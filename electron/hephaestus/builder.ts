@@ -683,10 +683,10 @@ export async function runHephaestusBuild(
       text: ko
         ? req.runtime
           ? `선택한 런타임(${req.runtime.kind})을 사용할 수 없습니다. 모델 선택을 다시 확인하세요.`
-          : "활성 런타임이 없습니다. 설정에서 Claude Code/Codex/Gemini 또는 API 키(BYOK)를 먼저 구성하세요."
+          : "활성 런타임이 없습니다. 설정에서 Claude Code/Codex/Antigravity 또는 API 키(BYOK)를 먼저 구성하세요."
         : req.runtime
           ? `The selected runtime (${req.runtime.kind}) is unavailable. Review the Build model selection.`
-          : "No active runtime. Configure Claude Code/Codex/Gemini or an API key (BYOK) in Settings first.",
+          : "No active runtime. Configure Claude Code/Codex/Antigravity or an API key (BYOK) in Settings first.",
     });
     return;
   }

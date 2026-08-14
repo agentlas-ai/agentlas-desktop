@@ -2,7 +2,7 @@
 // main(러너/감지)과 renderer(설정/채팅 UI)가 공유한다.
 //
 // 핵심 구분 (CONTEXT_MANAGED_BY):
-//  - "runtime"  : CLI 도구(Claude Code/Codex/Gemini)가 세션·컨텍스트 윈도우·압축을 자체적으로
+//  - "runtime"  : CLI 도구(Claude Code/Codex/Antigravity)가 세션·컨텍스트 윈도우·압축을 자체적으로
 //                 자동 관리한다. Agentlas는 위임만 하고 모델/압축을 손대지 않는다 → UI도 "자동"으로 표기.
 //  - "agentlas" : BYOK 직접 API / Ollama — 대화 히스토리를 Agentlas가 직접 들고 있으므로
 //                 모델 선택·1M 컨텍스트·히스토리 압축을 Agentlas가 구현/적용한다.
@@ -169,7 +169,6 @@ export const CONTEXT_MANAGED_BY: Record<RuntimeKind, "runtime" | "agentlas"> = {
   "claude-code": "runtime",
   codex: "runtime",
   antigravity: "runtime",
-  gemini: "runtime",
   kimi: "runtime",
   grok: "runtime",
   cursor: "runtime",
@@ -181,7 +180,7 @@ export const CONTEXT_MANAGED_BY: Record<RuntimeKind, "runtime" | "agentlas"> = {
 
 // ── CLI 런타임 모델 선택 ──────────────────────────────────
 // CLI 도구는 컨텍스트·압축을 자체 관리하지만(CONTEXT_MANAGED_BY === "runtime"),
-// 모델은 `--model`(또는 codex/gemini의 -m)로 고를 수 있다. 컨텍스트 관리와 모델 선택은 독립.
+// 모델은 `--model`로 고를 수 있다. 컨텍스트 관리와 모델 선택은 독립.
 // 빈 model(undefined)은 "구독 기본 모델" — --model을 전달하지 않는다.
 //
 // 헤드리스(-p) 한계: Claude Code의 인터랙티브 메뉴에 있는 "빠른 모드"와 `model[1m]`(1M) 변형은
@@ -228,7 +227,6 @@ export const CLI_MODELS: Partial<Record<RuntimeKind, CliModelOption[]>> = {
   ],
   codex: [],
   antigravity: [],
-  gemini: [],
   // Kimi Code membership chooses the live account model. Keep the model
   // omitted unless the CLI itself exposes an authoritative inventory.
   kimi: [],

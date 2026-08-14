@@ -20,18 +20,18 @@ interface RuntimeOpt {
 const RUNTIME_FALLBACK: RuntimeOpt[] = [
   { kind: "claude-code", label: "Claude Code", detected: false },
   { kind: "codex", label: "Codex", detected: false },
-  { kind: "gemini", label: "Gemini CLI", detected: false },
+  { kind: "antigravity", label: "Antigravity", detected: false },
   { kind: "grok", label: "Grok CLI", detected: false },
 ];
 
 const RUNTIME_LABEL: Record<string, string> = {
   "claude-code": "Claude Code",
   codex: "Codex",
-  gemini: "Gemini CLI",
+  antigravity: "Antigravity",
   grok: "Grok CLI",
   cursor: "Cursor Agent",
 };
-const CLI_RUNTIMES = new Set(["claude-code", "codex", "gemini", "kimi", "grok", "cursor"]);
+const CLI_RUNTIMES = new Set(["claude-code", "codex", "antigravity", "kimi", "grok", "cursor"]);
 const OBERON_VIDEO_PROVIDERS = new Set(["grok-cli-video", "google-veo", "kling-video", "seedance-video", "runway-video", "luma-video"]);
 
 export function ModelSettingsPanel({

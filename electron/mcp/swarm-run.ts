@@ -292,7 +292,7 @@ export async function runSwarmInvocation(
   };
   const taskLabel = (task: SwarmTask): string => `“${task.title.replace(/\s+/g, " ").slice(0, 72)}”`;
   const runtimeLabel = (kind: string): string =>
-    kind === "claude-code" ? "Claude Code" : kind === "codex" ? "Codex" : kind === "gemini" ? "Gemini" : kind;
+    kind === "claude-code" ? "Claude Code" : kind === "codex" ? "Codex" : kind === "antigravity" ? "Antigravity" : kind;
   const emit = (task: SwarmTask, ev: McpInvocationEvent): void =>
     p.sink({ ...ev, agentId: task.id, agentName: task.title, role: task.role ?? "worker" });
   const recordSwarmEvent = (ev: SwarmEvent): void => {

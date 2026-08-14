@@ -37,27 +37,3 @@ export async function claudeUsageAccountFingerprint(): Promise<string | undefine
     return undefined;
   }
 }
-
-/** Gemini oauth_creds.json의 id_token JWT에서 email/sub claim만 읽는다(검증 불필요 — 표시용 지문). */
-export async function geminiUsageAccountFingerprint(): Promise<string | undefined> {
-  try {
-    const raw = await readFile(path.join(os.homedir(), ".gemini", "oauth_creds.json"), "utf8");
-    const parsed = JSON.parse(raw) as { id_token?: unknown };
-    if (typeof parsed.id_token !== "string" || !parsed.id_token) return undefined;
-    const segments = parsed.id_token.split(".");
-    if (segments.length < 2) return undefined;
-    const claims = JSON.parse(Buffer.from(segments[1], "base64url").toString("utf8")) as {
-      email?: unknown;
-      sub?: unknown;
-    };
-    const identity =
-      typeof claims.email === "string" && claims.email
-        ? claims.email
-        : typeof claims.sub === "string"
-          ? claims.sub
-          : undefined;
-    return usageAccountFingerprint("gemini", identity);
-  } catch {
-    return undefined;
-  }
-}

@@ -67,11 +67,13 @@ import {
 import { materializeAllAgents } from "./agents/files";
 import { backfillEntityKinds } from "./mcp/registry";
 import { backfillLegacyLocalRouteDefinitionHashes } from "./agents/routes";
+import { dedupeLocalInstalledAgents } from "./store/agent-dedupe";
 import { reconcileExistingCuratedMemoryCandidates } from "./experience/store";
 import { seedBuiltinAgents } from "./architecture/seed";
 import { repairAllRootChatSurfaceControllers } from "./store/chats";
 import { ensureDefaultMcpPluginsInstalled } from "./mcp-tools/defaults";
 import { startHephaestusRuntimeAutoUpdate } from "./hephaestus/engine";
+import { startCliRuntimeAutoUpdate, stopCliRuntimeAutoUpdate } from "./runtime/auto-update";
 import { scrubLegacyOpenCrabMcpConfig } from "./mcp-tools/mcp-config";
 import { scrubLegacyOpenCrabCredentialUrls } from "./mcp-tools/registry";
 import { startBrowserApprovalServer, stopBrowserApprovalServer } from "./browser/approval-server";
@@ -648,6 +650,7 @@ async function prepareAutomaticUpdateQuit(): Promise<void> {
 function finishQuitCleanup(): void {
   if (quitCleanupDone) return;
   quitCleanupDone = true;
+  try { stopCliRuntimeAutoUpdate(); } catch {}
   void stopQuitServices().catch(() => {});
   try { disposeAutoUpdater(); } catch {}
 }
@@ -971,11 +974,14 @@ app.whenReady().then(async () => {
   traceStartup("agent-files-ready");
   try {
     const definitions = backfillLegacyLocalRouteDefinitionHashes();
+    const duplicates = dedupeLocalInstalledAgents();
     const experience = reconcileExistingCuratedMemoryCandidates();
-    if (definitions.updated > 0 || experience.candidateCreated > 0 || experience.blocked > 0) {
+    if (definitions.updated > 0 || duplicates.merged > 0 || experience.candidateCreated > 0 || experience.blocked > 0) {
       console.log("[experience] reconciled legacy local learning", {
         definitionHashesUpdated: definitions.updated,
         definitionHashFailures: definitions.failed,
+        localDuplicateGroups: duplicates.groups,
+        localDuplicatesMerged: duplicates.merged,
         memoriesScanned: experience.scanned,
         candidatesCreated: experience.candidateCreated,
         privacyBlocked: experience.blocked,
@@ -988,6 +994,10 @@ app.whenReady().then(async () => {
   }
   ensureDefaultMcpPluginsInstalled();
   traceStartup("local-data-ready");
+  // Provider CLI updates are main-owned and independent of the Dashboard
+  // renderer. This starts after the store/bootstrap gates so the maintenance
+  // slot can safely defer while a chat or automation is active.
+  startCliRuntimeAutoUpdate();
   // The customer window is the startup boundary. Optional network-backed
   // services below (Mobile Bridge, Telegram workers, browser helpers) restore
   // independently and must never keep a healthy local Desktop invisible.

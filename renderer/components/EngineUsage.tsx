@@ -1,5 +1,6 @@
 // 대시보드 "엔진 사용량" 카드 — 모든 엔진을 카탈로그로 보여준다.
-//   · 구독형(Claude·Codex·Gemini): 연결 시 usage.snapshot()의 5시간/주간/일일 바.
+//   · 구독형(Claude·Codex): 연결 시 usage.snapshot()의 5시간/주간/일일 바.
+//   · Antigravity: agy 연결 상태와 런타임이 제공한 모델 목록을 기준으로 표시한다.
 //   · API키형(DeepSeek·GLM·Pi): 연결 시 "키 과금", 미연결 시 키 입력 팝업.
 //   · Grok CLI: 실제 402가 확인되면 소진 상태와 공식 Usage 이동 버튼.
 //   · 로컬(Ollama): "무제한".
@@ -22,16 +23,18 @@ import type {
   UsageWindow,
 } from "@/lib/types";
 
-// 사용량 %는 몇 분 단위로만 변하고, 이 조회 엔드포인트는 rate limit이 짜다 —
-// 평상시 폴링은 넉넉히 잡아 429를 예방한다(수동 새로고침 버튼은 즉시 조회 유지).
-const POLL_MS = 180_000;
+// 사용량 %는 몇 분 단위로만 변하고, Main의 usage snapshot/어댑터 캐시가
+// 실제 공급자 호출을 막는다. 여기서는 Main 소유 `agy update`가 끝난 뒤
+// 카드가 오래된 "auto-update failed" 상태를 붙잡지 않도록 15초마다 같은
+// 캐시된 snapshot을 재확인한다(수동 새로고침만 force 조회).
+const POLL_MS = 15_000;
 const WARN_PCT = 80;
 type EngineAuth = "cli" | "apikey" | "local";
 interface EngineDef {
   id: string; // usage provider id와 일치(구독형)
   label: string;
   auth: EngineAuth;
-  cliKind?: "claude-code" | "codex" | "gemini" | "kimi" | "grok";
+  cliKind?: "claude-code" | "codex" | "antigravity" | "kimi" | "grok";
   retryProviderId?: UsageRetryProviderId;
   keyEnv?: string;
   logoSrc: string;
@@ -41,7 +44,7 @@ interface EngineDef {
 const ENGINES: EngineDef[] = [
   { id: "claude-code", label: "Claude Code", auth: "cli", cliKind: "claude-code", retryProviderId: "claude-code", logoSrc: "/brand/llm/claude.svg", logoAlt: "Claude" },
   { id: "codex", label: "Codex", auth: "cli", cliKind: "codex", retryProviderId: "codex", logoSrc: "/brand/llm/openai.svg", logoAlt: "OpenAI" },
-  { id: "gemini", label: "Gemini", auth: "cli", cliKind: "gemini", retryProviderId: "gemini", logoSrc: "/brand/llm/googlegemini.svg", logoAlt: "Google Gemini" },
+  { id: "antigravity", label: "Antigravity", auth: "cli", cliKind: "antigravity", logoSrc: "/brand/llm/googlegemini.svg", logoAlt: "Antigravity" },
   { id: "deepseek", label: "DeepSeek", auth: "apikey", keyEnv: "DEEPSEEK_API_KEY", logoSrc: "/brand/llm/deepseek.svg", logoAlt: "DeepSeek" },
   { id: "grok", label: "Grok", auth: "cli", cliKind: "grok", retryProviderId: "grok", keyEnv: "XAI_API_KEY", logoSrc: "/brand/llm/x.svg", logoAlt: "xAI" },
   { id: "glm", label: "GLM", auth: "apikey", keyEnv: "ZHIPU_API_KEY", logoSrc: "/brand/llm/zhipu.png", logoAlt: "Zhipu GLM" },
@@ -257,13 +260,6 @@ export function EngineUsage() {
     void loadUsage();
     void loadConnections();
   }, [loadUsage, loadConnections]);
-  // 채팅 실행이 Gemini UNSUPPORTED_CLIENT를 확인하면 main은 즉시 agy로 런타임을 바꾼다.
-  // 사용량 snapshot이 그 영수증을 본 순간 runtime source도 다시 읽어 오래된 공식 CLI 표기를 없앤다.
-  useEffect(() => {
-    if (snap?.providers.some((provider) => provider.provider === "gemini" && provider.error === "unsupported_client")) {
-      void loadConnections();
-    }
-  }, [snap?.fetchedAt, loadConnections]);
   useVisibleInterval(() => void loadUsage(), POLL_MS);
 
   // 재로그인은 터미널에서 끝난다 — 완료 시점을 앱이 폴링으로 감지해 자동 반영(15초 × 12 = 3분).
@@ -382,23 +378,25 @@ export function EngineUsage() {
     setNotice(null);
     let opened = false;
     try {
-      // 1) 설치 — 없으면 깔고, 실패하면 터미널을 열지 않고 이유+수동 명령을 보여준다.
-      setBusyStage("install");
-      const inst = await api.runtime.installCli(e.cliKind);
-      if (!inst?.ok) {
-        setNotice({
-          id: e.id,
-          text: ko ? `CLI 설치에 실패했습니다: ${inst?.message ?? ""}` : `CLI install failed: ${inst?.message ?? ""}`,
-          command: inst?.command,
-        });
-        return;
-      }
-      if (inst.message?.startsWith("already installed")) {
-        // 기존 설치본만 최신으로(버전 불일치 자동 해소) — 방금 설치한 건 이미 최신. 실패해도 로그인은 진행.
-        try {
-          await api.runtime.updateCli?.(e.cliKind);
-        } catch {
-          // best-effort
+      // Antigravity는 앱이 npm으로 설치하지 않는다. 설치된 agy만 검증하고
+      // 로그인/업데이트는 Antigravity 자체 경로로 연다.
+      if (e.cliKind !== "antigravity") {
+        setBusyStage("install");
+        const inst = await api.runtime.installCli(e.cliKind);
+        if (!inst?.ok) {
+          setNotice({
+            id: e.id,
+            text: ko ? `CLI 설치에 실패했습니다: ${inst?.message ?? ""}` : `CLI install failed: ${inst?.message ?? ""}`,
+            command: inst?.command,
+          });
+          return;
+        }
+        if (inst.message?.startsWith("already installed")) {
+          try {
+            await api.runtime.updateCli?.(e.cliKind);
+          } catch {
+            // best-effort
+          }
         }
       }
       // 2) 로그인 — 절대경로 실행(셸 PATH 무관). 실패도 표면화.
@@ -420,7 +418,7 @@ export function EngineUsage() {
       setBusyStage(null);
     }
     // 터미널 로그인 완료를 감지해 자동 갱신 — usage 어댑터가 있는 엔진만(그 외엔 성공 신호가 없어 헛폴링).
-    if (opened && ["claude-code", "codex", "gemini"].includes(e.id)) void watchRecovery(e.id);
+    if (opened && ["claude-code", "codex"].includes(e.id)) void watchRecovery(e.id);
     if (opened && e.cliKind === "kimi") void watchKimiConnection();
   }
 
@@ -457,11 +455,6 @@ export function EngineUsage() {
     return u?.status === "error" && ["quota_exhausted", "unsupported_client"].includes(u.error ?? "");
   }
 
-  function isAgyRuntime(e: EngineDef): boolean {
-    const source = runtimeFor(e)?.source ?? "";
-    return /(^|[/\\])agy(?:\.(?:exe|cmd))?$/i.test(source);
-  }
-
   function openProviderHelp(e: EngineDef): void {
     const url = e.id === "grok" ? "https://grok.com" : "https://antigravity.google";
     void ipc()?.fs.openPath(url).catch(() => undefined);
@@ -470,25 +463,9 @@ export function EngineUsage() {
   function statusText(e: EngineDef, u: ProviderUsage | undefined): string {
     if (e.auth === "apikey") return ko ? "키 과금" : "key-billed";
     if (e.auth === "local") return ko ? "로컬 · 무제한" : "local · unlimited";
-    // gemini 슬롯이 실제 Antigravity(agy)로 연결된 경우: agy는 ~/.gemini/oauth_creds.json을 만들지 않아
-    // usage 어댑터가 구조적으로 조회할 수 없다 — "연결됨"과 구분되는 정직한 라벨로 알린다.
-    // (스냅샷 로딩 전 깜빡임 방지를 위해 snap 수신 후에만.)
-    if (e.id === "gemini" && snap && !u && isAgyRuntime(e)) {
-      return ko ? "연결됨 · 사용량은 Antigravity에서 확인" : "connected · check usage in Antigravity";
-    }
     if (u?.status === "error") {
       if (u.error === "quota_exhausted") {
         return ko ? "한도 소진(402) · Usage 확인" : "quota exhausted (402) · open usage";
-      }
-      if (u.error === "unsupported_client") {
-        if (isAgyRuntime(e)) {
-          return ko
-            ? "연결됨 · 사용량은 Antigravity에서 확인"
-            : "connected · check usage in Antigravity";
-        }
-        return ko
-          ? "Gemini CLI 지원 종료 · Antigravity 필요"
-          : "Gemini CLI unsupported · Antigravity required";
       }
       if (u.error === "credentials_corrupt") {
         return ko ? "로그인 파일 손상 · 재로그인 필요" : "login file corrupt · re-login required";
@@ -519,14 +496,10 @@ export function EngineUsage() {
     const u = usageFor(e.id);
     const connected = isConnected(e);
     const rt = runtimeFor(e);
-    const agyRuntime = e.id === "gemini" && isAgyRuntime(e);
     const runtimeVersionLabel = runtimeVersionText(runtimeVersionFor(e));
     const hasBars = connected && (u?.windows.length ?? 0) > 0;
-    // Antigravity가 정상 실행 중일 때 legacy Gemini usage adapter의
-    // unsupported_client는 연결 오류가 아니라 사용량 API 부재다.
-    const agyUsageUnavailable = agyRuntime && u?.error === "unsupported_client";
-    const terminalError = connected && isTerminalProviderError(u) && !agyUsageUnavailable;
-    const retryableError = connected && u?.status === "error" && !isRateLimited(u) && !agyUsageUnavailable;
+    const terminalError = connected && isTerminalProviderError(u);
+    const retryableError = connected && u?.status === "error" && !isRateLimited(u);
     const showConnectedChip = connected && !terminalError && !retryableError;
     // The default-engine status and the "use as default" action belong at the
     // top-right of the card (compact), not in the action foot.
@@ -564,7 +537,7 @@ export function EngineUsage() {
         <div className="dashboard-engine-card-head">
           <span className="dashboard-engine-logo" aria-hidden="true"><img src={e.logoSrc} alt="" /></span>
           <span className="sr-only">{e.logoAlt}</span>
-          <span className="dashboard-engine-card-name">{agyRuntime ? "Antigravity" : e.label}</span>
+          <span className="dashboard-engine-card-name">{e.label}</span>
           <span className="dashboard-engine-head-right" style={{ marginLeft: "auto" }}>
             {activeRoles.length > 0 ? (
               <>
@@ -597,7 +570,7 @@ export function EngineUsage() {
         <div
           className="dashboard-engine-card-status"
           data-terminal-state={terminalError ? "true" : undefined}
-          style={connected && u?.status === "error" && !agyUsageUnavailable ? { color: "var(--dash-red)" } : undefined}
+          style={connected && u?.status === "error" ? { color: "var(--dash-red)" } : undefined}
           title={statusLine}
         >
           {statusLine}

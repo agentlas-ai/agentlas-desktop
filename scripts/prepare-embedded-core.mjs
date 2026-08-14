@@ -111,18 +111,21 @@ function transformCli(filePath) {
 function transformPackageContract(filePath) {
   const payload = JSON.parse(fs.readFileSync(filePath, "utf8"));
   if (!Array.isArray(payload.artifacts)) throw new Error(`${filePath}: missing artifacts array`);
-  const before = payload.artifacts.length;
+  // v1.2.4 may carry the retired ontology as several package entries. The
+  // desktop projection owns the retirement boundary, so remove the complete
+  // retired family rather than assuming it is represented by one seed.
   payload.artifacts = payload.artifacts.filter((artifact) => !/super[-_ ]ontology/i.test(JSON.stringify(artifact)));
-  if (before - payload.artifacts.length > 1) throw new Error(`${filePath}: removed more than one retired package artifact`);
   fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 }
 
 function transformActivation(filePath) {
   const payload = JSON.parse(fs.readFileSync(filePath, "utf8"));
   if (!Array.isArray(payload.seedFiles)) throw new Error(`${filePath}: missing seedFiles`);
-  const before = payload.seedFiles.length;
+  // The upstream activation contract contains one entry per retired ontology
+  // seed. All matching entries belong to the same retirement boundary and
+  // must be removed together for the prepared runtime to be internally
+  // consistent.
   payload.seedFiles = payload.seedFiles.filter((entry) => !/super[-_ ]ontology/i.test(String(entry)));
-  if (before - payload.seedFiles.length > 1) throw new Error(`${filePath}: removed more than one retired seed file`);
   fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 }
 

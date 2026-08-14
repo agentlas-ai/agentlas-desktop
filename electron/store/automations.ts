@@ -122,7 +122,7 @@ function normalizeExecutionPermission(value: unknown): AutomationExecutionPermis
 }
 
 const RUNTIME_KINDS = new Set([
-  "claude-code", "codex", "antigravity", "gemini", "kimi", "grok", "cursor", "byok", "ollama", "lmstudio", "mlx",
+  "claude-code", "codex", "antigravity", "kimi", "grok", "cursor", "byok", "ollama", "lmstudio", "mlx",
 ]);
 const RUNTIME_BACKENDS = new Set([
   "anthropic", "openai", "google", "ollama", "lmstudio", "mlx", "upstage", "custom", "glm",
@@ -139,17 +139,20 @@ function decodeRuntimeSelection(raw: string | null | undefined): {
   if (raw == null) return { state: "missing" };
   try {
     const value = JSON.parse(raw) as Record<string, unknown>;
+    const normalized = value.kind === "gemini"
+      ? { ...value, kind: "antigravity", source: undefined, model: undefined }
+      : value;
     if (
-      value && typeof value === "object" && !Array.isArray(value) &&
-      Object.keys(value).every((key) => RUNTIME_SELECTION_KEYS.has(key)) &&
-      typeof value.kind === "string" && RUNTIME_KINDS.has(value.kind) &&
-      (value.backend === undefined || typeof value.backend === "string" && RUNTIME_BACKENDS.has(value.backend)) &&
-      (value.source === undefined || typeof value.source === "string" && value.source.length > 0 && value.source.length <= 2_048) &&
-      (value.model === undefined || typeof value.model === "string" && value.model.length > 0 && value.model.length <= 512) &&
-      (value.longContext === undefined || typeof value.longContext === "boolean") &&
-      (value.effort === undefined || typeof value.effort === "string" && value.effort.length <= 128)
+      normalized && typeof normalized === "object" && !Array.isArray(normalized) &&
+      Object.keys(normalized).every((key) => RUNTIME_SELECTION_KEYS.has(key)) &&
+      typeof normalized.kind === "string" && RUNTIME_KINDS.has(normalized.kind) &&
+      (normalized.backend === undefined || typeof normalized.backend === "string" && RUNTIME_BACKENDS.has(normalized.backend)) &&
+      (normalized.source === undefined || typeof normalized.source === "string" && normalized.source.length > 0 && normalized.source.length <= 2_048) &&
+      (normalized.model === undefined || typeof normalized.model === "string" && normalized.model.length > 0 && normalized.model.length <= 512) &&
+      (normalized.longContext === undefined || typeof normalized.longContext === "boolean") &&
+      (normalized.effort === undefined || typeof normalized.effort === "string" && normalized.effort.length <= 128)
     ) {
-      return { state: "valid", value: value as unknown as RuntimeSelection };
+      return { state: "valid", value: normalized as unknown as RuntimeSelection };
     }
   } catch {
     // The caller distinguishes damaged data from a truly missing legacy pin.

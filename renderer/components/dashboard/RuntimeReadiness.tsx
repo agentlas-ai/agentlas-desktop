@@ -77,7 +77,6 @@ function activeRuntimeLabel(runtimes: RuntimeStatus[], ko: boolean): string {
     "claude-code": "Claude Code",
     codex: "Codex",
     antigravity: "Antigravity",
-    gemini: "Gemini CLI · Legacy",
     grok: "Grok",
     byok: "BYOK API",
     ollama: "Ollama",

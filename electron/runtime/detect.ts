@@ -3,7 +3,7 @@
 import { probeClaudeCode, probeClaudeEfforts } from "./claude-code";
 import { probeCodex } from "./codex";
 import { readCodexModelInventory } from "./codex-models";
-import { probeAntigravity, probeGemini } from "./gemini";
+import { probeAntigravity } from "./antigravity";
 import { probeKimi } from "./kimi";
 import { probeGrok } from "./grok";
 import { probeCursor } from "./cursor";
@@ -293,7 +293,6 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     cx,
     codexModelInventory,
     agy,
-    gm,
     kimiCli,
     gr,
     cursor,
@@ -317,7 +316,6 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     probeCodex(),
     readCodexModelInventory(),
     probeAntigravity(),
-    probeGemini(),
     probeKimi(),
     probeGrok(),
     probeCursor(),
@@ -420,19 +418,6 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       model: cliModelOf("antigravity", active, antigravityModels, "google") ?? antigravityModels[0],
       availableModels: antigravityModels,
       allocationModels: agy.models,
-    });
-  }
-  if (gm) {
-    const geminiModels = cliModels("gemini").map((model) => model.id);
-    list.push({
-      kind: "gemini",
-      backend: "google",
-      source: gm.path,
-      version: gm.version,
-      active: false,
-      model: cliModelOf("gemini", active, geminiModels, "google") ?? geminiModels[0],
-      availableModels: geminiModels,
-      allocationModels: [],
     });
   }
   if (kimiCli) {

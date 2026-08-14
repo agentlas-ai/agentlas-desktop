@@ -49,7 +49,7 @@ function isOrchestrationTarget(value: unknown): value is OrchestrationTarget {
 const CLI_LABEL: Record<string, string> = {
   "claude-code": "Claude Code",
   codex: "Codex",
-  gemini: "Antigravity",
+  antigravity: "Antigravity",
   grok: "Grok",
 };
 
@@ -1060,10 +1060,18 @@ function ChatInputComponent({
           appsGenerateMode={appsGenerateMode}
           onToggleAppsGenerate={requestAppsGenerateMode}
           onInsertMention={() => {
-            setInput((s) => `${s}${s.endsWith(" ") || s === "" ? "" : " "}@`);
+            // This is a programmatic insertion, so React will not call
+            // onInputChange for us. Keep the mention trigger in sync or the
+            // user sees an @ but never gets the real agent/team autocomplete.
+            const next = `${input}${input.endsWith(" ") || input === "" ? "" : " "}@`;
+            setInput(next);
+            setTrigger({ kind: "mention", query: "", startIndex: next.length - 1 });
             setPlusOpen(false);
             setPlusSubmenu(null);
-            setTimeout(() => textareaRef.current?.focus(), 0);
+            setTimeout(() => {
+              textareaRef.current?.focus();
+              textareaRef.current?.setSelectionRange(next.length, next.length);
+            }, 0);
           }}
           hepToggles={hepToggles}
           onToggleHep={(id) => {
@@ -2778,7 +2786,7 @@ function ModelMenu({
   t: TFunction;
 }) {
   const efforts = runtime.efforts ?? [];
-  // CLI(claude-code/codex/gemini)는 "구독 기본" 선택 가능. BYOK/로컬(ollama/lmstudio/mlx)은 항상 구체 모델.
+  // CLI(claude-code/codex/antigravity)는 "구독 기본" 선택 가능. BYOK/로컬(ollama/lmstudio/mlx)은 항상 구체 모델.
   const allowDefaultModel = runtime.kind !== "byok" && !LOCAL_RUNTIME_LABEL[runtime.kind];
   const managedByRuntime = CONTEXT_MANAGED_BY[runtime.kind] === "runtime";
   const check = <span style={{ color: "var(--accent)", fontWeight: 700 }}>•</span>;

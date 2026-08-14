@@ -60,7 +60,6 @@ const RUNTIME_LABEL: Record<string, string> = {
   "claude-code": "Claude Code",
   codex: "Codex",
   antigravity: "Antigravity",
-  gemini: "Gemini CLI · Legacy",
   kimi: "Kimi Code",
   grok: "Grok",
   cursor: "Cursor Agent",

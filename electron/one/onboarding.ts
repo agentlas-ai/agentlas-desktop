@@ -223,7 +223,7 @@ function providerMatchesRuntime(provider: Exclude<OneOnboardingProvider, null>, 
   if (provider === "openai") return runtime.kind === "codex" || runtime.backend === "openai";
   if (provider === "anthropic") return runtime.kind === "claude-code" || runtime.backend === "anthropic";
   if (provider === "kimi") return runtime.kind === "kimi" || runtime.backend === "kimi";
-  return runtime.kind === "gemini" || runtime.backend === "google";
+  return runtime.kind === "antigravity" || runtime.backend === "google";
 }
 
 async function mainOwnedReadyProvider(
@@ -237,7 +237,8 @@ async function mainOwnedReadyProvider(
     // Kimi currently exposes no normalized authenticated-usage probe. Installed
     // bytes alone are not proof of a paid, signed-in execution entitlement.
     if (provider === "kimi" || !runtimes.some((runtime) => providerMatchesRuntime(provider, runtime))) continue;
-    const usageProvider = provider === "openai" ? "codex" : provider === "anthropic" ? "claude-code" : "gemini";
+    if (provider === "google") return provider;
+    const usageProvider = provider === "openai" ? "codex" : "claude-code";
     if (usage.providers.some((item) => item.provider === usageProvider && item.status !== "error")) return provider;
   }
   return null;

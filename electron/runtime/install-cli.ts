@@ -12,7 +12,7 @@ import path from "node:path";
 import { spawnCli } from "./exec";
 import { resolveManagedNodeRuntime, type ManagedNodeRuntime } from "./managed-node";
 
-export type InstallableCli = "claude-code" | "codex" | "gemini" | "kimi" | "grok";
+export type InstallableCli = "claude-code" | "codex" | "kimi" | "grok";
 export type ManageableCli = InstallableCli | "antigravity";
 
 /**
@@ -27,9 +27,6 @@ const CLI_PLAN: Record<InstallableCli, {
 }> = {
   "claude-code": { pkg: "@anthropic-ai/claude-code", version: "2.1.214", loginArgs: [], bin: "claude" },
   codex: { pkg: "@openai/codex", version: "0.144.6", loginArgs: ["login"], bin: "codex" },
-  // 공식 Gemini CLI가 Google OAuth + 전역 extension/skills/MCP를 모두 지원한다.
-  // 기존 Antigravity(agy)는 이미 설치된 머신의 호환 폴백으로만 감지한다.
-  gemini: { pkg: "@google/gemini-cli", version: "0.51.0", loginArgs: [], bin: "gemini" },
   // Official Moonshot Kimi Code CLI. `kimi login` opens the device-code OAuth
   // flow and does not require the user to create an API key.
   kimi: { pkg: "@moonshot-ai/kimi-code", version: "0.28.0", loginArgs: ["login"], bin: "kimi" },
@@ -43,7 +40,6 @@ const AGENTLAS_NPM_CONFIG = path.join(os.homedir(), ".agentlas", "config", "mana
 const AGENTLAS_NPM_GLOBAL_CONFIG = path.join(os.homedir(), ".agentlas", "config", "managed-global-npmrc");
 const AGENTLAS_NPM_BOOTSTRAP_BIN = path.join(os.homedir(), ".agentlas", "runtime", "npm-bootstrap-bin");
 const OFFICIAL_NPM_REGISTRY = "https://registry.npmjs.org/";
-const GEMINI_NPM_PACKAGE = "@google/gemini-cli";
 
 // GUI Electron은 Finder/dock에서 뜨면 로그인 셸 PATH(/opt/homebrew/bin 등)를 못 받는다 →
 // bare `npm`/`claude` spawn이 ENOENT로 실패. CLI 탐지/설치 모두에서 PATH를 보강한다.
@@ -58,7 +54,6 @@ const EXTRA_BIN_DIRS = [
   path.join(os.homedir(), "node_modules", ".bin"),
   path.join(os.homedir(), ".claude", "local"),
   path.join(os.homedir(), ".codex", "bin"),
-  path.join(os.homedir(), ".gemini", "bin"),
   path.join(os.homedir(), ".kimi-code", "bin"),
   path.join(os.homedir(), ".grok", "bin"),
   path.join(os.homedir(), ".bun", "bin"),
@@ -512,78 +507,6 @@ function isAgentlasManagedNpmBinary(binary: string): boolean {
   }
 }
 
-function updateAgentlasManagedGemini(): Promise<CliActionResult> {
-  return installCli("gemini", { force: true });
-}
-
-export type GeminiInstallOwner =
-  | { kind: "npm"; prefix: string }
-  | { kind: "homebrew" }
-  | { kind: "unknown" };
-
-/** 실제 바이너리 경로로 설치 소유자를 판별한다. npm 설치는 원래 global prefix까지 보존한다. */
-export function classifyGeminiInstallOwner(
-  binary: string,
-  resolvedOverride?: string,
-): GeminiInstallOwner {
-  let resolved = binary;
-  if (resolvedOverride) {
-    resolved = resolvedOverride;
-  } else {
-    try {
-      resolved = fs.realpathSync(binary);
-    } catch {
-      // 끊어진 심 등은 표시 경로만 사용한다.
-    }
-  }
-  const normalized = resolved.replace(/\\/g, "/");
-  const lower = normalized.toLowerCase();
-  // npm -g가 /opt/homebrew/lib/node_modules 아래 설치되는 경우도 있으므로 node_modules를
-  // Homebrew formula보다 먼저 구분해야 패키지 관리자를 잘못 안내하지 않는다.
-  const unixMarker = "/lib/node_modules/";
-  const unixMarkerAt = lower.indexOf(unixMarker);
-  if (unixMarkerAt > 0) {
-    return { kind: "npm", prefix: normalized.slice(0, unixMarkerAt) };
-  }
-  const windowsMarker = "/node_modules/";
-  const windowsMarkerAt = lower.indexOf(windowsMarker);
-  if (windowsMarkerAt > 0 && lower.slice(0, windowsMarkerAt).endsWith("/npm")) {
-    return { kind: "npm", prefix: normalized.slice(0, windowsMarkerAt) };
-  }
-  if (lower.includes("/cellar/") || lower.includes("/homebrew/opt/gemini-cli/")) {
-    return { kind: "homebrew" };
-  }
-  return { kind: "unknown" };
-}
-
-/** 외부 설치도 고정된 원래 패키지 관리자만 사용해 최신화한다. 권한 실패는 수동 명령과 함께 표면화한다. */
-function updateSelfManagedGemini(binary: string): Promise<CliActionResult> {
-  const owner = classifyGeminiInstallOwner(binary);
-  if (owner.kind === "npm") {
-    const npmBin = resolveBinary("npm");
-    const command = `npm install -g ${GEMINI_NPM_PACKAGE}@latest --prefix ${owner.prefix}`;
-    if (!npmBin) {
-      return Promise.resolve({ ok: false, message: "npm not found on PATH", command });
-    }
-    return runBinary(
-      npmBin,
-      ["install", "-g", `${GEMINI_NPM_PACKAGE}@latest`, "--prefix", owner.prefix],
-      5 * 60 * 1000,
-    );
-  }
-  if (owner.kind === "homebrew") {
-    const brew = resolveBinary("brew");
-    const command = "brew upgrade gemini-cli";
-    if (!brew) return Promise.resolve({ ok: false, message: "Homebrew not found on PATH", command });
-    return runBinary(brew, ["upgrade", "gemini-cli"], 10 * 60 * 1000);
-  }
-  return Promise.resolve({
-    ok: false,
-    message: `Gemini CLI install owner could not be verified: ${binary}`,
-    command: `npm install -g ${GEMINI_NPM_PACKAGE}@latest`,
-  });
-}
-
 /**
  * CLI를 최신으로 — 재로그인/연결 시 버전 불일치를 자동 해소한다.
  *   · 미설치 → installCli(설치가 곧 최신)
@@ -591,7 +514,6 @@ function updateSelfManagedGemini(binary: string): Promise<CliActionResult> {
  *   · claude-code 네이티브 설치본 → 공식 self-updater `claude update`
  *   · Codex standalone/네이티브 설치본 → 공식 self-updater `codex update`
  *   · Antigravity(agy) → 자체 updater `agy update`
- *   · Gemini CLI → Agentlas 관리 npm 또는 감지한 원래 npm/Homebrew로 최신화
  *   · grok → 공식 self-updater `grok update`
  *   · 그 외(사용자 자체 관리본) → 건드리지 않는다
  */
@@ -622,6 +544,11 @@ export function updateCli(kind: ManageableCli, requestedSource?: string | null):
     if (!selected) {
       return Promise.resolve({ ok: false, message: "Selected Antigravity CLI source is unavailable" });
     }
+    // `agy update` is source-owned and intentionally keeps the CLI's own
+    // updater semantics. It is safe to run headlessly: the current Antigravity
+    // CLI reports the check/result over stdout and exits without a login shell.
+    // Keep this separate from npm-managed CLIs so a retired Gemini package can
+    // never be selected as the update target again.
     return runBinary(selected, ["update"], 5 * 60 * 1000);
   }
   const plan = CLI_PLAN[kind];
@@ -630,14 +557,6 @@ export function updateCli(kind: ManageableCli, requestedSource?: string | null):
   const selected = resolveCliActionSource(kind, requestedSource);
   if (requestedSource && !selected) {
     return Promise.resolve({ ok: false, message: `Selected CLI source is unavailable: ${requestedSource}` });
-  }
-
-  if (kind === "gemini") {
-    if (selected) {
-      if (isAgentlasManagedNpmBinary(selected)) return updateAgentlasManagedGemini();
-      return updateSelfManagedGemini(selected);
-    }
-    return installCli(kind);
   }
 
   const existing = selected;

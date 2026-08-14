@@ -1,6 +1,6 @@
 // 대화 히스토리 압축 — Agentlas-managed 러너(BYOK/Ollama) 전용.
 //
-// 왜 여기서? CLI 런타임(Claude Code/Codex/Gemini)은 자체 세션·압축을 자동 관리하므로
+// 왜 여기서? CLI 런타임(Claude Code/Codex/Antigravity)은 자체 세션·압축을 자동 관리하므로
 // 건드리지 않는다 (CONTEXT_MANAGED_BY === "runtime"). 반면 BYOK 직접 API와 Ollama는
 // Agentlas가 매 턴 히스토리를 통째로 들고 보내므로, 모델 컨텍스트 윈도우를 넘기면
 // 무한 성장·API 거부가 발생한다. 이 모듈이 그걸 모델 컨텍스트 기준으로 막는다.

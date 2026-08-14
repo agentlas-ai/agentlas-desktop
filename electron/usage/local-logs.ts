@@ -166,7 +166,7 @@ function withCache(key: string, compute: () => LocalWindowTokens): LocalWindowTo
 
 export function localTokensFor(provider: string): LocalWindowTokens | null {
   if (provider === "claude-code") return getClaudeLocalTokens();
-  // Codex(rollout 형식 다양·archived 방대해 느림)와 Gemini(로컬 토큰 로그 없음)는 서버 전용.
+  // Codex(rollout 형식 다양·archived 방대해 느림)와 Antigravity(로컬 토큰 로그 없음)는 서버 전용.
   // 서버 usage 조회가 안정적이라 폴백 필요가 낮다 — 후속에 Codex 로컬을 정밀화할 수 있다.
   return null;
 }

@@ -192,7 +192,6 @@ const MOBILE_RUNTIME_KINDS = [
   "claude-code",
   "codex",
   "antigravity",
-  "gemini",
   "kimi",
   "grok",
   "cursor",
@@ -1061,7 +1060,7 @@ function cleanToolDisplayValue(value: string | undefined, maxBytes: number): str
  *
  * 판별은 shared/tool-call-detail.ts 한 벌이 소유한다 — 폰이 러너별 도구 이름을
  * 보고 다시 추측하면 두 표면이 갈라진다(2026-08-08 실측 사고: 렌더러가 Claude Code
- * 도구명만 알아 codex/gemini/ollama/MCP를 전부 "기타"로 그렸고, bash는 실제 명령을
+ * 도구명만 알아 codex/antigravity/ollama/MCP를 전부 "기타"로 그렸고, bash는 실제 명령을
  * 버렸다).
  *
  * 이름과 사실(`exit 0`, `+23 −1`, `8 files · 31 matches`)은 집계값이라 늘 안전하다.

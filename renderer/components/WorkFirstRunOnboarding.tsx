@@ -7,14 +7,14 @@ import { useT } from "@/lib/i18n";
 import styles from "./WorkFirstRunOnboarding.module.css";
 
 type Experience = "beginner" | "intermediate" | "expert";
-type Provider = "codex" | "claude-code" | "gemini";
+type Provider = "codex" | "claude-code" | "antigravity";
 
 const STORAGE_KEY = "agentlas.work.firstRunOnboarding.v2";
 
-const PROVIDERS: Array<{ id: Provider; label: string; logo: string; cli: "codex" | "claude-code" | "gemini" }> = [
+const PROVIDERS: Array<{ id: Provider; label: string; logo: string; cli: "codex" | "claude-code" | "antigravity" }> = [
   { id: "codex", label: "GPT / Codex", logo: "/brand/llm/openai.svg", cli: "codex" },
   { id: "claude-code", label: "Claude", logo: "/brand/llm/claude.svg", cli: "claude-code" },
-  { id: "gemini", label: "Gemini / Antigravity", logo: "/brand/llm/googlegemini.svg", cli: "gemini" },
+  { id: "antigravity", label: "Antigravity", logo: "/brand/llm/googlegemini.svg", cli: "antigravity" },
 ];
 
 export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityChange?: (visible: boolean) => void }) {
@@ -75,8 +75,10 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
     setProvider(next); setConnecting(true); setConnectionError(null); setConnected(false);
     try {
       const api = ipc();
-      const installed = await api?.runtime.installCli(selected.cli);
-      if (!installed?.ok) throw new Error(installed?.message || "installation failed");
+      if (selected.cli !== "antigravity") {
+        const installed = await api?.runtime.installCli(selected.cli);
+        if (!installed?.ok) throw new Error(installed?.message || "installation failed");
+      }
       const result = await api?.runtime.openCliLogin(selected.cli);
       if (!result?.ok) throw new Error(result?.message || "connection failed");
       let detected = false;

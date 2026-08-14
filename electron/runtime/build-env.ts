@@ -68,19 +68,6 @@ const BUILD_RUNTIME_ENV_KEYS: Record<RuntimeKind, readonly string[]> = {
     "GOOGLE_CLOUD_LOCATION",
     "GOOGLE_APPLICATION_CREDENTIALS",
   ],
-  gemini: [
-    "GEMINI_CLI_HOME",
-    "GEMINI_CLI_SYSTEM_SETTINGS_PATH",
-    "GEMINI_CLI_USER_SETTINGS",
-    "GEMINI_CLI_TRUSTED_FOLDERS_PATH",
-    "GEMINI_CLI_EXTENSION_REGISTRY_URI",
-    "GEMINI_API_KEY",
-    "GOOGLE_API_KEY",
-    "GOOGLE_GENAI_USE_VERTEXAI",
-    "GOOGLE_CLOUD_PROJECT",
-    "GOOGLE_CLOUD_LOCATION",
-    "GOOGLE_APPLICATION_CREDENTIALS",
-  ],
   // Kimi Code keeps OAuth state in its own home directory. No unrelated host
   // credential is copied into build workers.
   kimi: ["KIMI_CODE_HOME", "AGENTLAS_KIMI_BIN"],

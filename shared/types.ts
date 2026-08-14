@@ -586,11 +586,11 @@ export type {
   MultimodalSettings,
 } from "./multimodal";
 
-export type RuntimeKind = "claude-code" | "codex" | "antigravity" | "gemini" | "kimi" | "grok" | "cursor" | "byok" | "ollama" | "lmstudio" | "mlx";
+export type RuntimeKind = "claude-code" | "codex" | "antigravity" | "kimi" | "grok" | "cursor" | "byok" | "ollama" | "lmstudio" | "mlx";
 export type RuntimeRole = "orchestrator" | "worker";
 
 /**
- * 사용자 편집형 터미널 프로필 — Paseo식 "프로바이더". 하드코딩된 claude/codex/gemini와
+ * 사용자 편집형 터미널 프로필 — Paseo식 "프로바이더". 하드코딩된 claude/codex/antigravity와
  * 달리, 사용자가 임의의 CLI를 등록한다. `template`의 `{{{prompt}}}`가 메시지로 치환돼
  * 실행된다(예: `claude {{{prompt}}}`, `opencode --prompt={{{prompt}}}`).
  * ★런타임 dispatch 배선(RuntimeKind 편입)은 후속 단계 — 지금은 설정 저장/조회만.
@@ -657,12 +657,12 @@ export interface AgentRuntimeOverrideSetInput {
   selection: RuntimeSelection;
 }
 
-/** CLI(Claude/Codex/Gemini)에서 스캔한 슬래시 명령 — 챗 입력 `/` 자동완성에 노출. */
+/** CLI(Claude/Codex/Antigravity)에서 스캔한 슬래시 명령 — 챗 입력 `/` 자동완성에 노출. */
 export interface RuntimeCommand {
   /** "/deploy", "/frontend:component" 등 (앞에 / 포함) */
   name: string;
   description: string;
-  source: "claude-code" | "codex" | "gemini";
+  source: "claude-code" | "codex" | "antigravity";
 }
 
 export interface RuntimeStatus {
@@ -784,7 +784,7 @@ export interface InstalledAgent {
   trustGrade: "A" | "B" | "C" | "unknown";
   installedAt: string;
   tone: "blue" | "green" | "purple" | "amber" | "peach";
-  /** 로컬 폴더에서 임포트한 경우: 전용 CLI 런타임 라벨 (claude-code/codex/gemini/cursor/generic) */
+  /** 로컬 폴더에서 임포트한 경우: 전용 CLI 런타임 라벨. legacy GEMINI.md 패키지 라벨은 gemini로 보존한다. */
   runtimeLabel?: "claude-code" | "codex" | "gemini" | "cursor" | "generic";
   /** 로컬 임포트 원본 폴더 절대경로 (있으면 파일 패널이 이 폴더를 사용) */
   localPath?: string;
@@ -821,6 +821,25 @@ export interface InstalledAgentExactBinding {
   agentReleaseId: string;
   source: "hub-install" | "agent-cloud-restore";
   boundAt: string;
+}
+
+/** Explicit removal controls used by the organization chart X action. */
+export interface InstalledAgentRemovalOptions {
+  /** Move a local-import source folder to the OS Trash after registry removal. */
+  removeSource?: boolean;
+}
+
+export interface InstalledFirmRemovalOptions {
+  /** Remove the firm and its materialized member rows, not only the relationship. */
+  removeMembers?: boolean;
+  /** Move local team source folders to the OS Trash after registry removal. */
+  removeSource?: boolean;
+}
+
+export interface RosterRemovalResult {
+  removed: boolean;
+  sourceMovedToTrash: boolean;
+  retainedAgentIds?: string[];
 }
 
 /**
@@ -4114,7 +4133,7 @@ export type UsageProviderErrorCode =
   | "local_estimate";
 
 /** 사용량을 기계 판독할 수 있고 명시 재시도를 지원하는 Provider allowlist. */
-export type UsageRetryProviderId = "claude-code" | "codex" | "gemini" | "kimi" | "grok";
+export type UsageRetryProviderId = "claude-code" | "codex" | "kimi" | "grok";
 
 /** 한 LLM 프로바이더의 사용량 스냅샷. */
 export interface ProviderUsage {
@@ -4148,7 +4167,7 @@ export type CliRuntimeUpdateState =
   | "unverifiable";
 
 export interface CliRuntimeVersionStatus {
-  kind: "claude-code" | "codex" | "antigravity" | "gemini" | "kimi" | "grok";
+  kind: "claude-code" | "codex" | "antigravity" | "kimi" | "grok";
   installedVersion: string | null;
   latestVersion: string | null;
   state: CliRuntimeUpdateState;
@@ -4609,7 +4628,7 @@ export interface OberonAnimateKeyStatus {
 }
 
 // ── Oberon text planning jobs ──────────────────────────────────
-export type OberonPlanRuntime = "claude-code" | "codex" | "gemini";
+export type OberonPlanRuntime = "claude-code" | "codex" | "antigravity";
 
 /** Optional, main-process-owned OpenCrab ontology enrichment. No endpoint or result body crosses IPC. */
 export interface OpenCrabReadiness {
@@ -5558,7 +5577,7 @@ export interface AgentlasIpc {
     judge: (spec: RendererJudgmentSpec) => Promise<RendererJudgmentVerdict>;
     judgeSubset: (spec: RendererSubsetJudgmentSpec) => Promise<RendererSubsetJudgmentVerdict>;
   };
-  /** T-rex 슬라이드 스튜디오 — 키리스 CLI 이미지 생성(codex image_gen / gemini). */
+  /** T-rex 슬라이드 스튜디오 — 키리스 CLI 이미지 생성(codex image_gen / agy). */
   trex: {
     generateImage: (payload: { model?: "codex" | "gemini" | "auto"; prompt: string }) => Promise<{ ok: boolean; src?: string; reason?: string; engine?: "codex" | "gemini" }>;
     imageProviders: () => Promise<{ codex: boolean; gemini: boolean }>;
@@ -5907,17 +5926,17 @@ export interface AgentlasIpc {
     setActive: (selection: RuntimeSelection) => Promise<RuntimeStatus[]>;
     /** CLI 미설치 사용자용 — Windows는 앱에 동봉한 검증된 Node/npm으로 무관리자 설치. */
     installCli: (
-      kind: "claude-code" | "codex" | "gemini" | "kimi" | "grok",
+      kind: "claude-code" | "codex" | "kimi" | "grok",
     ) => Promise<{ ok: boolean; message: string; command?: string }>;
     /** 시스템 터미널을 열어 CLI 로그인 실행 — 사용자는 브라우저 로그인만 하면 됨. */
     openCliLogin: (
-      kind: "claude-code" | "codex" | "antigravity" | "gemini" | "kimi" | "grok",
+      kind: "claude-code" | "codex" | "antigravity" | "kimi" | "grok",
     ) => Promise<{ ok: boolean; message: string; command?: string }>;
     /** CLI를 최신으로 업데이트 — 미설치면 설치, npm 관리본은 재설치, claude는 self-updater. */
     updateCli: (
-      kind: "claude-code" | "codex" | "antigravity" | "gemini" | "kimi" | "grok",
+      kind: "claude-code" | "codex" | "antigravity" | "kimi" | "grok",
     ) => Promise<{ ok: boolean; message: string; command?: string }>;
-    /** CLI(Claude/Codex/Gemini)의 커스텀 슬래시 명령을 스캔 — 매 호출마다 최신. */
+    /** CLI(Claude/Codex/Antigravity)의 커스텀 슬래시 명령을 스캔 — 매 호출마다 최신. */
     listCommands: () => Promise<RuntimeCommand[]>;
     /** 런타임의 모델 목록을 실시간 조회 — BYOK는 provider /models API, ollama는 동적, CLI는 카탈로그.
      *  하드코딩 대신 실제 소스에서 가져와 자동 동기화 (5분 캐시). */
@@ -6003,7 +6022,7 @@ export interface AgentlasIpc {
     install: (slug: string) => Promise<InstalledAgent>;
     /** 내 에이전트(cargo) 설치 — 로그인 사용자가 agentlas.cloud에서 만든 것 */
     installMine: (id: string) => Promise<InstalledAgent>;
-    uninstall: (id: string) => Promise<void>;
+    uninstall: (id: string, options?: InstalledAgentRemovalOptions) => Promise<RosterRemovalResult>;
     /** NFC 1-80 code-point local alias; empty text clears it. */
     setLocalDisplayName: (id: string, value: string) => Promise<InstalledAgent>;
     /** 로컬 폴더(기존 에이전트/팀)를 임포트 — 런타임 감지·라벨링 후 라우팅 저장. */
@@ -6122,6 +6141,7 @@ export interface AgentlasIpc {
     status: (force?: boolean) => Promise<MarketplaceSourceStatus>;
     /** 로그인 사용자의 실제 복원 가능한 Agent Cloud 패키지 목록. 미로그인/오프라인이면 [] */
     listMine: () => Promise<MarketplaceListing[]>;
+    deleteMine: (slug: string) => Promise<CloudAgentDeleteResult>;
     bookmarks: () => Promise<HubAgentBookmark[]>;
     /** Web account snapshot + local outbox reconciliation. No polling; callers trigger lifecycle sync. */
     syncBookmarks: () => Promise<HubAgentBookmark[]>;
@@ -6147,7 +6167,7 @@ export interface AgentlasIpc {
     list: () => Promise<InstalledFirm[]>;
     get: (id: string) => Promise<InstalledFirm | null>;
     install: (slug: string) => Promise<InstalledFirm>;
-    uninstall: (id: string) => Promise<void>;
+    uninstall: (id: string, options?: InstalledFirmRemovalOptions) => Promise<RosterRemovalResult>;
     /** 정규화된 3-tier 조직 스펙 (저장된 리졸버 결과 또는 orgChart 파생) */
     getResolvedOrg: (id: string) => Promise<ResolvedOrg | null>;
     /** LLM으로 팀 폴더를 분석해 3-tier 조직 스펙 생성 (임포트 팀용) */

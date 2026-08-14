@@ -1,6 +1,6 @@
 // 로컬 에이전트/팀 폴더 임포트.
 // 드래그&드롭 또는 폴더 선택으로 받은 기존 에이전트 폴더를 분석한다:
-//   - 어떤 CLI 런타임 전용인지 라벨 (CLAUDE.md→claude-code, AGENTS.md→codex, GEMINI.md→gemini, .cursor→cursor)
+//   - 어떤 CLI 런타임 전용인지 라벨 (CLAUDE.md→claude-code, AGENTS.md→codex, legacy GEMINI.md→gemini, .cursor→cursor)
 //   - 단일 에이전트인지 팀인지 (TEAM.md / ceo / hr-departments)
 //   - 이름·태그라인·시스템 프롬프트
 // 원본은 그대로 두고, 위치를 routes.json에 라우팅 저장한다 (앱이 그 폴더를 그대로 사용).
@@ -781,6 +781,10 @@ async function importLocalFolderOnce(
   const sameDefinition = sameFolder || !definitionHash
     ? undefined
     : routes.find((r) => Boolean(r.definitionHash) && r.definitionHash === definitionHash);
+  // Presentation metadata is not a durable ownership key: two unrelated
+  // teams or agents commonly start from the same boilerplate title. The exact
+  // folder or content fingerprint is the safe identity across re-imports and
+  // copied checkouts; otherwise create a distinct owned row.
   const existing = sameFolder ?? sameDefinition;
   let row = existing
     ? (getDb().prepare("SELECT id, slug, tone FROM installed_agents WHERE id = ?").get(existing.agentId) as

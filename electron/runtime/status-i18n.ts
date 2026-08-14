@@ -35,7 +35,7 @@ const DICT = {
     errChatNotFound: "채팅을 찾지 못했습니다.",
     errAgentNotFound: "에이전트가 삭제되었거나 찾을 수 없습니다.",
     errNoRuntime:
-      "연결된 LLM 백엔드가 없습니다. 설정에서 Claude Code/Codex/Gemini CLI 또는 API 키를 연결해 주세요.",
+      "연결된 LLM 백엔드가 없습니다. 설정에서 Claude Code/Codex/Antigravity 또는 API 키를 연결해 주세요.",
     errNoRunner: "지원하지 않는 런타임 조합: {kind}/{backend}",
     errKeyMissingAnthropic: "Anthropic API 키가 저장되어 있지 않습니다. 설정에서 추가하세요.",
     errKeyMissingOpenAI: "OpenAI API 키가 저장되어 있지 않습니다. 설정에서 추가하세요.",
@@ -43,8 +43,8 @@ const DICT = {
     errCliMissingClaude:
       "claude CLI를 찾지 못했습니다. `npm i -g @anthropic-ai/claude-code` 후 다시 시도하세요.",
     errCliMissingCodex: "codex CLI를 찾지 못했습니다. `npm i -g @openai/codex` 후 다시 시도하세요.",
-    errCliMissingGemini:
-      "gemini CLI를 찾지 못했습니다. `npm i -g @google/gemini-cli` 후 다시 시도하세요.",
+    errCliMissingAntigravity:
+      "Antigravity CLI(agy)를 찾지 못했습니다. Antigravity를 설치하고 로그인한 뒤 다시 시도하세요.",
     errCliMissingGrok:
       "공식 xAI Grok CLI를 찾지 못했습니다. `curl -fsSL https://x.ai/cli/install.sh | bash` 후 다시 시도하세요.",
     errOllamaUnreachable:
@@ -95,7 +95,7 @@ const DICT = {
     errChatNotFound: "Chat not found.",
     errAgentNotFound: "Agent was removed or could not be found.",
     errNoRuntime:
-      "No LLM backend connected. Connect a Claude Code/Codex/Gemini CLI or an API key in Settings.",
+      "No LLM backend connected. Connect Claude Code, Codex, Antigravity, or an API key in Settings.",
     errNoRunner: "Unsupported runtime combination: {kind}/{backend}",
     errKeyMissingAnthropic: "Anthropic API key is not saved. Add it in Settings.",
     errKeyMissingOpenAI: "OpenAI API key is not saved. Add it in Settings.",
@@ -103,8 +103,8 @@ const DICT = {
     errCliMissingClaude:
       "claude CLI not found. Install with `npm i -g @anthropic-ai/claude-code` and try again.",
     errCliMissingCodex: "codex CLI not found. Install with `npm i -g @openai/codex` and try again.",
-    errCliMissingGemini:
-      "gemini CLI not found. Install with `npm i -g @google/gemini-cli` and try again.",
+    errCliMissingAntigravity:
+      "Antigravity CLI (agy) was not found. Install and sign in to Antigravity, then try again.",
     errCliMissingGrok: "Official xAI Grok CLI not found. Install with `curl -fsSL https://x.ai/cli/install.sh | bash` and try again.",
     errOllamaUnreachable:
       "Couldn't reach the local Ollama server ({host}). Make sure `ollama serve` is running.",

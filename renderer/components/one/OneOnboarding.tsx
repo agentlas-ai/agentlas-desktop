@@ -60,7 +60,7 @@ const PROVIDERS: Array<{
   { id: "openai", runtime: "codex", name: "OpenAI · Codex", logo: "/brand/llm/openai.svg", page: "https://openai.com/chatgpt/pricing/" },
   { id: "anthropic", runtime: "claude-code", name: "Claude", logo: "/brand/llm/claude.svg", page: "https://claude.com/pricing" },
   { id: "kimi", runtime: "kimi", name: "Kimi", logo: "/brand/llm/kimi.svg", page: "https://www.kimi.com/help/membership/membership-overview" },
-  { id: "google", runtime: "gemini", name: "Gemini", logo: "/brand/llm/googlegemini.svg", page: "https://one.google.com/about/google-ai-plans/" },
+  { id: "google", runtime: "antigravity", name: "Antigravity", logo: "/brand/llm/googlegemini.svg", page: "https://one.google.com/about/google-ai-plans/" },
 ];
 
 const EXAMPLE_SEEDS = ["one.onb.seed.cafe", "one.onb.seed.sales", "one.onb.seed.name"] as const;
@@ -274,7 +274,7 @@ function providerMatchesRuntime(provider: Exclude<OneOnboardingProvider, null>, 
   if (provider === "openai") return runtime.kind === "codex" || runtime.backend === "openai";
   if (provider === "anthropic") return runtime.kind === "claude-code" || runtime.backend === "anthropic";
   if (provider === "kimi") return runtime.kind === "kimi" || runtime.backend === "kimi";
-  return runtime.kind === "gemini" || runtime.backend === "google";
+  return runtime.kind === "antigravity" || runtime.backend === "google";
 }
 
 function moveRadio<T extends string>(
@@ -651,7 +651,7 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
         play("success");
         return;
       }
-      const login = await api.runtime.openCliLogin(entry.runtime as "claude-code" | "codex" | "gemini" | "kimi");
+      const login = await api.runtime.openCliLogin(entry.runtime as "claude-code" | "codex" | "antigravity" | "kimi");
       setRuntimeMessage(provider === "kimi"
         ? tFor(locale, "one.onb.rt.kimi_limited")
         : login.message || tFor(locale, "one.onb.rt.finish_signin"));
@@ -671,10 +671,12 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
     setBusy(true);
     setError(null);
     try {
-      const result = await api.runtime.installCli(entry.runtime as "claude-code" | "codex" | "gemini" | "kimi");
-      if (!result.ok) throw new Error(result.message);
+      if (entry.runtime !== "antigravity") {
+        const result = await api.runtime.installCli(entry.runtime as "claude-code" | "codex" | "kimi");
+        if (!result.ok) throw new Error(result.message);
+      }
       setPendingInstall(null);
-      const login = await api.runtime.openCliLogin(entry.runtime as "claude-code" | "codex" | "gemini" | "kimi");
+      const login = await api.runtime.openCliLogin(entry.runtime as "claude-code" | "codex" | "antigravity" | "kimi");
       setRuntimeMessage(login.message || tFor(locale, "one.onb.rt.installed_check"));
     } catch (cause) {
       recover("install-runtime", cause);
@@ -785,9 +787,11 @@ export function OneOnboarding({ locale, onComplete, onVisibilityChange }: Props)
       ]);
       setRuntimeFacts(runtimes);
       const readyProvider = (["openai", "anthropic", "google"] as const).find((provider) => {
-        const usageProvider = provider === "openai" ? "codex" : provider === "anthropic" ? "claude-code" : "gemini";
         return runtimes.some((runtime) => providerMatchesRuntime(provider, runtime))
-          && usage.providers.some((item) => item.provider === usageProvider && item.status !== "error");
+          && (provider === "google" || usage.providers.some((item) => {
+            const usageProvider = provider === "openai" ? "codex" : "claude-code";
+            return item.provider === usageProvider && item.status !== "error";
+          }));
       });
       if (readyProvider) current = await api.oneOnboarding.verifyProvider({ expectedVersion: current.version, provider: readyProvider });
       if (current.brainStatus === "connected") {

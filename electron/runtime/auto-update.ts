@@ -14,17 +14,22 @@ import { clearCliVersionProbeCache, probeCliVersion } from "./exec";
 import { updateCli, type InstallableCli, type ManageableCli } from "./install-cli";
 import { tryAcquireRuntimeMaintenance } from "./run-slots";
 
-const CLI_KINDS: ManageableCli[] = ["claude-code", "codex", "antigravity", "gemini", "kimi", "grok"];
+const CLI_KINDS: ManageableCli[] = ["claude-code", "codex", "antigravity", "kimi", "grok"];
 const PACKAGE_BY_KIND: Record<InstallableCli, string> = {
   "claude-code": "@anthropic-ai/claude-code",
   codex: "@openai/codex",
-  gemini: "@google/gemini-cli",
   kimi: "@moonshot-ai/kimi-code",
   grok: "@xai-official/grok",
 };
 const CHECK_INTERVAL_MS = 24 * 60 * 60_000;
 const FAILURE_RETRY_MS = 6 * 60 * 60_000;
+// `agy update` is source-owned and idempotent. A transient network/feed failure
+// should not leave the user on a stale CLI for six hours, while still avoiding
+// a tight retry loop from usage polling.
+const SOURCE_UPDATE_RETRY_MS = 15 * 60_000;
 const REGISTRY_TIMEOUT_MS = 8_000;
+const PERSISTED_STATE_VERSION = 2;
+const STARTUP_CHECK_DELAY_MS = 8_000;
 
 interface InternalVersionRecord extends CliRuntimeVersionStatus {
   source: string | null;
@@ -32,13 +37,14 @@ interface InternalVersionRecord extends CliRuntimeVersionStatus {
 }
 
 interface PersistedVersionState {
-  version: 1;
+  version: number;
   records: Partial<Record<ManageableCli, InternalVersionRecord>>;
 }
 
 const records = new Map<ManageableCli, InternalVersionRecord>();
 let stateLoaded = false;
 let cycleInFlight: Promise<void> | null = null;
+let runtimeAutoUpdateStop: (() => void) | null = null;
 
 function isManagedKind(kind: unknown): kind is ManageableCli {
   return typeof kind === "string" && CLI_KINDS.includes(kind as ManageableCli);
@@ -80,7 +86,8 @@ function loadState(): void {
   if (!file) return;
   try {
     const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as PersistedVersionState;
-    if (parsed?.version !== 1 || !parsed.records || typeof parsed.records !== "object") return;
+    if (![1, PERSISTED_STATE_VERSION].includes(parsed?.version) || !parsed.records || typeof parsed.records !== "object") return;
+    const legacyState = parsed.version === 1;
     for (const [kind, candidate] of Object.entries(parsed.records)) {
       if (!isManagedKind(kind) || !candidate || !isUpdateState(candidate.state)) continue;
       records.set(kind, {
@@ -88,11 +95,20 @@ function loadState(): void {
         installedVersion: typeof candidate.installedVersion === "string" ? candidate.installedVersion : null,
         latestVersion: typeof candidate.latestVersion === "string" ? candidate.latestVersion : null,
         // A process cannot still be checking/updating after restart. Recheck instead of lying.
-        state: candidate.state === "checking" || candidate.state === "updating"
+        // Version 1 also predates the Antigravity updater contract: it may contain
+        // a Gemini target and an `update-failed` result produced by a non-interactive
+        // invocation. Force one fresh source-owned check after this fix ships.
+        state: legacyState && kind === "antigravity"
+          ? "checking"
+          : candidate.state === "checking" || candidate.state === "updating"
           ? "checking"
           : candidate.state,
-        checkedAt: typeof candidate.checkedAt === "number" ? candidate.checkedAt : null,
-        attemptedAt: typeof candidate.attemptedAt === "number" ? candidate.attemptedAt : null,
+        checkedAt: legacyState && kind === "antigravity"
+          ? null
+          : typeof candidate.checkedAt === "number" ? candidate.checkedAt : null,
+        attemptedAt: legacyState && kind === "antigravity"
+          ? null
+          : typeof candidate.attemptedAt === "number" ? candidate.attemptedAt : null,
         source: typeof candidate.source === "string" ? candidate.source : null,
       });
     }
@@ -108,7 +124,7 @@ function saveState(): void {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const temporary = `${file}.tmp-${process.pid}`;
     const payload: PersistedVersionState = {
-      version: 1,
+      version: PERSISTED_STATE_VERSION,
       records: Object.fromEntries(records),
     };
     fs.writeFileSync(temporary, JSON.stringify(payload), { encoding: "utf8", mode: 0o600 });
@@ -122,7 +138,11 @@ function runtimeOf(runtimes: readonly RuntimeStatus[], kind: ManageableCli): Run
   return runtimes.find((runtime) => runtime.kind === kind) ?? null;
 }
 
-/** Antigravity is a distinct source-owned runtime; never compare its version to Gemini CLI. */
+function retryDelayFor(kind: ManageableCli): number {
+  return kind === "antigravity" ? SOURCE_UPDATE_RETRY_MS : FAILURE_RETRY_MS;
+}
+
+/** Antigravity is a distinct source-owned runtime with its own updater. */
 export function isAntigravityRuntimeSource(source: string | null | undefined): boolean {
   return /(^|[/\\])agy(?:\.(?:exe|cmd))?$/.test(String(source ?? ""));
 }
@@ -190,15 +210,50 @@ function reconcileRecords(runtimes: readonly RuntimeStatus[], now: number): void
 
     const installedVersion = runtime.version && parseSemVer(runtime.version) ? runtime.version : null;
     const sourceChanged = previous?.source !== runtime.source;
+    const sourceOwned = kind === "antigravity";
+    // Antigravity does not have a registry "latest" version. Older builds
+    // persisted the Gemini CLI target (or an older agy probe) under this slot,
+    // which produced misleading arrows such as `1.1.13 -> 1.1.12` and kept a
+    // stale `update-failed` state alive after the runtime had already migrated.
+    // Treat a mismatched target as a one-time migration check; the updater will
+    // replace it with the version measured after `agy update`.
+    const sourceOwnedStateStale = sourceOwned &&
+      !!installedVersion &&
+      !!previous &&
+      previous.latestVersion !== installedVersion;
     let state = previous?.state ?? "checking";
-    let latestVersion = sourceChanged ? null : previous?.latestVersion ?? null;
-    let checkedAt = sourceChanged ? null : previous?.checkedAt ?? null;
-    let attemptedAt = sourceChanged ? null : previous?.attemptedAt ?? null;
+    let latestVersion = sourceOwned
+      ? installedVersion
+      : sourceChanged ? null : previous?.latestVersion ?? null;
+    let checkedAt = sourceChanged || sourceOwnedStateStale ? null : previous?.checkedAt ?? null;
+    let attemptedAt = sourceChanged || sourceOwnedStateStale ? null : previous?.attemptedAt ?? null;
 
     if (!installedVersion) {
       state = "unverifiable";
       latestVersion = null;
       checkedAt = now;
+    } else if (sourceOwned) {
+      if (sourceChanged || !previous || sourceOwnedStateStale) {
+        state = "checking";
+      } else if (previous.state === "update-failed") {
+        // A source-owned updater has no registry target to compare against.
+        // Once its retry cooldown expires, force a fresh `agy update` check
+        // instead of accidentally turning the record into a quiet `current`.
+        const retryDue = now - (previous.attemptedAt ?? 0) >= retryDelayFor(kind);
+        state = retryDue ? "checking" : "update-failed";
+        if (retryDue) checkedAt = null;
+      } else if (previous.state === "updating" || previous.state === "checking") {
+        // A process cannot still be updating after a restart; re-enter the
+        // single-flight check rather than presenting a permanent spinner.
+        state = "checking";
+        checkedAt = null;
+      } else if (previous.state === "deferred-active-runs") {
+        state = "deferred-active-runs";
+      } else if (previous.state === "updated") {
+        state = "updated";
+      } else {
+        state = "current";
+      }
     } else if (previous?.state === "updating") {
       state = "updating";
     } else if (
@@ -232,17 +287,17 @@ function reconcileRecords(runtimes: readonly RuntimeStatus[], now: number): void
   }
 }
 
-function checkDue(record: InternalVersionRecord, now: number): boolean {
+function checkDue(record: InternalVersionRecord, now: number, kind: ManageableCli): boolean {
   if (!record.installedVersion) return false;
-  if (record.state === "check-failed") return now - (record.checkedAt ?? 0) >= FAILURE_RETRY_MS;
-  if (record.state === "update-failed") return now - (record.attemptedAt ?? 0) >= FAILURE_RETRY_MS;
+  if (record.state === "check-failed") return now - (record.checkedAt ?? 0) >= retryDelayFor(kind);
+  if (record.state === "update-failed") return now - (record.attemptedAt ?? 0) >= retryDelayFor(kind);
   if (record.state === "unverifiable") return false;
   return record.checkedAt == null || now - record.checkedAt >= CHECK_INTERVAL_MS;
 }
 
-function updateRetryAllowed(record: InternalVersionRecord, now: number): boolean {
+function updateRetryAllowed(record: InternalVersionRecord, now: number, kind: ManageableCli): boolean {
   if (record.state !== "update-failed") return true;
-  return now - (record.attemptedAt ?? 0) >= FAILURE_RETRY_MS;
+  return now - (record.attemptedAt ?? 0) >= retryDelayFor(kind);
 }
 
 async function verifyUpdatedRuntime(
@@ -270,7 +325,7 @@ async function runCycle(initialRuntimes: readonly RuntimeStatus[]): Promise<void
     const now = Date.now();
     const antigravity = kind === "antigravity";
 
-    if (!antigravity && checkDue(record, now)) {
+    if (!antigravity && checkDue(record, now, kind)) {
       record.state = "checking";
       records.set(kind, record);
       try {
@@ -296,11 +351,11 @@ async function runCycle(initialRuntimes: readonly RuntimeStatus[]): Promise<void
 
     // Antigravity owns its update feed. Run its exact source updater once per interval,
     // then treat the post-update measured version as both installed and latest.
-    const sourceOwnedCheckDue = antigravity && checkDue(record, now);
+    const sourceOwnedCheckDue = antigravity && checkDue(record, now, kind);
     const shouldUpdate = sourceOwnedCheckDue || (
       record.latestVersion != null &&
       cliVersionRelation(record.installedVersion, record.latestVersion) === "outdated" &&
-      updateRetryAllowed(record, now)
+      updateRetryAllowed(record, now, kind)
     );
     if (!shouldUpdate) continue;
 
@@ -321,6 +376,7 @@ async function runCycle(initialRuntimes: readonly RuntimeStatus[]): Promise<void
       const result = await updateCli(kind, runtime.source);
       if (!result.ok) {
         record.state = "update-failed";
+        if (antigravity) record.latestVersion = record.installedVersion;
         record.checkedAt = Date.now();
         records.set(kind, record);
         saveState();
@@ -338,6 +394,7 @@ async function runCycle(initialRuntimes: readonly RuntimeStatus[]): Promise<void
       if (verified.verified) runtimes = await detectRuntimes();
     } catch {
       record.state = "update-failed";
+      if (antigravity) record.latestVersion = record.installedVersion;
       record.checkedAt = Date.now();
       records.set(kind, record);
       saveState();
@@ -348,8 +405,8 @@ async function runCycle(initialRuntimes: readonly RuntimeStatus[]): Promise<void
 }
 
 /**
- * Usage IPC가 호출하는 진입점. 현재 상태를 즉시 반환하고 네트워크 확인/업데이트는
- * single-flight 백그라운드로 진행해 사용량 UI를 막지 않는다.
+ * 현재 상태를 즉시 반환하고 네트워크 확인/업데이트는 single-flight
+ * 백그라운드로 진행해 사용량 UI와 앱 부팅을 막지 않는다.
  */
 export function runtimeVersionsWithAutoUpdate(
   runtimes: readonly RuntimeStatus[],
@@ -358,9 +415,61 @@ export function runtimeVersionsWithAutoUpdate(
   reconcileRecords(runtimes, now);
   saveState();
   if (process.env.AGENTLAS_DISABLE_CLI_AUTO_UPDATE !== "1" && !cycleInFlight) {
-    cycleInFlight = runCycle(runtimes).finally(() => {
-      cycleInFlight = null;
-    });
+    cycleInFlight = runCycle(runtimes)
+      .catch((error) => {
+        // A store/maintenance probe failure must not become an unhandled
+        // rejection that takes down the main process. The next scheduled or
+        // renderer-triggered check reconciles the durable record again.
+        console.warn("[runtime-update] cycle failed", error instanceof Error ? error.message : "unknown error");
+      })
+      .finally(() => {
+        cycleInFlight = null;
+      });
   }
   return CLI_KINDS.map((kind) => publicRecord(records.get(kind)!));
+}
+
+/**
+ * Start the CLI updater from Main, not from a particular renderer card.
+ * The usage panel still reports the same persisted state, but a person no
+ * longer has to open Dashboard for an installed Antigravity CLI to be checked.
+ */
+export function startCliRuntimeAutoUpdate(): void {
+  if (runtimeAutoUpdateStop || process.env.AGENTLAS_DISABLE_CLI_AUTO_UPDATE === "1") return;
+
+  let disposed = false;
+  let initialTimer: NodeJS.Timeout | null = null;
+  let interval: NodeJS.Timeout | null = null;
+  const run = async (): Promise<void> => {
+    if (disposed) return;
+    try {
+      const runtimes = await detectRuntimes();
+      if (!disposed) runtimeVersionsWithAutoUpdate(runtimes);
+    } catch (error) {
+      // A runtime probe must never make Desktop startup fail. The renderer will
+      // continue to show the last safe persisted state and retry on its normal
+      // usage poll.
+      console.warn("[runtime-update] background check skipped", error instanceof Error ? error.message : "unknown error");
+    }
+  };
+
+  initialTimer = setTimeout(() => {
+    initialTimer = null;
+    void run();
+  }, STARTUP_CHECK_DELAY_MS);
+  initialTimer.unref?.();
+  interval = setInterval(() => void run(), CHECK_INTERVAL_MS);
+  interval.unref?.();
+  runtimeAutoUpdateStop = () => {
+    disposed = true;
+    if (initialTimer) clearTimeout(initialTimer);
+    if (interval) clearInterval(interval);
+    initialTimer = null;
+    interval = null;
+    runtimeAutoUpdateStop = null;
+  };
+}
+
+export function stopCliRuntimeAutoUpdate(): void {
+  runtimeAutoUpdateStop?.();
 }

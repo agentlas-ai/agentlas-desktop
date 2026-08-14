@@ -178,15 +178,23 @@ export function OrgTree() {
   );
 
   const isLocalSource = (a: InstalledAgent | undefined) =>
-    Boolean(a?.localPath && a.assetSource !== "agent-cloud" && a.assetSource !== "hub");
-  const agentSource = (a: InstalledAgent): Source => (isLocalSource(a) ? "local" : "cloud");
+    Boolean(a?.assetSource === "local-import" || (a?.localPath && a.assetSource !== "agent-cloud" && a.assetSource !== "hub"));
+  const agentSource = (a: InstalledAgent): Source => {
+    if (a.assetSource === "hub") return "hub";
+    if (a.assetSource === "agent-cloud") return "cloud";
+    return isLocalSource(a) ? "local" : "cloud";
+  };
   // firm 출처: CEO 에이전트의 권위 출처가 1차. Cloud/Hub 복원본도 localPath를 가지므로
   // 경로 유무만으로 local로 분류하지 않는다. CEO가 visible 필터에서 빠져 map에 없을 수 있으므로
   // 로컬 임포트 firm(slug: firm-local-*) 이거나 조직도의 어떤 에이전트라도 로컬이면 로컬로 본다.
   const firmSource = (f: InstalledFirm): Source => {
-    if (isLocalSource(agentById.get(f.ceoAgentId))) return "local";
-    if (f.slug?.startsWith("firm-local-")) return "local";
-    if (f.orgChart.some((n) => isLocalSource(agentById.get(n.agentId)))) return "local";
+    const sources = [
+      agentById.get(f.ceoAgentId),
+      ...f.orgChart.map((node) => agentById.get(node.agentId)),
+    ].filter(Boolean).map((agent) => agentSource(agent!));
+    if (sources.includes("hub")) return "hub";
+    if (sources.includes("cloud")) return "cloud";
+    if (sources.includes("local") || f.slug?.startsWith("firm-local-")) return "local";
     return "cloud";
   };
 
@@ -221,32 +229,79 @@ export function OrgTree() {
     }
   }
 
-  // 제거 — 개별 에이전트/회사, 그리고 최상단 그룹(local/cloud/hub) 전체.
+  function sourceLabel(source: Source): string {
+    if (source === "local") return ko ? "로컬 폴더" : "local folder";
+    if (source === "cloud") return "Agent Cloud";
+    return "Agentlas Hub 북마크";
+  }
+
+  async function removeAgentCore(api: NonNullable<ReturnType<typeof ipc>>, agent: InstalledAgent): Promise<void> {
+    const source = agentSource(agent);
+    if (source === "cloud") await api.marketplace.deleteMine(agent.slug);
+    if (source === "hub") await api.marketplace.bookmarkRemove(agent.slug, agent.kind === "team" ? "team" : "agent");
+    const result = await api.team.uninstall(agent.id, { removeSource: source === "local" });
+    if (source === "local" && !result.sourceMovedToTrash && agent.localPath) {
+      throw new Error(ko ? "레지스트리는 제거됐지만 원본 폴더를 휴지통으로 옮기지 못했습니다." : "The registry was removed, but the original folder could not be moved to Trash.");
+    }
+  }
+
+  async function removeFirmCore(api: NonNullable<ReturnType<typeof ipc>>, firm: InstalledFirm): Promise<void> {
+    const source = firmSource(firm);
+    const controller = agentById.get(firm.ceoAgentId) ?? agents.find((agent) => agent.id === firm.ceoAgentId);
+    if (source === "cloud" && controller?.slug) await api.marketplace.deleteMine(controller.slug);
+    if (source === "hub" && controller?.slug) await api.marketplace.bookmarkRemove(controller.slug, "team");
+    const result = await api.firms.uninstall(firm.id, {
+      removeMembers: true,
+      removeSource: source === "local",
+    });
+    if (source === "local" && !result.sourceMovedToTrash && controller?.localPath) {
+      throw new Error(ko ? "팀은 제거됐지만 원본 팀 폴더를 휴지통으로 옮기지 못했습니다." : "The team was removed, but its source folder could not be moved to Trash.");
+    }
+    if (result.retainedAgentIds?.length) {
+      setImportMessage({
+        tone: "ok",
+        text: ko ? `공유 중인 구성원 ${result.retainedAgentIds.length}개는 다른 조직도 때문에 유지했습니다.` : `${result.retainedAgentIds.length} shared member(s) remain because another organization still uses them.`,
+      });
+    }
+  }
+
+  // 조직도 X는 출처별 소유권 정리까지 한 번에 수행한다: 로컬=휴지통,
+  // Cloud=내 Cloud 원본 삭제, Hub=북마크 삭제. 팀은 CEO가 아닌 조직도 단위다.
   async function removeAgent(id: string, name: string) {
     const api = ipc();
     if (!api || busy) return;
-    if (!window.confirm(t("org.confirm.remove_agent", { name }))) return;
+    const agent = agentById.get(id);
+    const source = agent ? agentSource(agent) : "local";
+    if (!window.confirm(ko
+      ? `${name}을(를) 조직도에서 삭제할까요? 출처: ${sourceLabel(source)}. 로컬이면 원본 폴더를 휴지통으로 옮기고, Cloud/Hub이면 원본 또는 북마크도 함께 정리합니다.`
+      : `Remove ${name} from the org chart? Source: ${sourceLabel(source)}. Local sources move to Trash; Cloud/Hub also removes the owned source or bookmark.`)) return;
     setBusy(true);
     try {
-      await api.team.uninstall(id);
+      if (agent) await removeAgentCore(api, agent);
+      else await api.team.uninstall(id);
     } catch (err) {
       setImportMessage({ tone: "error", text: t("org.error.remove_agent", { error: String(err) }) });
     } finally {
-      await load();
+      await load(true);
       setBusy(false);
     }
   }
   async function removeFirm(id: string, name: string) {
     const api = ipc();
     if (!api || busy) return;
-    if (!window.confirm(t("org.confirm.remove_firm", { name }))) return;
+    const firm = firms.find((item) => item.id === id);
+    const source = firm ? firmSource(firm) : "local";
+    if (!window.confirm(ko
+      ? `${name} 팀을 조직도에서 삭제할까요? 출처: ${sourceLabel(source)}. 팀 구성원 설치와 로컬 원본/Cloud 원본/Hub 북마크 정리를 함께 처리합니다.`
+      : `Remove team ${name} from the org chart? Source: ${sourceLabel(source)}. This removes member installs and cleans the local source, Cloud source, or Hub bookmark.`)) return;
     setBusy(true);
     try {
-      await api.firms.uninstall(id);
+      if (firm) await removeFirmCore(api, firm);
+      else await api.firms.uninstall(id, { removeMembers: true });
     } catch (err) {
       setImportMessage({ tone: "error", text: t("org.error.remove_firm", { error: String(err) }) });
     } finally {
-      await load();
+      await load(true);
       setBusy(false);
     }
   }
@@ -260,12 +315,44 @@ export function OrgTree() {
     if (!window.confirm(t("org.confirm.remove_group", { name: label, count: total }))) return;
     setBusy(true);
     try {
-      for (const f of gFirms) await api.firms.uninstall(f.id);
-      for (const a of gAgents) await api.team.uninstall(a.id);
+      for (const f of gFirms) await removeFirmCore(api, f);
+      for (const a of gAgents) await removeAgentCore(api, a);
     } catch (err) {
       setImportMessage({ tone: "error", text: t("org.error.remove_group", { error: String(err) }) });
     } finally {
-      await load();
+      await load(true);
+      setBusy(false);
+    }
+  }
+
+  async function removeCloudListing(listing: MarketplaceListing) {
+    const api = ipc();
+    if (!api || busy) return;
+    const name = ko ? listing.name : listing.nameEn || listing.name;
+    if (!window.confirm(ko ? `${name}을 Agent Cloud에서 영구 삭제할까요?` : `Delete ${name} permanently from Agent Cloud?`)) return;
+    setBusy(true);
+    try {
+      await api.marketplace.deleteMine(listing.slug);
+    } catch (err) {
+      setImportMessage({ tone: "error", text: String(err) });
+    } finally {
+      await load(true);
+      setBusy(false);
+    }
+  }
+
+  async function removeHubBookmark(slug: string, listing: MarketplaceListing) {
+    const api = ipc();
+    if (!api || busy) return;
+    const name = ko ? listing.name : listing.nameEn || listing.name;
+    if (!window.confirm(ko ? `${name}의 Hub 북마크를 조직도에서 삭제할까요?` : `Remove the Hub bookmark for ${name} from the org chart?`)) return;
+    setBusy(true);
+    try {
+      await api.marketplace.bookmarkRemove(slug, listing.entityKind);
+    } catch (err) {
+      setImportMessage({ tone: "error", text: String(err) });
+    } finally {
+      await load(true);
       setBusy(false);
     }
   }
@@ -422,32 +509,52 @@ export function OrgTree() {
 
               {open &&
                 cloudOnly.map((m) => (
-                  <button
-                    key={`cloud:${m.slug}`}
-                    onClick={() => navigate("/cloud")}
-                    className="dashboard-org-row dashboard-org-agent dashboard-org-agent-single"
-                    title={t("org.cloud_only.title")}
-                  >
-                    <Dot />
-                    <span className="dashboard-org-label">{ko ? m.name : m.nameEn || m.name}</span>
-                    <span className="dashboard-org-count">{t("org.kind.single")}</span>
-                  </button>
+                  <div key={`cloud:${m.slug}`} className="dashboard-org-rowwrap">
+                    <button
+                      onClick={() => navigate("/cloud")}
+                      className="dashboard-org-row dashboard-org-agent dashboard-org-agent-single"
+                      title={t("org.cloud_only.title")}
+                    >
+                      <Dot />
+                      <span className="dashboard-org-label">{ko ? m.name : m.nameEn || m.name}</span>
+                      <span className="dashboard-org-count">{t("org.kind.single")}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="dashboard-org-remove"
+                      title={ko ? "Agent Cloud 원본 삭제" : "Delete Agent Cloud source"}
+                      aria-label={ko ? "Agent Cloud 원본 삭제" : "Delete Agent Cloud source"}
+                      onClick={() => void removeCloudListing(m)}
+                    >
+                      ×
+                    </button>
+                  </div>
                 ))}
 
               {open &&
                 hubOnly.map(({ slug, listing }) => {
                   const entityClass = classifyHubEntity(listing);
                   return (
-                    <button
-                      key={`hub:${String(listing.entityKind || "agent")}:${slug}`}
-                      onClick={() => navigate(`/marketplace?q=${encodeURIComponent(slug)}`)}
-                      className={`dashboard-org-row dashboard-org-agent dashboard-org-agent-${entityClass}`}
-                      title={t("org.hub_bookmark.title")}
-                    >
-                      <Dot />
-                      <span className="dashboard-org-label">{ko ? listing.name : listing.nameEn || listing.name}</span>
-                      <span className="dashboard-org-count">{entityClassShortLabel(entityClass, locale)}</span>
-                    </button>
+                    <div key={`hub:${String(listing.entityKind || "agent")}:${slug}`} className="dashboard-org-rowwrap">
+                      <button
+                        onClick={() => navigate(`/marketplace?q=${encodeURIComponent(slug)}`)}
+                        className={`dashboard-org-row dashboard-org-agent dashboard-org-agent-${entityClass}`}
+                        title={t("org.hub_bookmark.title")}
+                      >
+                        <Dot />
+                        <span className="dashboard-org-label">{ko ? listing.name : listing.nameEn || listing.name}</span>
+                        <span className="dashboard-org-count">{entityClassShortLabel(entityClass, locale)}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="dashboard-org-remove"
+                        title={ko ? "Hub 북마크 삭제" : "Remove Hub bookmark"}
+                        aria-label={ko ? "Hub 북마크 삭제" : "Remove Hub bookmark"}
+                        onClick={() => void removeHubBookmark(slug, listing)}
+                      >
+                        ×
+                      </button>
+                    </div>
                   );
                 })}
             </div>

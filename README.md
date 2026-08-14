@@ -55,7 +55,7 @@
     <img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-green">
   </a>
   <img alt="Platforms" src="https://img.shields.io/badge/macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-lightgrey">
-  <img alt="Runtime" src="https://img.shields.io/badge/runtime-Claude%20Code%20%7C%20Codex%20%7C%20Gemini%20%7C%20Grok%20%7C%20Ollama%20%7C%20BYOK-black">
+  <img alt="Runtime" src="https://img.shields.io/badge/runtime-Claude%20Code%20%7C%20Codex%20%7C%20Antigravity%20%7C%20Grok%20%7C%20Ollama%20%7C%20BYOK-black">
 </p>
 
 <p align="center">
@@ -69,7 +69,10 @@ Canonical release history lives in [CHANGELOG](CHANGELOG.md) and the
 This README keeps the newest source release note. The Releases page remains the
 authority for which version is actually public, stable, and downloadable.
 
-- **2026-08-14 · v1.0.8 — One Activity stays attached and narrow layouts stay usable** — One keeps the live Activity timeline after renderer reload or run attachment, shows worker/role context on tool activity, avoids a zero-width conversation column on narrow task-active windows, and deduplicates the visible sub-agent rail. This release binds Agentlas OS v1.2.2 at 0ef47d1bec6ad0cb2fed1024661753c1a83377ee. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
+- **2026-08-15 · v1.0.12 — Agent Toolbox team graph and deletion repair** — Teams now use one Description/Metadata detail surface, render the complete CEO → HQ → specialist graph, expose source-aware X deletion, prevent local package identity duplication, and make the composer’s + → @ team selection path real. This release binds Agentlas OS v1.2.4 at d2dbd5a9697fd94dd69457f009bea1f66d6e6084. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
+- **2026-08-14 · v1.0.11 — Antigravity updater retry and migration repair** — The Desktop-owned `agy update` path retries transient source-owned failures after 15 minutes, removes the retired Gemini `0.51.0 → 0.55.1` journal during migration, and persists only the post-update verified Antigravity version. This release binds Agentlas OS v1.2.4 at d2dbd5a9697fd94dd69457f009bea1f66d6e6084. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
+- **2026-08-14 · v1.0.10 — Antigravity CLI auto-update** — Desktop now owns the CLI update check in Main, so `agy` is checked without opening the usage card; pre-migration Gemini update state is invalidated and the post-update `agy` version is verified before success is recorded. Agent Toolbox continues to use one team detail page with Description/Metadata tabs and a complete CEO-to-specialist org chart. This release binds Agentlas OS v1.2.4 at d2dbd5a9697fd94dd69457f009bea1f66d6e6084. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
+- **2026-08-14 · v1.0.8 — One Activity stays attached and narrow layouts stay usable** — One keeps the live Activity timeline after renderer reload or run attachment, shows worker/role context on tool activity, avoids a zero-width conversation column on narrow task-active windows, and deduplicates the visible sub-agent rail. This release binds Agentlas OS v1.2.4 at d2dbd5a9697fd94dd69457f009bea1f66d6e6084. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
 - **2026-08-14 · v1.0.7 — Mobile model controls reach the Desktop runtime** — Mobile One now has a real model control, Work pins a runtime per chat, and Settings mirrors Desktop's orchestrator/worker role pool. Antigravity is accepted by the Mobile Bridge, and every selected provider/model/effort/context tuple is carried into the actual invocation. This release binds Agentlas OS v1.2.2 at 0ef47d1bec6ad0cb2fed1024661753c1a83377ee. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
 - **2026-08-14 · v1.0.6 — Desktop carries the fail-closed Agentlas OS 1.2.2 runtime** — The signed bundle now pins the public Hephaestus v1.2.2 release, including the Python resolver load gate, graph skill mirrors, default-session capability descriptor fix, and the runtime model-list parser compatibility fix. This release binds Agentlas OS v1.2.2 at 0ef47d1bec6ad0cb2fed1024661753c1a83377ee. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
 - **2026-08-14 · v1.0.5 — Desktop carries the fail-closed Agentlas OS 1.2.1 runtime** — The signed bundle pins the public Hephaestus v1.2.1 release, including the Python resolver load gate, graph skill mirrors, and default-session capability descriptor fix. This release binds Agentlas OS v1.2.1 at bdcc80db5b78b93ae355a5e6ba179bfa28f00123. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
@@ -1292,7 +1295,7 @@ authority for which version is actually public, stable, and downloadable.
 
 | | |
 |---|---|
-| **Local + BYOK runtimes** | Claude Code · Codex · Gemini/Antigravity · Grok · Ollama · API keys — auto-detected |
+| **Local + BYOK runtimes** | Claude Code · Codex · Antigravity · Grok · Ollama · API keys — auto-detected |
 | **BYOK providers** | Anthropic · OpenAI · Google · Upstage · GLM · Kimi · DeepSeek · compatible custom endpoints |
 | **+$0 to your model bill** | Agentlas runs no model and never proxies a call |
 | **100% local** | keys in the OS keychain, chats & agents in local SQLite |
@@ -1310,7 +1313,7 @@ apps or whole agent teams from one local window — with the UI, org chart, and 
 behind every run in plain view. Your keys and your chat history stay on your
 machine, never on someone else's agent platform.
 
-- **Bring your own models.** Claude Code, Codex, Gemini/Antigravity, Grok, and
+- **Bring your own models.** Claude Code, Codex, Antigravity, Grok, and
   Ollama, or supported BYOK API keys directly. Agentlas never proxies the model call.
 - **Install Apps over MCP.** Drop in an App, an agent, or a whole team — for example
   a package you built on [agentlas.cloud](https://agentlas.cloud) — and run it.
@@ -1346,15 +1349,15 @@ A complete tour of what ships today.
 ### Bring your own everything (BYOC)
 
 - **Local CLI runtimes, auto-detected.** Agentlas finds your installed
-  `claude-code`, `codex`, `gemini`, and `grok` CLIs plus a local Ollama server and
+  `claude-code`, `codex`, `agy` (Antigravity), and `grok` CLIs plus a local Ollama server and
   runs through them using the connection you already have.
-- **Honest provider health.** If the official Gemini CLI is rejected as a
-  retired client, one installed Antigravity fallback is attempted. Grok quota
-  exhaustion is shown as HTTP 402; usage or reset values that a provider does
-  not expose are never invented.
+- **Honest provider health.** Antigravity is the supported Google subscription
+  runtime and is shown from the installed `agy` connection; it is not silently
+  represented as a legacy CLI. Grok quota exhaustion is shown as HTTP 402;
+  usage or reset values that a provider does not expose are never invented.
 - **BYOK cloud keys.** No CLI? Paste an Anthropic, OpenAI, or Google API key and
   go. Keys are stored in the OS keychain, never a file.
-- **Mix and switch freely.** Have Claude Code *and* a Gemini key? Both show up; pick
+- **Mix and switch freely.** Have Claude Code *and* Antigravity? Both show up; pick
   the active backend per run. Most apps lock you to one provider — Agentlas doesn't.
 - **No proxy, ever.** Every model call goes straight from your machine to the
   provider. Agentlas runs no LLM of its own and adds **$0** to your model bill.
@@ -1535,7 +1538,7 @@ Three common ways to run AI agents today — and where Agentlas lands.
 | Where keys & history live | **Your keychain + local SQLite** | Their cloud | Local (varies) | Local |
 | Multi-agent firms + org chart | **Yes** | Sometimes | No | No (manual) |
 | Install 3rd-party Apps over MCP | **Yes, Apps Store** | Varies | No | Manual |
-| Use local runtimes (Claude Code / Codex / Gemini / Grok / Ollama) | **Yes** | Rarely | No | One at a time |
+| Use local runtimes (Claude Code / Codex / Antigravity / Grok / Ollama) | **Yes** | Rarely | No | One at a time |
 | Mix CLIs **and** cloud keys in one window | **Yes** | No | No | No |
 | Open source (Apache-2.0) | **Yes** | Usually no | Varies | Varies |
 | Desktop GUI on mac / win / linux | **Yes** | Web only | Often | No (terminal) |
@@ -1543,7 +1546,7 @@ Three common ways to run AI agents today — and where Agentlas lands.
 **Why people pick Agentlas**
 
 - **It runs on the AI you already pay for.** No second model subscription to an
-  agent platform — your Claude/ChatGPT/Gemini/Grok plan does the work.
+  agent platform — your Claude/ChatGPT/Antigravity/Grok plan does the work.
 - **The local boundary is explicit.** Keys stay in the OS keychain and chats in
   local SQLite. Model inputs go directly to the provider you chose; packages or
   Experience assets reach Agent Cloud/Hub only after an explicit save or publish.
@@ -1580,7 +1583,7 @@ from your machine to the provider; Agentlas never sits in the middle.
 |----------|-----------------|-------|
 | **Claude Code** | Local CLI (`claude-code`) | Auto-detected. Uses your existing Claude subscription/login. |
 | **Codex** | Local CLI (`codex`) | Auto-detected. Uses your existing ChatGPT/OpenAI login. |
-| **Gemini** | Local CLI (`gemini`) | Auto-detected. Uses your existing Google login; an installed Antigravity runtime is a one-time fallback for `UNSUPPORTED_CLIENT`. |
+| **Antigravity** | Local CLI (`agy`) | Auto-detected. Uses your existing Google subscription/login and exposes the live `agy models` inventory. |
 | **Grok** | Local CLI (`grok`) | Auto-detected. Uses the CLI login. HTTP 402 is reported as exhausted quota, not a healthy connection. |
 | **Ollama** | Local server | Auto-detected from the local Ollama endpoint; models and context stay under the local host configuration. |
 | **Anthropic** | BYOK API key | `console.anthropic.com → API Keys`. Stored in the OS keychain. |
@@ -1718,7 +1721,7 @@ flow:
 
 1. **Open the app** and let the welcome screen finish (first launch only).
 2. **Connect a backend.** Agentlas auto-detects any installed `claude-code`,
-   `codex`, or `gemini` CLI. No CLI? Paste an Anthropic / OpenAI / Google API key —
+   `codex`, or `agy` (Antigravity) CLI. No CLI? Paste an Anthropic / OpenAI / Google API key —
    it goes straight into the OS keychain.
 3. **Install an App, team, or agent** from **Apps Store**. Try a firm (a CEO plus
    its departments), a single specialist, or a generated App.
@@ -1740,7 +1743,7 @@ machine; here's how they differ.
 
 | Action | Local CLI runtime | Cloud API key (BYOK) |
 |--------|-------------------|----------------------|
-| Connect | Auto-detected (`claude-code` / `codex` / `gemini`) | Paste a key in **Settings → BYOK** |
+| Connect | Auto-detected (`claude-code` / `codex` / `agy`) | Paste a key in **Settings → BYOK** |
 | Who pays | Your existing subscription / login | Your API account, metered per token |
 | Where the key lives | The CLI's own login | The OS keychain (never a file) |
 | Works offline-ish | Whatever the CLI supports | No — direct cloud calls |
@@ -1818,7 +1821,7 @@ need any of that.
 ```text
 Agentlas Desktop
 ├─ electron/          privileged main process
-│  ├─ runtime/        Claude Code, Codex, Gemini/Antigravity, Grok, Ollama, BYOK adapters
+│  ├─ runtime/        Claude Code, Codex, Antigravity, Grok, Ollama, BYOK adapters
 │  ├─ mcp/            MCP client and installer
 │  ├─ marketplace/    agentlas.cloud Apps Store source
 │  ├─ migrate/        OpenClaw / Hermes importer

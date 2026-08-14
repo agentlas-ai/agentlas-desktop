@@ -8,7 +8,9 @@ import { getDb } from "./db";
 
 interface ModelRoleRow {
   role: RuntimeRole;
-  kind: RuntimeKind;
+  // Existing databases may still contain the removed Google CLI kind. Read it
+  // as a string and canonicalize it at the boundary below.
+  kind: string;
   backend: RuntimeBackend | null;
   source: string | null;
   model: string | null;
@@ -50,7 +52,7 @@ export interface ModelRolePoolPick {
 interface ModelRoleMemberRow {
   role: RuntimeRole;
   position: number;
-  kind: RuntimeKind;
+  kind: string;
   backend: RuntimeBackend | null;
   source: string | null;
   model: string | null;
@@ -64,7 +66,6 @@ const VALID_KINDS = new Set<RuntimeKind>([
   "claude-code",
   "codex",
   "antigravity",
-  "gemini",
   "kimi",
   "grok",
   "cursor",
@@ -79,16 +80,37 @@ function cleanText(value: string | null | undefined): string | null {
   return trimmed ? trimmed : null;
 }
 
+function canonicalStoredKind(kind: string): RuntimeKind {
+  const canonical = kind === "gemini" ? "antigravity" : kind;
+  if (!VALID_KINDS.has(canonical as RuntimeKind)) {
+    throw new Error(`Unknown stored runtime kind: ${kind}`);
+  }
+  return canonical as RuntimeKind;
+}
+
+function canonicalStoredSelection(row: {
+  kind: string;
+  backend: RuntimeBackend | null;
+  source: string | null;
+  model: string | null;
+}): Pick<RuntimeSelection, "kind" | "backend" | "source" | "model"> {
+  const legacyGemini = row.kind === "gemini";
+  return {
+    kind: canonicalStoredKind(row.kind),
+    backend: row.backend ?? undefined,
+    // A legacy Google CLI source/model is not a valid Antigravity executable pin.
+    source: legacyGemini ? undefined : row.source ?? undefined,
+    model: legacyGemini ? undefined : row.model ?? undefined,
+  };
+}
+
 function assertRole(role: RuntimeRole): void {
   if (!VALID_ROLES.has(role)) throw new Error(`Unknown runtime role: ${role}`);
 }
 
 function rowSelection(row: ModelRoleRow, role = row.role): RuntimeSelection {
   return {
-    kind: row.kind,
-    backend: row.backend ?? undefined,
-    source: row.source ?? undefined,
-    model: row.model ?? undefined,
+    ...canonicalStoredSelection(row),
     effort: row.effort ?? undefined,
     longContext: Boolean(row.long_context),
     role,
@@ -115,7 +137,7 @@ function getLegacyOrchestrator(): ResolvedModelRole | null {
       .prepare("SELECT kind, backend, source, model, long_context FROM active_runtime WHERE id = 1")
       .get() as
       | {
-          kind: RuntimeKind;
+          kind: string;
           backend: RuntimeBackend | null;
           source: string | null;
           model: string | null;
@@ -137,10 +159,7 @@ function getLegacyOrchestrator(): ResolvedModelRole | null {
     return {
       role: "orchestrator",
       selection: {
-        kind: row.kind,
-        backend: row.backend ?? undefined,
-        source: row.source ?? undefined,
-        model: row.model ?? undefined,
+        ...canonicalStoredSelection(row),
         effort,
         longContext: Boolean(row.long_context),
         role: "orchestrator",
@@ -210,10 +229,7 @@ function memberRowToMember(row: ModelRoleMemberRow): ModelRoleMember {
     role: row.role,
     position: row.position,
     selection: {
-      kind: row.kind,
-      backend: row.backend ?? undefined,
-      source: row.source ?? undefined,
-      model: row.model ?? undefined,
+      ...canonicalStoredSelection(row),
       effort: row.effort ?? undefined,
       longContext: Boolean(row.long_context),
       role: row.role,

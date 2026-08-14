@@ -4,8 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 export type ProviderHealthCode =
-  | "grok_quota_exhausted"
-  | "gemini_unsupported_client";
+  | "grok_quota_exhausted";
 
 export interface ProviderHealthEntry {
   code: ProviderHealthCode;
@@ -18,8 +17,6 @@ const TTL_BY_CODE: Record<ProviderHealthCode, number> = {
   // Grok CLI는 정확한 quota window/reset을 주지 않는다. 상태 영수증만 최대 8일 보존하며
   // 이 TTL을 7일 사용량 창이나 퍼센트로 투영해서는 안 된다.
   grok_quota_exhausted: 8 * 24 * 60 * 60_000,
-  // 계정/클라이언트 자격은 바뀔 수 있으므로 하루 뒤 다시 공식 CLI를 점검한다.
-  gemini_unsupported_client: 24 * 60 * 60_000,
 };
 
 export function providerHealthFile(): string | null {
@@ -39,7 +36,7 @@ function isHealthEntry(value: unknown): value is ProviderHealthEntry {
   if (!value || typeof value !== "object") return false;
   const entry = value as Partial<ProviderHealthEntry>;
   return (
-    (entry.code === "grok_quota_exhausted" || entry.code === "gemini_unsupported_client") &&
+    entry.code === "grok_quota_exhausted" &&
     typeof entry.updatedAt === "number" &&
     Number.isFinite(entry.updatedAt)
   );

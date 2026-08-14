@@ -10,7 +10,7 @@ import type {
 } from "../../shared/types";
 import { runClaudeCode } from "../runtime/claude-code";
 import { runCodex } from "../runtime/codex";
-import { runGemini } from "../runtime/gemini";
+import { runAntigravity } from "../runtime/antigravity";
 import type { Runner } from "../runtime/runner";
 import {
   deriveOpenCrabMatchSignal,
@@ -21,7 +21,7 @@ import {
 const RUNTIMES: Record<OberonPlanRuntime, { label: string; runner: Runner }> = {
   "claude-code": { label: "Claude Code", runner: runClaudeCode },
   codex: { label: "Codex CLI", runner: runCodex },
-  gemini: { label: "Gemini CLI", runner: runGemini },
+  antigravity: { label: "Antigravity", runner: runAntigravity },
 };
 
 export async function planOberonWithCli(request: OberonPlanRequest): Promise<OberonPlanResult> {
@@ -194,11 +194,11 @@ export function buildOpenCrabQuery(brief: JsonObject): string {
 
 function runtimeOrder(runtime?: string): OberonPlanRuntime[] {
   const requested = isPlanRuntime(runtime) ? runtime : "claude-code";
-  return Array.from(new Set<OberonPlanRuntime>([requested, "codex", "claude-code", "gemini"]));
+  return Array.from(new Set<OberonPlanRuntime>([requested, "codex", "claude-code", "antigravity"]));
 }
 
 function isPlanRuntime(value?: string): value is OberonPlanRuntime {
-  return value === "claude-code" || value === "codex" || value === "gemini";
+  return value === "claude-code" || value === "codex" || value === "antigravity";
 }
 
 function extractJsonObject(text: string): JsonObject | null {

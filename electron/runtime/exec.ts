@@ -1,6 +1,6 @@
 // 크로스플랫폼 CLI 실행 헬퍼.
 //
-// Windows에서 npm 전역 CLI(claude/codex/gemini)는 `claude.cmd` 같은 셸 심으로
+// Windows에서 npm 전역 CLI(claude/codex/kimi/grok)는 `claude.cmd` 같은 셸 심으로
 // 설치된다. Node의 child_process.spawn/execFile은 `shell:true` 없이는 `.cmd`/`.bat`
 // 를 실행하지 못해(ENOENT), 감지와 실행이 모두 실패했다. cross-spawn은 PATH+PATHEXT로
 // 심을 찾아주고 인자를 cmd.exe에 안전하게 전달한다(수동 셸 인용 없이).
@@ -13,8 +13,8 @@ import type { ChildProcess, SpawnOptions } from "node:child_process";
 
 /**
  * 패키지된 GUI 앱(Finder/Dock 실행)은 로그인 셸의 PATH를 상속받지 못해 PATH가
- * 최소(`/usr/bin:/bin:/usr/sbin:/sbin`)다. 그 결과 (1) bare 커맨드(claude/codex/gemini)
- * 감지가 실패하고, (2) node 기반 CLI(codex.js/gemini.js)가 셰뱅의 `env node`로 node를
+ * 최소(`/usr/bin:/bin:/usr/sbin:/sbin`)다. 그 결과 (1) bare 커맨드(claude/codex/agy)
+ * 감지가 실패하고, (2) node 기반 CLI(codex.js 등)가 셰뱅의 `env node`로 node를
  * 못 찾아 죽는다. 흔한 CLI/런타임 bin 디렉터리를 보강해 둘 다 해결한다. Agentlas가 직접
  * 설치하고 검증한 prefix만 기존 PATH보다 먼저 두고, 그 밖의 사용자/시스템 후보는 원래
  * PATH 우선순위를 유지한다.
@@ -30,11 +30,10 @@ function cliSearchDirs(): string[] {
   }
   const home = os.homedir();
   return [
-    path.join(home, ".local/bin"), // 네이티브 인스톨러: claude/codex/gemini
+    path.join(home, ".local/bin"), // 네이티브 인스톨러: claude/codex/agy
     path.join(home, ".agentlas/npm/bin"), // Agentlas가 관리하는 최신 npm prefix
     path.join(home, ".codex/bin"),
     path.join(home, ".claude/local"),
-    path.join(home, ".gemini/bin"),
     path.join(home, ".bun/bin"),
     path.join(home, ".volta/bin"),
     path.join(home, ".nvm/current/bin"),

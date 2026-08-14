@@ -98,7 +98,7 @@ export function StudioLanding({
                 <span style={panelIndex}>EXECUTION</span>
                 <h2 id="oberon-runtime-boundary" style={panelTitleSmall}>{ko ? "누가 무엇을 실행하나" : "What executes each step"}</h2>
               </div>
-              <BoundaryRow label={ko ? "기획" : "Plan"} value={ko ? "연결된 Claude · Codex · Gemini CLI" : "Connected Claude, Codex, or Gemini CLI"} />
+              <BoundaryRow label={ko ? "기획" : "Plan"} value={ko ? "연결된 Claude · Codex · Antigravity" : "Connected Claude, Codex, or Antigravity"} />
               <BoundaryRow label={ko ? "이미지" : "Images"} value={ko ? "선택한 이미지 엔진 · 병렬 컷 생성" : "Selected image engine · parallel cuts"} />
               <BoundaryRow label={ko ? "영상" : "Video"} value={ko ? "선택한 영상 엔진 · 샷별 테이크" : "Selected video engine · per-shot takes"} />
               <BoundaryRow label={ko ? "승인" : "Review"} value={ko ? "기획·보드·에셋·테이크에서 중단 가능" : "Pause at plan, board, assets, and takes"} />

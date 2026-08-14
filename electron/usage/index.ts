@@ -1,4 +1,4 @@
-// 엔진 사용량 매니저 — 구독형 프로바이더(Claude/Codex/Gemini/Grok)의 usage를 모아
+// 엔진 사용량 매니저 — 구독형 프로바이더(Claude/Codex/Grok)의 usage를 모아
 // 정규화된 UsageSnapshot으로. main에서 60초 캐시(엔드포인트 과호출 방지).
 //
 // 일시 장애 내성: HTTP 429/네트워크류 실패는 "조회 실패" UI로 떨어뜨리지 않고
@@ -22,7 +22,6 @@ import type {
 import { getDb } from "../store/db";
 import { getClaudeUsage } from "./claude";
 import { getCodexUsage } from "./codex";
-import { getGeminiUsage } from "./gemini";
 import { getGrokUsage } from "./grok";
 import { localTokensFor } from "./local-logs";
 import { readProviderHealth } from "./provider-health";
@@ -154,7 +153,6 @@ function saveLastGood(): void {
 const ADAPTERS: Array<{ id: UsageRetryProviderId; fn: () => Promise<ProviderUsage | null> }> = [
   { id: "claude-code", fn: getClaudeUsage },
   { id: "codex", fn: getCodexUsage },
-  { id: "gemini", fn: getGeminiUsage },
   { id: "grok", fn: getGrokUsage },
 ];
 
@@ -227,9 +225,7 @@ async function fetchProvider(
   // 실제 실행에서 확인된 terminal 상태는 과거 정상/비할당 last-good보다 권위가 높다.
   // runtime이 전체 cache를 비운 직후뿐 아니라 앱 재시작 후에도 바로 어댑터를 읽는다.
   const terminalHealth = readProviderHealth(id);
-  const hasTerminalHealth =
-    terminalHealth?.code === "grok_quota_exhausted" ||
-    terminalHealth?.code === "gemini_unsupported_client";
+  const hasTerminalHealth = terminalHealth?.code === "grok_quota_exhausted";
   const last = lastResult.get(id);
   if (!hasTerminalHealth && (backoffUntil.get(id) ?? 0) > now && last) return last.usage;
   if (!hasTerminalHealth && last && now - last.at < FORCE_MIN_MS) return last.usage;

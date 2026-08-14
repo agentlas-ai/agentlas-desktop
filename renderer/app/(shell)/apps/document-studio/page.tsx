@@ -71,7 +71,7 @@ export default function DocumentStudioPage() {
   const [title, setTitle] = useState("");
   const [documentText, setDocumentText] = useState("");
   const [figureCaption, setFigureCaption] = useState("");
-  const [figureSrc, setFigureSrc] = useState(""); // 생성된 도표 이미지 data URI(codex/gemini image_gen).
+  const [figureSrc, setFigureSrc] = useState(""); // 생성된 도표 이미지 data URI(codex/agy image_gen).
   const [figureBusy, setFigureBusy] = useState(false);
   const [generatedAt, setGeneratedAt] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
@@ -354,7 +354,7 @@ export default function DocumentStudioPage() {
     }
   }
 
-  // 도표 캡션 → 실제 이미지(codex/gemini image_gen, 키리스). no-fallback.
+  // 도표 캡션 → 실제 이미지(codex/agy image_gen, 키리스). no-fallback.
   async function generateFigure() {
     const prompt = figureCaption.trim();
     if (figureBusy) return;
@@ -375,8 +375,8 @@ export default function DocumentStudioPage() {
       } else {
         setError(
           locale === "en"
-            ? "No image runtime connected (codex/gemini) — cannot render the figure."
-            : "이미지 런타임 미연결(codex/gemini) — 도표를 만들 수 없습니다.",
+            ? "No image runtime connected (codex/agy) — cannot render the figure."
+            : "이미지 런타임 미연결(codex/agy) — 도표를 만들 수 없습니다.",
         );
       }
     } finally {

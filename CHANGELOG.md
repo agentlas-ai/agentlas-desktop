@@ -1,5 +1,58 @@
 # Changelog
 
+## 1.0.12 — 2026-08-15
+
+- Unifies Agent Toolbox teams under one detail surface with Description and
+  Metadata tabs; every available team keeps its CEO → HQ → specialist graph.
+- Adds source-labelled X deletion for local, Agent Cloud, and Hub assets,
+  including project detachment and shared-member-safe cleanup.
+- Prevents copied/re-imported local packages from creating duplicate identities
+  and makes the composer’s + → @ team selection path functional.
+- Binds Agentlas OS v1.2.4 at
+  d2dbd5a9697fd94dd69457f009bea1f66d6e6084.
+- Source readiness does not prove a published installer or update feed; the
+  Releases page remains the authority for the downloadable installer.
+
+## 1.0.11 — 2026-08-14
+
+- Retries the source-owned Antigravity updater after a short transient failure
+  instead of keeping `agy` stale for the generic six-hour CLI cooldown.
+- Adds a migration regression proving that the retired Gemini `0.51.0 → 0.55.1`
+  failure record is removed, `agy update` is invoked automatically, and only
+  the verified Antigravity result is persisted.
+- Binds Agentlas OS v1.2.4 at
+  d2dbd5a9697fd94dd69457f009bea1f66d6e6084.
+- Source readiness does not prove a published installer or update feed; the
+  Releases page remains the authority for the downloadable installer.
+
+## 1.0.10 — 2026-08-14
+
+- Moves CLI auto-update ownership into the Desktop main process so Antigravity
+  is checked even when the Dashboard usage card is not open.
+- Invalidates the pre-migration Gemini/Antigravity update journal and verifies
+  the installed `agy` version after its source-owned update command completes.
+- Adds a regression fixture for a real update result without touching the host
+  Antigravity installation.
+- Binds Agentlas OS v1.2.4 at
+  d2dbd5a9697fd94dd69457f009bea1f66d6e6084.
+- Source readiness does not prove a published installer or update feed; the
+  Releases page remains the authority for the downloadable installer.
+
+## 1.0.9 — 2026-08-14
+
+- Unifies Agent Toolbox team details under one Description/Metadata surface.
+- Renders every stored CEO-to-specialist org-chart node instead of dropping
+  nested members behind a stale resolver projection.
+- Makes X removal source-aware: local sources move to Trash, Agent Cloud owned
+  packages are deleted, Hub entries lose their bookmark, and member installs
+  are cleaned without deleting shared agents or conversations.
+- Prevents duplicate local UUIDs on copied/re-imported packages and repairs
+  legacy duplicate agents, firms, references, and routes idempotently at boot.
+- Binds Agentlas OS v1.2.4 at
+  d2dbd5a9697fd94dd69457f009bea1f66d6e6084.
+- Source readiness does not prove a published installer or update feed; the
+  Releases page remains the authority for the downloadable installer.
+
 ## 1.0.8 — 2026-08-14
 
 - Keeps One's live Activity attached after renderer reload or run attachment,
@@ -8,8 +61,8 @@
   instead of collapsing to a zero-width grid track.
 - Deduplicates worker/tool entries in the artifact rail so the visible
   sub-agent list reflects the actual run participants.
-- Continues to bind Agentlas OS v1.2.2 at
-  0ef47d1bec6ad0cb2fed1024661753c1a83377ee.
+- Continues to bind Agentlas OS v1.2.4 at
+  d2dbd5a9697fd94dd69457f009bea1f66d6e6084.
 - Source readiness does not prove a published installer or update feed; the
   Releases page remains the authority for the downloadable installer.
 

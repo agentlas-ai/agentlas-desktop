@@ -111,6 +111,8 @@ import { recommendMcpBuildPlan } from "./mcp-tools/build-plan";
 import { getOpenCrabReadiness } from "./opencrab/ontology";
 import {
   getSource as getMarketSource,
+  getCargoSource,
+  invalidateMyAgentsCache,
   listMyAgentsCached,
   refreshSourceStatus as refreshMarketSourceStatus,
 } from "./marketplace";
@@ -118,6 +120,7 @@ import {
   getFirm,
   installFirm,
   listFirms,
+  removeFirmFromRoster,
   uninstallFirm,
 } from "./store/firms";
 import { listAgentFiles, readAgentFile, readAgentPromptSource, writeAgentFile } from "./agents/files";
@@ -130,6 +133,7 @@ import {
   rejectAgentEvolutionProposal,
   rollbackAgentEvolutionProposal,
 } from "./agents/evolution";
+import { getRoute } from "./agents/routes";
 import { importLocalFolder } from "./agents/import-local";
 import { getDb } from "./store/db";
 import { getResolvedOrg } from "./store/org-spec";
@@ -1439,7 +1443,7 @@ export function registerIpcHandlers(): void {
   /** package.json의 version — 사이드바 푸터 표기/디버그 용 */
   ipcMain.handle("app:getVersion", () => app.getVersion());
 
-  // ── T-rex 슬라이드 스튜디오 이미지 생성(키리스 CLI: codex image_gen / gemini) ──
+  // ── T-rex 슬라이드 스튜디오 이미지 생성(키리스 CLI: codex image_gen / agy) ──
   ipcMain.handle("trex:generateImage", async (_e, payload: { model?: "codex" | "gemini" | "auto"; prompt?: string }) => {
     const { generateTrexImage } = await import("./trex/imagegen");
     const model = payload?.model === "gemini" ? "gemini" : payload?.model === "codex" ? "codex" : "auto";
@@ -2486,7 +2490,7 @@ export function registerIpcHandlers(): void {
     // 로그인 터미널을 여는 시점에 감지/사용량 캐시를 즉시 무효화 — 로그인 완료가
     // watchRecovery 폴링(및 그 이후 일반 폴링)에 재시작 없이 바로 반영되게 한다.
     clearDetectCache();
-    if (kind === "claude-code" || kind === "codex" || kind === "gemini") invalidateUsage(kind);
+    if (kind === "claude-code" || kind === "codex") invalidateUsage(kind);
     const runtimes = await detectRuntimes();
     const selected = runtimes.find((runtime) => runtime.kind === kind && runtime.active)
       ?? runtimes.find((runtime) => runtime.kind === kind);
@@ -2562,7 +2566,7 @@ export function registerIpcHandlers(): void {
 
   // ── 터미널 프로필(사용자 편집형 CLI 러너) ───────────────────────────
   // Paseo식: 각 프로필 = {id, name, template}. template의 {{{prompt}}}가 메시지로
-  // 치환돼 CLI로 실행된다. 하드코딩된 claude/codex/gemini와 달리 사용자가 어떤 CLI든
+  // 치환돼 CLI로 실행된다. 하드코딩된 claude/codex/antigravity와 달리 사용자가 어떤 CLI든
   // 등록·편집한다. (런타임 dispatch 배선은 후속 — 여기서는 저장/조회만.)
   ipcMain.handle("config:getTerminalProfiles", () => {
     try {
@@ -2738,7 +2742,23 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("team:list", () => listInstalledAgents());
   ipcMain.handle("team:install", (_e, slug: string) => installAgent(slug));
   ipcMain.handle("team:installMine", (_e, id: string) => installMyAgent(id));
-  ipcMain.handle("team:uninstall", (_e, id: string) => uninstallAgent(id));
+  ipcMain.handle("team:uninstall", async (_e, id: string, options?: { removeSource?: boolean }) => {
+    const existing = getAgentById(id);
+    if (!existing) return { removed: false, sourceMovedToTrash: false };
+    const route = getRoute(id);
+    uninstallAgent(id);
+    let sourceMovedToTrash = false;
+    if (options?.removeSource && route?.source === "local-import" && fs.existsSync(route.path)) {
+      try {
+        await shell.trashItem(route.path);
+        sourceMovedToTrash = true;
+      } catch {
+        // Registry removal remains complete; the result tells the renderer that
+        // the original folder still needs attention.
+      }
+    }
+    return { removed: true, sourceMovedToTrash };
+  });
   ipcMain.handle("team:setLocalDisplayName", (_e, id: string, value: string) =>
     setAgentLocalDisplayName(id, value),
   );
@@ -2895,6 +2915,13 @@ export function registerIpcHandlers(): void {
       return [];
     }
   });
+  ipcMain.handle("marketplace:deleteMine", async (_e, slug: string) => {
+    const source = getCargoSource();
+    if (!source) throw new Error("Agent Cloud is not connected.");
+    const result = await source.deleteMyAgent(String(slug ?? ""));
+    invalidateMyAgentsCache();
+    return result;
+  });
 
   /*
    * Core CLI 를 부르는 오래 걸리는 작업에 붙이는 옵션 두 가지.
@@ -3033,7 +3060,38 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("firms:list", () => listFirms());
   ipcMain.handle("firms:get", (_e, id: string) => getFirm(id));
   ipcMain.handle("firms:install", (_e, slug: string) => installFirm(slug));
-  ipcMain.handle("firms:uninstall", (_e, id: string) => uninstallFirm(id));
+  ipcMain.handle("firms:uninstall", async (_e, id: string, options?: { removeMembers?: boolean; removeSource?: boolean }) => {
+    const firm = getFirm(id);
+    if (!firm) return { removed: false, sourceMovedToTrash: false };
+    const sourceRoutes = [...new Set([firm.ceoAgentId, ...firm.orgChart.map((node) => node.agentId)])]
+      .map((agentId) => getRoute(agentId))
+      .filter((route): route is NonNullable<ReturnType<typeof getRoute>> => Boolean(route));
+    const result = options?.removeMembers
+      ? removeFirmFromRoster(id)
+      : (uninstallFirm(id), { removedAgentIds: [], retainedAgentIds: [] });
+    let sourceMovedToTrash = false;
+    if (options?.removeSource) {
+      const localPaths = [...new Set(sourceRoutes
+        .filter((route) => route.source === "local-import" && fs.existsSync(route.path))
+        .map((route) => route.path))];
+      let moved = 0;
+      for (const localPath of localPaths) {
+        try {
+          await shell.trashItem(localPath);
+          moved += 1;
+        } catch {
+          // Keep the registry result truthful; a false flag means at least one
+          // source folder could not be moved to Trash.
+        }
+      }
+      sourceMovedToTrash = localPaths.length > 0 && moved === localPaths.length;
+    }
+    return {
+      removed: true,
+      sourceMovedToTrash,
+      ...(result.retainedAgentIds.length > 0 ? { retainedAgentIds: result.retainedAgentIds } : {}),
+    };
+  });
   // 정규화된 3-tier 조직 스펙 조회 (저장된 리졸버 결과 또는 orgChart 파생)
   ipcMain.handle("firms:getResolvedOrg", (_e, id: string) => {
     const firm = getFirm(id);

@@ -1,6 +1,6 @@
 // T-rex 슬라이드 배경 이미지 생성 — 키 없는 CLI 경로(codex image_gen) 우선.
 //  - codex: `codex exec`의 내장 image_gen(OAuth, API 키 불필요) — 검증된 키리스 경로.
-//  - gemini(나노바나나): 플레인 Gemini CLI는 이미지 툴 미노출(NO_IMAGE_GEN/404)이라,
+//  - gemini(나노바나나): Antigravity CLI에는 이미지 툴이 노출되지 않아
 //    GEMINI_API_KEY가 보관함에 있을 때만 @google/genai로 생성(없으면 needs-key).
 // 결과는 data:image/png;base64 로 렌더러에 바로 넘겨 슬라이드 배경으로 깐다.
 import { spawn } from "node:child_process";

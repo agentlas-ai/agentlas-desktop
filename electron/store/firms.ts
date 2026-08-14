@@ -2,10 +2,11 @@
 import { randomUUID } from "node:crypto";
 import { getDb } from "./db";
 import { emitDesktopStoreChange } from "./change-bus";
-import { installAgent, getAgentById } from "../mcp/registry";
+import { installAgent, getAgentById, uninstallAgent } from "../mcp/registry";
 import { getSource as getMarketSource } from "../marketplace";
 import type { FirmOrgNode, InstalledFirm } from "../../shared/types";
 import { materializeTeamMemberCells } from "./team-member-cells";
+import { dedupeLocalInstalledAgents } from "./agent-dedupe";
 
 interface FirmRow {
   id: string;
@@ -36,6 +37,14 @@ function toFirm(row: FirmRow): InstalledFirm {
 }
 
 export function listFirms(): InstalledFirm[] {
+  try {
+    // Agent and firm lists can be requested in parallel by the dashboard. Run
+    // the same idempotent local-repair gate here too, so a stale firm snapshot
+    // cannot expose duplicate organizations when the agent list wins the race.
+    dedupeLocalInstalledAgents();
+  } catch (error) {
+    console.error("[firms] local duplicate repair failed", error);
+  }
   const rows = getDb()
     .prepare("SELECT * FROM firms ORDER BY installed_at DESC")
     .all() as FirmRow[];
@@ -146,6 +155,58 @@ export function uninstallFirm(id: string): void {
   emitDesktopStoreChange({ entity: "firm", id });
   // ON DELETE SET NULL changes the projected target of former firm chats.
   emitDesktopStoreChange({ entity: "chat" });
+}
+
+/**
+ * Organization-chart removal. The old uninstallFirm contract intentionally
+ * removed only the relationship; the visible X action is an explicit stronger
+ * operation that also removes materialized member rows. Conversations and
+ * project references follow their existing SQLite FK contracts.
+ */
+export function removeFirmFromRoster(id: string): { removedAgentIds: string[]; retainedAgentIds: string[] } {
+  const firm = getFirm(id);
+  if (!firm) return { removedAgentIds: [], retainedAgentIds: [] };
+  const db = getDb();
+  const agentIds = [...new Set([firm.ceoAgentId, ...firm.orgChart.map((node) => node.agentId)].filter(Boolean))];
+  uninstallFirm(id);
+  const removedAgentIds: string[] = [];
+  const retainedAgentIds: string[] = [];
+
+  const remainingFirmForAgent = (agentId: string): string | null => {
+    const rows = db
+      .prepare("SELECT id, ceo_agent_id, org_chart_json FROM firms")
+      .all() as Array<{ id: string; ceo_agent_id: string; org_chart_json: string }>;
+    for (const row of rows) {
+      if (row.ceo_agent_id === agentId) return row.id;
+      try {
+        const chart = JSON.parse(row.org_chart_json) as Array<{ agentId?: string }>;
+        if (chart.some((node) => node.agentId === agentId)) return row.id;
+      } catch {
+        // A malformed unrelated firm must not prevent the selected team from
+        // being removed; the normal firm read path already reports that data.
+      }
+    }
+    return null;
+  };
+
+  for (const agentId of agentIds) {
+    try {
+      uninstallAgent(agentId);
+      removedAgentIds.push(agentId);
+    } catch (error) {
+      const remainingFirmId = remainingFirmForAgent(agentId);
+      if (!remainingFirmId) throw error;
+      // A shared agent can still belong to another installed firm. Keep it
+      // installed and move its materialized ownership pointer to the firm
+      // that still owns it; leaving the deleted firm id here makes the agent
+      // disappear from the surviving team's roster and misroutes memory.
+      db.prepare("UPDATE installed_agents SET parent_team_id = ? WHERE id = ?")
+        .run(remainingFirmId, agentId);
+      emitDesktopStoreChange({ entity: "agent", id: agentId });
+      retainedAgentIds.push(agentId);
+    }
+  }
+  return { removedAgentIds, retainedAgentIds };
 }
 
 /**

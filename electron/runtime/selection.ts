@@ -19,7 +19,7 @@ import {
 } from "./byok";
 import { runClaudeCode } from "./claude-code";
 import { runCodex } from "./codex";
-import { runGemini } from "./gemini";
+import { runAntigravity } from "./antigravity";
 import { runKimi } from "./kimi";
 import { runGrok } from "./grok";
 import { runCursor } from "./cursor";
@@ -80,7 +80,7 @@ function withLocalInferenceSlot(runner: Runner): Runner {
 
 const runClaudeCodeSlotted = withRunSlot(runClaudeCode);
 const runCodexSlotted = withRunSlot(runCodex);
-const runGeminiSlotted = withRunSlot(runGemini);
+const runAntigravitySlotted = withRunSlot(runAntigravity);
 const runKimiSlotted = withRunSlot(runKimi);
 const runGrokSlotted = withRunSlot(runGrok);
 const runCursorSlotted = withRunSlot(runCursor);
@@ -96,7 +96,6 @@ const RUNNER_LABEL: Record<string, string> = {
   "claude-code": "Claude Code CLI",
   codex: "Codex CLI",
   antigravity: "Antigravity CLI",
-  gemini: "Gemini CLI · Legacy",
   kimi: "Kimi Code CLI",
   grok: "Grok CLI",
   cursor: "Cursor Agent CLI",
@@ -163,14 +162,8 @@ export function pickRunner(active: RuntimeStatus): { runner: Runner; label: stri
   if (active.kind === "codex") return { runner: runCodexSlotted, label: RUNNER_LABEL.codex };
   if (active.kind === "antigravity") {
     return {
-      runner: bindRuntimeSource(runGeminiSlotted, active.source),
+      runner: bindRuntimeSource(runAntigravitySlotted, active.source),
       label: RUNNER_LABEL.antigravity,
-    };
-  }
-  if (active.kind === "gemini") {
-    return {
-      runner: bindRuntimeSource(runGeminiSlotted, active.source),
-      label: RUNNER_LABEL.gemini,
     };
   }
   if (active.kind === "kimi")
@@ -225,14 +218,8 @@ export function pickRecoveryRunner(selection: Pick<RuntimeStatus, "kind"> & { so
   if (selection.kind === "codex") return { runner: runCodex, label: RUNNER_LABEL.codex };
   if (selection.kind === "antigravity") {
     return {
-      runner: bindRuntimeSource(runGemini, selection.source),
+      runner: bindRuntimeSource(runAntigravity, selection.source),
       label: RUNNER_LABEL.antigravity,
-    };
-  }
-  if (selection.kind === "gemini") {
-    return {
-      runner: bindRuntimeSource(runGemini, selection.source),
-      label: RUNNER_LABEL.gemini,
     };
   }
   if (selection.kind === "kimi") return { runner: runKimi, label: RUNNER_LABEL.kimi };

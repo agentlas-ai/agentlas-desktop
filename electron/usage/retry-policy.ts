@@ -3,7 +3,6 @@ import type { UsageRetryProviderId } from "../../shared/types";
 export const USAGE_RETRY_PROVIDER_IDS = [
   "claude-code",
   "codex",
-  "gemini",
   "grok",
 ] as const satisfies readonly UsageRetryProviderId[];
 

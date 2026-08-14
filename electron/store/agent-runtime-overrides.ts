@@ -12,7 +12,8 @@ interface RuntimeOverrideRow {
   scope: AgentRuntimeOverrideScope;
   target_id: string;
   label: string | null;
-  kind: RuntimeKind;
+  // Keep legacy rows readable; canonicalize removed Google CLI rows below.
+  kind: string;
   backend: RuntimeBackend | null;
   source: string | null;
   model: string | null;
@@ -27,11 +28,17 @@ export interface RuntimeOverrideTarget {
 }
 
 const VALID_SCOPES = new Set<AgentRuntimeOverrideScope>(["agent", "firm", "division"]);
-const VALID_KINDS = new Set<RuntimeKind>(["claude-code", "codex", "antigravity", "gemini", "kimi", "byok", "ollama"]);
+const VALID_KINDS = new Set<RuntimeKind>(["claude-code", "codex", "antigravity", "kimi", "byok", "ollama"]);
 
 function cleanText(value: string | null | undefined): string | null {
   const trimmed = value?.trim();
   return trimmed ? trimmed : null;
+}
+
+function canonicalStoredKind(kind: string): RuntimeKind {
+  const canonical = kind === "gemini" ? "antigravity" : kind;
+  if (!VALID_KINDS.has(canonical as RuntimeKind)) throw new Error(`Unknown stored runtime kind: ${kind}`);
+  return canonical as RuntimeKind;
 }
 
 function assertScope(scope: AgentRuntimeOverrideScope): void {
@@ -54,10 +61,10 @@ function normalizeSelection(selection: RuntimeSelection): RuntimeSelection {
 
 function toOverride(row: RuntimeOverrideRow): AgentRuntimeOverride {
   const selection: RuntimeSelection = {
-    kind: row.kind,
+    kind: canonicalStoredKind(row.kind),
     backend: row.backend ?? undefined,
-    source: row.source ?? undefined,
-    model: row.model ?? undefined,
+    source: row.kind === "gemini" ? undefined : row.source ?? undefined,
+    model: row.kind === "gemini" ? undefined : row.model ?? undefined,
     longContext: Boolean(row.long_context),
     effort: row.effort ?? undefined,
   };

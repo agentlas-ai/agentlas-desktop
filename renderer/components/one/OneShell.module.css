@@ -95,10 +95,20 @@
   grid-template-columns: 0 minmax(0, 1fr);
 }
 
+.body[data-task-active="true"][data-rail-open="true"] {
+  grid-template-columns: 252px minmax(0, 1fr);
+}
+
 .body[data-task-active="true"] .rail {
   transform: translateX(-100%);
   opacity: 0;
   pointer-events: none;
+}
+
+.body[data-task-active="true"][data-rail-open="true"] .rail {
+  transform: translateX(0);
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .rail {
@@ -463,6 +473,10 @@
   gap: 12px;
   padding: 0 20px 0 96px;
   color: #4e5357;
+}
+
+.body[data-task-active="true"][data-rail-open="true"] .taskToolbar {
+  padding-left: 20px;
 }
 
 .taskToolbar > button,

@@ -47,7 +47,6 @@ const CHAT_RUNTIME_KINDS = new Set<RuntimeKind>([
   "claude-code",
   "codex",
   "antigravity",
-  "gemini",
   "kimi",
   "grok",
   "cursor",
@@ -94,7 +93,9 @@ function normalizeChatRuntimeSelection(value: unknown): RuntimeSelection | null 
     throw new TypeError("Invalid chat runtime selection");
   }
   const input = value as Record<string, unknown>;
-  if (typeof input.kind !== "string" || !CHAT_RUNTIME_KINDS.has(input.kind as RuntimeKind)) {
+  const legacyGemini = input.kind === "gemini";
+  const normalizedKind = legacyGemini ? "antigravity" : input.kind;
+  if (typeof normalizedKind !== "string" || !CHAT_RUNTIME_KINDS.has(normalizedKind as RuntimeKind)) {
     throw new TypeError("Invalid chat runtime kind");
   }
   if (
@@ -121,10 +122,10 @@ function normalizeChatRuntimeSelection(value: unknown): RuntimeSelection | null 
     throw new TypeError("Invalid chat runtime longContext");
   }
   return {
-    kind: input.kind as RuntimeKind,
+    kind: normalizedKind as RuntimeKind,
     backend: input.backend as RuntimeBackend | undefined,
-    source: boundedOptionalText(input.source, "source", 2_048),
-    model: boundedOptionalText(input.model, "model", 512),
+    source: legacyGemini ? undefined : boundedOptionalText(input.source, "source", 2_048),
+    model: legacyGemini ? undefined : boundedOptionalText(input.model, "model", 512),
     effort: boundedOptionalText(input.effort, "effort", 80),
     longContext: input.longContext === true,
     role: "orchestrator",

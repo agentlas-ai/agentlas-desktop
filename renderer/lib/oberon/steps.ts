@@ -104,8 +104,8 @@ export const OBERON_STEPS: OberonStepDef[] = [
     shortEn: "Treatment and script written by your BYOK CLI",
     gateLabel: "기획 승인",
     gateLabelEn: "Approve plan",
-    about: "선택한 CLI(Claude Code/Codex/Gemini)가 로그라인·트리트먼트·비트를 작성합니다. 읽고 수정·승인하면 다음 단계가 열립니다.",
-    aboutEn: "Your chosen CLI (Claude Code/Codex/Gemini) writes the logline, treatment, and beats. Read, edit, and approve it to unlock the next step.",
+    about: "선택한 CLI(Claude Code/Codex/Antigravity)가 로그라인·트리트먼트·비트를 작성합니다. 읽고 수정·승인하면 다음 단계가 열립니다.",
+    aboutEn: "Your chosen CLI (Claude Code/Codex/Antigravity) writes the logline, treatment, and beats. Read, edit, and approve it to unlock the next step.",
     humanGate: true,
   },
   {

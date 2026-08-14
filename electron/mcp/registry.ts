@@ -16,6 +16,7 @@ import {
 import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
 import { installFromCatalog } from "../mcp-tools/registry";
 import { replaceInstalledAgentHubBinding } from "../ontology/hub-bindings";
+import { dedupeLocalInstalledAgents } from "../store/agent-dedupe";
 import type { SeedListingFull } from "../marketplace/source";
 import type {
   AgentEnvRequirement,
@@ -26,6 +27,7 @@ import type {
 type FullListing = SeedListingFull & MarketplaceListing;
 
 type AgentRow = CloudRegistryAgentRow;
+let localDuplicateRepairChecked = false;
 
 function toAgent(row: AgentRow): InstalledAgent {
   let envReqs: AgentEnvRequirement[] = [];
@@ -133,6 +135,14 @@ export function backfillEntityKinds(): void {
 
 export function listInstalledAgents(): InstalledAgent[] {
   recoverCloudRegistryTransactions();
+  if (!localDuplicateRepairChecked) {
+    localDuplicateRepairChecked = true;
+    try {
+      dedupeLocalInstalledAgents();
+    } catch (error) {
+      console.error("[agents] local duplicate repair failed", error);
+    }
+  }
   return listInstalledAgentsReadOnly();
 }
 

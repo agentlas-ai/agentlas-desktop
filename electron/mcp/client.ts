@@ -3213,11 +3213,11 @@ export async function runMcpInvocation(
         }
       }
     }
-    // 세션 지원 러너(claude-code/codex/gemini/kimi)는 턴 컨텍스트를 분리 전달해 러너가
+    // 세션 지원 러너(claude-code/codex/kimi)는 턴 컨텍스트를 분리 전달해 러너가
     // 새 세션/resume에 맞게 배치한다. 그 외 stateless 러너는 기존처럼 시스템 프롬프트에 합친다.
     const turnContext = turnContextParts.filter((part) => part && part.trim()).join("\n\n");
     const sessionCapableRuntime =
-      active.kind === "claude-code" || active.kind === "codex" || active.kind === "gemini" || active.kind === "kimi";
+      active.kind === "claude-code" || active.kind === "codex" || active.kind === "kimi";
     const runnerReq = {
       systemPrompt: sessionCapableRuntime || !turnContext
         ? systemPrompt

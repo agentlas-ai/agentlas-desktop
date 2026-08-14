@@ -1802,7 +1802,6 @@ const MOBILE_RUNTIME_KINDS = [
   "claude-code",
   "codex",
   "antigravity",
-  "gemini",
   "kimi",
   "grok",
   "cursor",

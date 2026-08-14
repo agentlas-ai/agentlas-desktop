@@ -2459,14 +2459,14 @@ function LaunchdPanel() {
 }
 
 // ── 터미널 프로필(사용자 편집형 CLI 러너) — Paseo식 "프로바이더" ──────────
-// 하드코딩된 claude/codex/gemini 외에, 사용자가 임의 CLI를 등록·편집한다.
+// 하드코딩된 claude/codex/antigravity 외에, 사용자가 임의 CLI를 등록·편집한다.
 // template의 {{{prompt}}}가 메시지로 치환돼 실행된다(예: `claude {{{prompt}}}`).
 // ★런타임 dispatch(RuntimeKind 편입)는 후속 단계 — 이 패널은 저장/조회만 담당.
 const TP_PRESETS: Array<{ name: string; template: string }> = [
   { name: "Claude Code", template: "claude {{{prompt}}}" },
   { name: "Codex", template: "codex {{{prompt}}}" },
   { name: "OpenCode", template: "opencode --prompt={{{prompt}}}" },
-  { name: "Gemini CLI", template: "gemini -p {{{prompt}}}" },
+  { name: "Antigravity", template: "agy --prompt {{{prompt}}}" },
 ];
 
 function TerminalProfilesPanel() {
@@ -2543,8 +2543,8 @@ function TerminalProfilesPanel() {
       </h2>
       <p style={{ fontSize: 12, color: "var(--muted-deep)", margin: "0 0 8px", lineHeight: 1.55 }}>
         {ko
-          ? "임의의 CLI를 러너 프로필로 등록합니다. 명령 템플릿의 {{{prompt}}} 자리에 메시지가 치환됩니다. 내장 엔진(Claude·Codex·Gemini) 외에 원하는 도구를 자유롭게 정의하세요."
-          : "Register any CLI as a runner profile. The message is substituted into the {{{prompt}}} slot of the command template. Define whatever tool you want beyond the built-in engines (Claude, Codex, Gemini)."}
+          ? "임의의 CLI를 러너 프로필로 등록합니다. 명령 템플릿의 {{{prompt}}} 자리에 메시지가 치환됩니다. 내장 엔진(Claude·Codex·Antigravity) 외에 원하는 도구를 자유롭게 정의하세요."
+          : "Register any CLI as a runner profile. The message is substituted into the {{{prompt}}} slot of the command template. Define whatever tool you want beyond the built-in engines (Claude, Codex, Antigravity)."}
       </p>
       <p style={{ fontSize: 11, color: "var(--muted-deep)", margin: "0 0 12px", opacity: 0.85 }}>
         {ko
@@ -2676,11 +2676,11 @@ function Banner() {
 }
 
 // ── CLI 설치 패널 (요청 ⑤) ────────────────────────────────
-type CliKind = "claude-code" | "codex" | "gemini" | "kimi";
+type CliKind = "claude-code" | "codex" | "antigravity" | "kimi";
 const CLI_DEFS: Array<{ kind: CliKind; name: string; sub: string }> = [
   { kind: "claude-code", name: "Claude Code", sub: "Claude Pro · Max" },
   { kind: "codex", name: "Codex", sub: "ChatGPT Plus · Pro" },
-  { kind: "gemini", name: "Gemini CLI · Legacy", sub: "Google AI" },
+  { kind: "antigravity", name: "Antigravity", sub: "Google AI subscription" },
   { kind: "kimi", name: "Kimi Code", sub: "Kimi Code membership" },
 ];
 
@@ -2702,9 +2702,11 @@ function CliInstallPanel({
     setInstalling(kind);
     setMsg((m) => ({ ...m, [kind]: "" }));
     try {
-      const r = await api.runtime.installCli(kind);
+      const r = kind === "antigravity"
+        ? await api.runtime.openCliLogin(kind)
+        : await api.runtime.installCli(kind);
       if (r.ok) {
-        setMsg((m) => ({ ...m, [kind]: t("settings.cli.install_ok") }));
+        setMsg((m) => ({ ...m, [kind]: kind === "antigravity" ? t("settings.cli.login_hint") : t("settings.cli.install_ok") }));
         await onChanged();
       } else {
         setMsg((m) => ({ ...m, [kind]: t("settings.cli.install_failed", { cmd: r.command ?? "" }) }));
@@ -2807,7 +2809,9 @@ function CliInstallPanel({
                       boxShadow: isInstalling ? "none" : "var(--neu-raised)",
                     }}
                   >
-                    {isInstalling ? t("settings.cli.installing") : t("settings.cli.install")}
+                    {isInstalling
+                      ? t("settings.cli.installing")
+                      : def.kind === "antigravity" ? t("settings.cli.login") : t("settings.cli.install")}
                   </button>
                   <button
                     onClick={() => void doLogin(def.kind)}

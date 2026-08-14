@@ -1118,17 +1118,33 @@ function LibraryAgentsView() {
           ? `\n\n장착 해제될 프로젝트 ${affectedProjects.length}개: ${affectedProjects.map((project) => project.name).join(", ")}`
           : `\n\nIt will be detached from ${affectedProjects.length} project(s): ${affectedProjects.map((project) => project.name).join(", ")}`)
       : "";
-    if (!window.confirm(locale === "ko" ? `'${displayName}' 에이전트를 설치 목록에서 제거할까요? 원본 폴더는 삭제하지 않습니다.${impact}` : `Remove '${displayName}' from installed agents? The source folder will not be deleted.${impact}`)) return;
+    const source: "local" | "cloud" | "hub" = agent.assetSource === "agent-cloud"
+      ? "cloud"
+      : agent.assetSource === "hub"
+        ? "hub"
+        : "local";
+    const sourceLabel = source === "local"
+      ? (locale === "ko" ? "로컬 폴더는 휴지통으로 이동" : "the local folder will move to Trash")
+      : source === "cloud"
+        ? (locale === "ko" ? "Agent Cloud 원격 자산도 삭제" : "the Agent Cloud asset will also be deleted")
+        : (locale === "ko" ? "Hub 북마크도 제거" : "the Hub bookmark will also be removed");
+    if (!window.confirm(locale === "ko"
+      ? `'${displayName}'을(를) 조직도에서 삭제할까요? ${sourceLabel}합니다.${impact}`
+      : `Delete '${displayName}' from the organization chart? ${sourceLabel}.${impact}`)) return;
     try {
       for (const project of affectedProjects) {
         await api.projects.update(project.id, {
           agentPool: project.agentPool.filter((member) => member.agentId !== agent.id),
         });
       }
-      await api.team.uninstall(agent.id);
+      if (source === "cloud") await api.marketplace.deleteMine(agent.slug);
+      if (source === "hub") await api.marketplace.bookmarkRemove(agent.slug, agent.kind === "team" ? "team" : "agent");
+      const removal = await api.team.uninstall(agent.id, { removeSource: source === "local" });
       setSelectedNode(null);
       await refresh();
-      showToast(locale === "ko" ? "에이전트를 설치 목록에서 제거했습니다." : "Agent removed from installed agents.");
+      showToast(locale === "ko"
+        ? `에이전트를 삭제했습니다.${source === "local" && !removal.sourceMovedToTrash ? " 원본 폴더는 휴지통 이동에 실패했습니다." : ""}`
+        : `Agent deleted.${source === "local" && !removal.sourceMovedToTrash ? " The source folder could not be moved to Trash." : ""}`);
     } catch (err) {
       showToast((locale === "ko" ? "에이전트 제거 실패: " : "Failed to remove agent: ") + String(err));
     }
@@ -1149,7 +1165,20 @@ function LibraryAgentsView() {
           ? `\n\n장착 해제될 프로젝트 ${affectedProjects.length}개: ${affectedProjects.map((project) => project.name).join(", ")}`
           : `\n\nIt will be detached from ${affectedProjects.length} project(s): ${affectedProjects.map((project) => project.name).join(", ")}`)
       : "";
-    if (!window.confirm(locale === "ko" ? `'${name}' 팀을 설치 목록에서 제거할까요? 원본 폴더는 삭제하지 않습니다.${impact}` : `Remove the '${name}' team? The source folder will not be deleted.${impact}`)) return;
+    const controller = agents.find((agent) => agent.id === firm.ceoAgentId) ?? null;
+    const source: "local" | "cloud" | "hub" = controller?.assetSource === "agent-cloud"
+      ? "cloud"
+      : controller?.assetSource === "hub"
+        ? "hub"
+        : "local";
+    const sourceLabel = source === "local"
+      ? (locale === "ko" ? "팀 원본 폴더는 휴지통으로 이동" : "the team source folder will move to Trash")
+      : source === "cloud"
+        ? (locale === "ko" ? "Agent Cloud 팀 자산도 삭제" : "the Agent Cloud team asset will also be deleted")
+        : (locale === "ko" ? "Hub 팀 북마크도 제거" : "the Hub team bookmark will also be removed");
+    if (!window.confirm(locale === "ko"
+      ? `'${name}' 팀을 조직도에서 완전히 삭제할까요? ${sourceLabel}합니다. 팀 멤버 설치 행과 장착 참조도 함께 정리합니다.${impact}`
+      : `Permanently delete '${name}' from the organization chart? ${sourceLabel}. Team member installs and attachments will also be cleaned up.${impact}`)) return;
     try {
       for (const project of affectedProjects) {
         await api.projects.update(project.id, {
@@ -1158,10 +1187,14 @@ function LibraryAgentsView() {
             : !member.agentId || !firmAgentIds.has(member.agentId)),
         });
       }
-      await api.firms.uninstall(firm.id);
+      if (source === "cloud" && controller) await api.marketplace.deleteMine(controller.slug);
+      if (source === "hub" && controller) await api.marketplace.bookmarkRemove(controller.slug, "team");
+      const removal = await api.firms.uninstall(firm.id, { removeMembers: true, removeSource: source === "local" });
       setSelectedFirmId(null);
       await refresh();
-      showToast(locale === "ko" ? "팀을 설치 목록에서 제거했습니다." : "Team removed from My Agents.");
+      showToast(locale === "ko"
+        ? `팀을 삭제했습니다.${source === "local" && !removal.sourceMovedToTrash ? " 원본 폴더는 휴지통 이동에 실패했습니다." : ""}`
+        : `Team deleted.${source === "local" && !removal.sourceMovedToTrash ? " The source folder could not be moved to Trash." : ""}`);
     } catch (err) {
       showToast((locale === "ko" ? "팀 제거 실패: " : "Failed to remove team: ") + String(err));
     }
@@ -1281,6 +1314,9 @@ function LibraryAgentsView() {
   const selectedFirm = selectedFirmId ? firms.find((firm) => firm.id === selectedFirmId) ?? null : null;
   const selectedStandaloneTeam = !selectedFirm && selectedNode?.agentId
     ? agents.find((agent) => agent.id === selectedNode.agentId && agent.kind === "team") ?? null
+    : null;
+  const selectedStandaloneTeamFirm = selectedStandaloneTeam
+    ? firms.find((firm) => firm.ceoAgentId === selectedStandaloneTeam.id) ?? null
     : null;
   const selectedStandaloneTeamBinding = selectedStandaloneTeam
     ? exactBindings.find((binding) => binding.installedAgentId === selectedStandaloneTeam.id) ?? null
@@ -1527,6 +1563,15 @@ function LibraryAgentsView() {
                           </span>
                         ) : null;
                       })()}
+                      <button
+                        type="button"
+                        aria-label={locale === "ko" ? `${fLoc.name} 팀 삭제` : `Delete ${fLoc.name} team`}
+                        title={locale === "ko" ? "조직도에서 팀 삭제" : "Delete team from organization chart"}
+                        onClick={(event) => { event.stopPropagation(); void removeInstalledFirm(firm); }}
+                        style={{ width: 34, height: 34, flexShrink: 0, border: "1px solid var(--paper-edge)", borderRadius: 8, background: "var(--paper)", color: "var(--muted-deep)", cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+                      >
+                        <IconClose size={13} />
+                      </button>
                     </div>
                   )}
                   {(!isCollapsed || sidebarCollapsed) && (
@@ -1535,7 +1580,7 @@ function LibraryAgentsView() {
                         {rOrg ? (
                           <>
                             {isVisibleResolvedNode(rOrg.ceo, agentMap) && (
-                              <MiniNodeAvatar node={withAgentDisplayName(rOrg.ceo, agentMap, locale)} active={selectedNode?.id === rOrg.ceo.id} onClick={() => { setSelectedNode(withAgentDisplayName(rOrg.ceo, agentMap, locale)); setActiveTab("identity"); }} />
+                              <MiniNodeAvatar node={withAgentDisplayName(rOrg.ceo, agentMap, locale)} active={selectedFirmId === firm.id} onClick={() => { setSelectedFirmId(firm.id); setSelectedNode(null); }} />
                             )}
                             {rOrg.divisions
                               .filter((d) => isVisibleResolvedNode(d, agentMap) || d.specialists.some((s) => isVisibleResolvedNode(s, agentMap)))
@@ -1559,22 +1604,38 @@ function LibraryAgentsView() {
                                 node={{ name: agent ? agentDisplayName(agent, locale) : n.role, role: n.role }}
                                 active={selectedNode?.id === n.agentSlug}
                                 onClick={() => {
-                                  const resolved: ResolvedNode = { id: n.agentSlug, name: agent ? agentDisplayName(agent, locale) : n.role, role: n.role, agentId: n.agentId };
-                                  setSelectedNode(resolved);
-                                  setActiveTab("identity");
+                                  if (n.agentId === firm.ceoAgentId) {
+                                    setSelectedFirmId(firm.id);
+                                    setSelectedNode(null);
+                                  } else {
+                                    const resolved: ResolvedNode = { id: n.agentSlug, name: agent ? agentDisplayName(agent, locale) : n.role, role: n.role, agentId: n.agentId };
+                                    setSelectedNode(resolved);
+                                    setActiveTab("ontology");
+                                  }
                                 }}
                               />
                             );
                           })
                         )}
                       </div>
-                    ) : rOrg ? (
-                      <div style={{ paddingLeft: 12 }}>
-                        <ResolvedOrgChart org={rOrg} agentMap={agentMap} locale={locale} selectedId={selectedNode?.id ?? null} onSelect={(node) => { setSelectedNode(node); setActiveTab("identity"); }} />
-                      </div>
                     ) : (
                       <div style={{ paddingLeft: 12 }}>
-                        <OrgChart firm={firm} agentMap={agentMap} locale={locale} selectedId={selectedNode?.id ?? null} onSelect={(node) => { setSelectedNode(node); setActiveTab("identity"); }} />
+                        <OrgChart
+                          firm={firm}
+                          agentMap={agentMap}
+                          locale={locale}
+                          selectedId={selectedNode?.id ?? null}
+                          onSelect={(node) => {
+                            if (node.agentId === firm.ceoAgentId) {
+                              setSelectedFirmId(firm.id);
+                              setSelectedNode(null);
+                            } else {
+                              setSelectedNode(node);
+                              setActiveTab("ontology");
+                            }
+                          }}
+                          onRemoveRoot={() => void removeInstalledFirm(firm)}
+                        />
                       </div>
                     )
                   )}
@@ -1637,6 +1698,20 @@ function LibraryAgentsView() {
                             </div>
                           </button>
                           <IconLayers size={14} style={{ color: "var(--accent)" }} />
+                          <button
+                            type="button"
+                            aria-label={locale === "ko" ? `${displayName} 팀 삭제` : `Delete ${displayName} team`}
+                            title={locale === "ko" ? "조직도에서 팀 삭제" : "Delete team from organization chart"}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const firm = firms.find((item) => item.ceoAgentId === a.id) ?? null;
+                              if (firm) void removeInstalledFirm(firm);
+                              else void removeInstalledAgent(a);
+                            }}
+                            style={{ width: 34, height: 34, flexShrink: 0, border: "1px solid var(--paper-edge)", borderRadius: 8, background: "var(--paper)", color: "var(--muted-deep)", cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+                          >
+                            <IconClose size={13} />
+                          </button>
                         </div>
                         {expanded && (
                           <div style={{ paddingLeft: 34, display: "flex", flexDirection: "column", gap: 3, marginTop: 2, marginBottom: 4 }}>
@@ -1908,162 +1983,31 @@ function LibraryAgentsView() {
             profile={selectedBorrowedProfile}
             onBack={() => setSelectedBorrowedProfileId(null)}
           />
-        ) : selectedFirm ? (
-          <div style={{ flex: 1, overflowY: "auto" }} data-tour-id="agents.detail">
-            <header className="titlebar-drag" style={{ padding: "16px 32px", minHeight: 56, borderBottom: "var(--hairline)", background: "var(--paper)", display: "flex", alignItems: "center", gap: 12 }}>
-              <span style={{ width: 36, height: 36, borderRadius: 10, background: "var(--fill-1)", color: "var(--accent)", display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
-                <IconBuilding size={18} />
-              </span>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 18 }}>{pickLocalized(selectedFirm, locale).name}</h1>
-                <p style={{ margin: "3px 0 0", color: "var(--muted-deep)", fontSize: 12 }}>{locale === "ko" ? "프로젝트에 장착하는 팀 도구" : "A team tool attached to projects"}</p>
-              </div>
-            </header>
-            <section style={{ maxWidth: 760, margin: "24px auto", padding: "0 24px", display: "flex", flexDirection: "column", gap: 16 }}>
-              <div style={{ padding: 20, border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", background: "var(--paper)" }}>
-                <h2 style={{ margin: 0, fontSize: 15 }}>{locale === "ko" ? "팀 도구 구성" : "Team tool composition"}</h2>
-                <p style={{ margin: "7px 0 0", color: "var(--ink-soft)", fontSize: 13, lineHeight: 1.6 }}>
-                  {locale === "ko"
-                    ? "프로젝트는 이 팀을 도구 하나로 장착합니다. 실행할 때는 CEO→HQ→전문가 위계를 유지하며, 내부 worker와 eval·judge는 별도 소유 에이전트처럼 노출하지 않습니다."
-                    : "A project attaches this team as one tool. Execution preserves the CEO → HQ → specialist hierarchy; internal workers, evals, and judges are not exposed as separately owned agents."}
-                </p>
-                <dl style={{ margin: "16px 0 0", display: "grid", gridTemplateColumns: "120px 1fr", gap: "8px 12px", fontSize: 12 }}>
-                  <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "로컬 팀 ID" : "Local team ID"}</dt><dd style={{ margin: 0 }}>{selectedFirm.id}</dd>
-                  <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "팀 슬러그" : "Team slug"}</dt><dd style={{ margin: 0 }}>{selectedFirm.slug}</dd>
-                  <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "실행 컨트롤러" : "Execution controller"}</dt><dd style={{ margin: 0 }}>{selectedFirmController ? agentDisplayName(selectedFirmController, locale) : selectedFirm.ceoAgentId}</dd>
-                  <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "원본 출처" : "Origin"}</dt><dd style={{ margin: 0 }}>{selectedFirmController?.assetSource === "agent-cloud" ? "Agent Cloud" : selectedFirmController?.assetSource === "hub" ? "Agentlas Hub" : (locale === "ko" ? "로컬 가져오기" : "Local import")}</dd>
-                  <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "팀 릴리스 바인딩" : "Team release binding"}</dt>
-                  <dd style={{ margin: 0, color: selectedFirmNeedsTeamBinding ? "var(--amber-deep)" : "var(--ink)" }}>
-                    {selectedFirmNeedsTeamBinding
-                      ? (locale === "ko" ? "팀 자체 ID·릴리스 필요 · 장착 차단" : "Team-level ID and release required · attachment blocked")
-                      : (locale === "ko" ? "로컬 팀 ID에 고정" : "Pinned to local team ID")}
-                  </dd>
-                  {selectedFirmControllerBinding && (
-                    <>
-                      <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "컨트롤러 릴리스" : "Controller release"}</dt>
-                      <dd style={{ margin: 0 }}>{selectedFirmControllerBinding.agentReleaseId} <span style={{ color: "var(--muted-deep)" }}>({locale === "ko" ? "팀 릴리스 아님" : "not the team release"})</span></dd>
-                    </>
-                  )}
-                  <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "사용자용 조직 자리" : "User-facing slots"}</dt><dd style={{ margin: 0 }}>{selectedFirm.orgChart.filter((node) => isUserFacingAgentText(node.agentSlug, node.role)).length}</dd>
-                  <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "실제 연결됨" : "Bound agents"}</dt><dd style={{ margin: 0 }}>{selectedFirm.orgChart.filter((node) => isUserFacingAgentText(node.agentSlug, node.role) && agentMap.has(node.agentId)).length}</dd>
-                </dl>
-              </div>
-              <div style={{ padding: 20, border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", background: "var(--paper)" }}>
-                <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
-                  <h2 style={{ margin: 0, fontSize: 15 }}>{locale === "ko" ? "CEO → HQ → 전문가 구성" : "CEO → HQ → specialist composition"}</h2>
-                  <span style={{ color: "var(--muted-deep)", fontSize: 11 }}>{locale === "ko" ? "실제 연결 상태" : "Actual binding state"}</span>
-                </div>
-                <p style={{ margin: "7px 0 14px", color: "var(--ink-soft)", fontSize: 12, lineHeight: 1.55 }}>
-                  {locale === "ko"
-                    ? "조직 자리와 실행 가능한 에이전트를 구분합니다. 미연결 자리는 역할 설계일 뿐 프로젝트에 장착되거나 경험 칩을 소유하지 않습니다. 연결된 멤버를 선택하면 그 멤버의 Experience Chips로 이동합니다."
-                    : "Organization slots are distinct from executable agents. An unbound slot is only a role design; it cannot be attached to projects or own Experience Chips. Select a bound member to open that member's Experience Chips."}
-                </p>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 8 }}>
-                  {selectedFirm.orgChart.filter((node) => isUserFacingAgentText(node.agentSlug, node.role)).map((node) => {
-                    const boundAgent = agentMap.get(node.agentId) ?? null;
-                    const parent = node.reportsTo ? selectedFirm.orgChart.find((candidate) => candidate.agentSlug === node.reportsTo) : null;
-                    return (
-                      <button
-                        key={node.agentSlug}
-                        type="button"
-                        disabled={!boundAgent}
-                        onClick={() => {
-                          if (!boundAgent) return;
-                          setSelectedFirmId(null);
-                          setSelectedNode({ id: boundAgent.id, name: agentDisplayName(boundAgent, locale), role: node.role, agentId: boundAgent.id });
-                          setActiveTab("ontology");
-                        }}
-                        aria-label={boundAgent ? `${agentDisplayName(boundAgent, locale)} · ${locale === "ko" ? "Experience Chips 보기" : "View Experience Chips"}` : undefined}
-                        style={{ minWidth: 0, minHeight: 58, padding: 11, border: "1px solid var(--paper-edge)", borderRadius: 9, background: boundAgent ? "var(--paper-2)" : "var(--paper)", color: "var(--ink)", opacity: boundAgent ? 1 : 0.72, textAlign: "left", cursor: boundAgent ? "pointer" : "default" }}
-                      >
-                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                          <span style={{ width: 28, height: 28, borderRadius: 8, display: "grid", placeItems: "center", background: boundAgent ? "var(--accent-soft)" : "var(--fill-1)", color: boundAgent ? "var(--accent)" : "var(--muted-deep)", fontSize: 11, fontWeight: 800 }}>
-                            {(boundAgent ? agentDisplayName(boundAgent, locale) : node.role).slice(0, 1).toUpperCase()}
-                          </span>
-                          <div style={{ minWidth: 0, flex: 1 }}>
-                            <strong style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12 }}>{boundAgent ? agentDisplayName(boundAgent, locale) : node.role}</strong>
-                            <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--muted-deep)", fontSize: 10.5 }}>{parent ? `${parent.role} → ${node.role}` : node.role}</span>
-                          </div>
-                          <span style={{ flexShrink: 0, padding: "2px 6px", borderRadius: 999, background: boundAgent ? "var(--green-soft)" : "var(--fill-1)", color: boundAgent ? "var(--green-deep)" : "var(--muted-deep)", fontSize: 9.5, fontWeight: 750 }}>
-                            {boundAgent ? (locale === "ko" ? "연결됨" : "Bound") : (locale === "ko" ? "미연결" : "Unbound")}
-                          </span>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <ProjectAttachControl
-                  projects={projects}
-                  projectId={activeProjectId}
-                  entityKind="team"
-                  localTargetId={selectedFirm.id}
-                  locale={locale}
-                  disabled={!selectedFirmController || selectedFirmNeedsTeamBinding}
-                  onProjectChange={setActiveProjectId}
-                  onAttach={() => void attachTeamToActiveProject(selectedFirm)}
-                />
-                <button type="button" onClick={() => navigate(`/cloud?team=${encodeURIComponent(selectedFirm.id)}`)} style={{ minHeight: 44, padding: "0 14px", borderRadius: 8, border: "1px solid var(--paper-edge)", background: "var(--paper)", color: "var(--ink)", cursor: "pointer", fontWeight: 700 }}>
-                  {locale === "ko" ? "Cloud 저장·Hub 공개 관리" : "Manage Cloud save & Hub publish"}
-                </button>
-              </div>
-              {(!selectedFirmController || selectedFirmNeedsTeamBinding) && (
-                <p role="status" style={{ margin: "-4px 0 0", color: "var(--amber-deep)", fontSize: 11.5, lineHeight: 1.5 }}>
-                  {!selectedFirmController
-                    ? (locale === "ko"
-                        ? "이 팀의 로컬 실행 진입점이 없어 장착할 수 없습니다. 팀을 다시 가져오거나 복원하세요."
-                        : "This team has no local execution entrypoint. Re-import or restore the team.")
-                    : (locale === "ko"
-                        ? "원격 컨트롤러의 릴리스를 팀 전체의 릴리스로 추정하지 않습니다. 팀 자체의 정확한 ID·릴리스 계약이 필요합니다."
-                        : "The controller's remote release is not inferred to be the team's release. A team-level exact identity and release contract is required.")}
-                </p>
-              )}
-              <details style={{ alignSelf: "flex-start", fontSize: 11.5, color: "var(--muted-deep)" }}>
-                <summary style={{ cursor: "pointer", minHeight: 44, display: "flex", alignItems: "center" }}>{locale === "ko" ? "고급 관리" : "Advanced management"}</summary>
-                <button type="button" onClick={() => void removeInstalledFirm(selectedFirm)} style={{ minHeight: 44, padding: "0 14px", borderRadius: 8, border: "1px solid var(--red-deep)", background: "transparent", color: "var(--red-deep)", cursor: "pointer", fontWeight: 700 }}>
-                  {locale === "ko" ? "프로젝트 영향 확인 후 팀 제거" : "Review project impact and remove team"}
-                </button>
-              </details>
-            </section>
-          </div>
-        ) : selectedStandaloneTeam ? (
-          <div style={{ flex: 1, overflowY: "auto" }} data-tour-id="agents.detail" data-testid="canonical-package-team-detail">
-            <header className="titlebar-drag" style={{ padding: "16px 32px", minHeight: 56, borderBottom: "var(--hairline)", background: "var(--paper)", display: "flex", alignItems: "center", gap: 12 }}>
-              <span style={{ width: 36, height: 36, borderRadius: 10, background: "var(--fill-1)", color: "var(--accent)", display: "inline-flex", alignItems: "center", justifyContent: "center" }}><IconLayers size={18} /></span>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 18 }}>{agentDisplayName(selectedStandaloneTeam, locale)}</h1>
-                <p style={{ margin: "3px 0 0", color: "var(--muted-deep)", fontSize: 12 }}>{locale === "ko" ? "프로젝트에 장착하는 팀 패키지" : "A team package attached to projects"}</p>
-              </div>
-            </header>
-            <section style={{ maxWidth: 760, margin: "24px auto", padding: "0 24px", display: "grid", gap: 16 }}>
-              <div style={{ padding: 20, border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", background: "var(--paper)" }}>
-                <h2 style={{ margin: 0, fontSize: 15 }}>{locale === "ko" ? "팀 신원 원장" : "Team identity ledger"}</h2>
-                <p style={{ margin: "7px 0 16px", color: "var(--ink-soft)", fontSize: 12.5, lineHeight: 1.6 }}>
-                  {locale === "ko" ? "팀을 싱글 에이전트처럼 실행하거나 팀 전체의 Experience를 복제하지 않습니다. 이 패키지에 직접 연결된 팀 ID·릴리스만 프로젝트 장착에 사용합니다." : "This team is not run as a single agent and does not copy member Experience. Only the identity and release bound directly to this team package may be attached."}
-                </p>
-                <dl style={{ margin: 0, display: "grid", gridTemplateColumns: "132px 1fr", gap: "9px 12px", fontSize: 12 }}>
-                  <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "로컬 설치 ID" : "Local install ID"}</dt><dd style={{ margin: 0 }}>{selectedStandaloneTeam.id}</dd>
-                  <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "팀 슬러그" : "Team slug"}</dt><dd style={{ margin: 0 }}>{selectedStandaloneTeam.slug}</dd>
-                  <dt style={{ color: "var(--muted-deep)" }}>Definition ID</dt><dd style={{ margin: 0 }}>{selectedStandaloneTeamBinding?.agentDefinitionId ?? (locale === "ko" ? "확인 필요" : "Verification required")}</dd>
-                  <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "정확한 릴리스" : "Exact release"}</dt><dd style={{ margin: 0 }}>{selectedStandaloneTeamBinding?.agentReleaseId ?? (locale === "ko" ? "확인 필요 · 장착 차단" : "Verification required · attachment blocked")}</dd>
-                  <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "출처" : "Origin"}</dt><dd style={{ margin: 0 }}>{selectedStandaloneTeamBinding?.source === "hub-install" ? "Agentlas Hub" : selectedStandaloneTeamBinding?.source === "agent-cloud-restore" ? "Agent Cloud" : (locale === "ko" ? "로컬 설치" : "Local install")}</dd>
-                  <dt style={{ color: "var(--muted-deep)" }}>Package hash</dt><dd style={{ margin: 0 }}>{selectedStandaloneTeam.packageHash ?? (locale === "ko" ? "기록 없음" : "Not recorded")}</dd>
-                </dl>
-              </div>
-              <ProjectAttachControl
-                projects={projects}
-                projectId={activeProjectId}
-                entityKind="team"
-                localTargetId={selectedStandaloneTeamBinding?.agentDefinitionId ?? selectedStandaloneTeam.id}
-                locale={locale}
-                disabled={!selectedStandaloneTeamBinding}
-                onProjectChange={setActiveProjectId}
-                onAttach={() => void attachStandaloneTeamToActiveProject(selectedStandaloneTeam)}
-              />
-              {!selectedStandaloneTeamBinding && <p role="status" style={{ margin: 0, color: "var(--amber-deep)", fontSize: 11.5 }}>{locale === "ko" ? "팀 자체의 정확한 원격 바인딩이 없으므로 프로젝트에 장착하지 않습니다." : "This team is not attachable until its own exact remote binding is available."}</p>}
-            </section>
-          </div>
+        ) : (selectedFirm || selectedStandaloneTeam) ? (
+          <TeamDetailView
+            agent={selectedFirmController ?? selectedStandaloneTeam}
+            firm={selectedFirm ?? selectedStandaloneTeamFirm}
+            resolvedOrg={selectedFirm
+              ? resolvedOrgs[selectedFirm.id] ?? null
+              : selectedStandaloneTeamFirm
+                ? resolvedOrgs[selectedStandaloneTeamFirm.id] ?? null
+                : null}
+            agentMap={agentMap}
+            exactBinding={selectedFirmControllerBinding ?? selectedStandaloneTeamBinding}
+            projects={projects}
+            activeProjectId={activeProjectId}
+            locale={locale}
+            onActiveProjectChange={setActiveProjectId}
+            onAttach={() => {
+              if (selectedFirm) void attachTeamToActiveProject(selectedFirm);
+              else if (selectedStandaloneTeam) void attachStandaloneTeamToActiveProject(selectedStandaloneTeam);
+            }}
+            onRemove={() => {
+              if (selectedFirm) void removeInstalledFirm(selectedFirm);
+              else if (selectedStandaloneTeamFirm) void removeInstalledFirm(selectedStandaloneTeamFirm);
+              else void removeInstalledAgent(selectedStandaloneTeam);
+            }}
+          />
         ) : selectedNode === null ? (
           /* A. 에이전트 미선택 시: 기존 회사 오버뷰 화면 */
           <div style={{ flex: 1, overflowY: "auto" }} data-tour-id="agents.detail">
@@ -2211,6 +2155,203 @@ function LibraryAgentsView() {
           />
         )}
       </main>
+    </div>
+  );
+}
+
+interface TeamDetailViewProps {
+  agent: InstalledAgent | null;
+  firm: InstalledFirm | null;
+  resolvedOrg: ResolvedOrg | null;
+  agentMap: Map<string, InstalledAgent>;
+  exactBinding: InstalledAgentExactBinding | null;
+  projects: Project[];
+  activeProjectId: string;
+  locale: Locale;
+  onActiveProjectChange: (projectId: string) => void;
+  onAttach: () => void;
+  onRemove: () => void;
+}
+
+function teamSourceLabel(agent: InstalledAgent | null, locale: Locale): string {
+  if (agent?.assetSource === "agent-cloud") return "Agent Cloud";
+  if (agent?.assetSource === "hub") return "Agentlas Hub";
+  return locale === "ko" ? "로컬 가져오기" : "Local import";
+}
+
+function firmToResolvedOrg(firm: InstalledFirm): ResolvedOrg | null {
+  const ceo = firm.orgChart.find((node) => node.reportsTo === null) ?? firm.orgChart[0];
+  if (!ceo) return null;
+  const toNode = (node: InstalledFirm["orgChart"][number]): ResolvedNode => ({
+    id: node.agentSlug,
+    name: node.role || node.agentSlug,
+    role: node.role,
+    agentId: node.agentId,
+  });
+  const divisions = firm.orgChart
+    .filter((node) => node.reportsTo === ceo.agentSlug)
+    .map((division) => ({
+      ...toNode(division),
+      specialists: firm.orgChart
+        .filter((node) => node.reportsTo === division.agentSlug)
+        .map(toNode),
+    }));
+  return {
+    source: "orgchart",
+    ceo: toNode(ceo),
+    divisions,
+  };
+}
+
+function TeamDetailView({
+  agent,
+  firm,
+  resolvedOrg,
+  agentMap,
+  exactBinding,
+  projects,
+  activeProjectId,
+  locale,
+  onActiveProjectChange,
+  onAttach,
+  onRemove,
+}: TeamDetailViewProps) {
+  const [tab, setTab] = useState<"description" | "metadata">("description");
+  const loc = firm ? pickLocalized(firm, locale) : agent ? pickLocalized(agent, locale) : { name: "Team", tagline: "" };
+  const org = resolvedOrg ?? (firm ? firmToResolvedOrg(firm) : null);
+  const slotCount = firm?.orgChart.filter((node) => isUserFacingAgentText(node.agentSlug, node.role)).length ?? (agent ? 1 : 0);
+  const boundCount = firm?.orgChart.filter((node) => isUserFacingAgentText(node.agentSlug, node.role) && agentMap.has(node.agentId)).length ?? (agent ? 1 : 0);
+  const source = teamSourceLabel(agent, locale);
+  const memberExperienceNodes = firm?.orgChart.filter((node) => node.agentId && node.agentId !== firm.ceoAgentId && agentMap.has(node.agentId)) ?? [];
+
+  return (
+    <div style={{ flex: 1, overflowY: "auto", background: "var(--paper-2)" }} data-testid="canonical-package-team-detail" data-unified-team-detail="true" data-tour-id="agents.detail">
+      <header className="titlebar-drag" style={{ padding: "16px 32px", minHeight: 56, borderBottom: "var(--hairline)", background: "var(--paper)", display: "flex", alignItems: "center", gap: 12 }}>
+        <span style={{ width: 36, height: 36, borderRadius: 10, background: "var(--fill-1)", color: "var(--accent)", display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+          <IconLayers size={18} />
+        </span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 18, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{loc.name}</h1>
+          <p style={{ margin: "3px 0 0", color: "var(--muted-deep)", fontSize: 12 }}>{locale === "ko" ? "프로젝트에 장착하는 팀 도구" : "A team tool attached to projects"}</p>
+        </div>
+        <span style={{ flexShrink: 0, padding: "4px 8px", borderRadius: 999, background: "var(--fill-1)", color: "var(--muted-deep)", fontSize: 10, fontWeight: 700 }}>{source}</span>
+        <button type="button" onClick={onRemove} aria-label={locale === "ko" ? "조직도에서 팀 삭제" : "Delete team from organization chart"} title={locale === "ko" ? "조직도에서 팀 삭제" : "Delete team from organization chart"} style={{ width: 40, height: 40, border: "1px solid var(--paper-edge)", borderRadius: 9, background: "var(--paper)", color: "var(--muted-deep)", cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+          <IconClose size={14} />
+        </button>
+      </header>
+
+      <nav data-testid="team-detail-tabs" style={{ display: "flex", gap: 4, padding: "8px 32px", background: "var(--paper)", borderBottom: "var(--hairline)" }}>
+        {(["description", "metadata"] as const).map((item) => {
+          const active = tab === item;
+          return (
+            <button key={item} type="button" onClick={() => setTab(item)} aria-current={active ? "page" : undefined} style={{ minHeight: 44, padding: "8px 16px", border: 0, borderRadius: 8, background: active ? "var(--accent-soft)" : "transparent", color: active ? "var(--accent)" : "var(--ink-soft)", fontSize: 12.5, fontWeight: active ? 750 : 500, cursor: "pointer" }}>
+              {item === "description" ? (locale === "ko" ? "디스크립션" : "Description") : (locale === "ko" ? "메타데이터" : "Metadata")}
+            </button>
+          );
+        })}
+      </nav>
+
+      <section style={{ maxWidth: 960, margin: "24px auto", padding: "0 24px 32px", display: "flex", flexDirection: "column", gap: 16 }}>
+        {tab === "description" ? (
+          <>
+            <div style={{ padding: 20, border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", background: "var(--paper)" }}>
+              <h2 style={{ margin: 0, fontSize: 15 }}>{locale === "ko" ? "팀 디스크립션" : "Team description"}</h2>
+              <p style={{ margin: "8px 0 0", color: "var(--ink-soft)", fontSize: 13, lineHeight: 1.65 }}>
+                {loc.tagline || (locale === "ko" ? "이 팀은 CEO → HQ → 전문가 순서로 작업을 분배합니다." : "This team distributes work through a CEO → HQ → specialist hierarchy.")}
+              </p>
+              {firm?.persona && <p style={{ margin: "10px 0 0", color: "var(--muted-deep)", fontSize: 12, lineHeight: 1.6 }}>{firm.persona}</p>}
+              <p style={{ margin: "12px 0 0", color: "var(--muted-deep)", fontSize: 12, lineHeight: 1.6 }}>
+                {locale === "ko" ? "팀은 프로젝트에서 하나의 도구로 장착되며, 아래 조직도는 실제 연결된 구성원과 역할을 그대로 보여줍니다." : "The team attaches as one project tool; the org chart below shows its actual connected members and roles."}
+              </p>
+            </div>
+            <div style={{ padding: 20, border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", background: "var(--paper)" }}>
+              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
+                <h2 style={{ margin: 0, fontSize: 15 }}>{locale === "ko" ? "CEO → HQ → 전문가 조직도" : "CEO → HQ → specialist org chart"}</h2>
+                <span style={{ color: "var(--muted-deep)", fontSize: 11 }}>{locale === "ko" ? "실제 연결 상태" : "Actual binding state"}</span>
+              </div>
+              {org ? (
+                <div style={{ marginTop: 14 }}>
+                  <ResolvedOrgChart
+                    org={org}
+                    agentMap={agentMap}
+                    locale={locale}
+                    selectedId={null}
+                    onSelect={() => undefined}
+                    onRemoveRoot={onRemove}
+                  />
+                </div>
+              ) : firm ? (
+                <div style={{ marginTop: 14 }}>
+                  <OrgChart
+                    firm={firm}
+                    agentMap={agentMap}
+                    locale={locale}
+                    selectedId={null}
+                    onSelect={() => undefined}
+                    onRemoveRoot={onRemove}
+                  />
+                </div>
+              ) : (
+                <p style={{ margin: "14px 0 0", color: "var(--muted-deep)", fontSize: 12 }}>{locale === "ko" ? "이 팀에는 아직 저장된 조직도가 없습니다." : "This team has no stored org chart yet."}</p>
+              )}
+              {memberExperienceNodes.length > 0 && (
+                <div style={{ marginTop: 16, paddingTop: 14, borderTop: "1px solid var(--paper-edge)" }}>
+                  <p style={{ margin: "0 0 8px", color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.5 }}>
+                    {locale === "ko" ? "멤버의 경험은 팀에 복사하지 않고 각 멤버 자산에서 확인합니다." : "Member experience stays with each member asset instead of being copied into the team."}
+                  </p>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                    {memberExperienceNodes.map((node) => {
+                      const member = agentMap.get(node.agentId);
+                      if (!member) return null;
+                      return (
+                        <Link
+                          key={node.agentId}
+                          href={`/library/agents?agentId=${encodeURIComponent(node.agentId)}&tab=ontology&firmId=${encodeURIComponent(firm!.id)}`}
+                          style={{ display: "inline-flex", alignItems: "center", minHeight: 36, padding: "0 10px", border: "1px solid var(--paper-edge)", borderRadius: 8, background: "var(--paper-2)", color: "var(--accent)", fontSize: 11.5, fontWeight: 700, textDecoration: "none" }}
+                        >
+                          {agentDisplayName(member, locale)} · {locale === "ko" ? "Experience Chips 보기" : "View Experience Chips"}
+                        </Link>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          </>
+        ) : (
+          <div style={{ padding: 20, border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", background: "var(--paper)" }}>
+            <h2 style={{ margin: 0, fontSize: 15 }}>{locale === "ko" ? "팀 메타데이터" : "Team metadata"}</h2>
+            <p style={{ margin: "8px 0 16px", color: "var(--ink-soft)", fontSize: 12.5, lineHeight: 1.6 }}>
+              {locale === "ko" ? "CEO를 별도 에이전트 버튼으로 복제하지 않습니다. 이 팀의 신원·릴리스·출처는 한 화면에서 확인합니다." : "The CEO is not duplicated as a separate agent button. This screen is the single source for the team's identity, release, and origin."}
+            </p>
+            <dl style={{ margin: 0, display: "grid", gridTemplateColumns: "150px 1fr", gap: "9px 12px", fontSize: 12 }}>
+              <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "로컬 팀 ID" : "Local team ID"}</dt><dd style={{ margin: 0 }}>{firm?.id ?? agent?.id ?? "—"}</dd>
+              <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "팀 슬러그" : "Team slug"}</dt><dd style={{ margin: 0 }}>{firm?.slug ?? agent?.slug ?? "—"}</dd>
+              <dt style={{ color: "var(--muted-deep)" }}>Definition ID</dt><dd style={{ margin: 0 }}>{exactBinding?.agentDefinitionId ?? (locale === "ko" ? "확인 필요" : "Verification required")}</dd>
+              <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "정확한 릴리스" : "Exact release"}</dt><dd style={{ margin: 0 }}>{exactBinding?.agentReleaseId ?? (locale === "ko" ? "확인 필요 · 장착 차단" : "Verification required · attachment blocked")}</dd>
+              <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "실행 컨트롤러" : "Execution controller"}</dt><dd style={{ margin: 0 }}>{agent ? agentDisplayName(agent, locale) : "—"}</dd>
+              <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "원본 출처" : "Origin"}</dt><dd style={{ margin: 0 }}>{source}</dd>
+              <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "패키지 해시" : "Package hash"}</dt><dd style={{ margin: 0 }}>{agent?.packageHash ?? (locale === "ko" ? "기록 없음" : "Not recorded")}</dd>
+              <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "사용자용 조직 자리" : "User-facing slots"}</dt><dd style={{ margin: 0 }}>{slotCount}</dd>
+              <dt style={{ color: "var(--muted-deep)" }}>{locale === "ko" ? "실제 연결됨" : "Bound agents"}</dt><dd style={{ margin: 0 }}>{boundCount}</dd>
+            </dl>
+          </div>
+        )}
+
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+          <ProjectAttachControl
+            projects={projects}
+            projectId={activeProjectId}
+            entityKind="team"
+            localTargetId={firm?.id ?? agent?.id}
+            locale={locale}
+            disabled={!agent || (agent.assetSource !== "local-import" && !exactBinding)}
+            onProjectChange={onActiveProjectChange}
+            onAttach={onAttach}
+          />
+          <span style={{ fontSize: 11, color: "var(--muted-deep)" }}>{locale === "ko" ? `${source} · 팀 전체 장착` : `${source} · attach the whole team`}</span>
+        </div>
+      </section>
     </div>
   );
 }
@@ -2399,12 +2540,14 @@ function ResolvedOrgChart({
   locale,
   selectedId,
   onSelect,
+  onRemoveRoot,
 }: {
   org: ResolvedOrg;
   agentMap: Map<string, InstalledAgent>;
   locale: Locale;
   selectedId: string | null;
   onSelect: (node: ResolvedNode) => void;
+  onRemoveRoot?: () => void;
 }) {
   const visibleDivisions = org.divisions.filter(
     (division) =>
@@ -2414,7 +2557,25 @@ function ResolvedOrgChart({
   const showCeo = isVisibleResolvedNode(org.ceo, agentMap);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      {showCeo && <OrgNodeCard node={withAgentDisplayName(org.ceo, agentMap, locale)} tier={1} active={selectedId === org.ceo.id} onClick={() => onSelect(withAgentDisplayName(org.ceo, agentMap, locale))} />}
+      {showCeo && (
+        <div style={{ display: "flex", alignItems: "stretch", gap: 6 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <OrgNodeCard node={withAgentDisplayName(org.ceo, agentMap, locale)} tier={1} active={selectedId === org.ceo.id} onClick={() => onSelect(withAgentDisplayName(org.ceo, agentMap, locale))} />
+          </div>
+          {onRemoveRoot && (
+            <button
+              type="button"
+              data-testid="org-chart-delete-root"
+              aria-label={locale === "ko" ? "조직도에서 팀 삭제" : "Delete team from org chart"}
+              title={locale === "ko" ? "조직도에서 팀 삭제" : "Delete team from org chart"}
+              onClick={onRemoveRoot}
+              style={{ width: 36, minHeight: 36, alignSelf: "stretch", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-sm)", background: "var(--paper)", color: "var(--muted-deep)", cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+            >
+              <IconClose size={13} />
+            </button>
+          )}
+        </div>
+      )}
       {visibleDivisions.map((d) => {
         const visibleSpecialists = d.specialists.filter((specialist) => isVisibleResolvedNode(specialist, agentMap));
         const showDivision = isVisibleResolvedNode(d, agentMap);
@@ -2520,7 +2681,9 @@ function isVisibleResolvedNode(node: ResolvedNode, agentMap: Map<string, Install
   if (!isUserFacingAgentText(node.name, node.role)) return false;
   if (!node.agentId) return true;
   const agent = agentMap.get(node.agentId);
-  return Boolean(agent && isRosterVisibleAgent(agent));
+  // Team members are hidden from the top-level roster, but they must remain
+  // visible inside their owning team's org chart.
+  return Boolean(agent && (agent.parentTeamId ? agent.visibility !== "private" : isRosterVisibleAgent(agent)));
 }
 
 function withAgentDisplayName(node: ResolvedNode, agentMap: Map<string, InstalledAgent>, locale: Locale): ResolvedNode {
@@ -2534,7 +2697,7 @@ function isVisibleFirmOrgNode(
 ): boolean {
   if (!isUserFacingAgentText(node.agentSlug, node.role)) return false;
   const agent = agentMap.get(node.agentId);
-  return Boolean(agent && isRosterVisibleAgent(agent));
+  return Boolean(agent && (agent.parentTeamId ? agent.visibility !== "private" : isRosterVisibleAgent(agent)));
 }
 
 // ── 일반 트리 재귀 렌더 (사이드바 내부) ─────────────────
@@ -2544,12 +2707,14 @@ function OrgChart({
   locale,
   selectedId,
   onSelect,
+  onRemoveRoot,
 }: {
   firm: InstalledFirm;
   agentMap: Map<string, InstalledAgent>;
   locale: Locale;
   selectedId: string | null;
   onSelect: (node: ResolvedNode) => void;
+  onRemoveRoot?: () => void;
 }) {
   const ceo = firm.orgChart.find((n) => n.reportsTo === null);
   if (!ceo) return <div style={{ fontSize: 12, color: "var(--muted)" }}>{locale === "ko" ? "조직도가 비어있습니다." : "The org chart is empty."}</div>;
@@ -2576,56 +2741,74 @@ function OrgChart({
 
     return (
       <div key={node.agentSlug} style={{ marginTop: depth === 0 ? 0 : 6 }}>
-        <button
-          type="button"
-          onClick={() => onSelect(resolved)}
-          title={[displayName, roleLabel].filter(Boolean).join(" - ")}
-          style={{
-            width: "100%",
-            display: "flex",
-            alignItems: "flex-start",
-            gap: 8,
-            padding: "8px 10px",
-            background: active ? "var(--accent-soft)" : isCeo ? "var(--fill-1)" : "var(--paper)",
-            border: active ? "1px solid var(--accent)" : isCeo ? "1px solid var(--accent-soft)" : "1px solid var(--paper-edge)",
-            borderRadius: "var(--radius-sm)",
-            cursor: "pointer",
-            transition: "all 0.15s ease",
-            color: "inherit",
-            font: "inherit",
-            textAlign: "left",
-          }}
-        >
-          <div
+        <div style={{ display: "flex", alignItems: "stretch", gap: 6 }}>
+          <button
+            type="button"
+            onClick={() => onSelect(resolved)}
+            title={[displayName, roleLabel].filter(Boolean).join(" - ")}
             style={{
-              width: 24,
-              height: 24,
-              borderRadius: 6,
-              background: isCeo ? "linear-gradient(135deg, var(--accent), var(--blue))" : "var(--paper-2)",
-              color: isCeo ? "#fff" : "var(--ink-soft)",
+              flex: 1,
+              minWidth: 0,
               display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontSize: 10,
-              fontWeight: 700,
-              flexShrink: 0,
+              alignItems: "flex-start",
+              gap: 8,
+              padding: "8px 10px",
+              background: active ? "var(--accent-soft)" : isCeo ? "var(--fill-1)" : "var(--paper)",
+              border: active ? "1px solid var(--accent)" : isCeo ? "1px solid var(--accent-soft)" : "1px solid var(--paper-edge)",
+              borderRadius: "var(--radius-sm)",
+              cursor: "pointer",
+              transition: "all 0.15s ease",
+              color: "inherit",
+              font: "inherit",
+              textAlign: "left",
             }}
           >
-            {displayName.slice(0, 1).toUpperCase()}
-          </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 3, minWidth: 0 }}>
-              <strong style={{ ...rosterNameStyle, fontSize: 12, color: "var(--ink)", fontWeight: 750 }}>
-                {displayName}
-              </strong>
-              {roleLabel && (
-                <span style={{ maxWidth: "100%", fontSize: 9, padding: "1px 5px", borderRadius: 999, background: "var(--paper-2)", color: "var(--muted-deep)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                  {roleLabel}
-                </span>
-              )}
+            <div
+              style={{
+                width: 24,
+                height: 24,
+                borderRadius: 6,
+                background: isCeo ? "linear-gradient(135deg, var(--accent), var(--blue))" : "var(--paper-2)",
+                color: isCeo ? "#fff" : "var(--ink-soft)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: 10,
+                fontWeight: 700,
+                flexShrink: 0,
+              }}
+            >
+              {displayName.slice(0, 1).toUpperCase()}
             </div>
-          </div>
-        </button>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 3, minWidth: 0 }}>
+                <strong style={{ ...rosterNameStyle, fontSize: 12, color: "var(--ink)", fontWeight: 750 }}>
+                  {displayName}
+                </strong>
+                {roleLabel && (
+                  <span style={{ maxWidth: "100%", fontSize: 9, padding: "1px 5px", borderRadius: 999, background: "var(--paper-2)", color: "var(--muted-deep)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {roleLabel}
+                  </span>
+                )}
+              </div>
+            </div>
+          </button>
+          {isCeo && onRemoveRoot && (
+            <button
+              type="button"
+              data-testid="org-chart-delete-root"
+              aria-label={locale === "ko" ? "조직도에서 팀 삭제" : "Delete team from org chart"}
+              title={locale === "ko" ? "조직도에서 팀 삭제" : "Delete team from org chart"}
+              onClick={(event) => {
+                event.stopPropagation();
+                onRemoveRoot();
+              }}
+              style={{ width: 36, minHeight: 36, alignSelf: "stretch", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-sm)", background: "var(--paper)", color: "var(--muted-deep)", cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+            >
+              <IconClose size={13} />
+            </button>
+          )}
+        </div>
         {kids.length > 0 && (
           <div
             style={{
@@ -3010,7 +3193,7 @@ function runtimeStatusKey(runtime: Pick<RuntimeStatus, "kind" | "backend">): str
 function runtimeDisplayName(runtime: Pick<RuntimeStatus, "kind" | "backend" | "model">): string {
   if (runtime.kind === "claude-code") return "Claude Code";
   if (runtime.kind === "codex") return "Codex";
-  if (runtime.kind === "gemini") return "Gemini";
+  if (runtime.kind === "antigravity") return "Antigravity";
   if (runtime.kind === "ollama") return runtime.model ? `Ollama · ${runtime.model}` : "Ollama";
   if (runtime.kind === "byok") return `BYOK · ${runtime.backend}`;
   return runtime.kind;

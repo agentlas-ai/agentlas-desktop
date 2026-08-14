@@ -6,10 +6,10 @@
  * 열거한다 — 특정 MCP 하나에 capability를 고정하지 않기 위한 조각이다.
  *
  * 항목을 더할 때는 실측 근거를 적을 것. (셋 다 자체 웹 검색 도구를 내장한다 —
- * claude-code: WebSearch 도구 · codex: web search · gemini: GoogleSearch. 실측 2026-08-06.)
+ * claude-code: WebSearch 도구 · codex: web search · antigravity: GoogleSearch. 실측 2026-08-06.)
  */
 export const RUNTIME_NATIVE_CAPABILITIES: Record<string, string[]> = {
   "claude-code": ["web.search"],
   codex: ["web.search"],
-  gemini: ["web.search"],
+  antigravity: ["web.search"],
 };

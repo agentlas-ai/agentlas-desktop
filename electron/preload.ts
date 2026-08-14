@@ -255,11 +255,11 @@ const api: AgentlasIpc = {
     detect: (force?: boolean) => ipcRenderer.invoke("runtime:detect", force === true),
     setActive: (selection: RuntimeSelection) =>
       ipcRenderer.invoke("runtime:setActive", selection),
-    installCli: (kind: "claude-code" | "codex" | "gemini" | "kimi" | "grok") =>
+    installCli: (kind: "claude-code" | "codex" | "kimi" | "grok") =>
       ipcRenderer.invoke("runtime:installCli", kind),
-    openCliLogin: (kind: "claude-code" | "codex" | "antigravity" | "gemini" | "kimi" | "grok") =>
+    openCliLogin: (kind: "claude-code" | "codex" | "antigravity" | "kimi" | "grok") =>
       ipcRenderer.invoke("runtime:openCliLogin", kind),
-    updateCli: (kind: "claude-code" | "codex" | "antigravity" | "gemini" | "kimi" | "grok") =>
+    updateCli: (kind: "claude-code" | "codex" | "antigravity" | "kimi" | "grok") =>
       ipcRenderer.invoke("runtime:updateCli", kind),
     listCommands: () => ipcRenderer.invoke("runtime:listCommands"),
     listModels: (sel) => ipcRenderer.invoke("runtime:listModels", sel),
@@ -326,7 +326,8 @@ const api: AgentlasIpc = {
     list: () => ipcRenderer.invoke("team:list"),
     install: (slug: string) => ipcRenderer.invoke("team:install", slug),
     installMine: (id: string) => ipcRenderer.invoke("team:installMine", id),
-    uninstall: (id: string) => ipcRenderer.invoke("team:uninstall", id),
+    uninstall: (id: string, options?: { removeSource?: boolean }) =>
+      ipcRenderer.invoke("team:uninstall", id, options),
     setLocalDisplayName: (id: string, value: string) =>
       ipcRenderer.invoke("team:setLocalDisplayName", id, value),
     importLocalFolder: (input) =>
@@ -397,6 +398,7 @@ const api: AgentlasIpc = {
     listFirms: () => ipcRenderer.invoke("marketplace:listFirms"),
     status: (force?: boolean) => ipcRenderer.invoke("marketplace:status", force === true),
     listMine: () => ipcRenderer.invoke("marketplace:listMine"),
+    deleteMine: (slug: string) => ipcRenderer.invoke("marketplace:deleteMine", slug),
     bookmarks: () => ipcRenderer.invoke("marketplace:bookmarks"),
     syncBookmarks: () => ipcRenderer.invoke("marketplace:bookmarksSync"),
     onBookmarksSnapshot: (handler) => {
@@ -427,7 +429,8 @@ const api: AgentlasIpc = {
     list: () => ipcRenderer.invoke("firms:list"),
     get: (id: string) => ipcRenderer.invoke("firms:get", id),
     install: (slug: string) => ipcRenderer.invoke("firms:install", slug),
-    uninstall: (id: string) => ipcRenderer.invoke("firms:uninstall", id),
+    uninstall: (id: string, options?: { removeMembers?: boolean; removeSource?: boolean }) =>
+      ipcRenderer.invoke("firms:uninstall", id, options),
     getResolvedOrg: (id: string) => ipcRenderer.invoke("firms:getResolvedOrg", id),
     resolveOrg: (id: string) => ipcRenderer.invoke("firms:resolveOrg", id),
   },

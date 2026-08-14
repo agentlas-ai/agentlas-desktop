@@ -888,7 +888,7 @@ export function OneShell() {
       api.mcpTools.listCatalog().catch(() => []),
     ]).then(([agents, plugins, catalog]) => {
       if (cancelled) return;
-      setAvailableAgents(visibleAgents(agents));
+      setAvailableAgents(visibleAgents(agents, { includeTeams: true }));
       setInstalledPlugins(plugins);
       setPluginCatalog(catalog);
     });
@@ -1737,7 +1737,7 @@ export function OneShell() {
       });
       const provider = runtime.kind === "claude-code" ? "Claude"
         : runtime.kind === "codex" ? "Codex"
-          : runtime.kind === "gemini" ? "Gemini"
+          : runtime.kind === "antigravity" ? "Antigravity"
             : runtime.kind === "grok" ? "Grok"
               : runtime.kind === "kimi" ? "Kimi"
                 : runtime.backend || runtime.kind;
@@ -3669,6 +3669,7 @@ export function OneShell() {
       <div
         className={styles.body}
         data-rail-collapsed={railCollapsed ? "true" : "false"}
+        data-rail-open={railOpen ? "true" : "false"}
         data-task-active={selected || conversation ? "true" : "false"}
       >
         {railOpen && <button type="button" className={styles.railScrim} aria-label={tFor(appLocale, "one.shell.rail.close_history_aria")} onClick={() => setRailOpen(false)} />}
@@ -3760,8 +3761,19 @@ export function OneShell() {
                 <button
                   ref={railRevealButtonRef}
                   type="button"
-                  aria-label={tFor(appLocale, "one.shell.workspace.open_sidebar_aria")}
-                  onClick={() => { setRailCollapsed(false); setRailOpen(true); }}
+                  aria-label={railOpen
+                    ? (appLocale === "ko" ? "사이드바 닫기" : "Close sidebar")
+                    : tFor(appLocale, "one.shell.workspace.open_sidebar_aria")}
+                  aria-expanded={railOpen}
+                  onClick={() => {
+                    if (railOpen) {
+                      setRailCollapsed(true);
+                      setRailOpen(false);
+                      return;
+                    }
+                    setRailCollapsed(false);
+                    setRailOpen(true);
+                  }}
                 ><IconSidebar size={16} /></button>
                 <span className={styles.taskToolbarDivider} aria-hidden="true" />
                 <IconFolder size={15} />
@@ -3821,8 +3833,19 @@ export function OneShell() {
                 ref={railRevealButtonRef}
                 type="button"
                 className={`${styles.sidebarRevealButton} titlebar-nodrag`}
-                aria-label={tFor(appLocale, "one.shell.workspace.open_sidebar_aria")}
-                onClick={() => { setRailCollapsed(false); setRailOpen(true); }}
+                aria-label={railOpen
+                  ? (appLocale === "ko" ? "사이드바 닫기" : "Close sidebar")
+                  : tFor(appLocale, "one.shell.workspace.open_sidebar_aria")}
+                aria-expanded={railOpen}
+                onClick={() => {
+                  if (railOpen) {
+                    setRailCollapsed(true);
+                    setRailOpen(false);
+                    return;
+                  }
+                  setRailCollapsed(false);
+                  setRailOpen(true);
+                }}
               ><IconSidebar size={16} /></button>
             )}
           </div>

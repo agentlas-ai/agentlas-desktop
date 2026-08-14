@@ -115,7 +115,7 @@ export async function postForm(
 }
 
 /** 타임아웃 있는 JSON POST(JSON 본문/응답). non-2xx면 throw.
- *  net.fetch 경유(pickFetch) — Gemini 어댑터가 raw Node fetch를 쓰면 프록시/보안장비 머신에서
+ *  net.fetch 경유(pickFetch) — Google/Antigravity usage adapter가 raw Node fetch를 쓰면 프록시/보안장비 머신에서
  *  GUI만 "fetch failed"가 나는 함정(getJson과 동일 근본원인)이 재발한다. */
 export async function postJson(
   url: string,

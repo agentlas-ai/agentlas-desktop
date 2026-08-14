@@ -83,6 +83,14 @@ function cloneValue<T>(value: T): T {
   }
 }
 
+function isForcedRead(args: unknown[]): boolean {
+  return args.some((arg) => (
+    arg !== null
+    && typeof arg === "object"
+    && (arg as { force?: unknown }).force === true
+  ));
+}
+
 function evictIfOverfull(): void {
   if (valueCache.size <= MAX_CACHE_ENTRIES) return;
   let oldestKey: string | null = null;
@@ -139,7 +147,8 @@ function wrapMethod(
     } catch {
       return fn.apply(target, args);
     }
-    if (ttl > 0) {
+    const forced = isForcedRead(args);
+    if (ttl > 0 && !forced) {
       const hit = valueCache.get(key);
       if (hit && Date.now() - hit.at < ttl) {
         return Promise.resolve(cloneValue(hit.value));
@@ -150,7 +159,7 @@ function wrapMethod(
     const flight = Promise.resolve(fn.apply(target, args)).then(
       (result) => {
         inFlight.delete(key);
-        if (ttl > 0) {
+        if (ttl > 0 && !forced) {
           valueCache.set(key, { at: Date.now(), value: result });
           evictIfOverfull();
         }

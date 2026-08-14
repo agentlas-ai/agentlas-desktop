@@ -1,11 +1,11 @@
-// CLI 슬래시 명령 자동 스캔 — Claude Code / Codex / Gemini가 쓰는 커스텀 커맨드를
+// CLI 슬래시 명령 자동 스캔 — Claude Code / Codex가 쓰는 커스텀 커맨드를
 // 파일시스템에서 읽어 챗 입력의 `/` 자동완성에 공급한다. 매 호출마다 재스캔하므로
 // 사용자가 새 워크플로우 커맨드를 추가하거나 CLI가 업데이트되면 자동으로 최신화된다.
 //
 // 위치(커스텀 커맨드):
 //   - Claude Code: ~/.claude/commands/**/*.md   (하위폴더는 name:sub 네임스페이스)
 //   - Codex:       ~/.codex/prompts/**/*.md
-//   - Gemini:      ~/.gemini/commands/**/*.toml
+//   - Antigravity: no local slash-command directory is assumed.
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -70,7 +70,6 @@ export function listRuntimeCommands(): RuntimeCommand[] {
   const out: RuntimeCommand[] = [];
   scan(path.join(home, ".claude", "commands"), ".md", "claude-code", out);
   scan(path.join(home, ".codex", "prompts"), ".md", "codex", out);
-  scan(path.join(home, ".gemini", "commands"), ".toml", "gemini", out);
   const seen = new Set<string>();
   return out
     .filter((c) => {
