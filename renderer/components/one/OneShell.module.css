@@ -432,6 +432,7 @@
 
 .workspace {
   position: relative;
+  grid-column: 2;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -2134,7 +2135,10 @@
 @media (max-width: 760px) {
   .decisionMultiOptions { grid-template-columns: 1fr; }
   .body,
-  .body[data-rail-collapsed="true"] { grid-template-columns: 1fr; }
+  .body[data-rail-collapsed="true"],
+  .body[data-task-active="true"],
+  .body[data-task-active="true"][data-rail-collapsed="true"] { grid-template-columns: 1fr; }
+  .workspace { grid-column: 1; }
   .rail {
     position: absolute;
     z-index: 65;

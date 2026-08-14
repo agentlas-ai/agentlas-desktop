@@ -975,7 +975,12 @@ export function OneShell() {
     }
     return null;
   }, [activeRunPrompt, busy, messages, preflightPrompt, teamPreflightBusy]);
-  const activeActivityRunId = activeRunPrompt?.runId ?? null;
+  // A renderer reload can reattach to an already-running invocation before a
+  // fresh prompt exists in this component. In that path `activeRunPrompt` is
+  // intentionally null, but the first typed event has already established the
+  // run id in `activityStateRunId`. Treat that attached run as the owner of the
+  // visible Activity instead of blanking it back to an optimistic empty state.
+  const activeActivityRunId = activeRunPrompt?.runId ?? activityStateRunId;
   const activeRunOwnsActivity = Boolean(
     busy
     && activeActivityRunId

@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.8 — 2026-08-14
+
+- Keeps One's live Activity attached after renderer reload or run attachment,
+  including the worker and role context for tool rows.
+- Keeps the One conversation column usable on narrow task-active windows
+  instead of collapsing to a zero-width grid track.
+- Deduplicates worker/tool entries in the artifact rail so the visible
+  sub-agent list reflects the actual run participants.
+- Continues to bind Agentlas OS v1.2.2 at
+  0ef47d1bec6ad0cb2fed1024661753c1a83377ee.
+- Source readiness does not prove a published installer or update feed; the
+  Releases page remains the authority for the downloadable installer.
+
 ## 1.0.7 — 2026-08-14
 
 - Mirrors Desktop runtime model pins and orchestrator/worker role pools through

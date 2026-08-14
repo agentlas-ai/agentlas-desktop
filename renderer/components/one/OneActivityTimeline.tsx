@@ -231,7 +231,11 @@ function ActivityRow({
               ? (locale === "ko" ? "실행 중단" : "Run stopped")
               : (locale === "ko" ? "실행 완료" : "Run completed")
             : typedActivityMessage || safeMessage || (locale === "ko" ? "알림" : "Notice"));
-  const secondary = activityToolSummary(item, tool, locale)
+  const toolSummary = activityToolSummary(item, tool, locale);
+  const toolOwner = item.kind === "tool"
+    ? [safeAgentName, safeRole].filter(Boolean).join(" · ")
+    : "";
+  const secondary = [toolSummary, toolOwner].filter(Boolean).join(" · ")
     || (item.kind === "agent" ? [safeRole, agentStateLabel(item, locale)].filter(Boolean).join(" · ") : "")
     || (item.kind === "reasoning" && item.durationMs != null ? elapsedLabel(item.durationMs) : "")
     || (item.kind === "run" && item.durationMs != null ? elapsedLabel(item.durationMs) : "")
@@ -424,7 +428,15 @@ export function OneActivityArtifactRail({
   onClose?: () => void;
 }) {
   const [collapsedSections, setCollapsedSections] = useState<Set<OutputSectionKey>>(readCollapsedOutputSections);
-  const agents = activity?.items.filter((item) => item.kind === "agent") ?? [];
+  const agents = useMemo(() => {
+    const candidates = activity?.items.filter((item) => item.kind === "agent" || (item.kind === "tool" && item.agentName)) ?? [];
+    const unique = new Map<string, OneActivityItem>();
+    for (const item of candidates) {
+      const key = localeSafeRuntimeText(item.agentName, locale, true) || item.id;
+      if (!unique.has(key)) unique.set(key, item);
+    }
+    return [...unique.values()];
+  }, [activity?.items, locale]);
   const processes = activity?.items.filter((item) => item.kind === "tool" && /(?:bash|shell|terminal|exec|command)/i.test(item.tool?.name ?? "")) ?? [];
   const computerUse = activity?.items.filter((item) => item.kind === "tool" && /(?:computer|browser|screenshot|playwright)/i.test(item.tool?.name ?? "")) ?? [];
   const sources = activity?.sources ?? [];
