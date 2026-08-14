@@ -30,6 +30,10 @@ function transformTextFile(filePath, transform) {
 
 function transformBootstrap(filePath) {
   transformTextFile(filePath, (source) => {
+    // Core v1.2.1 already retired this surface upstream. Keep the Desktop
+    // projection compatible with both the last pre-retirement source and the
+    // already-transformed runtime instead of requiring a second removal.
+    if (!source.includes('    ".agentlas/super-ontology-*",\n') && !/super[-_ ]ontology/i.test(source)) return source;
     let next = replaceExactly(source, '    ".agentlas/super-ontology-*",\n', "", `${filePath}: privacy pattern`);
     next = replaceExactly(
       next,
@@ -43,6 +47,7 @@ function transformBootstrap(filePath) {
 
 function transformAgentOs(filePath) {
   transformTextFile(filePath, (source) => {
+    if (!/super[-_ ]ontology|verify_enforcement|load_kernel|ENFORCED_SEEDS/i.test(source)) return source;
     let next = source;
     const replacements = [
       ["  the AO graph + kernel enforcement + interchange formats, with a content hash.", "  the AO graph + interchange formats, with a content hash."],
@@ -65,6 +70,7 @@ function transformAgentOs(filePath) {
 
 function transformAgentGraphInit(filePath) {
   transformTextFile(filePath, (source) => {
+    if (!/from \.kernel import|ENFORCED_SEEDS|load_kernel|verify_enforcement/.test(source)) return source;
     let next = replaceExactly(source, "from .kernel import ENFORCED_SEEDS, load_kernel, verify_enforcement\n", "", `${filePath}: import`);
     for (const name of ["ENFORCED_SEEDS", "load_kernel", "verify_enforcement"]) {
       next = replaceExactly(next, `    "${name}",\n`, "", `${filePath}: export ${name}`);
@@ -75,6 +81,7 @@ function transformAgentGraphInit(filePath) {
 
 function transformCatalog(filePath) {
   transformTextFile(filePath, (source) => {
+    if (!/super ontology|kernel_enforced|kernel's public-export invariant/i.test(source)) return source;
     let next = replaceExactly(source, "(redaction-safe) per the kernel's public-export invariant.", "(redaction-safe) under the public-export invariant.", `${filePath}: docs`);
     next = replaceExactly(next, '        "kernel_enforced": pack["kernel"]["all_enforced"],', '        "ao_validated": pack["valid"],', `${filePath}: result`);
     return next;
@@ -83,6 +90,7 @@ function transformCatalog(filePath) {
 
 function transformCli(filePath) {
   transformTextFile(filePath, (source) => {
+    if (!/super[-_ ]ontology|load_kernel|verify_enforcement|ENFORCED_SEEDS/.test(source)) return source;
     let next = replaceExactly(
       source,
       '    ao_kernel = ao_sub.add_parser("kernel", help="Super-ontology kernel status (runtime-enforced seed contracts)")\n    ao_kernel.add_argument("project", nargs="?", default=".")\n',
@@ -105,7 +113,7 @@ function transformPackageContract(filePath) {
   if (!Array.isArray(payload.artifacts)) throw new Error(`${filePath}: missing artifacts array`);
   const before = payload.artifacts.length;
   payload.artifacts = payload.artifacts.filter((artifact) => !/super[-_ ]ontology/i.test(JSON.stringify(artifact)));
-  if (payload.artifacts.length !== before - 1) throw new Error(`${filePath}: expected one retired package artifact`);
+  if (before - payload.artifacts.length > 1) throw new Error(`${filePath}: removed more than one retired package artifact`);
   fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 }
 
@@ -114,7 +122,7 @@ function transformActivation(filePath) {
   if (!Array.isArray(payload.seedFiles)) throw new Error(`${filePath}: missing seedFiles`);
   const before = payload.seedFiles.length;
   payload.seedFiles = payload.seedFiles.filter((entry) => !/super[-_ ]ontology/i.test(String(entry)));
-  if (payload.seedFiles.length >= before) throw new Error(`${filePath}: no retired seed files were removed`);
+  if (before - payload.seedFiles.length > 1) throw new Error(`${filePath}: removed more than one retired seed file`);
   fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 }
 

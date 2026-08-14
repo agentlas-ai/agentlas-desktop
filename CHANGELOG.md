@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.5 — 2026-08-14
+
+- Binds Agentlas OS v1.2.1 at
+  bdcc80db5b78b93ae355a5e6ba179bfa28f00123.
+- Carries the fail-closed Python runtime resolver, graph skill mirrors, and
+  default-session capability descriptor fix into the signed Desktop bundle.
+- Source readiness does not prove a published installer or update feed; the
+  Releases page remains the authority for the downloadable installer.
+
 ## 1.0.4 — 2026-08-13
 
 - Keeps the memory map as One's first surface even when the Main memory-map
