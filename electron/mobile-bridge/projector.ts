@@ -47,6 +47,8 @@ import type {
   ChatHistoryEntry,
   PendingConfirmation,
   RuntimeStatus,
+  RuntimeRolePoolState,
+  RuntimeSelection,
   UsageSnapshot,
 } from "../../shared/types";
 import {
@@ -105,6 +107,10 @@ import {
   type MobileBridgeOneProfileDto,
   type MobileBridgeProjectDto,
   type MobileBridgeRuntimeDto,
+  type MobileBridgeRuntimeRoleMemberDto,
+  type MobileBridgeRuntimeRolePoolDto,
+  type MobileBridgeRuntimeRolePoolPickDto,
+  type MobileBridgeRuntimeSelectionDto,
   type MobileBridgeSnapshot,
   type MobileBridgeUsageProviderDto,
   isMobileBridgeOneImprovementProofDto,
@@ -671,6 +677,9 @@ export function projectMobileBridgeChat(
     updatedAt: chat.updatedAt,
     continuousMode: chat.continuousMode,
     swarmMode: chat.swarmMode,
+    runtimeSelection: chat.runtimeSelection
+      ? projectMobileBridgeRuntimeSelection(chat.runtimeSelection)
+      : null,
     active,
   };
 }
@@ -1323,6 +1332,54 @@ export function projectMobileBridgeRuntimes(
     // DESKTOP_MOBILE_BRIDGE: source may be an absolute CLI path or provider
     // locator and is intentionally omitted.
   }));
+}
+
+/** Runtime source paths are Desktop-only; Mobile receives only executable choices. */
+export function projectMobileBridgeRuntimeSelection(
+  selection: RuntimeSelection,
+): MobileBridgeRuntimeSelectionDto {
+  return {
+    kind: selection.kind,
+    backend: selection.backend ?? null,
+    model: selection.model ?? null,
+    effort: selection.effort ?? null,
+    longContext: selection.longContext === true,
+    role: selection.role === "worker" ? "worker" : "orchestrator",
+    inherit: selection.inherit === true,
+  };
+}
+
+export function projectMobileBridgeRuntimeRolePool(
+  state: RuntimeRolePoolState,
+): MobileBridgeRuntimeRolePoolDto {
+  const member = (item: RuntimeRolePoolState["members"]["orchestrator"][number]): MobileBridgeRuntimeRoleMemberDto => ({
+    role: item.role,
+    position: item.position,
+    selection: projectMobileBridgeRuntimeSelection(item.selection),
+    updatedAt: item.updatedAt,
+  });
+  const pick = (item: NonNullable<RuntimeRolePoolState["picks"]["orchestrator"]>): MobileBridgeRuntimeRolePoolPickDto => ({
+    role: item.role,
+    selection: projectMobileBridgeRuntimeSelection(item.selection),
+    position: item.position,
+    inherited: item.inherited,
+    skipped: item.skipped.map((entry) => ({
+      position: entry.position,
+      kind: entry.kind,
+      model: entry.model,
+      reason: entry.reason,
+    })),
+  });
+  return {
+    members: {
+      orchestrator: state.members.orchestrator.map(member),
+      worker: state.members.worker.map(member),
+    },
+    picks: {
+      ...(state.picks.orchestrator ? { orchestrator: pick(state.picks.orchestrator) } : {}),
+      ...(state.picks.worker ? { worker: pick(state.picks.worker) } : {}),
+    },
+  };
 }
 
 /** DESKTOP_MOBILE_BRIDGE: Usage projection carries quota state, never provider credentials. */

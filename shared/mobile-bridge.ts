@@ -45,6 +45,7 @@ export const MOBILE_BRIDGE_METHODS = [
   "chats.setContinuousMode",
   "chats.setSwarmMode",
   "chats.clearContext",
+  "chats.setRuntimeSelection",
   "tasks.createProject",
   "tasks.latestResult",
   "one.artifact.imagePreview",
@@ -72,6 +73,8 @@ export const MOBILE_BRIDGE_METHODS = [
   "usage.snapshot",
   "runtime.detect",
   "runtime.setActive",
+  "runtime.listRoleMembers",
+  "runtime.setRoleMembers",
   "hub.borrowable.list",
   "hephaestus.engineToggles",
   "hephaestus.routePreview",
@@ -97,6 +100,7 @@ export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new 
   "chats.setContinuousMode",
   "chats.setSwarmMode",
   "chats.clearContext",
+  "chats.setRuntimeSelection",
   "projects.setAgentPool",
   "tasks.createProject",
   "tasks.acceptResult",
@@ -111,6 +115,7 @@ export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new 
   "automations.toggle",
   "automations.runNow",
   "runtime.setActive",
+  "runtime.setRoleMembers",
   "ontology.attach.resolve",
   "agents.cloudUploadSave",
   "agents.cloudDelete",
@@ -869,7 +874,53 @@ export interface MobileBridgeChatDto {
   updatedAt: string;
   continuousMode: boolean;
   swarmMode: boolean;
+  /** Exact Desktop-owned model pin for this chat; null follows role defaults. */
+  runtimeSelection: MobileBridgeRuntimeSelectionDto | null;
   active: boolean;
+}
+
+/** Secret-free runtime selection. Desktop source paths never cross Mobile. */
+export interface MobileBridgeRuntimeSelectionDto {
+  kind: string;
+  backend: string | null;
+  model: string | null;
+  effort: string | null;
+  longContext: boolean;
+  role: "orchestrator" | "worker";
+  inherit: boolean;
+}
+
+export interface MobileBridgeRuntimeRoleMemberDto {
+  role: "orchestrator" | "worker";
+  position: number;
+  selection: MobileBridgeRuntimeSelectionDto;
+  updatedAt: string;
+}
+
+export interface MobileBridgeRuntimeRolePoolSkipDto {
+  position: number;
+  kind: string;
+  model: string | null;
+  reason: "runtime-unavailable" | "model-unavailable" | "quota-exceeded";
+}
+
+export interface MobileBridgeRuntimeRolePoolPickDto {
+  role: "orchestrator" | "worker";
+  selection: MobileBridgeRuntimeSelectionDto;
+  position: number | null;
+  inherited: boolean;
+  skipped: MobileBridgeRuntimeRolePoolSkipDto[];
+}
+
+export interface MobileBridgeRuntimeRolePoolDto {
+  members: {
+    orchestrator: MobileBridgeRuntimeRoleMemberDto[];
+    worker: MobileBridgeRuntimeRoleMemberDto[];
+  };
+  picks: {
+    orchestrator?: MobileBridgeRuntimeRolePoolPickDto;
+    worker?: MobileBridgeRuntimeRolePoolPickDto;
+  };
 }
 
 export interface MobileBridgeChatMessageDto {
@@ -1640,6 +1691,7 @@ const EMPTY_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
   "confirm.listPending",
   "automations.list",
   "runtime.detect",
+  "runtime.listRoleMembers",
   "hub.borrowable.list",
   "hephaestus.engineToggles",
   "ontology.projections.list",
@@ -1746,6 +1798,75 @@ function validateEnum(
     : `${key} must be one of: ${choices.join(", ")}`;
 }
 
+const MOBILE_RUNTIME_KINDS = [
+  "claude-code",
+  "codex",
+  "antigravity",
+  "gemini",
+  "kimi",
+  "grok",
+  "cursor",
+  "byok",
+  "ollama",
+  "lmstudio",
+  "mlx",
+] as const;
+
+const MOBILE_RUNTIME_BACKENDS = [
+  "anthropic",
+  "openai",
+  "google",
+  "ollama",
+  "lmstudio",
+  "mlx",
+  "upstage",
+  "custom",
+  "glm",
+  "kimi",
+  "deepseek",
+  "minimax",
+  "xai",
+  "openrouter",
+  "cursor",
+] as const;
+
+function validateRuntimeSelectionValue(
+  value: unknown,
+  role?: "orchestrator" | "worker",
+): string | null {
+  if (!isRecord(value)) return "runtime selection must be an object";
+  if (!hasOnlyKeys(value, ["kind", "backend", "model", "effort", "longContext", "role", "inherit"])) {
+    return "runtime selection contains unsupported fields";
+  }
+  const selectedRole = value.role ?? role;
+  return firstError(
+    validateEnum(value, "kind", MOBILE_RUNTIME_KINDS, false),
+    validateEnum(value, "backend", MOBILE_RUNTIME_BACKENDS),
+    optionalString(value, "model", 512),
+    optionalString(value, "effort", 80),
+    optionalBoolean(value, "longContext"),
+    validateEnum(value, "role", ["orchestrator", "worker"]),
+    optionalBoolean(value, "inherit"),
+    role !== undefined && selectedRole !== role
+      ? `runtime selection role must be ${role}`
+      : null,
+    value.inherit === true && selectedRole !== "worker"
+      ? "inherit is allowed only for the worker runtime role"
+      : null,
+  );
+}
+
+function validateRuntimeRoleMembers(value: unknown): string | null {
+  if (!Array.isArray(value) || value.length > 32) {
+    return "selections must be an array of at most 32 runtime members";
+  }
+  for (const selection of value) {
+    const error = validateRuntimeSelectionValue(selection);
+    if (error) return error;
+  }
+  return null;
+}
+
 function firstError(...errors: Array<string | null>): string | null {
   return errors.find((error): error is string => Boolean(error)) ?? null;
 }
@@ -1816,6 +1937,9 @@ function validateInvokeOptions(
     optionalBoolean(params, "networkMode"),
     optionalBoolean(params, "appsGenerateMode"),
     optionalBoolean(params, "stormbreakerMode"),
+    params.runtimeSelection === undefined
+      ? null
+      : validateRuntimeSelectionValue(params.runtimeSelection, "orchestrator"),
     taskForceTargetsError,
     decisionBindingError,
   );
@@ -2028,6 +2152,15 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
         ? firstError(requiredString(params, "id"), optionalBoolean(params, "enabled"),
             typeof params.enabled === "boolean" ? null : "enabled must be a boolean")
         : `${method} accepts only id and enabled`;
+    case "chats.setRuntimeSelection":
+      return hasOnlyKeys(params, ["id", "selection"])
+        ? firstError(
+            requiredString(params, "id"),
+            params.selection === null
+              ? null
+              : validateRuntimeSelectionValue(params.selection, "orchestrator"),
+          )
+        : "chats.setRuntimeSelection accepts only id and selection";
     case "tasks.acceptResult":
       return hasOnlyKeys(params, ["taskId", "expectedVersion", "expectedRunId"])
         ? firstError(
@@ -2106,7 +2239,7 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
         ? requiredString(params, "chatId")
         : "composer.context accepts only chatId";
     case "one.invoke.start":
-      if (!hasOnlyKeys(params, ["schemaVersion", "userPrompt", "permissions", "planMode", "goalMode", "networkMode", "liveMode", "taskForceTargets", "images"])) {
+      if (!hasOnlyKeys(params, ["schemaVersion", "userPrompt", "permissions", "planMode", "goalMode", "networkMode", "liveMode", "taskForceTargets", "images", "runtimeSelection"])) {
         return "one.invoke.start contains unsupported fields";
       }
       return firstError(
@@ -2122,14 +2255,17 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
         optionalBoolean(params, "liveMode"),
         validateTurnAgentTargets(params.taskForceTargets),
         validateImageAttachments(params.images),
+        params.runtimeSelection === undefined
+          ? null
+          : validateRuntimeSelectionValue(params.runtimeSelection, "orchestrator"),
       );
     case "invoke.start":
-      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "networkMode", "appsGenerateMode", "stormbreakerMode", "taskForceTargets", "images", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion"])) {
+      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "networkMode", "appsGenerateMode", "stormbreakerMode", "taskForceTargets", "images", "runtimeSelection", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion"])) {
         return "invoke.start contains unsupported fields";
       }
       return validateInvokeOptions(params);
     case "invoke.steer":
-      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "networkMode", "appsGenerateMode", "stormbreakerMode", "taskForceTargets", "images", "expectedRunId", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion"])) {
+      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "networkMode", "appsGenerateMode", "stormbreakerMode", "taskForceTargets", "images", "runtimeSelection", "expectedRunId", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion"])) {
         return "invoke.steer contains unsupported fields";
       }
       return firstError(validateInvokeOptions(params, true), requiredString(params, "expectedRunId", 160));
@@ -2173,8 +2309,8 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
         return "runtime.setActive contains unsupported fields";
       }
       const error = firstError(
-        requiredString(params, "kind", 80),
-        optionalString(params, "backend", 80),
+        validateEnum(params, "kind", MOBILE_RUNTIME_KINDS, false),
+        validateEnum(params, "backend", MOBILE_RUNTIME_BACKENDS),
         optionalString(params, "model", 200),
         optionalString(params, "effort", 80),
         optionalBoolean(params, "longContext"),
@@ -2185,6 +2321,15 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
       return params.inherit === true && params.role !== "worker"
         ? "inherit is allowed only for the worker runtime role"
         : null;
+    }
+    case "runtime.setRoleMembers": {
+      if (!hasOnlyKeys(params, ["role", "selections"])) {
+        return "runtime.setRoleMembers accepts only role and selections";
+      }
+      return firstError(
+        validateEnum(params, "role", ["orchestrator", "worker"], false),
+        validateRuntimeRoleMembers(params.selections),
+      );
     }
     case "hephaestus.routePreview":
       return hasOnlyKeys(params, ["query", "scope", "allowLocal", "offline"])

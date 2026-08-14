@@ -51,7 +51,13 @@ import {
 import { oneDecisionJudgedReaders, prejudgeOneDecision } from "../one/judged-decision";
 import { prejudgeOneRequestIntent } from "../one/judged-request-intent";
 import { prejudgeOneMemoryIntent } from "../one/memory-detector";
-import { detectRuntimes, setActiveRuntime } from "../runtime/detect";
+import {
+  clearDetectCache,
+  detectRuntimes,
+  resolveRolePoolPicks,
+  setActiveRuntime,
+} from "../runtime/detect";
+import { listModelRoleMembers, setModelRoleMembers } from "../store/model-roles";
 import { listRuntimeCommands } from "../runtime/commands";
 import { listInstalledAgents } from "../mcp/registry";
 import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
@@ -77,6 +83,7 @@ import {
   removeChat,
   renameChat,
   setChatContinuousMode,
+  setChatRuntimeSelection,
   setChatSwarmMode,
   setChatWorkingFolder,
   unarchiveChat,
@@ -115,6 +122,8 @@ import type {
   Recommendation,
   RuntimeBackend,
   RuntimeKind,
+  RuntimeRole,
+  RuntimeSelection,
 } from "../../shared/types";
 import {
   MOBILE_BRIDGE_PROTOCOL_VERSION,
@@ -147,6 +156,8 @@ import {
   projectMobileBridgeConfirmations,
   projectMobileBridgeHistory,
   projectMobileBridgeProject,
+  projectMobileBridgeRuntimeRolePool,
+  projectMobileBridgeRuntimeSelection,
   projectMobileBridgeRuntimes,
   projectMobileBridgeSnapshot,
   projectMobileBridgeUsage,
@@ -177,6 +188,37 @@ const BUILD_SUMMARY_MAX_BYTES = 2_000;
 const BUILD_RUN_HISTORY_LIMIT = 64;
 const BUILD_HISTORY_ENTRY_MAX_BYTES = 16_000;
 const BUILD_HISTORY_MAX_ENTRIES = 32;
+const MOBILE_RUNTIME_KINDS = [
+  "claude-code",
+  "codex",
+  "antigravity",
+  "gemini",
+  "kimi",
+  "grok",
+  "cursor",
+  "byok",
+  "ollama",
+  "lmstudio",
+  "mlx",
+] as const;
+const MOBILE_RUNTIME_BACKENDS = [
+  "anthropic",
+  "openai",
+  "google",
+  "ollama",
+  "lmstudio",
+  "mlx",
+  "upstage",
+  "custom",
+  "glm",
+  "kimi",
+  "deepseek",
+  "minimax",
+  "xai",
+  "openrouter",
+  "cursor",
+] as const;
+const MOBILE_RUNTIME_ROLES = ["orchestrator", "worker"] as const;
 const BUILD_APPROVAL_TIMEOUT_MS = 90_000;
 // Ontology enriches the Mobile surface, but it is not required to establish a
 // Desktop connection. A fetch implementation that ignores AbortSignal (or a
@@ -665,6 +707,7 @@ function invocationParams(
           "stormbreakerMode",
           "taskForceTargets",
           "images",
+          "runtimeSelection",
           "expectedQuestionMessageId",
           "expectedTaskId",
           "expectedTaskVersion",
@@ -684,6 +727,7 @@ function invocationParams(
           "stormbreakerMode",
           "taskForceTargets",
           "images",
+          "runtimeSelection",
           "expectedQuestionMessageId",
           "expectedTaskId",
           "expectedTaskVersion",
@@ -705,6 +749,9 @@ function invocationParams(
   const stormbreakerMode = optionalBoolean(params, "stormbreakerMode");
   const taskForceTargets = optionalTurnAgentTargets(params);
   const images = optionalImages(params);
+  const runtimeSelection = params.runtimeSelection === undefined
+    ? undefined
+    : mobileRuntimeSelectionFromValue(params.runtimeSelection, "orchestrator");
   const expectedQuestionMessageId = optionalIdentifier(params, "expectedQuestionMessageId");
   const expectedTaskId = optionalIdentifier(params, "expectedTaskId");
   const expectedTaskVersion = optionalInteger(params, "expectedTaskVersion", 1, Number.MAX_SAFE_INTEGER);
@@ -740,6 +787,7 @@ function invocationParams(
   if (stormbreakerMode !== undefined) invocation.stormbreakerMode = stormbreakerMode;
   if (taskForceTargets !== undefined) invocation.taskForceTargets = taskForceTargets;
   if (images !== undefined) invocation.images = images;
+  if (runtimeSelection !== undefined) invocation.runtimeSelection = runtimeSelection;
   const expectedRunId: MobileBridgeInvokeSteerParams["expectedRunId"] | undefined = steering
     ? requiredIdentifier(params, "expectedRunId", RUN_ID_RE)
     : undefined;
@@ -778,6 +826,80 @@ function assertMobileOneDeviceAuthority(context: MobileBridgeConnectionContext):
   }
 }
 
+function mobileRuntimeSelectionFromValue(
+  value: unknown,
+  role: RuntimeRole,
+): RuntimeSelection {
+  if (!isRecord(value)) throw new TypeError("Runtime selection must be an object");
+  assertOnlyKeys(
+    value,
+    ["kind", "backend", "model", "effort", "longContext", "role", "inherit"],
+    "runtime selection",
+  );
+  const kind = requiredEnum(value, "kind", MOBILE_RUNTIME_KINDS) as RuntimeKind;
+  const selectedRole = optionalEnum(value, "role", MOBILE_RUNTIME_ROLES) ?? role;
+  if (selectedRole !== role) {
+    throw new TypeError(`Runtime selection role must be ${role}`);
+  }
+  const inherit = optionalBoolean(value, "inherit") ?? false;
+  if (role === "orchestrator" && inherit) {
+    throw new TypeError("The orchestrator runtime cannot inherit");
+  }
+  const backend = optionalEnum(value, "backend", MOBILE_RUNTIME_BACKENDS) as RuntimeBackend | undefined;
+  const model = optionalIdentifier(value, "model", 512);
+  const effort = optionalIdentifier(value, "effort", 80);
+  return {
+    kind,
+    ...(backend !== undefined ? { backend } : {}),
+    ...(model !== undefined ? { model } : {}),
+    ...(effort !== undefined ? { effort } : {}),
+    longContext: optionalBoolean(value, "longContext") ?? false,
+    role,
+    inherit: role === "worker" && inherit,
+  };
+}
+
+async function resolveMobileRoleSelection(
+  selection: RuntimeSelection,
+): Promise<RuntimeSelection> {
+  const candidates = await detectRuntimes();
+  const runtime = candidates.find((candidate) =>
+    candidate.kind === selection.kind &&
+    (selection.backend === undefined || candidate.backend === selection.backend),
+  );
+  if (!runtime) throw new Error("The selected Desktop runtime is unavailable");
+  if (
+    selection.model &&
+    (runtime.availableModels?.length ?? 0) > 0 &&
+    !runtime.availableModels!.includes(selection.model)
+  ) {
+    throw new Error("The selected model is unavailable on this Desktop runtime");
+  }
+  if (
+    selection.effort &&
+    (runtime.efforts?.length ?? 0) > 0 &&
+    !runtime.efforts!.some((item) => item.id === selection.effort)
+  ) {
+    throw new Error("The selected effort is unavailable on this Desktop runtime");
+  }
+  return {
+    ...selection,
+    backend: runtime.backend,
+    source: runtime.source,
+  };
+}
+
+async function mobileRuntimeRolePoolDto() {
+  const picks = await resolveRolePoolPicks();
+  return projectMobileBridgeRuntimeRolePool({
+    members: {
+      orchestrator: listModelRoleMembers("orchestrator"),
+      worker: listModelRoleMembers("worker"),
+    },
+    picks,
+  });
+}
+
 function mobileOneStartParams(request: MobileBridgeRpcRequest): {
   userPrompt: string;
   permissions: "read" | "write" | "full";
@@ -787,6 +909,7 @@ function mobileOneStartParams(request: MobileBridgeRpcRequest): {
   liveMode?: true;
   images?: ImageAttachment[];
   taskForceTargets?: OrchestrationTarget[];
+  runtimeSelection?: RuntimeSelection;
 } {
   const params = guardedParams(request, [
     "schemaVersion",
@@ -798,6 +921,7 @@ function mobileOneStartParams(request: MobileBridgeRpcRequest): {
     "liveMode",
     "taskForceTargets",
     "images",
+    "runtimeSelection",
   ]);
   if (params.schemaVersion !== 1) {
     throw new TypeError("one.invoke.start requires schemaVersion 1");
@@ -815,6 +939,9 @@ function mobileOneStartParams(request: MobileBridgeRpcRequest): {
   const liveMode = optionalBoolean(params, "liveMode");
   const images = optionalImages(params);
   const taskForceTargets = optionalTurnAgentTargets(params);
+  const runtimeSelection = params.runtimeSelection === undefined
+    ? undefined
+    : mobileRuntimeSelectionFromValue(params.runtimeSelection, "orchestrator");
   return {
     userPrompt,
     permissions,
@@ -823,7 +950,9 @@ function mobileOneStartParams(request: MobileBridgeRpcRequest): {
     ...(networkMode === true ? { networkMode: true as const } : {}),
     ...(liveMode === true ? { liveMode: true as const } : {}),
     ...(images !== undefined ? { images } : {}),
+    ...(runtimeSelection !== undefined ? { runtimeSelection } : {}),
     ...(taskForceTargets !== undefined ? { taskForceTargets } : {}),
+    ...(runtimeSelection !== undefined ? { runtimeSelection } : {}),
   };
 }
 
@@ -1519,6 +1648,23 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           request.method,
         );
       }
+      case "chats.setRuntimeSelection": {
+        const params = guardedParams(request, ["id", "selection"]);
+        const id = requiredIdentifier(params, "id");
+        requireChat(id);
+        const rawSelection = params.selection;
+        const runtimeSelection = rawSelection === null
+          ? null
+          : await resolveMobileRoleSelection(
+              mobileRuntimeSelectionFromValue(rawSelection, "orchestrator"),
+            );
+        const chat = setChatRuntimeSelection(id, runtimeSelection);
+        this.scheduleSnapshotUpdated(id);
+        return asJsonValue(
+          projectMobileBridgeChat(chat, invocationService.activeChatIds().includes(chat.id)),
+          request.method,
+        );
+      }
       case "chats.clearContext": {
         const params = guardedParams(request, ["id"]);
         const id = requiredIdentifier(params, "id");
@@ -1782,6 +1928,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       case "one.invoke.start": {
         assertMobileOneDeviceAuthority(context);
         const input = mobileOneStartParams(request);
+        const runtimeSelection = input.runtimeSelection
+          ? await resolveMobileRoleSelection(input.runtimeSelection)
+          : undefined;
         // Main creates a Task-free One conversation and keeps its identity,
         // project/team selection, and durable One capabilities authoritative.
         // Permission is the normal Desktop execution choice and is forwarded
@@ -1793,6 +1942,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         });
         let result;
         try {
+          if (runtimeSelection) setChatRuntimeSelection(chat.id, runtimeSelection);
           // Mobile's optimistic transcript is not durable Desktop history.
           // Persist the person's exact turn before execution so reconnect,
           // restart recovery, and One memory all retain the same conversation.
@@ -1812,6 +1962,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
               ...(input.networkMode ? { sessionRouting: true } : {}),
               ...(input.taskForceTargets ? { taskForceTargets: input.taskForceTargets } : {}),
               ...(input.images ? { images: input.images } : {}),
+              ...(runtimeSelection ? { runtimeSelection } : {}),
             });
           result = invocationService.start(
             invocation,
@@ -2035,15 +2186,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           "role",
           "inherit",
         ]);
-        const kind = requiredEnum(params, "kind", [
-          "claude-code",
-          "codex",
-          "gemini",
-          "grok",
-          "cursor",
-          "byok",
-          "ollama",
-        ] as const) as RuntimeKind;
+        const kind = requiredEnum(params, "kind", MOBILE_RUNTIME_KINDS) as RuntimeKind;
         const role =
           optionalEnum(params, "role", ["orchestrator", "worker"] as const) ??
           "orchestrator";
@@ -2051,7 +2194,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         if (inherit && role !== "worker") {
           throw new Error("Only the worker runtime role can inherit");
         }
-        const backend = optionalIdentifier(params, "backend", 80) as RuntimeBackend | undefined;
+        const backend = optionalEnum(params, "backend", MOBILE_RUNTIME_BACKENDS) as RuntimeBackend | undefined;
         const candidates = await detectRuntimes();
         const runtime = candidates.find((candidate) =>
           candidate.kind === kind && (backend === undefined || candidate.backend === backend));
@@ -2081,6 +2224,32 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         });
         this.scheduleSnapshotUpdated();
         return asJsonValue(projectMobileBridgeRuntimes(list), request.method);
+      }
+      case "runtime.listRoleMembers": {
+        noParams(request);
+        return asJsonValue(await mobileRuntimeRolePoolDto(), request.method);
+      }
+      case "runtime.setRoleMembers": {
+        const params = guardedParams(request, ["role", "selections"]);
+        const role = requiredEnum(params, "role", MOBILE_RUNTIME_ROLES) as RuntimeRole;
+        if (!Array.isArray(params.selections) || params.selections.length > 32) {
+          throw new TypeError("Runtime role pools accept at most 32 selections");
+        }
+        const selections = params.selections.map((value) => {
+          const selection = mobileRuntimeSelectionFromValue(value, role);
+          if (selection.inherit) {
+            throw new TypeError("Worker inheritance is represented by an empty worker pool");
+          }
+          return selection;
+        });
+        const resolvedSelections = await Promise.all(
+          selections.map((selection) => resolveMobileRoleSelection(selection)),
+        );
+        setModelRoleMembers(role, resolvedSelections);
+        clearDetectCache();
+        await detectRuntimes(true);
+        this.scheduleSnapshotUpdated();
+        return asJsonValue(await mobileRuntimeRolePoolDto(), request.method);
       }
       case "hub.borrowable.list": {
         noParams(request);

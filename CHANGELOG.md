@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.7 — 2026-08-14
+
+- Mirrors Desktop runtime model pins and orchestrator/worker role pools through
+  the Mobile Bridge, including Antigravity as a selectable runtime.
+- Adds chat-scoped runtime pins so One and Work send the selected provider,
+  model, effort and context mode to the actual Desktop invocation.
+- Exposes the same role defaults in Mobile Settings and adds a One composer
+  model control instead of leaving model selection as decoration.
+- Source readiness does not prove a published installer or update feed; the
+  Releases page remains the authority for the downloadable installer.
+
 ## 1.0.6 — 2026-08-14
 
 - Fixes Gemini/Antigravity model discovery when agy emits tab-separated model
