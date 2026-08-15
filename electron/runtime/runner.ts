@@ -372,15 +372,14 @@ export function startCliHeartbeat(
  * 세 러너(agy·claude·codex)가 전부 `close`에서만 정산하므로, 그 순간 실행 Promise는
  * 영구 pending이 되고 실행은 좀비가 된다.
  *
- * 실측 재현(2026-08-15): `bash -c "sleep 30 & echo hi; exit 0"` → exit 2ms,
- * close 없음(무한). 같은 자식에서 exit 후 stdout/stderr를 destroy하면 close가 정상
- * 발사된다(503ms).
+ * 실측 재현: `bash -c "sleep 30 & echo hi; exit 0"` → exit 2ms, close 없음(무한).
+ * 같은 자식에서 exit 후 stdout/stderr를 destroy하면 close가 정상 발사된다(503ms).
  *
- * 제품 실측(2026-08-15, run_events): agy 실행 `ebd8b451`이 `agy: init` 이후
- * **93분간 이벤트 0건**으로 "진행 중"에 머물렀고, 사용자가 손으로 중지할 때까지
- * 끝나지 않았다. 심장박동은 자식 사망을 알고 있었지만(`exitCode !== null` → 박동 정지)
- * 아무에게도 말하지 않았고, 채팅 실행 경로에는 그 침묵을 받는 워치독이 없다
- * (무활동 워치독은 automation 전용). 침묵이 아니라 **정산**이 있어야 했다.
+ * 이 결함의 증상은 "실패"가 아니라 "끝나지 않음"이다 — 채팅 실행이 한 시간 넘게
+ * "진행 중"에 머무르고 사람이 손으로 중지할 때까지 정산되지 않는다. 심장박동은 자식
+ * 사망을 알고 있지만(`exitCode !== null` → 박동 정지) 아무에게도 말하지 않고,
+ * 채팅 실행 경로에는 그 침묵을 받는 워치독이 없다(무활동 워치독은 automation 전용).
+ * 침묵이 아니라 **정산**이 있어야 한다.
  *
  * 그래서 `exit`을 함께 듣고, 유예 안에 `close`가 오지 않으면 남은 파이프를 끊어
  * **진짜 `close`를 발사시킨다.** 러너의 close 핸들러가 유일한 정산 경로로 남는다 —
