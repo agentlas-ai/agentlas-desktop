@@ -378,7 +378,18 @@ async function runPreparedAntigravity(
    * agy는 등록된 워크스페이스 밖의 쓰기를 조용히 버린다 — 실패 표식조차 없어서
    * "했다고 말하는데 아무것도 없는" 상태가 된다.
    */
-  let agyReadDirs = runReq.cwd ? [runReq.cwd, ...agyAdditionalDirs] : agyAdditionalDirs;
+  /*
+   * ★스폰 cwd 와 등록 폴더는 **같은 값**이어야 한다 — 그래서 변수 하나로 둔다.
+   *
+   * 예전에는 둘이 따로 계산됐고 기본값이 달랐다. cwd 는 `req.cwd ?? agentRunCwd()` 로
+   * 폴백했는데 등록 목록은 `req.cwd` 가 없으면 **빈 채로** 남았다. 프로젝트를 고르지
+   * 않은 실행(일반 대화가 파일을 만드는 흔한 경우)에서는 `--add-dir` 가 인자에서 통째로
+   * 사라졌고, agy 는 등록된 워크스페이스가 없으니 쓰기를 자기 스크래치
+   * (~/.gemini/antigravity-cli/scratch)로 돌렸다. 모델은 "만들었다"고 답하고 사용자가
+   * 연 폴더는 비어 있다. 실행 중 프로세스의 인자와 cwd 를 직접 떠서 확인했다.
+   */
+  const agyWorkDir = runReq.cwd ?? agentRunCwd();
+  let agyReadDirs = [agyWorkDir, ...agyAdditionalDirs];
   /*
    * ★agy 프롬프트는 **argv 한계에 걸릴 때만** 파일로 우회한다.
    *
@@ -444,7 +455,18 @@ async function runPreparedAntigravity(
       agyPromptFile = path.join(agyPromptDirectory, "request.txt");
       await fs.writeFile(agyPromptFile, prompt, { encoding: "utf8", mode: 0o600 });
       spawnPrompt = buildAgyPromptBootstrap(agyPromptFile);
-      agyReadDirs = [agyPromptDirectory, ...agyAdditionalDirs];
+      /*
+       * ★프롬프트 폴더를 **더한다**. 갈아치우지 않는다.
+       *
+       * 여기서 목록을 통째로 교체하면 바로 위에서 넣은 작업 폴더가 사라진다. 그러면
+       * agy 는 사용자의 폴더를 워크스페이스로 받지 못하고, 쓰기를 자기 스크래치
+       * (~/.gemini/antigravity-cli/scratch)로 돌린다 — 모델은 "만들었다"고 답하는데
+       * 사용자가 연 폴더에는 아무것도 없다. 실측으로 정확히 그 모습을 봤다.
+       *
+       * 그리고 이 갈래는 예외가 아니라 평소다. 짧은 질문이라도 시스템 프롬프트와 세션
+       * 규칙이 붙으면 argv 한도를 넘으므로, 실사용은 대부분 이 경로로 온다.
+       */
+      agyReadDirs = [agyPromptDirectory, agyWorkDir, ...agyAdditionalDirs];
     } catch (error) {
       await fs.rm(agyPromptDirectory, { recursive: true, force: true });
       throw error;
@@ -478,8 +500,8 @@ async function runPreparedAntigravity(
         {
           stdio: ["ignore", "pipe", "pipe"],
           env,
-          // 사용자가 지정한 프로젝트 폴더에서 실행 — 미지정이면 전용 폴더.
-          cwd: req.cwd ?? agentRunCwd(),
+          // 등록 폴더와 반드시 같은 값 — 위 agyWorkDir 주석 참고.
+          cwd: agyWorkDir,
           ...detachedSpawnOpts(),
         },
       );

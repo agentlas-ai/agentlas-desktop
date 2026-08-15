@@ -304,13 +304,42 @@ async function main() {
     assert.ok(!full.includes("--sandbox"), "full은 샌드박스를 풀어야 한다");
   });
 
-  await check("★작업 폴더가 워크스페이스로 등록된다(등록 없으면 쓰기가 조용히 버려진다)", () => {
+  /*
+   * ★이 검사는 원래 대입문 한 줄을 문자 그대로 못박고 있었다. 그래서 **다른 대입문**이
+   * 뒤에서 같은 변수를 갈아치우는 것을 보지 못했다: 프롬프트가 길어 파일 부트스트랩을
+   * 타면 목록이 통째로 교체되면서 작업 폴더가 빠졌고, agy 는 파일을 자기 스크래치에
+   * 만들었다. 모델은 "만들었다"고 답하고 사용자 폴더는 비어 있다.
+   *
+   * 그래서 구현 문장이 아니라 계약을 단언한다: 이 목록에 값을 넣는 **모든** 지점이
+   * 작업 폴더를 유지해야 한다. 갈래가 늘어도 자동으로 걸린다.
+   */
+  await check("★작업 폴더가 워크스페이스로 등록된다 — 모든 대입 지점에서(등록 없으면 쓰기가 딴 데로 간다)", () => {
     const src = fs.readFileSync(path.join(root, "electron/runtime/antigravity.ts"), "utf8");
-    assert.match(
-      src,
-      /agyReadDirs = runReq\.cwd \? \[runReq\.cwd, \.\.\.agyAdditionalDirs\]/,
-      "cwd가 --add-dir로 등록되지 않는다 — 모델이 DONE이라 답해도 파일이 안 생긴다",
-    );
+    const assignments = src.split("\n")
+      .map((line, i) => ({ line: line.trim(), no: i + 1 }))
+      // 선언(let)도 대입이다 — 접두사를 빠뜨리면 첫 지점을 통째로 놓친다.
+      .filter(({ line }) => /^(let|const|var)?\s*agyReadDirs\s*=/.test(line));
+    assert.ok(assignments.length >= 2, `agyReadDirs 대입을 ${assignments.length}개만 찾았다 — 탐지가 깨졌다`);
+
+    // 대입은 여러 줄에 걸칠 수 있으므로 대입 지점부터 다음 대입/블록 끝까지를 본다.
+    const offenders = [];
+    for (const { no } of assignments) {
+      const window = src.split("\n").slice(no - 1, no + 4).join("\n");
+      if (!/agyWorkDir/.test(window)) offenders.push(no);
+    }
+    assert.deepEqual(offenders, [], `작업 폴더를 빠뜨린 agyReadDirs 대입: ${offenders.join(", ")}행`);
+
+    /*
+     * ★그리고 스폰 cwd 와 등록 폴더는 같은 값에서 나와야 한다. 둘을 따로 계산하면
+     * 기본값이 갈리고, 실측에서 정확히 그 일이 있었다: cwd 는 agentRunCwd() 로
+     * 폴백하는데 등록 목록은 빈 채로 남아 --add-dir 가 인자에서 통째로 사라졌다.
+     */
+    assert.match(src, /const agyWorkDir = runReq\.cwd \?\? agentRunCwd\(\)/,
+      "작업 폴더 폴백이 한 곳에서 정해지지 않는다");
+    assert.match(src, /cwd: agyWorkDir,/,
+      "스폰 cwd 가 등록 폴더와 다른 식으로 계산된다 — 둘이 갈리면 쓰기가 딴 데로 간다");
+    assert.ok(!/cwd: req\.cwd \?\? agentRunCwd\(\)/.test(src),
+      "스폰 cwd 가 여전히 따로 계산된다");
   });
 
   await check("★세션 규칙이 권한과 같은 말을 한다(도구 열림/닫힘 일관)", () => {
