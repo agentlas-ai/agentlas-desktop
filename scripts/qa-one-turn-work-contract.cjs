@@ -300,6 +300,26 @@ check("reasoning text is a typed protocol row: runtimes emit it, Main persists t
   assert.match(read("electron/mobile-bridge/authority.ts"), /boundedRedactedText\(event\.reasoning\.text, 2_000\)/, "the phone gets a bounded, redacted copy on end only");
   assert.match(read("electron/invocation/service.ts"), /event\.reasoning\?\.phase === "delta"[\s\S]*?record\.events\[record\.events\.length - 1\] = \{/, "delta chatter is coalesced in the replay buffer");
 });
+check("no wording judgments: compaction is the typed display flag, a stop is a typed code or cancel_requested", () => {
+  const lib = read("renderer/lib/one-turn-work.ts") + read("renderer/lib/one-activity.ts");
+  assert.doesNotMatch(lib, /압축\|compact|\/cancel\|중지\|중단\//, "no regex over notice/error wording");
+  assert.match(read("renderer/lib/one-turn-work.ts"), /item\.noticeDisplay === "divider"/);
+  const wordedOnly = reduceAll([
+    { kind: "lifecycle", lifecycle: { phase: "start" } },
+    { kind: "notice", notice: { level: "info", message: "컨텍스트가 자동으로 압축됨" } },
+    { kind: "error", error: { code: "runtime_error", message: "실행이 중지되었습니다" } },
+  ]);
+  const p = turnWork.buildOneWorkPresentation(wordedOnly, "ko", null);
+  assert.equal(p.dividers.length, 0, "a plain notice whose words mention compaction is still a row");
+  assert.equal(p.terminal, "failed", "an error whose message says 중지 is not a user stop without the typed fact");
+  const typedStop = reduceAll([
+    { kind: "lifecycle", lifecycle: { phase: "start" } },
+    { kind: "lifecycle", lifecycle: { phase: "cancel_requested" } },
+    { kind: "error", error: { code: "runtime_error", message: "x" } },
+  ]);
+  assert.equal(turnWork.buildOneWorkPresentation(typedStop, "ko", null).terminal, "cancelled");
+});
+
 check("agy forwards tool parameters and output; Main keeps the model's answer text", () => {
   assert.match(read("electron/runtime/antigravity.ts"), /events\.onTool\?\.\(step\.tool\.name, step\.tool\.args, step\.tool\.result, step\.tool\.id, step\.tool\.failed\)/);
   assert.match(read("electron/mcp/client.ts"), /const modelText = surfaceParse\.cleanedText\.trim\(\);\s*displayText = modelText\s*\|\| deterministicOneCompletionCopy/, "the persisted assistant message is the model's text whenever it wrote one");

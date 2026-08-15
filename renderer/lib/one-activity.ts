@@ -29,6 +29,8 @@ export interface OneActivityItem {
   /** A durable notice carries both product locales so a mirrored screen does not inherit the sender's language. */
   noticeI18n?: { ko: string; en: string };
   activityCode?: OneActivityCode;
+  /** notice rows: `divider` marks a conversation boundary (context compaction) — a typed fact, not a wording. */
+  noticeDisplay?: "row" | "divider";
   tool?: OneActivityTool;
   /** Characters of the streamed answer so far — only on the live `answer:stream` result row. */
   answerChars?: number;
@@ -402,6 +404,7 @@ export function reduceOneActivity(
       message: event.notice.message,
       detail: event.notice.details,
       noticeLevel: event.notice.level,
+      ...(event.notice.display ? { noticeDisplay: event.notice.display } : {}),
       ...(event.notice.i18n?.ko?.trim() && event.notice.i18n?.en?.trim()
         ? { noticeI18n: { ko: event.notice.i18n.ko.trim(), en: event.notice.i18n.en.trim() } }
         : {}),
@@ -478,8 +481,8 @@ export function reduceOneActivity(
     // A run the person stopped ends through the same error channel as a
     // runtime failure; the earlier cancel_requested lifecycle fact (or an
     // explicit cancel code) tells them apart. "Stopped" is not "failed".
-    const cancelled = /cancel/i.test(event.error?.code ?? "")
-      || /cancel|중지|중단/i.test(event.error?.message ?? "")
+    // Typed facts only — never the wording of the message.
+    const cancelled = /^(?:cancelled|canceled|user_cancelled|user-cancelled|aborted_by_user)$/i.test(event.error?.code ?? "")
       || items.some((item) => item.status === "cancelling");
     const status = cancelled ? "cancelled" : "failed";
     items = closeRunning(items, observedAt, status);

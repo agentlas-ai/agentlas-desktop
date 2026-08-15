@@ -297,8 +297,6 @@ function pushEdit(cells: OneWorkCell[], item: OneActivityItem, file: OneWorkEdit
   cells.push({ kind: "edit", id: item.id, status, startedAt: item.observedAt, files: [{ ...file }], ...(diff ? { diff } : {}) });
 }
 
-const COMPACTION_NOTICE_RE = /압축|compact/i;
-
 export function buildOneWorkPresentation(
   state: OneActivityState,
   locale: "ko" | "en",
@@ -361,9 +359,11 @@ export function buildOneWorkPresentation(
         const message = (item.noticeI18n?.[locale] ?? item.message ?? "").trim();
         if (!message && !item.activityCode) break;
         const level = item.noticeLevel ?? "info";
-        // Compaction is a boundary of the conversation, not a step of this
-        // turn's work — Codex draws it as its own line between messages.
-        if (message && COMPACTION_NOTICE_RE.test(message) && level === "info") {
+        // A `divider` notice (context compaction) is a boundary of the
+        // conversation, not a step of this turn's work — Codex draws it as its
+        // own line between messages. The typed display flag decides, never the
+        // wording.
+        if (message && item.noticeDisplay === "divider") {
           dividers.push({ id: item.id, message, observedAt: item.observedAt });
           break;
         }
