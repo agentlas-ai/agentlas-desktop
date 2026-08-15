@@ -27,10 +27,20 @@
 - Removes the guard that dropped everything before a completion sentence based
   on a list of common words. Prose and progress logs cannot be told apart by
   vocabulary, so that guard eventually ate real answers.
-- Surfaces tool calls that were blocked for missing approval. Headless runs have
-  no approver, so the CLI auto-denies and the session records a user rejection
-  for a choice nobody made; Work now names the blocked command and says plainly
-  that the user did not reject it.
+- Lets the user answer a runtime's permission request. Every runtime asked
+  differently and none of it reached the screen: a headless run has no approver,
+  so the CLI denied the call itself and recorded it as a user rejection for a
+  choice nobody made. Approval is now one contract with two shapes — a live
+  request that waits for the answer, and a notice for a call that was already
+  denied and can only widen the next run — drawn as a bottom sheet that renders
+  each case differently.
+- ACP runs now ask before acting instead of being answered on the user's behalf.
+- Antigravity denials are detected structurally rather than by wording, and an
+  empty answer with denied tool calls is carried as a failure instead of passing
+  as success — that combination is what made a run look like it had stopped.
+- Claude Code denials name the blocked command.
+- Kimi states that its read-only boundary is not enforceable, because the
+  permission chip is never passed to that CLI at all.
 - Replaces literal NUL separators in five source files with the escaped form.
   They made file(1) classify those files as binary, so every grep-based check
   skipped them silently — including the file holding the reported defect.
@@ -43,9 +53,9 @@
 
 Known gaps carried past this release:
 
-- Blocked approvals are reported but not yet actionable. A headless run cannot
-  approve a tool call in place, so acting on one means re-running with that
-  command allowed; the card and the one-time grant do not exist yet.
+- Approval is answerable for ACP, which is the one runtime that asks before
+  acting. The CLI runtimes deny before anyone can be asked, so their sheet can
+  only widen the next run; replaying the blocked call itself is not implemented.
 - The terminal engine still settles CLI runs on `close` alone. The desktop
   runners were fixed and are enforced by a contract test; the terminal spawn
   sites were surveyed but not changed.
