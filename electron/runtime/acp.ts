@@ -18,7 +18,7 @@
 import type { ChildProcess } from "node:child_process";
 import { AcpConnection, ACP_PROTOCOL_VERSION, AcpRpcError, chooseAuthMethod, modelOptionsFromNewSession } from "./acp-protocol";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
-import { wrapSystemPrompt } from "./runner";
+import { ensureChildCloseAfterExit, startCliHeartbeat, wrapSystemPrompt } from "./runner";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, spawnCli, trackRunChild } from "./exec";
 import { pickLocale, tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
@@ -241,7 +241,16 @@ interface Session {
 
 async function openAcp(
   spec: AcpAgentSpec,
-  opts: { command?: string; cwd: string; env: NodeJS.ProcessEnv; handlers: { onNotification?: (m: string, p: any) => void; onRequest?: (m: string, p: any) => any } ; timeoutMs: number },
+  opts: {
+    command?: string;
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    handlers: { onNotification?: (m: string, p: any) => void; onRequest?: (m: string, p: any) => any };
+    timeoutMs: number;
+    /** 있으면 생존 신호와 고아 stdio 통지를 이 채널로 낸다(실행 경로). */
+    onStatus?: (status: string) => void;
+    label?: string;
+  },
 ): Promise<Session> {
   const child = spawnCli(opts.command ?? spec.command, spec.args, {
     stdio: ["pipe", "pipe", "pipe"],
@@ -250,6 +259,24 @@ async function openAcp(
     ...detachedSpawnOpts(),
   });
   trackRunChild(child);
+  /*
+   * ★ACP 러너도 자식을 띄운다 — 그러므로 같은 정산 계약이 필요하다.
+   *
+   * `pickRunner` 는 cursor·grok·kimi 를 이 러너로 보낸다(ACP_PREFERRED_KINDS).
+   * 즉 그 세 런타임의 **실제 실행 경로가 여기**다. 손 드라이버 쪽에만 정산을 달고
+   * 이 자리를 비워 두면, 고친 코드가 안 쓰이는 경로에만 있는 셈이 된다.
+   *
+   * Node 계약상 `close` 는 자식의 stdio 가 전부 닫혀야 오는데, 에이전트가 파이프를
+   * 상속한 손자를 남기고 죽으면 영영 오지 않는다 — runner.ts 주석 참고.
+   */
+  const stopAcpHeartbeat = opts.onStatus
+    ? startCliHeartbeat(child, opts.onStatus, opts.label ?? spec.id)
+    : () => {};
+  ensureChildCloseAfterExit(child, () => {
+    opts.onStatus?.(`${opts.label ?? spec.id}: agent exited without closing its output — settling the session`);
+  });
+  child.on("close", () => stopAcpHeartbeat());
+  child.on("error", () => stopAcpHeartbeat());
   const conn = new AcpConnection(child, opts.handlers);
   const init = await conn.request("initialize", {
     protocolVersion: ACP_PROTOCOL_VERSION,
@@ -351,6 +378,8 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         cwd,
         env: req.env ?? process.env,
         timeoutMs: 60_000,
+        onStatus: (s) => events.onStatus(s),
+        label: req.backendLabel || spec.label,
         handlers: {
           onNotification: (method, params) => { if (method === "session/update") client.onUpdate(params); },
           onRequest: async (method, params) => {

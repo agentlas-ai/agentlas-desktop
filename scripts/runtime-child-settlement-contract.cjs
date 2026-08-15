@@ -144,6 +144,12 @@ async function main() {
    * cursor·grok·kimi 를 한 번도 보지 못했다(실측: 셋 다 close 전용, exit 구독 0,
    * 심장박동 0). 하드코딩된 형제 목록은 형제가 늘어나는 순간 조용히 맹인이 된다.
    * 목록 대신 **자식을 띄우는가**로 대상을 정한다.
+   *
+   * ★2차 맹인: 그 "자식을 띄우는가"를 `: Runner =` 선언으로 좁혔더니 이번엔 acp.ts 를
+   * 건너뛰었다 — ACP 러너는 팩토리(`createAcpRunner`)라 그 문장이 없는데, 정작
+   * cursor·grok·kimi 의 **실제 실행 경로**가 거기다(ACP_PREFERRED_KINDS). 손 드라이버
+   * 쪽만 고쳐 두면 안 쓰이는 경로에만 수리가 있는 셈이 된다. 그래서 판별을 선언 문법이
+   * 아니라 **행동**으로 바꾼다: 실행 수명의 자식은 중지·정리를 위해 반드시 추적된다.
    */
   await check("★CLI를 띄우는 모든 러너가 자식 정산 헬퍼를 단다", () => {
     const runtimeDir = path.join(root, "electron/runtime");
@@ -151,7 +157,10 @@ async function main() {
       .filter((name) => name.endsWith(".ts"))
       .map((name) => ({ name, src: fs.readFileSync(path.join(runtimeDir, name), "utf8") }))
       // 실행용 스폰만 — 짧은 버전/모델 프로브는 자체 타임아웃으로 끝난다.
-      .filter(({ src }) => /:\s*Runner\s*=/.test(src) && /spawnCli\(/.test(src));
+      // 이 헬퍼들을 **정의**하는 파일(exec.ts)은 제공자이지 러너가 아니다 — 이름이 아니라
+      // export 여부로 가른다.
+      .filter(({ src }) => !/export function (spawnCli|trackRunChild)\b/.test(src))
+      .filter(({ src }) => /spawnCli\(/.test(src) && /trackRunChild\(/.test(src));
 
     assert.ok(spawning.length >= 6, `스폰 러너를 ${spawning.length}개만 찾았다 — 탐지가 깨졌다`);
 
@@ -168,7 +177,8 @@ async function main() {
       .map((name) => ({ name, src: fs.readFileSync(path.join(runtimeDir, name), "utf8") }))
       .filter(({ src }) => /\bstartCliHeartbeat\(child/.test(src))
       // 반환된 정리 함수를 어떤 이름으로 받든 종료 경로에서 호출해야 한다.
-      .filter(({ src }) => !/\b(stopHeartbeat|clearAgyHeartbeat|stopCliHeartbeat)\(\)/.test(src))
+      // 이름을 열거하면 새 러너가 다른 이름을 쓰는 순간 또 맹인이 된다 — 모양으로 본다.
+      .filter(({ src }) => !/\b(stop|clear)\w*[Hh]eartbeat\w*\(\)/.test(src))
       .map(({ name }) => name);
     assert.deepEqual(leaking, [], `심장박동 정리를 부르지 않는 러너: ${leaking.join(", ")}`);
   });
