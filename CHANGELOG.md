@@ -23,6 +23,43 @@
 - Source readiness does not prove a published installer or update feed; the
   Releases page remains the authority for the downloadable installer.
 
+
+Known gaps carried past this release:
+
+- Blocked approvals are reported but not yet actionable. A headless run cannot
+  approve a tool call in place, so acting on one means re-running with that
+  command allowed; the card and the one-time grant do not exist yet.
+- The terminal engine still settles CLI runs on `close` alone. The desktop
+  runners were fixed and are enforced by a contract test; the terminal spawn
+  sites were surveyed but not changed.
+- The embedded engine carries ten pre-existing test failures on its own main
+  (template allow-read drift, workforce schema and golden vectors). They were
+  verified as pre-existing against the previously published tag, not introduced
+  here, and the v1.2.5 tag was pushed with that suite skipped once.
+
+## 1.0.16 — 2026-08-15
+
+- Stops the final display layer from deleting shell code blocks. A command the
+  user was told to run no longer disappears from Work while the same text sits
+  intact in the database.
+- Stops replacing localhost preview URLs with the words "local preview"; the
+  address is what the user needs in order to open the result.
+- Removes the guard that dropped everything before a completion sentence based
+  on a list of common words. Prose and progress logs cannot be told apart by
+  vocabulary, so that guard eventually ate real answers.
+- Surfaces tool calls that were blocked for missing approval. Headless runs have
+  no approver, so the CLI auto-denies and the session records a user rejection
+  for a choice nobody made; Work now names the blocked command and says plainly
+  that the user did not reject it.
+- Replaces literal NUL separators in five source files with the escaped form.
+  They made file(1) classify those files as binary, so every grep-based check
+  skipped them silently — including the file holding the reported defect.
+- Account-revealing absolute paths and already corrupted bytes are still hidden.
+- Binds Agentlas OS v1.2.5 at
+  54ec54ef8b08810668c11f506bd22015a3e71294.
+- Source readiness does not prove a published installer or update feed; the
+  Releases page remains the authority for the downloadable installer.
+
 ## 1.0.15 — 2026-08-15
 
 - Gives Antigravity runs the permission flags every other runner already
