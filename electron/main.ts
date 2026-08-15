@@ -22,6 +22,7 @@ import {
   shell,
 } from "electron";
 import fs from "node:fs";
+import { installModelCatalogResolver, refreshRemoteCatalog } from "./runtime/model-catalog";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -690,6 +691,17 @@ app.whenReady().then(async () => {
   const traceStartup = (stage: string): void => {
     console.info(`[startup] ${stage} +${Date.now() - startupStartedAt}ms`);
   };
+  // 4-tier model catalog (PRD 2026-08-15 D-4): wire the context-window resolver
+  // so BYOK compaction stops assuming 128k, and refresh models.dev in the
+  // background (TTL 24h; failure keeps the stale copy, never blocks startup).
+  try {
+    installModelCatalogResolver();
+    void refreshRemoteCatalog().then((r) => {
+      if (r.status !== "fresh") console.info(`[model-catalog] remote ${r.status} (${r.rows} rows)${r.reason ? `: ${r.reason}` : ""}`);
+    });
+  } catch (err) {
+    console.warn("[model-catalog] resolver not installed:", err instanceof Error ? err.message : String(err));
+  }
   if (app.isPackaged && process.platform === "darwin" && installIdentity.channel === "official") {
     try {
       const bundlePath = resolveMacAppBundle(process.execPath);

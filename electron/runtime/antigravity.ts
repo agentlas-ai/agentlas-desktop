@@ -16,6 +16,8 @@ import { tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild } from "./exec";
 import { stageCliImageAttachments } from "./image-attachments";
+import { parseAgyModels, unsupportedDiscovery, type DiscoveryOutcome } from "../../shared/model-discovery";
+import { settleDiscovery } from "./model-discovery-store";
 
 /**
  * 중지 사유를 그대로 전한다. 중지는 사람이 누른 것 외에도 무활동 워치독·단계 시간 초과·
@@ -76,15 +78,18 @@ async function firstExisting(paths: string[]): Promise<string | null> {
 export interface AntigravityProbe {
   path: string;
   version: string;
+  /** Model ids to offer (last-good ids when discovery failed — see `discovery.stale`). */
   models: string[];
+  /** DiscoveryOutcome contract (PRD 2026-08-15 D-1): ok / unsupported / failed, never a silent []. */
+  discovery: DiscoveryOutcome;
 }
 
 export function isAgyBinaryPath(binary: string | undefined): boolean {
   return /(^|[/\\])agy(?:\.(?:exe|cmd))?$/.test(String(binary ?? ""));
 }
 
-async function probeAgyModels(binary: string): Promise<string[]> {
-  if (!isAgyBinaryPath(binary)) return [];
+async function probeAgyModels(binary: string): Promise<DiscoveryOutcome> {
+  if (!isAgyBinaryPath(binary)) return unsupportedDiscovery("not-agy-binary");
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawnCli>;
     try {
@@ -92,8 +97,8 @@ async function probeAgyModels(binary: string): Promise<string[]> {
         stdio: ["ignore", "pipe", "pipe"],
         ...detachedSpawnOpts(),
       });
-    } catch {
-      resolve([]);
+    } catch (err) {
+      resolve(settleDiscovery("antigravity", { stdout: "", models: [], exitCode: null, source: "cli" }));
       return;
     }
     let settled = false;
@@ -104,39 +109,29 @@ async function probeAgyModels(binary: string): Promise<string[]> {
     // 줄 전체를 식별자로 검사하던 예전 파서는 탭·공백·괄호 때문에 14줄을 전부 버리고
     // 0개를 반환했다 — 예외도 로그도 없이 모델 선택기가 비어 Gemini 3.7이 보이지 않았다.
     // 같은 1.1.x 안에서 형식이 바뀌었으므로 버전 게이트로는 잡을 수 없는 종류의 드리프트다.
-    //
-    // 탭으로만 자르고 첫 칸을 취한다(공백으로 자르지 않는 이유: "Fetching available
-    // models..." 같은 헤더 줄은 탭이 없어 줄 전체가 후보가 되고, 공백을 품고 있어
-    // 식별자 검사에서 정상적으로 탈락한다). 탭이 없던 예전 형식도 그대로 통과한다.
-    const parsedModels = () => [...new Set(stdout
-      .split(/\r?\n/)
-      .map((line) => line.split("\t")[0]?.trim() ?? "")
-      .filter((value) => /^[A-Za-z0-9][A-Za-z0-9._:-]{1,119}$/.test(value)))].slice(0, 100);
-    const finish = (models: string[]) => {
+    // 파서는 shared/model-discovery.ts(parseAgyModels)로 옮겨 픽스처 테스트가 가능하고,
+    // 결과는 DiscoveryOutcome으로 분류된다: stdout이 있는데 0개면 `failed`(수확량 회귀).
+    const finish = (input: { timedOut?: boolean; exitCode?: number | null }) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve(models);
+      resolve(settleDiscovery("antigravity", { stdout, models: parseAgyModels(stdout), source: "cli", ...input }));
     };
     const timer = setTimeout(() => {
       killCliTree(child, 250);
       // agy 1.1.x prints the complete catalog but can keep its non-interactive
       // pipe alive. Preserve the validated stdout instead of turning a healthy
       // catalog into an empty "subscription default" picker.
-      finish(parsedModels());
+      finish({ timedOut: parseAgyModels(stdout).length === 0 });
     }, 5_000);
     timer.unref?.();
     child.stdout?.on("data", (chunk: Buffer) => {
       if (stdout.length < 32_768) stdout = (stdout + probeDecoder.write(chunk)).slice(0, 32_768);
     });
-    child.on("error", () => finish([]));
+    child.on("error", () => finish({ exitCode: null }));
     child.on("close", (code) => {
       stdout += probeDecoder.end();
-      if (code !== 0) {
-        finish([]);
-        return;
-      }
-      finish(parsedModels());
+      finish({ exitCode: code });
     });
   });
 }
@@ -145,7 +140,8 @@ export async function probeAntigravity(): Promise<AntigravityProbe | null> {
   const found = await firstExisting(AGY_CANDIDATES);
   if (!found) return null;
   const version = (await probeCliVersion(found)) ?? "unknown";
-  return { path: found, version, models: await probeAgyModels(found) };
+  const discovery = await probeAgyModels(found);
+  return { path: found, version, models: discovery.models, discovery };
 }
 
 async function getBin(opts?: { source?: string }): Promise<string | null> {

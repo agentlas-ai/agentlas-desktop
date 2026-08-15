@@ -682,6 +682,14 @@ export interface RuntimeStatus {
   model?: string | null;
   /** ollama가 로컬에 받아둔 모델 목록 (설정 화면의 모델 선택용). 그 외 LLM은 미설정 */
   availableModels?: string[];
+  /**
+   * How `availableModels` was obtained (PRD 2026-08-15 D-3). `failed` means the
+   * probe ran and yielded nothing usable — the picker may show a stale last-good
+   * list (`stale: true`), and the UI must say so instead of showing an empty
+   * menu that looks like "subscription default". `unsupported` is honest
+   * absence (no list concept, e.g. claude-code) — not an error.
+   */
+  modelDiscovery?: import("./model-discovery").ModelDiscoverySummary;
   /** Host-verified execution inventory for automatic allocation. Never filled from UI fallback catalogs. */
   allocationModels?: string[];
   /** Optional host-authored facts for exact automatic allocation. Model IDs remain opaque. */

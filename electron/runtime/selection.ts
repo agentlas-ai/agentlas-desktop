@@ -27,6 +27,7 @@ import { runOllama } from "./ollama";
 import { runLMStudio } from "./lmstudio";
 import { runMLX } from "./mlx";
 import { acquireRunSlot } from "./run-slots";
+import { acpOrLegacyRunner } from "./acp";
 import { acquireLocalInferenceSlot } from "./local-inference-run-slots";
 import type { Runner } from "./runner";
 
@@ -81,9 +82,13 @@ function withLocalInferenceSlot(runner: Runner): Runner {
 const runClaudeCodeSlotted = withRunSlot(runClaudeCode);
 const runCodexSlotted = withRunSlot(runCodex);
 const runAntigravitySlotted = withRunSlot(runAntigravity);
-const runKimiSlotted = withRunSlot(runKimi);
-const runGrokSlotted = withRunSlot(runGrok);
-const runCursorSlotted = withRunSlot(runCursor);
+// B-grade runtimes route through the generic ACP runner (PRD 2026-08-15 D-5):
+// cursor showed no tool calls, grok guessed tool kinds from `type` strings,
+// kimi was absent from the terminal. `AGENTLAS_DISABLE_ACP=1` (or a kind list)
+// restores the legacy hand drivers without a rebuild.
+const runKimiSlotted = withRunSlot(acpOrLegacyRunner("kimi", runKimi));
+const runGrokSlotted = withRunSlot(acpOrLegacyRunner("grok", runGrok));
+const runCursorSlotted = withRunSlot(acpOrLegacyRunner("cursor", runCursor));
 const runOllamaSlotted = withLocalInferenceSlot(runOllama);
 const runLMStudioSlotted = withLocalInferenceSlot(runLMStudio);
 const runMLXSlotted = withLocalInferenceSlot(runMLX);
@@ -166,12 +171,14 @@ export function pickRunner(active: RuntimeStatus): { runner: Runner; label: stri
       label: RUNNER_LABEL.antigravity,
     };
   }
+  // The detected executable travels with the request so the ACP runner spawns
+  // exactly the binary detection verified (never a sibling from PATH).
   if (active.kind === "kimi")
-    return { runner: runKimiSlotted, label: RUNNER_LABEL.kimi };
+    return { runner: bindRuntimeSource(runKimiSlotted, active.source), label: RUNNER_LABEL.kimi };
   if (active.kind === "grok")
-    return { runner: runGrokSlotted, label: `Grok CLI${active.model ? ` · ${active.model}` : ""}` };
+    return { runner: bindRuntimeSource(runGrokSlotted, active.source), label: `Grok CLI${active.model ? ` · ${active.model}` : ""}` };
   if (active.kind === "cursor")
-    return { runner: runCursorSlotted, label: `Cursor Agent${active.model && active.model !== "auto" ? ` · ${active.model}` : " · Auto"}` };
+    return { runner: bindRuntimeSource(runCursorSlotted, active.source), label: `Cursor Agent${active.model && active.model !== "auto" ? ` · ${active.model}` : " · Auto"}` };
   if (active.kind === "ollama")
     return { runner: runOllamaSlotted, label: `Ollama${active.model ? ` · ${active.model}` : ""}` };
   if (active.kind === "lmstudio")
@@ -222,9 +229,9 @@ export function pickRecoveryRunner(selection: Pick<RuntimeStatus, "kind"> & { so
       label: RUNNER_LABEL.antigravity,
     };
   }
-  if (selection.kind === "kimi") return { runner: runKimi, label: RUNNER_LABEL.kimi };
-  if (selection.kind === "grok") return { runner: runGrok, label: RUNNER_LABEL.grok };
-  if (selection.kind === "cursor") return { runner: runCursor, label: RUNNER_LABEL.cursor };
+  if (selection.kind === "kimi") return { runner: bindRuntimeSource(acpOrLegacyRunner("kimi", runKimi), selection.source), label: RUNNER_LABEL.kimi };
+  if (selection.kind === "grok") return { runner: bindRuntimeSource(acpOrLegacyRunner("grok", runGrok), selection.source), label: RUNNER_LABEL.grok };
+  if (selection.kind === "cursor") return { runner: bindRuntimeSource(acpOrLegacyRunner("cursor", runCursor), selection.source), label: RUNNER_LABEL.cursor };
   if (selection.kind === "ollama") return { runner: runOllama, label: "Ollama" };
   if (selection.kind === "lmstudio") return { runner: runLMStudio, label: "LM Studio" };
   if (selection.kind === "mlx") return { runner: runMLX, label: "MLX" };

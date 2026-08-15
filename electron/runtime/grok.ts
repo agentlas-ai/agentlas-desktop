@@ -16,6 +16,8 @@ import { clearProviderHealth, recordProviderHealth } from "../usage/provider-hea
 import { invalidateUsage } from "../usage";
 import { getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions";
 import { StringDecoder } from "node:string_decoder";
+import { parseGrokModels, type DiscoveryOutcome } from "../../shared/model-discovery";
+import { settleDiscovery } from "./model-discovery-store";
 
 /**
  * 중지 사유를 그대로 전한다. 중지는 사람이 누른 것 외에도 무활동 워치독·단계 시간 초과·
@@ -170,23 +172,24 @@ function grokEnv(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return env;
 }
 
-// `grok models` → 모델 id 목록 (best-effort, 짧은 타임아웃). 새 모델이 나오면 자동 반영된다.
-// 실패(키 없음/네트워크/포맷 변경)하면 빈 배열 → 호출부가 정적 CLI_MODELS로 폴백.
-function listGrokModels(bin: string): Promise<string[]> {
+// `grok models` → DiscoveryOutcome (PRD 2026-08-15 D-1). 파싱은 shared/model-discovery.ts
+// (parseGrokModels: 글머리표 `  * grok-4.6 (default)` 우선, 없으면 grok-* 토큰). 실패는
+// []가 아니라 `failed`로 돌려주고, 마지막 성공 목록이 있으면 stale로 채운다.
+function listGrokModels(bin: string): Promise<DiscoveryOutcome> {
   return new Promise((resolve) => {
     let out = "";
     let settled = false;
-    const finish = (v: string[]) => {
+    const finish = (input: { timedOut?: boolean; exitCode?: number | null }) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve(v);
+      resolve(settleDiscovery("grok", { stdout: out, models: parseGrokModels(out), source: "cli", ...input }));
     };
     let child: ReturnType<typeof spawnCli>;
     try {
       child = spawnCli(bin, ["models"], { stdio: ["ignore", "pipe", "ignore"], env: grokEnv(process.env) });
     } catch {
-      resolve([]);
+      resolve(settleDiscovery("grok", { stdout: "", models: [], exitCode: null, source: "cli" }));
       return;
     }
     const timer = setTimeout(() => {
@@ -195,27 +198,17 @@ function listGrokModels(bin: string): Promise<string[]> {
       } catch {
         // ignore
       }
-      finish([]);
+      finish({ timedOut: parseGrokModels(out).length === 0 });
     }, 5000);
     const outDecoder = new StringDecoder("utf8");
     child.stdout?.on("data", (c: Buffer) => (out += outDecoder.write(c)));
     child.on("error", () => {
-      // 프로세스 종료 시 stdout data 리스너를 제거해 누수 방지(stderr는 ignore라 리스너 없음).
       child.stdout?.removeAllListeners("data");
-      finish([]);
+      finish({ exitCode: null });
     });
-    child.on("close", () => {
-      // 프로세스 종료 시 stdout data 리스너를 제거해 누수 방지(stderr는 ignore라 리스너 없음).
+    child.on("close", (code) => {
       child.stdout?.removeAllListeners("data");
-      // `grok models` 실측 출력: 각 기본 모델이 `  grok-4.3 — Grok 4.3 (reasoning)` 형태(ANSI 컬러 포함).
-      // ANSI 제거 후 "id — 설명" 라인의 id만 뽑는다(별칭 줄은 제외 → 드롭다운 깔끔).
-      // ANSI(컬러) 무관하게 grok-* 모델 id를 추출한다(별칭 포함이지만 모두 유효한 모델).
-      const ids: string[] = [];
-      for (const mm of out.matchAll(/grok[\w.-]*\d[\w.-]*/gi)) {
-        const id = mm[0].toLowerCase();
-        if (!ids.includes(id)) ids.push(id);
-      }
-      finish(ids);
+      finish({ exitCode: code });
     });
   });
 }
@@ -223,16 +216,19 @@ function listGrokModels(bin: string): Promise<string[]> {
 export interface GrokProbe {
   path: string;
   version: string;
-  /** `grok models`로 받은 라이브 모델 목록(가능할 때). 비어있으면 정적 카탈로그로 폴백. */
+  /** `grok models` 라이브 목록(실패 시 마지막 성공 목록, discovery.stale 참고). */
   models: string[];
+  discovery: DiscoveryOutcome;
 }
 
 export async function probeGrok(): Promise<GrokProbe | null> {
   const found = await firstExisting(grokCandidates());
   if (!found) return null;
   const version = (await probeCliVersion(found)) ?? "unknown";
-  const models = await listGrokModels(found).catch(() => []);
-  return { path: found, version, models };
+  const discovery = await listGrokModels(found).catch(
+    (err): DiscoveryOutcome => ({ status: "failed", models: [], rawLineCount: 0, reason: `spawn-error:${err instanceof Error ? err.message : String(err)}`, source: "cli" }),
+  );
+  return { path: found, version, models: discovery.models, discovery };
 }
 
 let cachedBin: string | null | undefined;

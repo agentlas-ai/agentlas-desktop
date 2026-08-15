@@ -8,6 +8,8 @@ import { wrapSystemPrompt } from "./runner";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild } from "./exec";
 import { tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
+import { parseCursorModels, type DiscoveryOutcome } from "../../shared/model-discovery";
+import { settleDiscovery } from "./model-discovery-store";
 
 /**
  * 중지 사유를 그대로 전한다. 중지는 사람이 누른 것 외에도 무활동 워치독·단계 시간 초과·
@@ -69,91 +71,52 @@ async function resolveCursorBinary(): Promise<string | null> {
   return null;
 }
 
-function cleanModelName(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const cleaned = value
-    .replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "")
-    .replace(/\s+\((?:default|selected|recommended)\)\s*$/i, "")
-    .trim();
-  return cleaned && cleaned.length <= 180 ? cleaned : null;
-}
-
-function modelNamesFromJson(value: unknown): string[] {
-  const out: string[] = [];
-  const add = (raw: unknown) => {
-    const name = cleanModelName(raw);
-    if (name && !out.includes(name)) out.push(name);
-  };
-  const visit = (item: unknown) => {
-    if (Array.isArray(item)) return item.forEach(visit);
-    if (!item || typeof item !== "object") return add(item);
-    const record = item as Record<string, unknown>;
-    add(record.id ?? record.model ?? record.name ?? record.slug ?? record.label);
-    for (const key of ["models", "data", "items", "availableModels"]) {
-      if (Array.isArray(record[key])) visit(record[key]);
-    }
-  };
-  visit(value);
-  return out;
-}
-
-/** Parse the supported JSON and human-readable `agent models` representations. */
+/**
+ * Parse `agent models` output. Delegates to the shared, fixture-tested parser
+ * (shared/model-discovery.ts) — the vendor-word allowlist that used to live here
+ * silently dropped any new vendor. Kept as an export for callers.
+ */
 export function parseCursorModelList(stdout: string): string[] {
-  try {
-    const models = modelNamesFromJson(JSON.parse(stdout));
-    if (models.length > 0) return models;
-  } catch { /* Cursor normally emits readable text. */ }
-  const models: string[] = [];
-  for (const rawLine of stdout.replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, "").split("\n")) {
-    for (const cell of rawLine.split(/[|│]/)) {
-      const name = cleanModelName(cell);
-      if (!name || !/(?:\d|auto|composer|opus|sonnet|haiku|gpt|gemini|grok|claude)/i.test(name)) continue;
-      if (!models.includes(name)) models.push(name);
-    }
-  }
-  return models;
+  return parseCursorModels(stdout);
 }
 
 /** `agent models` is the account-authoritative inventory on current Cursor CLI. */
-async function listCursorModels(bin: string): Promise<string[]> {
+async function listCursorModels(bin: string): Promise<DiscoveryOutcome> {
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawnCli>;
     let stdout = "";
     let settled = false;
     let timer: NodeJS.Timeout | undefined;
-    const finish = (models: string[]) => {
+    const finish = (input: { timedOut?: boolean; exitCode?: number | null }) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
-      resolve(models);
+      resolve(settleDiscovery("cursor", { stdout, models: parseCursorModels(stdout), source: "cli", ...input }));
     };
     try {
       child = spawnCli(bin, ["models"], { stdio: ["ignore", "pipe", "pipe"], env: process.env });
     } catch {
-      finish([]);
+      finish({ exitCode: null });
       return;
     }
     timer = setTimeout(() => {
       try { child.kill(); } catch { /* best effort */ }
-      finish([]);
+      finish({ timedOut: parseCursorModels(stdout).length === 0 });
     }, 5_000);
     const probeDecoder = new StringDecoder("utf8");
     child.stdout?.on("data", (chunk: Buffer) => { stdout = (stdout + probeDecoder.write(chunk)).slice(0, 64_000); });
-    child.on("error", () => finish([]));
-    child.on("close", (code) => {
-      if (code !== 0) return finish([]);
-      finish(parseCursorModelList(stdout));
-    });
+    child.on("error", () => finish({ exitCode: null }));
+    child.on("close", (code) => finish({ exitCode: code }));
   });
 }
 
-export interface CursorProbe { path: string; version: string; models: string[]; }
+export interface CursorProbe { path: string; version: string; models: string[]; discovery: DiscoveryOutcome; }
 
 export async function probeCursor(): Promise<CursorProbe | null> {
   const bin = await resolveCursorBinary();
   if (!bin) return null;
-  const [version, models] = await Promise.all([probeCliVersion(bin, 2_500), listCursorModels(bin)]);
-  return { path: bin, version: version ?? "unknown", models };
+  const [version, discovery] = await Promise.all([probeCliVersion(bin, 2_500), listCursorModels(bin)]);
+  return { path: bin, version: version ?? "unknown", models: discovery.models, discovery };
 }
 
 function promptFor(req: RunnerRequest): string {

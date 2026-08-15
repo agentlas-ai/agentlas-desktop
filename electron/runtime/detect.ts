@@ -2,7 +2,11 @@
 // PRD 3.1 FRE 6단계 — 사용자가 입력 안 해도 한 번 클릭으로 연결되도록.
 import { probeClaudeCode, probeClaudeEfforts } from "./claude-code";
 import { probeCodex } from "./codex";
-import { readCodexModelInventory } from "./codex-models";
+import { readCodexModelDiscovery } from "./codex-models";
+import { summarizeDiscovery, unsupportedDiscovery, type DiscoveryOutcome } from "../../shared/model-discovery";
+import { reportDiscoveryLoudly } from "./model-discovery-store";
+import { registerProbeModels } from "./model-catalog";
+import { ACP_AGENTS, acpDisabledFor, probeAcpModelsCached } from "./acp";
 import { probeAntigravity } from "./antigravity";
 import { probeKimi } from "./kimi";
 import { probeGrok } from "./grok";
@@ -291,7 +295,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
   const [
     cc,
     cx,
-    codexModelInventory,
+    codexModelDiscovery,
     agy,
     kimiCli,
     gr,
@@ -314,7 +318,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
   ] = await Promise.all([
     probeClaudeCode(),
     probeCodex(),
-    readCodexModelInventory(),
+    readCodexModelDiscovery(),
     probeAntigravity(),
     probeKimi(),
     probeGrok(),
@@ -337,7 +341,24 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
   ]);
 
   const list: RuntimeStatus[] = [];
+  const codexModelInventory = codexModelDiscovery.inventory;
   const codexDiscoveredModels = codexModelInventory.map((model) => model.id);
+  // Discovery outcomes are reported once per change (loud, not spammy) and the
+  // ok/stale rows feed the model catalog's probe layer (tier ③).
+  const discoveryOf = (kind: string, outcome: DiscoveryOutcome): NonNullable<RuntimeStatus["modelDiscovery"]> => {
+    reportDiscoveryLoudly(kind, outcome);
+    if (outcome.models.length > 0) registerProbeModels(kind, outcome.models);
+    return summarizeDiscovery(outcome);
+  };
+  // Kimi has no `models` command; when it speaks ACP, session/new is the list.
+  // Cursor/Grok keep their cheap CLI probe and fall back to ACP when it fails.
+  const acpDiscovery = async (kind: "cursor" | "grok" | "kimi", command: string, current?: DiscoveryOutcome): Promise<DiscoveryOutcome> => {
+    if (current && current.status === "ok") return current;
+    if (acpDisabledFor(kind)) return current ?? unsupportedDiscovery("acp-disabled", "acp");
+    const viaAcp = await probeAcpModelsCached(ACP_AGENTS[kind], { command });
+    if (viaAcp.status === "ok") return viaAcp;
+    return current ?? viaAcp;
+  };
   const codexHostCatalog = new Map(cliModels("codex").map((model) => [model.id, model]));
   const codexModelProfiles: NonNullable<RuntimeStatus["allocationModelProfiles"]> =
     Object.fromEntries(codexModelInventory.map((model) => [
@@ -369,6 +390,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       // 컨텍스트는 CLI가 자동 관리하지만 모델은 --model로 선택 가능 (opus/sonnet/haiku).
       model: selectedClaudeModel,
       availableModels: cliModels("claude-code").map((m) => m.id),
+      modelDiscovery: discoveryOf("claude-code", unsupportedDiscovery("no-list-concept:cli-aliases")),
       allocationModels: selectedClaudeModel ? [selectedClaudeModel] : [],
       allocationModelProfiles: Object.fromEntries(claudeHostCatalog.flatMap((model) => (
         model.workforceTier
@@ -401,6 +423,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       // Codex도 선택 모델을 저장·복원해야 --model이 다음 대화까지 유지된다.
       model: cliModelOf("codex", active, codexModels, "openai"),
       availableModels: codexModels,
+      modelDiscovery: discoveryOf("codex", codexModelDiscovery.discovery),
       allocationModels: codexDiscoveredModels,
       allocationModelProfiles: codexModelProfiles,
     });
@@ -417,21 +440,34 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       active: false,
       model: cliModelOf("antigravity", active, antigravityModels, "google") ?? antigravityModels[0],
       availableModels: antigravityModels,
+      modelDiscovery: discoveryOf("antigravity", agy.discovery),
       allocationModels: agy.models,
     });
   }
   if (kimiCli) {
+    const kimiDiscovery = await acpDiscovery("kimi", kimiCli.path);
+    const kimiModels = kimiDiscovery.models;
     list.push({
       kind: "kimi",
       backend: "kimi",
       source: kimiCli.path,
       version: kimiCli.version,
       active: false,
+      ...(kimiModels.length > 0
+        ? {
+            model: cliModelOf("kimi", active, kimiModels, "kimi"),
+            availableModels: kimiModels,
+            allocationModels: kimiModels,
+          }
+        : {}),
+      modelDiscovery: discoveryOf("kimi", kimiDiscovery),
     });
   }
   if (gr) {
-    // 모델: `grok models` 라이브 목록 우선(새 모델 자동 반영) → 없으면 정적 카탈로그로 폴백.
-    const grokModels = gr.models.length > 0 ? gr.models : cliModels("grok").map((m) => m.id);
+    // 모델: `grok models` 라이브 목록 우선(새 모델 자동 반영) → 실패 시 ACP session/new → 정적 카탈로그.
+    const grokDiscovery = await acpDiscovery("grok", gr.path, gr.discovery);
+    const grokLive = grokDiscovery.models.length > 0 ? grokDiscovery.models : gr.models;
+    const grokModels = grokLive.length > 0 ? grokLive : cliModels("grok").map((m) => m.id);
     const storedGrok = cliModelOf("grok", active, grokModels, "custom");
     list.push({
       kind: "grok",
@@ -441,7 +477,8 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       active: false,
       model: storedGrok ?? grokModels[0],
       availableModels: grokModels,
-      allocationModels: gr.models,
+      modelDiscovery: discoveryOf("grok", grokDiscovery),
+      allocationModels: grokLive,
     });
   }
   if (cursor) {
@@ -451,9 +488,11 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     const rememberedCursor =
       (active?.kind === "cursor" && active.backend === "cursor" ? active.model : undefined) ??
       recallRuntimeSelection("cursor", "cursor")?.model;
+    const cursorDiscovery = await acpDiscovery("cursor", cursor.path, cursor.discovery);
+    const cursorLive = cursorDiscovery.models.length > 0 ? cursorDiscovery.models : (cursor.models ?? []);
     const cursorModels = [
       "auto",
-      ...(cursor.models ?? []),
+      ...cursorLive,
       ...(rememberedCursor && rememberedCursor !== "auto" ? [rememberedCursor] : []),
     ].filter((model, index, list) => Boolean(model) && list.indexOf(model) === index);
     list.push({
@@ -464,7 +503,8 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       active: false,
       model: cliModelOf("cursor", active, cursorModels, "cursor") ?? "auto",
       availableModels: cursorModels,
-      allocationModels: ["auto", ...(cursor.models ?? [])].filter(
+      modelDiscovery: discoveryOf("cursor", cursorDiscovery),
+      allocationModels: ["auto", ...cursorLive].filter(
         (model, index, models) => models.indexOf(model) === index,
       ),
     });

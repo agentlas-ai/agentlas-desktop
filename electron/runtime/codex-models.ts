@@ -2,6 +2,8 @@ import fs from "node:fs/promises";
 import { constants, type BigIntStats } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { DiscoveryOutcome } from "../../shared/model-discovery";
+import { settleDiscovery } from "./model-discovery-store";
 import { registerDiscoveredCliModels } from "../../shared/models";
 
 const MAX_MODEL_CACHE_BYTES = 2 * 1024 * 1024;
@@ -334,4 +336,31 @@ export async function readCodexModelIds(
   codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex"),
 ): Promise<string[]> {
   return (await readCodexModelInventory(codexHome)).map((model) => model.id);
+}
+
+/**
+ * DiscoveryOutcome view of the codex inventory (PRD 2026-08-15 D-1). The
+ * cache file is a vendor-owned structured source, so a present-but-unparsable
+ * file is `failed` (loud) while an absent file on a fresh install is `failed`
+ * with reason `no-cache` — the picker then shows the last-good list as stale.
+ */
+export async function readCodexModelDiscovery(
+  codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex"),
+): Promise<{ inventory: CodexModelInventoryEntry[]; discovery: DiscoveryOutcome }> {
+  const cachePath = path.join(codexHome, "models_cache.json");
+  let raw = "";
+  try {
+    raw = (await readStableCache(cachePath)) ?? "";
+  } catch {
+    raw = "";
+  }
+  const inventory = await readCodexModelInventory(codexHome);
+  const discovery = settleDiscovery("codex", {
+    stdout: raw ? "cache:present" : "",
+    models: inventory.map((model) => model.id),
+    exitCode: null,
+    source: "file",
+  });
+  if (discovery.status === "failed" && !raw) discovery.reason = "no-cache";
+  return { inventory, discovery };
 }

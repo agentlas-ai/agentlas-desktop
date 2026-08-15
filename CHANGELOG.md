@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- Model discovery has a contract: every runtime probe returns `ok /
+  unsupported / failed` (`RuntimeStatus.modelDiscovery`). Non-empty CLI output
+  that parses to zero models is a loud `failed` (yield regression), never an
+  empty menu; the last good list is kept on disk and shown as stale.
+- 4-tier model catalog (bundled models.dev snapshot → 24h remote refresh →
+  runtime probes → `~/.agentlas/model-overrides.json`). Context windows come
+  from the catalog instead of a 128k constant; `gemini-3.7-flash-high` resolves
+  to its base model plus effort.
+- Cursor, Grok, and Kimi run through one generic ACP runner (dependency-free
+  JSON-RPC over stdio): tool calls arrive in the protocol's fixed vocabulary,
+  refusals are markers, auth methods are a menu. `AGENTLAS_DISABLE_ACP=1`
+  restores the legacy drivers. Kimi's model list now comes from ACP
+  `session/new`.
+
+
 ## 1.0.16 — 2026-08-15
 
 - Stops the final display layer from deleting shell code blocks. A command the

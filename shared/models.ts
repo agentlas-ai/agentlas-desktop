@@ -145,6 +145,22 @@ export function activeLongContextTokens(
   return null;
 }
 
+/**
+ * Context-window lookup supplied by the main process from the 4-tier model
+ * catalog (electron/runtime/model-catalog.ts). shared/ stays I/O-free, so the
+ * catalog is injected rather than imported. Before this hook, BYOK_MODELS was
+ * empty for every backend and this function returned the 128,000 constant for
+ * every model — compaction thresholds were a guess (PRD 2026-08-15 D-4).
+ */
+export type ContextWindowResolver = (backend: string, id: string) => number | undefined;
+let contextWindowResolver: ContextWindowResolver | null = null;
+export function setContextWindowResolver(resolver: ContextWindowResolver | null): void {
+  contextWindowResolver = resolver;
+}
+
+/** The last-resort default when no layer of the catalog knows the model. */
+export const UNKNOWN_CONTEXT_WINDOW = 128_000;
+
 /** 압축 임계값 산정용 — 긴 컨텍스트가 활성이면 그 토큰, 아니면 모델 기본 윈도우. */
 export function effectiveContextWindow(
   backend: string,
@@ -153,7 +169,17 @@ export function effectiveContextWindow(
 ): number {
   const m = findByokModel(backend, id);
   const long = activeLongContextTokens(backend, id, longEnabled);
-  return long ?? m?.contextWindow ?? 128_000;
+  if (long) return long;
+  if (m?.contextWindow) return m.contextWindow;
+  if (id && contextWindowResolver) {
+    try {
+      const known = contextWindowResolver(backend, id);
+      if (typeof known === "number" && Number.isFinite(known) && known > 0) return known;
+    } catch {
+      /* resolver must never break a run */
+    }
+  }
+  return UNKNOWN_CONTEXT_WINDOW;
 }
 
 /** beta-header 토글이 의미 있는 모델인지 (UI에 1M 토글을 보여줄지 결정) */
