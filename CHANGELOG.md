@@ -41,6 +41,12 @@
 - Claude Code denials name the blocked command.
 - Kimi states that its read-only boundary is not enforceable, because the
   permission chip is never passed to that CLI at all.
+- Settles runs for every CLI runner, not just three. Cursor, Grok and Kimi still
+  ended only on `close`, so a CLI that exited while a grandchild held its output
+  left the run pending — the same defect already fixed elsewhere. The contract
+  test now selects runners by whether they spawn a CLI instead of listing them by
+  name, which is why the gap survived a gate.
+- Grok now reports approval-blocked tool calls like its siblings.
 - Replaces literal NUL separators in five source files with the escaped form.
   They made file(1) classify those files as binary, so every grep-based check
   skipped them silently — including the file holding the reported defect.
