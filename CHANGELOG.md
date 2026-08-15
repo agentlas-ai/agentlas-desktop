@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+## 1.0.17 — 2026-08-16
+
+- This release binds Agentlas OS v1.2.6 at 80e62ef7e23f4ea577b54c53e91723edd903ef23
+  (project map reaches the agent and grows from work; runtime registry, ACP
+  client, `agentlas-one uninstall`, drift status). Behaviour change from the
+  engine: project bootstrap defaults on (opt out `AGENTLAS_PROJECT_BOOTSTRAP_AUTO=0`).
+- **One reads like Codex.** Every turn keeps its own work block: while the model
+  works, the line above the answer is the model's latest reasoning headline (its
+  own words, streamed as a typed reasoning row from Codex summaries, Claude
+  thinking, ACP thoughts, local `reasoning_content`) with a left→right light
+  sweep; when it settles it collapses to "27s 동안 작업 ›" and opens onto what
+  actually happened in Codex vocabulary — 탐색함 (Read/List/Search lines, shell
+  parsed like Codex), 실행함 `cmd`, 편집함 file (+n −m), 생각함 with the
+  model's summary, 호출함. Past turns are rebuilt from the run ledger (tool
+  args, result previews, reasoning summaries, working folder are now kept), so
+  reopening a thread shows the same rows and paths are relative to the run.
+- The answer is always the answer: the model's Markdown message is never hidden
+  behind a result card (the card carries files, sources and actions only), and
+  Main persists the model's text instead of a "your result is ready" line.
+- Fixed while measuring against Codex/Paseo/Antigravity: a queued next
+  instruction shown twice (once as a bubble, once in the queue), the previous
+  answer vanishing while a queued instruction ran, a stop the person asked for
+  reported as "failed", the red system banner, the "여기서 멈췄어요" card, a
+  directory listing turned into a "선택·제품·핵심 내용" comparison table by a
+  bullet-shape guess, tool completions wiping the live command, absolute paths.
+- Codex runs now request `model_reasoning_summary=auto`; Antigravity tool rows
+  carry their parameters and output.
+- Markdown answers keep single line breaks; diagrams (mermaid) and math render.
+- One no longer draws an empty code block under an answer: the fence lines a
+  model wraps around a control block are removed with the block.
+- Source readiness does not prove a published installer or update feed; the
+  Releases page remains the authority for the downloadable installer.
 - New engine kind "acp" — the open seat (Phase B-1). Any agent that speaks the
   Agent Client Protocol shows up in the engine picker without a release:
   built-in specs (OpenCode, Goose, GitHub Copilot CLI) when installed, and any
