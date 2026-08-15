@@ -367,12 +367,25 @@ async function runPreparedAntigravity(
    *
    * 도구가 열린 실행에서는 반대로 **실제로 만들라**고 말해야 한다. 코드를 답변에
    * 옮겨 적는 것으로 대신하는 것이 이 런타임의 기본 습관이기 때문이다.
+   *
+   * ★그리고 "끝나지 않는 명령"을 반드시 말해 준다. 도구를 열어 준 첫날 실측:
+   * 모델이 요청대로 dev 서버를 띄웠고 Vite는 실제로 :5173에서 200을 응답했는데,
+   * `npm run dev`를 **foreground로** 실행하는 바람에 그 명령이 끝나기를 기다리며
+   * 실행이 8분+ 멈췄다. 화면에는 "작업 경로를 준비하는 중"만 남아 사용자에게는
+   * 실패로 보인다 — 정작 결과물은 이미 떠 있는데도. 도구를 열어 주는 것과
+   * **되돌아오게 하는 것**은 다른 일이다.
    */
   spawnPrompt = [
     "Non-interactive session rules:",
     ...(agyToolsAllowed
       ? [
         "- Tools ARE available and pre-approved. Use them to do the work for real.",
+        "- NEVER run a long-lived process in the foreground (dev servers, watchers, `npm run dev`,",
+        "  `vite`, `next dev`, `tail -f`, anything that does not exit on its own). This session waits",
+        "  for the command to finish, so a foreground dev server hangs the whole run until timeout.",
+        "  Start it detached instead (for example `npm run dev >/tmp/dev.log 2>&1 &`), then poll the",
+        "  URL until it answers, and report that URL. If a task only needs the site reachable, a",
+        "  server that is already listening is done — do not restart it in the foreground.",
         "- Apply changes to the actual files in the workspace: create, edit, and run what the",
         "  request needs. Printing code in your reply is NOT doing the work.",
         "- Your final text is a report of what you actually changed, not a substitute for it.",
