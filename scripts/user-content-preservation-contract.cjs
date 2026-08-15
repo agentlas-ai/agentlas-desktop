@@ -181,14 +181,54 @@ check("★화면까지 배선되어 있다(IPC · preload · 시트 · 마운트
   assert.match(preloadSrc, /onToolApproval/, "preload가 승인 구독을 노출하지 않는다");
   assert.match(preloadSrc, /resolveToolApproval/, "preload가 승인 결정을 노출하지 않는다");
 
+  /*
+   * ★오너 결정(2026-08-15): 승인 카드는 "묻는 순간, 그 실행이 있는 대화 안에서만".
+   *  - 대화 화면(One/Work)이 자기 chatId 의 live 요청을 인라인으로 그린다.
+   *  - 전역(AppShell)은 모달이 아니라 배지 — 지금 화면에 없는 대화의 요청만 세고 그 대화로 보낸다.
+   *  - post-denial 은 카드가 아니다(큐가 live 만 담는다). 러너의 알림 한 줄이 전부다.
+   */
+  const store = fs.readFileSync(path.join(root, "renderer/lib/tool-approvals.ts"), "utf8");
+  assert.match(store, /mode !== "live"\) return/, "승인 큐가 post-denial 을 카드로 받는다");
+  assert.match(store, /listToolApprovals/, "화면이 늦게 떠도 대기 중 요청을 따라잡지 않는다");
+  assert.match(store, /markChatVisible/, "대화 가시성 등록이 없어 배지가 인라인과 겹친다");
+
+  const inline = fs.readFileSync(path.join(root, "renderer/components/ToolApprovalInline.tsx"), "utf8");
+  assert.match(inline, /allow_once/, "live 승인 버튼이 없다");
+  assert.match(inline, /allow_session/, "세션 허용 버튼이 없다");
+  assert.match(inline, /item\.chatId === chatId/, "인라인 카드가 자기 대화의 요청만 고르지 않는다");
+  assert.ok(!/다음부터 허용|Allow from next run/.test(inline), "post-denial 문구가 카드에 남아 있다 — 사후 고지는 카드가 아니다");
+
   const sheet = fs.readFileSync(path.join(root, "renderer/components/ToolApprovalSheet.tsx"), "utf8");
-  // 같은 버튼으로 그리면 "허용했는데 아무 일도 안 일어나는" 화면이 된다.
-  assert.match(sheet, /const live = req\.mode === "live"/, "시트가 두 모드를 구분하지 않는다");
-  assert.match(sheet, /allow_once/, "live 승인 버튼이 없다");
-  assert.match(sheet, /다음부터 허용|Allow from next run/, "post-denial 전용 문구가 없다");
+  assert.ok(!/OneBottomSheet|alertdialog/.test(sheet), "전역 표면이 여전히 모달이다 — 배지여야 한다");
+  assert.match(sheet, /needsBadge/, "전역 배지가 '지금 화면에 없는 대화'만 세지 않는다");
+  assert.match(sheet, /openConversation/, "배지가 그 대화로 보내지 않는다");
 
   const shell = fs.readFileSync(path.join(root, "renderer/components/AppShell.tsx"), "utf8");
-  assert.match(shell, /<ToolApprovalSheet \/>/, "시트가 마운트되지 않았다");
+  assert.match(shell, /<ToolApprovalSheet \/>/, "전역 배지가 마운트되지 않았다");
+  for (const rel of ["renderer/components/one/OneShell.tsx", "renderer/components/TaskCockpit.tsx"]) {
+    const src = fs.readFileSync(path.join(root, rel), "utf8");
+    assert.match(src, /<ToolApprovalInline chatId=/, `${rel} 이 대화 안에 승인 카드를 그리지 않는다`);
+  }
+});
+
+check("★승인은 경계를 넘을 때만 묻는다 — 권한 범위 안은 처음부터 허용", () => {
+  const ipcSrc = fs.readFileSync(path.join(root, "electron/ipc.ts"), "utf8");
+  const arb = ipcSrc.slice(ipcSrc.indexOf("setAcpPermissionArbiter(async"), ipcSrc.indexOf("onToolApprovalRequested((request)"));
+  assert.match(arb, /ask\.permission === "full"\) return "allow_session"/, "full 이 묻는다");
+  assert.match(arb, /!ask\.mutating\) return/, "비변이 도구가 묻는다");
+  assert.match(arb, /ask\.permission === "write"\) return "allow_session"/, "write 범위 안 변이가 묻는다");
+  assert.match(arb, /!ask\.chatId \|\| ask\.unattended/, "답할 사람 없는 실행이 매달린다(즉시 거부+고지여야 함)");
+  assert.match(arb, /announceToolDenied\(/, "무인 실행 거부가 기록되지 않는다");
+  assert.match(arb, /chatId: ask\.chatId/, "요청이 대화 id 를 싣지 않아 인라인으로 갈 수 없다");
+
+  // 묻는 순간이 없는 헤드리스는 spawn 플래그로 같은 규칙을 미리 준다.
+  const claude = fs.readFileSync(path.join(root, "electron/runtime/claude-code.ts"), "utf8");
+  assert.match(claude, /WRITE_MODE_PRE_ALLOWED_TOOLS = \["Bash"/, "claude write 모드가 Bash 를 여전히 묻게 둔다(헤드리스 자동거부)");
+  const grok = fs.readFileSync(path.join(root, "electron/runtime/grok.ts"), "utf8");
+  assert.match(grok, /"acceptEdits", "--allow", "Bash"/, "grok write 모드가 Bash 를 여전히 묻게 둔다");
+  const acp = fs.readFileSync(path.join(root, "electron/runtime/acp.ts"), "utf8");
+  assert.match(acp, /chatId: req\.chatId/, "acp 러너가 요청에 대화 id 를 싣지 않는다");
+  assert.match(acp, /unattended: req\.unattended === true/, "acp 러너가 무인 여부를 싣지 않는다");
 });
 
 check("★실행 전에 묻는 런타임(ACP)은 사용자에게 묻는다", () => {

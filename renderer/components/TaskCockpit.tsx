@@ -23,6 +23,7 @@ import type {
 } from "@/lib/types";
 import type { ChatGoalContext, InvocationRunReceipt, OrchestrationTarget, Recommendation, RecExecChoice, RecRouterAgent, RecStage, RunEventUi, RuntimeSelection } from "@shared/types";
 import { ChatStream, type StreamMessage, type StreamStep, type PipelineStage } from "@/components/ChatStream";
+import { ToolApprovalInline } from "@/components/ToolApprovalInline";
 import { normalizeToolCall } from "@shared/tool-call-detail";
 import { ChatQuestionSheet, type QuestionSheetAnswer } from "@/components/ChatQuestionSheet";
 import { McpKeyRequestSheet } from "@/components/McpKeyRequestSheet";
@@ -3755,6 +3756,8 @@ function ChatPage() {
           workspaceRoot={restoredFolder ?? defaultRunFolder ?? undefined}
           focusMessageId={requestedFocusMessageId}
         />
+        {/* 도구 승인은 이 대화 안에서, 묻는 순간에(오너 결정 2026-08-15) */}
+        <ToolApprovalInline chatId={chat?.id ?? null} />
       </div>
       {/* 실행 전 API 키 요청 바텀 시트 — 값은 vault(env.set)로만, IPC는 완료 신호만 */}
       {keyRequestSheet && (

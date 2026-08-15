@@ -527,6 +527,8 @@ export const runClaudeCode: Runner = async (
    * 없어서 강제 불가를 사용자에게 말한다). 읽기·검색·분석은 그대로 가능하다.
    */
   const READ_ONLY_DENIED_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "BashOutput", "KillShell"];
+  /** write 모드에서 acceptEdits 가 여전히 묻는 내장 도구 — 헤드리스는 답할 수 없으니 미리 허용. */
+  const WRITE_MODE_PRE_ALLOWED_TOOLS = ["Bash", "BashOutput", "KillShell", "WebFetch", "WebSearch"];
   const permArgs = runReq.untrustedNoTools
     ? []
     : req.permission === "full"
@@ -568,14 +570,28 @@ export const runClaudeCode: Runner = async (
     ? ["--setting-sources", "", "--strict-mcp-config"]
     : [];
   // write/full 권한이면 헤드리스에서 권한 프롬프트로 막히지 않도록 MCP 툴을 미리 허용.
-  const allowedToolArgs =
+  const mcpPreAllowed =
     runReq.mcpConfigPath &&
     runReq.mcpAllowedTools &&
     runReq.mcpAllowedTools.length > 0 &&
     ((!runReq.untrustedNoTools && (req.permission === "write" || req.permission === "full")) ||
       hasExactUntrustedMcpGrant)
-      ? ["--allowedTools", runReq.mcpAllowedTools.join(",")]
+      ? runReq.mcpAllowedTools
       : [];
+  /*
+   * ★오너 결정(2026-08-15): 묻는 순간이 없는 헤드리스 실행은 **권한 범위 안의 도구를
+   * 처음부터 풀어 둔다.** `acceptEdits` 는 파일 편집만 자동 허용하고 Bash·웹은 여전히
+   * 물어보는데, `-p` 에는 답할 사람이 없어 런타임이 스스로 거부하고 지나갔다 — 그래서
+   * "파일 편집은 되는데 npm test 만 조용히 안 되는" 실행이 나왔고, 그 뒤에 "다음부터
+   * 허용?" 카드가 떴다. 사용자가 write 를 골랐다는 것은 프로젝트 안에서 일하라는 뜻이지
+   * 셸을 막으라는 뜻이 아니다. 거부를 사후에 알리는 대신 거부가 생길 이유를 없앤다.
+   * read 는 그대로 도구 자체를 제거하고(위 READ_ONLY_DENIED_TOOLS), 정책 거절은 도구
+   * 브로커 PreToolUse 훅이 계속 맡는다 — 허용 깃발은 켜기만 하고 거절은 훅만 한다.
+   */
+  const builtinPreAllowed =
+    !runReq.untrustedNoTools && req.permission === "write" ? WRITE_MODE_PRE_ALLOWED_TOOLS : [];
+  const preAllowedTools = [...builtinPreAllowed, ...mcpPreAllowed];
+  const allowedToolArgs = preAllowedTools.length > 0 ? ["--allowedTools", preAllowedTools.join(",")] : [];
   // ★C38 — 도구 호출 직전 관문. 실측(2026-08-04, claude 2.1.220): PreToolUse deny가
   // `--permission-mode bypassPermissions`를 이기고 Bash 호출을 실제로 막았다. 허용 깃발
   // (`--allowedTools`)은 켜기만 하므로, 선언되지 않은 호출을 거절하는 곳은 여기뿐이다.

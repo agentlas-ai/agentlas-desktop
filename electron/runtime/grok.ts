@@ -356,7 +356,12 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
   if (req.model) args.push("-m", req.model); // grok --help 확인: -m, --model <model>
   if (req.effort) args.push("--effort", req.effort);
   if (!req.untrustedNoTools && req.permission === "full") args.push("--permission-mode", "bypassPermissions");
-  else if (!req.untrustedNoTools && req.permission === "write") args.push("--permission-mode", "acceptEdits");
+  else if (!req.untrustedNoTools && req.permission === "write") {
+    // ★오너 결정(2026-08-15) — 헤드리스는 답할 사람이 없으니 권한 범위 안의 도구는
+    // 처음부터 풀어 둔다(claude 형제 규칙: acceptEdits 는 셸·웹을 여전히 묻는다).
+    // grok --help 실측: `--allow <RULE>` (compat alias: --allowedTools).
+    args.push("--permission-mode", "acceptEdits", "--allow", "Bash", "--allow", "WebFetch", "--allow", "WebSearch");
+  }
 
   const truncate = (s: string, max = 12000): string => (s.length > max ? `${s.slice(0, max)}…` : s);
   const stringify = (v: unknown): string => {

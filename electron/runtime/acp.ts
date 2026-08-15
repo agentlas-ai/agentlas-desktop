@@ -86,6 +86,10 @@ export interface AcpPermissionAsk {
   cwd?: string;
   permission: RunnerRequest["permission"];
   mutating: boolean;
+  /** 이 실행이 붙어 있는 대화 — 승인 카드는 그 대화 안에서만 뜬다(오너 결정 2026-08-15). */
+  chatId?: string;
+  /** 자동화·그래프처럼 답할 사람이 없는 실행 — 묻지 않고 즉시 거부한다. */
+  unattended?: boolean;
 }
 export type AcpPermissionDecision = "allow_once" | "allow_session" | "deny";
 export type AcpPermissionArbiter = (ask: AcpPermissionAsk) => Promise<AcpPermissionDecision>;
@@ -107,7 +111,7 @@ class AcpSessionClient {
     private readonly events: RunnerEvents,
     private readonly permission: RunnerRequest["permission"],
     private readonly locale: "ko" | "en",
-    private readonly approval: { runtime: string; sessionKey: string; cwd?: string } = { runtime: "acp", sessionKey: "acp" },
+    private readonly approval: { runtime: string; sessionKey: string; cwd?: string; chatId?: string; unattended?: boolean } = { runtime: "acp", sessionKey: "acp" },
   ) {}
 
   onUpdate(params: any): void {
@@ -202,6 +206,8 @@ class AcpSessionClient {
           cwd: this.approval.cwd,
           permission: this.permission,
           mutating,
+          chatId: this.approval.chatId,
+          unattended: this.approval.unattended,
         });
       } catch {
         decision = "deny"; // an arbiter failure must never turn into an allow
@@ -377,6 +383,8 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       runtime: spec.id,
       sessionKey: `${spec.id}:${req.sessionFingerprintSeed ?? req.cwd ?? "default"}`,
       cwd,
+      chatId: req.chatId,
+      unattended: req.unattended === true,
     });
     let session: Session | null = null;
     const onAbort = () => { if (session) killCliTree(session.child); };

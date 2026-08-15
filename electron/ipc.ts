@@ -728,6 +728,7 @@ import {
   reconcileAutomationGraph,
 } from "./store/graph-reconciliation";
 import {
+  announceToolDenied,
   listPendingToolApprovals,
   onToolApprovalRequested,
   requestToolApproval,
@@ -3181,15 +3182,58 @@ export function registerIpcHandlers(): void {
    * 결합은 import 가 아니라 주입이다 — acp 런타임은 이 계약 파일을 알지 못하고,
    * 등록되지 않으면 종전의 보수 기본값(read+mutating → 거절)으로 돈다.
    */
-  setAcpPermissionArbiter(async (ask) => (
-    await requestToolApproval({
+  /*
+   * ★오너 결정(2026-08-15) — 승인 카드는 **경계를 넘을 때만, 묻는 순간, 그 대화 안에서**.
+   * 실행에 준 권한 범위 안의 호출은 처음부터 풀어 둔다(묻지 않는다):
+   *   full            → 전부 허용
+   *   write + 변이     → 허용(세션) — 사용자가 write 를 골랐다는 뜻이 그것이다
+   *   비변이(read/search/fetch/think) → 허용
+   *   read + 변이      → 경계를 넘는 요청. 여기만 사용자에게 live 로 묻는다.
+   * 헤드리스 CLI 들은 묻는 순간이 없어 같은 규칙을 spawn 플래그로 미리 준다
+   * (claude/grok acceptEdits+allow, codex workspace-write, agy skip-permissions+sandbox).
+   */
+  /*
+   * 사람이 방금 거부한 것을 같은 실행의 복구 패스가 곧바로 다시 묻지 않게 한다 — One 은
+   * 도구 실패 흔적이 있으면 최대 2번 스스로 재시도하는데(완주 규범), 사용자의 "거부"는
+   * 막힌 단계가 아니라 결정이다. 같은 도구·대상 거부는 짧게(5분) 기억해 조용히 거부한다.
+   * 영구 기억은 아니다 — 다음 요청 때는 다시 묻는다.
+   */
+  const recentUserDenials = new Map<string, number>();
+  const USER_DENIAL_TTL_MS = 5 * 60_000;
+  const denialKey = (ask: { sessionKey: string; tool: string; detail?: string }) => `${ask.sessionKey}\u0000${ask.tool}\u0000${ask.detail ?? ""}`;
+  setAcpPermissionArbiter(async (ask) => {
+    if (ask.permission === "full") return "allow_session";
+    if (!ask.mutating) return "allow_once";
+    if (ask.permission === "write") return "allow_session";
+    const deniedAt = recentUserDenials.get(denialKey(ask));
+    if (deniedAt && Date.now() - deniedAt < USER_DENIAL_TTL_MS) return "deny";
+    /*
+     * 대화가 붙어 있지 않은 실행(자동화/그래프/헤드리스)은 답할 사람이 없다 — 5분을
+     * 매달아 두었다가 거부하는 대신 즉시 거부하고 사실만 남긴다(08-09 결정: 실행 중
+     * 승인 게이트 없음. 승인은 만들 때 한 번).
+     */
+    if (!ask.chatId || ask.unattended) {
+      announceToolDenied({
+        sessionKey: ask.sessionKey,
+        runtime: "acp",
+        tool: ask.tool,
+        detail: ask.detail,
+        cwd: ask.cwd,
+        deniedBy: "runtime-headless",
+      });
+      return "deny";
+    }
+    const outcome = await requestToolApproval({
       sessionKey: ask.sessionKey,
       runtime: "acp",
       tool: ask.tool,
       detail: ask.detail,
       cwd: ask.cwd,
-    })
-  ).decision);
+      chatId: ask.chatId,
+    });
+    if (outcome.decision === "deny") recentUserDenials.set(denialKey(ask), Date.now());
+    return outcome.decision;
+  });
 
   onToolApprovalRequested((request) => {
     for (const window of BrowserWindow.getAllWindows()) {
