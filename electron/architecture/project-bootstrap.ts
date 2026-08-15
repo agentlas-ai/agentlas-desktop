@@ -51,11 +51,12 @@ interface ProjectBootstrapTestHooks {
 }
 
 export function projectBootstrapAccessAllowed(access: ProjectBootstrapAccess): boolean {
-  return (
-    (access.permission === "write" || access.permission === "full") &&
-    access.restrictedReadBoundary !== true &&
-    access.agentAppMode !== true
-  );
+  // `.agentlas` is Agentlas's own workspace, not user content, so a read-scoped
+  // project still gets its map on first contact — a read run needs the map more
+  // than a write run does. The runtime trust boundaries still apply: an agent
+  // app, or a run confined to a restricted read boundary, never seeds a folder.
+  // writableProjectRoot() below still enforces real filesystem writability.
+  return access.restrictedReadBoundary !== true && access.agentAppMode !== true;
 }
 
 function writableProjectRoot(projectPath: string, access: ProjectBootstrapAccess): string {

@@ -1283,6 +1283,27 @@ function rendererInvocationRequest(req: McpInvocationRequest): McpInvocationRequ
 // owns the firmMemberIds filter which prevents a Team's internal workers from
 // appearing again as ordinary upload choices.
 
+/**
+ * Seed a project folder's `.agentlas` (and its code map) off the critical path.
+ *
+ * Project creation returns immediately; a first map build can take tens of
+ * seconds on a large workspace and must never hold the IPC reply. Failures are
+ * logged, not surfaced: the next turn's recordFolderVisit retries anyway.
+ */
+async function seedProjectMapInBackground(folderPath: string, projectName?: string): Promise<void> {
+  try {
+    const { ensureDesktopProjectBootstrap } = await import("./architecture/project-bootstrap");
+    await ensureDesktopProjectBootstrap({
+      projectPath: folderPath,
+      projectName,
+      access: { permission: "full" },
+      reason: "desktop-project-created",
+    });
+  } catch (err) {
+    console.error("[architecture] project map seed failed:", err);
+  }
+}
+
 export function registerIpcHandlers(): void {
   let oneProjectionHostRef: string | null = null;
   const oneTaskProjectionRuntime = createOneTaskProjectionRuntime({
@@ -3173,13 +3194,15 @@ export function registerIpcHandlers(): void {
       );
       if (existing) return existing;
 
-      return createProject({
+      const created = createProject({
         name,
         sourceType: "local",
         sourceRef: null,
         agentPool: input.agentPool ?? [],
         folderPath,
       });
+      void seedProjectMapInBackground(folderPath, name);
+      return created;
     },
   );
   ipcMain.handle("projects:get", (_e, id: string) => getProject(id));
@@ -3195,15 +3218,21 @@ export function registerIpcHandlers(): void {
       sourceType: ProjectSourceType;
       sourceRef?: string | null;
       folderGrant?: FsPathGrant | null;
-    }) =>
-      createProject({
+    }) => {
+      const folderPath = input.folderGrant ? pathFromGrant(input.folderGrant, "directory") : null;
+      const project = createProject({
         name: input.name,
         systemPrompt: input.systemPrompt,
         agentPool: input.agentPool,
         sourceType: input.sourceType,
         sourceRef: input.sourceRef,
-        folderPath: input.folderGrant ? pathFromGrant(input.folderGrant, "directory") : null,
-      }),
+        folderPath,
+      });
+      // Seed .agentlas as soon as the folder is known so the first turn already
+      // has a project map. Runs in the background: creation must not block on it.
+      if (folderPath) void seedProjectMapInBackground(folderPath, input.name);
+      return project;
+    },
   );
   ipcMain.handle(
     "projects:update",

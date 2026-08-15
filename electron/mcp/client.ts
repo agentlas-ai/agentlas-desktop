@@ -96,6 +96,7 @@ import {
 } from "./workforce-goal-continuity";
 import { runSwarmInvocation } from "./swarm-run";
 import { canReadActivatedFolderMemory, recordFolderVisit } from "../architecture/activation";
+import { ensureDesktopProjectBootstrap } from "../architecture/project-bootstrap";
 import { buildMemoryContext } from "../memory/context";
 import {
   ingestWorkingFolderOntologyInBackground,
@@ -2932,17 +2933,34 @@ export async function runMcpInvocation(
   // 워킹 폴더에서 반복 작업하면 그 폴더가 활성화되고, 그때부터 프로젝트 메모리(.agentlas)를
   // 시스템 프롬프트에 주입한다. 폴더가 없거나 아직 활성 전이면 전역 메모리를 주입.
   // 채팅별 폴더가 없으면 프로젝트의 작업 폴더(folderPath)를 기본 cwd로 사용한다.
+  // Seeding the map and activating the folder are separate things. Every first
+  // contact seeds `.agentlas` — the map is Agentlas's own workspace, and a
+  // read-only run is the case that needs it most. Activation is what earns
+  // project-memory injection, so it stays gated on write permission: a read run
+  // gets a map, never someone else's memory.
   let activePath: string | null = null;
-  if (!req.agentAppMode && canWrite && workingFolder) {
+  if (!req.agentAppMode && workingFolder) {
     try {
-      const visit = await recordFolderVisit(workingFolder, undefined, {
-        permission: normalizedPermission,
-        restrictedReadBoundary,
-        agentAppMode: req.agentAppMode,
-      });
-      if (visit.activated) activePath = workingFolder;
+      if (canWrite) {
+        const visit = await recordFolderVisit(workingFolder, undefined, {
+          permission: normalizedPermission,
+          restrictedReadBoundary,
+          agentAppMode: req.agentAppMode,
+        });
+        if (visit.activated) activePath = workingFolder;
+      } else {
+        await ensureDesktopProjectBootstrap({
+          projectPath: workingFolder,
+          access: {
+            permission: normalizedPermission,
+            restrictedReadBoundary,
+            agentAppMode: req.agentAppMode,
+          },
+          reason: "desktop-read-contact",
+        });
+      }
     } catch (err) {
-      console.error("[architecture] recordFolderVisit failed:", err);
+      console.error("[architecture] project map seed failed:", err);
     }
   }
   const memoryReadPath = workingFolder && !suppressMutableProjectContext && (
