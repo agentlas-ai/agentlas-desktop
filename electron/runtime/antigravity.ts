@@ -243,7 +243,20 @@ export function reduceAgyLine(
     /** 승인이 없어 거부된 도구 호출 — 구조 신호로 모은다(문구 판별이 아니다). */
     deniedTools?: { tool: string; detail: string }[];
   },
-): { delta?: string; activity?: string; approvalDenied?: { tool: string; detail: string } } {
+): {
+  delta?: string;
+  activity?: string;
+  approvalDenied?: { tool: string; detail: string };
+  /*
+   * ★agy 가 무슨 도구를 썼는지 — 예전에는 여기서 그냥 버렸다.
+   *
+   * agy 스트림은 step_type:"tool" 과 tool_name 을 그대로 준다. 그런데 러너가 그것을
+   * 화면 이벤트로 올리지 않아, agy 실행은 활동 목록에도 출력 패널에도 아무것도 남기지
+   * 못했다(실측: 도구 이벤트 0건, 다른 런타임은 Write/Bash 가 보인다). 사용자에게는
+   * 일하는 동안 "작업 중" 한 줄만 보인다.
+   */
+  tool?: { name: string; id: string; failed: boolean };
+} {
   let ev: {
     event?: string;
     result?: { status?: string; response?: string };
@@ -299,6 +312,16 @@ export function reduceAgyLine(
       };
       (state.deniedTools ??= []).push(denial);
       return { activity: `denied:${denial.tool}`, approvalDenied: denial };
+    }
+  }
+
+  if (step.step_type === "tool") {
+    const name = step.tool_name || step.tool_info?.name || "";
+    if (name) {
+      return {
+        activity: `tool:${name}`,
+        tool: { name, id: `agy-tool:${name}:${step.state ?? ""}`, failed: step.state === "ERROR" },
+      };
     }
   }
 
@@ -530,6 +553,7 @@ async function runPreparedAntigravity(
       deniedTools?: { tool: string; detail: string }[];
     } = { text: "", inputTokens: 0, outputTokens: 0 };
     const announcedDenials = new Set<string>();
+    const reportedAgyTools = new Set<string>();
     let agyLineBuf = "";
 
     const stdoutDecoder = new StringDecoder("utf8");
@@ -543,6 +567,11 @@ async function runPreparedAntigravity(
       const trimmedLine = line.trim();
       if (!trimmedLine) return;
       const step = reduceAgyLine(trimmedLine, agyState);
+      // 도구 호출을 화면으로 올린다 — 같은 도구가 진행/완료로 두 번 오면 같은 id 로 갱신된다.
+      if (step.tool && !reportedAgyTools.has(step.tool.id)) {
+        reportedAgyTools.add(step.tool.id);
+        events.onTool?.(step.tool.name, undefined, undefined, step.tool.id, step.tool.failed);
+      }
       /*
        * ★막힌 도구는 **즉시** 말한다. 이 실행은 뒤에서 SUCCESS + 빈 응답으로 끝나기 때문에,
        * 여기서 알리지 않으면 사용자는 아무 일도 일어나지 않은 화면만 보게 된다.

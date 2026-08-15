@@ -23,6 +23,7 @@ import type {
   OneActivityState,
 } from "@/lib/one-activity";
 import { buildToolCallDisplay, normalizeToolCall } from "@shared/tool-call-detail";
+import { isCommandTool, isComputerUseTool } from "@shared/tool-taxonomy";
 import type { OnePermissionMode } from "./OneComposerControls";
 import styles from "./OneActivityTimeline.module.css";
 
@@ -223,7 +224,13 @@ function ActivityRow({
       : item.kind === "agent"
         ? (safeAgentName || (locale === "ko" ? "에이전트" : "Agent"))
         : item.kind === "result"
-          ? (locale === "ko" ? "결과 준비됨" : "Result ready")
+          ? item.status === "running"
+            ? (locale === "ko" ? "답변 작성 중" : "Writing answer")
+            : item.answerChars != null
+              ? item.status === "completed"
+                ? (locale === "ko" ? "답변 작성됨" : "Answer written")
+                : (locale === "ko" ? "답변 중단" : "Answer stopped")
+              : (locale === "ko" ? "결과 준비됨" : "Result ready")
           : item.kind === "terminal"
             ? item.status === "cancelled"
               ? (locale === "ko" ? "실행 취소됨" : "Run cancelled")
@@ -239,6 +246,9 @@ function ActivityRow({
     || (item.kind === "agent" ? [safeRole, agentStateLabel(item, locale)].filter(Boolean).join(" · ") : "")
     || (item.kind === "reasoning" && item.durationMs != null ? elapsedLabel(item.durationMs) : "")
     || (item.kind === "run" && item.durationMs != null ? elapsedLabel(item.durationMs) : "")
+    || (item.kind === "result" && item.answerChars != null
+      ? (locale === "ko" ? `${item.answerChars.toLocaleString()}자` : `${item.answerChars.toLocaleString()} chars`)
+      : "")
     || (item.kind === "terminal" ? safeMessage : "");
   const facts = tool?.facts;
   const detail = item.detail || tool?.errorText || (item.tool
@@ -437,8 +447,14 @@ export function OneActivityArtifactRail({
     }
     return [...unique.values()];
   }, [activity?.items, locale]);
-  const processes = activity?.items.filter((item) => item.kind === "tool" && /(?:bash|shell|terminal|exec|command)/i.test(item.tool?.name ?? "")) ?? [];
-  const computerUse = activity?.items.filter((item) => item.kind === "tool" && /(?:computer|browser|screenshot|playwright)/i.test(item.tool?.name ?? "")) ?? [];
+  /*
+   * 분류는 도구 이름의 단어가 아니라 그 도구가 한 일로 한다 — shared/tool-taxonomy.ts.
+   * 단어 매칭은 claude 의 `Bash` 하나만 잡고 codex `bash`(소문자 통과), grok `write`,
+   * agy `write_to_file`, ACP 의 kind 는 전부 놓쳤다. 그래서 이 두 칸은 대부분의
+   * 런타임에서 늘 0 이었다.
+   */
+  const processes = activity?.items.filter((item) => item.kind === "tool" && isCommandTool(item.tool?.name)) ?? [];
+  const computerUse = activity?.items.filter((item) => item.kind === "tool" && isComputerUseTool(item.tool?.name)) ?? [];
   const sources = activity?.sources ?? [];
   const toggleSection = (section: OutputSectionKey) => {
     setCollapsedSections((current) => {

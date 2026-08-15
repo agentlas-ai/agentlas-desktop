@@ -170,6 +170,34 @@ async function main() {
     assert.deepEqual(missing, [], `자식 정산이 빠진 러너: ${missing.join(", ")}`);
   });
 
+  /*
+   * ★도구 호출을 **읽어 놓고** 화면에 올리지 않는 러너가 없어야 한다.
+   *
+   * 실측: antigravity 는 스트림에서 step_type:"tool" 과 tool_name 을 그대로 받고도
+   * onTool 을 부르지 않았다. 그래서 agy 로 돌린 실행은 활동 목록에도 출력 패널에도
+   * 아무것도 남기지 못했고, 사용자에게는 "작업 중" 한 줄만 몇 분씩 보였다 —
+   * 다른 런타임에서는 Write/Bash 가 보이는 자리다.
+   *
+   * 도구를 아예 파싱하지 않는 드라이버(cursor: 설계상 도구 표시가 없어 ACP 로 대체됨)는
+   * 이 계약의 대상이 아니다. 읽은 것을 버리는 것만 잡는다.
+   */
+  await check("★도구를 파싱하는 러너는 그것을 화면에 올린다", () => {
+    const runtimeDir = path.join(root, "electron/runtime");
+    const parsers = fs.readdirSync(runtimeDir)
+      .filter((name) => name.endsWith(".ts"))
+      .map((name) => ({ name, src: fs.readFileSync(path.join(runtimeDir, name), "utf8") }))
+      // 러너만 본다 — 문자열 표나 모델 목록에도 "tool_name" 같은 낱말은 들어 있다.
+      .filter(({ src }) => /RunnerEvents/.test(src))
+      .filter(({ src }) => /tool_name|tool_call|step_type === "tool"|toolCallId/.test(src));
+
+    assert.ok(parsers.length >= 3, `도구를 파싱하는 러너를 ${parsers.length}개만 찾았다 — 탐지가 깨졌다`);
+
+    const silent = parsers
+      .filter(({ src }) => !/onTool\??\.?\(/.test(src))
+      .map(({ name }) => name);
+    assert.deepEqual(silent, [], `도구를 읽고도 화면에 올리지 않는 러너: ${silent.join(", ")}`);
+  });
+
   await check("★심장박동은 종료 경로에서 반드시 멈춘다(타이머 누수 금지)", () => {
     const runtimeDir = path.join(root, "electron/runtime");
     const leaking = fs.readdirSync(runtimeDir)
