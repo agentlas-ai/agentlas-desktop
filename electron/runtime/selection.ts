@@ -27,7 +27,8 @@ import { runOllama } from "./ollama";
 import { runLMStudio } from "./lmstudio";
 import { runMLX } from "./mlx";
 import { acquireRunSlot } from "./run-slots";
-import { acpOrLegacyRunner } from "./acp";
+import { acpOrLegacyRunner, createAcpRunner } from "./acp";
+import { resolveAcpAgentSpec } from "./acp-agents";
 import { acquireLocalInferenceSlot } from "./local-inference-run-slots";
 import type { Runner } from "./runner";
 
@@ -179,6 +180,16 @@ export function pickRunner(active: RuntimeStatus): { runner: Runner; label: stri
     return { runner: bindRuntimeSource(runGrokSlotted, active.source), label: `Grok CLI${active.model ? ` · ${active.model}` : ""}` };
   if (active.kind === "cursor")
     return { runner: bindRuntimeSource(runCursorSlotted, active.source), label: `Cursor Agent${active.model && active.model !== "auto" ? ` · ${active.model}` : " · Auto"}` };
+  if (active.kind === "acp") {
+    // Open seat: the spec (built-in or user profile) is looked up by acpAgentId;
+    // the detected executable travels as runtimeSource so we spawn exactly it.
+    const spec = resolveAcpAgentSpec(active.acpAgentId);
+    if (!spec) return null;
+    return {
+      runner: bindRuntimeSource(withRunSlot(createAcpRunner(spec)), active.source),
+      label: `${active.label ?? spec.label}${active.model ? ` · ${active.model}` : ""}`,
+    };
+  }
   if (active.kind === "ollama")
     return { runner: runOllamaSlotted, label: `Ollama${active.model ? ` · ${active.model}` : ""}` };
   if (active.kind === "lmstudio")
@@ -217,7 +228,7 @@ export function pickRunner(active: RuntimeStatus): { runner: Runner; label: stri
  * different runtime and never acquires a DB-backed concurrency slot. This path
  * is only for tool-free judgment while the operational store is unavailable.
  */
-export function pickRecoveryRunner(selection: Pick<RuntimeStatus, "kind"> & { source?: string }): {
+export function pickRecoveryRunner(selection: Pick<RuntimeStatus, "kind"> & { source?: string; acpAgentId?: string }): {
   runner: Runner;
   label: string;
 } | null {
@@ -232,6 +243,11 @@ export function pickRecoveryRunner(selection: Pick<RuntimeStatus, "kind"> & { so
   if (selection.kind === "kimi") return { runner: bindRuntimeSource(acpOrLegacyRunner("kimi", runKimi), selection.source), label: RUNNER_LABEL.kimi };
   if (selection.kind === "grok") return { runner: bindRuntimeSource(acpOrLegacyRunner("grok", runGrok), selection.source), label: RUNNER_LABEL.grok };
   if (selection.kind === "cursor") return { runner: bindRuntimeSource(acpOrLegacyRunner("cursor", runCursor), selection.source), label: RUNNER_LABEL.cursor };
+  if (selection.kind === "acp") {
+    const spec = resolveAcpAgentSpec(selection.acpAgentId);
+    if (!spec) return null;
+    return { runner: bindRuntimeSource(createAcpRunner(spec), selection.source), label: spec.label };
+  }
   if (selection.kind === "ollama") return { runner: runOllama, label: "Ollama" };
   if (selection.kind === "lmstudio") return { runner: runLMStudio, label: "LM Studio" };
   if (selection.kind === "mlx") return { runner: runMLX, label: "MLX" };

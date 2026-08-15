@@ -86,7 +86,7 @@ function activeRuntimeLabel(runtimes: RuntimeStatus[], ko: boolean): string {
   const model = active.model?.trim();
   const version = active.version && active.version !== "unknown" ? active.version : "";
   const detail = model || version || active.source;
-  return [labels[active.kind] ?? active.kind, detail].filter(Boolean).join(" · ");
+  return [active.label ?? labels[active.kind] ?? active.kind, detail].filter(Boolean).join(" · ");
 }
 
 function updaterItem(state: UpdaterState | null, ko: boolean): ReadinessItem {

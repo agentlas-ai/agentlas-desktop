@@ -31,7 +31,7 @@ const RUNTIME_LABEL: Record<string, string> = {
   grok: "Grok CLI",
   cursor: "Cursor Agent",
 };
-const CLI_RUNTIMES = new Set(["claude-code", "codex", "antigravity", "kimi", "grok", "cursor"]);
+const CLI_RUNTIMES = new Set(["claude-code", "codex", "antigravity", "kimi", "grok", "cursor", "acp"]);
 const OBERON_VIDEO_PROVIDERS = new Set(["grok-cli-video", "google-veo", "kling-video", "seedance-video", "runway-video", "luma-video"]);
 
 export function ModelSettingsPanel({

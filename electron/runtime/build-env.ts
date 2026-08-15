@@ -83,6 +83,8 @@ const BUILD_RUNTIME_ENV_KEYS: Record<RuntimeKind, readonly string[]> = {
   ollama: ["OLLAMA_HOST", "OLLAMA_API_KEY"],
   lmstudio: ["LMSTUDIO_HOST"],
   mlx: ["MLX_HOST"],
+  // ACP agents authenticate through their own login sessions; no vendor keys are forwarded.
+  acp: [],
   // BYOK runners read their one selected key directly from the Main vault and
   // do not need any host environment credential.
   byok: [],

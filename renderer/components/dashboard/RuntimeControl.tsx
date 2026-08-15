@@ -119,7 +119,8 @@ function runtimeLabel(runtime: RuntimeStatus): string {
   if (runtime.kind === "byok") {
     return `${BACKEND_LABEL[runtime.backend] ?? runtime.backend} API`;
   }
-  return RUNTIME_LABEL[runtime.kind] ?? runtime.kind;
+  // kind "acp" carries the agent's own name (RuntimeStatus.label).
+  return runtime.label ?? RUNTIME_LABEL[runtime.kind] ?? runtime.kind;
 }
 
 function runtimeWithSelection(

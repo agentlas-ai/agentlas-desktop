@@ -32,6 +32,8 @@ import type { RuntimeRole } from "../shared/types";
 import { requiredExecutionPermission } from "../shared/graph-node-protocol";
 import { runtimeVersionsWithAutoUpdate } from "./runtime/auto-update";
 import { agentRunCwd } from "./runtime/exec";
+import { setAcpProfileReader } from "./runtime/acp-agents";
+import { sanitizeTerminalProfiles } from "../shared/terminal-profiles";
 import { tryAcquireRuntimeMaintenance } from "./runtime/run-slots";
 import { clearModelCache, listRuntimeModels } from "./runtime/providers";
 import { installCli, openCliLogin, updateCli, type InstallableCli, type ManageableCli } from "./runtime/install-cli";
@@ -2597,6 +2599,14 @@ export function registerIpcHandlers(): void {
   // Paseo식: 각 프로필 = {id, name, template}. template의 {{{prompt}}}가 메시지로
   // 치환돼 CLI로 실행된다. 하드코딩된 claude/codex/antigravity와 달리 사용자가 어떤 CLI든
   // 등록·편집한다. (런타임 dispatch 배선은 후속 — 여기서는 저장/조회만.)
+  // detect() reads ACP-mode profiles through this store-backed reader (electron/runtime/acp-agents.ts).
+  setAcpProfileReader(() => {
+    try {
+      const row = getDb().prepare("SELECT value FROM meta WHERE key = 'terminal_profiles'").get() as { value: string } | undefined;
+      const parsed = row?.value ? JSON.parse(row.value) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch { return []; }
+  });
   ipcMain.handle("config:getTerminalProfiles", () => {
     try {
       const row = getDb().prepare("SELECT value FROM meta WHERE key = 'terminal_profiles'").get() as { value: string } | undefined;
@@ -2606,17 +2616,9 @@ export function registerIpcHandlers(): void {
     } catch { return []; }
   });
   ipcMain.handle("config:setTerminalProfiles", (_e, profiles: unknown) => {
-    // {{{prompt}}} 없는 템플릿은 거부한다 — 없으면 메시지가 어디로 들어갈지 없어 프롬프트가 사라진다.
-    const list = Array.isArray(profiles) ? profiles : [];
-    const safe = list
-      .filter((p): p is Record<string, unknown> => !!p && typeof p === "object")
-      .map((p) => ({
-        id: String(p.id ?? ""),
-        name: String(p.name ?? "").slice(0, 80),
-        template: String(p.template ?? "").slice(0, 2000),
-        enabled: p.enabled !== false,
-      }))
-      .filter((p) => p.id && p.name && p.template.includes("{{{prompt}}}"));
+    // Shape rules live in shared/terminal-profiles.ts (template needs {{{prompt}}};
+    // acp needs a command). Saved acp profiles are detected as kind "acp".
+    const safe = sanitizeTerminalProfiles(profiles);
     getDb().prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('terminal_profiles', ?)").run(JSON.stringify(safe));
     return safe;
   });

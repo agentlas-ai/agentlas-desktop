@@ -1740,7 +1740,7 @@ export function OneShell() {
           : runtime.kind === "antigravity" ? "Antigravity"
             : runtime.kind === "grok" ? "Grok"
               : runtime.kind === "kimi" ? "Kimi"
-                : runtime.backend || runtime.kind;
+                : runtime.label ?? (runtime.backend || runtime.kind);
       return models.map((model) => ({ ...model, runtime, tag: model.tag ?? provider }));
     })).then((groups) => {
       if (!cancelled) setOneModelOptions(groups.flat());

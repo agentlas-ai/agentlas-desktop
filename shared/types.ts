@@ -586,7 +586,14 @@ export type {
   MultimodalSettings,
 } from "./multimodal";
 
-export type RuntimeKind = "claude-code" | "codex" | "antigravity" | "kimi" | "grok" | "cursor" | "byok" | "ollama" | "lmstudio" | "mlx";
+/**
+ * "acp" is the open seat (PRD 2026-08-15 Phase B-1): any agent that speaks the
+ * Agent Client Protocol — built-in specs (OpenCode, Goose, Copilot CLI, …) or a
+ * user-registered TerminalProfile in ACP mode — is detected and dispatched
+ * through the generic ACP runner without a new RuntimeKind per vendor. Which
+ * agent a status row is: `RuntimeStatus.acpAgentId`; display name: `label`.
+ */
+export type RuntimeKind = "claude-code" | "codex" | "antigravity" | "kimi" | "grok" | "cursor" | "byok" | "ollama" | "lmstudio" | "mlx" | "acp";
 export type RuntimeRole = "orchestrator" | "worker";
 
 /**
@@ -598,9 +605,16 @@ export type RuntimeRole = "orchestrator" | "worker";
 export interface TerminalProfile {
   id: string;
   name: string;
-  /** 반드시 `{{{prompt}}}`를 포함(없으면 메시지가 실행 커맨드에 안 들어감). */
+  /** template 모드: 반드시 `{{{prompt}}}`를 포함(없으면 메시지가 실행 커맨드에 안 들어감). acp 모드에서는 비워도 된다. */
   template: string;
   enabled: boolean;
+  /**
+   * "acp": the profile is an Agent Client Protocol agent — `acp.command` +
+   * `acp.args` spawn it, and it shows up in the engine picker as kind "acp"
+   * (PRD 2026-08-15 B-1). Absent/"template" keeps the legacy save-only template.
+   */
+  mode?: "template" | "acp";
+  acp?: { command: string; args: string[] };
 }
 
 /** LLM 제공자. "ollama"/"lmstudio"/"mlx"는 로컬 머신에서 도는 오픈 모델(gemma/deepseek/qwen 등). */
@@ -678,6 +692,10 @@ export interface RuntimeStatus {
   activeRoles?: RuntimeRole[];
   /** Exact per-role model/effort selection, including worker inheritance. */
   roleSelections?: Partial<Record<RuntimeRole, RuntimeSelection>>;
+  /** Display name when the kind alone is not enough (kind "acp": the agent's name). */
+  label?: string;
+  /** kind "acp": which ACP agent spec (built-in id such as "opencode", or "profile:<TerminalProfile.id>"). */
+  acpAgentId?: string;
   /** ollama·BYOK 활성 모델 이름. 모델 개념 없는 LLM은 미설정 */
   model?: string | null;
   /** ollama가 로컬에 받아둔 모델 목록 (설정 화면의 모델 선택용). 그 외 LLM은 미설정 */

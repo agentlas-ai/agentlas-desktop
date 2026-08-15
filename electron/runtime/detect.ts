@@ -7,6 +7,7 @@ import { summarizeDiscovery, unsupportedDiscovery, type DiscoveryOutcome } from 
 import { reportDiscoveryLoudly } from "./model-discovery-store";
 import { registerProbeModels } from "./model-catalog";
 import { ACP_AGENTS, acpDisabledFor, probeAcpModelsCached } from "./acp";
+import { listAcpKindSpecs, resolveAcpCommand } from "./acp-agents";
 import { probeAntigravity } from "./antigravity";
 import { probeKimi } from "./kimi";
 import { probeGrok } from "./grok";
@@ -564,6 +565,36 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       availableModels: mlx.models,
       ...conservativeLocalRuntimeAllocation(mlx.models),
     });
+  }
+  // kind "acp" — the open seat (PRD 2026-08-15 B-1): built-in ACP agents without a
+  // dedicated kind (OpenCode, Goose, Copilot CLI) plus user profiles in ACP mode.
+  // Presence = the command exists; models = ACP session/new (cached 10 min).
+  // Detection is best-effort per spec: one broken agent never hides the others.
+  for (const spec of listAcpKindSpecs()) {
+    try {
+      const found = await resolveAcpCommand(spec);
+      if (!found) continue;
+      const discovery = acpDisabledFor("acp")
+        ? unsupportedDiscovery("acp-disabled", "acp")
+        : await probeAcpModelsCached(spec, { command: found.path });
+      const acpModels = discovery.models;
+      const remembered = cliModelOf("acp", active, acpModels, "custom");
+      list.push({
+        kind: "acp",
+        backend: "custom",
+        source: found.path,
+        version: found.version ?? "unknown",
+        active: false,
+        label: spec.label,
+        acpAgentId: spec.id,
+        ...(acpModels.length > 0
+          ? { model: remembered ?? acpModels[0], availableModels: acpModels, allocationModels: acpModels }
+          : {}),
+        modelDiscovery: discoveryOf(`acp:${spec.id}`, discovery),
+      });
+    } catch (err) {
+      console.warn(`[detect] acp agent ${spec.id} skipped: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
   if (anthropicByok) {
     const selectedModel = byokModelOf("anthropic", active);

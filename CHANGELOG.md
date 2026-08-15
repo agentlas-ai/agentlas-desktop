@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- New engine kind "acp" — the open seat (Phase B-1). Any agent that speaks the
+  Agent Client Protocol shows up in the engine picker without a release:
+  built-in specs (OpenCode, Goose, GitHub Copilot CLI) when installed, and any
+  Terminal profile saved in the new ACP mode (Settings → Terminal profiles →
+  command + args, seven presets). Models come from the agent's ACP session/new.
 - Model discovery has a contract: every runtime probe returns `ok /
   unsupported / failed` (`RuntimeStatus.modelDiscovery`). Non-empty CLI output
   that parses to zero models is a loud `failed` (yield regression), never an

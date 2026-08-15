@@ -2469,6 +2469,22 @@ const TP_PRESETS: Array<{ name: string; template: string }> = [
   { name: "Antigravity", template: "agy --prompt {{{prompt}}}" },
 ];
 
+// ACP(Agent Client Protocol) 프리셋 — 실행 명령은 agentclientprotocol/registry(2026-08-15) 실물 기준.
+// 이 모드의 프로필은 저장 즉시 엔진 선택에 kind "acp"로 나타난다(PRD 2026-08-15 B-1).
+const TP_ACP_PRESETS: Array<{ name: string; command: string; args: string[] }> = [
+  { name: "OpenCode", command: "opencode", args: ["acp"] },
+  { name: "Goose", command: "goose", args: ["acp"] },
+  { name: "GitHub Copilot CLI", command: "npx", args: ["-y", "@github/copilot@1.0.80", "--acp"] },
+  { name: "Qwen Code", command: "npx", args: ["-y", "@qwen-code/qwen-code@0.21.12", "--acp", "--experimental-skills"] },
+  { name: "Kilo Code", command: "npx", args: ["-y", "@kilocode/cli@7.4.22", "acp"] },
+  { name: "Cline", command: "npx", args: ["-y", "cline@3.0.55", "--acp"] },
+  { name: "Gemini CLI (enterprise)", command: "gemini", args: ["--acp"] },
+];
+
+function splitArgs(text: string): string[] {
+  return text.trim() ? text.trim().split(/\s+/) : [];
+}
+
 function TerminalProfilesPanel() {
   const { locale } = useT();
   const ko = locale === "ko";
@@ -2494,20 +2510,28 @@ function TerminalProfilesPanel() {
 
   function startAdd() {
     setErr("");
-    setEditing({ id: `tp-${crypto.randomUUID()}`, name: "", template: "", enabled: true });
+    setEditing({ id: `tp-${crypto.randomUUID()}`, name: "", template: "", enabled: true, mode: "acp", acp: { command: "", args: [] } });
   }
   async function saveEditing() {
     if (!editing) return;
     const name = editing.name.trim();
     const template = editing.template.trim();
+    const isAcp = editing.mode === "acp";
     if (!name) { setErr(ko ? "이름을 입력하세요." : "Enter a name."); return; }
-    if (!template.includes("{{{prompt}}}")) {
+    if (isAcp) {
+      if (!editing.acp?.command?.trim()) {
+        setErr(ko ? "ACP 실행 명령을 입력하세요 (예: opencode)." : "Enter the ACP command (e.g. opencode).");
+        return;
+      }
+    } else if (!template.includes("{{{prompt}}}")) {
       setErr(ko
         ? "명령 템플릿에 {{{prompt}}} 를 반드시 포함하세요 — 메시지가 들어갈 자리입니다."
         : "The command template must contain {{{prompt}}} — that is where the message goes.");
       return;
     }
-    const cleaned: TerminalProfile = { ...editing, name, template };
+    const cleaned: TerminalProfile = isAcp
+      ? { ...editing, name, template, mode: "acp", acp: { command: editing.acp!.command.trim(), args: editing.acp?.args ?? [] } }
+      : { ...editing, name, template, mode: "template" };
     const exists = list.some((p) => p.id === cleaned.id);
     const next = exists ? list.map((p) => (p.id === cleaned.id ? cleaned : p)) : [...list, cleaned];
     await persist(next);
@@ -2548,8 +2572,8 @@ function TerminalProfilesPanel() {
       </p>
       <p style={{ fontSize: 11, color: "var(--muted-deep)", margin: "0 0 12px", opacity: 0.85 }}>
         {ko
-          ? "※ 지금은 프로필 저장까지 지원합니다. 저장한 프로필을 엔진 선택에서 실행 러너로 쓰는 배선은 준비 중입니다."
-          : "※ For now profiles are saved here. Wiring saved profiles as selectable execution runners is in progress."}
+          ? "※ ACP 모드 프로필은 저장 즉시 엔진 선택에 나타나 실제 실행 러너가 됩니다(도구 호출·사고 신호 표준 표시). 명령 템플릿 모드는 아직 저장만 지원합니다."
+          : "※ ACP-mode profiles become real execution runners as soon as they are saved (standard tool-call and thinking signals). Command-template mode is still save-only."}
       </p>
 
       <div style={{ border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", background: "var(--paper)", overflow: "hidden" }}>
@@ -2573,7 +2597,9 @@ function TerminalProfilesPanel() {
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>{p.name}</div>
-              <code style={{ fontSize: 11.5, color: "var(--muted-deep)", fontFamily: "var(--font-mono, monospace)", wordBreak: "break-all" }}>{p.template}</code>
+              <code style={{ fontSize: 11.5, color: "var(--muted-deep)", fontFamily: "var(--font-mono, monospace)", wordBreak: "break-all" }}>
+                {p.mode === "acp" ? `ACP · ${[p.acp?.command ?? "", ...(p.acp?.args ?? [])].join(" ")}` : p.template}
+              </code>
             </div>
             <button type="button" onClick={() => void toggle(p.id)}
               style={chip(p.enabled ? "var(--fill-1)" : "var(--paper-2)", p.enabled ? "var(--accent)" : "var(--muted-deep)")}>
@@ -2597,20 +2623,63 @@ function TerminalProfilesPanel() {
                   onChange={(e) => setEditing({ ...editing, name: e.target.value })}
                   style={{ ...inputStyle, marginTop: 5 }} />
               </label>
-              <label style={{ fontSize: 11, fontWeight: 700, color: "var(--muted-deep)" }}>
-                {ko ? "명령 템플릿" : "Command template"}
-                <input value={editing.template} placeholder="claude {{{prompt}}}" spellCheck={false}
-                  onChange={(e) => setEditing({ ...editing, template: e.target.value })}
-                  style={{ ...inputStyle, marginTop: 5, fontFamily: "var(--font-mono, monospace)" }} />
-              </label>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-                <span style={{ fontSize: 11, color: "var(--muted-deep)" }}>{ko ? "예시:" : "Presets:"}</span>
-                {TP_PRESETS.map((preset) => (
-                  <button key={preset.name} type="button"
-                    onClick={() => setEditing({ ...editing, name: editing.name || preset.name, template: preset.template })}
-                    style={chip("var(--paper)", "var(--ink-soft)")}>{preset.name}</button>
-                ))}
+              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <span style={{ fontSize: 11, fontWeight: 700, color: "var(--muted-deep)" }}>{ko ? "모드" : "Mode"}</span>
+                <button type="button" onClick={() => setEditing({ ...editing, mode: "acp", acp: editing.acp ?? { command: "", args: [] } })}
+                  style={chip(editing.mode === "acp" ? "var(--fill-1)" : "var(--paper)", editing.mode === "acp" ? "var(--accent)" : "var(--ink-soft)")}>
+                  {ko ? "ACP 에이전트 (권장)" : "ACP agent (recommended)"}
+                </button>
+                <button type="button" onClick={() => setEditing({ ...editing, mode: "template" })}
+                  style={chip(editing.mode !== "acp" ? "var(--fill-1)" : "var(--paper)", editing.mode !== "acp" ? "var(--accent)" : "var(--ink-soft)")}>
+                  {ko ? "명령 템플릿" : "Command template"}
+                </button>
               </div>
+              {editing.mode === "acp" ? (
+                <>
+                  <label style={{ fontSize: 11, fontWeight: 700, color: "var(--muted-deep)" }}>
+                    {ko ? "실행 명령" : "Command"}
+                    <input value={editing.acp?.command ?? ""} placeholder="opencode" spellCheck={false}
+                      onChange={(e) => setEditing({ ...editing, acp: { command: e.target.value, args: editing.acp?.args ?? [] } })}
+                      style={{ ...inputStyle, marginTop: 5, fontFamily: "var(--font-mono, monospace)" }} />
+                  </label>
+                  <label style={{ fontSize: 11, fontWeight: 700, color: "var(--muted-deep)" }}>
+                    {ko ? "인자 (공백 구분)" : "Arguments (space separated)"}
+                    <input value={(editing.acp?.args ?? []).join(" ")} placeholder="acp" spellCheck={false}
+                      onChange={(e) => setEditing({ ...editing, acp: { command: editing.acp?.command ?? "", args: splitArgs(e.target.value) } })}
+                      style={{ ...inputStyle, marginTop: 5, fontFamily: "var(--font-mono, monospace)" }} />
+                  </label>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                    <span style={{ fontSize: 11, color: "var(--muted-deep)" }}>{ko ? "예시:" : "Presets:"}</span>
+                    {TP_ACP_PRESETS.map((preset) => (
+                      <button key={preset.name} type="button"
+                        onClick={() => setEditing({ ...editing, name: editing.name || preset.name, mode: "acp", acp: { command: preset.command, args: preset.args } })}
+                        style={chip("var(--paper)", "var(--ink-soft)")}>{preset.name}</button>
+                    ))}
+                  </div>
+                  <p style={{ fontSize: 11, color: "var(--muted-deep)", margin: 0, lineHeight: 1.5 }}>
+                    {ko
+                      ? "에이전트 자체 로그인 세션을 그대로 씁니다(키를 새로 받지 않음). 저장 후 엔진 선택 목록에 이 이름으로 나타나며, 모델 목록은 에이전트가 ACP로 직접 알려줍니다."
+                      : "Uses the agent's own login session (no new keys). After saving it appears under this name in the engine picker; the model list comes from the agent over ACP."}
+                  </p>
+                </>
+              ) : (
+                <>
+                  <label style={{ fontSize: 11, fontWeight: 700, color: "var(--muted-deep)" }}>
+                    {ko ? "명령 템플릿" : "Command template"}
+                    <input value={editing.template} placeholder="claude {{{prompt}}}" spellCheck={false}
+                      onChange={(e) => setEditing({ ...editing, template: e.target.value })}
+                      style={{ ...inputStyle, marginTop: 5, fontFamily: "var(--font-mono, monospace)" }} />
+                  </label>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                    <span style={{ fontSize: 11, color: "var(--muted-deep)" }}>{ko ? "예시:" : "Presets:"}</span>
+                    {TP_PRESETS.map((preset) => (
+                      <button key={preset.name} type="button"
+                        onClick={() => setEditing({ ...editing, name: editing.name || preset.name, template: preset.template })}
+                        style={chip("var(--paper)", "var(--ink-soft)")}>{preset.name}</button>
+                    ))}
+                  </div>
+                </>
+              )}
               {err && <div style={{ fontSize: 11.5, color: "var(--red-deep, #b4533a)" }}>{err}</div>}
               <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
                 <button type="button" onClick={() => { setEditing(null); setErr(""); }} style={chip("var(--paper)", "var(--muted-deep)")}>

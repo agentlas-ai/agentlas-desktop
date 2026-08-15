@@ -202,6 +202,7 @@ export const CONTEXT_MANAGED_BY: Record<RuntimeKind, "runtime" | "agentlas"> = {
   ollama: "agentlas",
   lmstudio: "agentlas",
   mlx: "agentlas",
+  acp: "runtime",
 };
 
 // ── CLI 런타임 모델 선택 ──────────────────────────────────
