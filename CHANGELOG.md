@@ -56,6 +56,42 @@
   They made file(1) classify those files as binary, so every grep-based check
   skipped them silently — including the file holding the reported defect.
 - Account-revealing absolute paths and already corrupted bytes are still hidden.
+- Stops One conversations from bleeding into each other. Leaving a running
+  conversation and coming back showed both threads merged under the newer
+  title, because the thread loader skipped its history fetch whenever the chat
+  had a live run attached — a fact about the run, not about what was on screen.
+  It now skips only when the screen is already showing that conversation.
+- Pictures pasted into One stay. They arrived twice (the clipboard exposes the
+  same file two ways and each read mints a new object, so deduping by identity
+  never matched), never appeared in the thread once sent (One's message model
+  had no place for an attachment, and a picture-only turn was dropped
+  entirely), and were never stored — the only caller passing images to the
+  database was the mobile bridge.
+- Antigravity writes into the folder you are working in. The spawn directory
+  and the registered workspace were computed separately with different
+  fallbacks, so a run started without a project passed no workspace at all and
+  the agent fell back to its own scratch directory while reporting success.
+- Read-only means read-only for Claude Code. Asked to create a file on a read
+  run it simply created it, while Codex, Antigravity and Grok all refused; read
+  passed no arguments at all on the assumption that a headless session
+  auto-denies. It now removes the tools that can change things, and says so in
+  the session instead of letting the model spend minutes looking for a way
+  around a limit nobody explained.
+- A spent quota is no longer reported as an authentication problem, and an ACP
+  agent's real reason survives: agents put it in the error's `data` while
+  `message` holds the generic JSON-RPC wording, so a missing provider read as
+  "Internal error" and nothing else.
+- The blocked-tool card names the command, appears once, and its "allow next
+  time" actually stores the grant.
+- Antigravity reports its tool calls. The stream carries them and the runner
+  read them and threw them away, so those runs showed one "Working" line for
+  minutes with an empty output panel. Tool sections are now sorted by what a
+  tool did rather than by words in its name, which is why they were empty for
+  every runtime except Claude Code.
+- Answers can contain diagrams and math. ```mermaid blocks render as pictures
+  and `$…$` / `$$…$$` as equations, both loaded only when they appear. A
+  diagram that fails to draw falls back to its source, and prices like "$100"
+  are not mistaken for math.
 - Binds Agentlas OS v1.2.5 at
   54ec54ef8b08810668c11f506bd22015a3e71294.
 - Source readiness does not prove a published installer or update feed; the
