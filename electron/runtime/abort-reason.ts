@@ -1,4 +1,5 @@
 import { tStatus } from "./status-i18n";
+import { STOPPED_BY_USER } from "./invocation-lifecycle";
 
 /**
  * 왜 멈췄는지를 **끊은 쪽이 실은 말**로 전한다.
@@ -17,6 +18,17 @@ import { tStatus } from "./status-i18n";
  */
 export function abortReasonError(req: { signal?: AbortSignal; locale?: unknown }): Error {
   const reason = req.signal?.reason;
+  /*
+   * ★"사용자가 멈췄다"는 표식은 사람 문장으로 바꿔서 내보낸다.
+   *
+   * 중지 요청은 사유를 표식(STOPPED_BY_USER)으로 싣는다 — 기계가 분기할 수 있어야
+   * 하기 때문이다. 그 표식이 그대로 화면에 가면 그것대로 읽을 수 없는 문장이 되므로,
+   * 사람에게 나가는 마지막 자리인 여기서 로케일 문구로 바꾼다. 표식을 안 쓰면 DOM 이
+   * 넣는 기본 사유("This operation was aborted")가 대신 흘러가 실패처럼 보인다.
+   */
+  if (reason instanceof Error && reason.message === STOPPED_BY_USER) {
+    return new Error(tStatus(req.locale as never, "aborted"));
+  }
   if (reason instanceof Error && reason.message.trim()) return reason;
   if (typeof reason === "string" && reason.trim()) return new Error(reason);
   return new Error(tStatus(req.locale as never, "aborted"));

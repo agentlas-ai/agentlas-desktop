@@ -198,6 +198,22 @@ async function main() {
     assert.deepEqual(silent, [], `도구를 읽고도 화면에 올리지 않는 러너: ${silent.join(", ")}`);
   });
 
+  /*
+   * ★사용자가 누른 중지는 실패가 아니다 — 그 사실이 화면까지 가야 한다.
+   *
+   * 실측: 인자 없이 abort() 하면 신호에 DOM 기본 사유가 실리고, 화면에 영어 문구
+   * "This operation was aborted" 가 오류로 떴다. 사용자는 자기가 멈춘 것을 실패로 본다.
+   */
+  await check("★중지는 사유를 싣고, 표식은 사람 문장으로 나간다", () => {
+    const lifecycle = fs.readFileSync(path.join(root, "electron/runtime/invocation-lifecycle.ts"), "utf8");
+    assert.match(lifecycle, /STOPPED_BY_USER/, "중지 사유 표식이 없다");
+    assert.ok(!/controller\.abort\(\)/.test(lifecycle), "abort 에 사유를 넘기지 않는다 — DOM 기본 문구가 화면으로 간다");
+
+    const abortReason = fs.readFileSync(path.join(root, "electron/runtime/abort-reason.ts"), "utf8");
+    assert.match(abortReason, /STOPPED_BY_USER/, "표식을 알아보지 못한다");
+    assert.match(abortReason, /tStatus\(/, "표식을 로케일 문장으로 바꾸지 않는다 — 기계 문자열이 화면에 뜬다");
+  });
+
   await check("★심장박동은 종료 경로에서 반드시 멈춘다(타이머 누수 금지)", () => {
     const runtimeDir = path.join(root, "electron/runtime");
     const leaking = fs.readdirSync(runtimeDir)

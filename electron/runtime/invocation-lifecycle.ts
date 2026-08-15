@@ -13,6 +13,12 @@ import { assertInvocationChatAvailable } from "./run-id";
  * settles. Removing it when AbortController.abort() is called would let a
  * retry start while the old CLI/MCP process tree is still shutting down.
  */
+/**
+ * 사용자가 멈췄다는 사실 자체를 사유로 쓴다. 로케일별 문장은 화면 층에서 고르되,
+ * 표식이 되도록 기계가 알아볼 수 있는 형태를 유지한다.
+ */
+export const STOPPED_BY_USER = "stopped_by_user";
+
 export interface InvocationLifecycleRecord {
   controller: AbortController;
   chatId: string;
@@ -70,7 +76,15 @@ export class InvocationLifecycleRegistry<T extends InvocationLifecycleRecord> {
     if (!record) return "not-found";
     if (record.cancelRequestedAt || record.controller.signal.aborted) return "already-requested";
     record.cancelRequestedAt = at;
-    record.controller.abort();
+    /*
+     * ★왜 멈췄는지 사유를 함께 넘긴다.
+     *
+     * 인자 없이 abort() 하면 신호에는 DOM 기본 사유("This operation was aborted")만
+     * 남고, 그 문장이 그대로 화면까지 갔다 — 영어 기계 문구인 데다 실패처럼 보인다.
+     * 사용자가 누른 중지는 실패가 아니고, 그 사실은 지어낼 필요 없이 여기서 이미 안다.
+     * 러너들은 abortReasonError() 로 signal.reason 을 먼저 읽으므로 이 문장이 쓰인다.
+     */
+    record.controller.abort(new Error(STOPPED_BY_USER));
     return "requested";
   }
 
