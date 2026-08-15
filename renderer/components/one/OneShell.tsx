@@ -249,6 +249,16 @@ type UiMessage = {
   role: "user" | "assistant" | "system";
   text: string;
   streaming?: boolean;
+  /*
+   * ★첨부는 대화의 일부다 — 보내고 나면 사라지던 것을 남긴다.
+   *
+   * 이 모델에는 첨부가 들어갈 자리 자체가 없었다. 그래서 사진을 붙여 보내면 작성 중
+   * 미리보기만 잠깐 보이고, 보내는 순간 화면에서 사라졌다(Work 쪽 ChatStream 은
+   * 예전부터 그렸다). 텍스트 없이 사진만 보낸 턴은 아예 렌더 조건에 걸려 통째로
+   * 없어졌다.
+   */
+  images?: string[];
+  files?: Array<{ name: string; kind: "image" | "file" }>;
 };
 
 const ONE_SEQUENCE_STEP_RE = /(?:^|\s)(?:ONE-SESSION-QA-[\w-]+\s*\/\s*)?0*(\d{1,3})\s*\/\s*(\d{1,3})(?:\s*(?:작업|task))?(?=\s*(?:[.:—-]|$))/i;
@@ -442,6 +452,7 @@ function toUiMessages(history: ChatHistoryEntry[]): UiMessage[] {
       id: entry.id,
       role: entry.role === "assistant" ? "assistant" : entry.role,
       text: entry.text,
+      images: entry.imageDataUrls?.length ? entry.imageDataUrls : undefined,
     });
   }
   return visible;
@@ -2522,7 +2533,14 @@ export function OneShell() {
       setReceipt(null);
       setMessages((current) => [
         ...current.filter((item) => item.id !== "one-live-response"),
-        { id: preflightId, role: "user", text: value },
+        {
+          id: preflightId,
+          role: "user",
+          text: value,
+          // 보낸 즉시 대화에 남는다 — 미리보기가 사라지고 텍스트만 남던 자리.
+          images: attachmentSnapshot.filter((a) => a.kind === "image" && a.previewUrl).map((a) => a.previewUrl as string),
+          files: attachmentSnapshot.map((a) => ({ name: a.name, kind: a.kind })),
+        },
       ]);
       setSubmissionBusy(true);
     });
@@ -3961,7 +3979,9 @@ export function OneShell() {
                         ? narrativeResultMessage.text
                         : visibleOneMessageText(message);
                     const showActivityBefore = message.id === activityAnchorMessageId;
-                    if (!visibleText && !showActivityBefore) return null;
+                    // 첨부만 있는 턴도 대화다 — 텍스트가 없다고 버리면 사진을 보낸 사실 자체가 사라진다.
+                    const hasAttachments = (message.images?.length ?? 0) > 0 || (message.files?.length ?? 0) > 0;
+                    if (!visibleText && !showActivityBefore && !hasAttachments) return null;
                     return (
                       <Fragment key={message.id}>
                         {showActivityBefore && (
@@ -3974,14 +3994,29 @@ export function OneShell() {
                             locale={appLocale}
                           />
                         )}
-                        {visibleText && (
+                        {(visibleText || hasAttachments) && (
                           <article
                             className={styles.message}
                             data-role={message.role}
                             data-kind={isResultContinuationMessage(message) ? "continuity" : undefined}
                           >
                             <div className={styles.messageBody}>
-                              {message.streaming ? <StreamingMarkdown text={visibleText} messageId={message.id} /> : <Markdown text={visibleText} messageId={message.id} />}
+                              {message.images && message.images.length > 0 && (
+                                <div className={styles.messageImages}>
+                                  {message.images.map((src, i) => (
+                                    // eslint-disable-next-line @next/next/no-img-element
+                                    <img key={`${message.id}-img-${i}`} src={src} alt="" className={styles.messageImage} />
+                                  ))}
+                                </div>
+                              )}
+                              {message.files && message.files.filter((f) => f.kind !== "image").length > 0 && (
+                                <div className={styles.messageFiles}>
+                                  {message.files.filter((f) => f.kind !== "image").map((f, i) => (
+                                    <span key={`${message.id}-file-${i}`} className={styles.messageFileChip}>{f.name}</span>
+                                  ))}
+                                </div>
+                              )}
+                              {visibleText && (message.streaming ? <StreamingMarkdown text={visibleText} messageId={message.id} /> : <Markdown text={visibleText} messageId={message.id} />)}
                             </div>
                           </article>
                         )}
@@ -4344,12 +4379,22 @@ export function OneShell() {
                   const clipboard = event.clipboardData;
                   if (!clipboard) return;
                   const files: File[] = [];
-                  const seen = new Set<File>();
+                  /*
+                   * ★같은 파일을 두 목록에서 받는다 — 중복은 신원이 아니라 내용으로 판단한다.
+                   *
+                   * clipboard.files 와 clipboard.items[].getAsFile() 은 같은 스크린샷을
+                   * 가리키지만, getAsFile() 은 호출할 때마다 **새 File 객체**를 만든다.
+                   * 그래서 객체 신원으로 거르면 한 번도 걸리지 않고, 붙여넣은 사진이 늘
+                   * 두 장이 된다.
+                   */
+                  const seen = new Set<string>();
+                  const identityOf = (file: File) => `${file.name}|${file.size}|${file.type}|${file.lastModified}`;
                   const add = (file: File | null) => {
-                    if (file && !seen.has(file)) {
-                      seen.add(file);
-                      files.push(file);
-                    }
+                    if (!file) return;
+                    const id = identityOf(file);
+                    if (seen.has(id)) return;
+                    seen.add(id);
+                    files.push(file);
                   };
                   for (const file of Array.from(clipboard.files)) add(file);
                   for (const item of Array.from(clipboard.items)) {

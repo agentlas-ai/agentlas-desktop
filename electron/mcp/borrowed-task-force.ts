@@ -3709,7 +3709,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     if (systemAuthored) {
       appendChatMessage(p.chat.id, "system", p.req.userPrompt);
     } else {
-      appendChatMessage(p.chat.id, "user", p.req.userPrompt);
+      appendChatMessage(p.chat.id, "user", p.req.userPrompt, p.req.images?.length ? { images: p.req.images } : undefined);
       if (history.length === 0) autoTitleFromFirstMessage(p.chat.id, p.req.userPrompt);
     }
   }

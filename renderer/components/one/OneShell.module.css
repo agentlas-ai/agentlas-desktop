@@ -2210,3 +2210,48 @@
   .body, .rail { transition: none; }
   .taskHeader { backdrop-filter: none; }
 }
+
+/*
+ * 대화에 남는 첨부 — 붙여 보낸 사진이 보내는 순간 사라지던 자리.
+ * 그리드로 두는 이유는 한 턴에 여러 장을 붙이는 일이 흔하기 때문이고, 원본 비율을
+ * 유지하되 화면을 잡아먹지 않도록 높이를 묶는다.
+ */
+.messageImages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.messageImage {
+  max-width: min(320px, 100%);
+  max-height: 240px;
+  width: auto;
+  height: auto;
+  border-radius: 10px;
+  border: 1px solid var(--one-border, rgba(0, 0, 0, 0.08));
+  object-fit: contain;
+  background: var(--one-surface-muted, rgba(0, 0, 0, 0.03));
+}
+
+.messageFiles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.messageFileChip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--one-border, rgba(0, 0, 0, 0.08));
+  background: var(--one-surface-muted, rgba(0, 0, 0, 0.03));
+  font-size: 12px;
+  line-height: 1.5;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

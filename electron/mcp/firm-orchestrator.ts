@@ -861,7 +861,8 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
     if (systemAuthored) {
       appendChatMessage(chat.id, "system", req.userPrompt);
     } else {
-      appendChatMessage(chat.id, "user", req.userPrompt);
+      // 첨부도 그 사람의 턴이다 — client.ts 의 같은 자리 주석 참고.
+      appendChatMessage(chat.id, "user", req.userPrompt, req.images?.length ? { images: req.images } : undefined);
       if (history.length === 0) autoTitleFromFirstMessage(chat.id, req.userPrompt);
     }
   }

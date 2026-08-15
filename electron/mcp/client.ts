@@ -1325,7 +1325,13 @@ export async function runMcpInvocation(
     if (promptIsSystemAuthored) {
       appendChatMessage(chat.id, "system", req.userPrompt);
     } else {
-      appendChatMessage(chat.id, "user", req.userPrompt);
+      /*
+       * ★붙인 사진은 그 사람의 턴의 일부다 — 텍스트만 저장하면 대화를 다시 열었을 때
+       * 사진이 사라진다. 저장 배관(persistChatMessageImages)은 예전부터 있었는데
+       * 데스크탑 경로에서 이 인자를 넘기지 않아, 실제로 그것을 쓰는 곳은 모바일
+       * 브리지 하나뿐이었다.
+       */
+      appendChatMessage(chat.id, "user", req.userPrompt, req.images?.length ? { images: req.images } : undefined);
       if (priorHistory.length === 0) autoTitleFromFirstMessage(chat.id, req.userPrompt);
     }
     userMessagePersisted = true;
