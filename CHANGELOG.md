@@ -4,6 +4,9 @@
 
 ## 1.0.17 — 2026-08-16
 
+- This is the first published build after 1.0.15: the 1.0.16 section below
+  existed in source only and was never published, so everything listed there
+  ships in this release too.
 - This release binds Agentlas OS v1.2.6 at 80e62ef7e23f4ea577b54c53e91723edd903ef23
   (project map reaches the agent and grows from work; runtime registry, ACP
   client, `agentlas-one uninstall`, drift status). Behaviour change from the
@@ -54,7 +57,7 @@
   `session/new`.
 
 
-## 1.0.16 — 2026-08-15
+## 1.0.16 — 2026-08-15 (source only — never published; shipped in 1.0.17)
 
 - Stops the final display layer from deleting shell code blocks. A command the
   user was told to run no longer disappears from Work while the same text sits
