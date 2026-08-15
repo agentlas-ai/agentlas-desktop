@@ -10421,3 +10421,25 @@ button[data-toggle-state="on"] {
   background: var(--paper-2);
   color: var(--ink);
 }
+
+/*
+ * 다이어그램·수식이 대화 폭을 넘지 않게. 둘 다 원래 크기를 고집하는 편이라
+ * 좁은 창에서 옆으로 밀어내는 대신 자기 영역 안에서만 스크롤하게 둔다.
+ */
+.agentlas-mermaid svg {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+.agentlas-math-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* KaTeX 기본 글자색은 상속이라, 어두운 배경에서도 본문색을 따르게 고정한다. */
+.agentlas-math-inline .katex,
+.agentlas-math-display .katex {
+  color: inherit;
+  font-size: 1.05em;
+}

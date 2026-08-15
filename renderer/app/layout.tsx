@@ -1,5 +1,8 @@
 import type { Metadata } from "next";
 import "./globals.css";
+// 수식 스타일 — KaTeX 는 자체 CSS 와 폰트가 있어야 글자가 제자리에 선다. 앱과 함께
+// 번들되므로 네트워크가 없어도 그대로 그려진다(Electron 오프라인 전제).
+import "katex/dist/katex.min.css";
 import { I18nProvider } from "@/lib/i18n";
 import { ThemeProvider } from "@/lib/theme";
 import { AuthGate } from "@/components/AuthGate";

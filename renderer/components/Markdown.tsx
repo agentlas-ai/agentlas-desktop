@@ -7,6 +7,8 @@
 // 의도적으로 단순 — HTML 태그는 모두 escape, 사용자 입력 출처 X (LLM 출력만)이지만 안전 우선.
 "use client";
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { MermaidBlock } from "./MermaidBlock";
+import { MathSpan } from "./MathSpan";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { splitStreamingSegments, type SegmentCache } from "@shared/streaming-segments";
@@ -183,6 +185,7 @@ export function StreamingMarkdown({
 type TableAlign = "left" | "center" | "right" | "default";
 type Block =
   | { type: "code"; lang: string; code: string; id: string }
+  | { type: "math"; tex: string }
   | { type: "h1" | "h2" | "h3"; text: string }
   | { type: "ul" | "ol"; items: string[] }
   | { type: "quote"; text: string }
@@ -217,6 +220,32 @@ function parseBlocks(input: string, messageId: string): Block[] {
         id: `${messageId}-c${codeIdx++}`,
       });
       continue;
+    }
+
+    /*
+     * 블록 수식 `$$ ... $$`. 코드 펜스 **다음에** 본다 — 코드블록 안의 $$ 는 수식이
+     * 아니라 코드이기 때문이다. 닫는 $$ 가 아직 안 왔으면(스트리밍 중) 수식으로 삼지
+     * 않고 평범한 문단으로 흘려보낸다.
+     */
+    const oneLineMath = line.match(/^\s*\$\$(.+?)\$\$\s*$/);
+    if (oneLineMath) {
+      out.push({ type: "math", tex: oneLineMath[1].trim() });
+      i++;
+      continue;
+    }
+    if (/^\s*\$\$\s*$/.test(line)) {
+      const texLines: string[] = [];
+      let j = i + 1;
+      while (j < lines.length && !/^\s*\$\$\s*$/.test(lines[j])) {
+        texLines.push(lines[j]);
+        j++;
+      }
+      if (j < lines.length) {
+        out.push({ type: "math", tex: texLines.join("\n") });
+        i = j + 1;
+        continue;
+      }
+      // 닫히지 않았다 — 아래 일반 처리로 넘긴다.
     }
 
     // GFM 테이블 — 헤더 + 구분자 + 1개 이상의 본문 행.
@@ -285,14 +314,18 @@ function parseBlocks(input: string, messageId: string): Block[] {
       continue;
     }
 
-    // 일반 단락 — 연속된 비어있지 않은 줄을 모음
+    // 일반 단락 — 연속된 비어있지 않은 줄을 모음.
+    // 줄바꿈은 보존한다. CommonMark의 소프트브레이크(=공백) 규칙을 따랐더니
+    // "한 줄에 하나씩 세라"는 답이 "Grape 1 Grape 2 Grape 3 …" 한 덩어리로
+    // 벽처럼 흘렀다 — 채팅 답변에서 모델이 낸 개행은 의도다. Codex/Claude 웹 UI
+    // 모두 단일 개행을 줄바꿈으로 그린다. 렌더 쪽(case "p")이 "\n"마다 줄을 나눈다.
     const buf: string[] = [line];
     i++;
     while (i < lines.length && lines[i].trim() !== "" && !isBlockStart(lines[i])) {
       buf.push(lines[i]);
       i++;
     }
-    out.push({ type: "p", text: buf.join(" ") });
+    out.push({ type: "p", text: buf.join("\n") });
   }
   return out;
 }
@@ -361,7 +394,20 @@ function renderBlock(
   mediaBasePaths: string[] = [],
 ) {
   switch (b.type) {
+    case "math":
+      return <MathSpan key={i} tex={b.tex} display />;
     case "code":
+      // ```mermaid 는 코드가 아니라 그림으로 보여준다. 그리지 못하면(문법 오류·스트리밍
+      // 중간·미지원 종류) 원래의 코드블록이 그대로 남는다 — 내용을 잃지 않는다.
+      if (b.lang.trim().toLowerCase() === "mermaid") {
+        return (
+          <MermaidBlock
+            key={i}
+            code={b.code}
+            fallback={<CodeBlock block={b} onOpen={onOpenArtifact} t={t} />}
+          />
+        );
+      }
       return <CodeBlock key={i} block={b} onOpen={onOpenArtifact} t={t} />;
     case "h1":
       return (
@@ -449,12 +495,20 @@ function renderBlock(
           ))}
         </blockquote>
       );
-    case "p":
+    case "p": {
+      // 파서가 보존한 개행마다 줄을 나눈다 (blockquote와 동일한 규칙).
+      const lines = b.text.split("\n");
       return (
         <p key={i} style={{ margin: "6px 0" }}>
-          {inline(b.text, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
+          {lines.map((line, j) => (
+            <span key={j}>
+              {inline(line, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
+              {j < lines.length - 1 ? <br /> : null}
+            </span>
+          ))}
         </p>
       );
+    }
   }
 }
 
@@ -725,6 +779,30 @@ function inline(
         render: (m) => renderInlineImage(key++, m[1].trim(), imageNameFromSrc(m[1], mediaBasePaths), onOpenMedia, mediaBasePaths),
       },
       {
+        /*
+         * 인라인 수식 `$...$`. 인라인 코드보다 **뒤에** 둘 수 없어(먼저 매칭돼야 코드 안의
+         * $ 가 보호된다) 여기 두되, 판정을 좁게 한다:
+         *   - 여는 $ 뒤와 닫는 $ 앞에 공백이 없어야 한다
+         *   - 안에 개행이 없어야 한다
+         *   - 수식에 쓰이는 글자(\ ^ _ { } 등)나 숫자·연산자가 하나는 있어야 한다
+         * 이 제약이 없으면 "$100 에서 $200 으로" 같은 평범한 문장이 통째로 수식이 된다.
+         * 실제로 그 오탐이 금액을 지워 버리는 쪽이 수식을 못 그리는 것보다 나쁘다.
+         */
+        regex: /^\$(?!\s)((?:[^$\n]|\\\$){1,200}?)(?<!\s)\$(?!\d)/,
+        render: (m) => {
+          const tex = m[1];
+          const body = tex.trim();
+          const looksMath =
+            // 연산자·중괄호·백슬래시 명령이 있으면 수식이다.
+            /[\\^_{}=+\-*/<>]|\\[a-zA-Z]+/.test(body)
+            // 짧은 변수 하나도 수식이다($m$, $x_1$ 이전 형태, 그리스 문자 포함).
+            // 숫자로 시작하는 것은 제외한다 — 그쪽은 거의 항상 금액이다.
+            || /^[A-Za-z\u0370-\u03FF][A-Za-z0-9\u0370-\u03FF]{0,2}$/.test(body);
+          if (!looksMath) return <span key={key++}>{`$${tex}$`}</span>;
+          return <MathSpan key={key++} tex={tex} display={false} />;
+        },
+      },
+      {
         regex: /^`([^`]+)`/,
         render: (m) => {
           const codeText = m[1].trim();
@@ -783,8 +861,14 @@ function inline(
     }
     if (matched) continue;
 
-    // 다음 특수 문자 위치 (! 는 이미지 ![]() 시작용)
-    const next = remaining.search(/file:|[`*![\/]|(?:^|[\s(])(?:\.{1,2}\/)?[A-Za-z0-9_. -]+(?:\/[^\s`'"<>)]*)?\.(?:png|jpe?g|gif|webp|avif|svg)/i);
+    /*
+     * 다음 특수 문자 위치 (! 는 이미지 ![]() 시작용, $ 는 수식).
+     *
+     * ★여기에 문자를 빠뜨리면 그 문법은 **영영 매칭되지 않는다.** 위 matcher 목록에
+     * 수식을 추가하고도 화면에 안 나왔던 이유가 이것이다: 커서가 `$` 로 점프하지 못해
+     * matcher 가 시험조차 되지 않았다. 목록과 점프표는 함께 움직여야 한다.
+     */
+    const next = remaining.search(/file:|[`*![\/$]|(?:^|[\s(])(?:\.{1,2}\/)?[A-Za-z0-9_. -]+(?:\/[^\s`'"<>)]*)?\.(?:png|jpe?g|gif|webp|avif|svg)/i);
     if (next < 0) {
       out.push(remaining);
       break;
