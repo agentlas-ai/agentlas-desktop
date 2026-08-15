@@ -14,6 +14,7 @@ import type {
   RuntimeKind,
   RuntimeSelection,
 } from "../../shared/types";
+import { isRuntimeKind as isSharedRuntimeKind } from "../../shared/runtime-kinds";
 import { createHash, randomUUID } from "node:crypto";
 import {
   canonicalJsonValue,
@@ -1550,11 +1551,7 @@ export async function runGraph(
    */
   // 런타임 종류는 닫힌 열거형이다. 모르는 값을 그대로 넘기면 런타임 해석이
   // 어디선가 조용히 기본값으로 떨어진다 — 여기서 막는다.
-  const RUNTIME_KINDS: readonly RuntimeKind[] = [
-    "claude-code", "codex", "antigravity", "kimi", "grok", "cursor", "byok", "ollama", "lmstudio", "mlx",
-  ];
-  const isRuntimeKind = (value: string): value is RuntimeKind =>
-    (RUNTIME_KINDS as readonly string[]).includes(value);
+  const isRuntimeKind = (value: string): value is RuntimeKind => isSharedRuntimeKind(value);
 
   const runtimeSelectionForNode = (node: WorkflowNode): RuntimeSelection | undefined => {
     const base = automation.runtimeSelection ?? undefined;

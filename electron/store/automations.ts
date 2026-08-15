@@ -6,6 +6,7 @@
 // 반환하며(null=미래 발생 없음 → 종료), markAutomationRun은 misfire coalesce 정책 + run_history
 // 기록 + max_runs/end_at 종료를 적용한다. graph_json/schedule_json/timezone은 additive.
 import { judgedComputerUse } from "../system-agents/judged-tool-mode";
+import { RUNTIME_KINDS as SHARED_RUNTIME_KINDS } from "../../shared/runtime-kinds";
 import { createHash, randomUUID } from "node:crypto";
 import type { GraphJournalKindGenerated } from "../../shared/graph-vocabulary.generated";
 import { hostname } from "node:os";
@@ -121,9 +122,7 @@ function normalizeExecutionPermission(value: unknown): AutomationExecutionPermis
   return value == null ? "write" : "read";
 }
 
-const RUNTIME_KINDS = new Set([
-  "claude-code", "codex", "antigravity", "kimi", "grok", "cursor", "byok", "ollama", "lmstudio", "mlx",
-]);
+const RUNTIME_KINDS = new Set<string>(SHARED_RUNTIME_KINDS);
 const RUNTIME_BACKENDS = new Set([
   "anthropic", "openai", "google", "ollama", "lmstudio", "mlx", "upstage", "custom", "glm",
   "kimi", "deepseek", "minimax", "xai", "openrouter", "cursor",

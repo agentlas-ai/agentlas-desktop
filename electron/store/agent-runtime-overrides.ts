@@ -1,4 +1,5 @@
 import { getDb } from "./db";
+import { RUNTIME_KINDS } from "../../shared/runtime-kinds";
 import type {
   AgentRuntimeOverride,
   AgentRuntimeOverrideScope,
@@ -28,7 +29,8 @@ export interface RuntimeOverrideTarget {
 }
 
 const VALID_SCOPES = new Set<AgentRuntimeOverrideScope>(["agent", "firm", "division"]);
-const VALID_KINDS = new Set<RuntimeKind>(["claude-code", "codex", "antigravity", "kimi", "byok", "ollama"]);
+// Every kind the picker can offer may be pinned per agent (was a stale six-kind list).
+const VALID_KINDS = new Set<RuntimeKind>(RUNTIME_KINDS);
 
 function cleanText(value: string | null | undefined): string | null {
   const trimmed = value?.trim();

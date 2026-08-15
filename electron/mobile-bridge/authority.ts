@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { RUNTIME_KINDS } from "../../shared/runtime-kinds";
 import {
   extractBuildInterviewQuestions,
   isCompletedBuildTurn,
@@ -188,18 +189,7 @@ const BUILD_SUMMARY_MAX_BYTES = 2_000;
 const BUILD_RUN_HISTORY_LIMIT = 64;
 const BUILD_HISTORY_ENTRY_MAX_BYTES = 16_000;
 const BUILD_HISTORY_MAX_ENTRIES = 32;
-const MOBILE_RUNTIME_KINDS = [
-  "claude-code",
-  "codex",
-  "antigravity",
-  "kimi",
-  "grok",
-  "cursor",
-  "byok",
-  "ollama",
-  "lmstudio",
-  "mlx",
-] as const;
+const MOBILE_RUNTIME_KINDS = RUNTIME_KINDS;
 const MOBILE_RUNTIME_BACKENDS = [
   "anthropic",
   "openai",

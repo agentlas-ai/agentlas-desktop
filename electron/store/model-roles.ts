@@ -4,6 +4,7 @@ import type {
   RuntimeRole,
   RuntimeSelection,
 } from "../../shared/types";
+import { RUNTIME_KINDS } from "../../shared/runtime-kinds";
 import { getDb } from "./db";
 
 interface ModelRoleRow {
@@ -62,18 +63,7 @@ interface ModelRoleMemberRow {
 }
 
 const VALID_ROLES = new Set<RuntimeRole>(["orchestrator", "worker"]);
-const VALID_KINDS = new Set<RuntimeKind>([
-  "claude-code",
-  "codex",
-  "antigravity",
-  "kimi",
-  "grok",
-  "cursor",
-  "byok",
-  "ollama",
-  "lmstudio",
-  "mlx",
-]);
+const VALID_KINDS = new Set<RuntimeKind>(RUNTIME_KINDS);
 
 function cleanText(value: string | null | undefined): string | null {
   const trimmed = value?.trim();

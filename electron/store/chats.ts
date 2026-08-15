@@ -2,6 +2,7 @@
 // 사이드바 "최근 채팅" 섹션은 listRecent로 채운다.
 // 프로젝트 페이지는 listByProject로, 회사 페이지는 listByFirm으로 채운다.
 import { randomUUID } from "node:crypto";
+import { RUNTIME_KINDS } from "../../shared/runtime-kinds";
 import { getDb } from "./db";
 import { emitDesktopStoreChange } from "./change-bus";
 import { getFirm } from "./firms";
@@ -43,18 +44,7 @@ interface ChatRow {
   runtime_selection_json: string | null;
 }
 
-const CHAT_RUNTIME_KINDS = new Set<RuntimeKind>([
-  "claude-code",
-  "codex",
-  "antigravity",
-  "kimi",
-  "grok",
-  "cursor",
-  "byok",
-  "ollama",
-  "lmstudio",
-  "mlx",
-]);
+const CHAT_RUNTIME_KINDS = new Set<RuntimeKind>(RUNTIME_KINDS);
 
 const CHAT_RUNTIME_BACKENDS = new Set<RuntimeBackend>([
   "anthropic",

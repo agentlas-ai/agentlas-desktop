@@ -35,6 +35,8 @@ export interface DiscoveryOutcome {
   stale?: boolean;
   /** ISO timestamp of the discovery (or of the last-good run when stale). */
   at?: string;
+  /** The runtime's own current/default model when it reports one (ACP configOptions currentValue). */
+  defaultModel?: string;
 }
 
 /** Runtime status summary carried on RuntimeStatus.modelDiscovery (IPC-safe subset). */

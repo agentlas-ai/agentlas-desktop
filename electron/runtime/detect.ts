@@ -456,7 +456,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       active: false,
       ...(kimiModels.length > 0
         ? {
-            model: cliModelOf("kimi", active, kimiModels, "kimi"),
+            model: cliModelOf("kimi", active, kimiModels, "kimi") ?? kimiDiscovery.defaultModel,
             availableModels: kimiModels,
             allocationModels: kimiModels,
           }
@@ -579,6 +579,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
         : await probeAcpModelsCached(spec, { command: found.path });
       const acpModels = discovery.models;
       const remembered = cliModelOf("acp", active, acpModels, "custom");
+      const agentDefault = discovery.defaultModel && acpModels.includes(discovery.defaultModel) ? discovery.defaultModel : undefined;
       list.push({
         kind: "acp",
         backend: "custom",
@@ -588,7 +589,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
         label: spec.label,
         acpAgentId: spec.id,
         ...(acpModels.length > 0
-          ? { model: remembered ?? acpModels[0], availableModels: acpModels, allocationModels: acpModels }
+          ? { model: remembered ?? agentDefault ?? acpModels[0], availableModels: acpModels, allocationModels: acpModels }
           : {}),
         modelDiscovery: discoveryOf(`acp:${spec.id}`, discovery),
       });
