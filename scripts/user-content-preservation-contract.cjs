@@ -149,9 +149,14 @@ check("★claude 런타임이 승인 차단을 사용자에게 고지한다", ()
   const src = fs.readFileSync(path.join(root, "electron/runtime/claude-code.ts"), "utf8");
   assert.match(src, /detectApprovalRequired/, "승인 감지를 부르지 않는다");
   assert.match(src, /approval-required/, "고지에 식별 코드가 없다");
-  // tool_result 처리 지점 둘 다에 붙어야 한다 — 한쪽만 붙으면 이벤트 모양에 따라 샌다.
-  const hooks = (src.match(/announceApprovalBlock\(result\)/g) ?? []).length;
-  assert.ok(hooks >= 2, `tool_result 처리 ${hooks}곳에만 붙었다(2곳 필요)`);
+  /*
+   * tool_result 처리 지점 둘 다에 붙어야 한다 — 한쪽만 붙으면 이벤트 모양에 따라 샌다.
+   * ★인자까지 못박으면 안 된다: 호출에 인자를 하나 더한 것만으로 이 검사가 0을 세고
+   *   실패했다. 계약은 "두 지점 모두에서 부른다"이지 "이렇게 부른다"가 아니다.
+   */
+  // 선언은 `const … = (` 라 이 패턴에 걸리지 않는다 — 세는 것은 호출뿐이다.
+  const hooks = (src.match(/announceApprovalBlock\(/g) ?? []).length;
+  assert.ok(hooks >= 2, `승인 고지 호출이 ${hooks}곳뿐이다 — tool_result 는 assistant·user 두 경로로 온다`);
 });
 
 // 5. 승인 프로토콜 — 런타임이 말하는 승인을 화면이 받는가
