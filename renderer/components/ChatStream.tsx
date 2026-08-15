@@ -3181,6 +3181,7 @@ function toolGroupOf(detail: ToolCallDetail): ToolGroup {
     case "write":
       return "edit";
     case "search":
+    case "list":
       return "search";
     case "fetch":
       return "command";

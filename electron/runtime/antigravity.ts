@@ -255,7 +255,16 @@ export function reduceAgyLine(
    * 못했다(실측: 도구 이벤트 0건, 다른 런타임은 Write/Bash 가 보인다). 사용자에게는
    * 일하는 동안 "작업 중" 한 줄만 보인다.
    */
-  tool?: { name: string; id: string; failed: boolean };
+  tool?: {
+    name: string;
+    id: string;
+    failed: boolean;
+    /** JSON of `tool_info.parameters` — 실측 1.1.13: list_dir {DirectoryPath}, view_file 등. */
+    args?: string;
+    /** `tool_info.output` — DONE 스텝에만 온다. */
+    result?: string;
+    done: boolean;
+  };
 } {
   let ev: {
     event?: string;
@@ -263,7 +272,12 @@ export function reduceAgyLine(
     step_update?: {
       step_type?: string; text_delta?: string; state?: string;
       tool_name?: string;
-      tool_info?: { name?: string; error?: { type?: string; message?: string } };
+      tool_info?: {
+        name?: string;
+        parameters?: unknown;
+        output?: unknown;
+        error?: { type?: string; message?: string };
+      };
       usage?: { input_tokens?: number; output_tokens?: number };
     };
   };
@@ -318,9 +332,35 @@ export function reduceAgyLine(
   if (step.step_type === "tool") {
     const name = step.tool_name || step.tool_info?.name || "";
     if (name) {
+      /*
+       * ★인자와 출력을 버리지 않는다(2026-08-15 실측). 예전엔 이름만 올려서 화면 행이
+       * "list_dir"뿐이었다 — 어느 폴더를 봤는지, 무엇이 나왔는지 없이. agy 스트림은
+       * ACTIVE에 parameters, DONE에 parameters+output을 준다. 같은 도구 호출의 ACTIVE→DONE은
+       * step_index로 이어진다(같은 id로 갱신되게 index를 id에 넣는다).
+       */
+      const params = step.tool_info?.parameters;
+      const output = step.tool_info?.output;
+      const stringify = (value: unknown): string | undefined => {
+        if (value === undefined || value === null) return undefined;
+        if (typeof value === "string") return value;
+        try {
+          return JSON.stringify(value);
+        } catch {
+          return String(value);
+        }
+      };
+      const stepIndex = (ev.step_update as { step_index?: unknown } | undefined)?.step_index;
+      const done = step.state === "DONE" || step.state === "ERROR";
       return {
         activity: `tool:${name}`,
-        tool: { name, id: `agy-tool:${name}:${step.state ?? ""}`, failed: step.state === "ERROR" },
+        tool: {
+          name,
+          id: `agy-tool:${name}:${typeof stepIndex === "number" ? stepIndex : (step.state ?? "")}`,
+          failed: step.state === "ERROR",
+          args: stringify(params),
+          result: done ? (stringify(output) ?? (step.state === "ERROR" ? (step.tool_info?.error?.message ?? "error") : "")) : undefined,
+          done,
+        },
       };
     }
   }
@@ -567,10 +607,14 @@ async function runPreparedAntigravity(
       const trimmedLine = line.trim();
       if (!trimmedLine) return;
       const step = reduceAgyLine(trimmedLine, agyState);
-      // 도구 호출을 화면으로 올린다 — 같은 도구가 진행/완료로 두 번 오면 같은 id 로 갱신된다.
-      if (step.tool && !reportedAgyTools.has(step.tool.id)) {
-        reportedAgyTools.add(step.tool.id);
-        events.onTool?.(step.tool.name, undefined, undefined, step.tool.id, step.tool.failed);
+      // 도구 호출을 화면으로 올린다 — 같은 도구가 진행(ACTIVE)/완료(DONE)로 두 번 오면 같은
+      // id 로 갱신된다(ACTIVE 1회 + DONE 1회만 올린다; 반복 ACTIVE는 무시).
+      if (step.tool) {
+        const key = `${step.tool.id}:${step.tool.done ? "done" : "active"}`;
+        if (!reportedAgyTools.has(key)) {
+          reportedAgyTools.add(key);
+          events.onTool?.(step.tool.name, step.tool.args, step.tool.result, step.tool.id, step.tool.failed);
+        }
       }
       /*
        * ★막힌 도구는 **즉시** 말한다. 이 실행은 뒤에서 SUCCESS + 빈 응답으로 끝나기 때문에,

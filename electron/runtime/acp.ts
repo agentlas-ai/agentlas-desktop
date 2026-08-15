@@ -132,6 +132,10 @@ class AcpSessionClient {
           this.thinkingStartedAt = Date.now();
           this.events.onThinking?.("start");
         }
+        // 생각 텍스트는 자기 행으로 — 본문(partial)에 섞지 않는다. Gemini CLI는
+        // "**주제**\n\n본문" 꼴로 오므로 첫 줄이 곧 진행 헤드라인이 된다.
+        const thought = textOf(update.content);
+        if (thought) this.events.onThinking?.("delta", undefined, thought);
         break;
       }
       case "plan": {

@@ -457,6 +457,13 @@ function runCodexProcess(
         // reasoning 구간 신호 — 상태줄 "생각 중…" 회전의 근거 (Claude 경로와 동일 계약).
         openThinking();
       } else if (ev.type === "item.completed" && ev.item?.type === "reasoning") {
+        // reasoning summary 아이템 — `-c model_reasoning_summary=auto`로 켠다(실측 0.147:
+        // 켜지 않으면 이 아이템이 아예 안 온다). text는 모델이 낸 헤드라인
+        // ("**Counting files in current directory**") — 화면의 진행 헤드라인이자
+        // 펼쳤을 때의 생각 요약. 사고 원문이 아니라 요약이므로 그대로 흘린다.
+        openThinking();
+        const summary = nonEmptyText(ev.item.text);
+        if (summary) events.onThinking?.("delta", undefined, summary.endsWith("\n") ? summary : `${summary}\n`);
         closeThinking();
       } else if (
         ev.type === "item.completed" &&
@@ -668,6 +675,10 @@ export const runCodex: Runner = async (
   // 앱이 모델을 갖고 있으면 그 모델이 반드시 이긴다. 없으면 기기 설정을 따른다(BYOM 존중).
   // `--model`/`-c`는 `exec`와 `exec resume` 둘 다 지원 확인됨(0.133+).
   const modelArgs: string[] = [];
+  // reasoning summary 아이템을 켠다 — 실측(codex 0.147): 이 설정 없이는 `--json`에
+  // reasoning 아이템이 0건이라 화면이 "생각 중" 외에 아무것도 말할 수 없었다. 켜면
+  // 모델이 낸 헤드라인("**Preparing file count command execution**")이 아이템으로 온다.
+  modelArgs.push("-c", "model_reasoning_summary=auto");
   let appliedEffort: string | null = null;
   if (runReq.model) modelArgs.push("--model", runReq.model);
   // 모델 캐시의 exact profile을 실행 시점에도 다시 검증한다. 최신 Codex 모델은 max를

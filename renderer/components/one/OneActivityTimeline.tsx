@@ -324,7 +324,16 @@ export function OneActivityTimeline({
   // made long runs impossible to audit. The rows container owns bounded
   // scrolling instead of deleting evidence from the UI.
   const visible = useMemo(() => {
-    if (busy) return state.items;
+    if (busy) {
+      // The lifecycle row's live label is the generic "Working". While a
+      // specific row (tool, thought, answer) is already running, that generic
+      // line is a second spinner saying nothing — drop it until it settles
+      // and can report the run duration.
+      const specificRunning = state.items.some((item) => item.kind !== "run" && item.status === "running");
+      return specificRunning
+        ? state.items.filter((item) => !(item.kind === "run" && item.status === "running"))
+        : state.items;
+    }
     // The lifecycle row starts first but completes last. Keeping it at array
     // position zero made settled Activity read "Completed" before "Thought",
     // reversing the visible causal order. Terminal run summary belongs last.
@@ -481,7 +490,7 @@ export function OneActivityArtifactRail({
         </div>
       </header>
       <div className={styles.artifactList}>
-        <OutputDisclosure section="files" label={locale === "ko" ? "파일 또는 사이트" : "Files or sites"} count={items.length} expanded={sectionExpanded("files")} onToggle={toggleSection}>
+        <OutputDisclosure section="files" label={locale === "ko" ? "결과물" : "Artifacts"} count={items.length} expanded={sectionExpanded("files")} onToggle={toggleSection}>
           {items.length === 0 && <p className={styles.artifactEmpty}>{locale === "ko" ? "만든 파일 또는 사이트가 여기에 표시됩니다" : "Files or sites you create appear here"}</p>}
           {items.map((item) => (
             <button key={item.id} type="button" className={styles.artifact} onClick={() => void openArtifact(item)} title={item.label}>

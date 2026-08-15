@@ -983,9 +983,9 @@
 }
 
 .message[data-role="user"] .messageBody {
-  padding: 11px 15px;
-  border-radius: 16px 16px 4px 16px;
-  background: #f1f2f3;
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: #f2f3f4;
   color: #272a2d;
 }
 
@@ -994,6 +994,15 @@
   border-left: 3px solid #bd5c50;
   background: #fbf4f2;
   color: #873f36;
+}
+
+/* A prompt One sent on the person's behalf ("One continued the remaining
+   steps") — a quiet meta line in the thread, never an alert bar or a bubble. */
+.systemTurn {
+  margin: 0;
+  color: #7c8186;
+  font-size: 12.5px;
+  line-height: 1.5;
 }
 
 .message[data-kind="continuity"] .messageBody {

@@ -22,6 +22,7 @@
 export type ToolCallKind =
   | "shell"
   | "read"
+  | "list"
   | "edit"
   | "write"
   | "search"
@@ -41,6 +42,8 @@ export interface ToolCallDiffStat {
 export type ToolCallDetail =
   | { type: "shell"; command: string; cwd?: string; output?: string; exitCode?: number | null }
   | { type: "read"; filePath: string; lines?: number }
+  /** 디렉터리 나열 — Codex의 "List path" 줄. 검색(글롭)과 다르다: 질의가 없다. */
+  | { type: "list"; path: string }
   | { type: "edit"; filePath: string; unifiedDiff?: string; diffStat?: ToolCallDiffStat }
   | { type: "write"; filePath: string; bytes?: number }
   | {
@@ -241,7 +244,7 @@ export function normalizeToolCall(input: NormalizeToolCallInput): ToolCallDetail
   }
 
   // ── 편집/쓰기 ─────────────────────────────────────────────────────────
-  if (/^(edit|multiedit|str_replace|str_replace_editor|apply_patch|replace)$/.test(name) || name.includes("edit_file")) {
+  if (/^(edit|multiedit|str_replace|str_replace_editor|apply_patch|replace|replace_file_content|multi_replace_file_content)$/.test(name) || name.includes("edit_file")) {
     const filePath = pickString(args, FILE_KEYS) ?? "";
     const unifiedDiff = pickString(args, DIFF_KEYS);
     const diffStat =
@@ -257,7 +260,7 @@ export function normalizeToolCall(input: NormalizeToolCallInput): ToolCallDetail
       ...(diffStat ? { diffStat } : {}),
     };
   }
-  if (/^(write|create_file|write_file|notebookedit|notebook_edit)$/.test(name)) {
+  if (/^(write|create_file|write_file|write_to_file|notebookedit|notebook_edit)$/.test(name)) {
     const filePath = pickString(args, FILE_KEYS) ?? "";
     const content = pickString(args, CONTENT_KEYS);
     return {
@@ -268,7 +271,7 @@ export function normalizeToolCall(input: NormalizeToolCallInput): ToolCallDetail
   }
 
   // ── 읽기 ──────────────────────────────────────────────────────────────
-  if (/^(read|read_file|view|cat|open_file)$/.test(name)) {
+  if (/^(read|read_file|view|view_file|view_code_item|view_file_outline|cat|open_file|read_many_files)$/.test(name)) {
     const filePath = pickString(args, FILE_KEYS) ?? "";
     const lines = pickNumber(args, ["limit", "num_lines", "lines"]);
     return {
@@ -294,7 +297,7 @@ export function normalizeToolCall(input: NormalizeToolCallInput): ToolCallDetail
   }
 
   // ── 검색 ──────────────────────────────────────────────────────────────
-  if (/^(grep|search|search_files|ripgrep|rg|codebase_search)$/.test(name)) {
+  if (/^(grep|grep_search|search|search_files|search_file_content|ripgrep|rg|codebase_search)$/.test(name)) {
     const counts = searchCountsFromResult(result);
     return {
       type: "search",
@@ -304,7 +307,11 @@ export function normalizeToolCall(input: NormalizeToolCallInput): ToolCallDetail
       ...counts,
     };
   }
-  if (/^(glob|find|list_files|file_search|ls)$/.test(name)) {
+  if (/^(ls|list_dir|list_directory|dir)$/.test(name)) {
+    const path = pickString(args, [...FILE_KEYS, "DirectoryPath", "directory_path", "directoryPath", "dir", "directory"]) ?? "";
+    return { type: "list", path: stripCwdPrefix(path, input.cwd) };
+  }
+  if (/^(glob|find|find_by_name|list_files|file_search)$/.test(name)) {
     const counts = searchCountsFromResult(result);
     return {
       type: "search",
@@ -313,12 +320,12 @@ export function normalizeToolCall(input: NormalizeToolCallInput): ToolCallDetail
       ...(counts.numFiles !== undefined ? { numFiles: counts.numFiles } : {}),
     };
   }
-  if (name.includes("web_search") || name === "websearch" || name.includes("brave") || name.includes("google_search")) {
+  if (name.includes("web_search") || name === "websearch" || name === "search_web" || name.includes("brave") || name.includes("google_search")) {
     return { type: "search", query: pickString(args, QUERY_KEYS) ?? "", mode: "web" };
   }
 
   // ── 네트워크 ──────────────────────────────────────────────────────────
-  if (/^(webfetch|fetch|http_request|curl|web_fetch)$/.test(name)) {
+  if (/^(webfetch|fetch|http_request|curl|web_fetch|read_url_content|url_fetch)$/.test(name)) {
     const url = pickString(args, URL_KEYS) ?? "";
     const statusCode = pickNumber(args, ["status", "status_code", "code"]);
     return {
@@ -399,6 +406,7 @@ function humanizeToolName(name: string): string {
 const DISPLAY_NAMES: Record<string, { ko: string; en: string }> = {
   shell: { ko: "실행", en: "Shell" },
   read: { ko: "읽기", en: "Read" },
+  list: { ko: "목록", en: "List" },
   edit: { ko: "편집", en: "Edit" },
   write: { ko: "작성", en: "Write" },
   search: { ko: "검색", en: "Search" },
@@ -434,6 +442,8 @@ export function buildToolCallDisplay(input: {
       };
     case "read":
       return { displayName: named("read"), summary: detail.filePath, ...(errorText ? { errorText } : {}) };
+    case "list":
+      return { displayName: named("list"), summary: detail.path, ...(errorText ? { errorText } : {}) };
     case "edit": {
       const stat = detail.diffStat;
       return {
@@ -540,6 +550,7 @@ export function summarizeToolRun(details: readonly ToolCallDetail[]): ToolRunSum
         commandCount += 1;
         break;
       case "search":
+      case "list":
         searchCount += 1;
         break;
       case "fetch":

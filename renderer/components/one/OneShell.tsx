@@ -126,7 +126,7 @@ import { ProductModeMenu } from "./ProductModeMenu";
 import { OneBottomSheet } from "./OneBottomSheet";
 import { OneAutomationSheet } from "./OneAutomationSheet";
 import { OneUseCaseChips, type OneUseCaseChipAction } from "./OneUseCaseChips";
-import { OneAdaptiveResult, oneSurfaceNeedsDedicatedResult } from "./OneAdaptiveResult";
+import { OneAdaptiveResult } from "./OneAdaptiveResult";
 import { OneActivation } from "./OneActivation";
 import { OneFeatureIntro } from "./OneFeatureIntro";
 import { OneMemorySheet } from "./OneMemorySheet";
@@ -136,7 +136,10 @@ import { OneProfileSheet } from "./OneProfileSheet";
 import { OneProjectSessionSheet } from "./OneProjectSessionSheet";
 import { OneSuggestionCard } from "./OneSuggestionCard";
 import { OneGrowthCard } from "./OneGrowthCard";
-import { OneActivityArtifactRail, OneActivityTimeline } from "./OneActivityTimeline";
+import { OneActivityArtifactRail } from "./OneActivityTimeline";
+import { OneTurnWork, OneTurnWorkDividers } from "./OneTurnWork";
+import { buildOneWorkPresentation } from "@/lib/one-turn-work";
+import { planOneThreadWork, projectThreadRuns, type OneThreadRunBlock } from "@/lib/one-thread-work";
 import { ToolApprovalInline } from "@/components/ToolApprovalInline";
 import {
   OneComposerControls,
@@ -260,6 +263,8 @@ type UiMessage = {
    */
   images?: string[];
   files?: Array<{ name: string; kind: "image" | "file" }>;
+  /** Durable rows only (ISO). Optimistic rows have none and sort after every durable row. */
+  createdAt?: string;
 };
 
 const ONE_SEQUENCE_STEP_RE = /(?:^|\s)(?:ONE-SESSION-QA-[\w-]+\s*\/\s*)?0*(\d{1,3})\s*\/\s*(\d{1,3})(?:\s*(?:작업|task))?(?=\s*(?:[.:—-]|$))/i;
@@ -454,6 +459,7 @@ function toUiMessages(history: ChatHistoryEntry[]): UiMessage[] {
       role: entry.role === "assistant" ? "assistant" : entry.role,
       text: entry.text,
       images: entry.imageDataUrls?.length ? entry.imageDataUrls : undefined,
+      createdAt: entry.createdAt,
     });
   }
   return visible;
@@ -748,6 +754,13 @@ export function OneShell() {
   // a late receipt from run N while run N+1 is live even if that receipt lands
   // between React state batches.
   const [activityStateRunId, setActivityStateRunId] = useState<string | null>(null);
+  /**
+   * Every settled run of this conversation, projected from the ledger — one
+   * "Worked for Ns" block per turn. The live run is *not* here; it lives in
+   * `activity` until it settles and the ledger is re-read.
+   */
+  const [threadRuns, setThreadRuns] = useState<OneThreadRunBlock[]>([]);
+  const threadRunsChatIdRef = useRef<string | null>(null);
   // React can paint the busy shell before its dispatch state batch is visible.
   // These refs make that first paint belong to the new run, rather than briefly
   // borrowing the prior answer's Activity and elapsed clock.
@@ -927,66 +940,10 @@ export function OneShell() {
       })
       .sort((left, right) => Number(right.enabled && right.ready) - Number(left.enabled && left.ready) || left.name.localeCompare(right.name));
   }, [appLocale, installedPlugins, pluginCatalog]);
-  const dedicatedResultMessageId = useMemo(() => {
-    if (!oneSurfaceNeedsDedicatedResult(surface)) return null;
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      const message = messages[index];
-      if (message.role === "assistant" && !message.streaming) return message.id;
-    }
-    return null;
-  }, [messages, surface]);
-  const narrativeResultMessage = useMemo(() => {
-    if (!surface || oneSurfaceNeedsDedicatedResult(surface)) return null;
-    const allParagraphs = surface.blocks.flatMap((block) => block.type === "Narrative" ? block.paragraphs : []);
-    const paragraphs = allParagraphs.length > 1 && /\b(?:I(?:’|'| a)m|I am) using (?:the )?.*\bskill\b/i.test(allParagraphs[0])
-      ? allParagraphs.slice(1)
-      : allParagraphs;
-    if (paragraphs.length === 0) return null;
-    const joined = paragraphs.join("\n\n");
-    const completion = /\b\d+\s*\/\s*\d+\s+is\s+complete\b/i.exec(joined);
-    const answer = stripGenericResultReadyCopy(completion && /^I(?:’|'| a)m using (?:the )?.*\bskill\b/i.test(joined.trim())
-      ? joined.slice(completion.index)
-      : joined);
-    const text = toCustomerSafeText(
-      stripAgentIdentityBadges(answer),
-      appLocale,
-    ).trim();
-    if (!text) return null;
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      if (messages[index].role === "assistant" && !messages[index].streaming) {
-        return { messageId: messages[index].id, text };
-      }
-    }
-    return null;
-  }, [appLocale, messages, surface]);
   const activeRunPrompt = busy
     ? (dispatchRunPrompt ?? liveRunPrompt ?? dispatchRunPromptRef.current)
     : liveRunPrompt;
-  const activityAnchorMessageId = useMemo(() => {
-    // A pending preflight is rendered immediately after its newly committed
-    // user turn below. Do not anchor the previous answer's Activity while Main
-    // is still preparing the current request.
-    if (preflightPrompt) return null;
-    // A live response intentionally starts empty. Anchoring Activity to the
-    // prior visible assistant reply made a new run look like it belonged to
-    // the previous answer, even when the Activity data itself was current.
-    // Keep progress directly after the current user turn until streamed text
-    // arrives.
-    if (busy && activeRunPrompt) {
-      const liveResponse = messages.find((message) => message.id === "one-live-response");
-      if (liveResponse) return liveResponse.id;
-      return null;
-    }
-    if (teamPreflightBusy) {
-      const liveResponse = messages.find((message) => message.id === "one-live-response");
-      if (liveResponse) return liveResponse.id;
-    }
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      const message = messages[index];
-      if (message.role === "assistant" && visibleOneMessageText(message)) return message.id;
-    }
-    return null;
-  }, [activeRunPrompt, busy, messages, preflightPrompt, teamPreflightBusy]);
+  const workBusy = busy || teamPreflightBusy;
   // A renderer reload can reattach to an already-running invocation before a
   // fresh prompt exists in this component. In that path `activeRunPrompt` is
   // intentionally null, but the first typed event has already established the
@@ -1004,10 +961,64 @@ export function OneShell() {
   const renderedActivityStartedAt = busy && !activeRunOwnsActivity
     ? activeRunStartedAtRef.current
     : runStartedAt;
+  // An optimistic "next instruction" row and its durable twin (persisted by Main
+  // when the queued run starts) must never both render — that was the doubled
+  // user bubble in the 2026-08-15 recording. The durable row wins.
+  const visibleMessages = useMemo(() => {
+    if (!messages.some((message) => message.id.startsWith("one-steer:"))) return messages;
+    return messages.filter((message, index) => {
+      if (!message.id.startsWith("one-steer:")) return true;
+      return !messages.some((other, otherIndex) => (
+        otherIndex !== index
+        && !other.id.startsWith("one-steer:")
+        && other.role === "user"
+        && other.text === message.text
+      ));
+    });
+  }, [messages]);
   const liveResponseMounted = messages.some((message) => message.id === "one-live-response");
   const livePromptMounted = Boolean(activeRunPrompt && messages.some((message) => (
     message.role === "user" && message.text === activeRunPrompt.text
   )));
+  // The live run's work block: before the streaming reply once text arrives,
+  // otherwise at the tail of the thread (after the prompt that started it).
+  const liveWorkAnchorMessageId = workBusy && liveResponseMounted ? "one-live-response" : null;
+  const liveWorkBlock = workBusy
+    ? (
+      <OneTurnWork
+        key={`work:live:${activeActivityRunId ?? "pending"}`}
+        state={renderedActivity}
+        busy
+        startedAt={renderedActivityStartedAt}
+        locale={appLocale}
+        workspacePath={workspacePath}
+      />
+    )
+    : null;
+  // Settled blocks for every past run of this conversation. Between a run's
+  // terminal event and the ledger re-read, the just-settled run is still only
+  // in live `activity`; it is drawn from there so the block never blinks out.
+  const threadWorkPlan = useMemo(() => {
+    const runs: OneThreadRunBlock[] = [...threadRuns];
+    const settledLiveRunId = !workBusy ? (activityStateRunId ?? activityEventRunIdRef.current) : null;
+    if (
+      settledLiveRunId
+      && activity.items.length > 0
+      && !runs.some((run) => run.runId === settledLiveRunId)
+    ) {
+      runs.push({
+        runId: settledLiveRunId,
+        startedAt: runStartedAt != null ? new Date(runStartedAt).toISOString() : (activity.items[0]?.observedAt ?? new Date().toISOString()),
+        status: activity.terminalStatus ?? "completed",
+        state: activity,
+      });
+    }
+    return planOneThreadWork({
+      messages: visibleMessages.map((message) => ({ id: message.id, role: message.role, createdAt: message.createdAt })),
+      runs,
+      excludeRunId: workBusy ? activeActivityRunId : null,
+    });
+  }, [activeActivityRunId, activity, activityStateRunId, visibleMessages, runStartedAt, threadRuns, workBusy]);
   const searchTriggerRef = useRef<HTMLButtonElement>(null);
   const searchSheetRef = useRef<HTMLElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
@@ -1424,8 +1435,15 @@ export function OneShell() {
     // older timeline during the async refresh.
     const latestReceipt = await api.invoke.latestReceipt(chatId).catch(() => null);
     if (supersededByNewerRun() || !latestReceipt || (settledRunId && latestReceipt.runId !== settledRunId)) return;
-    const ledgerEvents = await api.runLedger.events(latestReceipt.runId, 500).catch(() => []);
-    if (supersededByNewerRun() || ledgerEvents.length === 0) return;
+    const [ledgerEvents, chatTimeline] = await Promise.all([
+      api.runLedger.events(latestReceipt.runId, 500).catch(() => []),
+      api.runLedger.chatTimeline(chatId, { maxRuns: 40, eventsPerRun: 400 }).catch(() => []),
+    ]);
+    if (supersededByNewerRun()) return;
+    if (threadRunsChatIdRef.current === chatId && chatTimeline.length > 0) {
+      setThreadRuns(projectThreadRuns(chatTimeline));
+    }
+    if (ledgerEvents.length === 0) return;
     const restoredActivity = projectOneActivityFromLedger(ledgerEvents);
     cacheOneActivity(chatId, restoredActivity);
     activityEventRunIdRef.current = latestReceipt.runId;
@@ -1482,7 +1500,15 @@ export function OneShell() {
       const settledRunId = eventRunId;
       setKeyRequestSheet(null);
       const text = event.text ?? streamTextRef.current;
-      setMessages((current) => upsertLiveMessage(current, text, false));
+      // Commit the streamed answer under its own id. Leaving it as the shared
+      // "one-live-response" row meant the next turn's live row *replaced* it
+      // (measured 2026-08-15: the previous answer vanished while a queued
+      // instruction ran, until the history reload brought it back).
+      setMessages((current) => upsertLiveMessage(current, text, false).map((message) => (
+        message.id === "one-live-response"
+          ? { ...message, id: `one-answer:${settledRunId ?? uid()}`, createdAt: message.createdAt ?? new Date().toISOString() }
+          : message
+      )));
       setBusy(false);
       setLiveRunPrompt((current) => current?.runId === settledRunId ? null : current);
       setDispatchRunPrompt((current) => current?.runId === settledRunId ? null : current);
@@ -1501,6 +1527,14 @@ export function OneShell() {
       setKeyRequestSheet(null);
       // Failure evidence is persisted by Main and consumed by One's recovery
       // judgment. It never becomes transcript copy in the renderer.
+      // Whatever streamed before the failure stays as this run's answer row
+      // (Main persists the same partial); an empty live row is dropped so it
+      // cannot be mistaken for "the place where it ended".
+      setMessages((current) => current.flatMap((message) => {
+        if (message.id !== "one-live-response") return [message];
+        if (!message.text.trim()) return [];
+        return [{ ...message, id: `one-answer:${settledRunId ?? uid()}`, streaming: false, createdAt: message.createdAt ?? new Date().toISOString() }];
+      }));
       setBusy(false);
       setLiveRunPrompt((current) => current?.runId === settledRunId ? null : current);
       setDispatchRunPrompt((current) => current?.runId === settledRunId ? null : current);
@@ -1583,6 +1617,8 @@ export function OneShell() {
       setMessages([]);
       shownThreadChatIdRef.current = null;
       setCommittedAnswers([]);
+      setThreadRuns([]);
+      threadRunsChatIdRef.current = null;
       return;
     }
     const api = ipc();
@@ -1591,6 +1627,12 @@ export function OneShell() {
       return;
     }
     const chatId = activeThreadChatId;
+    // Another conversation's settled blocks must never sit under this one's
+    // messages while the ledger loads.
+    if (threadRunsChatIdRef.current !== chatId) {
+      setThreadRuns([]);
+      threadRunsChatIdRef.current = chatId;
+    }
     const taskId = selected?.taskId ?? null;
     /*
      * ★"이 실행이 이 대화의 것인가"는 **바꾸기 전** 값으로 판정해야 한다.
@@ -1609,7 +1651,8 @@ export function OneShell() {
       api.invoke.attach(chatId).catch(() => null),
       api.confirm.committedAnswers(chatId).catch(() => []),
       api.invoke.latestReceipt(chatId).catch(() => null),
-    ]).then(async ([history, attachment, answers, latestReceipt]) => {
+      api.runLedger.chatTimeline(chatId, { maxRuns: 40, eventsPerRun: 400 }).catch(() => []),
+    ]).then(async ([history, attachment, answers, latestReceipt, chatTimeline]) => {
       const taskReceipt = taskId ? selected?.latestReceipt ?? null : null;
       const durableReceipt = latestReceipt ?? taskReceipt;
       const ledgerEvents = !attachment && durableReceipt
@@ -1638,10 +1681,23 @@ export function OneShell() {
           if (!screenAlreadyOnThisThread) return next;
           // 같은 대화인데 서버 스냅샷이 아직 비었다면(첫 실행이 방금 시작됐다면)
           // 사람이 막 친 말과 라이브 응답을 빈 스냅샷으로 지우지 않는다.
-          return next.length === 0 && current.length > 0 ? current : next;
+          if (next.length === 0 && current.length > 0) return current;
+          // 큐에 넣은 다음 지시(one-steer:)는 Main이 그 실행을 시작할 때 비로소 원장에
+          // 남는다. 그 사이의 히스토리 재적재가 낙관 행을 지우면 사람이 친 말이 화면에서
+          // 사라졌다가 실행 끝에 다시 나타난다 — 원장에 같은 말이 오기 전까지 유지한다.
+          const pendingSteers = current.filter((message) => (
+            message.id.startsWith("one-steer:")
+            && !next.some((durable) => durable.role === "user" && durable.text === message.text)
+          ));
+          return pendingSteers.length > 0 ? [...next, ...pendingSteers] : next;
         });
       }
       shownThreadChatIdRef.current = chatId;
+      // Every settled run of this conversation becomes its own turn block. The
+      // live run (attachment) is drawn from live state and excluded at render.
+      if (threadRunsChatIdRef.current === chatId) {
+        setThreadRuns(projectThreadRuns(chatTimeline));
+      }
       // This effect can finish after another turn has started. In that case its
       // receipt belongs to the prior run and may restore only transcript data,
       // never the current Activity/timer projection.
@@ -1840,7 +1896,20 @@ export function OneShell() {
         setBusy(true);
         setActivity(initialOneActivityState());
         setRunStartedAt(attachment.startedAt ? Date.parse(attachment.startedAt) : Date.now());
-        setQueuedSteers((current) => current.slice(1));
+        // The queued instruction is now the model's turn: it leaves the queue
+        // strip and enters the conversation as the prompt of this run.
+        setQueuedSteers((current) => {
+          const started = current[0];
+          if (started) {
+            setMessages((messages) => messages.some((message) => message.id === started.id)
+              ? messages
+              : [
+                ...messages.filter((message) => message.id !== "one-live-response"),
+                { id: started.id, role: "user" as const, text: started.text, createdAt: attachment.startedAt ?? new Date().toISOString() },
+              ]);
+          }
+          return current.slice(1);
+        });
         subscribeRun(attachment.runId);
         for (const event of attachment.events) consumeRunEventRef.current(event, attachment.runId);
       }).catch(() => undefined);
@@ -2103,7 +2172,7 @@ export function OneShell() {
           ...withoutLive,
           ...(userAlreadyVisible || options?.displayUserMessage === false
             ? []
-            : [{ id: uid(), role: "user" as const, text }]),
+            : [{ id: uid(), role: "user" as const, text, createdAt: new Date().toISOString() }]),
           { id: "one-live-response", role: "assistant" as const, text: "", streaming: true },
         ];
       });
@@ -2400,7 +2469,10 @@ export function OneShell() {
       if (!chatId || !activeRunId || attachmentSnapshot.length > 0) return;
       const optimisticId = `one-steer:${uid()}`;
       setComposer("");
-      setMessages((current) => [...current, { id: optimisticId, role: "user", text: value }]);
+      // Codex keeps a queued instruction in the queue strip above the composer
+      // until the model actually receives it; it becomes a conversation turn
+      // only when its run starts (see the active-chat attach below). Showing it
+      // as a bubble *and* in the queue drew the same words twice.
       setQueuedSteers((current) => [...current, { id: optimisticId, text: value }]);
       scrollToLatest();
       try {
@@ -2417,7 +2489,6 @@ export function OneShell() {
         });
       } catch (cause) {
         setQueuedSteers((current) => current.filter((item) => item.id !== optimisticId));
-        setMessages((current) => current.filter((item) => item.id !== optimisticId));
         setComposer(value);
         requestOneOperationalRecovery("one-steer", cause);
       }
@@ -2571,6 +2642,9 @@ export function OneShell() {
           id: preflightId,
           role: "user",
           text: value,
+          // Optimistic rows carry the local send time so the run that follows
+          // can be anchored after them before the durable row ever loads.
+          createdAt: new Date().toISOString(),
           // 보낸 즉시 대화에 남는다 — 미리보기가 사라지고 텍스트만 남던 자리.
           images: attachmentSnapshot.filter((a) => a.kind === "image" && a.previewUrl).map((a) => a.previewUrl as string),
           files: attachmentSnapshot.map((a) => ({ name: a.name, kind: a.kind })),
@@ -4008,32 +4082,47 @@ export function OneShell() {
             ) : (
               <div className={styles.threadContent}>
                 <section className={styles.messages} aria-label={selected ? tFor(appLocale, "one.shell.thread.work_conversation_aria") : tFor(appLocale, "one.shell.thread.general_conversation_aria")} aria-live="polite">
-                  {messages.map((message) => {
+                  {threadWorkPlan.leading.map((block) => (
+                    <OneTurnWork
+                      key={`work:${block.runId}`}
+                      state={block.state}
+                      busy={false}
+                      startedAt={Date.parse(block.startedAt)}
+                      locale={appLocale}
+                      workspacePath={workspacePath}
+                    />
+                  ))}
+                  {visibleMessages.map((message) => {
                     // Narrative output remains the primary final response.
                     // Only a genuinely visual/interactive surface replaces its
                     // duplicate Markdown payload.
-                    const visibleText = message.id === dedicatedResultMessageId
-                      ? ""
-                      : message.id === narrativeResultMessage?.messageId
-                        ? narrativeResultMessage.text
-                        : visibleOneMessageText(message);
-                    const showActivityBefore = message.id === activityAnchorMessageId;
+                    // Codex parity (owner decision 2026-08-15): the model's
+                    // answer is the answer, drawn as Markdown in the thread.
+                    // A structured result card below never replaces it, and a
+                    // Surface's flattened narrative never stands in for it
+                    // (measured: it dropped links/fences and rendered raw
+                    // "[hello.txt]([local path]" and a stray ``` ).
+                    const visibleText = visibleOneMessageText(message);
+                    // Codex draws the turn's work above the answer it produced:
+                    // the live block sits right before the streaming reply,
+                    // settled blocks right after the prompt that started them.
+                    const liveBefore = liveWorkAnchorMessageId === message.id;
+                    const blocksAfter = threadWorkPlan.afterMessage.get(message.id) ?? [];
                     // 첨부만 있는 턴도 대화다 — 텍스트가 없다고 버리면 사진을 보낸 사실 자체가 사라진다.
                     const hasAttachments = (message.images?.length ?? 0) > 0 || (message.files?.length ?? 0) > 0;
-                    if (!visibleText && !showActivityBefore && !hasAttachments) return null;
+                    if (!visibleText && !hasAttachments && !liveBefore && blocksAfter.length === 0) return null;
+                    const systemLabel = message.role === "system" ? oneSystemPromptLabel(message) : null;
                     return (
                       <Fragment key={message.id}>
-                        {showActivityBefore && (
-                          <OneActivityTimeline
-                            state={renderedActivity}
-                            busy={teamPreflightBusy || busy}
-                            startedAt={renderedActivityStartedAt}
-                            permission={onePermission}
-                            workspacePath={workspacePath}
-                            locale={appLocale}
-                          />
-                        )}
-                        {(visibleText || hasAttachments) && (
+                        {liveBefore && !preflightPrompt && liveWorkBlock}
+                        {(visibleText || hasAttachments) && (systemLabel
+                          ? (
+                            // A prompt One sent on the person's behalf ("One
+                            // continued the remaining steps") is a quiet system
+                            // line, not an alert and not a bubble.
+                            <p className={styles.systemTurn} data-role="system" data-one-system-turn="true">{systemLabel}</p>
+                          )
+                          : (
                           <article
                             className={styles.message}
                             data-role={message.role}
@@ -4058,48 +4147,40 @@ export function OneShell() {
                               {visibleText && (message.streaming ? <StreamingMarkdown text={visibleText} messageId={message.id} /> : <Markdown text={visibleText} messageId={message.id} />)}
                             </div>
                           </article>
-                        )}
+                          ))}
+                        {blocksAfter.map((block) => (
+                          <OneTurnWork
+                            key={`work:${block.runId}`}
+                            state={block.state}
+                            busy={false}
+                            startedAt={Date.parse(block.startedAt)}
+                            locale={appLocale}
+                            workspacePath={workspacePath}
+                          />
+                        ))}
                       </Fragment>
                     );
                   })}
                   {preflightPrompt && (
-                    <OneActivityTimeline
+                    <OneTurnWork
                       state={initialOneActivityState()}
                       busy={false}
                       preparing
                       startedAt={preflightPrompt.startedAt}
-                      permission={onePermission}
-                      workspacePath={workspacePath}
                       locale={appLocale}
+                      workspacePath={workspacePath}
                     />
                   )}
                   {messages.length === 0 && !busy && !teamPreflightBusy && !teamPreflight && !preflightPrompt && <div className={styles.emptyThread}>{selected ? tFor(appLocale, "one.shell.thread.empty_work") : tFor(appLocale, "one.shell.thread.empty_conversation")}</div>}
-                  {busy && activeRunPrompt && !liveResponseMounted && (
+                  {workBusy && !preflightPrompt && !liveWorkAnchorMessageId && (
                     <>
-                      {!livePromptMounted && (
+                      {busy && activeRunPrompt && !livePromptMounted && (
                         <article className={styles.message} data-role="user">
                           <div className={styles.messageBody}><Markdown text={activeRunPrompt.text} messageId={`one-live-prompt:${activeRunPrompt.runId}`} /></div>
                         </article>
                       )}
-                      <OneActivityTimeline
-                        state={renderedActivity}
-                        busy
-                        startedAt={renderedActivityStartedAt}
-                        permission={onePermission}
-                        workspacePath={workspacePath}
-                        locale={appLocale}
-                      />
+                      {liveWorkBlock}
                     </>
-                  )}
-                  {!preflightPrompt && !activityAnchorMessageId && !(busy && activeRunPrompt && !liveResponseMounted) && (
-                    <OneActivityTimeline
-                      state={renderedActivity}
-                      busy={teamPreflightBusy || busy}
-                      startedAt={renderedActivityStartedAt}
-                      permission={onePermission}
-                      workspacePath={workspacePath}
-                      locale={appLocale}
-                    />
                   )}
                   {/* 도구 승인은 이 대화 안에서, 묻는 순간에(오너 결정 2026-08-15) */}
                   <ToolApprovalInline chatId={activeThreadChatId} />
@@ -4133,6 +4214,7 @@ export function OneShell() {
                       projection={selected}
                       receipt={receipt}
                       locale={appLocale}
+                      omitNarrative
                       onOpenWork={() => void openWork()}
                       canOpenWork={canOpenSelectedInWork}
                       onSemanticAction={handleOneSemanticAction}

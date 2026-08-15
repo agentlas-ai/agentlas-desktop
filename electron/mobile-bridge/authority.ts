@@ -1251,6 +1251,12 @@ export function projectMobileBridgeInvocationEvent(
       ...(Number.isFinite(event.reasoning.durationMs) && Number(event.reasoning.durationMs) >= 0
         ? { durationMs: Math.floor(Number(event.reasoning.durationMs)) }
         : {}),
+      // The span's summary text (end only; deltas stay desktop-live). Bounded and
+      // redacted like every other mirrored string so the phone can show the same
+      // collapsed "Thought for Ns" row without a second protocol.
+      ...(event.reasoning.phase === "end" && typeof event.reasoning.text === "string" && event.reasoning.text.trim()
+        ? { text: boundedRedactedText(event.reasoning.text, 2_000) }
+        : {}),
     };
   }
   if (event.error) {

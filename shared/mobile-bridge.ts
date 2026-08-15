@@ -467,7 +467,7 @@ export interface MobileBridgeInvocationEventDto {
   agentName?: string;
   role?: string;
   phase?: "plan" | "delegate" | "synthesize";
-  reasoning?: { phase: "start" | "end"; durationMs?: number };
+  reasoning?: { phase: "start" | "end"; durationMs?: number; /** end only — the span's bounded, redacted summary text. */ text?: string };
   /** Main-sanitized, non-executable semantic result shared with Flutter. */
   surface?: OneSurfaceManifestV1;
 }

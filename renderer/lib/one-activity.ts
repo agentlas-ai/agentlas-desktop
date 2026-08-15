@@ -30,6 +30,15 @@ export interface OneActivityItem {
   noticeI18n?: { ko: string; en: string };
   activityCode?: OneActivityCode;
   tool?: OneActivityTool;
+  /** Characters of the streamed answer so far — only on the live `answer:stream` result row. */
+  answerChars?: number;
+  /**
+   * Reasoning rows only: the model's own summary/thought text for this span
+   * (Codex reasoning-summary headline, Claude thinking block, ACP thought chunk).
+   * Streams in through `reasoning.delta`; the `end` event may replace it with
+   * the full span text (also what the ledger keeps). Never mixed into the answer.
+   */
+  text?: string;
 }
 
 export interface OneActivityArtifact {
@@ -60,7 +69,12 @@ export interface OneActivityState {
   effectivePermission?: "read" | "write" | "full";
   selectedPermissionMode?: "auto" | "read" | "write" | "full";
   terminalStatus?: "completed" | "failed" | "cancelled";
+  /** The run's working folder from the lifecycle start fact — tool paths are shown relative to it. */
+  cwd?: string;
 }
+
+/** Same ceiling as Main's reasoning span cap — a thought row is evidence, not a transcript. */
+const REASONING_TEXT_CAP = 6_000;
 
 export function initialOneActivityState(): OneActivityState {
   return { items: [], artifacts: [], sources: [], lastSequence: 0 };
@@ -221,11 +235,13 @@ export function reduceOneActivity(
   let tokens = state.tokens;
   let effectivePermission = state.effectivePermission;
   let selectedPermissionMode = state.selectedPermissionMode;
+  let cwd = state.cwd;
   let terminalStatus: OneActivityState["terminalStatus"] = undefined;
 
   if (event.kind === "lifecycle" && event.lifecycle?.phase === "start") {
     effectivePermission = event.lifecycle.permission ?? effectivePermission;
     selectedPermissionMode = event.lifecycle.selectedPermissionMode ?? selectedPermissionMode;
+    if (typeof event.lifecycle.cwd === "string" && event.lifecycle.cwd.trim()) cwd = event.lifecycle.cwd.trim();
     items = upsertItem(items, {
       id: "run:lifecycle",
       kind: "run",
@@ -250,8 +266,27 @@ export function reduceOneActivity(
       ...(event.agentName?.trim() ? { agentName: event.agentName.trim() } : {}),
     });
     activeReasoningId = id;
+  } else if (event.kind === "reasoning" && event.reasoning?.phase === "delta") {
+    // A delta can arrive before the runner's explicit start (some runtimes emit
+    // text first). Open the span implicitly so no thought text is ever lost.
+    let id = activeReasoningId;
+    if (!id) {
+      id = `reasoning:${sequence}`;
+      items = upsertItem(items, { id, kind: "reasoning", status: "running", observedAt });
+      activeReasoningId = id;
+    }
+    const chunk = typeof event.reasoning.text === "string" ? event.reasoning.text : "";
+    if (chunk) {
+      const target = id;
+      items = items.map((item) => item.id === target
+        ? { ...item, text: `${item.text ?? ""}${chunk}`.slice(0, REASONING_TEXT_CAP) }
+        : item);
+    }
   } else if (event.kind === "reasoning" && event.reasoning?.phase === "end") {
     const id = activeReasoningId;
+    const fullText = typeof event.reasoning.text === "string" && event.reasoning.text.trim()
+      ? event.reasoning.text.slice(0, REASONING_TEXT_CAP)
+      : undefined;
     if (id) {
       items = items.map((item) => item.id === id ? {
         ...item,
@@ -260,8 +295,23 @@ export function reduceOneActivity(
         ...(typeof event.reasoning?.durationMs === "number"
           ? { durationMs: Math.max(0, event.reasoning.durationMs) }
           : {}),
+        ...(fullText ? { text: fullText } : {}),
       } : item);
       activeReasoningId = undefined;
+    } else if (fullText) {
+      // Ledger replay: the start row may be older than the retained window, or
+      // a runner reported a whole summary in one end event. Keep the thought.
+      items = upsertItem(items, {
+        id: `reasoning:${sequence}`,
+        kind: "reasoning",
+        status: "completed",
+        observedAt,
+        completedAt: observedAt,
+        text: fullText,
+        ...(typeof event.reasoning?.durationMs === "number"
+          ? { durationMs: Math.max(0, event.reasoning.durationMs) }
+          : {}),
+      });
     }
   } else if (event.kind === "thinking") {
     // The legacy provider bridge emits one generic owner `thinking` pulse for
@@ -323,7 +373,14 @@ export function reduceOneActivity(
       ...(status !== "running" ? { completedAt: observedAt } : {}),
       ...(event.agentName?.trim() ? { agentName: event.agentName.trim() } : {}),
       ...(event.role?.trim() ? { role: event.role.trim() } : {}),
-      tool: { ...existing?.tool, ...event.tool },
+      // A completion event often repeats the tool without its arguments. A
+      // spread copies `args: undefined` over the start event's real args and
+      // the live row loses its command until the ledger replays it — keep
+      // only the keys the new event actually carries.
+      tool: {
+        ...existing?.tool,
+        ...Object.fromEntries(Object.entries(event.tool).filter(([, value]) => value !== undefined)),
+      } as OneActivityTool,
     });
   } else if (event.kind === "tool-use" && event.activity) {
     const id = `notice:${event.activity.code}`;
@@ -363,7 +420,45 @@ export function reduceOneActivity(
   } else if (event.kind === "partial") {
     items = closeRunning(items, observedAt, "completed", true);
     activeReasoningId = undefined;
+    // The answer is streaming. Without this the timeline sat on the run row's
+    // generic "Working" for the whole generation (measured: 45s of "Working"
+    // while 300 lines were visibly arriving underneath). Say what is happening
+    // and how far along, the way tool rows do; the row closes on final/error.
+    // Live partials are deltas: the size lives in `textLen`; replay/fallback
+    // partials still carry the accumulated `text`.
+    const answerLength = typeof event.textLen === "number" && Number.isFinite(event.textLen)
+      ? event.textLen
+      : typeof event.text === "string"
+        ? event.text.length
+        : 0;
+    const existing = items.find((item) => item.id === "answer:stream");
+    items = upsertItem(items, {
+      id: "answer:stream",
+      kind: "result",
+      status: "running",
+      observedAt: existing?.observedAt || observedAt,
+      answerChars: Math.max(existing?.answerChars ?? 0, answerLength),
+    });
   } else if (event.kind === "final") {
+    // The answer row is closed by closeRunning below; settle its final size.
+    // A ledger replay never saw the live partials (they are not persisted),
+    // so the row is created here from the recorded length instead of vanishing
+    // from Activity the moment the run settles.
+    const finalAnswerChars = typeof event.textLen === "number" && Number.isFinite(event.textLen)
+      ? event.textLen
+      : typeof event.text === "string"
+        ? event.text.length
+        : null;
+    if (finalAnswerChars != null && finalAnswerChars > 0) {
+      const existing = items.find((item) => item.id === "answer:stream");
+      items = upsertItem(items, {
+        id: "answer:stream",
+        kind: "result",
+        status: existing?.status ?? "running",
+        observedAt: existing?.observedAt || observedAt,
+        answerChars: Math.max(existing?.answerChars ?? 0, finalAnswerChars),
+      });
+    }
     items = closeRunning(items, observedAt);
     activeReasoningId = undefined;
     if (!items.some((item) => item.kind === "run")) {
@@ -380,7 +475,12 @@ export function reduceOneActivity(
     }
     terminalStatus = "completed";
   } else if (event.kind === "error") {
-    const cancelled = /cancelled|canceled/i.test(event.error?.code ?? "");
+    // A run the person stopped ends through the same error channel as a
+    // runtime failure; the earlier cancel_requested lifecycle fact (or an
+    // explicit cancel code) tells them apart. "Stopped" is not "failed".
+    const cancelled = /cancel/i.test(event.error?.code ?? "")
+      || /cancel|중지|중단/i.test(event.error?.message ?? "")
+      || items.some((item) => item.status === "cancelling");
     const status = cancelled ? "cancelled" : "failed";
     items = closeRunning(items, observedAt, status);
     activeReasoningId = undefined;
@@ -406,6 +506,7 @@ export function reduceOneActivity(
     ...(activeReasoningId ? { activeReasoningId } : {}),
     ...(effectivePermission ? { effectivePermission } : {}),
     ...(selectedPermissionMode ? { selectedPermissionMode } : {}),
+    ...(cwd ? { cwd } : {}),
     ...(terminalStatus ? { terminalStatus } : {}),
   };
 }
@@ -510,6 +611,9 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
     state = reduceOneActivity(state, { ...event, sequence: projectedSequence, observedAt });
   };
 
+  // A stop arrives as mcp_error followed by invoke_cancelled. The first row
+  // would otherwise seal the run as "failed" before the cancel row is read.
+  const cancelledRun = events.some((row) => row.kind === "invoke_cancelled");
   for (const row of events) {
     const payload = row.payload ?? {};
     if (row.kind === "invoke_started") {
@@ -525,6 +629,15 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
       }, row.ts);
       continue;
     }
+    if (row.kind === "mcp_lifecycle") {
+      // The desktop lifecycle fact carries the run's working folder; the
+      // invoke_started row above does not.
+      const lifecycleCwd = ledgerString(payload, "lifecycleCwd");
+      if (ledgerString(payload, "lifecyclePhase") === "start" && lifecycleCwd) {
+        apply({ kind: "lifecycle", lifecycle: { phase: "start", cwd: lifecycleCwd } }, row.ts);
+      }
+      continue;
+    }
     if (row.kind === "invoke_cancel_requested") {
       apply({ kind: "lifecycle", lifecycle: { phase: "cancel_requested" } }, row.ts);
       continue;
@@ -536,7 +649,12 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
       const toolSourceUrls = ledgerHttpsUrls(payload, "toolSourceUrls");
       const oneArtifacts = ledgerOneArtifacts(payload);
       if (toolName) {
-        const isCompletion = toolIsError || Boolean(toolId && observedToolIds.has(toolId));
+        // A ledger row that carries a result preview is a completion even when
+        // the tool id was never observed (single-event runners like agy DONE).
+        const toolArgs = ledgerString(payload, "toolArgs");
+        const rawResultPreview = payload.toolResultPreview;
+        const hasResultPreview = typeof rawResultPreview === "string";
+        const isCompletion = toolIsError || hasResultPreview || Boolean(toolId && observedToolIds.has(toolId));
         if (toolId) observedToolIds.add(toolId);
         const agentName = ledgerString(payload, "agentName");
         const role = ledgerString(payload, "role");
@@ -545,7 +663,8 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
           tool: {
             name: toolName,
             ...(toolId ? { id: toolId } : {}),
-            ...(isCompletion ? { result: "" } : {}),
+            ...(toolArgs ? { args: toolArgs } : {}),
+            ...(isCompletion ? { result: hasResultPreview ? (rawResultPreview as string) : "" } : {}),
             ...(toolIsError ? { isError: true } : {}),
             ...(toolSourceUrls ? { sourceUrls: toolSourceUrls } : {}),
           },
@@ -566,6 +685,7 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
       const phase = ledgerString(payload, "reasoningPhase");
       if (phase === "start" || phase === "end") {
         const durationValue = Number(payload.reasoningDurationMs);
+        const reasoningText = ledgerString(payload, "reasoningText");
         apply({
           kind: "reasoning",
           reasoning: {
@@ -573,6 +693,7 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
             ...(phase === "end" && Number.isFinite(durationValue)
               ? { durationMs: Math.max(0, durationValue) }
               : {}),
+            ...(phase === "end" && reasoningText ? { text: reasoningText } : {}),
           },
         }, row.ts);
       }
@@ -625,11 +746,16 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
     }
     if (row.kind === "mcp_final" || row.kind === "invoke_completed") {
       const tokenValue = Number(payload.tokens);
-      apply({ kind: "final", ...(Number.isFinite(tokenValue) ? { tokens: tokenValue } : {}) }, row.ts);
+      const textLenValue = Number(payload.textLen);
+      apply({
+        kind: "final",
+        ...(Number.isFinite(tokenValue) ? { tokens: tokenValue } : {}),
+        ...(Number.isFinite(textLenValue) && textLenValue > 0 ? { textLen: textLenValue } : {}),
+      }, row.ts);
       continue;
     }
     if (row.kind === "mcp_error" || row.kind === "invoke_failed" || row.kind === "invoke_cancelled") {
-      const cancelled = row.kind === "invoke_cancelled";
+      const cancelled = row.kind === "invoke_cancelled" || cancelledRun;
       apply({
         kind: "error",
         error: {

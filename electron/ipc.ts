@@ -329,6 +329,7 @@ import {
   hasInvocationRunReceipt,
   listFailureEvents,
   listRunEvents,
+  listChatRunTimeline,
   recordRunEvent,
   recordMcpInvocationEvent,
   tryRecordFailureEvent,
@@ -2815,6 +2816,11 @@ export function registerIpcHandlers(): void {
   // ── runLedger (실행/실패 원장 — 실패 메모리·자가진화 평가 입력) ──
   ipcMain.handle("runLedger:events", (_e, runId: string, limit?: number) =>
     listRunEvents(runId, limit),
+  );
+  ipcMain.handle(
+    "runLedger:chatTimeline",
+    (_e, chatId: string, input?: { maxRuns?: number; eventsPerRun?: number }) =>
+      listChatRunTimeline(chatId, input),
   );
   ipcMain.handle(
     "runLedger:failures",

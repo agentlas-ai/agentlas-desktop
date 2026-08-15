@@ -214,9 +214,17 @@ interface StreamTurnResult {
   toolCalls: OpenAiToolCall[];
 }
 
-async function streamChatTurn(resp: Response, onPartial: (acc: string) => void): Promise<StreamTurnResult> {
+async function streamChatTurn(
+  resp: Response,
+  onPartial: (acc: string) => void,
+  onThinking?: RunnerEvents["onThinking"],
+): Promise<StreamTurnResult> {
   let acc = "";
   let lastEmit = 0;
+  // OpenAI-호환 로컬 서버(ollama·LM Studio·MLX)는 생각을 delta.reasoning_content(또는
+  // ollama의 delta.reasoning / delta.thinking)로 따로 준다. 자기 행으로 흘린다.
+  let thinkingOpen = false;
+  let thinkingStartedAt = 0;
   const pending = new Map<number, { id?: string; name: string; args: string }>();
   for await (const line of iterSseLines(resp)) {
     if (!line.startsWith("data:")) continue;
@@ -227,6 +235,9 @@ async function streamChatTurn(resp: Response, onPartial: (acc: string) => void):
         choices?: Array<{
           delta?: {
             content?: string;
+            reasoning_content?: string;
+            reasoning?: string;
+            thinking?: string;
             tool_calls?: Array<{
               index: number;
               id?: string;
@@ -236,7 +247,20 @@ async function streamChatTurn(resp: Response, onPartial: (acc: string) => void):
         }>;
       };
       const delta = event.choices?.[0]?.delta;
+      const thought = delta?.reasoning_content ?? delta?.reasoning ?? delta?.thinking;
+      if (typeof thought === "string" && thought) {
+        if (!thinkingOpen) {
+          thinkingOpen = true;
+          thinkingStartedAt = Date.now();
+          onThinking?.("start");
+        }
+        onThinking?.("delta", undefined, thought);
+      }
       if (delta?.content) {
+        if (thinkingOpen) {
+          thinkingOpen = false;
+          onThinking?.("end", Date.now() - thinkingStartedAt);
+        }
         acc += delta.content;
         const now = Date.now();
         if (now - lastEmit > 80) {
@@ -255,6 +279,7 @@ async function streamChatTurn(resp: Response, onPartial: (acc: string) => void):
       // 빈 줄 / keep-alive — 무시
     }
   }
+  if (thinkingOpen) onThinking?.("end", Date.now() - thinkingStartedAt);
   const toolCalls: OpenAiToolCall[] = [...pending.values()]
     .filter((entry) => entry.name)
     .map((entry, i) => ({
@@ -370,7 +395,7 @@ export async function runLocalOpenAiChat(
           const fallbackErrText = await fallback.text().catch(() => "");
           throw new Error(`${host} ${fallback.status}: ${fallbackErrText.slice(0, 300)}`);
         }
-        const result = await streamChatTurn(fallback, events.onPartial);
+        const result = await streamChatTurn(fallback, events.onPartial, events.onThinking);
         finalText = result.text;
         reachedAnswer = true;
         break;
@@ -378,7 +403,7 @@ export async function runLocalOpenAiChat(
       throw new Error(`${host} ${resp.status}: ${errText.slice(0, 300)}`);
     }
 
-    const result = await streamChatTurn(resp, events.onPartial);
+    const result = await streamChatTurn(resp, events.onPartial, events.onThinking);
     if (result.toolCalls.length === 0) {
       finalText = result.text;
       reachedAnswer = true;

@@ -107,6 +107,7 @@ export function OneAdaptiveResult({
   onAcceptResult,
   onSemanticAction,
   autoRecovery,
+  omitNarrative = false,
 }: {
   manifest: OneSurfaceManifestV1 | null;
   projection: OneTaskProjection;
@@ -114,6 +115,13 @@ export function OneAdaptiveResult({
   locale: "ko" | "en";
   onOpenWork: () => void;
   canOpenWork?: boolean;
+  /**
+   * The thread already shows the model's answer as Markdown (Codex parity).
+   * Skip the Surface's flattened Narrative blocks and the title/summary header
+   * so the card carries only what the answer text cannot: files, sources,
+   * decisions, checklists, actions.
+   */
+  omitNarrative?: boolean;
   onSemanticAction?: (action: OneSurfaceSemanticAction) => void;
   valueClosure?: OneValueClosureRecord | null;
   experienceReuse?: OneExperienceReuseRecord | null;
@@ -139,7 +147,18 @@ export function OneAdaptiveResult({
   const renderDecision = useMemo(() => surface ? inspectSurfaceForDesktop(surface, projection.taskId) : null, [projection.taskId, surface]);
   const fallback = useMemo(() => readSafeFallback(manifest, projection.taskId), [manifest, projection.taskId]);
   const hasManifest = Boolean(manifest && typeof manifest === "object");
-  const hasDedicatedResult = Boolean(surface && renderDecision?.native && oneSurfaceNeedsDedicatedResult(surface));
+  const dedicatedBlocks = useMemo(
+    () => (renderDecision?.blocks ?? []).filter((block) => (
+      block.type !== "ValueClosure"
+      && block.type !== "ImprovementProof"
+      && !(omitNarrative && block.type === "Narrative")
+    )),
+    [omitNarrative, renderDecision],
+  );
+  const hasDedicatedResult = Boolean(
+    surface && renderDecision?.native && oneSurfaceNeedsDedicatedResult(surface)
+    && (!omitNarrative || dedicatedBlocks.length > 0),
+  );
   const canAcceptResult = Boolean(
     projection.canonicalStatus === "partial"
     && receipt?.status === "completed"
@@ -172,18 +191,19 @@ export function OneAdaptiveResult({
   return (
     <section className={styles.root} aria-label={tFor(locale, "one.res.aria.work_result")}>
       {hasDedicatedResult && (
-        <article className={styles.result} data-surface-contract={surface?.contractVersion ?? "invalid"}>
-          <header className={styles.header}>
-            <div className={styles.headerCopy}>
-              <h3>{showNative && surface ? friendlySurfaceTitle(surface, locale) : tFor(locale, "one.res.title.too_large")}</h3>
-              <p className={styles.summary}>{showNative && surface
-                ? friendlySurfaceSummary(surface.summary, locale)
-                : tFor(locale, "one.res.summary.open_work")}</p>
-            </div>
-          </header>
+        <article className={styles.result} data-surface-contract={surface?.contractVersion ?? "invalid"} data-narrative={omitNarrative ? "omitted" : "inline"}>
+          {!omitNarrative && (
+            <header className={styles.header}>
+              <div className={styles.headerCopy}>
+                <h3>{showNative && surface ? friendlySurfaceTitle(surface, locale) : tFor(locale, "one.res.title.too_large")}</h3>
+                <p className={styles.summary}>{showNative && surface
+                  ? friendlySurfaceSummary(surface.summary, locale)
+                  : tFor(locale, "one.res.summary.open_work")}</p>
+              </div>
+            </header>
+          )}
           <div className={styles.body}>
-            {showNative && renderDecision ? renderDecision.blocks
-              .filter((block) => block.type !== "ValueClosure" && block.type !== "ImprovementProof")
+            {showNative && renderDecision ? dedicatedBlocks
               .map((block) => (
               <NativeBlock
                 key={block.blockId}
@@ -1314,12 +1334,15 @@ function RunClosure({ receipt, locale, onRetryUnfinished, autoRecovery }: {
       </section>
     );
   }
-  const stopped = receipt.status === "cancelled";
+  // A stop the person asked for is already written on the turn's work line
+  // ("27s 동안 작업 · 중단됨", the way Codex marks an interrupted turn). A second
+  // "stopped here" card under it said the same thing louder — dropped.
+  const stopped = false;
   // A failed receipt is internal evidence. Only One's model-authored diagnosis
   // may cross this boundary; raw errors and code-authored semantic summaries do
   // not have a customer-visible representation.
   const outcome = autoRecovery?.phase === "stopped" ? autoRecovery.diagnosis.trim() : "";
-  if (!stopped && !outcome) return null;
+  if (!outcome) return null;
   return (
     <section className={styles.failureClosure} data-status={stopped ? "cancelled" : "failed"} role="status">
       <span className={styles.closureCheck} data-tone={stopped ? "neutral" : "bad"} aria-hidden="true">!</span>

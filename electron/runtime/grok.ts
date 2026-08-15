@@ -411,6 +411,7 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
     /** 같은 도구의 승인 거부를 한 번만 알린다. */
     const announcedGrokDenials = new Set<string>();
     let thoughtActive = false;
+    let thoughtStartedAt = 0;
     let sessionId: string | undefined = resumeSessionId ?? undefined;
     const stdoutDecoder = new StringDecoder("utf8");
     const stderrDecoder = new StringDecoder("utf8");
@@ -424,9 +425,15 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
       const type = ev.type ?? ev.event;
       if (type === "thought") {
         // streaming-json exposes private reasoning deltas. Never render or persist them.
-        if (!thoughtActive) events.onStatus(tStatus(req.locale, "thinking", { agent: req.backendLabel }));
+        // The span itself is a typed fact the timeline shows as "Thought for Ns".
+        if (!thoughtActive) {
+          events.onStatus(tStatus(req.locale, "thinking", { agent: req.backendLabel }));
+          thoughtStartedAt = Date.now();
+          events.onThinking?.("start");
+        }
         thoughtActive = true;
       } else if (type === "text" || type === "assistant" || type === "message") {
+        if (thoughtActive) events.onThinking?.("end", Date.now() - thoughtStartedAt);
         thoughtActive = false;
         const t = ev.text ?? ev.content ?? ev.delta ?? (typeof ev.data === "string" ? ev.data : "");
         if (typeof t === "string" && t) {
@@ -441,6 +448,7 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
         const s = ev.name ?? ev.step ?? ev.title ?? ev.status;
         if (s) events.onStatus(String(s));
       } else if (type === "tool_use" || type === "tool" || type === "tool_call" || type === "tool_start" || type === "tool_end") {
+        if (thoughtActive) events.onThinking?.("end", Date.now() - thoughtStartedAt);
         thoughtActive = false;
         const data = ev.data && typeof ev.data === "object" ? (ev.data as Record<string, unknown>) : null;
         const name = ev.tool ?? ev.name ?? (typeof data?.name === "string" ? data.name : "tool");
@@ -478,6 +486,7 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
           toolFailed,
         );
       } else if (type === "step_finish" || type === "done" || type === "final" || type === "end") {
+        if (thoughtActive) events.onThinking?.("end", Date.now() - thoughtStartedAt);
         thoughtActive = false;
         const fin = ev.text ?? ev.content ?? ev.output ?? (typeof ev.data === "string" ? ev.data : undefined);
         if (typeof fin === "string" && fin && !text) text = fin;

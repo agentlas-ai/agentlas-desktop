@@ -242,8 +242,13 @@ export interface RunnerEvents {
   onTool?: (name: string, args?: string, result?: string, id?: string, isError?: boolean, artifactPaths?: readonly string[]) => void;
   /** 라이브 누적 출력 토큰 — 스트리밍 중 "N tokens" 실시간 표시용. 단조 증가 값(usage 실측 + 추정). 선택. */
   onUsage?: (tokens: number) => void;
-  /** reasoning(thinking) 구간 신호 — 구간 시작/종료. durationMs는 end에만(이번 구간 지속 ms). 선택. */
-  onThinking?: (phase: "start" | "end", durationMs?: number) => void;
+  /**
+   * reasoning(thinking) 구간 신호 — 구간 시작/증분/종료. durationMs는 end에만(이번 구간 지속 ms).
+   * `text`: delta면 이번 증분, end면 이 구간에서 러너가 이미 전문을 아는 경우(codex의
+   * reasoning summary 아이템처럼 한 번에 오는 것) 그 전문. 없으면 생략 — 호스트가 delta를
+   * 누적해 end에 전문을 붙인다. 선택.
+   */
+  onThinking?: (phase: "start" | "delta" | "end", durationMs?: number, text?: string) => void;
   /**
    * ★호스트가 사용자에게 하는 말. 상태줄(onStatus)과 다르다 — 상태줄은 **지나가는** 값이고
    * 이건 대화에 **남아야 하는 사실**이다.

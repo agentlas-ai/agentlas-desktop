@@ -1021,6 +1021,9 @@ export const runClaudeCode: Runner = async (
           const delta = se.delta;
           if (delta?.type === "thinking_delta" && typeof delta.thinking === "string") {
             curMsgEstChars += delta.thinking.length;
+            // 생각 텍스트는 본문(partial)에 싣지 않는다 — 자기 행(reasoning delta)으로 흘린다.
+            // 화면은 접힌 "N초 동안 생각함 ›" 아래에서만 보여 준다(Codex/Claude 앱과 같은 계약).
+            if (delta.thinking) events.onThinking?.("delta", undefined, delta.thinking);
             emitUsage();
           } else if (delta?.type === "text_delta" && delta.text && !accCapped) {
             cur += delta.text;

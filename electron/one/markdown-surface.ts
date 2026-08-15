@@ -214,7 +214,10 @@ function addMissingRecommendationToTable(
   return { columns: table.columns, rows: [row, ...cleanedTable.rows].slice(0, MAX_TABLE_ROWS) };
 }
 
-function recommendationComparison(markdown: string): { columns: string[]; rows: JsonObject[] } | null {
+function recommendationComparison(
+  markdown: string,
+  options: { allowBulletShape?: boolean } = {},
+): { columns: string[]; rows: JsonObject[] } | null {
   const rankedParagraphs = [...markdown.matchAll(
     /^\*\*((?:(?:공동[ \t]+)?1순위(?:\([^)*\r\n]{1,40}\))?|추천|대안(?:[ \t]+[A-Z0-9가-힣]+)?)[^*\r\n]{2,300}?):\*\*[ \t]*([^\r\n]+)$/gmi,
   )].slice(0, MAX_TABLE_ROWS);
@@ -279,8 +282,12 @@ function recommendationComparison(markdown: string): { columns: string[]; rows: 
     };
   }
 
-  const candidateBullets = [...markdown.matchAll(/^\s*-\s+\*\*(.+?)\*\*\s*(?::|[—-])\s*(.+)$/gm)]
-    .slice(0, MAX_TABLE_ROWS);
+  // `- **X**: Y` bullets carry no recommendation signal of their own — they are
+  // how any answer lists facts. Promote them to 추천/대안 rows only when a model
+  // verdict already said the task is a product comparison (see the caller).
+  const candidateBullets = options.allowBulletShape
+    ? [...markdown.matchAll(/^\s*-\s+\*\*(.+?)\*\*\s*(?::|[—-])\s*(.+)$/gm)].slice(0, MAX_TABLE_ROWS)
+    : [];
   const productCandidateBullets = candidateBullets.filter((candidate) =>
     !/^(?:커버리지|가격|스펙|장점|단점|한계|사용면적|소음|크기|무게|성능|근거|적정[ \t]+용량[ \t]+기준|평판)(?:[ \t(:（]|$)/i.test(cleanText(candidate[1], 80)),
   );
@@ -847,7 +854,16 @@ export function buildOneSurfaceFromMarkdown(input: {
   const travelRequest = judgedIntent === "travel";
   const budget = travelRequest ? travelBudget(markdownTable, input.taskPrompt ?? "") : null;
   const timeline = travelRequest ? travelTimeline(input.markdown) : [];
-  const table = budget ? null : markdownTable ?? recommendationComparison(input.markdown);
+  // A recommendation/alternatives table is *inferred* from prose shapes
+  // (`- **X**: Y` bullets, "추천/대안" lines). Those shapes are also how any
+  // ordinary answer is written — measured 2026-08-15: "- **작업 폴더**: … /
+  // - **package.json**: 없음" became a "선택 · 제품 · 핵심 내용" product table
+  // with "추천 / 대안 1 / 대안 2" rows over a directory listing. Infer it only
+  // when a model verdict says the task is a product comparison; otherwise only
+  // an explicit Markdown table is a table, and the answer stays the answer.
+  const table = budget
+    ? null
+    : markdownTable ?? recommendationComparison(input.markdown, { allowBulletShape: judgedIntent === "product-comparison" });
   const checklist = orderedChecklist(input.markdown)
     || [];
   const resolvedChecklist = checklist.length > 0

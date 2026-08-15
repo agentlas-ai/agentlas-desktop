@@ -1246,6 +1246,7 @@ export class InvocationService {
         phase: "start",
         ...(runReq.permissions ? { permission: runReq.permissions } : {}),
         ...(requestedOneMode && selectedOnePermissionMode ? { selectedPermissionMode: selectedOnePermissionMode } : {}),
+        ...(record.resultFolder ? { cwd: record.resultFolder } : {}),
       },
       sequence: observableStepSequence,
       observedAt: new Date().toISOString(),
@@ -1474,6 +1475,22 @@ export class InvocationService {
         // 같은 kind의 직전 버퍼 항목을 교체해 버퍼가 고빈도 신호로 밀려나지 않게 한다.
         if (event.kind === "partial" && !event.agentId && last?.kind === "partial" && !last.agentId) {
           record.events[record.events.length - 1] = event;
+        } else if (
+          event.kind === "reasoning" && event.reasoning?.phase === "delta"
+          && last?.kind === "reasoning" && last.reasoning?.phase === "delta"
+          && (last.agentId ?? null) === (event.agentId ?? null)
+        ) {
+          // Thought text streams token by token (Claude thinking can be
+          // thousands of deltas). The replay buffer keeps one merged delta per
+          // span so tool rows are never evicted by think-time chatter; the wire
+          // still gets each delta live.
+          record.events[record.events.length - 1] = {
+            ...event,
+            reasoning: {
+              ...event.reasoning,
+              text: `${last.reasoning?.text ?? ""}${event.reasoning.text ?? ""}`.slice(0, 6_000),
+            },
+          };
         } else if (event.kind === "usage") {
           let prevUsageIdx = -1;
           for (let i = record.events.length - 1; i >= 0; i -= 1) {

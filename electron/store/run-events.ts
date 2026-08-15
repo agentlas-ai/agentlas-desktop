@@ -104,6 +104,21 @@ function safePayload(input: Record<string, unknown> | undefined): Record<string,
       if (ko && en) out[key] = { ko, en };
       continue;
     }
+    // 채팅 타임라인 재방문용 증거 — 도구 인자·결과 미리보기·생각 요약은 800자로는
+    // 잘려서 무의미해진다(diff 한 개, 명령 한 줄, 요약 두 문단). 상한만 다르게 둔다.
+    // 비밀 마스킹(SECRET_RE)은 truncate 안에서 동일하게 적용된다.
+    if (key === "reasoningText" && typeof value === "string") {
+      out[key] = truncate(value, 4_000);
+      continue;
+    }
+    if (key === "toolArgs" && typeof value === "string") {
+      out[key] = truncate(value, 2_000);
+      continue;
+    }
+    if (key === "toolResultPreview" && typeof value === "string") {
+      out[key] = truncate(value, 1_200);
+      continue;
+    }
     if (typeof value === "string") {
       out[key] = truncate(value, 800);
     } else if (typeof value === "number" || typeof value === "boolean") {
@@ -306,6 +321,8 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
   // only start/end timing. Persist those typed facts so Activity does not lose
   // its Thought row after a route change or app restart.
   if (ev.kind === "partial" || ev.kind === "usage") return;
+  // reasoning delta는 partial과 같은 고빈도 live 스트림 — end의 전문만 남긴다.
+  if (ev.kind === "reasoning" && ev.reasoning?.phase === "delta") return;
   const payload = {
     eventKind: ev.kind,
     status: ev.status,
@@ -321,6 +338,10 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     toolName: ev.tool?.name,
     toolId: ev.tool?.id,
     toolIsError: ev.tool?.isError,
+    // 재방문 시에도 "무엇을 어디에" 했는지 남는다 — 이름만 남기면 과거 턴의 행이
+    // "Bash"·"Read"로만 보인다(2026-08-15 실측). 상한·마스킹은 safePayload가 건다.
+    toolArgs: ev.tool?.args,
+    toolResultPreview: ev.tool?.result,
     // Public HTTPS URLs are evidence references, not tool output content. Keep
     // them so the One Sources rail survives a route change or app restart.
     toolSourceUrls: ev.tool?.sourceUrls,
@@ -332,8 +353,16 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     noticeLevel: ev.notice?.level,
     textLen: ev.textLen ?? ev.text?.length,
     tokens: ev.tokens,
+    lifecyclePhase: ev.lifecycle?.phase,
+    lifecycleCwd: ev.lifecycle?.cwd,
+    // The error row itself must say why — replay reads these to tell a user
+    // stop ("cancelled") from a runtime failure.
+    errorCode: ev.error?.code,
+    errorMessage: ev.error?.message,
     reasoningPhase: ev.reasoning?.phase,
     reasoningDurationMs: ev.reasoning?.durationMs,
+    // end에만 전문이 온다(delta는 live 전용 — 아래에서 원장에 안 남긴다).
+    reasoningText: ev.reasoning?.phase === "end" ? ev.reasoning?.text : undefined,
     permissions: req.permissions,
     toolMode: req.toolMode,
     hubMode: req.hubMode,
@@ -562,6 +591,39 @@ export function listRunEvents(runId: string, limit?: number): RunEventUi[] {
     .prepare("SELECT * FROM run_events WHERE run_id = ? ORDER BY seq ASC LIMIT ?")
     .all(runId, capped) as RunEventRow[];
   return rows.map(runRowToUi);
+}
+
+/**
+ * Every run this conversation started, oldest first, each with its own bounded
+ * event window — the raw material for One's per-turn "Worked for Ns" blocks.
+ *
+ * `invoke_started` rows are the authority for "which runs belong to this chat".
+ * A run that has only a start row (interrupted) still returns, so a turn whose
+ * process was cut off keeps its evidence instead of vanishing from the thread.
+ */
+export function listChatRunTimeline(
+  chatId: string,
+  input: { maxRuns?: number; eventsPerRun?: number } = {},
+): Array<{ receipt: InvocationRunReceipt; events: RunEventUi[] }> {
+  if (!chatId) return [];
+  const maxRuns = normalizeLimit(input.maxRuns, 40);
+  const eventsPerRun = normalizeLimit(input.eventsPerRun, 400);
+  const rows = getDb()
+    .prepare(
+      `SELECT run_id
+       FROM run_events
+       WHERE chat_id = ? AND kind = 'invoke_started'
+       ORDER BY ts DESC, rowid DESC
+       LIMIT ?`,
+    )
+    .all(chatId, maxRuns) as Array<{ run_id: string }>;
+  const out: Array<{ receipt: InvocationRunReceipt; events: RunEventUi[] }> = [];
+  for (const row of rows.reverse()) {
+    const receipt = getInvocationRunReceipt(row.run_id);
+    if (!receipt) continue;
+    out.push({ receipt, events: listRunEvents(row.run_id, eventsPerRun) });
+  }
+  return out;
 }
 
 export function listFailureEvents(input: {

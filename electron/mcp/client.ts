@@ -447,6 +447,9 @@ function cleanPathCandidate(raw: string | undefined): string | null {
   return cleaned;
 }
 
+/** reasoning 전문 상한 — 원장 payload와 IPC를 지킨다(Claude thinking은 수만 자가 될 수 있다). */
+const REASONING_SPAN_TEXT_CAP = 6_000;
+
 export function inferWorkingFolderFromPrompt(prompt: string): string | null {
   const explicit = prompt.match(
     /(?:(?:project|working|workspace|target|output)?\s*(?:folder|directory|dir)|(?:작업|프로젝트|워크스페이스|대상|출력)\s*(?:루트|폴더|디렉터리|경로))\s*(?:only|전용|만)?[^/]*(\/(?:Volumes|Users|tmp|private\/tmp)\/[^\s`"'<>]+)/i,
@@ -1112,17 +1115,6 @@ function oneTaskSurfaceRecipe(prompt: string, ko: boolean): string | null {
       : "Do not end research or strategy work with generic summary prose. Put the decision-ready conclusion and rationale in data.summary, and compare concrete options in data.table with priority, audience, channel or method, immediate action, required resources, risks or constraints, and verification state. Mark exactly one row recommended. Add the first 3–7 ordered launch steps in data.checklist. Never claim an unexecuted preparation was completed. Treat this result as a document with inspectable, editable, and reusable capabilities and always propose 2–3 next actions that continue directly from the result, such as detailing the recommended execution plan, drafting channel-specific copy, or defining measurement criteria. Never propose viewing an original or finishing here.";
   }
   return null;
-}
-
-/**
- * 결과 카드를 그릴 화면이 없는 표면인가.
- *
- * 텔레그램은 텍스트만 오간다 — "아래에서 확인하세요"처럼 UI를 가리키는 완료 문구를
- * 보내면 가리킬 "아래"가 없고, 정작 결과(경로·내용)는 사라진다(실측: 파일을 만들고도
- * 텔레그램에는 카드 안내만 갔다).
- */
-function isCardlessTextSurface(executionContext?: InvocationExecutionContext): boolean {
-  return executionContext?.source === "telegram";
 }
 
 function deterministicOneCompletionCopy(
@@ -3323,6 +3315,8 @@ export async function runMcpInvocation(
     // 0부터 다시 세도 표시가 뒤로 가지 않도록 이전 패스 최고치를 floor로 더한다.
     let liveUsageFloor = 0;
     let liveUsageHigh = 0;
+    // 현재 reasoning 구간의 누적 텍스트(end에 원장용 전문으로 붙는다).
+    let reasoningSpanText = "";
     // partial도 같은 문제 — 패스가 바뀌면 러너 누적이 0부터 다시 시작해 렌더러 본문이
     // 통째로 줄고(전문 교체) 이전 패스 도구 카드 앵커가 붕괴한다. 이전 패스 전문을 floor로
     // 접두해 본문/앵커 좌표계를 패스 전체에 걸쳐 단조로 유지한다. (continuousMode는 패스마다
@@ -3432,8 +3426,28 @@ export async function runMcpInvocation(
         sink({ kind: "usage", tokens: liveUsageHigh });
       },
       // reasoning(thinking) 구간 신호 — 상태줄 "생각 중…" 회전 + "N초 동안 생각함".
-      onThinking: (phase: "start" | "end", durationMs?: number) =>
-        sink({ kind: "reasoning", reasoning: { phase, durationMs } }),
+      // 텍스트는 live로는 delta 그대로 흘리고, end에는 이 구간의 전문을 붙인다 —
+      // 원장(run_events)은 partial을 안 남기므로 end의 전문이 재방문 때의 유일한 근거다.
+      onThinking: (phase: "start" | "delta" | "end", durationMs?: number, text?: string) => {
+        if (phase === "start") {
+          reasoningSpanText = "";
+          sink({ kind: "reasoning", reasoning: { phase } });
+          return;
+        }
+        if (phase === "delta") {
+          if (typeof text === "string" && text) {
+            if (reasoningSpanText.length < REASONING_SPAN_TEXT_CAP) reasoningSpanText += text;
+            sink({ kind: "reasoning", reasoning: { phase, text } });
+          }
+          return;
+        }
+        const fullText = (typeof text === "string" && text.trim() ? text : reasoningSpanText).slice(0, REASONING_SPAN_TEXT_CAP);
+        reasoningSpanText = "";
+        sink({
+          kind: "reasoning",
+          reasoning: { phase, ...(durationMs !== undefined ? { durationMs } : {}), ...(fullText.trim() ? { text: fullText } : {}) },
+        });
+      },
       // 러너가 사용자에게 남겨야 하는 사실(첫 소비자: 컨텍스트 압축).
       // 상태줄과 달리 대화에 남는다.
       onNotice: (notice: NonNullable<McpInvocationEvent["notice"]>) => sink({ kind: "notice", notice }),
@@ -4076,10 +4090,12 @@ export async function runMcpInvocation(
             ? "실행 가능한 해결안을 안전하게 구성하지 못해 이 실행은 완료로 표시하지 않았습니다."
             : "This run is not marked complete because an executable solution could not be formed safely.";
         } else if (usedDeterministicOneSurface && deterministicOneSurface) {
-          // 카드를 못 그리는 채널에는 카드를 가리키는 문구 대신 모델이 쓴 결과 본문을
-          // 그대로 보낸다. 본문이 비었을 때만 완료 문구로 되돌아간다.
-          const cardless = isCardlessTextSurface(executionContext);
-          const modelText = cardless ? surfaceParse.cleanedText.trim() : "";
+          // 모델이 쓴 결과 본문이 답이다 — 어느 채널이든(Codex 패리티, 오너 결정 2026-08-15).
+          // 예전에는 카드가 있는 화면에 "요청한 결과와 파일을 준비했어요. 아래에서 바로 확인할
+          // 수 있어요."라는 완료 문구를 **답변으로 저장**하고 진짜 답은 카드 안 Narrative에만
+          // 남겼다(실측: 카드는 마크다운을 평문으로 그려 링크·코드펜스가 깨졌고, 재방문
+          // 스레드에는 답이 없었다). 본문이 비었을 때만 완료 문구로 되돌아간다.
+          const modelText = surfaceParse.cleanedText.trim();
           displayText = modelText
             || deterministicOneCompletionCopy(req.userPrompt, deterministicOneSurface, locale);
         } else if (surfaceParse.surfaces.length > 0 || surfaceParse.errors.length > 0) {

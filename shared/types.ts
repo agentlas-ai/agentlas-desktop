@@ -3927,6 +3927,12 @@ export interface McpInvocationEvent {
     permission?: "read" | "write" | "full";
     /** Original One policy selected by the user before Auto was resolved. */
     selectedPermissionMode?: "auto" | "read" | "write" | "full";
+    /**
+     * The run's working folder (start only). The timeline relativizes tool
+     * paths against it the way Codex prints `src/foo.ts`, not the whole
+     * absolute path. Desktop-only: the phone projection never carries it.
+     */
+    cwd?: string;
   };
   status?: string;
   /** Machine-readable transient progress. Status copy is presentation only. */
@@ -4003,8 +4009,13 @@ export interface McpInvocationEvent {
   /** 생성 토큰 수 — final에 동봉. kind:"usage"면 실행 중 라이브 누적치(단조 증가, 추정 포함). */
   tokens?: number;
   /** reasoning(thinking) 구간 신호(kind:"reasoning") — 상태줄 "생각 중…" 회전과
-   *  종료 후 "N초 동안 생각함" 표시의 근거. durationMs는 end에만 동봉. */
-  reasoning?: { phase: "start" | "end"; durationMs?: number };
+   *  종료 후 "N초 동안 생각함" 표시의 근거. durationMs는 end에만 동봉.
+   *
+   *  `text`: 모델이 낸 생각 요약/사고 텍스트. `delta`면 증분, `end`면 그 구간의 전문
+   *  (원장에 남는 값 — 재방문 시 "N초 동안 생각함 ›"을 펼치면 이게 보인다).
+   *  Codex는 reasoning summary 헤드라인, Claude는 thinking 블록, ACP는 thought chunk,
+   *  ollama는 thinking 필드가 온다. 없는 런타임(agy)은 start/end만 온다. */
+  reasoning?: { phase: "start" | "delta" | "end"; durationMs?: number; text?: string };
   // ── 멀티 에이전트 속성 (firm 오케스트레이션) — 없으면 단일 CEO/에이전트 ──
   /** 이 이벤트를 낸 노드의 안정 id (ResolvedNode.id) — 네트워크 패널 per-agent 버킷 키 */
   agentId?: string;
@@ -5900,6 +5911,12 @@ export interface AgentlasIpc {
   /** 실행/실패 원장 — 긴 원문 없이 runId, 노드, 도구, 오류 메타데이터만 조회한다. */
   runLedger: {
     events: (runId: string, limit?: number) => Promise<RunEventUi[]>;
+    /**
+     * Every run of one conversation (oldest first) with a bounded event window each —
+     * One renders one "Worked for Ns" block per turn from this, so past turns keep
+     * their process instead of only the latest run surviving a reload.
+     */
+    chatTimeline: (chatId: string, input?: { maxRuns?: number; eventsPerRun?: number }) => Promise<Array<{ receipt: InvocationRunReceipt; events: RunEventUi[] }>>;
     failures: (input?: { runId?: string; automationId?: string; chatId?: string; limit?: number }) => Promise<FailureEventUi[]>;
   };
   /** 에이전트 자가진화 proposal 원장 — 제안/승인/적용/측정/롤백 상태를 로컬 DB에 남긴다. */

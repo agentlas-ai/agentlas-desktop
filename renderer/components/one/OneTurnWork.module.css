@@ -1,0 +1,261 @@
+/*
+ * One turn's work block — Codex desktop look.
+ *
+ *  running   ✦ 파일 구조를 살펴보는 중            (shimmer, model headline)
+ *              탐색함  README.md, package.json
+ *              실행함  npm test
+ *  settled   27s 동안 작업 ›                        (13px gray, collapsed)
+ *
+ * The block is text on the page, not a card: no border, no fill, one quiet
+ * column that sits above the answer it produced.
+ */
+.work {
+  --work-ink: #3c4043;
+  --work-muted: #6f7479;
+  --work-faint: #9aa0a5;
+  --work-line: #e6e8ea;
+  --work-fail: #b3473c;
+  --work-ok: #5f8f52;
+  --work-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  width: 100%;
+  max-width: min(790px, 88%);
+  margin: 2px 0 10px;
+  color: var(--work-ink);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+/* ── live header (running) ────────────────────────────────────────────── */
+.live {
+  min-height: 26px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.liveMark {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--work-muted);
+  opacity: 0.55;
+}
+
+.liveText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13.5px;
+  font-weight: 500;
+}
+
+.liveToggle {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--work-faint);
+  cursor: pointer;
+}
+
+.liveToggle[aria-expanded="true"] { transform: rotate(180deg); }
+.liveToggle:hover { color: var(--work-ink); background: #f1f2f3; }
+
+/* Left→right light sweep. The gradient is wider than the box so the bright
+   band travels across the text and the base gray stays put around it. */
+.shimmer {
+  color: transparent;
+  background-image: linear-gradient(90deg, #7d8287 0%, #7d8287 38%, #d9dcdf 50%, #7d8287 62%, #7d8287 100%);
+  background-size: 220% 100%;
+  background-repeat: no-repeat;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: oneWorkShimmer 1.9s linear infinite;
+}
+
+@keyframes oneWorkShimmer {
+  from { background-position: 100% 0; }
+  to { background-position: -20% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shimmer { animation: none; color: var(--work-muted); background: none; }
+}
+
+/* ── settled header ───────────────────────────────────────────────────── */
+.header {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 24px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--work-muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.header:hover { color: var(--work-ink); }
+.header:focus-visible { outline: 2px solid rgba(96, 122, 54, 0.35); outline-offset: 3px; border-radius: 4px; }
+.headerTerminal { color: var(--work-fail); }
+.headerChevron {
+  display: inline-grid;
+  place-items: center;
+  color: var(--work-faint);
+  transform: rotate(-90deg);
+  transition: transform 140ms ease;
+}
+.header[aria-expanded="true"] .headerChevron { transform: rotate(0deg); }
+
+/* ── rows ─────────────────────────────────────────────────────────────── */
+.rows {
+  display: grid;
+  gap: 1px;
+  padding: 4px 0 4px 14px;
+}
+
+.work[data-state="settled"] .rows {
+  max-height: min(56vh, 620px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.row { min-width: 0; }
+
+.rowHead {
+  width: 100%;
+  min-height: 24px;
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: default;
+}
+
+.rowHead:not(:disabled) { cursor: pointer; }
+.rowHead:not(:disabled):hover .rowText { color: var(--work-ink); }
+.rowHead:focus-visible { outline: 2px solid rgba(96, 122, 54, 0.35); outline-offset: 2px; border-radius: 4px; }
+
+.rowMark {
+  width: 5px;
+  height: 5px;
+  margin-top: 8px;
+  border-radius: 999px;
+  background: var(--work-faint);
+}
+.rowMark[data-status="failed"] { background: var(--work-fail); }
+.rowMark[data-status="running"] { background: var(--work-muted); }
+
+.rowText {
+  min-width: 0;
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 7px;
+  row-gap: 2px;
+  color: var(--work-muted);
+  overflow-wrap: anywhere;
+}
+
+.rowText strong {
+  color: var(--work-ink);
+  font-weight: 590;
+}
+
+.rowChevron {
+  display: inline-grid;
+  place-items: center;
+  margin-top: 5px;
+  color: var(--work-faint);
+  transition: transform 140ms ease;
+}
+.row[data-open="true"] .rowChevron { transform: rotate(180deg); }
+
+.rowBody {
+  padding: 2px 0 8px 15px;
+}
+
+.object,
+.thoughtLabel { color: var(--work-muted); }
+
+.command,
+.file code {
+  font-family: var(--work-mono);
+  font-size: 12px;
+  color: var(--work-ink);
+  background: #f4f5f6;
+  border-radius: 4px;
+  padding: 1px 5px;
+  overflow-wrap: anywhere;
+}
+
+.files { display: inline-flex; flex-wrap: wrap; gap: 6px 10px; }
+.file { display: inline-flex; align-items: baseline; gap: 5px; }
+.diffStat em { font-style: normal; font-size: 12px; font-variant-numeric: tabular-nums; }
+.added { color: #4c8a3f; }
+.removed { color: #b3473c; margin-left: 4px; }
+
+.failed { color: var(--work-fail); font-size: 12px; }
+.muted { color: var(--work-faint); font-size: 12px; }
+
+.output {
+  max-height: 260px;
+  overflow: auto;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #f6f7f8;
+  color: #4a4f54;
+  font-family: var(--work-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.exploreHead { display: grid; gap: 2px; min-width: 0; }
+.exploreList {
+  display: grid;
+  gap: 1px;
+  margin: 0;
+  padding: 0 0 0 2px;
+  list-style: none;
+}
+.exploreLine { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+.exploreOp { flex: 0 0 auto; color: var(--work-faint); font-size: 12px; }
+.exploreTarget { color: var(--work-muted); font-family: var(--work-mono); font-size: 12px; overflow-wrap: anywhere; }
+
+.thoughtBody { display: grid; gap: 4px; color: #5f6469; font-size: 13px; line-height: 1.6; }
+.thoughtBody p { margin: 0; }
+.thoughtBody strong { color: var(--work-ink); font-weight: 600; }
+.thoughtGap { height: 4px; }
+
+.notice { color: var(--work-muted); }
+.notice[data-level="warning"] { color: #8a6a2b; }
+.notice[data-level="error"] { color: var(--work-fail); }
+.notice[data-level="success"] { color: var(--work-ok); }
+
+/* ── conversation boundary (compaction) ───────────────────────────────── */
+.divider {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0 6px;
+  color: #7c8186;
+  font-size: 12.5px;
+}
+.dividerIcon { display: inline-grid; place-items: center; color: #9aa0a5; }
