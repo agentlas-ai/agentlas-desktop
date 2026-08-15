@@ -176,11 +176,39 @@ function buildPrompt(req: RunnerRequest): string {
   return parts.join("\n");
 }
 
+/**
+ * ★권한 칩 → agy 권한 플래그. 형제 러너와 같은 규칙이다.
+ *
+ * claude는 `--permission-mode acceptEdits|bypassPermissions`, codex는
+ * `--sandbox workspace-write|--dangerously-bypass-approvals-and-sandbox`를 권한에 맞춰
+ * 넘긴다. agy만 **아무 플래그도 넘기지 않아서**, 쓰기 권한 실행인데도 도구가 전부
+ * 자동 거부됐다 — 모델은 코드를 텍스트로 그려줄 뿐 파일 하나 만들지 못했다.
+ *
+ * agy 자신이 그 사실을 정확히 말해 준다(실측 1.1.13, 플래그 없이 파일 생성 요청):
+ *   `a tool required the "write_file" permission that headless mode cannot prompt for,
+ *    so it was auto-denied. ... re-run with --dangerously-skip-permissions`
+ *
+ * 실측(1.1.13, 임시 디렉터리에 실제 파일 생성):
+ * - 플래그 없음 → 파일 0개(auto-denied)
+ * - `--dangerously-skip-permissions` → 생성됨
+ * - `--dangerously-skip-permissions --sandbox` → **생성됨**(샌드박스는 터미널만 제한)
+ *
+ * 그래서 write는 codex의 workspace-write와 같은 자리에 `--sandbox`를 함께 준다 —
+ * 파일 작업은 되고 셸은 묶인다. full만 샌드박스를 푼다.
+ * read는 플래그를 주지 않는다(도구 없이 텍스트만 = 기존 격리 계약 유지).
+ */
+export function antigravityPermissionArgs(permission?: "read" | "write" | "full"): string[] {
+  if (permission === "full") return ["--dangerously-skip-permissions"];
+  if (permission === "write") return ["--dangerously-skip-permissions", "--sandbox"];
+  return [];
+}
+
 /** Antigravity의 헤드리스 실행 인자. 세션/stdin 계약은 사용하지 않는다. */
 export function buildAntigravitySpawnArgs(
   model: string | undefined,
   prompt = "",
   addDirectories: string[] = [],
+  permission?: "read" | "write" | "full",
 ): string[] {
   const modelArgs = model && model.trim() ? ["--model", model.trim()] : [];
   const directoryArgs = [...new Set(addDirectories.filter((value) => value.trim()))]
@@ -192,12 +220,11 @@ export function buildAntigravitySpawnArgs(
    */
   /*
    * agy 헤드리스: --print-timeout 기본 5분은 긴 생성(체스 게임)을 agy가 스스로 포기하게
-   * 만든다(실측) → 30분. 도구 승인 우회는 **넣지 않는다** — 비대화형에서 도구가 승인될 수
-   * 없다는 사실이 곧 무도구 격리의 근거다. 대신 프롬프트가 그 사실을 모델에게 말한다
-   * (아래 spawnPrompt 조립) — 말하지 않으면 모델이 도구를 시도하다 승인 대기에 갇힌다.
+   * 만든다(실측) → 30분.
    */
   return [
     ...modelArgs, ...directoryArgs,
+    ...antigravityPermissionArgs(permission),
     "--output-format", "stream-json",
     "--print-timeout", "30m",
     "--prompt", prompt,
@@ -297,13 +324,29 @@ async function runPreparedAntigravity(
   events.onStatus(tStatus(runReq.locale, "callingBackend", { backend: runReq.backendLabel }));
   const prompt = buildPrompt(runReq);
 
+  /*
+   * ★이 실행이 실제로 도구를 쓸 수 있는가 — 권한 플래그와 세션 규칙이 같은 답을 써야 한다.
+   * 두 곳이 어긋나면(플래그는 열고 프롬프트는 금지, 또는 그 반대) 모델은 자기가 무엇을
+   * 할 수 있는지 모르게 된다. 무도구 격리 실행은 러너 진입에서 이미 거부되므로
+   * (untrustedNoTools·restrictedReadBoundary), 여기서는 권한 칩만 보면 된다.
+   */
+  const agyToolsAllowed = runReq.permission === "write" || runReq.permission === "full";
+
   // agy에는 stdin/prompt-file 입력이 없다. 전체 시스템·히스토리를 argv에 넣으면 로컬
   // process listing에 노출되고 Windows 길이 제한도 넘는다. 0600 파일에는 본문을,
   // argv에는 그 파일을 읽으라는 짧은 bootstrap만 전달한다.
   let agyPromptDirectory: string | null = null;
   let agyPromptFile: string | null = null;
   let spawnPrompt = prompt;
-  let agyReadDirs = agyAdditionalDirs;
+  /*
+   * ★작업 폴더를 워크스페이스로 **등록**한다 — cwd로 스폰하는 것만으로는 부족하다.
+   *
+   * 실측(1.1.13): 같은 플래그·같은 cwd라도 `--add-dir <작업폴더>`가 있으면 파일이
+   * 생성되고, 없으면 모델이 DONE이라고 답하는데 파일은 하나도 만들어지지 않는다.
+   * agy는 등록된 워크스페이스 밖의 쓰기를 조용히 버린다 — 실패 표식조차 없어서
+   * "했다고 말하는데 아무것도 없는" 상태가 된다.
+   */
+  let agyReadDirs = runReq.cwd ? [runReq.cwd, ...agyAdditionalDirs] : agyAdditionalDirs;
   /*
    * ★agy 프롬프트는 **argv 한계에 걸릴 때만** 파일로 우회한다.
    *
@@ -315,15 +358,31 @@ async function runPreparedAntigravity(
    */
   const AGY_ARGV_PROMPT_LIMIT = 100_000;
   /*
-   * 도구가 승인될 수 없는 비대화형 실행임을 모델에게 명시한다. 산출물은
-   * 파일이 아니라 최종 텍스트이며, 다음 단계는 그 텍스트만 읽는다.
+   * ★세션 규칙은 이 실행이 실제로 도구를 쓸 수 있는지에 맞춰 말한다.
+   *
+   * 예전에는 권한과 무관하게 "도구를 시도하지 말고 파일로 저장하지 마라"를 항상 보냈다.
+   * 쓰기 권한 실행에서 그 문장은 **거짓이자 금지령**이 된다 — 모델은 지시받은 대로
+   * 코드를 화면에 그려주고 끝냈고, 프로젝트에는 파일 하나 생기지 않았다.
+   * 권한 칩이 "읽기 + 쓰기"인데 아무것도 쓰이지 않는 상태가 여기서 만들어졌다.
+   *
+   * 도구가 열린 실행에서는 반대로 **실제로 만들라**고 말해야 한다. 코드를 답변에
+   * 옮겨 적는 것으로 대신하는 것이 이 런타임의 기본 습관이기 때문이다.
    */
   spawnPrompt = [
     "Non-interactive session rules:",
-    "- Tool calls cannot be approved here — do not attempt them.",
-    "- Do NOT save your work to a file. Your final text response IS the deliverable;",
-    "  the next automation step reads only that text. If the request asks for a file's",
-    "  contents (HTML, code, a document), put the COMPLETE contents in your response.",
+    ...(agyToolsAllowed
+      ? [
+        "- Tools ARE available and pre-approved. Use them to do the work for real.",
+        "- Apply changes to the actual files in the workspace: create, edit, and run what the",
+        "  request needs. Printing code in your reply is NOT doing the work.",
+        "- Your final text is a report of what you actually changed, not a substitute for it.",
+      ]
+      : [
+        "- Tool calls cannot be approved here — do not attempt them.",
+        "- Do NOT save your work to a file. Your final text response IS the deliverable;",
+        "  the next automation step reads only that text. If the request asks for a file's",
+        "  contents (HTML, code, a document), put the COMPLETE contents in your response.",
+      ]),
     "",
     spawnPrompt,
   ].join("\n");
@@ -369,6 +428,7 @@ async function runPreparedAntigravity(
           req.model,
           spawnPrompt,
           agyReadDirs,
+          agyToolsAllowed ? req.permission : undefined,
         ),
         {
           stdio: ["ignore", "pipe", "pipe"],
