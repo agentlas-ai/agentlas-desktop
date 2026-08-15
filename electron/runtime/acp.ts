@@ -320,7 +320,12 @@ export async function probeAcpModels(
     if (rows.length === 0) outcome.reason = "acp:no-model-config-option";
     return { ...outcome, init: session.init };
   } catch (err) {
-    return { status: "failed", models: [], rawLineCount: 0, reason: `acp:${err instanceof Error ? err.message : String(err)}`, source: "acp" };
+    // 여기서도 사유는 data 에 있다 — `acp:Internal error` 만 남기면 모델 탐지 실패를
+    // 아무도 진단할 수 없다(실측: goose 의 provider 미설정이 정확히 그 모습이었다).
+    const raw = err instanceof Error ? err.message : String(err);
+    const data = err instanceof AcpRpcError ? err.data : undefined;
+    const detail = data == null ? "" : (typeof data === "string" ? data : JSON.stringify(data));
+    return { status: "failed", models: [], rawLineCount: 0, reason: `acp:${detail && !raw.includes(detail) ? `${raw}: ${detail}` : raw}`, source: "acp" };
   } finally {
     if (session) {
       try { session.conn.close(); } catch { /* ignore */ }
@@ -417,9 +422,43 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       return { text, sessionId };
     } catch (err) {
       if (req.signal?.aborted) throw abortReasonError(req);
-      const message = err instanceof Error ? err.message : String(err);
-      if (/auth_required|not authenticated|login/i.test(message)) {
-        return { text: "", failure: { kind: "auth", message, runtime: spec.id, source: "marker" } };
+      /*
+       * ★사유는 `message` 가 아니라 `data` 에 온다.
+       *
+       * JSON-RPC 는 규격 코드에 규격 문구를 쓰라고 하므로, 에이전트는 -32603 에
+       * message="Internal error" 를 싣고 사람이 읽을 사유는 `data` 로 보낸다. 실측:
+       * goose 는 provider 미설정일 때 정확히 그렇게 답한다
+       * ("Failed to resolve provider: Configuration value not found: GOOSE_PROVIDER").
+       * `message` 만 읽으면 화면에 남는 말은 "Internal error" 한 마디뿐이고, 사용자는
+       * 자기가 무엇을 해야 하는지 알 방법이 없다.
+       */
+      const raw = err instanceof Error ? err.message : String(err);
+      const data = err instanceof AcpRpcError ? err.data : undefined;
+      const detail = data == null ? "" : (typeof data === "string" ? data : JSON.stringify(data));
+      const message = detail && !raw.includes(detail) ? `${raw}: ${detail}` : raw;
+
+      /*
+       * 인증은 문장이 아니라 구조로 판정한다. 에이전트가 initialize 에서 광고한
+       * `authMethods` 가 곧 "무엇을 해야 하는가"이고, 대개 명령까지 적어 준다
+       * (goose: `goose configure`, opencode: `opencode auth login`). 단어 매칭은
+       * 문구나 로케일이 바뀌는 순간 눈이 먼다 — 위 goose 사례가 이미 그랬다.
+       */
+      const advertised: any[] = Array.isArray(session?.init?.authMethods) ? session.init.authMethods : [];
+      const prescription = advertised
+        .map((m) => String(m?.description || m?.name || m?.id || "").trim())
+        .filter(Boolean)
+        .join(" / ");
+
+      if (err instanceof AcpRpcError || /auth_required|not authenticated|login/i.test(message)) {
+        const help = prescription
+          ? (locale === "ko"
+            ? ` — 이 런타임은 먼저 로그인이나 설정이 필요하다: ${prescription}`
+            : ` — this runtime needs sign-in or setup first: ${prescription}`)
+          : "";
+        // 인증 수단을 광고한 채 실패했으면 auth 로 부른다. 그렇지 않으면 원인을 모르는
+        // 종료이므로 단정하지 않고, 다만 사유는 그대로 들고 나간다.
+        const kind = prescription || /auth_required|not authenticated|login/i.test(message) ? "auth" as const : "exit" as const;
+        return { text: "", failure: { kind, message: message + help, runtime: spec.id, source: "marker" } };
       }
       throw err;
     } finally {
