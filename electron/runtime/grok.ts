@@ -2,6 +2,8 @@
 // Headless contract: --prompt-file + --cwd + --output-format streaming-json.
 // Authentication is normally OAuth (`grok login`); XAI/GROK_API_KEY remains a supported fallback.
 import path from "node:path";
+import { announceToolDenied } from "./tool-approval";
+import { detectApprovalRequired } from "./runtime-refusal";
 import os from "node:os";
 import fs from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
@@ -394,6 +396,8 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
     let stderr = "";
     let tokens: number | undefined;
     let lastEmit = 0;
+    /** 같은 도구의 승인 거부를 한 번만 알린다. */
+    const announcedGrokDenials = new Set<string>();
     let thoughtActive = false;
     let sessionId: string | undefined = resumeSessionId ?? undefined;
     const stdoutDecoder = new StringDecoder("utf8");
@@ -430,12 +434,35 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
         const name = ev.tool ?? ev.name ?? (typeof data?.name === "string" ? data.name : "tool");
         const argPayload = ev.input ?? ev.args ?? ev.arguments ?? ev.parameters ?? data?.input ?? data?.args;
         const resultPayload = ev.output ?? ev.result ?? data?.output ?? data?.result;
+        const toolFailed = ev.error != null || ev.is_error === true;
+        /*
+         * ★형제 규칙 — grok 도 claude 와 같은 `--permission-mode` 를 받는다.
+         * 즉 헤드리스에서 승인이 필요한 호출은 여기서도 자동 거부되고, 그 사유가
+         * 도구 결과에 실려 온다. claude·agy 만 고치고 여기를 두면 같은 병이 남는다.
+         */
+        if (toolFailed) {
+          const denialText = resultPayload == null ? "" : stringify(resultPayload);
+          const blocked = detectApprovalRequired(denialText);
+          if (blocked) {
+            const key = blocked.blocked ?? blocked.message.slice(0, 120);
+            if (!announcedGrokDenials.has(key)) {
+              announcedGrokDenials.add(key);
+              announceToolDenied({
+                runtime: "grok",
+                tool: String(name),
+                detail: blocked.blocked,
+                cwd: req.cwd,
+                deniedBy: "runtime-headless",
+              });
+            }
+          }
+        }
         events.onTool?.(
           String(name),
           argPayload == null ? undefined : truncate(stringify(argPayload), 2000),
           resultPayload == null ? undefined : truncate(stringify(resultPayload)),
           ev.id,
-          ev.error != null || ev.is_error === true,
+          toolFailed,
         );
       } else if (type === "step_finish" || type === "done" || type === "final" || type === "end") {
         thoughtActive = false;
