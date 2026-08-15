@@ -18,6 +18,7 @@ import {
 } from "./runner";
 import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
 import { detectApprovalRequired } from "./runtime-refusal";
+import { announceToolDenied } from "./tool-approval";
 import {
   CLI_HISTORY_CONTEXT_TOKENS,
   composeResumeTurnPrompt,
@@ -765,6 +766,13 @@ export const runClaudeCode: Runner = async (
       const key = blocked.blocked ?? blocked.message.slice(0, 120);
       if (announcedApprovalBlocks.has(key)) return;
       announcedApprovalBlocks.add(key);
+      announceToolDenied({
+        runtime: KIND,
+        tool: blocked.blocked ? "Bash" : "tool",
+        detail: blocked.blocked,
+        cwd: runReq.cwd,
+        deniedBy: "runtime-headless",
+      });
       const what = blocked.blocked ? `: ${blocked.blocked}` : "";
       const ko = `승인이 필요해 중단된 단계가 있습니다${what}. 이 실행에는 승인할 사람이 붙어 있지 않아 자동으로 거부됐습니다 — 사용자가 거절한 것이 아닙니다. 권한을 올리거나 다시 요청해 주세요.`;
       const en = `A step was blocked because it needs approval${what}. This run has nobody to approve it, so it was auto-denied — you did not reject it. Raise the permission or ask again.`;

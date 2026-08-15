@@ -725,6 +725,14 @@ import {
   getAutomationGraphReconciliation,
   reconcileAutomationGraph,
 } from "./store/graph-reconciliation";
+import {
+  listPendingToolApprovals,
+  onToolApprovalRequested,
+  requestToolApproval,
+  resolveToolApproval,
+} from "./runtime/tool-approval";
+import { setAcpPermissionArbiter } from "./runtime/acp";
+import type { ToolApprovalDecision } from "../shared/types";
 
 // DESKTOP_MOBILE_BRIDGE: live invocation authority moved to invocation/service.ts.
 // Hephaestus 빌더(hep-build) 진행 중 실행 — 취소용 AbortController 레지스트리.
@@ -3154,6 +3162,43 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("browser:resolveApproval", (_e, requestId: string, decision: BrowserPermissionDecision) =>
     browserResolveApproval(requestId, decision),
   );
+
+  /*
+   * 도구 승인 — 런타임이 승인을 필요로 하거나(live) 이미 자동 거부한(post-denial) 사실을
+   * 화면으로 나른다. 예전에는 어느 쪽도 화면에 도달하지 않아, 사용자는 파일 편집은 되는데
+   * 셸 명령만 조용히 안 되는 상태를 원인 없이 겪었다.
+   */
+  ipcMain.handle("runtime:listToolApprovals", () => listPendingToolApprovals());
+  ipcMain.handle("runtime:resolveToolApproval", (_e, id: string, decision: ToolApprovalDecision) =>
+    resolveToolApproval(id, decision),
+  );
+  /*
+   * ACP는 전수 조사에서 **유일하게 런타임이 실행 전에 묻는** 경로다
+   * (`session/request_permission`). 그래서 여기만 진짜 live 승인이 성립한다.
+   *
+   * 결합은 import 가 아니라 주입이다 — acp 런타임은 이 계약 파일을 알지 못하고,
+   * 등록되지 않으면 종전의 보수 기본값(read+mutating → 거절)으로 돈다.
+   */
+  setAcpPermissionArbiter(async (ask) => (
+    await requestToolApproval({
+      sessionKey: ask.sessionKey,
+      runtime: "acp",
+      tool: ask.tool,
+      detail: ask.detail,
+      cwd: ask.cwd,
+    })
+  ).decision);
+
+  onToolApprovalRequested((request) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (window.isDestroyed() || window.webContents.isDestroyed()) continue;
+      try {
+        window.webContents.send("runtime:toolApprovalRequest", request);
+      } catch {
+        // 화면 하나가 사라져도 실행 경계는 그대로다.
+      }
+    }
+  });
   ipcMain.handle("browser:listLogs", (_e, limit?: number) => browserListLogs(limit));
   ipcMain.handle("browser:captureLiveFrame", (event) => {
     assertTrustedSitePublishIpcSender(event);

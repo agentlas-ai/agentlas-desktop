@@ -154,5 +154,61 @@ check("★claude 런타임이 승인 차단을 사용자에게 고지한다", ()
   assert.ok(hooks >= 2, `tool_result 처리 ${hooks}곳에만 붙었다(2곳 필요)`);
 });
 
+// 5. 승인 프로토콜 — 런타임이 말하는 승인을 화면이 받는가
+check("★승인 계약이 live 와 post-denial 을 구분한다", () => {
+  const src = fs.readFileSync(path.join(root, "electron/runtime/tool-approval.ts"), "utf8");
+  assert.match(src, /mode === "live"|mode: "live"/, "live 모드가 없다");
+  assert.match(src, /post-denial/, "post-denial 모드가 없다");
+  // live 는 답을 기다리되 영원히 기다리지 않는다 — 이 제품에서 무한 대기는 이미 겪은 실패다.
+  assert.match(src, /timeoutMs/, "live 요청에 만료가 없다");
+  assert.match(src, /deniedBy/, "자동 거부와 사람의 거절을 구분하는 칸이 없다");
+});
+
+check("★거부를 감지한 런타임이 승인 계약으로 올린다", () => {
+  for (const rel of ["electron/runtime/antigravity.ts", "electron/runtime/claude-code.ts"]) {
+    const src = fs.readFileSync(path.join(root, rel), "utf8");
+    assert.match(src, /announceToolDenied\(/, `${rel}가 거부를 승인 계약으로 올리지 않는다`);
+    assert.match(src, /deniedBy: "runtime-headless"/, `${rel}가 자동 거부임을 표시하지 않는다`);
+  }
+});
+
+check("★화면까지 배선되어 있다(IPC · preload · 시트 · 마운트)", () => {
+  const ipcSrc = fs.readFileSync(path.join(root, "electron/ipc.ts"), "utf8");
+  assert.match(ipcSrc, /runtime:toolApprovalRequest/, "승인 요청이 렌더러로 방송되지 않는다");
+  assert.match(ipcSrc, /runtime:resolveToolApproval/, "승인 결정 핸들러가 없다");
+
+  const preloadSrc = fs.readFileSync(path.join(root, "electron/preload.ts"), "utf8");
+  assert.match(preloadSrc, /onToolApproval/, "preload가 승인 구독을 노출하지 않는다");
+  assert.match(preloadSrc, /resolveToolApproval/, "preload가 승인 결정을 노출하지 않는다");
+
+  const sheet = fs.readFileSync(path.join(root, "renderer/components/ToolApprovalSheet.tsx"), "utf8");
+  // 같은 버튼으로 그리면 "허용했는데 아무 일도 안 일어나는" 화면이 된다.
+  assert.match(sheet, /const live = req\.mode === "live"/, "시트가 두 모드를 구분하지 않는다");
+  assert.match(sheet, /allow_once/, "live 승인 버튼이 없다");
+  assert.match(sheet, /다음부터 허용|Allow from next run/, "post-denial 전용 문구가 없다");
+
+  const shell = fs.readFileSync(path.join(root, "renderer/components/AppShell.tsx"), "utf8");
+  assert.match(shell, /<ToolApprovalSheet \/>/, "시트가 마운트되지 않았다");
+});
+
+check("★실행 전에 묻는 런타임(ACP)은 사용자에게 묻는다", () => {
+  const acp = path.join(root, "electron/runtime/acp.ts");
+  if (!fs.existsSync(acp)) { console.log("       (acp.ts 없음 — 건너뜀)"); return; }
+  const src = fs.readFileSync(acp, "utf8");
+  // 결합은 주입이다 — acp 는 승인 계약 파일을 import 하지 않는다(커밋 순서 독립).
+  assert.ok(!/from "\.\/tool-approval"/.test(src), "acp 가 승인 계약을 직접 import 한다(주입이어야 함)");
+  assert.match(src, /setAcpPermissionArbiter/, "arbiter 주입 지점이 없다");
+  assert.match(src, /async answerPermission/, "승인 응답이 동기라 사용자에게 물을 수 없다");
+
+  const ipcSrc = fs.readFileSync(path.join(root, "electron/ipc.ts"), "utf8");
+  assert.match(ipcSrc, /setAcpPermissionArbiter\(/, "arbiter 가 등록되지 않아 ACP 는 여전히 대신 답한다");
+  assert.match(ipcSrc, /requestToolApproval\(/, "ACP arbiter 가 live 승인 계약을 쓰지 않는다");
+});
+
+check("권한을 강제할 수 없는 런타임은 그 사실을 말한다", () => {
+  const kimi = fs.readFileSync(path.join(root, "electron/runtime/kimi.ts"), "utf8");
+  assert.match(kimi, /permission-not-enforceable/, "kimi가 권한 미전달 사실을 숨긴다");
+});
+
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length) process.exit(1);

@@ -1,5 +1,7 @@
 // preload.ts가 contextBridge로 노출한 window.agentlas / window.agentlasEvents 타이핑.
 import type {
+  ToolApprovalRequestEvent,
+  ToolApprovalDecision,
   AgentlasIpc,
   AgentlasUpdaterEvents,
   McpInvocationEvent,
@@ -48,6 +50,11 @@ interface AgentlasEvents {
   onMobileBridgeChanged?: (handler: (event: { reason: string }) => void) => () => void;
   /** Browser 승인 요청 구독 — 경량 바텀시트. unsubscribe 반환. */
   onBrowserApproval: (handler: (req: BrowserApprovalRequestEvent) => void) => () => void;
+  /**
+   * 도구 승인 구독 — live(답을 기다림)와 post-denial(이미 거부됨)을 함께 받는다.
+   * 구 preload에는 없어 optional.
+   */
+  onToolApproval?: (handler: (req: ToolApprovalRequestEvent) => void) => () => void;
   /** 스토어 변경 방송({entity, id}) — 읽기 캐시 무효화용. 구 preload에는 없어 optional. */
   onStoreChanged?: (handler: (change: { entity: string; id?: string }) => void) => () => void;
   /** Site Copilot의 사용자용 처리 단계·타이핑 피드백 구독. */

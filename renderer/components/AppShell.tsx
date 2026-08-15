@@ -19,6 +19,7 @@ import { IconLayers, IconBug, IconCheck } from "./Icon";
 import { PageTour, replayCurrentPageTour } from "./PageTour";
 import { BuildDoneToast } from "./BuildDoneToast";
 import { BrowserActionApprovalSheet } from "./BrowserActionApprovalSheet";
+import { ToolApprovalSheet } from "./ToolApprovalSheet";
 import FloatingComputerUsePanel from "./browser/FloatingComputerUsePanel";
 import { OntologyChipFeatureUpdateModal } from "./OntologyChipFeatureUpdateModal";
 import { OneFeatureIntro } from "./one/OneFeatureIntro";
@@ -443,6 +444,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       )}
       <BuildDoneToast />
       <BrowserActionApprovalSheet />
+      <ToolApprovalSheet />
       {showWorkspaceSidebar && <FloatingComputerUsePanel />}
       <OntologyChipFeatureUpdateModal
         eligible={featureUpdateEligible && oneIntroState !== null && !oneIntroPending}

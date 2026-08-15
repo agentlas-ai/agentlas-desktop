@@ -2,6 +2,8 @@
 // shared/types.ts AgentlasIpc 모양과 1:1 일치해야 한다.
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
+  ToolApprovalDecision,
+  ToolApprovalRequestEvent,
   AgentlasIpc,
   RendererJudgmentSpec,
   RendererSubsetJudgmentSpec,
@@ -450,6 +452,11 @@ const api: AgentlasIpc = {
     configureBotSettings: (id: string) => ipcRenderer.invoke("telegram:configureBotSettings", id),
     pruneOrphans: () => ipcRenderer.invoke("telegram:pruneOrphans"),
   },
+  // 도구 승인 결정 — live 요청은 이 호출이 대기 중인 실행을 풀고,
+  // post-denial 은 다음 실행의 허용 범위에만 반영된다.
+  resolveToolApproval: (id: string, decision: ToolApprovalDecision) =>
+    ipcRenderer.invoke("runtime:resolveToolApproval", id, decision),
+  listToolApprovals: () => ipcRenderer.invoke("runtime:listToolApprovals"),
   browser: {
     status: () => ipcRenderer.invoke("browser:status"),
     listSites: () => ipcRenderer.invoke("browser:listSites"),
@@ -938,6 +945,12 @@ contextBridge.exposeInMainWorld("agentlasEvents", {
     const wrapped = (_evt: Electron.IpcRendererEvent, event: { reason: string }) => handler(event);
     ipcRenderer.on("mobileBridge:changed", wrapped);
     return () => ipcRenderer.removeListener("mobileBridge:changed", wrapped);
+  },
+  // 도구 승인 — 런타임이 승인을 기다리거나(live) 이미 자동 거부한(post-denial) 사실.
+  onToolApproval: (handler: (req: ToolApprovalRequestEvent) => void) => {
+    const wrapped = (_evt: Electron.IpcRendererEvent, req: ToolApprovalRequestEvent) => handler(req);
+    ipcRenderer.on("runtime:toolApprovalRequest", wrapped);
+    return () => ipcRenderer.removeListener("runtime:toolApprovalRequest", wrapped);
   },
   // Browser 승인 요청 — 되돌릴 수 없는 브라우저 행동 전 경량 바텀시트를 띄운다.
   onBrowserApproval: (handler: (req: BrowserApprovalRequestEvent) => void) => {

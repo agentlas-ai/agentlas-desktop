@@ -5559,6 +5559,9 @@ export interface RendererSubsetJudgmentVerdict {
 }
 
 export interface AgentlasIpc {
+  /** 도구 승인 결정 — live 요청만 대기 중인 실행을 푼다. post-denial 은 다음 실행에 반영. */
+  resolveToolApproval: (id: string, decision: ToolApprovalDecision) => Promise<boolean>;
+  listToolApprovals: () => Promise<ToolApprovalRequestEvent[]>;
   /** Electron 메인이 알려주는 OS 환경 정보 (Apple/Codex/Claude 데스크톱과 동일 패턴) */
   app: {
     /** macOS 시스템 설정의 1순위 언어 — "ko-KR" / "en-US" 등. i18n 자동 감지에 사용 */
@@ -6876,3 +6879,31 @@ declare global {
 export interface AgentlasUpdaterEvents {
   onState: (handler: (state: UpdaterState) => void) => () => void;
 }
+
+/**
+ * 도구 승인 — 런타임이 제각각 말하는 "승인"을 화면이 한 모양으로 받는다.
+ *
+ * `mode` 가 이 계약의 중심이다(electron/runtime/tool-approval.ts 주석 참고):
+ *  - live: 런타임이 실행 전에 물었고 답을 기다린다. 선택이 이번 호출을 결정한다.
+ *  - post-denial: 헤드리스라 물어볼 상대가 없어 런타임이 이미 거부하고 지나갔다.
+ *    선택은 다음 실행에만 적용된다. 이 둘을 한 버튼으로 그리면 "허용했는데
+ *    아무 일도 안 일어나는" 화면이 된다.
+ *
+ * `deniedBy` 는 사람이 거절한 것과 런타임이 자동 거부한 것을 화면에서 구분하기 위한
+ * 칸이다. 런타임들은 자동 거부를 "User denied" / "user-rejected" 로 기록하지만,
+ * 사용자는 손도 대지 않았다.
+ */
+export interface ToolApprovalRequestEvent {
+  id: string;
+  /** claude-code | antigravity | acp | ollama … */
+  runtime: string;
+  tool: string;
+  /** 실제로 무엇을 하려 했는가 — 명령줄이나 대상 경로. */
+  detail?: string;
+  cwd?: string;
+  mode: "live" | "post-denial";
+  deniedBy?: "runtime-headless" | "sandbox";
+  requestedAt: string;
+}
+
+export type ToolApprovalDecision = "allow_once" | "allow_session" | "deny";

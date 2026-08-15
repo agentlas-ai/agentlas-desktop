@@ -8,6 +8,7 @@ import { rmSync } from "node:fs";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult, RunnerFailure } from "./runner";
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import { ensureChildCloseAfterExit, startCliHeartbeat, wrapSystemPrompt } from "./runner";
+import { announceToolDenied } from "./tool-approval";
 import {
   CLI_HISTORY_CONTEXT_TOKENS,
   renderConversationContext,
@@ -234,13 +235,22 @@ export function buildAntigravitySpawnArgs(
  */
 export function reduceAgyLine(
   line: string,
-  state: { text: string; finalResponse?: string; inputTokens: number; outputTokens: number },
-): { delta?: string; activity?: string } {
+  state: {
+    text: string;
+    finalResponse?: string;
+    inputTokens: number;
+    outputTokens: number;
+    /** 승인이 없어 거부된 도구 호출 — 구조 신호로 모은다(문구 판별이 아니다). */
+    deniedTools?: { tool: string; detail: string }[];
+  },
+): { delta?: string; activity?: string; approvalDenied?: { tool: string; detail: string } } {
   let ev: {
     event?: string;
     result?: { status?: string; response?: string };
     step_update?: {
       step_type?: string; text_delta?: string; state?: string;
+      tool_name?: string;
+      tool_info?: { name?: string; error?: { type?: string; message?: string } };
       usage?: { input_tokens?: number; output_tokens?: number };
     };
   };
@@ -266,6 +276,32 @@ export function reduceAgyLine(
     return ev.event ? { activity: String(ev.event) } : {};
   }
   const step = ev.step_update;
+
+  /*
+   * ★승인이 없어 거부된 도구 호출 — 실측(agy 1.1.13, 플래그 없이 파일 쓰기 요청):
+   *   step_type:"tool", state:"ERROR", tool_name:"write_to_file",
+   *   tool_info.error.message: "User denied permission for write_file(<path>)."
+   *   ...이어서 event:"result", status:"SUCCESS", response:"" 로 **성공 종료**한다.
+   *
+   * 사용자는 아무것도 거절한 적이 없다 — 헤드리스에는 물어볼 상대가 없어서 CLI가
+   * 자동으로 거부한 것이다. 그런데 최종 결과가 SUCCESS + 빈 응답이라, 이 실행은
+   * "성공했는데 답이 없다"로 처리되어 화면에 아무 표시도 남지 않았다.
+   *
+   * 문구가 아니라 **구조**(tool 스텝 + ERROR 상태 + 도구 이름)로 잡는다. 메시지는
+   * 사용자에게 무엇이 막혔는지 보여주기 위해서만 들고 간다.
+   */
+  if (step.step_type === "tool" && step.state === "ERROR") {
+    const message = step.tool_info?.error?.message ?? "";
+    if (/\bdenied permission\b|\bpermission denied\b|\brequires? approval\b/i.test(message)) {
+      const denial = {
+        tool: step.tool_name || step.tool_info?.name || "tool",
+        detail: message,
+      };
+      (state.deniedTools ??= []).push(denial);
+      return { activity: `denied:${denial.tool}`, approvalDenied: denial };
+    }
+  }
+
   if (step.step_type !== "agent_response") {
     /*
      * ★본문이 아니어도 **생존 신호다.** 첫 판은 agent_response 델타만 통과시켰는데,
@@ -464,7 +500,14 @@ async function runPreparedAntigravity(
     let stderr = "";
     let lastEmit = 0;
     /** agy stream-json 누적 상태 — 본문은 text_delta만, 사용량은 DONE에서. */
-    const agyState: { text: string; finalResponse?: string; inputTokens: number; outputTokens: number } = { text: "", inputTokens: 0, outputTokens: 0 };
+    const agyState: {
+      text: string;
+      finalResponse?: string;
+      inputTokens: number;
+      outputTokens: number;
+      deniedTools?: { tool: string; detail: string }[];
+    } = { text: "", inputTokens: 0, outputTokens: 0 };
+    const announcedDenials = new Set<string>();
     let agyLineBuf = "";
 
     const stdoutDecoder = new StringDecoder("utf8");
@@ -478,6 +521,30 @@ async function runPreparedAntigravity(
       const trimmedLine = line.trim();
       if (!trimmedLine) return;
       const step = reduceAgyLine(trimmedLine, agyState);
+      /*
+       * ★막힌 도구는 **즉시** 말한다. 이 실행은 뒤에서 SUCCESS + 빈 응답으로 끝나기 때문에,
+       * 여기서 알리지 않으면 사용자는 아무 일도 일어나지 않은 화면만 보게 된다.
+       */
+      if (step.approvalDenied && !announcedDenials.has(step.approvalDenied.tool)) {
+        announcedDenials.add(step.approvalDenied.tool);
+        const tool = step.approvalDenied.tool;
+        // 시트로도 올린다 — onNotice 는 대화에 남는 사실이고, 이건 지금 결정할 자리다.
+        announceToolDenied({
+          runtime: "antigravity",
+          tool,
+          detail: step.approvalDenied.detail,
+          cwd: runReq.cwd,
+          deniedBy: "runtime-headless",
+        });
+        const ko = `승인이 필요한 도구 호출이 자동 거부됐습니다: ${tool}. 이 실행에는 승인할 사람이 붙어 있지 않아 런타임이 스스로 거부한 것이며, 사용자가 거절한 것이 아닙니다. 권한을 올리면 이어서 진행됩니다.`;
+        const en = `A tool call needing approval was auto-denied: ${tool}. This run has nobody to approve it, so the runtime denied it itself — you did not reject it. Raising the permission lets it continue.`;
+        events.onNotice?.({
+          level: "warning",
+          code: "approval-required",
+          message: runReq.locale === "ko" ? ko : en,
+          i18n: { ko, en },
+        });
+      }
       const now = Date.now();
       if (step.delta && now - lastEmit > 80 && agyState.text) {
         events.onPartial(agyState.text);
@@ -550,7 +617,26 @@ async function runPreparedAntigravity(
         }
         const body = agyBody ?? "";
         const trimmed = body.trim();
-        const failure = antigravityExitFailure(body, stderr);
+        /*
+         * ★승인 거부로 답이 비었으면 성공이 아니다.
+         *
+         * 실측(agy 1.1.13): 도구가 승인 없이 auto-deny되면 그 스텝만 ERROR로 지나가고,
+         * 최종 이벤트는 `status:"SUCCESS", response:""` 로 온다. 그대로 두면 이 실행은
+         * "성공했는데 답이 없다"가 되어 화면에 아무것도 남지 않는다 — 사용자에게는
+         * 그냥 멈춘 것처럼 보인다.
+         *
+         * 답이 없고 막힌 도구가 있으면 그 사실을 실패 표식으로 싣는다. 소비자는
+         * `failure` 칸으로 판정하므로(runtime-failure 계약) 조용히 지나갈 수 없다.
+         */
+        const denied = agyState.deniedTools ?? [];
+        const failure = !trimmed && denied.length > 0
+          ? {
+            kind: "refused" as const,
+            message: `Antigravity produced no answer because ${denied.length === 1 ? "a tool call was" : `${denied.length} tool calls were`} auto-denied for missing approval: ${denied.map((d) => d.tool).join(", ")}. ${denied[0]?.detail ?? ""}`.trim(),
+            runtime: "antigravity",
+            source: "marker" as const,
+          }
+          : antigravityExitFailure(body, stderr);
         resolve({
           text: trimmed,
           ...(failure ? { failure } : {}),

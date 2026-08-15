@@ -369,6 +369,30 @@ export const runKimi: Runner = async (req, events): Promise<RunnerResult> => {
   if (runReq.model) baseArgs.push("--model", runReq.model);
   const args = resumeSessionId ? ["--session", resumeSessionId, ...baseArgs] : baseArgs;
 
+  /*
+   * ★권한 칩이 이 런타임에는 전달되지 않는다 — 그 사실을 숨기지 않는다.
+   *
+   * 전수 조사(2026-08-15): 다른 CLI 런타임은 권한을 인자로 번역한다
+   * (claude·grok `--permission-mode`, codex `--sandbox`, agy `--dangerously-skip-permissions`,
+   * cursor `--force`). Kimi는 `req.permission`을 세션 지문 계산에만 쓰고 **실행 인자에는
+   * 전혀 싣지 않는다.** 즉 "읽기 전용"으로 걸어도 CLI 기본값대로 돈다.
+   *
+   * 올바른 수리는 Kimi가 실제로 지원하는 권한 플래그를 넘기는 것인데, 그 플래그가
+   * 무엇인지는 CLI 없이 확정할 수 없다. 추측한 플래그를 넣으면 실행 자체가 깨진다.
+   * 그래서 동작은 바꾸지 않고, 사용자가 고른 경계가 지켜지지 않는다는 사실만 말한다.
+   * 조용히 두는 것이 가장 나쁘다 — 사용자는 읽기 전용이라고 믿고 있다.
+   */
+  if (runReq.permission === "read") {
+    const ko = "이 런타임(Kimi)에는 읽기 전용 경계를 강제할 방법이 확인되지 않았습니다. 권한 칩과 무관하게 CLI 기본 동작으로 실행되므로, 읽기만 필요한 작업에는 다른 런타임을 쓰는 편이 안전합니다.";
+    const en = "This runtime (Kimi) has no verified way to enforce a read-only boundary. It runs with the CLI default regardless of the permission chip, so prefer another runtime when a task must stay read-only.";
+    events.onNotice?.({
+      level: "warning",
+      code: "permission-not-enforceable",
+      message: runReq.locale === "ko" ? ko : en,
+      i18n: { ko, en },
+    });
+  }
+
   events.onStatus(resumeSessionId
     ? (runReq.locale === "ko" ? "Kimi Code 대화를 이어가는 중..." : "Resuming the Kimi Code conversation...")
     : tStatus(runReq.locale, "callingBackend", { backend: runReq.backendLabel }));

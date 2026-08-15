@@ -1,5 +1,7 @@
 // shared/types.ts를 렌더러에서 그대로 쓰도록 re-export.
 export type {
+  ToolApprovalRequestEvent,
+  ToolApprovalDecision,
   AgentConcurrencyInfo,
   AgentEnvRequirement,
   AgentEvolutionProposalUi,
