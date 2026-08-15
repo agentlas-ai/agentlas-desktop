@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.0.15 — 2026-08-15
+
+- Gives Antigravity runs the permission flags every other runner already
+  received, so a write run can actually use its tools instead of printing
+  code it never wrote.
+- Registers the working folder as an Antigravity workspace; without it a write
+  was discarded silently while the model still reported success.
+- Tells the runtime never to foreground a long-lived command; a dev server
+  started in the foreground used to hold the run open until timeout even
+  though the result was already serving.
+- Labels an interrupted answer as interrupted when it is persisted, so a
+  partial stream is no longer read as a finished result.
+- Settles Tasks left running by a restart at boot instead of showing them as
+  in progress forever.
+- Seeds the project map on first contact, including read-only runs, without
+  granting the project-memory activation that stays gated on write.
+- Binds Agentlas OS v1.2.5 at
+  54ec54ef8b08810668c11f506bd22015a3e71294.
+- Source readiness does not prove a published installer or update feed; the
+  Releases page remains the authority for the downloadable installer.
+
 ## 1.0.14 — 2026-08-15
 
 - Hides the host-only `<<agentlas-goal-complete: ...>>` marker from Work chat,
