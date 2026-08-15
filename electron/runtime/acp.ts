@@ -318,7 +318,11 @@ export async function probeAcpModels(
     const rows = modelOptionsFromNewSession(created);
     const outcome = classifyDiscovery({ stdout: rows.length ? rows.map((r) => r.id).join("\n") : "", models: rows.map((r) => r.id), source: "acp" });
     if (rows.length === 0) outcome.reason = "acp:no-model-config-option";
-    return { ...outcome, init: session.init };
+    // The agent's own current model is the right default — never the first row of
+    // an alphabetical list (live E2E 2026-08-15: OpenCode's first row was a Vertex
+    // model whose credential file was gone, so a fresh chat failed on auth).
+    const current = rows.find((r) => r.current)?.id;
+    return { ...outcome, ...(current ? { defaultModel: current } : {}), init: session.init };
   } catch (err) {
     // 여기서도 사유는 data 에 있다 — `acp:Internal error` 만 남기면 모델 탐지 실패를
     // 아무도 진단할 수 없다(실측: goose 의 provider 미설정이 정확히 그 모습이었다).
@@ -450,14 +454,26 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         .join(" / ");
 
       if (err instanceof AcpRpcError || /auth_required|not authenticated|login/i.test(message)) {
-        const help = prescription
+        /*
+         * ★한도 소진은 인증 문제가 아니다.
+         *
+         * 로그인은 멀쩡한데 "로그인하라"고 말하면 틀린 처방이고, 사용자는 될 리 없는
+         * 일을 하게 된다. 실측: grok 은 429 와 "free-usage-exhausted", 리셋 창까지
+         * 그대로 실어 보낸다 — 그 원문이 이미 사용자가 알아야 할 전부다. 그래서 이
+         * 경우에는 authMethods 안내를 **붙이지 않는다**.
+         */
+        const quota = /\b429\b|rate.?limit|too many requests|usage.?exhausted|quota/i.test(message);
+        const authish = /auth_required|not authenticated|login/i.test(message);
+        const help = prescription && !quota
           ? (locale === "ko"
             ? ` — 이 런타임은 먼저 로그인이나 설정이 필요하다: ${prescription}`
             : ` — this runtime needs sign-in or setup first: ${prescription}`)
           : "";
-        // 인증 수단을 광고한 채 실패했으면 auth 로 부른다. 그렇지 않으면 원인을 모르는
-        // 종료이므로 단정하지 않고, 다만 사유는 그대로 들고 나간다.
-        const kind = prescription || /auth_required|not authenticated|login/i.test(message) ? "auth" as const : "exit" as const;
+        // 인증 수단을 광고한 채 실패했으면 auth. 원인을 모르면 단정하지 않되 사유는
+        // 그대로 들고 나간다 — 지어낸 이름보다 원문이 낫다.
+        const kind = quota ? "quota" as const
+          : (prescription || authish) ? "auth" as const
+            : "exit" as const;
         return { text: "", failure: { kind, message: message + help, runtime: spec.id, source: "marker" } };
       }
       throw err;

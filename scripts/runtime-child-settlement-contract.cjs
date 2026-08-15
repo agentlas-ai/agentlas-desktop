@@ -342,6 +342,37 @@ async function main() {
       "스폰 cwd 가 여전히 따로 계산된다");
   });
 
+  /*
+   * ★권한 칩은 런타임 인자로 **강제**돼야 한다 — 모델의 선의로 지켜지는 경계는 경계가
+   * 아니다. 실측(1.0.16 이전): 읽기 권한으로 파일 생성을 시켰더니 claude 는 그냥 만들었고
+   * codex·antigravity·grok 셋은 거절했다. read 에 인자를 하나도 주지 않고 "헤드리스면
+   * 알아서 거부된다"고 가정한 결과였다.
+   */
+  await check("★읽기 권한이 인자로 강제된다(모델의 선의에 맡기지 않는다)", () => {
+    const cc = fs.readFileSync(path.join(root, "electron/runtime/claude-code.ts"), "utf8");
+    assert.match(cc, /--disallowed-tools/, "claude read 갈래가 변경 도구를 막지 않는다");
+    for (const tool of ["Write", "Edit", "NotebookEdit", "Bash"]) {
+      assert.ok(new RegExp(`"${tool}"`).test(cc), `read 차단 목록에 ${tool} 이 없다 — 그것으로 파일을 쓸 수 있다`);
+    }
+
+    const cx = fs.readFileSync(path.join(root, "electron/runtime/codex.ts"), "utf8");
+    assert.match(cx, /"--sandbox", "read-only"/, "codex read 갈래가 read-only 샌드박스를 잃었다");
+  });
+
+  /*
+   * ★런타임이 준 사유를 그대로 들고 나온다. JSON-RPC 는 규격 코드에 규격 문구를 쓰므로
+   * 진짜 이유는 `data` 에 온다 — 실측: goose 는 message="Internal error", data 에
+   * "GOOSE_PROVIDER 없음". message 만 읽으면 화면에 두 단어만 남는다.
+   */
+  await check("★ACP 실패는 message 가 아니라 data 의 사유까지 싣는다", () => {
+    const src = fs.readFileSync(path.join(root, "electron/runtime/acp.ts"), "utf8");
+    assert.match(src, /err instanceof AcpRpcError \? err\.data/, "ACP 에러의 data 를 읽지 않는다");
+    assert.match(src, /authMethods/, "인증 안내를 에이전트가 광고한 목록에서 가져오지 않는다");
+    // 한도 소진에 "로그인하라"고 답하면 될 리 없는 일을 시키는 것이다.
+    assert.match(src, /quota\s*\?\s*"quota"/, "한도 소진이 인증 실패로 분류된다");
+    assert.match(src, /prescription && !quota/, "한도 소진에 로그인 안내가 붙는다");
+  });
+
   await check("★세션 규칙이 권한과 같은 말을 한다(도구 열림/닫힘 일관)", () => {
     const src = fs.readFileSync(path.join(root, "electron/runtime/antigravity.ts"), "utf8");
     assert.match(src, /agyToolsAllowed\s*\?/, "세션 규칙이 권한에 따라 갈리지 않는다");

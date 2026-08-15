@@ -479,9 +479,20 @@ export const runClaudeCode: Runner = async (
         runReq.locale,
       )
     : flattenHistory(runReq);
-  const seededSystemPrompt = !resumeSessionId && runReq.turnContext?.trim()
+  /*
+   * 읽기 전용 실행이면 그 사실을 말해 준다 — 도구를 조용히 빼기만 하면 모델은 그것을
+   * 일시적 장애로 읽고 우회를 찾는다. 실측: 서브에이전트 위임 → 다른 도구 대체 →
+   * 브라우저까지 시도하며 2분을 썼고, 결국 아무것도 못 했다. 경계는 숨길 이유가 없다.
+   */
+  const readOnlyToolNotice =
+    !runReq.untrustedNoTools && req.permission !== "write" && req.permission !== "full"
+      ? (runReq.locale === "ko"
+        ? "\n\n[읽기 전용 실행] 이 세션에는 파일 쓰기·편집·셸 도구가 없다(제거됨). 서브에이전트 위임이나 다른 도구로 우회하지 마라. 작업에 쓰기가 필요하면 그 사실만 말하고, 사용자가 권한을 올리게 하라. 읽기·검색·분석은 평소대로 하면 된다."
+        : "\n\n[Read-only run] This session has no file write, edit, or shell tools — they were removed. Do not work around it by delegating to a subagent or substituting another tool. If the task needs writing, say so and let the user raise the permission. Reading, searching, and analysis work as usual.")
+      : "";
+  const seededSystemPrompt = (!resumeSessionId && runReq.turnContext?.trim()
     ? `${systemPrompt}\n\n${runReq.turnContext.trim()}`
-    : systemPrompt;
+    : systemPrompt) + readOnlyToolNotice;
 
   if (stagedImages.images.length > 0) {
     events.onStatus(
@@ -500,14 +511,29 @@ export const runClaudeCode: Runner = async (
     events.onStatus(tStatus(runReq.locale, "callingBackend", { backend: runReq.backendLabel }));
   }
 
-  // 권한 칩 → claude 권한 모드. read=기본(헤드리스에서 위험 툴 자동 거부), write=편집 허용, full=전체.
+  /*
+   * 권한 칩 → claude 권한 모드. full=전체, write=편집 허용.
+   *
+   * ★read 는 "플래그 없음"이 아니다.
+   *
+   * 예전에는 read 에 아무 인자도 주지 않고 "헤드리스면 위험한 도구는 알아서 거부된다"고
+   * 가정했다. 실측으로 그 가정이 깨졌다: 읽기 권한으로 파일 생성을 시켰더니 claude 는
+   * 그냥 만들었다(같은 요청에서 codex·antigravity·grok 은 셋 다 거절했다). 사용자가
+   * 읽기를 골랐다는 것은 "내 파일을 바꾸지 마라"는 뜻인데, 그 약속이 지켜지지 않았다.
+   *
+   * 그래서 변경 수단을 이름으로 막는다. Bash 까지 막는 이유는 그것으로 파일을 쓸 수
+   * 있기 때문이다 — Bash 를 열어 둔 채 "읽기 전용"이라고 말하면 그 경계는 거짓말이고,
+   * 이 제품은 지킬 수 없는 경계를 조용히 통과시키지 않기로 했다(kimi 는 플래그 자체가
+   * 없어서 강제 불가를 사용자에게 말한다). 읽기·검색·분석은 그대로 가능하다.
+   */
+  const READ_ONLY_DENIED_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "BashOutput", "KillShell"];
   const permArgs = runReq.untrustedNoTools
     ? []
     : req.permission === "full"
       ? ["--permission-mode", "bypassPermissions"]
       : req.permission === "write"
         ? ["--permission-mode", "acceptEdits"]
-        : [];
+        : ["--disallowed-tools", ...READ_ONLY_DENIED_TOOLS];
 
   // 모델 선택 — opus/sonnet/haiku 별칭(또는 풀 ID). 미지정이면 구독 기본 모델.
   const modelArgs = req.model && req.model.trim() ? ["--model", req.model.trim()] : [];
