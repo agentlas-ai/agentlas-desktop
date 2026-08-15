@@ -8,6 +8,7 @@ import os from "node:os";
 import fs from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
+import { ensureChildCloseAfterExit, startCliHeartbeat } from "./runner";
 import { wrapSystemPrompt } from "./runner";
 import { CLI_HISTORY_CONTEXT_TOKENS, composeResumeTurnPrompt, renderConversationContext } from "./continuity";
 import { tStatus } from "./status-i18n";
@@ -384,6 +385,12 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
       return;
     }
     trackRunChild(child);
+    // ★자식이 죽었는데 close 가 안 오면 이 실행은 영영 안 끝난다 — runner.ts 주석 참고.
+    //   형제 러너(agy·claude·codex)에만 붙어 있던 계약을 여기에도 세운다.
+    const stopHeartbeat = startCliHeartbeat(child, events.onStatus, "grok");
+    ensureChildCloseAfterExit(child, () => {
+      events.onStatus("grok: process exited without closing its output — settling the run");
+    });
 
     const onAbort = () => killCliTree(child);
     if (req.signal) {
@@ -496,6 +503,7 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
     });
 
     child.on("error", (err) => {
+      stopHeartbeat();
       // 프로세스 종료 시 stdout/stderr data 리스너를 제거해 누수 방지.
       child.stdout?.removeAllListeners("data");
       child.stderr?.removeAllListeners("data");
@@ -504,6 +512,7 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
       reject(err);
     });
     child.on("close", (code) => {
+      stopHeartbeat();
       buffer += stdoutDecoder.end();
       stderr += stderrDecoder.end();
       // 프로세스 종료 시 stdout/stderr data 리스너를 제거해 누수 방지.

@@ -4,6 +4,7 @@ import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import os from "node:os";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
+import { ensureChildCloseAfterExit, startCliHeartbeat } from "./runner";
 import { wrapSystemPrompt } from "./runner";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild } from "./exec";
 import { tStatus } from "./status-i18n";
@@ -202,6 +203,12 @@ export const runCursor: Runner = async (req: RunnerRequest, events: RunnerEvents
       return;
     }
     trackRunChild(child);
+    // ★자식이 죽었는데 close 가 안 오면 이 실행은 영영 안 끝난다 — runner.ts 주석 참고.
+    //   형제 러너(agy·claude·codex)에만 붙어 있던 계약을 여기에도 세운다.
+    const stopHeartbeat = startCliHeartbeat(child, events.onStatus, "cursor");
+    ensureChildCloseAfterExit(child, () => {
+      events.onStatus("cursor: process exited without closing its output — settling the run");
+    });
     const onAbort = () => killCliTree(child);
     req.signal?.addEventListener("abort", onAbort, { once: true });
     let buffer = "";
@@ -235,6 +242,7 @@ export const runCursor: Runner = async (req: RunnerRequest, events: RunnerEvents
     child.stderr?.on("data", (chunk: Buffer) => { stderr = (stderr + stderrDecoder.write(chunk)).slice(-4_000); });
     child.on("error", (error) => finishReject(error));
     child.on("close", (code) => {
+      stopHeartbeat();
       if (settled) return;
       settled = true;
       req.signal?.removeEventListener("abort", onAbort);

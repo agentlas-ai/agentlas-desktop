@@ -6,6 +6,7 @@ import os from "node:os";
 import fs from "node:fs/promises";
 import { createHash } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
+import { ensureChildCloseAfterExit, startCliHeartbeat } from "./runner";
 import { wrapSystemPrompt } from "./runner";
 import {
   CLI_HISTORY_CONTEXT_TOKENS,
@@ -262,6 +263,12 @@ function runKimiProcess(
       return;
     }
     trackRunChild(child);
+    // ★자식이 죽었는데 close 가 안 오면 이 실행은 영영 안 끝난다 — runner.ts 주석 참고.
+    //   형제 러너(agy·claude·codex)에만 붙어 있던 계약을 여기에도 세운다.
+    const stopHeartbeat = startCliHeartbeat(child, events.onStatus, "kimi");
+    ensureChildCloseAfterExit(child, () => {
+      events.onStatus("kimi: process exited without closing its output — settling the run");
+    });
     const onAbort = () => killCliTree(child);
     if (req.signal?.aborted) killCliTree(child);
     else req.signal?.addEventListener("abort", onAbort, { once: true });
@@ -325,6 +332,7 @@ function runKimiProcess(
     });
     child.on("error", reject);
     child.on("close", (code) => {
+      stopHeartbeat();
       req.signal?.removeEventListener("abort", onAbort);
       if (buffer.trim()) consume(buffer);
       resolve({ code, text: text.trim(), stderr: stderr.trim(), sessionId });
