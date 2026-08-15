@@ -137,6 +137,7 @@ import { OneProjectSessionSheet } from "./OneProjectSessionSheet";
 import { OneSuggestionCard } from "./OneSuggestionCard";
 import { OneGrowthCard } from "./OneGrowthCard";
 import { OneActivityArtifactRail, OneActivityTimeline } from "./OneActivityTimeline";
+import { ToolApprovalInline } from "@/components/ToolApprovalInline";
 import {
   OneComposerControls,
   type OneComposerMenuKey,
@@ -1022,6 +1023,16 @@ export function OneShell() {
   const runIdRef = useRef<string | null>(null);
   const runTaskIdRef = useRef<string | null>(null);
   const runChatIdRef = useRef<string | null>(null);
+  /*
+   * ★화면에 지금 떠 있는 메시지가 **어느 대화의 것인가**.
+   *
+   * 스레드 로딩은 "이 대화에 실행이 붙어 있는가"(attachment)로 히스토리 로드를 건너뛰고
+   * 있었다. 그런데 그 질문은 화면 내용과 무관하다. 진행 중인 B 를 보다가 A 로 갔다
+   * 돌아오면 B 에는 여전히 실행이 붙어 있으므로 로드를 건너뛰고, 화면에는 조금 전
+   * A 의 메시지가 그대로 남는다 — 사용자에게는 두 세션이 하나로 합쳐진 것처럼 보인다.
+   * 건너뛰어도 되는 경우는 오직 "화면이 이미 이 대화를 그리고 있을 때"뿐이다.
+   */
+  const shownThreadChatIdRef = useRef<string | null>(null);
   const streamTextRef = useRef("");
   const unsubscribeRunRef = useRef<(() => void) | null>(null);
   const selectedTaskIdRef = useRef(selectedTaskId);
@@ -1570,6 +1581,7 @@ export function OneShell() {
         setRunStartedAt(null);
       }
       setMessages([]);
+      shownThreadChatIdRef.current = null;
       setCommittedAnswers([]);
       return;
     }
@@ -1580,6 +1592,16 @@ export function OneShell() {
     }
     const chatId = activeThreadChatId;
     const taskId = selected?.taskId ?? null;
+    /*
+     * ★"이 실행이 이 대화의 것인가"는 **바꾸기 전** 값으로 판정해야 한다.
+     *
+     * 아래에서 runChatIdRef 를 지금 여는 대화로 덮어쓴 다음, 그 값을 다시 읽어
+     * 소유를 판정하고 있었다. 그러면 비교는 언제나 참이 되고, 다른 대화로 옮겨도
+     * "지금 실행이 이 스레드를 쓰고 있다"고 잘못 판단해 히스토리를 불러오지 않는다.
+     * 화면에는 방금 떠난 대화의 메시지가 그대로 남고 제목만 새 대화가 된다 —
+     * 사용자에게는 여러 세션이 하나로 합쳐진 것처럼 보인다.
+     */
+    const runChatIdBeforeSwitch = runChatIdRef.current;
     runChatIdRef.current = chatId;
     runTaskIdRef.current = taskId;
     void Promise.all([
@@ -1604,10 +1626,22 @@ export function OneShell() {
       // A newly created conversation can start its first run before this
       // initial history request resolves. Do not replace the optimistic user
       // turn and live response with the earlier empty snapshot.
-      const liveRunOwnsThread = Boolean(
-        attachment || (runIdRef.current && runChatIdRef.current === chatId),
+      const screenAlreadyOnThisThread = shownThreadChatIdRef.current === chatId;
+      const liveRunOwnsThread = screenAlreadyOnThisThread && Boolean(
+        attachment || (runIdRef.current && runChatIdBeforeSwitch === chatId),
       );
-      if (!liveRunOwnsThread) setMessages(toUiMessages(history));
+      if (!liveRunOwnsThread) {
+        const next = toUiMessages(history);
+        setMessages((current) => {
+          // 다른 대화에서 왔으면 비어 있더라도 교체한다 — 남의 화면을 남겨 두는 것이
+          // 바로 "합쳐져 보이는" 증상이다.
+          if (!screenAlreadyOnThisThread) return next;
+          // 같은 대화인데 서버 스냅샷이 아직 비었다면(첫 실행이 방금 시작됐다면)
+          // 사람이 막 친 말과 라이브 응답을 빈 스냅샷으로 지우지 않는다.
+          return next.length === 0 && current.length > 0 ? current : next;
+        });
+      }
+      shownThreadChatIdRef.current = chatId;
       // This effect can finish after another turn has started. In that case its
       // receipt belongs to the prior run and may restore only transcript data,
       // never the current Activity/timer projection.
@@ -2575,6 +2609,9 @@ export function OneShell() {
         homeTransitionPendingRef.current = false;
         setConversation(chat);
         selectedConversationIdRef.current = chat.id;
+        // 화면에는 이미 이 대화의 첫 턴이 떠 있다(낙관적 렌더). 소유를 지금 넘겨 두지
+        // 않으면 곧 도착할 빈 히스토리가 그 턴을 지운다.
+        shownThreadChatIdRef.current = chat.id;
         router.replace(`/one?chat=${encodeURIComponent(chat.id)}`);
       }
       await resolveActivationConcern(chat.id);
@@ -2887,6 +2924,8 @@ export function OneShell() {
     setSelected(null);
     setConversation(null);
     setMessages([]);
+    // 화면을 비웠으니 그 화면이 누구 것이었는지도 함께 지운다.
+    shownThreadChatIdRef.current = null;
     setSurface(null);
     setReceipt(null);
     setCommittedAnswers([]);
@@ -4062,6 +4101,8 @@ export function OneShell() {
                       locale={appLocale}
                     />
                   )}
+                  {/* 도구 승인은 이 대화 안에서, 묻는 순간에(오너 결정 2026-08-15) */}
+                  <ToolApprovalInline chatId={activeThreadChatId} />
                 </section>
                 {awaitingWorkforceConsent && !teamPreflightBusy && !busy && (
                   <section className={styles.teamPreflightConsent} role="group" aria-live="polite">
