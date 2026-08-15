@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.0.16 — 2026-08-15
+
+- Stops the final display layer from deleting shell code blocks. A command the
+  user was told to run no longer disappears from Work while the same text sits
+  intact in the database.
+- Stops replacing localhost preview URLs with the words "local preview"; the
+  address is what the user needs in order to open the result.
+- Removes the guard that dropped everything before a completion sentence based
+  on a list of common words. Prose and progress logs cannot be told apart by
+  vocabulary, so that guard eventually ate real answers.
+- Surfaces tool calls that were blocked for missing approval. Headless runs have
+  no approver, so the CLI auto-denies and the session records a user rejection
+  for a choice nobody made; Work now names the blocked command and says plainly
+  that the user did not reject it.
+- Replaces literal NUL separators in five source files with the escaped form.
+  They made file(1) classify those files as binary, so every grep-based check
+  skipped them silently — including the file holding the reported defect.
+- Account-revealing absolute paths and already corrupted bytes are still hidden.
+- Binds Agentlas OS v1.2.5 at
+  54ec54ef8b08810668c11f506bd22015a3e71294.
+- Source readiness does not prove a published installer or update feed; the
+  Releases page remains the authority for the downloadable installer.
+
 ## 1.0.15 — 2026-08-15
 
 - Gives Antigravity runs the permission flags every other runner already
