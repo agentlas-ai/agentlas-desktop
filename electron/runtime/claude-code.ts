@@ -773,6 +773,24 @@ export const runClaudeCode: Runner = async (
     };
 
     const toolNameById = new Map<string, string>();
+    /*
+     * ★무엇이 막혔는지는 거부 문구가 아니라 **그 호출**이 안다.
+     *
+     * claude 의 거부 tool_result 는 "This command requires approval" 한 줄이고 명령을
+     * 담지 않는다(실측). 그래서 이름 없이 "도구가 막혔다"고만 알리게 되는데, 그건
+     * 사용자에게 아무 정보가 아니다. tool_use 는 같은 id 로 먼저 지나가므로, 그때 무엇을
+     * 하려 했는지 적어 두면 거부가 왔을 때 정확히 이름을 붙일 수 있다 — 추측이 아니라 연결.
+     */
+    const toolCallById = new Map<string, { name: string; detail?: string }>();
+    const detailOfToolInput = (input: unknown): string | undefined => {
+      if (!input || typeof input !== "object") return undefined;
+      const o = input as Record<string, unknown>;
+      for (const key of ["command", "file_path", "path", "url", "pattern"]) {
+        const v = o[key];
+        if (typeof v === "string" && v.trim()) return v.trim().slice(0, 300);
+      }
+      return undefined;
+    };
 
     /*
      * ★승인이 없어 막힌 도구 호출을 사용자에게 말한다.
@@ -786,20 +804,28 @@ export const runClaudeCode: Runner = async (
      * 사실로 올려서, 사용자가 권한을 올릴지 다시 시킬지 정할 수 있게 한다.
      */
     const announcedApprovalBlocks = new Set<string>();
-    const announceApprovalBlock = (resultText: string): void => {
+    const announceApprovalBlock = (resultText: string, toolId?: string): void => {
       const blocked = detectApprovalRequired(resultText);
       if (!blocked) return;
-      const key = blocked.blocked ?? blocked.message.slice(0, 120);
+      const call = toolId ? toolCallById.get(toolId) : undefined;
+      const what0 = blocked.blocked ?? call?.detail;
+      /*
+       * 같은 tool_result 가 assistant 메시지와 user 메시지 두 경로로 들어온다(실측: 같은
+       * 요청이 승인 카드에 두 번 떴다). 호출 id 를 열쇠에 넣어 한 호출은 한 번만 알린다.
+       */
+      const key = `${toolId ?? ""}|${what0 ?? blocked.message.slice(0, 120)}`;
       if (announcedApprovalBlocks.has(key)) return;
       announcedApprovalBlocks.add(key);
       announceToolDenied({
         runtime: KIND,
-        tool: blocked.blocked ? "Bash" : "tool",
-        detail: blocked.blocked,
+        // 선택("다음부터 허용")을 반영하려면 어느 세션의 결정인지 알아야 한다.
+        sessionKey: `${KIND}:${runReq.chatId ?? runReq.cwd ?? "default"}`,
+        tool: call?.name ?? (blocked.blocked ? "Bash" : "tool"),
+        detail: what0,
         cwd: runReq.cwd,
         deniedBy: "runtime-headless",
       });
-      const what = blocked.blocked ? `: ${blocked.blocked}` : "";
+      const what = what0 ? `: ${what0}` : "";
       const ko = `승인이 필요해 중단된 단계가 있습니다${what}. 이 실행에는 승인할 사람이 붙어 있지 않아 자동으로 거부됐습니다 — 사용자가 거절한 것이 아닙니다. 권한을 올리거나 다시 요청해 주세요.`;
       const en = `A step was blocked because it needs approval${what}. This run has nobody to approve it, so it was auto-denied — you did not reject it. Raise the permission or ask again.`;
       events.onNotice?.({
@@ -1007,7 +1033,10 @@ export const runClaudeCode: Runner = async (
             } catch {
               argStr = "";
             }
-            if (block.id) toolNameById.set(block.id, block.name);
+            if (block.id) {
+              toolNameById.set(block.id, block.name);
+              toolCallById.set(block.id, { name: block.name, detail: detailOfToolInput(block.input) });
+            }
             // 도구 이벤트 전에 본문을 강제 플러시 — 렌더러 인터리브 앵커가 최신 좌표를 본다.
             emitPartial(true);
             events.onTool?.(
@@ -1021,7 +1050,7 @@ export const runClaudeCode: Runner = async (
             const toolId = block.tool_use_id;
             const toolName = toolId ? toolNameById.get(toolId) ?? "tool_result" : "tool_result";
             const result = truncateUi(stringifyToolPayload(block.content));
-            if (block.is_error === true) announceApprovalBlock(result);
+            if (block.is_error === true) announceApprovalBlock(result, toolId);
             events.onTool?.(toolName, undefined, result, toolId, block.is_error === true);
           }
         }
@@ -1031,7 +1060,7 @@ export const runClaudeCode: Runner = async (
           const toolId = block.tool_use_id;
           const toolName = toolId ? toolNameById.get(toolId) ?? "tool_result" : "tool_result";
           const result = truncateUi(stringifyToolPayload(block.content));
-          if (block.is_error === true) announceApprovalBlock(result);
+          if (block.is_error === true) announceApprovalBlock(result, toolId);
           events.onTool?.(toolName, undefined, result, toolId, block.is_error === true);
         }
       } else if (ev.type === "rate_limit_event") {

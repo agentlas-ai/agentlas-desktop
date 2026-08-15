@@ -114,19 +114,39 @@ export function requestToolApproval(
   });
 }
 
+/*
+ * 고지한 post-denial 요청들 — 사용자의 선택("다음부터 허용")을 나중에 반영하려면 그
+ * 요청이 어느 세션의 무엇이었는지 알아야 한다. live 요청과 달리 기다리는 실행이 없어서
+ * pending 에는 남지 않는다.
+ *
+ * ★이 맵이 없을 때 "다음부터 허용"은 아무 일도 하지 않았다: 허용 저장이 live 경로의
+ *   resolve 안에만 있었고, post-denial 은 그 경로를 지나지 않는다. 누를 수 있는데 아무
+ *   효과가 없는 버튼은 선택이 아니라 거짓말이다.
+ */
+const announced = new Map<string, { request: ToolApprovalRequest; sessionKey?: string }>();
+const ANNOUNCED_LIMIT = 200;
+
 /**
  * post-denial 고지 — 이미 거부된 호출을 사용자에게 보이게만 한다.
  * 답을 기다리지 않는다(기다릴 대상이 없다). 선택은 다음 실행의 허용 범위에만 쓰인다.
  */
 export function announceToolDenied(
-  input: Omit<ToolApprovalRequest, "id" | "requestedAt" | "mode">,
+  input: Omit<ToolApprovalRequest, "id" | "requestedAt" | "mode"> & { sessionKey?: string },
 ): ToolApprovalRequest {
+  const { sessionKey, ...rest } = input;
   const request: ToolApprovalRequest = {
-    ...input,
+    ...rest,
     id: `denied:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 10)}`,
     mode: "post-denial",
     requestedAt: new Date().toISOString(),
   };
+  announced.set(request.id, { request, sessionKey });
+  // 오래된 고지부터 버린다 — 삽입 순서가 곧 시간 순서다.
+  while (announced.size > ANNOUNCED_LIMIT) {
+    const oldest = announced.keys().next();
+    if (oldest.done) break;
+    announced.delete(oldest.value);
+  }
   for (const fn of listeners) { try { fn(request); } catch { /* 같은 이유 */ } }
   return request;
 }
@@ -139,6 +159,11 @@ export function resolveToolApproval(id: string, decision: ToolApprovalDecision):
     clearTimeout(entry.timer);
     pending.delete(id);
     entry.resolve(outcome);
+  } else if (decision === "allow_session") {
+    // 이미 거부된 호출이라 이번 실행은 되살릴 수 없다 — 그래서 이 선택이 뜻하는 바는
+    // 오직 "다음부터는 묻지 말고 허용하라"이고, 그것만은 반드시 남아야 한다.
+    const known = announced.get(id);
+    if (known?.sessionKey) rememberSessionGrant(known.sessionKey, known.request);
   }
   for (const fn of resolvedListeners) { try { fn(id, outcome); } catch { /* 같은 이유 */ } }
   return Boolean(entry);

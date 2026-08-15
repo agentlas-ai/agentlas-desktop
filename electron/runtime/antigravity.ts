@@ -553,6 +553,7 @@ async function runPreparedAntigravity(
         // 시트로도 올린다 — onNotice 는 대화에 남는 사실이고, 이건 지금 결정할 자리다.
         announceToolDenied({
           runtime: "antigravity",
+          sessionKey: `antigravity:${runReq.chatId ?? runReq.cwd ?? "default"}`,
           tool,
           detail: step.approvalDenied.detail,
           cwd: runReq.cwd,

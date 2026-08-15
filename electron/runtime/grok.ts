@@ -456,6 +456,7 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
               announcedGrokDenials.add(key);
               announceToolDenied({
                 runtime: "grok",
+                sessionKey: `grok:${req.chatId ?? req.cwd ?? "default"}`,
                 tool: String(name),
                 detail: blocked.blocked,
                 cwd: req.cwd,
