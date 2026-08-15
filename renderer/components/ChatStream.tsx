@@ -16,6 +16,10 @@ import {
 } from "@shared/tool-call-detail";
 import { useRouter } from "next/navigation";
 import { stageDocumentHandoff } from "@/lib/document-store";
+import {
+  stripAgentControlBlocks,
+  stripAgentIdentityBadges,
+} from "@shared/agent-control-blocks";
 
 /** 작업 중 패널에 누적되는 단일 단계. 새 이벤트마다 push (replace 아님). */
 export interface StreamStep {
@@ -800,7 +804,7 @@ const Bubble = memo(function Bubble({
   // agent — Markdown 렌더링.
   // 단일 실행은 영상형 인터리브 본문(텍스트 사이 도구 그룹) + 하단 ✳ 상태줄로,
   // 카드형 작업 패널은 실제 멀티/병렬 실행에서만 쓴다.
-  const displayText = userFacingAssistantText(message.text);
+  const displayText = userFacingAssistantText(message.text, Boolean(message.streaming));
   const displayMessage = displayText === message.text ? message : { ...message, text: displayText };
   const hasProgress = Boolean(message.busy || message.status || (message.steps && message.steps.length > 0));
   const showParallelWork = hasProgress && isParallelWorkMessage(message);
@@ -1697,8 +1701,12 @@ function isInternalRuntimeStatus(text: string): boolean {
   return /가\s*생각\s*중|is\s+thinking|(?:^|\s)codex:\s|\[runtime-session\]|sessionend hook|skill descriptions were shortened|agentlas plugins|career graph (?:색인 갱신|refreshed):?\s*nodes=|\/Users\/[^\s]+\/(?:\.codex|\.claude|Library\/Application Support)|(?:^|\s)(?:mcp__|automation_graph_|hep-network|stormbreaker[_-])|\b(?:bash|collab_tool_call|mcp_tool_call|write|read|edit|glob|grep|websearch|webfetch)\b|\b(?:codex|claude code|gemini|kimi|grok)\s+cli\b/i.test(text);
 }
 
-function userFacingAssistantText(text: string): string {
-  let visible = text
+function userFacingAssistantText(text: string, streaming = false): string {
+  // Main normally removes these blocks before persisting a final event. This
+  // renderer-side backstop also protects older Work history and partial
+  // streams, so protocol JSON can never become ordinary Markdown content.
+  let visible = stripAgentControlBlocks(text, { streaming });
+  visible = stripAgentIdentityBadges(visible)
     .replace(/^\s*(?:사용 스킬|Skills used)\s*:[^\n]*(?:\n|$)/i, "")
     .replace(/^\s*I(?:'|’)m using (?:the )?`?[^`.\n]+`? skill because [^.]*\.\s*/i, "")
     .replace(/^\s*Execution mode:\s*`?appbridge-ceo-orchestrator`?[^\n]*\n?/gim, "")
@@ -1727,6 +1735,10 @@ function userFacingAssistantText(text: string): string {
     .replace(/(?:브라우저에서\s+`?local preview`?|Open\s+`?local preview`?\s+in\s+(?:a\s+)?browser)[^\n]*/gim, "")
     .replace(/모든 Node 스모크·회귀 테스트 통과/g, "모든 자동 검증 통과")
     .replace(/`(fail|pass)`/gi, "$1")
+    // U+FFFD means the upstream byte stream was already decoded incorrectly.
+    // The original bytes cannot be reconstructed at render time; hide the
+    // replacement run instead of exposing `���`/`???` as if it were an answer.
+    .replace(/\uFFFD+/gu, "…")
     .trim();
 }
 

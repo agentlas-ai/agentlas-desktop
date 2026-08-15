@@ -18,6 +18,7 @@
  *    승격해 원래 보여야 했던 화면을 보여준다.
  */
 import type { AgentlasSurfaceManifest } from "../../shared/types";
+import { stripAgentControlBlocks } from "../../shared/agent-control-blocks";
 import { SURFACE_OPEN_FENCE, parseSurfaces } from "../surface-emitter";
 import { SURFACE_INTENT_MARKER } from "../runtime/runner";
 
@@ -42,7 +43,16 @@ function surfaceDroppedLine(locale: string): string {
 
 /** 값 없이 순수하게 잘라내도 되는 마커들(프로토콜 제어 문자열). */
 function stripBareMarkers(text: string): string {
+  // Surface fences must remain intact until parseSurfaces has had a chance to
+  // promote their manifest into a structured event. Other control markers are
+  // removed after that parse boundary.
   return text.split(SURFACE_INTENT_MARKER).join("");
+}
+
+/** U+FFFD는 이미 upstream 바이트 디코딩이 깨졌다는 뜻이다. 원문을 다시
+ * 사용자에게 보여주지 않고, 누락된 부분만 짧은 생략부호로 표시한다. */
+function sanitizeDisplayText(text: string): string {
+  return stripAgentControlBlocks(text).replace(/\uFFFD+/gu, "…");
 }
 
 /**
@@ -56,10 +66,11 @@ export function applyFinalDisplayBackstop(
   const original = typeof rawText === "string" ? rawText : "";
   const withoutMarkers = stripBareMarkers(original);
   if (!withoutMarkers.includes(SURFACE_OPEN_FENCE)) {
+    const cleaned = sanitizeDisplayText(withoutMarkers);
     return {
-      text: withoutMarkers,
+      text: cleaned,
       surfaces: [],
-      changed: withoutMarkers !== original,
+      changed: cleaned !== original,
     };
   }
 
@@ -73,7 +84,7 @@ export function applyFinalDisplayBackstop(
   }
 
   const surfaces = opts.allowSurfaceRender ? parsed.surfaces.map((entry) => entry.manifest) : [];
-  const cleaned = parsed.cleanedText.trim();
+  const cleaned = sanitizeDisplayText(parsed.cleanedText).trim();
   return {
     text: cleaned || (surfaces.length > 0 ? surfaceReadyLine(opts.locale) : surfaceDroppedLine(opts.locale)),
     surfaces,

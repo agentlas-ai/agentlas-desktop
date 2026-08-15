@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.0.14 — 2026-08-15
+
+- Hides the host-only `<<agentlas-goal-complete: ...>>` marker from Work chat,
+  including persisted final messages and streaming tails.
+- Sanitizes malformed UTF-8 replacement characters at the final display
+  boundary so broken bytes cannot surface as `???`/replacement glyphs.
+- Keeps valid surface manifests structured while removing their protocol
+  envelope from the user-facing answer.
+- Binds Agentlas OS v1.2.4 at
+  d2dbd5a9697fd94dd69457f009bea1f66d6e6084.
+- Source readiness does not prove a published installer or update feed; the
+  Releases page remains the authority for the downloadable installer.
+
+## 1.0.13 — 2026-08-15
+
+- Prevents a Work run from remaining stuck after a CLI process exits while a
+  child process still holds stdout or stderr open; the run now settles after a
+  bounded close grace period.
+- Flushes Antigravity's final UTF-8 decoder bytes and trailing JSON line, and
+  refuses to persist a response when every available candidate is malformed.
+- Removes Agentlas control blocks, surface JSON, identity badges and replacement
+  characters from Work chat display, including older persisted messages.
+- Labels recoverable partial answers as interrupted and avoids saving empty
+  assistant bubbles when an invocation produces no user-facing text.
+- Source readiness does not prove a published installer or update feed; the
+  signed release and Releases page remain the authority for the downloadable
+  installer.
+
 ## 1.0.12 — 2026-08-15
 
 - Unifies Agent Toolbox teams under one detail surface with Description and

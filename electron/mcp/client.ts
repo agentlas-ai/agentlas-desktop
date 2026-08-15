@@ -4263,7 +4263,23 @@ export async function runMcpInvocation(
       partialFloor ? `${partialFloor}\n${displayText}` : displayText,
     ));
     if (!req.agentAppMode) {
-      appendChatMessage(chat.id, "assistant", displayWithFloor);
+      /*
+       * ★빈 답은 빈 말풍선으로 남기지 않는다 — 대화창 하단에 아무것도 안 적힌 잔해만
+       * 쌓이고, 사용자는 그것을 "끝난 자리"로 읽는다(실측 2026-08-15: 다중 패스 루프의
+       * 중간 턴이 길이 0 assistant 메시지로 저장됨).
+       * 삼키지도 않는다 — 빈 답 자체가 진단 신호이므로 사실은 원장에 남긴다.
+       */
+      if (displayWithFloor.trim()) {
+        appendChatMessage(chat.id, "assistant", displayWithFloor);
+      } else {
+        tryRecordRunEvent({
+          runId: req.runId ?? `chat:${chat.id}`,
+          kind: "invoke_result",
+          chatId: chat.id,
+          agentId: agent.id,
+          payload: { phase: "chat", emptyDisplayText: true, runtime: active.kind },
+        });
+      }
       // 세션 워터마크 전진 — 이 kind의 세션은 방금 답변까지 봤다. 다음 resume 턴의
       // gap-replay가 자기 답변을 중복 주입하지 않고, 스웜/다른 러너 턴만 메우게 된다.
       if (sessionCapableRuntime) touchRuntimeSession(chat.id, active.kind);

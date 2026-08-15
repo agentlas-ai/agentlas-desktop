@@ -486,6 +486,37 @@ export function setCanonicalTaskStatus(
   return getCanonicalTask(taskId) as CanonicalTask;
 }
 
+/**
+ * ★부팅 시점의 `running`은 정의상 전부 고아다 — 앱이 방금 시작했으므로 살아 있는
+ * 실행이 있을 수 없다. 실행 권위는 프로세스 안의 activeRuns이고, 그 맵은 지금 비어 있다.
+ *
+ * 실측(2026-08-15): `2026-08-11T12:06`에 멈춘 Task가 나흘째, 그리고 같은 날 agy 좀비
+ * Task가 `running`으로 남아 있었다. 그 사이 앱은 여러 번 재시작됐다 — 즉 재시작으로도
+ * "진행 중" 표시가 사라지지 않는다. 실행이 끝나지 못한 사실과, 화면이 영원히 진행 중을
+ * 말하는 것은 다른 문제다. 후자는 거짓말이다.
+ *
+ * 조용히 completed로 덮지 않는다(거짓 성공). `failed`로 정산하고 사유를 원장에 남긴다 —
+ * 사용자는 "끝나지 않았다"를 알아야 이어서 할지 다시 할지 정할 수 있다.
+ * `waiting-decision`은 사람의 답을 기다리는 정당한 상태이므로 건드리지 않는다.
+ */
+export function settleInterruptedTasksOnBoot(): { settled: number; taskIds: string[] } {
+  if (!tableExists("tasks")) return { settled: 0, taskIds: [] };
+  const db = getDb();
+  const rows = db
+    .prepare("SELECT id FROM tasks WHERE status = 'running'")
+    .all() as { id: string }[];
+  const taskIds: string[] = [];
+  for (const row of rows) {
+    try {
+      setCanonicalTaskStatus(row.id, "failed");
+      taskIds.push(row.id);
+    } catch {
+      // 한 건의 정산 실패가 나머지 고아를 진행 중으로 남겨두게 두지 않는다.
+    }
+  }
+  return { settled: taskIds.length, taskIds };
+}
+
 export function acceptCanonicalTaskResult(
   input: CanonicalTaskResultAcceptance,
   receipt: InvocationRunReceipt | null,

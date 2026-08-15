@@ -9,7 +9,7 @@ import fs from "node:fs/promises";
 import crypto from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult , RunnerFailure } from "./runner";
-import { startCliHeartbeat, wrapSystemPrompt } from "./runner";
+import { ensureChildCloseAfterExit, startCliHeartbeat, wrapSystemPrompt } from "./runner";
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
 import {
@@ -270,6 +270,10 @@ function runCodexProcess(
     trackRunChild(child);
     // ★호스트 소유 생존 신호 — 러너 공통 규칙(runner.ts startCliHeartbeat 주석 참고).
     const stopHeartbeat = startCliHeartbeat(child, events.onStatus, "codex");
+    // ★죽은 자식이 close를 안 보내면 이 실행은 영영 안 끝난다 — runner.ts 주석 참고.
+    ensureChildCloseAfterExit(child, () => {
+      events.onStatus("codex: process exited without closing its output — settling the run");
+    });
 
     const onAbort = () => killCliTree(child);
     if (req.signal) {

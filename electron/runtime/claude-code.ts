@@ -10,6 +10,7 @@ import fs from "node:fs/promises";
 import crypto from "node:crypto";
 import type { Runner, RunnerRequest, RunnerEvents, RunnerResult , RunnerFailure } from "./runner";
 import {
+  ensureChildCloseAfterExit,
   startCliHeartbeat,
   workforceNativeToolEnforcement,
   workforceZeroToolsEnforcement,
@@ -664,6 +665,10 @@ export const runClaudeCode: Runner = async (
     //   stream-json이라도 긴 생각/도구 구간은 수 분 침묵할 수 있고, 그 침묵은
     //   무활동 워치독에게 사망과 구별되지 않는다.
     const stopHeartbeat = startCliHeartbeat(child, events.onStatus, "claude");
+    // ★죽은 자식이 close를 안 보내면 이 실행은 영영 안 끝난다 — runner.ts 주석 참고.
+    ensureChildCloseAfterExit(child, () => {
+      events.onStatus("claude: process exited without closing its output — settling the run");
+    });
 
     // 취소 — 사용자가 Stop을 누르면 자식 프로세스 트리 종료. 병렬 세션 각각 독립 취소.
     const onAbort = () => killCliTree(child);

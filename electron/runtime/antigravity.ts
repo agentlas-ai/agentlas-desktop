@@ -7,7 +7,7 @@ import fs from "node:fs/promises";
 import { rmSync } from "node:fs";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult, RunnerFailure } from "./runner";
 import { detectRuntimeRefusal } from "./runtime-refusal";
-import { startCliHeartbeat, wrapSystemPrompt } from "./runner";
+import { ensureChildCloseAfterExit, startCliHeartbeat, wrapSystemPrompt } from "./runner";
 import {
   CLI_HISTORY_CONTEXT_TOKENS,
   renderConversationContext,
@@ -131,6 +131,7 @@ async function probeAgyModels(binary: string): Promise<string[]> {
     });
     child.on("error", () => finish([]));
     child.on("close", (code) => {
+      stdout += probeDecoder.end();
       if (code !== 0) {
         finish([]);
         return;
@@ -400,29 +401,36 @@ async function runPreparedAntigravity(
     const stdoutDecoder = new StringDecoder("utf8");
     const stderrDecoder = new StringDecoder("utf8");
     const clearAgyHeartbeat = startCliHeartbeat(child, events.onStatus, "agy");
-    child.stdout?.on("data", (chunk: Buffer) => {
-      const text = stdoutDecoder.write(chunk);
+    // ★죽은 자식이 close를 안 보내면 이 실행은 영영 안 끝난다 — runner.ts 주석 참고.
+    ensureChildCloseAfterExit(child, () => {
+      events.onStatus("agy: process exited without closing its output — settling the run");
+    });
+    const consumeAgyLine = (line: string): void => {
+      const trimmedLine = line.trim();
+      if (!trimmedLine) return;
+      const step = reduceAgyLine(trimmedLine, agyState);
+      const now = Date.now();
+      if (step.delta && now - lastEmit > 80 && agyState.text) {
+        events.onPartial(agyState.text);
+        lastEmit = now;
+      } else if (step.activity && now - lastEmit > 5000) {
+        // 델타 없는 활동(도구 스텝·생각) — 워치독 시계용. 5초 한도로 소음 억제.
+        events.onStatus(`agy: ${step.activity}`);
+        lastEmit = now;
+      }
+    };
+    const consumeAgyText = (text: string): void => {
       // stream-json 라인 파싱 — 델타가 생존 신호이자 본문이다.
       agyLineBuf += text;
       let nl = agyLineBuf.indexOf("\n");
       while (nl >= 0) {
-        const line = agyLineBuf.slice(0, nl).trim();
+        const line = agyLineBuf.slice(0, nl);
         agyLineBuf = agyLineBuf.slice(nl + 1);
-        if (line) {
-          const step = reduceAgyLine(line, agyState);
-          const now = Date.now();
-          if (step.delta && now - lastEmit > 80 && agyState.text) {
-            events.onPartial(agyState.text);
-            lastEmit = now;
-          } else if (step.activity && now - lastEmit > 5000) {
-            // 델타 없는 활동(도구 스텝·생각) — 워치독 시계용. 5초 한도로 소음 억제.
-            events.onStatus(`agy: ${step.activity}`);
-            lastEmit = now;
-          }
-        }
+        consumeAgyLine(line);
         nl = agyLineBuf.indexOf("\n");
       }
-    });
+    };
+    child.stdout?.on("data", (chunk: Buffer) => consumeAgyText(stdoutDecoder.write(chunk)));
     child.stderr?.on("data", (chunk: Buffer) => {
       stderr += stderrDecoder.write(chunk);
     });
@@ -436,6 +444,14 @@ async function runPreparedAntigravity(
       reject(err);
     });
     child.on("close", (code) => {
+      // A child may end on a UTF-8 code-point boundary or without a trailing
+      // newline. Flush both decoder tails before deciding which result arrived.
+      consumeAgyText(stdoutDecoder.end());
+      stderr += stderrDecoder.end();
+      if (agyLineBuf.trim()) {
+        consumeAgyLine(agyLineBuf);
+        agyLineBuf = "";
+      }
       // 프로세스 종료 시 stdout/stderr data 리스너를 제거해 누수 방지(일관성+안전).
       clearAgyHeartbeat();
       child.stdout?.removeAllListeners("data");
@@ -453,9 +469,19 @@ async function runPreparedAntigravity(
          * (표식 우선, 휴리스틱은 runtime-refusal.ts 한 곳 — 출처를 heuristic으로 남긴다.)
          */
         // ★최종 result.response가 정본 — 델타 누적은 오염될 수 있는 표시용이다.
-        const agyBody = agyState.finalResponse ?? agyState.text;
-        const trimmed = agyBody.trim();
-        const failure = antigravityExitFailure(agyBody, stderr);
+        // If the final event itself is malformed, prefer a clean accumulated
+        // response. If every candidate contains U+FFFD, fail closed instead of
+        // persisting a visibly corrupted answer.
+        const responseCandidates = [agyState.finalResponse, agyState.text]
+          .filter((value): value is string => typeof value === "string" && value.length > 0);
+        const agyBody = responseCandidates.find((value) => !value.includes("\uFFFD"));
+        if (responseCandidates.length > 0 && !agyBody) {
+          reject(new Error("Antigravity returned malformed UTF-8 output"));
+          return;
+        }
+        const body = agyBody ?? "";
+        const trimmed = body.trim();
+        const failure = antigravityExitFailure(body, stderr);
         resolve({
           text: trimmed,
           ...(failure ? { failure } : {}),

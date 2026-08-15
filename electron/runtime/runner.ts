@@ -363,6 +363,62 @@ export function startCliHeartbeat(
   return stop;
 }
 
+/**
+ * ★자식이 죽었는데 `close`가 오지 않는 경우를 끝낸다 — CLI 스폰 공통.
+ *
+ * Node 계약에서 `close`는 자식의 **stdio가 전부 닫혀야** 온다. `exit`은 프로세스가
+ * 죽으면 즉시 오지만, CLI가 stdout/stderr를 상속한 손자(MCP 서버·language server 등)를
+ * 남기고 죽으면 그 손자가 파이프를 붙들어 **`close`는 영영 오지 않는다.**
+ * 세 러너(agy·claude·codex)가 전부 `close`에서만 정산하므로, 그 순간 실행 Promise는
+ * 영구 pending이 되고 실행은 좀비가 된다.
+ *
+ * 실측 재현(2026-08-15): `bash -c "sleep 30 & echo hi; exit 0"` → exit 2ms,
+ * close 없음(무한). 같은 자식에서 exit 후 stdout/stderr를 destroy하면 close가 정상
+ * 발사된다(503ms).
+ *
+ * 제품 실측(2026-08-15, run_events): agy 실행 `ebd8b451`이 `agy: init` 이후
+ * **93분간 이벤트 0건**으로 "진행 중"에 머물렀고, 사용자가 손으로 중지할 때까지
+ * 끝나지 않았다. 심장박동은 자식 사망을 알고 있었지만(`exitCode !== null` → 박동 정지)
+ * 아무에게도 말하지 않았고, 채팅 실행 경로에는 그 침묵을 받는 워치독이 없다
+ * (무활동 워치독은 automation 전용). 침묵이 아니라 **정산**이 있어야 했다.
+ *
+ * 그래서 `exit`을 함께 듣고, 유예 안에 `close`가 오지 않으면 남은 파이프를 끊어
+ * **진짜 `close`를 발사시킨다.** 러너의 close 핸들러가 유일한 정산 경로로 남는다 —
+ * 두 번째 정산 경로를 만들면 "어느 이벤트로 끝났는지"가 결과를 바꾸는 새 지뢰가 된다.
+ */
+export function ensureChildCloseAfterExit(
+  child: {
+    stdout?: { destroy(): void } | null;
+    stderr?: { destroy(): void } | null;
+    on(event: "close" | "exit", listener: (code: number | null) => void): unknown;
+    on(event: "error", listener: (error: Error) => void): unknown;
+  },
+  onOrphanedStdio?: () => void,
+  graceMs = 10_000,
+): void {
+  let ended = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const disarm = (): void => {
+    ended = true;
+    if (timer) { clearTimeout(timer); timer = null; }
+  };
+  child.on("close", disarm);
+  child.on("error", disarm);
+  child.on("exit", () => {
+    // close가 곧바로 따라오는 정상 종료가 절대다수다 — 유예를 두고, 오면 타이머를 버린다.
+    if (ended || timer) return;
+    timer = setTimeout(() => {
+      timer = null;
+      if (ended) return;
+      onOrphanedStdio?.();
+      // 남은 파이프를 끊는다 → Node가 close를 발사하고, 러너의 close 핸들러가 정산한다.
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+    }, graceMs);
+    timer.unref?.();
+  });
+}
+
 export type Runner = (
   req: RunnerRequest,
   events: RunnerEvents,

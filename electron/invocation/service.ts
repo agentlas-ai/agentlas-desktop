@@ -12,6 +12,7 @@ import {
   type InvocationWorkspaceBinding,
 } from "./workspace-binding";
 import { pickLocale } from "../runtime/status-i18n";
+import { markInterruptedPartial } from "./interrupted-partial";
 import { untrustedRuntimeFailurePayload } from "../runtime/untrusted-error";
 import {
   getInvocationRunReceipt,
@@ -440,6 +441,7 @@ function oneWorkspaceTerminalPhase(
   if (terminalKind === "invoke_completed") return "completed";
   return terminalKind === "invoke_cancelled" ? "cancelled" : "failed";
 }
+
 
 function recordObservableRunStep(
   task: CanonicalTask | null,
@@ -935,7 +937,11 @@ export class InvocationService {
         || !record.partialText.trim()
       ) return;
       try {
-        appendChatMessage(runReq.chatId, "assistant", record.partialText);
+        appendChatMessage(
+          runReq.chatId,
+          "assistant",
+          markInterruptedPartial(record.partialText, pickLocale(runReq)),
+        );
         recoverablePartialPersisted = true;
       } catch {
         // The durable run ledger remains authoritative for the failure. A

@@ -34,6 +34,8 @@ import { buildAppMenu } from "./menu";
 import { initStore, runPostContinuityStoreRepairs } from "./store/db";
 import { onDesktopStoreChange } from "./store/change-bus";
 import { repairPlaceholderTaskTitles } from "./store/chats";
+import { settleInterruptedTasksOnBoot } from "./store/tasks";
+import { tryRecordRunEvent } from "./store/run-events";
 import { startAutomationScheduler, stopAutomationScheduler } from "./automation-scheduler";
 import { claimOneBriefingDesktopNotification, configureOneBriefingRuntime } from "./one/briefing";
 import { invocationService } from "./invocation/service";
@@ -816,6 +818,26 @@ app.whenReady().then(async () => {
   startupStage = "store-opening";
   initStore({ deferPostContinuityRepairs: updatePreflight.pendingInstall });
   repairPlaceholderTaskTitles();
+  /*
+   * ★부팅 시점의 running Task는 전부 고아다 — 실행 권위인 activeRuns 맵이 방금 비어서
+   * 시작했다. 정산하지 않으면 화면이 영원히 "진행 중"을 말한다(실측: 나흘째 running).
+   * 조용히 completed로 덮지 않고 failed로 적어, 이어서 할지 다시 할지는 사용자가 정한다.
+   */
+  try {
+    const interrupted = settleInterruptedTasksOnBoot();
+    if (interrupted.settled > 0) {
+      console.log("[tasks] settled interrupted runs on boot", { count: interrupted.settled });
+      for (const taskId of interrupted.taskIds) {
+        tryRecordRunEvent({
+          runId: `boot-settle:${taskId}`,
+          kind: "invoke_failed",
+          payload: { errorCode: "host-restarted-mid-run", taskId },
+        });
+      }
+    }
+  } catch (error) {
+    console.error("[tasks] boot settlement failed:", error);
+  }
   startupStage = "store-ready";
   traceStartup("store-ready");
   try {

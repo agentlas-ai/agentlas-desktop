@@ -11,6 +11,7 @@
  *  - `<<agentlas-ask>>…<</agentlas-ask>>`             → renderer/lib/ask-question.ts
  *  - `<<agentlas-one-followups>>…<</…>>`              → shared/one-friendly-followups.ts
  *  - `<<agentlas-surface>>…<</agentlas-surface>>`     → electron/surface-emitter.ts parseSurfaces
+ *  - `<<agentlas-goal-complete: …>>`                 → host goal-loop completion marker
  *
  * 이 파일은 **표시 전용**이다. 파싱·적용은 위 정본들이 계속 소유한다.
  * Mobile(Dart)에도 같은 규칙이 이식되어 있고, 공유 픽스처로 두 표면의 출력이
@@ -41,6 +42,8 @@ export const AGENT_SURFACE_CLOSE = "<</agentlas-surface>>";
 export const AGENT_MULTIMODAL_MARKER = "<<agentlas-multimodal-setup>>";
 /** 값 없는 제어 마커(runtime/runner.ts SURFACE_INTENT_MARKER). 표시되면 안 된다. */
 export const AGENT_SURFACE_INTENT_MARKER = "<<surface-intent>>";
+/** Host-only completion marker. It is control metadata, never answer content. */
+export const AGENT_GOAL_COMPLETE_PREFIX = "<<agentlas-goal-complete";
 
 /**
  * One owns assistant identity in product chrome. Provider/persona badges such
@@ -62,6 +65,9 @@ const PAIRED_BLOCKS = [
   { probe: "<<agentlas-surface", open: AGENT_SURFACE_OPEN, close: AGENT_SURFACE_CLOSE },
 ] as const;
 
+/** 완료 마커는 paired fence가 아니라 `: message >>` 한 토큰으로 온다. */
+const GOAL_COMPLETE_RE = /<<agentlas-goal-complete(?::[\s\S]*?)?>>/g;
+
 /** 헤딩 뒤 첫 코드펜스. 정본 파서들과 같은 표현식이다. */
 const FENCE_RE = /```(?:json)?\s*[\s\S]*?```/;
 
@@ -73,6 +79,7 @@ const TAIL_TOKENS: readonly string[] = [
   AGENT_SURFACE_OPEN,
   AGENT_MULTIMODAL_MARKER,
   AGENT_SURFACE_INTENT_MARKER,
+  AGENT_GOAL_COMPLETE_PREFIX,
 ];
 
 /** 값 없이 통째로 지워도 되는 제어 마커. */
@@ -136,7 +143,7 @@ function pairedHit(
  * 그 조각까지 감춘다. 완성된 응답에는 적용하지 않는다 — 정상 본문을 자르면 안 된다.
  */
 export function stripAgentControlBlocks(value: string, options?: { streaming?: boolean }): string {
-  let visible = value;
+  let visible = value.replace(GOAL_COMPLETE_RE, "");
   for (const marker of BARE_MARKERS) visible = visible.split(marker).join("");
 
   // 모델은 제어 블록을 여러 개 낼 수 있다. 적대적 스팸에도 멈추도록 상한을 둔다.
