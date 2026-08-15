@@ -1523,7 +1523,7 @@ export function getExperienceIntakeDiagnostics(agentIdValue: string): Experience
       reasons = ["invalid-local-receipt"];
     }
     for (const code of reasons) {
-      const key = `${row.status} ${code}`;
+      const key = `${row.status}\u0000${code}`;
       reasonCounts.set(key, (reasonCounts.get(key) ?? 0) + 1);
     }
     if (row.status === "candidate-created" && Number(row.redaction_count ?? 0) > 0) {
@@ -1553,7 +1553,7 @@ export function getExperienceIntakeDiagnostics(agentIdValue: string): Experience
     promotions,
     reasons: [...reasonCounts.entries()]
       .map(([key, count]) => {
-        const [status, code] = key.split(" ");
+        const [status, code] = key.split("\u0000");
         return { status: status as "candidate-created" | "blocked" | "skipped", code, count };
       })
       .sort((left, right) => right.count - left.count || left.code.localeCompare(right.code)),

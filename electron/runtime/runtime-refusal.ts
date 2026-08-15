@@ -51,6 +51,46 @@ function kindOf(text: string): RunnerFailureKind {
   return "refused";
 }
 
+/*
+ * ── 승인 대기로 막힌 도구 호출 ────────────────────────────────────────────────
+ *
+ * 헤드리스 실행에는 승인할 사람이 붙어 있지 않다. 그래서 CLI는 승인이 필요한
+ * 도구를 **거부된 것으로** 처리하고 tool_result에 그 사유를 적어 보낸다.
+ * 실측(사용자 제보, Claude Code 2.1.x):
+ *   "This Bash command contains multiple operations.
+ *    The following part requires approval: npm run verify 2>&1"
+ *   "Claude requested permissions to write to <…>, but you haven't granted it yet."
+ * 세션 이벤트에는 `toolDenialKind: "user-rejected"` 로 남는다 — 사용자는 아무것도
+ * 거절한 적이 없는데도. 그리고 화면에는 그 사실이 **전혀 표시되지 않았다.**
+ *
+ * 이건 실패가 아니라 **막힌 것**이라 별도로 센다. 실패로 세면 실행이 끝나 버리고,
+ * 무시하면 사용자는 왜 아무 일도 안 일어났는지 알 수 없다.
+ *
+ * 여기 두는 이유는 이 파일의 존재 이유와 같다 — 문구로 판정하는 코드는 저장소에
+ * 한 곳만 둔다. 다만 이 판별은 **tool_result 본문**을 보므로 길이·구조 제한을
+ * 적용하지 않는다(도구 결과는 길고 구조가 있을 수 있다).
+ */
+const APPROVAL_REQUIRED_PATTERNS: RegExp[] = [
+  /\brequires? approval\b/i,
+  /\brequested permissions? to\b/i,
+  /\bhaven'?t granted (it|permission)\b/i,
+  /\bpermission to use\b[^\n]*\bhas not been granted\b/i,
+  /\bapproval (is )?required\b/i,
+];
+
+/** 이 tool_result가 "승인이 없어서 막혔다"를 말하는가. 막힌 명령을 함께 돌려준다. */
+export function detectApprovalRequired(
+  toolResultText: string,
+): { message: string; blocked?: string } | null {
+  const t = String(toolResultText || "").trim();
+  if (!t) return null;
+  if (!APPROVAL_REQUIRED_PATTERNS.some((re) => re.test(t))) return null;
+  // "The following part requires approval: <명령>" 형태면 그 명령을 뽑아 보여준다.
+  const blocked = t.match(/requires? approval:\s*([^\n]+)/i)?.[1]?.trim()
+    ?? t.match(/permissions? to (?:write to|use) ([^\n,]+)/i)?.[1]?.trim();
+  return blocked ? { message: t, blocked } : { message: t };
+}
+
 /** 텍스트가 산출물이 아니라 거절 고지문인가. */
 export function detectRuntimeRefusal(text: string): { kind: RunnerFailureKind; message: string } | null {
   const t = String(text || "").trim();

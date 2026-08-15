@@ -1175,7 +1175,7 @@ function SingleRunBody({
   const stableArtifact = useCallback((a: CodeArtifact) => artifactRef.current?.(a), []);
   const stableMedia = useCallback((a: MediaArtifact) => mediaRef.current?.(a), []);
   const stableLinkedFile = useCallback((a: LinkedFileArtifact) => linkedFileRef.current?.(a), []);
-  const basePathsKey = mediaBasePaths.join(" ");
+  const basePathsKey = mediaBasePaths.join("\u0000");
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const stableBasePaths = useMemo(() => mediaBasePaths.slice(), [basePathsKey]);
   if (!text.trim() && toolSteps.length === 0) return null;
@@ -1716,25 +1716,34 @@ function userFacingAssistantText(text: string, streaming = false): string {
   // one final assistant message. Keep that evidence in the local database, but
   // render only the controller's final result once a clear completion section
   // exists. Short ordinary answers are never trimmed by this legacy guard.
-  const outcomeStart = visible.search(/^(?:완료했습니다(?:\.|:)|Completed(?:\.|:)|Done(?:\.|:))/im);
-  const legacyProgress = /(?:실시간 검증 중|재실행|회귀|게이트|스크린샷|MCP tool call|python3?|localhost|127\.0\.0\.1|sandbox|샌드박스)/i;
-  if (outcomeStart > 600 && legacyProgress.test(visible.slice(0, outcomeStart))) {
-    visible = visible.slice(outcomeStart);
-  }
+  /*
+   * ★긴 답의 앞부분을 잘라내던 legacy guard는 제거했다.
+   * "완료했습니다"가 600자 뒤에 나오고 앞에 흔한 낱말(회귀·게이트·localhost…)이 있으면
+   * 그 앞을 통째로 버렸는데, 그 앞부분이 실제 설명인 경우와 진행 로그인 경우를
+   * 낱말로는 가를 수 없다. 가를 수 없는 판정은 반드시 진짜 답을 먹는다.
+   * 내부 진행 로그는 애초에 최종 메시지에 섞이지 않게 Main이 막는 것이 옳고,
+   * 렌더는 받은 본문을 자르지 않는다.
+   */
 
   return visible
     // Local filesystem layout is implementation detail. Preserve useful link
     // labels and filenames without revealing account names or absolute paths.
     .replace(/\[([^\]]+)\]\((?:file:\/\/)?\/Users\/[^)\n]+\)/g, "$1")
     .replace(/(?:file:\/\/)?\/Users\/[^\s)\]}>`,]+/g, (path) => path.split("/").filter(Boolean).at(-1) ?? "")
-    .replace(/https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?(?:\/[^\s]*)?/gi, "local preview")
-    // Shell launch instructions belong in the inspector or artifact action,
-    // not in the novice-facing conversation.
-    .replace(/\n+(?:실행|Run locally|To run):\s*\n+```(?:bash|sh|shell|zsh|powershell|cmd)?[\s\S]*?```\s*(?:\n+(?:브라우저에서|Open in (?:a )?browser)[^\n]*)?/gi, "")
-    .replace(/```(?:bash|sh|shell|zsh|powershell|cmd)\s*[\s\S]*?```/gi, "")
-    .replace(/(?:브라우저에서\s+`?local preview`?|Open\s+`?local preview`?\s+in\s+(?:a\s+)?browser)[^\n]*/gim, "")
-    .replace(/모든 Node 스모크·회귀 테스트 통과/g, "모든 자동 검증 통과")
-    .replace(/`(fail|pass)`/gi, "$1")
+    /*
+     * ★여기서 지우던 것들을 되돌렸다 — 이 함수는 프로토콜을 벗기는 자리이지
+     * 답을 편집하는 자리가 아니다.
+     *
+     * 지웠던 것과 그 결과:
+     * - 모든 셸 코드블록(```bash|sh|shell|zsh|powershell|cmd) → 사용자가 실행하라고
+     *   받은 명령이 화면에서 사라졌다. DB 원문에는 그대로 있어서 화면만 거짓이 됐다.
+     * - `실행:` / `Run locally:` + 코드블록 → 같은 과잉.
+     * - localhost·127.0.0.1 URL → "local preview" 치환. 로컬 미리보기 주소는
+     *   **사용자가 열어야 하는 정보**인데 주소를 지우면 열 방법이 없어진다.
+     *
+     * 실행 위험은 렌더가 명령을 삭제해서 막는 게 아니라, 명령을 자동 실행하지
+     * 않음으로써 막는다. 보여주는 것과 실행하는 것은 다른 권한이다.
+     */
     // U+FFFD means the upstream byte stream was already decoded incorrectly.
     // The original bytes cannot be reconstructed at render time; hide the
     // replacement run instead of exposing `���`/`???` as if it were an answer.

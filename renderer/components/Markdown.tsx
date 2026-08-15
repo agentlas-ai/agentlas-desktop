@@ -330,7 +330,7 @@ function isTableSeparator(line: string): boolean {
 function splitTableRow(line: string): string[] {
   // 양 끝 파이프 제거 후 split. 셀 안의 escape `\|`는 placeholder 처리.
   const t = line.trim().replace(/^\|/, "").replace(/\|$/, "");
-  const PLACEHOLDER = " ESC_PIPE ";
+  const PLACEHOLDER = "\u0000ESC_PIPE\u0000";
   return t
     .replace(/\\\|/g, PLACEHOLDER)
     .split("|")

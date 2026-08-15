@@ -17,6 +17,7 @@ import {
   wrapSystemPrompt,
 } from "./runner";
 import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
+import { detectApprovalRequired } from "./runtime-refusal";
 import {
   CLI_HISTORY_CONTEXT_TOKENS,
   composeResumeTurnPrompt,
@@ -745,6 +746,36 @@ export const runClaudeCode: Runner = async (
     };
 
     const toolNameById = new Map<string, string>();
+
+    /*
+     * ★승인이 없어 막힌 도구 호출을 사용자에게 말한다.
+     *
+     * 헤드리스에는 승인할 사람이 없어서 CLI가 그런 호출을 거부로 처리하고, 세션에는
+     * `toolDenialKind: "user-rejected"` 로 남는다 — 사용자는 아무것도 거절한 적이 없는데도.
+     * 예전에는 그 tool_result가 다른 도구 결과와 똑같이 흘러가 화면에 아무 표시도 남지
+     * 않았다. 파일 편집은 되는데 `npm test`나 `git commit`만 조용히 안 되는 상태였다.
+     *
+     * 실행을 실패로 끝내지는 않는다(막힌 것이지 깨진 것이 아니다). 대신 대화에 남는
+     * 사실로 올려서, 사용자가 권한을 올릴지 다시 시킬지 정할 수 있게 한다.
+     */
+    const announcedApprovalBlocks = new Set<string>();
+    const announceApprovalBlock = (resultText: string): void => {
+      const blocked = detectApprovalRequired(resultText);
+      if (!blocked) return;
+      const key = blocked.blocked ?? blocked.message.slice(0, 120);
+      if (announcedApprovalBlocks.has(key)) return;
+      announcedApprovalBlocks.add(key);
+      const what = blocked.blocked ? `: ${blocked.blocked}` : "";
+      const ko = `승인이 필요해 중단된 단계가 있습니다${what}. 이 실행에는 승인할 사람이 붙어 있지 않아 자동으로 거부됐습니다 — 사용자가 거절한 것이 아닙니다. 권한을 올리거나 다시 요청해 주세요.`;
+      const en = `A step was blocked because it needs approval${what}. This run has nobody to approve it, so it was auto-denied — you did not reject it. Raise the permission or ask again.`;
+      events.onNotice?.({
+        level: "warning",
+        code: "approval-required",
+        message: runReq.locale === "ko" ? ko : en,
+        i18n: { ko, en },
+      });
+    };
+
     let agentAppMcpInitFailed = false;
     let agentAppMcpInitConnected = false;
     let agentAppMcpUnavailableNotified = false;
@@ -956,6 +987,7 @@ export const runClaudeCode: Runner = async (
             const toolId = block.tool_use_id;
             const toolName = toolId ? toolNameById.get(toolId) ?? "tool_result" : "tool_result";
             const result = truncateUi(stringifyToolPayload(block.content));
+            if (block.is_error === true) announceApprovalBlock(result);
             events.onTool?.(toolName, undefined, result, toolId, block.is_error === true);
           }
         }
@@ -965,6 +997,7 @@ export const runClaudeCode: Runner = async (
           const toolId = block.tool_use_id;
           const toolName = toolId ? toolNameById.get(toolId) ?? "tool_result" : "tool_result";
           const result = truncateUi(stringifyToolPayload(block.content));
+          if (block.is_error === true) announceApprovalBlock(result);
           events.onTool?.(toolName, undefined, result, toolId, block.is_error === true);
         }
       } else if (ev.type === "rate_limit_event") {

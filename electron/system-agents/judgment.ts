@@ -975,7 +975,7 @@ export async function judgeChecklist(spec: ChecklistJudgeSpec): Promise<Checklis
   const correctionLines = corrections.map((c) =>
     `- A result like: "${secretValueFloor(c.subjectPreview).redacted.slice(0, 200)}" — the person ruled ${c.correctedVerdict.toUpperCase()}${c.note ? ` (${c.note.slice(0, 150)})` : ""}`);
   // ★교정이 캐시 키에 들어가야 한다 — 아니면 새 교정이 와도 캐시된 옛 판정이 그대로 나온다.
-  const cacheKey = [spec.kind, spec.salt ?? "", itemLines.join("\n"), correctionLines.join("\n"), evidence ?? "", subject].join(" ");
+  const cacheKey = [spec.kind, spec.salt ?? "", itemLines.join("\n"), correctionLines.join("\n"), evidence ?? "", subject].join("\u0000");
   const cached = checklistCacheGet(cacheKey);
   if (cached) return cached;
 
