@@ -173,7 +173,48 @@ export function stripAgentControlBlocks(value: string, options?: { streaming?: b
   visible = failClosedOnRemainingControlToken(visible);
   visible = stripTrailingMemoryTicketEnvelope(visible);
   if (options?.streaming) visible = trimIncompleteControlTail(visible);
+  visible = stripOrphanCodeFences(visible);
   return visible.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/** A line that is only a code fence, with or without an info string. */
+const FENCE_LINE_RE = /^[ \t]*```[A-Za-z0-9_+.-]*[ \t]*$/;
+/** A closing fence carries no info string (CommonMark; same rule as the Markdown renderer). */
+const CLOSING_FENCE_LINE_RE = /^[ \t]*```[ \t]*$/;
+
+/**
+ * Models wrap control blocks in a code fence ("```\n<<agentlas-ask>>…\n```").
+ * After the block is consumed the fence lines stay behind as an **empty code
+ * block**, or — when the block ran to the end of the text — as a lone opening
+ * fence at the tail, which the renderer draws as an empty box under the answer
+ * (measured 2026-08-16: 12 persisted One answers ended in a bare "```").
+ * Remove exactly those two shapes; a fenced block with content is untouched.
+ */
+export function stripOrphanCodeFences(value: string): string {
+  const lines = value.split("\n");
+  const out: string[] = [];
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!FENCE_LINE_RE.test(line)) {
+      out.push(line);
+      index += 1;
+      continue;
+    }
+    let close = index + 1;
+    while (close < lines.length && !CLOSING_FENCE_LINE_RE.test(lines[close])) close += 1;
+    const bodyIsBlank = lines.slice(index + 1, close).every((body) => body.trim() === "");
+    if (close >= lines.length) {
+      // Unclosed opener. Blank body = orphan (or a fence whose content has not
+      // streamed yet — it reappears with its first content line). Content
+      // present = keep everything; the renderer already shows it as code.
+      if (!bodyIsBlank) out.push(...lines.slice(index));
+      break;
+    }
+    if (!bodyIsBlank) out.push(...lines.slice(index, close + 1));
+    index = close + 1;
+  }
+  return out.join("\n");
 }
 
 /**
