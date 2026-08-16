@@ -213,10 +213,17 @@ function parseBlocks(input: string, messageId: string): Block[] {
       }
       // closing ```
       if (i < lines.length) i++;
+      const code = codeLines.join("\n");
+      // A fenced block with nothing inside draws as an empty dark box labelled
+      // by its language ("JSON · 1줄" — user report 2026-08-16). Whatever left
+      // it empty (a stripped control block, a model that opened a fence and
+      // wrote nothing, a partial stream), an empty box is not content — skip it.
+      // Content-bearing blocks are never touched here.
+      if (code.trim() === "") continue;
       out.push({
         type: "code",
         lang,
-        code: codeLines.join("\n"),
+        code,
         id: `${messageId}-c${codeIdx++}`,
       });
       continue;

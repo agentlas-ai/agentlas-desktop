@@ -22,6 +22,17 @@ function check(name, fn) {
 console.log("markdown-rendering-contract");
 
 /*
+ * 사용자 제보(2026-08-16): 답변에 "JSON · 1줄"이라고만 적힌 빈 검은 상자가 떴다.
+ * 내용이 없는 펜스 블록은 그릴 것이 없다 — 파서가 블록을 만들지 않는다.
+ * 내용이 있는 블록(셸 명령 포함)은 절대 건드리지 않는다.
+ */
+check("★내용 없는 펜스 블록은 그리지 않는다 — 빈 \"JSON · 1줄\" 상자 금지", () => {
+  assert.match(md, /const code = codeLines\.join\("\\n"\);\s*[\s\S]*?if \(code\.trim\(\) === ""\) continue;/, "빈 코드 블록 스킵 규칙이 없다");
+  // 내용 있는 셸 블록은 그대로 블록이 된다(표시 정제기가 셸 블록을 지우던 사고의 재발 방지).
+  assert.doesNotMatch(md, /```\(\?:bash\|sh\|shell/, "렌더러가 셸 코드 블록을 삭제하는 규칙을 다시 들이면 안 된다");
+});
+
+/*
  * ★matcher 목록과 "다음 특수문자 점프표"는 함께 움직여야 한다.
  *
  * 실측: 인라인 수식 matcher 를 정확한 정규식으로 추가하고도 화면에 전혀 나오지 않았다.
