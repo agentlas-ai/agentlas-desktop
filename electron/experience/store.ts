@@ -530,6 +530,8 @@ function getCandidateRow(id: string): CandidateRow {
 // (base_agent_definition_id / base_agent_release_id) and are NOT weakened by
 // this local fingerprint.
 const BUILTIN_BASE_FINGERPRINT_DOMAIN = "agentlas-builtin-experience-base-v1";
+/** 로컬(패키지 없는) 에이전트 기준 — 빌트인과 섞이지 않도록 도메인을 분리한다. */
+const LOCAL_BASE_FINGERPRINT_DOMAIN = "agentlas.experience.local-base.v1";
 
 export function builtinExperienceBasePackageHash(slug: string): string {
   return hash(BUILTIN_BASE_FINGERPRINT_DOMAIN, String(slug ?? "").trim());
@@ -542,10 +544,35 @@ function isBuiltinInstalledAgent(agentId: string): boolean {
 }
 
 /** Verified package hash for imported agents; deterministic local fingerprint for builtins; null otherwise. */
+/**
+ * 이 에이전트의 경험을 어느 기준에 묶을 것인가.
+ *
+ * 원래는 셋 중 하나만 통과했다: 유효한 패키지 해시, 또는 빌트인(slug 로 만든 안정 해시).
+ * 그래서 **로컬로 가져온 에이전트는 항상 null** 이었고, 경험이 구조적으로 불가능했다 —
+ * 실측: 로컬로 가져온 팀원 3명의 기억 59건이 전부
+ * `exact-base-unavailable` 로 버려졌다. 패키지가 없다는 것은 "출처를 고정할 파일이 없다"는
+ * 뜻이지 "이 에이전트는 배우면 안 된다"는 뜻이 아니다.
+ *
+ * 로컬 에이전트도 빌트인과 같은 방식으로 안정 기준을 갖는다. 기준의 목적은 "어느 버전이
+ * 배운 경험인가"를 고정하는 것이고, 버전 개념이 없는 에이전트에게는 그 신원 자체가
+ * 안정된 기준이다. 손상된 해시(형식 위반)는 여전히 거절한다 — 그건 없는 것과 다르다.
+ */
 function effectiveExperienceBaseHash(agent: { id: string; slug: string; packageHash?: string }): string | null {
   if (agent.packageHash && /^[a-f0-9]{64}$/.test(agent.packageHash)) return agent.packageHash;
   if (agent.packageHash) return null;
-  return isBuiltinInstalledAgent(agent.id) ? builtinExperienceBasePackageHash(agent.slug) : null;
+  if (isBuiltinInstalledAgent(agent.id)) return builtinExperienceBasePackageHash(agent.slug);
+  return localExperienceBasePackageHash(agent.slug || agent.id);
+}
+
+/** 패키지가 없는 로컬 에이전트의 안정 기준 — 신원에서 파생하므로 실행마다 바뀌지 않는다. */
+export function localExperienceBasePackageHash(identity: string): string {
+  return hash(LOCAL_BASE_FINGERPRINT_DOMAIN, String(identity ?? "").trim());
+}
+
+/** 설치된 에이전트가 지금 쓰는 경험 기준 해시(보정·진단용 공개 진입점). */
+export function currentExperienceBaseHash(agentId: string): string | null {
+  const agent = getAgentById(agentId);
+  return agent ? effectiveExperienceBaseHash(agent) : null;
 }
 
 function assertPackBaseCurrent(pack: PackRow): void {
@@ -1195,7 +1222,7 @@ function requestContextFromMemory(raw: string | null): AutoExperienceIntakeInput
  * records blocked/skipped reasons without content, and never promotes, uploads,
  * purchases or attaches a chip.
  */
-export function reconcileExistingCuratedMemoryCandidates(limitValue = 2_000): {
+export function reconcileExistingCuratedMemoryCandidates(limitValue = 2_000, options: { agentId?: string } = {}): {
   scanned: number;
   candidateCreated: number;
   blocked: number;
@@ -1203,14 +1230,18 @@ export function reconcileExistingCuratedMemoryCandidates(limitValue = 2_000): {
   deferred: number;
 } {
   const limit = Math.max(1, Math.min(10_000, Math.trunc(limitValue)));
+  // 아키텍처 마이그레이션은 에이전트 한 명씩 돈다(원장이 에이전트 단위라 결과도 그 단위여야
+  // 한다). 인자가 없으면 예전처럼 전체를 훑는다.
+  const only = typeof options.agentId === "string" && options.agentId.trim() ? options.agentId.trim() : null;
   const rows = getDb().prepare(
     `SELECT id, kind, content, project_id, project_path, agent_id, confidence,
             sensitivity, context_json, superseded_at
        FROM memory_entries
       WHERE agent_id IS NOT NULL AND superseded_at IS NULL
+        AND (? IS NULL OR agent_id = ?)
       ORDER BY created_at ASC, id ASC
       LIMIT ?`,
-  ).all(limit) as MemoryProjectionRow[];
+  ).all(only, only, limit) as MemoryProjectionRow[];
   const result = { scanned: 0, candidateCreated: 0, blocked: 0, skipped: 0, deferred: 0 };
 
   for (const memory of rows) {
@@ -1232,7 +1263,7 @@ export function reconcileExistingCuratedMemoryCandidates(limitValue = 2_000): {
         projectId: memory.project_id,
         projectPath: memory.project_path,
         environment: { platform: process.platform, arch: process.arch, runtimeKind: "agentlas-desktop" },
-        basePackageHash: agent?.packageHash ?? null,
+        basePackageHash: agent ? effectiveExperienceBaseHash(agent) : null,
         taskHint: requestContext?.userIntent ?? requestContext?.triggerTerms?.join(" ") ?? null,
       };
       autoIntakeCuratedMemory(input);

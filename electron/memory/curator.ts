@@ -757,9 +757,19 @@ function hostObservedTurnEvents(ctx: CurationContext): RawMemoryEvent[] {
   const hint = String(ctx.experienceIntake?.taskHint ?? "").replace(/\s+/g, " ").trim();
   if (hint.length < 12) return [];
   const request = hint.length > 220 ? `${hint.slice(0, 220)}…` : hint;
+  /*
+   * ★kind 는 procedure 다 — fact 로 두면 칩이 되지 못한다.
+   *
+   * 경험 후보가 되는 종류는 procedure·decision·risk 뿐이고(experience/store.ts
+   * operationalKinds) fact 는 durable 기억까지만 간다. 첫 판에서 이 기록을 fact 로
+   * 남겼더니 기억은 생기는데 경험칩은 여전히 0이었다 — 고쳤다고 말할 뻔한 자리다.
+   *
+   * 그리고 이것은 실제로 절차다: "이 에이전트는 이런 요청을 처리한다"는 다음 배정과
+   * 다음 실행에서 쓰이는 운영 지식이지, 시간이 지나면 거짓이 되는 상태값이 아니다.
+   */
   return [{
-    memory_kind: "fact",
-    content: `이 에이전트가 다음 요청을 수행했다: ${request}`,
+    memory_kind: "procedure",
+    content: `이 에이전트는 다음과 같은 요청을 수행한다: ${request}`,
     suggested_scope: "agent_repo",
     confidence: "medium",
     sensitivity: "internal",
@@ -871,6 +881,28 @@ export function stripReplyMemoryEventsReadOnly(
     turnSummary: parsed.turnSummary ?? fallbackTurnObservation(parsed.cleanedText),
   });
   if (ticket.created) {
+    /*
+     * ★읽기 실행도 일어난 일이다 — 권한과 무관하게 사실은 남긴다(오너 결정 2026-08-16).
+     *
+     * 이 경계는 **모델이 낸 기억**을 버린다. 읽기 권한으로 도는 턴이 프로젝트 파일이나
+     * 남의 기억을 건드리지 못하게 하려는 것이고, 그 부분은 그대로 둔다. 하지만 "이
+     * 에이전트가 이런 요청을 처리했다"는 호스트 자신의 관측이지 모델이 주장한 내용이
+     * 아니다. 그것까지 버리면, 읽기로만 쓰이는 에이전트는 아무리 오래 일해도 경험이
+     * 0으로 남는다 — 실측에서 913회 실행에 기억 0이던 원인의 절반이 여기였다.
+     */
+    const hostObserved = hostObservedTurnEvents(ctx);
+    if (hostObserved.length > 0) {
+      const hostReport = curateEvents(hostObserved, ctx, {
+        ticketId: ticket.ticketId,
+        curatorMode: "read_only",
+        projectPath: null,
+      });
+      finalReport = {
+        ...report,
+        written: report.written + hostReport.written,
+        deduped: report.deduped + hostReport.deduped,
+      };
+    }
     for (const [index, event] of parsed.events.entries()) {
       recordCandidateDecision({
         options: {

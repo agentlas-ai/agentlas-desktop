@@ -17,7 +17,7 @@ import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-p
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 95;
+const SCHEMA_VERSION = 96;
 
 function hardenStoreFile(file: string): void {
   if (process.platform === "win32" || !fs.existsSync(file)) return;
@@ -4471,6 +4471,30 @@ export function initStore(options: StoreInitOptions = {}): void {
   _db.exec(
     "CREATE INDEX IF NOT EXISTS idx_judgment_verdicts_recency ON judgment_verdicts(last_hit_at)",
   );
+
+  /*
+   * v96 — 에이전트 아키텍처 마이그레이션 원장.
+   *
+   * 업데이트는 새 아키텍처를 가져오지만, 이미 등록된 에이전트는 옛 상태로 남는다. 그래서
+   * "이 에이전트에게 이 단계를 적용했는가"를 (에이전트 × 단계)로 기록한다. 새 버전이 단계를
+   * 하나 추가하면 그 단계는 기존에 등록된 **모든** 에이전트에게 자동으로 한 번씩 돈다.
+   *
+   * 원장에 남는 것은 결과이지 내용이 아니다 — 무엇을 몇 건 바꿨는지와 사유 코드만.
+   */
+  _db.exec(`
+    CREATE TABLE IF NOT EXISTS agent_architecture_migrations (
+      agent_id TEXT NOT NULL,
+      step_id TEXT NOT NULL,
+      architecture_version TEXT NOT NULL,
+      outcome TEXT NOT NULL CHECK(outcome IN ('applied','noop','failed')),
+      changed INTEGER NOT NULL DEFAULT 0,
+      detail TEXT,
+      applied_at TEXT NOT NULL,
+      PRIMARY KEY (agent_id, step_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_architecture_migrations_step
+      ON agent_architecture_migrations(step_id, outcome);
+  `);
 
   if (userVersion < SCHEMA_VERSION) _db.pragma(`user_version = ${SCHEMA_VERSION}`);
   } catch (error) {

@@ -17,6 +17,7 @@ const path = require("node:path");
 
 const root = path.resolve(__dirname, "..");
 const curator = fs.readFileSync(path.join(root, "electron/memory/curator.ts"), "utf8");
+const experienceStore = fs.readFileSync(path.join(root, "electron/experience/store.ts"), "utf8");
 
 let passed = 0;
 let failed = 0;
@@ -67,7 +68,21 @@ check("★내용을 지어내지 않는다(요청 문구와 실행 id 만)", () 
   const body = hookBody();
   assert.match(body, /ctx\.experienceIntake\?\.taskHint/, "요청 문구를 쓰지 않는다");
   assert.match(body, /evidence_refs: \[runId\]/, "증거로 실행 id 를 달지 않는다");
-  assert.match(body, /memory_kind: "fact"/, "관측 사실이 아닌 종류로 저장한다");
+  /*
+   * ★종류는 "경험이 될 수 있는 것"이어야 한다.
+   *
+   * 첫 판은 `fact` 로 저장했다. 관측 사실이라는 뜻으로는 맞지만, 수집은 운영 종류
+   * (procedure/decision/risk)만 후보로 만든다(store.ts 의 operationalKinds). 그래서 기억은
+   * 쌓이는데 칩은 영원히 0이었다 — 이 훅이 고치려던 병이 한 칸 뒤로 밀렸을 뿐이다.
+   * 종류 이름을 못박지 않고, 수집이 실제로 받는 집합에 속하는지 본다.
+   */
+  const kind = body.match(/memory_kind: "([^"]+)"/)?.[1];
+  const operational = experienceStore.match(/const operationalKinds = new Set\(\[([^\]]+)\]\)/)?.[1] ?? "";
+  assert.ok(kind, "저장할 기억 종류가 없다");
+  assert.ok(
+    operational.includes(`"${kind}"`),
+    `호스트 기록이 "${kind}" 로 저장되는데 수집은 ${operational} 만 후보로 만든다 — 기억은 쌓여도 칩은 0이 된다`,
+  );
   assert.ok(!/replyText|cleanedText/.test(body),
     "모델의 답을 요약해 넣는다 — 그건 모델이 할 일이고, 호스트가 하면 지어내는 것이다");
 });

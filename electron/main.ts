@@ -72,6 +72,7 @@ import { backfillEntityKinds } from "./mcp/registry";
 import { backfillLegacyLocalRouteDefinitionHashes } from "./agents/routes";
 import { dedupeLocalInstalledAgents } from "./store/agent-dedupe";
 import { reconcileExistingCuratedMemoryCandidates } from "./experience/store";
+import { migrateRegisteredAgents } from "./architecture/agent-migrations";
 import { seedBuiltinAgents } from "./architecture/seed";
 import { repairAllRootChatSurfaceControllers } from "./store/chats";
 import { ensureDefaultMcpPluginsInstalled } from "./mcp-tools/defaults";
@@ -1010,6 +1011,17 @@ app.whenReady().then(async () => {
     const definitions = backfillLegacyLocalRouteDefinitionHashes();
     const duplicates = dedupeLocalInstalledAgents();
     const experience = reconcileExistingCuratedMemoryCandidates();
+    /*
+     * 등록된 모든 에이전트를 현재 아키텍처로 올린다.
+     *
+     * 업데이트는 새 아키텍처를 가져오지만 이미 등록된 에이전트는 옛 상태로 남는다 — 그래서
+     * 오래 쓴 에이전트일수록 새 기능이 비어 있었다(실측: 913회 실행에 경험 칩 0). 원장이
+     * (에이전트 × 단계)라 새 단계는 설치 시점과 무관하게 전원에게 한 번씩 돈다.
+     */
+    const migrated = migrateRegisteredAgents();
+    if (migrated.stepsRun > 0) {
+      console.log("[architecture] migrated registered agents", migrated);
+    }
     if (definitions.updated > 0 || duplicates.merged > 0 || experience.candidateCreated > 0 || experience.blocked > 0) {
       console.log("[experience] reconciled legacy local learning", {
         definitionHashesUpdated: definitions.updated,
