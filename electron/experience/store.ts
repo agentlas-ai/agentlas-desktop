@@ -1080,17 +1080,19 @@ export function autoIntakeCuratedMemory(input: AutoExperienceIntakeInput): void 
     input.memory.requestContext?.userIntent,
     ...(input.memory.requestContext?.triggerTerms ?? []),
   );
-  if (tasks.length === 0) {
-    recordAutoIntakeReceipt({
-      agentId: input.agentId,
-      sourceMemoryHash,
-      memoryKind: input.memory.kind,
-      status: "skipped",
-      reasons: ["task-taxonomy-unavailable"],
-      runId,
-    });
-    return;
-  }
+  /*
+   * ★분류에 실패했다고 경험을 버리지 않는다(오너 결정 2026-08-16).
+   *
+   * 작업 분류는 23개 낱말 규칙으로 정해진다. 거기 안 걸리는 일은 늘 있고 — 런타임 정산,
+   * 권한 경계, 릴리즈 절차처럼 규칙에 없는 주제 — 예전에는 그런 기억이 통째로 버려졌다
+   * (실측 218건, 그 중 174건이 One). 분류는 나중에 이 칩을 **찾기 위한** 꼬리표이지
+   * 칩이 존재할 자격이 아니다. 꼬리표가 비면 검색이 조금 불편할 뿐, 버리면 경험 자체가
+   * 사라진다. 판정 모델이 붙으면 같은 후보를 다시 분류할 수 있다.
+   *
+   * 영수증에는 분류가 비었다는 사실을 남긴다 — 규칙이 현실을 얼마나 못 따라가는지
+   * 세어 볼 수 있어야 나중에 고칠 수 있다.
+   */
+  const taskTermsUnavailable = tasks.length === 0;
 
   const pack = ensureAutoExperiencePack({ ...input, basePackageHash });
   const existingCandidate = getDb().prepare(
@@ -1102,7 +1104,11 @@ export function autoIntakeCuratedMemory(input: AutoExperienceIntakeInput): void 
       sourceMemoryHash,
       memoryKind: input.memory.kind,
       status: "candidate-created",
-      reasons: redactionCount > 0 ? ["redacted-admit"] : [],
+      reasons: [
+        ...(redactionCount > 0 ? ["redacted-admit"] : []),
+        // 분류가 비었어도 후보는 만든다 — 세어 볼 수 있게 사실만 남긴다.
+        ...(taskTermsUnavailable ? ["task-taxonomy-empty"] : []),
+      ],
       packId: pack.id,
       candidateId: existingCandidate.id,
       runId,
@@ -1149,7 +1155,11 @@ export function autoIntakeCuratedMemory(input: AutoExperienceIntakeInput): void 
       sourceMemoryHash,
       memoryKind: input.memory.kind,
       status: "candidate-created",
-      reasons: redactionCount > 0 ? ["redacted-admit"] : [],
+      reasons: [
+        ...(redactionCount > 0 ? ["redacted-admit"] : []),
+        // 분류가 비었어도 후보는 만든다 — 세어 볼 수 있게 사실만 남긴다.
+        ...(taskTermsUnavailable ? ["task-taxonomy-empty"] : []),
+      ],
       packId: pack.id,
       candidateId,
       runId,
