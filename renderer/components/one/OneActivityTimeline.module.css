@@ -188,6 +188,37 @@
   overflow: hidden;
 }
 
+/* Left-edge grip: invisible until hover, wide enough to grab. */
+.artifactResizeHandle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -6px;
+  width: 12px;
+  cursor: col-resize;
+  border-radius: 6px;
+  touch-action: none;
+  z-index: 2;
+}
+.artifactResizeHandle::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 5px;
+  width: 3px;
+  height: 44px;
+  transform: translateY(-50%);
+  border-radius: 999px;
+  background: #d5d8db;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.artifactResizeHandle:hover::after,
+.artifactResizeHandle:focus-visible::after,
+.artifactRail[data-resizing="true"] .artifactResizeHandle::after { opacity: 1; }
+.artifactResizeHandle:focus-visible { outline: 2px solid rgba(96, 122, 54, 0.35); outline-offset: -2px; }
+.artifactRail[data-resizing="true"] { user-select: none; }
+
 .artifactRail > header {
   min-height: 64px;
   display: flex;

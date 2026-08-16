@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   IconCheck,
   IconChevronDown,
@@ -438,6 +438,11 @@ export function OneActivityArtifactRail({
   visible = items.length > 0,
   onAdd,
   onClose,
+  width,
+  onResize,
+  minWidth = 300,
+  maxWidth = 720,
+  defaultWidth = 420,
 }: {
   items: OneActivityArtifact[];
   activity?: OneActivityState;
@@ -445,8 +450,18 @@ export function OneActivityArtifactRail({
   visible?: boolean;
   onAdd?: () => void;
   onClose?: () => void;
+  /** Current rail width in px; the shell owns and persists it. */
+  width?: number;
+  /** Drag/keyboard resize — the shell clamps and persists. Absent = fixed width. */
+  onResize?: (width: number) => void;
+  minWidth?: number;
+  maxWidth?: number;
+  defaultWidth?: number;
 }) {
   const [collapsedSections, setCollapsedSections] = useState<Set<OutputSectionKey>>(readCollapsedOutputSections);
+  const resizeRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
+  const [resizing, setResizing] = useState(false);
+  const clampWidth = (value: number) => Math.min(maxWidth, Math.max(minWidth, Math.round(value)));
   const agents = useMemo(() => {
     const candidates = activity?.items.filter((item) => item.kind === "agent" || (item.kind === "tool" && item.agentName)) ?? [];
     const unique = new Map<string, OneActivityItem>();
@@ -481,7 +496,60 @@ export function OneActivityArtifactRail({
   const sectionExpanded = (section: OutputSectionKey) => !collapsedSections.has(section);
   if (!visible) return null;
   return (
-    <aside className={styles.artifactRail} aria-label={locale === "ko" ? "작업 산출물" : "Work outputs"} data-one-runtime-artifacts="true">
+    <aside
+      className={styles.artifactRail}
+      aria-label={locale === "ko" ? "작업 산출물" : "Work outputs"}
+      data-one-runtime-artifacts="true"
+      data-resizing={resizing ? "true" : "false"}
+      style={width ? { width } : undefined}
+    >
+      {onResize && (
+        // Drag the left edge to resize (owner request 2026-08-16). Keyboard:
+        // ←/→ move 16px, Home/End jump to the bounds, double-click resets.
+        <div
+          className={styles.artifactResizeHandle}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label={locale === "ko" ? "출력 패널 너비 조절" : "Resize output panel"}
+          aria-valuemin={minWidth}
+          aria-valuemax={maxWidth}
+          aria-valuenow={width ?? defaultWidth}
+          tabIndex={0}
+          data-one-rail-resize="true"
+          onPointerDown={(event) => {
+            if (event.button !== 0) return;
+            resizeRef.current = { pointerId: event.pointerId, startX: event.clientX, startWidth: width ?? defaultWidth };
+            event.currentTarget.setPointerCapture(event.pointerId);
+            setResizing(true);
+            event.preventDefault();
+          }}
+          onPointerMove={(event) => {
+            const drag = resizeRef.current;
+            if (!drag || drag.pointerId !== event.pointerId) return;
+            // The rail sits on the right: dragging left widens it.
+            onResize(clampWidth(drag.startWidth + (drag.startX - event.clientX)));
+          }}
+          onPointerUp={(event) => {
+            if (resizeRef.current?.pointerId !== event.pointerId) return;
+            resizeRef.current = null;
+            setResizing(false);
+          }}
+          onPointerCancel={() => {
+            resizeRef.current = null;
+            setResizing(false);
+          }}
+          onDoubleClick={() => onResize(defaultWidth)}
+          onKeyDown={(event) => {
+            const current = width ?? defaultWidth;
+            if (event.key === "ArrowLeft") onResize(clampWidth(current + 16));
+            else if (event.key === "ArrowRight") onResize(clampWidth(current - 16));
+            else if (event.key === "Home") onResize(maxWidth);
+            else if (event.key === "End") onResize(minWidth);
+            else return;
+            event.preventDefault();
+          }}
+        />
+      )}
       <header>
         <strong>{locale === "ko" ? "출력" : "Outputs"}</strong>
         <div className={styles.artifactHeaderActions}>

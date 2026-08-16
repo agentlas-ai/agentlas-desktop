@@ -1036,8 +1036,8 @@
 @media (min-width: 1181px) {
   .workspace[data-runtime-artifacts="true"] .scroll { width: calc(100% - 300px); }
   .workspace[data-runtime-artifacts="true"] .composerDock { right: 300px; }
-  .workspace[data-context-rail="true"] .scroll { width: calc(100% - 448px); }
-  .workspace[data-context-rail="true"] .composerDock { right: 448px; }
+  .workspace[data-context-rail="true"] .scroll { width: calc(100% - var(--one-rail-width, 420px) - 28px); }
+  .workspace[data-context-rail="true"] .composerDock { right: calc(var(--one-rail-width, 420px) + 28px); }
   .body[data-task-active="true"] .composer,
   .body[data-task-active="true"] .steeringQueue,
   .body[data-task-active="true"] .oneTurnAgentChips { width: min(1040px, 100%); }

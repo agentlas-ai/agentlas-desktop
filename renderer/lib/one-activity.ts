@@ -487,6 +487,12 @@ export function reduceOneActivity(
     const status = cancelled ? "cancelled" : "failed";
     items = closeRunning(items, observedAt, status);
     activeReasoningId = undefined;
+    // Keep the reason on the run row so the turn block can say why it failed
+    // (Codex shows the runtime's error inline; a bare "failed" is not enough).
+    if (!cancelled && event.error?.message?.trim()) {
+      const reason = event.error.message.trim();
+      items = items.map((item) => item.kind === "run" && item.status === "failed" && !item.message ? { ...item, message: reason } : item);
+    }
     if (!items.some((item) => item.kind === "run")) {
       items = upsertItem(items, {
         id: `terminal:${sequence}`,

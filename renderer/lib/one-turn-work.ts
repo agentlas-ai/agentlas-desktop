@@ -314,8 +314,10 @@ export function buildOneWorkPresentation(
     switch (item.kind) {
       case "run": {
         if (item.durationMs != null) durationMs = item.durationMs;
-        if (item.status === "failed") terminal = "failed";
-        else if (item.status === "cancelled") terminal = "cancelled";
+        if (item.status === "failed") {
+          terminal = "failed";
+          if (item.message?.trim()) terminalMessage = item.message.trim();
+        } else if (item.status === "cancelled") terminal = "cancelled";
         else if (item.status === "completed") terminal = "completed";
         break;
       }

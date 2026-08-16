@@ -819,6 +819,18 @@ export const runCodex: Runner = async (
       appliedEffort,
     };
   }
+  // The stream may already have said *why* (turn.failed: "You've hit your
+  // usage limit…"). That typed marker is the failure; a generic "exit 1" that
+  // drops it left the person a red "실패" with no reason (measured 2026-08-16).
+  if (created.failure) {
+    return {
+      text: created.text.trim(),
+      failure: created.failure,
+      sessionId: created.threadId ?? undefined,
+      tokens: created.tokens,
+      appliedEffort,
+    };
+  }
   throw new Error(
     `codex CLI exit ${created.code}${created.stderr ? `\n${created.stderr.slice(0, 500)}` : ""}`,
   );

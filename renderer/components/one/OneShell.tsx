@@ -2,6 +2,7 @@
 
 import { useRouter, useSearchParams } from "next/navigation";
 import {
+  type CSSProperties,
   Fragment,
   useCallback,
   useEffect,
@@ -163,6 +164,22 @@ const ONE_PERMISSION_STORAGE_KEY = "agentlas.one.permission-mode.v1";
 const ONE_RUNTIME_STORAGE_KEY = "agentlas.one.runtime-selection.v1";
 const ONE_LEFT_RAIL_COLLAPSED_STORAGE_KEY = "agentlas.one.left-rail-collapsed.v1";
 const ONE_CONTEXT_RAIL_OPEN_STORAGE_KEY = "agentlas.one.context-rail-open.v1";
+/** The right rail is resizable (owner request 2026-08-16); the width persists like its open state. */
+const ONE_CONTEXT_RAIL_WIDTH_STORAGE_KEY = "agentlas.one.context-rail-width.v1";
+const ONE_CONTEXT_RAIL_WIDTH_DEFAULT = 420;
+const ONE_CONTEXT_RAIL_WIDTH_MIN = 300;
+const ONE_CONTEXT_RAIL_WIDTH_MAX = 720;
+
+function clampContextRailWidth(value: number): number {
+  if (!Number.isFinite(value)) return ONE_CONTEXT_RAIL_WIDTH_DEFAULT;
+  return Math.min(ONE_CONTEXT_RAIL_WIDTH_MAX, Math.max(ONE_CONTEXT_RAIL_WIDTH_MIN, Math.round(value)));
+}
+
+function readStoredContextRailWidth(): number {
+  if (typeof window === "undefined") return ONE_CONTEXT_RAIL_WIDTH_DEFAULT;
+  const raw = Number(window.localStorage.getItem(ONE_CONTEXT_RAIL_WIDTH_STORAGE_KEY));
+  return raw > 0 ? clampContextRailWidth(raw) : ONE_CONTEXT_RAIL_WIDTH_DEFAULT;
+}
 const oneActivitySessionCache = new Map<string, OneActivityState>();
 const EMPTY_ONE_MEMORY_MAP: OneMemoryMapSnapshot = Object.freeze({
   contractVersion: ONE_MEMORY_MAP_CONTRACT_VERSION,
@@ -865,6 +882,16 @@ export function OneShell() {
   const [railOpen, setRailOpen] = useState(false);
   const [railCollapsed, setRailCollapsedState] = useState(() => readStoredBoolean(ONE_LEFT_RAIL_COLLAPSED_STORAGE_KEY, false));
   const [contextRailOpen, setContextRailOpenState] = useState(() => readStoredBoolean(ONE_CONTEXT_RAIL_OPEN_STORAGE_KEY, true));
+  const [contextRailWidth, setContextRailWidthState] = useState<number>(readStoredContextRailWidth);
+  const setContextRailWidth = useCallback((next: number) => {
+    const clamped = clampContextRailWidth(next);
+    setContextRailWidthState(clamped);
+    try {
+      window.localStorage.setItem(ONE_CONTEXT_RAIL_WIDTH_STORAGE_KEY, String(clamped));
+    } catch {
+      // The rail stays resizable even when persistence is unavailable.
+    }
+  }, []);
   const [taskMenuOpen, setTaskMenuOpen] = useState(false);
   const setRailCollapsed = useCallback((collapsed: boolean) => {
     window.localStorage.setItem(ONE_LEFT_RAIL_COLLAPSED_STORAGE_KEY, String(collapsed));
@@ -3885,6 +3912,7 @@ export function OneShell() {
           className={styles.workspace}
           data-runtime-artifacts={runtimeArtifacts.length > 0 ? "true" : "false"}
           data-context-rail={selected && contextRailOpen ? "true" : "false"}
+          style={{ "--one-rail-width": `${contextRailWidth}px` } as CSSProperties}
         >
           <div className={`${styles.windowBar} titlebar-drag`}>
             {selected || conversation ? (
@@ -4259,6 +4287,11 @@ export function OneShell() {
             visible={Boolean(selected && contextRailOpen)}
             onAdd={() => attachmentInputRef.current?.click()}
             onClose={() => setContextRailOpen(false)}
+            width={contextRailWidth}
+            onResize={setContextRailWidth}
+            minWidth={ONE_CONTEXT_RAIL_WIDTH_MIN}
+            maxWidth={ONE_CONTEXT_RAIL_WIDTH_MAX}
+            defaultWidth={ONE_CONTEXT_RAIL_WIDTH_DEFAULT}
           />
 
           <div
