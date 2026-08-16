@@ -429,6 +429,8 @@ const api: AgentlasIpc = {
     saveBuiltPrivate: (input) => ipcRenderer.invoke("cloudAgents:saveBuiltPrivate", input),
     publishPublic: (input) => ipcRenderer.invoke("cloudAgents:publishPublic", input),
     publish: (input) => ipcRenderer.invoke("cloudAgents:publish", input),
+    readPrices: (slug: string) => ipcRenderer.invoke("cloudAgents:readPrices", slug),
+    setPrices: (input) => ipcRenderer.invoke("cloudAgents:setPrices", input),
     onProgress: (handler) => {
       const listener = (_event: unknown, payload: CloudAgentPublishProgressEvent) => handler(payload);
       ipcRenderer.on("cloudAgents:progress", listener);

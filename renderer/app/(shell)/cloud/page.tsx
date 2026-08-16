@@ -5,6 +5,7 @@ import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { IconCheck, IconFileUp } from "@/components/Icon";
 import { ElapsedClock } from "@/components/ElapsedClock";
+import { HubPriceStep } from "@/components/HubPriceStep";
 import type {
   CloudAgentPublishStage,
   CloudAgentRegisteredUploadOption,
@@ -162,6 +163,11 @@ export default function CloudAgentPublishPage() {
           visibility,
           link,
           careerGraph,
+          // Only for a public listing. A private save has nothing to price —
+          // it is not on the Hub and nobody can hire it.
+          ...(visibility === "marketplace" && res.registration?.slug
+            ? { slug: res.registration.slug }
+            : {}),
         };
         return;
       }
@@ -316,6 +322,13 @@ export default function CloudAgentPublishPage() {
                   {result.link}
                 </span>
               </button>
+            )}
+
+            {/* Offered only after a public listing actually exists. The agent is
+                already live and free at this point, so this is an offer rather
+                than a step that can fail the publish. */}
+            {result.ok && result.visibility === "marketplace" && result.slug && (
+              <HubPriceStep slug={result.slug} />
             )}
 
             <div style={{ marginTop: 4 }}>

@@ -654,6 +654,7 @@ import { archiveToolPackage, installToolMcp, restoreToolPackage } from "./tool-f
 import { runToolFactorySmoke, scaffoldAgentTool } from "./tool-factory/scaffold";
 import { createCommerceAgentTeam } from "./meta-agent/commerce-team";
 import { packageAndReviewCloudAgent } from "./cloud-agents/package";
+import { readAgentPrices, setAgentPrices } from "./cloud-agents/pricing";
 import { resolveCloudAgentPackageRequest } from "./cloud-agents/access";
 import { registeredUploadOptions, registeredUploadRoot } from "./cloud-agents/registered-upload";
 import { selectedMultimodalEnvRequirements } from "../shared/multimodal";
@@ -687,6 +688,7 @@ import type {
   CloudAgentPublishProgressEvent,
   CloudAgentPublishStage,
   CloudAgentPublishRequest,
+  CloudAgentPricePatch,
   CloudAgentRegisteredPublishRequest,
   CloudAgentRegisteredSaveRequest,
   InvocationRunReceipt,
@@ -3101,6 +3103,16 @@ export function registerIpcHandlers(): void {
   // omitted visibility to private-link; explicit marketplace remains public.
   ipcMain.handle("cloudAgents:publish", async (_e, input: CloudAgentPublishRequest) =>
     packageAndReviewCloudAgent(resolveCloudAgentPackageRequest(input)),
+  );
+
+  // Pricing is a separate call from publishing on purpose: the agent is already
+  // on the Hub by the time prices are set, so a pricing failure leaves a live
+  // free listing rather than a failed publish.
+  ipcMain.handle("cloudAgents:readPrices", async (_e, slug: string) => readAgentPrices(String(slug || "")));
+  ipcMain.handle(
+    "cloudAgents:setPrices",
+    async (_e, input: { slug: string; patch: CloudAgentPricePatch }) =>
+      setAgentPrices({ slug: String(input?.slug || ""), patch: input?.patch ?? {} }),
   );
 
   // ── firms (설치된 회사) ────────────────────────────────

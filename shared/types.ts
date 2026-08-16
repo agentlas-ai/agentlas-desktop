@@ -5587,6 +5587,32 @@ export interface RendererSubsetJudgmentVerdict {
   reason: string;
 }
 
+/** The three things a creator can charge for. Ceilings live on the server. */
+export type CloudAgentPriceKind = "RENT" | "INGEST" | "FORK";
+
+export type CloudAgentPrices = Partial<Record<CloudAgentPriceKind, number>>;
+
+/**
+ * A PATCH, not a replacement.
+ *
+ * A kind left out is untouched; a kind set to null is removed. Blank is not
+ * zero — an agent with no fork price cannot be forked, while a fork priced at
+ * zero would be giving copies away.
+ */
+export type CloudAgentPricePatch = Partial<Record<CloudAgentPriceKind, number | null>>;
+
+export interface CloudAgentPricesRead {
+  ok: boolean;
+  prices: CloudAgentPrices;
+  /** True when nothing has ever been priced — the agent is callable for free. */
+  legacyUnpriced: boolean;
+  agentDefinitionId?: string;
+}
+
+export type CloudAgentSetPricesResult =
+  | { ok: true; prices: CloudAgentPrices; changed: boolean }
+  | { ok: false; code: string; message: string; kind?: string; maxCredits?: number; minCredits?: number };
+
 export interface AgentlasIpc {
   /** 도구 승인 결정 — live 요청만 대기 중인 실행을 푼다. post-denial 은 다음 실행에 반영. */
   resolveToolApproval: (id: string, decision: ToolApprovalDecision) => Promise<boolean>;
@@ -6219,6 +6245,15 @@ export interface AgentlasIpc {
     publish: (input: CloudAgentPublishRequest) => Promise<CloudAgentPackageResult>;
     /** Live upload phases for the in-flight `progressId`. Returns an unsubscribe. */
     onProgress: (handler: (event: CloudAgentPublishProgressEvent) => void) => () => void;
+    /**
+     * What a published agent charges, keyed by slug.
+     *
+     * Slug rather than a definition id because the registration receipt has
+     * never carried one — pricing on the server resolves the slug against this
+     * account's own listings, so this is one call rather than resolve-then-price.
+     */
+    readPrices: (slug: string) => Promise<CloudAgentPricesRead>;
+    setPrices: (input: { slug: string; patch: CloudAgentPricePatch }) => Promise<CloudAgentSetPricesResult>;
   };
   firms: {
     list: () => Promise<InstalledFirm[]>;

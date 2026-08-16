@@ -46,6 +46,14 @@ export interface CloudUploadResult {
   link?: string;
   careerGraph?: CloudUploadCareerGraphProof;
   needsPurpose?: boolean;
+  /**
+   * The published listing's slug, kept so the result card can price it.
+   *
+   * Pricing is a separate call made after the publish succeeded, and the slug
+   * is the only identifier the registration receipt carries — there is no
+   * agentDefinitionId in it, which is why the server accepts a slug.
+   */
+  slug?: string;
 }
 
 export interface CloudUploadState {
