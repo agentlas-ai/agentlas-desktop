@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## 1.0.20 — 2026-08-16
+
+- One steering can be taken back: every queued "다음 지시" has an × (Main removes
+  it from the queue), Stop clears the strip together with Main's queue, and an
+  instruction typed while the run is still preparing is queued instead of lost.
+- Markdown answers keep their shape: `---` draws a rule, one level of nested
+  lists renders, ordered lists honour their start number, and the identity-badge
+  cleaner no longer collapses whitespace across the whole answer (which dedented
+  nested lists).
+- A run stopped mid-marker no longer leaves "<<agentl" at the end of the answer
+  (Desktop and Mobile share the fixture).
+- Agent architecture migration layer: registered agents are swept once on the
+  first boot after this update (schema 95 → 96, `agent_architecture_migrations`
+  ledger); a live copy with 170 agents took a few seconds with 0 failures.
+- Loadout editor edits the agent's files where they are described; roster names
+  come first and engine text assets are editable; experience chips promote
+  themselves; the host records the turn when the model stays silent.
+- This release binds Agentlas OS v1.2.7 at 1246167e1533e62b22231781332656ec9b35af2e
+  (unchanged from 1.0.18).
+- Source readiness does not prove a published installer or update feed; the
+  Releases page remains the authority for the downloadable installer.
+
 ## 1.0.19 — 2026-08-16
 
 - 기억 sheet lists what One actually remembers (same rows as the memory map,
