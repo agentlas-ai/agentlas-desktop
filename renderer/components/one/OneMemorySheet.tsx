@@ -421,64 +421,6 @@ export function OneMemorySheet({
               </section>
             )}
 
-            <section className={styles.section} aria-labelledby="memory-candidates-title">
-              <div className={styles.sectionHeading}>
-                <div>
-                  <h3 id="memory-candidates-title">{tFor(locale, "one.mem.candidates.title", { n: pending.length })}</h3>
-                  <p>{tFor(locale, "one.mem.candidates.body")}</p>
-                </div>
-              </div>
-              <div className={styles.cardList}>
-                {pending.length === 0 && <p className={styles.empty}>{tFor(locale, "one.mem.candidates.empty")}</p>}
-                {pending.map((candidate) => (
-                  <article key={candidate.id} className={styles.card}>
-                    {editingCandidateId === candidate.id ? (
-                      <form className={styles.editForm} onSubmit={(event) => void editAndSaveCandidate(event, candidate)}>
-                        <label className={styles.wideField}>
-                          <span>{tFor(locale, "one.mem.field.content_to_save")}</span>
-                          <textarea value={candidateContent} onChange={(event) => setCandidateContent(event.target.value)} maxLength={500} rows={4} required disabled={Boolean(busyId)} />
-                        </label>
-                        <div className={styles.cardActions}>
-                          <button type="submit" className={styles.primaryButton} disabled={Boolean(busyId) || !candidateContent.trim()}>{tFor(locale, "one.mem.action.approve_edits_save")}</button>
-                          <button type="button" className={styles.secondaryButton} onClick={() => setEditingCandidateId(null)} disabled={Boolean(busyId)}>{tFor(locale, "one.mem.action.cancel")}</button>
-                        </div>
-                      </form>
-                    ) : (
-                      <>
-                        <div className={styles.cardTop}>
-                          <span className={styles.scopeBadge}>{tFor(locale, "one.mem.scope.for_use", { scope: locale === "ko" ? scopeLabel(candidate.scope, locale) : scopeLabel(candidate.scope, locale).toLowerCase() })}</span>
-                          <span className={styles.pendingBadge}>{basisLabel(candidate, locale)}</span>
-                        </div>
-                        <p className={styles.cardContent}>{candidate.normalizedPreview}</p>
-                        <details className={styles.sourceBox}>
-                          <summary>{tFor(locale, "one.mem.candidate.why_summary")}</summary>
-                          <span>{tFor(locale, "one.mem.label.original_work")} · {shortRef(candidate.source.sourceTaskId)}</span>
-                          <span>{tFor(locale, "one.mem.label.source")} · {shortRef(candidate.source.sourceRef)}</span>
-                          <span>{tFor(locale, "one.mem.label.check_records")} · {candidate.source.evidenceRefs.length}</span>
-                          <span>{candidate.source.provenanceStatus === "verified"
-                            ? tFor(locale, "one.mem.provenance.verified")
-                            : tFor(locale, "one.mem.provenance.unverified")}</span>
-                          <span>{tFor(locale, "one.mem.label.review_again")} · {formatDate(candidate.reviewAfter, locale)}</span>
-                        </details>
-                        <div className={styles.cardActions}>
-                          <button type="button" className={styles.primaryButton} onClick={() => void saveCandidate(candidate)} disabled={Boolean(busyId) || candidate.source.provenanceStatus !== "verified"}>{tFor(locale, "one.mem.action.save_to_memory")}</button>
-                          <button type="button" className={styles.secondaryButton} onClick={() => beginCandidateEdit(candidate)} disabled={Boolean(busyId) || candidate.source.provenanceStatus !== "verified"}>{tFor(locale, "one.mem.action.edit_and_save")}</button>
-                          <button
-                            type="button"
-                            className={styles.secondaryButton}
-                            onClick={() => void useCandidateOnce(candidate)}
-                            disabled={Boolean(busyId) || !useOnceTarget}
-                            title={!useOnceTarget ? tFor(locale, "one.mem.use_once_title") : undefined}
-                          >{tFor(locale, "one.mem.action.use_once")}</button>
-                          <button type="button" className={styles.dangerButton} onClick={() => void rejectCandidate(candidate)} disabled={Boolean(busyId)}>{tFor(locale, "one.mem.action.reject")}</button>
-                        </div>
-                      </>
-                    )}
-                  </article>
-                ))}
-              </div>
-            </section>
-
             <section className={styles.section} aria-labelledby="durable-memory-title" data-one-durable-memory="true">
               <div className={styles.sectionHeading}>
                 <div>
@@ -530,52 +472,115 @@ export function OneMemorySheet({
               </div>
             </section>
 
-            <section className={styles.section} aria-labelledby="saved-memory-title">
-              <div className={styles.sectionHeading}>
-                <div>
-                  <h3 id="saved-memory-title">{tFor(locale, "one.mem.saved.title", { n: state.memories.length })}</h3>
-                  <p>{tFor(locale, "one.mem.saved.body")}</p>
+            {/* Empty review/saved lists carry no information — hide them (owner 2026-08-16). */}
+            {pending.length > 0 && (
+              <section className={styles.section} aria-labelledby="memory-candidates-title">
+                <div className={styles.sectionHeading}>
+                  <div>
+                    <h3 id="memory-candidates-title">{tFor(locale, "one.mem.candidates.title", { n: pending.length })}</h3>
+                    <p>{tFor(locale, "one.mem.candidates.body")}</p>
+                  </div>
                 </div>
-              </div>
-              <div className={styles.cardList}>
-                {state.memories.length === 0 && <p className={styles.empty}>{tFor(locale, "one.mem.saved.empty")}</p>}
-                {state.memories.map((memory) => (
-                  <article key={memory.id} className={styles.card} data-enabled={memory.enabled ? "true" : "false"}>
-                    {editingMemoryId === memory.id ? (
-                      <form className={styles.editForm} onSubmit={(event) => void saveMemory(event, memory)}>
-                        <label className={styles.wideField}>
-                          <span>{tFor(locale, "one.mem.field.what_to_remember")}</span>
-                          <textarea value={memoryContent} onChange={(event) => setMemoryContent(event.target.value)} maxLength={500} rows={4} required disabled={Boolean(busyId)} />
-                        </label>
-                        <div className={styles.cardActions}>
-                          <button type="submit" className={styles.primaryButton} disabled={Boolean(busyId) || !memoryContent.trim()}>{tFor(locale, "one.mem.action.reapprove_save")}</button>
-                          <button type="button" className={styles.secondaryButton} onClick={() => setEditingMemoryId(null)} disabled={Boolean(busyId)}>{tFor(locale, "one.mem.action.cancel")}</button>
-                        </div>
-                      </form>
-                    ) : (
-                      <>
-                        <div className={styles.cardTop}>
-                          <span className={styles.scopeBadge}>{tFor(locale, "one.mem.scope.for_use", { scope: locale === "ko" ? scopeLabel(memory.scope, locale) : scopeLabel(memory.scope, locale).toLowerCase() })}</span>
-                          <span className={memory.enabled ? styles.enabledBadge : styles.disabledBadge}>{memory.enabled ? tFor(locale, "one.mem.status.available") : tFor(locale, "one.mem.status.not_in_use")}</span>
-                        </div>
-                        <p className={styles.cardContent}>{memory.content}</p>
-                        <details className={styles.sourceBox}>
-                          <summary>{tFor(locale, "one.mem.memory.source_summary")}</summary>
-                          <span>{tFor(locale, "one.mem.label.approved_by_me")} · {formatDate(memory.approvedAt, locale)}</span>
-                          <span>{tFor(locale, "one.mem.label.original_work")} · {shortRef(memory.sourceTaskId)}</span>
-                          <span>{tFor(locale, "one.mem.label.check_records")} · {memory.evidenceRefs.length}</span>
-                        </details>
-                        <div className={styles.cardActions}>
-                          <button type="button" className={styles.secondaryButton} onClick={() => beginMemoryEdit(memory)} disabled={Boolean(busyId)}>{tFor(locale, "one.mem.action.edit")}</button>
-                          <button type="button" className={styles.secondaryButton} onClick={() => void toggleMemory(memory)} disabled={Boolean(busyId)}>{memory.enabled ? tFor(locale, "one.mem.action.disable") : tFor(locale, "one.mem.action.enable")}</button>
-                          <button type="button" className={styles.dangerButton} onClick={() => void deleteMemory(memory)} disabled={Boolean(busyId)}>{tFor(locale, "one.mem.action.delete")}</button>
-                        </div>
-                      </>
-                    )}
-                  </article>
-                ))}
-              </div>
-            </section>
+                <div className={styles.cardList}>
+                  {pending.length === 0 && <p className={styles.empty}>{tFor(locale, "one.mem.candidates.empty")}</p>}
+                  {pending.map((candidate) => (
+                    <article key={candidate.id} className={styles.card}>
+                      {editingCandidateId === candidate.id ? (
+                        <form className={styles.editForm} onSubmit={(event) => void editAndSaveCandidate(event, candidate)}>
+                          <label className={styles.wideField}>
+                            <span>{tFor(locale, "one.mem.field.content_to_save")}</span>
+                            <textarea value={candidateContent} onChange={(event) => setCandidateContent(event.target.value)} maxLength={500} rows={4} required disabled={Boolean(busyId)} />
+                          </label>
+                          <div className={styles.cardActions}>
+                            <button type="submit" className={styles.primaryButton} disabled={Boolean(busyId) || !candidateContent.trim()}>{tFor(locale, "one.mem.action.approve_edits_save")}</button>
+                            <button type="button" className={styles.secondaryButton} onClick={() => setEditingCandidateId(null)} disabled={Boolean(busyId)}>{tFor(locale, "one.mem.action.cancel")}</button>
+                          </div>
+                        </form>
+                      ) : (
+                        <>
+                          <div className={styles.cardTop}>
+                            <span className={styles.scopeBadge}>{tFor(locale, "one.mem.scope.for_use", { scope: locale === "ko" ? scopeLabel(candidate.scope, locale) : scopeLabel(candidate.scope, locale).toLowerCase() })}</span>
+                            <span className={styles.pendingBadge}>{basisLabel(candidate, locale)}</span>
+                          </div>
+                          <p className={styles.cardContent}>{candidate.normalizedPreview}</p>
+                          <details className={styles.sourceBox}>
+                            <summary>{tFor(locale, "one.mem.candidate.why_summary")}</summary>
+                            <span>{tFor(locale, "one.mem.label.original_work")} · {shortRef(candidate.source.sourceTaskId)}</span>
+                            <span>{tFor(locale, "one.mem.label.source")} · {shortRef(candidate.source.sourceRef)}</span>
+                            <span>{tFor(locale, "one.mem.label.check_records")} · {candidate.source.evidenceRefs.length}</span>
+                            <span>{candidate.source.provenanceStatus === "verified"
+                              ? tFor(locale, "one.mem.provenance.verified")
+                              : tFor(locale, "one.mem.provenance.unverified")}</span>
+                            <span>{tFor(locale, "one.mem.label.review_again")} · {formatDate(candidate.reviewAfter, locale)}</span>
+                          </details>
+                          <div className={styles.cardActions}>
+                            <button type="button" className={styles.primaryButton} onClick={() => void saveCandidate(candidate)} disabled={Boolean(busyId) || candidate.source.provenanceStatus !== "verified"}>{tFor(locale, "one.mem.action.save_to_memory")}</button>
+                            <button type="button" className={styles.secondaryButton} onClick={() => beginCandidateEdit(candidate)} disabled={Boolean(busyId) || candidate.source.provenanceStatus !== "verified"}>{tFor(locale, "one.mem.action.edit_and_save")}</button>
+                            <button
+                              type="button"
+                              className={styles.secondaryButton}
+                              onClick={() => void useCandidateOnce(candidate)}
+                              disabled={Boolean(busyId) || !useOnceTarget}
+                              title={!useOnceTarget ? tFor(locale, "one.mem.use_once_title") : undefined}
+                            >{tFor(locale, "one.mem.action.use_once")}</button>
+                            <button type="button" className={styles.dangerButton} onClick={() => void rejectCandidate(candidate)} disabled={Boolean(busyId)}>{tFor(locale, "one.mem.action.reject")}</button>
+                          </div>
+                        </>
+                      )}
+                    </article>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {state.memories.length > 0 && (
+              <section className={styles.section} aria-labelledby="saved-memory-title">
+                <div className={styles.sectionHeading}>
+                  <div>
+                    <h3 id="saved-memory-title">{tFor(locale, "one.mem.saved.title", { n: state.memories.length })}</h3>
+                    <p>{tFor(locale, "one.mem.saved.body")}</p>
+                  </div>
+                </div>
+                <div className={styles.cardList}>
+                  {state.memories.length === 0 && <p className={styles.empty}>{tFor(locale, "one.mem.saved.empty")}</p>}
+                  {state.memories.map((memory) => (
+                    <article key={memory.id} className={styles.card} data-enabled={memory.enabled ? "true" : "false"}>
+                      {editingMemoryId === memory.id ? (
+                        <form className={styles.editForm} onSubmit={(event) => void saveMemory(event, memory)}>
+                          <label className={styles.wideField}>
+                            <span>{tFor(locale, "one.mem.field.what_to_remember")}</span>
+                            <textarea value={memoryContent} onChange={(event) => setMemoryContent(event.target.value)} maxLength={500} rows={4} required disabled={Boolean(busyId)} />
+                          </label>
+                          <div className={styles.cardActions}>
+                            <button type="submit" className={styles.primaryButton} disabled={Boolean(busyId) || !memoryContent.trim()}>{tFor(locale, "one.mem.action.reapprove_save")}</button>
+                            <button type="button" className={styles.secondaryButton} onClick={() => setEditingMemoryId(null)} disabled={Boolean(busyId)}>{tFor(locale, "one.mem.action.cancel")}</button>
+                          </div>
+                        </form>
+                      ) : (
+                        <>
+                          <div className={styles.cardTop}>
+                            <span className={styles.scopeBadge}>{tFor(locale, "one.mem.scope.for_use", { scope: locale === "ko" ? scopeLabel(memory.scope, locale) : scopeLabel(memory.scope, locale).toLowerCase() })}</span>
+                            <span className={memory.enabled ? styles.enabledBadge : styles.disabledBadge}>{memory.enabled ? tFor(locale, "one.mem.status.available") : tFor(locale, "one.mem.status.not_in_use")}</span>
+                          </div>
+                          <p className={styles.cardContent}>{memory.content}</p>
+                          <details className={styles.sourceBox}>
+                            <summary>{tFor(locale, "one.mem.memory.source_summary")}</summary>
+                            <span>{tFor(locale, "one.mem.label.approved_by_me")} · {formatDate(memory.approvedAt, locale)}</span>
+                            <span>{tFor(locale, "one.mem.label.original_work")} · {shortRef(memory.sourceTaskId)}</span>
+                            <span>{tFor(locale, "one.mem.label.check_records")} · {memory.evidenceRefs.length}</span>
+                          </details>
+                          <div className={styles.cardActions}>
+                            <button type="button" className={styles.secondaryButton} onClick={() => beginMemoryEdit(memory)} disabled={Boolean(busyId)}>{tFor(locale, "one.mem.action.edit")}</button>
+                            <button type="button" className={styles.secondaryButton} onClick={() => void toggleMemory(memory)} disabled={Boolean(busyId)}>{memory.enabled ? tFor(locale, "one.mem.action.disable") : tFor(locale, "one.mem.action.enable")}</button>
+                            <button type="button" className={styles.dangerButton} onClick={() => void deleteMemory(memory)} disabled={Boolean(busyId)}>{tFor(locale, "one.mem.action.delete")}</button>
+                          </div>
+                        </>
+                      )}
+                    </article>
+                  ))}
+                </div>
+              </section>
+            )}
 
             {resolved.length > 0 && <section className={styles.section} aria-labelledby="memory-history-title">
               <div className={styles.sectionHeading}>

@@ -128,11 +128,15 @@
   font-weight: 650;
   letter-spacing: -0.01em;
   line-height: 1.25;
+  word-break: keep-all;
+  text-wrap: balance;
 }
 
 .description {
   max-width: 680px;
   margin: 6px 0 0;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
   color: var(--one-sheet-muted);
   font-size: var(--one-sheet-body-size);
   line-height: 1.55;

@@ -70,6 +70,10 @@
   font-weight: 650;
   letter-spacing: -0.045em;
   line-height: 1.05;
+  /* Korean wraps at word boundaries and lines balance — never a lone "다." */
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+  text-wrap: balance;
 }
 
 .copy p {
@@ -78,6 +82,9 @@
   color: #60656b;
   font-size: 15px;
   line-height: 1.7;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
 }
 
 .preview {
