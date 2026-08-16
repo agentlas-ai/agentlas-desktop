@@ -18,6 +18,7 @@ import { useT } from "@/lib/i18n";
 import { IconLayers, IconBug, IconCheck } from "./Icon";
 import { PageTour, replayCurrentPageTour } from "./PageTour";
 import { BuildDoneToast } from "./BuildDoneToast";
+import { BetaEconomyNotice } from "@/components/BetaEconomyNotice";
 import { BrowserActionApprovalSheet } from "./BrowserActionApprovalSheet";
 import { ToolApprovalSheet } from "./ToolApprovalSheet";
 import FloatingComputerUsePanel from "./browser/FloatingComputerUsePanel";
@@ -442,6 +443,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       {pathname.startsWith("/dashboard") && (
         <WorkFirstRunOnboarding onVisibilityChange={setWorkFirstRunVisible} />
       )}
+      {/* Mounted on the shell so it is seen once on launch, whatever screen the
+          app opens on — the notice is about the account, not about a screen. */}
+      <BetaEconomyNotice />
       <BuildDoneToast />
       <BrowserActionApprovalSheet />
       <ToolApprovalSheet />
