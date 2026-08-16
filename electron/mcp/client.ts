@@ -105,7 +105,7 @@ import {
 import {
   buildExperienceContext,
 } from "../experience/context";
-import { promoteExperienceCandidatesForRun } from "../experience/store";
+import { promoteExperienceCandidatesForRun, promoteWaitingExperienceCandidates } from "../experience/store";
 import { writeEvolutionProposalsForProject, evolutionSessionContextLine } from "../agents/evolution-hep";
 import { resolveDesktopOperationalRuntimeSession } from "../ontology/operational-runtime-session";
 import { operationalRuntimeOverlayMatchesTask } from "../ontology/operational-runtime-contract";
@@ -4237,6 +4237,29 @@ export async function runMcpInvocation(
     if (!req.agentAppMode && !projectReadOnlyBoundary && req.runId && !oneToolFailureBlocksCompletion()) {
       try {
         const outcome = promoteExperienceCandidatesForRun({ agentId: agent.id, runId: req.runId });
+        /*
+         * ★그리고 이 에이전트가 붙들고 있던 대기 후보도 함께 승격한다(오너 결정 2026-08-16).
+         *
+         * 위 호출은 **이 런이 만든** 후보만 본다(영수증의 run_id 로 이어진 것). 그런데
+         * One durable 기억·임포트·복구 경로는 run_id 를 싣지 않아, 그 경로로 들어온
+         * 후보는 어떤 런에서도 대상이 되지 못하고 영영 대기했다 — 실측: One 176건,
+         * appbridge 30건 전부 run_id 가 null 이고 승격 0건. 사람이 손으로 올릴 화면도
+         * 그 후보들에는 닿지 않는다.
+         */
+        const waiting = promoteWaitingExperienceCandidates({ agentId: agent.id, runId: req.runId });
+        if (waiting.promoted > 0) {
+          console.log(
+            `[experience] promoted ${waiting.promoted}/${waiting.eligible} waiting candidate(s) ` +
+              `(agent ${agent.id}, run ${req.runId})`,
+          );
+          tryRecordRunEvent({
+            runId: req.runId,
+            kind: "experience_auto_promotion",
+            chatId: chat.id,
+            agentId: agent.id,
+            payload: { eligible: waiting.eligible, promoted: waiting.promoted, method: "waiting-backlog" },
+          });
+        }
         if (outcome.eligible > 0) {
           console.log(
             `[experience] interactive run promoted ${outcome.promoted}/${outcome.eligible} candidate(s) ` +

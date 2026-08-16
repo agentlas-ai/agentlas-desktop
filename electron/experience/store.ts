@@ -1393,6 +1393,58 @@ export function promoteExperienceCandidateFromRunReceipt(input: {
 }
 
 /**
+ * ★Owner decision 2026-08-16 — experience chips promote themselves.
+ *
+ * Promotion used to need a `run_id` on the intake receipt, and only the chat
+ * path writes one. Measured on a live library: orchestrator had 21 promoted
+ * chips while One sat on 176 candidates and appbridge on 30, every one of them
+ * with a null run_id — so those two surfaces could never promote at all, by any
+ * route. The owner could not find a way to promote them by hand either, because
+ * there is no screen that reaches a candidate the run-receipt query cannot see.
+ *
+ * A candidate with no run_id is not less true; it just arrived through a path
+ * (One durable memory, imports, recovery) that never carried the id. So the
+ * agent's next successful turn promotes its waiting candidates too, attested by
+ * that run. Everything else stays as it was: only pending candidates, only when
+ * the pack base still matches, idempotent through the UNIQUE promote receipt.
+ */
+export function promoteWaitingExperienceCandidates(input: {
+  agentId: string;
+  runId: string;
+  limit?: number;
+}): { eligible: number; promoted: number } {
+  const agentId = cleanText(input.agentId, "agentId", 120);
+  const runId = cleanText(input.runId, "runId", 120);
+  if (!SAFE_EVIDENCE_REF_RE.test(runId)) {
+    throw new Error("Run receipt evidence must be a value-free run id.");
+  }
+  if (!hasDurableRunStartReceipt(runId)) return { eligible: 0, promoted: 0 };
+  // A bound keeps one turn from doing unbounded work on a long-neglected
+  // library; the rest are picked up by the turns that follow.
+  const limit = Math.max(1, Math.min(Number(input.limit ?? 25), 200));
+  const rows = getDb().prepare(
+    `SELECT c.id
+       FROM experience_candidates c
+       JOIN experience_packs p ON p.id = c.pack_id
+      WHERE c.agent_id = ? AND c.status = 'candidate'
+      ORDER BY c.created_at ASC
+      LIMIT ?`,
+  ).all(agentId, limit) as Array<{ id: string }>;
+  if (rows.length === 0) return { eligible: 0, promoted: 0 };
+  let promoted = 0;
+  for (const row of rows) {
+    try {
+      promoteExperienceCandidateFromRunReceipt({ candidateId: row.id, runId });
+      promoted += 1;
+    } catch {
+      // A stale pack base or a candidate promoted by a concurrent turn is not a
+      // reason to abandon the rest of the batch.
+    }
+  }
+  return { eligible: rows.length, promoted };
+}
+
+/**
  * Interactive-run auto-promotion — after a chat turn completes successfully
  * with a durable run start receipt, promote exactly the candidates this run's
  * intake created (receipt-linked by run_id). Uses the same outcome-attested
