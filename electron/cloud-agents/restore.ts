@@ -6,6 +6,7 @@ import type {
   CloudAgentPackageDownload,
   CloudAgentPackageDownloadFile,
   CloudAgentPackageHashVersion,
+  CloudAgentForkOrigin,
   CloudAgentRevisionIdentity,
 } from "../../shared/types";
 
@@ -39,6 +40,22 @@ export interface CloudAgentRestoreMarker {
   registrations?: Partial<Record<CloudAgentCloudScope, CloudAgentRevisionIdentity>>;
   /** Legacy marker field written by Desktop <=0.7.28. */
   installedAt?: string;
+  /**
+   * Set when the restored package is an INSTALLED COPY of somebody else's Hub
+   * agent (owner decision 2026-08-17).
+   *
+   * ★ WHY IT HAS TO LIVE IN THE RESTORE MARKER
+   *   The server refuses to publish a fork two ways: the declared lineage on
+   *   the submitted manifest, and identical bytes already listed by another
+   *   account. Restoring a fork to a local folder and EDITING it defeats both —
+   *   the local folder has no lineage of its own, and the edit changes the
+   *   hash. Carrying the origin in the marker is what keeps the copy traceable
+   *   across a round trip through the filesystem.
+   *
+   *   Absent means "not a fork", never "unknown": only the restore path writes
+   *   this, and it writes it from the package it actually restored.
+   */
+  fork?: CloudAgentForkOrigin;
 }
 
 export interface CloudAgentRestoreResult {
@@ -68,6 +85,14 @@ export function restoreCloudAgentPackage(input: {
   /** Registrations from the managed directory that a registry transaction has
    * moved aside. They remain valid baselines for the other Cloud scope. */
   preservedRegistrations?: Partial<Record<CloudAgentCloudScope, CloudAgentRevisionIdentity>>;
+  /**
+   * Lineage of the package being restored, when it is an installed copy.
+   *
+   * Written into the marker so the Hub-upload refusal survives a round trip
+   * through the filesystem. Without it, restoring a fork and editing one line
+   * produces a folder indistinguishable from original work.
+   */
+  fork?: CloudAgentForkOrigin;
 }): CloudAgentRestoreResult {
   const destinationDir = path.resolve(input.destinationDir);
   const parentDir = path.dirname(destinationDir);
@@ -158,6 +183,9 @@ export function restoreCloudAgentPackage(input: {
         ? { executablePaths: expectedExecutablePaths(validated.files, validated.packageHashVersion) }
         : {}),
       restoredAt,
+      // Carried from the package, or preserved from the marker already on disk:
+      // a repair or re-restore must not quietly launder a copy into an original.
+      ...((input.fork ?? previousMarker?.fork) ? { fork: (input.fork ?? previousMarker?.fork)! } : {}),
       ...((previousMarker?.registrations || registration)
         ? {
             registrations: {

@@ -479,6 +479,28 @@ export async function packageAndReviewCloudAgent(
 
   const visibility = input.visibility ?? "private-link";
   const isPublicHubPublish = visibility === "marketplace";
+
+  // ★ AN INSTALLED COPY IS NEVER PUBLISHED FROM HERE. Owner decision 2026-08-17.
+  //
+  //   The server refuses a fork two ways — declared lineage, and identical
+  //   bytes already listed by another account — and a local round trip defeats
+  //   both: restore the copy, edit one line, and the hash no longer matches
+  //   anything while the folder carries no lineage of its own. The restore
+  //   marker is what survives that round trip, so the refusal belongs here,
+  //   before a minute of scanning and packaging is spent on an upload the
+  //   server will reject anyway.
+  //
+  //   Only the HUB upload is blocked. A private re-upload of your own copy is
+  //   ordinary use and stays allowed, which is rule 3.
+  {
+    const forkMarker = readCloudAgentRestoreMarker(rootPath)?.fork;
+    if (isPublicHubPublish && forkMarker) {
+      throw new Error(
+        `This folder is an installed copy of ${forkMarker.originSlug}. ` +
+          "It can be run, edited, and staffed into work orders, but the Hub listing belongs to the original creator.",
+      );
+    }
+  }
   const publicCareerPrepareFindings = isPublicHubPublish
     ? await preparePublicCareerGraphCard(rootPath)
     : [];

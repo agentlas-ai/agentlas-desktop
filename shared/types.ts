@@ -3463,6 +3463,24 @@ export interface CloudAgentPackageDownload {
   scope?: CloudAgentCloudScope;
   revision?: string;
   updatedAt?: string;
+  /**
+   * Set when this package is an installed COPY of somebody else's Hub agent.
+   *
+   * Travels with the download so the restore marker can record it. Without it
+   * the desktop cannot tell an installed copy from original work once the files
+   * are on disk, and the Hub-upload refusal has nothing to read.
+   */
+  fork?: CloudAgentForkOrigin;
+}
+
+/** Where an installed copy came from. Mirrors the web `CloudAgentForkOrigin`. */
+export interface CloudAgentForkOrigin {
+  originPackageHash: string;
+  originAgentDefinitionId: string | null;
+  originAgentReleaseId: string | null;
+  originSlug: string;
+  originOwnerUserId: string | null;
+  forkedAt: string;
 }
 
 export interface CloudAgentPublicCareerGraph {

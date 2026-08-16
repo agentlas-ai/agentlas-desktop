@@ -153,6 +153,10 @@ export function commitCloudRegistryPackage(input: CommitCloudRegistryPackageInpu
       restoredAt: input.expectedRoute.importedAt,
       registration: input.registration,
       preservedRegistrations: previousRestoreMarker?.registrations,
+      // Lineage travels with the package. Falling back to the marker already on
+      // disk means a repair or re-restore cannot launder a copy into an
+      // original by arriving without it.
+      fork: input.package.fork ?? previousRestoreMarker?.fork,
     });
     updateJournal(journalFile, journal, "assets-swapped");
     injectFailure("after-swap");
