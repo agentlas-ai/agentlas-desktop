@@ -465,17 +465,31 @@ function extractZip(zipPath, destination, subject) {
   return findOfficialApp(destination, subject);
 }
 
+// The required-history tags (v0.8.59/v0.8.60) are fixed while the release
+// count grows by one per publish. With `--limit 100`, Desktop 1.0.20 was the
+// release that pushed v0.8.59 to position 101 — the writer then failed with
+// required-history-tag-unavailable after every build had already succeeded
+// (run 31924954976, 2026-08-16). The list must cover the whole history.
+const RELEASE_LIST_LIMIT = "1000";
+
 function readReleaseList(repo) {
   const output = run(
     "gh",
-    ["release", "list", "--repo", repo, "--limit", "100", "--json", "tagName,isDraft,isPrerelease,publishedAt"],
+    ["release", "list", "--repo", repo, "--limit", RELEASE_LIST_LIMIT, "--json", "tagName,isDraft,isPrerelease,publishedAt"],
     { capture: true, code: "release-list-unavailable", subject: "previous-release" },
   );
+  let parsed;
   try {
-    return JSON.parse(output);
+    parsed = JSON.parse(output);
   } catch {
     fail("release-list-invalid", "previous-release");
   }
+  // A saturated window would silently hide older required tags again; say so
+  // instead of reporting the required tag as missing.
+  if (Array.isArray(parsed) && parsed.length >= Number(RELEASE_LIST_LIMIT)) {
+    fail("release-list-window-saturated", "previous-release");
+  }
+  return parsed;
 }
 
 function downloadPreviousArtifact({ repo, previous, architecture, extension, destination }) {
