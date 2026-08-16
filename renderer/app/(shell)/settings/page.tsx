@@ -1,6 +1,6 @@
 // 설정 — BYOC 연결 관리. PRD 3.1 FRE 6단계 + 10번 리스크 "키 저장 위치 명시".
 "use client";
-import { useCallback, useEffect, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useState, type CSSProperties , useMemo} from "react";
 import { ipc, ipcEvents, updaterEvents } from "@/lib/ipc";
 import { useT, type LocalePref } from "@/lib/i18n";
 import { useTheme, type ThemePref } from "@/lib/theme";
@@ -22,6 +22,7 @@ import {
 import { AUTO_PROVIDER } from "@shared/multimodal";
 import { navigate } from "@/lib/navigation";
 import { IconCheck, IconFilm, IconImage, IconKey, IconLock, IconRefresh, IconWand } from "@/components/Icon";
+import { AgentFileEditor, runtimeEditorSource } from "@/components/AgentFileEditor";
 import { MigrationPanel } from "@/components/MigrationPanel";
 import QRCode from "qrcode";
 import type { HephaestusUpdateJournal, MobileBridgeDeviceSummary, MobileBridgeRuntimeStatus } from "@shared/types";
@@ -118,6 +119,8 @@ function backendKeyHint(b: ByokBackend, locale: string): string {
 
 export default function SettingsPage() {
   const { t, pref, setPref, locale } = useT();
+  // 소스 객체를 매 렌더마다 새로 만들면 편집기가 목록을 끝없이 다시 불러온다.
+  const runtimeSource = useMemo(() => runtimeEditorSource(locale === "ko"), [locale]);
   const { pref: themePref, setPref: setThemePref } = useTheme();
   const [statuses, setStatuses] = useState<RuntimeStatus[]>([]);
   const [draftKey, setDraftKey] = useState<Record<ByokBackend, string>>({
@@ -421,6 +424,21 @@ export default function SettingsPage() {
             );
           })}
         </div>
+
+        {/* 엔진 파일 — 스킬·호스트 훅·어댑터 매니페스트를 앱 안에서 직접 고친다.
+            지금까지 스킬은 읽기만 됐고 훅은 표면 자체가 없어, 고치려면 앱 밖에서
+            런타임 폴더를 찾아야 했다. */}
+        <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "24px 0 12px" }}>
+          {locale === "ko" ? "엔진 파일 (스킬 · 훅 · 어댑터)" : "Engine files (skills · hooks · adapters)"}
+        </h2>
+        <AgentFileEditor
+          locale={locale}
+          source={runtimeSource}
+          title={locale === "ko" ? "엔진 파일 편집" : "Edit engine files"}
+          subtitle={locale === "ko"
+            ? "설치된 엔진의 스킬, 호스트 훅, 어댑터 매니페스트를 여기서 고칩니다. 저장하면 파일에 그대로 씁니다."
+            : "Edit the installed engine's skills, host hooks and adapter manifests here. Saving writes straight to the file."}
+        />
 
         {/* 화면 테마 (라이트/다크/시스템) */}
         <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "24px 0 12px" }}>

@@ -20,7 +20,57 @@ import { ipc } from "@/lib/ipc";
 
 type FileEntry = { name: string; path: string; size?: number };
 
-export function AgentFileEditor({ agentId, locale }: { agentId: string; locale: "ko" | "en" }) {
+/**
+ * 편집기가 다루는 파일 소스. 에이전트 폴더와 설치된 엔진은 경로 규칙도 안전 경계도
+ * 다르지만, 사람이 하는 일(고르고·고치고·저장)은 같다. 그래서 화면은 하나만 두고
+ * 소스를 주입한다.
+ */
+export interface EditorSource {
+  list: () => Promise<{ root: string; entries: FileEntry[]; notice?: string }>;
+  read: (key: string) => Promise<string>;
+  write: (key: string, content: string) => Promise<void>;
+}
+
+/** 설치된 엔진의 텍스트 자산(스킬·호스트 훅·어댑터 매니페스트). */
+export function runtimeEditorSource(ko: boolean): EditorSource {
+  return {
+    list: async () => {
+      const api = ipc();
+      if (!api) return { root: "", entries: [] };
+      const listing = await api.runtimeFiles.list();
+      return {
+        root: String(listing?.root ?? ""),
+        entries: (listing?.entries ?? []).map((e) => ({ name: e.relPath, path: e.relPath, size: e.size })),
+        // 사라질 수 있다는 걸 알고 고치는 것과 모르고 잃는 것은 다르다.
+        notice: listing?.overwrittenByUpdate
+          ? (ko
+            ? "이 파일들은 엔진 업데이트가 다시 씁니다 — 여기서 한 편집은 다음 업데이트에서 사라질 수 있습니다."
+            : "These files are rewritten by engine updates — edits here can disappear on the next update.")
+          : undefined,
+      };
+    },
+    read: async (key) => {
+      const api = ipc();
+      if (!api) return "";
+      const r = await api.runtimeFiles.read(key);
+      return typeof r === "string" ? r : String(r?.content ?? "");
+    },
+    write: async (key, content) => {
+      const api = ipc();
+      if (!api) throw new Error("bridge unavailable");
+      await api.runtimeFiles.write(key, content);
+    },
+  };
+}
+
+export function AgentFileEditor({ agentId, locale, source, title, subtitle }: {
+  agentId?: string;
+  locale: "ko" | "en";
+  /** 주입하면 그 소스를 쓴다. 없으면 agentId 의 에이전트 폴더. */
+  source?: EditorSource;
+  title?: string;
+  subtitle?: string;
+}) {
   const ko = locale === "ko";
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [rootPath, setRootPath] = useState<string>("");
@@ -35,22 +85,33 @@ export function AgentFileEditor({ agentId, locale }: { agentId: string; locale: 
 
   const dirty = draft !== loaded;
 
+  const [notice, setNotice] = useState("");
+
   useEffect(() => {
     let cancelled = false;
     const api = ipc();
-    if (!api || !agentId) return;
+    if (!api) return;
+    if (!source && !agentId) return;
     setListError("");
-    void api.agentFiles.list(agentId)
-      .then((listing: { path?: string; exists?: boolean; entries?: FileEntry[] } | null) => {
+    const load = source
+      ? source.list()
+      : api.agentFiles.list(agentId as string).then((l: { path?: string; entries?: FileEntry[] } | null) => ({
+          root: String(l?.path ?? ""),
+          entries: Array.isArray(l?.entries) ? l.entries : [],
+          notice: undefined as string | undefined,
+        }));
+    void load
+      .then((listing) => {
         if (cancelled) return;
-        setRootPath(String(listing?.path ?? ""));
-        setEntries(Array.isArray(listing?.entries) ? listing.entries : []);
+        setRootPath(listing.root);
+        setEntries(listing.entries);
+        setNotice(listing.notice ?? "");
       })
       .catch((e: unknown) => {
         if (!cancelled) setListError(e instanceof Error ? e.message : String(e));
       });
     return () => { cancelled = true; };
-  }, [agentId]);
+  }, [agentId, source]);
 
   const openFile = useCallback(async (path: string) => {
     const api = ipc();
@@ -64,8 +125,10 @@ export function AgentFileEditor({ agentId, locale }: { agentId: string; locale: 
     setBusy(true);
     setStatus({ kind: "idle", text: "" });
     try {
-      const text = await api.agentFiles.read(agentId, path);
-      const value = typeof text === "string" ? text : String((text as { content?: string })?.content ?? "");
+      const value = source
+        ? await source.read(path)
+        : await api.agentFiles.read(agentId as string, path)
+            .then((t) => (typeof t === "string" ? t : String((t as { content?: string })?.content ?? "")));
       setActivePath(path);
       setLoaded(value);
       setDraft(value);
@@ -74,7 +137,7 @@ export function AgentFileEditor({ agentId, locale }: { agentId: string; locale: 
     } finally {
       setBusy(false);
     }
-  }, [agentId, activePath, dirty, ko]);
+  }, [agentId, activePath, dirty, ko, source]);
 
   const save = useCallback(async () => {
     const api = ipc();
@@ -83,7 +146,8 @@ export function AgentFileEditor({ agentId, locale }: { agentId: string; locale: 
     setStatus({ kind: "idle", text: "" });
     try {
       const intended = draftRef.current;
-      await api.agentFiles.write(agentId, activePath, intended);
+      if (source) await source.write(activePath, intended);
+      else await api.agentFiles.write(agentId as string, activePath, intended);
       /*
        * 디스크가 정본이다 — 쓴 값을 그대로 믿지 않고 다시 읽는다.
        *
@@ -92,8 +156,10 @@ export function AgentFileEditor({ agentId, locale }: { agentId: string; locale: 
        * 저장됐다고 말하는 쪽이 저장 실패보다 나쁘다. 돌아온 내용이 의도와 다르면 편집을
        * 화면에 남긴 채 그 사실을 말한다.
        */
-      const back = await api.agentFiles.read(agentId, activePath);
-      const value = typeof back === "string" ? back : String((back as { content?: string })?.content ?? "");
+      const value = source
+        ? await source.read(activePath)
+        : await api.agentFiles.read(agentId as string, activePath)
+            .then((b) => (typeof b === "string" ? b : String((b as { content?: string })?.content ?? "")));
       setLoaded(value);
       if (value === intended) {
         setDraft(value);
@@ -111,7 +177,7 @@ export function AgentFileEditor({ agentId, locale }: { agentId: string; locale: 
     } finally {
       setBusy(false);
     }
-  }, [agentId, activePath, ko]);
+  }, [agentId, activePath, ko, source]);
 
   const lineCount = useMemo(() => draft.split("\n").length, [draft]);
 
@@ -124,12 +190,18 @@ export function AgentFileEditor({ agentId, locale }: { agentId: string; locale: 
 
   return (
     <section style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
-      <h4 style={{ margin: "0 0 6px", fontSize: 13.5 }}>{ko ? "파일 편집" : "Edit files"}</h4>
+      <h4 style={{ margin: "0 0 6px", fontSize: 13.5 }}>{title ?? (ko ? "파일 편집" : "Edit files")}</h4>
       <p style={{ margin: "0 0 12px", color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.5 }}>
-        {ko
+        {subtitle ?? (ko
           ? "이 에이전트를 이루는 파일을 여기서 바로 고칩니다. 저장하면 디스크에 그대로 씁니다 — 다음 실행부터 반영됩니다."
-          : "Edit the files this agent is made of, right here. Saving writes to disk and takes effect on the next run."}
+          : "Edit the files this agent is made of, right here. Saving writes to disk and takes effect on the next run.")}
       </p>
+
+      {notice && (
+        <p style={{ margin: "0 0 10px", padding: "8px 10px", borderRadius: 8, background: "var(--amber-soft, rgba(180,120,0,0.08))", color: "var(--amber-deep, #8a5a00)", fontSize: 11.5, lineHeight: 1.5 }}>
+          {notice}
+        </p>
+      )}
 
       {listError && (
         <p style={{ margin: "0 0 10px", fontSize: 11.5, color: "var(--danger, #b42318)" }}>
