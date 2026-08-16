@@ -107,5 +107,32 @@ check("★렌더 라이브러리는 초기 번들이 아니라 필요할 때 불
   assert.match(ms, /import\("katex"\)/, "katex 를 동적으로 불러오지 않는다");
 });
 
+/*
+ * 오너 녹화(2026-08-15 21:25, 프레임 37~44): 모델 답변의 `---`가 글자 "---"로 그려졌고,
+ * "1. 항목 / - 하위" 구조가 평문으로 흘렀다. Codex/GitHub처럼 수평선·하위 리스트·
+ * 번호 시작값(start)을 그린다. 규칙은 파서 상수 하나에 산다.
+ */
+check("★`---`/`***`/`___`는 수평선 블록이다(글자로 그리지 않는다)", () => {
+  assert.match(md, /const HR_LINE = \/\^ \{0,3\}\(\?:\(\?:-\\s\*\)\{3,\}\|\(\?:\\\*\\s\*\)\{3,\}\|\(\?:_\\s\*\)\{3,\}\)\$\//, "HR_LINE 상수가 없다");
+  assert.match(md, /if \(HR_LINE\.test\(line\)\) \{\s*out\.push\(\{ type: "hr" \}\);/, "수평선 블록을 만들지 않는다");
+  assert.match(md, /case "hr":\s*return <hr/, "hr 블록을 <hr>로 그리지 않는다");
+  // 문단 누적도 `---`에서 끊겨야 한다(끊기지 않으면 앞 문단 안에 글자로 남는다).
+  assert.match(md, /HR_LINE\.test\(line\) \|\|\s*isTableHeader\(line\)/, "isBlockStart 가 수평선을 모른다");
+});
+
+check("★한 단계 들여쓴 하위 리스트와 번호 시작값을 그린다", () => {
+  assert.match(md, /const NESTED_LIST_ITEM = \/\^ \{2,\}\(\[-\*\]\|\\d\+\\\.\)\\s\+\(\.\+\)\$\//, "NESTED_LIST_ITEM 상수가 없다");
+  assert.match(md, /item\.children\.items\.push\(nested\[2\]\)/, "하위 항목을 부모 항목에 붙이지 않는다");
+  assert.match(md, /<ol key=\{i\} start=\{b\.start\}/, "<ol start> 를 넘기지 않는다");
+});
+
+check("★표시 정제기는 답의 들여쓰기를 건드리지 않는다(배지 제거가 문서 전체 공백을 접지 않는다)", () => {
+  const blocks = fs.readFileSync(path.join(root, "shared/agent-control-blocks.ts"), "utf8");
+  assert.doesNotMatch(blocks, /\.replace\(\/\[ \\t\]\{2,\}\/g, " "\)/, "배지 제거기가 답 전체의 연속 공백을 한 칸으로 접는다 — 하위 리스트 들여쓰기가 죽는다");
+  const { stripAgentIdentityBadges } = require(path.join(root, "dist/shared/agent-control-blocks.js"));
+  assert.equal(stripAgentIdentityBadges("1. 첫\n   - 하위\n   - 하위2"), "1. 첫\n   - 하위\n   - 하위2");
+  assert.equal(stripAgentIdentityBadges("Hello [Hope] world"), "Hello world");
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

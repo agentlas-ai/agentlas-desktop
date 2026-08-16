@@ -51,11 +51,18 @@ export const AGENT_GOAL_COMPLETE_PREFIX = "<<agentlas-goal-complete";
  * locale. Remove only compact capitalized or Hangul name badges surrounded by
  * whitespace; redaction markers such as `[local path]` remain intact.
  */
+const IDENTITY_BADGE = /(^|\s)(?:\*\*)?\[\s*(?:[A-Z][A-Za-z .'-]{0,31}|[\u3131-\u318e\uac00-\ud7a3]{1,16})\s*\](?:\*\*)?(?=\s|$)/gu;
+
 export function stripAgentIdentityBadges(value: string): string {
-  return value.replace(
-    /(^|\s)(?:\*\*)?\[\s*(?:[A-Z][A-Za-z .'-]{0,31}|[\u3131-\u318e\uac00-\ud7a3]{1,16})\s*\](?:\*\*)?(?=\s|$)/gu,
-    "$1",
-  ).replace(/[ \t]{2,}/g, " ").trim();
+  // Remove the badge and, when it sat between two blanks on a line, one of
+  // them — and nothing else. The old `[ \t]{2,} → " "` pass ran over the whole
+  // answer and dedented it: nested list items ("   - …") became paragraphs with
+  // a literal dash (measured 2026-08-16, gemini answer with 1./- structure).
+  // Whitespace elsewhere is markdown structure, not a badge artifact.
+  return value.replace(IDENTITY_BADGE, (match: string, prefix: string, offset: number, source: string) => {
+    const after = source.charAt(offset + match.length);
+    return (prefix === " " || prefix === "\t") && (after === " " || after === "\t") ? "" : prefix;
+  }).trim();
 }
 
 /** 여는 토큰이 완성되기 전 스트리밍 조각도 숨기기 위한 탐침(prefix). */
@@ -172,7 +179,11 @@ export function stripAgentControlBlocks(value: string, options?: { streaming?: b
     .join("");
   visible = failClosedOnRemainingControlToken(visible);
   visible = stripTrailingMemoryTicketEnvelope(visible);
-  if (options?.streaming) visible = trimIncompleteControlTail(visible);
+  // Streaming: any half-typed control token at the tail is hidden. Settled: a
+  // run stopped mid-marker leaves "<<agentl" at the end of the persisted answer
+  // (measured 2026-08-16, cancelled gemini run) — a `<<…` marker prefix at the
+  // very end is never content, so it goes too. Headings are left alone here.
+  visible = options?.streaming ? trimIncompleteControlTail(visible) : trimIncompleteMarkerTail(visible);
   visible = stripOrphanCodeFences(visible);
   return visible.replace(/\n{3,}/g, "\n\n").trim();
 }
@@ -255,8 +266,17 @@ function stripTrailingMemoryTicketEnvelope(value: string): string {
  * 도착하면 온전한 판정이 다시 이루어지므로 손실이 아니라 한 프레임 지연이다.
  */
 export function trimIncompleteControlTail(value: string): string {
+  return trimIncompleteTail(value, TAIL_TOKENS);
+}
+
+/** Only `<<…` marker prefixes — safe on settled text (a heading prefix could be a real heading). */
+export function trimIncompleteMarkerTail(value: string): string {
+  return trimIncompleteTail(value, TAIL_TOKENS.filter((token) => token.startsWith("<<")));
+}
+
+function trimIncompleteTail(value: string, tokens: readonly string[]): string {
   let cut = value.length;
-  for (const token of TAIL_TOKENS) {
+  for (const token of tokens) {
     for (let length = Math.min(token.length - 1, value.length); length >= MIN_PARTIAL_TAIL; length -= 1) {
       if (value.endsWith(token.slice(0, length))) {
         cut = Math.min(cut, value.length - length);

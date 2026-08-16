@@ -1806,6 +1806,24 @@ export class InvocationService {
     };
   }
 
+  /**
+   * Remove a queued (not yet started) direction. Codex lets the user pull a
+   * queued message back before the model receives it; the Desktop strip offers
+   * the same. Removal is by 1-based position and exact text so a stale click
+   * cannot pull a different, later-queued direction. Returns false when nothing
+   * matched (already started, already cleared by stop, or already removed).
+   */
+  unsteer(chatId: string, position: number, text: string): boolean {
+    const queue = this.steerQueues.get(chatId);
+    if (!queue?.length) return false;
+    const index = position - 1;
+    if (index < 0 || index >= queue.length) return false;
+    if (queue[index].request.userPrompt !== text) return false;
+    queue.splice(index, 1);
+    if (!queue.length) this.steerQueues.delete(chatId);
+    return true;
+  }
+
   attach(chatId: string): InvocationAttachResult | null {
     let found: InvocationAttachResult | null = null;
     for (const [runId, record] of this.activeRuns.entries()) {

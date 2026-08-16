@@ -33,7 +33,7 @@
   --one-sheet-success-surface: #f4f8ef;
   --one-sheet-success-line: #dfe6d7;
   --one-sheet-radius: 16px;
-  --one-sheet-horizontal-padding: 22px;
+  --one-sheet-horizontal-padding: clamp(24px, 3vw, 34px);
   --one-sheet-body-padding-top: 16px;
   --one-sheet-body-padding-bottom: 20px;
   position: fixed;

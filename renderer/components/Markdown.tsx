@@ -187,10 +187,25 @@ type Block =
   | { type: "code"; lang: string; code: string; id: string }
   | { type: "math"; tex: string }
   | { type: "h1" | "h2" | "h3"; text: string }
-  | { type: "ul" | "ol"; items: string[] }
+  | { type: "ul" | "ol"; items: ListItem[]; start?: number }
+  | { type: "hr" }
   | { type: "quote"; text: string }
   | { type: "table"; header: string[]; align: TableAlign[]; rows: string[][] }
   | { type: "p"; text: string };
+
+/** 리스트 항목 — 본문과, 한 단계 들여쓴 하위 리스트(모델 답변의 "1. … / - …" 구조). */
+interface ListItem {
+  text: string;
+  children?: { ordered: boolean; items: string[] };
+}
+
+// 수평선 `---` / `***` / `___` (CommonMark thematic break, 앞 공백 3칸까지, 사이 공백 허용).
+// 채팅 답변에서 모델이 문단 사이에 넣는 `---`는 구분선 의도다 — 지원이 없어 "---"가
+// 글자로 그려졌다(오너 녹화 2026-08-15 21:25, 프레임 37~44).
+const HR_LINE = /^ {0,3}(?:(?:-\s*){3,}|(?:\*\s*){3,}|(?:_\s*){3,})$/;
+const LIST_ITEM = /^([-*]|\d+\.)\s+(.+)$/;
+const NESTED_LIST_ITEM = /^ {2,}([-*]|\d+\.)\s+(.+)$/;
+const NESTED_CONTINUATION = /^ {2,}(\S.*)$/;
 
 function parseBlocks(input: string, messageId: string): Block[] {
   const lines = input.replace(/\r\n/g, "\n").split("\n");
@@ -299,19 +314,45 @@ function parseBlocks(input: string, messageId: string): Block[] {
       continue;
     }
 
-    // 리스트 (- / * / 1.)
-    const ulMatch = line.match(/^[-*]\s+(.+)$/);
-    const olMatch = line.match(/^\d+\.\s+(.+)$/);
-    if (ulMatch || olMatch) {
-      const isOl = !!olMatch;
-      const items: string[] = [];
+    // 수평선 — 리스트보다 먼저 본다(`- - -`는 리스트 항목이 아니라 구분선).
+    if (HR_LINE.test(line)) {
+      out.push({ type: "hr" });
+      i++;
+      continue;
+    }
+
+    // 리스트 (- / * / 1.) — 같은 종류의 연속 항목 + 한 단계 들여쓴 하위 항목/이어지는 줄.
+    const listStart = line.match(LIST_ITEM);
+    if (listStart) {
+      const isOl = /\d/.test(listStart[1]);
+      const start = isOl ? Number.parseInt(listStart[1], 10) : undefined;
+      const items: ListItem[] = [];
       while (i < lines.length) {
-        const m = lines[i].match(isOl ? /^\d+\.\s+(.+)$/ : /^[-*]\s+(.+)$/);
-        if (!m) break;
-        items.push(m[1]);
+        const m = lines[i].match(LIST_ITEM);
+        if (!m || /\d/.test(m[1]) !== isOl) break;
+        const item: ListItem = { text: m[2] };
         i++;
+        while (i < lines.length) {
+          const nested = lines[i].match(NESTED_LIST_ITEM);
+          if (nested) {
+            const ordered = /\d/.test(nested[1]);
+            if (!item.children) item.children = { ordered, items: [] };
+            item.children.items.push(nested[2]);
+            i++;
+            continue;
+          }
+          const continuation = lines[i].match(NESTED_CONTINUATION);
+          if (continuation && !HR_LINE.test(lines[i]) && !/^ {2,}```/.test(lines[i])) {
+            if (item.children) item.children.items[item.children.items.length - 1] += `\n${continuation[1]}`;
+            else item.text += `\n${continuation[1]}`;
+            i++;
+            continue;
+          }
+          break;
+        }
+        items.push(item);
       }
-      out.push({ type: isOl ? "ol" : "ul", items });
+      out.push(isOl && start !== undefined && start !== 1 ? { type: "ol", items, start } : { type: isOl ? "ol" : "ul", items });
       continue;
     }
 
@@ -344,6 +385,7 @@ function isBlockStart(line: string): boolean {
     /^>\s?/.test(line) ||
     /^[-*]\s/.test(line) ||
     /^\d+\.\s/.test(line) ||
+    HR_LINE.test(line) ||
     isTableHeader(line)
   );
 }
@@ -462,25 +504,45 @@ function renderBlock(
         </h3>
       );
     case "ul":
-      return (
-        <ul key={i} style={{ paddingLeft: 22, margin: "6px 0" }}>
-          {b.items.map((it, j) => (
-            <li key={j} style={{ marginBottom: 2 }}>
-              {inline(it, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
-            </li>
-          ))}
-        </ul>
-      );
-    case "ol":
-      return (
-        <ol key={i} style={{ paddingLeft: 22, margin: "6px 0" }}>
-          {b.items.map((it, j) => (
-            <li key={j} style={{ marginBottom: 2 }}>
-              {inline(it, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
-            </li>
-          ))}
-        </ol>
-      );
+    case "ol": {
+      const renderItem = (it: ListItem, j: number) => {
+        const textLines = it.text.split("\n");
+        const children = it.children;
+        const ChildTag = children?.ordered ? "ol" : "ul";
+        return (
+          <li key={j} style={{ marginBottom: 2 }}>
+            {textLines.map((line, k) => (
+              <span key={k}>
+                {inline(line, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
+                {k < textLines.length - 1 ? <br /> : null}
+              </span>
+            ))}
+            {children ? (
+              <ChildTag style={{ paddingLeft: 20, margin: "2px 0" }}>
+                {children.items.map((child, k) => {
+                  const childLines = child.split("\n");
+                  return (
+                    <li key={k} style={{ marginBottom: 2 }}>
+                      {childLines.map((line, l) => (
+                        <span key={l}>
+                          {inline(line, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
+                          {l < childLines.length - 1 ? <br /> : null}
+                        </span>
+                      ))}
+                    </li>
+                  );
+                })}
+              </ChildTag>
+            ) : null}
+          </li>
+        );
+      };
+      return b.type === "ol"
+        ? <ol key={i} start={b.start} style={{ paddingLeft: 22, margin: "6px 0" }}>{b.items.map(renderItem)}</ol>
+        : <ul key={i} style={{ paddingLeft: 22, margin: "6px 0" }}>{b.items.map(renderItem)}</ul>;
+    }
+    case "hr":
+      return <hr key={i} style={{ border: 0, borderTop: "var(--hairline, 1px solid #e0e2e3)", margin: "12px 0" }} />;
     case "table":
       return <TableBlock key={i} block={b} onOpenMedia={onOpenMedia} onOpenLinkedFile={onOpenLinkedFile} mediaBasePaths={mediaBasePaths} />;
     case "quote":

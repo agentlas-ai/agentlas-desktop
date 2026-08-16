@@ -6810,6 +6810,8 @@ export interface AgentlasIpc {
     eventChannel: (runId: string) => string;
     /** 진행 중인 실행을 취소 — CLI 자식 프로세스 kill / API fetch abort. 병렬 세션 각각 독립 취소. */
     cancel: (runId: string) => Promise<void>;
+    /** Pull a queued direction back before its run starts (1-based queue position + exact text). */
+    unsteer: (req: { chatId: string; position: number; text: string }) => Promise<boolean>;
     history: (chatId: string) => Promise<ChatHistoryEntry[]>;
     clearHistory: (chatId: string) => Promise<void>;
     /** 현재 실행 중인 chatId 목록 — 사이드바 "실행 중" 인디케이터 초기 시드용. */

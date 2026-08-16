@@ -794,6 +794,11 @@ export function OneShell() {
   // look like duplicates of the previous run.
   const activityEventRunIdRef = useRef<string | null>(null);
   const [queuedSteers, setQueuedSteers] = useState<Array<{ id: string; text: string }>>([]);
+  // Instructions typed while the run is still being prepared (no runId yet).
+  // They join the queue strip at once and reach Main as steers the moment the
+  // run exists — Codex queues a message typed during the model's first
+  // processing the same way; dropping it (measured 2026-08-16) is not parity.
+  const pendingSteersRef = useRef<Array<{ id: string; text: string }>>([]);
   // A running One turn accepts the next instruction directly; never revive an
   // obsolete two-step steering draft from an earlier app version.
   const [stagedSteer, setStagedSteerState] = useState<string | null>(null);
@@ -1896,11 +1901,26 @@ export function OneShell() {
     };
   }, [composerMenu]);
   useEffect(() => {
-    setQueuedSteers([]);
+    // Switching threads drops the strip — unless this navigation is the fresh
+    // submit landing on the chat it just created, whose steers are already
+    // queued in Main behind the run that is starting.
+    if (!activeThreadChatId || runChatIdRef.current !== activeThreadChatId) setQueuedSteers([]);
     if (composerDraftKeyRef.current === composerDraftKey) return;
+    const previousKey = composerDraftKeyRef.current;
     composerDraftKeyRef.current = composerDraftKey;
     const restored = readOneComposerDraft(composerDraftKey);
-    setComposerState(restored.composer);
+    // A fresh submit navigates from "new" to the chat it created while the
+    // user may already be typing the next instruction into the same box.
+    // Restoring that chat's (empty) draft erased what they typed (measured
+    // 2026-08-16: text sent during "준비하는 중" vanished without a trace).
+    // Carry in-progress text over instead of replacing it with nothing.
+    const inProgress = composerInputRef.current?.value ?? "";
+    if (previousKey === "new" && restored.composer.trim() === "" && inProgress.trim() !== "") {
+      writeOneComposerDraft(composerDraftKey, { composer: inProgress });
+      setComposerState(inProgress);
+    } else {
+      setComposerState(restored.composer);
+    }
     setStagedSteerState(null);
   }, [activeThreadChatId, composerDraftKey]);
   // Main starts a queued steer only after the active model turn settles. Attach
@@ -1911,8 +1931,26 @@ export function OneShell() {
     const events = ipcEvents();
     const chatId = activeThreadChatId;
     if (!api || !events || !chatId) return;
-    return events.onActiveChats((chatIds) => {
-      if (!chatIds.includes(chatId) || runIdRef.current) return;
+    let idleCheck: ReturnType<typeof setTimeout> | null = null;
+    const unsubscribe = events.onActiveChats((chatIds) => {
+      if (idleCheck) { clearTimeout(idleCheck); idleCheck = null; }
+      if (!chatIds.includes(chatId)) {
+        // The chat went idle. Main starts a queued direction a microtask after
+        // settlement, so a queue that is still shown once the chat has been
+        // idle for a moment has no run behind it (stop cleared it, or the
+        // start failed) — drop it rather than show a "next" that never comes.
+        if (!runIdRef.current) {
+          idleCheck = setTimeout(() => {
+            idleCheck = null;
+            if (runIdRef.current || runChatIdRef.current !== chatId) return;
+            void api.invoke.activeChats().then((active) => {
+              if (!active.includes(chatId) && !runIdRef.current) setQueuedSteers([]);
+            }).catch(() => undefined);
+          }, 1_500);
+        }
+        return;
+      }
+      if (runIdRef.current) return;
       void api.invoke.attach(chatId).then((attachment) => {
         if (!attachment || runIdRef.current || runChatIdRef.current !== chatId) return;
         runIdRef.current = attachment.runId;
@@ -1941,6 +1979,10 @@ export function OneShell() {
         for (const event of attachment.events) consumeRunEventRef.current(event, attachment.runId);
       }).catch(() => undefined);
     });
+    return () => {
+      if (idleCheck) clearTimeout(idleCheck);
+      unsubscribe();
+    };
   }, [activeThreadChatId, appLocale, selected?.taskId, subscribeRun]);
 
   // The event channel is the fast path, but a renderer reload can miss both a
@@ -2245,6 +2287,28 @@ export function OneShell() {
         setTeamPreflight(await api.oneTeamPreflight.getForChat(chatId).catch(() => null));
         setPendingTeamPrompt(null);
       }
+      // Instructions typed during preparation become steers of this run now.
+      const pendingSteers = pendingSteersRef.current;
+      pendingSteersRef.current = [];
+      for (const pending of pendingSteers) {
+        try {
+          await api.invoke.steer({
+            chatId,
+            userPrompt: pending.text,
+            taskIntent,
+            oneMode: true,
+            locale: runLocale,
+            onePermissionMode: onePermission,
+            permissions: executionPermission,
+            ...(oneRuntimeSelection ? { runtimeSelection: oneRuntimeSelection } : {}),
+            sessionRouting: false,
+          });
+        } catch (cause) {
+          setQueuedSteers((current) => current.filter((item) => item.id !== pending.id));
+          setComposer((current) => current ? `${current}\n${pending.text}` : pending.text);
+          requestOneOperationalRecovery("one-steer", cause);
+        }
+      }
       await refreshAll();
     } catch (cause) {
       if (options?.teamRef) {
@@ -2476,7 +2540,19 @@ export function OneShell() {
       agentId,
     }));
     const explicitValue = text.trim();
-    if ((!explicitValue && attachmentSnapshot.length === 0) || teamPreflightBusy) return;
+    if (!explicitValue && attachmentSnapshot.length === 0) return;
+    if (teamPreflightBusy) {
+      // The previous submit is still preparing its run. Queue this one behind
+      // it (flushed in startRun once the runId exists); attachments cannot be
+      // steered in v1, so they stay in the composer.
+      if (!explicitValue || attachmentSnapshot.length > 0) return;
+      const optimisticId = `one-steer:${uid()}`;
+      pendingSteersRef.current = [...pendingSteersRef.current, { id: optimisticId, text: explicitValue }];
+      setQueuedSteers((current) => [...current, { id: optimisticId, text: explicitValue }]);
+      setComposer("");
+      scrollToLatest();
+      return;
+    }
     const submissionNavigationEpoch = navigationEpochRef.current;
     const setSubmissionBusy = (value: boolean) => {
       if (navigationEpochRef.current === submissionNavigationEpoch) {
@@ -2643,6 +2719,16 @@ export function OneShell() {
         throw cause;
       } finally {
         setSubmissionBusy(false);
+        // Preparation ended without a run (refused, failed, or waiting on a
+        // team decision): instructions queued behind it go back to the composer
+        // instead of lingering as a "next" that has nothing to follow.
+        if (!runIdRef.current && pendingSteersRef.current.length > 0) {
+          const orphaned = pendingSteersRef.current;
+          pendingSteersRef.current = [];
+          const orphanIds = new Set(orphaned.map((item) => item.id));
+          setQueuedSteers((current) => current.filter((item) => !orphanIds.has(item.id)));
+          setComposer((current) => [current, ...orphaned.map((item) => item.text)].filter(Boolean).join("\n"));
+        }
       }
     };
     setComposer("");
@@ -2746,7 +2832,26 @@ export function OneShell() {
       requestOneOperationalRecovery("one-run-stop", new Error("Desktop bridge unavailable"));
       return;
     }
+    // Stop is terminal for the visible work item: Main drops the directions
+    // queued behind it (InvocationService.cancel), so the strip must not keep
+    // showing them as "next".
+    setQueuedSteers([]);
     void api.invoke.cancel(runId);
+  }, []);
+
+  // Pull a queued direction back before its run starts. Main removes it by
+  // position + exact text; if it already started (or the queue was already
+  // cleared), the strip entry is dropped anyway — the truth is the run list.
+  const removeQueuedSteer = useCallback(async (id: string, position: number, text: string) => {
+    const api = ipc();
+    const chatId = runChatIdRef.current;
+    setQueuedSteers((current) => current.filter((item) => item.id !== id));
+    if (!api || !chatId) return;
+    try {
+      await api.invoke.unsteer({ chatId, position, text });
+    } catch (cause) {
+      requestOneOperationalRecovery("one-steer-remove", cause);
+    }
   }, []);
 
   // "이어서 진행" 한 번의 클릭 — 끝까지 확인되지 않은 실행을 같은 대화에서
@@ -4480,13 +4585,28 @@ export function OneShell() {
                 </button>
               </div>
             )}
-            {queuedSteers.length > 0 && (
-              <div className={styles.steeringQueue} role="status" aria-live="polite" data-one-steering-queue="true">
+            {queuedSteers.map((queued, index) => (
+              // Codex keeps each queued message visible above the composer and
+              // lets the user pull it back before the model receives it. Stop
+              // clears the queue in Main, so the strip clears with it (see
+              // stopRun) — a strip that outlives its queue was the recording's
+              // "steering cannot be cancelled" (2026-08-15 21:25, frames 46–72).
+              <div key={queued.id} className={styles.steeringQueue} role="status" aria-live="polite" data-one-steering-queue="true">
                 <span>{appLocale === "ko" ? "다음 지시" : "Next instruction"}</span>
-                <strong>{queuedSteers[queuedSteers.length - 1]?.text}</strong>
+                <strong>{queued.text}</strong>
                 <small>{appLocale === "ko" ? "현재 모델을 중단하지 않고 이어서 반영합니다" : "Will be applied without stopping the current model"}</small>
+                <button
+                  type="button"
+                  className={styles.steeringQueueRemove}
+                  data-one-steering-remove="true"
+                  aria-label={appLocale === "ko" ? "다음 지시 취소" : "Remove queued instruction"}
+                  title={appLocale === "ko" ? "다음 지시 취소" : "Remove queued instruction"}
+                  onClick={() => void removeQueuedSteer(queued.id, index + 1, queued.text)}
+                >
+                  <IconClose size={12} />
+                </button>
               </div>
-            )}
+            ))}
             <form className={styles.composer} data-one-composer="true" onSubmit={(event) => {
               event.preventDefault();
               const submittedValue = composerInputRef.current?.value ?? composer;

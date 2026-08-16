@@ -5196,6 +5196,11 @@ export function registerIpcHandlers(): void {
   });
   ipcMain.handle("invoke:steer", (_event, req: McpInvocationRequest) => invocationService.steer(rendererInvocationRequest(req)));
   ipcMain.handle("invoke:cancel", (_event, runId: string) => invocationService.cancel(runId));
+  ipcMain.handle(
+    "invoke:unsteer",
+    (_event, req: { chatId: string; position: number; text: string }) =>
+      invocationService.unsteer(req.chatId, req.position, req.text),
+  );
   ipcMain.handle("invoke:activeChats", () => invocationService.activeChatIds());
   ipcMain.handle("invoke:attach", (_event, chatId: string) => invocationService.attach(chatId));
   ipcMain.handle("invoke:receipt", (_event, runId: string) => invocationService.receipt(runId));
