@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- One's output rail is resizable (drag its left edge, 300–720px, persisted).
+- A failed turn shows the runtime's own reason under "· 실패" (Codex usage limit
+  text instead of a bare "exit 1").
+- 기억 sheet lists what One actually remembers (same rows as the memory map,
+  with search and "잊기"); empty proposal/saved lists are hidden.
+- One's bottom sheets follow the app's neutral surface language; the intro
+  presents One as a personal agent that knows you and commands many agents;
+  Korean titles wrap at word boundaries.
+- Markdown never draws an empty fenced code block.
 ## 1.0.18 — 2026-08-16
 
 - Answers no longer show an empty code box. A model that wraps a control block in
