@@ -153,6 +153,7 @@ import { invocationService } from "./invocation/service";
 import { hepAuthLogin, hepAuthStatus } from "./hephaestus/commands";
 import { hephaestusAvailable, hephaestusDoctor, hephaestusRoot, readHephaestusUpdateJournal, runHephaestusRuntimeUpdate } from "./hephaestus/engine";
 import { listSkillCatalog, readSkillCatalogAsset } from "./hephaestus/skill-catalog";
+import { listRuntimeFiles, readRuntimeFile, writeRuntimeFile } from "./hephaestus/runtime-files";
 import {
   aoGraph,
   hepNetwork,
@@ -2855,6 +2856,14 @@ export function registerIpcHandlers(): void {
   // ── skills (주입 가능한 스킬 카탈로그 — 엔진 skills/ 디렉토리 실측) ──
   // 하드코딩 목록이 아니라 디스크의 SKILL.md 프론트매터에서 name/description 을 읽는다.
   // SKILL.md 가 없는 디렉토리는 카탈로그에서 제외(추측 금지, 실측 원칙).
+  /*
+   * 엔진 텍스트 자산 편집 — 스킬·호스트 훅·어댑터 매니페스트를 앱 안에서 고친다.
+   * 경계와 "업데이트가 덮어쓴다"는 사실은 runtime-files.ts 가 들고 있다.
+   */
+  ipcMain.handle("runtimeFiles:list", () => listRuntimeFiles());
+  ipcMain.handle("runtimeFiles:read", (_e, relPath: string) => readRuntimeFile(relPath));
+  ipcMain.handle("runtimeFiles:write", (_e, relPath: string, content: string) =>
+    writeRuntimeFile(relPath, content));
   ipcMain.handle("skills:listCatalog", () => listSkillCatalog());
   ipcMain.handle("skills:readCatalog", (_event, slug: string) => readSkillCatalogAsset(slug));
 

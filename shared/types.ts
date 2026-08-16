@@ -6090,6 +6090,17 @@ export interface AgentlasIpc {
   };
   /** 스킬 카탈로그 — 엔진(Hephaestus)의 skills/ 디렉토리를 실제로 스캔해 반환한다.
    *  하드코딩 목록이 아니라 디스크의 SKILL.md 프론트매터에서 읽는다. */
+  /** 엔진 텍스트 자산(스킬·호스트 훅·어댑터 매니페스트) 직접 편집. */
+  runtimeFiles: {
+    list: () => Promise<{
+      root: string | null;
+      /** 이 폴더는 엔진 업데이트가 다시 쓴다 — 편집은 그때 사라질 수 있다. */
+      overwrittenByUpdate: true;
+      entries: Array<{ relPath: string; size: number; group: string }>;
+    }>;
+    read: (relPath: string) => Promise<{ relPath: string; content: string; size: number }>;
+    write: (relPath: string, content: string) => Promise<{ ok: true; size: number }>;
+  };
   skills: {
     /** 주입 가능한 스킬 카탈로그 (엔진 skills/ 디렉토리 실측) */
     listCatalog: () => Promise<SkillCatalogEntry[]>;

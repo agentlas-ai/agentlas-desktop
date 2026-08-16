@@ -367,6 +367,12 @@ const api: AgentlasIpc = {
     listGrowth: (limit?: number) =>
       ipcRenderer.invoke("agentEvolution:listGrowth", limit),
   },
+  // 엔진 텍스트 자산(스킬·훅·어댑터 매니페스트) 직접 편집.
+  runtimeFiles: {
+    list: () => ipcRenderer.invoke("runtimeFiles:list"),
+    read: (relPath: string) => ipcRenderer.invoke("runtimeFiles:read", relPath),
+    write: (relPath: string, content: string) => ipcRenderer.invoke("runtimeFiles:write", relPath, content),
+  },
   skills: {
     listCatalog: () => ipcRenderer.invoke("skills:listCatalog"),
     readCatalog: (slug: string) => ipcRenderer.invoke("skills:readCatalog", slug),

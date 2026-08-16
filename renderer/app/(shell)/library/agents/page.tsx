@@ -188,9 +188,8 @@ function RosterUsageBadge({ usage, frequent, locale }: {
         background: frequent ? "var(--accent-soft)" : "var(--fill-1)",
       }}
     >
-      {frequent
-        ? (locale === "ko" ? "자주 씀" : "Frequent")
-        : (locale === "ko" ? "사용함" : "Used")}
+      {/* 이름을 밀어내지 않도록 낱말 대신 사용 횟수만 — 뜻은 위 title 에 있다. */}
+      {usage.useCount}
     </span>
   );
 }
@@ -1549,7 +1548,7 @@ function LibraryAgentsView() {
                       </button>
                       <IconBuilding size={14} style={{ color: "var(--accent)" }} />
                       <button type="button" onClick={() => { setSelectedFirmId(firm.id); setSelectedNode(null); }} style={{ border: 0, background: "transparent", padding: 0, cursor: "pointer", textAlign: "left", minWidth: 0, minHeight: 44, flex: 1, color: "inherit" }}>
-                        <span style={{ fontSize: 13, fontWeight: 700, fontFamily: "var(--font-head)", display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{fLoc.name}</span>
+                        <span title={fLoc.name} style={{ minWidth: 72, fontSize: 13, fontWeight: 700, fontFamily: "var(--font-head)", display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{fLoc.name}</span>
                       </button>
                       {(() => {
                         // 파생 롤업: 팀 멤버들의 run 참여 합계(사용 원장 집계). 성공 점수가 아니다.
@@ -1560,7 +1559,10 @@ function LibraryAgentsView() {
                             title={locale === "ko" ? `팀 멤버 사용 합계 ${totalUses}회` : `Team members used ${totalUses} times in total`}
                             style={{ flexShrink: 0, fontSize: 9, fontWeight: 750, padding: "2px 6px", borderRadius: 999, background: "var(--fill-1)", color: "var(--muted-deep)" }}
                           >
-                            {locale === "ko" ? `멤버 사용 ${totalUses}` : `Member uses ${totalUses}`}
+                            {/* ★이름이 먼저다. 이 배지는 보조 수치인데 flexShrink:0 이라
+                                좁은 사이드바에서 팀·에이전트 이름을 밀어내 "pit…" 처럼 잘랐다.
+                                뜻은 title 에 그대로 두고 화면에는 숫자만 남긴다. */}
+                            {totalUses}
                           </span>
                         ) : null;
                       })()}
@@ -1692,7 +1694,7 @@ function LibraryAgentsView() {
                             <AgentAvatar name={displayName} tone={a.tone} size={28} />
                             <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
                               <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-                                <span style={{ minWidth: 0, fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{displayName}</span>
+                                <span title={displayName} style={{ minWidth: 72, flex: 1, fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{displayName}</span>
                                 <RosterUsageBadge usage={usageByAgentId.get(a.id)} frequent={isFrequentlyUsed(a.id)} locale={locale} />
                               </span>
                               <span style={{ fontSize: 11, color: "var(--muted-deep)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{loc.tagline}</span>
