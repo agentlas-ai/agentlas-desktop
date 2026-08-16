@@ -53,6 +53,7 @@ import type {
   WorkspaceNode,
 } from "@/lib/types";
 import { AgentAvatar } from "@/components/AgentAvatar";
+import { AgentFileEditor } from "@/components/AgentFileEditor";
 import {
   AgentLearningMetricGrid,
   AgentNameEditor,
@@ -5662,6 +5663,9 @@ function AgentDetailView({
           {/* 탭 3: 플레이북 & 워크플로우 */}
           {activeTab === "playbook" && (
             <div style={{ display: "flex", flexDirection: "column", gap: 24, maxWidth: 840 }}>
+              {/* 구성요소는 읽기만 하는 목록이 아니라 고칠 수 있는 자리다 — 배관(read/write)은
+                  이미 있었고 없던 것은 화면뿐이었다. */}
+              {agent?.id && <AgentFileEditor agentId={agent.id} locale={locale} />}
               <section style={{ background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)", padding: 16 }}>
                 <h4 style={{ margin: "0 0 6px", fontSize: 13.5 }}>{locale === "ko" ? "장착 구성요소" : "Attached loadout"}</h4>
                 <p style={{ margin: "0 0 13px", color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.5 }}>
