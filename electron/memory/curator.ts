@@ -741,6 +741,33 @@ function fallbackTurnObservation(cleanedText: string): string | null {
   return plain ? plain.slice(0, 360) : null;
 }
 
+/**
+ * 모델이 Memory Events 를 내지 않은 턴에서, 호스트가 대신 남기는 사실 한 줄.
+ *
+ * 지어내지 않는 것이 요점이다. 모델의 답을 요약하지 않고(그건 모델이 할 일이다),
+ * 호스트가 이미 아는 값만 쓴다: 이 실행이 어떤 요청이었는지(taskHint)와 어느 실행에서
+ * 나왔는지(runId). 그래서 kind 는 fact 이고 증거는 실행 id 다.
+ *
+ * 요청 문구를 모르면 아무것도 만들지 않는다 — 내용 없는 기억을 쌓는 것은 0건보다 나쁘다.
+ */
+function hostObservedTurnEvents(ctx: CurationContext): RawMemoryEvent[] {
+  const runId = String(ctx.runId ?? "").trim();
+  if (!runId) return [];
+  if (!ctx.agentId) return [];
+  const hint = String(ctx.experienceIntake?.taskHint ?? "").replace(/\s+/g, " ").trim();
+  if (hint.length < 12) return [];
+  const request = hint.length > 220 ? `${hint.slice(0, 220)}…` : hint;
+  return [{
+    memory_kind: "fact",
+    content: `이 에이전트가 다음 요청을 수행했다: ${request}`,
+    suggested_scope: "agent_repo",
+    confidence: "medium",
+    sensitivity: "internal",
+    evidence_refs: [runId],
+    source: "host-observed",
+  } as RawMemoryEvent];
+}
+
 export function curateReply(
   replyText: string,
   ctx: CurationContext,
@@ -767,8 +794,24 @@ export function curateReply(
       ? "policy_fallback"
       : "semantic"
     : "policy";
-  const attemptedReport = parsed.events.length > 0
-    ? curateEvents(parsed.events, ctx, {
+  /*
+   * ★모델이 침묵해도 그 턴은 일어났다 — 호스트가 사실을 남긴다(오너 결정 2026-08-16).
+   *
+   * 기억 방출은 지금까지 순전히 프롬프트 계약이었다. 지시를 따르는 런타임에서는 잘
+   * 돌지만(One 813건), 같은 지시를 받고도 한 건도 내지 않는 에이전트가 있었다 —
+   * 실측: Pitch Deck Architect 913회 실행에 기억 0, 큐레이션 영수증은
+   * memoryEventCount 0 / discarded 0. 버려진 게 아니라 애초에 후보가 없었다.
+   * 기억이 0이면 경험 후보도 0이고 칩도 0이라, 사용자에게는 제품이 고장난 것과
+   * 구분되지 않는다.
+   *
+   * 그래서 모델이 아무것도 내지 않은 턴에서는 호스트가 **검증 가능한 사실 한 줄**을
+   * 대신 만든다. 내용을 지어내지 않는다: 무엇을 요청받았고 어느 실행이었는지만 적고,
+   * 출처를 host-observed 로 표시해 모델이 스스로 남긴 배움과 섞이지 않게 한다.
+   */
+  const hostObserved = parsed.events.length === 0 ? hostObservedTurnEvents(ctx) : [];
+  const effectiveEvents = parsed.events.length > 0 ? parsed.events : hostObserved;
+  const attemptedReport = effectiveEvents.length > 0
+    ? curateEvents(effectiveEvents, ctx, {
         ticketId: ticket.ticketId,
         curatorMode,
         semanticDecisions: options.semanticDecisions,
