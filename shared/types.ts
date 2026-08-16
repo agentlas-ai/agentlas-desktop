@@ -6428,6 +6428,14 @@ export interface AgentlasIpc {
   oneMemory: {
     getState: () => Promise<OneMemoryState>;
     getMap: () => Promise<OneMemoryMapSnapshot>;
+    /**
+     * What One actually remembers — the durable memory_entries the memory map is
+     * drawn from (same rows, same count), bounded and path-free. The sheet lists
+     * these so "기억" and the map never disagree (owner report 2026-08-16).
+     */
+    listEntries: (input?: { limit?: number }) => Promise<OneDurableMemoryEntryUi[]>;
+    /** Supersede one durable entry (non-destructive; the map drops it). */
+    forgetEntry: (input: { memoryId: string }) => Promise<{ ok: boolean; memoryId: string; forgottenAt: string | null }>;
     propose: (input: ProposeOneMemoryCandidateInput) => Promise<OneMemoryMutationResult<OneMemoryCandidate>>;
     save: (input: SaveOneMemoryCandidateInput) => Promise<OneMemoryMutationResult<OneMemorySavedResult>>;
     editAndSave: (input: EditAndSaveOneMemoryCandidateInput) => Promise<OneMemoryMutationResult<OneMemorySavedResult>>;
@@ -6947,3 +6955,14 @@ export interface ToolApprovalRequestEvent {
 }
 
 export type ToolApprovalDecision = "allow_once" | "allow_session" | "deny";
+
+/** One's durable memory row as the renderer may see it: bounded content, project slug only, never a local path. */
+export interface OneDurableMemoryEntryUi {
+  id: string;
+  kind: string;
+  scope: string;
+  content: string;
+  projectSlug: string | null;
+  evidenceCount: number;
+  createdAt: string;
+}

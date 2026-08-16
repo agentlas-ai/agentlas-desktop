@@ -12,6 +12,7 @@ import {
   type OneMemoryMapSnapshot,
 } from "../../shared/one-memory-map";
 import { getDb } from "../store/db";
+import type { OneDurableMemoryEntryUi } from "../../shared/types";
 
 const ONE_AGENT_ID = "builtin-agentlas-one";
 const MAX_RENDERED_RELATIONS_PER_NODE = 12;
@@ -367,4 +368,53 @@ export function getOneMemoryMap(): OneMemoryMapSnapshot {
   };
   cachedMap = { signature, snapshot };
   return snapshot;
+}
+
+/**
+ * The rows behind the map, listed. Same table, same filter (One's live entries),
+ * so the count in the sheet equals the node count on the map. Content is bounded
+ * and control characters stripped; only the project folder's basename travels.
+ */
+export function listOneDurableMemoryEntries(limit = 300): OneDurableMemoryEntryUi[] {
+  const capped = Math.min(1_000, Math.max(1, Math.floor(limit) || 300));
+  const rows = getDb().prepare(
+    `SELECT id, scope, kind, content, project_path, evidence_json, created_at
+     FROM memory_entries
+     WHERE agent_id = ? AND superseded_at IS NULL
+     ORDER BY created_at DESC, id DESC
+     LIMIT ?`,
+  ).all(ONE_AGENT_ID, capped) as Array<{
+    id: string; scope: string; kind: string; content: string; project_path: string | null; evidence_json: string; created_at: string;
+  }>;
+  return rows.map((row) => {
+    let evidenceCount = 0;
+    try {
+      const evidence = JSON.parse(row.evidence_json || "[]");
+      evidenceCount = Array.isArray(evidence) ? evidence.length : 0;
+    } catch {
+      evidenceCount = 0;
+    }
+    const content = String(row.content ?? "").replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, " ").trim();
+    return {
+      id: row.id,
+      kind: row.kind,
+      scope: row.scope,
+      content: content.length > 600 ? `${content.slice(0, 599)}…` : content,
+      projectSlug: row.project_path ? safeSlug(path.basename(row.project_path)) : null,
+      evidenceCount,
+      createdAt: row.created_at,
+    };
+  });
+}
+
+/** "잊기": supersede one of One's live entries. Non-destructive (history stays); the map drops the node. */
+export function forgetOneDurableMemoryEntry(memoryId: string): { ok: boolean; memoryId: string; forgottenAt: string | null } {
+  const id = typeof memoryId === "string" ? memoryId.trim() : "";
+  if (!id) return { ok: false, memoryId: "", forgottenAt: null };
+  const now = new Date().toISOString();
+  const result = getDb().prepare(
+    "UPDATE memory_entries SET superseded_at = ? WHERE id = ? AND agent_id = ? AND superseded_at IS NULL",
+  ).run(now, id, ONE_AGENT_ID);
+  if (result.changes > 0) cachedMap = null;
+  return { ok: result.changes > 0, memoryId: id, forgottenAt: result.changes > 0 ? now : null };
 }

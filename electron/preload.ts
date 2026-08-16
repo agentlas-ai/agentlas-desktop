@@ -591,6 +591,8 @@ const api: AgentlasIpc = {
   oneMemory: {
     getState: () => ipcRenderer.invoke("oneMemory:getState"),
     getMap: () => ipcRenderer.invoke("oneMemory:getMap"),
+    listEntries: (input?: { limit?: number }) => ipcRenderer.invoke("oneMemory:listEntries", input),
+    forgetEntry: (input: { memoryId: string }) => ipcRenderer.invoke("oneMemory:forgetEntry", input),
     propose: (input) => ipcRenderer.invoke("oneMemory:propose", input),
     save: (input) => ipcRenderer.invoke("oneMemory:save", input),
     editAndSave: (input) => ipcRenderer.invoke("oneMemory:editAndSave", input),

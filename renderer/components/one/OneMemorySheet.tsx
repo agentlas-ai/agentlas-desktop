@@ -26,6 +26,7 @@ import { OneValueClosureCard } from "./OneValueClosureCard";
 import { OneExperienceReuseCard } from "./OneExperienceReuseCard";
 import { OneImprovementProofCard } from "./OneImprovementProofCard";
 import { OneBottomSheet } from "./OneBottomSheet";
+import type { OneDurableMemoryEntryUi } from "@shared/types";
 import styles from "./OneMemorySheet.module.css";
 
 interface OneMemorySheetProps {
@@ -101,6 +102,49 @@ export function OneMemorySheet({
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [useOnceReceipt, setUseOnceReceipt] = useState<OneMemoryUseOnceReceipt | null>(null);
+  // What One actually remembers (the rows the memory map is drawn from). Loaded
+  // when the sheet opens; the sheet and the map must agree on the count.
+  const [durable, setDurable] = useState<OneDurableMemoryEntryUi[] | null>(null);
+  const [durableQuery, setDurableQuery] = useState("");
+  const [durableExpanded, setDurableExpanded] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    const api = ipc();
+    if (!api?.oneMemory?.listEntries) {
+      setDurable([]);
+      return;
+    }
+    api.oneMemory.listEntries({ limit: 1000 })
+      .then((rows) => { if (!cancelled) setDurable(rows); })
+      .catch(() => { if (!cancelled) setDurable([]); });
+    return () => { cancelled = true; };
+  }, [open]);
+  const forgetDurable = async (entry: OneDurableMemoryEntryUi) => {
+    const api = ipc();
+    if (!api?.oneMemory?.forgetEntry) return;
+    setBusyId(entry.id);
+    try {
+      const result = await api.oneMemory.forgetEntry({ memoryId: entry.id });
+      if (result.ok) {
+        setDurable((current) => (current ?? []).filter((row) => row.id !== entry.id));
+        setMessage(locale === "ko" ? "잊었어요. 기억 지도에서도 사라집니다." : "Forgotten. It leaves the memory map too.");
+        setError(null);
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusyId(null);
+    }
+  };
+  const durableFiltered = useMemo(() => {
+    const rows = durable ?? [];
+    const query = durableQuery.trim().toLowerCase();
+    const filtered = query
+      ? rows.filter((row) => row.content.toLowerCase().includes(query) || (row.projectSlug ?? "").toLowerCase().includes(query) || row.kind.toLowerCase().includes(query))
+      : rows;
+    return durableExpanded || query ? filtered : filtered.slice(0, 8);
+  }, [durable, durableQuery, durableExpanded]);
   const [editingCandidateId, setEditingCandidateId] = useState<string | null>(null);
   const [candidateContent, setCandidateContent] = useState("");
   const [editingMemoryId, setEditingMemoryId] = useState<string | null>(null);
@@ -432,6 +476,57 @@ export function OneMemorySheet({
                     )}
                   </article>
                 ))}
+              </div>
+            </section>
+
+            <section className={styles.section} aria-labelledby="durable-memory-title" data-one-durable-memory="true">
+              <div className={styles.sectionHeading}>
+                <div>
+                  <h3 id="durable-memory-title">
+                    {locale === "ko"
+                      ? `One이 기억하는 것 ${durable ? durable.length : "…"}`
+                      : `What One remembers ${durable ? durable.length : "…"}`}
+                  </h3>
+                  <p>
+                    {locale === "ko"
+                      ? "기억 지도의 점 하나가 여기의 한 줄입니다. 대화와 일에서 One이 스스로 남긴 기억이고, 여기서 잊게 할 수 있어요."
+                      : "Each dot on the memory map is one line here — what One kept from conversations and work. You can make it forget any of them."}
+                  </p>
+                </div>
+              </div>
+              {durable && durable.length > 8 && (
+                <input
+                  className={styles.searchInput}
+                  type="search"
+                  value={durableQuery}
+                  onChange={(event) => setDurableQuery(event.target.value)}
+                  placeholder={locale === "ko" ? "기억 검색" : "Search memories"}
+                  aria-label={locale === "ko" ? "기억 검색" : "Search memories"}
+                />
+              )}
+              <div className={styles.cardList}>
+                {durable && durable.length === 0 && (
+                  <p className={styles.empty}>{locale === "ko" ? "아직 One이 남긴 기억이 없어요. 대화하고 일을 맡기면 여기에 쌓입니다." : "One has not kept anything yet. It fills up as you talk and delegate work."}</p>
+                )}
+                {durableFiltered.map((entry) => (
+                  <article key={entry.id} className={styles.card} data-durable-entry="true">
+                    <div className={styles.cardTop}>
+                      <span className={styles.scopeBadge}>{entry.kind}{entry.projectSlug ? ` · ${entry.projectSlug}` : ""}</span>
+                      <span className={styles.enabledBadge}>{formatDate(entry.createdAt, locale)}</span>
+                    </div>
+                    <p className={styles.cardContent}>{entry.content}</p>
+                    <div className={styles.cardActions}>
+                      <button type="button" className={styles.dangerButton} onClick={() => void forgetDurable(entry)} disabled={Boolean(busyId)}>
+                        {locale === "ko" ? "잊기" : "Forget"}
+                      </button>
+                    </div>
+                  </article>
+                ))}
+                {durable && !durableExpanded && !durableQuery.trim() && durable.length > 8 && (
+                  <button type="button" className={styles.secondaryButton} onClick={() => setDurableExpanded(true)}>
+                    {locale === "ko" ? `${durable.length - 8}개 더 보기` : `Show ${durable.length - 8} more`}
+                  </button>
+                )}
               </div>
             </section>
 

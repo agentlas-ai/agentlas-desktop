@@ -477,7 +477,7 @@ import {
   updateOneMemoryAsset,
   useOneMemoryCandidateOnce,
 } from "./one/memory-candidates";
-import { getOneMemoryMap } from "./one/memory-map";
+import { forgetOneDurableMemoryEntry, getOneMemoryMap, listOneDurableMemoryEntries } from "./one/memory-map";
 import {
   acceptOneSuggestionForReviewFromUser,
   dismissOneSuggestion,
@@ -3776,6 +3776,8 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("oneActivation:resolveMobile", (_e, input) => resolveOneActivationMobile(input));
   ipcMain.handle("oneMemory:getState", () => getOneMemoryState());
   ipcMain.handle("oneMemory:getMap", () => getOneMemoryMap());
+  ipcMain.handle("oneMemory:listEntries", (_e, input?: { limit?: number }) => listOneDurableMemoryEntries(input?.limit));
+  ipcMain.handle("oneMemory:forgetEntry", (_e, input: { memoryId: string }) => forgetOneDurableMemoryEntry(input?.memoryId));
   ipcMain.handle("oneMemory:propose", (_e, input: ProposeOneMemoryCandidateInput) =>
     proposeOneMemoryCandidate(input));
   ipcMain.handle("oneMemory:save", (_e, input: SaveOneMemoryCandidateInput) =>

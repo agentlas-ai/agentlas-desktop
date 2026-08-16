@@ -1,37 +1,41 @@
 /* One bottom-sheet token. Feature sheets inherit this contract and own only their content styles. */
 .layer {
-  --one-sheet-surface: #fffdf9;
-  --one-sheet-ink: #20251f;
-  --one-sheet-muted: #6f746c;
-  --one-sheet-accent: #536938;
-  --one-sheet-line: rgba(40, 48, 39, 0.12);
-  --one-sheet-scrim: rgba(25, 30, 25, 0.38);
+  /* One's sheets follow the app's neutral surface language (the composer
+     popovers, settings): white paper, hairline #e0e2e3, quiet gray labels.
+     Owner decision 2026-08-16 — the warm-paper/oversized-title look was
+     the odd one out. */
+  --one-sheet-surface: #ffffff;
+  --one-sheet-ink: #202326;
+  --one-sheet-muted: #7b8185;
+  --one-sheet-accent: #5d7a39;
+  --one-sheet-line: #e0e2e3;
+  --one-sheet-scrim: rgba(20, 25, 20, 0.28);
   --one-sheet-control-surface: #ffffff;
-  --one-sheet-control-border: #dfe3da;
-  --one-sheet-control-radius: 11px;
-  --one-sheet-control-height: 44px;
+  --one-sheet-control-border: #e0e2e3;
+  --one-sheet-control-radius: 10px;
+  --one-sheet-control-height: 40px;
   --one-sheet-card-surface: #ffffff;
-  --one-sheet-card-muted: #f8f9f6;
-  --one-sheet-card-radius: 15px;
-  --one-sheet-label-ink: #444940;
-  --one-sheet-section-gap: 28px;
-  --one-sheet-section-padding: 28px;
-  --one-sheet-title-size: clamp(24px, 3vw, 30px);
-  --one-sheet-body-size: 14px;
-  --one-sheet-label-size: 12px;
-  --one-sheet-focus: 0 0 0 3px rgba(83, 105, 56, 0.16);
-  --one-sheet-primary: #596f3b;
-  --one-sheet-primary-hover: #4e6234;
+  --one-sheet-card-muted: #f3f4f4;
+  --one-sheet-card-radius: 12px;
+  --one-sheet-label-ink: #25292c;
+  --one-sheet-section-gap: 22px;
+  --one-sheet-section-padding: 22px;
+  --one-sheet-title-size: 17px;
+  --one-sheet-body-size: 13px;
+  --one-sheet-label-size: 11px;
+  --one-sheet-focus: 0 0 0 3px rgba(93, 122, 57, 0.18);
+  --one-sheet-primary: #718b4e;
+  --one-sheet-primary-hover: #627b42;
   --one-sheet-danger: #9c3f35;
   --one-sheet-danger-surface: #fff3f1;
   --one-sheet-danger-line: #f0d0ca;
   --one-sheet-success: #40522d;
   --one-sheet-success-surface: #f4f8ef;
   --one-sheet-success-line: #dfe6d7;
-  --one-sheet-radius: 26px;
-  --one-sheet-horizontal-padding: clamp(24px, 3vw, 34px);
-  --one-sheet-body-padding-top: 20px;
-  --one-sheet-body-padding-bottom: 24px;
+  --one-sheet-radius: 16px;
+  --one-sheet-horizontal-padding: 22px;
+  --one-sheet-body-padding-top: 16px;
+  --one-sheet-body-padding-bottom: 20px;
   position: fixed;
   inset: 0;
   z-index: 120;
@@ -68,7 +72,7 @@
   border-radius: var(--one-sheet-radius) var(--one-sheet-radius) 0 0;
   background: var(--one-sheet-surface);
   color: var(--one-sheet-ink);
-  box-shadow: 0 -24px 80px rgba(28, 35, 27, 0.22);
+  box-shadow: 0 -14px 38px rgba(20, 25, 20, 0.12);
   outline: none;
   animation: oneSheetRise 200ms cubic-bezier(0.22, 0.8, 0.28, 1) both;
 }
@@ -91,7 +95,7 @@
   height: 4px;
   margin: 10px auto 4px;
   border-radius: 999px;
-  background: rgba(45, 54, 44, 0.25);
+  background: #e0e2e3;
 }
 
 .header {
@@ -100,7 +104,7 @@
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: start;
   gap: 20px;
-  padding: 22px 0 24px;
+  padding: 14px 0 16px;
   border-bottom: 1px solid var(--one-sheet-line);
 }
 
@@ -109,27 +113,26 @@
 }
 
 .eyebrow {
-  margin: 0 0 5px;
-  color: var(--one-sheet-accent);
-  font-size: 11px;
-  font-weight: 800;
-  letter-spacing: 0.1em;
+  margin: 0 0 4px;
+  color: #8b9195;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
   line-height: 1.2;
-  text-transform: uppercase;
 }
 
 .header h2 {
   margin: 0;
   color: var(--one-sheet-ink);
   font-size: var(--one-sheet-title-size);
-  font-weight: 760;
-  letter-spacing: -0.035em;
-  line-height: 1.08;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
 }
 
 .description {
   max-width: 680px;
-  margin: 8px 0 0;
+  margin: 6px 0 0;
   color: var(--one-sheet-muted);
   font-size: var(--one-sheet-body-size);
   line-height: 1.55;
@@ -147,8 +150,8 @@
 }
 
 .closeButton {
-  width: 44px;
-  height: 44px;
+  width: 34px;
+  height: 34px;
   display: grid;
   place-items: center;
   border: 1px solid var(--one-sheet-line);
@@ -156,7 +159,7 @@
   background: var(--one-sheet-control-surface);
   color: var(--one-sheet-ink);
   font: inherit;
-  font-size: 24px;
+  font-size: 20px;
   line-height: 1;
   cursor: pointer;
 }
