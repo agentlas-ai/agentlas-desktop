@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 1.0.18 — 2026-08-16
+
+- Answers no longer show an empty code box. A model that wraps a control block in
+  a fence left the fence behind when the block was stripped, so the reply ended
+  with a dark box labelled JSON and one blank line. Reported by a user, fixed on
+  main after 1.0.17 was already built — which is why this release exists.
+- Ordinary Korean writing is no longer discarded as prompt injection. The curator
+  decided injection from a list of seven Korean sentence endings, so instructions
+  written the way instructions are written were rejected: dosage and care steps
+  ("하루 3회 식후에 복용하세요", "개봉 후에는 냉장 보관하세요") and app steps
+  ("설치 후 앱을 다시 시작해줘"), while other endings passed. The split was which
+  ending was on the list, not what the sentence meant. The explicit English
+  override phrasing still rejects, and the real boundary stays at the PreToolUse
+  broker.
+- Binds Agentlas OS v1.2.7 at
+  1246167e1533e62b22231781332656ec9b35af2e.
+- Source readiness does not prove a published installer or update feed; the
+  Releases page remains the authority for the downloadable installer.
+
 ## 1.0.17 — 2026-08-16
 
 - This is the first published build after 1.0.15: the 1.0.16 section below
