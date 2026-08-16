@@ -2,11 +2,17 @@
 
 ## Unreleased
 
+## 1.0.19 — 2026-08-16
+
 - 기억 sheet lists what One actually remembers (same rows as the memory map,
   with search and "잊기"); empty proposal/saved lists are hidden.
 - One's bottom sheets follow the app's neutral surface language; the intro
   presents One as a personal agent that knows you and commands many agents;
   Korean titles wrap at word boundaries.
+- This release binds Agentlas OS v1.2.7 at 1246167e1533e62b22231781332656ec9b35af2e
+  (unchanged from 1.0.18).
+- Source readiness does not prove a published installer or update feed; the
+  Releases page remains the authority for the downloadable installer.
 
 ## 1.0.18 — 2026-08-16
 
