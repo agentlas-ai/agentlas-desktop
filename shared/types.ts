@@ -3524,6 +3524,18 @@ export interface CloudAgentPackageManifest {
   costOwner: "submitter" | "none";
   /** Required for public Hub publication; optional for owner-private storage. */
   localized?: CloudAgentLocalizedListing;
+  /**
+   * Declared when this folder is an installed copy — read from the restore
+   * marker, sent on EVERY save including private ones.
+   *
+   * ★ It travels on the private save specifically because that is the save
+   *   that used to erase it. Refusing the Hub upload locally is not enough:
+   *   the copy could be re-saved privately as a parentless agent, restored
+   *   again into a folder with no marker, and published from there. The server
+   *   now also refuses to let an omission clear stored lineage, so this field
+   *   and that rule cover the honest and the dishonest client respectively.
+   */
+  fork?: CloudAgentForkOrigin;
   security: {
     verdict: "pass" | "fail" | "needs-review";
     blockerCount: number;

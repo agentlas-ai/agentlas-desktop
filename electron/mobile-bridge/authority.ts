@@ -2340,7 +2340,27 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const option = this.registeredUploadOptionForAgent(agentLocalId);
         const sessionRefusal = this.cloudSessionRefusal();
         if (sessionRefusal) return asJsonValue({ refusal: sessionRefusal }, request.method);
-        const result = await this.cloudAgentActions.saveRegisteredPrivate(option.target);
+        // ★ A REFUSAL MUST NOT LEAVE HERE AS AN EXCEPTION. Measured 2026-08-17.
+        //
+        //   Registration throws on a server refusal, and nothing caught it, so
+        //   the server's every "no" arrived at the phone as the bridge's fixed
+        //   "Desktop rejected the request". That generic string is correct
+        //   redaction for an unexpected crash and completely wrong for a
+        //   decision: a full seat plan and a forked package each have one thing
+        //   for the person to do, and neither of them was ever said.
+        //
+        //   Only typed refusals are converted — `cloudRefusalOf` returns null
+        //   for anything else, and that still rethrows into the generic path,
+        //   so an unexpected error cannot smuggle a local path out through this
+        //   branch. Same shape the delete case below already used.
+        let result: Awaited<ReturnType<typeof this.cloudAgentActions.saveRegisteredPrivate>>;
+        try {
+          result = await this.cloudAgentActions.saveRegisteredPrivate(option.target);
+        } catch (error) {
+          const refusal = this.cloudRefusalOf(error);
+          if (refusal) return asJsonValue({ refusal }, request.method);
+          throw error;
+        }
         if (result.status !== "registered" || !result.registration) {
           // The local security review blocked the package or the registration
           // did not commit. Never report success; surface the bounded summary.

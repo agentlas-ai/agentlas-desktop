@@ -10,6 +10,10 @@ import type { RemediationAction } from "../hephaestus/publish-autofix";
 import type { RuntimeStatus } from "../../shared/types";
 import { getSessionCookieHeader } from "../auth";
 import { invalidateMyAgentsCache } from "../marketplace";
+// Registration refusals are thrown as the same typed error the cargo client
+// uses, so every surface — Desktop, Mobile Bridge, MCP — reads one machine
+// code instead of matching on a sentence. See `cloudRegistrationError`.
+import { OwnerCloudActionError } from "../marketplace/mcp-source";
 import { readCloudAgentRestoreMarker, writeCloudAgentRegistrationMarker } from "./restore";
 import type {
   CloudAgentCloudScope,
@@ -491,12 +495,16 @@ export async function packageAndReviewCloudAgent(
   //   server will reject anyway.
   //
   //   Only the HUB upload is blocked. A private re-upload of your own copy is
-  //   ordinary use and stays allowed, which is rule 3.
+  //   ordinary use and stays allowed, which is rule 3 — but it carries the
+  //   lineage with it (see `forkLineage` below). Allowing the save while
+  //   dropping the parent is what turned this refusal into a speed bump: save
+  //   the copy privately, restore THAT into a fresh folder with no marker, and
+  //   publish it as original work without ever breaking a rule.
+  const forkLineage = readCloudAgentRestoreMarker(rootPath)?.fork;
   {
-    const forkMarker = readCloudAgentRestoreMarker(rootPath)?.fork;
-    if (isPublicHubPublish && forkMarker) {
+    if (isPublicHubPublish && forkLineage) {
       throw new Error(
-        `This folder is an installed copy of ${forkMarker.originSlug}. ` +
+        `This folder is an installed copy of ${forkLineage.originSlug}. ` +
           "It can be run, edited, and staffed into work orders, but the Hub listing belongs to the original creator.",
       );
     }
@@ -651,6 +659,8 @@ export async function packageAndReviewCloudAgent(
     billingMode: isPublicHubPublish && input.reviewMode === "local-runtime" ? "submitter-local-runtime" : "static-only",
     costOwner: isPublicHubPublish && input.reviewMode === "local-runtime" ? "submitter" : "none",
     ...(localized ? { localized } : {}),
+    // Declared on every save, private included — see the manifest field's note.
+    ...(forkLineage ? { fork: forkLineage } : {}),
     security: summarizeSecurity(packageFindings),
     ...(routingCard.card ? { routingCard: routingCard.card } : {}),
     ...(careerGraphCard ? { careerGraph: careerGraphCard } : {}),
@@ -1929,6 +1939,43 @@ function cloudRegistrationError(status: number, body: string, sentAsCreate = fal
   if (status === 428 && code === "cloud_precondition_required") {
     return new Error(
       "cloud_precondition_required: Agent Cloud requires a saved revision receipt before updating this asset. Restore the latest Cloud copy, then retry.",
+    );
+  }
+  // ★ A POLICY REFUSAL IS NOT A MALFUNCTION AND MUST NOT READ LIKE ONE.
+  //   Both of these are decisions the server is entitled to make, and each has
+  //   exactly one thing for the person to do. Falling through to the generic
+  //   branch below put an HTTP status and a JSON body on screen — and on
+  //   Mobile that string is the ONLY explanation the user ever sees for why
+  //   the save stopped.
+  //   Thrown as OwnerCloudActionError so the code survives to every surface.
+  //   `retryable: false` and `actionState: not-committed` are the honest facts:
+  //   nothing was uploaded, and pressing save again changes nothing until the
+  //   person acts. Mobile shows this text verbatim and offers no retry.
+  if (status === 402 && code === "cloud_agent_limit_reached") {
+    const used = typeof parsed?.usedAgents === "number" ? parsed.usedAgents : null;
+    const limit = typeof parsed?.limitAgents === "number" ? parsed.limitAgents : null;
+    const counts = used !== null && limit !== null ? ` (${used} of ${limit} used)` : "";
+    return new OwnerCloudActionError(
+      "cloud_agent_limit_reached",
+      `Your plan's cloud agent seats are full${counts}. Nothing was uploaded. `
+      + "Delete a cloud agent you no longer need, or move to a larger plan, then save again.",
+      { retryable: false, actionState: "not-committed" },
+    );
+  }
+  if (status === 409 && code === "fork_cannot_publish") {
+    const origin = typeof parsed?.originSlug === "string" ? parsed.originSlug : "";
+    return new OwnerCloudActionError(
+      "fork_cannot_publish",
+      `This is an installed copy${origin ? ` of ${origin}` : ""}. Run it, edit it, and staff it `
+      + "into work orders — but the Hub listing belongs to the original creator.",
+      { retryable: false, actionState: "not-committed" },
+    );
+  }
+  if (status === 409 && code === "duplicate_hub_package") {
+    return new OwnerCloudActionError(
+      "duplicate_hub_package",
+      "These exact files are already listed on the Hub by another account. Nothing was uploaded.",
+      { retryable: false, actionState: "not-committed" },
     );
   }
   return new Error(`Agentlas Cloud register failed (${status}): ${body.slice(0, 300)}`);
