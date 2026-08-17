@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 1.0.22 — 2026-08-17
+
+- The prompt guard is sized against the runtimes instead of a guess. 120,000
+  characters was an arbitrary number that happened to clear one day's bundle;
+  merging the canonical command bodies took the margin to ~16k, at which point
+  the ceiling had turned back into a ration on the contract itself. It is now
+  400,000 (~100k tokens) against runtimes that carry 200k to 1M — a runaway
+  guard, not a budget.
+- Binds Agentlas OS v1.2.10, whose canonical command bodies carry every
+  runtime's rules and no longer repeat them: for four of the twelve commands the
+  Claude copy had been the thin one, and the shorter copies held contract rules
+  it never had.
+- This release binds Agentlas OS v1.2.10 at e378c0addf67527b4ad3934dd3229b224dbc146e
+- Source readiness does not prove a published installer or update feed; the
+  Releases page remains the authority for the downloadable installer.
+
 ## 1.0.21 — 2026-08-17
 
 - Build finishes. Seven defects sat in series between the interview and a
