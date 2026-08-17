@@ -465,10 +465,20 @@ const BUILD_PROMPT_SENTINEL = "<!-- agentlas-build-system-prompt/v1 -->";
 // was never caught, and the build sat at "Starting the AI engine" forever with
 // no error shown (measured: 74,807 > 47,232, silent death).
 //
-// ~120k chars is roughly 30k tokens — well inside every runtime we dispatch to,
-// and the guard still exists to catch a runaway (e.g. an attachment summary
-// looping) rather than to ration the contract itself.
-export const MAX_BUILD_SYSTEM_PROMPT_CHARS = 120_000;
+// Raised again 2026-08-17, from 120,000. That number was mine and it was
+// arbitrary: it happened to clear the bundle of the day by ~45k, and once the
+// canonical bodies were merged from every runtime's copy the margin fell to
+// ~16k. At that point the ceiling had quietly turned back into a ration — the
+// next person adding a canonical rule would have been deciding between the
+// contract and a constant nobody had measured anything against.
+//
+// So size it against the only real limit. 400,000 chars is roughly 100k tokens;
+// the runtimes we dispatch to carry 200k (Claude, Codex) to 1M (Gemini). This
+// is a runaway guard — an attachment summary looping, a repair prompt appending
+// to itself — and nothing here should ever approach it. If a build legitimately
+// needs more than 100k tokens of contract, the contract is the thing to look
+// at, and the failure will say so instead of dying at "Starting the AI engine".
+export const MAX_BUILD_SYSTEM_PROMPT_CHARS = 400_000;
 export const BUILD_MCP_DEGRADED_GUARD_RESERVE_CHARS = 768;
 
 /**
