@@ -24,6 +24,8 @@
 - Bundled Python ships its own `jsonschema` and no longer reads the user's
   site-packages. Schema validation was not passing; it was never running.
 - This release binds Agentlas OS v1.2.9 at 2d86363202cf5725c4eb5764dcb25865dbc9fdb1
+- Source readiness does not prove a published installer or update feed; the
+  Releases page remains the authority for the downloadable installer.
 
 ## 1.0.20 — 2026-08-16
 
