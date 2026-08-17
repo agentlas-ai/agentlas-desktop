@@ -2,6 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { getDb } from "./db";
 import { emitDesktopStoreChange } from "./change-bus";
+import { detachProjectPoolReferences } from "./projects";
 import { installAgent, getAgentById, uninstallAgent } from "../mcp/registry";
 import { getSource as getMarketSource } from "../marketplace";
 import type { FirmOrgNode, InstalledFirm } from "../../shared/types";
@@ -152,6 +153,9 @@ export function uninstallFirm(id: string): void {
       throw new Error("Firm removal tried to delete an installed agent or conversation; rolled back.");
     }
   })();
+  // The team row is gone, so a project staging that team is staging nothing.
+  // The pool is JSON in a TEXT column and has no FK to cascade through.
+  detachProjectPoolReferences({ firmIds: [id] });
   emitDesktopStoreChange({ entity: "firm", id });
   // ON DELETE SET NULL changes the projected target of former firm chats.
   emitDesktopStoreChange({ entity: "chat" });

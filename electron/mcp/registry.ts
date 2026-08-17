@@ -15,7 +15,8 @@ import {
 } from "../cloud-agents/registry-transaction";
 import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
 import { installFromCatalog } from "../mcp-tools/registry";
-import { replaceInstalledAgentHubBinding } from "../ontology/hub-bindings";
+import { getInstalledAgentHubBinding, replaceInstalledAgentHubBinding } from "../ontology/hub-bindings";
+import { detachProjectPoolReferences } from "../store/projects";
 import { dedupeLocalInstalledAgents } from "../store/agent-dedupe";
 import type { SeedListingFull } from "../marketplace/source";
 import type {
@@ -450,10 +451,26 @@ export function uninstallAgent(id: string): void {
     );
   }
 
+  // Read the identities this agent can be referenced by BEFORE the row and its
+  // cascading binding disappear: the installed id, the slug a Cloud/Hub catalog
+  // row carries, and the exact Hub definition id a synced bookmark row uses.
+  const identity = db
+    .prepare("SELECT slug FROM installed_agents WHERE id = ?")
+    .get(id) as { slug?: string } | undefined;
+  const binding = getInstalledAgentHubBinding(id);
+
   const deleted = db.prepare("DELETE FROM installed_agents WHERE id = ?").run(id).changes > 0;
   // 로컬 임포트 라우팅도 정리 (원본 폴더는 건드리지 않음).
   if (deleted) {
     removeRoute(id);
+    // A removed agent must not keep staffing projects. This is the consequence
+    // of removal itself, so every surface that can remove an agent gets it.
+    detachProjectPoolReferences({
+      agentIds: [id],
+      remoteTargetIds: [identity?.slug, binding?.agentDefinitionId].filter(
+        (value): value is string => Boolean(value),
+      ),
+    });
     emitDesktopStoreChange({ entity: "agent", id });
   }
 }

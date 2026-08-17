@@ -2,6 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { getDb } from "./db";
 import { emitDesktopStoreChange } from "./change-bus";
+import { projectPoolMemberReferences } from "../../shared/project-agent-pool";
 import type { Project, ProjectAgentPoolMember, ProjectSourceType } from "../../shared/types";
 
 interface ProjectRow {
@@ -162,6 +163,44 @@ export function updateProject(
   const project = getProject(id) as Project;
   emitDesktopStoreChange({ entity: "project", id });
   return project;
+}
+
+/**
+ * Explicit removal must reach the project pools that reference the asset.
+ *
+ * The pool is JSON in a TEXT column, so the "project references follow their
+ * existing SQLite FK contracts" assumption never held — nothing cascades here.
+ * Detachment used to live in the agents page as two hand-written filters keyed
+ * on local ids only (`member.agentId`, `member.firmId`), which meant a Cloud or
+ * Hub row — whose agentId is null and whose targetId is a slug or definition id
+ * — survived every delete and kept showing up in the project forever. Any other
+ * removal surface skipped detachment entirely.
+ *
+ * Making it a consequence of the removal itself covers every caller, and it
+ * matches identity the way the roster builds it: local rows by installed id or
+ * firm id, remote rows by their own source-namespace target id.
+ */
+export function detachProjectPoolReferences(refs: {
+  agentIds?: readonly string[];
+  firmIds?: readonly string[];
+  remoteTargetIds?: readonly string[];
+}): number {
+  const agentIds = new Set((refs.agentIds ?? []).filter(Boolean));
+  const firmIds = new Set((refs.firmIds ?? []).filter(Boolean));
+  const remoteTargetIds = new Set(
+    (refs.remoteTargetIds ?? []).map((value) => String(value ?? "").trim().toLowerCase()).filter(Boolean),
+  );
+  if (agentIds.size === 0 && firmIds.size === 0 && remoteTargetIds.size === 0) return 0;
+
+  const removed = { agentIds, firmIds, remoteTargetIds };
+  let detached = 0;
+  for (const project of listProjects()) {
+    const kept = project.agentPool.filter((member) => !projectPoolMemberReferences(member, removed));
+    if (kept.length === project.agentPool.length) continue;
+    detached += project.agentPool.length - kept.length;
+    updateProject(project.id, { agentPool: kept });
+  }
+  return detached;
 }
 
 export function removeProject(id: string): void {

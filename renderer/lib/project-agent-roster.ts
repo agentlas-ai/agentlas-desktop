@@ -82,6 +82,101 @@ function installedSource(agent: InstalledAgent, binding: InstalledAgentExactBind
   return "local";
 }
 
+/**
+ * Staging a tool in a project is SELECTION, not INVOCATION.
+ *
+ * v0.9.76 made every remote row require a Hub exact pair
+ * (agentDefinitionId + agentReleaseId) before it could be selected. No server
+ * surface that feeds this roster returns that pair: the owner shelf comes from
+ * `cargo.search_agents`, whose projection carries cloudId/manifestId/revision/
+ * packageHash and never a definition/release, and the Hub search projection
+ * drops both fields outright. The gate was therefore unsatisfiable — the entire
+ * "내 에이전트" section was permanently disabled, and so was every installed
+ * agent restored from Cloud without a public Hub registration.
+ *
+ * The Mobile Bridge hit this exact defect first and recorded the measurement
+ * (`shared/mobile-bridge.ts`: "requiring a Hub binding to show a cloud row hid
+ * the owner's entire shelf — measured: 50 rows, 1 shown"). Its answer was to
+ * let cloud identity be cloud-shaped instead of fabricating a Hub pair. This is
+ * the same answer for the Desktop roster: each source resolves its identity in
+ * its OWN namespace, and the exact-release authority stays where a remote call
+ * is actually prepared — `workforce-orchestrator` still requires a definition
+ * and release id on every pin, fail-closed, before anything is invoked.
+ *
+ * targetId keeps the pre-v0.9.76 derivation (`agentDefinitionId ?? slug`) so
+ * saved pools are not orphaned: for cloud rows that has always resolved to the
+ * slug, and for Hub rows it keeps the exact definition id whenever the Hub
+ * supplies one.
+ */
+function remoteReleasePin(listing: MarketplaceListing): string | null {
+  const exact = listing.agentReleaseId?.trim();
+  if (exact) return exact;
+  const revision = listing.revision === undefined || listing.revision === null
+    ? ""
+    : String(listing.revision).trim();
+  if (revision) return revision;
+  return listing.packageHash?.trim() || null;
+}
+
+/**
+ * Pool members for installed assets, exported so the agents page's "attach to
+ * project" buttons stage exactly what this roster stages. Those buttons used to
+ * derive their own members behind their own copies of the Hub-pair gate, so an
+ * asset could be selectable in one screen and refused in the other.
+ */
+export function installedAgentPoolMember(
+  agent: InstalledAgent,
+  binding: InstalledAgentExactBinding | null,
+  locale: Locale,
+): ProjectAgentPoolMember {
+  return {
+    entityKind: "agent",
+    targetId: binding?.agentDefinitionId ?? agent.id,
+    agentId: agent.id,
+    firmId: null,
+    controllerAgentId: null,
+    source: installedSource(agent, binding),
+    releaseId: binding?.agentReleaseId ?? null,
+    nameSnapshot: pickLocalized(agent, locale).name,
+  };
+}
+
+export function installedTeamPoolMember(
+  agent: InstalledAgent,
+  binding: InstalledAgentExactBinding | null,
+  locale: Locale,
+): ProjectAgentPoolMember {
+  return {
+    entityKind: "team",
+    targetId: binding?.agentDefinitionId ?? agent.id,
+    agentId: null,
+    firmId: null,
+    controllerAgentId: null,
+    source: installedSource(agent, binding),
+    releaseId: binding?.agentReleaseId ?? null,
+    nameSnapshot: pickLocalized(agent, locale).name,
+  };
+}
+
+export function firmPoolMember(
+  firm: InstalledFirm,
+  ceo: InstalledAgent,
+  ceoBinding: InstalledAgentExactBinding | null,
+  locale: Locale,
+): ProjectAgentPoolMember {
+  return {
+    entityKind: "team",
+    targetId: firm.id,
+    agentId: null,
+    firmId: firm.id,
+    controllerAgentId: ceo.id,
+    source: installedSource(ceo, ceoBinding),
+    // Never the controller's release: a team is keyed by the firm alone.
+    releaseId: null,
+    nameSnapshot: pickLocalized(firm, locale).name,
+  };
+}
+
 function installedProjectCandidate(
   agent: InstalledAgent,
   locale: Locale,
@@ -89,18 +184,10 @@ function installedProjectCandidate(
 ): ProjectRosterCandidate {
   const localized = pickLocalized(agent, locale);
   const source = installedSource(agent, binding);
-  const exactRemote = source === "local" || Boolean(binding?.agentDefinitionId && binding?.agentReleaseId);
+  // An installed agent executes from the local registry. Its provenance decides
+  // which section it sits in, never whether it can be staged.
   const sourceAvailable = !agent.sourceMissingSince;
-  const member: ProjectAgentPoolMember = {
-    entityKind: "agent",
-    targetId: binding?.agentDefinitionId ?? agent.id,
-    agentId: agent.id,
-    firmId: null,
-    controllerAgentId: null,
-    source,
-    releaseId: binding?.agentReleaseId ?? null,
-    nameSnapshot: localized.name,
-  };
+  const member = installedAgentPoolMember(agent, binding, locale);
   return {
     key: projectPoolMemberKey(member),
     member,
@@ -109,12 +196,10 @@ function installedProjectCandidate(
     source,
     kind: "agent",
     installed: true,
-    callable: isUserFacingProjectAgent(agent) && exactRemote && sourceAvailable,
-    blockedReason: !sourceAvailable
-      ? (locale === "ko" ? "로컬 원본 경로 연결이 끊겼습니다." : "The local source path is disconnected.")
-      : !exactRemote
-        ? (locale === "ko" ? "정확한 Definition ID와 릴리스 확인 필요" : "Exact Definition ID and release required")
-        : undefined,
+    callable: isUserFacingProjectAgent(agent) && sourceAvailable,
+    blockedReason: sourceAvailable
+      ? undefined
+      : (locale === "ko" ? "로컬 원본 경로 연결이 끊겼습니다." : "The local source path is disconnected."),
   };
 }
 
@@ -125,17 +210,8 @@ function installedTeamProjectCandidate(
 ): ProjectRosterCandidate {
   const localized = pickLocalized(agent, locale);
   const source = installedSource(agent, binding);
-  const hasExactRemoteBinding = source !== "local" && Boolean(binding?.agentDefinitionId && binding?.agentReleaseId);
-  const member: ProjectAgentPoolMember = {
-    entityKind: "team",
-    targetId: binding?.agentDefinitionId ?? agent.id,
-    agentId: null,
-    firmId: null,
-    controllerAgentId: null,
-    source,
-    releaseId: binding?.agentReleaseId ?? null,
-    nameSnapshot: localized.name,
-  };
+  const sourceAvailable = !agent.sourceMissingSince;
+  const member = installedTeamPoolMember(agent, binding, locale);
   return {
     key: projectPoolMemberKey(member),
     member,
@@ -144,12 +220,13 @@ function installedTeamProjectCandidate(
     source,
     kind: "team",
     installed: true,
-    callable: hasExactRemoteBinding,
-    blockedReason: hasExactRemoteBinding
+    // An imported team runs through its own installed package, exactly like an
+    // imported agent. Requiring a Hub release here disabled every locally
+    // imported and Cloud-restored team, which are the common cases.
+    callable: sourceAvailable,
+    blockedReason: sourceAvailable
       ? undefined
-      : (locale === "ko"
-          ? "독립 팀은 팀 자체의 정확한 Definition ID와 릴리스가 필요합니다."
-          : "A standalone team requires its own exact Definition ID and release."),
+      : (locale === "ko" ? "로컬 원본 경로 연결이 끊겼습니다." : "The local source path is disconnected."),
   };
 }
 
@@ -168,10 +245,13 @@ function remoteProjectCandidate(
     firmId: null,
     controllerAgentId: null,
     source,
-    releaseId: listing.agentReleaseId ?? null,
+    releaseId: remoteReleasePin(listing),
     nameSnapshot: localized.name,
   };
-  const hasExactBinding = Boolean(listing.agentDefinitionId && listing.agentReleaseId);
+  // A row is selectable when it resolves to an identity in its own source
+  // namespace. A listing with no slug and no definition id is not an asset at
+  // all — that is the only remote row this surface refuses.
+  const hasIdentity = Boolean(targetId.trim());
   return {
     key: projectPoolMemberKey(member),
     member,
@@ -180,10 +260,10 @@ function remoteProjectCandidate(
     source,
     kind: entityKind,
     installed: false,
-    callable: hasExactBinding,
-    blockedReason: hasExactBinding
+    callable: hasIdentity,
+    blockedReason: hasIdentity
       ? undefined
-      : (locale === "ko" ? "정확한 Definition ID와 릴리스 확인 필요" : "Exact Definition ID and release required"),
+      : (locale === "ko" ? "이 목록 행에는 식별자가 없습니다." : "This catalog row carries no identity."),
   };
 }
 
@@ -206,11 +286,24 @@ export function buildProjectRosterSections(
   const roster = buildAgentRoster(safeAgents, safeFirms);
   const installedExactRemote = new Set(safeExactBindings.map((binding) =>
     `${bindingSource(binding)}:${binding.agentDefinitionId}:${binding.agentReleaseId}`));
-  const listingAlreadyInstalled = (listing: MarketplaceListing, source: "cloud" | "hub") => Boolean(
-    listing.agentDefinitionId
-    && listing.agentReleaseId
-    && installedExactRemote.has(`${source}:${listing.agentDefinitionId}:${listing.agentReleaseId}`),
+  // Local ownership wins over a remote catalog row. The exact-pair test alone
+  // could never fire for a cloud row (that pair does not exist on the shelf), so
+  // an agent already installed from Cloud was listed twice: once as an installed
+  // row and once as a shelf row. Slug is the identity the organization chart and
+  // the Hub bookmark helper already dedupe on; this surface now uses the same
+  // authority instead of a third private rule.
+  const installedSlugs = new Set(
+    safeAgents.map((agent) => String(agent.slug ?? "").trim().toLowerCase()).filter(Boolean),
   );
+  const listingAlreadyInstalled = (listing: MarketplaceListing, source: "cloud" | "hub") => {
+    const slug = String(listing.slug ?? "").trim().toLowerCase();
+    if (slug && installedSlugs.has(slug)) return true;
+    return Boolean(
+      listing.agentDefinitionId
+      && listing.agentReleaseId
+      && installedExactRemote.has(`${source}:${listing.agentDefinitionId}:${listing.agentReleaseId}`),
+    );
+  };
   const visibleRemoteListing = (listing: MarketplaceListing) => (
     listing.visibility !== "background" && listing.visibility !== "private"
   );
@@ -227,17 +320,7 @@ export function buildProjectRosterSections(
     if (!ceo || !isUserFacingProjectAgent(ceo)) continue;
     const ceoBinding = bindingByInstalledId.get(ceo.id) ?? null;
     const source = installedSource(ceo, ceoBinding);
-    const remoteControllerOnly = source !== "local" || ceo.assetSource === "hub" || ceo.assetSource === "agent-cloud";
-    const teamMember: ProjectAgentPoolMember = {
-      entityKind: "team",
-      targetId: firm.id,
-      agentId: null,
-      firmId: firm.id,
-      controllerAgentId: ceo.id,
-      source,
-      releaseId: null,
-      nameSnapshot: pickLocalized(firm, locale).name,
-    };
+    const teamMember = firmPoolMember(firm, ceo, ceoBinding, locale);
     const team: ProjectRosterCandidate = {
       key: projectPoolMemberKey(teamMember),
       member: teamMember,
@@ -246,12 +329,12 @@ export function buildProjectRosterSections(
       source,
       kind: "team",
       installed: true,
-      callable: !remoteControllerOnly,
-      blockedReason: remoteControllerOnly
-        ? (locale === "ko"
-            ? "컨트롤러 릴리스는 팀 릴리스가 아닙니다. 팀 자체의 정확한 ID·릴리스 확인이 필요합니다."
-            : "A controller release is not a team release. The team's own exact identity and release are required.")
-        : undefined,
+      // "A controller release is not a team release" was the right rule, and it
+      // is already satisfied structurally: this member is keyed by firm.id with
+      // releaseId null, so the CEO's release can never stand in for the team's.
+      // Blocking selection on top of that added nothing and disabled every firm
+      // whose CEO came from Cloud or Hub.
+      callable: true,
     };
     const orderedIds = [firm.ceoAgentId, ...firm.orgChart.map((node) => node.agentId)];
     const seen = new Set<string>();
@@ -285,7 +368,11 @@ export function buildProjectRosterSections(
     if (listingAlreadyInstalled(listing, "cloud") || !visibleRemoteListing(listing)) continue;
     sectionBySource.get("cloud")?.standalone.push(remoteProjectCandidate(listing, "cloud", locale));
   }
-  for (const bookmark of hubBookmarksWithoutLocalDuplicates(safeHubBookmarks)) {
+  // Every other caller of this helper (organization chart, chat context) passes
+  // the installed agents so a locally owned asset hides its Hub reference. This
+  // surface was the only one that omitted them, which is why the same asset
+  // could appear under both the organization chart and the project Hub section.
+  for (const bookmark of hubBookmarksWithoutLocalDuplicates(safeHubBookmarks, safeAgents)) {
     if (!visibleRemoteListing(bookmark.listing)) continue;
     if (listingAlreadyInstalled(bookmark.listing, "hub")) continue;
     sectionBySource.get("hub")?.standalone.push(remoteProjectCandidate(bookmark.listing, "hub", locale));

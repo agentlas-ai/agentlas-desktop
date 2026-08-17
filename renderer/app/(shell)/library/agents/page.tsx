@@ -14,6 +14,16 @@ import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import { AgentMemorySaveQueue, parseMemoryMarkdown, type ParsedMemory } from "@/lib/agent-memory";
 import { cliModelTagLabel } from "@shared/models";
+import {
+  projectPoolMemberKey,
+  projectPoolMemberReferences,
+  type ProjectPoolReferenceSet,
+} from "@shared/project-agent-pool";
+import {
+  firmPoolMember,
+  installedAgentPoolMember,
+  installedTeamPoolMember,
+} from "@/lib/project-agent-roster";
 import type {
   AgentEvolutionProposalUi,
   AgentLearningSummary,
@@ -101,6 +111,32 @@ function projectPoolHasTarget(
   return Boolean(project?.agentPool.some((member) => entityKind === "team"
     ? member.entityKind === "team" && member.firmId === localTargetId
     : member.entityKind === "agent" && member.agentId === localTargetId));
+}
+
+/**
+ * Which projects a removal actually touches.
+ *
+ * The confirm dialog used to count only local rows (`member.agentId`,
+ * `member.firmId`), so deleting an asset the user had staged from Cloud or Hub
+ * promised "0 projects affected" and then left the row behind. The store owns
+ * the detach now; this shares its predicate so the warning tells the truth.
+ */
+function projectsReferencing(projects: Project[], refs: ProjectPoolReferenceSet): Project[] {
+  return projects.filter((project) => project.agentPool.some((member) => projectPoolMemberReferences(member, refs)));
+}
+
+function removalReferenceSet(input: {
+  agentIds?: Array<string | null | undefined>;
+  firmIds?: Array<string | null | undefined>;
+  remoteTargetIds?: Array<string | null | undefined>;
+}): ProjectPoolReferenceSet {
+  const clean = (values: Array<string | null | undefined> | undefined) =>
+    new Set((values ?? []).map((value) => String(value ?? "").trim()).filter(Boolean));
+  return {
+    agentIds: clean(input.agentIds),
+    firmIds: clean(input.firmIds),
+    remoteTargetIds: new Set([...clean(input.remoteTargetIds)].map((value) => value.toLowerCase())),
+  };
 }
 
 function ProjectAttachControl({
@@ -666,32 +702,22 @@ function LibraryAgentsView() {
       return;
     }
     const exactBinding = exactBindings.find((binding) => binding.installedAgentId === agent.id) ?? null;
-    const remoteSource = agent.assetSource === "hub" || agent.assetSource === "agent-cloud";
-    if (remoteSource && !exactBinding) {
+    // No Hub-pair gate here. An installed agent executes from the local
+    // registry, and a Cloud restore without a public Hub registration can never
+    // acquire that pair — the old refusal told the user to "re-import or
+    // restore", which could not have helped. The project roster stages the same
+    // asset under the same rule; both call the one member builder.
+    if (agent.sourceMissingSince) {
       showToast(locale === "ko"
-        ? "정확한 원격 릴리스를 확인할 수 없어 장착하지 않았습니다. 다시 가져오거나 복원해 주세요."
-        : "This tool has no verified exact remote release. Re-import or restore it before attaching.");
+        ? "로컬 원본 경로 연결이 끊겨 장착하지 않았습니다. 원본을 다시 연결해 주세요."
+        : "The local source path is disconnected, so nothing was attached. Reconnect the source first.");
       return;
     }
-    const source = exactBinding?.source === "hub-install"
-      ? "hub"
-      : exactBinding?.source === "agent-cloud-restore"
-        ? "cloud"
-        : "local";
     try {
       const updated = await api.projects.update(project.id, {
         agentPool: [
           ...project.agentPool,
-          {
-            entityKind: "agent",
-            targetId: exactBinding?.agentDefinitionId ?? agent.id,
-            agentId: agent.id,
-            firmId: null,
-            controllerAgentId: null,
-            source,
-            releaseId: exactBinding?.agentReleaseId ?? null,
-            nameSnapshot: agentDisplayName(agent, locale),
-          },
+          installedAgentPoolMember(agent, exactBinding, locale),
         ],
       });
       setProjects((current) => current.map((item) => item.id === updated.id ? updated : item));
@@ -713,27 +739,17 @@ function LibraryAgentsView() {
       showToast(locale === "ko" ? "이미 이 프로젝트에 장착된 팀입니다." : "This team is already attached to the project.");
       return;
     }
-    const remoteSource = controller.assetSource === "hub" || controller.assetSource === "agent-cloud";
-    if (remoteSource) {
-      showToast(locale === "ko"
-        ? "컨트롤러 에이전트 릴리스를 팀 릴리스로 대신 사용할 수 없습니다. 팀 자체의 정확한 ID·릴리스 바인딩이 제공될 때까지 장착하지 않습니다."
-        : "A controller agent release cannot stand in for a team release. Attachment stays blocked until the team has its own exact identity and release binding.");
-      return;
-    }
+    // "A controller release cannot stand in for a team release" is satisfied by
+    // the member shape itself: keyed on firm.id with releaseId null, the CEO's
+    // release can never be mistaken for the team's. Refusing on top of that
+    // blocked every firm whose controller came from Cloud or Hub, which is most
+    // installed teams.
+    const controllerBinding = exactBindings.find((binding) => binding.installedAgentId === controller.id) ?? null;
     try {
       const updated = await api.projects.update(project.id, {
         agentPool: [
           ...project.agentPool,
-          {
-            entityKind: "team",
-            targetId: firm.id,
-            agentId: null,
-            firmId: firm.id,
-            controllerAgentId: controller.id,
-            source: "local",
-            releaseId: null,
-            nameSnapshot: pickLocalized(firm, locale).name,
-          },
+          firmPoolMember(firm, controller, controllerBinding, locale),
         ],
       });
       setProjects((current) => current.map((item) => item.id === updated.id ? updated : item));
@@ -747,33 +763,28 @@ function LibraryAgentsView() {
     const api = ipc();
     const project = projects.find((item) => item.id === activeProjectId) ?? null;
     const binding = exactBindings.find((item) => item.installedAgentId === team.id) ?? null;
-    const source = binding?.source === "hub-install" ? "hub" : binding?.source === "agent-cloud-restore" ? "cloud" : null;
     if (!api || !project) {
       showToast(locale === "ko" ? "장착할 프로젝트를 선택하세요." : "Choose a project to attach this team to.");
       return;
     }
-    if (!binding || !source) {
+    // An imported team runs through its own installed package. Demanding a Hub
+    // definition and release refused every locally imported and Cloud-restored
+    // team; the exact pin is carried when the Hub supplies one and asserted
+    // where a remote call is actually prepared.
+    if (team.sourceMissingSince) {
       showToast(locale === "ko"
-        ? "독립 팀은 팀 자체의 정확한 Definition ID와 릴리스가 확인되어야 장착할 수 있습니다."
-        : "A standalone team needs its own exact Definition ID and release before attachment.");
+        ? "로컬 원본 경로 연결이 끊겨 장착하지 않았습니다. 원본을 다시 연결해 주세요."
+        : "The local source path is disconnected, so nothing was attached. Reconnect the source first.");
       return;
     }
-    if (projectPoolHasTarget(project, "team", binding.agentDefinitionId)) {
+    const member = installedTeamPoolMember(team, binding, locale);
+    if (project.agentPool.some((existing) => projectPoolMemberKey(existing) === projectPoolMemberKey(member))) {
       showToast(locale === "ko" ? "이미 이 프로젝트에 장착된 팀입니다." : "This team is already attached to the project.");
       return;
     }
     try {
       const updated = await api.projects.update(project.id, {
-        agentPool: [...project.agentPool, {
-          entityKind: "team",
-          targetId: binding.agentDefinitionId,
-          agentId: null,
-          firmId: null,
-          controllerAgentId: null,
-          source,
-          releaseId: binding.agentReleaseId,
-          nameSnapshot: agentDisplayName(team, locale),
-        }],
+        agentPool: [...project.agentPool, member],
       });
       setProjects((current) => current.map((item) => item.id === updated.id ? updated : item));
       showToast(locale === "ko" ? `${updated.name} 프로젝트에 팀 도구를 장착했습니다.` : `Attached the team tool to ${updated.name}.`);
@@ -1112,7 +1123,10 @@ function LibraryAgentsView() {
     const api = ipc();
     if (!api || !agent) return;
     const displayName = agentDisplayName(agent, locale);
-    const affectedProjects = projects.filter((project) => projectPoolHasTarget(project, "agent", agent.id));
+    const affectedProjects = projectsReferencing(
+      projects,
+      removalReferenceSet({ agentIds: [agent.id], remoteTargetIds: [agent.slug] }),
+    );
     const impact = affectedProjects.length > 0
       ? (locale === "ko"
           ? `\n\n장착 해제될 프로젝트 ${affectedProjects.length}개: ${affectedProjects.map((project) => project.name).join(", ")}`
@@ -1132,11 +1146,10 @@ function LibraryAgentsView() {
       ? `'${displayName}'을(를) 조직도에서 삭제할까요? ${sourceLabel}합니다.${impact}`
       : `Delete '${displayName}' from the organization chart? ${sourceLabel}.${impact}`)) return;
     try {
-      for (const project of affectedProjects) {
-        await api.projects.update(project.id, {
-          agentPool: project.agentPool.filter((member) => member.agentId !== agent.id),
-        });
-      }
+      // Detachment is a consequence of the removal itself now
+      // (electron/store/projects.ts detachProjectPoolReferences), so every
+      // removal surface gets it and a remote row can no longer outlive its
+      // asset. This screen only reports the impact.
       if (source === "cloud") await api.marketplace.deleteMine(agent.slug);
       if (source === "hub") await api.marketplace.bookmarkRemove(agent.slug, agent.kind === "team" ? "team" : "agent");
       const removal = await api.team.uninstall(agent.id, { removeSource: source === "local" });
@@ -1154,12 +1167,15 @@ function LibraryAgentsView() {
     const api = ipc();
     if (!api || !firm) return;
     const name = pickLocalized(firm, locale).name;
-    const firmAgentIds = new Set([firm.ceoAgentId, ...firm.orgChart.flatMap((node) => node.agentId ? [node.agentId] : [])]);
-    const affectedProjects = projects.filter((project) => project.agentPool.some((member) => (
-      member.entityKind === "team"
-        ? member.firmId === firm.id
-        : Boolean(member.agentId && firmAgentIds.has(member.agentId))
-    )));
+    const firmAgentIds = [firm.ceoAgentId, ...firm.orgChart.flatMap((node) => node.agentId ? [node.agentId] : [])];
+    const affectedProjects = projectsReferencing(
+      projects,
+      removalReferenceSet({
+        agentIds: firmAgentIds,
+        firmIds: [firm.id],
+        remoteTargetIds: firmAgentIds.map((agentId) => agents.find((item) => item.id === agentId)?.slug),
+      }),
+    );
     const impact = affectedProjects.length > 0
       ? (locale === "ko"
           ? `\n\n장착 해제될 프로젝트 ${affectedProjects.length}개: ${affectedProjects.map((project) => project.name).join(", ")}`
@@ -1180,13 +1196,7 @@ function LibraryAgentsView() {
       ? `'${name}' 팀을 조직도에서 완전히 삭제할까요? ${sourceLabel}합니다. 팀 멤버 설치 행과 장착 참조도 함께 정리합니다.${impact}`
       : `Permanently delete '${name}' from the organization chart? ${sourceLabel}. Team member installs and attachments will also be cleaned up.${impact}`)) return;
     try {
-      for (const project of affectedProjects) {
-        await api.projects.update(project.id, {
-          agentPool: project.agentPool.filter((member) => member.entityKind === "team"
-            ? member.firmId !== firm.id
-            : !member.agentId || !firmAgentIds.has(member.agentId)),
-        });
-      }
+      // See removeInstalledAgent: the store detaches on removal.
       if (source === "cloud" && controller) await api.marketplace.deleteMine(controller.slug);
       if (source === "hub" && controller) await api.marketplace.bookmarkRemove(controller.slug, "team");
       const removal = await api.firms.uninstall(firm.id, { removeMembers: true, removeSource: source === "local" });
