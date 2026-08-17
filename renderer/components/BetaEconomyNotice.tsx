@@ -1,16 +1,16 @@
 "use client";
 
-// The Real Economy beta notice — Desktop.
+// The Agentlas Build Competition notice — Desktop.
 //
 // SAME FACTS AS THE WEB DIALOG, ON PURPOSE
 //   Earnings are not paid out yet, calls may be unstable, and a contest closes
 //   on a date. Someone who reads it in the browser and then opens Desktop must
-//   not get a different deadline or a different promise. The constant and the
-//   dismissal rule below are deliberately identical to
+//   not get a different deadline, a different prize, or different rules. The
+//   constant and the dismissal rule below are deliberately identical to
 //   AgentsAtlas/app/src/components/views/BetaEconomyNotice.tsx.
 //
 // WHY IT IS NOT SHARED CODE
-//   The two products do not share a bundle. Copying twenty lines is the honest
+//   The two products do not share a bundle. Copying the content is the honest
 //   cost; a package would be a bigger commitment than the notice is worth, and
 //   both sides carry a gate asserting the same facts so they cannot drift
 //   silently.
@@ -25,6 +25,9 @@ import { useT } from "@/lib/i18n";
 
 /** When the beta closes. Must equal the web constant. */
 export const BETA_ENDS_AT = "2026-09-30T23:59:59+09:00";
+
+/** Dispatch this to open the dialog on demand, bypassing the snooze. */
+export const OPEN_BUILD_NOTICE_EVENT = "agentlas:open-build-notice";
 
 const STORAGE_KEY = "agentlas.beta-economy-notice.snoozed-until";
 const SNOOZE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -57,6 +60,12 @@ export function BetaEconomyNotice() {
       stored = null;
     }
     if (shouldShowNotice(stored, Date.now(), endsAt)) setOpen(true);
+  }, []);
+
+  useEffect(() => {
+    const onExternalOpen = () => setOpen(true);
+    window.addEventListener(OPEN_BUILD_NOTICE_EVENT, onExternalOpen);
+    return () => window.removeEventListener(OPEN_BUILD_NOTICE_EVENT, onExternalOpen);
   }, []);
 
   useEffect(() => {
@@ -100,7 +109,8 @@ export function BetaEconomyNotice() {
         style={card}
       >
         <span style={kicker}>{ko ? "허브 네트워크" : "HUB NETWORK"}</span>
-        <h2 style={title}>{ko ? "Real Economy를 시작합니다" : "Real Economy starts now"}</h2>
+        <h2 style={title}>Agentlas Build Competition</h2>
+        <p style={subtitle}>{ko ? "총 상금 260 USDC" : "Total 260 USDC Prize"}</p>
 
         <p style={body}>
           {ko
@@ -108,28 +118,51 @@ export function BetaEconomyNotice() {
             : "This is a beta. Earnings will not be paid out until the full launch, and servers and network calls may be unstable."}
         </p>
 
-        <div style={prize}>
-          <strong style={{ fontSize: 13.5 }}>
-            {ko ? `베타 기간: ${deadlineLabel}까지` : `Beta runs through ${deadlineLabel}`}
-          </strong>
-          <p style={{ ...body, margin: "6px 0 0", fontSize: 12.5 }}>
-            {ko
-              ? "기간 동안 에이전트 호출 수가 가장 많은 제작자 세 분께 USDC를 드립니다."
-              : "The three creators whose agents are called the most in that time receive USDC."}
-          </p>
-          <div style={ranks}>
-            {([["1st", "$100"], ["2nd", "$50"], ["3rd", "$10"]] as const).map(([rank, amount]) => (
-              <div key={rank} style={rankBox}>
-                <span style={{ fontSize: 10.5, color: "var(--muted-deep)" }}>{rank}</span>
-                <strong style={{ fontSize: 18 }}>{amount}</strong>
-              </div>
+        <div style={flowRulesGrid}>
+          <ol style={flow} aria-label={ko ? "참여 순서" : "How it works"}>
+            {[
+              ko ? "에이전트 만들기" : "Agent Build",
+              ko ? "Agent Hub 업로드 (마켓플레이스)" : "Agent Hub Upload (Marketplace)",
+              ko ? "누군가 에이전트를 호출" : "Someone calls your Agent",
+              ko ? `${deadlineLabel} 이후 USDC 지급` : `You get USDC after ${deadlineLabel}`,
+            ].map((step, index, steps) => (
+              <li key={step} style={flowStep}>
+                <span style={flowStepBox}>{step}</span>
+                {index < steps.length - 1 && (
+                  <span style={flowArrow} aria-hidden="true">
+                    ↓
+                  </span>
+                )}
+              </li>
             ))}
+          </ol>
+
+          <div style={rules}>
+            <strong style={rulesTitle}>{ko ? "참가 규정" : "Rules"}</strong>
+            <ol style={rulesList}>
+              {(ko
+                ? [
+                    "기존 마켓플레이스에서 포크한 에이전트는 참여할 수 없습니다.",
+                    "배포한 에이전트 개수가 여러 개일 경우, 가장 호출 수가 많은 에이전트 하나로 평가합니다.",
+                    "보편적 통념상 반사회적, 마약, 총기 및 각국 법률에 저촉되는 내용의 에이전트는 수상에서 제외됩니다.",
+                    "본인이 만든 에이전트를 본인이 부를 경우 이벤트 호출에 포함되지 않습니다.",
+                    "이벤트 내용과 일정은 주최측 사정에 따라 변경될 수 있습니다.",
+                  ]
+                : [
+                    "Agents forked from the existing marketplace cannot take part.",
+                    "If a creator has deployed more than one agent, only the one with the most calls is scored.",
+                    "Agents whose content is widely considered antisocial, involves drugs or firearms, or violates any country's laws are excluded from winning.",
+                    "Calling an agent you made yourself does not count toward the event's call total.",
+                    "Event details and schedule may change at the organizer's discretion.",
+                  ]
+              ).map((rule, index) => (
+                <li key={index} style={rulesItem}>
+                  {rule}
+                </li>
+              ))}
+            </ol>
           </div>
         </div>
-
-        <p style={{ ...body, fontSize: 13 }}>
-          {ko ? "많은 참여 부탁드립니다." : "We would love to have you take part."}
-        </p>
 
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 18 }}>
           <button type="button" ref={primaryRef} onClick={() => setOpen(false)} style={primary}>
@@ -155,7 +188,7 @@ const backdrop: CSSProperties = {
 };
 
 const card: CSSProperties = {
-  width: "min(440px, calc(100vw - 40px))",
+  width: "min(520px, calc(100vw - 40px))",
   maxHeight: "calc(100vh - 40px)",
   overflowY: "auto",
   padding: "22px 22px 18px",
@@ -191,7 +224,17 @@ const body: CSSProperties = {
   wordBreak: "keep-all",
 };
 
-const prize: CSSProperties = {
+const subtitle: CSSProperties = {
+  margin: "4px 0 0",
+  fontSize: 13,
+  fontWeight: 700,
+  color: "var(--accent, #111)",
+};
+
+const flowRulesGrid: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "minmax(0, 0.9fr) minmax(0, 1.1fr)",
+  gap: 14,
   marginTop: 14,
   padding: "12px 14px 14px",
   border: "1px solid var(--paper-edge)",
@@ -199,21 +242,68 @@ const prize: CSSProperties = {
   background: "var(--surface-2, rgba(0,0,0,.02))",
 };
 
-const ranks: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-  gap: 8,
-  marginTop: 11,
+const flow: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "stretch",
+  // The rules column is almost always the taller one — this spreads the four
+  // steps across that same height instead of leaving dead space below the
+  // last arrow.
+  justifyContent: "space-between",
+  height: "100%",
+  margin: 0,
+  padding: 0,
+  listStyle: "none",
 };
 
-const rankBox: CSSProperties = {
+const flowStep: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  gap: 3,
+};
+
+const flowStepBox: CSSProperties = {
   display: "grid",
-  gap: 2,
-  justifyItems: "center",
-  padding: "8px 4px",
-  border: "1px solid var(--paper-edge)",
+  placeItems: "center",
+  width: "100%",
+  minHeight: 36,
+  padding: "5px 8px",
+  border: "1px solid var(--muted-deep)",
   borderRadius: 8,
   background: "var(--paper)",
+  fontSize: 10.5,
+  fontWeight: 700,
+  lineHeight: 1.25,
+  textAlign: "center",
+  wordBreak: "keep-all",
+};
+
+const flowArrow: CSSProperties = {
+  color: "var(--muted-deep)",
+  fontSize: 12,
+  lineHeight: 1,
+};
+
+const rules: CSSProperties = {
+  fontSize: 11,
+};
+
+const rulesTitle: CSSProperties = {
+  display: "block",
+  fontSize: 11.5,
+  fontWeight: 700,
+};
+
+const rulesList: CSSProperties = {
+  margin: "7px 0 0",
+  paddingLeft: 15,
+  color: "var(--muted-deep)",
+  lineHeight: 1.5,
+};
+
+const rulesItem: CSSProperties = {
+  marginTop: 5,
 };
 
 const primary: CSSProperties = {
