@@ -6967,6 +6967,12 @@ button[data-toggle-state="on"] {
   align-items: start;
 }
 
+/* 플러그인 카드는 브랜드 로고가 앞에 한 칸 더 붙는다. 이 규칙이 없으면 로고가
+   제목 열을 차지하고 카테고리 태그가 다음 줄로 떨어진다. */
+.rd .hub-card-head[data-with-logo="true"] {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
 .rd .hub-card-main {
   min-width: 0;
   display: grid;
@@ -6996,6 +7002,23 @@ button[data-toggle-state="on"] {
   line-height: 1.12;
   letter-spacing: 0;
   overflow-wrap: anywhere;
+}
+
+/* 제목이 소개 페이지로 들어가는 문일 때. button 기본 스타일(가운데 정렬·테두리·
+   배경)을 지워 제목 텍스트와 같은 모양으로 되돌린다. */
+.rd button.hub-card-title-link {
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rd button.hub-card-title-link:hover,
+.rd button.hub-card-title-link:focus-visible {
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 .rd .hub-card-author {
@@ -7255,6 +7278,10 @@ button[data-toggle-state="on"] {
 @container (max-width: 310px) {
   .rd .hub-card-head {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rd .hub-card-head[data-with-logo="true"] {
+    grid-template-columns: auto minmax(0, 1fr);
   }
 
   .rd .hub-credit-tag {
@@ -8769,6 +8796,13 @@ button[data-toggle-state="on"] {
   position: relative;
   display: flex;
   align-items: center;
+  /* Sub-items render as <a> for routes and <button> for dialogs (Telegram opens a
+     popup, not a page). A flex <button> inherits the UA's centring, so the button
+     row sat indented while its <a> siblings were flush — same markup, two
+     alignments. Pin the axis and width so the tag never decides the layout. */
+  justify-content: flex-start;
+  text-align: left;
+  width: 100%;
   gap: 9px;
   padding: 7px 10px;
   border-radius: 8px;

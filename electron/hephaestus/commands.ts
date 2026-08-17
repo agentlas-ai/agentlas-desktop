@@ -305,13 +305,58 @@ export function hepPackage(
 /** contract scaffold: 패키지 계약 템플릿을 워크스페이스에 복사(기존 파일은 절대 덮지 않음). */
 export function contractScaffold(
   folder: string,
-  opts: { mode?: "single" | "team" | "package"; id?: string; name?: string } & HephaestusRunOptions = {},
+  opts: {
+    mode?: "single" | "team" | "package";
+    id?: string;
+    name?: string;
+    /** Interview result. The engine refuses to scaffold without it (or an explicit opt-out). */
+    workBrief?: string;
+    minimalPrivateReason?: string;
+  } & HephaestusRunOptions = {},
 ): Promise<HephaestusResult> {
   const args = ["contract", "scaffold", assertPositional(folder, "folder")];
   if (opts.mode) args.push("--mode", opts.mode);
   if (opts.id) args.push("--id", opts.id);
   if (opts.name) args.push("--name", opts.name);
+  if (opts.workBrief) args.push("--work-brief", opts.workBrief);
+  if (opts.minimalPrivateReason) args.push("--minimal-private-reason", opts.minimalPrivateReason);
   return runHephaestus("agentlas_cloud", args, { timeoutMs: 60_000, ...opts });
+}
+
+/**
+ * contract complete: 패키지가 이미 선언한 사실만으로 채울 수 있는 산출물을 엔진이 채운다.
+ *
+ * 정본 `/hep-build` 5단계가 scaffold 직후 verify **전에** 반드시 돌리는 명령이다.
+ * agent.md, .agentlas/work-brief.json, .agentlas/sitemap.json,
+ * .agentlas/routing-benchmarks.jsonl, .agentlas/capability-eval-plan.json,
+ * docs/builder-interview.md, docs/research-sources.md, contracts/output.example.json
+ * 여덟 개를 라우팅 카드·로스터·스키마에서 파생시킨다. 사람이 쓴 본문은 덮지 않고
+ * 없는 사실을 지어내지도 않는다.
+ *
+ * 데스크탑에는 이 단계가 없어서(2026-08-16 실측) 모델이 여덟 개를 손으로 다 쓰지
+ * 못하면 verify가 막았다 — 화면에 "패키지 무결성 검증을 통과하지 못해 설치와 등록을
+ * 중지했습니다"로 나오던 그 상태다. 정본 주석의 측정값과 같은 증상:
+ * "the published corpus was missing these eight artifacts almost universally,
+ *  and every one of them was derivable."
+ */
+export function contractComplete(
+  folder: string,
+  opts: { mode?: "single" | "team" | "package" } & HephaestusRunOptions = {},
+): Promise<HephaestusResult> {
+  const args = ["contract", "complete", assertPositional(folder, "folder")];
+  if (opts.mode) args.push("--mode", opts.mode);
+  return runHephaestus("agentlas_cloud", args, { timeoutMs: 120_000, ...opts });
+}
+
+/** cards migrate: 생성된 패키지를 로컬 탐색에 등록(정본 9단계). 반드시 절대 패키지 경로로. */
+export function cardsMigrate(
+  packageRoot: string,
+  opts: { tier?: "local" | "cloud" | "hub"; overwrite?: boolean } & HephaestusRunOptions = {},
+): Promise<HephaestusResult> {
+  const args = ["cards", "migrate", assertPositional(packageRoot, "folder")];
+  if (opts.tier) args.push("--tier", opts.tier);
+  if (opts.overwrite) args.push("--overwrite");
+  return runHephaestus("agentlas_cloud", args, { timeoutMs: 120_000, ...opts });
 }
 
 /** contract verify: 패키지 계약 완결성 게이트 — blockers JSON은 모델 자가수리 워크리스트. */

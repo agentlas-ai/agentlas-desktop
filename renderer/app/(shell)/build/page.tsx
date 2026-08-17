@@ -50,6 +50,7 @@ import {
   chooseBuildLocalOnly,
   type Mode,
   type BuildAttachment,
+  reattachRunningBuild,
 } from "@/lib/build-session";
 import { buildScanDisposition, buildScanFindings, buildScanSeverityBucket } from "@/lib/build-scan";
 import type { ChatQuestion } from "@/components/ChatStream";
@@ -237,6 +238,10 @@ export default function BuildPage() {
 
   // 모듈 레벨 빌드 스토어 구독 — 다른 메뉴로 이동했다 돌아와도 진행 상태(로그·단계·결과·인터뷰)가 유지된다.
   const s = useSyncExternalStore(buildSubscribe, getBuildSnapshot, getBuildSnapshot);
+
+  // 앱을 다시 켜거나 새로고침해도 Main에서 돌고 있는 빌드에 다시 붙는다.
+  // (메뉴 이동은 모듈 스토어가 이미 지키므로 여기 대상이 아니다.)
+  useEffect(() => { void reattachRunningBuild(); }, []);
   const { request, mode, workspace, workspaceGrant, runtime, phase, log, reached, errored, recoverable, error: buildError, result, registered, registeredEntity, pendingQuestions, pendingAllocation, awaitingReply, turn, attachments, mcpPlan, mcpReceipt, cloudSaveChoice, liveness } = s;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -433,13 +438,34 @@ export default function BuildPage() {
     }
   };
 
+  // 빌드 화면은 런타임만 고르게 하고 모델은 못 고르게 돼 있었다 — Claude 안에서
+  // opus/sonnet 을 나눌 방법이 없어 "opus 왜 없어"가 나왔다. One 컴포저는 이미
+  // `runtime.listModels` 로 모델까지 고르므로, 같은 배선을 여기에도 쓴다.
+  const [modelsByRuntime, setModelsByRuntime] = useState<Record<string, Array<{ id: string; label: string }>>>({});
+  useEffect(() => {
+    const api = ipc();
+    if (!api || runtimes.length === 0) return;
+    let cancelled = false;
+    void Promise.all(runtimes.map(async (r) => {
+      const models = await api.runtime.listModels({
+        kind: r.kind, backend: r.backend, availableModels: r.availableModels,
+      }).catch(() => []);
+      return [`${r.kind}:${r.source}`, models.map((m) => ({ id: m.id, label: m.label }))] as const;
+    })).then((pairs) => { if (!cancelled) setModelsByRuntime(Object.fromEntries(pairs)); });
+    return () => { cancelled = true; };
+  }, [runtimes]);
+
   const onSelectRuntime = (key: string) => {
     if (!key) {
       setBuildRuntime(null);
       return;
     }
-    const r = runtimes.find((x) => `${x.kind}:${x.source}` === key);
-    setBuildRuntime(r ? { kind: r.kind, backend: r.backend, source: r.source, model: r.model ?? undefined } : null);
+    // key 형식: "<kind>:<source>" 또는 "<kind>:<source>::<modelId>"
+    const [runtimeKeyPart, modelId] = key.split("::");
+    const r = runtimes.find((x) => `${x.kind}:${x.source}` === runtimeKeyPart);
+    setBuildRuntime(r
+      ? { kind: r.kind, backend: r.backend, source: r.source, model: modelId || r.model || undefined }
+      : null);
   };
 
   const installToLibrary = async () => {
@@ -780,14 +806,26 @@ export default function BuildPage() {
                   disabled={busy}
                 >
                   <option value="">{ko ? "자동 선택 (활성 엔진)" : "Auto (active engine)"}</option>
-                  {runtimes.map((r) => (
-                    <option key={`${r.kind}:${r.source}`} value={`${r.kind}:${r.source}`} disabled={runtimeUsageBlocked(r, usage)}>
-                      {engineLabel(r, ko)}
-                      {r.model ? ` · ${r.model}` : ""}
-                      {r.active ? (ko ? " · 활성" : " · active") : ""}
-                      {runtimeUsageBlocked(r, usage) ? (ko ? " · 사용량 소진" : " · usage exhausted") : ""}
-                    </option>
-                  ))}
+                  {runtimes.flatMap((r) => {
+                    const key = `${r.kind}:${r.source}`;
+                    const blocked = runtimeUsageBlocked(r, usage);
+                    const suffix = `${r.active ? (ko ? " · 활성" : " · active") : ""}${blocked ? (ko ? " · 사용량 소진" : " · usage exhausted") : ""}`;
+                    const models = modelsByRuntime[key] ?? [];
+                    // 모델을 아는 런타임은 모델까지 고르게 한다. 모르는 런타임은
+                    // 종전처럼 런타임 한 줄로 남긴다(없는 선택지를 지어내지 않는다).
+                    if (models.length === 0) {
+                      return [(
+                        <option key={key} value={key} disabled={blocked}>
+                          {engineLabel(r, ko)}{r.model ? ` · ${r.model}` : ""}{suffix}
+                        </option>
+                      )];
+                    }
+                    return models.map((m) => (
+                      <option key={`${key}::${m.id}`} value={`${key}::${m.id}`} disabled={blocked}>
+                        {engineLabel(r, ko)} · {m.label}{suffix}
+                      </option>
+                    ));
+                  })}
                 </select>
               </div>
 
@@ -1073,8 +1111,15 @@ export default function BuildPage() {
             </section>
           )}
 
+          {/* 실행 중과 실패 직후에는 펼쳐 둔다. 접힌 채로 두면 "작업 중"이라는 글자만
+              보이고 그 아래가 비어 있어, 아무 일도 안 일어나는 것처럼 읽힌다
+              (2026-08-16 오너 제보). 완료된 빌드만 접어 둔다. */}
           {log.length > 0 && (
-            <details className="build-card build-log-card" data-tour-id="build.log">
+            <details
+              className="build-card build-log-card"
+              data-tour-id="build.log"
+              open={running || phase === "error"}
+            >
               <summary className="build-card-head">
                 <span>{ko ? "진행 세부사항" : "Activity details"}</span>
                 {running

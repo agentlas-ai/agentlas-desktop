@@ -288,3 +288,10 @@ scripts/fixtures/
 # session scratch/demo (never publish)
 scripts/capture-x-graph.cjs
 scripts/demo/
+
+# Local QA drivers for the Build surface. These pilot the running app over CDP
+# with a test account and are worthless to anyone else — they name this
+# machine's scratch paths and grants.
+/qa-*.mjs
+/renderer/qa-*.mjs
+/run-queue.sh

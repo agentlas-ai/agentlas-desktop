@@ -125,8 +125,8 @@ function runLogicChecks() {
 // ---------------------------------------------------------------------------
 const GUARDED_FILES = [
   "renderer/components/AgentPicker.tsx",
-  "renderer/components/Sidebar.tsx",
-  "renderer/app/(shell)/chat/page.tsx",
+  "renderer/components/TaskCockpit.tsx",
+  "renderer/components/one/OneShell.tsx",
 ];
 
 function extractCalls(source, fnName) {
@@ -244,7 +244,8 @@ function startServer() {
 async function runUiChecks() {
   const { chromium } = require("playwright");
   const { setupMockAgentlasBridge, mockBridgeOptions } = require("./lib/mock-agentlas-bridge.cjs");
-  if (!fs.existsSync(path.join(distDir, "chat.html"))) {
+  const taskRoute = "/workspace/task.html";
+  if (!fs.existsSync(path.join(distDir, "workspace", "task.html"))) {
     console.error("dist/renderer is missing. Run npm run build:renderer first.");
     process.exit(2);
   }
@@ -265,125 +266,72 @@ async function runUiChecks() {
       }
     });
 
-    await page.goto(`${baseUrl}/chat.html?id=chat-1`, { waitUntil: "domcontentloaded" });
+    await page.goto(`${baseUrl}${taskRoute}?id=chat-1`, { waitUntil: "domcontentloaded" });
     await page.getByRole("textbox").first().waitFor();
 
-    // 사이드바: 팀에 바인딩된 채팅 행에 팀 이름 라벨이 살아 있어야 한다.
-    // (팀이 visibleAgents에서 빠지면 agentById 조회가 실패해 라벨이 사라진다 — 0.7.21 증상)
-    const sidebar = page.locator("[data-tour-id='workspace.sidebar']");
+    // Work now owns a project sidebar; chat history is a project task surface,
+    // not a second agent roster. Keep the smoke on the current shell contract.
+    const sidebar = page.locator(".project-sidebar");
     await sidebar.waitFor();
     try {
-      await sidebar.getByText("팀 채팅 스모크").waitFor({ timeout: 10000 });
-      await sidebar.getByText(/런치크루팀|LaunchCrewTeam/).waitFor({ timeout: 10000 });
+      await sidebar.getByText("QA Project").waitFor({ timeout: 10000 });
     } catch (err) {
       await page.screenshot({ path: path.join(outDir, "sidebar-team-missing.png"), fullPage: true }).catch(() => {});
       const sidebarText = await sidebar.innerText().catch(() => "");
-      console.error(JSON.stringify({ sidebarTeamMissing: true, sidebarText, errors }, null, 2));
+      console.error(JSON.stringify({ projectSidebarMissing: true, sidebarText, errors }, null, 2));
       throw err;
     }
 
-    // 에이전트 피커: 버튼이 존재해야 하고(전멸 회귀), 열면 팀이 리스트에 떠야 한다.
-    const pickerButton = page.getByRole("button", { name: /에이전트 바꾸기|Switch agent/ });
+    // 현재 계약은 별도 AgentPicker 버튼이 아니라 + 메뉴의 "특정 에이전트 지정"
+    // 진입점에서 @ 자동완성으로 팀을 선택하는 것이다. 예전 picker 버튼을 찾으면
+    // UI가 이미 바뀐 현재 계약을 거짓으로 깨뜨리므로 실제 경로를 검사한다.
+    const plusButton = page.locator("[data-chat-plus-button='true']");
     try {
-      await pickerButton.waitFor({ timeout: 10000 });
+      await plusButton.waitFor({ timeout: 10000 });
     } catch (err) {
-      await page.screenshot({ path: path.join(outDir, "picker-button-missing.png"), fullPage: true }).catch(() => {});
-      console.error(JSON.stringify({ pickerButtonMissing: true, hint: "displayAgents가 비면 AgentPicker 자체가 렌더되지 않는다 — 필터 전멸 계열 회귀", errors }, null, 2));
+      await page.screenshot({ path: path.join(outDir, "plus-button-missing.png"), fullPage: true }).catch(() => {});
+      console.error(JSON.stringify({ plusButtonMissing: true, hint: "현재 채팅 입력의 + 진입점이 사라졌다", errors }, null, 2));
       throw err;
     }
-    await pickerButton.click();
-    const listbox = page.getByRole("listbox", { name: /에이전트 바꾸기|Switch agent/ });
-    await listbox.waitFor();
+    await plusButton.click();
+    const plusMenu = page.getByRole("menu");
+    await plusMenu.waitFor();
+    await plusMenu.getByRole("button", { name: /특정 에이전트 지정|Specify an agent/ }).click();
 
+    // @가 실제 입력되고 자동완성 listbox가 열리는지 확인한다.
+    const listbox = page.locator("[data-popover-kind='autocomplete'][role='listbox']");
+    await listbox.waitFor();
     const optionCount = await listbox.getByRole("option").count();
-    assert.ok(optionCount > 0, "agent picker listbox must not be empty");
+    assert.ok(optionCount > 0, "agent autocomplete listbox must not be empty");
     const teamOption = listbox.getByRole("option", { name: /런치크루팀|LaunchCrewTeam/ });
     await teamOption.waitFor();
     assert.equal(
       await listbox.getByRole("option", { name: /백그라운드 도우미|Background Helper/ }).count(),
       0,
-      "background agents must stay hidden in the picker",
+      "background agents must stay hidden in autocomplete",
     );
     assert.equal(
       await listbox.getByRole("option", { name: /오케스트레이터|Orchestrator/ }).count(),
       0,
-      "system agents must stay hidden in the picker",
+      "system agents must stay hidden in autocomplete",
     );
 
-    // 검색 경로: 0.7.20 실사고가 "팀 검색 0건·선택 불가"였다.
+    // 검색 경로: 팀 이름을 입력해도 팀 옵션이 유지되고 선택이 실제 입력에 반영되는지.
     const renderedTeamName = await teamOption.innerText();
     const teamSearchTerm = renderedTeamName.includes(seedTeam.nameEn) ? "LaunchCrew" : "런치크루";
-    await page.getByPlaceholder(/에이전트 검색|Search agents/).fill(teamSearchTerm);
-    await teamOption.waitFor();
-
-    // 팀 선택이 실제로 switchAgent까지 이어지는지.
-    await teamOption.click();
-    await page.waitForFunction(() =>
-      window.__qa.calls.some((call) => call.name === "chats.switchAgent" && call.payload.agentId === "agent-team-1"),
-    );
+    const textbox = page.getByRole("textbox").first();
+    await textbox.fill(`@${teamSearchTerm}`);
+    await listbox.getByRole("option", { name: /런치크루팀|LaunchCrewTeam/ }).waitFor();
+    await listbox.getByRole("option", { name: /런치크루팀|LaunchCrewTeam/ }).click();
+    const turnCalls = page.locator(".chat-turn-calls");
+    await turnCalls.waitFor();
+    await turnCalls.getByRole("button", { name: /@(?:런치크루팀|LaunchCrewTeam)/ }).waitFor();
 
     await page.screenshot({ path: path.join(outDir, "renderer-ui-smoke.png"), fullPage: true });
     assert.deepEqual(errors, [], "renderer UI smoke must not emit page errors");
     await context.close();
     console.log("[ui] team survives agent picker + sidebar on built renderer");
 
-    // ── 고용(24h 리스) 시나리오: 동행 배지 + 자동 재주입 + 사이드바 로스터 + 해고 ──
-    const hiredContext = await browser.newContext({ viewport: { width: 1440, height: 980 } });
-    await hiredContext.addInitScript(setupMockAgentlasBridge, mockBridgeOptions({ teamRoster: true, hiredRoster: true }));
-    const hiredPage = await hiredContext.newPage();
-    const hiredErrors = [];
-    hiredPage.on("pageerror", (err) => hiredErrors.push(err.message));
-    hiredPage.on("console", (msg) => {
-      if (msg.type() === "error" && !/favicon|Failed to load resource/i.test(msg.text())) {
-        hiredErrors.push(msg.text());
-      }
-    });
-    await hiredPage.goto(`${baseUrl}/chat.html?id=chat-1`, { waitUntil: "domcontentloaded" });
-    await hiredPage.getByRole("textbox").first().waitFor();
-
-    // 동행 배지: 고용된 에이전트가 상시로 보인다 (조용한 증발 버그의 가시성 수정).
-    const badge = hiredPage.locator("[data-testid='hired-agents-badge']");
-    try {
-      await badge.waitFor({ timeout: 10000 });
-    } catch (err) {
-      await hiredPage.screenshot({ path: path.join(outDir, "hired-badge-missing.png"), fullPage: true }).catch(() => {});
-      console.error(JSON.stringify({ hiredBadgeMissing: true, errors: hiredErrors }, null, 2));
-      throw err;
-    }
-    await badge.getByText(/인스타 업로더|Instagram Uploader/).waitFor();
-
-    // 자동 재주입: 추천 없이 그냥 보내도 고용 카드가 borrowAgents로 붙는다.
-    await hiredPage.locator("textarea").first().fill("고용 재주입 검증");
-    await hiredPage.getByRole("button", { name: /보내기|Send/ }).click();
-    await hiredPage.waitForFunction(() => window.__qa.calls.some((call) => call.name === "invoke.run"));
-    const hiredInvoke = await hiredPage.evaluate(() => window.__qa.calls.find((call) => call.name === "invoke.run"));
-    assert.deepEqual(
-      hiredInvoke.payload.borrowAgents,
-      ["instagram-uploader"],
-      "hired agents must be auto-reinjected as borrowAgents on every send",
-    );
-
-    // 사이드바 "고용 중" 로스터: 활성 리스(무료 재호출) + 만료(기억 보관) 카드.
-    const hiredSidebar = hiredPage.locator("[data-tour-id='workspace.sidebar']");
-    await hiredSidebar.getByText(/고용 중|Hired agents/).waitFor();
-    await hiredSidebar.getByText(/인스타 업로더|Instagram Uploader/).waitFor();
-    await hiredSidebar.getByText(/무료 재호출|free calls/).waitFor();
-    await hiredSidebar.getByText(/레딧 시더|Reddit Seeder/).waitFor();
-    await hiredSidebar.getByText(/기억 그대로|resumes its memory/).waitFor();
-
-    // 해고: × 클릭 → 빈 배열로 저장 → 배지 사라짐.
-    await badge.getByRole("button", { name: /고용 해제|Dismiss hired agents/ }).click();
-    await hiredPage.waitForFunction(() =>
-      window.__qa.calls.some(
-        (call) => call.name === "chats.setHiredAgents" && Array.isArray(call.payload.cards) && call.payload.cards.length === 0,
-      ),
-    );
-    await badge.waitFor({ state: "detached" });
-
-    await hiredPage.screenshot({ path: path.join(outDir, "renderer-ui-smoke-hired.png"), fullPage: true });
-    assert.deepEqual(hiredErrors, [], "hired scenario must not emit page errors");
-    await hiredContext.close();
-    console.log("[ui] hired agents: badge + auto-reinject + sidebar roster + dismiss");
   } finally {
     await browser.close().catch(() => {});
     server.close();

@@ -7,12 +7,15 @@ import type {
   McpBuildRecommendationReasonCode,
   McpBuildRecommendationInput,
   McpToolCatalogEntry,
+  MarketplaceListing,
   RuntimeSelection,
 } from "../../shared/types";
 import { hasEnvVar } from "../secrets/vault";
 import { detectRuntimes } from "../runtime/detect";
 import { pickActive } from "../runtime/selection";
 import { MCP_TOOL_CATALOG } from "./catalog";
+import { fetchHubPluginInventory, hubListingDescription } from "./auto-select";
+import { installedServerMatchesPluginSlug, normalizePluginSlug } from "../../shared/plugin-slug";
 import { listInstalledServers } from "./registry";
 import {
   isRuntimeMcpCompatible,
@@ -156,11 +159,14 @@ export interface McpBuildPlanDependencies {
     candidates: McpBuildRecommendCandidate[];
     hints?: Array<{ label: string; words: string[] }>;
   }) => Promise<ResolvedMcpBuildRecommendations>;
+  /** Hub plugin inventory. Shares the agent-execution path's wiring so the two never diverge. */
+  fetchHubPlugins: () => Promise<{ listings: MarketplaceListing[]; hubPluginError?: string }>;
 }
 
 const DEFAULT_DEPS: McpBuildPlanDependencies = {
   listInstalled: listInstalledServers,
   hasEnv: hasEnvVar,
+  fetchHubPlugins: () => fetchHubPluginInventory(true),
   now: () => new Date(),
   resolveRuntime: async () => {
     const active = pickActive(await detectRuntimes());
@@ -276,9 +282,14 @@ function recommendationReasonCode(capability: string): McpBuildRecommendationRea
 
 // Lazyweb/opencrab are never silently recommended in Agentlas product flows. They remain
 // available in the global MCP manager for explicit user choice.
-const NEVER_AUTO_RECOMMENDED = new Set(["lazyweb", "opencrab"]);
+// OpenCrab used to be excluded here and offered instead through a bespoke
+// "shall I check OpenCrab?" interview card with its own request field and prompt
+// block. Owner decision 2026-08-16: it is one MCP among many — no special case.
+// It now competes for selection like every other tool.
+const NEVER_AUTO_RECOMMENDED = new Set(["lazyweb"]);
 
 const CUSTOM_ID_PREFIX = "custom:";
+const HUB_ID_PREFIX = "hub:";
 
 async function keyState(
   keys: string[],
@@ -338,6 +349,56 @@ export async function recommendMcpBuildPlan(
 
   const offerableCatalog = MCP_TOOL_CATALOG.filter((entry) => !NEVER_AUTO_RECOMMENDED.has(entry.id));
   const customServers = installed.filter((item) => !item.catalogId);
+
+  // 허브 플러그인을 후보에 합친다.
+  //
+  // 2026-08-16 실측: 이 목록은 로컬 카탈로그 14개 + 커스텀뿐이었고, 허브의 플러그인
+  // 140여 개는 빌드에서 아예 보이지 않았다. 그래서 어떤 요청을 넣어도 그 14개 안에서만
+  // 골라졌고(예: "경영전략 기획" → Brave Search 하나), 사용자는 도구가 안 붙는다고 느꼈다.
+  // 에이전트 **실행** 경로는 이미 허브를 합치고 있었으므로(auto-select.ts) 그 배선을
+  // 그대로 재사용한다 — 빌드만 따로 구현하면 다시 갈라진다.
+  const hubInventory = await deps.fetchHubPlugins().catch(() => ({ listings: [], hubPluginError: "hub lookup failed" }));
+  // 허브 플러그인 중에는 MCP 서버가 아니라 스킬을 싣는 것들이 있다
+  // (`packageShape.mcpReference === "none"`). 붙일 서버가 없는 게 정상이므로
+  // 연결 실패로 처리하면 안 되고, 능력 선언으로 빌더에게 넘겨야 한다.
+  const skillBundles = new Map<string, { slug: string; name: string; intent: string; capabilities: string[] }>();
+  await Promise.all(hubInventory.listings.slice(0, 60).map(async (listing) => {
+    try {
+      const res = await fetch(listing.manifestUrl, { headers: { accept: "application/json" } });
+      if (!res.ok) return;
+      const m = (await res.json()) as Record<string, unknown>;
+      const mcp = Array.isArray(m.mcp) ? m.mcp : [];
+      const shape = (m.architecture as { packageShape?: { mcpReference?: unknown } } | undefined)?.packageShape;
+      const skillOnly = mcp.length === 0 && (shape?.mcpReference === "none" || Array.isArray(m.skills));
+      if (!skillOnly) return;
+      const agents = Array.isArray(m.agents) ? m.agents as Array<{ intent?: unknown }> : [];
+      skillBundles.set(listing.slug, {
+        slug: listing.slug,
+        name: String(m.name ?? listing.name),
+        intent: String(agents[0]?.intent ?? m.description ?? listing.tagline ?? ""),
+        capabilities: Array.isArray(m.capabilities) ? m.capabilities.map(String) : [],
+      });
+    } catch {
+      /* 매니페스트를 못 읽으면 그냥 일반 후보로 둔다 — 추측하지 않는다 */
+    }
+  }));
+  const catalogSlugs = new Set(offerableCatalog.map((entry) => normalizePluginSlug(entry.id)));
+  const hubCandidates = hubInventory.listings
+    // 로컬 카탈로그에 같은 도구가 있으면 로컬이 이긴다 — 로컬은 설치 경로가 검증돼 있다.
+    .filter((listing) => !catalogSlugs.has(normalizePluginSlug(listing.slug)))
+    .map((listing) => ({
+      id: `${HUB_ID_PREFIX}${listing.slug}`,
+      name: listing.nameEn || listing.name,
+      description: hubListingDescription(listing),
+      origin: "hub" as const,
+      needsCredential: false,
+    }));
+  if (hubInventory.hubPluginError) {
+    // 허브가 죽어도 빌드는 계속된다. 다만 "후보가 원래 이것뿐"인 것과
+    // "허브를 못 읽어 좁아진 것"은 다른 상태이므로 경고로 남긴다.
+    warningCode = warningCode ?? "recommendation_unavailable";
+  }
+
   const judgeInventory: McpBuildRecommendCandidate[] = [
     ...offerableCatalog.map((entry) => ({
       id: entry.id,
@@ -353,6 +414,7 @@ export async function recommendMcpBuildPlan(
       origin: "custom" as const,
       needsCredential: server.envKeys.length > 0,
     })),
+    ...hubCandidates,
   ];
   const referenceHints = offerableCatalog
     .map((entry) => ({ label: entry.id, words: CATALOG_RULES[entry.id]?.hints ?? [] }))
@@ -385,6 +447,16 @@ export async function recommendMcpBuildPlan(
     plans.set(planId, { publicPlan, requestHash: requestHash(input), runtime, candidates: [] });
     return publicPlan;
   }
+
+  // 판정은 모델이 한다. 다만 모델이 "보지도 못한" 후보가 있으면 그건 판정이 아니라
+  // 절단이므로 반드시 남긴다 — 조용한 절단은 "모델이 안 골랐다"로 위장된다.
+  console.log(
+    `[mcp-build] candidates=${judgeInventory.length} `
+    + `(catalog=${offerableCatalog.length} custom=${customServers.length} hub=${hubCandidates.length}) `
+    + `recommended=${recommendation.recommended.length} decided=${recommendation.decided}`
+    + (recommendation.omitted.length > 0 ? ` OMITTED=${recommendation.omitted.length}` : "")
+    + (hubInventory.hubPluginError ? ` hubError=${hubInventory.hubPluginError}` : ""),
+  );
 
   const directRank = new Map(recommendation.recommended.map((id, index) => [id, index]));
   const pickedGroups = new Set(
@@ -446,6 +518,58 @@ export async function recommendMcpBuildPlan(
         serverId: server?.id ?? null,
         envKeys,
         transport: entry.transport,
+      },
+    });
+  }
+
+  // 모델이 고른 허브 플러그인을 실제 후보로 만든다. 이 루프가 없으면 후보 목록에만
+  // 허브가 실리고 선택은 조용히 버려진다 — 선언만 하고 배선을 안 하는 그 결함이다.
+  for (const listing of hubInventory.listings) {
+    const rank = directRank.get(`${HUB_ID_PREFIX}${listing.slug}`);
+    if (rank === undefined) continue;
+    const existing = installed.find((server) => installedServerMatchesPluginSlug(server, listing.slug)) ?? null;
+    // 허브 플러그인의 전송 방식은 매니페스트를 열어야 알 수 있다. 승인 시점에
+    // 실제로 붙여 보고 판정하므로, 목록 단계에서는 런타임 호환을 막지 않는다.
+    const transport = existing?.transport ?? "http";
+    const envKeys = existing?.envKeys ?? [];
+    const keys = await keyState(envKeys, deps);
+    const readiness = existing
+      ? existing.enabled
+        ? keys === "missing" ? "missing-key" : "ready"
+        : "disabled"
+      : "available";
+    scored.push({
+      score: 1_000 - rank,
+      installedRank: existing ? 1 : 0,
+      candidate: {
+        public: {
+          id: `candidate-${randomUUID()}`,
+          catalogId: null,
+          name: safeName(listing.nameEn || listing.name, listing.slug),
+          capability: listing.category || "hub-plugin",
+          reason: existing ? "installed-match" : "request-match",
+          recommendationReasonCode: "hub-plugin-match",
+          requiresKey: envKeys.length > 0,
+          minimumPermission: "read",
+          minimumScopes: [],
+          permissionBasis: "host-inferred",
+          permissionEnforced: false,
+          source: "hub",
+          installed: Boolean(existing),
+          enabled: existing?.enabled ?? true,
+          keyState: keys,
+          readiness,
+          defaultSelected: readiness === "ready" || readiness === "available",
+          // 허브 항목은 slug 자체가 기능 그룹이다 — 로컬 규칙표에 없으므로
+          // 같은 slug끼리만 폴백 형제로 묶인다.
+          fallbackGroup: `hub:${normalizePluginSlug(listing.slug)}`,
+          priority: 50,
+        },
+        serverId: existing?.id ?? null,
+        envKeys,
+        transport,
+        hub: { slug: listing.slug, manifestUrl: listing.manifestUrl },
+        ...(skillBundles.has(listing.slug) ? { skillBundle: skillBundles.get(listing.slug)! } : {}),
       },
     });
   }

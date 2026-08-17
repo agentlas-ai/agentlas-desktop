@@ -1001,6 +1001,24 @@ export interface MarketplaceListing {
   agentReleaseId?: string;
   /** Account shelf provenance; never invocation authority. */
   bookmarkState?: "bookmarked" | "used";
+  /**
+   * Hub 브랜드 자산 — 웹 `/api/plugins`가 내려주는 값을 절대 URL로 올린 것.
+   * 웹이 정본이므로 데스크탑에 로고 파일을 복사해 두지 않는다.
+   */
+  iconUrl?: string;
+  brandGlyphUrl?: string;
+  brandColor?: string;
+}
+
+/** slug 하나에 대한 Hub 브랜드 자산(로고). 웹 카탈로그의 거울이며 정본이 아니다. */
+export interface PluginBrandAsset {
+  slug: string;
+  name: string;
+  /** 풀컬러 래스터 아이콘. */
+  iconUrl?: string;
+  /** 브랜드 컬러 타일 위에 얹는 단색 글리프. */
+  brandGlyphUrl?: string;
+  brandColor?: string;
 }
 
 export interface HubAgentBookmark {
@@ -4999,6 +5017,16 @@ export interface HephaestusBuildRequest {
   runtimeSessionId?: string;
   /** 대화형 딥인터뷰용 이전 대화(이번 턴 입력 이전까지). 빌더가 인터뷰 맥락을 이어간다. */
   history?: Array<{ role: "user" | "assistant"; text: string }>;
+  /**
+   * True when `request` is the host's own "keep going without asking" nudge
+   * rather than something a person typed or chose.
+   *
+   * The host writes the interview receipt and the work brief from what it saw a
+   * person send. Its own instruction, carried on a user-shaped turn, is not that
+   * — counting it produced a brief whose `assumptions` listed a prompt Agentlas
+   * wrote to itself, tagged `source: "user"` (measured 2026-08-17).
+   */
+  hostAuthoredContinuation?: boolean;
   /** Explicit answer to the conditional OpenCrab interview question. */
   openCrabOntology?: "use" | "skip";
   /**
@@ -6168,6 +6196,8 @@ export interface AgentlasIpc {
   mcpTools: {
     /** 연결 가능한 외부 툴 카탈로그 (setting_guide) */
     listCatalog: () => Promise<McpToolCatalogEntry[]>;
+    /** 정규화된 slug -> 허브 브랜드 자산(로고). 웹 카탈로그의 거울. */
+    brandMap: () => Promise<Record<string, PluginBrandAsset>>;
     /** 설치/구성된 서버 목록 */
     listInstalled: () => Promise<InstalledMcpServer[]>;
     /** 카탈로그 id로 설치 (env 요구는 vault에 자동 등록) */
@@ -6256,6 +6286,22 @@ export interface AgentlasIpc {
     listMine: () => Promise<MarketplaceListing[]>;
     deleteMine: (slug: string) => Promise<CloudAgentDeleteResult>;
     bookmarks: () => Promise<HubAgentBookmark[]>;
+    /**
+     * 허브 소개 페이지(agentlas.cloud/p/<slug>)를 앱 안에 그대로 띄운다.
+     * 원격 페이지이므로 preload도 IPC도 붙지 않는다 — 읽기 전용 소개 전용 경로다.
+     * bounds는 렌더러 좌표(윈도 콘텐츠 기준 CSS px).
+     */
+    openProfileView: (input: {
+      slug: string;
+      bounds: { x: number; y: number; width: number; height: number };
+      locale?: "ko" | "en";
+    }) => Promise<{ ok: boolean; url?: string; reason?: string }>;
+    setProfileViewBounds: (
+      bounds: { x: number; y: number; width: number; height: number },
+    ) => Promise<{ ok: boolean }>;
+    closeProfileView: () => Promise<{ ok: true }>;
+    /** 임베드가 소개 페이지 밖으로 나가려 할 때 — 데스크탑 화면이 대신 처리한다. */
+    onProfileViewExit: (handler: () => void) => () => void;
     /** Web account snapshot + local outbox reconciliation. No polling; callers trigger lifecycle sync. */
     syncBookmarks: () => Promise<HubAgentBookmark[]>;
     /** Main-owned full snapshot broadcast after local mutation or account sync. */
@@ -6982,6 +7028,24 @@ export interface AgentlasIpc {
     buildEventChannel: (runId: string) => string;
     /** 채널 구독 완료 신호 — 구독 전 버퍼링된 초기 이벤트를 flush 한다(첫 stage 틱 유실 방지). */
     buildReady: (runId: string) => Promise<void>;
+    /**
+     * Main이 들고 있는 최신 빌드 전사. 화면을 떠났다 돌아왔을 때 붙기 위한 것.
+     * `running`이면 같은 채널을 다시 구독하면 되고, 끝난 빌드면 결과만 재생한다.
+     */
+    activeBuild: () => Promise<{
+      runId: string;
+      request: string;
+      workspace: string;
+      startedAt: string;
+      running: boolean;
+      events: HephaestusBuildEvent[];
+    } | null>;
+    /**
+     * 패키지 계약 게이트를 직접 물어본다. 모델의 완료 선언과 무관하게 사실을 잰다.
+     * blockers가 빈 배열이면 통과, null이면 검증 자체가 불가(통과로 간주 금지).
+     */
+    contractVerify: (input: { folder: string; scope: FsReadScope; mode?: "single" | "team" | "package" })
+      => Promise<{ ok: boolean; blockers: string[] | null; error: string | null }>;
     /** 진행 중 빌드 취소. */
     cancelBuild: (runId: string) => Promise<void>;
     /** Startup Founder Studio — 패키지의 실제 GUI 런처를 띄우고 iframe 용 로컬 URL 반환. */

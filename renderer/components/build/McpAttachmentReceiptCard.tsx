@@ -2,12 +2,36 @@
 
 import type { McpBuildAttachmentReceipt, McpBuildReceiptItem } from "@/lib/types";
 
-function ReceiptGroup(props: { label: string; items: McpBuildReceiptItem[]; state: string }) {
+/** 사유 코드를 사람 말로. 이유 없는 상태 칩은 "고장인가?"를 사용자에게 떠넘긴다. */
+function reasonText(reason: string, ko: boolean): string | null {
+  if (reason === "no_connectable_server") {
+    return ko
+      ? "붙일 MCP 서버가 없는 스킬 묶음입니다 — 고장이 아닙니다"
+      : "a skill bundle with no MCP server to attach — not a failure";
+  }
+  if (reason === "missing_key") return ko ? "API 키 미설정" : "API key not set";
+  if (reason === "runtime_incompatible") return ko ? "이 런타임과 호환되지 않음" : "not compatible with this runtime";
+  if (reason === "disabled") return ko ? "꺼져 있음" : "turned off";
+  return null;
+}
+
+function ReceiptGroup(props: { label: string; items: McpBuildReceiptItem[]; state: string; ko: boolean }) {
   if (props.items.length === 0) return null;
+  // 같은 칸 안에서도 사유가 갈리면 사유별로 나눠 적는다.
+  const byReason = new Map<string, string[]>();
+  for (const item of props.items) {
+    const key = item.reason ?? "";
+    byReason.set(key, [...(byReason.get(key) ?? []), item.name]);
+  }
   return (
     <div className="build-mcp-receipt-group" data-state={props.state}>
       <strong>{props.label} · {props.items.length}</strong>
-      <span>{props.items.map((item) => item.name).join(", ")}</span>
+      <span>
+        {[...byReason.entries()].map(([reason, names]) => {
+          const why = reasonText(reason, props.ko);
+          return why ? `${names.join(", ")} — ${why}` : names.join(", ");
+        }).join(" / ")}
+      </span>
     </div>
   );
 }
@@ -32,11 +56,11 @@ export function McpAttachmentReceiptCard(props: { receipt: McpBuildAttachmentRec
         <span>{props.receipt.emptyMode ? (props.ko ? "MCP 없는 제한 모드" : "empty MCP mode") : (props.ko ? "연결 확인됨" : "resolved")}</span>
       </div>
       <div className="build-mcp-receipt-grid">
-        <ReceiptGroup label={props.ko ? "붙음" : "Attached"} items={props.receipt.attached} state="attached" />
-        <ReceiptGroup label={props.ko ? "건너뜀" : "Skipped"} items={props.receipt.skipped} state="skipped" />
-        <ReceiptGroup label={props.ko ? "키 없음" : "Missing key"} items={props.receipt.missingKey} state="missing" />
-        <ReceiptGroup label={props.ko ? "연결 실패" : "Failed"} items={props.receipt.failed} state="failed" />
-        <ReceiptGroup label={props.ko ? "제한됨" : "Degraded"} items={props.receipt.degraded} state="degraded" />
+        <ReceiptGroup label={props.ko ? "붙음" : "Attached"} items={props.receipt.attached} state="attached" ko={props.ko} />
+        <ReceiptGroup label={props.ko ? "건너뜀" : "Skipped"} items={props.receipt.skipped} state="skipped" ko={props.ko} />
+        <ReceiptGroup label={props.ko ? "키 없음" : "Missing key"} items={props.receipt.missingKey} state="missing" ko={props.ko} />
+        <ReceiptGroup label={props.ko ? "연결 실패" : "Failed"} items={props.receipt.failed} state="failed" ko={props.ko} />
+        <ReceiptGroup label={props.ko ? "제한됨" : "Degraded"} items={props.receipt.degraded} state="degraded" ko={props.ko} />
         {fallbackNames && <div className="build-mcp-receipt-group" data-state="fallback"><strong>{props.ko ? "폴백 사용" : "Fallback used"}</strong><span>{fallbackNames}</span></div>}
         {props.receipt.emptyMode && <div className="build-mcp-empty">{props.ko ? "MCP가 하나도 붙지 않아도 빌드 자체는 계속됩니다." : "The Build continues even when no MCP can be attached."}</div>}
         {props.receipt.hostReceiptWarning === "receipt_storage_failed" && (

@@ -85,6 +85,7 @@ import { startComputerUseControlServer, stopComputerUseControlServer } from "./c
 import { authorizeLocalMediaPath } from "./fs/access";
 import { readChatMessageAttachment } from "./store/chat-message-attachments";
 import { serveOneArtifactProtocolRequest } from "./one/artifact-preview";
+import { servePluginIconRequest } from "./mcp-tools/plugin-brand";
 import { reconcileOneHubDerivativeDraftStorage } from "./one/hub-derivative";
 import { recoverDesktopStartup, type StartupRecoveryPresentation } from "./one/startup-recovery";
 import { initFileLogging, mainLogFilePath } from "./logging";
@@ -445,6 +446,11 @@ function registerRendererProtocol(): void {
       const url = new URL(request.url);
       if (url.hostname === "one-artifact") {
         return serveOneArtifactProtocolRequest(request.url, request.headers.get("range"));
+      }
+      // 허브 플러그인 로고 — 원격에서 한 번 받아 디스크에 두고 그 뒤로는 로컬에서 답한다.
+      // 카드가 매번 외부로 나가지 않고, 한 번 본 로고는 오프라인에서도 뜬다.
+      if (url.hostname === "plugin-icon") {
+        return servePluginIconRequest(request.url);
       }
       if (url.hostname === "chat-attachment") {
         const id = url.pathname.replace(/^\//, "");

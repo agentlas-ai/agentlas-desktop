@@ -456,7 +456,19 @@ This run is unattended — no user is present and nobody can answer questions.
 - If required information or a decision has no safe default, do NOT guess or fabricate. Stop and reply with a single line starting with "NEEDS-INPUT:" describing exactly what is missing.`;
 
 const BUILD_PROMPT_SENTINEL = "<!-- agentlas-build-system-prompt/v1 -->";
-export const MAX_BUILD_SYSTEM_PROMPT_CHARS = 48_000;
+// Budget for the Build system prompt.
+//
+// Raised 2026-08-16 from 48,000. Owner rule: Desktop Build ships the canonical
+// /hep-build procedure, the interview gate, AGENTS.md and the active builder
+// VERBATIM — that bundle alone is ~73k characters. The old ceiling made the
+// canonical literally unshippable: `wrapBuildSystemPrompt` threw, the rejection
+// was never caught, and the build sat at "Starting the AI engine" forever with
+// no error shown (measured: 74,807 > 47,232, silent death).
+//
+// ~120k chars is roughly 30k tokens — well inside every runtime we dispatch to,
+// and the guard still exists to catch a runaway (e.g. an attachment summary
+// looping) rather than to ration the contract itself.
+export const MAX_BUILD_SYSTEM_PROMPT_CHARS = 120_000;
 export const BUILD_MCP_DEGRADED_GUARD_RESERVE_CHARS = 768;
 
 /**

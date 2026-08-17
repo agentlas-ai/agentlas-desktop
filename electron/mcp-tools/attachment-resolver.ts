@@ -15,12 +15,30 @@ import { hasEnvVar } from "../secrets/vault";
 import { testServerConnection } from "./client";
 import { buildMcpConfigFile, type McpConfigResult } from "./mcp-config";
 import { installFromCatalog, listInstalledServers } from "./registry";
+import { installHubPlugin } from "./hub-plugin-bridge";
+import { installedServerMatchesPluginSlug } from "../../shared/plugin-slug";
 
 export interface InternalMcpBuildCandidate {
   public: McpBuildCandidate;
   serverId: string | null;
   envKeys: string[];
   transport: McpTransport;
+  /**
+   * Hub-sourced candidate. Hub plugins are not in the local catalog, so
+   * `installCatalog` cannot materialize them — they install through the Hub
+   * manifest instead. Without this the model could pick a Hub tool and the
+   * approval would silently attach nothing.
+   */
+  hub?: { slug: string; manifestUrl: string };
+  /**
+   * Hub plugin that ships skills instead of an MCP server
+   * (`packageShape.mcpReference === "none"`). There is nothing to connect, so the
+   * capability travels to the builder as a declared skill rather than being
+   * reported as a broken attachment — measured 2026-08-17: Documents,
+   * Presentations and Spreadsheets showed as "Failed · 3" while being perfectly
+   * healthy skill bundles.
+   */
+  skillBundle?: { slug: string; name: string; intent: string; capabilities: string[] };
 }
 
 export interface ResolvedMcpBuildAttachment {
@@ -36,6 +54,8 @@ export interface ResolvedMcpBuildAttachment {
 export interface McpAttachmentResolverDependencies {
   listInstalled: () => InstalledMcpServer[];
   installCatalog: (catalogId: string) => InstalledMcpServer;
+  /** Hub plugin install. Same host path the Hub screen uses. */
+  installHub: (input: { slug: string; manifestUrl: string }) => Promise<InstalledMcpServer | null>;
   hasEnv: (key: string) => Promise<boolean>;
   testServer: (server: InstalledMcpServer) => Promise<{
     connected: boolean;
@@ -47,6 +67,12 @@ export interface McpAttachmentResolverDependencies {
 const DEFAULT_DEPS: McpAttachmentResolverDependencies = {
   listInstalled: listInstalledServers,
   installCatalog: installFromCatalog,
+  installHub: async ({ slug, manifestUrl }) => {
+    const result = await installHubPlugin({ slug, manifestUrl, approveLocalExecution: true });
+    const connected = result.receipts.find((entry) => entry.action === "connected" || entry.action === "already-installed");
+    if (!connected) return null;
+    return listInstalledServers().find((server) => installedServerMatchesPluginSlug(server, slug)) ?? null;
+  },
   hasEnv: hasEnvVar,
   testServer: (server) => testServerConnection(server, { timeoutMs: 15_000 }),
   buildConfig: (serverIds, planId) =>
@@ -172,6 +198,27 @@ async function advanceFallbackGroup(input: {
     }
 
     let server = currentServer(candidate, input.deps);
+    if (!server && candidate.hub) {
+      let hubError: unknown = null;
+      try {
+        server = await input.deps.installHub(candidate.hub);
+      } catch (err) {
+        server = null;
+        hubError = err;
+      }
+      if (!server) {
+        // 스킬 묶음(연결할 MCP 서버가 없는 플러그인)은 고장이 아니다. 설치가
+        // 깨진 것과 같은 칸에 넣으면 정상 자산이 빨간 실패로 보고된다.
+        // 스킬 묶음은 붙일 서버가 없는 게 정상이다. 요약을 통해 빌더에게 스킬로 전달되므로
+        // 여기서는 "연결 실패"가 아니라 상태만 남긴다.
+        const reason = hubError === null ? "no_connectable_server" : "install_failed";
+        input.state[hubError === null ? "degraded" : "failed"].push(
+          receiptItem(candidate, hubError === null ? "degraded" : "failed", reason),
+        );
+        input.state.unavailable.push(candidate.public.id);
+        continue;
+      }
+    }
     if (!server && candidate.public.catalogId) {
       try {
         server = input.deps.installCatalog(candidate.public.catalogId);
@@ -236,6 +283,18 @@ function markRemainingGroupHostFailure(state: GroupResolutionState): void {
   }
   state.attached = null;
   state.cursor = state.ordered.length;
+}
+
+/** Skill-only plugins the user approved. They reach the builder as capabilities, not servers. */
+function compactSkillSummary(bundles: NonNullable<InternalMcpBuildCandidate["skillBundle"]>[]): string {
+  if (bundles.length === 0) return "";
+  return [
+    "",
+    "Approved Agentlas skill plugins (no MCP server — bundle these as package skills):",
+    ...bundles.map((b) => `- ${b.slug} (${b.name}): ${b.intent}${b.capabilities.length ? ` [${b.capabilities.join("/")}]` : ""}`),
+    "Declare each one in the package's skills and in docs/tool-selection.md. Do not",
+    "invent an MCP server for them and do not report them as a failed connection.",
+  ].join("\n");
 }
 
 function compactReceiptSummary(receipt: McpBuildAttachmentReceipt): string {
@@ -395,7 +454,12 @@ export async function resolveApprovedMcpCandidates(input: {
   const resolvedAttachment: ResolvedMcpBuildAttachment = {
     receipt,
     config,
-    compactSummary: compactReceiptSummary(receipt),
+    compactSummary: compactReceiptSummary(receipt)
+      + compactSkillSummary(
+          input.candidates
+            .filter((candidate) => selected.has(candidate.public.id) && candidate.skillBundle)
+            .map((candidate) => candidate.skillBundle!),
+        ),
     runtimeBindings,
   };
 

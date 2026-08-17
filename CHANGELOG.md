@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## 1.0.21 — 2026-08-17
+
+- Build finishes. Seven defects sat in series between the interview and a
+  registered package, and each one only became visible once the one before it
+  was fixed: the contract scaffold was guarded by a condition that could never
+  be true, so a build that answered every interview question left an empty
+  folder; the interview receipt could not see the answer the host was carrying
+  that turn; a zero-file result was reported as "package integrity verification
+  did not pass. Generated files were preserved", which is a false sentence when
+  nothing was written; and the canonical command substituted the current turn's
+  text for `$ARGUMENTS`, so a repair round put its own forty-line blocker list
+  into the system prompt and a long enough round crossed the character budget
+  and ended the build outright.
+- A build that stops with blockers now gets the list. Both endings — the model
+  that prints its completion line and the model that simply stops — feed the
+  same loop, and each round names one file to fix, starting with the cards the
+  contract derives everything else from.
+- The builder prompt carries `.agentlas/mode-map.json` and the mode/overlay
+  contracts it names, with `$ENGINE` pinned to the copy the prompt quotes.
+- Bundled Python ships its own `jsonschema` and no longer reads the user's
+  site-packages. Schema validation was not passing; it was never running.
+- This release binds Agentlas OS v1.2.9 at 2d86363202cf5725c4eb5764dcb25865dbc9fdb1
+
 ## 1.0.20 — 2026-08-16
 
 - One steering can be taken back: every queued "다음 지시" has an × (Main removes

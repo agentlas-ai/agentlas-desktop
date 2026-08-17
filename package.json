@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "1.0.20",
+  "version": "1.0.21",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Antigravity 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -16,12 +16,12 @@
     "minimumRuntimeVersion": "1.0.4",
     "minimumSchemaVersion": 35,
     "targetSchemaVersion": 96,
-    "bundledRuntimeVersion": "1.2.7"
+    "bundledRuntimeVersion": "1.2.9"
   },
   "agentlasBundledRuntimeSource": {
     "repository": "https://github.com/agentlas-ai/Agentlas-OS.git",
-    "ref": "v1.2.7",
-    "commit": "1246167e1533e62b22231781332656ec9b35af2e"
+    "ref": "v1.2.9",
+    "commit": "2d86363202cf5725c4eb5764dcb25865dbc9fdb1"
   },
   "scripts": {
     "dev": "concurrently -k --success first -n NEXT,ELECTRON -c blue,magenta \"npm:dev:renderer\" \"npm:dev:electron\"",
@@ -236,6 +236,7 @@
     "test:telegram-automation-report-fanout": "npm run build:electron && electron scripts/test-telegram-automation-report-fanout.cjs",
     "test:telegram-judged-intents": "npm run build:electron && electron scripts/test-telegram-judged-intents.cjs",
     "test:goal-completion": "npm run build:electron && node scripts/goal-completion-contract.cjs",
+    "parity:hep-build": "npm run build:electron && node scripts/hep-build-parity.mjs",
     "test:telegram-command-surface": "npm run build:electron && node scripts/telegram-command-surface-contract.cjs",
     "test:telegram-one-binding": "npm run build:electron && electron scripts/telegram-one-binding-contract.cjs",
     "test:telegram-one-dialog-ui": "npm run build:renderer && node scripts/telegram-one-dialog-ui-contract.mjs",

@@ -379,6 +379,7 @@ const api: AgentlasIpc = {
   },
   mcpTools: {
     listCatalog: () => ipcRenderer.invoke("mcpTools:listCatalog"),
+    brandMap: () => ipcRenderer.invoke("mcpTools:brandMap"),
     listInstalled: () => ipcRenderer.invoke("mcpTools:listInstalled"),
     install: (catalogId: string) => ipcRenderer.invoke("mcpTools:install", catalogId),
     installCustom: (def) => ipcRenderer.invoke("mcpTools:installCustom", def),
@@ -410,6 +411,16 @@ const api: AgentlasIpc = {
     listMine: () => ipcRenderer.invoke("marketplace:listMine"),
     deleteMine: (slug: string) => ipcRenderer.invoke("marketplace:deleteMine", slug),
     bookmarks: () => ipcRenderer.invoke("marketplace:bookmarks"),
+    // 허브 소개 페이지 임베드 — 렌더러는 "어디에 놓을지"만 정하고, 페이지 자체는 main이 띄운다.
+    openProfileView: (input) => ipcRenderer.invoke("marketplace:openProfileView", input),
+    setProfileViewBounds: (bounds) => ipcRenderer.invoke("marketplace:setProfileViewBounds", bounds),
+    closeProfileView: () => ipcRenderer.invoke("marketplace:closeProfileView"),
+    // 임베드 안에서 웹의 다른 화면으로 나가려 했다는 신호 — 데스크탑 허브로 되돌린다.
+    onProfileViewExit: (handler) => {
+      const wrapped = () => handler();
+      ipcRenderer.on("marketplace:profileViewExit", wrapped);
+      return () => ipcRenderer.removeListener("marketplace:profileViewExit", wrapped);
+    },
     syncBookmarks: () => ipcRenderer.invoke("marketplace:bookmarksSync"),
     onBookmarksSnapshot: (handler) => {
       const wrapped = (_event: Electron.IpcRendererEvent, snapshot: Parameters<typeof handler>[0]) =>
@@ -888,6 +899,8 @@ const api: AgentlasIpc = {
     build: (input) => ipcRenderer.invoke("hephaestus:build", input),
     buildEventChannel: (runId: string) => `hephaestus:build:${runId}`,
     buildReady: (runId: string) => ipcRenderer.invoke("hephaestus:buildReady", runId),
+    contractVerify: (input) => ipcRenderer.invoke("hephaestus:contractVerify", input),
+    activeBuild: () => ipcRenderer.invoke("hephaestus:activeBuild"),
     cancelBuild: (runId: string) => ipcRenderer.invoke("hephaestus:cancelBuild", runId),
     startStudio: (input) => ipcRenderer.invoke("hephaestus:startStudio", input),
     stopStudio: () => ipcRenderer.invoke("hephaestus:stopStudio"),

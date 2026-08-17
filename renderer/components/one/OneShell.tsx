@@ -968,6 +968,12 @@ export function OneShell() {
           description: (appLocale === "ko" ? catalog?.description : catalog?.descriptionEn) || fallbackDescription,
           enabled: plugin.enabled,
           ready: plugin.configurationValid !== false,
+          // 로고 조회 재료 — 저장된 이름(`<slug>:<서버>` 형태일 수 있음)이 필요하다.
+          // `name`은 이미 지역화·정제된 표시용이라 slug 추출에 쓸 수 없다.
+          catalogId: plugin.catalogId,
+          serverName: plugin.name,
+          brandColor: catalog?.brandColor,
+          mark: catalog?.mark,
         };
       })
       .sort((left, right) => Number(right.enabled && right.ready) - Number(left.enabled && left.ready) || left.name.localeCompare(right.name));
@@ -4534,6 +4540,33 @@ export function OneShell() {
                 onOpenPlugins={() => {
                   setComposerMenu(null);
                   router.push("/library/mcps");
+                }}
+                onTogglePlugin={(pluginId) => {
+                  const target = installedPlugins.find((plugin) => plugin.id === pluginId);
+                  if (!target) return;
+                  // 설정이 덜 끝난 플러그인은 여기서 켜 봐야 동작하지 않는다 —
+                  // 스위치를 흉내 내는 대신 키를 넣을 수 있는 화면으로 보낸다.
+                  if (target.configurationValid === false) {
+                    setComposerMenu(null);
+                    router.push("/library/mcps");
+                    return;
+                  }
+                  const api = ipc();
+                  if (!api) return;
+                  const nextEnabled = !target.enabled;
+                  // 낙관적 반영 — 왕복을 기다리면 스위치가 한 박자 늦게 움직인다.
+                  setInstalledPlugins((current) => current.map((plugin) => (
+                    plugin.id === pluginId ? { ...plugin, enabled: nextEnabled } : plugin
+                  )));
+                  void api.mcpTools.setEnabled(pluginId, nextEnabled)
+                    .then(() => api.mcpTools.listInstalled())
+                    .then((plugins) => setInstalledPlugins(plugins))
+                    .catch(() => {
+                      // 실패하면 되돌린다 — 꺼진 도구가 켜진 것처럼 남으면 안 된다.
+                      setInstalledPlugins((current) => current.map((plugin) => (
+                        plugin.id === pluginId ? { ...plugin, enabled: target.enabled } : plugin
+                      )));
+                    });
                 }}
                 onToggleAgent={(agentId) => {
                   setTurnAgentIds((current) => current.includes(agentId)

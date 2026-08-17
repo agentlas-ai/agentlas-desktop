@@ -108,6 +108,13 @@ import {
   listPendingHubPluginApprovals,
   previewHubPlugin,
 } from "./mcp-tools/hub-plugin-bridge";
+import { getPluginBrandMap } from "./mcp-tools/plugin-brand";
+import {
+  closeHubProfileView,
+  openHubProfileView,
+  setHubProfileViewBounds,
+  type HubProfileBounds,
+} from "./hub-profile-view";
 import { statusAllServers, testServerById } from "./mcp-tools/client";
 import { recommendMcpBuildPlan } from "./mcp-tools/build-plan";
 import { getOpenCrabReadiness } from "./opencrab/ontology";
@@ -165,6 +172,7 @@ import {
   securityScan,
   stormbreakerJournal,
   stormbreakerRun,
+  contractVerify,
 } from "./hephaestus/commands";
 import { autofixForPublish } from "./hephaestus/publish-autofix";
 import { normalizeRecommendation } from "./hephaestus/recommendation";
@@ -744,6 +752,25 @@ import type { ToolApprovalDecision } from "../shared/types";
 // DESKTOP_MOBILE_BRIDGE: live invocation authority moved to invocation/service.ts.
 // Hephaestus 빌더(hep-build) 진행 중 실행 — 취소용 AbortController 레지스트리.
 const activeBuilds = new Map<string, AbortController>();
+/**
+ * 실행 중(또는 마지막) 빌드의 전사(轉寫).
+ *
+ * 빌드는 main에서 돌지만 진행 상태는 렌더러 모듈 변수에만 있었다. 그래서 빌드 중에
+ * 다른 메뉴를 한 번 누르면 요청·로그·단계가 통째로 사라졌다(2026-08-16 실측:
+ * rows 10→0, request 소실, 화면상 "멈춤" — 실제로는 main에서 계속 돌고 있었다).
+ * 터미널 hep-build는 프로세스가 살아 있는 한 화면을 잃지 않으므로, 이건 GUI가
+ * 만들어 낸 차이다. 여기 전사를 남겨 두면 화면이 돌아왔을 때 그대로 복원된다.
+ */
+const buildTranscripts = new Map<string, {
+  runId: string;
+  request: string;
+  workspace: string;
+  startedAt: string;
+  running: boolean;
+  events: HephaestusBuildEvent[];
+}>();
+/** 한 빌드가 남기는 이벤트 상한 — 긴 빌드가 메모리를 무한히 쓰지 않게. */
+const BUILD_TRANSCRIPT_MAX_EVENTS = 4_000;
 // runId → "렌더러 구독 완료" 신호. 구독 전 발생한 이벤트를 버퍼링하다 이 신호로 flush 한다.
 const buildReadySignals = new Map<string, () => void>();
 // 조기 실패가 렌더러의 invoke 응답보다 먼저 끝나도 terminal event를 잃지 않는다.
@@ -2871,6 +2898,8 @@ export function registerIpcHandlers(): void {
 
   // ── mcpTools (외부 MCP 툴 플러그인 — Slack/Discord/GitHub 등) ─
   ipcMain.handle("mcpTools:listCatalog", () => MCP_TOOL_CATALOG);
+  // 로고는 웹 카탈로그가 정본이다 — 데스크탑은 slug->자산 주소만 거울로 들고 있는다.
+  ipcMain.handle("mcpTools:brandMap", () => getPluginBrandMap());
   ipcMain.handle("mcpTools:listInstalled", () => listInstalledServers());
   ipcMain.handle("mcpTools:install", (_e, catalogId: string) => installFromCatalog(catalogId));
   ipcMain.handle(
@@ -2944,6 +2973,17 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("marketplace:listFirms", () => getMarketSource().listFirms());
   ipcMain.handle("marketplace:status", (_e, force?: boolean) => refreshMarketSourceStatus(force === true));
   ipcMain.handle("marketplace:bookmarks", () => listHubAgentBookmarks());
+  // 허브 소개 페이지 임베드 — 원격 페이지라 preload/IPC를 붙이지 않는다(hub-profile-view 참고).
+  ipcMain.handle(
+    "marketplace:openProfileView",
+    (_e, input: { slug: string; bounds: HubProfileBounds; locale?: "ko" | "en" }) =>
+      openHubProfileView(input),
+  );
+  ipcMain.handle(
+    "marketplace:setProfileViewBounds",
+    (_e, bounds: HubProfileBounds) => setHubProfileViewBounds(bounds),
+  );
+  ipcMain.handle("marketplace:closeProfileView", () => closeHubProfileView());
   ipcMain.handle("marketplace:bookmarksSync", () => syncHubBookmarks({ rerunIfBusy: true }));
   ipcMain.handle("marketplace:bookmarkAdd", (_e, listing) => {
     const bookmark = addHubAgentBookmark(listing);
@@ -5468,6 +5508,43 @@ export function registerIpcHandlers(): void {
     }
   });
 
+  // 화면이 돌아왔을 때 붙을 수 있게, main이 들고 있는 전사를 그대로 돌려준다.
+  // 렌더러는 이걸 재생해 로그·단계를 복원하고, 아직 running이면 같은 채널을 다시 구독한다.
+  // 완료 신호가 없어도 "계약이 통과했는가"는 물어볼 수 있어야 한다. 모델이 마지막
+  // 한 줄을 빠뜨렸다고 완성된 패키지를 실패로 통보하는 건 사실과 다르다
+  // (2026-08-17 실측: blockers 0인 패키지가 "최종 검증 완료 신호 미확인"으로 실패 처리).
+  ipcMain.handle(
+    "hephaestus:contractVerify",
+    async (_e, input: { folder: string; scope: FsReadScope; mode?: "single" | "team" | "package" }) => {
+      let folder: string;
+      try {
+        folder = resolveFsReadPath(input.folder, input.scope);
+      } catch (e) {
+        return { ok: false, blockers: null, error: (e as PathGuardError).message };
+      }
+      const res = await contractVerify(folder, { mode: input.mode });
+      const blockers = (res.json as { blockers?: unknown } | null)?.blockers;
+      return {
+        ok: Array.isArray(blockers),
+        blockers: Array.isArray(blockers) ? blockers.map(String) : null,
+        error: res.error ?? null,
+      };
+    },
+  );
+
+  ipcMain.handle("hephaestus:activeBuild", () => {
+    const latest = [...buildTranscripts.values()].at(-1);
+    if (!latest) return null;
+    return {
+      runId: latest.runId,
+      request: latest.request,
+      workspace: latest.workspace,
+      startedAt: latest.startedAt,
+      running: latest.running,
+      events: latest.events,
+    };
+  });
+
   ipcMain.handle("hephaestus:build", async (event, req: HephaestusBuildRequest) => {
     // Renderer가 보낸 절대경로는 권한이 아니다. Native picker / trusted drop이
     // 발급한 capability를 main에서 다시 검증하고 그 경로만 builder에 전달한다.
@@ -5477,6 +5554,15 @@ export function registerIpcHandlers(): void {
     const win = BrowserWindow.fromWebContents(event.sender);
     const controller = new AbortController();
     activeBuilds.set(runId, controller);
+    buildTranscripts.clear();
+    buildTranscripts.set(runId, {
+      runId,
+      request: String(req.request ?? ""),
+      workspace: resolvedRequest.workspace,
+      startedAt: new Date().toISOString(),
+      running: true,
+      events: [],
+    });
     // 렌더러는 build() 응답을 await 한 뒤에야 채널을 구독하므로, 그 사이에 발생한 첫 이벤트
     // (예: 'build' stage 틱)가 유실될 수 있다. 렌더러가 buildReady 로 구독 완료를 알릴 때까지
     // 이벤트를 버퍼링했다가 한 번에 flush 한다(첫 stage 틱 손실 방지).
@@ -5490,6 +5576,13 @@ export function registerIpcHandlers(): void {
       }
     };
     const emit = (ev: HephaestusBuildEvent) => {
+      const transcript = buildTranscripts.get(runId);
+      if (transcript) {
+        transcript.events.push(ev);
+        if (transcript.events.length > BUILD_TRANSCRIPT_MAX_EVENTS) {
+          transcript.events.splice(0, transcript.events.length - BUILD_TRANSCRIPT_MAX_EVENTS);
+        }
+      }
       if (ready) {
         sendToWin(ev);
       } else {
@@ -5506,6 +5599,8 @@ export function registerIpcHandlers(): void {
     });
     void runHephaestusBuild(runId, resolvedRequest, emit, controller.signal, pickLocale(req)).finally(() => {
       activeBuilds.delete(runId);
+      const finished = buildTranscripts.get(runId);
+      if (finished) finished.running = false;
       // If buildReady already fired, its callback removed the signal. Otherwise
       // retain the buffered terminal event long enough for invoke() to resolve,
       // the renderer to subscribe, and buildReady() to flush it.

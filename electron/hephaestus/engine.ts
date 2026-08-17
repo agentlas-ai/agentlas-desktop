@@ -15,7 +15,7 @@ import path from "node:path";
 import { app } from "electron";
 import { spawnSync, type ChildProcess } from "node:child_process";
 import { detachedSpawnOpts, killCliTree, trackRunChild, withCliPath } from "../runtime/exec";
-import { withPythonCacheBoundary } from "../runtime/python-cache";
+import { withPythonCacheBoundary, withPythonRuntimeBoundary } from "../runtime/python-cache";
 import { currentUiLocale } from "../ui-locale";
 import { hephaestusRoot, hephaestusRootDetail, readHephaestusVersion, resetHephaestusRootCache } from "./root";
 import type { HephaestusStatus, HephaestusUpdateJournal } from "../../shared/types";
@@ -685,7 +685,7 @@ export async function runHephaestus<T = unknown>(
     // An unreadable link is not a reason to refuse to run — fall back to the
     // path as given, which is what this code did before.
   }
-  const env = withPythonCacheBoundary(withCliPath({
+  const env = withPythonRuntimeBoundary(py.python, withCliPath({
     ...process.env,
     ...opts.env,
     HEPHAESTUS_RUNTIME_ROOT: pinnedRoot,

@@ -17,12 +17,14 @@ import {
   hubVerificationFacts,
   isCallableHubListing,
 } from "@/lib/hub-verification";
-import { installedServerMatchesPluginSlug } from "@shared/plugin-slug";
+import { installedServerMatchesPluginSlug, normalizePluginSlug } from "@shared/plugin-slug";
+import { PluginLogo } from "@/components/PluginLogo";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import type {
   ExperienceHubCatalogResult,
   HephaestusCommandResult,
   MarketplaceListing,
+  McpToolCatalogEntry,
   MarketplaceSourceStatus,
 } from "@/lib/types";
 
@@ -41,6 +43,65 @@ type HubView = "agents" | "experience";
 
 function isLiveHubListing(listing: MarketplaceListing): boolean {
   return listing.source === "hub-index" || listing.source === "hub-profile" || listing.source === "hub-plugin" || listing.kind === "cloud-callable" || listing.callable === true;
+}
+
+/** 이 카드가 허브가 아니라 데스크탑 내장 카탈로그에서 온 것인가. */
+const DESKTOP_CATALOG_SOURCE = "desktop-catalog";
+
+function isDesktopCatalogListing(listing: MarketplaceListing): boolean {
+  return listing.source === DESKTOP_CATALOG_SOURCE;
+}
+
+/**
+ * 데스크탑 내장 카탈로그 → 허브 카드가 읽을 수 있는 리스팅.
+ *
+ * 허브에 같은 도구가 있으면 제외한다(정규화 slug로 판정 — github ↔ github-mcp).
+ * 허브 것이 로고·상세를 달고 있어 상위호환이고, 둘 다 보이면 같은 도구가 두 장이 된다.
+ */
+function desktopCatalogListings(
+  catalog: McpToolCatalogEntry[],
+  hubListings: MarketplaceListing[],
+  normalizedQuery: string,
+  ko: boolean,
+): MarketplaceListing[] {
+  if (catalog.length === 0) return [];
+  const hubSlugs = new Set(
+    hubListings
+      .filter((listing) => hubCategoryFor(listing) === "plugin")
+      .map((listing) => normalizePluginSlug(listing.slug)),
+  );
+  return catalog
+    .filter((entry) => !hubSlugs.has(normalizePluginSlug(entry.id)))
+    .filter((entry) => {
+      if (!normalizedQuery) return true;
+      return [entry.id, entry.name, entry.nameEn, entry.description, entry.descriptionEn, entry.category]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase()
+        .includes(normalizedQuery);
+    })
+    .map((entry) => ({
+      slug: entry.id,
+      name: entry.name,
+      nameEn: entry.nameEn || entry.name,
+      tagline: entry.description,
+      taglineEn: entry.descriptionEn || entry.description,
+      trustGrade: "A" as const,
+      installCount: 0,
+      // 허브 매니페스트가 없다 — 설치는 로컬 카탈로그 id로 직접 간다.
+      manifestUrl: "",
+      ownerName: ko ? "Agentlas 기본 도구" : "Agentlas built-in",
+      developer: ko ? "Agentlas 기본 도구" : "Agentlas built-in",
+      kind: "hub-plugin",
+      callable: false,
+      routingReady: true,
+      source: DESKTOP_CATALOG_SOURCE,
+      entityKind: "plugin",
+      perCallCredits: 0,
+      category: entry.category,
+      ...(entry.brandColor ? { brandColor: entry.brandColor } : {}),
+      ...(entry.docsUrl ? { homepage: entry.docsUrl } : {}),
+    }));
 }
 
 function hubCategoryFor(listing: MarketplaceListing): HubCategory {
@@ -147,6 +208,10 @@ function MarketplacePage() {
   const [installedMcpServers, setInstalledMcpServers] = useState<
     Array<{ catalogId?: string | null; name?: string | null; enabled?: boolean }>
   >([]);
+  // Agentlas 기본 도구(파일 시스템·브라우저·컴퓨터 유즈 등)는 허브 카탈로그에 없다.
+  // MCP 관리 화면의 카탈로그 탭이 여기로 합쳐졌으므로, 이걸 안 실으면 그 도구들은
+  // 앱 어디에서도 연결할 수 없게 된다.
+  const [desktopCatalog, setDesktopCatalog] = useState<McpToolCatalogEntry[]>([]);
   const [bookmarkedIdentities, setBookmarkedIdentities] = useState<Set<string>>(new Set());
   const [sourceStatus, setSourceStatus] = useState<MarketplaceSourceStatus | null>(null);
   const [q, setQ] = useState(() => searchParams.get("q") ?? "");
@@ -193,16 +258,18 @@ function MarketplacePage() {
     const api = ipc();
     if (!api) return;
     const bookmarkGeneration = ++bookmarkStateGenerationRef.current;
-    const [ag, session, bookmarks, mcpServers] = await Promise.all([
+    const [ag, session, bookmarks, mcpServers, localCatalog] = await Promise.all([
       api.team.list(),
       api.auth.getSession(),
       api.marketplace.bookmarks?.().catch(() => []),
       // 플러그인 카드가 "이미 설치됨"을 말할 수 있어야 한다. 이게 없으면 Desktop 카탈로그로
       // 이미 깐 도구에도 계속 "설치"를 권한다(hub:brave-search-mcp ↔ desktop:brave-search).
       api.mcpTools.listInstalled().catch(() => []),
+      api.mcpTools.listCatalog().catch(() => []),
     ]);
     setInstalledAgentSlugs(new Set(visibleAgents(ag).map((a) => a.slug)));
     setInstalledMcpServers(mcpServers ?? []);
+    setDesktopCatalog(localCatalog ?? []);
     if (bookmarkStateGenerationRef.current === bookmarkGeneration) {
       setBookmarkedIdentities(new Set((bookmarks ?? []).map(hubBookmarkIdentityKey)));
     }
@@ -391,9 +458,18 @@ function MarketplacePage() {
   const liveListings = dropInstallOnlyShadows(listings.filter(isLiveHubListing));
   // 검색 중에는 서버의 의미 순위를 그대로 보존한다. 유형/호출 수 기반 로컬 정렬은
   // 검색어가 없는 둘러보기 모드에서만 사용한다.
-  const matchingListings = normalizedQuery
+  const hubListings = normalizedQuery
     ? liveListings
     : orderListingsForHub(liveListings, hubLive);
+  // 허브에 쌍이 없는 데스크탑 전용 도구만 뒤에 덧붙인다. 허브에 같은 도구가 있으면
+  // (github ↔ github-mcp) 허브 쪽이 이긴다 — 로고와 상세가 붙어 있기 때문이다.
+  const desktopOnlyListings = desktopCatalogListings(
+    desktopCatalog,
+    liveListings,
+    normalizedQuery,
+    ko,
+  );
+  const matchingListings = [...hubListings, ...desktopOnlyListings];
 
   // Agent Hub 정보구조: 에이전트·팀·플러그인은 같은 시장에서 검색하되,
   // 사용자가 필요한 고용 단위를 즉시 좁힐 수 있게 실제 엔티티 종류로 필터한다.
@@ -752,6 +828,10 @@ function MarketplacePage() {
                       bookmarking={bookmarking === hubListingIdentityKey(listing)}
                       onBookmark={() => void bookmarkOne(listing)}
                       onCopyCall={() => void copyHubCall(listing)}
+                      onOpenProfile={() => router.push(
+                        `/marketplace/profile?slug=${encodeURIComponent(listing.slug)}`
+                        + `&name=${encodeURIComponent(pickLocalized(listing, locale).name)}`,
+                      )}
                     />
                   ))}
                 </div>
@@ -1061,6 +1141,7 @@ function AgentCard({
   bookmarking,
   onBookmark,
   onCopyCall,
+  onOpenProfile,
 }: {
   listing: MarketplaceListing;
   locale: Locale;
@@ -1071,6 +1152,8 @@ function AgentCard({
   bookmarking: boolean;
   onBookmark: () => void;
   onCopyCall: () => void;
+  /** 허브의 공개 소개 페이지를 앱 안에 띄운다. 데스크탑 전용 도구에는 소개가 없다. */
+  onOpenProfile: () => void;
 }) {
   const loc = pickLocalized(listing, locale);
   const ko = locale === "ko";
@@ -1106,11 +1189,12 @@ function AgentCard({
     : typeof listing.perCallCredits === "number" && Number.isFinite(listing.perCallCredits)
       ? listing.perCallCredits
       : entityKind === "multi" ? TEAM_CALL_CREDITS : plugin ? 0 : AGENT_CALL_CREDITS;
-  const creditTooltipId = `hub-credit-${entityKind}-${listing.slug}`;
   const author = listing.ownerName ? (ko ? `${listing.ownerName} 제공` : `by ${listing.ownerName}`) : "Agentlas Hub";
   // 이 플러그인을 실제로 제공하는 사이트. Hub가 아직 homepage를 못 돌려주는 낡은 응답이면
   // 최소한 Hub 자체 상세 페이지(manifestUrl)로라도 보낸다 — 링크가 아예 없는 것보다 낫다.
-  const websiteUrl = plugin ? (listing.homepage || listing.manifestUrl) : null;
+  const builtIn = plugin && isDesktopCatalogListing(listing);
+  // 기본 도구는 manifestUrl이 비어 있다 — 빈 주소로 창을 여는 버튼을 만들지 않는다.
+  const websiteUrl = plugin ? (listing.homepage || listing.manifestUrl || null) : null;
   const cardLabel = entityClassLabel(entityKind, locale);
   const verificationFacts = hubVerificationFacts(listing, locale);
   const statFacts = [
@@ -1127,19 +1211,37 @@ function AgentCard({
       <div className="hub-card-availability" data-callable={callable ? "true" : "false"}>
         <span className="hub-card-availability-dot" aria-hidden="true" />
         <span>
-          {plugin
+          {builtIn
+            ? (ko ? "Agentlas 기본 도구" : "Agentlas built-in tool")
+            : plugin
             ? (ko ? "도구 연결 가능" : "Tool available")
             : graph
               ? (ko ? "받아서 내 자동화로" : "Install as my automation")
               : callable
-                ? (ko ? "지금 호출 가능" : "Ready to call")
+                // 가격을 한 줄에 붙여 말한다 — 같은 값을 오른쪽 크레딧 원에서 한 번
+                // 더 보여주던 중복을 없앴다(오너 지시 2026-08-16).
+                ? (ko ? `24시간 사용 · ${perCallCredits} 크레딧` : `24-hour use · ${perCallCredits} credits`)
                 : (ko ? "설치 후 사용" : "Install to use")}
         </span>
       </div>
-      <div className="hub-card-head">
+      {/* data-with-logo가 있어야 머리 영역이 2열에서 3열로 늘어난다 — 없으면 로고가
+          제목 자리를 밀어내고 카테고리 태그가 다음 줄로 떨어진다. */}
+      <div className="hub-card-head" data-with-logo={plugin ? "true" : undefined}>
+        {/* 로고는 웹 카탈로그가 정본 — 데스크탑은 slug만 넘기고 main이 캐시해 준다.
+            에이전트·팀에는 브랜드 자산이 없으므로 플러그인에만 붙는다. */}
+        {plugin ? (
+          <PluginLogo
+            slug={listing.slug}
+            name={loc.name}
+            size={38}
+            brandColor={listing.brandColor}
+          />
+        ) : null}
         <div className="hub-card-main">
           <div className="hub-card-kicker">
-            {plugin
+            {builtIn
+              ? (ko ? "Agentlas · 내장 도구" : "AGENTLAS · BUILT-IN")
+              : plugin
               ? (ko ? "허브 플러그인" : "HUB PLUGIN")
               : graph
                 ? (ko ? "Hub · 자동화 그래프" : "Hub · automation graph")
@@ -1147,24 +1249,25 @@ function AgentCard({
                   ? (ko ? "Hub · 멀티 에이전트 팀" : "Hub · multi-agent team")
                   : (ko ? "Hub · 싱글 에이전트" : "Hub · single agent")}
           </div>
-          <div className="portal-card-title hub-card-title">{loc.name}</div>
+          {/* 데스크탑 내장 도구는 허브에 공개 소개 페이지가 없다 — 눌러도 404가
+              되는 제목을 링크처럼 보이게 두지 않는다. */}
+          {builtIn ? (
+            <div className="portal-card-title hub-card-title">{loc.name}</div>
+          ) : (
+            <button
+              type="button"
+              className="portal-card-title hub-card-title hub-card-title-link"
+              onClick={onOpenProfile}
+              title={ko ? "소개 페이지 열기" : "Open the profile page"}
+            >
+              {loc.name}
+            </button>
+          )}
           <div className="hub-card-author">{author}</div>
         </div>
-        {callable && !plugin ? (
-          <span
-            className="hub-credit-orb-wrap"
-            tabIndex={0}
-            aria-label={ko
-              ? `24시간 사용, ${perCallCredits} 크레딧`
-              : `24-hour use, ${perCallCredits} credits`}
-            aria-describedby={creditTooltipId}
-          >
-            <span className="hub-credit-orb" aria-hidden="true">{perCallCredits}</span>
-            <span id={creditTooltipId} className="hub-credit-tooltip" role="tooltip">
-              {ko ? `24시간 사용 · ${perCallCredits} 크레딧` : `24-hour use · ${perCallCredits} credits`}
-            </span>
-          </span>
-        ) : plugin ? (
+        {/* 크레딧 원(3/10)은 없앴다 — 같은 값이 카드 맨 윗줄에 이미 글자로 적힌다.
+            오른쪽에 숫자만 뜬 원은 무슨 숫자인지 툴팁을 열어야 알 수 있었다. */}
+        {callable && !plugin ? null : plugin ? (
           <RdTag className="hub-credit-tag" bg={C.blue}>
             {listing.category || cardLabel}
           </RdTag>
@@ -1332,7 +1435,30 @@ function AgentCard({
           type="button"
           className={"btn sm hub-card-action-btn" + ((plugin && install.phase === "idle") || (!plugin && !graph && !bookmarked) ? " primary" : "")}
           onClick={
-            plugin
+            // Agentlas 기본 도구는 허브 매니페스트가 없다 — 승인 미리보기를 거치지 않고
+            // 로컬 카탈로그 id로 바로 연결한다(구 MCP 카탈로그 탭과 같은 동작).
+            plugin && isDesktopCatalogListing(listing)
+              ? () => {
+                  if (install.phase === "loading" || install.phase === "installing") return;
+                  setInstall({ phase: "installing" });
+                  void window.agentlas.mcpTools
+                    .install(listing.slug)
+                    .then(() => {
+                      setInstall({
+                        phase: "done",
+                        message: ko
+                          ? "연결됨 — 다음 대화부터 바로 쓸 수 있습니다."
+                          : "Connected — usable from your next conversation.",
+                      });
+                    })
+                    .catch((error: unknown) => {
+                      setInstall({
+                        phase: "error",
+                        message: error instanceof Error ? error.message : String(error),
+                      });
+                    });
+                }
+              : plugin
               ? () => {
                   if (install.phase === "loading" || install.phase === "installing") return;
                   setInstall({ phase: "loading" });

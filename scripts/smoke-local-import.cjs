@@ -232,6 +232,31 @@ function writeFile(filePath, body) {
       "team kind must survive even if the route projection is unavailable",
     );
     assert.ok(listRoutes().some((route) => route.agentId === team.agent.id && route.path === teamRoot && route.kind === "team"));
+
+    // Regression: copying a team checkout must update the existing owned team
+    // instead of minting a second CEO UUID and a second firm row. The old
+    // path-only identity check made this exact flow produce duplicate teams.
+    const copiedTeamRoot = path.join(tempDir, "elsewhere", "proof-founder-team");
+    fs.mkdirSync(path.dirname(copiedTeamRoot), { recursive: true });
+    fs.cpSync(teamRoot, copiedTeamRoot, { recursive: true });
+    const copiedTeam = await importLocalFolder(copiedTeamRoot);
+    assert.equal(copiedTeam.agent.id, team.agent.id, "a copied team must reuse the existing CEO identity");
+    assert.equal(copiedTeam.firmId, team.firmId, "a copied team must reuse the existing firm identity");
+    assert.equal(
+      getDb().prepare("SELECT COUNT(*) AS count FROM firms WHERE slug = ?").get(`firm-${team.agent.slug}`).count,
+      1,
+      "a copied team must not create a second firm row",
+    );
+    assert.equal(
+      getDb().prepare("SELECT COUNT(*) AS count FROM installed_agents WHERE entity_kind = 'team' AND name = ?").get(team.agent.name).count,
+      1,
+      "a copied team must not create a second CEO row",
+    );
+    assert.equal(listRoutes().find((route) => route.agentId === team.agent.id).path, copiedTeamRoot, "the route follows the newest checkout");
+    // Continue the rest of this fixture from the original checkout so the
+    // existing team-to-single conversion assertion remains meaningful.
+    await importLocalFolder(teamRoot);
+
     const teamFirms = listFirms();
     assert.ok(teamFirms.some((firm) => firm.slug === `firm-${team.agent.slug}` && firm.ceoAgentId === team.agent.id));
     const flatFirm = getFirmBySlug(`firm-${team.agent.slug}`);

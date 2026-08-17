@@ -15,6 +15,7 @@ import {
   IconSparkles,
   IconTarget,
 } from "@/components/Icon";
+import { PluginLogo, usePluginBrandMap } from "@/components/PluginLogo";
 import type { RuntimeStatus } from "@shared/types";
 import styles from "./OneShell.module.css";
 
@@ -41,6 +42,11 @@ export type OneComposerPluginOption = {
   description: string;
   enabled: boolean;
   ready: boolean;
+  /** 로고 조회용 — 카탈로그 id와 서버 이름 둘 다 slug 후보다. */
+  catalogId?: string | null;
+  serverName?: string;
+  brandColor?: string;
+  mark?: string;
 };
 
 type OneTurnOptionKey = "goalMode" | "planMode" | "sessionRouting" | "fastMode";
@@ -59,6 +65,8 @@ type Props = {
   onAddFolder: () => void;
   onOpenProjectSessions: () => void;
   onOpenPlugins: () => void;
+  /** 플러그인 행 자체가 켜기/끄기 스위치다. 설정이 덜 된 항목은 관리 화면으로 보낸다. */
+  onTogglePlugin: (id: string) => void;
   onToggleAgent: (id: string) => void;
   onSelectModel: (runtime: RuntimeStatus, id: string) => void;
   onSelectEffort: (id: string) => void;
@@ -87,6 +95,7 @@ export function OneComposerControls({
   onAddFolder,
   onOpenProjectSessions,
   onOpenPlugins,
+  onTogglePlugin,
   onToggleAgent,
   onSelectModel,
   onSelectEffort,
@@ -94,6 +103,7 @@ export function OneComposerControls({
   onToggleTurnOption,
 }: Props) {
   const [query, setQuery] = useState("");
+  const brandMap = usePluginBrandMap();
   const [portalHost, setPortalHost] = useState<HTMLElement | null>(null);
   const [popoverPosition, setPopoverPosition] = useState({
     left: 12,
@@ -210,7 +220,16 @@ export function OneComposerControls({
             ) : plugins.map((plugin) => (
               <ComposerRow
                 key={plugin.id}
-                icon={<IconLayers size={15} />}
+                icon={(
+                  <PluginLogo
+                    catalogId={plugin.catalogId}
+                    name={plugin.serverName ?? plugin.name}
+                    size={18}
+                    brandColor={plugin.brandColor}
+                    mark={plugin.mark}
+                    brandMap={brandMap}
+                  />
+                )}
                 title={plugin.name}
                 subtitle={plugin.enabled && plugin.ready
                   ? plugin.description
@@ -218,13 +237,13 @@ export function OneComposerControls({
                     ? (locale === "ko" ? "설정 필요" : "Setup required")
                     : (locale === "ko" ? "비활성화됨" : "Disabled")} · ${plugin.description}`}
                 checked={plugin.enabled && plugin.ready}
-                onClick={onOpenPlugins}
+                onClick={() => onTogglePlugin(plugin.id)}
               />
             ))}
           </div>
           <ComposerRow
             icon={<IconLayers size={15} />}
-            title={locale === "ko" ? "MCP 및 플러그인 관리" : "Manage MCP and plugins"}
+            title={locale === "ko" ? "MCP, Plugin" : "MCP, Plugin"}
             trailing={<IconChevronRight size={13} />}
             onClick={onOpenPlugins}
           />

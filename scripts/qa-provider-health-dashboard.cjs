@@ -95,7 +95,7 @@ function setupProviderHealthBridge(payload) {
       model: "gpt-5.1-codex",
     },
     {
-      kind: "gemini",
+      kind: "antigravity",
       backend: "google",
       source: "/fixture/bin/agy",
       version: "1.1.1",
@@ -150,14 +150,6 @@ function setupProviderHealthBridge(payload) {
               ],
             },
         {
-          provider: "gemini",
-          backend: "oauth",
-          label: "Gemini",
-          status: "error",
-          error: "unsupported_client",
-          windows: [],
-        },
-        {
           provider: "grok",
           backend: "custom",
           label: "Grok",
@@ -193,6 +185,7 @@ function watchPage(page, errors) {
 function forceLocale(context, locale) {
   return context.addInitScript((value) => {
     window.localStorage.setItem("agentlas.locale", value);
+    window.localStorage.setItem("agentlas.work.firstRunOnboarding.v2", "1");
   }, locale);
 }
 
@@ -205,24 +198,24 @@ async function inspectViewport(page, viewport, screenshotName) {
   const panel = page.locator('[data-tour-id="dashboard.llm"]');
   await panel.getByText("LLM 연결 · 사용량", { exact: true }).waitFor({ timeout: 12_000 });
 
-  const geminiRow = panel.locator(".dashboard-engine-row").filter({ hasText: "Gemini" });
-  const grokRow = panel.locator(".dashboard-engine-row").filter({ hasText: "Grok" });
-  await geminiRow.getByText(
-    "Antigravity 작동 · 사용량 미제공",
-    { exact: true },
-  ).waitFor();
+  const antigravityRow = panel.locator(".dashboard-engine-card").filter({ hasText: "Antigravity" });
+  const grokRow = panel.locator(".dashboard-engine-card").filter({ hasText: "Grok" });
+  const antigravityStatus = antigravityRow.locator(".dashboard-engine-card-status");
+  await antigravityStatus.waitFor();
+  assert.match((await antigravityStatus.textContent()).replace(/\s+/g, " ").trim(), /^연결됨(?:\s·.*)?$/);
   await grokRow.getByText(
     "한도 소진(402) · Usage 확인",
     { exact: true },
   ).waitFor();
 
-  await geminiRow.getByRole("button", { name: "Antigravity", exact: true }).waitFor();
+  assert.equal(await antigravityRow.getByRole("button", { name: "다시 시도", exact: true }).count(), 0);
+  assert.equal(await antigravityRow.getByRole("button", { name: "재로그인", exact: true }).count(), 0);
   await grokRow.getByRole("button", { name: "Usage 열기", exact: true }).waitFor();
 
   assert.equal(
-    await geminiRow.getByRole("button", { name: /다시 시도|재로그인/ }).count(),
+    await antigravityRow.getByRole("button", { name: /다시 시도|재로그인/ }).count(),
     0,
-    "Gemini unsupported-client row must not show generic retry/re-login",
+    "Antigravity connected row must not show generic retry/re-login",
   );
   assert.equal(
     await grokRow.getByRole("button", { name: /다시 시도|재로그인/ }).count(),
@@ -238,13 +231,13 @@ async function inspectViewport(page, viewport, screenshotName) {
 
   const fit = await page.evaluate(() => {
     const panelNode = document.querySelector('[data-tour-id="dashboard.llm"]');
-    const rows = Array.from(panelNode?.querySelectorAll(".dashboard-engine-row") || []);
-    const requiredRows = rows.filter((row) => /Gemini|Grok/.test(row.textContent || ""));
+    const rows = Array.from(panelNode?.querySelectorAll(".dashboard-engine-card") || []);
+    const requiredRows = rows.filter((row) => /Antigravity|Grok/.test(row.textContent || ""));
     const root = document.documentElement;
     const panelRect = panelNode?.getBoundingClientRect();
     const rowMetrics = requiredRows.map((row) => {
       const rect = row.getBoundingClientRect();
-      const status = row.querySelector(".dashboard-engine-copy > div:last-child");
+      const status = row.querySelector(".dashboard-engine-card-status");
       return {
         text: (row.textContent || "").replace(/\s+/g, " ").trim(),
         left: rect.left,
@@ -313,10 +306,14 @@ async function verifyUsageSnapshotRecovery(page, options) {
 
   // Snapshot IPC failure must not erase or rewrite the last provider-specific receipts.
   if (options.locale === "ko") {
-    await panel.getByText("Antigravity 작동 · 사용량 미제공", { exact: true }).waitFor();
+    const antigravityStatus = panel.locator(".dashboard-engine-card").filter({ hasText: "Antigravity" }).locator(".dashboard-engine-card-status");
+    await antigravityStatus.waitFor();
+    assert.match((await antigravityStatus.textContent()).replace(/\s+/g, " ").trim(), /^연결됨(?:\s·.*)?$/);
     await panel.getByText("한도 소진(402) · Usage 확인", { exact: true }).waitFor();
   } else {
-    await panel.getByText("Antigravity active · usage n/a", { exact: true }).waitFor();
+    const antigravityStatus = panel.locator(".dashboard-engine-card").filter({ hasText: "Antigravity" }).locator(".dashboard-engine-card-status");
+    await antigravityStatus.waitFor();
+    assert.match((await antigravityStatus.textContent()).replace(/\s+/g, " ").trim(), /^connected(?:\s·.*)?$/i);
     await panel.getByText("quota exhausted (402) · open usage", { exact: true }).waitFor();
   }
 
@@ -333,46 +330,35 @@ async function verifyUsageSnapshotRecovery(page, options) {
   return { before, after, recovered: true };
 }
 
-async function verifyUsageSnapshotOrdering(page) {
+async function verifyUsageSnapshotCoalescing(page) {
   const panel = page.locator('[data-tour-id="dashboard.llm"]');
   const refresh = panel.locator(".dashboard-refresh-button");
+  const before = await page.evaluate(() => window.__providerHealthQA.usageCalls);
 
-  // A stale failure that finishes after a newer success must not resurrect the global error banner.
+  // The renderer cache coalesces concurrent forced refreshes. This keeps a
+  // double-click from issuing two provider calls or letting a stale response
+  // replace the one that is already in flight.
   await page.evaluate(() => {
     window.__providerHealthQA.snapshotPlans.push(
-      { delayMs: 140, fail: true },
       { delayMs: 5, codexUsedPercent: 17 },
     );
   });
-  await refresh.click();
-  await refresh.click();
-  await page.waitForTimeout(190);
+  await Promise.all([refresh.click(), refresh.click()]);
+  await page.waitForTimeout(40);
   assert.equal(await panel.getByRole("alert").count(), 0, "stale snapshot failure must not replace a newer success");
-  await panel.locator(".dashboard-engine-row").filter({ hasText: "Codex" })
+  await panel.locator(".dashboard-engine-card").filter({ hasText: "Codex" })
     .getByText("17%", { exact: true }).waitFor();
+  const after = await page.evaluate(() => window.__providerHealthQA.usageCalls);
+  assert.equal(after, before + 1, "concurrent forced refreshes must share one in-flight snapshot");
 
-  // A stale success must not overwrite the newest usage values either.
-  await page.evaluate(() => {
-    window.__providerHealthQA.snapshotPlans.push(
-      { delayMs: 140, codexUsedPercent: 88 },
-      { delayMs: 5, codexUsedPercent: 23 },
-    );
-  });
-  await refresh.click();
-  await refresh.click();
-  await page.waitForTimeout(190);
-  const codexRow = panel.locator(".dashboard-engine-row").filter({ hasText: "Codex" });
-  await codexRow.getByText("23%", { exact: true }).waitFor();
-  assert.equal(await codexRow.getByText("88%", { exact: true }).count(), 0, "stale snapshot success must be ignored");
-
-  return { staleFailureIgnored: true, staleSuccessIgnored: true };
+  return { concurrentRefreshesCoalesced: true, latestSnapshotRendered: true };
 }
 
 async function verifyStaleReceiptDoesNotImplyRuntime(page) {
   const panel = page.locator('[data-tour-id="dashboard.llm"]');
   await panel.getByText("LLM 연결 · 사용량", { exact: true }).waitFor();
-  for (const label of ["Gemini", "Grok"]) {
-    const row = panel.locator(".dashboard-engine-row").filter({ hasText: label });
+  for (const label of ["Antigravity", "Grok"]) {
+    const row = panel.locator(".dashboard-engine-card").filter({ hasText: label });
     await row.getByRole("button", { name: "연결", exact: true }).waitFor();
     assert.equal(
       await row.getByRole("button", { name: /Antigravity|Usage 열기/ }).count(),
@@ -380,12 +366,12 @@ async function verifyStaleReceiptDoesNotImplyRuntime(page) {
       `${label}: a stale receipt must not hide the runtime Connect action`,
     );
   }
-  return { geminiConnectVisible: true, grokConnectVisible: true };
+  return { antigravityConnectVisible: true, grokConnectVisible: true };
 }
 
 async function verifyAtomicProviderRetry(page) {
   const panel = page.locator('[data-tour-id="dashboard.llm"]');
-  const codexRow = panel.locator(".dashboard-engine-row").filter({ hasText: "Codex" });
+  const codexRow = panel.locator(".dashboard-engine-card").filter({ hasText: "Codex" });
   await codexRow.getByText("조회 실패", { exact: true }).waitFor();
   assert.equal(
     await page.evaluate(() => typeof window.agentlas.usage.invalidate),
@@ -441,20 +427,16 @@ async function main() {
       retry: "다시 시도",
       screenshotName: "07-provider-usage-ipc-error-ko-1440x1100.png",
     });
-    const ordering = await verifyUsageSnapshotOrdering(page);
-
+    const ordering = await verifyUsageSnapshotCoalescing(page);
     const panel = page.locator('[data-tour-id="dashboard.llm"]');
-    await panel.locator(".dashboard-engine-row").filter({ hasText: "Gemini" })
-      .getByRole("button", { name: "Antigravity", exact: true }).click();
-    await panel.locator(".dashboard-engine-row").filter({ hasText: "Grok" })
+    await panel.locator(".dashboard-engine-card").filter({ hasText: "Grok" })
       .getByRole("button", { name: "Usage 열기", exact: true }).click();
     assert.deepEqual(
       await page.evaluate(() => window.__providerHealthQA.calls),
       [
-        { name: "fs.openPath", target: "https://antigravity.google" },
         { name: "fs.openPath", target: "https://grok.com" },
       ],
-      "provider actions must open the intended official surfaces",
+      "Grok usage action must open the intended official surface",
     );
 
     const compactFit = await inspectViewport(
@@ -492,7 +474,7 @@ async function main() {
       setupSource,
       baseOptions: mockBridgeOptions({ teamRoster: true }),
       locale: "ko-KR",
-      excludeRuntimeKinds: ["gemini", "grok"],
+      excludeRuntimeKinds: ["antigravity", "grok"],
     });
     const missingRuntimePage = await missingRuntimeContext.newPage();
     missingRuntimePage.setDefaultTimeout(10_000);
@@ -532,11 +514,11 @@ async function main() {
         compact: compactFit,
       },
       labels: {
-        gemini: "Antigravity 작동 · 사용량 미제공",
+        antigravity: "연결됨",
         grok: "한도 소진(402) · Usage 확인",
       },
       actions: {
-        gemini: "https://antigravity.google",
+        antigravity: "https://antigravity.google",
         grok: "https://grok.com",
       },
       snapshotIpcRecovery: {

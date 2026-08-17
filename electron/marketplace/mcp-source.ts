@@ -774,7 +774,19 @@ export function marketPublicAgentToListing(raw: Record<string, unknown>): Market
   };
 }
 
-function marketPublicPluginToListing(raw: Record<string, unknown>): MarketplaceListing | null {
+/** 허브가 내려준 상대 자산 경로를 절대 URL로 올린다. 웹이 로고의 정본이다. */
+function absoluteHubAssetUrl(value: unknown, origin: string): string | undefined {
+  const raw = cleanString(value);
+  if (!raw) return undefined;
+  if (/^https?:\/\//i.test(raw)) return raw;
+  if (!raw.startsWith("/")) return undefined;
+  return `${origin}${raw}`;
+}
+
+function marketPublicPluginToListing(
+  raw: Record<string, unknown>,
+  origin = "https://agentlas.cloud",
+): MarketplaceListing | null {
   const slug = cleanString(raw.slug);
   if (!slug) return null;
   const name = cleanString(raw.name, slug);
@@ -805,6 +817,11 @@ function marketPublicPluginToListing(raw: Record<string, unknown>): MarketplaceL
     detailUrl: detailUrl.startsWith("http") ? detailUrl : `https://agentlas.cloud${detailUrl}`,
     installCli: cleanString(install.cli, `npx agentlas@latest plugin add ${slug}`),
     ...(cleanString(raw.homepage) ? { homepage: cleanString(raw.homepage) } : {}),
+    // 로고 3필드는 여기서 버려지고 있었다(2026-08-16) — 그래서 허브 화면이 흑백
+    // 텍스트 카드였다. 웹이 로고를 바꾸면 데스크탑도 따라오도록 주소만 옮긴다.
+    ...(absoluteHubAssetUrl(raw.icon, origin) ? { iconUrl: absoluteHubAssetUrl(raw.icon, origin) } : {}),
+    ...(absoluteHubAssetUrl(raw.brandGlyph, origin) ? { brandGlyphUrl: absoluteHubAssetUrl(raw.brandGlyph, origin) } : {}),
+    ...(cleanString(raw.brandColor) ? { brandColor: cleanString(raw.brandColor) } : {}),
   };
 }
 
@@ -958,7 +975,14 @@ export class McpSource implements MarketplaceSource {
       if (!resp.ok) throw new Error(`public marketplace plugins ${resp.status}`);
       const json = (await resp.json()) as unknown;
       const rawPlugins = asArray<Record<string, unknown>>(json, "plugins", "items", "listings");
-      const listings = normalizeListings(rawPlugins.map(marketPublicPluginToListing).filter((item): item is MarketplaceListing => Boolean(item)));
+      const assetOrigin = (() => {
+        try { return new URL(url).origin; } catch { return "https://agentlas.cloud"; }
+      })();
+      const listings = normalizeListings(
+        rawPlugins
+          .map((rawPlugin) => marketPublicPluginToListing(rawPlugin, assetOrigin))
+          .filter((item): item is MarketplaceListing => Boolean(item)),
+      );
       this.publicPluginCache = { fetchedAt, listings };
       return listings;
     } finally {

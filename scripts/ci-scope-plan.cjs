@@ -71,7 +71,7 @@ const updaterPatterns = [
   /^renderer\/app\/\(shell\)\/settings\/page\.tsx$/,
   /^scripts\/(?:atomic-swap-mac\.swift|install-stable-mac\.sh|mac-install-transaction\.mjs)$/,
   /^scripts\/(?:verify-mac-(?:app-bundle|install-boundary|release|update-lineage)\.mjs)$/,
-  /^scripts\/(?:test-(?:mac-app-trust|mac-install-transaction|mac-update-lineage|install-identity|runtime-update-resolution|update-release-contract|updater-production-contract|updater-ui|packaged-updater-install-e2e)\.cjs)$/,
+  /^scripts\/(?:test-(?:mac-app-trust|mac-install-transaction|mac-update-lineage|install-identity|runtime-update-resolution|antigravity-auto-update|update-release-contract|updater-production-contract|updater-ui|packaged-updater-install-e2e)\.cjs)$/,
   /^scripts\/lib\/mac-app-signature\.mjs$/,
   /^build-resources\/(?:after-sign-trust\.cjs|entitlements\.mac\.plist|macos-release-signing-policy\.json|update-compatibility\.cjs)$/,
 ];

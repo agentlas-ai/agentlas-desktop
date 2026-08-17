@@ -165,12 +165,12 @@ function listLocalPluginInventory(installed: Set<string>): string[] {
   return Array.from(inventory).sort((a, b) => a.localeCompare(b));
 }
 
-function isHubPluginListing(listing: MarketplaceListing): boolean {
+export function isHubPluginListing(listing: MarketplaceListing): boolean {
   return listing.entityKind === "plugin" || listing.source === "hub-plugin" || listing.kind === "hub-plugin";
 }
 
 /** One line of inventory text for the resident judge — what this plugin does, in words. */
-function hubListingDescription(listing: MarketplaceListing): string {
+export function hubListingDescription(listing: MarketplaceListing): string {
   return (
     [listing.taglineEn, listing.tagline, listing.category, listing.developer]
       .filter(Boolean)
@@ -251,7 +251,7 @@ function isExplicitProjectFolder(workingFolder?: string | null): boolean {
 /** Fetch the Hub plugin inventory. NOTHING is scored or filtered by words here — the
  *  listings are handed to the resident judge as candidates and it names the ones the
  *  task actually needs. */
-async function fetchHubPluginInventory(hubAllowed: boolean): Promise<{
+export async function fetchHubPluginInventory(hubAllowed: boolean): Promise<{
   listings: MarketplaceListing[];
   hubPluginCount: number;
   hubPluginError?: string;

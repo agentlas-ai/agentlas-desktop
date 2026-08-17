@@ -30,6 +30,7 @@ function candidateLabel(candidate: McpBuildCandidate, ko: boolean): string {
     "discord-work": ["Discord 작업이 포함된 요청", "The request includes Discord work"],
     "ui-components": ["UI 컴포넌트 탐색이 필요한 요청", "The request needs UI component lookup"],
     "custom-name-match": ["사용자가 설치한 MCP 이름이 요청과 일치", "A user-installed MCP name matches the request"],
+    "hub-plugin-match": ["Agentlas 허브 플러그인이 요청과 일치", "An Agentlas Hub plugin matches the request"],
     "task-match": ["요청과 기능이 일치", "The MCP capability matches the request"],
   };
   return reasons[candidate.recommendationReasonCode]?.[ko ? 0 : 1] ?? reasons["task-match"][ko ? 0 : 1];

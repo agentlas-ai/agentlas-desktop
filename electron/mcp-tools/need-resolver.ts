@@ -44,7 +44,13 @@ export interface ResolvedMcpNeeds {
 
 /** Inventory ceiling for one judgment call. Hub entries are offered first, so a cut
  *  never silently drops a Hub capability in favour of a local one. */
-const MAX_CANDIDATES = 80;
+// The judge must see the whole shelf. When Hub plugins joined the Build inventory
+// this cap silently dropped 75 of 155 candidates — and because Hub entries are
+// appended last, the cut fell entirely on them, so "the model chose" was really
+// "the model never saw it". The real budget guard is MAX_INPUT_CHARS below
+// (measured 2026-08-16: 155 candidates render to ~12k of the 24k allowance);
+// this count cap only exists as a runaway backstop.
+const MAX_CANDIDATES = 400;
 const MAX_INPUT_CHARS = 24_000;
 
 export const MCP_NEED_JUDGMENT_KIND = "mcp-tool-need";
@@ -112,7 +118,7 @@ export interface McpBuildRecommendCandidate {
   id: string;
   name: string;
   description: string;
-  origin: "catalog" | "custom";
+  origin: "catalog" | "custom" | "hub";
   needsCredential?: boolean;
 }
 

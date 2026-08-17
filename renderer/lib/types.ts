@@ -368,6 +368,7 @@ export type {
   McpServerStatus,
   McpToolCatalogEntry,
   McpTransport,
+  PluginBrandAsset,
   MobileBridgeDeviceSummary,
   MobileBridgeRuntimeStatus,
   McpBuildAttachmentReceipt,

@@ -360,6 +360,128 @@ function commit() {
   for (const l of listeners) l();
 }
 
+/**
+ * Reattach to a build that Main is still running (or just finished).
+ *
+ * The build lives in Main; this module only mirrors it. A full reload — app
+ * restart, refresh, crash of the window — drops the mirror while the build keeps
+ * going, and the user comes back to an empty page with no way to learn the
+ * outcome (measured 2026-08-16: rows 12 → 0, request gone, "멈춤"으로 보임).
+ * Main keeps a transcript for exactly this; replay it.
+ *
+ * Route changes do NOT need this — the module singleton already survives them.
+ */
+let reattachInFlight: Promise<boolean> | null = null;
+/** How often a reattached view re-reads Main's transcript while the build runs. */
+const REATTACH_POLL_MS = 4_000;
+
+export async function reattachRunningBuild(): Promise<boolean> {
+  if (typeof window === "undefined") return false;
+  // Never clobber a live in-memory session; the mirror is already correct there.
+  if (state.runId || state.log.length > 0 || state.request.trim()) return false;
+  // React runs mount effects twice in development. Both calls pass the guard above
+  // before either commits, and the reattach line lands twice.
+  if (reattachInFlight) return reattachInFlight;
+  reattachInFlight = reattachOnce().finally(() => { reattachInFlight = null; });
+  return reattachInFlight;
+}
+
+/** 끝난 빌드를 얼마나 오래 "돌아올 수 있는 것"으로 볼지. 그 뒤엔 새 화면이 이긴다. */
+const REATTACH_FINISHED_GRACE_MS = 2 * 60_000;
+
+async function reattachOnce(): Promise<boolean> {
+  const api = ipc();
+  const active = await api?.hephaestus?.activeBuild?.().catch(() => null);
+  if (!active) return false;
+  // 아직 돌고 있거나 방금 끝난 빌드만 복원한다. 이 조건이 없으면 한 시간 전에 끝난
+  // 빌드가 새 빌드를 시작하려는 빈 화면을 점거하고, 옛 인터뷰 질문까지 되살려
+  // 사용자가 새 요청을 넣을 수 없게 된다(2026-08-17 실측: 녹화 실행이 이것 때문에 멈췄다).
+  const finishedAgoMs = Date.now() - Date.parse(active.startedAt || "");
+  if (!active.running && !(Number.isFinite(finishedAgoMs) && finishedAgoMs < REATTACH_FINISHED_GRACE_MS)) {
+    return false;
+  }
+
+  state.request = active.request;
+  state.workspace = active.workspace;
+  state.runId = active.runId;
+  const ko = currentLocale() === "ko";
+  pushLog(
+    "stage",
+    ko
+      ? active.running
+        ? "진행 중이던 빌드에 다시 연결했습니다."
+        : "직전 빌드 상태를 복원했습니다."
+      : active.running
+        ? "Reattached to the build that was still running."
+        : "Restored the record of the previous build.",
+  );
+  // Replay only what the user reads. Turn/phase machinery is not re-driven: a
+  // half-restored state machine that thinks it owns a turn is worse than a
+  // faithful log the user can act on.
+  for (const ev of active.events) {
+    if (ev.kind === "stage") {
+      const visible = safeBuildProgressText(ev.text ?? ev.stage ?? "", ko);
+      if (visible) pushLog("stage", visible);
+    } else if (ev.kind === "log") {
+      const visible = safeBuildProgressText(ev.text ?? "", ko);
+      if (visible) pushLog("log", visible);
+    } else if (ev.kind === "error") {
+      pushLog("error", ev.text ?? "");
+    }
+  }
+  // 인터뷰 질문을 낸 뒤 답을 기다리던 빌드는 "끝난 빌드"가 아니다. 마지막 done
+  // 이벤트에서 질문을 되살리지 않으면, 리로드 한 번에 사용자는 자기가 답해야 할
+  // 질문을 영영 잃는다(그리고 빌드는 영원히 답을 못 받는다).
+  const lastDone = [...active.events].reverse().find((ev) => ev.kind === "done");
+  const restored = lastDone ? extractQuestions(lastDone.text ?? "", "reattach") : null;
+  if (restored && restored.questions.length > 0) {
+    state.pendingQuestions = restored.questions;
+    state.awaitingReply = true;
+    state.phase = "interview";
+    state.reached = Math.max(state.reached, 1);
+    pushLog(
+      "log",
+      ko
+        ? "답을 기다리던 인터뷰 질문을 복원했습니다."
+        : "Restored the interview questions that were waiting for your answer.",
+    );
+  } else {
+    state.phase = active.running ? "running" : "done";
+  }
+  commit();
+  // 리로드된 화면에는 살아 있는 이벤트 채널이 없다(채널 구독은 빌드를 시작한
+  // 렌더러 인스턴스에 묶여 있다). 전사를 주기적으로 다시 읽어 새 이벤트만 잇는다.
+  if (active.running) pollReattached(active.events.length);
+  return true;
+}
+
+function pollReattached(seen: number): void {
+  let cursor = seen;
+  const timer = window.setInterval(async () => {
+    const api = ipc();
+    const latest = await api?.hephaestus?.activeBuild?.().catch(() => null);
+    if (!latest) { window.clearInterval(timer); return; }
+    const ko = currentLocale() === "ko";
+    for (const ev of latest.events.slice(cursor)) {
+      if (ev.kind === "stage") {
+        const visible = safeBuildProgressText(ev.text ?? ev.stage ?? "", ko);
+        if (visible) pushLog("stage", visible);
+      } else if (ev.kind === "log") {
+        const visible = safeBuildProgressText(ev.text ?? "", ko);
+        if (visible) pushLog("log", visible);
+      } else if (ev.kind === "error") {
+        pushLog("error", ev.text ?? "");
+      }
+    }
+    cursor = latest.events.length;
+    if (!latest.running) {
+      state.phase = "done";
+      window.clearInterval(timer);
+    }
+    commit();
+  }, REATTACH_POLL_MS);
+}
+
 export function subscribe(cb: () => void): () => void {
   listeners.add(cb);
   return () => listeners.delete(cb);
@@ -510,11 +632,18 @@ function classifyBuildError(raw: string, ko: boolean): BuildError {
         : "The MCP review expired or no longer matches the current settings. Start a new build to review the connection plan again.",
     };
   }
+  // Everything above recognises a specific cause and explains it. What is left
+  // used to be reported as "the build could not continue" with the actual
+  // engine error dropped on the floor — the user was told to "review the
+  // detailed progress" for a reason that was never put there (measured
+  // 2026-08-17 on a gemini build). Carry the raw message; it is the only
+  // description of what happened that anyone has.
+  const detail = raw.replace(/\s+/g, " ").trim().slice(0, 240);
   return {
     kind: "build-failed",
     message: ko
-      ? "빌드를 계속하지 못했습니다. 만든 파일은 그대로 보존했습니다. 세부 진행 기록을 확인한 뒤 같은 폴더에서 재시도할 수 있습니다."
-      : "The build could not continue. Existing files were preserved. Review the detailed progress, then retry in the same folder.",
+      ? `빌드를 계속하지 못했습니다${detail ? `: ${detail}` : ""}. 만든 파일은 그대로 보존했습니다. 같은 폴더에서 재시도할 수 있습니다.`
+      : `The build could not continue${detail ? `: ${detail}` : ""}. Existing files were preserved. Retry in the same folder.`,
   };
 }
 
@@ -629,7 +758,30 @@ async function performAutoRegister(workspace: string, readScope: FsReadScope, ge
 // 승격, (b) 없으면 "질문 금지·기본값으로 완성" 지시로 자동 계속(최대 3회), (c) 한도 초과 시
 // 에러로 표면화. 어떤 경우에도 빈 질문 카드로 사용자를 붙잡지 않는다.
 const AUTO_CONTINUE_MAX = 3;
+/**
+ * How many extra rounds a build may take while it is still visibly closing
+ * blockers. Three rounds fit a strong model finishing a few leftovers; a local
+ * 30B model that scaffolded 32 files and left 45 placeholders open needs more
+ * than three passes, and cutting it off there throws away a package that was
+ * getting closer every round (measured 2026-08-17).
+ *
+ * This is not "try harder for longer": the counter only stops advancing while
+ * the blocker count keeps dropping, so a model that stalls still ends at
+ * AUTO_CONTINUE_MAX.
+ */
+const AUTO_CONTINUE_MAX_WHILE_IMPROVING = 24;
 let autoContinues = 0;
+/** Blocker count at the previous hand-back, so a stalled build stops early. */
+let lastBlockerCount = Number.POSITIVE_INFINITY;
+/**
+ * Consecutive rounds that closed nothing. One file per round means a round can
+ * legitimately come back level — the model rewrote the file and still missed a
+ * field — so a single flat round is not a stall. Two in a row is.
+ */
+let stalledRounds = 0;
+const MAX_STALLED_ROUNDS = 2;
+/** 이 빌드에서 호스트가 실제로 질문을 사용자에게 날랐는가. 모델의 주장이 아니라 관측값. */
+let interviewObserved = false;
 
 const PKG_MARKERS = new Set(["agentlas.json", "AGENTS.md", ".agentlas"]);
 
@@ -679,11 +831,44 @@ function packageContractBlockers(report: unknown): string[] | null {
   return Array.isArray(blockers) ? blockers.map(String) : null;
 }
 
+/**
+ * Which file the next repair round should fix, first by what unlocks the most
+ * downstream derivation, then by whatever is left.
+ *
+ * A blocker reads `<path>: <problem>`, so the path is everything before the
+ * first colon.
+ */
+const BLOCKER_FOCUS_ORDER = [
+  ".agentlas/agent-card.json",
+  ".agentlas/routing-card.json",
+  "agent.md",
+  "AGENTS.md",
+  ".agentlas/capability-eval-plan.json",
+  "contracts/intake.schema.json",
+  "contracts/output.schema.json",
+  "contracts/output.example.json",
+];
+
+export function nextBlockerFocus(blockers: readonly string[]): string | null {
+  const paths = blockers.map((blocker) => blocker.split(":")[0]?.trim() ?? "").filter(Boolean);
+  if (paths.length === 0) return null;
+  for (const preferred of BLOCKER_FOCUS_ORDER) {
+    if (paths.includes(preferred)) return preferred;
+  }
+  return paths[0] ?? null;
+}
+
+/** main이 "파일을 하나도 안 썼다"고 표식을 남겼는지. 문장 파싱이 아니라 표식이다. */
+function wroteNothing(report: unknown): boolean {
+  return Boolean(report && typeof report === "object" && (report as { wroteNothing?: unknown }).wroteNothing === true);
+}
+
 function stopForPackageContract(
   pkgRoot: string,
   scan: unknown,
   readScope: FsReadScope,
   blockers: string[] | null,
+  empty = false,
 ): void {
   const ko = currentLocale() === "ko";
   state.result = { workspace: pkgRoot, securityScan: scan, readScope, mcpReceipt: state.mcpReceipt };
@@ -692,18 +877,29 @@ function stopForPackageContract(
   state.errored = true;
   state.recoverable = true;
   state.phase = "error";
+  // 보존할 파일이 없는데 "생성한 파일은 그대로 보존했습니다"라고 말하면, 사용자는
+  // 있지도 않은 산출물을 찾으러 폴더를 열게 된다. 빈 결과는 빈 결과라고 말한다.
   state.error = {
     kind: "build-failed",
-    message: ko
-      ? "패키지 무결성 검증을 통과하지 못해 설치와 등록을 중지했습니다. 생성한 파일은 그대로 보존했습니다. 같은 폴더에서 다시 준비하면 남은 항목만 복구할 수 있습니다."
-      : "Package integrity verification did not pass, so install and registration were stopped. Generated files were preserved. Prepare again in the same folder to repair only the remaining items.",
+    message: empty
+      ? (ko
+        ? "선택한 모델이 완료를 선언했지만 파일을 하나도 만들지 않아 설치를 중지했습니다. 폴더는 비어 있습니다 — 더 큰 모델(예: Claude·Gemini)로 다시 시도하세요."
+        : "The selected model declared completion but created no files, so installation was stopped. The folder is empty — try again with a larger model (Claude or Gemini, for example).")
+      : (ko
+        ? "패키지 무결성 검증을 통과하지 못해 설치와 등록을 중지했습니다. 생성한 파일은 그대로 보존했습니다. 같은 폴더에서 다시 준비하면 남은 항목만 복구할 수 있습니다."
+        : "Package integrity verification did not pass, so install and registration were stopped. Generated files were preserved. Prepare again in the same folder to repair only the remaining items."),
   };
   pushLog(
     "error",
-    blockers === null
-      ? (ko ? "패키지 무결성을 확인할 수 없습니다 — 통과로 간주하지 않습니다." : "Package integrity could not be verified — it was not treated as passing.")
-      : (ko ? `패키지 무결성 미충족 ${blockers.length}건 — 자동 등록을 중지했습니다.` : `Package integrity: ${blockers.length} blocker(s) remain — automatic registration was stopped.`),
+    empty
+      ? (ko ? "생성된 파일 0개 — 검증할 패키지가 없습니다." : "Zero files generated — there is no package to verify.")
+      : blockers === null
+        ? (ko ? "패키지 무결성을 확인할 수 없습니다 — 통과로 간주하지 않습니다." : "Package integrity could not be verified — it was not treated as passing.")
+        : (ko ? `패키지 무결성 미충족 ${blockers.length}건 — 자동 등록을 중지했습니다.` : `Package integrity: ${blockers.length} blocker(s) remain — automatic registration was stopped.`),
   );
+  // 정본 /hep-build 10단계: "report `blocked` and list them verbatim".
+  // 개수만 말하면 사용자는 무엇을 고쳐야 하는지 알 수 없다 — 실패 화면이 막다른 길이 된다.
+  for (const blocker of blockers ?? []) pushLog("error", `· ${blocker}`);
   commit();
 }
 
@@ -743,6 +939,67 @@ function finalizeBuild(pkgRoot: string, scan: unknown, readScope: FsReadScope, n
   }
 }
 
+/**
+ * Hand the exact contract blockers back to the model for one more round.
+ *
+ * Both endings of a build land here — the model that stops without a completion
+ * line and the model that prints one — so a package gets the same number of
+ * chances either way.
+ */
+async function handBackBlockers(
+  pkgRoot: string,
+  open: string[],
+  readScope: FsReadScope,
+  generation: number,
+): Promise<void> {
+  const ko = currentLocale() === "ko";
+  autoContinues += 1;
+  const improving = open.length > 0 && open.length < lastBlockerCount;
+  stalledRounds = improving ? 0 : stalledRounds + 1;
+  if (autoContinues > AUTO_CONTINUE_MAX && stalledRounds >= MAX_STALLED_ROUNDS) {
+    pushLog(
+      "stage",
+      ko
+        ? `미충족 ${open.length}건에서 ${MAX_STALLED_ROUNDS}라운드 연속 진전이 없어 멈춥니다`
+        : `Stopping: ${MAX_STALLED_ROUNDS} rounds in a row closed nothing, still ${open.length} blocker(s)`,
+    );
+    stopForPackageContract(
+      pkgRoot,
+      { status: "unverified", reason: "the build stopped before a security scan ran" },
+      readScope,
+      open,
+    );
+    commit();
+    return;
+  }
+  lastBlockerCount = open.length > 0 ? open.length : lastBlockerCount;
+  // Nineteen files at once is a list a strong model triages and a weak one
+  // freezes on. Name one file per round and it has a task it can finish; the
+  // order puts the cards `contract complete` derives from first.
+  const focus = nextBlockerFocus(open);
+  const listed = (focus ? open.filter((blocker) => blocker.startsWith(focus)) : open)
+    .slice(0, 40)
+    .map((blocker) => `- ${blocker}`)
+    .join("\n");
+  const others = focus ? open.filter((blocker) => !blocker.startsWith(focus)).length : 0;
+  const withheld = others > 0
+    ? `\n\n(${others} other item(s) in other files are deliberately not listed — fix this file only, this round.)`
+    : "";
+  pushLog(
+    "stage",
+    ko
+      ? `패키지 계약 미충족 ${open.length}건 — ${focus ?? "다음 파일"} 수리 ${autoContinues}`
+      : `Package contract: ${open.length} blocker(s) — repairing ${focus ?? "the next file"} (round ${autoContinues})`,
+  );
+  commit();
+  await runTurn(
+    ko
+      ? `이번 라운드에는 **${focus ?? "아래 파일"} 하나만** 고치세요. 질문하지 말고, 기존 패키지 폴더 안의 그 파일을 열어 아래 항목을 해결하세요. {{...}} 자리표시자는 이 에이전트에 맞는 실제 값으로 바꿔야 합니다(자리표시자를 지우기만 하면 안 됩니다). 다른 파일은 건드리지 말고, 처음부터 다시 만들지 말고, 끝나면 마지막 줄에 'BUILD_COMPLETE: <패키지 폴더명>'을 출력하세요.\n\n${listed}${withheld}`
+      : `Fix **only ${focus ?? "the file below"}** this round. Do not ask questions. Open that one file inside the existing package folder and resolve the items below — every {{PLACEHOLDER}} must become a real value for this agent, not be deleted. Leave every other file alone, do not rebuild from scratch, and end with 'BUILD_COMPLETE: <package folder name>'.\n\n${listed}${withheld}`,
+    generation,
+  );
+}
+
 async function verifyRepairOrFinalize(
   pkgRoot: string,
   scan: unknown,
@@ -753,8 +1010,24 @@ async function verifyRepairOrFinalize(
 ): Promise<void> {
   if (!isCurrentBuild(generation)) return;
   const contractBlockers = packageContractBlockers(packageContract);
+  // A build had two different endings depending on whether the model happened
+  // to print its completion line. Without it, blockers were handed back round
+  // after round; with it, the very first non-empty list ended the build. So a
+  // model that finished politely got less help than one that just stopped, and
+  // a package three placeholders from done was thrown away (measured
+  // 2026-08-17: 22 blockers handed back once, then BUILD_COMPLETE, then a hard
+  // stop at 38 with no second chance). Both endings now feed the same loop.
+  if (
+    contractBlockers !== null
+    && contractBlockers.length > 0
+    && !wroteNothing(packageContract)
+    && autoContinues < AUTO_CONTINUE_MAX_WHILE_IMPROVING
+  ) {
+    await handBackBlockers(pkgRoot, contractBlockers, readScope, generation);
+    return;
+  }
   if (contractBlockers === null || contractBlockers.length > 0) {
-    stopForPackageContract(pkgRoot, scan, readScope, contractBlockers);
+    stopForPackageContract(pkgRoot, scan, readScope, contractBlockers, wroteNothing(packageContract));
     return;
   }
   const verifiedScan = buildScanDisposition(scan) === "unverified"
@@ -774,21 +1047,70 @@ async function resolveTurnWithoutSignal(
   const pkgRoot = await findPackageRoot(workspace, readScope, generation);
   if (!isCurrentBuild(generation)) return;
   if (pkgRoot) {
-    if (autoContinues < AUTO_CONTINUE_MAX) {
+    // ★첫 턴에 질문 없이 파일부터 쓴 경우, 여기서 "추가 질문 없이 마무리하라"고
+    // 이어붙이면 인터뷰는 영원히 오지 않는다. 실측 2026-08-17: 모든 런타임에서
+    // 인터뷰를 본 적이 없다는 제보의 실제 경로가 이것이었다 — 정본 게이트가
+    // 프롬프트에 실려 있어도, 그 다음 턴의 이 문장이 그것을 무효화했다.
+    // 첫 턴이고 인터뷰가 아직 없었다면 되돌려서 인터뷰를 요구한다.
+    if (state.turn <= 1 && !interviewObserved) {
       autoContinues += 1;
       pushLog(
         "stage",
         ko
-          ? `패키지 파일 확인 — 최종 검증 ${autoContinues}/${AUTO_CONTINUE_MAX}`
-          : `Package files found — final verification ${autoContinues}/${AUTO_CONTINUE_MAX}`,
+          ? "인터뷰 없이 파일부터 만들었습니다 — 되돌려 인터뷰를 요구합니다"
+          : "Files were written before any interview — sending it back to interview first",
       );
       commit();
       await runTurn(
         ko
-          ? "패키지 파일이 이미 있습니다. 추가 질문 없이 같은 패키지의 계약·무결성·보안 검증을 실행하고, 실패 항목만 고친 뒤 마지막 줄에 'BUILD_COMPLETE: <패키지 폴더명>'을 출력하세요. 검증을 건너뛰거나 통과로 가정하지 마세요."
-          : "Package files already exist. Without asking more questions, run the package contract, integrity, and security verification for this same package; repair only failed items, then end with 'BUILD_COMPLETE: <package folder name>'. Do not skip verification or assume it passed.",
+          ? "STOP. 사용자에게 아무것도 묻지 않은 채 파일부터 만들었습니다. Builder Interview and Research Gate는 생성 전에 지나야 하는 계약입니다. 지금 인터뷰 배치만 답하세요: 이 요청이 아직 정하지 않은 것에 대해서만, 그 분야의 용어와 실제 산출물로 `<<agentlas-ask>>` 질문을 내세요. 이번 답변에서는 파일을 쓰지 말고 완료 신호도 출력하지 마세요."
+          : "STOP. You wrote files without asking the user anything. The Builder Interview and Research Gate is a contract that runs before generation. Reply with the interview batch only: `<<agentlas-ask>>` questions about what THIS request has not settled, in the domain's own vocabulary and artifacts. Do not write files and do not print the completion line in this reply.",
         generation,
       );
+      return;
+    }
+    if (autoContinues < AUTO_CONTINUE_MAX_WHILE_IMPROVING) {
+      const midway = await ipc()?.hephaestus?.contractVerify?.({
+        folder: pkgRoot,
+        scope: readScope,
+        mode: state.mode || undefined,
+      }).catch(() => null) ?? null;
+      if (!isCurrentBuild(generation)) return;
+      const open = Array.isArray(midway?.blockers) ? midway.blockers.map(String) : [];
+      if (open.length === 0) {
+        autoContinues += 1;
+        pushLog("stage", ko ? "패키지 파일 확인 — 최종 검증" : "Package files found — final verification");
+        commit();
+        await runTurn(
+          ko
+            ? "패키지 파일이 이미 있습니다. 추가 질문 없이 같은 패키지의 계약·무결성·보안 검증을 실행하고, 실패 항목만 고친 뒤 마지막 줄에 'BUILD_COMPLETE: <패키지 폴더명>'을 출력하세요. 검증을 건너뛰거나 통과로 가정하지 마세요."
+            : "Package files already exist. Without asking more questions, run the package contract, integrity, and security verification for this same package; repair only failed items, then end with 'BUILD_COMPLETE: <package folder name>'. Do not skip verification or assume it passed.",
+          generation,
+        );
+        return;
+      }
+      await handBackBlockers(pkgRoot, open, readScope, generation);
+      return;
+    }
+    // ★모델의 완료 선언이 없더라도, 계약 게이트가 통과하면 그 패키지는 완성된 것이다.
+    // 마지막 한 줄을 빠뜨렸다는 이유로 blockers 0인 패키지를 실패로 통보하면
+    // 사용자는 멀쩡한 결과물을 버린다(2026-08-17 실측: 리조트 전략 에이전트가
+    // blockers 0이었는데 "최종 검증 완료 신호 미확인"으로 실패 처리됐다).
+    // 판정 권한은 모델의 문장이 아니라 계약 검증 결과에 있다.
+    const verdict = await ipc()?.hephaestus?.contractVerify?.({
+      folder: pkgRoot,
+      scope: readScope,
+      mode: state.mode || undefined,
+    }).catch(() => null) ?? null;
+    if (!isCurrentBuild(generation)) return;
+    if (verdict?.blockers && verdict.blockers.length === 0) {
+      pushLog(
+        "stage",
+        ko
+          ? "완료 신호는 없었지만 패키지 계약이 통과했습니다 — 완료로 처리합니다."
+          : "No completion line was printed, but the package contract passed — treating it as complete.",
+      );
+      finalizeBuild(pkgRoot, null, readScope, null, generation);
       return;
     }
     state.errored = true;
@@ -797,10 +1119,11 @@ async function resolveTurnWithoutSignal(
     state.error = {
       kind: "build-failed",
       message: ko
-        ? "패키지 파일은 생성됐지만 최종 검증 완료 신호를 확인하지 못했습니다. 파일은 보존했습니다. 같은 폴더에서 다시 준비해 검증을 완료하세요."
-        : "Package files were created, but final verified completion was not confirmed. Files were preserved. Prepare again in the same folder to finish verification.",
+        ? "패키지 파일은 생성됐지만 계약 검증을 통과하지 못했습니다. 파일은 보존했습니다. 같은 폴더에서 다시 준비해 남은 항목만 고치세요."
+        : "Package files were created, but the package contract did not pass. Files were preserved. Prepare again in the same folder to fix the remaining items.",
     };
     pushLog("error", state.error.message);
+    for (const blocker of verdict?.blockers ?? []) pushLog("error", `· ${blocker}`);
     commit();
     return;
   }
@@ -827,6 +1150,7 @@ async function resolveTurnWithoutSignal(
         ? "추가 질문 없이 계속 진행하세요. 남은 결정은 전부 합리적 기본값으로 정해 work-brief에 assumption으로 기록하고, 패키지를 끝까지 완성한 뒤 마지막 줄에 'BUILD_COMPLETE: <패키지 폴더명>'을 출력하세요."
         : "Continue WITHOUT asking any further questions. Decide every remaining choice with sensible defaults (record them as assumptions in the work-brief), finish the complete package, and end with 'BUILD_COMPLETE: <package folder name>'.",
       generation,
+      true,
     );
     return;
   }
@@ -837,7 +1161,13 @@ async function resolveTurnWithoutSignal(
 }
 
 /** 한 번의 빌드/인터뷰 턴을 실행한다. input = 이번 턴 사용자 입력. */
-async function runTurn(input: string, generation = buildGeneration): Promise<void> {
+async function runTurn(
+  input: string,
+  generation = buildGeneration,
+  // 호스트가 스스로에게 보내는 진행 지시. 사람의 답이 아니므로 영수증·브리프에서
+  // 사용자 답변으로 세면 안 된다.
+  hostAuthoredContinuation = false,
+): Promise<void> {
   const api = ipc();
   const ev = ipcEvents();
   if (!api || !ev || !state.workspace || !state.workspaceGrant || !state.mcpPlan || !isCurrentBuild(generation)) return;
@@ -882,6 +1212,7 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
         ? undefined
         : state.attachments.map((a) => ({ grant: a.grant, name: a.name })),
       history: [...history],
+      ...(hostAuthoredContinuation ? { hostAuthoredContinuation: true } : {}),
       openCrabOntology: openCrabOntologyForTurn,
       locale: currentLocale(),
     });
@@ -955,7 +1286,11 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
         ? mainOwnedOpenCrabQuestion(result?.supplementalQuestion)
         : null;
       if (e.sessionId) runtimeSessionId = e.sessionId;
-      history.push({ role: "user", text: input });
+      // 호스트가 자기에게 보낸 진행 지시는 대화 기록에 사람의 말로 남기지 않는다.
+      // 남기면 다음 턴의 인터뷰 영수증이 그것을 답변 한 건으로 세고, work-brief의
+      // assumptions에 Agentlas가 스스로 쓴 문장이 source:"user"로 실린다.
+      // 모델은 이번 턴에 이미 그 지시를 받았고, 런타임 세션이 대화를 이어 간다.
+      if (!hostAuthoredContinuation) history.push({ role: "user", text: input });
       history.push({ role: "assistant", text: assistantText + questionHistorySuffix(supplementalQuestion) });
       detach();
 
@@ -990,6 +1325,8 @@ async function runTurn(input: string, generation = buildGeneration): Promise<voi
         state.pendingQuestions = questions;
         state.awaitingReply = true;
         state.phase = "interview";
+        // 호스트가 실제로 질문을 사용자에게 날랐다는 관측값. 모델의 주장이 아니다.
+        interviewObserved = true;
         state.turn += 1;
         state.reached = Math.max(state.reached, 1);
         pushLog("log", ko ? "딥인터뷰 — 질문 묶음에 한 번에 답해 주세요." : "Deep interview — answer the batch of questions in one go.");
@@ -1088,8 +1425,16 @@ export async function startBuild(activeRuntime?: RuntimeSelection): Promise<void
   attachmentsSentForBuild = false;
   openCrabOntologyChoice = undefined;
   autoContinues = 0;
+  lastBlockerCount = Number.POSITIVE_INFINITY;
+  stalledRounds = 0;
+  interviewObserved = false;
   const generation = ++buildGeneration;
-  state.turn = 1;
+  // ★엔진의 첫 응답을 받기 전 턴 번호는 0이어야 한다.
+  // 여기가 1이면 모델 질문 렌더 조건(`state.turn === 0`)이 구조적으로 절대 참이 되지
+  // 않아 `<<agentlas-ask>>`가 파싱돼도 화면에 오르지 못한다. 2026-08-17 실측:
+  // "수십 개 런타임에서 인터뷰 나오는 걸 본 적 없다"의 데스크탑 쪽 실체가 이 한 줄이다.
+  // (엔진 앞 고정 4문항이 있던 시절엔 그게 turn 1을 소비해 가려져 있었다.)
+  state.turn = 0;
   state.reached = 0;
   state.result = null;
   state.registered = false;
@@ -1103,23 +1448,29 @@ export async function startBuild(activeRuntime?: RuntimeSelection): Promise<void
   const ko = currentLocale() === "ko";
   const reqLen = state.request.trim().length;
   const mode = state.mode || (ko ? "자동 분류" : "auto-classify");
-  state.phase = "interview";
-  state.pendingQuestions = mainOwnedBuildBriefQuestions(state.mode, ko);
-  state.awaitingReply = true;
+  // 엔진보다 먼저 뜨던 고정 4문항(mainOwnedBuildBriefQuestions)을 제거했다.
+  //
+  // 그 배치는 요청 문자열을 인자로 받지도 않아서 "천안상록리조트 중장기 경영전략"이든
+  // "이메일 정리"든 글자 하나 안 바뀌었고(2026-08-16 실측), 정본 `/hep-build`에는
+  // 존재하지 않는 단계였다. 정본 4단계는 Builder Interview and Research Gate를 거쳐
+  // **모델이** 도메인에 맞는 8-12문항을 만든다. 데스크탑이 그 앞에 상수 배열을 끼워
+  // 넣는 순간 "터미널 hep-build + GUI"가 아니라 다른 절차가 된다.
+  //
+  // 이제 첫 턴은 사용자의 요청 그대로 엔진에 간다. 빌더가 인터뷰를 건너뛰면 Main이
+  // 되돌려 보내고(builder.ts의 인터뷰 계약 게이트), 그래도 안 물으면 아래 turn===1
+  // 폴백이 최후에만 뜬다.
+  pendingBuildBriefReply = state.request.trim();
+  state.phase = "running";
+  state.reached = Math.max(state.reached, 1);
   history.push({ role: "user", text: state.request.trim() });
-  history.push({
-    role: "assistant",
-    text: ko
-      ? "빌드 전 확인: 완료 기준, 입력, 사용 맥락, 권한 경계를 먼저 확인합니다."
-      : "Pre-build check: confirm the outcome, inputs, operating context, and authority boundary first.",
-  });
-  pushLog("stage", ko ? "빌드 요구사항 확인 — 엔진을 시작하기 전 질문" : "Confirming the build brief — questions before engine setup");
+  pushLog("stage", ko ? "빌드 엔진과 연결 범위 준비" : "Preparing the build engine and connection scope");
   pushLog("log", ko ? `요청 길이 ${reqLen}자 · 모드 ${mode}` : `Request length ${reqLen} chars · mode ${mode}`);
   pushLog("log", ko ? `생성 폴더 ${state.workspace}` : `Output folder ${state.workspace}`);
   if (state.attachments.length > 0) pushLog("log", ko ? `첨부 ${state.attachments.length}개: ${state.attachments.map((a) => a.name).join(", ").slice(0, 200)}` : `Attachments ${state.attachments.length}: ${state.attachments.map((a) => a.name).join(", ").slice(0, 200)}`);
   if (resolvedBuildRuntime) pushLog("log", `${ko ? "엔진" : "Engine"} ${resolvedBuildRuntime.kind}${resolvedBuildRuntime.model ? ` · ${resolvedBuildRuntime.model}` : ""}`);
-  pushLog("log", ko ? "질문 묶음에 답한 뒤에만 모델 선택과 MCP 연결 검토를 시작합니다." : "Model selection and MCP review start only after you answer this question batch.");
+  pushLog("log", ko ? "빌더가 요청을 읽고 필요한 질문을 직접 만듭니다." : "The builder reads the request and composes its own questions.");
   commit();
+  void prepareBuildRuntimeAndMcp(generation);
 }
 
 async function prepareBuildRuntimeAndMcp(generation: number): Promise<void> {
@@ -1296,7 +1647,7 @@ export async function answerBuild(
   const ko = currentLocale() === "ko";
   const normalizedReply = reply.trim();
   pushLog("log", ko ? "인터뷰 답변을 확인했습니다." : "Interview answers confirmed.");
-  if (!state.mcpPlan && state.turn === 1 && pendingBuildBriefReply === null) {
+  if (!state.mcpPlan && state.turn <= 1 && pendingBuildBriefReply === null) {
     pendingBuildBriefReply = normalizedReply;
     state.awaitingReply = false;
     state.pendingQuestions = [];
@@ -1353,6 +1704,9 @@ export function cancelBuild() {
   openCrabOntologyChoice = undefined;
   if (!cancelledRunId) {
     autoContinues = 0;
+    lastBlockerCount = Number.POSITIVE_INFINITY;
+    stalledRounds = 0;
+  lastBlockerCount = Number.POSITIVE_INFINITY;
     state.mcpPlan = null;
     state.mcpSelectedCandidateIds = [];
     state.mcpReceipt = null;
@@ -1418,6 +1772,8 @@ export function resetBuild() {
   attachmentsSentForBuild = false;
   openCrabOntologyChoice = undefined;
   autoContinues = 0;
+  lastBlockerCount = Number.POSITIVE_INFINITY;
+  stalledRounds = 0;
   state.mcpPlan = null;
   state.mcpSelectedCandidateIds = [];
   state.mcpReceipt = null;
