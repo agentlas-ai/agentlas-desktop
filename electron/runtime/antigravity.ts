@@ -20,6 +20,8 @@ import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli,
 import { stageCliImageAttachments } from "./image-attachments";
 import { parseAgyModels, unsupportedDiscovery, type DiscoveryOutcome } from "../../shared/model-discovery";
 import { settleDiscovery } from "./model-discovery-store";
+import { getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions";
+import { createHash } from "node:crypto";
 
 /**
  * 중지 사유를 그대로 전한다. 중지는 사람이 누른 것 외에도 무활동 워치독·단계 시간 초과·
@@ -209,6 +211,11 @@ export function buildAntigravitySpawnArgs(
   permission?: "read" | "write" | "full",
   /** 출력 형태 계약 — 실측 agy 1.1.14 `--json-schema`(문자열 또는 파일 경로). */
   outputSchema?: Record<string, unknown>,
+  /**
+   * 이어갈 대화 ID. 있으면 히스토리를 통째로 재전송하지 않는다 — 실측 2026-08-19:
+   * `--conversation <id>` 로 되돌린 턴이 이전 턴의 코드워드를 기억했다.
+   */
+  resumeConversationId?: string,
 ): string[] {
   const modelArgs = model && model.trim() ? ["--model", model.trim()] : [];
   const directoryArgs = [...new Set(addDirectories.filter((value) => value.trim()))]
@@ -228,6 +235,7 @@ export function buildAntigravitySpawnArgs(
     "--output-format", "stream-json",
     "--print-timeout", "30m",
     ...(outputSchema ? ["--json-schema", JSON.stringify(outputSchema)] : []),
+    ...(resumeConversationId ? ["--conversation", resumeConversationId] : []),
     "--prompt", prompt,
   ];
 }
@@ -246,6 +254,13 @@ export function reduceAgyLine(
     outputTokens: number;
     /** 승인이 없어 거부된 도구 호출 — 구조 신호로 모은다(문구 판별이 아니다). */
     deniedTools?: { tool: string; detail: string }[];
+    /**
+     * ★agy 가 이 실행에 붙인 대화 ID. 실측 2026-08-19(agy 1.1.14): 최상위와
+     * `result`·`step_update` 어디에나 `conversation_id` 로 실려 온다. 이걸 저장해
+     * 다음 턴에 `--conversation` 으로 되돌리면 히스토리를 매 턴 통째로 재전송하지
+     * 않아도 된다 — 재개가 실제로 기억한다는 것은 코드워드 실측으로 확인했다.
+     */
+    conversationId?: string;
   },
 ): {
   delta?: string;
@@ -272,8 +287,10 @@ export function reduceAgyLine(
 } {
   let ev: {
     event?: string;
-    result?: { status?: string; response?: string };
+    conversation_id?: string;
+    result?: { status?: string; response?: string; conversation_id?: string };
     step_update?: {
+      conversation_id?: string;
       step_type?: string; text_delta?: string; state?: string;
       tool_name?: string;
       tool_info?: {
@@ -290,6 +307,9 @@ export function reduceAgyLine(
   } catch {
     return {}; // 비-JSON 잡음(경고 등)은 본문이 아니다 — 평문 모드로 오인해 섞으면 산출물이 오염된다.
   }
+  // 대화 ID 는 세 자리 중 어디로든 온다(실측 agy 1.1.14). 처음 본 값을 붙든다.
+  state.conversationId ??=
+    ev.conversation_id ?? ev.result?.conversation_id ?? ev.step_update?.conversation_id;
   /*
    * ★본문은 최종 result.response에서 받는다 — 델타 접합은 오염된다.
    * 실측(2026-08-06): agy가 text_delta를 **UTF-8 바이트 경계에서** 잘라 각 조각을 따로
@@ -420,6 +440,16 @@ export function antigravityExitFailure(
  * server/discover → tools/list 를 받았다(프로브 서버의 수신 로그로 확인). agy 의 내장
  * 도구 목록에도 call_mcp_tool · list_resources · read_resource 가 실재한다.
  */
+/**
+ * 우리가 전역 설정에 넣은 MCP 서버 키 → 지금 그 서버를 쓰고 있는 실행 수.
+ *
+ * agy 는 설정 파일이 하나뿐이라 동시 실행이 같은 파일을 공유한다. 계수 없이 정리하면
+ * 먼저 끝난 실행이 아직 도는 실행의 도구를 지운다 — 그래프에서 노드 둘이 병렬로 도는
+ * 흔한 경우가 정확히 그 모양이다. 모든 실행이 같은 메인 프로세스 안에 있으므로
+ * 프로세스 안 계수로 충분하다.
+ */
+const AGY_MCP_REFCOUNT = new Map<string, number>();
+
 export function agyMcpConfigPath(home = os.homedir()): string {
   return path.join(home, ".gemini", "config", "mcp_config.json");
 }
@@ -485,7 +515,24 @@ async function reconcileAgyMcpServers(
 
   const added: string[] = [];
   for (const [key, server] of entries) {
-    if (parsed.mcpServers[key]) continue; // 실물 우선 — 우리 것이 아니므로 소유하지 않는다.
+    if (parsed.mcpServers[key]) {
+      /*
+       * ★이미 있는 키 — 두 경우가 섞여 있다.
+       *
+       * (a) 사용자가 직접 등록한 서버: 우리 것이 아니므로 소유하지 않는다.
+       * (b) **동시에 도는 다른 실행이 방금 넣은 서버**: 이걸 그냥 건너뛰면, 먼저 넣은
+       *     실행이 끝나면서 지워 버려 이 실행은 도중에 도구를 잃는다. 실행 하나가
+       *     끝났다고 다른 실행의 도구가 사라지면 안 된다.
+       *
+       * 그래서 우리가 넣은 키는 참조 계수로 센다. 계수가 0이 될 때만 걷어낸다.
+       */
+      const live = AGY_MCP_REFCOUNT.get(key);
+      if (live !== undefined) {
+        AGY_MCP_REFCOUNT.set(key, live + 1);
+        added.push(key);
+      }
+      continue;
+    }
     if (server.command) {
       parsed.mcpServers[key] = {
         command: server.command,
@@ -501,6 +548,7 @@ async function reconcileAgyMcpServers(
       continue;
     }
     added.push(key);
+    AGY_MCP_REFCOUNT.set(key, (AGY_MCP_REFCOUNT.get(key) ?? 0) + 1);
   }
   if (added.length === 0) return noop;
   try {
@@ -517,6 +565,13 @@ async function reconcileAgyMcpServers(
         if (!current.mcpServers || typeof current.mcpServers !== "object") return;
         let dirty = false;
         for (const key of added) {
+          const live = (AGY_MCP_REFCOUNT.get(key) ?? 1) - 1;
+          if (live > 0) {
+            // 다른 실행이 아직 이 서버를 쓰고 있다 — 계수만 내리고 남겨 둔다.
+            AGY_MCP_REFCOUNT.set(key, live);
+            continue;
+          }
+          AGY_MCP_REFCOUNT.delete(key);
           if (current.mcpServers[key]) {
             delete current.mcpServers[key];
             dirty = true;
@@ -540,7 +595,28 @@ async function runPreparedAntigravity(
   // history/turnContext를 prompt에 넣어 관리하고, agy 세션 ID에는 의존하지 않는다.
   const runReq = req;
   events.onStatus(tStatus(runReq.locale, "callingBackend", { backend: runReq.backendLabel }));
-  const prompt = buildPrompt(runReq);
+  /*
+   * ★세션 재개 — agy 는 `--conversation <id>` 를 갖고 있었는데 우리가 안 썼다.
+   *
+   * 그동안 이 러너는 매 턴 시스템 프롬프트 + 전체 히스토리를 다시 보냈다. 대화가
+   * 길어질수록 느려지고 컨텍스트 한도에 먼저 부딪히는 이유가 그것이다. 지문이 바뀌면
+   * (시스템 프롬프트·모델이 달라지면) 이어가지 않는다 — 다른 계약의 대화를 물려받는
+   * 것은 히스토리를 다시 보내는 비용보다 나쁘다.
+   */
+  const agyFingerprint = runReq.chatId
+    ? createHash("sha256")
+        .update("agy-session-v1\0")
+        .update(runReq.sessionFingerprintSeed ?? runReq.systemPrompt ?? "")
+        .update("\0")
+        .update(runReq.model ?? "")
+        .digest("hex")
+    : null;
+  const agySaved = runReq.chatId ? getRuntimeSession(runReq.chatId, ANTIGRAVITY_KIND) : null;
+  const agyResumeId =
+    agySaved && agyFingerprint && agySaved.fingerprint === agyFingerprint ? agySaved.sessionId : null;
+  const prompt = agyResumeId
+    ? [runReq.turnContext?.trim(), runReq.userPrompt].filter(Boolean).join("\n\n")
+    : buildPrompt(runReq);
 
   /*
    * ★이 실행이 실제로 도구를 쓸 수 있는가 — 권한 플래그와 세션 규칙이 같은 답을 써야 한다.
@@ -698,6 +774,7 @@ async function runPreparedAntigravity(
           agyReadDirs,
           agyToolsAllowed ? req.permission : undefined,
           req.outputSchema?.schema,
+          agyResumeId ?? undefined,
         ),
         {
           stdio: ["ignore", "pipe", "pipe"],
@@ -730,6 +807,7 @@ async function runPreparedAntigravity(
       inputTokens: number;
       outputTokens: number;
       deniedTools?: { tool: string; detail: string }[];
+      conversationId?: string;
     } = { text: "", inputTokens: 0, outputTokens: 0 };
     const announcedDenials = new Set<string>();
     const reportedAgyTools = new Set<string>();
@@ -872,6 +950,15 @@ async function runPreparedAntigravity(
             source: "marker" as const,
           }
           : antigravityExitFailure(body, stderr);
+        /*
+         * ★대화 ID 를 저장해야 재개가 다음 턴에 실제로 걸린다. 이 한 줄이 없으면
+         * `--conversation` 배선은 영원히 죽은 코드다 — 저장 없이는 되돌릴 ID 가 없다.
+         * 실패한 턴은 저장하지 않는다: 답이 없는 대화를 이어가면 다음 턴이 그 실패를
+         * 문맥으로 물려받는다.
+         */
+        if (runReq.chatId && agyFingerprint && agyState.conversationId && !failure) {
+          saveRuntimeSession(runReq.chatId, ANTIGRAVITY_KIND, agyState.conversationId, agyFingerprint);
+        }
         resolve({
           text: trimmed,
           ...(failure ? { failure } : {}),
