@@ -4,7 +4,13 @@ import { isPrimarilyKorean, preferredLocaleFromText } from "../../shared/detect-
 // no executable UI code, explicit capabilities, delegation, budget, evidence,
 // and reversible app/tool actions.
 import type { AgentlasSurfaceManifest, JsonObject } from "../../shared/types";
-import { AGENTLAS_OS_FALLBACK_LADDER } from "../../shared/surface-delegation";
+import {
+  AGENTLAS_OS_FALLBACK_LADDER,
+  SURFACE_AUTONOMY_ALLOWED_WITHOUT_PROMPT,
+  SURFACE_AUTONOMY_CHECKPOINTS,
+  SURFACE_AUTONOMY_DESTRUCTIVE_ACTIONS,
+  SURFACE_AUTONOMY_NO_DEAD_END_REASONS,
+} from "../../shared/surface-delegation";
 
 interface CommerceProfile {
   business: string;
@@ -377,37 +383,10 @@ export function buildEcommerceOpsManifest(input: { prompt: string; now?: string 
       mode: "agent-operated",
       autonomy: {
         mode: "agent-first",
-        allowedWithoutPrompt: [
-          "browser-navigation",
-          "provider-account-signup",
-          "provider-app-creation",
-          "api-key-creation",
-          "webhook-setup",
-          "local-file-write",
-          "mcp-adapter-generation",
-          "local-tool-scaffold",
-          "local-preview-deploy",
-          "alternate-provider-switch",
-        ],
-        checkpoints: [
-          "password-entry",
-          "otp-entry",
-          "legal-identity-confirmation",
-          "terms-or-compliance-attestation",
-          "card-or-cvv-entry",
-          "payment-submit",
-          "budget-threshold-exceeded",
-          "destructive-delete-or-archive",
-        ],
-        noDeadEndReasons: [
-          "missing-api",
-          "missing-mcp",
-          "unsupported-region",
-          "provider-console-complexity",
-          "credential-missing",
-          "paid-service-required",
-        ],
-        destructiveActions: ["delete-files", "archive-os-object", "unregister-mcp", "revoke-credential", "cancel-paid-service"],
+        allowedWithoutPrompt: [...SURFACE_AUTONOMY_ALLOWED_WITHOUT_PROMPT],
+        checkpoints: [...SURFACE_AUTONOMY_CHECKPOINTS],
+        noDeadEndReasons: [...SURFACE_AUTONOMY_NO_DEAD_END_REASONS],
+        destructiveActions: [...SURFACE_AUTONOMY_DESTRUCTIVE_ACTIONS],
       },
       fallbackLadder: [...AGENTLAS_OS_FALLBACK_LADDER],
       browser: {

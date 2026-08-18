@@ -476,4 +476,65 @@ assert.equal(deepSurface.cleanedText.includes("<<agentlas-surface>>"), false);
 assert.match(deepSurface.errors.join("\n"), /Surface manifest could not be safely validated/);
 assert.equal(deepSurface.diagnostics.some((diagnostic) => diagnostic.code === "surface-parse-failed"), true);
 
+// --- surface autonomy vocabulary: one declaration, five consumers -----------
+// The prompt example is what the model copies. It used to be hand-typed and
+// named nine allowedWithoutPrompt entries against the runtime's ten, so
+// `local-tool-scaffold` was a capability the runtime supports and the model
+// could never ask for. Every site renders from shared/surface-delegation.ts
+// now; this asserts the rendering, and fails if anyone retypes a literal.
+const fs = require("node:fs");
+const path = require("node:path");
+const { SURFACE_PROTOCOL, SURFACE_DISCOVERY_CATALOG } = require("../dist/electron/surface-emitter.js");
+const {
+  AGENTLAS_OS_FALLBACK_LADDER,
+  SURFACE_AUTONOMY_ALLOWED_WITHOUT_PROMPT,
+  SURFACE_AUTONOMY_CHECKPOINTS,
+  SURFACE_AUTONOMY_NO_DEAD_END_REASONS,
+  SURFACE_AUTONOMY_DESTRUCTIVE_ACTIONS,
+} = require("../dist/shared/surface-delegation.js");
+
+const protocolText = typeof SURFACE_PROTOCOL === "string" ? SURFACE_PROTOCOL : SURFACE_PROTOCOL.join("\n");
+const promptLine = protocolText.split("\n").find((line) => line.includes('"delegation"'));
+assert.ok(promptLine, "the prompt template no longer shows a delegation example");
+const promptList = (key) => {
+  const found = new RegExp(`"${key}": (\\[[^\\]]*\\])`).exec(promptLine);
+  assert.ok(found, `the prompt delegation example has no ${key}`);
+  return JSON.parse(found[1]);
+};
+assert.deepEqual(promptList("allowedWithoutPrompt"), [...SURFACE_AUTONOMY_ALLOWED_WITHOUT_PROMPT]);
+assert.deepEqual(promptList("checkpoints"), [...SURFACE_AUTONOMY_CHECKPOINTS]);
+assert.deepEqual(promptList("noDeadEndReasons"), [...SURFACE_AUTONOMY_NO_DEAD_END_REASONS]);
+assert.deepEqual(promptList("fallbackLadder"), [...AGENTLAS_OS_FALLBACK_LADDER]);
+
+const catalog = JSON.parse(JSON.stringify(SURFACE_DISCOVERY_CATALOG));
+const catalogAutonomy = catalog.trustContract && catalog.trustContract.autonomy;
+assert.ok(catalogAutonomy, "the discovery catalog no longer carries an autonomy block");
+assert.deepEqual(catalogAutonomy.allowedWithoutPrompt, [...SURFACE_AUTONOMY_ALLOWED_WITHOUT_PROMPT]);
+assert.deepEqual(catalogAutonomy.checkpoints, [...SURFACE_AUTONOMY_CHECKPOINTS]);
+assert.deepEqual(catalogAutonomy.noDeadEndReasons, [...SURFACE_AUTONOMY_NO_DEAD_END_REASONS]);
+
+// A retyped literal is the defect, not a style problem: fail on the first
+// member of each list appearing as a quoted string outside the canonical file.
+const canonicalFile = path.join(__dirname, "..", "shared", "surface-delegation.ts");
+const sentinels = [
+  ["allowedWithoutPrompt", SURFACE_AUTONOMY_ALLOWED_WITHOUT_PROMPT[0]],
+  ["checkpoints", SURFACE_AUTONOMY_CHECKPOINTS[0]],
+  ["noDeadEndReasons", SURFACE_AUTONOMY_NO_DEAD_END_REASONS[0]],
+  ["destructiveActions", SURFACE_AUTONOMY_DESTRUCTIVE_ACTIONS[0]],
+];
+for (const relative of [
+  "electron/surface-emitter.ts",
+  "electron/creative-pack/surface.ts",
+  "electron/ecommerce-pack/surface.ts",
+]) {
+  const body = fs.readFileSync(path.join(__dirname, "..", relative), "utf8");
+  for (const [axis, sentinel] of sentinels) {
+    assert.equal(
+      body.includes(`"${sentinel}"`),
+      false,
+      `${relative} restates the ${axis} vocabulary ("${sentinel}") instead of spreading the canonical array in ${path.relative(path.join(__dirname, ".."), canonicalFile)}`,
+    );
+  }
+}
+
 console.log("surface-emitter smoke passed");

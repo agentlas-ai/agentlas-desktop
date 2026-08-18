@@ -24,6 +24,12 @@ import { SURFACE_TRUST_REGISTRY, lintSurfaceTrust } from "./surface-trust";
 // (2026-08-12 사용자 제보: followups + surface 동시 노출).
 export { AGENT_SURFACE_OPEN as SURFACE_OPEN_FENCE, AGENT_SURFACE_CLOSE as SURFACE_CLOSE_FENCE } from "../shared/agent-control-blocks";
 import { AGENT_SURFACE_OPEN, AGENT_SURFACE_CLOSE } from "../shared/agent-control-blocks";
+import {
+  AGENTLAS_OS_FALLBACK_LADDER,
+  SURFACE_AUTONOMY_ALLOWED_WITHOUT_PROMPT,
+  SURFACE_AUTONOMY_CHECKPOINTS,
+  SURFACE_AUTONOMY_NO_DEAD_END_REASONS,
+} from "../shared/surface-delegation";
 const SURFACE_OPEN_FENCE = AGENT_SURFACE_OPEN;
 const SURFACE_CLOSE_FENCE = AGENT_SURFACE_CLOSE;
 
@@ -115,47 +121,13 @@ export const SURFACE_DISCOVERY_CATALOG = {
       "human-approval",
     ],
     delegationFallbackLadder: [
-      "installed-mcp-or-api",
-      "browser-delegation",
-      "provider-console-account-or-app",
-      "agentlas-vault-credential",
-      "approved-provider-checkout",
-      "alternate-provider",
-      "generated-local-helper-or-tool",
-      "explicit-human-handoff-only-for-legal-identity-or-provider-block",
+      ...AGENTLAS_OS_FALLBACK_LADDER,
     ],
     autonomy: {
       defaultMode: "agent-first",
-      allowedWithoutPrompt: [
-        "browser-navigation",
-        "provider-account-signup",
-        "provider-app-creation",
-        "api-key-creation",
-        "webhook-setup",
-        "local-file-write",
-        "mcp-adapter-generation",
-        "local-tool-scaffold",
-        "local-preview-deploy",
-        "alternate-provider-switch",
-      ],
-      checkpoints: [
-        "password-entry",
-        "otp-entry",
-        "legal-identity-confirmation",
-        "terms-or-compliance-attestation",
-        "card-or-cvv-entry",
-        "payment-submit",
-        "budget-threshold-exceeded",
-        "destructive-delete-or-archive",
-      ],
-      noDeadEndReasons: [
-        "missing-api",
-        "missing-mcp",
-        "unsupported-region",
-        "provider-console-complexity",
-        "credential-missing",
-        "paid-service-required",
-      ],
+      allowedWithoutPrompt: [...SURFACE_AUTONOMY_ALLOWED_WITHOUT_PROMPT],
+      checkpoints: [...SURFACE_AUTONOMY_CHECKPOINTS],
+      noDeadEndReasons: [...SURFACE_AUTONOMY_NO_DEAD_END_REASONS],
     },
     stateOwners: ["agent", "user", "derived"],
     rules: SURFACE_TRUST_REGISTRY,
@@ -350,7 +322,12 @@ export const SURFACE_PROTOCOL = [
   '  "evidence": [ { "id": "src_1", "kind": "verified | claimed | estimated | unverified", "source": "Name", "url": "https://...", "retrievedAt": "ISO time", "confidence": 0.8 } ],',
   '  "claims": [ { "id": "claim_1", "text": "A checkable statement or number shown in the surface", "kind": "verified | claimed | estimated", "evidenceIds": ["src_1"], "status": "unchecked | passed | failed | needs-review" } ],',
   '  "capabilities": [ { "id": "network_search", "type": "network | filesystem | pii | payment | payment-method | credential | browser-session | external-api | model-generation | human-approval", "purpose": "...", "approval": "once", "allowlist": ["https://example.com"] } ],',
-  '  "delegation": { "mode": "agent-operated", "autonomy": { "mode": "agent-first", "allowedWithoutPrompt": ["browser-navigation", "provider-account-signup", "provider-app-creation", "api-key-creation", "webhook-setup", "local-file-write", "mcp-adapter-generation", "local-preview-deploy", "alternate-provider-switch"], "checkpoints": ["password-entry", "otp-entry", "captcha-solving", "legal-identity-confirmation", "card-or-cvv-entry", "payment-submit", "budget-threshold-exceeded", "destructive-delete-or-archive"], "noDeadEndReasons": ["missing-api", "missing-mcp", "unsupported-region", "provider-console-complexity", "credential-missing", "paid-service-required"] }, "credentials": [ { "id": "provider_key", "label": "Provider API key", "envKey": "PROVIDER_API_KEY", "inputMode": "agentlas-vault", "status": "missing" } ], "payments": [ { "id": "checkout", "merchant": "Provider", "quoteRequired": true, "recurrence": "one-time", "approvalMode": "explicit-before-checkout", "cardHandling": "provider-checkout" } ], "fallbackLadder": ["installed-mcp-or-api", "browser-delegation", "provider-console-account-or-app", "agentlas-vault-credential", "approved-provider-checkout", "alternate-provider", "generated-local-helper-or-tool"] },',
+  // The three autonomy lists and the fallback ladder are RENDERED from the
+  // canonical arrays, never typed here. This example is what the model copies,
+  // so a hand-written copy silently caps what it can emit: this line used to
+  // omit "local-tool-scaffold", a capability the runtime supports and the model
+  // could therefore never ask for.
+  `  "delegation": { "mode": "agent-operated", "autonomy": { "mode": "agent-first", "allowedWithoutPrompt": ${JSON.stringify(SURFACE_AUTONOMY_ALLOWED_WITHOUT_PROMPT)}, "checkpoints": ${JSON.stringify(SURFACE_AUTONOMY_CHECKPOINTS)}, "noDeadEndReasons": ${JSON.stringify(SURFACE_AUTONOMY_NO_DEAD_END_REASONS)} }, "credentials": [ { "id": "provider_key", "label": "Provider API key", "envKey": "PROVIDER_API_KEY", "inputMode": "agentlas-vault", "status": "missing" } ], "payments": [ { "id": "checkout", "merchant": "Provider", "quoteRequired": true, "recurrence": "one-time", "approvalMode": "explicit-before-checkout", "cardHandling": "provider-checkout" } ], "fallbackLadder": ${JSON.stringify(AGENTLAS_OS_FALLBACK_LADDER)} },`,
   '  "budget": { "currency": "USD", "limit": 5, "spent": 0, "approvalThreshold": 1, "unit": "surface" },',
   '  "stateSchema": { "fields": [ { "path": "/data/items/rows", "owner": "user | agent | derived", "merge": "preserve-user" } ] },',
   '  "jobs": [ { "id": "job_1", "label": "Generate variants", "status": "queued", "costEstimate": 0.5, "currency": "USD", "resumable": true } ],',

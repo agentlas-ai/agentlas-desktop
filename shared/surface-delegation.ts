@@ -17,6 +17,61 @@ export const AGENTLAS_OS_FALLBACK_LADDER = [
   "explicit-human-handoff-only-for-legal-identity-or-provider-block",
 ] as const;
 
+// The surface autonomy vocabulary — one list per axis.
+//
+// Five places used to spell these out by hand: the defaults below, the creative
+// and ecommerce packs, the SURFACE catalog in surface-emitter.ts, and the JSON
+// example in the LLM prompt template. The prompt copy was the one that mattered
+// and the one that drifted: it named nine allowedWithoutPrompt entries, missing
+// `local-tool-scaffold`, so the model could never emit a capability the runtime
+// supports. Its checkpoints disagreed too. Every site now renders from here, so
+// a new member reaches the prompt and the runtime in the same edit.
+export const SURFACE_AUTONOMY_ALLOWED_WITHOUT_PROMPT = [
+  "browser-navigation",
+  "provider-account-signup",
+  "provider-app-creation",
+  "api-key-creation",
+  "webhook-setup",
+  "local-file-write",
+  "mcp-adapter-generation",
+  "local-tool-scaffold",
+  "local-preview-deploy",
+  "alternate-provider-switch",
+] as const;
+
+// Union of what the runtime and the prompt each carried. `captcha-solving` came
+// only from the prompt; it stays, because a checkpoint hands the step to a
+// person and a CAPTCHA is precisely a step the agent must not complete itself.
+// Widening this list only ever adds a human gate.
+export const SURFACE_AUTONOMY_CHECKPOINTS = [
+  "password-entry",
+  "otp-entry",
+  "captcha-solving",
+  "legal-identity-confirmation",
+  "terms-or-compliance-attestation",
+  "card-or-cvv-entry",
+  "payment-submit",
+  "budget-threshold-exceeded",
+  "destructive-delete-or-archive",
+] as const;
+
+export const SURFACE_AUTONOMY_NO_DEAD_END_REASONS = [
+  "missing-api",
+  "missing-mcp",
+  "unsupported-region",
+  "provider-console-complexity",
+  "credential-missing",
+  "paid-service-required",
+] as const;
+
+export const SURFACE_AUTONOMY_DESTRUCTIVE_ACTIONS = [
+  "delete-files",
+  "archive-os-object",
+  "unregister-mcp",
+  "revoke-credential",
+  "cancel-paid-service",
+] as const;
+
 export type AgentlasDelegationStepKind =
   | "connector"
   | "browser"
@@ -572,43 +627,16 @@ function autonomyPolicyFromDelegation(delegation?: JsonObject): AgentlasSurfaceA
     mode: stringValue(raw?.mode) || "agent-first",
     allowedWithoutPrompt: stringArray(raw?.allowedWithoutPrompt).length
       ? stringArray(raw?.allowedWithoutPrompt)
-      : [
-          "browser-navigation",
-          "provider-account-signup",
-          "provider-app-creation",
-          "api-key-creation",
-          "webhook-setup",
-          "local-file-write",
-          "mcp-adapter-generation",
-          "local-tool-scaffold",
-          "local-preview-deploy",
-          "alternate-provider-switch",
-        ],
+      : [...SURFACE_AUTONOMY_ALLOWED_WITHOUT_PROMPT],
     checkpoints: stringArray(raw?.checkpoints).length
       ? stringArray(raw?.checkpoints)
-      : [
-          "password-entry",
-          "otp-entry",
-          "legal-identity-confirmation",
-          "terms-or-compliance-attestation",
-          "card-or-cvv-entry",
-          "payment-submit",
-          "budget-threshold-exceeded",
-          "destructive-delete-or-archive",
-        ],
+      : [...SURFACE_AUTONOMY_CHECKPOINTS],
     noDeadEndReasons: stringArray(raw?.noDeadEndReasons).length
       ? stringArray(raw?.noDeadEndReasons)
-      : [
-          "missing-api",
-          "missing-mcp",
-          "unsupported-region",
-          "provider-console-complexity",
-          "credential-missing",
-          "paid-service-required",
-        ],
+      : [...SURFACE_AUTONOMY_NO_DEAD_END_REASONS],
     destructiveActions: stringArray(raw?.destructiveActions).length
       ? stringArray(raw?.destructiveActions)
-      : ["delete-files", "archive-os-object", "unregister-mcp", "revoke-credential", "cancel-paid-service"],
+      : [...SURFACE_AUTONOMY_DESTRUCTIVE_ACTIONS],
   };
 }
 
