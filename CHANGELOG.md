@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 1.0.23 — 2026-08-18
+
+- Cloud publish excludes machine-local state, auto-trims the package to
+  limits, and explains refusals without echoing raw bodies.
+- Escalation decides staffing from what happened in the run, not from words
+  in the request.
+- Mobile bridge: publish to the Hub and price it from a phone.
+- Per-work-order rent with project toggles and a hard gate, the day-lease
+  dialog on two channels, agent picker search, a performance pass, and the
+  revived bundle-contract gate.
+- Project staging keeps agents under their own identity, and deletion
+  reaches the pool.
+- This release binds Agentlas OS v1.2.11 at b1e98e8c01b1cd54cb84fd41e244b46f58ff6e6a
+- Source readiness does not prove a published installer or update feed; the
+  Releases page remains the authority for the downloadable installer.
+
 ## 1.0.22 — 2026-08-17
 
 - The prompt guard is sized against the runtimes instead of a guess. 120,000
