@@ -1744,9 +1744,19 @@ button[data-dashboard-import="true"]:disabled {
 
 .dashboard-engine-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(208px, 1fr));
+  /* 두 장씩 — auto-fill로 넉 장이 들어가면 카드가 208px까지 좁아지고, 그 안의
+     사용량 행(4열)에서 마지막 칸이 잘려 `resets…`가 읽히지 않았다(실측 2026-08-18).
+     열 수를 고정해 리셋 시각을 항상 끝까지 보여준다. */
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
   margin-top: 8px;
+}
+
+/* 좁은 창에서는 두 장도 못 버틴다 — 그때만 한 장씩. */
+@media (max-width: 640px) {
+  .dashboard-engine-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .dashboard-engine-card {
@@ -2931,7 +2941,10 @@ button[data-dashboard-chevron="open"] {
 
 .dashboard-usage-bar {
   display: grid;
-  grid-template-columns: minmax(56px, 84px) minmax(60px, 1fr) 38px minmax(0, 88px);
+  /* 마지막 칸(리셋 시각)에 88px 상한이 박혀 있어 카드를 넓혀도 `resets in 2d 6h`가
+     2px 모자라 잘렸다(실측 2026-08-18: 필요 90px vs 허용 88px). 상한을 풀고 내용
+     폭을 따르게 한다 — 값이 짧으면 자리도 줄어드니 좁은 카드가 손해 보지 않는다. */
+  grid-template-columns: minmax(56px, 84px) minmax(60px, 1fr) 38px max-content;
   align-items: center;
   gap: 8px;
 }
