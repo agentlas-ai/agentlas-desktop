@@ -24,6 +24,11 @@
  */
 
 import type { ToolApprovalRequestEvent, ToolApprovalDecision } from "../../shared/types";
+import {
+  builtinToolByName,
+  runBuiltinTool,
+  type ToolPermission,
+} from "../../shared/builtin-tools";
 
 /** 승인 요청 하나 — 화면과 같은 정의를 쓴다(shared/types.ts). */
 export type ToolApprovalRequest = ToolApprovalRequestEvent;
@@ -228,4 +233,75 @@ export function resolveToolApproval(id: string, decision: ToolApprovalDecision):
   }
   for (const fn of resolvedListeners) { try { fn(id, outcome); } catch { /* 같은 이유 */ } }
   return Boolean(entry);
+}
+
+/**
+ * 내장 도구(shared/builtin-tools.ts)의 승인 + 실행 — **한 벌**.
+ *
+ * ★로컬 루프(ollama·lmstudio·mlx)와 BYOK 가 각자 승인을 짜면, 한쪽이 관문을
+ * 빠뜨렸을 때 그 런타임만 조용히 무방비가 된다. 이 파일이 이미 승인 정책의
+ * 소유자이므로 실행까지 여기서 묶는다.
+ *
+ * 도구의 성격은 **알고 있는 것만** 싣는다: 내장 도구는 우리가 만들었으니
+ * read/edit/execute 를 안다. 중재자가 던지면 거부다(fail-closed).
+ */
+export interface BuiltinApprovalContext {
+  runtimeKind: string;
+  sessionKey: string;
+  permission: RuntimeToolPermissionAsk["permission"];
+  cwd?: string;
+  chatId?: string;
+  unattended: boolean;
+  signal?: AbortSignal;
+}
+
+export async function runApprovedBuiltinTool(
+  toolName: string,
+  args: Record<string, unknown>,
+  ctx: BuiltinApprovalContext,
+  events: { onTool?: (name: string, args?: string, result?: string, id?: string, isError?: boolean) => void },
+  callId: string,
+): Promise<{ ok: boolean; content: string }> {
+  const builtin = builtinToolByName(toolName);
+  const kind = builtin
+    ? builtin.minPerm === "read"
+      ? ("read" as const)
+      : builtin.name === "bash"
+        ? ("execute" as const)
+        : ("edit" as const)
+    : ("other" as const);
+  const ask: RuntimeToolPermissionAsk = {
+    runtime: ctx.runtimeKind,
+    sessionKey: ctx.sessionKey,
+    tool: toolName,
+    kind,
+    cwd: ctx.cwd,
+    permission: ctx.permission,
+    mutating: kind !== "read",
+    ...(ctx.chatId ? { chatId: ctx.chatId } : {}),
+    ...(ctx.unattended ? { unattended: true as const } : {}),
+  };
+  const arbiter = getRuntimeToolPermissionArbiter();
+  let approved: boolean;
+  if (!arbiter) {
+    approved = defaultRuntimeToolPermission(ask) !== "deny";
+  } else {
+    try {
+      approved = (await arbiter(ask)) !== "deny";
+    } catch {
+      approved = false; // 중재자 실패는 거부다 — 실패가 허용이 되면 관문이 아니다.
+    }
+  }
+  if (!approved) {
+    const denied = `tool call denied — "${toolName}" was not approved for this run.`;
+    events.onTool?.(toolName, JSON.stringify(args), denied, callId, true);
+    return { ok: false, content: denied };
+  }
+  const outcome = await runBuiltinTool(toolName, args, {
+    cwd: ctx.cwd ?? process.cwd(),
+    permission: (ctx.permission ?? "read") as ToolPermission,
+    ...(ctx.signal ? { signal: ctx.signal } : {}),
+  });
+  events.onTool?.(toolName, JSON.stringify(args), outcome.content, callId, !outcome.ok);
+  return outcome;
 }

@@ -81,7 +81,7 @@ const DICT = {
     // 예전엔 전부 "사용자가 정지 버튼으로"라고 단정해, 누른 적 없는 사람이 거짓 사유를 받았다.
     aborted: "실행이 중지되었습니다.",
     abortedByUser: "사용자가 정지 버튼으로 실행을 중지했습니다.",
-    mcpToolsAttached: "MCP 도구 {count}개 연결됨",
+    mcpToolsAttached: "도구 {count}개 연결됨",
     mcpToolCallUnsupported: "이 모델/서버는 도구 호출(tool_calls) 응답 형식을 지원하지 않는 것 같습니다 — 도구 없이 텍스트로만 계속합니다.",
   },
   en: {
@@ -138,7 +138,7 @@ const DICT = {
     compactedDigestHeader: "[Summary of compacted earlier conversation — older context condensed]",
     aborted: "The run was stopped.",
     abortedByUser: "Run stopped from the stop button.",
-    mcpToolsAttached: "{count} MCP tool(s) attached",
+    mcpToolsAttached: "{count} tool(s) attached",
     mcpToolCallUnsupported: "This model/server doesn't seem to support tool-call responses — continuing with text only, no tools.",
   },
 } as const;

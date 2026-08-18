@@ -25,6 +25,12 @@ import {
   getRuntimeToolPermissionArbiter,
   type RuntimeToolPermissionAsk,
 } from "./tool-approval";
+import {
+  builtinToolByName,
+  builtinToolsAsOpenAi,
+  runBuiltinTool,
+  type ToolPermission,
+} from "../../shared/builtin-tools";
 
 export type LocalChatContent =
   | { type: "text"; text: string }
@@ -46,10 +52,19 @@ export type ChatMessage =
   | { role: "assistant"; content: string; tool_calls?: OpenAiToolCall[] }
   | { role: "tool"; tool_call_id: string; content: string };
 
-interface ResolvedTool {
-  server: InstalledMcpServer;
-  serverToolName: string;
-}
+/**
+ * 이 루프가 부를 수 있는 도구는 두 출처다.
+ * - `mcp`: 사용자가 붙인 MCP 서버의 도구.
+ * - `builtin`: 우리가 쥐여 주는 파일·셸 도구(shared/builtin-tools.ts).
+ *
+ * ★내장 도구가 없던 동안, MCP 서버를 붙이지 않은 BYOK·로컬 실행은 도구가 0개였다 —
+ * 모델은 코드를 답변에 적어 줄 뿐 파일 하나 못 만들었다. 벤더 CLI 가 없는 런타임은
+ * 도구를 빌려올 곳이 없으므로 우리가 줘야 한다. 승인 관문·이벤트·결과 처리는
+ * 두 출처가 **같은 경로**를 탄다 — 갈래를 나누면 한쪽만 관문을 빠뜨린다.
+ */
+type ResolvedTool =
+  | { kind: "mcp"; server: InstalledMcpServer; serverToolName: string }
+  | { kind: "builtin"; builtinName: string };
 
 const MAX_TOOL_LOOP_TURNS = 8;
 const MAX_TOOL_RESULT_CHARS = 20_000;
@@ -93,23 +108,33 @@ function scopeServerToWorkspace(server: InstalledMcpServer, workspaceRoot: strin
 async function loadOpenAiTools(
   mcpConfigPath: string | undefined,
   workspaceRoot: string | undefined,
+  permission: ToolPermission,
 ): Promise<{ tools: OpenAiToolDef[]; byName: Map<string, ResolvedTool> }> {
-  const empty = { tools: [] as OpenAiToolDef[], byName: new Map<string, ResolvedTool>() };
-  if (!mcpConfigPath) return empty;
+  const tools: OpenAiToolDef[] = [];
+  const byName = new Map<string, ResolvedTool>();
+
+  // ★내장 도구 먼저. MCP 설정이 없어도(그게 흔한 경우다) 이 런타임은 일할 수 있어야
+  // 한다. 권한 칩보다 위의 도구는 목록에 **아예 없다** — "있는데 거절"이 아니라 "없다".
+  if (workspaceRoot) {
+    for (const def of builtinToolsAsOpenAi(permission)) {
+      tools.push(def);
+      byName.set(def.function.name, { kind: "builtin", builtinName: def.function.name });
+    }
+  }
+
+  if (!mcpConfigPath) return { tools, byName };
   let parsed: { mcpServers?: Record<string, unknown> };
   try {
     parsed = JSON.parse(fs.readFileSync(mcpConfigPath, "utf8"));
   } catch {
-    return empty;
+    return { tools, byName };
   }
   const keys = Object.keys(parsed.mcpServers ?? {});
-  if (keys.length === 0) return empty;
+  if (keys.length === 0) return { tools, byName };
 
   const serverByKey = new Map(
     listInstalledServers().map((s) => [mcpConfigKey(s), scopeServerToWorkspace(s, workspaceRoot)]),
   );
-  const tools: OpenAiToolDef[] = [];
-  const byName = new Map<string, ResolvedTool>();
   for (const key of keys) {
     const server = serverByKey.get(key);
     if (!server) continue; // config가 가리키는 서버가 레지스트리에서 사라진 경우 — 건너뜀
@@ -136,7 +161,7 @@ async function loadOpenAiTools(
               : { type: "object", properties: {} },
         },
       });
-      byName.set(name, { server, serverToolName: tool.name });
+      byName.set(name, { kind: "mcp", server, serverToolName: tool.name });
     }
   }
   return { tools, byName };
@@ -166,24 +191,37 @@ interface LocalToolApprovalContext {
   cwd?: string;
   chatId?: string;
   unattended: boolean;
+  /** 내장 bash 도구가 취소를 따르도록 — 실행 중단이 도구까지 닿아야 한다. */
+  signal?: AbortSignal;
 }
 
 async function approveLocalToolCall(
   ctx: LocalToolApprovalContext,
   toolName: string,
 ): Promise<boolean> {
+  // 내장 도구는 우리가 만든 것이라 성격을 안다 — 지어내는 게 아니라 아는 것을 싣는다.
+  // MCP 도구는 정의에 종류 칸이 없으므로 "other"에 머문다.
+  const builtin = builtinToolByName(toolName);
+  const builtinKind = builtin
+    ? builtin.minPerm === "read"
+      ? ("read" as const)
+      : builtin.name === "bash"
+        ? ("execute" as const)
+        : ("edit" as const)
+    : null;
   const ask: RuntimeToolPermissionAsk = {
     runtime: ctx.runtimeKind,
     sessionKey: ctx.sessionKey,
     tool: toolName,
-    // MCP 도구 정의에는 종류 칸이 없다. 지어내지 않고 "other"로 둔다.
-    kind: "other",
+    kind: builtinKind ?? "other",
     // detail 을 비워 두는 것은 의도적이다 — 세션 허용 키가 `tool::detail` 이라
     // 인자를 실으면 인자 한 글자만 달라져도 다시 묻는다. 도구 이름
     // (`mcp__<서버>__<도구>`) 자체가 사용자에게 무엇을 허용하는지 말해 준다.
     cwd: ctx.cwd,
     permission: ctx.permission,
-    mutating: true,
+    // 내장 read_file·list_dir 은 변이가 아니라는 것을 **증명할 수 있다**(우리 코드다).
+    // MCP 도구는 여전히 전부 변이로 본다 — 증명할 수 없는 무해함은 허용 근거가 못 된다.
+    mutating: builtinKind ? builtinKind !== "read" : true,
     ...(ctx.chatId ? { chatId: ctx.chatId } : {}),
     ...(ctx.unattended ? { unattended: true as const } : {}),
   };
@@ -227,6 +265,22 @@ export async function runOneToolCall(
     events.onTool?.(call.function.name, call.function.arguments, denied, call.id, true);
     return {
       toolMessage: { role: "tool", tool_call_id: call.id, content: denied },
+      visionMessage: null,
+    };
+  }
+  if (resolved.kind === "builtin") {
+    const outcome = await runBuiltinTool(resolved.builtinName, args, {
+      cwd: approval.cwd ?? process.cwd(),
+      permission: (approval.permission ?? "read") as ToolPermission,
+      signal: approval.signal,
+    });
+    events.onTool?.(call.function.name, call.function.arguments, outcome.content, call.id, !outcome.ok);
+    return {
+      toolMessage: {
+        role: "tool",
+        tool_call_id: call.id,
+        content: (outcome.ok ? outcome.content : `Error: ${outcome.content}`).slice(0, MAX_TOOL_RESULT_CHARS),
+      },
       visionMessage: null,
     };
   }
@@ -414,8 +468,13 @@ export async function runLocalOpenAiChat(
     ...(req.cwd ? { cwd: req.cwd } : {}),
     ...(req.chatId ? { chatId: req.chatId } : {}),
     unattended: req.unattended === true,
+    ...(req.signal ? { signal: req.signal } : {}),
   };
-  const { tools, byName } = await loadOpenAiTools(req.mcpConfigPath, req.cwd);
+  const { tools, byName } = await loadOpenAiTools(
+    req.mcpConfigPath,
+    req.cwd,
+    (req.permission ?? "read") as ToolPermission,
+  );
   if (tools.length > 0) {
     events.onStatus(tStatus(req.locale, "mcpToolsAttached", { count: tools.length }));
     if (req.cwd) {
