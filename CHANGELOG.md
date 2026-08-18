@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 1.0.24 — 2026-08-18
+
+- Agent screen captures get a durable home at ~/.agentlas/captures: the
+  control server persists every capture and returns the saved path, and the
+  playwright and agentlas-browser MCPs write screenshots there instead of a
+  temp dir that gets reaped.
+- Chat display cleaners no longer rewrite markdown image sources, so
+  captures render inline in Work and One instead of a silent blank.
+- A markdown image whose file is missing shows an honest missing-image card
+  instead of an empty box.
+- This release binds Agentlas OS v1.2.11 at b1e98e8c01b1cd54cb84fd41e244b46f58ff6e6a
+- Source readiness does not prove a published installer or update feed; the
+  Releases page remains the authority for the downloadable installer.
+
 ## 1.0.23 — 2026-08-18
 
 - Cloud publish excludes machine-local state, auto-trims the package to
