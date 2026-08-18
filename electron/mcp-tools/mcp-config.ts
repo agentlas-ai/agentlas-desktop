@@ -31,6 +31,14 @@ import {
 } from "../computer-use/mcp-server";
 import { COMPUTER_USE_CONTROL_FILE_ENV, computerUseControlInfoPath } from "../computer-use/channel";
 import { resolveHephaestusStdioLaunch } from "../hephaestus/engine";
+import {
+  MCP_PROXY_CONTROL_FILE_ENV,
+  MCP_PROXY_SERVER_KEY_ENV,
+  MCP_PROXY_SESSION_ENV,
+  MCP_PROXY_TARGET_ENV,
+  mcpProxyControlInfoPath,
+} from "./proxy-channel";
+import { mcpProxyApprovalPort } from "./proxy-server";
 
 function expandHome(arg: string): string {
   if (arg === "~") return os.homedir();
@@ -92,6 +100,53 @@ export interface McpConfigBuildOptions {
   skipDefaultSeed?: boolean;
   /** Per-run file key. Prevents concurrent Build plans from racing on one shared config. */
   configKey?: string;
+  /**
+   * 이 실행의 도구 관문 정보. 있으면 stdio MCP 서버가 **우리 프록시를 거쳐** 실행되고,
+   * 모든 tools/call 이 중재자를 지난다. 없으면 예전처럼 서버를 직접 넘긴다.
+   *
+   * 관문이 필요한 이유는 런타임마다 다르다 — cursor CLI 는 MCP 훅을 아예 안 쏘고,
+   * copilot 은 서브에이전트 내부 호출에 훅이 안 걸린다. claude 처럼 자기 훅이 이미
+   * 배선된 런타임에도 붙여 두면 두 관문이 같은 답을 내므로 해롭지 않다.
+   */
+  toolGate?: {
+    runtime: string;
+    sessionKey: string;
+    permission?: "read" | "write" | "full";
+    cwd?: string;
+    chatId?: string;
+    unattended?: boolean;
+  };
+}
+
+/**
+ * stdio 서버 하나를 프록시로 감싼다. 승인 서버가 떠 있지 않거나 이 실행이 관문 정보를
+ * 주지 않았으면 `null` — 그때는 감싸지 않는다. 관문 없는 프록시는 통과 파이프일 뿐이고,
+ * 한 겹 늘린 만큼 손해만 본다.
+ */
+function mcpProxySpec(
+  serverKey: string,
+  actual: { command: string; args: string[]; env: Record<string, string> },
+  opts: McpConfigBuildOptions | undefined,
+): { command: string; args: string[]; env: Record<string, string> } | null {
+  const gate = opts?.toolGate;
+  if (!gate) return null;
+  if (mcpProxyApprovalPort() <= 0) return null;
+  const childPath = path.join(__dirname, "proxy-child.cjs");
+  if (!fs.existsSync(childPath)) return null;
+  return {
+    command: process.execPath,
+    args: [childPath],
+    env: {
+      ELECTRON_RUN_AS_NODE: "1",
+      [MCP_PROXY_CONTROL_FILE_ENV]: mcpProxyControlInfoPath(),
+      [MCP_PROXY_TARGET_ENV]: JSON.stringify(actual),
+      [MCP_PROXY_SERVER_KEY_ENV]: serverKey,
+      [MCP_PROXY_SESSION_ENV]: JSON.stringify(gate),
+      // 실제 서버가 쓰는 alias 참조는 프록시가 그대로 물려줘야 한다 — 프록시는
+      // 자기 env 를 자식에게 펼쳐 준다(proxy-child.cjs).
+      ...actual.env,
+    },
+  };
 }
 
 function safeProfileKey(value: string): string {
@@ -438,7 +493,25 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
           ...builtInEnv,
           ...Object.fromEntries(aliases.map((alias) => [alias, envReference(alias)])),
         };
-        mcpServers[key] = {
+        /*
+         * ★도구 관문을 우리가 소유한다 — 벤더 훅이 아니라.
+         *
+         * 실행 전 거절이 실제로 먹히는 곳은 벤더 CLI 의 PreToolUse 훅뿐인데, 그 훅은
+         * claude 에만 배선돼 있고 어떤 벤더는 CLI 에서 아예 발화하지 않는다(실측:
+         * cursor CLI 는 beforeMCPExecution 을 쏘지 않고, copilot 훅은 서브에이전트
+         * 내부 호출에 안 걸린다). 남의 훅에 기대는 한 그 구멍은 못 막는다.
+         *
+         * 그래서 서버를 런타임에 직접 주지 않고 프록시를 준다. 누가 부르든 모든
+         * tools/call 이 우리 프로세스를 지나고, 우리는 ACP·로컬 루프와 같은 중재자에게
+         * 묻는다. 프록시를 붙이는 조건은 하나 — 승인 서버가 **실제로 떠 있을 때만**.
+         * 관문 없는 프록시는 통과 파이프일 뿐이라 한 겹만 늘리는 손해다.
+         */
+        const proxied = mcpProxySpec(key, {
+          command: process.execPath,
+          args: wrapperArgs,
+          env: wrapperEnv,
+        }, opts);
+        mcpServers[key] = proxied ?? {
           command: process.execPath,
           args: wrapperArgs,
           env: wrapperEnv,

@@ -81,6 +81,7 @@ import { startCliRuntimeAutoUpdate, stopCliRuntimeAutoUpdate } from "./runtime/a
 import { scrubLegacyOpenCrabMcpConfig } from "./mcp-tools/mcp-config";
 import { scrubLegacyOpenCrabCredentialUrls } from "./mcp-tools/registry";
 import { startBrowserApprovalServer, stopBrowserApprovalServer } from "./browser/approval-server";
+import { startMcpProxyApprovalServer, stopMcpProxyApprovalServer } from "./mcp-tools/proxy-server";
 import { startComputerUseControlServer, stopComputerUseControlServer } from "./computer-use/control-server";
 import { authorizeLocalMediaPath } from "./fs/access";
 import { readChatMessageAttachment } from "./store/chat-message-attachments";
@@ -628,6 +629,7 @@ function stopQuitServices(): Promise<void> {
   try { stopAutomationScheduler(); } catch {}
   try { stopOneBriefingScheduler(); } catch {}
   try { stopBrowserApprovalServer(); } catch {}
+  try { stopMcpProxyApprovalServer(); } catch {}
   try { stopComputerUseControlServer(); } catch {}
   try { disposeAppFactoryLaunches(); } catch {}
   try { disposeSiteAgentAppRuntimes(); } catch {}
@@ -1103,6 +1105,11 @@ app.whenReady().then(async () => {
   );
   void startComputerUseControlServer().catch((err) =>
     console.error("[computer-use] control server failed:", err),
+  );
+  // MCP 프록시 승인 서버 — 벤더 훅이 없거나 발화하지 않는 런타임에서 도구 관문이 된다.
+  // 이게 떠 있을 때만 설정 생성기가 서버를 프록시로 감싼다(mcp-config.ts mcpProxySpec).
+  void startMcpProxyApprovalServer().catch((err) =>
+    console.error("[mcp] proxy approval server failed:", err),
   );
   startAutomationScheduler(); // 자동화 스케줄러 — 60초마다 due 자동화를 백그라운드로 실행
   void import("./telegram/connect")

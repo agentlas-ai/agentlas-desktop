@@ -2240,6 +2240,24 @@ export async function runMcpInvocation(
           ...hubBridgedServerIds,
           ...(req.requiredToolCatalogIds ?? []),
         ])],
+        /*
+         * ★도구 관문을 이 실행에 붙인다 — 어느 런타임이든.
+         *
+         * 실행 전 거절이 실제로 먹히던 곳은 claude 의 PreToolUse 훅 하나뿐이었다.
+         * 나머지 런타임에서는 사용자가 "거절"을 눌러도 다음 호출을 막지 못했고,
+         * cursor CLI 는 MCP 훅을 아예 쏘지 않으며 copilot 은 서브에이전트 내부 호출에
+         * 훅이 안 걸린다. 관문을 벤더 훅이 아니라 **도구가 지나는 길**에 두면
+         * 그 차이가 사라진다(mcp-config.ts mcpProxySpec → proxy-child.cjs).
+         */
+        toolGate: {
+          runtime: active.kind,
+          // 승인 세션 키는 러너들과 같은 규칙이라야 "이번 세션 동안 허용"이 이어진다.
+          sessionKey: `${active.kind}:${req.chatId ?? workingFolder ?? "default"}`,
+          permission: normalizedPermission,
+          ...(workingFolder ? { cwd: workingFolder } : {}),
+          ...(req.chatId ? { chatId: req.chatId } : {}),
+          ...(executionContext ? { unattended: true } : {}),
+        },
       });
       if (cfg) {
         mcpConfigPath = cfg.configPath;
