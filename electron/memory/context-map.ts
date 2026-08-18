@@ -8,6 +8,15 @@ import { hephaestusContextRoot } from "../hephaestus/root";
 const MAX_TASK_CHARS = 12_000;
 const MAX_RESULT_BYTES = 1_500_000;
 const SLICE_TIMEOUT_MS = 4_000;
+// The slice runs through spawnSync on the main process, so every millisecond
+// here is a frozen UI. Core's passive freshness check walks the whole
+// repository — measured on the pilot: 11.0s, i.e. the call could never finish
+// inside SLICE_TIMEOUT_MS and Desktop silently produced no slice at all. Core
+// now accepts a freshness budget and serves the last complete map labelled
+// `unverified_served` when the budget runs out. Measured end to end on the
+// same repository: 1.94s at 0.4s, against 11.4s (an outright `context_map_stale`
+// error) before. Small projects still verify fully inside the budget.
+const SLICE_FRESHNESS_BUDGET_SECONDS = 0.4;
 const REFRESH_TIMEOUT_MS = 15_000;
 const refreshTriggered = new Set<string>();
 
@@ -157,6 +166,12 @@ export function buildProjectContextSlice(
     "--task-stdin",
     "--no-refresh",
     "--render",
+    // Recall must degrade to a labelled map, never to nothing: another session
+    // editing the project made every slice `context_map_stale`, and this call
+    // site turns any non-zero exit into `null`.
+    "--allow-stale",
+    "--freshness-budget",
+    String(SLICE_FRESHNESS_BUDGET_SECONDS),
   ]);
   if (!launch) return null;
   try {
