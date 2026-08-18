@@ -201,6 +201,21 @@ interface SelectionMemoEntry {
 }
 
 const selectionMemo = new Map<string, SelectionMemoEntry>();
+/**
+ * ── 캐시 안정 sticky 도구셋 (2026-08-18) ──────────────────────────────────
+ * 위 1단계 메모는 키에 과제문 해시가 들어가 **새 턴에서는 절대 히트하지 않는다** —
+ * 그래서 턴마다 선택이 새로 돌았고, 조합이 조금만 달라져도 런타임 도구 목록이 바뀌어
+ * 프롬프트 캐시가 그 지점부터 전부 무효가 됐다(실측: 도구/MCP 델타가 있던 턴의 캐시
+ * 붕괴율 28.8% vs 없던 턴 2.2%, 데스크탑 히트율 34.6% vs baseline 97.7%).
+ *
+ * 같은 대화(structuralKey)의 후속 턴은 지난 도구셋을 **합집합으로만** 넓힌다:
+ *  - 이번 턴 선택 ⊆ sticky → 도구셋 불변 → MCP config 바이트 동일 → 캐시 보존
+ *  - 이번 턴이 새 도구를 요구 → sticky ∪ fresh (딱 1회 캐시 브레이크, 축소는 없음)
+ * 상태(ready/missing-key)는 이번 턴 선택분이 우선하고, 이월분은 지난 상태를 유지한다.
+ * TTL은 대화 호흡에 맞춰 1단계보다 길게 둔다. 자격 증명 변경 시 invalidate가 함께 비운다.
+ */
+const STICKY_SELECTION_TTL_MS = 30 * 60_000;
+const stickySelectionMemo = new Map<string, SelectionMemoEntry>();
 /** key = `${structuralKey}\u0000${serverId}` → 마지막 접속 성공 시각 */
 const probeMemo = new Map<string, number>();
 
@@ -236,6 +251,7 @@ function memoSet<V>(store: Map<string, V>, key: string, value: V): void {
 export function invalidateMcpSelectionMemo(): void {
   selectionMemo.clear();
   probeMemo.clear();
+  stickySelectionMemo.clear();
 }
 
 function isExplicitProjectFolder(workingFolder?: string | null): boolean {
@@ -646,6 +662,18 @@ export async function autoSelectMcpTools(input: {
     ...(needsNote ? { needsNote } : {}),
     ...(hubInventory.hubPluginError ? { hubPluginError: hubInventory.hubPluginError } : {}),
   };
+  // ── sticky 합집합 병합 — 같은 대화의 도구셋은 넓어지기만 한다(캐시 보존) ──
+  if (structuralKey && needs.decided) {
+    const sticky = stickySelectionMemo.get(structuralKey);
+    if (sticky && Date.now() - sticky.at <= STICKY_SELECTION_TTL_MS) {
+      const freshIds = new Set(context.tools.map((tool) => tool.id));
+      const carried = sticky.context.tools
+        .filter((tool) => !freshIds.has(tool.id))
+        .map((tool) => ({ ...tool, missingEnv: [...tool.missingEnv] }));
+      if (carried.length > 0) context.tools = [...context.tools, ...carried];
+    }
+    memoSet(stickySelectionMemo, structuralKey, { context: cloneContext(context), at: Date.now() });
+  }
   // 모델이 못 닿아 아무것도 못 정한 실행은 기억하지 않는다 — 그 침묵을 다음 턴까지 굳히면 안 된다.
   if (memoKey && needs.decided) memoSet(selectionMemo, memoKey, { context: cloneContext(context), at: Date.now() });
   return context;

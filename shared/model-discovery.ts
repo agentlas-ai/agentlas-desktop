@@ -79,10 +79,13 @@ export function classifyDiscovery(input: {
   timedOut?: boolean;
   previousCount?: number | null;
   source?: DiscoverySource;
+  /** 파서가 이미 통과시킨 표기를 다시 거르지 않도록, 그 파서의 허용 패턴을 넘긴다(기본 MODEL_ID_RE). */
+  idRe?: RegExp;
 }): DiscoveryOutcome {
   const source = input.source ?? "cli";
   const rawLineCount = countRawLines(input.stdout ?? "");
-  const models = [...new Set(input.models.map((m) => m.trim()).filter((m) => MODEL_ID_RE.test(m)))];
+  const idRe = input.idRe ?? MODEL_ID_RE;
+  const models = [...new Set(input.models.map((m) => m.trim()).filter((m) => idRe.test(m)))];
   const previous = typeof input.previousCount === "number" && input.previousCount > 0 ? input.previousCount : undefined;
   if (models.length > 0) {
     const yieldWarning = previous !== undefined && models.length < previous * YIELD_DROP_RATIO;
@@ -166,10 +169,17 @@ export function parseGrokModels(stdout: string): string[] {
 }
 
 function cleanCursorCell(raw: string): string {
-  return stripAnsi(raw).replace(/^[\s*•·\-]+|[\s]+$/g, "").replace(/\s*\((?:default|current|selected)\)\s*$/i, "").trim();
+  return stripAnsi(raw).replace(/^[\s*•·\-]+|[\s]+$/g, "").replace(/\s*\((?:default|current|selected|recommended)\)\s*$/i, "").trim();
 }
 
-function modelNamesFromJson(value: unknown): string[] {
+/**
+ * Cursor 전용 표기 허용 — 현행 CLI는 "Composer 2.5", "GPT-5.6 Sol High Fast"처럼
+ * 공백 포함 표시명을 계정 인벤토리로 내보낸다. 전역 MODEL_ID_RE(공백 불허)를 넓히면
+ * 다른 파서가 문장 조각을 모델로 오인하므로, cursor 경로에서만 이 패턴을 쓴다.
+ */
+export const CURSOR_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:\/@\[\] -]{1,119}$/;
+
+function modelNamesFromJson(value: unknown, idRe: RegExp = MODEL_ID_RE): string[] {
   const out: string[] = [];
   const visit = (node: unknown): void => {
     if (!node) return;
@@ -178,7 +188,7 @@ function modelNamesFromJson(value: unknown): string[] {
       const rec = node as Record<string, unknown>;
       for (const key of ["id", "name", "model", "slug"]) {
         const v = rec[key];
-        if (typeof v === "string" && MODEL_ID_RE.test(v.trim()) && !out.includes(v.trim())) { out.push(v.trim()); break; }
+        if (typeof v === "string" && idRe.test(v.trim()) && !out.includes(v.trim())) { out.push(v.trim()); break; }
       }
       for (const v of Object.values(rec)) if (v && typeof v === "object") visit(v);
     }
@@ -195,7 +205,7 @@ function modelNamesFromJson(value: unknown): string[] {
  */
 export function parseCursorModels(stdout: string): string[] {
   try {
-    const parsed = modelNamesFromJson(JSON.parse(stdout));
+    const parsed = modelNamesFromJson(JSON.parse(stdout), CURSOR_MODEL_RE);
     if (parsed.length > 0) return parsed;
   } catch { /* text form */ }
   const out: string[] = [];
@@ -204,7 +214,7 @@ export function parseCursorModels(stdout: string): string[] {
     if (/^\s*[-─=+|]+\s*$/.test(rawLine)) continue;
     for (const cell of rawLine.split(/[|│]/)) {
       const name = cleanCursorCell(cell);
-      if (!name || HEADER.test(name) || !MODEL_ID_RE.test(name)) continue;
+      if (!name || HEADER.test(name) || !CURSOR_MODEL_RE.test(name)) continue;
       // require at least one digit or a dash/dot so bare words like "Available" fail
       if (!/[\d.\-]/.test(name) && name.toLowerCase() !== "auto") continue;
       if (!out.includes(name)) out.push(name);

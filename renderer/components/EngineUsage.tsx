@@ -34,7 +34,17 @@ interface EngineDef {
   id: string; // usage provider id와 일치(구독형)
   label: string;
   auth: EngineAuth;
+  /** 우리가 설치/로그인을 대신 실행할 수 있는 CLI만 이 칸을 갖는다(IPC 계약과 동일 집합). */
   cliKind?: "claude-code" | "codex" | "antigravity" | "kimi" | "grok";
+  /** 감지 전용 kind — 설치는 manualSetup으로 안내한다(cursor처럼 설치 API가 없는 경우). */
+  detectKind?: "cursor";
+  /** kind "acp"로 감지되는 내장 에이전트(전용 kind가 없다) — acpAgentId로 매칭한다. */
+  acpAgentId?: string;
+  /**
+   * 우리가 대신 설치할 수 없는 CLI의 정확한 설치/인증 명령. 설치 경로가 없는데
+   * "연결" 버튼만 두면 눌러도 아무 일이 없다 — 그럴 땐 명령을 그대로 보여준다.
+   */
+  manualSetup?: string;
   retryProviderId?: UsageRetryProviderId;
   keyEnv?: string;
   logoSrc: string;
@@ -49,6 +59,10 @@ const ENGINES: EngineDef[] = [
   { id: "grok", label: "Grok", auth: "cli", cliKind: "grok", retryProviderId: "grok", keyEnv: "XAI_API_KEY", logoSrc: "/brand/llm/x.svg", logoAlt: "xAI" },
   { id: "glm", label: "GLM", auth: "apikey", keyEnv: "ZHIPU_API_KEY", logoSrc: "/brand/llm/zhipu.png", logoAlt: "Zhipu GLM" },
   { id: "kimi", label: "Kimi Code", auth: "cli", cliKind: "kimi", logoSrc: "/brand/llm/kimi.svg", logoAlt: "Kimi Code" },
+  // 실행되는 런타임과 이 목록은 반드시 같아야 한다(오너 결정 2026-08-18). cursor와
+  // Copilot CLI는 실제로 실행되는데 여기 없어서 대시보드에서 연결할 길이 없었다.
+  { id: "cursor", label: "Cursor", auth: "cli", detectKind: "cursor", manualSetup: "curl https://cursor.com/install -fsS | bash", logoSrc: "/brand/llm/cursor.svg", logoAlt: "Cursor" },
+  { id: "github-copilot-cli", label: "GitHub Copilot", auth: "cli", acpAgentId: "github-copilot-cli", manualSetup: "gh auth login", logoSrc: "/brand/llm/githubcopilot.svg", logoAlt: "GitHub Copilot" },
   { id: "ollama", label: "Ollama", auth: "local", logoSrc: "/brand/llm/ollama.svg", logoAlt: "Ollama" },
 ];
 
@@ -366,14 +380,30 @@ export function EngineUsage() {
   }
   function isConnected(e: EngineDef): boolean {
     // 사용량/오류 영수증은 runtime 설치 증거가 아니다. 오래된 receipt가 Connect를 숨기면 안 된다.
-    if (e.auth === "cli") return runtimes.some((r) => r.kind === e.cliKind);
+    if (e.auth === "cli") {
+      return runtimes.some((r) => (e.cliKind && r.kind === e.cliKind)
+        || (e.detectKind && r.kind === e.detectKind)
+        || (e.acpAgentId && r.kind === "acp" && r.acpAgentId === e.acpAgentId));
+    }
     if (e.auth === "local") return runtimes.some((r) => r.kind === "ollama");
     return !!e.keyEnv && envKeys.has(e.keyEnv);
   }
 
   async function connectCli(e: EngineDef) {
     const api = ipc();
-    if (!api || !e.cliKind || busy) return;
+    if (!api || busy) return;
+    if (e.manualSetup) {
+      // 설치 경로가 없는 CLI — 무반응 버튼 대신 실행할 명령을 그대로 보여준다.
+      setNotice({
+        id: e.id,
+        text: ko
+          ? `${e.label}는 아래 명령으로 설치·인증한 뒤 자동으로 인식됩니다.`
+          : `Install and sign in to ${e.label} with the command below; it is detected automatically.`,
+        command: e.manualSetup,
+      });
+      return;
+    }
+    if (!e.cliKind) return;
     setBusy(e.id);
     setNotice(null);
     let opened = false;
@@ -429,7 +459,11 @@ export function EngineUsage() {
 
   // 기본 엔진 선택 — 연결/사용량과 "기본으로 쓸 엔진" 상태를 분리해 표시한다.
   function runtimeFor(e: EngineDef): RuntimeStatus | undefined {
-    if (e.auth === "cli") return runtimes.find((r) => r.kind === e.cliKind);
+    if (e.auth === "cli") {
+      return runtimes.find((r) => (e.cliKind && r.kind === e.cliKind)
+        || (e.detectKind && r.kind === e.detectKind)
+        || (e.acpAgentId && r.kind === "acp" && r.acpAgentId === e.acpAgentId));
+    }
     if (e.auth === "local") return runtimes.find((r) => r.kind === "ollama");
     return undefined; // API키형(BYOK)은 모델 선택이 필요해 세팅의 BYOK 패널이 담당
   }

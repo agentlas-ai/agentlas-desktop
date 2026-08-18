@@ -2,8 +2,8 @@
 //
 // Two sources, one shape (AcpAgentSpec):
 //   1. built-in specs from acp.ts (ACP_AGENTS) that are NOT already served by a
-//      dedicated RuntimeKind — cursor/grok/kimi keep their kinds; opencode, goose,
-//      github-copilot-cli, … enter through "acp".
+//      dedicated RuntimeKind — cursor/grok/kimi keep their kinds; github-copilot-cli
+//      enters through "acp" (GitHub Copilot subscription = a real auth asset).
 //   2. TerminalProfiles the user saved in ACP mode (settings → Terminal profiles),
 //      id "profile:<id>", command/args from the profile. This is the Paseo-style
 //      "add a provider" seat: registering any ACP agent is data, not code.
@@ -17,7 +17,7 @@ import { ACP_AGENTS, type AcpAgentSpec } from "./acp";
 import { probeCliVersion } from "./exec";
 
 /** Built-in ACP specs served through kind "acp" (the rest have their own kind). */
-export const ACP_KIND_BUILTINS = ["opencode", "goose", "github-copilot-cli"] as const;
+export const ACP_KIND_BUILTINS = ["github-copilot-cli"] as const;
 
 export function profileAcpId(profileId: string): string {
   return `profile:${profileId}`;

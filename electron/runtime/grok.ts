@@ -9,7 +9,7 @@ import fs from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 import { ensureChildCloseAfterExit, startCliHeartbeat } from "./runner";
-import { wrapSystemPrompt } from "./runner";
+import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { CLI_HISTORY_CONTEXT_TOKENS, composeResumeTurnPrompt, renderConversationContext } from "./continuity";
 import { tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
@@ -231,7 +231,7 @@ function buildPrompt(req: RunnerRequest): string {
     req.systemPrompt,
     req.locale,
     req.permission,
-    req.userPrompt,
+    cumulativeSurfaceGateText(req.history, req.userPrompt),
     req.forceSurface,
     req.restrictedReadBoundary,
     req.untrustedNoTools,

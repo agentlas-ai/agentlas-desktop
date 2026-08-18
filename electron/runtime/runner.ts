@@ -543,6 +543,27 @@ function responseLanguageGuide(locale: RuntimeLocale, _userPrompt?: string): str
   ].join(" ");
 }
 
+/**
+ * 서피스 게이트 입력 — **대화 누적**으로 판정한다(2026-08-18 캐시 수리, 러너 공통 규칙).
+ *
+ * system을 매 호출 재전송하는 러너(BYOK·Ollama·LM Studio·MLX·로컬 OpenAI 호환)와
+ * 히스토리를 프롬프트에 매번 재렌더하는 CLI 러너(Antigravity·Cursor)에서, 이 게이트를
+ * **이번 턴 입력만** 보고 켜면 SURFACE_PROTOCOL(~8KB)이 턴마다 붙었다 떨어져 프리픽스
+ * 바이트가 흔들린다 — 프롬프트 캐시는 그 지점부터 전부 무효가 된다.
+ *
+ * 누적 판정은 단조라(한 번 켜지면 그 대화에서 유지) 프리픽스가 안정된다. 한 런타임에서
+ * 배운 수리는 러너 공통으로 둔다 — 특례는 특례가 안 붙은 형제를 지뢰로 남긴다.
+ */
+export function cumulativeSurfaceGateText(
+  history: RunnerRequest["history"],
+  userPrompt: string,
+): string {
+  return [
+    ...history.filter((entry) => entry.role === "user").map((entry) => entry.text),
+    userPrompt,
+  ].filter(Boolean).join("\n");
+}
+
 /** 표준 시스템 프롬프트 — 에이전트 프롬프트 앞에 붙는 안전 헤더.
  *  명시적으로 선택된 UI 언어를 모든 사용자 노출 텍스트의 기준으로 쓴다. */
 export function wrapSystemPrompt(

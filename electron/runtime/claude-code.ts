@@ -601,18 +601,40 @@ export const runClaudeCode: Runner = async (
   // Windows에서 claude는 `.cmd` 심 → cmd.exe로 실행되고 커맨드라인은 ~8191자 한계라,
   // `--append-system-prompt`에 24KB를 실으면 잘려서 exit 1. `--append-system-prompt-file`은
   // 경로만 넘기므로 안전. 사용자 프롬프트(+히스토리)는 stdin으로 보낸다(`-p`는 stdin을 읽음).
-  const sysPromptFile = path.join(
-    os.tmpdir(),
-    `agentlas-claude-sys-${process.pid}-${crypto.randomUUID()}.txt`,
-  );
-  try {
-    await fs.writeFile(sysPromptFile, seededSystemPrompt, "utf8");
-  } catch (error) {
-    cleanupAgentAppMcpConfig();
-    throw error;
+  //
+  // 캐시 계약(2026-08-18 A/B 실측, run-e.sh):
+  //  - append를 턴1에만 보내면 재개 스폰의 요청 형상이 턴1과 달라져 세션 프리픽스가
+  //    매 턴 전액 재작성된다. **같은 바이트를 매 스폰 다시 보내야** 턴2부터 캐시가 읽힌다
+  //    (실측: no-fork+매 턴 동일 append = 턴2 write 373tok vs 현행 패턴 = 매 턴 26K+ 재작성).
+  //  - 그래서 파일 경로·내용을 세션 수명 동안 고정한다: 키는 chatId|KIND|fingerprint.
+  //    fingerprint가 바뀌면 storedSessionId도 함께 버려지므로(위 clearRuntimeSession)
+  //    낡은 내용이 재사용될 수 없다. 앱 재시작 등으로 파일이 사라졌으면 append 없이
+  //    재개한다(그 턴만 재작성, 다음 세션 생성 때 파일 재생성).
+  const stableSysKey = runReq.chatId && fingerprint
+    ? crypto.createHash("sha256").update(`${runReq.chatId}\0${KIND}\0${fingerprint}`).digest("hex").slice(0, 20)
+    : null;
+  const sysPromptFile = stableSysKey
+    ? path.join(os.tmpdir(), `agentlas-claude-sys-${stableSysKey}.txt`)
+    : path.join(os.tmpdir(), `agentlas-claude-sys-${process.pid}-${crypto.randomUUID()}.txt`);
+  let resumeAppendArgs: string[] = [];
+  if (!resumeSessionId) {
+    try {
+      await fs.writeFile(sysPromptFile, seededSystemPrompt, "utf8");
+    } catch (error) {
+      cleanupAgentAppMcpConfig();
+      throw error;
+    }
+  } else if (stableSysKey) {
+    try {
+      await fs.access(sysPromptFile);
+      resumeAppendArgs = ["--append-system-prompt-file", sysPromptFile];
+    } catch {
+      // 세션 생성 때의 파일이 없다 — append 없이 재개(레거시 형상). 이 턴만 재작성된다.
+    }
   }
   const cleanupSysFile = () => {
-    void fs.unlink(sysPromptFile).catch(() => {});
+    // 고정 파일은 다음 턴이 같은 바이트로 재사용해야 하므로 지우지 않는다(챗당 1개, ~24KB).
+    if (!stableSysKey) void fs.unlink(sysPromptFile).catch(() => {});
   };
 
   return new Promise<RunnerResult>((resolve, reject) => {
@@ -633,11 +655,15 @@ export const runClaudeCode: Runner = async (
     const systemPromptFileFlag = runReq.untrustedNoTools
       ? "--system-prompt-file"
       : "--append-system-prompt-file";
+    // --fork-session 제거(2026-08-18 실측): fork는 재개 스폰마다 요청 프리픽스를 바꿔
+    // 세션 캐시를 영원히 못 잇게 한다(fork 재개 3턴 연속 write 8.6K+ vs no-fork 3턴째
+    // write 360). `-p` 재개는 fork 없이도 매 스폰 새 세션 파일을 만들므로(D실측: 재개마다
+    // 새 session_id 반환) 원본 세션 훼손·동시성 문제도 없다.
     const args = resumeSessionId
       ? [
           "--resume",
           resumeSessionId,
-          "--fork-session",
+          ...resumeAppendArgs,
           "-p",
           "--output-format",
           "stream-json",

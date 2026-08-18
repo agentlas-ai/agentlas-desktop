@@ -7,7 +7,7 @@ import fs from "node:fs/promises";
 import { createHash } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 import { ensureChildCloseAfterExit, startCliHeartbeat } from "./runner";
-import { wrapSystemPrompt } from "./runner";
+import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import {
   CLI_HISTORY_CONTEXT_TOKENS,
   composeResumeTurnPrompt,
@@ -201,7 +201,7 @@ function buildPrompt(req: RunnerRequest): string {
     req.systemPrompt,
     req.locale,
     req.permission,
-    req.userPrompt,
+    cumulativeSurfaceGateText(req.history, req.userPrompt),
     req.forceSurface,
     req.restrictedReadBoundary,
     req.untrustedNoTools,

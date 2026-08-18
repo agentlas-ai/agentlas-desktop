@@ -764,12 +764,12 @@ export default function SettingsPage() {
           </div>
         )}
 
-        <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "32px 0 12px" }}>
-          {t("settings.byok")}
-        </h2>
-        <p style={{ fontSize: 12, color: "var(--muted-deep)", margin: "0 0 12px" }}>
-          {t("settings.byok.note")}
-        </p>
+        <ConnectSection
+          title={locale === "ko" ? "API 모델" : "API models"}
+          hint={t("settings.byok.note")}
+          count={BYOK_BACKENDS.length}
+          defaultOpen={false}
+        >
         {BYOK_BACKENDS.map((b) => (
           <div
             key={b}
@@ -875,6 +875,7 @@ export default function SettingsPage() {
             )}
           </div>
         ))}
+        </ConnectSection>
 
         <MemoryDiagnosticsPanel />
 
@@ -2483,19 +2484,85 @@ function LaunchdPanel() {
 const TP_PRESETS: Array<{ name: string; template: string }> = [
   { name: "Claude Code", template: "claude {{{prompt}}}" },
   { name: "Codex", template: "codex {{{prompt}}}" },
-  { name: "OpenCode", template: "opencode --prompt={{{prompt}}}" },
   { name: "Antigravity", template: "agy --prompt {{{prompt}}}" },
 ];
 
 // ACP(Agent Client Protocol) 프리셋 — 실행 명령은 agentclientprotocol/registry(2026-08-15) 실물 기준.
 // 이 모드의 프로필은 저장 즉시 엔진 선택에 kind "acp"로 나타난다(PRD 2026-08-15 B-1).
+/**
+ * 접이식 연결 섹션 (오너 결정 2026-08-18).
+ *
+ * 연결 대상이 18개까지 늘면서 한 줄로 늘어놓는 방식은 "무엇을 골라야 하는가"에
+ * 답하지 못했다. 두 섹션이 그 질문에 바로 답한다:
+ *   · 구독 모델 — 이미 내고 있는 구독으로 추가 비용 없이 (기본 펼침)
+ *   · API 모델 — 종량제 키로 (기본 접힘)
+ * 구독을 먼저 펼치는 이유: 대부분의 사용자에게 돈이 덜 드는 길이고, 우리가 CLI를
+ * 백그라운드로 띄우는 이유 자체가 그 구독 인증이기 때문이다.
+ */
+function ConnectSection({
+  title,
+  hint,
+  count,
+  defaultOpen,
+  children,
+}: {
+  title: string;
+  hint: string;
+  count: number;
+  defaultOpen: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <section style={{ margin: "32px 0 0" }}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        style={{
+          width: "100%",
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          padding: "10px 12px",
+          border: "1px solid var(--paper-edge)",
+          borderRadius: "var(--radius-md)",
+          background: "var(--paper)",
+          cursor: "pointer",
+          textAlign: "left",
+        }}
+      >
+        <span
+          aria-hidden
+          style={{
+            display: "inline-block",
+            transition: "transform 120ms ease",
+            transform: open ? "rotate(90deg)" : "rotate(0deg)",
+            fontSize: 11,
+            color: "var(--muted-deep)",
+          }}
+        >
+          ▶
+        </span>
+        <span style={{ fontFamily: "var(--font-head)", fontSize: 15, flex: 1, minWidth: 0 }}>{title}</span>
+        <span style={{ fontSize: 11, color: "var(--muted-deep)" }}>{count}</span>
+      </button>
+      {open && (
+        <div style={{ padding: "12px 0 0" }}>
+          <p style={{ fontSize: 12, color: "var(--muted-deep)", margin: "0 0 12px", lineHeight: 1.6 }}>{hint}</p>
+          {children}
+        </div>
+      )}
+    </section>
+  );
+}
+
+// 오너 결정(2026-08-18): 프리셋은 **자체 모델·구독을 가진 제공자**만 남긴다.
+// 사용자의 API 키를 중개할 뿐인 껍데기 런타임(OpenCode·Goose·Kilo·Cline)은 우리가
+// BYOK로 직접 부르는 것과 결과가 같아 고를 이유가 없고, 목록에 있으면 "무엇을 골라야
+// 하나"만 흐린다. Copilot은 구독 섹션(CLI 설치 패널)으로 승격돼 여기서는 뺀다.
+// 임의 ACP 에이전트를 붙이는 자리는 그대로 열려 있다 — 그건 사용자가 추가하는 것이다.
 const TP_ACP_PRESETS: Array<{ name: string; command: string; args: string[] }> = [
-  { name: "OpenCode", command: "opencode", args: ["acp"] },
-  { name: "Goose", command: "goose", args: ["acp"] },
-  { name: "GitHub Copilot CLI", command: "npx", args: ["-y", "@github/copilot@1.0.80", "--acp"] },
   { name: "Qwen Code", command: "npx", args: ["-y", "@qwen-code/qwen-code@0.21.12", "--acp", "--experimental-skills"] },
-  { name: "Kilo Code", command: "npx", args: ["-y", "@kilocode/cli@7.4.22", "acp"] },
-  { name: "Cline", command: "npx", args: ["-y", "cline@3.0.55", "--acp"] },
   { name: "Gemini CLI (enterprise)", command: "gemini", args: ["--acp"] },
 ];
 
@@ -2538,7 +2605,7 @@ function TerminalProfilesPanel() {
     if (!name) { setErr(ko ? "이름을 입력하세요." : "Enter a name."); return; }
     if (isAcp) {
       if (!editing.acp?.command?.trim()) {
-        setErr(ko ? "ACP 실행 명령을 입력하세요 (예: opencode)." : "Enter the ACP command (e.g. opencode).");
+        setErr(ko ? "ACP 실행 명령을 입력하세요 (예: gemini)." : "Enter the ACP command (e.g. gemini).");
         return;
       }
     } else if (!template.includes("{{{prompt}}}")) {
@@ -2637,7 +2704,7 @@ function TerminalProfilesPanel() {
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               <label style={{ fontSize: 11, fontWeight: 700, color: "var(--muted-deep)" }}>
                 {ko ? "이름" : "Name"}
-                <input value={editing.name} placeholder={ko ? "예: OpenCode" : "e.g. OpenCode"}
+                <input value={editing.name} placeholder={ko ? "예: 내 CLI" : "e.g. My CLI"}
                   onChange={(e) => setEditing({ ...editing, name: e.target.value })}
                   style={{ ...inputStyle, marginTop: 5 }} />
               </label>
@@ -2656,7 +2723,7 @@ function TerminalProfilesPanel() {
                 <>
                   <label style={{ fontSize: 11, fontWeight: 700, color: "var(--muted-deep)" }}>
                     {ko ? "실행 명령" : "Command"}
-                    <input value={editing.acp?.command ?? ""} placeholder="opencode" spellCheck={false}
+                    <input value={editing.acp?.command ?? ""} placeholder="gemini" spellCheck={false}
                       onChange={(e) => setEditing({ ...editing, acp: { command: e.target.value, args: editing.acp?.args ?? [] } })}
                       style={{ ...inputStyle, marginTop: 5, fontFamily: "var(--font-mono, monospace)" }} />
                   </label>
@@ -2763,12 +2830,29 @@ function Banner() {
 }
 
 // ── CLI 설치 패널 (요청 ⑤) ────────────────────────────────
-type CliKind = "claude-code" | "codex" | "antigravity" | "kimi";
-const CLI_DEFS: Array<{ kind: CliKind; name: string; sub: string }> = [
-  { kind: "claude-code", name: "Claude Code", sub: "Claude Pro · Max" },
-  { kind: "codex", name: "Codex", sub: "ChatGPT Plus · Pro" },
-  { kind: "antigravity", name: "Antigravity", sub: "Google AI subscription" },
-  { kind: "kimi", name: "Kimi Code", sub: "Kimi Code membership" },
+// 구독 모델 — 이미 내고 있는 구독으로 추가 비용 없이 쓰는 CLI 제공자.
+// 판단 기준(오너 결정 2026-08-18): "그 CLI를 통해야만 얻는 것" = 구독 인증.
+// 실행되는 런타임과 이 목록은 반드시 일치해야 한다 — 예전에는 grok·cursor가 실제로
+// 실행되는데 이 패널에 없어서, 사용자가 설치·로그인할 방법이 화면에 없었다.
+type CliKind = "claude-code" | "codex" | "antigravity" | "kimi" | "grok" | "cursor" | "github-copilot-cli";
+/**
+ * `setup`은 이 CLI를 실제로 쓸 수 있게 만드는 방법이다 — 버튼이 하는 일과 반드시 일치해야 한다.
+ *  - install: 우리가 관리 npm으로 설치한다(설치 후 로그인 버튼)
+ *  - login:   이미 배포된 앱이라 로그인만 연다(Antigravity)
+ *  - manual:  우리가 대신 설치할 수 없다 — 정확한 명령을 보여주고 사용자가 실행한다
+ *             (예전에는 이런 CLI가 목록에 아예 없어서, 실행은 되는데 화면에 길이 없었다)
+ */
+type CliSetup = "install" | "login" | "manual";
+const CLI_DEFS: Array<{ kind: CliKind; name: string; sub: string; setup: CliSetup; manual?: string }> = [
+  { kind: "claude-code", name: "Claude Code", sub: "Claude Pro · Max", setup: "install" },
+  { kind: "codex", name: "Codex", sub: "ChatGPT Plus · Pro", setup: "install" },
+  { kind: "antigravity", name: "Antigravity", sub: "Google AI subscription", setup: "login" },
+  { kind: "grok", name: "Grok", sub: "X Premium · xAI", setup: "install" },
+  { kind: "kimi", name: "Kimi Code", sub: "Kimi Code membership", setup: "install" },
+  // Cursor의 공식 배포는 설치 스크립트다. 우리가 대신 실행하지 않고 명령만 보여준다.
+  { kind: "cursor", name: "Cursor", sub: "Cursor Pro", setup: "manual", manual: "curl https://cursor.com/install -fsS | bash" },
+  // Copilot CLI는 npx로 실행되므로 설치가 필요 없다. 필요한 것은 GitHub 인증뿐.
+  { kind: "github-copilot-cli", name: "GitHub Copilot CLI", sub: "GitHub Copilot subscription", setup: "manual", manual: "gh auth login" },
 ];
 
 function CliInstallPanel({
@@ -2781,19 +2865,31 @@ function CliInstallPanel({
   const { t } = useT();
   const [installing, setInstalling] = useState<CliKind | null>(null);
   const [msg, setMsg] = useState<Partial<Record<CliKind, string>>>({});
-  const installedKinds = new Set(statuses.map((s) => s.kind));
+  // copilot은 전용 kind가 없고 kind "acp"의 acpAgentId로 감지된다 — 그 신원까지 봐야
+  // "설치됨"이 실제와 맞는다(kind만 보면 설치해 놓고도 영원히 미설치로 보인다).
+  const installedKinds = new Set<string>([
+    ...statuses.map((s) => s.kind),
+    ...statuses.flatMap((s) => (s.kind === "acp" && s.acpAgentId ? [s.acpAgentId] : [])),
+  ]);
 
   async function doInstall(kind: CliKind) {
     const api = ipc();
     if (!api) return;
     setInstalling(kind);
     setMsg((m) => ({ ...m, [kind]: "" }));
+    const def = CLI_DEFS.find((entry) => entry.kind === kind);
+    if (def?.setup === "manual") {
+      // 우리가 대신 설치할 수 없는 CLI — 정확한 명령을 보여주고 사용자가 실행한다.
+      setMsg((m) => ({ ...m, [kind]: def.manual ?? "" }));
+      setInstalling(null);
+      return;
+    }
     try {
-      const r = kind === "antigravity"
-        ? await api.runtime.openCliLogin(kind)
-        : await api.runtime.installCli(kind);
+      const r = def?.setup === "login"
+        ? await api.runtime.openCliLogin(kind as "antigravity")
+        : await api.runtime.installCli(kind as "claude-code" | "codex" | "kimi" | "grok");
       if (r.ok) {
-        setMsg((m) => ({ ...m, [kind]: kind === "antigravity" ? t("settings.cli.login_hint") : t("settings.cli.install_ok") }));
+        setMsg((m) => ({ ...m, [kind]: def?.setup === "login" ? t("settings.cli.login_hint") : t("settings.cli.install_ok") }));
         await onChanged();
       } else {
         setMsg((m) => ({ ...m, [kind]: t("settings.cli.install_failed", { cmd: r.command ?? "" }) }));
@@ -2808,8 +2904,13 @@ function CliInstallPanel({
   async function doLogin(kind: CliKind) {
     const api = ipc();
     if (!api) return;
+    const def = CLI_DEFS.find((entry) => entry.kind === kind);
+    if (def?.setup === "manual") {
+      setMsg((m) => ({ ...m, [kind]: def.manual ?? "" }));
+      return;
+    }
     try {
-      await api.runtime.openCliLogin(kind);
+      await api.runtime.openCliLogin(kind as "claude-code" | "codex" | "kimi" | "grok" | "antigravity");
       setMsg((m) => ({ ...m, [kind]: t("settings.cli.login_hint") }));
     } catch (err) {
       setMsg((m) => ({ ...m, [kind]: `${t("settings.cli.login_hint")} ${String(err)}` }));
@@ -2818,12 +2919,12 @@ function CliInstallPanel({
 
   return (
     <>
-      <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "32px 0 12px" }}>
-        {t("settings.cli.title")}
-      </h2>
-      <p style={{ fontSize: 12, color: "var(--muted-deep)", margin: "0 0 12px", lineHeight: 1.6 }}>
-        {t("settings.cli.note")}
-      </p>
+      <ConnectSection
+        title={t("settings.cli.subscription_title")}
+        hint={t("settings.cli.note")}
+        count={CLI_DEFS.length}
+        defaultOpen
+      >
       {CLI_DEFS.map((def) => {
         const installed = installedKinds.has(def.kind);
         const isInstalling = installing === def.kind;
@@ -2939,6 +3040,7 @@ function CliInstallPanel({
           </div>
         );
       })}
+      </ConnectSection>
     </>
   );
 }

@@ -1,6 +1,7 @@
 // CLI 자동 감지 통합 + 활성 백엔드 선택 상태 관리.
 // PRD 3.1 FRE 6단계 — 사용자가 입력 안 해도 한 번 클릭으로 연결되도록.
 import { probeClaudeCode, probeClaudeEfforts } from "./claude-code";
+import { allocationAdvertisement } from "./model-advertisement";
 import { probeCodex } from "./codex";
 import { readCodexModelDiscovery } from "./codex-models";
 import { summarizeDiscovery, unsupportedDiscovery, type DiscoveryOutcome } from "../../shared/model-discovery";
@@ -390,21 +391,22 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       active: false,
       // 컨텍스트는 CLI가 자동 관리하지만 모델은 --model로 선택 가능 (opus/sonnet/haiku).
       model: selectedClaudeModel,
-      availableModels: cliModels("claude-code").map((m) => m.id),
+      availableModels: claudeHostCatalog.map((m) => m.id),
       modelDiscovery: discoveryOf("claude-code", unsupportedDiscovery("no-list-concept:cli-aliases")),
-      allocationModels: selectedClaudeModel ? [selectedClaudeModel] : [],
-      allocationModelProfiles: Object.fromEntries(claudeHostCatalog.flatMap((model) => (
-        model.workforceTier
-          ? [[model.id, {
-              costTier: model.workforceTier,
-              contextWindow: 200_000,
-              capabilities: ["tools", "multimodal"],
-              supportsTools: true,
-              supportsMultimodal: true,
-              efforts: claudeEfforts.map((effort) => effort.id),
-            }]]
-          : []
-      ))),
+      // 디스커버리 개념이 없는 CLI라 카탈로그 별칭이 곧 광고다 — 선택 모델 1개만 광고하면
+      // 부모 플래너가 워커 티어를 낮출 수 없다(2026-08-18 실측: economy 배정 0건의 원인).
+      ...allocationAdvertisement({
+        catalogKind: "claude-code",
+        selected: selectedClaudeModel,
+        catalogFallback: true,
+        profileDefaults: {
+          contextWindow: 200_000,
+          capabilities: ["tools", "multimodal"],
+          supportsTools: true,
+          supportsMultimodal: true,
+          efforts: claudeEfforts.map((effort) => effort.id),
+        },
+      }),
       // 작업량 — 현재 선택값 + 이 CLI가 지원하는 레벨(--help 파싱으로 자동 동기화).
       effort: getStoredEffort(),
       efforts: claudeEfforts,
@@ -425,8 +427,13 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       model: cliModelOf("codex", active, codexModels, "openai"),
       availableModels: codexModels,
       modelDiscovery: discoveryOf("codex", codexModelDiscovery.discovery),
-      allocationModels: codexDiscoveredModels,
-      allocationModelProfiles: codexModelProfiles,
+      ...allocationAdvertisement({
+        catalogKind: "codex",
+        live: codexDiscoveredModels,
+        selected: cliModelOf("codex", active, codexModels, "openai"),
+        catalogFallback: true,
+        liveProfiles: codexModelProfiles,
+      }),
     });
   }
   if (agy) {
@@ -442,7 +449,12 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       model: cliModelOf("antigravity", active, antigravityModels, "google") ?? antigravityModels[0],
       availableModels: antigravityModels,
       modelDiscovery: discoveryOf("antigravity", agy.discovery),
-      allocationModels: agy.models,
+      ...allocationAdvertisement({
+        catalogKind: "antigravity",
+        live: agy.models,
+        selected: cliModelOf("antigravity", active, antigravityModels, "google") ?? antigravityModels[0],
+        catalogFallback: true,
+      }),
     });
   }
   if (kimiCli) {
@@ -458,9 +470,16 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
         ? {
             model: cliModelOf("kimi", active, kimiModels, "kimi") ?? kimiDiscovery.defaultModel,
             availableModels: kimiModels,
-            allocationModels: kimiModels,
           }
         : {}),
+      ...allocationAdvertisement({
+        catalogKind: "kimi",
+        live: kimiModels,
+        selected: kimiModels.length > 0
+          ? cliModelOf("kimi", active, kimiModels, "kimi") ?? kimiDiscovery.defaultModel
+          : null,
+        catalogFallback: true,
+      }),
       modelDiscovery: discoveryOf("kimi", kimiDiscovery),
     });
   }
@@ -479,7 +498,12 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       model: storedGrok ?? grokModels[0],
       availableModels: grokModels,
       modelDiscovery: discoveryOf("grok", grokDiscovery),
-      allocationModels: grokLive,
+      ...allocationAdvertisement({
+        catalogKind: "grok",
+        live: grokLive,
+        selected: storedGrok ?? grokModels[0],
+        catalogFallback: true,
+      }),
     });
   }
   if (cursor) {
@@ -505,9 +529,12 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       model: cliModelOf("cursor", active, cursorModels, "cursor") ?? "auto",
       availableModels: cursorModels,
       modelDiscovery: discoveryOf("cursor", cursorDiscovery),
-      allocationModels: ["auto", ...cursorLive].filter(
-        (model, index, models) => models.indexOf(model) === index,
-      ),
+      // cursor 카탈로그는 표시 전용이라 실행 자격을 보증하지 못한다 — 폴백 금지 유지.
+      ...allocationAdvertisement({
+        live: ["auto", ...cursorLive],
+        selected: cliModelOf("cursor", active, cursorModels, "cursor") ?? "auto",
+        catalogFallback: false,
+      }),
     });
   }
   if (ollama) {
@@ -607,7 +634,12 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       active: false,
       model: selectedModel,
       availableModels: byokModels("anthropic").map((m) => m.id),
-      allocationModels: selectedModel ? [selectedModel] : [],
+      // BYOK는 저장된 API 키가 곧 자격이다 — 호스트 카탈로그 전체를 라이브로 광고한다.
+      ...allocationAdvertisement({
+        live: byokModels("anthropic").map((m) => m.id),
+        selected: selectedModel,
+        catalogFallback: false,
+      }),
       longContextEnabled: byokLongOf("anthropic", active),
     });
   }
@@ -621,7 +653,11 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       active: false,
       model: selectedModel,
       availableModels: byokModels("openai").map((m) => m.id),
-      allocationModels: selectedModel ? [selectedModel] : [],
+      ...allocationAdvertisement({
+        live: byokModels("openai").map((m) => m.id),
+        selected: selectedModel,
+        catalogFallback: false,
+      }),
       longContextEnabled: byokLongOf("openai", active),
     });
   }
@@ -635,7 +671,11 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       active: false,
       model: selectedModel,
       availableModels: byokModels("google").map((m) => m.id),
-      allocationModels: selectedModel ? [selectedModel] : [],
+      ...allocationAdvertisement({
+        live: byokModels("google").map((m) => m.id),
+        selected: selectedModel,
+        catalogFallback: false,
+      }),
       longContextEnabled: byokLongOf("google", active),
     });
   }
@@ -664,7 +704,11 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       active: false,
       model: selectedModel,
       availableModels: byokModels(backend).map((m) => m.id),
-      allocationModels: selectedModel ? [selectedModel] : [],
+      ...allocationAdvertisement({
+        live: byokModels(backend).map((m) => m.id),
+        selected: selectedModel,
+        catalogFallback: false,
+      }),
       longContextEnabled: byokLongOf(backend, active),
     });
   }

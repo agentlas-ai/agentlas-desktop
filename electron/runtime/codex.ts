@@ -9,7 +9,7 @@ import fs from "node:fs/promises";
 import crypto from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult , RunnerFailure } from "./runner";
-import { ensureChildCloseAfterExit, startCliHeartbeat, wrapSystemPrompt } from "./runner";
+import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, wrapSystemPrompt } from "./runner";
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
 import {
@@ -80,7 +80,7 @@ function buildPrompt(req: RunnerRequest): string {
     req.systemPrompt,
     req.locale,
     req.permission,
-    req.userPrompt,
+    cumulativeSurfaceGateText(req.history, req.userPrompt),
     req.forceSurface,
     req.restrictedReadBoundary,
     req.untrustedNoTools,

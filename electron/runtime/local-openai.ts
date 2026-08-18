@@ -4,7 +4,7 @@
 //   - 채팅 SSE:  POST {host}/v1/chat/completions  (OpenAI Chat Completions 호환)
 // API 키 불필요, 클라우드 미경유 — 완전 로컬. (PRD §3.1 BYOC의 로컬 변형)
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
-import { wrapSystemPrompt } from "./runner";
+import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
 import { compactHistory } from "./compact";
 import { runLocalOpenAiChat, type ChatMessage, type LocalChatContent } from "./local-tool-loop";
@@ -87,7 +87,7 @@ export function makeLocalOpenAiRunner(
         systemText,
         req.locale,
         req.permission,
-        req.userPrompt,
+        cumulativeSurfaceGateText(recent, req.userPrompt),
         req.forceSurface,
         req.restrictedReadBoundary,
         req.untrustedNoTools,

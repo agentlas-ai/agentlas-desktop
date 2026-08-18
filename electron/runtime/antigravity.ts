@@ -7,7 +7,7 @@ import fs from "node:fs/promises";
 import { rmSync } from "node:fs";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult, RunnerFailure } from "./runner";
 import { detectRuntimeRefusal } from "./runtime-refusal";
-import { ensureChildCloseAfterExit, startCliHeartbeat, wrapSystemPrompt } from "./runner";
+import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, wrapSystemPrompt } from "./runner";
 import { announceToolDenied } from "./tool-approval";
 import {
   CLI_HISTORY_CONTEXT_TOKENS,
@@ -157,7 +157,7 @@ function buildPrompt(req: RunnerRequest): string {
     req.systemPrompt,
     req.locale,
     req.permission,
-    req.userPrompt,
+    cumulativeSurfaceGateText(req.history, req.userPrompt),
     req.forceSurface,
     req.restrictedReadBoundary,
     req.untrustedNoTools,

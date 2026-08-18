@@ -10,7 +10,7 @@
 //  - 압축: 모델 컨텍스트 윈도우 초과 시 compactHistory로 과거 대화를 다이제스트로 접음
 import { readApiKey } from "../secrets/vault";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
-import { workforceZeroToolsEnforcement, wrapSystemPrompt } from "./runner";
+import { cumulativeSurfaceGateText, workforceZeroToolsEnforcement, wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
 import { compactHistory } from "./compact";
 import {
@@ -62,6 +62,8 @@ function prepareContext(
     });
   }
   const baseSystem = digest ? `${req.systemPrompt}\n\n${digest}` : req.systemPrompt;
+  // 서피스 게이트는 러너 공통 규칙(runner.ts cumulativeSurfaceGateText)을 따른다.
+  const surfaceGateText = cumulativeSurfaceGateText(recent, req.userPrompt);
   return {
     model,
     recent,
@@ -69,7 +71,7 @@ function prepareContext(
       baseSystem,
       req.locale,
       req.permission,
-      req.userPrompt,
+      surfaceGateText,
       req.forceSurface,
       req.restrictedReadBoundary,
       req.untrustedNoTools,
@@ -100,12 +102,42 @@ async function* iterSseLines(
 }
 
 // ── Anthropic Messages ────────────────────────────────────
+type CacheControl = { cache_control?: { type: "ephemeral" } };
 type AnthropicContent =
-  | { type: "text"; text: string }
-  | {
+  | ({ type: "text"; text: string } & CacheControl)
+  | ({
       type: "image";
       source: { type: "base64"; media_type: string; data: string };
-    };
+    } & CacheControl);
+
+type AnthropicMessage = { role: "user" | "assistant"; content: string | AnthropicContent[] };
+
+/**
+ * 대화 히스토리 캐시 브레이크포인트 (2026-08-18).
+ *
+ * system 블록에만 breakpoint를 두면 캐시되는 건 프리픽스뿐이고, 턴이 쌓일수록 커지는
+ * **대화 본문은 매 호출 전액 정가**로 재처리됐다. Anthropic은 breakpoint를 4개까지
+ * 허용하므로, 이번 턴 입력 **직전**(= 다음 턴에도 바이트가 그대로 남는 마지막 지점)에
+ * 하나를 더 둔다. 다음 턴은 그 지점까지를 0.1배로 읽는다.
+ *
+ * 호환 엔드포인트(GLM/Kimi/DeepSeek 등)에는 붙이지 않는다 — 서버측 자동 캐싱을 쓰고
+ * 이 필드를 거부할 수 있다(위 systemField와 같은 이유).
+ */
+function withHistoryCacheBreakpoint(messages: AnthropicMessage[]): AnthropicMessage[] {
+  // 마지막(이번 턴 입력) 바로 앞 메시지가 다음 턴에도 불변인 마지막 블록이다.
+  const index = messages.length - 2;
+  if (index < 0) return messages;
+  const target = messages[index];
+  const blocks: AnthropicContent[] = typeof target.content === "string"
+    ? [{ type: "text", text: target.content }]
+    : target.content.map((block) => ({ ...block }));
+  const last = blocks[blocks.length - 1];
+  if (!last) return messages;
+  blocks[blocks.length - 1] = { ...last, cache_control: { type: "ephemeral" } };
+  const next = messages.slice();
+  next[index] = { ...target, content: blocks };
+  return next;
+}
 
 /**
  * Anthropic Messages API(및 그 호환 서드파티 엔드포인트) 공통 호출.
@@ -122,7 +154,7 @@ async function runAnthropicMessages(
 
   const { model, recent, system } = prepareContext(backend, req, events);
 
-  const messages: Array<{ role: "user" | "assistant"; content: string | AnthropicContent[] }> = [];
+  const messages: AnthropicMessage[] = [];
   for (const m of recent) {
     if (m.role === "user" || m.role === "assistant") {
       messages.push({ role: m.role, content: m.text });
@@ -163,6 +195,9 @@ async function runAnthropicMessages(
       ? [{ type: "text" as const, text: system, cache_control: { type: "ephemeral" as const } }]
       : system;
 
+  // 히스토리 breakpoint도 진짜 Anthropic에서만(호환 엔드포인트는 이 필드를 거부할 수 있다).
+  const wireMessages = backend === "anthropic" ? withHistoryCacheBreakpoint(messages) : messages;
+
   const resp = await fetch(`${baseUrl}/v1/messages`, {
     method: "POST",
     headers,
@@ -172,7 +207,7 @@ async function runAnthropicMessages(
       max_tokens: 8192,
       stream: true,
       system: systemField,
-      messages,
+      messages: wireMessages,
     }),
   });
 
@@ -183,6 +218,13 @@ async function runAnthropicMessages(
 
   let acc = "";
   let lastEmit = 0;
+  // 계측(2026-08-18): 이 러너는 cache_control을 보내면서도 응답 usage를 한 번도 읽지
+  // 않았다 — 캐시가 먹는지 제품 안에서 확인할 방법이 없어 회귀가 보이지 않았다.
+  // message_start가 입력/캐시 계열을, message_delta가 누적 출력을 싣는다.
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cacheRead = 0;
+  let cacheWrite = 0;
   for await (const line of iterSseLines(resp)) {
     if (!line.startsWith("data:")) continue;
     const payload = line.slice(5).trim();
@@ -191,6 +233,8 @@ async function runAnthropicMessages(
       const event = JSON.parse(payload) as {
         type: string;
         delta?: { type?: string; text?: string };
+        message?: { usage?: Record<string, number | null | undefined> };
+        usage?: Record<string, number | null | undefined>;
       };
       if (event.type === "content_block_delta" && event.delta?.text) {
         acc += event.delta.text;
@@ -199,13 +243,34 @@ async function runAnthropicMessages(
           events.onPartial(acc);
           lastEmit = now;
         }
+      } else if (event.type === "message_start" && event.message?.usage) {
+        const usage = event.message.usage;
+        inputTokens = usage.input_tokens ?? 0;
+        cacheRead = usage.cache_read_input_tokens ?? 0;
+        cacheWrite = usage.cache_creation_input_tokens ?? 0;
+        outputTokens = usage.output_tokens ?? outputTokens;
+      } else if (event.type === "message_delta" && event.usage?.output_tokens != null) {
+        outputTokens = event.usage.output_tokens;
       }
     } catch {
       // 빈 줄 또는 ping — 무시
     }
   }
+  // 캐시 읽기/쓰기는 단가가 다르지만 영수증 칸은 입력 하나뿐이다. 모델이 실제로 본
+  // 문맥 크기를 싣는다(claude-code 러너와 같은 규칙). 히트율 자체는 아래 status로 남긴다.
+  const totalInput = inputTokens + cacheRead + cacheWrite;
+  if (totalInput > 0) {
+    const hitRate = Math.round((cacheRead / totalInput) * 100);
+    events.onStatus(
+      `[cache] read=${cacheRead} write=${cacheWrite} fresh=${inputTokens} hit=${hitRate}%`,
+    );
+  }
   return {
     text: acc.trim(),
+    ...(totalInput > 0 || outputTokens > 0
+      ? { observedUsage: { inputTokens: totalInput, outputTokens } }
+      : {}),
+    ...(outputTokens > 0 ? { tokens: outputTokens } : {}),
     workforcePermissionEnforcement: workforceZeroToolsEnforcement(
       req,
       "byok",
@@ -213,6 +278,9 @@ async function runAnthropicMessages(
     ),
   };
 }
+
+/** 테스트 전용 진입점 — 와이어 형상(캐시 브레이크포인트·usage 계측) 검증에만 쓴다. */
+export const __testRunAnthropicMessages = runAnthropicMessages;
 
 export const runAnthropicByok: Runner = async (
   req: RunnerRequest,

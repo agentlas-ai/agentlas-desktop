@@ -39,10 +39,11 @@ export const ACP_AGENTS: Record<string, AcpAgentSpec> = {
   cursor: { id: "cursor", label: "Cursor Agent (ACP)", command: "cursor-agent", args: ["acp"], registryId: "cursor" },
   grok: { id: "grok", label: "Grok Build (ACP)", command: "grok", args: ["agent", "stdio"], registryId: "grok-build" },
   kimi: { id: "kimi", label: "Kimi CLI (ACP)", command: "kimi", args: ["acp"], registryId: "kimi" },
-  // Reference rows for the C group — not dispatched by pickRunner yet (backlog:
-  // TerminalProfile ACP mode); kept here so the discovery probe can use them.
-  opencode: { id: "opencode", label: "OpenCode (ACP)", command: "opencode", args: ["acp"], registryId: "opencode" },
-  goose: { id: "goose", label: "Goose (ACP)", command: "goose", args: ["acp"], registryId: "goose" },
+  // 오너 결정(2026-08-18): 내장 제공은 **구독 인증 자산이 있는 CLI만** 둔다.
+  // OpenCode·Goose는 자체 모델도 구독도 없이 사용자의 API 키를 중개하는 껍데기라,
+  // 우리가 BYOK로 직접 부르는 것과 결과가 같으면서 러너 계약(캐시·세션·usage)만 하나
+  // 더 늘린다 — 내장 목록에서 제거했다. 사용자가 원하면 설정의 ACP 프로필로 직접
+  // 등록할 수 있다(그 자리는 "사용자가 추가한 것"이지 우리가 제공하는 것이 아니다).
   "github-copilot-cli": { id: "github-copilot-cli", label: "GitHub Copilot CLI (ACP)", command: "npx", args: ["-y", "@github/copilot@1.0.80", "--acp"], registryId: "github-copilot-cli" },
 };
 

@@ -484,49 +484,86 @@ export async function runSwarmInvocation(
       );
     }
     if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
-    const result = await taskRunner.runner(
-      {
-        // The canonical package prompt is authoritative, but the per-task
-        // swarm protocol is invocation context. Passing both as the fallback
-        // silently drops the protocol whenever a canonical prompt file exists.
-        systemPrompt: [
-          buildEffectiveAgentSystemPrompt(
-            p.orchestratorAgent.id,
-            p.orchestratorAgent.systemPrompt,
-          ),
-          !p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "",
-          coreHarnessPrompt,
-          swarmProtocol(goal, board, task, runtimeInventory, conversationContext),
-          p.stormbreakerMode ? STORMBREAKER_LOOP_PROTOCOL : "",
-          projectContextSlice ?? "",
-          ontology.prompt,
-        ].filter(Boolean).join("\n\n"),
-        history: [],
-        userPrompt: task.brief || task.title,
-        backendLabel: taskRunner.label,
-        model: active.model ?? undefined,
-        longContext: active.longContextEnabled ?? false,
-        effort: active.effort ?? undefined,
-        signal: signal ?? p.signal,
-        permission: p.req.permissions,
-        restrictedReadBoundary: p.restrictedReadBoundary,
-        cwd: p.workingFolder ?? undefined,
-        mcpConfigPath: p.mcpConfigPath,
-        mcpAllowedTools: p.mcpAllowedTools,
-        mcpCodexConfigArgs: p.mcpCodexConfigArgs,
-        env: p.runnerEnv,
-        locale: p.locale,
-      },
-      {
-        onStatus: (status) => emit(task, { kind: "tool-use", status }),
-        onPartial: (text) => {
-          if (!p.restrictedReadBoundary) emit(task, { kind: "partial", text });
+    // The canonical package prompt is authoritative, but the per-task
+    // swarm protocol is invocation context. Passing both as the fallback
+    // silently drops the protocol whenever a canonical prompt file exists.
+    const workerSystemPrompt = [
+      buildEffectiveAgentSystemPrompt(
+        p.orchestratorAgent.id,
+        p.orchestratorAgent.systemPrompt,
+      ),
+      !p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "",
+      coreHarnessPrompt,
+      swarmProtocol(goal, board, task, runtimeInventory, conversationContext),
+      p.stormbreakerMode ? STORMBREAKER_LOOP_PROTOCOL : "",
+      projectContextSlice ?? "",
+      ontology.prompt,
+    ].filter(Boolean).join("\n\n");
+    const runWorkerOn = (target: typeof p.active, targetRunner: typeof taskRunner) =>
+      targetRunner.runner(
+        {
+          systemPrompt: workerSystemPrompt,
+          history: [],
+          userPrompt: task.brief || task.title,
+          backendLabel: targetRunner.label,
+          model: target.model ?? undefined,
+          longContext: target.longContextEnabled ?? false,
+          effort: target.effort ?? undefined,
+          signal: signal ?? p.signal,
+          permission: p.req.permissions,
+          restrictedReadBoundary: p.restrictedReadBoundary,
+          cwd: p.workingFolder ?? undefined,
+          mcpConfigPath: p.mcpConfigPath,
+          mcpAllowedTools: p.mcpAllowedTools,
+          mcpCodexConfigArgs: p.mcpCodexConfigArgs,
+          env: p.runnerEnv,
+          locale: p.locale,
         },
-        onTool: (name, args, r, id, isError) => emit(task, { kind: "tool-use", tool: { name, args, result: r, id, isError } }),
-      },
-    );
-    if (resolution) {
-      const executedResolution = reconcileWorkloadRunnerResult(resolution, result);
+        {
+          onStatus: (status) => emit(task, { kind: "tool-use", status }),
+          onPartial: (text) => {
+            if (!p.restrictedReadBoundary) emit(task, { kind: "partial", text });
+          },
+          onTool: (name, args, r, id, isError) => emit(task, { kind: "tool-use", tool: { name, args, result: r, id, isError } }),
+        },
+      );
+    // 배정 안전망 — 카탈로그 별칭 광고는 계정 자격까지 보증하지 못하므로(model-advertisement
+    // 어댑터 §규칙 2), ai-assigned 워커가 실패하면 검증된 기본 워커로 1회 재시도한다.
+    // 조용한 하향 대체가 아니다: 상태 이벤트와 resolutionCodes에 그대로 남는다.
+    const allocationDiffersFromDefault = resolution?.source === "ai-assigned" &&
+      !(sameRuntime(active, workerDefault) && (active.model ?? null) === (workerDefault.model ?? null));
+    let workerFellBack = false;
+    const announceFallback = (why: string): void => {
+      workerFellBack = true;
+      emit(task, {
+        kind: "tool-use",
+        status: p.locale === "ko"
+          ? `배정된 모델(${active.model ?? active.kind}) 실행 실패 — 기본 워커(${workerDefault.model ?? workerDefault.kind})로 재시도: ${why}`
+          : `Allocated model (${active.model ?? active.kind}) failed — retrying on the default worker (${workerDefault.model ?? workerDefault.kind}): ${why}`,
+      });
+    };
+    let result: Awaited<ReturnType<typeof runWorkerOn>>;
+    try {
+      result = await runWorkerOn(active, taskRunner);
+      if (result.failure && allocationDiffersFromDefault && !(signal ?? p.signal)?.aborted) {
+        announceFallback(result.failure.message.slice(0, 160));
+        result = await runWorkerOn(workerDefault, workerDefaultRunner);
+      }
+    } catch (error) {
+      if (!allocationDiffersFromDefault || (signal ?? p.signal)?.aborted) throw error;
+      announceFallback(error instanceof Error ? error.message.slice(0, 160) : String(error).slice(0, 160));
+      result = await runWorkerOn(workerDefault, workerDefaultRunner);
+    }
+    const effectiveResolution = resolution && workerFellBack
+      ? {
+          ...resolution,
+          runtime: { ...workerDefault },
+          source: "safe-fallback" as const,
+          resolutionCodes: [...resolution.resolutionCodes, "allocated-worker-failed-fell-back-to-default"],
+        }
+      : resolution;
+    if (effectiveResolution) {
+      const executedResolution = reconcileWorkloadRunnerResult(effectiveResolution, result);
       task.resolvedAllocation = {
         runtimeId: executedResolution.resolvedRuntimeId,
         runtimeKind: executedResolution.runtime.kind ?? executedResolution.runtime.backend ?? null,

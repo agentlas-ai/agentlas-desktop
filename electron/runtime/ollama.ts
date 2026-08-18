@@ -7,7 +7,7 @@
 //   - 서버 버전: GET  {host}/api/version      → { version }
 //   - 채팅 SSE:  POST {host}/v1/chat/completions  (OpenAI Chat Completions 호환)
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
-import { wrapSystemPrompt } from "./runner";
+import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
 import { compactHistory } from "./compact";
 import { runLocalOpenAiChat, type ChatMessage, type LocalChatContent } from "./local-tool-loop";
@@ -96,7 +96,7 @@ export const runOllama: Runner = async (
       systemText,
       req.locale,
       req.permission,
-      req.userPrompt,
+      cumulativeSurfaceGateText(recent, req.userPrompt),
       req.forceSurface,
       req.restrictedReadBoundary,
       req.untrustedNoTools,

@@ -410,7 +410,10 @@
     "test:route-render-sweep": "npm run --silent build:renderer && node scripts/test-route-render-sweep.cjs",
     "test:graph-ergonomics": "npm run build:renderer && node scripts/test-graph-ergonomics.cjs",
     "test:graph-no-dead-end": "node scripts/test-graph-no-dead-end.cjs",
-    "verify:curator-fixtures": "npm run build:electron && node scripts/verify-curator-fixtures.mjs"
+    "verify:curator-fixtures": "npm run build:electron && node scripts/verify-curator-fixtures.mjs",
+    "test:workload-allocation": "npm run build:electron && node scripts/test-workload-allocation-e2e.cjs",
+    "test:cache-stable-prefix": "npm run build:electron && node scripts/test-cache-stable-prefix.cjs",
+    "test:runtime-surface-parity": "node scripts/test-runtime-surface-parity.cjs"
   },
   "dependencies": {
     "@google/genai": "^2.8.0",

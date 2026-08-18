@@ -105,7 +105,7 @@ export function recordDiscovery(runtime: string, outcome: DiscoveryOutcome): voi
  */
 export function settleDiscovery(
   runtime: string,
-  input: { stdout: string; models: readonly string[]; exitCode?: number | null; timedOut?: boolean; source?: DiscoverySource },
+  input: { stdout: string; models: readonly string[]; exitCode?: number | null; timedOut?: boolean; source?: DiscoverySource; idRe?: RegExp },
 ): DiscoveryOutcome {
   const previous = lastGoodDiscovery(runtime);
   const outcome = classifyDiscovery({ ...input, previousCount: previous?.count ?? null });

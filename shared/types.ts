@@ -708,7 +708,14 @@ export interface RuntimeStatus {
    * absence (no list concept, e.g. claude-code) — not an error.
    */
   modelDiscovery?: import("./model-discovery").ModelDiscoverySummary;
-  /** Host-verified execution inventory for automatic allocation. Never filled from UI fallback catalogs. */
+  /**
+   * Execution inventory for automatic allocation, built by the
+   * model-advertisement adapter. Live discovery is authoritative; runtimes
+   * whose vendor-maintained aliases are the only inventory (claude-code 등
+   * 디스커버리 개념이 없는 CLI) advertise catalog aliases as a fallback, paired
+   * with the swarm worker's failed-allocation retry. Display-only catalogs
+   * that cannot vouch for entitlement (cursor) must not fall back.
+   */
   allocationModels?: string[];
   /** Optional host-authored facts for exact automatic allocation. Model IDs remain opaque. */
   allocationModelProfiles?: Record<string, {

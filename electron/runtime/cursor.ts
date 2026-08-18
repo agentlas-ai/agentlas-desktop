@@ -5,11 +5,11 @@ import { StringDecoder } from "node:string_decoder";
 import os from "node:os";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 import { ensureChildCloseAfterExit, startCliHeartbeat } from "./runner";
-import { wrapSystemPrompt } from "./runner";
+import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild } from "./exec";
 import { tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
-import { parseCursorModels, type DiscoveryOutcome } from "../../shared/model-discovery";
+import { CURSOR_MODEL_RE, parseCursorModels, type DiscoveryOutcome } from "../../shared/model-discovery";
 import { settleDiscovery } from "./model-discovery-store";
 
 /**
@@ -92,7 +92,7 @@ async function listCursorModels(bin: string): Promise<DiscoveryOutcome> {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
-      resolve(settleDiscovery("cursor", { stdout, models: parseCursorModels(stdout), source: "cli", ...input }));
+      resolve(settleDiscovery("cursor", { stdout, models: parseCursorModels(stdout), source: "cli", idRe: CURSOR_MODEL_RE, ...input }));
     };
     try {
       child = spawnCli(bin, ["models"], { stdio: ["ignore", "pipe", "pipe"], env: process.env });
@@ -126,7 +126,7 @@ function promptFor(req: RunnerRequest): string {
       req.systemPrompt,
       req.locale,
       req.permission,
-      req.userPrompt,
+      cumulativeSurfaceGateText(req.history, req.userPrompt),
       req.forceSurface,
       req.restrictedReadBoundary,
       req.untrustedNoTools,
