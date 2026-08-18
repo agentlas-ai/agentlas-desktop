@@ -1383,15 +1383,18 @@ return (
         }}
       >
         <IconBolt size={18} style={{ color: automation.enabled ? "var(--accent)" : "var(--muted)", flexShrink: 0 }} />
-        {/* 제목이 0까지 줄어들 수 있어 "Ho/on/the/hour"처럼 한 글자씩 무너졌다.
-            바닥을 주면 그 아래로는 말줄임으로 끝난다. */}
-        <div style={{ flex: "1 1 160px", minWidth: 160 }}>
+        {/* 이름이 제목의 본체다. 0까지 줄어들면 "Ho/on/the/hour"처럼 한 글자씩
+            무너지고, 바닥이 너무 낮으면(160px) 이번엔 "X AI Ag…"로 잘린다. 헤더가
+            어차피 가로 스크롤되므로 여기서는 줄이지 않는다 — 이름은 온전히 보이고,
+            모자란 폭은 스크롤이 흡수한다. */}
+        <div style={{ flex: "0 0 auto", minWidth: 0, maxWidth: 420, marginRight: 4 }}>
           <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 17, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {automation.name}
           </h1>
           {/* ★크론 원문(`0 9 * * 1`)을 그대로 보여주지 않는다 — humanSchedule이 이미
-              사람 말로 바꿀 줄 아는데 이 자리만 안 쓰고 있었다(실사용 실측). */}
-          <div style={{ fontSize: 11, color: "var(--muted-deep)" }}>
+              사람 말로 바꿀 줄 아는데 이 자리만 안 쓰고 있었다(실사용 실측).
+              nowrap이 없으면 "Hourly, on the / hour"로 접혀 헤더 높이가 흔들린다. */}
+          <div style={{ fontSize: 11, color: "var(--muted-deep)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
             {humanSchedule(automation.scheduleHuman, locale)}
           </div>
         </div>
