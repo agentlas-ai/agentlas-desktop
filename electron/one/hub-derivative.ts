@@ -1,4 +1,5 @@
 import { app } from "electron";
+import { decodePackagedContent } from "../cloud-agents/package";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -192,7 +193,9 @@ function sourceFileFindingCategory(
   }
   let text: string;
   try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(packaged.contentBase64, "base64"));
+    // Goes through the package decoder: this is a locally scanned file, and a
+    // compressed one decoded as raw base64 reads as unsafe binary.
+    text = new TextDecoder("utf-8", { fatal: true }).decode(decodePackagedContent(packaged));
   } catch {
     return { category: "unsafe_content" };
   }

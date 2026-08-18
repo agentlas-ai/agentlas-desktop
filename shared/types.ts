@@ -3464,9 +3464,15 @@ export interface CloudAgentPackageFile {
 
 export interface CloudAgentPackageDownloadFile {
   path: string;
+  /** Size of the ORIGINAL file, whatever encoding carried it. */
   bytes: number;
+  /** sha256 of the ORIGINAL bytes — so packageHash does not move with the encoding. */
   sha256: string;
   contentBase64: string;
+  /** Absent means identity, which is what every package written before compression says. */
+  encoding?: "gzip";
+  /** Bytes that actually travelled. Present only alongside `encoding`. */
+  encodedBytes?: number;
   /** Portable execution bit. Raw host permission bits are never transferred. */
   executable?: boolean;
 }

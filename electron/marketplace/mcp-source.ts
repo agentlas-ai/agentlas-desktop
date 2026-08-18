@@ -340,6 +340,12 @@ function normalizeRestoreFile(raw: unknown): CloudAgentPackageDownloadFile | nul
     bytes: row.bytes,
     sha256: row.sha256,
     contentBase64: row.contentBase64,
+    // Carried through so the restore validator can see it. Agent Cloud stores
+    // packages decompressed today, so this is normally absent — dropping it
+    // here would mean a future compressed payload silently failed its own
+    // length and hash checks instead of being decoded.
+    ...(row.encoding === "gzip" ? { encoding: "gzip" as const } : {}),
+    ...(typeof row.encodedBytes === "number" ? { encodedBytes: row.encodedBytes } : {}),
     ...(typeof row.executable === "boolean" ? { executable: row.executable } : {}),
   };
 }

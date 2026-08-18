@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { gunzipSync } from "node:zlib";
 import type {
   CloudAgentCloudScope,
   CloudAgentPackageDownload,
@@ -488,14 +489,48 @@ function validateFile(
   if (typeof file.contentBase64 !== "string") {
     throw new Error(`Agent Cloud package file is not canonical base64: ${safePath}`);
   }
-  const expectedBase64Length = file.bytes === 0 ? 0 : Math.ceil(file.bytes / 3) * 4;
+  // ★ READ BOTH ENCODINGS. Compression is being introduced from the read side
+  //   first, on purpose: an installed copy of this app has to be able to open a
+  //   compressed package BEFORE any version starts writing one, or the day
+  //   writing switches on is the day every older install stops installing.
+  //
+  //   `bytes` and `sha256` always describe the ORIGINAL file, so packageHash is
+  //   unchanged by compression and a folder keeps one identity either way.
+  //   `encodedBytes` describes what actually travelled.
+  const encoding = (file as { encoding?: unknown }).encoding;
+  if (encoding !== undefined && encoding !== "gzip" && encoding !== "identity") {
+    throw new Error(`Agent Cloud package file uses an unknown encoding: ${safePath}`);
+  }
+  const compressed = encoding === "gzip";
+  const encodedBytes = compressed
+    ? (file as { encodedBytes?: unknown }).encodedBytes
+    : file.bytes;
+  if (compressed && (!Number.isSafeInteger(encodedBytes) || (encodedBytes as number) < 0 || (encodedBytes as number) > MAX_FILE_BYTES)) {
+    throw new Error(`Agent Cloud package file has an invalid encoded byte count: ${safePath}`);
+  }
+  const expectedBase64Length = encodedBytes === 0 ? 0 : Math.ceil((encodedBytes as number) / 3) * 4;
   if (file.contentBase64.length !== expectedBase64Length) {
     throw new Error(`Agent Cloud package file has an invalid encoded length: ${safePath}`);
   }
   if (!isCanonicalBase64(file.contentBase64)) {
     throw new Error(`Agent Cloud package file is not canonical base64: ${safePath}`);
   }
-  const content = Buffer.from(file.contentBase64, "base64");
+  const transported = Buffer.from(file.contentBase64, "base64");
+  if (transported.length !== encodedBytes) {
+    throw new Error(`Agent Cloud package file byte count mismatch: ${safePath}`);
+  }
+  let content: Buffer;
+  if (compressed) {
+    try {
+      // Bounded output: a small archive that expands without limit is the one
+      // way compression could turn a size ceiling into a memory exhaustion.
+      content = gunzipSync(transported, { maxOutputLength: MAX_FILE_BYTES });
+    } catch {
+      throw new Error(`Agent Cloud package file could not be decompressed: ${safePath}`);
+    }
+  } else {
+    content = transported;
+  }
   if (content.length !== file.bytes) {
     throw new Error(`Agent Cloud package file byte count mismatch: ${safePath}`);
   }

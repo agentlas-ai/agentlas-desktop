@@ -99,6 +99,12 @@ function relDirParts(rel: string): string[] {
 export function isNeverPublish(rel: string): boolean {
   if (relDirParts(rel).some((part) => NEVER_PUBLISH_DIRS.has(part))) return true;
   const name = rel.split("/").pop() ?? rel;
+  // `credentials/` and `signing/` match the secret-name patterns as FOLDERS, so
+  // the whole folder was dropped including the README the product writes into
+  // it — the note telling an installer what to put there. The generated
+  // .gitignore keeps exactly that file (`credentials/*` plus
+  // `!credentials/README.md`); this keeps the same one.
+  if (/^(?:credentials|signing)\/README\.md$/i.test(rel)) return false;
   return SECRET_FILE_PATTERNS.some((re) => re.test(name));
 }
 
@@ -275,16 +281,81 @@ function copyClean(src: string, dest: string, extraExclude: Set<string>): string
         excluded.push(rel);
         continue;
       }
-      if (isNeverPublish(rel) || extraExclude.has(rel)) {
+      // Directory names are matched only against the never-publish DIRECTORY
+      // list. Running the secret FILE patterns over a directory name is what
+      // made `credentials/` disappear whole — folder and README together —
+      // even though the product writes that README precisely to be read by
+      // whoever installs the package.
+      const neverPublishHere = entry.isDirectory()
+        ? relDirParts(`${rel}/x`).some((part) => NEVER_PUBLISH_DIRS.has(part))
+        : isNeverPublish(rel);
+      if (neverPublishHere || extraExclude.has(rel)) {
         excluded.push(rel);
         continue;
       }
       if (entry.isDirectory()) {
         walk(abs);
       } else if (entry.isFile()) {
+        // ★ A FILE THAT DID NOT COPY MUST NOT VANISH QUIETLY.
+        //
+        //   `entry.isFile()` is what readdir saw a moment ago. By the time the
+        //   copy runs the path may be something else — the swap-a-regular-file-
+        //   for-a-FIFO race is the sharp version, and a copy that blocks or
+        //   throws left the file out of the package with nothing recorded.
+        //   Measured 2026-08-18: the FIFO case ended `verdict: "pass"`, zero
+        //   findings, empty remediation, and `fifo.md` simply not there.
+        //
+        //   Re-check the type without following links, copy, and treat any
+        //   failure as an exclusion the caller will report by name.
         const target = path.join(dest, rel);
-        fs.mkdirSync(path.dirname(target), { recursive: true });
-        fs.copyFileSync(abs, target);
+        try {
+          const current = fs.lstatSync(abs);
+          if (!current.isFile()) {
+            excluded.push(rel);
+            continue;
+          }
+          fs.mkdirSync(path.dirname(target), { recursive: true });
+          // ★ THE SNAPSHOT MUST BE A SNAPSHOT.
+          //
+          //   The publish gate compares fstat before and after every read, so a
+          //   file that changes mid-scan is refused. That protection guards the
+          //   COPY — and nothing guarded the copying itself. Measured
+          //   2026-08-18: a file appended to while this pass was reading it was
+          //   copied in its half-written state and published, with zero
+          //   findings, because the scan then read a copy that was perfectly
+          //   stable. Compare size/mtime/inode across the copy, retry once for
+          //   an ordinary save landing at the wrong moment, and record an
+          //   exclusion rather than shipping bytes nobody chose to publish.
+          let copied = false;
+          for (let attempt = 0; attempt < 2 && !copied; attempt += 1) {
+            const before = fs.lstatSync(abs);
+            fs.copyFileSync(abs, target);
+            const after = fs.lstatSync(abs);
+            copied =
+              before.size === after.size
+              && before.mtimeMs === after.mtimeMs
+              && before.ino === after.ino
+              && after.size === fs.lstatSync(target).size;
+          }
+          if (!copied) {
+            fs.rmSync(target, { force: true });
+            excluded.push(rel);
+          }
+        } catch {
+          try {
+            fs.rmSync(target, { force: true });
+          } catch {
+            /* best effort */
+          }
+          excluded.push(rel);
+        }
+      } else {
+        // Neither a directory nor a regular file — a FIFO, socket or device,
+        // including one that replaced a regular file between readdir and now.
+        // The old code had no branch here at all: such an entry was skipped
+        // without being copied AND without being recorded, so it left the
+        // package with nothing said about it.
+        excluded.push(rel);
       }
     }
   };

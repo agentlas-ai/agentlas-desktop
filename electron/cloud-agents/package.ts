@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { gunzipSync, gzipSync } from "node:zlib";
 import { detectRuntimeLabelsFromPaths } from "../agents/runtime-labels";
 import { detectRuntimes } from "../runtime/detect";
 import { autofixForPublish, remediateBlockers } from "../hephaestus/publish-autofix";
@@ -32,7 +33,20 @@ import type {
 } from "../../shared/types";
 
 const MAX_TOTAL_BYTES = 3 * 1024 * 1024;
+const MAX_UNCOMPRESSED_TOTAL_BYTES = 4 * (3 * 1024 * 1024);
 const MAX_FILE_BYTES = 512 * 1024;
+// ★ THE CEILING MEASURES WHAT IS STORED, NOT WHAT WAS AUTHORED.
+//
+//   Packages travel as base64 with no compression, which inflates text by a
+//   third on the way to a 3 MB ceiling. Measured on the published teams, a
+//   text-heavy package compresses 1.5x-3.6x — so the ceiling was costing
+//   authors most of their room, and the trim pass was deleting knowledge files
+//   to save space that compression gives back for free.
+//
+//   Limits now apply to the COMPRESSED bytes. Original size keeps a bound of
+//   its own so a small archive cannot declare an enormous original. The server
+//   (api/cloud-agents/v1/register) enforces the identical pair.
+const MAX_UNCOMPRESSED_FILE_BYTES = 4 * MAX_FILE_BYTES;
 const MAX_FILES = 400;
 const MANIFEST_VERSION = "0.1" as const;
 const PACKAGE_HASH_VERSION = "path-sha256-executable-v2" as const;
@@ -93,6 +107,88 @@ const MACHINE_LOCAL_STATE_FILE_PREFIXES = [
   ".agentlas/ontology-runtime.sqlite",
   ".agentlas/career-graph.sqlite",
 ];
+
+/**
+ * ★ A RESULT IS NOT A CAPABILITY. Owner decision 2026-08-18.
+ *
+ * What an agent PRODUCES while it works — the rendered page, the screenshot it
+ * took to check itself, the deck it exported, the page dump its browser tool
+ * left behind — is an output of one run on one person's machine. It is not what
+ * the agent can DO. The thing that must ship is the script/prompt/preset that
+ * produces it again on the installer's machine.
+ *
+ * Measured 2026-08-18 across the published teams: every folder over the 3 MB
+ * ceiling was over it because of outputs, never because of knowledge.
+ * no-slop-seeder carried 3.0 MB of captures, logs and chat attachments;
+ * agentlas-startup-founder-studio 1.1 MB of `.studio-runtime` productions;
+ * Web_master 0.6 MB of report screenshots; browser-driving teams carry
+ * `.playwright-mcp/page-*.yml` dumps at 286 KB each. Not one of those files is
+ * read by the agent that shipped it.
+ *
+ * `.agentlas/work/` is the declared home for run outputs, so an agent author has
+ * somewhere correct to write. Everything here regenerates on first run; leaving
+ * it out costs the installer nothing.
+ */
+/**
+ * Cleaning drops these on sight and nobody needs to be told: build output,
+ * caches, vendored dependency trees. Everything else it drops gets named in the
+ * result — see the `autofix.excluded` loop in packageAndReviewCloudAgent.
+ */
+const AUTOFIX_SILENT_DROP_DIRS = new Set([
+  ".git", ".hg", ".svn", "node_modules", "__pycache__",
+  ".venv", "venv", ".env.d", ".mypy_cache", ".pytest_cache",
+  ".ruff_cache", ".tox", ".gradle", ".idea", ".terraform",
+]);
+
+const WORK_OUTPUT_DIRS = [
+  // the declared convention
+  ".agentlas/work/",
+  // per-run product state that is not the agent
+  ".agentlas/chat-attachments/",
+  ".agentlas/runs/",
+  // tool droppings
+  ".playwright-mcp/",
+  ".studio-runtime/",
+  ".pytest_cache/",
+  ".ruff_cache/",
+  ".mypy_cache/",
+  ".gradle/",
+  ".venv/",
+  "venv/",
+  ".cache/",
+  "tmp/",
+  "temp/",
+  ".tmp/",
+];
+
+export function isRegeneratedWorkOutputPath(value: string): boolean {
+  const normalized = value.replace(/\\/g, "/").toLowerCase();
+  return WORK_OUTPUT_DIRS.some((dir) => normalized === dir.slice(0, -1) || normalized.startsWith(dir) || normalized.includes(`/${dir}`));
+}
+
+/**
+ * ★ WHAT THE PRODUCT REFUSES TO COMMIT, THE PRODUCT MUST REFUSE TO PUBLISH.
+ *
+ * `ensureAgentlasCredentialIgnore` (memory/project-files.ts) writes
+ * `signing/*` and `credentials/*` into every project's .gitignore, keeping only
+ * each folder's README. Upload knew nothing about it: it screened FILE NAMES
+ * (`credentials.*`, `*.key`, `*.pem`) and let `credentials/google-services.json`
+ * or `signing/anything.txt` straight through. Measured 2026-08-18 — both
+ * returned "included".
+ *
+ * Mirrored here folder-for-folder, README exempted exactly as the .gitignore
+ * exempts it, so the installer still reads "put your config here".
+ */
+const PRODUCT_PRIVATE_DIRS = ["credentials/", "signing/"];
+const PRODUCT_PRIVATE_KEPT_FILES = new Set(["readme.md"]);
+
+export function isProductPrivateFolderPath(value: string): boolean {
+  const normalized = value.replace(/\\/g, "/").toLowerCase();
+  const dir = PRODUCT_PRIVATE_DIRS.find((candidate) => normalized.startsWith(candidate) || normalized.includes(`/${candidate}`));
+  if (!dir) return false;
+  const base = normalized.slice(normalized.lastIndexOf("/") + 1);
+  return !PRODUCT_PRIVATE_KEPT_FILES.has(base);
+}
 
 export function isMachineLocalStatePath(value: string): boolean {
   const normalized = value.replace(/\\/g, "/").toLowerCase();
@@ -164,7 +260,12 @@ const SKIP_DIRS = new Set([
 ]);
 
 const BLOCKED_FILE_PATTERNS = [
-  /^\.env(?:\..*)?$/i,
+  // `.env.example` / `.env.sample` / `.env.template` are documentation: they
+  // name the variables an installer must set and hold no values. The cleaning
+  // pass has always kept them (publish-autofix SECRET_FILE_PATTERNS); the scan
+  // did not, so a package that documented its own configuration had that file
+  // deleted by the repair pass. Measured on agentlas-startup-founder-studio.
+  /^\.env(?:\.(?!example$|sample$|template$).*)?$/i,
   /^id_rsa(?:\.pub)?$/i,
   /^credentials(?:\..*)?$/i,
   /^secrets?(?:\..*)?$/i,
@@ -187,10 +288,43 @@ const SECRET_PATTERNS: Array<{ id: string; re: RegExp; label: string }> = [
 
 export interface PackagedFile {
   path: string;
+  /** Size of the ORIGINAL file. packageHash is built from this and sha256, so it does not move with the encoding. */
   bytes: number;
+  /** sha256 of the ORIGINAL bytes. */
   sha256: string;
   contentBase64: string;
   executable: boolean;
+  /** Omitted means "identity" — exactly what every package written before compression says. */
+  encoding?: "gzip";
+  /** Bytes that actually travel. Present only alongside `encoding`. */
+  encodedBytes?: number;
+}
+
+/**
+ * Read a packaged file back. Every reader must go through this — reaching for
+ * `contentBase64` directly is how the routing card came back as "not valid
+ * JSON" the moment compression was switched on.
+ */
+export function decodePackagedContent(file: Pick<PackagedFile, "contentBase64" | "encoding">): Buffer {
+  const raw = Buffer.from(file.contentBase64, "base64");
+  return file.encoding === "gzip" ? gunzipSync(raw, { maxOutputLength: MAX_UNCOMPRESSED_FILE_BYTES }) : raw;
+}
+
+/**
+ * Compress when it helps and say so; otherwise ship the bytes unchanged. Text
+ * shrinks 2-3x, already-compressed media does not, and a "compressed" file that
+ * grew would cost the author room for nothing.
+ */
+function encodePackagedContent(bytes: Buffer): Pick<PackagedFile, "contentBase64" | "encoding" | "encodedBytes"> {
+  const compressed = gzipSync(bytes, { level: 9 });
+  if (compressed.byteLength >= bytes.byteLength) {
+    return { contentBase64: bytes.toString("base64") };
+  }
+  return {
+    contentBase64: compressed.toString("base64"),
+    encoding: "gzip",
+    encodedBytes: compressed.byteLength,
+  };
 }
 
 interface StaticScanResult {
@@ -252,6 +386,49 @@ interface RemediationOutcome {
  * Nothing here touches the user's own folder: `scanRoot` is the throwaway copy
  * autofix made, and the report lists every dropped path.
  */
+/**
+ * Every file name mentioned inside the package's own text. A shotplan naming
+ * `/samples/angle-frontal.jpg`, a prompt naming `lens-24.jpg`, a skill naming
+ * `dossier.md` — each of those makes the named file part of the agent, wherever
+ * it happens to live. Names only, never paths: a reference written as
+ * `./samples/x.jpg`, `/samples/x.jpg` or `samples/x.jpg` must all count.
+ */
+function collectReferencedFileNames(root: string): Set<string> {
+  const names = new Set<string>();
+  const nameRe = /[A-Za-z0-9._-]+\.[A-Za-z0-9]{1,8}/g;
+  const pending = [root];
+  let read = 0;
+  while (pending.length > 0 && read < MAX_FILES) {
+    const dir = pending.pop()!;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const absolute = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!SKIP_DIRS.has(entry.name)) pending.push(absolute);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const ext = path.extname(entry.name).toLowerCase();
+      if (!TEXT_EXTENSIONS.has(ext) && !AGENT_DEF_FILES.has(entry.name)) continue;
+      let text: string;
+      try {
+        if (fs.statSync(absolute).size > MAX_FILE_BYTES) continue;
+        text = fs.readFileSync(absolute, "utf8");
+      } catch {
+        continue;
+      }
+      read += 1;
+      for (const match of text.match(nameRe) ?? []) names.add(match.toLowerCase());
+    }
+  }
+  return names;
+}
+
 export function trimPackageToLimits(
   scanRoot: string,
   restoredExecutablePaths: ReadonlySet<string>,
@@ -270,16 +447,32 @@ export function trimPackageToLimits(
   };
   if (!overLimit()) return actions;
 
-  // Lower rank is dropped first. Rank 0 is never dropped.
+  // ★ TRIMMING MUST NOT COST THE AGENT ITS ABILITIES. Owner decision 2026-08-18.
+  //
+  //   The old ranking knew file SIZE and file TYPE and nothing about what the
+  //   agent needs. Two consequences, both measured on shipped teams:
+  //     - `knowledge/`, `skills/`, `prompts/`, `presets/` were ordinary content
+  //       (rank 5), so the biggest knowledge file went before any build output.
+  //     - `samples/` was rank 3 — dropped early as "examples" — while
+  //       photo-studio-agent-team's shotplans name `/samples/angle-frontal.jpg`
+  //       on every single cut. Those samples ARE the capability.
+  //
+  //   So: capability directories are rank 0, and any file another packaged file
+  //   actually names is rank 0 regardless of where it sits. What nobody reads
+  //   can go; what something reads stays.
+  const CAPABILITY_DIR_RE = /(^|\/)(knowledge|skills?|prompts?|presets?|agents|workers|contracts|shotplans|playbooks|templates)\//;
+  const referencedNames = collectReferencedFileNames(root);
   const rankOf = (rel: string, bytes: number): number => {
     const lower = rel.toLowerCase();
     const base = path.basename(rel);
     if (AGENT_DEF_FILES.has(base)) return 0;
     if (lower.startsWith(".agentlas/")) return 0;
     if (["agentlas.json", "manifest.json", "package.json"].includes(lower)) return 0;
+    if (CAPABILITY_DIR_RE.test(lower)) return 0;
+    if (referencedNames.has(base.toLowerCase())) return 0;
     if (/(^|\/)(node_modules|dist|build|out|coverage|\.next|\.venv|__pycache__|\.git)\//.test(lower)) return 1;
     if (/\.(png|jpe?g|gif|webp|svg|mp4|mov|mp3|wav|pdf|zip|tar|gz|tgz|bin|so|dylib|dll|wasm|sqlite|db)$/.test(lower)) return 2;
-    if (/(^|\/)(tests?|__tests__|fixtures?|benchmarks?|logs?|samples?|examples?)\//.test(lower)) return 3;
+    if (/(^|\/)(tests?|__tests__|fixtures?|benchmarks?|logs?|examples?)\//.test(lower)) return 3;
     if (/\.(log|jsonl|csv|tsv|lock)$/.test(lower)) return 4;
     // Ordinary content: biggest first, so one huge file goes before many small ones.
     return bytes > 64 * 1024 ? 5 : 6;
@@ -643,10 +836,23 @@ ${tagline || "Portable Agentlas cloud agent package."}
 }
 
 /** Friendly one-line breakdown of what the publish auto-fix did, for the user. */
+/**
+ * ★ A FILE THAT LEFT THE PACKAGE MUST BE NAMED. Owner decision 2026-08-18.
+ *
+ * Auto-fix ends every publish at zero blockers, and its last resort is deleting
+ * the offending file from the scan copy. That is a change to what the agent can
+ * do, so it cannot be reported as a count buried in a sentence — and until now
+ * it was not reported at all outside `status: "registered"`. Measured: a 600 KB
+ * `knowledge.md` vanished under `Private Agent Cloud package ready`, verdict
+ * "pass", zero findings.
+ *
+ * Excluded files are named (up to three, then "+N"). hep-upload does the same
+ * thing through its omission receipts; this is Desktop saying it out loud.
+ */
 function summarizeRemediation(actions: RemediationAction[], locale: "ko" | "en"): string {
   if (actions.length === 0) return "";
   const redacted = actions.filter((a) => a.action === "redacted").length;
-  const excluded = actions.filter((a) => a.action === "excluded").length;
+  const excludedFiles = actions.filter((a) => a.action === "excluded").map((a) => a.file);
   const rewritten = actions.filter((a) => a.action === "rewritten" && !a.detail.includes("routing card")).length;
   const routingCard = actions.some((a) => a.detail.includes("routing card"));
   const parts: string[] = [];
@@ -654,7 +860,12 @@ function summarizeRemediation(actions: RemediationAction[], locale: "ko" | "en")
   if (routingCard) parts.push(ko ? "라우팅 카드 생성" : "generated routing card");
   if (redacted) parts.push(ko ? `시크릿 ${redacted}건 리댁트` : `redacted ${redacted}`);
   if (rewritten) parts.push(ko ? `${rewritten}건 재작성` : `rewrote ${rewritten}`);
-  if (excluded) parts.push(ko ? `${excluded}건 제외` : `excluded ${excluded}`);
+  if (excludedFiles.length > 0) {
+    const shown = excludedFiles.slice(0, 3).join(", ");
+    const rest = excludedFiles.length - Math.min(3, excludedFiles.length);
+    const names = rest > 0 ? `${shown} +${rest}` : shown;
+    parts.push(ko ? `${excludedFiles.length}건 제외(${names})` : `excluded ${excludedFiles.length} (${names})`);
+  }
   if (parts.length === 0) return "";
   return ko ? ` 자동수정: ${parts.join(", ")}.` : ` Auto-fixed: ${parts.join(", ")}.`;
 }
@@ -748,6 +959,28 @@ export async function packageAndReviewCloudAgent(
           scanRoot = autofix.packageFolder;
         }
         autofixCleanup = autofix.cleanup;
+        // ★ THE CLEANING PASS ALSO DROPS FILES, AND IT SAID NOTHING.
+        //
+        //   `copyClean` refuses to copy symlinks and never-publish names into
+        //   the scan copy — correct, that is how outside bytes stay outside —
+        //   but `autofix.excluded` had no reader here, so those files simply
+        //   were not in the package and were not in the report either. Measured
+        //   2026-08-18: a symlink escape ended as `verdict: "pass"`, zero
+        //   findings, `remediation` naming only an unrelated rewrite.
+        //
+        //   Build and cache directories stay silent — nobody publishes
+        //   `node_modules` on purpose and listing it is noise. What the person
+        //   actually placed in the folder gets named.
+        for (const droppedPath of autofix.excluded) {
+          const dirParts = droppedPath.split("/").slice(0, -1);
+          if (dirParts.some((part) => AUTOFIX_SILENT_DROP_DIRS.has(part))) continue;
+          if (AUTOFIX_SILENT_DROP_DIRS.has(droppedPath)) continue;
+          remediationActions.push({
+            file: droppedPath,
+            action: "excluded",
+            detail: "left out during cleaning — a symlink, a never-publish name, or a path that could not be copied safely",
+          });
+        }
         // A missing/invalid routing card is a hard blocker added outside the scan
         // (the loop can't reach it) — auto-generate one so no agent dead-ends on it.
         const purposeInput = input.purposeAnswer
@@ -1046,9 +1279,13 @@ export async function packageAndReviewCloudAgent(
           ? isPublicHubPublish
             ? `Hub publish blocked: ${review.summary}`
             : `Private Agent Cloud save blocked: ${review.summary}`
-          : isPublicHubPublish
-            ? `Hub package ready: ${slug}.`
-            : `Private Agent Cloud package ready: ${slug}.`,
+          // "ready" is where auto-fix's own edits used to go unmentioned: the
+          // sentence was assembled without `summarizeRemediation`, so a dry run
+          // that dropped a file still read as a clean package.
+          : (isPublicHubPublish
+              ? `Hub package ready: ${slug}.`
+              : `Private Agent Cloud package ready: ${slug}.`)
+            + summarizeRemediation(remediationActions, opts?.locale ?? "en"),
   };
 }
 
@@ -1056,7 +1293,11 @@ function scanAgentFolder(rootPath: string, restoredExecutablePaths: ReadonlySet<
   const files: CloudAgentPackageFile[] = [];
   const included: PackagedFile[] = [];
   const findings: CloudAgentSecurityFinding[] = [];
+  // `totalBytes` stays the authored size (what the folder weighs on disk);
+  // `transportBytes` is what the package actually costs to send and store, and
+  // that is what the ceiling is about.
   let totalBytes = 0;
+  let transportBytes = 0;
   let seenFiles = 0;
   let hasAgentDef = false;
   const portableFiles = new Map<string, string>();
@@ -1074,16 +1315,16 @@ function scanAgentFolder(rootPath: string, restoredExecutablePaths: ReadonlySet<
     try {
       const before = fs.fstatSync(fd);
       if (!before.isFile()) throw new Error("package entry is not a regular file");
-      if (before.size > MAX_FILE_BYTES) throw new Error(`file exceeds ${MAX_FILE_BYTES} bytes`);
+      if (before.size > MAX_UNCOMPRESSED_FILE_BYTES) throw new Error(`file exceeds ${MAX_UNCOMPRESSED_FILE_BYTES} bytes`);
       const chunks: Buffer[] = [];
       let actualBytes = 0;
       for (;;) {
-        const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, MAX_FILE_BYTES + 1 - actualBytes));
-        if (chunk.byteLength <= 0) throw new Error(`file exceeds ${MAX_FILE_BYTES} bytes`);
+        const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, MAX_UNCOMPRESSED_FILE_BYTES + 1 - actualBytes));
+        if (chunk.byteLength <= 0) throw new Error(`file exceeds ${MAX_UNCOMPRESSED_FILE_BYTES} bytes`);
         const read = fs.readSync(fd, chunk, 0, chunk.byteLength, null);
         if (read === 0) break;
         actualBytes += read;
-        if (actualBytes > MAX_FILE_BYTES) throw new Error(`file exceeds ${MAX_FILE_BYTES} bytes`);
+        if (actualBytes > MAX_UNCOMPRESSED_FILE_BYTES) throw new Error(`file exceeds ${MAX_UNCOMPRESSED_FILE_BYTES} bytes`);
         chunks.push(chunk.subarray(0, read));
       }
       const after = fs.fstatSync(fd);
@@ -1229,6 +1470,31 @@ function scanAgentFolder(rootPath: string, restoredExecutablePaths: ReadonlySet<
         });
         continue;
       }
+      // A run output, not a capability. Regenerates on the installer's machine.
+      if (isRegeneratedWorkOutputPath(rel)) {
+        files.push({
+          path: rel,
+          bytes: st.size,
+          sha256: "",
+          kind: "binary",
+          included: false,
+          reason: "work-output-regenerated",
+        });
+        continue;
+      }
+      // The product's own .gitignore keeps these out of git; publishing is
+      // further than committing, so it keeps them out of packages too.
+      if (isProductPrivateFolderPath(rel)) {
+        files.push({
+          path: rel,
+          bytes: st.size,
+          sha256: "",
+          kind: "binary",
+          included: false,
+          reason: "product-private-folder",
+        });
+        continue;
+      }
       totalBytes += st.size;
       const blockedName = BLOCKED_FILE_PATTERNS.some((pattern) => pattern.test(entry.name));
       if (blockedName) {
@@ -1243,13 +1509,18 @@ function scanAgentFolder(rootPath: string, restoredExecutablePaths: ReadonlySet<
         files.push({ path: rel, bytes: st.size, sha256: "", kind: "binary", included: false, reason: "secret-file-blocked" });
         continue;
       }
-      if (st.size > MAX_FILE_BYTES) {
+      // Refuse early only what cannot fit even at the best compression ratio we
+      // are willing to assume. Anything smaller is read, compressed, and judged
+      // on what it actually costs — that is how a 600 KB knowledge file, which
+      // gzips to well under the per-file limit, now ships instead of being
+      // silently deleted by the repair pass.
+      if (st.size > MAX_UNCOMPRESSED_FILE_BYTES) {
         findings.push({
           id: findingId("large-file", rel),
           severity: "blocker",
           category: "size",
           file: rel,
-          message: `File exceeds ${MAX_FILE_BYTES} bytes.`,
+          message: `File exceeds ${MAX_UNCOMPRESSED_FILE_BYTES} bytes.`,
           remediation: "Move large assets to a documented external source or reduce the package.",
         });
         files.push({ path: rel, bytes: st.size, sha256: "", kind: "binary", included: false, reason: "file-too-large" });
@@ -1279,8 +1550,25 @@ function scanAgentFolder(rootPath: string, restoredExecutablePaths: ReadonlySet<
       const digest = sha256(bytes);
       addSecretFindingsFromBytes(bytes, rel, findings);
       if (!isText) {
-        files.push({ path: rel, bytes: bytes.length, sha256: digest, kind: "binary", executable, included: true });
-        included.push({ path: rel, bytes: bytes.length, sha256: digest, contentBase64: bytes.toString("base64"), executable });
+        {
+          const encoded = encodePackagedContent(bytes);
+          const stored = encoded.encodedBytes ?? bytes.length;
+          if (stored > MAX_FILE_BYTES) {
+            findings.push({
+              id: findingId("large-file", rel),
+              severity: "blocker",
+              category: "size",
+              file: rel,
+              message: `File is ${stored} bytes even after compression, over the ${MAX_FILE_BYTES} byte limit.`,
+              remediation: "Move large assets to a documented external source or reduce the package.",
+            });
+            files.push({ path: rel, bytes: bytes.length, sha256: "", kind: "binary", included: false, reason: "file-too-large" });
+            continue;
+          }
+          transportBytes += stored;
+          files.push({ path: rel, bytes: bytes.length, sha256: digest, kind: "binary", executable, included: true });
+          included.push({ path: rel, bytes: bytes.length, sha256: digest, executable, ...encoded });
+        }
         continue;
       }
       let text: string;
@@ -1308,8 +1596,25 @@ function scanAgentFolder(rootPath: string, restoredExecutablePaths: ReadonlySet<
           remediation: "Replace curl|sh style commands with explicit, reviewable install steps.",
         });
       }
-      files.push({ path: rel, bytes: bytes.length, sha256: digest, kind: "text", executable, included: true });
-      included.push({ path: rel, bytes: bytes.length, sha256: digest, contentBase64: bytes.toString("base64"), executable });
+      {
+        const encoded = encodePackagedContent(bytes);
+        const stored = encoded.encodedBytes ?? bytes.length;
+        if (stored > MAX_FILE_BYTES) {
+          findings.push({
+            id: findingId("large-file", rel),
+            severity: "blocker",
+            category: "size",
+            file: rel,
+            message: `File is ${stored} bytes even after compression, over the ${MAX_FILE_BYTES} byte limit.`,
+            remediation: "Move large assets to a documented external source or reduce the package.",
+          });
+          files.push({ path: rel, bytes: bytes.length, sha256: "", kind: "text", included: false, reason: "file-too-large" });
+          continue;
+        }
+        transportBytes += stored;
+        files.push({ path: rel, bytes: bytes.length, sha256: digest, kind: "text", executable, included: true });
+        included.push({ path: rel, bytes: bytes.length, sha256: digest, executable, ...encoded });
+      }
     }
     const directoryAfter = fs.lstatSync(dir);
     const directoryRealAfter = fs.realpathSync.native(dir);
@@ -1348,7 +1653,16 @@ function scanAgentFolder(rootPath: string, restoredExecutablePaths: ReadonlySet<
       remediation: "Add AGENTS.md, CLAUDE.md, GEMINI.md, AGENT.md, or README.md at the package root.",
     });
   }
-  if (totalBytes > MAX_TOTAL_BYTES) {
+  if (totalBytes > MAX_UNCOMPRESSED_TOTAL_BYTES) {
+    findings.push({
+      id: "package-uncompressed-size-limit",
+      severity: "blocker",
+      category: "size",
+      message: `Package contents exceed ${MAX_UNCOMPRESSED_TOTAL_BYTES} bytes before compression.`,
+      remediation: "Publish a focused agent or team folder.",
+    });
+  }
+  if (transportBytes > MAX_TOTAL_BYTES) {
     findings.push({
       id: "package-size-limit",
       severity: "blocker",
@@ -1485,7 +1799,7 @@ function hasUnpairedSurrogate(value: string): boolean {
 function readSnapshotText(snapshot: PackageSnapshot, relativePath: string): string {
   const file = snapshot.get(relativePath);
   if (!file) return "";
-  return Buffer.from(file.contentBase64, "base64").toString("utf8");
+  return decodePackagedContent(file).toString("utf8");
 }
 
 function addSecretFindings(
@@ -1766,8 +2080,8 @@ function replacePublicCareerCardWithSanitizedSnapshot(
     path: rel,
     bytes: bytes.length,
     sha256: digest,
-    contentBase64: bytes.toString("base64"),
     executable: false,
+    ...encodePackagedContent(bytes),
   });
   scan.included.sort(comparePackagedFiles);
   if (fileRecord) {
@@ -2191,12 +2505,43 @@ async function registerCloudAgent(input: {
   confirmedOverwrite?: PendingOverwriteTarget;
   /** One quiet retry has already been spent on a retryable server commit hiccup. */
   retried?: boolean;
+  /** The compressed attempt was refused; this call is the uncompressed resend. */
+  retriedUncompressed?: boolean;
 }): Promise<CloudAgentRegistrationResult> {
   const cookie = getSessionCookieHeader();
   if (!cookie) throw new Error("Sign in to agentlas.cloud before publishing a cloud agent.");
   const base = (process.env.AGENTLAS_WEB_BASE_URL || "https://agentlas.cloud").replace(/\/$/, "");
   const bundle = JSON.parse(fs.readFileSync(input.bundlePath, "utf8")) as unknown;
   const scope = scopeForVisibility(input.visibility);
+  // ★ NEVER LET THE ROLLOUT ORDER BREAK AN UPLOAD.
+  //
+  //   Compressed files are a NEW thing to send. An Agent Cloud that has not
+  //   deployed the matching change reads `contentBase64` as raw bytes, finds
+  //   the length and hash disagree, and answers 400 — every upload from a
+  //   newer desktop would fail until the web deploy landed, and the person
+  //   would just see "upload failed". Rather than pin the release order and
+  //   hope, the client asks once and falls back: if the refusal looks like the
+  //   server not knowing this encoding, resend the same bundle uncompressed.
+  //   Identical bytes, identical packageHash — only the wrapper differs.
+  const uncompressedBundle = (): unknown => {
+    if (!isRecord(bundle) || !Array.isArray(bundle.files)) return bundle;
+    return {
+      ...bundle,
+      files: bundle.files.map((file) => {
+        if (!isRecord(file) || file.encoding !== "gzip" || typeof file.contentBase64 !== "string") return file;
+        const { encoding: _encoding, encodedBytes: _encodedBytes, ...rest } = file;
+        return {
+          ...rest,
+          contentBase64: gunzipSync(Buffer.from(file.contentBase64, "base64"), {
+            maxOutputLength: MAX_UNCOMPRESSED_FILE_BYTES,
+          }).toString("base64"),
+        };
+      }),
+    };
+  };
+  const bundleCarriesCompression = isRecord(bundle)
+    && Array.isArray(bundle.files)
+    && bundle.files.some((file) => isRecord(file) && file.encoding === "gzip");
   const confirmed = input.confirmedOverwrite;
   const precondition = confirmed
     ? { "if-match": `"${confirmed.revision}"`, "x-agentlas-cloud-id": confirmed.cloudId }
@@ -2221,6 +2566,22 @@ async function registerCloudAgent(input: {
       },
     }),
   });
+  if (!response.ok && response.status === 400 && bundleCarriesCompression && !input.retriedUncompressed) {
+    const refusal = await response.clone().text().catch(() => "");
+    if (/encoding|byte_mismatch|byte length mismatch|invalid_base64|decompress|hash_mismatch/i.test(refusal)) {
+      const plainBundlePath = `${input.bundlePath}.uncompressed.json`;
+      fs.writeFileSync(plainBundlePath, JSON.stringify(uncompressedBundle()) + "\n", "utf8");
+      try {
+        return await registerCloudAgent({ ...input, bundlePath: plainBundlePath, retriedUncompressed: true });
+      } finally {
+        try {
+          fs.rmSync(plainBundlePath, { force: true });
+        } catch {
+          /* best effort */
+        }
+      }
+    }
+  }
   if (response.ok) {
     pendingOverwriteTargets.delete(path.resolve(input.rootPath));
     const receipt = validateCloudRegistrationReceipt(

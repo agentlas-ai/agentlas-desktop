@@ -413,7 +413,8 @@
     "verify:curator-fixtures": "npm run build:electron && node scripts/verify-curator-fixtures.mjs",
     "test:workload-allocation": "npm run build:electron && node scripts/test-workload-allocation-e2e.cjs",
     "test:cache-stable-prefix": "npm run build:electron && node scripts/test-cache-stable-prefix.cjs",
-    "test:runtime-surface-parity": "node scripts/test-runtime-surface-parity.cjs"
+    "test:runtime-surface-parity": "node scripts/test-runtime-surface-parity.cjs",
+    "test:upload-exclusion-parity": "npm run build:electron && node scripts/test-upload-exclusion-parity.cjs"
   },
   "dependencies": {
     "@google/genai": "^2.8.0",

@@ -166,13 +166,31 @@ export default function CloudAgentPublishPage() {
           severity: "info",
           message: note,
         }));
+        // ★ A FILE THAT LEFT THE PACKAGE IS THE USER'S BUSINESS. Owner decision
+        //   2026-08-18. Auto-fix's last resort deletes a file it cannot repair,
+        //   and package trimming drops files to fit the ceiling. Both were
+        //   invisible here: `res.remediation` had no reader, and the "excluded"
+        //   stage label scrolled past in the live timeline and was gone. The
+        //   person who published a knowledge file has to be told it did not go.
+        const droppedNotes: UploadIssue[] = (res.remediation ?? [])
+          .filter((action) => action.action === "excluded")
+          .map((action) => ({
+            severity: "warning",
+            message: ko
+              ? `${action.file} 은(는) 패키지에서 빠졌습니다 — 설치한 사람은 이 파일을 받지 못합니다.`
+              : `${action.file} did not ship — whoever installs this will not get that file.`,
+            file: action.file,
+            remediation: ko
+              ? "이 파일이 에이전트 역량에 필요하다면 용량을 줄이거나, 실행 시 다시 만드는 스크립트로 바꾼 뒤 다시 올리세요."
+              : "If the agent needs it, shrink it or replace it with a script that regenerates it at run time, then upload again.",
+          }));
         outcome = {
           ok: true,
           title:
             visibility === "marketplace"
               ? ko ? "Agentlas Hub에 공개 등록되었습니다" : "Published to Agentlas Hub"
               : ko ? "내 Agent Cloud에 비공개 저장되었습니다" : "Saved privately in my Agent Cloud",
-          issues: [...repairNotes, ...issues],
+          issues: [...droppedNotes, ...repairNotes, ...issues],
           visibility,
           link,
           careerGraph,
