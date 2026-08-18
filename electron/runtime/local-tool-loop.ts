@@ -506,6 +506,27 @@ export async function runLocalOpenAiChat(
             messages,
             ...(opts.keepAlive ? { keep_alive: opts.keepAlive } : {}),
             ...(tools.length > 0 ? { tools } : {}),
+            /*
+             * ★제약 디코딩 — 형식 붕괴를 배선으로 없앤다.
+             *
+             * 판정·화면생성·진화제안은 답에서 구조를 파싱하는데, 자유 서술이면 작은
+             * 모델은 형식을 깨뜨리고 그 결과가 조용히 사라졌다("완료라는데 결과물이
+             * 없음", 실측 2026-08-08). json_schema 응답 형식은 모델이 문법상 틀린
+             * 토큰을 뱉을 수 없게 만든다 — 남는 것은 판단력 문제뿐이고, 그건 배선으로
+             * 고칠 수 없다는 것이 정직한 경계다.
+             */
+            ...(req.outputSchema
+              ? {
+                  response_format: {
+                    type: "json_schema",
+                    json_schema: {
+                      name: req.outputSchema.name,
+                      schema: req.outputSchema.schema,
+                      strict: true,
+                    },
+                  },
+                }
+              : {}),
         }),
       });
     } catch (err) {

@@ -371,6 +371,8 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
   await fs.writeFile(promptFile, prompt, { encoding: "utf8", mode: 0o600 });
   const args = ["--prompt-file", promptFile, "--cwd", cwd, "--output-format", "streaming-json"];
   if (systemViaFlag && systemText) args.push("--system-prompt-override", systemText);
+  // 출력 형태 계약 — 지원 런타임은 플래그로 강제한다(실측 grok 1.0.5 `--json-schema`).
+  if (req.outputSchema) args.push("--json-schema", JSON.stringify(req.outputSchema.schema));
   if (grokSubagentsDisabled(env)) args.push("--no-subagents");
   if (resumeSessionId) args.unshift("--resume", resumeSessionId);
   if (req.model) args.push("-m", req.model); // grok --help 확인: -m, --model <model>

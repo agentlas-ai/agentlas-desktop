@@ -24,6 +24,24 @@ export interface RunnerRequest {
   longContext?: boolean;
   /** 작업량(reasoning effort) — Claude Code `--effort`로 전달. 그 외 러너는 무시. */
   effort?: string;
+  /**
+   * 최종 답의 형태를 **계약으로** 못박는다. 지원 런타임은 CLI 플래그로 강제하고
+   * (claude·grok·agy `--json-schema`, codex `--output-schema <FILE>`), OpenAI 호환
+   * 로컬 런타임은 `response_format`(json_schema)로 제약 디코딩을 건다.
+   *
+   * ★왜 필요한가. 판정·화면생성·진화제안은 답 안에서 구조를 **파싱**해 왔고, 자유
+   * 서술이라 형식이 깨지면 조용히 사라졌다 — 로컬 모델에서 "완료라는데 결과물이
+   * 없음"의 정체가 이것이다(실측 2026-08-08 붕괴 기록). 제약 디코딩은 모델이 문법상
+   * 틀린 토큰을 뱉을 수 없게 만들므로, 형식 붕괴는 능력 문제가 아니라 배선 문제가 된다.
+   *
+   * 지원하지 않는 런타임에서는 **조용히 무시하지 않는다** — 러너가 지시문 폴백을
+   * 쓰고, 그 사실이 실행 상태줄에 남는다(정직한 강등).
+   */
+  outputSchema?: {
+    /** 스키마 이름 — 일부 프로바이더가 요구한다(OpenAI response_format). */
+    name: string;
+    schema: Record<string, unknown>;
+  };
   /** 실행 취소 신호 — abort 시 CLI 러너는 자식 프로세스 kill, API 러너는 fetch abort. */
   signal?: AbortSignal;
   /** 도구 사용 권한 — read(읽기) / write(편집) / full(셸·외부). 런타임 권한 모드로 매핑. */

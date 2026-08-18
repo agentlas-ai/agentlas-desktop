@@ -233,3 +233,53 @@ export const RUNTIME_CAPABILITIES: Record<RuntimeKind, RuntimeCapabilityDescript
 export const COMMAND_SURFACE_RUNTIMES: readonly RuntimeKind[] = (
   Object.keys(RUNTIME_CAPABILITIES) as RuntimeKind[]
 ).filter((kind) => RUNTIME_CAPABILITIES[kind].commandSurfaces.length > 0);
+
+/**
+ * 이 런타임이 최종 답의 형태를 **강제**할 수 있는가, 어떤 통로로.
+ *
+ * 실측 2026-08-19: claude `--json-schema <schema>`, grok `--json-schema <SCHEMA>`,
+ * agy `--json-schema`(문자열 또는 파일 경로), codex `--output-schema <FILE>`.
+ * ACP 경유(cursor·kimi·copilot)는 프로토콜에 그 칸이 없고, OpenAI 호환 로컬 런타임은
+ * 플래그가 아니라 요청 본문의 `response_format` 으로 제약 디코딩을 건다.
+ *
+ * `null` 은 "강제 못 함" — 러너가 지시문 폴백을 쓰고 그 사실을 상태줄에 남긴다.
+ * 조용히 무시하면 소비자는 계약이 지켜진 줄 알고 파싱하다 빈손이 된다.
+ */
+export type SchemaOutputDelivery =
+  /** 스키마 JSON 을 인자로 직접 넘긴다. */
+  | { via: "flag-inline"; flag: string }
+  /** 스키마를 파일로 쓰고 그 경로를 넘긴다. */
+  | { via: "flag-file"; flag: string }
+  /** 요청 본문의 response_format(json_schema) — 제약 디코딩. */
+  | { via: "response-format" };
+
+export const RUNTIME_SCHEMA_OUTPUT: Record<RuntimeKind, SchemaOutputDelivery | null> = {
+  "claude-code": { via: "flag-inline", flag: "--json-schema" },
+  grok: { via: "flag-inline", flag: "--json-schema" },
+  antigravity: { via: "flag-inline", flag: "--json-schema" },
+  codex: { via: "flag-file", flag: "--output-schema" },
+  // ACP 에는 구조화 출력 칸이 없다(v1 스키마 확인). 어댑터가 대신 채워 줄 수도 없다.
+  cursor: null,
+  kimi: null,
+  acp: null,
+  // OpenAI 호환 본문을 우리가 직접 만든다 — 여기가 제약 디코딩이 가장 확실한 곳이다.
+  byok: { via: "response-format" },
+  ollama: { via: "response-format" },
+  lmstudio: { via: "response-format" },
+  mlx: { via: "response-format" },
+};
+
+/**
+ * 스키마를 강제할 수 없는 런타임에 붙이는 지시문 폴백. 계약을 지킬 **의무**를
+ * 말로 전할 뿐이라 깨질 수 있고, 그래서 러너는 이걸 쓸 때 상태줄에 남긴다.
+ */
+export function schemaFallbackInstruction(schema: Record<string, unknown>): string {
+  return [
+    "",
+    "[OUTPUT CONTRACT]",
+    "Your final message must be exactly one JSON document matching this schema,",
+    "with no prose, no explanation, and no code fence around it:",
+    JSON.stringify(schema),
+    "[/OUTPUT CONTRACT]",
+  ].join("\n");
+}

@@ -524,6 +524,8 @@ export const runClaudeCode: Runner = async (
   const modelArgs = req.model && req.model.trim() ? ["--model", req.model.trim()] : [];
   // 작업량(reasoning effort) — installed CLI가 노출한 값을 그대로 전달. 미지정이면 CLI 기본.
   const effortArgs = req.effort && req.effort.trim() ? ["--effort", req.effort.trim()] : [];
+  // 출력 형태 계약 — 실측 claude 2.1.234 `--json-schema <schema>`.
+  const schemaArgs = req.outputSchema ? ["--json-schema", JSON.stringify(req.outputSchema.schema)] : [];
 
   // MCP 서버 구성 주입 — mcp/client.ts가 설치·활성 서버를 .mcp.json으로 직렬화해 경로를 넘긴다.
   // 이게 있어야 에이전트가 브라우저(Playwright) 등 실제 MCP 툴을 호출한다. (사용자 config와 병합)
@@ -676,6 +678,7 @@ export const runClaudeCode: Runner = async (
           ...partialFlagArgs,
           ...modelArgs,
           ...effortArgs,
+          ...schemaArgs,
           ...permArgs,
           ...noToolsArgs,
           ...isolatedMcpArgs,
@@ -693,6 +696,7 @@ export const runClaudeCode: Runner = async (
           ...partialFlagArgs,
           ...modelArgs,
           ...effortArgs,
+          ...schemaArgs,
           ...permArgs,
           ...noToolsArgs,
           ...isolatedMcpArgs,

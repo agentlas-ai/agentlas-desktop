@@ -780,6 +780,32 @@ export const runCodex: Runner = async (
     events.onStatus(`[runtime-session] fingerprint_changed kind=${KIND}`);
   }
 
+  /*
+   * 출력 형태 계약 — codex 는 스키마를 **파일 경로**로만 받는다
+   * (실측 codex-cli 0.147.0: `--output-schema <FILE>`). 0600 임시 파일에 쓰고
+   * 실행이 끝나면 지운다; argv 에 스키마 본문이 남지 않는 부수 효과도 있다.
+   */
+  const schemaFile = runReq.outputSchema
+    ? path.join(os.tmpdir(), `agentlas-codex-schema-${process.pid}-${crypto.randomUUID()}.json`)
+    : null;
+  if (schemaFile && runReq.outputSchema) {
+    await fs.writeFile(schemaFile, JSON.stringify(runReq.outputSchema.schema), { encoding: "utf8", mode: 0o600 });
+  }
+  const schemaArgs = schemaFile ? ["--output-schema", schemaFile] : [];
+  /*
+   * 정리는 실행 경로에 맡기지 않는다 — 이 함수에는 return 지점이 여러 개고(resume 성공,
+   * resume 실패, create 성공, abort throw), 그중 하나만 빠뜨려도 0600 파일이 남는다.
+   * abort 신호와 프로세스 종료 양쪽에 걸어 두면 어느 갈래로 끝나도 지워진다.
+   */
+  if (schemaFile) {
+    const removeSchemaFile = (): void => {
+      void fs.rm(schemaFile, { force: true }).catch(() => {});
+    };
+    runReq.signal?.addEventListener("abort", removeSchemaFile, { once: true });
+    // codex 자식이 파일을 읽는 시점은 spawn 직후다. 넉넉히 지난 뒤 지운다.
+    setTimeout(removeSchemaFile, 10 * 60_000).unref?.();
+  }
+
   // RESUME: 새 user 턴만 stdin으로 — 시스템 프롬프트/히스토리는 세션이 이미 갖고 있다.
   // Resume reasserts the same permission boundary as the first turn.
   if (canResume) {
@@ -792,6 +818,7 @@ export const runCodex: Runner = async (
       ...resumePerm,
       ...mcpArgs,
       ...modelArgs,
+      ...schemaArgs,
       resumeSessionId!,
       "-",
     ];
@@ -862,6 +889,7 @@ export const runCodex: Runner = async (
     ...permArgs,
     ...mcpArgs,
     ...modelArgs,
+    ...schemaArgs,
     "-",
   ];
   const created = await runCodexProcess(bin, createArgs, buildPrompt(runReq), runReq, events, { output: 0, input: 0, cachedInput: 0 });

@@ -41,6 +41,10 @@ const SURFACE_CLAIMS = [
   { kind: "codex", flag: "--image", helpArgs: ["exec", "--help"] },
   { kind: "codex", flag: "resume", helpArgs: ["exec", "--help"] },
   { kind: "codex", flag: "--dangerously-bypass-hook-trust", helpArgs: ["exec", "--help"] },
+  { kind: "grok", flag: "--json-schema", helpArgs: ["--help"] },
+  { kind: "antigravity", flag: "--json-schema", helpArgs: ["--help"] },
+  { kind: "codex", flag: "--output-schema", helpArgs: ["exec", "--help"] },
+  { kind: "claude-code", flag: "--json-schema", helpArgs: ["--help"] },
   { kind: "claude-code", flag: "--mcp-config", helpArgs: ["--help"] },
   { kind: "claude-code", flag: "--permission-mode", helpArgs: ["--help"] },
 ];

@@ -207,6 +207,8 @@ export function buildAntigravitySpawnArgs(
   prompt = "",
   addDirectories: string[] = [],
   permission?: "read" | "write" | "full",
+  /** 출력 형태 계약 — 실측 agy 1.1.14 `--json-schema`(문자열 또는 파일 경로). */
+  outputSchema?: Record<string, unknown>,
 ): string[] {
   const modelArgs = model && model.trim() ? ["--model", model.trim()] : [];
   const directoryArgs = [...new Set(addDirectories.filter((value) => value.trim()))]
@@ -225,6 +227,7 @@ export function buildAntigravitySpawnArgs(
     ...antigravityPermissionArgs(permission),
     "--output-format", "stream-json",
     "--print-timeout", "30m",
+    ...(outputSchema ? ["--json-schema", JSON.stringify(outputSchema)] : []),
     "--prompt", prompt,
   ];
 }
@@ -694,6 +697,7 @@ async function runPreparedAntigravity(
           spawnPrompt,
           agyReadDirs,
           agyToolsAllowed ? req.permission : undefined,
+          req.outputSchema?.schema,
         ),
         {
           stdio: ["ignore", "pipe", "pipe"],

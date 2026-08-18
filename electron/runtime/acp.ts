@@ -44,6 +44,7 @@ import {
   type RuntimeToolPermissionDecision,
 } from "./tool-approval";
 import { classifyDiscovery, type DiscoveryOutcome } from "../../shared/model-discovery";
+import { schemaFallbackInstruction } from "../../shared/runtime-capabilities";
 
 /** How to spawn an ACP agent. Adding a runtime = one row (mirrors contracts/runtime-registry.json). */
 export interface AcpAgentSpec {
@@ -636,13 +637,30 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         }
       }
 
+      /*
+       * ★출력 형태 계약의 정직한 강등 — ACP 에는 구조화 출력 칸이 없다.
+       *
+       * claude·codex·grok·agy 는 스키마를 CLI 플래그로 강제하고 로컬 런타임은 제약
+       * 디코딩을 걸지만, ACP 프로토콜에는 그 자리가 없고 어댑터가 대신 채워 줄 수도
+       * 없다. 그래서 지시문으로 부탁하되 **조용히 넘어가지 않는다** — 소비자가 계약이
+       * 강제된 줄 알고 파싱하다 빈손이 되는 것이 형식이 가끔 깨지는 것보다 나쁘다.
+       */
+      const schemaFallback = req.outputSchema ? schemaFallbackInstruction(req.outputSchema.schema) : "";
+      if (schemaFallback) {
+        events.onStatus(
+          locale === "ko"
+            ? "이 런타임은 출력 형식을 강제할 수 없어 지시문으로만 요청합니다."
+            : "This runtime cannot enforce the output schema — asking for it in the prompt instead.",
+        );
+      }
       const promptText = resumed
-        ? composeResumeTurnPrompt(userPrompt, req.turnContext, locale)
+        ? `${composeResumeTurnPrompt(userPrompt, req.turnContext, locale)}${schemaFallback}`
         : [
           wrapSystemPrompt(req.systemPrompt, locale, req.permission, userPrompt),
           req.history.length > 0 ? renderConversationContext(req.history, locale, CLI_HISTORY_CONTEXT_TOKENS).block : "",
           req.turnContext,
           userPrompt,
+          schemaFallback,
         ].filter(Boolean).join("\n\n");
       const result = await session.conn.request(
         "session/prompt",
