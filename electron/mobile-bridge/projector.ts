@@ -398,6 +398,9 @@ function hostDto(options: MobileBridgeProjectionOptions): MobileBridgeHostDto {
       // v1 cloud-actions extension: registered upload preview/save,
       // server-side cloud delete, and remote Hephaestus builds.
       "cloud-agent-actions",
+      // v1 hub-publish extension: public Hub publish of the user's own
+      // registered agents plus post-publish price setting.
+      "hub-publish-v1",
       "remote-build",
       ...(options.ontology?.supported ? ["ontology-chips"] : []),
     ],

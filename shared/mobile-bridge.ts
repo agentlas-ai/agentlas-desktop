@@ -83,6 +83,8 @@ export const MOBILE_BRIDGE_METHODS = [
   "ontology.attach.resolve",
   "agents.cloudUploadPreview",
   "agents.cloudUploadSave",
+  "agents.cloudPublishHub",
+  "cloud.setHubPrices",
   "agents.cloudDelete",
   "build.start",
   "build.status",
@@ -119,6 +121,8 @@ export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new 
   "runtime.setRoleMembers",
   "ontology.attach.resolve",
   "agents.cloudUploadSave",
+  "agents.cloudPublishHub",
+  "cloud.setHubPrices",
   "agents.cloudDelete",
   "build.start",
   "build.answer",
@@ -1453,6 +1457,52 @@ export interface MobileBridgeCloudUploadSaveDto {
   };
 }
 
+/**
+ * DESKTOP_MOBILE_BRIDGE: Public Hub registration receipt for one of the user's
+ * OWN registered agents/teams. It reuses the exact Desktop
+ * `cloudAgents:publishRegisteredPublic` pipeline (marketplace + static-only
+ * local review); every server refusal (fork copies, seat plans, slug identity
+ * conflicts, …) surfaces verbatim through `refusal` instead of this DTO.
+ */
+export interface MobileBridgeHubPublishDto {
+  slug: string;
+  visibility: "marketplace";
+  status: "registered" | "registered-recovery-required";
+  /** The server-issued immutable release revision for this exact package. */
+  releaseVersion: string;
+  packageHash: string;
+  marketplaceUrl?: string;
+  localSyncStored: boolean;
+  recoveryRequired: boolean;
+  recovery?: {
+    code: "local_revision_receipt_not_saved";
+    message: string;
+  };
+}
+
+export const MOBILE_BRIDGE_HUB_PRICE_KINDS = ["RENT", "INGEST", "FORK"] as const;
+export type MobileBridgeHubPriceKind = (typeof MOBILE_BRIDGE_HUB_PRICE_KINDS)[number];
+
+/**
+ * Result of the authenticated `/api/account/rates` pricing patch for an
+ * already-published Hub listing. A pricing failure is never a failed publish:
+ * the listing stays live (and free) exactly like Desktop's own pricing flow.
+ * Server bounds/rejections travel inside `refusal` with the server's numbers.
+ */
+export interface MobileBridgeHubPricesDto {
+  ok: true;
+  changed: boolean;
+  prices: Partial<Record<MobileBridgeHubPriceKind, number>>;
+}
+
+export interface MobileBridgeHubPriceRefusalDto {
+  code: string;
+  message: string;
+  kind?: string;
+  minCredits?: number;
+  maxCredits?: number;
+}
+
 export interface MobileBridgeCloudDeleteResultDto {
   schema: "agentlas.agent_cloud.delete.v1";
   deleted: true;
@@ -2347,13 +2397,52 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
       return hasOnlyKeys(params, ["agentLocalId"])
         ? requiredString(params, "agentLocalId")
         : "agents.cloudUploadPreview accepts only agentLocalId";
+    // `confirmOverwrite` answers main's one overwrite question about THIS
+    // folder. It carries no target: main re-reads the asset it asked about, so
+    // a phone can never name which cloud asset gets replaced.
     case "agents.cloudUploadSave":
-      return hasOnlyKeys(params, ["agentLocalId", "idempotencyKey"])
+      return hasOnlyKeys(params, ["agentLocalId", "idempotencyKey", "confirmOverwrite"])
         ? firstError(
             requiredString(params, "agentLocalId"),
             requiredString(params, "idempotencyKey", 160),
+            optionalBoolean(params, "confirmOverwrite"),
           )
-        : "agents.cloudUploadSave accepts only agentLocalId and idempotencyKey";
+        : "agents.cloudUploadSave accepts only agentLocalId, idempotencyKey, and confirmOverwrite";
+    case "agents.cloudPublishHub":
+      return hasOnlyKeys(params, ["agentLocalId", "idempotencyKey", "confirmOverwrite"])
+        ? firstError(
+            requiredString(params, "agentLocalId"),
+            requiredString(params, "idempotencyKey", 160),
+            optionalBoolean(params, "confirmOverwrite"),
+          )
+        : "agents.cloudPublishHub accepts only agentLocalId, idempotencyKey, and confirmOverwrite";
+    case "cloud.setHubPrices": {
+      if (!hasOnlyKeys(params, ["slug", "prices", "idempotencyKey"])) {
+        return "cloud.setHubPrices accepts only slug, prices, and idempotencyKey";
+      }
+      const base = firstError(
+        requiredString(params, "slug", 160),
+        requiredString(params, "idempotencyKey", 160),
+      );
+      if (base) return base;
+      const prices = params.prices;
+      if (!isRecord(prices) || !hasOnlyKeys(prices, MOBILE_BRIDGE_HUB_PRICE_KINDS)) {
+        return "prices accepts only RENT, INGEST, and FORK";
+      }
+      const kinds = Object.keys(prices);
+      if (kinds.length === 0) {
+        return "prices must name at least one of RENT, INGEST, or FORK";
+      }
+      for (const kind of kinds) {
+        const value = (prices as Record<string, unknown>)[kind];
+        // null removes the price; the SERVER remains the bounds authority.
+        if (value === null) continue;
+        if (!Number.isInteger(value) || Number(value) < 1 || Number(value) > 1_000_000) {
+          return `${kind} must be null or an integer credit amount of at least 1`;
+        }
+      }
+      return null;
+    }
     case "agents.cloudDelete":
       return hasOnlyKeys(params, ["slug", "idempotencyKey"])
         ? firstError(

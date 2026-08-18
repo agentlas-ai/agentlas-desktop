@@ -137,6 +137,10 @@ import {
   type MobileBridgeBuildRefusalDto,
   type MobileBridgeBuildStatus,
   type MobileBridgeCloudDeleteResultDto,
+  type MobileBridgeHubPublishDto,
+  type MobileBridgeHubPricesDto,
+  type MobileBridgeHubPriceRefusalDto,
+  MOBILE_BRIDGE_HUB_PRICE_KINDS,
   type MobileBridgeCloudRefusalDto,
   type MobileBridgeCloudUploadSaveDto,
   type MobileBridgeCloudUploadPreviewDto,
@@ -2383,8 +2387,13 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         return asJsonValue(preview, request.method);
       }
       case "agents.cloudUploadSave": {
-        const params = guardedParams(request, ["agentLocalId", "idempotencyKey"]);
+        // `confirmOverwrite` answers the one question Desktop asks when the
+        // Cloud already holds this name and this machine has no record of
+        // uploading it from this folder. Without it the phone could receive
+        // that question and have no way to answer — see MobileBridgeUploadOptions.
+        const params = guardedParams(request, ["agentLocalId", "idempotencyKey", "confirmOverwrite"]);
         const agentLocalId = requiredIdentifier(params, "agentLocalId");
+        const confirmOverwrite = optionalBoolean(params, "confirmOverwrite") === true;
         this.consumeWriteIdempotencyKey(request, params);
         const option = this.registeredUploadOptionForAgent(agentLocalId);
         const sessionRefusal = this.cloudSessionRefusal();
@@ -2404,7 +2413,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         //   branch. Same shape the delete case below already used.
         let result: Awaited<ReturnType<typeof this.cloudAgentActions.saveRegisteredPrivate>>;
         try {
-          result = await this.cloudAgentActions.saveRegisteredPrivate(option.target);
+          result = await this.cloudAgentActions.saveRegisteredPrivate(
+            option.target,
+            confirmOverwrite ? { confirmOverwrite: true } : undefined,
+          );
         } catch (error) {
           const refusal = this.cloudRefusalOf(error);
           if (refusal) return asJsonValue({ refusal }, request.method);
@@ -2439,6 +2451,116 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
             : {}),
         };
         return asJsonValue(upload, request.method);
+      }
+      // DESKTOP_MOBILE_BRIDGE: explicit public Hub publish of one of the
+      // user's OWN registered agents/teams. Reuses the exact renderer
+      // `cloudAgents:publishRegisteredPublic` pipeline (marketplace +
+      // static-only local review). Refusal conversion mirrors cloudUploadSave:
+      // typed server refusals — fork copies cannot publish, seat plans,
+      // slug_identity_conflict, … — return their sentence verbatim; anything
+      // else stays a generic authority error so no local path can leak.
+      case "agents.cloudPublishHub": {
+        const params = guardedParams(request, ["agentLocalId", "idempotencyKey", "confirmOverwrite"]);
+        const agentLocalId = requiredIdentifier(params, "agentLocalId");
+        const confirmOverwrite = optionalBoolean(params, "confirmOverwrite") === true;
+        this.consumeWriteIdempotencyKey(request, params);
+        const option = this.registeredUploadOptionForAgent(agentLocalId);
+        const sessionRefusal = this.cloudSessionRefusal();
+        if (sessionRefusal) return asJsonValue({ refusal: sessionRefusal }, request.method);
+        let result: Awaited<ReturnType<typeof this.cloudAgentActions.publishRegisteredHub>>;
+        try {
+          result = await this.cloudAgentActions.publishRegisteredHub(
+            option.target,
+            confirmOverwrite ? { confirmOverwrite: true } : undefined,
+          );
+        } catch (error) {
+          const refusal = this.cloudRefusalOf(error);
+          if (refusal) return asJsonValue({ refusal }, request.method);
+          throw error;
+        }
+        if (result.status !== "registered" || !result.registration) {
+          // Local security review blocked the package or registration did not
+          // commit. Never report success; surface the bounded summary.
+          return asJsonValue({
+            refusal: {
+              code: result.status === "blocked" ? "package_blocked" : "not_registered",
+              message: boundedRedactedText(result.summary, 1_000),
+            },
+          }, request.method);
+        }
+        this.scheduleSnapshotUpdated();
+        const hubSyncStored = result.registration.localSyncStored === true;
+        const published: MobileBridgeHubPublishDto = {
+          slug: result.registration.slug,
+          visibility: "marketplace",
+          status: hubSyncStored ? "registered" : "registered-recovery-required",
+          releaseVersion: boundedRedactedText(result.registration.revision, 96),
+          packageHash: boundedRedactedText(result.registration.packageHash, 128),
+          ...(typeof result.registration.marketplaceUrl === "string"
+            ? { marketplaceUrl: boundedRedactedText(result.registration.marketplaceUrl, 512) }
+            : {}),
+          localSyncStored: hubSyncStored,
+          recoveryRequired: !hubSyncStored,
+          ...(!hubSyncStored
+            ? {
+                recovery: {
+                  code: "local_revision_receipt_not_saved" as const,
+                  message:
+                    "The Hub registration committed, but Desktop could not save its local revision receipt. Restore the latest Cloud copy before the next edit or save.",
+                },
+              }
+            : {}),
+        };
+        return asJsonValue(published, request.method);
+      }
+      // Pricing is deliberately a separate call from publishing: by the time it
+      // runs the agent is already live on the Hub, so a pricing failure leaves
+      // a live free listing rather than a failed publish. Server bounds and
+      // rejections come back inside `refusal` with the server's own numbers.
+      case "cloud.setHubPrices": {
+        const params = guardedParams(request, ["slug", "prices", "idempotencyKey"]);
+        const slug = requiredIdentifier(params, "slug", RUN_ID_RE);
+        this.consumeWriteIdempotencyKey(request, params);
+        const sessionRefusal = this.cloudSessionRefusal();
+        if (sessionRefusal) return asJsonValue({ refusal: sessionRefusal }, request.method);
+        const pricesInput = params.prices;
+        if (!pricesInput || typeof pricesInput !== "object" || Array.isArray(pricesInput)) {
+          throw new TypeError("cloud.setHubPrices requires a prices object");
+        }
+        const patch: Partial<Record<(typeof MOBILE_BRIDGE_HUB_PRICE_KINDS)[number], number | null>> = {};
+        for (const kind of MOBILE_BRIDGE_HUB_PRICE_KINDS) {
+          if (!(kind in pricesInput)) continue;
+          const value = (pricesInput as Record<string, unknown>)[kind];
+          if (value === null) {
+            patch[kind] = null;
+          } else if (Number.isInteger(value)) {
+            patch[kind] = value as number;
+          } else {
+            throw new TypeError(`cloud.setHubPrices ${kind} must be null or an integer`);
+          }
+        }
+        const result = await this.cloudAgentActions.setHubPrices({ slug, patch });
+        if (!result.ok) {
+          const refusal: MobileBridgeHubPriceRefusalDto = {
+            code: boundedRedactedText(result.code, 160),
+            message: boundedRedactedText(result.message, 1_000),
+            ...(typeof result.kind === "string" ? { kind: boundedRedactedText(result.kind, 16) } : {}),
+            ...(typeof result.minCredits === "number" ? { minCredits: result.minCredits } : {}),
+            ...(typeof result.maxCredits === "number" ? { maxCredits: result.maxCredits } : {}),
+          };
+          return asJsonValue({ refusal }, request.method);
+        }
+        const prices: MobileBridgeHubPricesDto["prices"] = {};
+        for (const kind of MOBILE_BRIDGE_HUB_PRICE_KINDS) {
+          const value = result.prices[kind];
+          if (typeof value === "number" && Number.isFinite(value)) prices[kind] = value;
+        }
+        const priced: MobileBridgeHubPricesDto = {
+          ok: true,
+          changed: result.changed === true,
+          prices,
+        };
+        return asJsonValue(priced, request.method);
       }
       case "agents.cloudDelete": {
         const params = guardedParams(request, ["slug", "idempotencyKey"]);

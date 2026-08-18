@@ -16,6 +16,11 @@ import { randomUUID } from "node:crypto";
 import { getSessionCookieHeader } from "../auth";
 import { getCargoSource, invalidateMyAgentsCache } from "../marketplace";
 import { registeredUploadOptions, registeredUploadRoot } from "../cloud-agents/registered-upload";
+import {
+  setAgentPrices,
+  type AgentPricePatch,
+  type SetAgentPricesResult,
+} from "../cloud-agents/pricing";
 import type {
   CloudAgentDeleteResult,
   CloudAgentPackageResult,
@@ -38,6 +43,19 @@ const ESTIMATE_SKIP_DIRS = new Set([
 ]);
 const ESTIMATE_FILE_CAP = 400;
 
+/**
+ * ★ A QUESTION ASKED ON ONE SURFACE MUST BE ANSWERABLE ON THAT SURFACE.
+ *   When something with the same name is already in the Cloud and this machine
+ *   has no record of uploading it from this folder, Desktop stops and offers
+ *   "replace it with this folder". Without this option Mobile could receive the
+ *   very same question and have no way to answer it — the upload would simply
+ *   be unreachable from the phone. Like Desktop, the phone only ever says
+ *   "yes": which cloud asset gets replaced is held in main and never travels.
+ */
+export interface MobileBridgeUploadOptions {
+  confirmOverwrite?: boolean;
+}
+
 export interface MobileBridgeCloudAgentActions {
   /** True when this Desktop holds an authenticated agentlas.cloud session. */
   hasCloudSession(): boolean;
@@ -45,7 +63,21 @@ export interface MobileBridgeCloudAgentActions {
   /** Bounded local file-count estimate for an upload preview. Read-only. */
   estimateUploadFileCount(target: CloudAgentRegisteredTarget): number;
   /** The `cloudAgents:saveRegisteredPrivate` path: private-link + static-only. */
-  saveRegisteredPrivate(target: CloudAgentRegisteredTarget): Promise<CloudAgentPackageResult>;
+  saveRegisteredPrivate(
+    target: CloudAgentRegisteredTarget,
+    options?: MobileBridgeUploadOptions,
+  ): Promise<CloudAgentPackageResult>;
+  /**
+   * The `cloudAgents:publishRegisteredPublic` path pinned to marketplace +
+   * static-only. Public routing-card gates and every server refusal
+   * (fork copies, slug identity conflicts, …) apply exactly as on Desktop.
+   */
+  publishRegisteredHub(
+    target: CloudAgentRegisteredTarget,
+    options?: MobileBridgeUploadOptions,
+  ): Promise<CloudAgentPackageResult>;
+  /** The authenticated `/api/account/rates` client Desktop pricing already uses. */
+  setHubPrices(input: { slug: string; patch: AgentPricePatch }): Promise<SetAgentPricesResult>;
   deleteMyAgent(slug: string): Promise<CloudAgentDeleteResult>;
 }
 
@@ -117,15 +149,30 @@ export function createDesktopMobileBridgeCloudAgentActions(): MobileBridgeCloudA
     hasCloudSession: () => Boolean(getSessionCookieHeader()),
     listRegisteredUploadOptions: () => registeredUploadOptions(),
     estimateUploadFileCount: (target) => countCandidateFiles(registeredUploadRoot(target).rootPath),
-    saveRegisteredPrivate: async (target) => {
+    saveRegisteredPrivate: async (target, options) => {
       const source = registeredUploadRoot(target);
       const { packageAndReviewCloudAgent } = await import("../cloud-agents/package");
       return packageAndReviewCloudAgent({
         ...source,
         visibility: "private-link",
         reviewMode: "static-only",
+        ...(options?.confirmOverwrite ? { confirmOverwrite: true } : {}),
       });
     },
+    publishRegisteredHub: async (target, options) => {
+      const source = registeredUploadRoot(target);
+      const { packageAndReviewCloudAgent } = await import("../cloud-agents/package");
+      const result = await packageAndReviewCloudAgent({
+        ...source,
+        visibility: "marketplace",
+        reviewMode: "static-only",
+        ...(options?.confirmOverwrite ? { confirmOverwrite: true } : {}),
+      });
+      // 새 Hub 등록도 선반 프로젝션을 바꾼다 — delete와 같은 캐시 규칙.
+      if (result.status === "registered") invalidateMyAgentsCache();
+      return result;
+    },
+    setHubPrices: async (input) => setAgentPrices({ slug: input.slug, patch: input.patch }),
     // 선반을 바꿨으면 캐시도 같이 바뀌어야 한다. 무효화하지 않으면 방금 지운
     // 에이전트가 최대 5분 동안 폰의 Cloud 탭에 그대로 남는다.
     deleteMyAgent: async (slug) => {
