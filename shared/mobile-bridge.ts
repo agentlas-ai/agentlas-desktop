@@ -3,6 +3,10 @@ import type { AgentlasOneTaskProjectionV1 } from "./one-task-projection";
 import { ONE_DECISION_CONTRACT_VERSION, type OneDecisionViewV1 } from "./one-decision";
 import type { OneMobileEcosystemSuggestionV1 } from "./one-mobile-suggestion";
 import { PROJECT_AGENT_POOL_MAX } from "./project-agent-pool";
+// runtime-kinds/runtime-backends import nothing but `./types` (type-only), so
+// the dependency-free contract below stays dependency-free at runtime.
+import { RUNTIME_KINDS } from "./runtime-kinds";
+import { RUNTIME_BACKENDS } from "./runtime-backends";
 
 /**
  * Agentlas Desktop Mobile Bridge wire contract.
@@ -1850,36 +1854,16 @@ function validateEnum(
     : `${key} must be one of: ${choices.join(", ")}`;
 }
 
-const MOBILE_RUNTIME_KINDS = [
-  "claude-code",
-  "codex",
-  "antigravity",
-  "kimi",
-  "grok",
-  "cursor",
-  "byok",
-  "ollama",
-  "lmstudio",
-  "mlx",
-] as const;
+// The wire validator must accept exactly the kinds/backends the Desktop can
+// run. Both lists used to be hand-typed here, and the hand-typed kinds list
+// silently missed "acp": a phone that picked the ACP engine was refused with
+// invalid_params in parseMobileBridgeRequest — before authority.ts (which had
+// already been derived from the canonical arrays) ever saw the frame. Derive
+// them so the next union member is a compile error in runtime-kinds.ts, not a
+// wire-level refusal only a paired phone can reproduce.
+const MOBILE_RUNTIME_KINDS = RUNTIME_KINDS;
 
-const MOBILE_RUNTIME_BACKENDS = [
-  "anthropic",
-  "openai",
-  "google",
-  "ollama",
-  "lmstudio",
-  "mlx",
-  "upstage",
-  "custom",
-  "glm",
-  "kimi",
-  "deepseek",
-  "minimax",
-  "xai",
-  "openrouter",
-  "cursor",
-] as const;
+const MOBILE_RUNTIME_BACKENDS = RUNTIME_BACKENDS;
 
 function validateRuntimeSelectionValue(
   value: unknown,
