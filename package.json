@@ -35,6 +35,7 @@
     "ensure:engine": "node scripts/ensure-engine.mjs",
     "prepare:embedded-core": "node scripts/prepare-embedded-core.mjs",
     "test:ensure-engine": "node scripts/test-ensure-engine.cjs",
+    "probe:runtime-capabilities": "node scripts/probe-runtime-capabilities.mjs --check",
     "fetch:python": "node scripts/fetch-python-runtime.mjs",
     "fetch:node": "node scripts/fetch-node-runtime.mjs",
     "studio:seed": "node scripts/studio-clean-seed.mjs",

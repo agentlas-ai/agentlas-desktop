@@ -676,7 +676,7 @@ export interface RuntimeCommand {
   /** "/deploy", "/frontend:component" 등 (앞에 / 포함) */
   name: string;
   description: string;
-  source: "claude-code" | "codex" | "antigravity";
+  source: "claude-code" | "codex" | "antigravity" | "cursor";
 }
 
 export interface RuntimeStatus {

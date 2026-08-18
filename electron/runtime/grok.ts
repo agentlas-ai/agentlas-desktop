@@ -240,7 +240,20 @@ async function getBin(): Promise<string | null> {
   return cachedBin;
 }
 
-function buildPrompt(req: RunnerRequest): string {
+/**
+ * ★시스템 프롬프트는 가능하면 **진짜 system 역할**로 넘긴다 — 실측 2026-08-18
+ * (grok 1.0.5 help): `--system-prompt-override <PROMPT>` (compat alias
+ * --system-prompt). 인라인([SYSTEM] 블록을 유저 프롬프트에 이어붙이기)은
+ * (1) 접두사가 매 턴 달라져 프롬프트 캐시를 깨고 (2) 시스템/유저 경계가 흐려져
+ * 지시 이행이 약해진다.
+ *
+ * 단 argv 는 로컬 process listing 에 노출되고 Windows 명령줄 한계(~32KB)가 있다 —
+ * 프롬프트 파일을 쓰는 이유가 그것이었다. 그래서 한도 안에서만 플래그를 쓰고,
+ * 넘으면 기존 인라인으로 정직하게 폴백한다(조용한 잘림 금지).
+ */
+export const GROK_SYSTEM_ARGV_LIMIT = 24_000;
+
+function buildSystemText(req: RunnerRequest): string {
   const sys = wrapSystemPrompt(
     req.systemPrompt,
     req.locale,
@@ -250,9 +263,13 @@ function buildPrompt(req: RunnerRequest): string {
     req.restrictedReadBoundary,
     req.untrustedNoTools,
   );
-  // 세션 미지원 러너 — 매 턴 히스토리를 연속성 프레이밍+압축과 함께 재주입한다.
   const turnContext = req.turnContext?.trim();
-  const parts: string[] = [`[SYSTEM]\n${sys}${turnContext ? `\n\n${turnContext}` : ""}`, ""];
+  return `${sys}${turnContext ? `\n\n${turnContext}` : ""}`;
+}
+
+function buildPrompt(req: RunnerRequest, systemViaFlag: boolean): string {
+  // 세션 미지원 러너 — 매 턴 히스토리를 연속성 프레이밍+압축과 함께 재주입한다.
+  const parts: string[] = systemViaFlag ? [] : [`[SYSTEM]\n${buildSystemText(req)}`, ""];
   if (req.history.length > 0) {
     const { block } = renderConversationContext(req.history, req.locale, CLI_HISTORY_CONTEXT_TOKENS);
     parts.push(block, "");
@@ -329,9 +346,12 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
   const savedSession = req.chatId ? getRuntimeSession(req.chatId, KIND) : null;
   const storedSessionId = savedSession && fingerprint && savedSession.fingerprint === fingerprint ? savedSession.sessionId : null;
   const resumeSessionId = req.runtimeSessionId ?? storedSessionId;
+  // 새 세션에서만 시스템을 플래그로 승격한다 — resume 턴은 세션이 이미 시스템을 안다.
+  const systemText = resumeSessionId ? null : buildSystemText(req);
+  const systemViaFlag = systemText != null && systemText.length <= GROK_SYSTEM_ARGV_LIMIT;
   const prompt = resumeSessionId
     ? composeResumeTurnPrompt(req.userPrompt, req.turnContext ?? "", req.locale)
-    : buildPrompt(req);
+    : buildPrompt(req, systemViaFlag);
 
   events.onStatus(resumeSessionId
     ? (req.locale === "ko" ? "Grok 세션 이어가는 중..." : "Resuming the Grok session...")
@@ -350,6 +370,7 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
   const promptFile = path.join(os.tmpdir(), `agentlas-grok-${process.pid}-${randomUUID()}.txt`);
   await fs.writeFile(promptFile, prompt, { encoding: "utf8", mode: 0o600 });
   const args = ["--prompt-file", promptFile, "--cwd", cwd, "--output-format", "streaming-json"];
+  if (systemViaFlag && systemText) args.push("--system-prompt-override", systemText);
   if (grokSubagentsDisabled(env)) args.push("--no-subagents");
   if (resumeSessionId) args.unshift("--resume", resumeSessionId);
   if (req.model) args.push("-m", req.model); // grok --help 확인: -m, --model <model>

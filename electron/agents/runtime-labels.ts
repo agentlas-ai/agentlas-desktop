@@ -1,6 +1,29 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { RuntimeLabel } from "./routes";
+import type { RuntimeKind } from "../../shared/types";
+import { RUNTIME_CAPABILITIES } from "../../shared/runtime-capabilities";
+
+/**
+ * ★어떤 파일이 어느 런타임 소속을 말해 주는지는 shared/runtime-capabilities.ts 의
+ * distinctiveContextFiles 가 정본이다 — 예전에는 이 파일이 자기 손 목록을 들고 있어
+ * 서술자와 어긋날 수 있었다. 라벨 유니온("gemini")과 런타임 킨드("antigravity")의
+ * 이름이 다른 곳만 여기서 잇는다. 공유 파일(AGENTS.md 를 grok·kimi 도 읽음)은
+ * 서술자 규칙대로 구별력이 없어 라벨을 만들지 않는다.
+ */
+const LABEL_TO_KIND: Record<Exclude<RuntimeLabel, "generic">, RuntimeKind> = {
+  "claude-code": "claude-code",
+  codex: "codex",
+  gemini: "antigravity",
+  cursor: "cursor",
+};
+
+function labelMatchers(): { label: Exclude<RuntimeLabel, "generic">; files: readonly string[] }[] {
+  return (Object.keys(LABEL_TO_KIND) as Exclude<RuntimeLabel, "generic">[]).map((label) => ({
+    label,
+    files: RUNTIME_CAPABILITIES[LABEL_TO_KIND[label]].distinctiveContextFiles,
+  }));
+}
 
 function exists(target: string): boolean {
   try {
@@ -22,10 +45,14 @@ function isDirectory(target: string): boolean {
 /** Pure package inspection shared by import and Cloud packaging. */
 export function detectRuntimeLabels(dir: string): RuntimeLabel[] {
   const labels: RuntimeLabel[] = [];
-  if (exists(path.join(dir, "CLAUDE.md")) || isDirectory(path.join(dir, ".claude"))) labels.push("claude-code");
-  if (exists(path.join(dir, "AGENTS.md"))) labels.push("codex");
-  if (exists(path.join(dir, "GEMINI.md"))) labels.push("gemini");
-  if (isDirectory(path.join(dir, ".cursor")) || exists(path.join(dir, ".cursorrules"))) labels.push("cursor");
+  for (const { label, files } of labelMatchers()) {
+    const hit = files.some((entry) =>
+      entry.endsWith("/")
+        ? isDirectory(path.join(dir, entry.slice(0, -1)))
+        : exists(path.join(dir, entry)),
+    );
+    if (hit) labels.push(label);
+  }
   if (labels.length === 0) labels.push("generic");
   return labels;
 }
@@ -44,10 +71,12 @@ export function detectRuntimeLabelsFromPaths(paths: Iterable<string>): RuntimeLa
   };
 
   const labels: RuntimeLabel[] = [];
-  if (hasFile("CLAUDE.md") || hasDirectory(".claude")) labels.push("claude-code");
-  if (hasFile("AGENTS.md")) labels.push("codex");
-  if (hasFile("GEMINI.md")) labels.push("gemini");
-  if (hasDirectory(".cursor") || hasFile(".cursorrules")) labels.push("cursor");
+  for (const { label, files } of labelMatchers()) {
+    const hit = files.some((entry) =>
+      entry.endsWith("/") ? hasDirectory(entry.slice(0, -1)) : hasFile(entry),
+    );
+    if (hit) labels.push(label);
+  }
   if (labels.length === 0) labels.push("generic");
   return labels;
 }

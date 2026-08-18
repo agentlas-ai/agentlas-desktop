@@ -23,6 +23,7 @@ const {
   AGENT_MULTIMODAL_MARKER,
 } = require("../dist/shared/agent-control-blocks.js");
 const { stripMobileBridgeControlFences } = require("../dist/electron/mobile-bridge/sanitize.js");
+const { flattenAskFences } = require("../dist/shared/ask-fence-flatten.js");
 
 const fixturePath = path.resolve(__dirname, "../../mobile/contracts/agent-control-blocks.fixtures.json");
 assert.ok(
@@ -46,11 +47,12 @@ for (const testCase of fixtures.cases) {
     testCase.expectedStreaming,
     `streaming text mismatch: ${testCase.name}`,
   );
-  // 브리지 진입점이 같은 규칙을 쓰는지도 확인한다 — 이름만 남기고 규칙이
-  // 갈라지면 계약이 두 벌이 된다.
+  // 브리지 진입점 계약(2026-08-18 갱신): 질문 펜스는 **평문화 후** 스트립한다 —
+  // 지우면 모바일 사용자는 질문받은 사실조차 모른다. 기대값은 문자열이 아니라
+  // 정본 함수 합성으로 잰다(게이트는 구현 문장이 아니라 계약을 못박는다).
   assert.equal(
     stripMobileBridgeControlFences(testCase.input),
-    testCase.expected,
+    stripAgentControlBlocks(flattenAskFences(testCase.input, "ko")),
     `bridge entry point diverged from the shared ruleset: ${testCase.name}`,
   );
 }

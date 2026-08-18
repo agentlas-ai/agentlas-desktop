@@ -26,7 +26,14 @@ export type RuntimeMcpDelivery =
   /** ACP `session/new.mcpServers` (electron/runtime/acp.ts). */
   | "acp-session-new"
   /** Our own in-process OpenAI tool loop (electron/runtime/local-tool-loop.ts). */
-  | "in-process-loop";
+  | "in-process-loop"
+  /**
+   * Per-run add/remove against the CLI's own persistent config (grok's
+   * `grok mcp add/remove --scope project`, antigravity's
+   * `~/.gemini/config/mcp_config.json`). We add approved servers before the
+   * run and remove only the keys we added afterwards.
+   */
+  | "config-reconcile";
 
 export interface RuntimeMcpSupport {
   delivery: RuntimeMcpDelivery;
@@ -93,11 +100,18 @@ export const RUNTIME_MCP_SUPPORT: Record<RuntimeKind, RuntimeMcpSupport | null> 
     extraTransports: ["sse", "http"],
     evidence: "same in-process loop as ollama",
   },
-  // ★antigravity genuinely has no MCP surface: electron/runtime/antigravity.ts
-  // contains zero occurrences of "mcp" (case-insensitive), and the CLI takes no
-  // config we could hand servers through. Handing it an mcpConfigPath would
-  // only produce a run that claims tools it never had.
-  antigravity: null,
+  // ★2026-08-18 반증 — "antigravity has no MCP surface" 는 틀린 근거였다.
+  // 프로브 실측(agy 1.1.14): ~/.gemini/config/mcp_config.json 에 등록한 서버가
+  // 실행 시작 시 initialize → tools/list 를 받았고(서버 수신 로그), agy 내장
+  // 도구에 call_mcp_tool · list_resources · read_resource 가 실재하며, 이 머신의
+  // 실물 설정에 이미 사용자 서버 4개가 등록돼 있었다. 러너의
+  // reconcileAgyMcpServers 가 승인된 서버를 실행 단위로 더하고 걷는다.
+  antigravity: {
+    delivery: "config-reconcile",
+    extraTransports: ["http", "sse"],
+    evidence:
+      "probed 2026-08-18 (agy 1.1.14): a server added to ~/.gemini/config/mcp_config.json received initialize/tools/list at run start; electron/runtime/antigravity.ts reconcileAgyMcpServers stages approved servers per run (command and serverUrl forms, matching the live config's own entries)",
+  },
   // byok runners talk to a provider HTTP API directly (electron/runtime/byok.ts
   // never reads mcpConfigPath) and have no tool loop of their own. When they
   // grow one, this row — not a new hand-written list — is what changes.

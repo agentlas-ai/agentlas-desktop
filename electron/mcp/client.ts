@@ -2084,7 +2084,17 @@ export async function runMcpInvocation(
   // the capability decision.
   const oneSoloTurn = oneTeamExecutionPolicy === "solo_locked";
   const workforceOwnsCapabilityChoice = Boolean(oneTeamExecutionPolicy) && !oneSoloTurn;
-  if (runtimeCanUseMcp && !req.agentAppMode && !workforceOwnsCapabilityChoice && canWrite && !explicitWorkforceGoal) {
+  /*
+   * ★읽기 실행도 MCP 를 받는다 — 오너 결정 2026-08-18.
+   *
+   * 예전에는 `canWrite` 가 이 관문에 걸려 있어 읽기 권한 실행은 MCP 설정 자체를 받지
+   * 못했다 — 브라우저 조회·시간 조회·온톨로지 읽기처럼 프로젝트 파일을 건드리지 않는
+   * 도구까지 전부. "읽기"는 **내 파일을 바꾸지 마라**는 뜻이지 **조회 도구를 쓰지
+   * 마라**가 아니다(2026-08-09 같은 병의 그래프 판이 이미 이 구분으로 수리됐다).
+   * 파일·셸 경계는 각 러너의 권한 플래그(claude READ_ONLY_DENIED_TOOLS 등)가 계속
+   * 지키고, 여기서는 승인된 MCP 서버만 전달한다.
+   */
+  if (runtimeCanUseMcp && !req.agentAppMode && !workforceOwnsCapabilityChoice && !explicitWorkforceGoal) {
     try {
       const autoSelectInput = {
         userPrompt: effectiveUserPrompt,

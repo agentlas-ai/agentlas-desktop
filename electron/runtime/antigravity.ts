@@ -5,6 +5,7 @@ import { StringDecoder } from "node:string_decoder";
 import os from "node:os";
 import fs from "node:fs/promises";
 import { rmSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult, RunnerFailure } from "./runner";
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, wrapSystemPrompt } from "./runner";
@@ -407,6 +408,125 @@ export function antigravityExitFailure(
   return refusal ? { kind: refusal.kind, message: refusal.message, runtime, source: "heuristic" } : undefined;
 }
 
+/**
+ * ★agy MCP 설정 실물 경로 — 실측 2026-08-18 (agy 1.1.14).
+ *
+ * 오랫동안 이 러너에는 MCP 배선이 없었고, shared/runtime-mcp.ts 는 "antigravity 는
+ * MCP 표면이 없다"고 적어 두었다. 그 근거가 반증됐다: `~/.gemini/config/mcp_config.json`
+ * 에 등록한 프로브 서버가 실행 시작 시 initialize → notifications/initialized →
+ * server/discover → tools/list 를 받았다(프로브 서버의 수신 로그로 확인). agy 의 내장
+ * 도구 목록에도 call_mcp_tool · list_resources · read_resource 가 실재한다.
+ */
+export function agyMcpConfigPath(home = os.homedir()): string {
+  return path.join(home, ".gemini", "config", "mcp_config.json");
+}
+
+interface AgyMcpServerEntry {
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  /** agy 의 URL 형 필드명 — 실물 설정의 lazyweb 항목이 이 모양이다. */
+  serverUrl?: string;
+  headers?: Record<string, string>;
+  [key: string]: unknown;
+}
+
+/**
+ * 이 실행이 승인받은 MCP 서버들을 agy 전역 설정에 **더하고**, 실행이 끝나면 우리가
+ * 더한 키만 되돌린다 — grok 러너의 `grok mcp add/remove` 리컨실과 같은 계약이다.
+ *
+ * 규칙:
+ * - 이미 있는 키는 절대 건드리지 않는다(사용자 자신의 서버·동시 실행의 서버).
+ *   cleanup 도 우리가 더한 키만 지운다. 파일을 백업으로 통째 되돌리지 않는 이유:
+ *   실행 중 다른 프로세스(안티그래비티 데스크탑 앱 포함)가 파일을 고칠 수 있다.
+ * - 전역 파일이 깨진 JSON 이면 **덮어쓰지 않는다** — 사용자 설정을 지키는 쪽이
+ *   이 실행에 도구를 주는 것보다 우선이고, 그 사실을 상태줄로 말한다(정직한 강등).
+ * - 동시 agy 실행 둘이 같은 키를 원하는 짧은 경합은 grok 리컨실과 동일하게 남는다.
+ */
+async function reconcileAgyMcpServers(
+  mcpConfigPath: string | undefined,
+  onStatus: (message: string) => void,
+): Promise<{ cleanup: () => Promise<void> }> {
+  const noop = { cleanup: async () => {} };
+  if (!mcpConfigPath) return noop;
+  let requested: { mcpServers?: Record<string, { command?: string; args?: string[]; env?: Record<string, string>; url?: string; headers?: Record<string, string> }> };
+  try {
+    requested = JSON.parse(await fs.readFile(mcpConfigPath, "utf8"));
+  } catch {
+    return noop;
+  }
+  const entries = Object.entries(requested.mcpServers ?? {});
+  if (entries.length === 0) return noop;
+
+  const globalPath = agyMcpConfigPath();
+  let parsed: { mcpServers?: Record<string, AgyMcpServerEntry>; [key: string]: unknown };
+  try {
+    parsed = JSON.parse(await fs.readFile(globalPath, "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      parsed = { mcpServers: {} };
+    } else {
+      onStatus("antigravity: existing mcp_config.json is unreadable — running without MCP tools to protect it");
+      return noop;
+    }
+  }
+  if (!parsed.mcpServers || typeof parsed.mcpServers !== "object") parsed.mcpServers = {};
+
+  const writeGlobal = async (value: typeof parsed): Promise<void> => {
+    // 임시 파일 + rename — 시작 중인 다른 agy 가 반쯤 쓰인 파일을 읽지 않게 한다.
+    const tmp = `${globalPath}.agentlas-${process.pid}-${randomUUID()}.tmp`;
+    await fs.mkdir(path.dirname(globalPath), { recursive: true });
+    await fs.writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    await fs.rename(tmp, globalPath);
+  };
+
+  const added: string[] = [];
+  for (const [key, server] of entries) {
+    if (parsed.mcpServers[key]) continue; // 실물 우선 — 우리 것이 아니므로 소유하지 않는다.
+    if (server.command) {
+      parsed.mcpServers[key] = {
+        command: server.command,
+        ...(server.args?.length ? { args: server.args } : {}),
+        ...(server.env && Object.keys(server.env).length ? { env: server.env } : {}),
+      };
+    } else if (server.url) {
+      parsed.mcpServers[key] = {
+        serverUrl: server.url,
+        ...(server.headers && Object.keys(server.headers).length ? { headers: server.headers } : {}),
+      };
+    } else {
+      continue;
+    }
+    added.push(key);
+  }
+  if (added.length === 0) return noop;
+  try {
+    await writeGlobal(parsed);
+  } catch (error) {
+    onStatus(`antigravity: could not stage MCP servers (${error instanceof Error ? error.message : String(error)}) — running without MCP tools`);
+    return noop;
+  }
+  return {
+    cleanup: async () => {
+      try {
+        // 실행 중 남이 고쳤을 수 있으니 다시 읽고, 우리가 더한 키만 걷어낸다.
+        const current = JSON.parse(await fs.readFile(globalPath, "utf8")) as typeof parsed;
+        if (!current.mcpServers || typeof current.mcpServers !== "object") return;
+        let dirty = false;
+        for (const key of added) {
+          if (current.mcpServers[key]) {
+            delete current.mcpServers[key];
+            dirty = true;
+          }
+        }
+        if (dirty) await writeGlobal(current);
+      } catch (error) {
+        console.error("[antigravity] mcp cleanup failed:", error);
+      }
+    },
+  };
+}
+
 async function runPreparedAntigravity(
   req: RunnerRequest,
   events: RunnerEvents,
@@ -544,6 +664,21 @@ async function runPreparedAntigravity(
     }
   };
 
+  /*
+   * ★MCP 서버 전달 — 승인된 서버를 agy 전역 설정에 리컨실한다(위 reconcileAgyMcpServers).
+   * 도구가 닫힌 읽기 실행에는 붙이지 않는다: agy 헤드리스는 권한 플래그 없이 모든 도구
+   * 호출을 자동 거부하므로, 서버를 붙여 봐야 "가진 척"만 된다(거짓 표시 금지).
+   */
+  const mcpReconcile = agyToolsAllowed
+    ? await reconcileAgyMcpServers(req.mcpConfigPath, events.onStatus)
+    : { cleanup: async () => {} };
+  try {
+    return await runAgyProcess();
+  } finally {
+    await mcpReconcile.cleanup();
+  }
+
+  function runAgyProcess(): Promise<RunnerResult> {
   return new Promise<RunnerResult>((resolve, reject) => {
     // Antigravity는 빈 prompt를 거부하므로 긴 요청만 private 파일 bootstrap으로 우회한다.
     const env: NodeJS.ProcessEnv = { ...(req.env ?? process.env), GEMINI_CLI_TRUST_WORKSPACE: "true" };
@@ -752,6 +887,7 @@ async function runPreparedAntigravity(
       }
     });
   });
+  }
 };
 
 export const runAntigravity: Runner = async (

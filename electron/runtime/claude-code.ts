@@ -552,13 +552,18 @@ export const runClaudeCode: Runner = async (
   const isolatedMcpArgs = runReq.isolatedMcpConfig
     ? ["--setting-sources", "", "--strict-mcp-config"]
     : [];
-  // write/full 권한이면 헤드리스에서 권한 프롬프트로 막히지 않도록 MCP 툴을 미리 허용.
+  /*
+   * 헤드리스에서 권한 프롬프트로 막히지 않도록 승인된 MCP 툴을 미리 허용한다.
+   * ★읽기 실행 포함 — 오너 결정 2026-08-18. 읽기의 경계는 위 READ_ONLY_DENIED_TOOLS
+   * (파일 변경·셸)이 이름으로 지키고, MCP 서버는 우리 승인 관문을 이미 통과한 것만
+   * 이 목록에 온다. 예전엔 write/full 전용이라, 읽기 실행이 MCP 설정은 받았는데
+   * 모든 호출이 승인 대기로 자동 거부되는 반배선 상태가 됐다.
+   */
   const mcpPreAllowed =
     runReq.mcpConfigPath &&
     runReq.mcpAllowedTools &&
     runReq.mcpAllowedTools.length > 0 &&
-    ((!runReq.untrustedNoTools && (req.permission === "write" || req.permission === "full")) ||
-      hasExactUntrustedMcpGrant)
+    (!runReq.untrustedNoTools || hasExactUntrustedMcpGrant)
       ? runReq.mcpAllowedTools
       : [];
   /*

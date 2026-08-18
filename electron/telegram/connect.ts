@@ -1,4 +1,5 @@
 import { stripAgentControlBlocks } from "../../shared/agent-control-blocks";
+import { flattenAskFences } from "../../shared/ask-fence-flatten";
 import { isPrimarilyKorean, preferredLocaleFromText } from "../../shared/detect-language";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
@@ -2233,71 +2234,14 @@ async function ensureBindingChat(binding: TelegramBindingRow) {
 // multimodal-setup.ts), 엔진(electron/mcp/client.ts)은 이 두 fence를 raw로 남긴 채
 // finalText를 반환한다. 텔레그램엔 그 UI가 없어 원문 마커가 그대로 노출됐다 —
 // 여기서 사람이 읽을 수 있는 텍스트로 평문화한다. fence 포맷은 ask-question.ts와 동일.
-const TG_ASK_OPEN = "<<agentlas-ask>>";
-const TG_ASK_CLOSE = "<</agentlas-ask>>";
 const TG_MULTIMODAL_MARKER = "<<agentlas-multimodal-setup>>";
-
-function flattenAskFenceBody(body: string, replyLocale: "ko" | "en"): string | null {
-  const stripped = body.replace(/^```(?:json)?\s*/i, "").replace(/```$/i, "").trim();
-  let obj: unknown;
-  try {
-    obj = JSON.parse(stripped);
-  } catch {
-    return null;
-  }
-  if (!obj || typeof obj !== "object") return null;
-  const o = obj as Record<string, unknown>;
-  if (typeof o.question !== "string") return null;
-  const lines: string[] = [o.question.trim()];
-  const optionsRaw = Array.isArray(o.options) ? o.options : [];
-  let n = 0;
-  for (const opt of optionsRaw) {
-    if (!opt || typeof opt !== "object") continue;
-    const ob = opt as Record<string, unknown>;
-    if (typeof ob.label !== "string") continue;
-    const desc =
-      typeof ob.description === "string" && ob.description.trim() ? ` — ${ob.description.trim()}` : "";
-    lines.push(`${n + 1}. ${ob.label.trim()}${desc}`);
-    n++;
-  }
-  if (n > 0) {
-    lines.push(
-      replyLocale === "en"
-        ? "\nReply with the number (or the option) you want."
-        : "\n원하는 번호(또는 항목)를 답장으로 보내주세요.",
-    );
-  }
-  return lines.join("\n");
-}
 
 /** 텔레그램 아웃바운드 텍스트의 ask/멀티모달 sentinel fence를 평문화·제거한다. */
 /** 내보내는 이유는 하나 — 게이트가 **실제 함수**로 계약을 재기 위해서다.
- *  소스를 문자열로 뒤져 호출을 확인하는 게이트는 구현 문장을 못박을 뿐이다. */
+ *  소스를 문자열로 뒤져 호출을 확인하는 게이트는 구현 문장을 못박을 뿐이다.
+ *  평문화 로직 자체는 shared/ask-fence-flatten.ts 한 벌이 소유한다(모바일과 공유). */
 export function flattenSentinelsForTelegram(text: string, replyLocale: "ko" | "en"): string {
-  let out = text;
-  if (out.includes(TG_ASK_OPEN)) {
-    let result = "";
-    let rest = out;
-    for (;;) {
-      const open = rest.indexOf(TG_ASK_OPEN);
-      if (open < 0) {
-        result += rest;
-        break;
-      }
-      result += rest.slice(0, open);
-      const afterOpen = rest.slice(open + TG_ASK_OPEN.length);
-      const close = afterOpen.indexOf(TG_ASK_CLOSE);
-      if (close < 0) {
-        // 닫는 fence가 없으면(스트리밍 잔재) 열림 마커만 제거하고 본문은 보존
-        result += afterOpen;
-        break;
-      }
-      const flat = flattenAskFenceBody(afterOpen.slice(0, close), replyLocale);
-      result += flat ?? ""; // 파싱 실패 시 fence 통째 제거(raw 노출 방지)
-      rest = afterOpen.slice(close + TG_ASK_CLOSE.length);
-    }
-    out = result;
-  }
+  let out = flattenAskFences(text, replyLocale);
   if (out.includes(TG_MULTIMODAL_MARKER)) {
     out = out.split(TG_MULTIMODAL_MARKER).join("");
   }
