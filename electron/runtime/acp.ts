@@ -16,12 +16,26 @@
 // never asks) — read-only runs still refuse mutating tools when asked, but the
 // real gate lives elsewhere.
 import type { ChildProcess } from "node:child_process";
-import { AcpConnection, ACP_PROTOCOL_VERSION, AcpRpcError, chooseAuthMethod, modelOptionsFromNewSession } from "./acp-protocol";
+import fs from "node:fs/promises";
+import { createHash } from "node:crypto";
+import {
+  AcpConnection,
+  ACP_PROTOCOL_VERSION,
+  AcpRpcError,
+  acpMcpServersFromConfig,
+  chooseAuthMethod,
+  modeOptionsFromNewSession,
+  modelOptionsFromNewSession,
+  type AcpMcpTranslation,
+} from "./acp-protocol";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 import { ensureChildCloseAfterExit, startCliHeartbeat, wrapSystemPrompt } from "./runner";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, spawnCli, trackRunChild } from "./exec";
 import { pickLocale, tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
+import { CLI_HISTORY_CONTEXT_TOKENS, composeResumeTurnPrompt, renderConversationContext } from "./continuity";
+import { stageCliImageAttachments } from "./image-attachments";
+import { getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions";
 import { classifyDiscovery, type DiscoveryOutcome } from "../../shared/model-discovery";
 
 /** How to spawn an ACP agent. Adding a runtime = one row (mirrors contracts/runtime-registry.json). */
@@ -45,6 +59,14 @@ export const ACP_AGENTS: Record<string, AcpAgentSpec> = {
   // 더 늘린다 — 내장 목록에서 제거했다. 사용자가 원하면 설정의 ACP 프로필로 직접
   // 등록할 수 있다(그 자리는 "사용자가 추가한 것"이지 우리가 제공하는 것이 아니다).
   "github-copilot-cli": { id: "github-copilot-cli", label: "GitHub Copilot CLI (ACP)", command: "npx", args: ["-y", "@github/copilot@1.0.80", "--acp"], registryId: "github-copilot-cli" },
+  // gemini(레지스트리에 `gemini --acp` 로 선언돼 있다)는 일부러 내장하지 않는다.
+  // 실측 2026-08-18 (gemini-cli 0.55.1): initialize 는 loadSession/image/http+sse 를
+  // 전부 광고하지만, 개인 Google 계정의 session/new 가 "Gemini Code Assist for
+  // individuals 는 더 이상 지원하지 않는다 — Antigravity 로 옮겨라"로 거절한다.
+  // 그 계정의 답은 이미 있는 antigravity 런타임이고, 내장 목록을 늘리면 구독 패널·
+  // 대시보드(runtime-surface-parity 계약)에도 연결 버튼이 생겨 대다수에게 실패하는
+  // 길을 화면에 새로 여는 셈이 된다. Vertex/유료 계정용으로 열려면 오너 결정으로
+  // ACP_KIND_BUILTINS·SUBSCRIPTION_RUNTIMES·설정/대시보드 표 세 곳을 함께 고칠 것.
 };
 
 /** Runtimes whose pickRunner path prefers ACP over the legacy hand driver. */
@@ -107,6 +129,12 @@ class AcpSessionClient {
   private readonly tools = new Map<string, ToolState>();
   private thinking = false;
   private thinkingStartedAt = 0;
+  /**
+   * ★session/load 는 지난 대화 전체를 session/update 로 다시 흘려보낸다(스펙: 클라이언트가
+   * UI를 복원하라는 뜻). 그걸 그대로 받으면 이번 턴의 답 앞에 옛 답변이 통째로 붙고 옛
+   * 도구 호출이 다시 보고된다 — 재생 구간은 통째로 무시하고 세션 상태만 얻는다.
+   */
+  private replaying = false;
 
   constructor(
     private readonly events: RunnerEvents,
@@ -115,7 +143,17 @@ class AcpSessionClient {
     private readonly approval: { runtime: string; sessionKey: string; cwd?: string; chatId?: string; unattended?: boolean } = { runtime: "acp", sessionKey: "acp" },
   ) {}
 
+  /** Everything between these two calls is history replay, not this turn. */
+  beginReplay(): void { this.replaying = true; }
+  endReplay(): void {
+    this.replaying = false;
+    this.text = "";
+    this.tools.clear();
+    this.thinking = false;
+  }
+
   onUpdate(params: any): void {
+    if (this.replaying) return;
     const update = params?.update ?? params;
     switch (update?.sessionUpdate) {
       case "agent_message_chunk": {
@@ -378,6 +416,53 @@ export function resetAcpProbeCacheForTests(): void {
   acpProbeCache.clear();
 }
 
+/**
+ * Session-mode policy. Mode ids are vendor words, so match on id AND name and
+ * only send a mode we actually recognise — guessing into an unknown mode could
+ * silently widen a read-only run. `read` is where the product's plan intent
+ * lives: plan/ask modes are exactly "look, propose, do not change".
+ */
+const MODE_PREFERENCE: Record<"read" | "write" | "full", RegExp[]> = {
+  read: [/^plan(ning)?$/i, /^(ask|chat|review)$/i, /^read[-_ ]?only$/i, /plan/i, /read[-_ ]?only/i, /\bask\b/i],
+  write: [/^(code|edit|build|write|agent|default)$/i, /accept[-_ ]?edits/i, /^auto$/i],
+  full: [/bypass/i, /yolo/i, /full[-_ ]?access/i, /danger/i, /^(code|edit|build|write|agent|default)$/i],
+};
+
+/** Which advertised mode does this run's permission ask for? undefined = leave the agent's default. */
+export function chooseAcpModeId(
+  permission: RunnerRequest["permission"],
+  modes: Array<{ id: string; name?: string }>,
+): string | undefined {
+  if (modes.length === 0) return undefined;
+  const key: "read" | "write" | "full" = permission === "write" || permission === "full" ? permission : "read";
+  for (const rule of MODE_PREFERENCE[key]) {
+    const hit = modes.find((m) => rule.test(m.id) || (m.name ? rule.test(m.name) : false));
+    if (hit) return hit.id;
+  }
+  return undefined;
+}
+
+/**
+ * Runtime-session key. ACP session ids are NOT interchangeable with the legacy
+ * driver's ids (`grok --resume <id>` cannot load an ACP session), so the two
+ * paths must never read each other's row — `AGENTLAS_DISABLE_ACP` flips the
+ * runner mid-conversation and would otherwise resume the wrong kind of id.
+ */
+export function acpSessionKind(specId: string): string {
+  return `acp:${specId}`;
+}
+
+/** Our MCP config file (or Main's inline JSON for restricted Agent Apps). */
+async function readMcpConfig(mcpConfigPath: string | undefined): Promise<unknown | null> {
+  const raw = mcpConfigPath?.trim();
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw.startsWith("{") ? raw : await fs.readFile(raw, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
 /** Runner factory — one Runner per ACP agent spec. */
 export function createAcpRunner(spec: AcpAgentSpec): Runner {
   return async (req: RunnerRequest, events: RunnerEvents): Promise<RunnerResult> => {
@@ -391,6 +476,25 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       chatId: req.chatId,
       unattended: req.unattended === true,
     });
+    const sessionKind = acpSessionKind(spec.id);
+    // 세션 정체성 — 모델/시스템 프롬프트가 바뀌면 이어갈 세션도 달라진다(형제 러너와 동일 규칙).
+    const fingerprint = req.chatId
+      ? createHash("sha256")
+        .update("acp-session-v1\0")
+        .update(spec.id)
+        .update("\0")
+        .update(req.sessionFingerprintSeed ?? req.systemPrompt ?? "")
+        .update("\0")
+        .update(req.model ?? "")
+        .update("\0")
+        // 권한은 세션 모드로 굳는다(session/set_mode 는 새 세션에서만 고를 수 있다).
+        // 권한이 바뀌면 지문이 달라져 그 권한에 맞는 새 세션이 열린다.
+        .update(req.permission ?? "")
+        .digest("hex")
+      : null;
+    const savedSession = req.chatId ? getRuntimeSession(req.chatId, sessionKind) : null;
+    const storedSessionId = savedSession && fingerprint && savedSession.fingerprint === fingerprint ? savedSession.sessionId : null;
+    const resumeSessionId = req.runtimeSessionId ?? storedSessionId;
     let session: Session | null = null;
     const onAbort = () => { if (session) killCliTree(session.child); };
     req.signal?.addEventListener("abort", onAbort, { once: true });
@@ -410,17 +514,139 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
           },
         },
       });
-      const created = await session.conn.request("session/new", { cwd, mcpServers: [] }, { timeoutMs: 60_000, signal: req.signal });
-      const sessionId = String(created?.sessionId ?? "");
-      if (!sessionId) throw new Error("ACP session/new returned no sessionId");
+      /*
+       * ★MCP — 예전에는 이 자리가 항상 `mcpServers: []` 였다.
+       * 그래서 사용자가 승인한 MCP 서버는 ACP 경로(=cursor·grok·kimi 의 실제 실행 경로)로
+       * 단 하나도 전달되지 않았고, "도구가 붙었다"고 알고 시작한 실행이 도구 0개로 돌았다.
+       * 전송이 안 되는 서버는 조용히 버리지 않고 상태줄로 말한다.
+       */
+      const agentCaps = session.init?.agentCapabilities ?? {};
+      const mcp: AcpMcpTranslation = acpMcpServersFromConfig(
+        await readMcpConfig(req.mcpConfigPath),
+        agentCaps.mcpCapabilities ?? null,
+      );
+      if (mcp.servers.length > 0) {
+        events.onStatus(locale === "ko" ? `MCP 서버 ${mcp.servers.length}개 연결됨` : `${mcp.servers.length} MCP server(s) attached`);
+      }
+      if (mcp.unsupported.length > 0) {
+        const names = mcp.unsupported.map((s) => `${s.name}(${s.transport})`).join(", ");
+        events.onStatus(locale === "ko"
+          ? `이 에이전트가 지원하지 않는 MCP 전송이라 제외했습니다: ${names}`
+          : `Skipped MCP servers whose transport this agent does not support: ${names}`);
+      }
+      if (mcp.malformed.length > 0) {
+        events.onStatus(locale === "ko"
+          ? `command 도 url 도 없어 해석하지 못한 MCP 항목을 제외했습니다: ${mcp.malformed.join(", ")}`
+          : `Skipped MCP entries with neither command nor url: ${mcp.malformed.join(", ")}`);
+      }
+
+      /*
+       * ★세션 — 예전에는 sessionId 를 받아만 두고 다음 턴에 쓰지 않아, 매 턴이 차가운
+       * 새 세션이었다(히스토리도 안 실었으니 사실상 기억 없는 런타임이었다).
+       * loadSession 을 광고하는 에이전트만 session/load 로 이어가고, 아니면 새 세션에
+       * 대화 기록을 다시 실어 보낸다 — 없는 기능을 있는 척하지 않는다.
+       */
+      const canLoadSession = agentCaps.loadSession === true;
+      let sessionId = "";
+      let resumed = false;
+      let created: any = null;
+      if (resumeSessionId && canLoadSession) {
+        client.beginReplay();
+        try {
+          await session.conn.request(
+            "session/load",
+            { sessionId: resumeSessionId, cwd, mcpServers: mcp.servers },
+            { timeoutMs: 120_000, signal: req.signal },
+          );
+          sessionId = resumeSessionId;
+          resumed = true;
+          events.onStatus(`[runtime-session] resumed kind=${sessionKind}`);
+        } catch (err) {
+          if (req.signal?.aborted) throw abortReasonError(req);
+          events.onStatus(`[runtime-session] resume_failed kind=${sessionKind}`);
+          if (req.unattended) {
+            throw new Error(`Automation runtime session resume failed for ${sessionKind}; refusing to create a fresh ACP session.`);
+          }
+        } finally {
+          client.endReplay();
+        }
+      } else if (resumeSessionId) {
+        events.onStatus(locale === "ko"
+          ? "이 런타임은 세션 복원을 지원하지 않아 대화 기록을 다시 실어 새 세션으로 진행합니다"
+          : "This runtime does not advertise session resume — starting a fresh session with the conversation re-attached");
+      }
+      if (!sessionId) {
+        created = await session.conn.request("session/new", { cwd, mcpServers: mcp.servers }, { timeoutMs: 60_000, signal: req.signal });
+        sessionId = String(created?.sessionId ?? "");
+        if (!sessionId) throw new Error("ACP session/new returned no sessionId");
+        events.onStatus(`[runtime-session] created kind=${sessionKind}`);
+      }
       if (req.model) {
         // Best effort: not every agent implements session/set_model.
         try { await session.conn.request("session/set_model", { sessionId, modelId: req.model }, { timeoutMs: 10_000 }); } catch { /* optional */ }
       }
-      const systemPrompt = wrapSystemPrompt(req.systemPrompt, locale, req.permission, req.userPrompt);
-      const promptText = [systemPrompt, req.turnContext, req.userPrompt].filter(Boolean).join("\n\n");
-      const result = await session.conn.request("session/prompt", { sessionId, prompt: [{ type: "text", text: promptText }] }, { signal: req.signal });
+      /*
+       * ★모드 — plan 모드는 ACP 로는 고를 방법이 아예 없었다(session/set_mode 미호출).
+       * 모드는 세션을 만들 때 광고되므로 새 세션에서만 고른다. resume 턴에서는 세션이
+       * 이미 그 모드를 갖고 있고, 권한이 바뀌면 지문이 달라져 새 세션이 열린다.
+       */
+      const modeId = created ? chooseAcpModeId(req.permission, modeOptionsFromNewSession(created)) : undefined;
+      if (modeId) {
+        try {
+          await session.conn.request("session/set_mode", { sessionId, modeId }, { timeoutMs: 10_000 });
+          events.onStatus(locale === "ko" ? `세션 모드: ${modeId}` : `Session mode: ${modeId}`);
+        } catch { /* optional — the permission arbiter is still the live gate */ }
+      }
+
+      /*
+       * ★이미지 — RunnerRequest.images 는 통째로 버려지고 있었다. promptCapabilities.image
+       * 를 광고하는 에이전트에는 ACP 이미지 블록을 그대로 싣고, 아니면 기존 산문 폴백
+       * (파일로 저장하고 경로를 알려주는 길)을 쓴다.
+       */
+      const images = req.images ?? [];
+      const imageBlocks: Array<Record<string, unknown>> = [];
+      let userPrompt = req.userPrompt;
+      if (images.length > 0) {
+        if (agentCaps.promptCapabilities?.image === true) {
+          for (const image of images) imageBlocks.push({ type: "image", mimeType: image.mediaType, data: image.data });
+          events.onStatus(locale === "ko"
+            ? `첨부 이미지 ${images.length}개를 그대로 전송합니다`
+            : `Sending ${images.length} attached image(s) inline`);
+        } else {
+          const staged = await stageCliImageAttachments({
+            userPrompt: req.userPrompt,
+            images,
+            cwd,
+            locale,
+            chatId: req.chatId,
+            runtimeSessionId: resumeSessionId ?? undefined,
+          });
+          userPrompt = staged.userPrompt;
+          events.onStatus(tStatus(locale, "cliImageReady", {
+            backend: req.backendLabel || spec.label,
+            count: staged.images.length,
+          }));
+        }
+      }
+
+      const promptText = resumed
+        ? composeResumeTurnPrompt(userPrompt, req.turnContext, locale)
+        : [
+          wrapSystemPrompt(req.systemPrompt, locale, req.permission, userPrompt),
+          req.history.length > 0 ? renderConversationContext(req.history, locale, CLI_HISTORY_CONTEXT_TOKENS).block : "",
+          req.turnContext,
+          userPrompt,
+        ].filter(Boolean).join("\n\n");
+      const result = await session.conn.request(
+        "session/prompt",
+        { sessionId, prompt: [{ type: "text", text: promptText }, ...imageBlocks] },
+        { signal: req.signal },
+      );
       client.finish();
+      // 세션은 이제 실재한다 — 거절/빈 답이어도 다음 턴이 이어갈 수 있게 먼저 저장한다.
+      if (req.chatId && fingerprint && !saveRuntimeSession(req.chatId, sessionKind, sessionId, fingerprint)) {
+        events.onStatus(`[runtime-session] store_failed kind=${sessionKind}`);
+      }
       if (req.signal?.aborted) throw abortReasonError(req);
       const stopReason = String(result?.stopReason ?? "");
       const text = client.text.trim();

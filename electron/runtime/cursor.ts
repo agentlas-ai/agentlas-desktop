@@ -1,5 +1,18 @@
 // Cursor Agent CLI runtime. The official headless contract is
 // `cursor-agent --print --output-format stream-json --model <model> <prompt>`.
+//
+// ★이 파일은 **기본 경로가 아니다**. cursor 는 ACP_PREFERRED_KINDS 라서 실제 실행은
+// electron/runtime/acp.ts 를 지나고, 여기는 `AGENTLAS_DISABLE_ACP` 탈출구에서만 돈다.
+// 그래서 세션 연속성(`--resume`/`create-chat`)은 여기가 아니라 ACP 쪽에 세웠다
+// (session/load). 이 러너는 이미 매 턴 히스토리를 프롬프트로 재주입하므로 기억을
+// 잃지는 않는다 — 남는 차이는 효율뿐이고, 그걸 위해 같은 연속성 계약을 두 벌로
+// 늘리면 두 곳이 갈라진다.
+//
+// `--mode ask`(읽기 전용)는 아래 거절을 풀지 못한다: 저 거절은 "읽기 전용"이 아니라
+// **도구 0개**(untrustedNoTools)와 **릴리스 검증된 파일시스템 경계**
+// (restrictedReadBoundary)를 요구한다. ask 모드는 읽기 도구를 그대로 갖고 있어
+// 둘 중 어느 것도 만족시키지 못한다. 권한→모드 매핑은 ACP 경로의 session/set_mode 가
+// 맡는다(read → plan/ask).
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import os from "node:os";

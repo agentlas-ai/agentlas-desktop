@@ -20,6 +20,10 @@ export interface RuntimeSession {
   updatedAt: string | null;
   /** Codex resume 스트림이 마지막으로 보고한 누적 output token 수. */
   reportedOutputTokens: number | null;
+  /** 같은 스트림이 보고한 누적 input token 수(캐시 읽기 포함한 전체). */
+  reportedInputTokens: number | null;
+  /** 그중 캐시에서 읽은 몫의 누적치 — 입력의 부분집합이라 합산하지 않는다. */
+  reportedCachedInputTokens: number | null;
 }
 
 const memSessions = new Map<string, RuntimeSession>();
@@ -31,10 +35,17 @@ export function getRuntimeSession(chatId: string, kind: string): RuntimeSession 
   try {
     const row = getDb()
       .prepare(
-        "SELECT session_id, fingerprint, updated_at, reported_output_tokens FROM chat_runtime_sessions WHERE chat_id = ? AND kind = ?",
+        "SELECT session_id, fingerprint, updated_at, reported_output_tokens, reported_input_tokens, reported_cached_input_tokens FROM chat_runtime_sessions WHERE chat_id = ? AND kind = ?",
       )
       .get(chatId, kind) as
-        | { session_id: string; fingerprint: string; updated_at: string | null; reported_output_tokens?: number | null }
+        | {
+          session_id: string;
+          fingerprint: string;
+          updated_at: string | null;
+          reported_output_tokens?: number | null;
+          reported_input_tokens?: number | null;
+          reported_cached_input_tokens?: number | null;
+        }
         | undefined;
     if (!row) return null;
     const resolved = {
@@ -42,6 +53,8 @@ export function getRuntimeSession(chatId: string, kind: string): RuntimeSession 
       fingerprint: row.fingerprint,
       updatedAt: row.updated_at ?? null,
       reportedOutputTokens: Number.isInteger(row.reported_output_tokens) ? row.reported_output_tokens! : null,
+      reportedInputTokens: Number.isInteger(row.reported_input_tokens) ? row.reported_input_tokens! : null,
+      reportedCachedInputTokens: Number.isInteger(row.reported_cached_input_tokens) ? row.reported_cached_input_tokens! : null,
     };
     // 첫 DB 읽기도 메모리에 승격한다. 이후 DB가 잠기거나 일시 실패해도 같은
     // 프로세스의 다음 턴은 이미 확인한 세션을 잃지 않는다.
@@ -58,24 +71,34 @@ export function saveRuntimeSession(
   kind: string,
   sessionId: string,
   fingerprint: string,
-  options?: { reportedOutputTokens?: number | null },
+  options?: { reportedOutputTokens?: number | null; reportedInputTokens?: number | null; reportedCachedInputTokens?: number | null },
 ): boolean {
   const now = new Date().toISOString();
   const previous = memSessions.get(memKey(chatId, kind)) ?? null;
-  const reportedOutputTokens = options?.reportedOutputTokens ?? (
-    previous?.sessionId === sessionId && previous.fingerprint === fingerprint
-      ? previous.reportedOutputTokens
-      : null
-  );
+  const sameSession = previous?.sessionId === sessionId && previous.fingerprint === fingerprint;
+  const carry = (
+    next: number | null | undefined,
+    kept: number | null | undefined,
+  ): number | null => next ?? (sameSession ? kept ?? null : null);
+  const reportedOutputTokens = carry(options?.reportedOutputTokens, previous?.reportedOutputTokens);
+  const reportedInputTokens = carry(options?.reportedInputTokens, previous?.reportedInputTokens);
+  const reportedCachedInputTokens = carry(options?.reportedCachedInputTokens, previous?.reportedCachedInputTokens);
   // 메모리 먼저 — DB가 실패해도 이 프로세스 안에서는 세션이 절대 유실되지 않는다.
-  memSessions.set(memKey(chatId, kind), { sessionId, fingerprint, updatedAt: now, reportedOutputTokens });
+  memSessions.set(memKey(chatId, kind), {
+    sessionId,
+    fingerprint,
+    updatedAt: now,
+    reportedOutputTokens,
+    reportedInputTokens,
+    reportedCachedInputTokens,
+  });
   try {
     getDb()
       .prepare(
-        `INSERT OR REPLACE INTO chat_runtime_sessions(chat_id, kind, session_id, fingerprint, updated_at, reported_output_tokens)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT OR REPLACE INTO chat_runtime_sessions(chat_id, kind, session_id, fingerprint, updated_at, reported_output_tokens, reported_input_tokens, reported_cached_input_tokens)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(chatId, kind, sessionId, fingerprint, now, reportedOutputTokens);
+      .run(chatId, kind, sessionId, fingerprint, now, reportedOutputTokens, reportedInputTokens, reportedCachedInputTokens);
     return true;
   } catch {
     // false = 디스크 영속화 실패(재시작 시 유실 가능) — 호출자가 lifecycle receipt를 남긴다.

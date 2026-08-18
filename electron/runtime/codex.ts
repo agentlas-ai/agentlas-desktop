@@ -180,10 +180,51 @@ interface CodexRunResult {
   text: string;
   threadId: string | null;
   tokens?: number;
-  /** Provider's raw session-cumulative counter; never render this directly for resume turns. */
+  /** Provider's raw session-cumulative counters; never render these directly for resume turns. */
   reportedOutputTokens?: number;
+  reportedInputTokens?: number;
+  reportedCachedInputTokens?: number;
+  /** This turn's real usage (cumulative counters minus the session baseline). */
+  observedUsage?: { inputTokens: number; outputTokens: number };
   /** 스트림 표식(또는 exit0 휴리스틱)이 말한 실패 — 있으면 text는 답이 아니다. */
   failure?: RunnerFailure;
+}
+
+/**
+ * `turn.completed.usage` 는 스레드 누적치다(`codex exec resume` 실측: output 이
+ * 대화 전체 합계로 온다. 세 칸이 한 구조체이므로 input/cached 도 같은 성질이다).
+ * 이번 턴의 실제 사용량은 "지금 값 − 지난 턴 값"이고, 그 지난 값이 이 baseline 이다.
+ * 새 세션은 전부 0. 옛 행처럼 baseline 을 모르면 null 이고, 그때는 usage 를 지어내지
+ * 않고 비워 둔다 — 없는 것과 0 은 다르다.
+ */
+interface CodexUsageBaseline {
+  output: number | null;
+  input: number | null;
+  cachedInput: number | null;
+}
+
+/**
+ * 누적 카운터 한 칸에서 이번 턴 몫을 뽑는다 — 순수 함수(게이트가 직접 시험한다).
+ * baseline 을 모르면 null(=usage 를 비운다). 카운터가 줄었으면 누적의 연속일 수 없으므로
+ * (세션이 새로 시작됐다는 뜻) 보고값을 그대로 이번 턴 값으로 읽는다.
+ */
+export function deltaFromBaseline(reported: number | undefined, baseline: number | null): number | null {
+  if (reported == null || !Number.isFinite(reported) || reported < 0) return null;
+  if (baseline == null) return null;
+  return reported >= baseline ? reported - baseline : reported;
+}
+
+/** 다음 턴의 기준선이 될 원시 누적치. 이번 실행이 말하지 않은 칸은 저장 측이 이전 값을 유지한다. */
+function codexUsageCounters(run: CodexRunResult): {
+  reportedOutputTokens: number | null;
+  reportedInputTokens: number | null;
+  reportedCachedInputTokens: number | null;
+} {
+  return {
+    reportedOutputTokens: run.reportedOutputTokens ?? null,
+    reportedInputTokens: run.reportedInputTokens ?? null,
+    reportedCachedInputTokens: run.reportedCachedInputTokens ?? null,
+  };
 }
 
 /**
@@ -238,8 +279,9 @@ function runCodexProcess(
   stdinPayload: string,
   req: RunnerRequest,
   events: RunnerEvents,
-  reportedOutputTokenBaseline: number | null,
+  usageBaseline: CodexUsageBaseline,
 ): Promise<CodexRunResult> {
+  const reportedOutputTokenBaseline = usageBaseline.output;
   return new Promise((resolve, reject) => {
     let terminalFailure: RunnerFailure | null = null;
     let itemFailure: RunnerFailure | null = null;
@@ -270,6 +312,9 @@ function runCodexProcess(
     let threadId: string | null = null;
     let tokens: number | undefined;
     let reportedOutputTokens: number | undefined;
+    let reportedInputTokens: number | undefined;
+    let reportedCachedInputTokens: number | undefined;
+    let observedUsage: { inputTokens: number; outputTokens: number } | undefined;
     let stderr = "";
     let lastEmit = 0;
     let turnCompleted = false;
@@ -379,7 +424,7 @@ function runCodexProcess(
         exit_code?: number;
         status?: string;
       };
-      usage?: { output_tokens?: number };
+      usage?: { output_tokens?: number; input_tokens?: number; cached_input_tokens?: number };
     }): void => {
       const payload = record(ev.payload);
       if (ev.type === "response_item" && payload?.type === "custom_tool_call") {
@@ -507,6 +552,8 @@ function runCodexProcess(
       } else if (ev.type === "turn.completed") {
         closeThinking();
         turnCompleted = true;
+        if (ev.usage?.input_tokens != null) reportedInputTokens = ev.usage.input_tokens;
+        if (ev.usage?.cached_input_tokens != null) reportedCachedInputTokens = ev.usage.cached_input_tokens;
         if (ev.usage?.output_tokens != null) {
           reportedOutputTokens = ev.usage.output_tokens;
           // `codex exec resume` emits the lifetime total for its thread. Only
@@ -517,6 +564,26 @@ function runCodexProcess(
             ? reportedOutputTokens - reportedOutputTokenBaseline
             : Math.ceil(estChars / 4);
           events.onUsage?.(tokens);
+        }
+        /*
+         * ★영수증의 usage — 예전에는 output_tokens 하나만 읽고 input/cached 를 버려서
+         * observedUsage 가 아예 설정되지 않았고, #2 런타임의 모든 모델 할당 영수증이
+         * `usage: null` 로 남았다. 영수증 스키마는 입력·출력을 둘 다 요구하므로,
+         * 둘 다 이번 턴 값으로 확정될 때만 싣는다(추정치는 넣지 않는다).
+         *
+         * inputTokens 는 **모델이 실제로 본 문맥 전체**다. codex 의 input_tokens 는
+         * 이미 캐시 읽기를 포함한 총량이고 cached_input_tokens 는 그 부분집합이라
+         * 더하지 않는다(claude-code·byok 러너와 같은 규칙, 이중계상 금지).
+         */
+        const turnInput = deltaFromBaseline(reportedInputTokens, usageBaseline.input);
+        const turnOutput = deltaFromBaseline(reportedOutputTokens, usageBaseline.output);
+        if (turnInput != null && turnOutput != null) {
+          observedUsage = { inputTokens: turnInput, outputTokens: turnOutput };
+        }
+        const turnCached = deltaFromBaseline(reportedCachedInputTokens, usageBaseline.cachedInput);
+        if (turnInput != null && turnInput > 0 && turnCached != null) {
+          // 캐시 히트율은 비용 판단의 절반이다 — 영수증 칸이 없으니 상태줄로 남긴다(byok 러너와 동일).
+          events.onStatus(`[cache] read=${turnCached} fresh=${turnInput - turnCached} hit=${Math.round((turnCached / turnInput) * 100)}%`);
         }
       }
     };
@@ -585,6 +652,9 @@ function runCodexProcess(
         threadId,
         tokens,
         ...(reportedOutputTokens != null ? { reportedOutputTokens } : {}),
+        ...(reportedInputTokens != null ? { reportedInputTokens } : {}),
+        ...(reportedCachedInputTokens != null ? { reportedCachedInputTokens } : {}),
+        ...(observedUsage ? { observedUsage } : {}),
         ...(runnerFailure ? { failure: runnerFailure } : {}),
       });
     });
@@ -689,9 +759,22 @@ export const runCodex: Runner = async (
       ? existing.sessionId
       : null;
   const resumeSessionId = runReq.runtimeSessionId ?? storedSessionId;
-  const reportedOutputTokenBaseline = resumeSessionId && existing?.sessionId === resumeSessionId
-    ? existing.reportedOutputTokens
-    : 0;
+  /*
+   * 이 실행의 누적 카운터 기준선. 세 갈래다:
+   *   새 세션        → 0 (이번 턴이 곧 전부)
+   *   우리가 아는 재개 → 저장된 값(옛 행은 칸이 비어 null)
+   *   호출자가 들고 온 세션(Build 등) → 모른다 = null. 예전엔 여기에도 0을 써서
+   *     대화 전체 누적을 이번 턴 수치로 보고했다 — 모를 때는 비워 두는 쪽이 정직하다.
+   */
+  const usageBaseline: CodexUsageBaseline = !resumeSessionId
+    ? { output: 0, input: 0, cachedInput: 0 }
+    : existing?.sessionId === resumeSessionId
+      ? {
+        output: existing.reportedOutputTokens,
+        input: existing.reportedInputTokens,
+        cachedInput: existing.reportedCachedInputTokens,
+      }
+      : { output: null, input: null, cachedInput: null };
   const canResume = !!resumeSessionId;
   if (existing && fingerprint && existing.fingerprint !== fingerprint) {
     events.onStatus(`[runtime-session] fingerprint_changed kind=${KIND}`);
@@ -728,18 +811,18 @@ export const runCodex: Runner = async (
       ),
       runReq,
       events,
-      reportedOutputTokenBaseline,
+      usageBaseline,
     );
     if (runReq.signal?.aborted) {
       // 취소여도 스레드가 생겼으면 저장 → steering 메시지가 이 세션을 resume해 문맥 유지.
       if (runReq.chatId && fingerprint && r.threadId) {
-        saveRuntimeSession(runReq.chatId, KIND, r.threadId, fingerprint, { reportedOutputTokens: r.reportedOutputTokens ?? null });
+        saveRuntimeSession(runReq.chatId, KIND, r.threadId, fingerprint, codexUsageCounters(r));
       }
       throw new Error(tStatus(runReq.locale, "aborted"));
     }
     if (r.code === 0) {
       if (runReq.chatId && fingerprint && r.threadId) {
-        if (!saveRuntimeSession(runReq.chatId, KIND, r.threadId, fingerprint, { reportedOutputTokens: r.reportedOutputTokens ?? null })) {
+        if (!saveRuntimeSession(runReq.chatId, KIND, r.threadId, fingerprint, codexUsageCounters(r))) {
           events.onStatus(`[runtime-session] store_failed kind=${KIND}`);
         }
       }
@@ -749,6 +832,7 @@ export const runCodex: Runner = async (
         ...(r.failure ? { failure: r.failure } : {}),
         sessionId: r.threadId ?? resumeSessionId,
         tokens: r.tokens,
+        ...(r.observedUsage ? { observedUsage: r.observedUsage } : {}),
         appliedEffort,
       };
     }
@@ -780,16 +864,16 @@ export const runCodex: Runner = async (
     ...modelArgs,
     "-",
   ];
-  const created = await runCodexProcess(bin, createArgs, buildPrompt(runReq), runReq, events, 0);
+  const created = await runCodexProcess(bin, createArgs, buildPrompt(runReq), runReq, events, { output: 0, input: 0, cachedInput: 0 });
   if (runReq.signal?.aborted) {
     if (runReq.chatId && fingerprint && created.threadId) {
-      saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint, { reportedOutputTokens: created.reportedOutputTokens ?? null });
+      saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint, codexUsageCounters(created));
     }
     throw new Error(tStatus(runReq.locale, "aborted"));
   }
   if (created.code === 0) {
     if (runReq.chatId && fingerprint && created.threadId) {
-      if (!saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint, { reportedOutputTokens: created.reportedOutputTokens ?? null })) {
+      if (!saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint, codexUsageCounters(created))) {
         events.onStatus(`[runtime-session] store_failed kind=${KIND}`);
       }
     }
@@ -799,6 +883,7 @@ export const runCodex: Runner = async (
       ...(created.failure ? { failure: created.failure } : {}),
       sessionId: created.threadId ?? undefined,
       tokens: created.tokens,
+      ...(created.observedUsage ? { observedUsage: created.observedUsage } : {}),
       appliedEffort,
     };
   }
@@ -811,6 +896,7 @@ export const runCodex: Runner = async (
       failure: created.failure,
       sessionId: created.threadId ?? undefined,
       tokens: created.tokens,
+      ...(created.observedUsage ? { observedUsage: created.observedUsage } : {}),
       appliedEffort,
     };
   }

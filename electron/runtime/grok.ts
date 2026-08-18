@@ -54,6 +54,20 @@ function grokCandidates(): string[] {
   return override ? [override, ...CANDIDATES] : CANDIDATES;
 }
 
+/**
+ * ★`--no-subagents`(grok --help: "Disable subagent spawning")는 2026-07-11 b3627aee의
+ * 플래그 시그니처 이행(`--prompt`→`--prompt-file` 등) 안에서 사유 없이 함께 들어왔다.
+ * 커밋 메시지·코드·주석 어디에도 이유가 없고, 이를 정당화할 실측 기록도 남아 있지 않다.
+ * 이유를 복원할 수 없는 강제는 강제로 둘 근거가 없으므로 **기본값은 벤더 동작**
+ * (서브에이전트 허용)으로 되돌리고, 끄는 길은 남겨 둔다:
+ *   AGENTLAS_GROK_SUBAGENTS=0|off|false  → `--no-subagents`
+ * 병렬 워커가 실제로 해를 끼치는 실측이 다시 나오면, 그 관측을 여기 적고 기본값을 뒤집을 것.
+ */
+export function grokSubagentsDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = (env.AGENTLAS_GROK_SUBAGENTS ?? "").trim().toLowerCase();
+  return raw === "0" || raw === "off" || raw === "false" || raw === "no";
+}
+
 interface GrokMcpServerConfigEntry {
   command?: string;
   args?: string[];
@@ -335,7 +349,8 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
   // Prompt files keep system/history text out of argv/process listings and avoid Windows command-line limits.
   const promptFile = path.join(os.tmpdir(), `agentlas-grok-${process.pid}-${randomUUID()}.txt`);
   await fs.writeFile(promptFile, prompt, { encoding: "utf8", mode: 0o600 });
-  const args = ["--prompt-file", promptFile, "--cwd", cwd, "--output-format", "streaming-json", "--no-subagents"];
+  const args = ["--prompt-file", promptFile, "--cwd", cwd, "--output-format", "streaming-json"];
+  if (grokSubagentsDisabled(env)) args.push("--no-subagents");
   if (resumeSessionId) args.unshift("--resume", resumeSessionId);
   if (req.model) args.push("-m", req.model); // grok --help 확인: -m, --model <model>
   if (req.effort) args.push("--effort", req.effort);

@@ -4232,6 +4232,15 @@ export function initStore(options: StoreInitOptions = {}): void {
     if (!runtimeSessionColumns.has("reported_output_tokens")) {
       _db.exec("ALTER TABLE chat_runtime_sessions ADD COLUMN reported_output_tokens INTEGER");
     }
+    // 같은 이유로 입력 쪽 카운터도 필요하다: `turn.completed.usage` 는 세 칸이 한 구조체라
+    // 입력도 스레드 누적이다. 출력만 보정하고 입력을 날것으로 실으면, 영수증의 usage 가
+    // 이 턴이 아니라 대화 전체를 이번 실행 비용으로 보고한다.
+    if (!runtimeSessionColumns.has("reported_input_tokens")) {
+      _db.exec("ALTER TABLE chat_runtime_sessions ADD COLUMN reported_input_tokens INTEGER");
+    }
+    if (!runtimeSessionColumns.has("reported_cached_input_tokens")) {
+      _db.exec("ALTER TABLE chat_runtime_sessions ADD COLUMN reported_cached_input_tokens INTEGER");
+    }
   }
 
   // v94: Goal's objective and engineering acceptance contract are Desktop

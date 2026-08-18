@@ -216,6 +216,94 @@ export function chooseAuthMethod(
   return methods[0];
 }
 
+/**
+ * Session modes from a session/new response. Two shapes are in the wild and both
+ * are real: the spec's `modes: { currentModeId, availableModes }` and the
+ * `configOptions[category=mode]` select (measured 2026-08-18: grok advertises
+ * neither, gemini/cursor use one of the two). Parsing only — which mode a run
+ * should pick is policy and lives in acp.ts.
+ */
+export function modeOptionsFromNewSession(response: any): Array<{ id: string; name: string; description?: string; current?: boolean }> {
+  const rows: Array<{ id: string; name: string; description?: string; current?: boolean }> = [];
+  const seen = new Set<string>();
+  const push = (id: unknown, name: unknown, description: unknown, current: boolean) => {
+    const mid = String(id ?? "").trim();
+    if (!mid || seen.has(mid)) return;
+    seen.add(mid);
+    rows.push({ id: mid, name: String(name ?? mid), ...(description ? { description: String(description) } : {}), ...(current ? { current: true } : {}) });
+  };
+  const modes = response?.modes;
+  if (modes && Array.isArray(modes.availableModes)) {
+    for (const mode of modes.availableModes) if (mode) push(mode.id, mode.name, mode.description, mode.id === modes.currentModeId);
+  }
+  const options: any[] = Array.isArray(response?.configOptions) ? response.configOptions : [];
+  const picked = options.find((o) => o && o.category === "mode") ?? options.find((o) => o && o.id === "mode");
+  if (picked && Array.isArray(picked.options)) {
+    for (const choice of picked.options) if (choice) push(choice.value, choice.name, choice.description, choice.value === picked.currentValue);
+  }
+  return rows;
+}
+
+/** What the agent said it can do with MCP beyond the always-available stdio transport. */
+export interface AcpMcpCapabilities {
+  http?: boolean;
+  sse?: boolean;
+}
+
+/** One translated `session/new` mcpServers row plus what we could not translate. */
+export interface AcpMcpTranslation {
+  servers: Array<Record<string, unknown>>;
+  /** Server names dropped because the agent does not speak that transport. */
+  unsupported: Array<{ name: string; transport: "http" | "sse" }>;
+  /** Server names dropped because the entry had neither a command nor a url. */
+  malformed: string[];
+}
+
+/**
+ * Our MCP config (`{ mcpServers: { name: {command,args,env} | {url,headers} } }`,
+ * the same file Claude Code takes as `--mcp-config`) → ACP's session/new
+ * `mcpServers` parameter.
+ *
+ * ACP models env vars and headers as `[{ name, value }]` arrays, not objects,
+ * and gates http/sse behind `agentCapabilities.mcpCapabilities`. stdio needs no
+ * capability flag — it is the protocol's baseline transport.
+ */
+export function acpMcpServersFromConfig(
+  config: unknown,
+  capabilities?: AcpMcpCapabilities | null,
+): AcpMcpTranslation {
+  const out: AcpMcpTranslation = { servers: [], unsupported: [], malformed: [] };
+  const servers = (config as any)?.mcpServers;
+  if (!servers || typeof servers !== "object") return out;
+  const pairs = (value: unknown): Array<{ name: string; value: string }> =>
+    value && typeof value === "object"
+      ? Object.entries(value as Record<string, unknown>).map(([name, v]) => ({ name, value: String(v ?? "") }))
+      : [];
+  for (const [name, raw] of Object.entries(servers as Record<string, any>)) {
+    if (!raw || typeof raw !== "object") { out.malformed.push(name); continue; }
+    const command = typeof raw.command === "string" ? raw.command.trim() : "";
+    const url = typeof raw.url === "string" ? raw.url.trim() : "";
+    if (command) {
+      out.servers.push({
+        name,
+        command,
+        args: Array.isArray(raw.args) ? raw.args.map(String) : [],
+        env: pairs(raw.env),
+      });
+      continue;
+    }
+    if (url) {
+      const declared = String(raw.type ?? raw.transport ?? "").toLowerCase();
+      const transport: "http" | "sse" = declared === "sse" || (!declared && !/^https?:\/\//i.test(url)) ? "sse" : "http";
+      if (!capabilities?.[transport]) { out.unsupported.push({ name, transport }); continue; }
+      out.servers.push({ type: transport, name, url, headers: pairs(raw.headers) });
+      continue;
+    }
+    out.malformed.push(name);
+  }
+  return out;
+}
+
 /** Model options from a session/new response — configOptions[category=model] first, vendor models[] second. */
 export function modelOptionsFromNewSession(response: any): Array<{ id: string; name: string; description?: string; current?: boolean }> {
   const rows: Array<{ id: string; name: string; description?: string; current?: boolean }> = [];
