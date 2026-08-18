@@ -19,6 +19,81 @@ let _postContinuityRepairsDeferred = false;
 
 const SCHEMA_VERSION = 97;
 
+/**
+ * The schema version this binary's migration ladder produces.
+ *
+ * Exported because `agentlas.sqlite` is a shared, lock-free multi-writer file and
+ * the terminal product must be able to *check* the version without being allowed
+ * to *raise* it. See `STORE_MIGRATION_AUTHORITY` below.
+ */
+export const STORE_SCHEMA_VERSION = SCHEMA_VERSION;
+
+/**
+ * ★단일 마이그레이션 권위 (Phase 0, docs/DAEMON-ARCHITECTURE-DESIGN-2026-08-18.md §2/§6).
+ *
+ * `~/Library/Application Support/Agentlas/agentlas.sqlite` has two products opening
+ * it: this core (Desktop, and the compiled core the terminal vendors) and the
+ * terminal's own light driver (`engine/core/db.cjs`). Until now BOTH could run this
+ * ladder against the same file — the terminal's `desktop-core.cjs` shim reports
+ * `isPackaged: true`, which by design defeats the dev sandbox guard in
+ * `resolveStorePath()`. Two processes interleaving 97 steps of unwrapped DDL is
+ * exactly how `run_events` + 4 indexes were corrupted (see the comment above
+ * `resolveStorePath`).
+ *
+ * The rule is now explicit, not accidental:
+ *
+ *   owner    — may run the ladder and may write `user_version`. The Desktop app
+ *              (and any process a human deliberately marks as the owner).
+ *   follower — never runs a ladder step, never writes `user_version`. If the file
+ *              is older than this binary it REFUSES with an actionable message
+ *              instead of migrating or (as before) silently proceeding.
+ *
+ * Why "follower refuses" instead of "whoever gets there first migrates": absence of
+ * the Desktop app is not observable race-free — Desktop can launch in the middle of
+ * a terminal-run ladder. Guessing wrong costs a corrupt 117 MB store; refusing costs
+ * one launch of the Desktop app. A refusal is recoverable, corruption is not.
+ *
+ * Escape hatch for a machine that genuinely has no Desktop app: the operator sets
+ * `AGENTLAS_STORE_MIGRATION_ROLE=owner` deliberately, with Desktop closed. Explicit
+ * beats accidental.
+ */
+export type StoreMigrationRole = "owner" | "follower";
+
+function resolveMigrationRole(options: StoreInitOptions): StoreMigrationRole {
+  if (options.migrationRole) return options.migrationRole;
+  const fromEnv = process.env.AGENTLAS_STORE_MIGRATION_ROLE?.trim().toLowerCase();
+  if (fromEnv === "follower") return "follower";
+  if (fromEnv === "owner") return "owner";
+  return "owner";
+}
+
+/**
+ * Honest, actionable refusal. Names both versions, the file, and the two ways out.
+ * Never mutate on this path — the caller is by definition not the migration owner.
+ */
+export function storeSchemaRefusalMessage(found: number, dbPath: string): string {
+  return [
+    `Agentlas store schema is v${found}, but this process needs v${SCHEMA_VERSION}.`,
+    `Store: ${dbPath}`,
+    "This process is not the migration owner, so it will not upgrade the shared database.",
+    "Launch (or update) the Agentlas Desktop app once — it owns the migration ladder — then retry.",
+    "If this machine has no Desktop app, close every Agentlas process and re-run with AGENTLAS_STORE_MIGRATION_ROLE=owner exactly once.",
+  ].join("\n");
+}
+
+/**
+ * Shared lock wait for `agentlas.sqlite`, in milliseconds.
+ *
+ * ★Must stay identical to `agentlas_terminal/engine/agentlas-sqlite-policy.cjs`
+ * (`SQLITE_BUSY_TIMEOUT_MS`). They were 5000 here vs 15000 there, so under contention
+ * the *Desktop* was always the first to give up with SQLITE_BUSY even when the
+ * terminal was the slow writer — an asymmetry that made the same contention look
+ * like a Desktop-only bug. Aligned upward to 15s because no long-running work holds
+ * a transaction on this file (the longest writer is the migration ladder itself), so
+ * 15s is a ceiling that is essentially never reached rather than added latency.
+ */
+const STORE_BUSY_TIMEOUT_MS = 15_000;
+
 function hardenStoreFile(file: string): void {
   if (process.platform === "win32" || !fs.existsSync(file)) return;
   const stat = fs.lstatSync(file);
@@ -867,6 +942,13 @@ export interface StoreInitOptions {
    * repair projections resume only after the updater continuity gate passes.
    */
   deferPostContinuityRepairs?: boolean;
+  /**
+   * Who may migrate the shared store. Defaults to the `AGENTLAS_STORE_MIGRATION_ROLE`
+   * env var, then to "owner" (the Desktop app). Pass "follower" from any process that
+   * shares `agentlas.sqlite` but must not be a second migration authority — the
+   * terminal's vendored-core path does exactly this. See `StoreMigrationRole`.
+   */
+  migrationRole?: StoreMigrationRole;
 }
 
 function runStoreRepairProjections(db: Database.Database): void {
@@ -959,21 +1041,71 @@ function resolveStorePath(): string {
   return path.join(app.getPath("userData"), "agentlas.sqlite");
 }
 
+/**
+ * Put the shared store in WAL, tolerating a peer that is doing the same thing.
+ *
+ * ★`PRAGMA journal_mode = WAL` is not an ordinary write: switching a rollback-journal
+ * database to WAL takes an EXCLUSIVE lock on the file, and SQLite reports SQLITE_BUSY
+ * for that transition without consulting the busy handler. So on a store that is not
+ * WAL yet, two processes opening it at the same time meant one of them died at boot
+ * with "database is locked" — reproduced by the cross-product contention test in
+ * scripts/test-store-migration-authority.cjs.
+ *
+ * Two defences: never ask when the file is already WAL (the steady state, so the race
+ * window only exists on a brand-new store), and treat a busy transition as "a peer is
+ * converting it right now" — re-read, and only fail if it is still not WAL.
+ */
+function ensureWalJournal(db: Database.Database, dbPath: string): void {
+  const mode = (): string => String(db.pragma("journal_mode", { simple: true }) ?? "").toLowerCase();
+  if (mode() === "wal") return;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      db.pragma("journal_mode = WAL");
+    } catch {
+      /* a peer holds the exclusive lock for the same conversion — re-read below */
+    }
+    if (mode() === "wal") return;
+  }
+  throw new Error(
+    `Agentlas could not put the store in WAL mode: ${path.basename(dbPath)} is still in "${mode()}". `
+    + "Close every other Agentlas process and retry.",
+  );
+}
+
 export function initStore(options: StoreInitOptions = {}): void {
   if (_db) return;
+  const migrationRole = resolveMigrationRole(options);
   try {
   const dbPath = resolveStorePath();
   preparePrivateStorePath(dbPath);
   _db = new Database(dbPath);
-  _db.pragma("journal_mode = WAL");
-  // GUI and launchd share this WAL. Event-source callbacks must wait briefly
-  // for the current writer instead of dropping a filesystem/chain delivery on
-  // an immediate SQLITE_BUSY. Long-running work never holds a DB transaction.
-  _db.pragma("busy_timeout = 5000");
+  // ★busy_timeout 이 journal_mode 보다 **먼저** 와야 한다 (2026-08-18 실측).
+  // `journal_mode = WAL` 은 파일에 배타 락을 잡는다. busy_timeout 이 아직 0이면
+  // 다른 프로세스가 쓰는 중일 때 대기 없이 즉시 SQLITE_BUSY 로 터진다 — 즉 부팅
+  // 자체가 "database is locked" 로 실패했다. 순서를 뒤집으면 같은 경합을 기다린다.
+  // (교차 제품 동시 쓰기 테스트가 이 순서로 재현시켰다:
+  //  scripts/test-store-migration-authority.cjs)
+  //
+  // GUI, launchd and the terminal share this WAL. Event-source callbacks must wait
+  // for the current writer instead of dropping a filesystem/chain delivery on an
+  // immediate SQLITE_BUSY. Long-running work never holds a DB transaction.
+  _db.pragma(`busy_timeout = ${STORE_BUSY_TIMEOUT_MS}`);
+  ensureWalJournal(_db, dbPath);
   hardenStoreSidecars(dbPath);
   _db.pragma("foreign_keys = ON");
 
   const userVersion = (_db.pragma("user_version", { simple: true }) as number) ?? 0;
+
+  // ── 단일 마이그레이션 권위 게이트 ──────────────────────────────────────
+  // A follower opens the shared store read/write for ordinary work but is not a
+  // migration authority: it runs no ladder step, writes no `user_version`, and runs
+  // no boot repair projection (those are owner-side writes). Too old → honest refusal.
+  if (migrationRole === "follower") {
+    if (userVersion < SCHEMA_VERSION) {
+      throw new Error(storeSchemaRefusalMessage(userVersion, dbPath));
+    }
+    return;
+  }
 
   // ── v0 → v1: 초기 스키마 (active_runtime, installed_agents) ─
   if (userVersion < 1) {
