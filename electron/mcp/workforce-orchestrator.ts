@@ -29,26 +29,16 @@ export const WORKFORCE_FEDERATION_ORDERING_POLICY = "canonical_identity_no_reran
 export const WORKFORCE_FEDERATION_RESULT_SCHEMA = FEDERATION_RESULT_SCHEMA;
 export const WORKFORCE_FEDERATED_SELECTION_SCHEMA = FEDERATED_SELECTION_SCHEMA;
 export const WORKFORCE_FEDERATED_PREPARATION_SCHEMA = FEDERATED_PREPARATION_SCHEMA;
-const WORKFORCE_SOURCE_FAILURE_CODES = new Set<string>([
-  "source_not_configured",
-  "source_not_supported",
-  "source_unavailable",
-  "source_timeout",
-  "source_unauthorized",
-  "source_forbidden",
-  "source_rate_limited",
-  "source_invalid_candidate_set",
-  "source_candidate_set_expired",
-  "source_work_order_mismatch",
-  "source_ontology_mismatch",
-  "source_slot_mismatch",
-  "source_candidate_set_digest_mismatch",
-  "source_history_influence_forbidden",
-  "insufficient_credits",
-  "owner_only",
-  "no_cloud_package",
-  "agent_not_found",
-]);
+// Core raises these; this side only recognises them. The list used to be typed
+// out here and fell one behind: `source_circuit_open` (raised by Core in
+// source_service.py) was missing, so receipt validation below did not recognise
+// it and reported `hub_source_receipt_invalid` — the user was told the receipt
+// was invalid instead of "the circuit is open, retry". It now ships through the
+// protocol contract, and scripts/gen-workforce-source-failure-codes.cjs --check
+// fails when the contract drifts from Core.
+const WORKFORCE_SOURCE_FAILURE_CODES = new Set<string>(
+  workforceProtocolContract.protocolMetadata.sourceFailureCodes,
+);
 const WORKFORCE_RUNTIME_BUNDLE_DIGEST_SCHEMA = "agentlas.workforce-runtime-bundle-digest.v4";
 const WORKFORCE_PERMISSION_POLICY_SCHEMA = "agentlas.workforce-permission-policy.v1";
 const WORKFORCE_PERMISSION_POLICY_DIGEST_SCHEMA = "agentlas.workforce-permission-policy-digest.v1";
