@@ -1376,10 +1376,16 @@ return (
           display: "flex",
           alignItems: "center",
           gap: 12,
+          // 좁은 창에서 버튼이 7개까지 늘어난다. 넘칠 때 접거나 눌러 뭉개는 대신
+          // 가로로 흐르게 둔다 — 어느 버튼도 사라지지 않고 라벨도 온전하다.
+          overflowX: "auto",
+          overflowY: "hidden",
         }}
       >
-        <IconBolt size={18} style={{ color: automation.enabled ? "var(--accent)" : "var(--muted)" }} />
-        <div style={{ flex: 1, minWidth: 0 }}>
+        <IconBolt size={18} style={{ color: automation.enabled ? "var(--accent)" : "var(--muted)", flexShrink: 0 }} />
+        {/* 제목이 0까지 줄어들 수 있어 "Ho/on/the/hour"처럼 한 글자씩 무너졌다.
+            바닥을 주면 그 아래로는 말줄임으로 끝난다. */}
+        <div style={{ flex: "1 1 160px", minWidth: 160 }}>
           <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 17, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {automation.name}
           </h1>
@@ -2214,6 +2220,9 @@ const actionBtn: React.CSSProperties = {
   color: "var(--ink)",
   boxShadow: "var(--neu-raised)",
   cursor: "pointer",
+  // pillBtn과 같은 이유 — 이 자리가 "Turn on"을 두 줄로 접어 버튼 높이를 흔들었다.
+  whiteSpace: "nowrap",
+  flexShrink: 0,
 };
 
 /** 도는 중임을 몸으로 보여주는 라벨 — 글자만 바꾸면 아무도 못 알아본다(실측). */
@@ -2236,5 +2245,11 @@ function pillBtn(active: boolean): React.CSSProperties {
     background: active ? "var(--fill-1)" : "var(--paper-2)",
     color: active ? "var(--accent)" : "var(--muted-deep)",
     cursor: "pointer",
+    // 라벨은 한 줄로 — 폭이 모자라면 글자가 접혀 "Edit name & / schedule",
+    // "Turn / on"처럼 두 줄이 되고 알약 높이가 제각각 튀었다(실측 2026-08-18).
+    whiteSpace: "nowrap",
+    // 버튼이 눌리는 대신 넘치게 둔다. 줄어들 수 있으면 제목 자리를 먼저 먹고,
+    // 결국 제목이 세로 한 글자씩 무너진다.
+    flexShrink: 0,
   };
 }
