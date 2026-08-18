@@ -224,7 +224,9 @@ async function runAnthropicMessages(
    */
   const toolPermission = (req.permission ?? "read") as ToolPermission;
   const toolsEnabled = !req.untrustedNoTools && Boolean(req.cwd);
-  const anthropicTools = toolsEnabled ? builtinToolsAsAnthropic(toolPermission) : [];
+  const anthropicTools = toolsEnabled
+    ? builtinToolsAsAnthropic(toolPermission, { canAskUser: req.unattended !== true })
+    : [];
   const approval: BuiltinApprovalContext = {
     runtimeKind: "byok",
     sessionKey: `byok:${req.sessionFingerprintSeed ?? req.cwd ?? "default"}`,

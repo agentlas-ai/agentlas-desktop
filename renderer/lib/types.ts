@@ -6,6 +6,7 @@ export type {
   AgentEnvRequirement,
   AgentEvolutionProposalUi,
   AgentlasIpc,
+  AskUserRequestEvent,
   GrowthProposalCardCopy,
   GrowthProposalInbox,
   AgentUsageSummaryRow,

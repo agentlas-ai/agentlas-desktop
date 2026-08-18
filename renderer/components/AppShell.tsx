@@ -20,6 +20,7 @@ import { PageTour, replayCurrentPageTour } from "./PageTour";
 import { BuildDoneToast } from "./BuildDoneToast";
 import { BetaEconomyNotice } from "@/components/BetaEconomyNotice";
 import { BrowserActionApprovalSheet } from "./BrowserActionApprovalSheet";
+import { AskUserSheet } from "./AskUserSheet";
 import { ToolApprovalSheet } from "./ToolApprovalSheet";
 import FloatingComputerUsePanel from "./browser/FloatingComputerUsePanel";
 import { OntologyChipFeatureUpdateModal } from "./OntologyChipFeatureUpdateModal";
@@ -448,6 +449,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <BetaEconomyNotice />
       <BuildDoneToast />
       <BrowserActionApprovalSheet />
+      <AskUserSheet />
       <ToolApprovalSheet />
       {showWorkspaceSidebar && <FloatingComputerUsePanel />}
       <OntologyChipFeatureUpdateModal

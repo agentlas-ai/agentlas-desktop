@@ -33,6 +33,18 @@ export interface BuiltinToolContext {
   permission: ToolPermission;
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
+  /**
+   * 사용자에게 묻고 **답을 기다리는** 함수. 주입으로 받는 이유는 이 파일이 electron 을
+   * import 하면 안 되기 때문이다(터미널·서버도 같은 도구를 쓸 수 있어야 한다).
+   *
+   * 없으면 `ask_user` 도구가 목록에 뜨지 않는다 — 물을 수 없는 표면에서 "물어보는
+   * 도구"를 보여 주면 모델은 그걸 쓰고 영원히 기다린다.
+   */
+  askUser?: (input: {
+    question: string;
+    options?: { label: string; description?: string }[];
+    allowFreeText?: boolean;
+  }) => Promise<{ status: "answered"; answer: string } | { status: string }>;
 }
 
 export interface BuiltinTool {
@@ -329,6 +341,55 @@ export const BUILTIN_TOOLS: readonly BuiltinTool[] = [
     },
   },
   {
+    name: "ask_user",
+    minPerm: "read",
+    description:
+      "Ask the person a question and wait for their answer. Use this when a decision is theirs to make — never guess a requirement, a scope boundary, or a destructive choice. Returns their answer as text.",
+    parameters: {
+      type: "object",
+      properties: {
+        question: { type: "string", description: "The question, in the user's language." },
+        options: {
+          type: "array",
+          description: "Concrete choices, when the answer is a selection. Free text stays possible.",
+          items: {
+            type: "object",
+            properties: {
+              label: { type: "string" },
+              description: { type: "string" },
+            },
+            required: ["label"],
+          },
+        },
+      },
+      required: ["question"],
+    },
+    async run(args, ctx) {
+      if (!ctx.askUser) throw new Error("this surface cannot ask the user");
+      const question = str(args.question);
+      if (!question) throw new Error("question must be a non-empty string");
+      const rawOptions = Array.isArray(args.options) ? args.options : [];
+      const options = rawOptions
+        .filter((o): o is Record<string, unknown> => Boolean(o) && typeof o === "object")
+        .map((o) => ({
+          label: String(o.label ?? "").trim(),
+          ...(str(o.description) ? { description: String(o.description) } : {}),
+        }))
+        .filter((o) => o.label);
+      const outcome = await ctx.askUser({ question, options, allowFreeText: true });
+      if (outcome.status === "answered") return (outcome as { answer: string }).answer;
+      /*
+       * 답이 없으면 **그 사실을 그대로** 돌려준다. 여기서 기본값을 지어내면 모델은
+       * 사람이 고른 줄 알고 진행하고, 사용자는 자기가 하지 않은 결정을 떠안는다.
+       */
+      throw new Error(
+        outcome.status === "no-surface"
+          ? "no one is available to answer here — continue without this decision, or stop and say what you need"
+          : `the question was not answered (${outcome.status})`,
+      );
+    },
+  },
+  {
     name: "bash",
     minPerm: "full",
     description: "Run a shell command in the working folder. Requires 'full' permission.",
@@ -406,9 +467,17 @@ export const BUILTIN_TOOLS: readonly BuiltinTool[] = [
 const BY_NAME = new Map(BUILTIN_TOOLS.map((tool) => [tool.name, tool]));
 
 /** 이 권한에서 **존재하는** 도구들. 부족한 도구는 목록에 아예 없다. */
-export function allowedBuiltinTools(permission: ToolPermission): BuiltinTool[] {
+export function allowedBuiltinTools(
+  permission: ToolPermission,
+  opts: { canAskUser?: boolean } = {},
+): BuiltinTool[] {
   const rank = PERM_RANK[permission] ?? 0;
-  return BUILTIN_TOOLS.filter((tool) => PERM_RANK[tool.minPerm] <= rank);
+  return BUILTIN_TOOLS.filter((tool) => {
+    if (PERM_RANK[tool.minPerm] > rank) return false;
+    // 물을 표면이 없으면 묻는 도구도 없다 — 있는데 못 쓰는 도구는 함정이다.
+    if (tool.name === "ask_user" && !opts.canAskUser) return false;
+    return true;
+  });
 }
 
 export function builtinToolByName(name: string): BuiltinTool | undefined {
@@ -416,23 +485,23 @@ export function builtinToolByName(name: string): BuiltinTool | undefined {
 }
 
 /** OpenAI 함수 호출 형식. */
-export function builtinToolsAsOpenAi(permission: ToolPermission): {
+export function builtinToolsAsOpenAi(permission: ToolPermission, opts: { canAskUser?: boolean } = {}): {
   type: "function";
   function: { name: string; description: string; parameters: Record<string, unknown> };
 }[] {
-  return allowedBuiltinTools(permission).map((tool) => ({
+  return allowedBuiltinTools(permission, opts).map((tool) => ({
     type: "function" as const,
     function: { name: tool.name, description: tool.description, parameters: tool.parameters },
   }));
 }
 
 /** Anthropic 도구 형식. */
-export function builtinToolsAsAnthropic(permission: ToolPermission): {
+export function builtinToolsAsAnthropic(permission: ToolPermission, opts: { canAskUser?: boolean } = {}): {
   name: string;
   description: string;
   input_schema: Record<string, unknown>;
 }[] {
-  return allowedBuiltinTools(permission).map((tool) => ({
+  return allowedBuiltinTools(permission, opts).map((tool) => ({
     name: tool.name,
     description: tool.description,
     input_schema: tool.parameters,

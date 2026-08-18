@@ -5,6 +5,7 @@ import type {
   AgentlasIpc,
   AgentlasUpdaterEvents,
   McpInvocationEvent,
+  AskUserRequestEvent,
   BrowserApprovalRequestEvent,
   FsPathGrant,
 } from "./types";
@@ -50,6 +51,8 @@ interface AgentlasEvents {
   onMobileBridgeChanged?: (handler: (event: { reason: string }) => void) => () => void;
   /** Browser 승인 요청 구독 — 경량 바텀시트. unsubscribe 반환. */
   onBrowserApproval: (handler: (req: BrowserApprovalRequestEvent) => void) => () => void;
+  /** 에이전트의 동기 질문 — 도구가 답을 기다린다(electron/confirm/ask-user.ts). */
+  onAskUser: (handler: (req: AskUserRequestEvent) => void) => () => void;
   /**
    * 도구 승인 구독 — live(답을 기다림)와 post-denial(이미 거부됨)을 함께 받는다.
    * 구 preload에는 없어 optional.

@@ -29,6 +29,7 @@ import {
   runBuiltinTool,
   type ToolPermission,
 } from "../../shared/builtin-tools";
+import { askUser } from "../confirm/ask-user";
 
 /** 승인 요청 하나 — 화면과 같은 정의를 쓴다(shared/types.ts). */
 export type ToolApprovalRequest = ToolApprovalRequestEvent;
@@ -301,6 +302,11 @@ export async function runApprovedBuiltinTool(
     cwd: ctx.cwd ?? process.cwd(),
     permission: (ctx.permission ?? "read") as ToolPermission,
     ...(ctx.signal ? { signal: ctx.signal } : {}),
+    askUser: (input) =>
+      askUser(
+        { ...input, askedBy: ctx.runtimeKind, ...(ctx.chatId ? { chatId: ctx.chatId } : {}) },
+        { unattended: ctx.unattended, ...(ctx.signal ? { signal: ctx.signal } : {}) },
+      ),
   });
   events.onTool?.(toolName, JSON.stringify(args), outcome.content, callId, !outcome.ok);
   return outcome;

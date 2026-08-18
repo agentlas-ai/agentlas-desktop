@@ -7,6 +7,7 @@ import type {
   AgentlasIpc,
   RendererJudgmentSpec,
   RendererSubsetJudgmentSpec,
+  AskUserRequestEvent,
   BrowserApprovalRequestEvent,
   BugReportInput,
   CloudAgentPublishProgressEvent,
@@ -240,6 +241,9 @@ const api: AgentlasIpc = {
     snooze: (input: { chatId: string; sourceMessageId: string; resumeAt: string }) =>
       ipcRenderer.invoke("confirm:snooze", input),
     committedAnswers: (chatId: string) => ipcRenderer.invoke("confirm:committedAnswers", chatId),
+    // 동기 질문의 답. `null` 은 "답하지 않음"이며, 지어낸 답으로 채우지 않는다.
+    submitAskUserAnswer: (requestId: string, answer: string | null) =>
+      ipcRenderer.invoke("confirm:submitAskUserAnswer", requestId, answer),
   },
   attention: {
     setPendingConfirmations: (count: number) =>
@@ -991,6 +995,16 @@ contextBridge.exposeInMainWorld("agentlasEvents", {
       handler(req);
     ipcRenderer.on("browser:approvalRequest", wrapped);
     return () => ipcRenderer.removeListener("browser:approvalRequest", wrapped);
+  },
+  /*
+   * 에이전트의 **동기 질문** — 도구가 답을 기다리는 질문이다(confirm/ask-user.ts).
+   * 기존 `<<agentlas-ask>>` 펜스는 비동기라 도구로 쓸 수 없었다: 답이 다음 채팅
+   * 메시지로 오므로 도구는 결과를 못 받는다. 이 채널은 답이 올 때까지 실행이 기다린다.
+   */
+  onAskUser: (handler: (req: AskUserRequestEvent) => void) => {
+    const wrapped = (_evt: Electron.IpcRendererEvent, req: AskUserRequestEvent) => handler(req);
+    ipcRenderer.on("agentlas:ask-user", wrapped);
+    return () => ipcRenderer.removeListener("agentlas:ask-user", wrapped);
   },
   // Site Copilot의 사용자용 상태/피드백 스트림. 내부 모델 추론이나 원문 HTML은 보내지 않는다.
   onSiteActivity: (handler: (event: SiteActivityEvent) => void) => {

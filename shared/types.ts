@@ -672,6 +672,22 @@ export interface AgentRuntimeOverrideSetInput {
 }
 
 /** CLI(Claude/Codex/Antigravity)에서 스캔한 슬래시 명령 — 챗 입력 `/` 자동완성에 노출. */
+/**
+ * 에이전트의 동기 질문 — 도구가 답을 기다리는 질문(electron/confirm/ask-user.ts).
+ * 기존 `<<agentlas-ask>>` 펜스는 비동기라 도구가 결과를 받을 수 없었다.
+ */
+export interface AskUserRequestEvent {
+  requestId: string;
+  question: string;
+  options: { label: string; description?: string }[];
+  allowFreeText: boolean;
+  askedBy: string | null;
+  chatId: string | null;
+  createdAt: number;
+  /** 0 이면 이 질문은 끝났다(만료·취소) — 시트에서 치우라는 신호. */
+  expiresAt: number;
+}
+
 export interface RuntimeCommand {
   /** "/deploy", "/frontend:component" 등 (앞에 / 포함) */
   name: string;
@@ -6097,6 +6113,11 @@ export interface AgentlasIpc {
     snooze: (input: { chatId: string; sourceMessageId: string; resumeAt: string }) =>
       Promise<{ chatId: string; sourceMessageId: string; snoozedUntil: string }>;
     committedAnswers: (chatId: string) => Promise<CommittedQuestionAnswer[]>;
+    /**
+     * 에이전트의 **동기 질문**에 대한 답(electron/confirm/ask-user.ts).
+     * `null` 은 "답하지 않음" — 지어낸 답으로 채우지 않는다.
+     */
+    submitAskUserAnswer: (requestId: string, answer: string | null) => Promise<boolean>;
   };
   /** 앱 주의 표시 — Dock/taskbar badge와 네이티브 알림을 갱신한다. */
   attention: {

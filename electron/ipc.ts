@@ -188,6 +188,7 @@ import { stripAutomationContinuityCapsule } from "./automation-continuity";
 import { buildChatRecap, markChatRecapViewed } from "./chat/recap";
 import { assertChatRemovalAllowed } from "./chat/removal-guard";
 import { startStudio, stopStudio } from "./hephaestus/studio";
+import { submitAskUserAnswer } from "./confirm/ask-user";
 import type {
   HephaestusBuildEvent,
   HephaestusBuildRequest,
@@ -3227,6 +3228,10 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("telegram:pruneOrphans", () => pruneOrphanedTelegramBindings());
 
   // ── browser (자격증명 볼트 · 전용 프로필 · 승인 게이트 · 로그) ─
+  // 동기 질문의 답 — confirm/ask-user.ts 의 대기 중인 약속을 깨운다.
+  ipcMain.handle("confirm:submitAskUserAnswer", (_e, requestId: string, answer: string | null) =>
+    submitAskUserAnswer(String(requestId), typeof answer === "string" ? answer : null),
+  );
   ipcMain.handle("browser:status", () => getBrowserStatus());
   ipcMain.handle("browser:listSites", () => browserListSites());
   ipcMain.handle("browser:saveSite", (_e, input) => browserSaveSite(input));
