@@ -42,6 +42,65 @@ const LOCAL_EXPERIENCE_LINEAGE_PATH = ".agentlas/experience-relations.jsonl";
 const ROUTING_CARD_CAPABILITY_RE = /^[a-z][a-z0-9]*(_[a-z0-9]+)+$/;
 const ROUTING_CARD_STATUSES = new Set(["draft", "searchable", "candidate", "routing_ready", "trusted"]);
 
+/**
+ * ★ WHAT THE PRODUCT ITSELF CALLS PRIVATE MUST NOT SHIP IN A PACKAGE.
+ *
+ * The product writes a `.gitignore` into every user project declaring these
+ * files machine-local: "per-machine outputs of features each user runs on their
+ * own files — nobody else consumes another person's copy — and publishing one
+ * leaks the shape of a private working tree" (project-files.ts). The upload
+ * scanner shipped almost all of them anyway. Measured 2026-08-18 on Quant
+ * Research Desk: the live Hub listing is 56 files / 287KB while the local
+ * folder had grown to 62 files / 732KB — the delta was exactly this local
+ * state, `ontology-runtime.sqlite` alone 316KB (43% of the folder).
+ *
+ * The list mirrors hep-upload's `GENERATED_RUNTIME_PATHS` +
+ * `UPLOAD_DERIVED_EVIDENCE_PATHS` (Agentlas-OS agentlas_cloud) plus the
+ * private-memory files both channels missed. Keeping the two channels'
+ * exclusion sets identical keeps the packageHash of one folder identical no
+ * matter which product uploads it. Installers lose nothing: first contact
+ * regenerates every one of these through the project bootstrap.
+ *
+ * Deliberately NOT here: `memory-tickets.jsonl` + `ticket-slugs.json` (teams
+ * ship authored seed memories — measured: qrd-mem-seed-001 — and One's
+ * memory-map consumes them) and `.agentlas/pm/learnings/` (the cross-host
+ * shared learning layer, part of the runtime-bundle contract).
+ */
+const MACHINE_LOCAL_STATE_FILES = new Set([
+  // rebuildable runtime indexes (hep-upload: GENERATED_RUNTIME_PATHS)
+  ".agentlas/ontology-runtime.json",
+  ".agentlas/ontology-sources.json",
+  ".agentlas/career-graph-sources.json",
+  // derived per-scan evidence (hep-upload: UPLOAD_DERIVED_EVIDENCE_PATHS)
+  ".agentlas/security-scan.json",
+  ".agentlas/security-llm-judgment.json",
+  ".agentlas/field-test-report.json",
+  ".agentlas/brief.json",
+  // private project memory (product .gitignore: AGENTLAS_PRIVATE_PROJECT_STATE)
+  ".agentlas/sitemap.json",
+  ".agentlas/project-soul-memory.md",
+  ".agentlas/memory-log.jsonl",
+  ".agentlas/curator-decisions.jsonl",
+  ".agentlas/skill-trials.jsonl",
+  ".agentlas/local-credentials.map.json",
+]);
+const MACHINE_LOCAL_STATE_DIRS = [
+  ".agentlas/ontology-inbox/",
+  ".agentlas/career-graph-inbox/",
+  ".agentlas/code-map/",
+];
+const MACHINE_LOCAL_STATE_FILE_PREFIXES = [
+  ".agentlas/ontology-runtime.sqlite",
+  ".agentlas/career-graph.sqlite",
+];
+
+export function isMachineLocalStatePath(value: string): boolean {
+  const normalized = value.replace(/\\/g, "/").toLowerCase();
+  if (MACHINE_LOCAL_STATE_FILES.has(normalized)) return true;
+  if (MACHINE_LOCAL_STATE_DIRS.some((dir) => normalized.startsWith(dir))) return true;
+  return MACHINE_LOCAL_STATE_FILE_PREFIXES.some((prefix) => normalized.startsWith(prefix));
+}
+
 function isLocalExperienceLineagePath(value: string): boolean {
   const normalized = value.replace(/\\/g, "/").toLowerCase();
   return normalized === LOCAL_EXPERIENCE_LINEAGE_PATH
@@ -182,6 +241,99 @@ interface RemediationOutcome {
  * publish: the end state is always an uploadable package. The user's folder is
  * never touched — all edits happen inside the temp copy at `scanRoot`.
  */
+/**
+ * Bring a package under the two whole-package limits by dropping the least
+ * essential files, largest first, until the scan stops reporting them.
+ *
+ * What can never be dropped is fixed and small: the agent definition files, the
+ * `.agentlas` cards, and the package manifests. Everything else is ranked by
+ * how unlikely it is to be part of what the agent IS — build output, caches,
+ * media, archives, fixtures, logs and benchmarks go before ordinary sources.
+ * Nothing here touches the user's own folder: `scanRoot` is the throwaway copy
+ * autofix made, and the report lists every dropped path.
+ */
+export function trimPackageToLimits(
+  scanRoot: string,
+  restoredExecutablePaths: ReadonlySet<string>,
+  onStage?: (stage: CloudAgentPublishStage, detail?: string) => void,
+): RemediationAction[] {
+  const root = path.resolve(scanRoot);
+  const actions: RemediationAction[] = [];
+  const LIMIT_FINDING_IDS = new Set(["package-size-limit", "file-count-limit"]);
+  const overLimit = (): boolean => {
+    try {
+      return scanAgentFolder(root, restoredExecutablePaths)
+        .findings.some((f) => f.severity === "blocker" && LIMIT_FINDING_IDS.has(f.id));
+    } catch {
+      return false;
+    }
+  };
+  if (!overLimit()) return actions;
+
+  // Lower rank is dropped first. Rank 0 is never dropped.
+  const rankOf = (rel: string, bytes: number): number => {
+    const lower = rel.toLowerCase();
+    const base = path.basename(rel);
+    if (AGENT_DEF_FILES.has(base)) return 0;
+    if (lower.startsWith(".agentlas/")) return 0;
+    if (["agentlas.json", "manifest.json", "package.json"].includes(lower)) return 0;
+    if (/(^|\/)(node_modules|dist|build|out|coverage|\.next|\.venv|__pycache__|\.git)\//.test(lower)) return 1;
+    if (/\.(png|jpe?g|gif|webp|svg|mp4|mov|mp3|wav|pdf|zip|tar|gz|tgz|bin|so|dylib|dll|wasm|sqlite|db)$/.test(lower)) return 2;
+    if (/(^|\/)(tests?|__tests__|fixtures?|benchmarks?|logs?|samples?|examples?)\//.test(lower)) return 3;
+    if (/\.(log|jsonl|csv|tsv|lock)$/.test(lower)) return 4;
+    // Ordinary content: biggest first, so one huge file goes before many small ones.
+    return bytes > 64 * 1024 ? 5 : 6;
+  };
+
+  const candidates: Array<{ rel: string; abs: string; bytes: number; rank: number }> = [];
+  const walk = (dir: string): void => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const abs = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(abs);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const rel = path.relative(root, abs).split(path.sep).join("/");
+      let bytes = 0;
+      try {
+        bytes = fs.statSync(abs).size;
+      } catch {
+        continue;
+      }
+      const rank = rankOf(rel, bytes);
+      if (rank === 0) continue;
+      candidates.push({ rel, abs, bytes, rank });
+    }
+  };
+  walk(root);
+  // Least essential first; within one rank, the biggest file buys the most room.
+  candidates.sort((a, b) => (a.rank - b.rank) || (b.bytes - a.bytes));
+
+  for (const candidate of candidates) {
+    if (!overLimit()) break;
+    try {
+      fs.rmSync(candidate.abs, { force: true });
+    } catch {
+      continue;
+    }
+    actions.push({
+      file: candidate.rel,
+      action: "excluded",
+      detail: "left out to fit the Agent Cloud package limits",
+    });
+    onStage?.("excluded", candidate.rel);
+  }
+  if (actions.length > 0) onStage?.("scan-clean");
+  return actions;
+}
+
 async function remediateUntilClean(
   scanRoot: string,
   restoredExecutablePaths: ReadonlySet<string>,
@@ -448,6 +600,48 @@ function ensureRoutingCard(
   }
 }
 
+/** Scaffold the minimal agent definition when none of the accepted files exist.
+ * Content comes only from what the package already declares about itself
+ * (agent-card / agentlas.json name+tagline) — nothing is invented. */
+function ensureAgentDefinitionFile(scanRoot: string): boolean {
+  const hasDefinition = [...AGENT_DEF_FILES].some((name) => {
+    try {
+      return fs.statSync(path.join(scanRoot, name)).isFile();
+    } catch {
+      return false;
+    }
+  });
+  if (hasDefinition) return false;
+  let name = path.basename(scanRoot);
+  let tagline = "";
+  for (const rel of [".agentlas/agent-card.json", "agentlas.json"]) {
+    try {
+      const data = JSON.parse(fs.readFileSync(path.join(scanRoot, rel), "utf8")) as unknown;
+      if (isRecord(data)) {
+        if (typeof data.name === "string" && data.name.trim()) name = data.name.trim();
+        if (typeof data.tagline === "string" && data.tagline.trim()) tagline = data.tagline.trim();
+        else if (typeof data.summary === "string" && data.summary.trim()) tagline = data.summary.trim();
+        break;
+      }
+    } catch {
+      /* try next candidate */
+    }
+  }
+  try {
+    fs.writeFileSync(
+      path.join(scanRoot, "AGENTS.md"),
+      `# ${name}
+
+${tagline || "Portable Agentlas cloud agent package."}
+`,
+      "utf8",
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Friendly one-line breakdown of what the publish auto-fix did, for the user. */
 function summarizeRemediation(actions: RemediationAction[], locale: "ko" | "en"): string {
   if (actions.length === 0) return "";
@@ -564,6 +758,14 @@ export async function packageAndReviewCloudAgent(
           opts?.onStage?.("routing-card");
           remediationActions.push({ file: ROUTING_CARD_PATH, action: "rewritten", detail: "auto-generated routing card" });
         }
+        // "No agent definition file" is a blocker that names no file, so the
+        // remediation loop below can never reach it — the same blind-spot family
+        // as the whole-package size limits. hep-upload scaffolds this from its
+        // package contract; Desktop refused the upload instead. Write the
+        // minimal definition from what the package already says about itself.
+        if (ensureAgentDefinitionFile(scanRoot)) {
+          remediationActions.push({ file: "AGENTS.md", action: "rewritten", detail: "auto-generated agent definition" });
+        }
         // Generic convergence loop against the real publish gate — the model fixes
         // each offending file (redact secrets to placeholders, defang installers,
         // rewrite), escalating to deterministic redaction then exclude, so ANY
@@ -576,6 +778,16 @@ export async function packageAndReviewCloudAgent(
           opts?.onStage,
         );
         remediationActions.push(...outcome.actions);
+        // ★ THE LOOP ABOVE ONLY SEES BLOCKERS THAT NAME A FILE.
+        //   `remediateUntilClean` filters on `!!f.file`, so the two whole-package
+        //   limits — more than MAX_FILES files, more than MAX_TOTAL_BYTES total —
+        //   were invisible to every pass INCLUDING the last-resort exclude. A
+        //   folder over either limit could not be repaired and could not be
+        //   published: the upload ended "blocked", and the only remaining fix was
+        //   the person hand-deleting files until they guessed their way under a
+        //   limit the screen never states. Owner, 2026-08-18: that is exactly what
+        //   packaging is supposed to do for them.
+        remediationActions.push(...trimPackageToLimits(scanRoot, restoredExecutablePaths, opts?.onStage));
       } else {
         autofix.cleanup();
       }
@@ -630,8 +842,12 @@ export async function packageAndReviewCloudAgent(
   //   agent-card, so ONE asset had two identities depending on which control the
   //   user clicked — and the second one is exactly what the server rejects as
   //   `slug_identity_conflict`. Measured 2026-08-18 on Quant Research Desk.
-  const callerSlug = sanitizeSlug(input.slug || "");
-  const packageSlug = sanitizeSlug(readStableSlug(finalSnapshot) || "");
+  // sanitizeSlug("")는 빈 문자열이 아니라 "agentlas-cloud-agent" 폴백을 돌려준다 —
+  // 빈 후보를 먼저 걸러야 우선순위 체인이 산다. (dry-run e2e가 잡은 결함:
+  // 모든 무명 업로드가 폴백 이름으로 발행될 뻔했다.)
+  const callerSlug = input.slug?.trim() ? sanitizeSlug(input.slug) : "";
+  const stableSlug = readStableSlug(finalSnapshot);
+  const packageSlug = stableSlug ? sanitizeSlug(stableSlug) : "";
   const slug =
     (input.preferPackageSlug ? packageSlug || callerSlug : callerSlug || packageSlug)
     || sanitizeSlug(name || path.basename(rootPath));
@@ -999,6 +1215,17 @@ function scanAgentFolder(rootPath: string, restoredExecutablePaths: ReadonlySet<
           kind: "text",
           included: false,
           reason: "experience-lineage-separate-asset",
+        });
+        continue;
+      }
+      if (isMachineLocalStatePath(rel)) {
+        files.push({
+          path: rel,
+          bytes: st.size,
+          sha256: "",
+          kind: "binary",
+          included: false,
+          reason: "machine-local-state",
         });
         continue;
       }
@@ -1908,18 +2135,48 @@ function parseOverwriteTarget(input: {
   return { slug, scope: input.scope, cloudId, revision, updatedAt };
 }
 
-function overwriteConfirmationError(target: PendingOverwriteTarget): OwnerCloudActionError {
+function overwriteConfirmationError(
+  target: PendingOverwriteTarget,
+  hadReceipt: boolean,
+): OwnerCloudActionError {
   const when = target.updatedAt ? new Date(target.updatedAt) : null;
   const savedAt = when && !Number.isNaN(when.getTime())
     ? when.toISOString().slice(0, 10)
     : "an earlier date";
+  // Both revision-conflict shapes end in the same question — which version
+  // wins — but the honest description differs: with a receipt the Cloud copy
+  // was saved somewhere else AFTER this folder's last upload; without one this
+  // machine simply has no record tying this folder to the listing.
+  const why = hadReceipt
+    ? `was saved again elsewhere after this folder's last upload (latest save ${savedAt})`
+    : `already exists, last saved ${savedAt}, and this computer has no record of having uploaded it from this folder`;
   return new OwnerCloudActionError(
     "cloud_overwrite_confirmation_required",
-    `"${target.slug}" already exists in your Agent Cloud, last saved ${savedAt}, and this computer has no record `
-    + "of having uploaded it from this folder. Nothing was uploaded and nothing was changed. "
+    `"${target.slug}" in your Agent Cloud ${why}. Nothing was uploaded and nothing was changed. `
     + "Replace it with this folder's contents only if this folder is the newer version.",
     { retryable: false, actionState: "not-committed" },
   );
+}
+
+/** Server-side commit hiccups the server itself marks as retryable. The package
+ * is fine and the previous version stays live — one quiet retry beats handing
+ * the person an error whose only remedy is pressing the same button again. */
+const RETRYABLE_COMMIT_CODES = new Set([
+  "registration_commit_failed",
+  "cloud_save_commit_failed",
+  "workforce_projection_pending",
+  "workforce_identity_missing",
+  "base_release_materialization_failed",
+]);
+
+function retryableCommitCode(body: string): string | null {
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    const code = isRecord(parsed) && typeof parsed.code === "string" ? parsed.code : "";
+    return RETRYABLE_COMMIT_CODES.has(code) ? code : null;
+  } catch {
+    return null;
+  }
 }
 
 async function registerCloudAgent(input: {
@@ -1932,6 +2189,8 @@ async function registerCloudAgent(input: {
   rootPath: string;
   /** The person answered the overwrite question for THIS folder. */
   confirmedOverwrite?: PendingOverwriteTarget;
+  /** One quiet retry has already been spent on a retryable server commit hiccup. */
+  retried?: boolean;
 }): Promise<CloudAgentRegistrationResult> {
   const cookie = getSessionCookieHeader();
   if (!cookie) throw new Error("Sign in to agentlas.cloud before publishing a cloud agent.");
@@ -1978,7 +2237,11 @@ async function registerCloudAgent(input: {
   const target = parseOverwriteTarget({ status: response.status, body, manifest: input.manifest, scope });
   if (target && !confirmed) {
     pendingOverwriteTargets.set(path.resolve(input.rootPath), target);
-    throw overwriteConfirmationError(target);
+    throw overwriteConfirmationError(target, Boolean(input.baseRegistration));
+  }
+  if (!input.retried && retryableCommitCode(body)) {
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    return registerCloudAgent({ ...input, retried: true });
   }
   throw cloudRegistrationError(response.status, body, !input.baseRegistration && !confirmed);
 }
@@ -2096,8 +2359,10 @@ function cloudRegistrationError(status: number, body: string, sentAsCreate = fal
     const counts = used !== null && limit !== null ? ` (${used} of ${limit} used)` : "";
     return new OwnerCloudActionError(
       "cloud_agent_limit_reached",
-      `Your plan's cloud agent seats are full${counts}. Nothing was uploaded. `
-      + "Delete a cloud agent you no longer need, or move to a larger plan, then save again.",
+      // "크레딧이 모자란 건가?"가 이 문장을 읽는 사람의 첫 질문이다 — 업로드는
+      // 크레딧을 쓰지 않으므로 먼저 그렇게 말한다.
+      `Uploading does not spend credits. Your plan's Agent Cloud seats are full${counts}, `
+      + "and nothing was uploaded. Delete a cloud agent you no longer need, or move to a larger plan.",
       { retryable: false, actionState: "not-committed" },
     );
   }
@@ -2145,6 +2410,74 @@ function cloudRegistrationError(status: number, body: string, sentAsCreate = fal
       + (canonical
         ? `Upload it under "${canonical}" to update that listing.`
         : "Upload it under its existing name to update that listing."),
+      { retryable: false, actionState: "not-committed" },
+    );
+  }
+  // ★ MOBILE READS THESE SENTENCES, NOT THE DESKTOP RESULT CARD.
+  //   The card classifies by code and writes its own ko/en text; the phone gets
+  //   only what a typed OwnerCloudActionError carries (`cloudRefusalOf` returns
+  //   null for a plain Error, and the bridge then answers with its generic
+  //   "Desktop rejected the request"). So every refusal the card explains must
+  //   ALSO be typed here, or the same upload is self-explanatory on the laptop
+  //   and unexplained on the phone. Owner rule 2026-08-18: a fix lands on every
+  //   channel.
+  if (status === 402 || code === "cloud_agent_limit_reached") {
+    return new OwnerCloudActionError(
+      "cloud_agent_limit_reached",
+      "Uploading does not spend credits. Your plan's Agent Cloud seats are full, and nothing was "
+      + "uploaded. Delete a cloud agent you no longer need, or move to a larger plan.",
+      { retryable: false, actionState: "not-committed" },
+    );
+  }
+  if (code === "cloud_mutations_maintenance") {
+    return new OwnerCloudActionError(
+      "cloud_mutations_maintenance",
+      "Writes to Agent Cloud are paused for maintenance. Nothing was uploaded and nothing changed. "
+      + "Try the same folder again shortly.",
+      { retryable: true, actionState: "not-committed" },
+    );
+  }
+  if (
+    code === "registration_commit_failed"
+    || code === "cloud_save_commit_failed"
+    || code === "workforce_projection_pending"
+    || code === "workforce_identity_missing"
+    || code === "base_release_materialization_failed"
+  ) {
+    return new OwnerCloudActionError(
+      code,
+      "Nothing is wrong with your package — the Cloud side could not finish the write, and the "
+      + "previous version is still live. Upload the same folder again shortly.",
+      { retryable: true, actionState: "not-committed" },
+    );
+  }
+  if (code === "localized_metadata_required") {
+    return new OwnerCloudActionError(
+      "localized_metadata_required",
+      "The Hub listing still needs Korean and English text, and Agentlas could not complete it with "
+      + "your connected model. Nothing was uploaded. Check that a model is connected, then upload again.",
+      { retryable: false, actionState: "not-committed" },
+    );
+  }
+  if (
+    code === "bundle_too_large"
+    || code === "file_limit"
+    || code === "file_too_large"
+    || code === "request_too_large"
+  ) {
+    return new OwnerCloudActionError(
+      code,
+      "Even after leaving out the less essential files, this package is over the Agent Cloud size or "
+      + "file-count limit. Nothing was uploaded. Upload just the agent folder, or split the team into "
+      + "smaller packages.",
+      { retryable: false, actionState: "not-committed" },
+    );
+  }
+  if (code === "client_upgrade_required") {
+    return new OwnerCloudActionError(
+      "client_upgrade_required",
+      "The Cloud copy of this agent uses a newer format, so this version of Agentlas did not overwrite "
+      + "it. Nothing changed. Update Agentlas, then upload again.",
       { retryable: false, actionState: "not-committed" },
     );
   }
@@ -2237,10 +2570,32 @@ export async function generateLocalizedListingWithSubmitterRuntime(
   name: string,
   tagline: string,
 ): Promise<CloudAgentLocalizedListing | undefined> {
+  // 활성 모델 하나가 실패하면 끝이었다 — 연결된 다른 모델이 놀고 있는데도.
+  // 활성 런타임 먼저, 이어서 연결된 나머지를 성공할 때까지 순서대로 시도한다.
+  const { pickRunner } = await import("../runtime/selection");
+  const runtimes = await detectRuntimes().catch(() => [] as Awaited<ReturnType<typeof detectRuntimes>>);
+  const ordered = [...runtimes].sort((a, b) => Number(b.active) - Number(a.active));
+  for (const runtime of ordered) {
+    const picked = pickRunner(runtime);
+    if (!picked) continue;
+    const localized = await generateLocalizedListingWithRunner(
+      { runner: picked.runner, label: picked.label, active: runtime },
+      rootPath,
+      name,
+      tagline,
+    );
+    if (localized) return localized;
+  }
+  return undefined;
+}
+
+async function generateLocalizedListingWithRunner(
+  picked: { runner: import("../runtime/runner").Runner; label: string; active: RuntimeStatus },
+  rootPath: string,
+  name: string,
+  tagline: string,
+): Promise<CloudAgentLocalizedListing | undefined> {
   try {
-    const { pickActiveRunner } = await import("../mcp/client");
-    const picked = await pickActiveRunner();
-    if (!picked) return undefined;
     const result = await picked.runner(
       {
         systemPrompt: [

@@ -190,7 +190,7 @@ export default function CloudAgentPublishPage() {
         title: classified.title,
         issues: issues.length > 0 ? issues : classified.issue ? [classified.issue] : [],
         visibility,
-        detail: buildFailureDetail(json, undefined, "", ""),
+        ...(classified.explained ? {} : { detail: buildFailureDetail(json, undefined, "", "") }),
         careerGraph,
         needsPurpose,
       };
@@ -203,7 +203,7 @@ export default function CloudAgentPublishPage() {
         needsOverwriteConfirmation: detail.includes("cloud_overwrite_confirmation_required"),
         issues: classified.issue ? [classified.issue] : [],
         visibility,
-        detail,
+        ...(classified.explained ? {} : { detail }),
       };
     } finally {
       // 어느 경로로 끝나든 실행은 끝났다. 결과도 스토어가 받는다 — 사용자가 화면을
@@ -724,12 +724,22 @@ function topEntries(value: Record<string, number> | undefined, limit: number): A
 /** 실패 원인 분류 — 엔진의 구조화 JSON을 우선하고, 텍스트 스니핑은 error/stderr에만 한다.
  *  stdout에는 패키지 번들(base64 포함)이 통째로 실려 오므로 절대 분류에 쓰지 않는다
  *  (예전엔 "author" 같은 substring이 "auth"에 걸려 가짜 "로그인이 필요합니다"가 떴다). */
+/**
+ * ★ AN EXPLAINED FAILURE MUST NOT ALSO SHIP ITS RAW BODY.
+ *   Every branch below writes a sentence for the person — and the card then
+ *   printed `err.message` under it anyway, so the screen still ended in
+ *   `Error invoking remote method 'cloudAgents:publishRegisteredPublic': ...`
+ *   followed by a JSON conflict object. On Mobile that string is the whole
+ *   explanation. `explained` marks the branches that already said everything
+ *   worth saying; only the final unknown-failure branch leaves it off, because
+ *   there the raw text is the sole diagnostic that exists.
+ */
 function classifyUploadFailure(
   json: Record<string, unknown> | null,
   error: string | undefined,
   stderr: string,
   ko: boolean,
-): { title: string; issue?: UploadIssue } {
+): { title: string; issue?: UploadIssue; explained?: boolean } {
   const manifest = json && isRecord(json.manifest) ? json.manifest : null;
   const publicHub = manifest?.visibility === "marketplace";
   const baseTitle = ko ? "저장 또는 발행 중단" : "Save or publish stopped";
@@ -745,6 +755,7 @@ function classifyUploadFailure(
   if (signal.includes("cloud_overwrite_confirmation_required")) {
     const saved = /last saved (\d{4}-\d{2}-\d{2})/.exec(error ?? "")?.[1];
     return {
+      explained: true,
       title: ko ? "같은 이름이 이미 Cloud에 있습니다" : "Something with this name is already in your Cloud",
       issue: {
         severity: "warning",
@@ -759,6 +770,7 @@ function classifyUploadFailure(
   }
   if (signal.includes("cloud_overwrite_target_expired")) {
     return {
+      explained: true,
       title: ko ? "확인이 만료되었습니다" : "That confirmation expired",
       issue: {
         severity: "warning",
@@ -770,6 +782,7 @@ function classifyUploadFailure(
   }
   if (signal.includes("slug_identity_conflict")) {
     return {
+      explained: true,
       title: ko ? "이미 등록된 에이전트입니다" : "This agent is already registered",
       issue: {
         severity: "warning",
@@ -784,6 +797,7 @@ function classifyUploadFailure(
   }
   if (signal.includes("cloud_agent_duplicate") || signal.includes("duplicate_hub_package")) {
     return {
+      explained: true,
       title: ko ? "이미 Hub에 등록된 에이전트입니다" : "This agent is already on the Hub",
       issue: {
         severity: "warning",
@@ -795,6 +809,7 @@ function classifyUploadFailure(
   }
   if (signal.includes("fork_cannot_publish")) {
     return {
+      explained: true,
       title: ko ? "설치해서 받은 사본은 공개 발행할 수 없습니다" : "An installed copy cannot be published",
       issue: {
         severity: "warning",
@@ -806,6 +821,7 @@ function classifyUploadFailure(
   }
   if (signal.includes("cloud_agent_revision_conflict") || signal.includes("changed on another machine")) {
     return {
+      explained: true,
       title: ko ? "다른 PC에서 이 에이전트가 먼저 변경되었습니다" : "This agent changed on another machine",
       issue: {
         severity: "warning",
@@ -820,6 +836,7 @@ function classifyUploadFailure(
   }
   if (signal.includes("cloud_precondition_required")) {
     return {
+      explained: true,
       title: ko ? "최신 Cloud 버전을 먼저 복원해야 합니다" : "Restore the latest Cloud version first",
       issue: {
         severity: "warning",
@@ -834,6 +851,7 @@ function classifyUploadFailure(
   }
   if (/sign[\s-]?in|signed[_\s-]?out|unauthorized|http 401|\b401\b|auth login/.test(signal)) {
     return {
+      explained: true,
       title: ko ? "Agentlas 로그인이 필요합니다" : "Agentlas sign-in required",
       issue: {
         severity: "warning",
@@ -851,6 +869,7 @@ function classifyUploadFailure(
     );
     if (isRecord(purposeQuestion)) {
       return {
+        explained: true,
         title: ko ? "한 가지만 알려주세요" : "One quick question",
         issue: {
           severity: "warning",
@@ -870,6 +889,7 @@ function classifyUploadFailure(
       findings.every((f) => isRecord(f) && typeof f.id === "string" && f.id.startsWith("routing-card"));
     if (onlyRoutingCard) {
       return {
+        explained: true,
         title: ko ? "Hub 공개에는 라우팅 카드가 필요합니다" : "Hub publishing needs a routing card",
         issue: {
           severity: "warning",
@@ -883,6 +903,7 @@ function classifyUploadFailure(
       };
     }
     return {
+      explained: true,
       title: publicHub
         ? ko ? "Hub 공개 심사에서 막혔습니다" : "Public Hub review blocked the package"
         : ko ? "비공개 저장 안전 검사에서 막혔습니다" : "Private-save safety checks blocked the package",
@@ -897,6 +918,7 @@ function classifyUploadFailure(
   }
   if (signal.includes("unsafe_path")) {
     return {
+      explained: true,
       title: ko ? "안전하지 않은 파일 경로가 있습니다" : "Unsafe file path",
       issue: {
         severity: "error",
@@ -911,6 +933,7 @@ function classifyUploadFailure(
   }
   if (signal.includes("manifest_missing") || signal.includes("agent folder not found")) {
     return {
+      explained: true,
       title: ko ? "agentlas.json을 먼저 고쳐야 합니다" : "Fix agentlas.json first",
       issue: {
         severity: "error",
@@ -921,6 +944,7 @@ function classifyUploadFailure(
   }
   if (signal.includes("needs-review") || signal.includes("acknowledge")) {
     return {
+      explained: true,
       title: ko ? "검토가 필요한 경고가 있습니다" : "Review required",
       issue: {
         severity: "warning",
@@ -929,22 +953,134 @@ function classifyUploadFailure(
       },
     };
   }
-  if (signal.includes("quota") || signal.includes("credit")) {
+  // ★ 업로드는 크레딧을 쓰지 않는다. 막히는 건 요금제의 "Cloud에 둘 수 있는
+  //   에이전트 수"(자리)이지 사용량 과금이 아니다. 이전 문구는 "크레딧 또는 사용량"
+  //   이라 유저에게 올릴 때마다 돈이 나가는 것처럼 읽혔다.
+  if (signal.includes("cloud_agent_limit_reached")) {
     return {
-      title: ko ? "크레딧 또는 사용량 확인이 필요합니다" : "Credit or quota check needed",
+      explained: true,
+      title: ko ? "Cloud에 둘 수 있는 에이전트 자리가 찼습니다" : "Your Cloud agent seats are full",
       issue: {
         severity: "warning",
-        message: ko ? "계정 한도 때문에 업로드가 멈췄을 수 있습니다." : "The upload may have stopped because of account quota.",
-        remediation: ko ? "계정/크레딧 상태를 확인한 뒤 다시 시도하세요." : "Check account and credit status, then retry.",
+        message: ko
+          ? "업로드에 크레딧이 들지는 않습니다. 요금제에서 Cloud에 보관할 수 있는 에이전트 수가 다 찼을 뿐이고, 아무것도 올라가지 않았습니다."
+          : "Uploading does not spend credits. Your plan's limit on how many agents can live in your Cloud is full, and nothing was uploaded.",
+        remediation: ko
+          ? "쓰지 않는 Cloud 에이전트를 지우거나 요금제를 올린 뒤 다시 올리세요."
+          : "Delete a Cloud agent you no longer need, or move to a larger plan, then upload again.",
       },
     };
   }
+  if (signal.includes("client_upgrade_required")) {
+    return {
+      explained: true,
+      title: ko ? "Agentlas를 업데이트해야 합니다" : "Update Agentlas first",
+      issue: {
+        severity: "warning",
+        message: ko
+          ? "Cloud에 있는 이 에이전트는 더 새로운 형식으로 저장돼 있어, 이 버전의 앱이 덮어쓰지 않았습니다. 아무것도 바뀌지 않았습니다."
+          : "The Cloud copy of this agent uses a newer format, so this version of the app did not overwrite it. Nothing changed.",
+        remediation: ko ? "Agentlas를 최신 버전으로 업데이트한 뒤 다시 올리세요." : "Update Agentlas, then upload again.",
+      },
+    };
+  }
+  if (signal.includes("cloud_mutations_maintenance")) {
+    return {
+      explained: true,
+      title: ko ? "Cloud가 점검 중입니다" : "Agent Cloud is under maintenance",
+      issue: {
+        severity: "warning",
+        message: ko
+          ? "지금은 Cloud에 쓰기가 잠겨 있습니다. 아무것도 올라가지 않았고 바뀐 것도 없습니다."
+          : "Writes to the Cloud are paused right now. Nothing was uploaded and nothing changed.",
+        remediation: ko ? "잠시 뒤 같은 폴더로 다시 시도하세요." : "Try the same folder again in a little while.",
+      },
+    };
+  }
+  // 서버가 스스로 "다시 시도하면 된다"고 표시한 일시적 실패들. 원인이 우리 쪽
+  // 인프라라 사용자가 패키지에서 고칠 것은 없다.
+  if (
+    signal.includes("registration_commit_failed")
+    || signal.includes("cloud_save_commit_failed")
+    || signal.includes("workforce_projection_pending")
+    || signal.includes("workforce_identity_missing")
+    || signal.includes("base_release_materialization_failed")
+  ) {
+    return {
+      explained: true,
+      title: ko ? "Cloud 쪽에서 저장이 끝나지 않았습니다" : "The Cloud side did not finish saving",
+      issue: {
+        severity: "warning",
+        message: ko
+          ? "패키지에는 문제가 없습니다. 서버가 마무리하지 못했고, 이전 버전은 그대로 살아 있습니다."
+          : "Nothing is wrong with your package. The server could not finish, and the previous version is still live.",
+        remediation: ko ? "잠시 뒤 같은 폴더로 다시 올리면 됩니다." : "Upload the same folder again shortly.",
+      },
+    };
+  }
+  if (signal.includes("localized_metadata_required")) {
+    return {
+      explained: true,
+      title: ko ? "한국어/영어 소개가 아직 비어 있습니다" : "The Korean/English listing text is still missing",
+      issue: {
+        severity: "warning",
+        message: ko
+          ? "Agentlas가 연결된 모델로 채우려 했지만 완성하지 못했습니다. 아무것도 올라가지 않았습니다."
+          : "Agentlas tried to fill this with your connected model and could not finish it. Nothing was uploaded.",
+        remediation: ko
+          ? "모델 연결 상태를 확인하고 다시 올리세요. 계속 안 되면 소개 문구를 직접 한 줄씩 적어도 됩니다."
+          : "Check that a model is connected and upload again, or write the short listing lines yourself.",
+      },
+    };
+  }
+  // 용량/개수는 이제 패키징이 알아서 줄인다. 여기까지 왔다는 건 필수 파일만으로도
+  // 한도를 넘었다는 뜻이라, 남은 선택은 사람이 폴더를 나누는 것뿐이다.
+  if (
+    signal.includes("bundle_too_large")
+    || signal.includes("file_limit")
+    || signal.includes("file_too_large")
+    || signal.includes("request_too_large")
+  ) {
+    return {
+      explained: true,
+      title: ko ? "줄여도 한도를 넘습니다" : "Still over the limit after trimming",
+      issue: {
+        severity: "warning",
+        message: ko
+          ? "덜 중요한 파일을 빼고도 크기 또는 파일 수가 한도를 넘습니다. 아무것도 올라가지 않았습니다."
+          : "Even after leaving out the less essential files, the package is over the size or file-count limit. Nothing was uploaded.",
+        remediation: ko
+          ? "에이전트 폴더만 따로 올리거나, 팀을 더 작은 단위로 나눠 올리세요."
+          : "Upload just the agent folder, or split the team into smaller packages.",
+      },
+    };
+  }
+  if (signal.includes("quota") || signal.includes("credit")) {
+    return {
+      explained: true,
+      title: ko ? "계정 한도 확인이 필요합니다" : "Account limit check needed",
+      issue: {
+        severity: "warning",
+        message: ko ? "계정 한도 때문에 업로드가 멈췄습니다." : "The upload stopped because of an account limit.",
+        remediation: ko ? "계정 상태를 확인한 뒤 다시 시도하세요." : "Check your account status, then retry.",
+      },
+    };
+  }
+  // 여기 도달한 실패는 유저의 폴더로는 일으킬 수 없는 것들이다 — 네트워크 단절,
+  // 서버 5xx, 또는 앱이 잘못된 데이터를 보냈다는 서버의 단언(해시·바이트 불일치류.
+  // 같은 바이트에서 해시를 만들어 보내므로 앱이 옳으면 구조적으로 안 난다).
+  // 그러니 유저에게 시킬 일이 없고, 아래 원문은 유저용이 아니라 우리가 고칠 때 쓰는
+  // 진단 자료다.
   return {
-    title: baseTitle,
+    title: ko ? "Agentlas 쪽 문제로 멈췄습니다" : "Stopped by a problem on Agentlas's side",
     issue: {
       severity: "error",
-      message: ko ? "저장 또는 발행이 끝나지 않았습니다. 로컬 파일은 그대로입니다." : "Save or publish did not finish. Local files were not changed.",
-      remediation: ko ? "세부 정보가 길면 기술 상세를 펼쳐 원인을 확인한 뒤 같은 폴더로 다시 시도하세요." : "Use the technical details below for diagnosis, then retry with the same folder.",
+      message: ko
+        ? "이 폴더의 문제가 아닙니다. 아무것도 올라가지 않았고 로컬 파일은 그대로입니다."
+        : "This is not a problem with your folder. Nothing was uploaded and local files were not changed.",
+      remediation: ko
+        ? "잠시 뒤 다시 시도하고, 반복되면 Agentlas 업데이트를 확인해 주세요. 아래 기술 상세는 저희가 고치는 데 쓰는 정보입니다."
+        : "Try again shortly, and check for an Agentlas update if it repeats. The technical details below are for us to fix it.",
     },
   };
 }

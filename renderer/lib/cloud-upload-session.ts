@@ -47,6 +47,13 @@ export interface CloudUploadResult {
   careerGraph?: CloudUploadCareerGraphProof;
   needsPurpose?: boolean;
   /**
+   * The upload stopped on one question: something with this name is already in
+   * the person's Cloud and this machine has no record of having uploaded it
+   * from this folder. The card offers the replace action; main holds which
+   * asset that is.
+   */
+  needsOverwriteConfirmation?: boolean;
+  /**
    * The published listing's slug, kept so the result card can price it.
    *
    * Pricing is a separate call made after the publish succeeded, and the slug
