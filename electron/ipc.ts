@@ -152,6 +152,7 @@ import { runMcpInvocation } from "./mcp/client";
 import {
   completeDesktopWorkforceGoal,
   desktopWorkforceGoalId,
+  resolveDesktopWorkforceGoalId,
   loadDesktopWorkforceGoal,
 } from "./mcp/workforce-goal-continuity";
 import { resolveRunKeyElicitation } from "./mcp/run-key-elicitation";
@@ -3530,7 +3531,13 @@ export function registerIpcHandlers(): void {
     if (!chat) throw new Error(`Chat not found: ${id}`);
     if (enabled) {
       const task = getCanonicalTaskForChat(id);
-      const goalId = chat.goalId ?? desktopWorkforceGoalId(task?.id ?? id);
+      // 프로젝트 대화의 목표는 프로젝트에 붙는다. 여기서 대화 단위로 파생해 두면
+      // 실행 경로가 프로젝트 편성을 물려받으려 해도 이 값이 먼저 이겨서 무효가 된다.
+      const goalId = chat.goalId ?? resolveDesktopWorkforceGoalId({
+        projectId: chat.projectId,
+        taskId: task?.id,
+        chatId: id,
+      });
       setChatGoalBinding(id, goalId);
       setChatContinuousMode(id, true);
       // Binding is not definition. The next explicit Goal-mode request owns

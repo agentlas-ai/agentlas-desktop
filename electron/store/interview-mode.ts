@@ -21,18 +21,11 @@ export function setInterviewMode(mode: InterviewMode): InterviewMode {
   return next as InterviewMode;
 }
 
-/** 이번 사용자 입력이 '사소함'이라 인터뷰 게이트 주입 자체를 건너뛰는가.
- *  하드 어서션: trivial 턴엔 질문 0개 — 판단 비용조차 쓰지 않는다. */
-export function isTrivialPrompt(userPrompt: string): boolean {
-  const text = (userPrompt ?? "").trim();
-  if (!text) return true;
-  // 짧은 인사/단답/리액션
-  if (text.length < 15) return true;
-  // 슬래시 커맨드/멘션 지시는 이미 의도가 구조화돼 있음
-  if (text.startsWith("/") || text.startsWith("@")) return true;
-  // 순수 질문(정보 요청)은 실행형이 아님 — 에이전트가 그냥 답하면 된다
-  if (/[?？]\s*$/.test(text) && text.length < 120) return true;
-  // 구체 참조(파일경로/URL/코드블록)가 있으면 이미 스코프가 잡힌 요청
-  if (/https?:\/\/|\.[a-z]{2,4}(\s|$)|\//.test(text) && text.length > 40) return false;
-  return false;
-}
+/*
+ * `isTrivialPrompt` 는 제거됐다 (2026-08-18).
+ *
+ * 판정 전부가 "15자 미만 · / 또는 @ 로 시작 · 물음표로 끝나고 120자 미만"이었다.
+ * 실사용 558턴 측정에서 이런 단어·길이 신호의 재현율은 21.7%였고, "전체 검증해줘"
+ * (11자)처럼 짧고 무거운 요청이 사소함으로 잘렸다. 브리핑 게이트의 판정자는 이제
+ * 모델 하나뿐이고, 그 지시문이 "분명하면 아무것도 묻지 마라"를 이미 담고 있다.
+ */

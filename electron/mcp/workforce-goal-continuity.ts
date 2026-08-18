@@ -58,6 +58,28 @@ export function desktopWorkforceGoalId(taskId: string): string {
   return `goal:desktop:${sha256(value).slice(0, 40)}`;
 }
 
+/**
+ * 이 실행이 속한 편성 목표의 id.
+ *
+ * 예전에는 대화(또는 그 대화의 Task) 하나가 곧 목표였다. 그래서 같은 프로젝트에서
+ * 새 대화를 열 때마다 편성이 처음부터였고, "프로젝트에 팀이 붙어 있다"가 성립하지
+ * 않았다. 프로젝트가 있으면 프로젝트가 목표의 단위다 — 대화는 그 안의 한 세션이다.
+ *
+ * 사용자가 명시적으로 묶어 둔 goalId가 있으면 그것이 언제나 우선한다.
+ */
+export function resolveDesktopWorkforceGoalId(input: {
+  chatGoalId?: string | null;
+  projectId?: string | null;
+  taskId?: string | null;
+  chatId: string;
+}): string {
+  const explicit = String(input.chatGoalId ?? "").trim();
+  if (explicit) return explicit;
+  const projectId = String(input.projectId ?? "").trim();
+  if (projectId) return desktopWorkforceGoalId(`project:${projectId}`);
+  return desktopWorkforceGoalId(String(input.taskId ?? "").trim() || input.chatId);
+}
+
 function requireAccountContext(value: unknown): AccountContext {
   const row = value && typeof value === "object" ? value as Partial<AccountContext> : {};
   if (

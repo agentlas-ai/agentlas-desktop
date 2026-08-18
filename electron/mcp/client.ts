@@ -64,7 +64,10 @@ import { listRentAllowedSlugs } from "../store/project-agent-rent";
 import { activeLeasedSlugs } from "../cloud-agents/leases";
 import { findCanonicalTaskForChat } from "../store/tasks";
 import { touchRuntimeSession } from "../store/runtime-sessions";
-import { getInterviewMode, isTrivialPrompt } from "../store/interview-mode";
+import { getInterviewMode } from "../store/interview-mode";
+import { isUserFacingProjectAgent } from "../../shared/project-agent-pool";
+import { projectRosterSpecs } from "../../shared/project-roster-specs";
+import { classifyTurnEscalation, describeTurnEscalation } from "../../shared/turn-escalation";
 import { getFirm, listFirms } from "../store/firms";
 import { recordBorrowedAgentCareer } from "../agents/borrowed-profiles";
 import {
@@ -91,7 +94,7 @@ import {
 } from "./workforce-orchestrator";
 import {
   bindDesktopWorkforceGoal,
-  desktopWorkforceGoalId,
+  resolveDesktopWorkforceGoalId,
   loadDesktopWorkforceGoal,
   recordDesktopWorkforceTurn,
   type DesktopWorkforceRuntimePlan,
@@ -138,7 +141,7 @@ import {
 import { buildOneSurfaceFromMarkdown, chooseOneSurfaceForDisplay, resolveOneMarkdownSurfaceIntent } from "../one/markdown-surface";
 import { bindOneRuntimeToolArtifacts } from "../one/artifact-preview";
 import { createAutomation, findAutomationByGoalId, listAutomations, toggleAutomation, updateAutomation, updateAutomationGraph } from "../store/automations";
-import { projectContextKey, recordContextSourceMarker, tryRecordRunEvent } from "../store/run-events";
+import { previousTurnObservation, projectContextKey, recordContextSourceMarker, tryRecordRunEvent } from "../store/run-events";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 import {
   resolveSiteAgentAppInlineMcpConfigForDispatch,
@@ -191,6 +194,7 @@ import type {
   AgentlasSurfaceManifest,
   JsonObject,
   OrchestrationTarget,
+  ProjectAgentPoolMember,
   RecStage,
   RecRouterAgent,
   RuntimeStatus,
@@ -1140,6 +1144,7 @@ function parseDesktopWorkforceTurnDecision(
   return { decision: decision as "recruit" | "local-only" | "blocked", planRevision: null, reasonCode };
 }
 
+
 /** 질문에 답할 사람이 없는 실행인가 — UNATTENDED_NO_ASK_DIRECTIVE 부착 기준. */
 function isUnattendedExecution(executionContext?: InvocationExecutionContext): boolean {
   return (
@@ -1663,6 +1668,9 @@ export async function runMcpInvocation(
     effectiveUserPrompt = routedGoal;
   }
   const borrowedAgentSlugs = [...new Set((req.borrowAgents ?? []).map((slug) => slug.trim()).filter(Boolean))];
+  // 이번 턴에 사용자가 대상을 직접 지목했는가. 아래 경로들이 req를 다시 만들며
+  // taskForceTargets를 지우므로, 지목 사실은 여기서 한 번 붙잡아 둔다.
+  const userNamedTargetsThisTurn = (req.taskForceTargets?.length ?? 0) > 0;
   let explicitBorrowUserPreamble: string | null = null;
   let explicitBorrowSpecs: BorrowedAgentSpec[] = [];
   let explicitBorrowMemoryKeys: string[] = [];
@@ -1959,17 +1967,29 @@ export async function runMcpInvocation(
     structuredStormbreakerRequest ||
     isStormbreakerAutoEnabled()
   );
+  /* 이번 턴을 얼마나 올릴 것인가 — 직전 턴의 관측으로 정한다.
+   *
+   * 요청 문장은 읽지 않는다. 실사용 558턴 실측에서 단어 신호의 재현율은 21.7%,
+   * 가벼운 턴 오탐은 130건 중 115건이었다. 같은 코퍼스에서 직전 턴 이어받기는
+   * 재현율 88.5%였고 전체 턴의 86%가 후속 턴이다. 첫 턴은 예측하지 않는다. */
+  const previousTurn = previousTurnObservation(chat.id);
+  const turnEscalation = classifyTurnEscalation({
+    previousTurn,
+    explicitTeamRequest: explicitStormbreakerRequest || structuredStormbreakerRequest,
+  });
+  const projectRosterForTurn = invocationProjectId
+    ? (getProject(invocationProjectId)?.agentPool ?? [])
+    : [];
   const stormbreakerSwarm =
     !oneTeamExecutionPolicy &&
     !req.agentAppMode &&
     !restrictedReadBoundary &&
     chat.kind !== "division" &&
     !chat.continuousMode &&
+    // 토글이 켜져 있어도 직전 턴이 가벼웠으면 올리지 않고, 사용자가 직접 요청했으면
+    // 언제나 올린다. "매번"이 아니라 "관측이 그렇게 말할 때"다.
     (explicitStormbreakerRequest || structuredStormbreakerRequest || isStormbreakerAutoEnabled()) &&
-    // `/hep-storm` is a routing slug, not a trivial task. Classify the goal
-    // after removing the explicit command so slash input reaches the same
-    // executable swarm path as the Composer Stormbreaker chip.
-    !isTrivialPrompt(explicitStormbreakerRequest ? explicitStormbreakerGoal : req.userPrompt);
+    turnEscalation.level === "team";
 
   // ── MCP 툴 브리지 ──────────────────────────────────────────
   // Claude Code/Codex 러너에는 요청/에이전트 문맥으로 필요한 MCP 플러그인을 자동 선택한 뒤
@@ -2266,7 +2286,13 @@ export async function runMcpInvocation(
   // durable fallback goal key until an authoritative promotion occurs.
   const canonicalTask = findCanonicalTaskForChat(chat.id);
   const workforceProjectDir = workingFolder ?? process.cwd();
-  const durableWorkforceGoalId = desktopWorkforceGoalId(canonicalTask?.id ?? chat.id);
+  // 프로젝트가 있으면 편성은 프로젝트에 붙는다 — 새 대화를 열어도 팀을 물려받는다.
+  const durableWorkforceGoalId = resolveDesktopWorkforceGoalId({
+    chatGoalId: chat.goalId,
+    projectId: invocationProjectId,
+    taskId: canonicalTask?.id,
+    chatId: chat.id,
+  });
   let durableTurnDecision: DesktopWorkforceTurnDecision | null = null;
   let durableRuntimePlan: DesktopWorkforceRuntimePlan | null = null;
   try {
@@ -2274,7 +2300,14 @@ export async function runMcpInvocation(
     const goal = durableContext.goals[0];
     if (goal) {
       const readyPlans = goal.plans.filter((plan) => plan.status === "ready" && plan.preparation);
-      if (durableContext.status === "refresh-required" || !goal.executionAllowed || !readyPlans.length) {
+      if (turnEscalation.level === "solo") {
+        /* 난이도가 solo면 판정 자체를 건너뛴다.
+         *
+         * 예전에는 편성이 묶인 대화의 **모든** 턴이 판정용 모델 왕복을 한 번씩 더 돌았다
+         * ("고마워요" 한 마디에도). 판정이 작업만큼 비싸면 라우팅의 의미가 없다. 양끝은
+         * 공짜 신호로 이미 정해졌으므로 여기서 다시 물을 것이 없다. */
+        durableTurnDecision = { decision: "local-only", planRevision: null, reasonCode: "escalation-solo" };
+      } else if (durableContext.status === "refresh-required" || !goal.executionAllowed || !readyPlans.length) {
         durableTurnDecision = {
           decision: "recruit",
           planRevision: null,
@@ -2285,9 +2318,13 @@ export async function runMcpInvocation(
           {
             systemPrompt: [
               "You are the active Agentlas Desktop host deciding one turn of a durable Workforce goal.",
+              "Decide the STAFFING SOURCE only. Never decompose the task or assign roles — the executing model owns that.",
+              "Order of preference, highest first: (1) an exact incumbent plan, (2) the agents this project already designates, (3) recruiting someone new.",
               "Choose reuse when one exact incumbent plan can perform this turn.",
-              "Choose local-only when the host and local skills can perform it without a borrowed worker.",
-              "Choose recruit only for a real capability, tool, or modality gap. Choose blocked only when safe progress is impossible.",
+              "Choose local-only when the host, local skills, or the project's designated agents can perform it without recruiting. A designated agent that fits is always preferred over recruiting a new one.",
+              "Choose recruit only when neither the incumbent plan nor any designated agent covers a real capability, tool, or modality gap. Name that gap in reasonCode.",
+              "Choose blocked only when safe progress is impossible.",
+              "escalation tells you how heavy this turn is; it never by itself justifies recruiting.",
               "Never complete or dismiss the goal.",
               'Return exactly one JSON object: {"decision":"reuse|recruit|local-only|blocked","planRevision":1|null,"reasonCode":"short-code"}.',
             ].join("\n"),
@@ -2295,6 +2332,20 @@ export async function runMcpInvocation(
             userPrompt: JSON.stringify({
               currentTurnTask: req.userPrompt,
               goalId: durableWorkforceGoalId,
+              // 판정이 리스트를 볼 수 없으면 "리스트 우선"은 성립할 수 없다. 예전에는
+              // 이 입력에 기존 플랜만 들어가서, 지정한 에이전트는 판정 대상에조차
+              // 오르지 못했다.
+              projectDesignatedAgents: projectRosterForTurn.map((member) => ({
+                name: member.nameSnapshot,
+                kind: member.entityKind,
+                source: member.source,
+              })),
+              // 난이도 근거는 해석이 아니라 직전 턴의 계측치다.
+              escalation: {
+                level: turnEscalation.level,
+                reasonCode: turnEscalation.reasonCode,
+                previousTurn: turnEscalation.basis,
+              },
               incumbentPlans: readyPlans.map((plan) => ({
                 revision: plan.revision,
                 agentReleaseIds: plan.agentReleaseIds,
@@ -2727,6 +2778,99 @@ export async function runMcpInvocation(
     return earlyResult();
   }
 
+  /* ── 리스트 우선 편성 ────────────────────────────────────────
+   *
+   * 순서는 캐시 → 리스트 → 네트워크다. 위쪽에서 이미 붙어 있는 편성(reuse)을 썼고,
+   * 여기서 **프로젝트에 지정한 리스트**를 쓰고, 그래도 모자랄 때만 아래에서 네트워크로
+   * 새로 뽑는다. 지금까지는 가운데 칸이 통째로 없어서, 리스트에 무엇을 넣든 실행은
+   * 곧바로 네트워크로 갔다.
+   *
+   * 사용자가 이번 턴에 직접 대상을 지목했으면(@ 지목·명시 borrow) 그 지시가 위다.
+   * 난이도가 solo면 팀을 만들지 않는다 — 한 줄 질문에 편성을 붙이는 것이 이 시스템의
+   * 반대 방향 결함이다. */
+  const rosterFirstEligible =
+    !oneTeamExecutionPolicy &&
+    !req.agentAppMode &&
+    !restrictedReadBoundary &&
+    chat.kind !== "division" &&
+    turnEscalation.level !== "solo" &&
+    borrowedAgentSlugs.length === 0 &&
+    !userNamedTargetsThisTurn &&
+    projectRosterForTurn.length > 0;
+  if (rosterFirstEligible) {
+    const rosterSpecs = projectRosterSpecs(
+      projectRosterForTurn,
+      {
+        agentById: (id) => {
+          const installed = getAgentById(id);
+          return installed
+            ? {
+                id: installed.id,
+                slug: installed.slug,
+                name: installed.name,
+                userFacing: isUserFacingProjectAgent(installed),
+              }
+            : null;
+        },
+        firmById: (id) => {
+          const firm = getFirm(id);
+          return firm ? { id: firm.id, slug: firm.slug, name: firm.name } : null;
+        },
+      },
+      locale,
+    ) as BorrowedAgentSpec[];
+    if (rosterSpecs.length > 0) {
+      try {
+        persistUserMessage();
+        // 영수증 — 무엇으로 이 등급이 나왔고 누구를 썼는지 남긴다. 이 줄이 없으면
+        // "리스트가 안 쓰였다"가 다시 조용해진다.
+        sink({
+          kind: "tool-use",
+          status: locale === "ko"
+            ? `프로젝트 지정 ${rosterSpecs.length}명으로 편성합니다 (난이도 ${describeTurnEscalation(turnEscalation)}).`
+            : `Staffing with ${rosterSpecs.length} project-designated member(s) (escalation ${describeTurnEscalation(turnEscalation)}).`,
+        });
+        await runBorrowedTaskForceInvocation({
+          req: { ...req, userPrompt: effectiveUserPrompt, borrowAgents: undefined, taskForceTargets: undefined },
+          chat,
+          orchestratorAgent: agent,
+          taskForceName: locale === "ko" ? "프로젝트 지정 팀" : "Project-designated team",
+          taskForceKind: "task-force",
+          taskForceSpecs: rosterSpecs,
+          priorHistory,
+          active,
+          runtimes,
+          picked,
+          runtimeOverride: runtimeChoice.override,
+          workingFolder,
+          ...(workspaceBinding ? { workspaceBinding } : {}),
+          ...(restrictedOrchestrationBoundary ? { restrictedReadBoundary: true as const } : {}),
+          mcpConfigPath,
+          mcpAllowedTools,
+          mcpCodexConfigArgs,
+          agentAppMcpRuntimeEnv: mcpRuntimeEnv,
+          onAgentAppMcpRuntimeUnavailable: markAgentAppMcpRuntimeUnavailable,
+          runnerEnv: orchestrationRunnerEnv,
+          locale,
+          sink,
+          signal,
+        });
+        return earlyResult();
+      } catch (err) {
+        // 리스트로 실패했다고 조용히 네트워크로 넘어가지 않는다 — 사용자가 지정한
+        // 팀이 실패했다는 사실 자체가 결과다.
+        sink({
+          kind: "error",
+          error: {
+            code: "project-roster-task-force-failed",
+            message: err instanceof Error ? err.message : String(err),
+          },
+        });
+        return earlyResult();
+      }
+    }
+  }
+
   // ── Hub borrowed task force ─────────────────────────────────
   // 추천 시트에서 Hub 에이전트 2개 이상을 고른 경우: 단일 프롬프트에 "여러 전문가를 적용"이라고
   // 뭉개지 않고, 로컬 오케스트레이터가 에이전트별 입력 패킷을 설계한 뒤 각 borrowed agent를
@@ -2968,21 +3112,35 @@ export async function runMcpInvocation(
   // 모호한 실행형 요청이면 실행 전에 배치 질문(3-5)을 강제한다. 판단은 모델이 턴 안에서
   // 인라인으로 수행(추가 LLM 콜/지연 0). trivial 프롬프트는 주입 자체를 건너뛴다(하드 어서션:
   // 사소한 요청에 질문 0개). 기본 모드는 build-only라 챗에는 꺼져 있다.
+  /* 브리핑 게이트 — 사소함 판정을 단어로 하지 않는다.
+   *
+   * 예전에는 이 주입 앞에 `isTrivialPrompt`가 서 있었다. 그 판정 전부는 "15자 미만",
+   * "/ 나 @ 로 시작", "물음표로 끝나고 120자 미만"이었다. 실사용 558턴에서 같은 계열
+   * 단어 신호의 재현율은 21.7%였고, "전체 검증해줘"(11자) 같은 무거운 요청이 사소함으로
+   * 잘렸다. 토큰 몇 개를 아끼려고 누구에게 물을지를 글자 수로 정한 셈이다.
+   *
+   * 판정은 이미 아래 지시문 안에 있다 — 모델이 조용히 판단하고, 분명하면 아무것도 묻지
+   * 않는다. 그러니 앞단에 두 번째 판정자를 세울 이유가 없다. 이제 모드가 켜져 있으면
+   * 언제나 주입하고, 유일한 판정자는 모델이다.
+   *
+   * 판단 차원은 Build 인터뷰(agentlas_cloud/interview/scorer.py)와 같은 것으로 맞춘다:
+   * 목표·제약·완료기준. 두 표면이 같은 것을 보고 판정해야 사용자가 같은 기준을 만난다. */
   if (
     !req.agentAppMode &&
     getInterviewMode() === "smart" &&
-    chat.kind !== "division" &&
-    !isTrivialPrompt(req.userPrompt)
+    chat.kind !== "division"
   ) {
     turnContextParts.push(
       `## Briefing gate (before executing)\n` +
-      `First judge silently: are the goal, constraints and success criteria of this request specific enough ` +
-      `that a stranger would produce the same result? If YES — proceed normally and ask NOTHING. ` +
-      `If NO (execution-shaped but ambiguous): ask ONE batch of 3-5 <<agentlas-ask>> questions covering the ` +
+      `First judge silently, on three dimensions: is the GOAL specific, are the CONSTRAINTS stated, ` +
+      `and is the SUCCESS CRITERION checkable — specific enough that a stranger would produce the same result? ` +
+      `If all three are clear — proceed normally and ask NOTHING. ` +
+      `A greeting, a pure question, a reaction, or an already-specific instruction is always clear: ask nothing. ` +
+      `Length is not a signal; a short request can be the heaviest one. ` +
+      `If a dimension is genuinely unclear on an execution-shaped request: ask ONE batch of 3-5 <<agentlas-ask>> questions covering the ` +
       `weakest of: what NOT to do (anti-scope), smallest acceptable version, done signal, audience. ` +
       `Then STOP and wait. After the answers arrive, restate the goal in one sentence and proceed — never ask a second batch; ` +
-      `record what is still open as explicit assumptions instead. 'decide later' is a valid answer (record as deferred). ` +
-      `Never use this gate for greetings, pure questions, or already-specific instructions.`,
+      `record what is still open as explicit assumptions instead. 'decide later' is a valid answer (record as deferred).`,
     );
   }
   if (invocationProjectId) {
