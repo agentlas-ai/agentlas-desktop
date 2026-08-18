@@ -34,6 +34,7 @@ import { resolveHephaestusStdioLaunch } from "../hephaestus/engine";
 import {
   MCP_PROXY_CONTROL_FILE_ENV,
   MCP_PROXY_SERVER_KEY_ENV,
+  MCP_PROXY_PLAN_ENV,
   MCP_PROXY_SESSION_ENV,
   MCP_PROXY_TARGET_ENV,
   mcpProxyControlInfoPath,
@@ -115,6 +116,8 @@ export interface McpConfigBuildOptions {
     cwd?: string;
     chatId?: string;
     unattended?: boolean;
+    /** 그래프 노드의 도구 중개 계획 파일(workflow/tool-broker-runtime.ts). */
+    planPath?: string;
   };
 }
 
@@ -142,6 +145,7 @@ function mcpProxySpec(
       [MCP_PROXY_TARGET_ENV]: JSON.stringify(actual),
       [MCP_PROXY_SERVER_KEY_ENV]: serverKey,
       [MCP_PROXY_SESSION_ENV]: JSON.stringify(gate),
+      ...(gate.planPath ? { [MCP_PROXY_PLAN_ENV]: gate.planPath } : {}),
       // 실제 서버가 쓰는 alias 참조는 프록시가 그대로 물려줘야 한다 — 프록시는
       // 자기 env 를 자식에게 펼쳐 준다(proxy-child.cjs).
       ...actual.env,

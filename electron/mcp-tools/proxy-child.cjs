@@ -29,6 +29,15 @@ const CONTROL_FILE = process.env.AGENTLAS_MCP_PROXY_CONTROL || "";
 const TARGET_RAW = process.env.AGENTLAS_MCP_PROXY_TARGET || "";
 const SERVER_KEY = process.env.AGENTLAS_MCP_PROXY_SERVER_KEY || "mcp";
 const SESSION_RAW = process.env.AGENTLAS_MCP_PROXY_SESSION || "";
+/**
+ * 이 노드의 도구 중개 계획(shared/graph-tool-broker.ts ToolBrokerPlan) 파일.
+ *
+ * ★그래프가 "이 노드는 이 도구만" 이라고 선언한 것을 실제로 지키던 곳은 claude 의
+ * PreToolUse 훅 하나뿐이었다. 다른 런타임에서는 선언이 기록으로만 남았다. 계획은
+ * 순수 데이터라 프록시가 그대로 강제할 수 있고, 프록시는 모든 런타임을 지난다.
+ * 그래서 여기서 먼저 계획을 적용하고, 통과한 것만 사람 승인으로 넘긴다.
+ */
+const PLAN_FILE = process.env.AGENTLAS_MCP_PROXY_PLAN || "";
 
 function warn(message) {
   try { process.stderr.write(`[agentlas-mcp-proxy] ${message}\n`); } catch { /* ignore */ }
@@ -57,6 +66,29 @@ function control() {
       return parsed;
     }
   } catch { /* 파일이 아직 없거나 앱이 죽었다 */ }
+  return null;
+}
+
+/** 계획이 이 도구를 아예 금지하는가. 사람에게 묻기 전에 답이 정해진 경우다. */
+function planRefusal(toolName) {
+  if (!PLAN_FILE) return null;
+  let plan;
+  try {
+    plan = JSON.parse(fs.readFileSync(PLAN_FILE, "utf8"));
+  } catch {
+    // 계획을 읽어야 하는데 못 읽었다 = 무엇이 허용인지 모른다 → 거부.
+    return "the node's tool plan could not be read";
+  }
+  const qualified = `mcp__${SERVER_KEY}__${toolName}`;
+  if (Array.isArray(plan.denyExact) && plan.denyExact.includes(qualified)) {
+    return "this node's plan denies that tool";
+  }
+  if (plan.denyUndeclaredMcp === true) {
+    const prefixes = Array.isArray(plan.allowPrefixes) ? plan.allowPrefixes : [];
+    if (!prefixes.some((prefix) => qualified.startsWith(prefix))) {
+      return "this node did not declare that tool";
+    }
+  }
   return null;
 }
 
@@ -157,6 +189,21 @@ process.stdin.on("data", (chunk) => {
     }
     const toolName = message?.params?.name ?? "";
     const id = message?.id;
+    // 계획이 먼저다 — 노드가 선언하지 않은 도구를 사람에게 물어볼 이유가 없다.
+    const refusal = planRefusal(String(toolName));
+    if (refusal) {
+      if (id === undefined || id === null) continue;
+      deniedIds.add(id);
+      send(process.stdout, {
+        jsonrpc: "2.0",
+        id,
+        result: {
+          isError: true,
+          content: [{ type: "text", text: `Tool call refused: "${toolName}" — ${refusal}.` }],
+        },
+      });
+      continue;
+    }
     void askApproval(String(toolName)).then((allowed) => {
       if (allowed) {
         send(upstream.stdin, message);

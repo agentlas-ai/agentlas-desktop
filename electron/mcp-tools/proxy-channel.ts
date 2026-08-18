@@ -22,6 +22,11 @@ export const MCP_PROXY_TARGET_ENV = "AGENTLAS_MCP_PROXY_TARGET";
 export const MCP_PROXY_SERVER_KEY_ENV = "AGENTLAS_MCP_PROXY_SERVER_KEY";
 /** 이 실행의 승인 세션 키 — 같은 대화의 "이번 세션 동안 허용"이 물려지도록. */
 export const MCP_PROXY_SESSION_ENV = "AGENTLAS_MCP_PROXY_SESSION";
+/**
+ * 이 노드의 도구 중개 계획 파일. 프록시가 사람에게 묻기 **전에** 이걸로 먼저 거른다 —
+ * 그래프가 선언하지 않은 도구는 승인 대상이 아니라 애초에 없는 것이다.
+ */
+export const MCP_PROXY_PLAN_ENV = "AGENTLAS_MCP_PROXY_PLAN";
 
 export function mcpProxyControlInfoPath(): string {
   return path.join(app.getPath("userData"), "mcp", "proxy-control.json");
