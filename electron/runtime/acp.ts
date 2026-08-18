@@ -307,9 +307,24 @@ async function openAcp(
     /** 있으면 생존 신호와 고아 stdio 통지를 이 채널로 낸다(실행 경로). */
     onStatus?: (status: string) => void;
     label?: string;
+    /**
+     * grok 전용 도구 관문 — `grok agent --plugin-dir <DIR>`.
+     *
+     * ★실측 2026-08-19(grok 1.0.5): 이 플래그는 `grok agent` 하위 명령에만 있고
+     * ("Highest-priority plugin scope; always trusted — hooks and MCP servers
+     * activate without a prompt"), 최상위 `grok` 에 붙이면 실행이 아예 안 뜬다.
+     * 그리고 grok 은 ACP_PREFERRED_KINDS 라 실제 실행이 바로 이 `agent stdio`
+     * 경로다 — 레거시 헤드리스 러너가 아니라 여기가 관문을 걸 자리다.
+     */
+    toolBrokerPluginDir?: string;
   },
 ): Promise<Session> {
-  const child = spawnCli(opts.command ?? spec.command, spec.args, {
+  const spawnArgs =
+    opts.toolBrokerPluginDir && spec.args[0] === "agent"
+      ? // `agent` 바로 뒤에 넣는다 — 하위 명령의 플래그이므로 자리를 지켜야 한다.
+        ["agent", "--plugin-dir", opts.toolBrokerPluginDir, ...spec.args.slice(1)]
+      : spec.args;
+  const child = spawnCli(opts.command ?? spec.command, spawnArgs, {
     stdio: ["pipe", "pipe", "pipe"],
     cwd: opts.cwd,
     env: opts.env,
@@ -514,6 +529,8 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         timeoutMs: 60_000,
         onStatus: (s) => events.onStatus(s),
         label: req.backendLabel || spec.label,
+        // 도구 관문 — grok 의 `agent` 하위 명령만 이 플래그를 받는다(openAcp 주석 참조).
+        ...(req.toolBrokerPluginDir ? { toolBrokerPluginDir: req.toolBrokerPluginDir } : {}),
         handlers: {
           onNotification: (method, params) => { if (method === "session/update") client.onUpdate(params); },
           onRequest: async (method, params) => {

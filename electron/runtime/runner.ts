@@ -86,6 +86,11 @@ export interface RunnerRequest {
    * 바깥을 바꾸는 호출을 실제로 막는 곳은 여기뿐이다. 모델도 렌더러도 이 값을 만들 수 없다.
    */
   toolBrokerSettingsPath?: string;
+  /**
+   * grok 의 도구 관문 — `--plugin-dir <DIR>` 로 넘길 디렉터리.
+   * claude 의 `--settings` 와 같은 자리이고, 같은 훅 스크립트·같은 stdout 계약을 쓴다.
+   */
+  toolBrokerPluginDir?: string;
   /** Codex CLI `exec`에 붙이는 MCP config override args (`-c mcp_servers...`). */
   mcpCodexConfigArgs?: string[];
   /** Agentlas-resolved environment: agent .env first, then global multimodal fallback/vault. */

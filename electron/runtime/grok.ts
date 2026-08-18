@@ -373,6 +373,13 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
   if (systemViaFlag && systemText) args.push("--system-prompt-override", systemText);
   // 출력 형태 계약 — 지원 런타임은 플래그로 강제한다(실측 grok 1.0.5 `--json-schema`).
   if (req.outputSchema) args.push("--json-schema", JSON.stringify(req.outputSchema.schema));
+  /*
+   * ★`--plugin-dir` 은 여기 없다. 실측 2026-08-19(grok 1.0.5): 최상위 `grok` 에 붙이면
+   * `unexpected argument '--plugin-dir'` 로 실행이 아예 안 뜨고, 프로젝트 스코프
+   * `./.grok/config.toml` 의 훅은 이 헤드리스 경로에서 **발화하지 않았다**(훅 0회,
+   * 파일은 생성됨). 이 플래그는 `grok agent` 하위 명령 전용이고, 그쪽이 우리의
+   * 실제 실행 경로다(ACP_PREFERRED_KINDS → electron/runtime/acp.ts). 배선은 거기 있다.
+   */
   if (grokSubagentsDisabled(env)) args.push("--no-subagents");
   if (resumeSessionId) args.unshift("--resume", resumeSessionId);
   if (req.model) args.push("-m", req.model); // grok --help 확인: -m, --model <model>

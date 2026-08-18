@@ -64,6 +64,28 @@ export const RUNTIME_CHOKEPOINTS: Record<string, RuntimeChokepoint> = {
     kind: "allowlist-only",
     evidence: "electron/runtime/codex.ts가 MCP 허용 목록을 좁힌다 · PreToolUse 거절은 미실측(2026-08-05 실측 시도 무응답)",
   },
+  /*
+   * ★grok 은 claude 와 **같은 stdout JSON 계약**을 쓴다. 실측 2026-08-19(grok 1.0.5
+   * 바이너리 내장 문서): "For `PreToolUse`, a `deny` decision in stdout JSON is
+   * honored regardless of exit code". 그래서 훅 스크립트는 claude 것을 그대로 쓰고
+   * (판단이 두 벌이 되면 갈라진다), 포장만 TOML 로 바꾼다.
+   *
+   * ★배선 위치를 두 번 틀렸다 — 기록해 둔다.
+   *  · 최상위 `grok --plugin-dir` → `unexpected argument` 로 **실행이 아예 안 뜬다**.
+   *  · 프로젝트 스코프 `./.grok/config.toml` 훅 → 헤드리스에서 **발화하지 않았다**
+   *    (훅 0회, 파일은 그대로 생성됨).
+   * 맞는 자리는 `grok agent` 하위 명령이고, grok 은 ACP_PREFERRED_KINDS 라 실제
+   * 실행이 바로 그 경로다(electron/runtime/acp.ts). "런타임이 그 기능을 가졌다"와
+   * "우리가 지나는 길에 그 기능이 있다"는 다른 질문이다.
+   *
+   * codex 와 등급이 갈리는 이유: codex 는 심볼만 있고 거절이 먹는지 실측이 무응답으로
+   * 끝났다. grok 은 벤더가 계약을 문서로 명시했고 주입점이 프로세스별이다.
+   */
+  grok: {
+    kind: "pretooluse-hook",
+    evidence:
+      "실측 2026-08-19 · grok 1.0.5: `grok agent --plugin-dir <DIR> stdio` 가 정상 기동·initialize 응답(exit 0)하고, 벤더 문서가 그 스코프를 'always trusted — hooks and MCP servers activate without a prompt' 로, PreToolUse 를 'a deny decision in stdout JSON is honored regardless of exit code' 로 명시한다",
+  },
 };
 
 /** 바깥을 바꾸는 내장 도구. dry-run은 이것들을 실제로 거절한다. */

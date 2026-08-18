@@ -3618,6 +3618,8 @@ export async function runMcpInvocation(
       // 등급이 "강제됨"으로 남는다(아래 brokerInstalled). 다른 실행 경로에서 등급만 들고
       // 다니면, 막지 않은 실행에 막았다는 라벨이 붙는다.
       ...(toolBroker?.settingsPath ? { toolBrokerSettingsPath: toolBroker.settingsPath } : {}),
+      // grok 은 같은 훅 스크립트를 자기 플러그인 디렉터리로 받는다(claude --settings 와 같은 자리).
+      ...(toolBroker?.pluginDirPath ? { toolBrokerPluginDir: toolBroker.pluginDirPath } : {}),
       env: runnerEnv.env,
       untrustedNoTools: req.agentAppMode === true,
       untrustedAllowedMcpTools: req.agentAppMode ? mcpAllowedTools : undefined,
@@ -3633,7 +3635,9 @@ export async function runMcpInvocation(
       // lightweight and plain-text capable.
       forceSurface: oneTeamExecutionPolicy ? true : undefined,
     };
-    toolBrokerInstalled = Boolean(runnerReq.toolBrokerSettingsPath);
+    // ★관문이 "설치됨"인지는 런타임이 실제로 받은 것으로 판정한다. settingsPath 하나만
+    // 보면 grok 실행은 관문을 받고도 영원히 미설치로 기록된다.
+    toolBrokerInstalled = Boolean(runnerReq.toolBrokerSettingsPath || runnerReq.toolBrokerPluginDir);
     // 라이브 토큰은 러너 1회 실행 기준 누적치 — Stormbreaker 연속 패스에서 다음 패스가
     // 0부터 다시 세도 표시가 뒤로 가지 않도록 이전 패스 최고치를 floor로 더한다.
     let liveUsageFloor = 0;

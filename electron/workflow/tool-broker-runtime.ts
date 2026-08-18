@@ -20,6 +20,17 @@ export interface MaterializedToolBroker {
   plan: ToolBrokerPlan;
   /** claude 계열에 `--settings`로 넘길 파일. 관문을 걸 수 없으면 null. */
   settingsPath: string | null;
+  /**
+   * grok 에 `--plugin-dir` 로 넘길 디렉터리. 관문을 걸 수 없으면 null.
+   *
+   * ★grok 은 claude 와 **같은 stdout JSON 계약**을 쓴다(바이너리 문서 실측 2026-08-19:
+   * "For `PreToolUse`, a `deny` decision in stdout JSON is honored regardless of
+   * exit code"). 그래서 훅 스크립트를 새로 쓰지 않고 그대로 재사용한다 — 판단이
+   * 두 벌이 되면 갈라지고, 갈라진 쪽은 항상 "막았다고 적혀 있는데 안 막힌 쪽"이다.
+   * 다른 것은 설정 형식뿐이라(TOML `[[hooks.PreToolUse]]`), 여기서 그것만 렌더한다.
+   * `--plugin-dir` 는 프로세스별 주입점이라 사용자 전역 설정을 건드리지 않는다.
+   */
+  pluginDirPath: string | null;
   /*
    * ★codex 용 hooks.json 은 여기 없다 — 만들었지만 아무도 읽지 않았다.
    *
@@ -55,7 +66,7 @@ export function materializeToolBroker(
 ): MaterializedToolBroker {
   const plan = planToolBrokerage(input);
   if (plan.chokepoint !== "pretooluse-hook") {
-    return { plan, settingsPath: null, planPath: null };
+    return { plan, settingsPath: null, planPath: null, pluginDirPath: null };
   }
 
   const prefix = brokerDir(input.runId, input.nodeId);
@@ -73,6 +84,7 @@ export function materializeToolBroker(
       },
       settingsPath: null,
       planPath: null,
+      pluginDirPath: null,
     };
   }
 
@@ -86,7 +98,35 @@ export function materializeToolBroker(
     },
   };
   fs.writeFileSync(settingsPath, JSON.stringify(hookBlock), "utf8");
-  return { plan, settingsPath, planPath };
+
+  /*
+   * grok 판: 같은 스크립트, 같은 stdout 계약, 다른 포장.
+   * `--plugin-dir <DIR>` 이 가리키는 디렉터리 안의 `hooks.toml` 을 읽는다.
+   * matcher 는 claude 쪽과 같은 `.*` — 무엇이 통과할지는 계획이 정하지, 매처가 정하지 않는다.
+   */
+  const pluginDirPath = `${prefix}.grok-plugin`;
+  try {
+    fs.mkdirSync(pluginDirPath, { recursive: true });
+    const tomlCommand = JSON.stringify(command);
+    fs.writeFileSync(
+      path.join(pluginDirPath, "hooks.toml"),
+      [
+        "[[hooks.PreToolUse]]",
+        'matcher = ".*"',
+        "  [[hooks.PreToolUse.hooks]]",
+        '  type = "command"',
+        `  command = ${tomlCommand}`,
+        "  timeout = 10",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+  } catch {
+    // 렌더에 실패하면 grok 쪽 관문은 없는 것이다. claude 쪽은 그대로 살아 있으므로
+    // 전체를 강등하지 않고 이 칸만 null 로 둔다 — 러너가 플래그를 안 붙인다.
+    return { plan, settingsPath, planPath, pluginDirPath: null };
+  }
+  return { plan, settingsPath, planPath, pluginDirPath };
 }
 
 /** 실행이 끝나면 이번 실행의 계획 파일을 치운다. 남겨 둘 이유가 없다. */
