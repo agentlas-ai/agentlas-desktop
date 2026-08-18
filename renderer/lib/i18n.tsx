@@ -361,7 +361,7 @@ const dict = {
     "chatinput.plus.agents_hint": "이 대화에 에이전트를 호출합니다",
     // 자동 라우팅(알아서 에이전트 부르기) — 묻지 않고 바로 라우팅, 게이트 시트 2종만 예외
     "chatinput.autoroute.routing": "적합한 에이전트 라우팅 중…",
-    "chatinput.autoroute.cost_notice": "허브 에이전트 대여 ~{credits}크레딧 · 24시간 리스 · 대여 비용(결과 성공 보장 아님)",
+    "chatinput.autoroute.cost_notice": "허브 에이전트 호출 · 작업당 ~{credits} 크레딧(결과 성공 보장 아님)",
     "chatinput.autoroute.cost_partial": "일부 에이전트 단가 미공개 — 최소 금액이며 실제 청구는 더 많을 수 있어요",
     "chatinput.autoroute.paywall_needed_min": "최소 필요",
     "chatinput.autoroute.paywall_title": "크레딧이 부족해요",
@@ -2703,7 +2703,7 @@ const dict = {
     "chatinput.plus.agents_hint": "Call agents into this conversation",
     // Auto routing (call agents automatically) — routes without asking; only two gate sheets
     "chatinput.autoroute.routing": "Routing to the right agents…",
-    "chatinput.autoroute.cost_notice": "Hiring hub agents: ~{credits} credits · 24h lease · rental fee (success not guaranteed)",
+    "chatinput.autoroute.cost_notice": "Hiring hub agents: ~{credits} credits per work order (success not guaranteed)",
     "chatinput.autoroute.cost_partial": "Some agents don't publish a price — this is a minimum; the actual charge can be higher",
     "chatinput.autoroute.paywall_needed_min": "at least",
     "chatinput.autoroute.paywall_title": "Not enough credits",

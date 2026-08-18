@@ -160,6 +160,20 @@ import {
 } from "@/lib/one-activity";
 import styles from "./OneShell.module.css";
 
+// IPC 결과는 호출마다 새 객체다. 내용이 같으면 이전 상태 참조를 돌려줘 React가
+// 리렌더를 생략하게 한다(모든 IPC 페이로드는 구조상 JSON 직렬화 가능).
+function keepPrevIfDeepEqual<T>(next: T): (prev: T | null | undefined) => T {
+  return (prev) => {
+    if ((prev as unknown) === next) return next;
+    try {
+      // JSON이 같으면 구조도 같으므로 이전 참조를 그대로 돌려줘도 안전하다.
+      return JSON.stringify(prev) === JSON.stringify(next) ? (prev as T) : next;
+    } catch {
+      return next;
+    }
+  };
+}
+
 const ONE_PERMISSION_STORAGE_KEY = "agentlas.one.permission-mode.v1";
 const ONE_RUNTIME_STORAGE_KEY = "agentlas.one.runtime-selection.v1";
 const ONE_LEFT_RAIL_COLLAPSED_STORAGE_KEY = "agentlas.one.left-rail-collapsed.v1";
@@ -1335,27 +1349,29 @@ export function OneShell() {
         }
       }
       const items = await listOneTaskProjections(api, active, pending, profile, appLocale);
-      setActiveChatIds(active);
-      setConfirmations(pending);
-      setUpdaterState(update);
-      setMobileStatus(mobile);
-      setOneProfile(profile);
-      setOneMemory(memory);
+      // 5초 리프레시가 IPC마다 새 객체를 돌려주므로, 내용이 같으면 이전 참조를
+      // 유지한다 — 그래야 무변경 틱에 이 셸 전체가 리렌더되지 않는다.
+      setActiveChatIds(keepPrevIfDeepEqual(active));
+      setConfirmations(keepPrevIfDeepEqual(pending));
+      setUpdaterState(keepPrevIfDeepEqual(update));
+      setMobileStatus(keepPrevIfDeepEqual(mobile));
+      setOneProfile(keepPrevIfDeepEqual(profile));
+      setOneMemory(keepPrevIfDeepEqual(memory));
       if (memoryMap) {
         setOneMemoryMap((current) => current?.sourceRevision === memoryMap.sourceRevision ? current : memoryMap);
       }
-      setOneSuggestions(suggestions);
-      setOneValueClosures(valueClosures);
-      setOneWeeklyReflection(weeklyReflection);
-      setOneExperienceReuse(experienceReuse);
-      setOneImprovementProofs(improvementProofs);
-      setOneIntroState(resolvedIntro);
-      setOneActivationState(activation);
-      setOneHomeSignals(homeSignals);
-      setBriefingSnapshot(safeBriefingSnapshot(proactiveBriefing));
-      setProjections(items);
+      setOneSuggestions(keepPrevIfDeepEqual(suggestions));
+      setOneValueClosures(keepPrevIfDeepEqual(valueClosures));
+      setOneWeeklyReflection(keepPrevIfDeepEqual(weeklyReflection));
+      setOneExperienceReuse(keepPrevIfDeepEqual(experienceReuse));
+      setOneImprovementProofs(keepPrevIfDeepEqual(improvementProofs));
+      setOneIntroState(keepPrevIfDeepEqual(resolvedIntro));
+      setOneActivationState(keepPrevIfDeepEqual(activation));
+      setOneHomeSignals(keepPrevIfDeepEqual(homeSignals));
+      setBriefingSnapshot(keepPrevIfDeepEqual(safeBriefingSnapshot(proactiveBriefing)));
+      setProjections(keepPrevIfDeepEqual(items));
       // One 홈은 One이 시작한 대화만 보여준다 — 전역 Work 대화는 Work에 남는다.
-      setConversations(recentChats.filter((chat) => !chat.taskId && chat.originSurface === "one"));
+      setConversations(keepPrevIfDeepEqual(recentChats.filter((chat) => !chat.taskId && chat.originSurface === "one")));
       const wanted = selectedTaskIdRef.current;
       if (wanted) {
         const detail = items.find((item) => item.taskId === wanted)

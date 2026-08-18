@@ -19,6 +19,7 @@ import {
 } from "@/lib/hub-verification";
 import { installedServerMatchesPluginSlug, normalizePluginSlug } from "@shared/plugin-slug";
 import { PluginLogo } from "@/components/PluginLogo";
+import { AgentLeaseDialog } from "@/components/AgentLeaseDialog";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import type {
   ExperienceHubCatalogResult,
@@ -213,6 +214,11 @@ function MarketplacePage() {
   // 앱 어디에서도 연결할 수 없게 된다.
   const [desktopCatalog, setDesktopCatalog] = useState<McpToolCatalogEntry[]>([]);
   const [bookmarkedIdentities, setBookmarkedIdentities] = useState<Set<string>>(new Set());
+  // 활성 장기대여(일 단위 선불, 계정 귀속) — 대여 중인 slug 는 카드에 가격 대신
+  // 만료일 배지를 단다. 대여 상태의 단일 정본은 main 의 60초 캐시(agentLeases IPC)다.
+  const [leaseUntilBySlug, setLeaseUntilBySlug] = useState<Map<string, string>>(new Map());
+  const [leaseDialog, setLeaseDialog] = useState<{ slug: string; name: string } | null>(null);
+  const [leaseRefreshTick, setLeaseRefreshTick] = useState(0);
   const [sourceStatus, setSourceStatus] = useState<MarketplaceSourceStatus | null>(null);
   const [q, setQ] = useState(() => searchParams.get("q") ?? "");
   const [searchFocused, setSearchFocused] = useState(false);
@@ -279,6 +285,22 @@ function MarketplacePage() {
   useEffect(() => {
     void refresh();
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void ipc()?.agentLeases.list()
+      .then((rows) => {
+        if (cancelled || !Array.isArray(rows)) return;
+        const now = Date.now();
+        setLeaseUntilBySlug(new Map(rows
+          .filter((row) => Number.isFinite(Date.parse(row.leasedUntil)) && Date.parse(row.leasedUntil) > now)
+          .map((row) => [row.slug.toLowerCase(), row.leasedUntil])));
+      })
+      .catch(() => {
+        // 미로그인/오프라인이면 배지 없이 가격만 보여준다.
+      });
+    return () => { cancelled = true; };
+  }, [leaseRefreshTick]);
 
   useEffect(() => {
     if (hubView !== "experience") return;
@@ -826,8 +848,13 @@ function MarketplacePage() {
                   installedServerMatchesPluginSlug(server, listing.slug))}
                       bookmarked={bookmarkedIdentities.has(hubListingIdentityKey(listing))}
                       bookmarking={bookmarking === hubListingIdentityKey(listing)}
+                      leasedUntil={leaseUntilBySlug.get((listing.slug || "").toLowerCase()) ?? null}
                       onBookmark={() => void bookmarkOne(listing)}
                       onCopyCall={() => void copyHubCall(listing)}
+                      onLease={() => setLeaseDialog({
+                        slug: listing.slug,
+                        name: pickLocalized(listing, locale).name,
+                      })}
                       onOpenProfile={() => router.push(
                         `/marketplace/profile?slug=${encodeURIComponent(listing.slug)}`
                         + `&name=${encodeURIComponent(pickLocalized(listing, locale).name)}`,
@@ -922,6 +949,19 @@ function MarketplacePage() {
           </div>
         </div>
       </div>
+      {leaseDialog && (
+        <AgentLeaseDialog
+          slug={leaseDialog.slug}
+          agentName={leaseDialog.name}
+          locale={locale}
+          onClose={() => setLeaseDialog(null)}
+          onLeased={() => {
+            // 성공 — 닫고 대여 목록을 다시 읽는다(main 캐시는 구매 시 무효화됨).
+            setLeaseDialog(null);
+            setLeaseRefreshTick((tick) => tick + 1);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -1139,9 +1179,11 @@ function AgentCard({
   pluginServerInstalled,
   bookmarked,
   bookmarking,
+  leasedUntil = null,
   onBookmark,
   onCopyCall,
   onOpenProfile,
+  onLease,
 }: {
   listing: MarketplaceListing;
   locale: Locale;
@@ -1150,10 +1192,14 @@ function AgentCard({
   pluginServerInstalled: boolean;
   bookmarked: boolean;
   bookmarking: boolean;
+  /** 활성 장기대여 만료 시각 — 있으면 작업당 가격 대신 대여 배지를 단다. */
+  leasedUntil?: string | null;
   onBookmark: () => void;
   onCopyCall: () => void;
   /** 허브의 공개 소개 페이지를 앱 안에 띄운다. 데스크탑 전용 도구에는 소개가 없다. */
   onOpenProfile: () => void;
+  /** [장기대여] — 호출형 Hub 에이전트에만 그린다. 대여는 계정 귀속(모든 프로젝트 유효). */
+  onLease?: () => void;
 }) {
   const loc = pickLocalized(listing, locale);
   const ko = locale === "ko";
@@ -1220,7 +1266,13 @@ function AgentCard({
               : callable
                 // 가격을 한 줄에 붙여 말한다 — 같은 값을 오른쪽 크레딧 원에서 한 번
                 // 더 보여주던 중복을 없앴다(오너 지시 2026-08-16).
-                ? (ko ? `24시간 사용 · ${perCallCredits} 크레딧` : `24-hour use · ${perCallCredits} credits`)
+                // 24시간 자동 리스는 폐지(오너 결정 2026-08-18) — RENT는 작업당 과금.
+                // 활성 장기대여 중이면 가격 대신 만료일을 말한다(기간 중 호출 무료).
+                ? (leasedUntil
+                  ? (ko
+                    ? `${new Intl.DateTimeFormat("ko-KR", { month: "long", day: "numeric" }).format(new Date(leasedUntil))}까지 대여`
+                    : `Leased until ${new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(new Date(leasedUntil))}`)
+                  : (ko ? `작업당 ${perCallCredits} 크레딧` : `${perCallCredits} credits per work order`))
                 : (ko ? "설치 후 사용" : "Install to use")}
         </span>
       </div>
@@ -1537,6 +1589,21 @@ function AgentCard({
             title={ko ? "복사한 호출어를 작업 공간의 채팅에 붙여넣으세요." : "Paste the copied call into a Workspace conversation."}
           >
             {ko ? "채팅에 붙여넣기" : "Paste into chat"}
+          </button>
+        ) : null}
+        {/* [장기대여] — 프로젝트 상세의 Hub 카드와 같은 다이얼로그(채널 패리티).
+            대여 가격(레거시 와이어 id INGEST)은 에이전트 단위라 싱글 에이전트에만 그린다.
+            활성 대여 중에는 카드 윗줄 배지가 상태를 말하고, 버튼은 연장으로 이어진다. */}
+        {callable && entityKind === "single" && onLease ? (
+          <button
+            type="button"
+            className="btn sm hub-card-action-btn"
+            onClick={onLease}
+            title={ko
+              ? "일 단위 선불 대여 — 계정 귀속이라 기간 중에는 어느 프로젝트에서든 호출이 무료입니다."
+              : "Prepaid day-based lease, bound to your account — calls are free in every project while it lasts."}
+          >
+            {leasedUntil ? (ko ? "대여 연장" : "Extend lease") : (ko ? "장기대여" : "Lease")}
           </button>
         ) : null}
       </div>

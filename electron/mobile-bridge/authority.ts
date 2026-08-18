@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { RUNTIME_KINDS } from "../../shared/runtime-kinds";
+import { RUNTIME_BACKENDS } from "../../shared/runtime-backends";
 import {
   extractBuildInterviewQuestions,
   isCompletedBuildTurn,
@@ -65,6 +66,7 @@ import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
 import { listInstalledServers } from "../mcp-tools/registry";
 import { routeOnly } from "../hephaestus/commands";
 import { normalizeRecommendation } from "../hephaestus/recommendation";
+import { activeLeasedSlugs } from "../cloud-agents/leases";
 import { getEngineToggles } from "../hephaestus/supervisor";
 import { listHubAgentBookmarks } from "../store/hub-bookmarks";
 import {
@@ -108,6 +110,7 @@ import {
   type MobileBridgeCloudAgentActions,
 } from "./cloud-actions";
 import { getUsageSnapshot } from "../usage";
+import { getBillingCredits } from "../billing";
 import { listInstalledAgentHubBindings } from "../ontology/hub-bindings";
 import type { TerminalOntologyLoadoutFeedWriter } from "../ontology/terminal-loadout-feed";
 import type {
@@ -190,23 +193,7 @@ const BUILD_RUN_HISTORY_LIMIT = 64;
 const BUILD_HISTORY_ENTRY_MAX_BYTES = 16_000;
 const BUILD_HISTORY_MAX_ENTRIES = 32;
 const MOBILE_RUNTIME_KINDS = RUNTIME_KINDS;
-const MOBILE_RUNTIME_BACKENDS = [
-  "anthropic",
-  "openai",
-  "google",
-  "ollama",
-  "lmstudio",
-  "mlx",
-  "upstage",
-  "custom",
-  "glm",
-  "kimi",
-  "deepseek",
-  "minimax",
-  "xai",
-  "openrouter",
-  "cursor",
-] as const;
+const MOBILE_RUNTIME_BACKENDS = RUNTIME_BACKENDS;
 const MOBILE_RUNTIME_ROLES = ["orchestrator", "worker"] as const;
 const BUILD_APPROVAL_TIMEOUT_MS = 90_000;
 // Ontology enriches the Mobile surface, but it is not required to establish a
@@ -591,6 +578,53 @@ function asJsonValue(value: unknown, label: string): MobileBridgeJsonValue {
 
 function boundedRedactedText(value: string, maxBytes: number): string {
   return sanitizeMobileBridgeText(value, maxBytes);
+}
+
+/**
+ * Hub credit balance for the phone — same main-process source as Desktop's own
+ * CreditBalanceWidget (billing.getCredits → GET /api/billing/credits), cached
+ * with the same 60s window the renderer uses (ipc-cache "billing.getCredits").
+ * Mobile polls piggyback on snapshot activity, so without this cache every
+ * snapshot tick would hit the Hub over the network.
+ *
+ * The projection is deliberately honest about "unknown": when the host is
+ * signed in but the Hub fetch failed (no numeric balance), `available` is
+ * omitted instead of being zero-filled — the phone keeps its last known value,
+ * exactly like the Desktop widget does.
+ */
+const MOBILE_BRIDGE_CREDITS_TTL_MS = 60_000;
+interface MobileBridgeCreditsProjection {
+  authenticated: boolean;
+  available?: number;
+  earnings?: number;
+}
+let mobileBridgeCreditsCache: { fetchedAt: number; value: MobileBridgeCreditsProjection } | null =
+  null;
+let mobileBridgeCreditsFlight: Promise<MobileBridgeCreditsProjection> | null = null;
+async function getMobileBridgeCredits(): Promise<MobileBridgeCreditsProjection> {
+  const cached = mobileBridgeCreditsCache;
+  if (cached && Date.now() - cached.fetchedAt < MOBILE_BRIDGE_CREDITS_TTL_MS) return cached.value;
+  const inFlight = mobileBridgeCreditsFlight;
+  if (inFlight) return inFlight;
+  const flight = (async (): Promise<MobileBridgeCreditsProjection> => {
+    const balance = await getBillingCredits();
+    const value: MobileBridgeCreditsProjection = { authenticated: balance.authenticated === true };
+    if (typeof balance.remainingCredits === "number" && Number.isFinite(balance.remainingCredits)) {
+      value.available = Math.max(0, Math.floor(balance.remainingCredits));
+      value.earnings =
+        typeof balance.earningsCredits === "number" && Number.isFinite(balance.earningsCredits)
+          ? Math.max(0, Math.floor(balance.earningsCredits))
+          : 0;
+    }
+    mobileBridgeCreditsCache = { fetchedAt: Date.now(), value };
+    return value;
+  })();
+  mobileBridgeCreditsFlight = flight;
+  try {
+    return await flight;
+  } finally {
+    if (mobileBridgeCreditsFlight === flight) mobileBridgeCreditsFlight = null;
+  }
 }
 
 function requireChat(id: string): Chat {
@@ -1125,26 +1159,35 @@ function resolveChatCwd(chatId: string): string | undefined {
 }
 
 /**
- * runId → cwd. 라이브 이벤트는 토큰마다 오지만 폴더는 실행당 하나다.
- * 종료(final/error) 시 지우고, 취소처럼 종료 이벤트가 안 오는 경우를 대비해
- * 상한을 둔다 — 무한히 자라는 맵은 그 자체가 결함이다.
+ * runId → {cwd, taskId}. 라이브 이벤트는 토큰마다 오지만 폴더와 Task 바인딩은
+ * 실행당 하나다(Task는 채팅 생성 시점에 루트 채팅에 묶인다). 종료(final/error)
+ * 시 지우고, 취소처럼 종료 이벤트가 안 오는 경우를 대비해 상한을 둔다 —
+ * 무한히 자라는 맵은 그 자체가 결함이다.
  */
-const RUN_CWD_CACHE_MAX = 64;
-const runCwdCache = new Map<string, string | undefined>();
+const RUN_CONTEXT_CACHE_MAX = 64;
+interface RunEventContext {
+  cwd: string | undefined;
+  taskId: string | null;
+}
+const runContextCache = new Map<string, RunEventContext>();
 
-function cachedRunCwd(runId: string, chatId: string): string | undefined {
-  if (runCwdCache.has(runId)) return runCwdCache.get(runId);
-  const resolved = resolveChatCwd(chatId);
-  if (runCwdCache.size >= RUN_CWD_CACHE_MAX) {
-    const oldest = runCwdCache.keys().next();
-    if (!oldest.done) runCwdCache.delete(oldest.value);
+function cachedRunContext(runId: string, chatId: string): RunEventContext {
+  const hit = runContextCache.get(runId);
+  if (hit) return hit;
+  const resolved: RunEventContext = {
+    cwd: resolveChatCwd(chatId),
+    taskId: findCanonicalTaskForChat(chatId)?.id ?? null,
+  };
+  if (runContextCache.size >= RUN_CONTEXT_CACHE_MAX) {
+    const oldest = runContextCache.keys().next();
+    if (!oldest.done) runContextCache.delete(oldest.value);
   }
-  runCwdCache.set(runId, resolved);
+  runContextCache.set(runId, resolved);
   return resolved;
 }
 
-function forgetRunCwd(runId: string): void {
-  runCwdCache.delete(runId);
+function forgetRunContext(runId: string): void {
+  runContextCache.delete(runId);
 }
 
 function summarizeToolPayload(value: string | undefined): MobileBridgeToolPayloadSummaryDto | null {
@@ -2250,6 +2293,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         noParams(request);
         return asJsonValue(projectBorrowableHubAgents(), request.method);
       }
+      case "billing.credits": {
+        noParams(request);
+        return asJsonValue(await getMobileBridgeCredits(), request.method);
+      }
       case "hephaestus.engineToggles": {
         noParams(request);
         return asJsonValue(getEngineToggles(), request.method);
@@ -2265,7 +2312,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
             noHub: optionalBoolean(params, "offline") ?? false,
             timeoutMs: 30_000,
           });
-          return asJsonValue(projectRouteRecommendation(normalizeRecommendation(result.json, query)), request.method);
+          // 활성 장기대여 slug 는 호출 0크레딧 — 모바일 고지액도 데스크탑과 같은 규칙.
+          const leasedSlugs = await activeLeasedSlugs().catch(() => new Set<string>());
+          return asJsonValue(projectRouteRecommendation(normalizeRecommendation(result.json, query, { leasedSlugs })), request.method);
         } catch {
           return asJsonValue(projectRouteRecommendation(normalizeRecommendation(null, query)), request.method);
         }
@@ -2994,10 +3043,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     if (this.upstreamUnsubscribers.length > 0) return;
     this.upstreamUnsubscribers = [
       invocationService.onEvent(({ runId, chatId, event }) => {
-        const taskId = findCanonicalTaskForChat(chatId)?.id ?? null;
-        // Live events arrive per token; the folder lookup is per RUN, not per
-        // event. The cache is dropped when the run terminates below.
-        const cwd = cachedRunCwd(runId, chatId);
+        // Live events arrive per token; the folder and Task lookups are per
+        // RUN, not per event. The cache is dropped when the run terminates.
+        const { cwd, taskId } = cachedRunContext(runId, chatId);
         this.emit({
           event: "invoke.event",
           payload: asJsonValue(
@@ -3006,7 +3054,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           ),
         });
         if (event.kind === "final" || event.kind === "error") {
-          forgetRunCwd(runId);
+          forgetRunContext(runId);
           this.scheduleSnapshotUpdated();
         }
       }),

@@ -3819,6 +3819,7 @@ function ChatPage() {
           context={chatInputContext}
           placeholder={locale === "ko" ? "원하는 결과를 설명하세요" : "Describe the result you want"}
           projectOrchestration={Boolean(project)}
+          activeProjectId={project?.id ?? chat.projectId ?? null}
           tokensUsage={chatInputTokensUsage}
           showModeToggles={chat.kind !== "division"}
           continuousMode={chat.continuousMode === true}

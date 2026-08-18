@@ -54,12 +54,20 @@ const TASK_STATUSES = new Set<CanonicalTaskStatus>([
   "archived",
 ]);
 
+// 존재 확인이 스트리밍 이벤트마다 sqlite_master를 다시 읽지 않도록 양성 결과만
+// 캐시한다. 테이블은 프로세스 수명 동안 사라지지 않지만, 마이그레이션 전에 물은
+// 음성 결과를 캐시하면 영영 없는 것으로 굳으므로 음성은 매번 다시 확인한다.
+const tableExistsCache = new Set<string>();
+
 function tableExists(name: string): boolean {
-  return Boolean(
+  if (tableExistsCache.has(name)) return true;
+  const exists = Boolean(
     getDb()
       .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1")
       .get(name),
   );
+  if (exists) tableExistsCache.add(name);
+  return exists;
 }
 
 function normalizeStatus(value: string): CanonicalTaskStatus {

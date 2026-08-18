@@ -105,8 +105,16 @@ export default function FloatingComputerUsePanel() {
   useEffect(() => {
     if (!open) return;
     void capture();
-    const timer = window.setInterval(() => void capture(), mode === "browser" ? 1_300 : 1_900);
-    return () => window.clearInterval(timer);
+    // 화면 캡처는 렌더러 타이머 중 가장 비싸다 — 창이 숨어 있는 동안은 프레임을
+    // 잡지 않고, 다시 보이면 즉시 한 장 갱신한다.
+    const tick = () => { if (document.visibilityState !== "hidden") void capture(); };
+    const timer = window.setInterval(tick, mode === "browser" ? 1_300 : 1_900);
+    const onVisible = () => { if (document.visibilityState !== "hidden") void capture(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [capture, mode, open]);
 
   const startDrag = useCallback((event: ReactPointerEvent<HTMLElement>) => {

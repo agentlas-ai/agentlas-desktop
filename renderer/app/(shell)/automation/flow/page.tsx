@@ -516,14 +516,34 @@ function AutomationFlowPage() {
     const pull = () => {
       void api.automations.latestRun(automation.id).then((snap) => {
         if (cancelled || !snap) return;
-        if (snap.nodeStates) setRunStates(snap.nodeStates);
+        if (snap.nodeStates) {
+          const next = snap.nodeStates;
+          // 무변경 틱마다 새 객체를 넣으면 노드/엣지 재구성 이펙트가 3초마다
+          // 캔버스 전체를 다시 그린다 — 값이 같으면 이전 참조를 유지한다.
+          setRunStates((prev) => {
+            const prevKeys = Object.keys(prev);
+            const nextKeys = Object.keys(next);
+            if (prevKeys.length === nextKeys.length && nextKeys.every((k) => prev[k] === next[k])) {
+              return prev;
+            }
+            return next;
+          });
+        }
         applySnapshotFailures(snap.nodeFailures);
         setRunStartedAt(snap.startedAt ?? null);
       }).catch(() => undefined);
     };
     if (liveRunning) {
-      const id = window.setInterval(pull, 3_000);
-      return () => { cancelled = true; window.clearInterval(id); };
+      // 숨은 창에서는 스냅샷 폴을 멈추고, 다시 보이면 즉시 한 번 당긴다.
+      const tick = () => { if (document.visibilityState !== "hidden") pull(); };
+      const onVisible = () => { if (document.visibilityState !== "hidden") pull(); };
+      const id = window.setInterval(tick, 3_000);
+      document.addEventListener("visibilitychange", onVisible);
+      return () => {
+        cancelled = true;
+        window.clearInterval(id);
+        document.removeEventListener("visibilitychange", onVisible);
+      };
     }
     // 마지막 노드 이벤트와 커널의 마무리 쓰기 사이에 틈이 있다 — 끝난 뒤 한 번 더.
     const id = window.setTimeout(pull, 1_200);

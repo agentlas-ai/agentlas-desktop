@@ -36,6 +36,18 @@ let monitorUsers = 0;
 let monitorTimer: number | null = null;
 let monitorBusy = false;
 
+// localStorage 파싱 캐시 — 전역 모니터(1.2초)와 AppShell 틱(2초)이 잡 0개인
+// 평상시에도 매 틱 JSON.parse를 돌리지 않게 마지막 파싱 결과를 재사용한다.
+// 같은 탭의 쓰기는 writeJobs가 갱신하고, 다른 창의 쓰기는 storage 이벤트가
+// 무효화한다. 반환 배열은 호출부가 절대 제자리 수정하지 않는다(filter/find만).
+let jobsReadCache: OberonBackgroundJob[] | null = null;
+
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (event) => {
+    if (event.key === STORAGE_KEY) jobsReadCache = null;
+  });
+}
+
 export function listOberonBackgroundJobs(): OberonBackgroundJob[] {
   const jobs = readJobs();
   const pruned = pruneJobs(jobs);
@@ -313,11 +325,16 @@ function pruneJobs(jobs: OberonBackgroundJob[]): OberonBackgroundJob[] {
 
 function readJobs(): OberonBackgroundJob[] {
   if (typeof window === "undefined") return [];
+  if (jobsReadCache) return jobsReadCache;
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
+    if (!raw) {
+      jobsReadCache = [];
+      return jobsReadCache;
+    }
     const parsed = JSON.parse(raw) as OberonBackgroundJob[];
-    return Array.isArray(parsed) ? parsed.filter(isJobLike) : [];
+    jobsReadCache = Array.isArray(parsed) ? parsed.filter(isJobLike) : [];
+    return jobsReadCache;
   } catch {
     return [];
   }
@@ -330,6 +347,7 @@ function writeJobs(jobs: OberonBackgroundJob[]): void {
   } catch {
     return;
   }
+  jobsReadCache = jobs;
   emitChange();
 }
 

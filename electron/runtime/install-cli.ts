@@ -24,14 +24,17 @@ const CLI_PLAN: Record<InstallableCli, {
   version: string;
   loginArgs: string[];
   bin: string;
+  /** 외부(사용자 소유) 설치본의 자체 업데이트 인자. 없으면 자체 업데이트 명령이 없는 CLI. */
+  selfUpdateArgs?: string[];
 }> = {
-  "claude-code": { pkg: "@anthropic-ai/claude-code", version: "2.1.214", loginArgs: [], bin: "claude" },
-  codex: { pkg: "@openai/codex", version: "0.144.6", loginArgs: ["login"], bin: "codex" },
+  "claude-code": { pkg: "@anthropic-ai/claude-code", version: "2.1.214", loginArgs: [], bin: "claude", selfUpdateArgs: ["update"] },
+  codex: { pkg: "@openai/codex", version: "0.144.6", loginArgs: ["login"], bin: "codex", selfUpdateArgs: ["update"] },
   // Official Moonshot Kimi Code CLI. `kimi login` opens the device-code OAuth
-  // flow and does not require the user to create an API key.
+  // flow and does not require the user to create an API key. It has no stable
+  // self-update command, so selfUpdateArgs stays absent.
   kimi: { pkg: "@moonshot-ai/kimi-code", version: "0.28.0", loginArgs: ["login"], bin: "kimi" },
   // Official xAI Grok Build CLI. Primary auth is browser OAuth; API key remains a headless fallback.
-  grok: { pkg: "@xai-official/grok", version: "0.2.103", loginArgs: ["login"], bin: "grok" },
+  grok: { pkg: "@xai-official/grok", version: "0.2.103", loginArgs: ["login"], bin: "grok", selfUpdateArgs: ["update"] },
 };
 
 const AGENTLAS_NPM_PREFIX = path.join(os.homedir(), ".agentlas", "npm");
@@ -564,11 +567,9 @@ export function updateCli(kind: ManageableCli, requestedSource?: string | null):
   if (isAgentlasManagedNpmBinary(existing)) {
     return installCli(kind, { force: true });
   }
-  if (kind === "claude-code") return runBinary(existing, ["update"], 2 * 60 * 1000);
-  if (kind === "codex") return runBinary(existing, ["update"], 2 * 60 * 1000);
-  if (kind === "grok") return runBinary(existing, ["update"], 2 * 60 * 1000);
-  // The official Kimi CLI has no stable self-update command. Agentlas-owned
-  // installs were handled above; external installs remain user-owned.
+  if (plan.selfUpdateArgs) return runBinary(existing, plan.selfUpdateArgs, 2 * 60 * 1000);
+  // No self-update command (kimi). Agentlas-owned installs were handled above;
+  // external installs remain user-owned.
   return Promise.resolve({ ok: true, message: `self-managed install: ${existing} — update skipped` });
 }
 

@@ -267,6 +267,23 @@ export function ChatStream({
     scrollingToBottomRef.current = false;
   }
 
+  // 아웃라인 레일 입력 — 사용자 프롬프트는 스트리밍으로 변하지 않으므로, 내용이
+  // 같으면 이전 배열 참조를 유지해 memo된 레일이 토큰 델타마다 리렌더되지 않게 한다.
+  const outlinePromptsRef = useRef<{ id: string; text: string }[]>([]);
+  const outlinePrompts = useMemo(() => {
+    const next = messages.filter((m) => m.role === "user").map((m) => ({ id: m.id, text: m.text }));
+    const prev = outlinePromptsRef.current;
+    if (prev.length === next.length && next.every((p, i) => prev[i].id === p.id && prev[i].text === p.text)) {
+      return prev;
+    }
+    outlinePromptsRef.current = next;
+    return next;
+  }, [messages]);
+  const jumpToPrompt = useCallback((id: string) => {
+    const node = document.getElementById(messageDomId(id));
+    node?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
+
   function scrollToLatest() {
     const el = scrollRef.current;
     if (!el) return;
@@ -294,13 +311,7 @@ export function ChatStream({
         display: "flex",
       }}
     >
-      <ChatOutlineRail
-        messages={messages}
-        onJump={(id) => {
-          const node = document.getElementById(messageDomId(id));
-          node?.scrollIntoView({ behavior: "smooth", block: "start" });
-        }}
-      />
+      <ChatOutlineRail prompts={outlinePrompts} onJump={jumpToPrompt} />
       <div
         ref={scrollRef}
         onScroll={handleScroll}
@@ -3108,18 +3119,14 @@ function ChatNoticeRow({ notice }: { notice: ChatNotice }) {
  * (Ctrl+F도 없다). 눈금을 누르면 그 프롬프트로 간다. 눈금 3개 미만이면 숨는다 —
  * 짧은 대화에서는 레일이 소음이다.
  */
-function ChatOutlineRail({
-  messages,
+const ChatOutlineRail = memo(function ChatOutlineRail({
+  prompts,
   onJump,
 }: {
-  messages: StreamMessage[];
+  prompts: { id: string; text: string }[];
   onJump: (messageId: string) => void;
 }) {
   const { locale } = useT();
-  const prompts = useMemo(
-    () => messages.filter((m) => m.role === "user").map((m) => ({ id: m.id, text: m.text })),
-    [messages],
-  );
   const [hovered, setHovered] = useState<number | null>(null);
   if (prompts.length < 3) return null;
   return (
@@ -3149,7 +3156,7 @@ function ChatOutlineRail({
       })}
     </div>
   );
-}
+});
 
 /**
  * 실행 폴더 — 도구 행의 경로를 상대경로로 줄이는 데만 쓴다.

@@ -5,6 +5,7 @@
 import { readApiKey } from "../secrets/vault";
 import { getDb } from "../store/db";
 import {
+  BYOK_BACKENDS_ALL,
   BYOK_MODELS,
   byokModels,
   cliModels,
@@ -17,19 +18,7 @@ type ModelOption = CliModelOption;
 const TTL_MS = 5 * 60 * 1000;
 const cache = new Map<ByokBackend, { at: number; models: ModelOption[] }>();
 
-const BYOK_BACKENDS: readonly ByokBackend[] = [
-  "anthropic",
-  "openai",
-  "google",
-  "upstage",
-  "custom",
-  "glm",
-  "kimi",
-  "deepseek",
-  "minimax",
-  "xai",
-  "openrouter",
-];
+const BYOK_BACKENDS: readonly ByokBackend[] = BYOK_BACKENDS_ALL;
 
 const OPENAI_COMPAT_BASE_URL: Partial<Record<ByokBackend, string>> = {
   openai: "https://api.openai.com/v1",

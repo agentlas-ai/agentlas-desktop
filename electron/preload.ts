@@ -508,6 +508,13 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("projects:update", id, patch),
     remove: (id: string) => ipcRenderer.invoke("projects:remove", id),
     connectGithub: (repositoryUrl: string) => ipcRenderer.invoke("projects:connectGithub", repositoryUrl),
+    listRentAllowed: (projectId: string) => ipcRenderer.invoke("projects:listRentAllowed", projectId),
+    setRentAllowed: (input) => ipcRenderer.invoke("projects:setRentAllowed", input),
+  },
+  agentLeases: {
+    quote: (slug: string) => ipcRenderer.invoke("agentLeases:quote", slug),
+    purchase: (input) => ipcRenderer.invoke("agentLeases:purchase", input),
+    list: () => ipcRenderer.invoke("agentLeases:list"),
   },
   ontology: {
     getProject: (projectId: string) => ipcRenderer.invoke("ontology:getProject", projectId),

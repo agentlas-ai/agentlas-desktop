@@ -622,7 +622,19 @@ export async function packageAndReviewCloudAgent(
       });
     }
   }
-  const slug = sanitizeSlug(input.slug || readStableSlug(finalSnapshot) || name || path.basename(rootPath));
+  // ★ THE PUBLISHING SLUG IS THE PACKAGE'S OWN, NOT THE LOCAL REGISTRY ROW'S.
+  //   Uploading a registered agent/team passed the registry slug through, and a
+  //   locally imported team is stored as `firm-local-<folder>` (its CEO as
+  //   `local-<folder>`, with a `-2` suffix on re-import). The same folder chosen
+  //   through "Choose an agent folder" derived `quant-research-desk` from its
+  //   agent-card, so ONE asset had two identities depending on which control the
+  //   user clicked — and the second one is exactly what the server rejects as
+  //   `slug_identity_conflict`. Measured 2026-08-18 on Quant Research Desk.
+  const callerSlug = sanitizeSlug(input.slug || "");
+  const packageSlug = sanitizeSlug(readStableSlug(finalSnapshot) || "");
+  const slug =
+    (input.preferPackageSlug ? packageSlug || callerSlug : callerSlug || packageSlug)
+    || sanitizeSlug(name || path.basename(rootPath));
   const cloudScope = scopeForVisibility(visibility);
   const markerRegistration = restoreMarker?.registrations?.[cloudScope];
   const baseRegistration = markerRegistration?.slug === slug ? markerRegistration : undefined;
@@ -721,9 +733,22 @@ export async function packageAndReviewCloudAgent(
   const dryRun = input.dryRun ?? false;
 
   let registration: CloudAgentRegistrationResult | undefined;
+  let effectiveSlug = slug;
   let status: CloudAgentPackageResult["status"] = blocked ? "blocked" : dryRun ? "dry-run" : "ready";
   if (!blocked && !dryRun) {
     stage("uploading", slug);
+    // A confirmation answers ONE question about ONE folder. Main re-reads the
+    // target it stored when it asked; the renderer only ever says "yes".
+    const confirmedOverwrite = input.confirmOverwrite
+      ? readPendingOverwriteTarget(rootPath) ?? undefined
+      : undefined;
+    if (input.confirmOverwrite && !confirmedOverwrite) {
+      throw new OwnerCloudActionError(
+        "cloud_overwrite_target_expired",
+        "That confirmation no longer matches anything. Upload again to see what is currently in your Cloud.",
+        { retryable: false, actionState: "not-committed" },
+      );
+    }
     registration = await registerCloudAgent({
       manifest,
       bundlePath,
@@ -731,15 +756,32 @@ export async function packageAndReviewCloudAgent(
       visibility,
       notes: input.notes,
       baseRegistration,
+      rootPath,
+      ...(confirmedOverwrite ? { confirmedOverwrite } : {}),
     });
     // 방금 선반이 바뀌었다. 캐시를 두면 사용자는 자기가 올린 에이전트가 없는
     // 목록을 최대 5분 동안 보게 된다.
     invalidateMyAgentsCache();
+    // A self-repaired publish may have landed on the package's canonical slug
+    // rather than the one this run asked for. The receipt marker is keyed by
+    // slug (`markerRegistration?.slug === slug`), so writing the requested slug
+    // here would strand the receipt and make the NEXT save look like a create
+    // all over again — the same dead end, one run later.
+    if (registration.slug !== slug) {
+      effectiveSlug = registration.slug;
+      manifest.slug = registration.slug;
+      try {
+        fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf8");
+      } catch {
+        // The local manifest copy is a convenience artifact; the server receipt
+        // below is the authority for what was actually published.
+      }
+    }
     stage("receipt");
     try {
       writeCloudAgentRegistrationMarker({
         rootPath,
-        slug,
+        slug: effectiveSlug,
         packageHash: manifest.packageHash,
         packageHashVersion: manifest.packageHashVersion,
         fileCount: manifest.includedFileCount,
@@ -780,8 +822,10 @@ export async function packageAndReviewCloudAgent(
     summary:
       status === "registered"
         ? (isPublicHubPublish
-            ? `Published ${slug} publicly to Agentlas Hub.`
-            : `Saved ${slug} privately in Agent Cloud.`) + summarizeRemediation(remediationActions, opts?.locale ?? "en")
+            ? `Published ${effectiveSlug} publicly to Agentlas Hub.`
+            : `Saved ${effectiveSlug} privately in Agent Cloud.`)
+          + summarizeRemediation(remediationActions, opts?.locale ?? "en")
+          + (registration?.autoRecovered?.length ? ` ${registration.autoRecovered.join(" ")}` : "")
         : status === "blocked"
           ? isPublicHubPublish
             ? `Hub publish blocked: ${review.summary}`
@@ -1799,6 +1843,85 @@ async function runSubmitterRuntimeReview(
   };
 }
 
+/**
+ * ★ WHAT AN UPLOAD MAY DO BY ITSELF — AND WHAT ONLY A PERSON MAY DECIDE.
+ *
+ * Owner rule, 2026-08-18: self-repair means the packaging agent FIXES THE
+ * PACKAGE and uploads the repaired one. It never means talking the server out
+ * of a refusal, and it never means writing over something the person did not
+ * name. Duplicates and forks are decisions, not defects — each reaches the
+ * person as a sentence saying which one it is (`cloudRegistrationError`).
+ *
+ * ★ AND THE OWNER IS NOT A SPECIAL CASE. An earlier pass here retried a 412 by
+ *   itself, reasoning "it is their own asset, so overwriting is what they
+ *   meant". Written out for any user that rule reads: WHENEVER A FOLDER'S SLUG
+ *   MATCHES A CLOUD LISTING, REPLACE THE LISTING WITH THIS FOLDER. A slug match
+ *   is not proof the two are the same work — a template copied from a teammate,
+ *   a second checkout edited on another laptop, and a re-import of an older
+ *   version all match by slug. The missing revision receipt IS the missing
+ *   proof, so the machine has no basis to decide and must not.
+ *
+ * So the 412 stops here and becomes a question with the facts attached: what is
+ * in the Cloud, when it was last saved, and the one action that resolves it.
+ * The target is held in main (never renderer) and used only when the person
+ * comes back with an explicit confirmation for that same folder.
+ */
+type PendingOverwriteTarget = {
+  slug: string;
+  scope: CloudAgentCloudScope;
+  cloudId: string;
+  revision: string;
+  updatedAt: string;
+};
+
+/** rootPath -> the target the user was asked about. Main is the authority for
+ * this; a renderer may say "yes", never "yes, to this cloudId". */
+const pendingOverwriteTargets = new Map<string, PendingOverwriteTarget>();
+
+export function readPendingOverwriteTarget(rootPath: string): PendingOverwriteTarget | null {
+  return pendingOverwriteTargets.get(path.resolve(rootPath)) ?? null;
+}
+
+function parseOverwriteTarget(input: {
+  status: number;
+  body: string;
+  manifest: CloudAgentPackageManifest;
+  scope: CloudAgentCloudScope;
+}): PendingOverwriteTarget | null {
+  if (input.status !== 412) return null;
+  let parsed: Record<string, unknown> | null = null;
+  try {
+    const value = JSON.parse(input.body) as unknown;
+    parsed = isRecord(value) ? value : null;
+  } catch {
+    return null;
+  }
+  if (parsed?.code !== "cloud_agent_revision_conflict") return null;
+  const current = isRecord(parsed.current) ? parsed.current : null;
+  const cloudId = typeof current?.cloudId === "string" ? current.cloudId : "";
+  const revision = typeof current?.revision === "string" ? current.revision : "";
+  const slug = typeof current?.slug === "string" ? current.slug : "";
+  const scope = typeof current?.scope === "string" ? current.scope : "";
+  const updatedAt = typeof current?.updatedAt === "string" ? current.updatedAt : "";
+  if (!cloudId || !/^rev_[a-f0-9]{32}$/.test(revision)) return null;
+  if (slug !== input.manifest.slug || scope !== input.scope) return null;
+  return { slug, scope: input.scope, cloudId, revision, updatedAt };
+}
+
+function overwriteConfirmationError(target: PendingOverwriteTarget): OwnerCloudActionError {
+  const when = target.updatedAt ? new Date(target.updatedAt) : null;
+  const savedAt = when && !Number.isNaN(when.getTime())
+    ? when.toISOString().slice(0, 10)
+    : "an earlier date";
+  return new OwnerCloudActionError(
+    "cloud_overwrite_confirmation_required",
+    `"${target.slug}" already exists in your Agent Cloud, last saved ${savedAt}, and this computer has no record `
+    + "of having uploaded it from this folder. Nothing was uploaded and nothing was changed. "
+    + "Replace it with this folder's contents only if this folder is the newer version.",
+    { retryable: false, actionState: "not-committed" },
+  );
+}
+
 async function registerCloudAgent(input: {
   manifest: CloudAgentPackageManifest;
   bundlePath: string;
@@ -1806,20 +1929,27 @@ async function registerCloudAgent(input: {
   visibility: CloudAgentVisibility;
   notes?: string;
   baseRegistration?: CloudAgentRevisionIdentity;
+  rootPath: string;
+  /** The person answered the overwrite question for THIS folder. */
+  confirmedOverwrite?: PendingOverwriteTarget;
 }): Promise<CloudAgentRegistrationResult> {
   const cookie = getSessionCookieHeader();
   if (!cookie) throw new Error("Sign in to agentlas.cloud before publishing a cloud agent.");
   const base = (process.env.AGENTLAS_WEB_BASE_URL || "https://agentlas.cloud").replace(/\/$/, "");
   const bundle = JSON.parse(fs.readFileSync(input.bundlePath, "utf8")) as unknown;
-  const headers: Record<string, string> = {
-    "content-type": "application/json",
-    cookie,
-    origin: base,
-    ...cloudRegistrationPreconditionHeaders(input.baseRegistration),
-  };
+  const scope = scopeForVisibility(input.visibility);
+  const confirmed = input.confirmedOverwrite;
+  const precondition = confirmed
+    ? { "if-match": `"${confirmed.revision}"`, "x-agentlas-cloud-id": confirmed.cloudId }
+    : cloudRegistrationPreconditionHeaders(input.baseRegistration);
   const response = await fetch(`${base}/api/cloud-agents/v1/register`, {
     method: "POST",
-    headers,
+    headers: {
+      "content-type": "application/json",
+      cookie,
+      origin: base,
+      ...precondition,
+    },
     body: JSON.stringify({
       manifest: input.manifest,
       bundle,
@@ -1832,16 +1962,25 @@ async function registerCloudAgent(input: {
       },
     }),
   });
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    throw cloudRegistrationError(response.status, body, !input.baseRegistration);
+  if (response.ok) {
+    pendingOverwriteTargets.delete(path.resolve(input.rootPath));
+    const receipt = validateCloudRegistrationReceipt(
+      await response.json(),
+      input.manifest,
+      input.visibility,
+      response.headers.get("etag"),
+    );
+    return confirmed
+      ? { ...receipt, autoRecovered: [`Replaced the copy already in your Cloud ("${confirmed.slug}").`] }
+      : receipt;
   }
-  return validateCloudRegistrationReceipt(
-    await response.json(),
-    input.manifest,
-    input.visibility,
-    response.headers.get("etag"),
-  );
+  const body = await response.text().catch(() => "");
+  const target = parseOverwriteTarget({ status: response.status, body, manifest: input.manifest, scope });
+  if (target && !confirmed) {
+    pendingOverwriteTargets.set(path.resolve(input.rootPath), target);
+    throw overwriteConfirmationError(target);
+  }
+  throw cloudRegistrationError(response.status, body, !input.baseRegistration && !confirmed);
 }
 
 /** Build the write precondition independently from authentication headers so
@@ -1975,6 +2114,37 @@ function cloudRegistrationError(status: number, body: string, sentAsCreate = fal
     return new OwnerCloudActionError(
       "duplicate_hub_package",
       "These exact files are already listed on the Hub by another account. Nothing was uploaded.",
+      { retryable: false, actionState: "not-committed" },
+    );
+  }
+  // ★ SAY "DUPLICATE" IN THE WORD THE PERSON USES.
+  //   Both codes below mean one thing to the person — this agent is already
+  //   listed — and both fell through to the generic branch, which put an HTTP
+  //   status and a raw JSON body on screen. Publishing it a second time under
+  //   another name is not a repair and is never done on their behalf; the
+  //   existing listing is named so they can upload to it instead.
+  if (status === 409 && code === "cloud_agent_duplicate") {
+    const conflict = isRecord(parsed?.conflict) ? parsed.conflict : null;
+    const existing = typeof conflict?.existingSlug === "string" ? conflict.existingSlug : "";
+    return new OwnerCloudActionError(
+      "cloud_agent_duplicate",
+      `This agent is already on the Hub${existing ? ` as "${existing}"` : ""}, listed by another account. `
+      + "Nothing was uploaded.",
+      { retryable: false, actionState: "not-committed" },
+    );
+  }
+  if (status === 409 && code === "slug_identity_conflict") {
+    const conflict = isRecord(parsed?.conflict) ? parsed.conflict : null;
+    const canonical = typeof conflict?.canonicalSlug === "string"
+      ? conflict.canonicalSlug
+      : typeof conflict?.existingSlug === "string" ? conflict.existingSlug : "";
+    return new OwnerCloudActionError(
+      "slug_identity_conflict",
+      `This agent is already in your Cloud${canonical ? ` as "${canonical}"` : ""}, so a second listing for `
+      + "the same agent was not created. Nothing was uploaded. "
+      + (canonical
+        ? `Upload it under "${canonical}" to update that listing.`
+        : "Upload it under its existing name to update that listing."),
       { retryable: false, actionState: "not-committed" },
     );
   }

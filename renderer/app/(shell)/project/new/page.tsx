@@ -62,6 +62,8 @@ export default function NewProjectPage() {
   const [openRosterFirms, setOpenRosterFirms] = useState<Record<string, boolean>>({});
   const [draggedCandidateKey, setDraggedCandidateKey] = useState<string | null>(null);
   const [draggedMemberKey, setDraggedMemberKey] = useState<string | null>(null);
+  // 픽커 검색 — 이름/slug(targetId) 부분 일치(클라이언트, 대소문자 무시).
+  const [rosterQuery, setRosterQuery] = useState("");
   const pointerDragRef = useRef<{ kind: "candidate" | "member"; id: string; startX: number; startY: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const [needsHelp, setNeedsHelp] = useState(false);
@@ -83,6 +85,23 @@ export default function NewProjectPage() {
     (sum, section) => sum + section.standalone.length + section.firms.reduce((firmSum, firm) => firmSum + 1 + firm.members.length, 0),
     0,
   ), [rosterSections]);
+  // 검색 필터 — 일치 후보만 남기고, 필터 중에는 섹션/팀을 강제로 펼친다.
+  const rosterFilterActive = rosterQuery.trim().length > 0;
+  const visibleRosterSections = useMemo(() => {
+    const q = rosterQuery.trim().toLowerCase();
+    if (!q) return rosterSections;
+    const matches = (candidate: ProjectRosterCandidate) =>
+      candidate.name.toLowerCase().includes(q) || candidate.member.targetId.toLowerCase().includes(q);
+    return rosterSections
+      .map((section) => ({
+        ...section,
+        firms: section.firms
+          .map((firm) => ({ ...firm, members: firm.members.filter(matches) }))
+          .filter((firm) => firm.members.length > 0 || matches(firm.team)),
+        standalone: section.standalone.filter(matches),
+      }))
+      .filter((section) => section.firms.length > 0 || section.standalone.length > 0);
+  }, [rosterQuery, rosterSections]);
 
   function recoverMissingBridge(_scope: string) {
     setNeedsHelp(true);
@@ -469,9 +488,23 @@ export default function NewProjectPage() {
               </div>
               <aside className="project-agent-library project-agent-library-tree-create" aria-label={ko ? "실행 가능한 팀과 에이전트" : "Callable teams and agents"}>
                 <div className="project-agent-pool-head"><strong>{ko ? "팀과 에이전트" : "Teams and agents"}</strong><span>{rosterCount}</span></div>
-                {rosterSections.map((section) => {
+                <label className="project-roster-search-create">
+                  <span className="sr-only">{ko ? "에이전트 검색" : "Search agents"}</span>
+                  <input
+                    type="search"
+                    value={rosterQuery}
+                    onChange={(event) => setRosterQuery(event.target.value)}
+                    placeholder={ko ? "에이전트 검색" : "Search agents"}
+                  />
+                </label>
+                {visibleRosterSections.length === 0 ? (
+                  <div className="project-roster-search-empty-create" role="status">
+                    {ko ? "일치하는 에이전트가 없습니다." : "No matching agents."}
+                  </div>
+                ) : null}
+                {visibleRosterSections.map((section) => {
                   const count = section.standalone.length + section.firms.reduce((sum, firm) => sum + 1 + firm.members.length, 0);
-                  const open = openRosterSources[section.source];
+                  const open = rosterFilterActive ? true : openRosterSources[section.source];
                   return (
                     <div key={section.source} className="project-roster-create-section">
                       <button type="button" className="project-roster-source-row-create" onClick={() => setOpenRosterSources((current) => ({ ...current, [section.source]: !open }))} aria-expanded={open}>
@@ -481,7 +514,7 @@ export default function NewProjectPage() {
                       {open ? (
                         <div>
                           {section.firms.map((firm) => {
-                            const firmOpen = openRosterFirms[firm.id] ?? false;
+                            const firmOpen = rosterFilterActive ? true : openRosterFirms[firm.id] ?? false;
                             const teamAddable = firm.team.callable && !selectedMemberKeys.has(firm.team.key);
                             return (
                               <div key={firm.id} className="project-roster-firm-create">

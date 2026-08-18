@@ -697,6 +697,9 @@ export function projectMobileBridgeHistory(
 ): MobileBridgeChatMessageDto[] {
   const budget = Math.max(1_024, Math.min(MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES, Math.floor(budgetBytes)));
   const out: MobileBridgeChatMessageDto[] = [];
+  // 누적 배열을 매 행마다 다시 직렬화하면 O(n²)라 200행 페이지에서 눈에 띄게
+  // 느렸다. JSON 배열 크기 = 괄호 2 + 원소 합 + 쉼표(n-1)이므로 합만 굴린다.
+  let outBytes = 2;
   const selected = history.slice(-Math.max(1, Math.min(200, Math.floor(limit))));
   // Newest messages are authoritative when a byte budget forces a shorter page.
   for (let index = selected.length - 1; index >= 0; index -= 1) {
@@ -707,7 +710,7 @@ export function projectMobileBridgeHistory(
       text: "",
       createdAt: message.createdAt,
     };
-    const remaining = budget - mobileBridgeJsonBytes(out) - mobileBridgeJsonBytes(shell) - 16;
+    const remaining = budget - outBytes - mobileBridgeJsonBytes(shell) - 16;
     if (remaining <= 0) break;
     const candidate: MobileBridgeChatMessageDto = {
       ...shell,
@@ -725,9 +728,10 @@ export function projectMobileBridgeHistory(
         Math.min(MOBILE_BRIDGE_TRANSCRIPT_TEXT_BYTES, remaining),
       ),
     };
-    const next = [candidate, ...out];
-    if (mobileBridgeJsonBytes(next) > budget) break;
+    const candidateBytes = mobileBridgeJsonBytes(candidate) + (out.length > 0 ? 1 : 0);
+    if (outBytes + candidateBytes > budget) break;
     out.unshift(candidate);
+    outBytes += candidateBytes;
   }
   return out;
 }
@@ -742,15 +746,22 @@ function messagesDto(
   const totalBudget = Math.max(0, Math.floor(budgetBytes));
   if (ids.length === 0 || totalBudget < 1_024) return messages;
   const perChatBudget = Math.max(1_024, Math.floor(totalBudget / ids.length) - 256);
+  // 맵 전체를 채팅마다 다시 직렬화하면 O(n²) — JSON 객체 크기 = 중괄호 2 +
+  // ("키":값) 합 + 쉼표(n-1)이므로 합만 굴린다.
+  let usedBytes = 2;
+  let entries = 0;
   for (const chatId of ids) {
     const projected = projectMobileBridgeHistory(
       listChatMessages(chatId, maxMessagesPerChat),
       maxMessagesPerChat,
       perChatBudget,
     );
-    const candidate = { ...messages, [chatId]: projected };
-    if (mobileBridgeJsonBytes(candidate) > totalBudget) break;
+    const entryBytes =
+      mobileBridgeJsonBytes(chatId) + 1 + mobileBridgeJsonBytes(projected) + (entries > 0 ? 1 : 0);
+    if (usedBytes + entryBytes > totalBudget) break;
     messages[chatId] = projected;
+    usedBytes += entryBytes;
+    entries += 1;
   }
   return messages;
 }
@@ -1466,12 +1477,16 @@ export async function projectMobileBridgeSnapshot(
     mode: "summary",
     limit: 20,
   });
-  const taskProjections = projectedTasks.reduce<typeof projectedTasks>((accepted, projection) => {
-    const candidate = [...accepted, projection];
-    return mobileBridgeJsonBytes(candidate) <= Math.floor(MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES / 2)
-      ? candidate
-      : accepted;
-  }, []);
+  // 수락 목록을 후보마다 통째로 다시 직렬화하지 않도록 바이트 합만 굴린다.
+  const taskProjectionBudget = Math.floor(MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES / 2);
+  const taskProjections: typeof projectedTasks = [];
+  let taskProjectionBytes = 2;
+  for (const projection of projectedTasks) {
+    const itemBytes = mobileBridgeJsonBytes(projection) + (taskProjections.length > 0 ? 1 : 0);
+    if (taskProjectionBytes + itemBytes > taskProjectionBudget) continue;
+    taskProjections.push(projection);
+    taskProjectionBytes += itemBytes;
+  }
   // Read once so the legacy DTO and Main-normalized Decision projection cannot
   // describe different pending-message generations inside one snapshot.
   const pendingConfirmations = listPendingConfirmations();

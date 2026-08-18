@@ -13,7 +13,7 @@ import { wrapSystemPrompt } from "./runner";
 import { CLI_HISTORY_CONTEXT_TOKENS, composeResumeTurnPrompt, renderConversationContext } from "./continuity";
 import { tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
-import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild } from "./exec";
+import { agentRunCwd, detachedSpawnOpts, firstExistingCli, killCliTree, probeCliVersion, spawnCli, trackRunChild } from "./exec";
 import { readEnvVar } from "../secrets/vault";
 import { clearProviderHealth, recordProviderHealth } from "../usage/provider-health";
 import { invalidateUsage } from "../usage";
@@ -52,22 +52,6 @@ const CANDIDATES = [
 function grokCandidates(): string[] {
   const override = process.env.AGENTLAS_GROK_BIN?.trim();
   return override ? [override, ...CANDIDATES] : CANDIDATES;
-}
-
-async function firstExisting(paths: string[]): Promise<string | null> {
-  for (const p of paths) {
-    if (!path.isAbsolute(p)) {
-      if ((await probeCliVersion(p, 2000)) !== null) return p;
-      continue;
-    }
-    try {
-      await fs.access(p);
-      return p;
-    } catch {
-      continue;
-    }
-  }
-  return null;
 }
 
 interface GrokMcpServerConfigEntry {
@@ -225,7 +209,7 @@ export interface GrokProbe {
 }
 
 export async function probeGrok(): Promise<GrokProbe | null> {
-  const found = await firstExisting(grokCandidates());
+  const found = await firstExistingCli(grokCandidates());
   if (!found) return null;
   const version = (await probeCliVersion(found)) ?? "unknown";
   const discovery = await listGrokModels(found).catch(
@@ -237,7 +221,7 @@ export async function probeGrok(): Promise<GrokProbe | null> {
 let cachedBin: string | null | undefined;
 async function getBin(): Promise<string | null> {
   if (cachedBin !== undefined) return cachedBin;
-  const found = await firstExisting(grokCandidates());
+  const found = await firstExistingCli(grokCandidates());
   cachedBin = found;
   return cachedBin;
 }

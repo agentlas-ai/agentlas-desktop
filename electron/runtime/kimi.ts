@@ -19,6 +19,7 @@ import { tStatus } from "./status-i18n";
 import {
   agentRunCwd,
   detachedSpawnOpts,
+  firstExistingCli,
   killCliTree,
   probeCliVersion,
   spawnCli,
@@ -61,20 +62,11 @@ function kimiCandidates(): string[] {
   return override ? [override, ...CANDIDATES] : CANDIDATES;
 }
 
-async function firstExisting(paths: string[]): Promise<string | null> {
-  for (const candidate of paths) {
-    if (!path.isAbsolute(candidate)) {
-      if (await probeCliVersion(candidate, 2_500)) return candidate;
-      continue;
-    }
-    try {
-      await fs.access(candidate);
-      if (await probeCliVersion(candidate, 2_500)) return candidate;
-    } catch {
-      // next candidate
-    }
-  }
-  return null;
+// 공유 헬퍼로 통합 — kimi는 절대경로도 버전 프로브를 요구한다(설치는 됐지만
+// 실행이 죽는 바이너리 거절). 사본 시절의 진리값 판정(빈 버전 문자열을 거절)은
+// 다른 러너들과 같은 `!== null` 판정으로 정렬됐다.
+function firstExisting(paths: string[]): Promise<string | null> {
+  return firstExistingCli(paths, { probeTimeoutMs: 2_500, probeAbsolute: true });
 }
 
 /**

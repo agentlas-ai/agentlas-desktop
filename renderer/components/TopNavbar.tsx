@@ -144,10 +144,12 @@ export function TopNavbar() {
       </div>
 
       <div className="titlebar-nodrag" style={{ display: "flex", alignItems: "center", gap: 12 }}>
-        <Link href="/settings" style={{ color: pathname === "/settings" ? "var(--ink)" : "var(--muted-deep)", display: "flex", padding: 6, borderRadius: 6, transition: "all 0.15s" }} className="hover-bg-fill">
+        {/* 좁은 창에서는 이 설정(톱니) 아이콘이 탭 행을 밀고 헤더 밖으로 넘쳤다 —
+            넘치게 두는 대신 숨긴다(설정은 메뉴/단축키로 계속 접근 가능). */}
+        <Link href="/settings" style={{ color: pathname === "/settings" ? "var(--ink)" : "var(--muted-deep)", display: "flex", padding: 6, borderRadius: 6, transition: "all 0.15s" }} className="hover-bg-fill topnav-settings">
           <IconSettings size={16} />
         </Link>
-        <div style={{ height: 20, width: 1, background: "var(--paper-edge)" }} />
+        <div className="topnav-settings" style={{ height: 20, width: 1, background: "var(--paper-edge)" }} />
         <AccountChip />
       </div>
 
@@ -155,6 +157,9 @@ export function TopNavbar() {
         @keyframes slideDown {
           from { opacity: 0; transform: translateY(-8px); }
           to { opacity: 1; transform: translateY(0); }
+        }
+        @media (max-width: 880px) {
+          .topnav-settings { display: none !important; }
         }
         .hover-bg-fill:hover {
           background: var(--fill-1);

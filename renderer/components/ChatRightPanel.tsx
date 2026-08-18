@@ -358,7 +358,17 @@ function useProjectTimeline(project: Project | null, busy: boolean) {
       return;
     }
     try {
-      setSnapshot(await api.projects.timeline(project.id, 20));
+      const next = await api.projects.timeline(project.id, 20);
+      // generatedAt은 호출마다 바뀌므로 표시 내용만 비교한다 — 내용이 같으면
+      // 이전 참조를 유지해 실행 중 2.5초 폴마다 패널이 리렌더되지 않게 한다.
+      setSnapshot((prev) =>
+        prev
+        && prev.projectId === next.projectId
+        && prev.truncated === next.truncated
+        && JSON.stringify(prev.entries) === JSON.stringify(next.entries)
+        && JSON.stringify(prev.sources) === JSON.stringify(next.sources)
+          ? prev
+          : next);
       setState("ready");
     } catch {
       setState("error");
@@ -370,8 +380,15 @@ function useProjectTimeline(project: Project | null, busy: boolean) {
     setState("loading");
     void load();
     if (!busy) return;
-    const interval = window.setInterval(() => void load(), 2500);
-    return () => window.clearInterval(interval);
+    // 숨은 창에서는 폴을 멈추고, 다시 보이면 즉시 한 번 당긴다.
+    const tick = () => { if (document.visibilityState !== "hidden") void load(); };
+    const onVisible = () => { if (document.visibilityState !== "hidden") void load(); };
+    const interval = window.setInterval(tick, 2500);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [busy, load]);
 
   const retry = useCallback(() => {

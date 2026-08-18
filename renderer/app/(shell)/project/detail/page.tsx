@@ -22,6 +22,7 @@ import {
 import { pickLocalized, useT } from "@/lib/i18n";
 import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
+import { AgentLeaseDialog } from "@/components/AgentLeaseDialog";
 import {
   buildProjectRosterSections,
   isUserFacingProjectPoolMember,
@@ -80,6 +81,15 @@ function ProjectPage() {
   // Tasks are the primary project surface. Keep the potentially long tool
   // roster collapsed by default so recent conversations remain above the fold.
   const [teamTreeOpen, setTeamTreeOpen] = useState(false);
+  // ── Hub 렌트/장기대여 상태 (오너 결정 2026-08-18: 24h 자동 리스 폐지) ──
+  // 렌트허용은 (projectId × slug) 데스크탑 로컬 저장, 대여는 서버 계정 상태.
+  const [rentAllowedSlugs, setRentAllowedSlugs] = useState<Set<string>>(new Set());
+  const [leaseUntilBySlug, setLeaseUntilBySlug] = useState<Map<string, string>>(new Map());
+  const [leaseDialog, setLeaseDialog] = useState<{ slug: string; name: string } | null>(null);
+  const [leaseRefreshTick, setLeaseRefreshTick] = useState(0);
+  const [agentKindsHelpOpen, setAgentKindsHelpOpen] = useState(false);
+  // 에이전트 픽커 검색 — 목록이 길어 이름/slug로 즉시 좁힌다(클라이언트 필터).
+  const [rosterQuery, setRosterQuery] = useState("");
   const [inspectorCollapsed, setInspectorCollapsed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [recoveryPending, setRecoveryPending] = useState(false);
@@ -106,6 +116,63 @@ function ProjectPage() {
   const recoverMissingBridge = useCallback((_scope: string) => {
     setRecoveryPending(true);
   }, []);
+
+  // Hub 풀 멤버의 targetId 는 slug 이거나 agentDefinitionId 다(로스터 규칙). 렌트/대여
+  // API 는 slug 를 키로 쓰므로 북마크 목록으로 되돌린다 — 못 되돌리면 컨트롤을 숨긴다.
+  const hubSlugByTargetId = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const bookmark of hubBookmarks) {
+      const slug = String(bookmark.listing.slug ?? "").trim().toLowerCase();
+      if (!slug) continue;
+      map.set(slug, slug);
+      const definitionId = String(bookmark.listing.agentDefinitionId ?? "").trim().toLowerCase();
+      if (definitionId) map.set(definitionId, slug);
+    }
+    return map;
+  }, [hubBookmarks]);
+  const hubSlugForMember = useCallback((member: ProjectAgentPoolMember): string | null => {
+    if (member.source !== "hub") return null;
+    return hubSlugByTargetId.get(member.targetId.trim().toLowerCase()) ?? null;
+  }, [hubSlugByTargetId]);
+
+  // 패널이 열릴 때마다 렌트허용/대여 상태를 새로 읽는다(대여 만료·타 기기 변경 반영).
+  const agentsPanelOpen = teamTreeOpen || editingTeam;
+  useEffect(() => {
+    if (!agentsPanelOpen || !id) return;
+    const api = ipc();
+    if (!api) return;
+    let cancelled = false;
+    void api.projects.listRentAllowed(id)
+      .then((slugs) => {
+        if (!cancelled) setRentAllowedSlugs(new Set(slugs.map((slug) => slug.toLowerCase())));
+      })
+      .catch(() => {
+        // 읽기 실패는 기본(OFF) 표시로 남긴다 — 쓰기가 아니므로 복구 배너는 띄우지 않는다.
+      });
+    void api.agentLeases.list()
+      .then((rows) => {
+        if (cancelled) return;
+        const now = Date.now();
+        setLeaseUntilBySlug(new Map(rows
+          .filter((row) => Number.isFinite(Date.parse(row.leasedUntil)) && Date.parse(row.leasedUntil) > now)
+          .map((row) => [row.slug.toLowerCase(), row.leasedUntil])));
+      })
+      .catch(() => {
+        // 미로그인/오프라인 — 대여 배지 없이 컨트롤만 보여준다.
+      });
+    return () => { cancelled = true; };
+  }, [agentsPanelOpen, id, leaseRefreshTick]);
+
+  async function toggleRentAllowed(slug: string, allowed: boolean) {
+    const api = ipc();
+    if (!api || !project) return;
+    try {
+      const updated = await api.projects.setRentAllowed({ projectId: project.id, slug, allowed });
+      setRentAllowedSlugs(new Set(updated.map((item) => item.toLowerCase())));
+    } catch {
+      setRecoveryPending(true);
+    }
+  }
 
   const refresh = useCallback(async () => {
     const api = ipc();
@@ -649,6 +716,20 @@ function ProjectPage() {
         </div>
       )}
 
+      {leaseDialog && (
+        <AgentLeaseDialog
+          slug={leaseDialog.slug}
+          agentName={leaseDialog.name}
+          locale={locale}
+          onClose={() => setLeaseDialog(null)}
+          onLeased={() => {
+            // 성공 — 닫고 대여 상태를 다시 읽는다(배지로 전환, 컨트롤 숨김).
+            setLeaseDialog(null);
+            setLeaseRefreshTick((tick) => tick + 1);
+          }}
+        />
+      )}
+
       {recoveryPending && (
         <section style={{ maxWidth: 1280, margin: "16px auto 0", padding: "0 24px" }} role="alert">
           <div style={pageNotice}>{locale === "en" ? "Some project information could not be loaded. Your saved work was not changed." : "프로젝트 정보 일부를 불러오지 못했습니다. 저장된 작업은 변경되지 않았습니다."}</div>
@@ -719,7 +800,7 @@ function ProjectPage() {
             )}
           </div>
 
-          <div style={{ ...cardStyle, marginBottom: 24 }}>
+          <div style={{ ...cardStyle, marginBottom: 24, position: "relative" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
               <button
                 type="button"
@@ -736,7 +817,38 @@ function ProjectPage() {
                   {locale === "ko" ? "편집" : "Edit"}
                 </button>
               ) : null}
+              <button
+                type="button"
+                className="project-agent-help"
+                aria-expanded={agentKindsHelpOpen}
+                aria-label={locale === "ko" ? "렌트·장기대여·포크 안내" : "About rent, lease, and fork"}
+                title={locale === "ko" ? "렌트·장기대여·포크 안내" : "About rent, lease, and fork"}
+                onClick={() => setAgentKindsHelpOpen((current) => !current)}
+              >
+                ?
+              </button>
             </div>
+            {agentKindsHelpOpen ? (
+              <div role="dialog" aria-label={locale === "ko" ? "이용 방식 안내" : "How hiring works"} className="project-agent-help-pop">
+                <dl>
+                  <dt>{locale === "ko" ? "렌트" : "Rent"}</dt>
+                  <dd>{locale === "ko"
+                    ? "작업당 과금. 렌트허용을 켜면 고지 없이 작업마다 호출·과금되고, 크레딧 부족 시에만 팝업이 뜹니다."
+                    : "Billed per work order. With Allow rent on, the agent is called and billed per work order without a notice; only an insufficient-credits popup interrupts."}</dd>
+                  <dt>{locale === "ko" ? "장기대여" : "Lease"}</dt>
+                  <dd>{locale === "ko"
+                    ? "일 단위 선불 대여. 계정에 귀속되어, 기간 중에는 어느 프로젝트에서든 호출이 무료입니다."
+                    : "Prepaid day-based lease, bound to your account. While it lasts, calls are free in every project."}</dd>
+                  <dt>{locale === "ko" ? "포크" : "Fork"}</dt>
+                  <dd>{locale === "ko"
+                    ? "내 워크스페이스로 사본 구매. 웹 에이전트 상세 페이지에서만 가능하며, 허브 재등록은 불가합니다."
+                    : "Buy a copy into your workspace. Web agent page only; it cannot be re-published to the Hub."}</dd>
+                </dl>
+                <button type="button" onClick={() => setAgentKindsHelpOpen(false)}>
+                  {locale === "ko" ? "닫기" : "Close"}
+                </button>
+              </div>
+            ) : null}
             {(teamTreeOpen || editingTeam) && <div className="project-agent-workbench project-agent-workbench-compact" data-editing={editingTeam}>
               <ProjectTeamOrgChart
                 locale={locale}
@@ -751,6 +863,13 @@ function ProjectPage() {
                 onPointerUp={finishPointerDrag}
                 onPointerCancel={() => { pointerDragRef.current = null; setDraggedMemberId(null); }}
                 onDrop={dropAgent}
+                hubCard={{
+                  slugFor: hubSlugForMember,
+                  rentAllowed: rentAllowedSlugs,
+                  leaseUntil: leaseUntilBySlug,
+                  onToggleRent: (slug, allowed) => void toggleRentAllowed(slug, allowed),
+                  onLease: (slug, name) => setLeaseDialog({ slug, name }),
+                }}
               />
               {editingTeam ? (
                 <ProjectAgentRosterLibrary
@@ -760,6 +879,8 @@ function ProjectPage() {
                   openSources={openRosterSources}
                   openFirms={openRosterFirms}
                   draggedCandidateKey={draggedCandidateKey}
+                  query={rosterQuery}
+                  onQueryChange={setRosterQuery}
                   onToggleSource={(source) => setOpenRosterSources((current) => ({ ...current, [source]: !current[source] }))}
                   onToggleFirm={(firmId) => setOpenRosterFirms((current) => ({ ...current, [firmId]: !current[firmId] }))}
                   onAddCandidate={addCandidate}
@@ -930,7 +1051,14 @@ function ProjectPage() {
         }
         .project-agent-workbench-compact {
           min-height: 0;
-          grid-template-columns: minmax(320px, 1.15fr) minmax(280px, .85fr);
+          /* minmax(320px/280px, …) 최소폭이 좁은 패널에서 그리드를 카드 밖으로
+             밀어냈다(스크린샷 실측) — 열이 0까지 줄 수 있어야 가로 넘침이 없다.
+             목록 세로 스크롤은 각 열(.project-team-org/.project-agent-library-tree)이
+             자기 overflow로 소유한다. */
+          grid-template-columns: minmax(0, 1.15fr) minmax(0, .85fr);
+        }
+        .project-agent-workbench-compact > * {
+          min-width: 0;
         }
         .project-agent-workbench-compact[data-editing="false"] {
           grid-template-columns: minmax(0, 1fr);
@@ -1068,10 +1196,159 @@ function ProjectPage() {
         .project-agent-library-tree {
           max-height: 540px;
           padding: 10px;
-          overflow: auto;
+          /* 목록은 자기 컨테이너 안에서만 세로 스크롤한다 — 패널 밖으로 그려지거나
+             페이지 가로 스크롤을 만들면 안 된다. */
+          overflow-x: hidden;
+          overflow-y: auto;
+          min-width: 0;
           border: 1px solid var(--paper-edge);
           border-radius: 16px;
           background: var(--paper);
+        }
+        .project-roster-search {
+          position: relative;
+          display: block;
+          margin: 0 2px 8px;
+        }
+        .project-roster-search > svg {
+          position: absolute;
+          left: 10px;
+          top: 50%;
+          transform: translateY(-50%);
+          color: var(--muted-deep);
+          pointer-events: none;
+        }
+        .project-roster-search > input {
+          width: 100%;
+          min-height: 32px;
+          padding: 0 10px 0 28px;
+          border: 1px solid var(--paper-edge);
+          border-radius: 9px;
+          background: var(--paper-2);
+          color: var(--ink);
+          font-size: 12px;
+        }
+        .project-roster-search > input:focus-visible {
+          outline: 2px solid color-mix(in srgb, var(--accent) 32%, transparent);
+          outline-offset: 1px;
+        }
+        .project-roster-search-empty {
+          padding: 14px 8px;
+          color: var(--muted-deep);
+          font-size: 11.5px;
+          text-align: center;
+        }
+        .project-agent-help {
+          flex-shrink: 0;
+          width: 22px;
+          height: 22px;
+          display: grid;
+          place-items: center;
+          border: 1px solid var(--paper-edge);
+          border-radius: 999px;
+          background: var(--paper);
+          color: var(--muted-deep);
+          font-size: 11px;
+          font-weight: 800;
+          cursor: pointer;
+        }
+        .project-agent-help:hover,
+        .project-agent-help[aria-expanded="true"] {
+          border-color: var(--accent);
+          color: var(--accent);
+        }
+        .project-agent-help-pop {
+          position: absolute;
+          top: 44px;
+          right: 14px;
+          z-index: 30;
+          width: min(320px, calc(100% - 28px));
+          padding: 12px 14px;
+          border: 1px solid var(--paper-edge);
+          border-radius: 12px;
+          background: var(--paper);
+          box-shadow: 0 14px 44px rgba(20, 22, 18, .16);
+        }
+        .project-agent-help-pop dl {
+          margin: 0;
+          display: grid;
+          gap: 8px;
+        }
+        .project-agent-help-pop dt {
+          font-size: 11.5px;
+          font-weight: 800;
+          color: var(--ink);
+        }
+        .project-agent-help-pop dd {
+          margin: 2px 0 0;
+          font-size: 11.5px;
+          line-height: 1.5;
+          color: var(--muted-deep);
+        }
+        .project-agent-help-pop > button {
+          margin-top: 10px;
+          min-height: 28px;
+          padding: 0 10px;
+          border: 1px solid var(--paper-edge);
+          border-radius: 8px;
+          background: var(--paper);
+          color: var(--ink-soft);
+          font-size: 11.5px;
+          font-weight: 700;
+          cursor: pointer;
+        }
+        .project-agent-hub-controls {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          flex-shrink: 0;
+        }
+        /* .project-team-actions button 규칙(테두리 제거·투명 배경)보다 이겨야 하므로
+           두 클래스 선택자로 특이도를 올린다 — 편집 모드에서도 같은 모양을 유지. */
+        .project-agent-hub-controls .project-agent-rent-toggle,
+        .project-agent-rent-toggle {
+          min-height: 24px;
+          padding: 0 8px;
+          border: 1px solid var(--paper-edge);
+          border-radius: 999px;
+          background: var(--paper);
+          color: var(--muted-deep);
+          font-size: 10px;
+          font-weight: 750;
+          cursor: pointer;
+          white-space: nowrap;
+        }
+        .project-agent-hub-controls .project-agent-rent-toggle[aria-checked="true"] {
+          border-color: var(--accent);
+          background: color-mix(in srgb, var(--accent) 9%, var(--paper));
+          color: var(--accent);
+        }
+        .project-agent-hub-controls .project-agent-lease-button,
+        .project-agent-lease-button {
+          min-height: 24px;
+          padding: 0 8px;
+          border: 1px solid var(--paper-edge);
+          border-radius: 7px;
+          background: var(--paper);
+          color: var(--ink-soft);
+          font-size: 10px;
+          font-weight: 700;
+          cursor: pointer;
+          white-space: nowrap;
+        }
+        .project-agent-hub-controls .project-agent-lease-button:hover {
+          border-color: var(--muted);
+          color: var(--ink);
+        }
+        .project-agent-lease-badge {
+          padding: 3px 8px;
+          border-radius: 999px;
+          background: color-mix(in srgb, var(--green-deep) 10%, transparent);
+          color: var(--green-deep);
+          font-size: 10px;
+          font-weight: 750;
+          white-space: nowrap;
+          flex-shrink: 0;
         }
         .project-roster-head {
           display: flex;
@@ -1339,6 +1616,16 @@ function ProjectPage() {
   );
 }
 
+/** Hub 북마크 카드 전용 컨트롤(렌트허용 토글·장기대여) 배선. 로컬/클라우드 카드는 무관. */
+interface ProjectHubCardControls {
+  /** Hub 멤버의 targetId → slug 복원. null 이면 컨트롤을 그리지 않는다. */
+  slugFor: (member: ProjectAgentPoolMember) => string | null;
+  rentAllowed: Set<string>;
+  leaseUntil: Map<string, string>;
+  onToggleRent: (slug: string, allowed: boolean) => void;
+  onLease: (slug: string, name: string) => void;
+}
+
 function ProjectTeamOrgChart({
   locale,
   members,
@@ -1352,6 +1639,7 @@ function ProjectTeamOrgChart({
   onPointerUp,
   onPointerCancel,
   onDrop,
+  hubCard,
 }: {
   locale: string;
   members: ProjectAgentPoolMember[];
@@ -1365,6 +1653,7 @@ function ProjectTeamOrgChart({
   onPointerUp: (event: ReactPointerEvent<HTMLElement>) => void;
   onPointerCancel: () => void;
   onDrop: (event: DragEvent<HTMLDivElement>) => void;
+  hubCard?: ProjectHubCardControls;
 }) {
   if (members.length === 0) {
     return (
@@ -1383,6 +1672,49 @@ function ProjectTeamOrgChart({
       </div>
     );
   }
+
+  const ko = locale === "ko";
+  // Hub 북마크 카드의 오른쪽 컨트롤:
+  //   활성 대여 → 배지만(두 컨트롤 숨김) / 그 외 → [렌트허용] 토글 + [장기대여] 버튼.
+  const renderHubControls = (member: ProjectAgentPoolMember) => {
+    if (!hubCard) return null;
+    const slug = hubCard.slugFor(member);
+    if (!slug) return null;
+    const leasedUntil = hubCard.leaseUntil.get(slug) ?? null;
+    if (leasedUntil) {
+      const date = new Date(leasedUntil);
+      const label = Number.isFinite(date.getTime())
+        ? ko
+          ? `${new Intl.DateTimeFormat("ko-KR", { month: "long", day: "numeric" }).format(date)}까지 대여`
+          : `Leased until ${new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(date)}`
+        : ko ? "대여 중" : "Leased";
+      return <span className="project-agent-lease-badge">{label}</span>;
+    }
+    const allowed = hubCard.rentAllowed.has(slug);
+    return (
+      <span className="project-agent-hub-controls" onPointerDown={(event) => event.stopPropagation()}>
+        <button
+          type="button"
+          className="project-agent-rent-toggle"
+          role="switch"
+          aria-checked={allowed}
+          title={ko
+            ? "켜면 이 프로젝트 작업에 고지 없이 작업당 호출·과금됩니다. 끄면 자동 고용에서 제외됩니다."
+            : "On: auto-hired and billed per work order with no notice. Off: excluded from auto-hire for this project."}
+          onClick={() => hubCard.onToggleRent(slug, !allowed)}
+        >
+          {ko ? "렌트허용" : "Allow rent"}
+        </button>
+        <button
+          type="button"
+          className="project-agent-lease-button"
+          onClick={() => hubCard.onLease(slug, member.nameSnapshot)}
+        >
+          {ko ? "장기대여" : "Lease"}
+        </button>
+      </span>
+    );
+  };
 
   const renderNode = (member: ProjectAgentPoolMember, index: number, child: boolean) => (
     <div
@@ -1411,11 +1743,15 @@ function ProjectTeamOrgChart({
       </span>
       {editing ? (
         <span className="project-team-actions" onPointerDown={(event) => event.stopPropagation()}>
+          {renderHubControls(member)}
           {/* 순위가 없으므로 위/아래로 옮길 자리도 없다. 재정렬 버튼은 그 자체가
               서열이 있다는 주장이라 제거한다. */}
           <button type="button" aria-label={locale === "ko" ? `${member.nameSnapshot} 제거` : `Remove ${member.nameSnapshot}`} onClick={() => onRemove(projectPoolMemberKey(member))}>×</button>
         </span>
-      ) : <span className="project-roster-kind">{child ? member.source : (locale === "ko" ? "프로젝트 도구" : "project tool")}</span>}
+      ) : (
+        renderHubControls(member)
+          ?? <span className="project-roster-kind">{child ? member.source : (locale === "ko" ? "프로젝트 도구" : "project tool")}</span>
+      )}
     </div>
   );
 
@@ -1442,6 +1778,8 @@ function ProjectAgentRosterLibrary({
   openSources,
   openFirms,
   draggedCandidateKey,
+  query,
+  onQueryChange,
   onToggleSource,
   onToggleFirm,
   onAddCandidate,
@@ -1456,6 +1794,8 @@ function ProjectAgentRosterLibrary({
   openSources: Record<ProjectRosterSource, boolean>;
   openFirms: Record<string, boolean>;
   draggedCandidateKey: string | null;
+  query: string;
+  onQueryChange: (query: string) => void;
   onToggleSource: (source: ProjectRosterSource) => void;
   onToggleFirm: (firmId: string) => void;
   onAddCandidate: (candidate: ProjectRosterCandidate) => void;
@@ -1464,6 +1804,13 @@ function ProjectAgentRosterLibrary({
   onPointerUp: (event: ReactPointerEvent<HTMLElement>) => void;
   onPointerCancel: () => void;
 }) {
+  // 클라이언트 필터 — 이름/slug(targetId) 부분 일치, 대소문자 무시. 검색 중에는
+  // 접힘 상태를 무시하고 일치 항목을 모두 펼쳐 보여준다.
+  const q = query.trim().toLowerCase();
+  const matchesCandidate = (candidate: ProjectRosterCandidate) =>
+    !q
+    || candidate.name.toLowerCase().includes(q)
+    || candidate.member.targetId.toLowerCase().includes(q);
   const renderCandidate = (candidate: ProjectRosterCandidate) => {
     const selected = selectedMemberKeys.has(candidate.key);
     const disabled = selected || !candidate.callable;
@@ -1499,15 +1846,48 @@ function ProjectAgentRosterLibrary({
     );
   };
 
+  // 검색 중에는 일치하는 후보만 남긴다. 팀 행은 팀 자신이 일치하거나 일치하는
+  // 멤버가 있을 때만 남고, 남은 팀/섹션은 강제로 펼친다.
+  const visibleSections = sections
+    .map((section) => {
+      const firms = q
+        ? section.firms
+          .map((firm) => ({ ...firm, members: firm.members.filter(matchesCandidate) }))
+          .filter((firm) => firm.members.length > 0 || matchesCandidate(firm.team))
+        : section.firms;
+      const standalone = q ? section.standalone.filter(matchesCandidate) : section.standalone;
+      return { ...section, firms, standalone };
+    })
+    .filter((section) => !q || section.firms.length > 0 || section.standalone.length > 0);
+  const totalCount = visibleSections.reduce(
+    (sum, section) => sum + section.standalone.length + section.firms.reduce((firmSum, firm) => firmSum + 1 + firm.members.length, 0),
+    0,
+  );
+
   return (
     <aside className="project-agent-library-tree" aria-label={locale === "ko" ? "실행 가능한 팀과 에이전트" : "Callable teams and agents"}>
       <div className="project-roster-head">
         <span>{locale === "ko" ? "팀과 에이전트" : "Teams and agents"}</span>
-        <span>{sections.reduce((sum, section) => sum + section.standalone.length + section.firms.reduce((firmSum, firm) => firmSum + 1 + firm.members.length, 0), 0)}</span>
+        <span>{totalCount}</span>
       </div>
-      {sections.map((section) => {
+      <label className="project-roster-search">
+        <span className="sr-only">{locale === "ko" ? "에이전트 검색" : "Search agents"}</span>
+        <IconSearch size={13} aria-hidden="true" />
+        <input
+          type="search"
+          value={query}
+          onChange={(event) => onQueryChange(event.target.value)}
+          placeholder={locale === "ko" ? "에이전트 검색" : "Search agents"}
+        />
+      </label>
+      {q && totalCount === 0 ? (
+        <div className="project-roster-search-empty" role="status">
+          {locale === "ko" ? "일치하는 에이전트가 없습니다." : "No matching agents."}
+        </div>
+      ) : null}
+      {visibleSections.map((section) => {
         const count = section.standalone.length + section.firms.reduce((sum, firm) => sum + 1 + firm.members.length, 0);
-        const open = openSources[section.source];
+        const open = q ? true : openSources[section.source];
         return (
           <div key={section.source}>
             <button type="button" className="project-roster-source-row" onClick={() => onToggleSource(section.source)} aria-expanded={open}>
@@ -1518,7 +1898,7 @@ function ProjectAgentRosterLibrary({
             {open ? (
               <>
                 {section.firms.map((firm) => {
-                  const firmOpen = openFirms[firm.id] ?? false;
+                  const firmOpen = q ? true : openFirms[firm.id] ?? false;
                   const teamAddable = firm.team.callable && !selectedMemberKeys.has(firm.team.key);
                   return (
                     <div key={firm.id}>

@@ -17,7 +17,7 @@ import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-p
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 96;
+const SCHEMA_VERSION = 97;
 
 function hardenStoreFile(file: string): void {
   if (process.platform === "win32" || !fs.existsSync(file)) return;
@@ -4494,6 +4494,25 @@ export function initStore(options: StoreInitOptions = {}): void {
     );
     CREATE INDEX IF NOT EXISTS idx_agent_architecture_migrations_step
       ON agent_architecture_migrations(step_id, outcome);
+  `);
+
+  /*
+   * v97 — 프로젝트별 Hub 에이전트 렌트 허용(작업당 과금 자동 고용 동의).
+   *
+   * 오너 결정 2026-08-18: 24시간 자동 리스 폐지. RENT는 작업(work order)당 과금이고,
+   * 이 표는 "이 프로젝트에서 이 Hub 에이전트를 고지 없이 작업당 자동 고용해도 된다"는
+   * 사용자의 명시적 허용을 (projectId × slug)로 기록한다. 행이 없으면 기본 OFF —
+   * 그 에이전트는 이 프로젝트의 네트워크 자동 고용 후보에서 제외된다.
+   * 사다리 끝에 append — 이미 지나간 단계에 끼우면 기존 설치가 못 받는다.
+   */
+  _db.exec(`
+    CREATE TABLE IF NOT EXISTS project_agent_rent_allow (
+      project_id TEXT NOT NULL,
+      slug TEXT NOT NULL,
+      allowed INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (project_id, slug)
+    );
   `);
 
   if (userVersion < SCHEMA_VERSION) _db.pragma(`user_version = ${SCHEMA_VERSION}`);

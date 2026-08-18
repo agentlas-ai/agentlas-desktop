@@ -246,10 +246,12 @@ export function snoozePendingConfirmation(
 }
 
 // listPendingConfirmations는 호출당 수십 개의 동기 쿼리를 실행하는데, 독립 폴러
-// 셋(AppShell·대시보드 위젯·태스크 투영 빌더)이 같은 틱 안에서 겹쳐 부른다.
-// 1초 캐시는 그 겹침만 제거한다 — 새 질문 도착은 최대 1초 늦게 보이고, 이 파일
-// 안의 상태 변화(답 확정·클레임·스누즈)는 즉시 무효화된다.
-const PENDING_CONFIRMATIONS_TTL_MS = 1_000;
+// 셋(AppShell·대시보드 위젯·태스크 투영 빌더)이 3초 간격으로 겹쳐 부른다.
+// 신선도는 TTL이 아니라 무효화가 지킨다 — 새 질문 도착(챗 쓰기)과 이 파일 안의
+// 상태 변화(답 확정·클레임·스누즈)가 모두 즉시 무효화하므로, TTL은 폴 간격보다
+// 길게 잡아 무변경 틱의 DB 팬아웃을 캐시로 흡수한다. (1초였을 때는 3초 폴이
+// 캐시에 한 번도 못 맞아 캐시가 장식이었다.)
+const PENDING_CONFIRMATIONS_TTL_MS = 30_000;
 let pendingConfirmationsCache: { at: number; items: PendingConfirmation[] } | null = null;
 
 function invalidatePendingConfirmationsCache(): void {

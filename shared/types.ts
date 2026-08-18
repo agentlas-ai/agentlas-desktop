@@ -3316,6 +3316,16 @@ export interface CloudAgentPackageRequest {
   rootPath: string;
   /** Optional public slug. If omitted, derived from the folder/name. */
   slug?: string;
+  /**
+   * The caller's `slug` is a local-registry name, not a publishing identity.
+   * A registered agent/team carries a namespaced local slug (`local-…`,
+   * `firm-local-…`, plus a `-2` de-duplication suffix) that exists only to keep
+   * rows unique on this machine. Uploading under it mints a SECOND cloud
+   * identity for a package that already owns one, which the server refuses with
+   * `slug_identity_conflict`. When this is set the package's own stable slug
+   * (agent-card / agentlas.json) wins and `slug` is only the fallback.
+   */
+  preferPackageSlug?: boolean;
   /** Defaults to owner-private Agent Cloud storage. Use marketplace only for an explicit public Hub publish. */
   visibility?: CloudAgentVisibility;
   /** true packages and reviews locally but does not call agentlas.cloud. */
@@ -3332,6 +3342,13 @@ export interface CloudAgentPackageRequest {
   purposeAnswer?: string;
   /** Opaque renderer-generated correlation id for live upload progress. Not authority. */
   progressId?: string;
+  /**
+   * The person answered "yes, replace it" to the one overwrite question main
+   * asked about THIS folder. It carries no target: main stored what it asked
+   * about and re-reads it, so a renderer can never name which cloud asset gets
+   * replaced.
+   */
+  confirmOverwrite?: boolean;
 }
 
 /** Renderer-to-main request. The native picker capability, not a renderer path,
@@ -3378,6 +3395,8 @@ export interface CloudAgentRegisteredSaveRequest {
   target: CloudAgentRegisteredTarget;
   /** Opaque renderer-generated correlation id for live upload progress. Not authority. */
   progressId?: string;
+  /** Answers main's one overwrite question for this target. Carries no cloud id. */
+  confirmOverwrite?: boolean;
 }
 
 export interface CloudAgentRegisteredPublishRequest extends CloudAgentRegisteredSaveRequest {
@@ -3588,6 +3607,14 @@ export interface CloudAgentRegistrationResult {
   dryRun: boolean;
   /** False means the server commit succeeded but its local CAS receipt could not be persisted. */
   localSyncStored?: boolean;
+  /**
+   * Server refusals this upload repaired by itself, in the order they happened.
+   * A silent repair is not allowed to stay silent: each entry is shown to the
+   * user, because "published under a different slug than you asked for" and
+   * "overwrote the copy already in your Cloud" are facts they must be able to
+   * see after the fact.
+   */
+  autoRecovered?: string[];
 }
 
 /** Exact immutable Hub release reference inside an owner cloud combination. */
@@ -5060,6 +5087,8 @@ export interface RecAgent {
   canonicalCommand?: string;
   /** type 이 팀/회사면 firm 바인딩 경로로 실행. */
   isFirm?: boolean;
+  /** Active day-based lease (owner-purchased): calls cost 0 while it lasts. */
+  leased?: boolean;
   /** Exact executable identity; id/source alone are display compatibility fields. */
   target: OrchestrationTarget;
 }
@@ -5670,6 +5699,30 @@ export interface CloudAgentPricesRead {
 export type CloudAgentSetPricesResult =
   | { ok: true; prices: CloudAgentPrices; changed: boolean }
   | { ok: false; code: string; message: string; kind?: string; maxCredits?: number; minCredits?: number };
+
+/**
+ * Day-based prepaid agent lease (owner decision 2026-08-18). The old 24-hour
+ * auto-lease is retired: RENT bills per work order, and a long-term lease is
+ * bought explicitly for 1..30 days. While active, calls to that slug cost 0.
+ */
+export interface AgentLeaseQuote {
+  /** False when signed out or the server could not be reached. */
+  ok: boolean;
+  active: boolean;
+  leasedUntil: string | null;
+  perDayCredits: number | null;
+  /** False → the creator does not sell long-term leases for this agent. */
+  leaseOffered: boolean;
+}
+
+export type AgentLeasePurchaseResult =
+  | { ok: true; leasedUntil: string; days: number; perDayCredits: number; chargedCredits: number }
+  | { ok: false; code: "lease_not_offered" | "insufficient_credits" | "signed_out" | "network" | string; needed?: number; have?: number; message: string };
+
+export interface AgentLeaseRow {
+  slug: string;
+  leasedUntil: string;
+}
 
 export interface AgentlasIpc {
   /** 도구 승인 결정 — live 요청만 대기 중인 실행을 푼다. post-denial 은 다음 실행에 반영. */
@@ -6401,6 +6454,16 @@ export interface AgentlasIpc {
     ) => Promise<Project>;
     remove: (id: string) => Promise<void>;
     connectGithub: (repositoryUrl: string) => Promise<ProjectSourceConnectResult>;
+    /** Hub slugs this project may auto-hire per work order without a per-send notice. */
+    listRentAllowed: (projectId: string) => Promise<string[]>;
+    /** Returns the updated allowed-slug list for the project. */
+    setRentAllowed: (input: { projectId: string; slug: string; allowed: boolean }) => Promise<string[]>;
+  };
+  agentLeases: {
+    quote: (slug: string) => Promise<AgentLeaseQuote>;
+    purchase: (input: { slug: string; days: number }) => Promise<AgentLeasePurchaseResult>;
+    /** Cached (~60s) list of this account's leases; active ones call at 0 credits. */
+    list: () => Promise<AgentLeaseRow[]>;
   };
   ontology: {
     getProject: (projectId: string) => Promise<OntologyProjectStatus>;

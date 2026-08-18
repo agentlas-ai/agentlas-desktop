@@ -296,6 +296,7 @@ function ChatInputComponent({
   activeChatId = null,
   placeholder,
   projectOrchestration = false,
+  activeProjectId = null,
 }: {
   onSend: (text: string, opts?: SendOptions) => void;
   /** Button-only session actions. They are never represented as chat commands. */
@@ -350,6 +351,8 @@ function ChatInputComponent({
   placeholder?: string;
   /** Project Work owns staffing automatically; legacy execution modes are not composer choices here. */
   projectOrchestration?: boolean;
+  /** Owning project — gates the per-project 렌트허용 policy for hub auto-hire. */
+  activeProjectId?: string | null;
 }) {
   const { t, locale } = useT();
   const router = useRouter();
@@ -842,32 +845,60 @@ function ChatInputComponent({
       setGateSheet({ kind: "build", text, opts, reason: preview.buildReason, routerAgent: preview.routerAgent });
       return;
     }
-    // 3) 저신뢰 에스컬레이션 + 허브 후보/clarify → 선고용 금지, LLM 재랭킹 경로로 즉시 전송.
-    const hubAgents = preview.agents.filter((a) => a.source !== "local");
-    if (preview.routerAgent && (preview.mode === "clarify" || hubAgents.length > 0)) {
-      onRecommendExecute?.({ kind: "plain", routerAgent: preview.routerAgent }, text, opts);
+    // 3) 프로젝트 렌트 정책(오너 결정 2026-08-18, 작업당 과금) — 렌트허용이 꺼진 Hub
+    //    에이전트는 이 프로젝트의 자동 고용 후보에서 제외한다. 활성 장기대여(선불,
+    //    호출 0크레딧)는 항상 후보로 남는다. 프로젝트가 없는 채팅은 기존 동작 유지.
+    let effectivePreview = preview;
+    // 남은 Hub 고용 전원이 명시 허용(토글 ON) 또는 활성 대여일 때만 매 전송 고지를
+    // 생략한다 — 크레딧 부족 페이월이 유일한 개입으로 남는다.
+    let suppressCostNotice = false;
+    if (activeProjectId && preview.agents.some((a) => a.source === "hub")) {
+      const allowedSlugs = new Set(
+        ((await ipc()?.projects.listRentAllowed(activeProjectId).catch(() => [])) ?? [])
+          .map((slug) => slug.toLowerCase()),
+      );
+      if (activeChatIdRef.current !== chatIdAtStart) return;
+      const agents = preview.agents.filter((agent) =>
+        agent.source !== "hub" || agent.leased === true || allowedSlugs.has(agent.id.toLowerCase()));
+      const keptHub = agents.filter((agent) => agent.source === "hub");
+      const known = keptHub.filter((agent) => agent.estCredits != null);
+      effectivePreview = {
+        ...preview,
+        agents,
+        totalEstCredits: known.length ? known.reduce((sum, agent) => sum + (agent.estCredits ?? 0), 0) : null,
+        ...(known.length < keptHub.length ? { totalEstCreditsPartial: true } : { totalEstCreditsPartial: undefined }),
+      };
+      suppressCostNotice = keptHub.length > 0
+        && keptHub.every((agent) => agent.leased === true || allowedSlugs.has(agent.id.toLowerCase()));
+    }
+    // 4) 저신뢰 에스컬레이션 + 허브 후보/clarify → 선고용 금지, LLM 재랭킹 경로로 즉시 전송.
+    const hubAgents = effectivePreview.agents.filter((a) => a.source !== "local");
+    if (effectivePreview.routerAgent && (effectivePreview.mode === "clarify" || hubAgents.length > 0)) {
+      onRecommendExecute?.({ kind: "plain", routerAgent: effectivePreview.routerAgent }, text, opts);
       finishComposerAfterSend();
       return;
     }
-    // 4) 크레딧 게이트 — 허브 고용 비용이 잔액을 넘을 때만 페이월. 잔액 조회 실패 시 서버 과금이 최종 심판.
+    // 5) 크레딧 게이트 — 허브 고용 비용이 잔액을 넘을 때만 페이월. 잔액 조회 실패 시 서버 과금이 최종 심판.
     //    hep-network 자동 개입 OFF면 자동 고용 자체가 없으므로 페이월도 건너뛴다.
     //    totalEstCreditsPartial=true 면 totalEstCredits 는 총액이 아니라 하한이다(단가 미상 Hub 행).
     //    그때 하한을 "필요 Ncr" 로 확정 표기하면 고지액보다 서버가 더 청구한다 —
     //    숫자는 하한임을 붙여 고지하고, 미상(null)도 0(무료)으로 삼키지 않는다.
-    const costFloor = preview.totalEstCredits ?? 0;
-    const costPartial = preview.totalEstCreditsPartial === true;
+    //    활성 장기대여 행은 main 이 이미 0으로 확정했다(leased) — 여기 합산에 그대로 반영된다.
+    const costFloor = effectivePreview.totalEstCredits ?? 0;
+    const costPartial = effectivePreview.totalEstCreditsPartial === true;
     if (engineToggles?.networkAuto === true && hubAgents.length > 0 && (costFloor > 0 || costPartial)) {
       const balance = await ipc()?.billing.getCredits().catch(() => null);
       if (activeChatIdRef.current !== chatIdAtStart) return;
       const have = balance?.remainingCredits;
       if (typeof have === "number" && have < costFloor) {
-        setGateSheet({ kind: "paywall", text, opts, needed: costFloor, have, partialCost: costPartial, routerAgent: preview.routerAgent });
+        setGateSheet({ kind: "paywall", text, opts, needed: costFloor, have, partialCost: costPartial, routerAgent: effectivePreview.routerAgent });
         return;
       }
-      // 유료 자동 고용이 실제로 나가는 경로 — 차감 전 예상 비용·리스 조건을 사용자에게 고지한다.
-      flashCostNotice(costFloor, costPartial);
+      // 유료 자동 고용이 실제로 나가는 경로 — 명시적 렌트허용이 없는 고용에만
+      // 작업당 예상 비용을 고지한다(렌트허용 ON은 고지 없이 호출·과금).
+      if (!suppressCostNotice) flashCostNotice(costFloor, costPartial);
     }
-    execAutoChoice(preview, text, opts, engineToggles);
+    execAutoChoice(effectivePreview, text, opts, engineToggles);
   }
 
   /** 게이트 시트에서 "그냥/에이전트 없이 보내기" — 고용 없이 원문 전송. */

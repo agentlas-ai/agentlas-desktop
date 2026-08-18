@@ -1013,37 +1013,44 @@ app.whenReady().then(async () => {
     materializeAllAgents();
   }
   traceStartup("agent-files-ready");
-  try {
-    const definitions = backfillLegacyLocalRouteDefinitionHashes();
-    const duplicates = dedupeLocalInstalledAgents();
-    const experience = reconcileExistingCuratedMemoryCandidates();
-    /*
-     * 등록된 모든 에이전트를 현재 아키텍처로 올린다.
-     *
-     * 업데이트는 새 아키텍처를 가져오지만 이미 등록된 에이전트는 옛 상태로 남는다 — 그래서
-     * 오래 쓴 에이전트일수록 새 기능이 비어 있었다(실측: 913회 실행에 경험 칩 0). 원장이
-     * (에이전트 × 단계)라 새 단계는 설치 시점과 무관하게 전원에게 한 번씩 돈다.
-     */
-    const migrated = migrateRegisteredAgents();
-    if (migrated.stepsRun > 0) {
-      console.log("[architecture] migrated registered agents", migrated);
+  // 레거시 학습 정합(정의 해시 backfill·중복 병합·큐레이션 후보 최대 2,000행
+  // 스캔·에이전트 아키텍처 마이그레이션)은 첫 화면이 필요로 하지 않는 일회성
+  // 유지보수다. 창 생성 앞에서 콜드 스타트를 수 초 늘리고 있었으므로 창이 뜬 뒤로
+  // 미룬다(runDeferredLegacyLearningReconciliation). 멱등이라 이번 실행에서
+  // 못 돌면 다음 실행이 이어받는다.
+  const runDeferredLegacyLearningReconciliation = () => {
+    try {
+      const definitions = backfillLegacyLocalRouteDefinitionHashes();
+      const duplicates = dedupeLocalInstalledAgents();
+      const experience = reconcileExistingCuratedMemoryCandidates();
+      /*
+       * 등록된 모든 에이전트를 현재 아키텍처로 올린다.
+       *
+       * 업데이트는 새 아키텍처를 가져오지만 이미 등록된 에이전트는 옛 상태로 남는다 — 그래서
+       * 오래 쓴 에이전트일수록 새 기능이 비어 있었다(실측: 913회 실행에 경험 칩 0). 원장이
+       * (에이전트 × 단계)라 새 단계는 설치 시점과 무관하게 전원에게 한 번씩 돈다.
+       */
+      const migrated = migrateRegisteredAgents();
+      if (migrated.stepsRun > 0) {
+        console.log("[architecture] migrated registered agents", migrated);
+      }
+      if (definitions.updated > 0 || duplicates.merged > 0 || experience.candidateCreated > 0 || experience.blocked > 0) {
+        console.log("[experience] reconciled legacy local learning", {
+          definitionHashesUpdated: definitions.updated,
+          definitionHashFailures: definitions.failed,
+          localDuplicateGroups: duplicates.groups,
+          localDuplicatesMerged: duplicates.merged,
+          memoriesScanned: experience.scanned,
+          candidatesCreated: experience.candidateCreated,
+          privacyBlocked: experience.blocked,
+          skipped: experience.skipped,
+          deferred: experience.deferred,
+        });
+      }
+    } catch (err) {
+      console.error("[experience] legacy learning reconciliation failed:", err);
     }
-    if (definitions.updated > 0 || duplicates.merged > 0 || experience.candidateCreated > 0 || experience.blocked > 0) {
-      console.log("[experience] reconciled legacy local learning", {
-        definitionHashesUpdated: definitions.updated,
-        definitionHashFailures: definitions.failed,
-        localDuplicateGroups: duplicates.groups,
-        localDuplicatesMerged: duplicates.merged,
-        memoriesScanned: experience.scanned,
-        candidatesCreated: experience.candidateCreated,
-        privacyBlocked: experience.blocked,
-        skipped: experience.skipped,
-        deferred: experience.deferred,
-      });
-    }
-  } catch (err) {
-    console.error("[experience] legacy learning reconciliation failed:", err);
-  }
+  };
   ensureDefaultMcpPluginsInstalled();
   traceStartup("local-data-ready");
   // Provider CLI updates are main-owned and independent of the Dashboard
@@ -1056,6 +1063,8 @@ app.whenReady().then(async () => {
   if (!mainWindow || mainWindow.isDestroyed()) await createWindow();
   else await loadMainRendererIntoWindow();
   traceStartup("window-loaded");
+  // 창이 뜨고 초기 렌더러 IPC가 가라앉은 뒤에 레거시 정합을 돌린다.
+  setTimeout(runDeferredLegacyLearningReconciliation, 3_000);
   startOneBriefingScheduler();
   // Start only after update continuity and store bootstrap have passed. A
   // bridge failure must not make Desktop unusable; Settings exposes the exact

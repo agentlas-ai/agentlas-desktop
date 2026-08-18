@@ -3129,9 +3129,16 @@ button[data-toggle-state="on"] {
 .project-field > span { font-size: 12px; font-weight: 700; color: var(--rd-ink-2); }
 .project-field input, .project-field textarea { width: 100%; border: 1px solid var(--rd-hair-strong); border-radius: 12px; padding: 12px 14px; background: var(--rd-surface); color: var(--rd-ink); font: inherit; resize: vertical; outline: none; }
 .project-field input:focus, .project-field textarea:focus { border-color: var(--rd-accent); box-shadow: 0 0 0 3px color-mix(in oklch, var(--rd-accent) 10%, transparent); }
-.project-agent-workbench { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(260px, .8fr); gap: 14px; min-height: 350px; }
-.project-agent-workbench-org { grid-template-columns: minmax(360px, 1.05fr) minmax(340px, .95fr); align-items: start; }
-.project-agent-pool, .project-agent-library { border: 1px solid var(--rd-hair); border-radius: 16px; background: var(--rd-surface); padding: 14px; overflow: auto; }
+/* 열 최소폭을 0으로 — 고정 최소폭(260/360/340px)이 좁은 컨테이너에서 그리드를
+   패널 밖으로 밀어 목록이 경계를 넘어 그려졌다. 스크롤은 각 열이 소유한다. */
+.project-agent-workbench { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, .8fr); gap: 14px; min-height: 350px; }
+.project-agent-workbench > * { min-width: 0; }
+.project-agent-workbench-org { grid-template-columns: minmax(0, 1.05fr) minmax(0, .95fr); align-items: start; }
+.project-agent-pool, .project-agent-library { min-width: 0; border: 1px solid var(--rd-hair); border-radius: 16px; background: var(--rd-surface); padding: 14px; overflow-x: hidden; overflow-y: auto; }
+.project-roster-search-create { position: relative; display: block; margin: 2px 0 10px; }
+.project-roster-search-create > input { width: 100%; min-height: 34px; padding: 0 10px; border: 1px solid var(--rd-hair); border-radius: 9px; background: var(--rd-surface-2); color: var(--rd-ink); font-size: 12.5px; }
+.project-roster-search-create > input:focus-visible { outline: 2px solid color-mix(in oklch, var(--rd-accent) 32%, transparent); outline-offset: 1px; }
+.project-roster-search-empty-create { padding: 16px 8px; color: var(--rd-ink-3); font-size: 12px; text-align: center; }
 .project-agent-pool[data-empty="true"] { border-style: dashed; background: color-mix(in oklch, var(--rd-accent) 4%, var(--rd-surface)); }
 .project-agent-pool-head { display: flex; align-items: center; justify-content: space-between; min-height: 36px; margin-bottom: 8px; }
 .project-agent-pool-head span { min-width: 24px; height: 24px; display: grid; place-items: center; border-radius: 999px; background: var(--rd-surface-2); color: var(--rd-ink-3); font-size: 11px; }

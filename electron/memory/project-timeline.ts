@@ -27,6 +27,12 @@ import { summarizeCompletedWork } from "./work-summary";
 const CODE_MAP_SEED_FILE = "code-map/project-seed.json";
 const CODE_MAP_FULL_FILE = "code-map/project-map.json";
 const MESSAGE_LOOKBACK = 600;
+
+// 채팅당 최근 600행 읽기가 이 스냅샷의 지배 비용인데, 우측 패널은 실행 중
+// 2.5초마다 다시 부른다. 메시지가 추가되면 chat.updatedAt이 바뀌므로, 그대로인
+// 채팅은 지난 스냅샷에서 읽은 행을 그대로 쓴다(상한 있는 삽입순 캐시).
+const CHAT_MESSAGES_CACHE_MAX = 128;
+const chatMessagesCache = new Map<string, { updatedAt: string; rows: ChatHistoryEntry[] }>();
 const MAX_ANCHOR_DISTANCE_MS = 15 * 60 * 1000;
 const DEFAULT_TIMELINE_LIMIT = 80;
 const MAX_TIMELINE_LIMIT = 200;
@@ -187,14 +193,24 @@ export function getProjectTimelineSnapshot(
   const entries: ProjectTimelineEntry[] = [];
   const representedChats = new Set<string>();
   // 에피소드 여러 개가 같은 채팅을 가리키는 경우가 흔한데, 원래는 에피소드마다
-  // 600행 전체 메시지를 다시 읽었다. 스냅샷 한 번 안에서는 채팅당 한 번만 읽는다.
+  // 600행 전체 메시지를 다시 읽었다. 스냅샷 한 번 안에서는 채팅당 한 번만 읽고,
+  // 스냅샷 사이에서는 updatedAt이 그대로인 채팅의 행을 재사용한다.
   const messagesByChat = new Map<string, ChatHistoryEntry[]>();
-  const chatMessages = (chatId: string): ChatHistoryEntry[] => {
+  const chatMessages = (chatId: string, updatedAt: string): ChatHistoryEntry[] => {
     let rows = messagesByChat.get(chatId);
-    if (!rows) {
+    if (rows) return rows;
+    const cached = chatMessagesCache.get(chatId);
+    if (cached && cached.updatedAt === updatedAt) {
+      rows = cached.rows;
+    } else {
       rows = listChatMessages(chatId, MESSAGE_LOOKBACK);
-      messagesByChat.set(chatId, rows);
+      if (chatMessagesCache.size >= CHAT_MESSAGES_CACHE_MAX) {
+        const oldest = chatMessagesCache.keys().next();
+        if (!oldest.done) chatMessagesCache.delete(oldest.value);
+      }
+      chatMessagesCache.set(chatId, { updatedAt, rows });
     }
+    messagesByChat.set(chatId, rows);
     return rows;
   };
 
@@ -234,7 +250,7 @@ export function getProjectTimelineSnapshot(
     }
 
     const anchor = nearestAssistantMessage(
-      chatMessages(chat.id),
+      chatMessages(chat.id, chat.updatedAt),
       episode.createdAt,
     );
     entries.push({
@@ -255,7 +271,7 @@ export function getProjectTimelineSnapshot(
   // remain the only timeline authority for it.
   for (const chat of listChatsByProject(project.id)) {
     if (representedChats.has(chat.id)) continue;
-    const messages = chatMessages(chat.id);
+    const messages = chatMessages(chat.id, chat.updatedAt);
     const anchor = lastTimelineMessage(messages);
     entries.push({
       id: `chat-fallback:${chat.id}`,

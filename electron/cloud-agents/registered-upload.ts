@@ -12,9 +12,25 @@ import type {
   CloudAgentRegisteredUploadOption,
 } from "../../shared/types";
 
+/**
+ * Strip the local-registry namespace from a registered row's slug.
+ *
+ * `local-` (imported agent) and `firm-local-` (its team projection) exist only
+ * to keep this machine's rows unique; they are not part of the asset's cloud
+ * identity. Left in place they either mint a second public identity for an
+ * asset that already has one (server: `slug_identity_conflict`) or publish a
+ * Hub listing literally named `firm-local-…`.
+ */
+export function publishSlugFromRegistrySlug(registrySlug: string): string {
+  return String(registrySlug || "")
+    .replace(/^firm-local-/, "")
+    .replace(/^firm-/, "")
+    .replace(/^local-/, "");
+}
+
 export function registeredUploadRoot(
   target: CloudAgentRegisteredTarget,
-): { rootPath: string; slug: string } {
+): { rootPath: string; slug: string; preferPackageSlug: true } {
   if (!target || typeof target !== "object") throw new Error("registered-upload-target-invalid");
   if (target.entityKind === "team" && "firmId" in target) {
     const firm = getFirm(String(target.firmId || ""));
@@ -23,7 +39,7 @@ export function registeredUploadRoot(
     if (!ceo?.localPath || !fs.existsSync(ceo.localPath) || !fs.statSync(ceo.localPath).isDirectory()) {
       throw new Error("registered-team-source-unavailable");
     }
-    return { rootPath: ceo.localPath, slug: firm.slug };
+    return { rootPath: ceo.localPath, slug: publishSlugFromRegistrySlug(firm.slug), preferPackageSlug: true };
   }
   if ("agentId" in target) {
     const agent = getAgentById(String(target.agentId || ""));
@@ -33,7 +49,7 @@ export function registeredUploadRoot(
     if (!agent.localPath || !fs.existsSync(agent.localPath) || !fs.statSync(agent.localPath).isDirectory()) {
       throw new Error("registered-agent-source-unavailable");
     }
-    return { rootPath: agent.localPath, slug: agent.slug };
+    return { rootPath: agent.localPath, slug: publishSlugFromRegistrySlug(agent.slug), preferPackageSlug: true };
   }
   throw new Error("registered-upload-target-invalid");
 }

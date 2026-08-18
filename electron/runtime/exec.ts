@@ -154,6 +154,39 @@ export function agentRunCwd(): string {
  * `<command> --version` 베스트에포트 실행. CLI가 PATH(또는 절대경로)에 있고
  * 실행 가능하면 버전 문자열을, 아니면 null을 반환한다. Windows 심도 해석된다.
  */
+/**
+ * 후보 경로 중 실제로 쓸 수 있는 첫 항목. 러너 다섯이 같은 함수를 손으로 들고
+ * 있다가 kimi 사본만 몰래 달라졌던 것(진리값 판정이라 빈 버전 문자열을 거절)을
+ * 여기 한 벌로 통합했다.
+ * - bare 커맨드명: PATH(+Windows PATHEXT)로 probeCliVersion 해석(.cmd 심 포함).
+ * - 절대경로: 기본은 존재 확인만. probeAbsolute는 절대경로에도 버전 프로브를
+ *   요구한다(존재하지만 실행이 죽는 바이너리를 거르는 kimi의 강한 판정).
+ */
+export async function firstExistingCli(
+  paths: string[],
+  options?: { probeTimeoutMs?: number; probeAbsolute?: boolean },
+): Promise<string | null> {
+  const timeout = options?.probeTimeoutMs ?? 2000;
+  for (const candidate of paths) {
+    if (!path.isAbsolute(candidate)) {
+      // bare 커맨드명 — PATH(+Windows PATHEXT)로 해석. .cmd 심 포함.
+      if ((await probeCliVersion(candidate, timeout)) !== null) return candidate;
+      continue;
+    }
+    try {
+      await fs.promises.access(candidate);
+    } catch {
+      continue;
+    }
+    if (options?.probeAbsolute) {
+      if ((await probeCliVersion(candidate, timeout)) !== null) return candidate;
+      continue;
+    }
+    return candidate;
+  }
+  return null;
+}
+
 export function probeCliVersion(command: string, timeoutMs = 3000): Promise<string | null> {
   const cacheMs = Number(process.env.AGENTLAS_RUNTIME_PROBE_CACHE_MS ?? 30_000);
   const key = `${command}\0${timeoutMs}`;

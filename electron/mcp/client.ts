@@ -60,6 +60,8 @@ import {
   setChatWorkingFolder,
 } from "../store/chats";
 import { getProject, listProjects } from "../store/projects";
+import { listRentAllowedSlugs } from "../store/project-agent-rent";
+import { activeLeasedSlugs } from "../cloud-agents/leases";
 import { findCanonicalTaskForChat } from "../store/tasks";
 import { touchRuntimeSession } from "../store/runtime-sessions";
 import { getInterviewMode, isTrivialPrompt } from "../store/interview-mode";
@@ -972,6 +974,70 @@ function emitHostNotice(
   sink({ kind: "notice", notice });
 }
 
+/**
+ * 프로젝트 렌트 정책의 하드 게이트(오너 규칙 2026-08-16: 모델의 자발적 협조에
+ * 기대는 계약은 배선이 아니다). 프롬프트에 주입되는 정책 문장과 별개로, **자동**
+ * 편성 경로가 실행 직전에 통과해야 하는 기계 관문이다 — 사용자가 명시적으로 고른
+ * 로스터(추천 시트 선택, 직접 지목)는 이 함수를 거치지 않는다.
+ *
+ * Hub 스펙은 다음 중 하나면 통과: 이 프로젝트에서 렌트허용됨 · 활성 장기대여 중 ·
+ * 사용자 프롬프트가 slug/이름을 직접 언급함. 나머지는 제외하고 고지를 남긴다.
+ */
+async function gateHubSpecsByProjectRentPolicy(input: {
+  specs: BorrowedAgentSpec[];
+  projectId: string | null | undefined;
+  userPrompt: string;
+  locale: "ko" | "en";
+  sink: (event: McpInvocationEvent) => void;
+}): Promise<BorrowedAgentSpec[]> {
+  const { specs, projectId, userPrompt, locale, sink } = input;
+  if (!projectId || !specs.some((s) => s.source === "hub")) return specs;
+  let allowed: Set<string>;
+  try {
+    allowed = new Set(listRentAllowedSlugs(projectId).map((s) => s.toLowerCase()));
+  } catch {
+    allowed = new Set();
+  }
+  let leased: Set<string>;
+  try {
+    leased = await activeLeasedSlugs();
+  } catch {
+    leased = new Set();
+  }
+  const prompt = String(userPrompt || "").toLowerCase();
+  const explicitlyNamed = (s: BorrowedAgentSpec): boolean => {
+    const slug = (s.slug || "").trim().toLowerCase();
+    const name = (s.name || "").trim().toLowerCase();
+    return (slug.length >= 3 && prompt.includes(slug)) || (name.length >= 3 && prompt.includes(name));
+  };
+  const kept: BorrowedAgentSpec[] = [];
+  const dropped: BorrowedAgentSpec[] = [];
+  for (const s of specs) {
+    if (s.source !== "hub") {
+      kept.push(s);
+      continue;
+    }
+    const slug = (s.slug || "").toLowerCase();
+    if (allowed.has(slug) || leased.has(slug) || explicitlyNamed(s)) kept.push(s);
+    else dropped.push(s);
+  }
+  if (dropped.length) {
+    const names = dropped.map((s) => s.name || s.slug).join(", ");
+    emitHostNotice(sink, {
+      level: "info",
+      code: "hub_rent_not_allowed",
+      message: locale === "ko"
+        ? `프로젝트 렌트 정책으로 Hub 에이전트 ${dropped.length}명을 제외했습니다: ${names}. 쓰려면 프로젝트 화면에서 [렌트허용]을 켜거나 직접 지목하세요.`
+        : `Project rent policy excluded ${dropped.length} Hub agent(s): ${names}. Enable [Allow rent] on the project screen or name them explicitly to use them.`,
+      i18n: {
+        ko: `프로젝트 렌트 정책으로 Hub 에이전트 ${dropped.length}명을 제외했습니다: ${names}. 쓰려면 프로젝트 화면에서 [렌트허용]을 켜거나 직접 지목하세요.`,
+        en: `Project rent policy excluded ${dropped.length} Hub agent(s): ${names}. Enable [Allow rent] on the project screen or name them explicitly to use them.`,
+      },
+    });
+  }
+  return kept;
+}
+
 function appendAutomationSummary(text: string, summary: string): string {
   const trimmed = text.trim();
   if (!summary.trim()) return trimmed;
@@ -1494,12 +1560,34 @@ export async function runMcpInvocation(
   }
   if (req.sessionRouting) {
     const incumbentRoster = [agent.nameEn || agent.name || agent.slug].filter(Boolean);
+    // 프로젝트 렌트 정책(오너 결정 2026-08-18) — Hub 자동 보강은 이 프로젝트에서
+    // 렌트허용이 켜진 slug 로만 제한한다(작업당 과금, 고지 없음). 렌트허용 목록이
+    // 비어 있으면 Hub 자동 고용 없이 사용자에게 확인을 구하는 것이 계약이다.
+    const rentAllowed = invocationProjectId
+      ? (() => {
+          try {
+            return listRentAllowedSlugs(invocationProjectId);
+          } catch {
+            return [] as string[];
+          }
+        })()
+      : null;
+    const rentPolicyLines = rentAllowed === null
+      ? []
+      : locale === "ko"
+        ? [rentAllowed.length > 0
+            ? `Hub 자동 고용은 이 프로젝트에서 렌트허용된 에이전트로만 제한됩니다: ${rentAllowed.join(", ")}. 그 밖의 Hub 에이전트는 사용자가 명시적으로 지목한 경우에만 부르세요.`
+            : "이 프로젝트는 렌트허용된 Hub 에이전트가 없습니다. 사용자가 명시적으로 지목하지 않는 한 유료 Hub 에이전트를 자동 고용하지 마세요."]
+        : [rentAllowed.length > 0
+            ? `Hub auto-hire is limited to the agents this project allows for rent: ${rentAllowed.join(", ")}. Call any other Hub agent only when the user explicitly names it.`
+            : "This project has no rent-allowed Hub agents. Do not auto-hire paid Hub agents unless the user explicitly names one."];
     const sessionRoutingPolicy = locale === "ko"
       ? [
           "[Agentlas 세션 팀 정책]",
           `현재 세션 팀: ${incumbentRoster.join(", ")}`,
           "이 팀이 요청을 수행할 수 있으면 그대로 수행하세요. 매 메시지마다 전역 에이전트를 검색하거나 다른 에이전트 이름을 끼워 넣지 마세요.",
           "현재 팀에 실제 역량·도구 공백이 있을 때만 사용 가능한 Agentlas Workforce/Hephaestus 도구로 Agent Hub 또는 Cloud에서 필요한 최소 인원만 동적으로 보강하세요.",
+          ...rentPolicyLines,
           "보강이 필요하면 이유와 새로 합류한 역할만 짧게 알리고, 관련 없는 휴면 에이전트는 언급하지 마세요.",
           "[/Agentlas 세션 팀 정책]",
         ].join("\n")
@@ -1508,6 +1596,7 @@ export async function runMcpInvocation(
           `Current session team: ${incumbentRoster.join(", ")}`,
           "If this team can complete the request, keep it and execute. Do not globally search or inject unrelated agent names on every message.",
           "Only on a genuine capability or tool gap, use available Agentlas Workforce/Hephaestus tools to recruit the minimum required role from Agent Hub or Cloud.",
+          ...rentPolicyLines,
           "When recruiting, state the gap and the newly joined role briefly; never mention unrelated dormant agents.",
           "[/Agentlas session-team policy]",
         ].join("\n");
@@ -2274,10 +2363,23 @@ export async function runMcpInvocation(
 
   if (durableTurnDecision?.decision === "reuse" && durableRuntimePlan?.preparation) {
     const continuation = durableRuntimePlan.preparation;
-    const specs = continuation.specs as BorrowedAgentSpec[];
+    const rawSpecs = continuation.specs as BorrowedAgentSpec[];
     const receipt = continuation.receipt as unknown as WorkforceSelectionReceipt;
-    if (!Array.isArray(specs) || !specs.length || receipt.schemaVersion !== "agentlas.desktop-workforce-selection-receipt.v1") {
+    if (!Array.isArray(rawSpecs) || !rawSpecs.length || receipt.schemaVersion !== "agentlas.desktop-workforce-selection-receipt.v1") {
       throw new Error("workforce_goal_runtime_invalid");
+    }
+    // 자동 재사용 경로 — 프로젝트 렌트 정책 하드 게이트를 지나야 실행된다.
+    const specs = await gateHubSpecsByProjectRentPolicy({
+      specs: rawSpecs,
+      projectId: invocationProjectId,
+      userPrompt: req.userPrompt,
+      locale,
+      sink,
+    });
+    if (!specs.length) {
+      throw new Error(locale === "ko"
+        ? "이 프로젝트에서 렌트허용된 Hub 에이전트가 없어 자동 편성을 실행하지 않았습니다. 프로젝트 화면에서 [렌트허용]을 켜거나 에이전트를 직접 지목해 주세요."
+        : "No Hub agent in this project is allowed for rent, so the automatic staffing was not run. Enable [Allow rent] on the project screen or name an agent explicitly.");
     }
     const execution = await runBorrowedTaskForceInvocation({
       req: { ...req, borrowAgents: undefined, taskForceTargets: undefined },
@@ -2498,13 +2600,26 @@ export async function runMcpInvocation(
           workOrderRefinements: workforce.receipt.workOrderRefinements,
         },
       });
+      // 자동 편성(recruit) 경로 — 프로젝트 렌트 정책 하드 게이트를 지나야 실행된다.
+      const rentGatedWorkforceSpecs = await gateHubSpecsByProjectRentPolicy({
+        specs: workforce.specs,
+        projectId: invocationProjectId,
+        userPrompt: req.userPrompt,
+        locale,
+        sink,
+      });
+      if (!rentGatedWorkforceSpecs.length) {
+        throw new Error(locale === "ko"
+          ? "이 프로젝트에서 렌트허용된 Hub 에이전트가 없어 자동 편성을 실행하지 않았습니다. 프로젝트 화면에서 [렌트허용]을 켜거나 에이전트를 직접 지목해 주세요."
+          : "No Hub agent in this project is allowed for rent, so the automatic staffing was not run. Enable [Allow rent] on the project screen or name an agent explicitly.");
+      }
       const execution = await runBorrowedTaskForceInvocation({
         req: { ...req, userPrompt: explicitWorkforceGoal, borrowAgents: undefined, taskForceTargets: undefined },
         chat,
         orchestratorAgent: agent,
         taskForceName: locale === "ko" ? "Agent Workforce TF" : "Agent Workforce task force",
         taskForceKind: "task-force",
-        taskForceSpecs: workforce.specs,
+        taskForceSpecs: rentGatedWorkforceSpecs,
         priorHistory,
         active,
         runtimes,

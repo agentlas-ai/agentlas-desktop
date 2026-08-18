@@ -13,11 +13,12 @@
 //   every agent published before pricing existed lives.
 //
 // WHY THREE FIELDS
-//   Rent, ingest and fork bill different units. A rental is a 24-hour lease a
-//   buyer opens many of, so its ceiling is low — the same work must not cost
-//   more because it was split into more pieces. Ingest is a day of a whole
-//   project, worth twenty times that. A fork is a copy sold once, with no
-//   repeat for a ceiling to protect against.
+//   Rent, lease and fork bill different units. Rent is charged per work
+//   order, so its ceiling is low — the same work must not cost more because it
+//   was split into more pieces. The long-term lease is a day of the agent
+//   (account-bound: valid in every project), worth twenty times that; its wire
+//   id "INGEST" is only a legacy spelling (owner decision 2026-08-18). A
+//   fork is a copy sold once, with no repeat for a ceiling to protect against.
 //
 // BLANK IS NOT ZERO
 //   An empty field means "I do not sell this". Zero would mean "this is free",
@@ -37,9 +38,12 @@ const BOUNDS: Record<CloudAgentPriceKind, { min: number; max: number | null }> =
   FORK: { min: 1, max: null },
 };
 
+// 24시간 자동 리스는 폐지됐다(오너 결정 2026-08-18) — RENT는 작업(work order) 1건당
+// 과금이고, 기간형 사용은 일 단위 장기대여(계정 귀속, 와이어 id "INGEST"는 레거시
+// 표기)가 담당한다.
 const LABEL: Record<CloudAgentPriceKind, { ko: string; en: string; koUnit: string; enUnit: string }> = {
-  RENT: { ko: "빌리기", en: "Rent", koUnit: "워크오더 1건 · 24시간", enUnit: "per work order · 24h" },
-  INGEST: { ko: "인제스트", en: "Ingest", koUnit: "프로젝트 1개 · 하루", enUnit: "per project · per day" },
+  RENT: { ko: "빌리기", en: "Rent", koUnit: "작업 1건당", enUnit: "per work order" },
+  INGEST: { ko: "장기대여", en: "Long-term lease", koUnit: "에이전트 1일당", enUnit: "per agent · per day" },
   FORK: { ko: "포크", en: "Fork", koUnit: "사본 1개 · 1회", enUnit: "one copy · once" },
 };
 

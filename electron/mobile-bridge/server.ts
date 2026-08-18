@@ -413,7 +413,9 @@ export class AgentlasMobileBridgeServer {
 
     // DESKTOP_MOBILE_BRIDGE: Authority events are the only live source. No
     // synthetic progress or reconnect fallback is emitted by the socket layer.
-    this.unsubscribeAuthority = this.authority.subscribe((event) => this.fanoutAuthorityEvent(event));
+    // The subscription is attached per connected client (syncAuthoritySubscription):
+    // the authority tears down its upstream per-token pipeline when it has no
+    // listeners, so a bridge with no paired phone must not hold one open.
     this.pingTimer = setInterval(() => this.checkLiveness(), this.pingIntervalMs);
     this.pingTimer.unref?.();
     return this.startedAddress;
@@ -504,7 +506,7 @@ export class AgentlasMobileBridgeServer {
         state.inflight.clear();
         state.pendingAuthorityEvents.length = 0;
         state.pendingAuthorityBytes = 0;
-        this.clients.delete(state);
+        this.dropClient(state);
         state.socket.close(
           SUPERSEDED_CONNECTION_CLOSE_CODE,
           SUPERSEDED_CONNECTION_CLOSE_REASON,
@@ -561,6 +563,7 @@ export class AgentlasMobileBridgeServer {
       requestCount: 0,
     };
     this.clients.add(state);
+    this.syncAuthoritySubscription();
     socket.on("pong", () => {
       state.alive = true;
     });
@@ -570,7 +573,7 @@ export class AgentlasMobileBridgeServer {
       state.inflight.clear();
       state.pendingAuthorityEvents.length = 0;
       state.pendingAuthorityBytes = 0;
-      this.clients.delete(state);
+      this.dropClient(state);
     });
     void this.sendInitialState(state);
   }
@@ -1090,7 +1093,34 @@ export class AgentlasMobileBridgeServer {
     }
   }
 
+  /**
+   * Attach the authority subscription only while at least one client is
+   * connected. The authority attaches its own expensive upstream listeners
+   * (per-token invocation events, store-change snapshot refreshes) on its
+   * first subscriber and drops them on its last — so keeping a permanent
+   * server subscription made every desktop run pay the mobile projection
+   * cost even with zero phones paired.
+   */
+  private syncAuthoritySubscription(): void {
+    if (this.clients.size > 0) {
+      if (!this.unsubscribeAuthority) {
+        this.unsubscribeAuthority = this.authority.subscribe((event) => this.fanoutAuthorityEvent(event));
+      }
+      return;
+    }
+    if (this.unsubscribeAuthority) {
+      this.unsubscribeAuthority();
+      this.unsubscribeAuthority = null;
+    }
+  }
+
+  private dropClient(state: ConnectionState): void {
+    this.clients.delete(state);
+    this.syncAuthoritySubscription();
+  }
+
   private fanoutAuthorityEvent(event: MobileBridgeAuthorityEvent): void {
+    if (this.clients.size === 0) return;
     if (!isMobileBridgeEventName(event.event) || !isMobileBridgeJsonValue(event.payload)) {
       this.onError(new Error("Mobile Bridge authority emitted an invalid event"));
       return;
@@ -1106,7 +1136,7 @@ export class AgentlasMobileBridgeServer {
           state.pendingAuthorityEvents.length = 0;
           state.pendingAuthorityBytes = 0;
           state.socket.close(1013, "initialization backlog exceeded");
-          this.clients.delete(state);
+          this.dropClient(state);
           continue;
         }
         state.pendingAuthorityEvents.push(event);
@@ -1207,7 +1237,7 @@ export class AgentlasMobileBridgeServer {
       state.inflight.clear();
       state.pendingAuthorityEvents.length = 0;
       state.pendingAuthorityBytes = 0;
-      this.clients.delete(state);
+      this.dropClient(state);
       if (state !== requestingState) state.socket.terminate();
     }
 
@@ -1229,12 +1259,12 @@ export class AgentlasMobileBridgeServer {
     for (const state of this.clients) {
       if (state.revoked) {
         state.socket.terminate();
-        this.clients.delete(state);
+        this.dropClient(state);
         continue;
       }
       if (!state.alive) {
         state.socket.terminate();
-        this.clients.delete(state);
+        this.dropClient(state);
         continue;
       }
       state.alive = false;
@@ -1243,7 +1273,7 @@ export class AgentlasMobileBridgeServer {
       } catch (error) {
         this.onError(errorOf(error));
         state.socket.terminate();
-        this.clients.delete(state);
+        this.dropClient(state);
       }
     }
   }
@@ -1280,7 +1310,7 @@ export class AgentlasMobileBridgeServer {
       state.inflight.clear();
       state.pendingAuthorityEvents.length = 0;
       state.pendingAuthorityBytes = 0;
-      this.clients.delete(state);
+      this.dropClient(state);
       state.socket.terminate();
     }
   }

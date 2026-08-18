@@ -3,6 +3,7 @@
 // 프로젝트 페이지는 listByProject로, 회사 페이지는 listByFirm으로 채운다.
 import { randomUUID } from "node:crypto";
 import { RUNTIME_KINDS } from "../../shared/runtime-kinds";
+import { RUNTIME_BACKENDS } from "../../shared/runtime-backends";
 import { getDb } from "./db";
 import { emitDesktopStoreChange } from "./change-bus";
 import { getFirm } from "./firms";
@@ -46,23 +47,7 @@ interface ChatRow {
 
 const CHAT_RUNTIME_KINDS = new Set<RuntimeKind>(RUNTIME_KINDS);
 
-const CHAT_RUNTIME_BACKENDS = new Set<RuntimeBackend>([
-  "anthropic",
-  "openai",
-  "google",
-  "ollama",
-  "lmstudio",
-  "mlx",
-  "upstage",
-  "custom",
-  "glm",
-  "kimi",
-  "deepseek",
-  "minimax",
-  "xai",
-  "openrouter",
-  "cursor",
-]);
+const CHAT_RUNTIME_BACKENDS = new Set<RuntimeBackend>(RUNTIME_BACKENDS);
 
 function boundedOptionalText(
   value: unknown,

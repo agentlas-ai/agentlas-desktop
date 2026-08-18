@@ -67,7 +67,9 @@ export const BYOK_MODELS: Record<ByokBackend, ModelOption[]> = {
 /** No versioned BYOK default is pinned. Discovery/manual selection is authoritative. */
 export const DEFAULT_BYOK_MODEL: Partial<Record<ByokBackend, string>> = {};
 
-const BYOK_BACKENDS_ALL: ByokBackend[] = [
+// BYOK 백엔드의 정본 목록 — providers.ts 등 다른 사본을 두지 말고 이걸 import한다.
+// satisfies + Exclude 검사로 ByokBackend 유니온이 자라면 컴파일 에러가 난다.
+export const BYOK_BACKENDS_ALL = [
   "anthropic",
   "openai",
   "google",
@@ -79,10 +81,14 @@ const BYOK_BACKENDS_ALL: ByokBackend[] = [
   "minimax",
   "xai",
   "openrouter",
-];
+] as const satisfies readonly ByokBackend[];
+
+type _MissingByokBackend = Exclude<ByokBackend, (typeof BYOK_BACKENDS_ALL)[number]>;
+const _byokExhaustive: _MissingByokBackend extends never ? true : never = true;
+void _byokExhaustive;
 
 function isByokBackend(backend: string): backend is ByokBackend {
-  return (BYOK_BACKENDS_ALL as string[]).includes(backend);
+  return (BYOK_BACKENDS_ALL as readonly string[]).includes(backend);
 }
 
 /**

@@ -28,7 +28,7 @@ import {
 } from "./continuity";
 import { tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
-import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, writeStdin } from "./exec";
+import { agentRunCwd, detachedSpawnOpts, firstExistingCli, killCliTree, probeCliVersion, spawnCli, trackRunChild, writeStdin } from "./exec";
 import { stageCliImageAttachments } from "./image-attachments";
 import { createUntrustedRuntimeFailure } from "./untrusted-error";
 import {
@@ -207,30 +207,13 @@ const CANDIDATES = [
   "/usr/local/bin/claude",
 ];
 
-async function firstExisting(paths: string[]): Promise<string | null> {
-  for (const p of paths) {
-    if (!path.isAbsolute(p)) {
-      // bare 커맨드명 — PATH(+Windows PATHEXT)로 해석. .cmd 심 포함.
-      if ((await probeCliVersion(p, 2000)) !== null) return p;
-      continue;
-    }
-    try {
-      await fs.access(p);
-      return p;
-    } catch {
-      continue;
-    }
-  }
-  return null;
-}
-
 export interface ClaudeCodeProbe {
   path: string;
   version: string;
 }
 
 export async function probeClaudeCode(): Promise<ClaudeCodeProbe | null> {
-  const found = await firstExisting(CANDIDATES);
+  const found = await firstExistingCli(CANDIDATES);
   if (!found) return null;
   const version = (await probeCliVersion(found)) ?? "unknown";
   return { path: found, version };

@@ -663,6 +663,13 @@ import { runToolFactorySmoke, scaffoldAgentTool } from "./tool-factory/scaffold"
 import { createCommerceAgentTeam } from "./meta-agent/commerce-team";
 import { packageAndReviewCloudAgent } from "./cloud-agents/package";
 import { readAgentPrices, setAgentPrices } from "./cloud-agents/pricing";
+import {
+  activeLeasedSlugs,
+  getAgentLeaseQuote,
+  listAgentLeasesCached,
+  purchaseAgentLease,
+} from "./cloud-agents/leases";
+import { listRentAllowedSlugs, setRentAllowed } from "./store/project-agent-rent";
 import { resolveCloudAgentPackageRequest } from "./cloud-agents/access";
 import { registeredUploadOptions, registeredUploadRoot } from "./cloud-agents/registered-upload";
 import { selectedMultimodalEnvRequirements } from "../shared/multimodal";
@@ -3098,6 +3105,7 @@ export function registerIpcHandlers(): void {
       ...source,
       visibility: "private-link",
       reviewMode: "static-only",
+      ...(input.confirmOverwrite ? { confirmOverwrite: true } : {}),
     }, cloudPublishProgressOptions(event, input.progressId));
   });
   ipcMain.handle("cloudAgents:publishRegisteredPublic", async (event, input: CloudAgentRegisteredPublishRequest) => {
@@ -3108,6 +3116,7 @@ export function registerIpcHandlers(): void {
       reviewMode: input.reviewMode,
       notes: input.notes,
       purposeAnswer: input.purposeAnswer,
+      ...(input.confirmOverwrite ? { confirmOverwrite: true } : {}),
     }, cloudPublishProgressOptions(event, input.progressId));
   });
   // Owner-private save is the default product action. It keeps local
@@ -3412,6 +3421,24 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("projects:remove", (_e, id: string) => removeProject(id));
   ipcMain.handle("projects:connectGithub", async (event, repositoryUrl: string) =>
     connectGithubProject(BrowserWindow.fromWebContents(event.sender), repositoryUrl));
+  // Per-project rent consent (per-work-order RENT; owner decision 2026-08-18).
+  // Desktop-local only — the server never learns which projects allow whom.
+  ipcMain.handle("projects:listRentAllowed", (_e, projectId: string) =>
+    listRentAllowedSlugs(String(projectId || "")));
+  ipcMain.handle(
+    "projects:setRentAllowed",
+    (_e, input: { projectId: string; slug: string; allowed: boolean }) =>
+      setRentAllowed(String(input?.projectId || ""), String(input?.slug || ""), input?.allowed === true),
+  );
+
+  // ── agent leases (day-based, prepaid; replaces the retired 24h auto-lease) ──
+  ipcMain.handle("agentLeases:quote", (_e, slug: string) => getAgentLeaseQuote(String(slug || "")));
+  ipcMain.handle(
+    "agentLeases:purchase",
+    (_e, input: { slug: string; days: number }) =>
+      purchaseAgentLease({ slug: String(input?.slug || ""), days: Number(input?.days) }),
+  );
+  ipcMain.handle("agentLeases:list", () => listAgentLeasesCached());
 
   // ── ontology activation (project-local, inbox + explicit sources only) ──
   ipcMain.handle("ontology:getProject", (_e, projectId: string) =>
@@ -5358,7 +5385,10 @@ export function registerIpcHandlers(): void {
           noHub: input.offline, // 오프라인-안전: 로컬 라우팅만
           timeoutMs: 30_000,
         });
-        return normalizeRecommendation(res.json, input.query);
+        // 활성 장기대여 slug 는 호출 비용 0 — 페이월/고지액이 실제 청구액을 넘보지 않게
+        // 정규화 단계에서 확정한다(리스 목록은 main 의 TTL 캐시).
+        const leasedSlugs = await activeLeasedSlugs().catch(() => new Set<string>());
+        return normalizeRecommendation(res.json, input.query, { leasedSlugs });
       } catch {
         return normalizeRecommendation(null, input.query);
       }

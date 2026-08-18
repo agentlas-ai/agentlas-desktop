@@ -110,7 +110,7 @@ export default function CloudAgentPublishPage() {
     if (dir) setCloudUploadRootGrant(dir);
   }
 
-  async function upload(visibility: Visibility, answer?: string) {
+  async function upload(visibility: Visibility, answer?: string, confirmOverwrite?: boolean) {
     const api = ipc();
     if (!api) return;
     if (!rootGrant && !selectedRegistered) {
@@ -131,8 +131,13 @@ export default function CloudAgentPublishPage() {
               target: selectedRegistered.target,
               progressId,
               ...(answer?.trim() ? { purposeAnswer: answer.trim() } : {}),
+              ...(confirmOverwrite ? { confirmOverwrite: true } : {}),
             })
-          : await api.cloudAgents.saveRegisteredPrivate({ target: selectedRegistered.target, progressId })
+          : await api.cloudAgents.saveRegisteredPrivate({
+              target: selectedRegistered.target,
+              progressId,
+              ...(confirmOverwrite ? { confirmOverwrite: true } : {}),
+            })
         : visibility === "marketplace"
           ? await api.cloudAgents.publishPublic({
               rootGrant: rootGrant!,
@@ -153,13 +158,21 @@ export default function CloudAgentPublishPage() {
         const link = visibility === "marketplace"
           ? res.registration?.marketplaceUrl ?? res.registration?.url
           : res.registration?.url;
+        // A publish that repaired itself must say so. The user asked for one
+        // slug and may have got the package's canonical one, or an existing
+        // Cloud copy may have been updated in place — both are visible facts,
+        // not internals.
+        const repairNotes: UploadIssue[] = (res.registration?.autoRecovered ?? []).map((note) => ({
+          severity: "info",
+          message: note,
+        }));
         outcome = {
           ok: true,
           title:
             visibility === "marketplace"
               ? ko ? "Agentlas Hub에 공개 등록되었습니다" : "Published to Agentlas Hub"
               : ko ? "내 Agent Cloud에 비공개 저장되었습니다" : "Saved privately in my Agent Cloud",
-          issues,
+          issues: [...repairNotes, ...issues],
           visibility,
           link,
           careerGraph,
@@ -187,6 +200,7 @@ export default function CloudAgentPublishPage() {
       outcome = {
         ok: false,
         title: classified.title,
+        needsOverwriteConfirmation: detail.includes("cloud_overwrite_confirmation_required"),
         issues: classified.issue ? [classified.issue] : [],
         visibility,
         detail,
@@ -342,6 +356,25 @@ export default function CloudAgentPublishPage() {
                 </div>
               )}
             </div>
+
+            {result.needsOverwriteConfirmation && (
+              <button
+                type="button"
+                disabled={Boolean(running)}
+                onClick={() => void upload(result.visibility === "marketplace" ? "marketplace" : "private-link", undefined, true)}
+                style={{
+                  ...actionButton,
+                  border: "none",
+                  background: "var(--ink)",
+                  color: "var(--paper)",
+                  opacity: running ? 0.55 : 1,
+                }}
+              >
+                {running
+                  ? ko ? "바꿔치는 중..." : "Replacing..."
+                  : ko ? "이 폴더 내용으로 바꾸기" : "Replace it with this folder"}
+              </button>
+            )}
 
             {result.needsPurpose && (
               <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
@@ -703,6 +736,74 @@ function classifyUploadFailure(
   const jsonError = json && typeof json.error === "string" ? json.error : "";
   const signal = [error ?? "", stderr, jsonError].join("\n").toLowerCase();
 
+  // ★ 중복과 포크는 "수리"할 대상이 아니라 그대로 알려야 하는 거절이다 (오너 지시
+  //   2026-08-18). 이 셋 모두 generic 분기로 떨어져 HTTP 상태와 JSON 원문이
+  //   화면에 그대로 찍히고 있었다 — 사람이 읽을 문장은 한 줄도 없이.
+  // 이름이 같다고 같은 작업물은 아니다 — 팀에게 받은 템플릿, 다른 노트북에서
+  // 고친 두 번째 체크아웃, 옛 버전 재임포트가 전부 이름으로는 일치한다. 그래서
+  // 기계가 대신 정하지 않고, 클라우드에 무엇이 언제 저장돼 있는지 보여주고 묻는다.
+  if (signal.includes("cloud_overwrite_confirmation_required")) {
+    const saved = /last saved (\d{4}-\d{2}-\d{2})/.exec(error ?? "")?.[1];
+    return {
+      title: ko ? "같은 이름이 이미 Cloud에 있습니다" : "Something with this name is already in your Cloud",
+      issue: {
+        severity: "warning",
+        message: ko
+          ? `Cloud에 같은 이름의 항목이 ${saved ? `${saved}에 저장된 채로 ` : ""}있는데, 이 컴퓨터에는 그걸 이 폴더에서 올렸다는 기록이 없습니다. 아무것도 올라가지 않았고 바뀐 것도 없습니다.`
+          : `A listing with this name is already in your Cloud${saved ? `, last saved ${saved}` : ""}, and this computer has no record of uploading it from this folder. Nothing was uploaded and nothing changed.`,
+        remediation: ko
+          ? "이 폴더가 더 최신이면 아래에서 바꿔치기할 수 있습니다. 확실하지 않으면 Cloud 쪽을 먼저 확인하세요."
+          : "If this folder is the newer version, replace it below. If you are not sure, check the Cloud copy first.",
+      },
+    };
+  }
+  if (signal.includes("cloud_overwrite_target_expired")) {
+    return {
+      title: ko ? "확인이 만료되었습니다" : "That confirmation expired",
+      issue: {
+        severity: "warning",
+        message: ko
+          ? "아무것도 바뀌지 않았습니다. 다시 올려서 지금 Cloud에 무엇이 있는지 확인하세요."
+          : "Nothing changed. Upload again to see what is currently in your Cloud.",
+      },
+    };
+  }
+  if (signal.includes("slug_identity_conflict")) {
+    return {
+      title: ko ? "이미 등록된 에이전트입니다" : "This agent is already registered",
+      issue: {
+        severity: "warning",
+        message: ko
+          ? "같은 에이전트가 이미 내 Cloud에 있어, 두 번째 항목은 만들지 않았습니다. 업로드된 것은 없습니다."
+          : "This agent is already in your Cloud, so a second listing was not created. Nothing was uploaded.",
+        remediation: ko
+          ? "기존 이름 그대로 다시 올리면 그 항목이 갱신됩니다."
+          : "Upload it under its existing name and that listing is updated.",
+      },
+    };
+  }
+  if (signal.includes("cloud_agent_duplicate") || signal.includes("duplicate_hub_package")) {
+    return {
+      title: ko ? "이미 Hub에 등록된 에이전트입니다" : "This agent is already on the Hub",
+      issue: {
+        severity: "warning",
+        message: ko
+          ? "같은 에이전트가 다른 계정 이름으로 이미 Hub에 올라와 있습니다. 업로드된 것은 없습니다."
+          : "The same agent is already listed on the Hub by another account. Nothing was uploaded.",
+      },
+    };
+  }
+  if (signal.includes("fork_cannot_publish")) {
+    return {
+      title: ko ? "설치해서 받은 사본은 공개 발행할 수 없습니다" : "An installed copy cannot be published",
+      issue: {
+        severity: "warning",
+        message: ko
+          ? "이 에이전트는 다른 사람이 만든 것을 설치한 사본입니다. 실행하고 편성하는 것은 되지만, Hub 항목은 원작자의 것입니다. 업로드된 것은 없습니다."
+          : "This is an installed copy of someone else's agent. Run it and staff it into work orders — but the Hub listing belongs to its creator. Nothing was uploaded.",
+      },
+    };
+  }
   if (signal.includes("cloud_agent_revision_conflict") || signal.includes("changed on another machine")) {
     return {
       title: ko ? "다른 PC에서 이 에이전트가 먼저 변경되었습니다" : "This agent changed on another machine",

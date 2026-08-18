@@ -74,8 +74,19 @@ function sumHubCredits(agents: RecAgent[]): { total: number | null; partial: boo
 /**
  * 라우터 결정 JSON(action: route|pipeline|hub_candidates|clarify|propose_new|refuse|…)을
  * 렌더러가 그대로 그릴 수 있는 정규형으로 변환한다. 알 수 없는/실행 불가 결정은 mode:"none".
+ *
+ * opts.leasedSlugs — 활성 장기대여(일 단위 선불) 중인 Hub slug 집합. 대여 기간 중 호출은
+ * 추가 크레딧이 들지 않으므로 그 행의 estCredits 는 0 으로 확정하고 leased 로 표시한다
+ * (미상 null 이 아니라 실측 0 — partial 하한 계산에도 "알려진 0" 으로 들어간다).
  */
-export function normalizeRecommendation(json: unknown, query: string): Recommendation {
+export function normalizeRecommendation(
+  json: unknown,
+  query: string,
+  opts?: { leasedSlugs?: ReadonlySet<string> },
+): Recommendation {
+  const leasedSlugs = opts?.leasedSlugs;
+  const isLeased = (slug: string | undefined): boolean =>
+    Boolean(slug && leasedSlugs?.has(slug.toLowerCase()));
   const decision = asObj(json);
   const action = str(decision.action) ?? str(decision.decision) ?? "none";
   const receiptId = str(decision.receipt_id) ?? str(decision.receiptId);
@@ -186,11 +197,14 @@ export function normalizeRecommendation(json: unknown, query: string): Recommend
       const source = remoteSource(decision, o);
       const entityKind = remoteEntityKind(o);
       if (!entityKind) continue;
+      const leased = isLeased(slug);
       agents.push({
         id: slug,
         name: str(o.name) ?? str(o.nameEn) ?? slug,
         source,
-        estCredits: source === "hub" ? hubCredits.get(slug) ?? null : null,
+        // 활성 장기대여 중이면 이 작업 호출은 무료다 — 미상(null)이 아니라 확정 0.
+        estCredits: leased ? 0 : source === "hub" ? hubCredits.get(slug) ?? null : null,
+        ...(leased ? { leased: true } : {}),
         target: { source, entityKind, slug },
       });
     }
@@ -220,14 +234,17 @@ export function normalizeRecommendation(json: unknown, query: string): Recommend
       const type = (str(o.type) ?? str(o.entityKind) ?? "agent").toLowerCase();
       const remoteKind = source === "local" ? null : remoteEntityKind(o);
       if (source !== "local" && !remoteKind) continue;
+      const clarifySlug = source === "local" ? undefined : str(o.slug) ?? id;
+      const leased = source !== "local" && isLeased(clarifySlug);
       clarifyAgents.push({
         id,
         name: str(o.name_ko) ?? str(o.name) ?? str(o.nameEn) ?? id,
         source,
-        estCredits: numOrNull(o.perCallCredits ?? o.per_call_credits),
+        estCredits: leased ? 0 : numOrNull(o.perCallCredits ?? o.per_call_credits),
+        ...(leased ? { leased: true } : {}),
         target: source === "local"
           ? localTarget(id, type)
-          : { source, entityKind: remoteKind!, slug: str(o.slug) ?? id },
+          : { source, entityKind: remoteKind!, slug: clarifySlug ?? id },
       });
       if (clarifyAgents.length >= 5) break;
     }
