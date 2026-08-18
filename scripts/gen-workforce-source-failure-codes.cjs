@@ -15,7 +15,7 @@
  * 정본: Agentlas-OS/agentlas_cloud/workforce/federation.py
  *       WORKFORCE_SOURCE_FAILURE_CODES
  * 생성물: electron/mcp-tools/workforce-protocol-contract.json
- *       protocolMetadata.sourceFailureCodes
+ *       sourceFailureCodes (top-level; protocolMetadata must mirror Core's advertised keys EXACTLY, and Core does not advertise the codes there)
  *
  * Agentlas-OS가 체크아웃돼 있지 않은 머신에서는 사유를 찍고 SKIP한다 — 부재를
  * 통과로 위장하지 않되, 저장소 하나만 가진 개발자를 막지도 않는다.
@@ -57,7 +57,7 @@ if (new Set(codes).size !== codes.length) {
 }
 
 const contract = JSON.parse(fs.readFileSync(contractFile, "utf8"));
-const current = contract.protocolMetadata.sourceFailureCodes;
+const current = contract.sourceFailureCodes;
 const same = Array.isArray(current) && current.length === codes.length
   && current.every((code, i) => code === codes[i]);
 
@@ -80,15 +80,11 @@ if (same) {
   console.log(`unchanged — workforce source failure codes (${codes.length})`);
   process.exit(0);
 }
-// protocolMetadata 안에서의 위치를 고정한다(키 순서가 흔들리면 diff가 커진다).
-const metadata = contract.protocolMetadata;
-const rebuilt = {};
-for (const key of Object.keys(metadata)) {
-  if (key === "sourceFailureCodes") continue;
-  rebuilt[key] = metadata[key];
-  if (key === "sourceScopeRequired") rebuilt.sourceFailureCodes = codes;
-}
-if (!rebuilt.sourceFailureCodes) rebuilt.sourceFailureCodes = codes;
-contract.protocolMetadata = rebuilt;
+// ★최상위 필드로 쓴다 — protocolMetadata는 Core가 광고하는 키 집합과 정확히
+// 일치해야 하고(client.ts의 exact key check), Core는 실패 코드를 거기 광고하지
+// 않는다. v1.0.25 프리플라이트가 이 배치 오류를 "metadata keys are incompatible"로
+// 실측해 잡았다.
+delete contract.protocolMetadata.sourceFailureCodes;
+contract.sourceFailureCodes = codes;
 fs.writeFileSync(contractFile, `${JSON.stringify(contract, null, 2)}\n`, "utf8");
 console.log(`wrote ${path.relative(root, contractFile)} — ${codes.length} source failure codes from Core`);

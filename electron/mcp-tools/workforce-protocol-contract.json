@@ -11,27 +11,6 @@
     "federatedPreparationSchemaVersion": "agentlas.workforce-federated-preparation.v1",
     "executionPlanSchemaVersion": "agentlas.workforce-execution-plan.v5",
     "sourceScopeRequired": true,
-    "sourceFailureCodes": [
-      "source_not_configured",
-      "source_not_supported",
-      "source_unavailable",
-      "source_timeout",
-      "source_circuit_open",
-      "source_unauthorized",
-      "source_forbidden",
-      "source_rate_limited",
-      "source_invalid_candidate_set",
-      "source_candidate_set_expired",
-      "source_work_order_mismatch",
-      "source_ontology_mismatch",
-      "source_slot_mismatch",
-      "source_candidate_set_digest_mismatch",
-      "source_history_influence_forbidden",
-      "insufficient_credits",
-      "owner_only",
-      "no_cloud_package",
-      "agent_not_found"
-    ],
     "prepareAttemptSchemaVersion": "agentlas.workforce-prepare-attempt.v1",
     "sourceFetchIdempotencySchemaVersion": "agentlas.workforce-source-fetch-idempotency.v1",
     "sourceBundleReceiptSchemaVersion": "agentlas.workforce-source-bundle-verification.v1",
@@ -134,5 +113,26 @@
       "executionContextDigest",
       "executionRoster"
     ]
-  }
+  },
+  "sourceFailureCodes": [
+    "source_not_configured",
+    "source_not_supported",
+    "source_unavailable",
+    "source_timeout",
+    "source_circuit_open",
+    "source_unauthorized",
+    "source_forbidden",
+    "source_rate_limited",
+    "source_invalid_candidate_set",
+    "source_candidate_set_expired",
+    "source_work_order_mismatch",
+    "source_ontology_mismatch",
+    "source_slot_mismatch",
+    "source_candidate_set_digest_mismatch",
+    "source_history_influence_forbidden",
+    "insufficient_credits",
+    "owner_only",
+    "no_cloud_package",
+    "agent_not_found"
+  ]
 }

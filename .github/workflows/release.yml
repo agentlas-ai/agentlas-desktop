@@ -47,8 +47,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
-      HEPHAESTUS_REF: v1.2.11
-      HEPHAESTUS_COMMIT: b1e98e8c01b1cd54cb84fd41e244b46f58ff6e6a
+      HEPHAESTUS_REF: v1.2.12
+      HEPHAESTUS_COMMIT: 2b075361f07f25577994f0ce87f46f33ac41ec64
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

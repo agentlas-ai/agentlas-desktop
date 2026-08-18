@@ -37,7 +37,7 @@ export const WORKFORCE_FEDERATED_PREPARATION_SCHEMA = FEDERATED_PREPARATION_SCHE
 // protocol contract, and scripts/gen-workforce-source-failure-codes.cjs --check
 // fails when the contract drifts from Core.
 const WORKFORCE_SOURCE_FAILURE_CODES = new Set<string>(
-  workforceProtocolContract.protocolMetadata.sourceFailureCodes,
+  workforceProtocolContract.sourceFailureCodes,
 );
 const WORKFORCE_RUNTIME_BUNDLE_DIGEST_SCHEMA = "agentlas.workforce-runtime-bundle-digest.v4";
 const WORKFORCE_PERMISSION_POLICY_SCHEMA = "agentlas.workforce-permission-policy.v1";

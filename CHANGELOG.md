@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 1.0.25 — 2026-08-19
+
+Bundled runtime: Agentlas OS v1.2.12 (2b075361f07f25577994f0ce87f46f33ac41ec64).
+
+- One runtime capability descriptor with per-row evidence, probed against the
+  installed CLIs, so a CLI upgrade alarms instead of silently drifting.
+- Antigravity runs receive MCP servers (the "no MCP surface" claim was refuted
+  by probe), and read-permission runs receive approved MCP tools too — browser
+  and lookup tools work without write permission.
+- Grok runs carry the system prompt as a real system role, keeping the prompt
+  cache warm.
+- Questions survive every surface: sheetless surfaces (telegram, mobile)
+  flatten the ask fence to readable text instead of deleting it.
+- Slash-command autocomplete now sees cursor commands and antigravity skills.
+
+Source readiness does not prove a public installer or update feed; the
+Releases page stays the authority.
+
 ## 1.0.24 — 2026-08-18
 
 - Agent screen captures get a durable home at ~/.agentlas/captures: the
