@@ -37,7 +37,18 @@ function isInternalRuntimeEnvelope(paragraph: string): boolean {
 
 function redactLocalPaths(text: string, locale: OneSafeLocale): string {
   const replacement = locale === "ko" ? LOCAL_PATH_KO : LOCAL_PATH;
-  return text.replace(ABSOLUTE_LOCAL_PATH, (match, prefix: string) => `${prefix}${replacement}${match.endsWith(".") ? "." : ""}`);
+  // ★마크다운 이미지 참조(![alt](/abs/path.png))는 통째로 보존한다(2026-08-18 캡처
+  // 정본 사고): 이 치환이 이미지 src를 "[local path]" 로 바꿔 One 채팅의 캡처가
+  // 항상 빈 박스로 렌더됐다. src는 텍스트로 보이는 경로가 아니라 <img> 로만
+  // 쓰이므로, 경로 삭제는 이미지 밖 텍스트에만 적용한다.
+  return text
+    .split(/(!\[[^\]\n]*\]\([^)\n]*\))/)
+    .map((segment, index) =>
+      index % 2 === 1
+        ? segment
+        : segment.replace(ABSOLUTE_LOCAL_PATH, (match, prefix: string) => `${prefix}${replacement}${match.endsWith(".") ? "." : ""}`),
+    )
+    .join("");
 }
 
 /**

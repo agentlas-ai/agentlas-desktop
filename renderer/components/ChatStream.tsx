@@ -1736,11 +1736,20 @@ function userFacingAssistantText(text: string, streaming = false): string {
    * 렌더는 받은 본문을 자르지 않는다.
    */
 
-  return visible
-    // Local filesystem layout is implementation detail. Preserve useful link
-    // labels and filenames without revealing account names or absolute paths.
+  // Local filesystem layout is implementation detail. Preserve useful link
+  // labels and filenames without revealing account names or absolute paths.
+  //
+  // ★단, 마크다운 이미지 참조(![alt](/abs/path.png))는 통째로 보존한다(2026-08-18
+  // 캡처 정본 사고): 이 치환이 ![screen](/Users/…/x.png) 을 "!screen" 으로 바꿔
+  // 채팅의 캡처가 항상 깨졌다. 이미지 src는 텍스트로 노출되는 경로가 아니라
+  // <img> 로만 쓰이므로, 경로 축약은 이미지 밖 텍스트에만 적용한다.
+  const shortenLocalPaths = (chunk: string) => chunk
     .replace(/\[([^\]]+)\]\((?:file:\/\/)?\/Users\/[^)\n]+\)/g, "$1")
-    .replace(/(?:file:\/\/)?\/Users\/[^\s)\]}>`,]+/g, (path) => path.split("/").filter(Boolean).at(-1) ?? "")
+    .replace(/(?:file:\/\/)?\/Users\/[^\s)\]}>`,]+/g, (path) => path.split("/").filter(Boolean).at(-1) ?? "");
+  return visible
+    .split(/(!\[[^\]\n]*\]\([^)\n]*\))/)
+    .map((segment, index) => (index % 2 === 1 ? segment : shortenLocalPaths(segment)))
+    .join("")
     /*
      * ★여기서 지우던 것들을 되돌렸다 — 이 함수는 프로토콜을 벗기는 자리이지
      * 답을 편집하는 자리가 아니다.

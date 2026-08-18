@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { screen } from "electron";
 import { checkComputerUsePermissions } from "../mac-permissions";
 import { captureComputerUsePreview } from "./preview";
+import { saveScreenCaptureArtifact } from "../media/capture-artifacts";
 import { computerUseControlInfoPath } from "./channel";
 import {
   invokeNativeInputDriver,
@@ -274,7 +275,12 @@ export function startComputerUseControlServer(): Promise<number> {
                 });
               }
             }
-            writeJson(res, 200, { ok: true, preview });
+            // 이 라우트는 에이전트(MCP get_screen/get_app_state) 전용이다 — 라이브
+            // 미리보기 패널은 IPC로 captureComputerUsePreview 를 직접 부르므로 여기서
+            // 저장해도 틱마다 디스크가 불지 않는다. 채팅에 보일 수 있는 캡처는
+            // 반드시 정본 파일을 남기고, 그 절대경로(savedPath)를 모델에게 알린다.
+            const savedPath = saveScreenCaptureArtifact(preview.dataUrl);
+            writeJson(res, 200, { ok: true, preview: savedPath ? { ...preview, savedPath } : preview });
           }, () => {
             writeJson(res, 500, { ok: false, error: "capture-failed" });
           });

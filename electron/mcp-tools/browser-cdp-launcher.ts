@@ -1037,7 +1037,15 @@ function loadSkill(name) { const p = skillPath(name); if (!fs.existsSync(p)) ret
 async function main() {
   await ensureChrome();
   if (!fs.existsSync(PLAYWRIGHT_MCP_CLI)) throw new Error('Bundled Playwright MCP runtime is missing: ' + PLAYWRIGHT_MCP_CLI);
-  const child = spawn(process.execPath, [PLAYWRIGHT_MCP_CLI, '--cdp-endpoint', 'http://127.0.0.1:' + PORT], {
+  // 스크린샷 정본을 os.tmpdir() 기본 출력(리핑됨 + 앱이 서빙 불가) 대신
+  // ~/.agentlas/captures/browser 에 남긴다 — 채팅 마크다운 이미지가 렌더되는 경로.
+  const OUTPUT_DIR = path.join(os.homedir(), '.agentlas', 'captures', 'browser');
+  const child = spawn(process.execPath, [
+    PLAYWRIGHT_MCP_CLI,
+    '--cdp-endpoint', 'http://127.0.0.1:' + PORT,
+    '--output-dir', OUTPUT_DIR,
+    '--output-max-size', '268435456',
+  ], {
     stdio: ['pipe', 'pipe', 'inherit'],
     env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
   });

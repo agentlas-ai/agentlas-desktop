@@ -9,6 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { FsPathGrant, FsReadScope } from "../../shared/types";
 import { getDb } from "../store/db";
+import { captureArtifactsRoot } from "../media/capture-artifacts";
 
 type GrantMode = "tree" | "file";
 
@@ -477,6 +478,10 @@ export function authorizeLocalMediaPath(absPath: string): string | null {
   loadDurableGrants();
   const approved: RootRule[] = [
     ...generatedRootRules(),
+    // 캡처 정본 홈(~/.agentlas/captures) — computer-use get_screen 과 브라우저 MCP
+    // 스크린샷이 여기 저장되고, 채팅 마크다운이 이 절대경로를 참조한다.
+    // 이 루트가 빠지면 캡처는 파일이 있어도 404 → 빈 이미지로 렌더된다.
+    { path: captureArtifactsRoot(), mode: "tree" },
     ...allChatWorkspaceRules(),
   ];
   return approved.some((rule) => ruleAllows(realTarget, rule)) ? realTarget : null;

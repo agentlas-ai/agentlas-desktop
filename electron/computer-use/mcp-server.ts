@@ -49,12 +49,12 @@ const tools = [
   },
   {
     name: "get_screen",
-    description: "Capture the current macOS display. Coordinates returned by this image are the coordinate space used by mouse tools.",
+    description: "Capture the current macOS display. Coordinates returned by this image are the coordinate space used by mouse tools. The capture is also saved to disk; the JSON metadata's savedPath is its absolute file path. To show the capture in your chat answer, embed exactly that path as a markdown image: ![screen](savedPath). Never invent a screenshot file path.",
     inputSchema: exact({ source_id: point.source_id }, []),
   },
   {
     name: "get_app_state",
-    description: "Focus an optional running app, then capture the current display for visual state inspection.",
+    description: "Focus an optional running app, then capture the current display for visual state inspection. The capture is also saved to disk; the JSON metadata's savedPath is its absolute file path. To show the capture in your chat answer, embed exactly that path as a markdown image. Never invent a screenshot file path.",
     inputSchema: exact({ app: point.app, source_id: point.source_id }, ["app"]),
   },
   {

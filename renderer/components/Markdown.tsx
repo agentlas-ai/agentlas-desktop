@@ -1060,14 +1060,70 @@ function renderInlineImage(
   onOpenMedia?: (a: MediaArtifact) => void,
   mediaBasePaths: string[] = [],
 ): React.ReactNode {
+  return <InlineChatImage key={key} rawSrc={rawSrc} alt={alt} onOpenMedia={onOpenMedia} mediaBasePaths={mediaBasePaths} />;
+}
+
+/**
+ * 채팅 인라인 이미지 — 로드 실패는 빈 박스가 아니라 정직한 에러 카드로 보인다.
+ *
+ * 배경(2026-08-18 오너 제보): 캡처 파일이 없거나 agentlas://localfile 허용 루트 밖이면
+ * 프로토콜이 404를 내는데, onError 없는 <img> 는 테두리만 있는 "빈 이미지"로 렌더됐다.
+ * One(OneShell)·Work(ChatStream) 둘 다 이 컴포넌트를 지나므로 여기 한 곳이 정본이다.
+ */
+function InlineChatImage({
+  rawSrc,
+  alt,
+  onOpenMedia,
+  mediaBasePaths,
+}: {
+  rawSrc: string;
+  alt: string;
+  onOpenMedia?: (a: MediaArtifact) => void;
+  mediaBasePaths: string[];
+}) {
+  const { locale } = useT();
+  const [failed, setFailed] = useState(false);
   const media = mediaArtifactFromImage(rawSrc, alt, mediaBasePaths);
   const { src, name } = media;
+  if (failed) {
+    const ko = locale === "ko";
+    return (
+      <span
+        role="img"
+        aria-label={name}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          margin: "8px 0",
+          padding: "10px 12px",
+          borderRadius: "var(--radius-md)",
+          border: "1px dashed var(--paper-edge)",
+          background: "color-mix(in srgb, var(--paper) 88%, transparent)",
+          color: "var(--muted-deep)",
+          fontSize: 12,
+          lineHeight: 1.45,
+          maxWidth: "100%",
+        }}
+      >
+        <span aria-hidden="true" style={{ fontSize: 15, flexShrink: 0 }}>⚠︎</span>
+        <span style={{ minWidth: 0 }}>
+          <strong style={{ display: "block", color: "var(--ink)" }}>
+            {ko ? "이미지 파일을 찾을 수 없습니다" : "Image file is missing"}
+          </strong>
+          <span style={{ display: "block", overflowWrap: "anywhere" }}>
+            {media.path || rawSrc}
+          </span>
+        </span>
+      </span>
+    );
+  }
   const image = (
     // eslint-disable-next-line @next/next/no-img-element
     <img
-      key={onOpenMedia ? undefined : key}
       src={src}
       alt={name}
+      onError={() => setFailed(true)}
       style={{
         display: "block",
         maxWidth: "100%",
@@ -1082,7 +1138,6 @@ function renderInlineImage(
   if (!onOpenMedia) return image;
   return (
     <button
-      key={key}
       type="button"
       onClick={() => onOpenMedia(media)}
       title={name}

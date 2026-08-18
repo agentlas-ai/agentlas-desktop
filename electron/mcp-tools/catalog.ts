@@ -285,7 +285,15 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
     // machine has Node/npm or resolve `latest` during an unattended run.
     // --user-data-dir: 영속 프로파일(persistent context). 매번 새 임시 브라우저(쿠키·로그인 날아감)
     // 대신 디스크의 프로파일로 띄워, 한 번 로그인하면 다음 실행에도 세션이 유지된다(expandHome가 ~ 확장).
-    args: [playwrightMcpCliPath(), "--user-data-dir", "~/.agentlas/browser-profile"],
+    // --output-dir: 스크린샷 정본을 os.tmpdir() 기본값(리핑됨 + agentlas://localfile 서빙 불가)
+    // 대신 ~/.agentlas/captures/browser 에 남긴다 — 채팅 마크다운 이미지가 실제로 렌더되는 경로.
+    // --output-max-size 로 playwright 가 스스로 오래된 출력을 비운다.
+    args: [
+      playwrightMcpCliPath(),
+      "--user-data-dir", "~/.agentlas/browser-profile",
+      "--output-dir", "~/.agentlas/captures/browser",
+      "--output-max-size", "268435456",
+    ],
     trust: "official",
     docsUrl: "https://github.com/microsoft/playwright-mcp",
     brandColor: "#2EAD33",
