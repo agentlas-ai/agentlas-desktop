@@ -59,14 +59,21 @@ export const ACP_AGENTS: Record<string, AcpAgentSpec> = {
   // 더 늘린다 — 내장 목록에서 제거했다. 사용자가 원하면 설정의 ACP 프로필로 직접
   // 등록할 수 있다(그 자리는 "사용자가 추가한 것"이지 우리가 제공하는 것이 아니다).
   "github-copilot-cli": { id: "github-copilot-cli", label: "GitHub Copilot CLI (ACP)", command: "npx", args: ["-y", "@github/copilot@1.0.80", "--acp"], registryId: "github-copilot-cli" },
-  // gemini(레지스트리에 `gemini --acp` 로 선언돼 있다)는 일부러 내장하지 않는다.
-  // 실측 2026-08-18 (gemini-cli 0.55.1): initialize 는 loadSession/image/http+sse 를
-  // 전부 광고하지만, 개인 Google 계정의 session/new 가 "Gemini Code Assist for
-  // individuals 는 더 이상 지원하지 않는다 — Antigravity 로 옮겨라"로 거절한다.
-  // 그 계정의 답은 이미 있는 antigravity 런타임이고, 내장 목록을 늘리면 구독 패널·
-  // 대시보드(runtime-surface-parity 계약)에도 연결 버튼이 생겨 대다수에게 실패하는
-  // 길을 화면에 새로 여는 셈이 된다. Vertex/유료 계정용으로 열려면 오너 결정으로
-  // ACP_KIND_BUILTINS·SUBSCRIPTION_RUNTIMES·설정/대시보드 표 세 곳을 함께 고칠 것.
+  // gemini는 레지스트리에 `gemini --acp`로 선언돼 있지만 **아직 내장하지 않는다 —
+  // 보류이지 기각이 아니고, 판단은 오너 몫이다.** 위 기준("구독 인증 자산이 있는가")에
+  // 해당하는지가 열린 질문이기 때문이다:
+  //   · 개인 Code Assist 티어가 2026-06-18 중단됐다고 알려져 있다(엔터프라이즈 전용).
+  //     그렇다면 이 CLI가 우리에게 주는 것은 구독 자산이 아니라 사용자의 API 키이고,
+  //     그건 OpenCode·Goose를 뺀 것과 정확히 같은 사유가 된다.
+  //   · 실측 2026-08-18 (gemini-cli 0.55.1): initialize는 loadSession/image/http+sse를
+  //     전부 광고하는데, 개인 Google 계정의 session/new는 "Gemini Code Assist for
+  //     individuals는 더 이상 지원하지 않는다 — Antigravity로 옮겨라"로 거절한다.
+  //     즉 이 기기에서는 프로토콜은 멀쩡하고 계정 자격만 없다.
+  //   · Google 구독 경로는 이미 antigravity 런타임이 덮고 있다.
+  // 열기로 결정한다면 세 곳을 함께 고쳐야 한다(runtime-surface-parity 계약):
+  // ACP_KIND_BUILTINS · SUBSCRIPTION_RUNTIMES · 설정 CLI_DEFS/대시보드 ENGINES 표.
+  // 그 전에 한쪽만 고치면 아무 데서도 연결할 수 없거나, 대다수에게 실패하는 연결
+  // 버튼이 화면에 새로 생긴다.
 };
 
 /** Runtimes whose pickRunner path prefers ACP over the legacy hand driver. */
