@@ -3,6 +3,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import {
+  SECRET_SCAN_TEXT_EXTENSIONS,
+  UPLOAD_AGENT_DEFINITION_FILES,
+  UPLOAD_SKIP_DIRECTORIES,
+} from "../../shared/upload-scan-catalog.generated";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { detectRuntimeLabelsFromPaths } from "../agents/runtime-labels";
 import { detectRuntimes } from "../runtime/detect";
@@ -204,60 +209,17 @@ function isLocalExperienceLineagePath(value: string): boolean {
     || normalized.startsWith(".agentlas/.experience-relations.jsonl.");
 }
 
-const TEXT_EXTENSIONS = new Set([
-  ".cjs",
-  ".cfg",
-  ".cmd",
-  ".conf",
-  ".config",
-  ".css",
-  ".csv",
-  ".js",
-  ".html",
-  ".jsx",
-  ".json",
-  ".jsonl",
-  ".md",
-  ".mjs",
-  ".ini",
-  ".properties",
-  ".ps1",
-  ".psd1",
-  ".psm1",
-  ".py",
-  ".sh",
-  ".toml",
-  ".ts",
-  ".tsx",
-  ".txt",
-  ".yaml",
-  ".yml",
-  ".xml",
-  ".bat",
-]);
+// Packaging vocabulary comes from the upload contract, generated from
+// agentlas/AgentsAtlas/app/src/lib/agentlas-cloud/upload-scan-catalog.json.
+// All three of these were hand-typed here and disagreed with the server and
+// with Terminal: this scan opened .bat/.cmd/.jsx that the SERVER-side scan
+// never did, and it did not skip .studio-runtime, so local studio runtime state
+// went up to the Hub.
+const TEXT_EXTENSIONS = new Set<string>(SECRET_SCAN_TEXT_EXTENSIONS);
 
-const AGENT_DEF_FILES = new Set([
-  "AGENT.md",
-  "AGENTS.md",
-  "CLAUDE.md",
-  "GEMINI.md",
-  "README.md",
-  "agent.md",
-  "manifest.md",
-  "system-prompt.md",
-]);
+const AGENT_DEF_FILES = new Set<string>(UPLOAD_AGENT_DEFINITION_FILES);
 
-const SKIP_DIRS = new Set([
-  ".git",
-  ".next",
-  ".turbo",
-  "build",
-  "coverage",
-  "dist",
-  "node_modules",
-  "out",
-  "release",
-]);
+const SKIP_DIRS = new Set<string>(UPLOAD_SKIP_DIRECTORIES);
 
 const BLOCKED_FILE_PATTERNS = [
   // `.env.example` / `.env.sample` / `.env.template` are documentation: they

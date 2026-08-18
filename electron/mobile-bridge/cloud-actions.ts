@@ -12,6 +12,7 @@
 // the option and gets these defaults.
 import fs from "node:fs";
 import path from "node:path";
+import { UPLOAD_SKIP_DIRECTORIES } from "../../shared/upload-scan-catalog.generated";
 import { randomUUID } from "node:crypto";
 import { getSessionCookieHeader } from "../auth";
 import { getCargoSource, invalidateMyAgentsCache } from "../marketplace";
@@ -29,18 +30,12 @@ import type {
   HephaestusBuildEvent,
 } from "../../shared/types";
 
-/** Matches cloud-agents/package.ts exclusions closely enough for an estimate. */
-const ESTIMATE_SKIP_DIRS = new Set([
-  ".git",
-  ".next",
-  ".turbo",
-  "build",
-  "coverage",
-  "dist",
-  "node_modules",
-  "out",
-  "release",
-]);
+/**
+ * The estimate must walk exactly what the upload walks. "Closely enough" is how
+ * this copy fell behind cloud-agents/package.ts, which itself had fallen behind
+ * Terminal (.studio-runtime). One list, from the upload contract.
+ */
+const ESTIMATE_SKIP_DIRS = new Set<string>(UPLOAD_SKIP_DIRECTORIES);
 const ESTIMATE_FILE_CAP = 400;
 
 /**

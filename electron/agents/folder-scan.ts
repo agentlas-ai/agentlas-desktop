@@ -10,6 +10,7 @@
 // 싱글/멀티 판정: 구성원 2+ 또는 오케스트레이터/CEO 마커 존재 = team, 아니면 agent.
 import fs from "node:fs";
 import path from "node:path";
+import { FOLDER_SCAN_AGENT_DEFINITION_FILES } from "../../shared/upload-scan-catalog.generated";
 
 export interface ScanMember {
   /** 폴더/파일 기반 안정 id (slug) */
@@ -43,20 +44,11 @@ export interface FolderScan {
   source: ScanSource;
 }
 
-// import-local.ts 와 정합 유지 — 에이전트 1명을 정의하는 흔한 파일들.
-const AGENT_DEF_FILES = [
-  "AGENT.md",
-  "agent.md",
-  "CLAUDE.md",
-  "AGENTS.md",
-  "GEMINI.md",
-  "system-prompt.md",
-  "system.md",
-  "soul.md",
-  "prompt.md",
-  "persona.md",
-  "manifest.md",
-];
+// 에이전트 1명을 정의하는 파일 목록은 업로드 계약에서 온다.
+// 이 파일과 import-local.ts는 "정합 유지"라고 주석만 달아 두고 실제로는 갈렸다:
+// 여기엔 소문자 agent.md가 있고 import-local.ts엔 없어서, 대소문자를 구분하는
+// 파일시스템에서 agent.md 하나만 가진 폴더는 탐지된 뒤 임포트에서 거절당했다.
+const AGENT_DEF_FILES: readonly string[] = FOLDER_SCAN_AGENT_DEFINITION_FILES;
 export const TEAM_CONTAINER_DIRS = [
   "agents",
   "team",

@@ -6,6 +6,7 @@
 // 원본은 그대로 두고, 위치를 routes.json에 라우팅 저장한다 (앱이 그 폴더를 그대로 사용).
 import fs from "node:fs";
 import path from "node:path";
+import { FOLDER_SCAN_AGENT_DEFINITION_FILES } from "../../shared/upload-scan-catalog.generated";
 import { randomUUID } from "node:crypto";
 import { getDb } from "../store/db";
 import { emitDesktopStoreChange } from "../store/change-bus";
@@ -86,19 +87,9 @@ function isDir(p: string): boolean {
   }
 }
 
-// 에이전트 1명을 정의하는 흔한 파일들 (하위 폴더가 에이전트인지 판별용).
-const AGENT_DEF_FILES = [
-  "AGENT.md",
-  "CLAUDE.md",
-  "AGENTS.md",
-  "GEMINI.md",
-  "system-prompt.md",
-  "system.md",
-  "soul.md",
-  "prompt.md",
-  "persona.md",
-  "manifest.md",
-];
+// 탐지(folder-scan.ts)와 같은 목록을 써야 한다 — 손목록 두 벌이 갈려서
+// agent.md 만 가진 폴더가 "탐지는 되는데 임포트는 거절"되는 상태였다.
+const AGENT_DEF_FILES: readonly string[] = FOLDER_SCAN_AGENT_DEFINITION_FILES;
 // 팀의 멤버/부서를 담는 흔한 컨테이너 디렉토리명 (프레임워크마다 다양).
 const TEAM_CONTAINER_DIRS = [
   "agents",
