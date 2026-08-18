@@ -6,7 +6,12 @@
  *
  *  - live: 런타임이 **실행 전에** 물어보고 답을 기다린다. 사용자의 선택이 그대로
  *    이번 호출의 결과가 된다. (acp `session/request_permission`, 그리고 우리 코드가
- *    도구를 직접 도는 local-tool-loop 계열)
+ *    도구를 직접 도는 local-tool-loop 계열 — 둘 다 아래 중재자 등록소를 지난다)
+ *
+ * ★이 문서가 한동안 거짓이었다: local-tool-loop 은 여기 이름만 올라 있었을 뿐
+ *   `runOneToolCall`이 승인을 한 번도 부르지 않았다(ollama/lmstudio/mlx 는 MCP 도구를
+ *   무조건 실행했다). 그래서 중재자 등록소를 이 파일로 옮겨 **두 경로가 같은 한 벌**을
+ *   쓰게 했다. 주석이 말한 관문이 실제로 걸려 있어야 이 문장이 사실이다.
  *
  *  - post-denial: 헤드리스라 물어볼 상대가 없어 런타임이 **이미 거부하고 지나갔다.**
  *    이번 호출은 되돌릴 수 없다. 사용자가 할 수 있는 건 다음 실행을 위해 허용 범위를
@@ -22,6 +27,62 @@ import type { ToolApprovalRequestEvent, ToolApprovalDecision } from "../../share
 
 /** 승인 요청 하나 — 화면과 같은 정의를 쓴다(shared/types.ts). */
 export type ToolApprovalRequest = ToolApprovalRequestEvent;
+
+/*
+ * ── 실행 전 중재자 등록소 ────────────────────────────────────────────────────
+ *
+ * 정책(무엇을 묻고 무엇을 바로 허용/거부할지)은 electron/ipc.ts 한 곳에서 정하고,
+ * 그 한 벌을 **실행 전에 물을 수 있는 모든 경로**가 공유한다:
+ *   · ACP `session/request_permission` (electron/runtime/acp.ts)
+ *   · 우리 in-process 도구 루프 (electron/runtime/local-tool-loop.ts)
+ *
+ * 등록소를 이 파일에 두는 이유: 경로마다 자기 등록소를 들면 정책이 갈라지고,
+ * 갈라진 쪽은 반드시 "묻지 않고 실행"으로 기운다. 이 파일은 shared/types 외에는
+ * 아무것도 import 하지 않아서, 러너들이 Electron 없이도 그대로 테스트된다.
+ */
+export interface RuntimeToolPermissionAsk {
+  runtime: string;
+  sessionKey: string;
+  tool: string;
+  /** ACP 도구 종류(read/edit/execute/…). 알 수 없으면 "other". */
+  kind: string;
+  detail?: string;
+  cwd?: string;
+  /** 이번 실행의 권한(러너 계약과 같은 값). undefined 는 read 와 같게 취급한다. */
+  permission: "read" | "write" | "full" | undefined;
+  mutating: boolean;
+  /** 이 실행이 붙어 있는 대화 — 승인 카드는 그 대화 안에서만 뜬다(오너 결정 2026-08-15). */
+  chatId?: string;
+  /** 자동화·그래프처럼 답할 사람이 없는 실행 — 묻지 않고 즉시 거부한다. */
+  unattended?: boolean;
+}
+
+export type RuntimeToolPermissionDecision = "allow_once" | "allow_session" | "deny";
+export type RuntimeToolPermissionArbiter = (
+  ask: RuntimeToolPermissionAsk,
+) => Promise<RuntimeToolPermissionDecision>;
+
+let runtimeToolPermissionArbiter: RuntimeToolPermissionArbiter | null = null;
+
+export function setRuntimeToolPermissionArbiter(arbiter: RuntimeToolPermissionArbiter | null): void {
+  runtimeToolPermissionArbiter = arbiter;
+}
+
+export function getRuntimeToolPermissionArbiter(): RuntimeToolPermissionArbiter | null {
+  return runtimeToolPermissionArbiter;
+}
+
+/**
+ * 중재자가 없을 때의 보수적 기본값 — ACP 경로가 오래 써 온 규칙과 **같은** 문장이다.
+ * read 실행에서 바깥을 바꾸는 호출은 거부하고, 나머지는 허용한다. 중재자가 던지면
+ * 이 함수를 부르지 말고 곧장 deny 다(실패가 허용으로 바뀌면 안 된다).
+ */
+export function defaultRuntimeToolPermission(
+  ask: Pick<RuntimeToolPermissionAsk, "permission" | "mutating">,
+): RuntimeToolPermissionDecision {
+  const readOnly = ask.permission === "read" || ask.permission === undefined;
+  return readOnly && ask.mutating ? "deny" : "allow_once";
+}
 
 export type { ToolApprovalDecision };
 

@@ -36,6 +36,13 @@ import { abortReasonError } from "./abort-reason";
 import { CLI_HISTORY_CONTEXT_TOKENS, composeResumeTurnPrompt, renderConversationContext } from "./continuity";
 import { stageCliImageAttachments } from "./image-attachments";
 import { getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions";
+import {
+  getRuntimeToolPermissionArbiter,
+  setRuntimeToolPermissionArbiter,
+  type RuntimeToolPermissionAsk,
+  type RuntimeToolPermissionArbiter,
+  type RuntimeToolPermissionDecision,
+} from "./tool-approval";
 import { classifyDiscovery, type DiscoveryOutcome } from "../../shared/model-discovery";
 
 /** How to spawn an ACP agent. Adding a runtime = one row (mirrors contracts/runtime-registry.json). */
@@ -100,32 +107,24 @@ export function normalizeToolKind(kind: unknown): string {
 interface ToolState { title?: string; kind?: string; status?: string; reported?: boolean }
 
 /**
- * Live approval hook (tool-approval contract, v1.0.16). ACP is the only path
- * where the runtime asks BEFORE executing, so a real user decision can be
- * attached here. The arbiter is injected (not imported) so this file stays
- * standalone; electron/runtime/tool-approval.ts registers itself via
- * setAcpPermissionArbiter(...). Without an arbiter the conservative default
- * below applies (never a silent allow of a mutating tool on a read run).
+ * Live approval hook (tool-approval contract, v1.0.16). ACP asks BEFORE
+ * executing, so a real user decision can be attached here.
+ *
+ * ★The arbiter registry moved to electron/runtime/tool-approval.ts, because ACP
+ * is no longer the only pre-execution ask: our own in-process tool loop
+ * (local-tool-loop.ts) now goes through the same one. Two registries would mean
+ * two policies, and the second one always drifts toward "run it without
+ * asking" — which is exactly what the local loop had been doing. tool-approval
+ * imports nothing but shared/types, so this file still runs without Electron.
+ *
+ * Without an arbiter the conservative default applies (never a silent allow of
+ * a mutating tool on a read run).
  */
-export interface AcpPermissionAsk {
-  runtime: string;
-  sessionKey: string;
-  tool: string;
-  kind: string;
-  detail?: string;
-  cwd?: string;
-  permission: RunnerRequest["permission"];
-  mutating: boolean;
-  /** 이 실행이 붙어 있는 대화 — 승인 카드는 그 대화 안에서만 뜬다(오너 결정 2026-08-15). */
-  chatId?: string;
-  /** 자동화·그래프처럼 답할 사람이 없는 실행 — 묻지 않고 즉시 거부한다. */
-  unattended?: boolean;
-}
-export type AcpPermissionDecision = "allow_once" | "allow_session" | "deny";
-export type AcpPermissionArbiter = (ask: AcpPermissionAsk) => Promise<AcpPermissionDecision>;
-let permissionArbiter: AcpPermissionArbiter | null = null;
+export type AcpPermissionAsk = RuntimeToolPermissionAsk;
+export type AcpPermissionDecision = RuntimeToolPermissionDecision;
+export type AcpPermissionArbiter = RuntimeToolPermissionArbiter;
 export function setAcpPermissionArbiter(arbiter: AcpPermissionArbiter | null): void {
-  permissionArbiter = arbiter;
+  setRuntimeToolPermissionArbiter(arbiter);
 }
 
 /** Client-side handling of one session's stream. */
@@ -244,6 +243,7 @@ class AcpSessionClient {
       (session ? find("allow_always", "allow_once") : find("allow_once", "allow_always")) ?? options.find((o) => /allow/i.test(String(o?.optionId)));
     const selected = (option: any) => (option ? { outcome: { outcome: "selected", optionId: option.optionId } } : { outcome: { outcome: "cancelled" } });
 
+    const permissionArbiter = getRuntimeToolPermissionArbiter();
     if (permissionArbiter) {
       let decision: AcpPermissionDecision = "deny";
       try {

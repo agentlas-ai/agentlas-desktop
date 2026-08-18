@@ -17,6 +17,7 @@ import { buildMcpConfigFile, type McpConfigResult } from "./mcp-config";
 import { installFromCatalog, listInstalledServers } from "./registry";
 import { installHubPlugin } from "./hub-plugin-bridge";
 import { installedServerMatchesPluginSlug } from "../../shared/plugin-slug";
+import { runtimeKindSupportsMcpTransport } from "../../shared/runtime-mcp";
 
 export interface InternalMcpBuildCandidate {
   public: McpBuildCandidate;
@@ -83,26 +84,19 @@ const DEFAULT_DEPS: McpAttachmentResolverDependencies = {
     }),
 };
 
+/**
+ * ★This used to be a second hand-written copy of "which runtime can receive
+ * MCP", and it drifted from the one in electron/mcp/client.ts the moment the
+ * ACP runner learned to translate our config into `session/new.mcpServers`.
+ * Both now derive from shared/runtime-mcp.ts, where each runtime's answer is
+ * stated once with the evidence for it.
+ */
 export function isRuntimeMcpCompatible(
   runtime: RuntimeSelection | null,
   transport: McpTransport,
 ): boolean {
   if (!runtime) return false;
-  if (runtime.kind === "claude-code") return true;
-  // Current Codex overrides safely represent stdio servers. Remote URL/header
-  // variants are kept out until the CLI can represent them without leaking a
-  // credential through argv.
-  if (runtime.kind === "codex") return transport === "stdio";
-  // Grok CLI's own `grok mcp add` supports stdio/http/sse natively (unlike
-  // Codex's config-override constraint), so every transport this catalog
-  // knows about is representable.
-  if (runtime.kind === "grok") return true;
-  // Ollama/LM Studio/MLX have no CLI of their own — Agentlas' in-process
-  // OpenAI-style tool loop (electron/runtime/local-tool-loop.ts) resolves
-  // each configured server directly via the MCP SDK client, so transport
-  // choice doesn't matter here either.
-  if (runtime.kind === "ollama" || runtime.kind === "lmstudio" || runtime.kind === "mlx") return true;
-  return false;
+  return runtimeKindSupportsMcpTransport(runtime.kind, transport);
 }
 
 function receiptItem(

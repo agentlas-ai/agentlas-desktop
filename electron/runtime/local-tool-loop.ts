@@ -20,6 +20,11 @@ import { mcpConfigKey } from "../mcp-tools/mcp-config";
 import { testServerConnection, callServerToolContent } from "../mcp-tools/client";
 import type { InstalledMcpServer } from "../../shared/types";
 import { getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions";
+import {
+  defaultRuntimeToolPermission,
+  getRuntimeToolPermissionArbiter,
+  type RuntimeToolPermissionAsk,
+} from "./tool-approval";
 
 export type LocalChatContent =
   | { type: "text"; text: string }
@@ -137,10 +142,66 @@ async function loadOpenAiTools(
   return { tools, byName };
 }
 
-async function runOneToolCall(
+/**
+ * ★실행 전 승인 — 이 루프에는 오랫동안 관문이 아예 없었다.
+ *
+ * tool-approval.ts 는 `local-tool-loop` 을 "live 승인이 있는 경로"로 적어 두었는데,
+ * `runOneToolCall` 은 승인 함수를 한 번도 부르지 않았다. 결과적으로 ollama·lmstudio·mlx
+ * 는 MCP 도구를 **무조건** 실행했다(파일 쓰기·셸·브라우저 포함). 문서가 있는 관문은
+ * 관문이 아니다.
+ *
+ * 판단 정책은 ACP 경로와 **같은 중재자 한 벌**이 내린다(electron/ipc.ts 등록).
+ * 다만 여기서는 도구의 성격을 알 방법이 없다 — ACP 는 에이전트가 `toolCall.kind`
+ * (read/edit/execute/…)를 실어 주지만, MCP 도구 정의에는 그런 칸이 없다. 그래서
+ * **전부 변이로 본다**: 이 루프의 도구는 정의상 프로세스 바깥(파일·셸·네트워크·브라우저)에
+ * 닿는 것들이고, 증명할 수 없는 무해함을 허용의 근거로 쓸 수는 없다.
+ *
+ * 중재자가 던지면 거부다. 실패가 허용으로 바뀌는 순간 이 관문은 없느니만 못하다
+ * (acp.ts answerPermission 과 같은 규칙).
+ */
+interface LocalToolApprovalContext {
+  runtimeKind: string;
+  sessionKey: string;
+  permission: RunnerRequest["permission"];
+  cwd?: string;
+  chatId?: string;
+  unattended: boolean;
+}
+
+async function approveLocalToolCall(
+  ctx: LocalToolApprovalContext,
+  toolName: string,
+): Promise<boolean> {
+  const ask: RuntimeToolPermissionAsk = {
+    runtime: ctx.runtimeKind,
+    sessionKey: ctx.sessionKey,
+    tool: toolName,
+    // MCP 도구 정의에는 종류 칸이 없다. 지어내지 않고 "other"로 둔다.
+    kind: "other",
+    // detail 을 비워 두는 것은 의도적이다 — 세션 허용 키가 `tool::detail` 이라
+    // 인자를 실으면 인자 한 글자만 달라져도 다시 묻는다. 도구 이름
+    // (`mcp__<서버>__<도구>`) 자체가 사용자에게 무엇을 허용하는지 말해 준다.
+    cwd: ctx.cwd,
+    permission: ctx.permission,
+    mutating: true,
+    ...(ctx.chatId ? { chatId: ctx.chatId } : {}),
+    ...(ctx.unattended ? { unattended: true as const } : {}),
+  };
+  const arbiter = getRuntimeToolPermissionArbiter();
+  if (!arbiter) return defaultRuntimeToolPermission(ask) !== "deny";
+  try {
+    return (await arbiter(ask)) !== "deny";
+  } catch {
+    return false;
+  }
+}
+
+/** 테스트 이음새 — 승인 관문이 **호출 직전에** 실제로 걸리는지 재기 위해 열어 둔다. */
+export async function runOneToolCall(
   byName: Map<string, ResolvedTool>,
   call: OpenAiToolCall,
   events: RunnerEvents,
+  approval: LocalToolApprovalContext,
 ): Promise<{ toolMessage: ChatMessage; visionMessage: ChatMessage | null }> {
   const resolved = byName.get(call.function.name);
   if (!resolved) {
@@ -157,6 +218,15 @@ async function runOneToolCall(
     events.onTool?.(call.function.name, call.function.arguments, "invalid JSON arguments", call.id, true);
     return {
       toolMessage: { role: "tool", tool_call_id: call.id, content: "Error: invalid JSON arguments" },
+      visionMessage: null,
+    };
+  }
+  // 승인은 **호출 직전**이다. 인자를 파싱한 뒤, 서버에 닿기 전.
+  if (!(await approveLocalToolCall(approval, call.function.name))) {
+    const denied = `Error: tool call denied — "${call.function.name}" was not approved for this run.`;
+    events.onTool?.(call.function.name, call.function.arguments, denied, call.id, true);
+    return {
+      toolMessage: { role: "tool", tool_call_id: call.id, content: denied },
       visionMessage: null,
     };
   }
@@ -335,6 +405,16 @@ export async function runLocalOpenAiChat(
       events.onStatus(req.locale === "ko" ? "로컬 모델 대화 기록 이어가는 중..." : "Continuing local model conversation history...");
     }
   }
+  // 승인 세션 키 — ACP 러너와 같은 규칙(런타임 + 세션 정체성). 같은 대화의 후속 턴이
+  // "이 세션 동안 허용"을 물려받게 하는 유일한 값이다.
+  const approvalContext: LocalToolApprovalContext = {
+    runtimeKind,
+    sessionKey: `${runtimeKind}:${req.sessionFingerprintSeed ?? req.cwd ?? "default"}`,
+    permission: req.permission,
+    ...(req.cwd ? { cwd: req.cwd } : {}),
+    ...(req.chatId ? { chatId: req.chatId } : {}),
+    unattended: req.unattended === true,
+  };
   const { tools, byName } = await loadOpenAiTools(req.mcpConfigPath, req.cwd);
   if (tools.length > 0) {
     events.onStatus(tStatus(req.locale, "mcpToolsAttached", { count: tools.length }));
@@ -413,7 +493,7 @@ export async function runLocalOpenAiChat(
     messages.push({ role: "assistant", content: result.text, tool_calls: result.toolCalls });
     const visionMessages: ChatMessage[] = [];
     for (const call of result.toolCalls) {
-      const outcome = await runOneToolCall(byName, call, events);
+      const outcome = await runOneToolCall(byName, call, events, approvalContext);
       messages.push(outcome.toolMessage);
       if (outcome.visionMessage) visionMessages.push(outcome.visionMessage);
     }

@@ -185,6 +185,7 @@ import {
   type MaterializedToolBroker,
 } from "../workflow/tool-broker-runtime";
 import type { ToolBrokerLevel } from "../../shared/graph-tool-broker";
+import { runtimeKindCanUseMcp } from "../../shared/runtime-mcp";
 import type {
   Chat,
   AppFactoryAppRecord,
@@ -2004,14 +2005,14 @@ export async function runMcpInvocation(
   let toolBroker: MaterializedToolBroker | null = null;
   // 관문 파일이 **실제로 러너 요청에 실렸는가**. 계획과 결과를 가르는 유일한 사실이다.
   let toolBrokerInstalled = false;
+  // config key ↔ catalog id 대응. 관문 생성이 이 블록 바깥으로 나가면서 필요해졌다.
+  let mcpIncludedServers: Array<{ serverId: string; catalogId: string | null; configKey: string }> = [];
   let mcpAutoSelectionPrompt = "";
-  const runtimeCanUseMcp =
-    active.kind === "claude-code" ||
-    active.kind === "codex" ||
-    active.kind === "grok" ||
-    active.kind === "ollama" ||
-    active.kind === "lmstudio" ||
-    active.kind === "mlx";
+  // ★한 곳에서만 답한다(shared/runtime-mcp.ts). 예전에는 이 자리에 손으로 적은
+  // 여섯 줄이 있었고, ACP 러너가 session/new.mcpServers 번역을 배운 뒤에도 그 목록은
+  // 배우지 못해 cursor·kimi·acp 는 mcpConfigPath 자체를 못 받았다 — 번역기는 고쳤는데
+  // 넘겨줄 config 가 없어 여전히 도구 0개로 돌았다.
+  const runtimeCanUseMcp = runtimeKindCanUseMcp(active.kind);
   const agentAppToolGrant = req.agentAppMode ? req.agentAppRuntimeToolGrant : undefined;
   let acceptedAgentAppInlineMcpConfig: string | undefined;
   const markAgentAppMcpRuntimeUnavailable = () => {
@@ -2235,27 +2236,48 @@ export async function runMcpInvocation(
         mcpAllowedTools = cfg.allowedTools;
         mcpCodexConfigArgs = cfg.codexConfigArgs;
         mcpRuntimeEnv = cfg.runtimeEnv;
-      }
-      // ★C38 — 관문은 **여기서** 만든다. 커널은 catalog id로 도구를 선언하지만 런타임이
-      // 실제로 보는 이름은 config key에서 나온다(`mcp__<key>__*`). 두 이름을 다 아는
-      // 유일한 지점이 이 자리다. 커널에서 이름을 짐작해 만들면 선언한 도구까지 막힌다.
-      if (req.toolBrokerScope) {
-        const declaredCatalogIds = req.requiredToolCatalogIds ?? [];
-        const declaredToolNames = (cfg?.includedServers ?? [])
-          .filter((server) => !!server.catalogId && declaredCatalogIds.includes(server.catalogId))
-          .map((server) => `mcp__${server.configKey}`);
-        toolBroker = materializeToolBroker({
-          runId: req.toolBrokerScope.runId,
-          nodeId: req.toolBrokerScope.nodeId,
-          declaredToolCatalogIds: declaredCatalogIds,
-          declaredToolNames,
-          dryRun: req.simulation === true,
-          runtimeKind: active.kind === "claude-code" ? "claude" : active.kind,
-        });
+        // 관문이 좁힐 이름은 config key에서 나온다(`mcp__<key>__*`). 커널은 catalog id로
+        // 선언하므로, 두 이름을 다 아는 유일한 지점이 여기다 — 아래 관문 생성이 이걸 쓴다.
+        mcpIncludedServers = cfg.includedServers ?? [];
       }
     } catch (err) {
       console.error("[mcp] buildMcpConfigFile failed:", err);
     }
+  }
+
+  /*
+   * ★C38 — 관문 생성은 위 블록 **바깥**이다.
+   *
+   * 예전에는 이 조각이 `canWrite`가 걸린 블록 안에 있었다. 그런데 그래프 시뮬레이션은
+   * 정확히 read 권한으로 돈다(shared/graph-node-protocol.ts automationRuntimePermission).
+   * 즉 "바깥을 바꾸는 내장 도구를 실제로 거절한다"는 dry-run의 유일한 실물 보증이,
+   * 그 보증이 필요한 유일한 실행에서만 한 번도 걸리지 않았다 — claude 를 포함해
+   * 모든 런타임에서. 실행 기록은 정직하게 `observed`로 내려갔으니 거짓말은 아니었지만,
+   * 그래프 프로토콜 주석이 약속한 "선언되지 않은 도구 호출을 실제로 거절하는 곳"은
+   * 존재하지 않았다.
+   *
+   * 관문은 쓰기 권한을 필요로 하지 않는다: 계획·설정 파일은 userData 아래에 쓰고
+   * (electron/workflow/tool-broker-runtime.ts brokerDir), 러너에는 `--settings` 한 줄로
+   * 실린다. 그래서 read 실행에도 그대로 걸 수 있다.
+   *
+   * 남는 한계는 정직하게 적어 둔다: read 실행에서는 MCP config 자체를 만들지 않으므로
+   * `declaredToolNames`가 비고, 그때 관문이 실제로 거는 것은 **dry-run의 변이 내장도구
+   * 거절**뿐이다(선언되지 않은 MCP 도구를 좁히는 쪽은 좁힐 대상이 없다). 이건 관문의
+   * 결함이 아니라 그 실행에 MCP 도구가 아예 없다는 사실의 반영이다.
+   */
+  if (req.toolBrokerScope) {
+    const declaredCatalogIds = req.requiredToolCatalogIds ?? [];
+    const declaredToolNames = mcpIncludedServers
+      .filter((server) => !!server.catalogId && declaredCatalogIds.includes(server.catalogId))
+      .map((server) => `mcp__${server.configKey}`);
+    toolBroker = materializeToolBroker({
+      runId: req.toolBrokerScope.runId,
+      nodeId: req.toolBrokerScope.nodeId,
+      declaredToolCatalogIds: declaredCatalogIds,
+      declaredToolNames,
+      dryRun: req.simulation === true,
+      runtimeKind: active.kind === "claude-code" ? "claude" : active.kind,
+    });
   }
 
   const runnerEnv = req.agentAppMode

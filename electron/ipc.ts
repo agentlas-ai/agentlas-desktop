@@ -753,8 +753,8 @@ import {
   onToolApprovalRequested,
   requestToolApproval,
   resolveToolApproval,
+  setRuntimeToolPermissionArbiter,
 } from "./runtime/tool-approval";
-import { setAcpPermissionArbiter } from "./runtime/acp";
 import type { ToolApprovalDecision } from "../shared/types";
 
 // DESKTOP_MOBILE_BRIDGE: live invocation authority moved to invocation/service.ts.
@@ -3278,7 +3278,10 @@ export function registerIpcHandlers(): void {
   const recentUserDenials = new Map<string, number>();
   const USER_DENIAL_TTL_MS = 5 * 60_000;
   const denialKey = (ask: { sessionKey: string; tool: string; detail?: string }) => `${ask.sessionKey}\u0000${ask.tool}\u0000${ask.detail ?? ""}`;
-  setAcpPermissionArbiter(async (ask) => {
+  // ★한 벌뿐이다 — ACP 의 session/request_permission 과 우리 in-process 도구 루프
+  // (ollama/lmstudio/mlx)가 **같은** 이 함수를 지난다. 정책을 두 벌 쓰면 갈라지고,
+  // 갈라진 쪽은 반드시 "묻지 않고 실행"으로 기운다(local-tool-loop 이 실제로 그랬다).
+  setRuntimeToolPermissionArbiter(async (ask) => {
     if (ask.permission === "full") return "allow_session";
     if (!ask.mutating) return "allow_once";
     if (ask.permission === "write") return "allow_session";
@@ -3292,7 +3295,9 @@ export function registerIpcHandlers(): void {
     if (!ask.chatId || ask.unattended) {
       announceToolDenied({
         sessionKey: ask.sessionKey,
-        runtime: "acp",
+        // 실제로 돈 런타임을 적는다. 예전엔 "acp"로 못 박혀 있어, 같은 중재자를
+        // 쓰는 로컬 런타임의 거부까지 ACP 가 한 일로 기록될 뻔했다.
+        runtime: ask.runtime,
         tool: ask.tool,
         detail: ask.detail,
         cwd: ask.cwd,
@@ -3302,7 +3307,7 @@ export function registerIpcHandlers(): void {
     }
     const outcome = await requestToolApproval({
       sessionKey: ask.sessionKey,
-      runtime: "acp",
+      runtime: ask.runtime,
       tool: ask.tool,
       detail: ask.detail,
       cwd: ask.cwd,

@@ -20,8 +20,17 @@ export interface MaterializedToolBroker {
   plan: ToolBrokerPlan;
   /** claude 계열에 `--settings`로 넘길 파일. 관문을 걸 수 없으면 null. */
   settingsPath: string | null;
-  /** codex 계열에 넘길 hooks.json. 관문을 걸 수 없으면 null. */
-  codexHooksPath: string | null;
+  /*
+   * ★codex 용 hooks.json 은 여기 없다 — 만들었지만 아무도 읽지 않았다.
+   *
+   * electron/runtime/codex.ts 는 이 값을 소비하지 않고, 애초에 소비할 수도 없다:
+   * codex 의 관문 등급은 `allowlist-only` 다(shared/graph-tool-broker.ts:59-66 —
+   * 실행 파일에 PreToolUse 심볼은 있지만 거절이 실제로 먹는지 실측이 무응답으로
+   * 끝났다). 그리고 이 함수는 `chokepoint !== "pretooluse-hook"` 이면 파일 자체를
+   * 만들지 않으므로, codex 경로에서는 그 값이 언제나 null 이었다. 즉 "쓰이지 않는
+   * 출력"이 아니라 **도달 불가능한 출력**이었다. 실측으로 codex 가 pretooluse-hook
+   * 으로 올라가는 날, 이 칸과 codex.ts 의 소비를 **함께** 넣는 것이 맞다.
+   */
   /** 이번 노드 계획을 적은 파일. 훅 스크립트가 이걸 읽는다. */
   planPath: string | null;
 }
@@ -46,13 +55,12 @@ export function materializeToolBroker(
 ): MaterializedToolBroker {
   const plan = planToolBrokerage(input);
   if (plan.chokepoint !== "pretooluse-hook") {
-    return { plan, settingsPath: null, codexHooksPath: null, planPath: null };
+    return { plan, settingsPath: null, planPath: null };
   }
 
   const prefix = brokerDir(input.runId, input.nodeId);
   const planPath = `${prefix}.plan.json`;
   const settingsPath = `${prefix}.settings.json`;
-  const codexHooksPath = `${prefix}.hooks.json`;
   const script = brokerHookScriptPath();
   if (!fs.existsSync(script)) {
     // 스크립트가 없으면 관문이 없는 것이다. 등급을 내려서 정직하게 돌려준다.
@@ -64,7 +72,6 @@ export function materializeToolBroker(
         reason: "도구 중개 관문 스크립트를 찾지 못해 막지 못했습니다 — 기록만 남습니다.",
       },
       settingsPath: null,
-      codexHooksPath: null,
       planPath: null,
     };
   }
@@ -79,8 +86,7 @@ export function materializeToolBroker(
     },
   };
   fs.writeFileSync(settingsPath, JSON.stringify(hookBlock), "utf8");
-  fs.writeFileSync(codexHooksPath, JSON.stringify(hookBlock), "utf8");
-  return { plan, settingsPath, codexHooksPath, planPath };
+  return { plan, settingsPath, planPath };
 }
 
 /** 실행이 끝나면 이번 실행의 계획 파일을 치운다. 남겨 둘 이유가 없다. */
