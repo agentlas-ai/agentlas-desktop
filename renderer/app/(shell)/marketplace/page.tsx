@@ -39,7 +39,12 @@ const C = {
   blue: "color-mix(in oklch, #0284c7 18%, var(--rd-surface))",
 };
 
-type HubCategory = "all" | "agent" | "team" | "plugin" | "graph";
+/**
+ * 이 시장이 다루는 고용 단위. "plugin"은 분류 결과로만 남아 있다 — 카테고리 탭에는
+ * 없고, 목록에서 제외하는 판정에만 쓰인다(도구는 환경설정 MCP·플러그인이 맡는다).
+ */
+type HubCategory = "all" | "agent" | "team" | "graph";
+type HubEntityCategory = HubCategory | "plugin";
 type HubView = "agents" | "experience";
 
 function isLiveHubListing(listing: MarketplaceListing): boolean {
@@ -105,7 +110,7 @@ function desktopCatalogListings(
     }));
 }
 
-function hubCategoryFor(listing: MarketplaceListing): HubCategory {
+function hubCategoryFor(listing: MarketplaceListing): HubEntityCategory {
   const entityClass = classifyHubEntity(listing);
   if (entityClass === "plugin") return "plugin";
   if (entityClass === "graph") return "graph";
@@ -491,15 +496,27 @@ function MarketplacePage() {
     normalizedQuery,
     ko,
   );
-  const matchingListings = [...hubListings, ...desktopOnlyListings];
+  /*
+   * 플러그인은 이 시장에 나오지 않는다 (2026-08-19).
+   *
+   * 고용(에이전트·팀·그래프)과 배관(MCP 도구)은 사용자가 서로 다른 순간에, 서로 다른
+   * 이유로 찾는다. 한 격자에 섞어 두니 도구를 붙이려는 사람이 인재 시장을 헤매고,
+   * 사람을 뽑으려는 사람은 도구 카드에 밀려났다. 도구는 이제 환경설정의 MCP·플러그인
+   * 화면과 그 팝업 한 곳에서만 다룬다 — 두 표면이 같은 목록을 다르게 보여주던 문제도
+   * 함께 사라진다.
+   *
+   * 걸러내는 지점이 카테고리 필터가 아니라 목록 자체인 이유: 필터에서만 빼면
+   * "전체"에 그대로 섞여 나와, 탭만 없앤 채 문제를 남긴다.
+   */
+  const matchingListings = [...hubListings, ...desktopOnlyListings]
+    .filter((listing) => hubCategoryFor(listing) !== "plugin");
 
-  // Agent Hub 정보구조: 에이전트·팀·플러그인은 같은 시장에서 검색하되,
+  // Agent Hub 정보구조: 에이전트·팀·그래프는 같은 시장에서 검색하되,
   // 사용자가 필요한 고용 단위를 즉시 좁힐 수 있게 실제 엔티티 종류로 필터한다.
   const categoryCounts: Record<HubCategory, number> = {
     all: matchingListings.length,
     agent: matchingListings.filter((listing) => hubCategoryFor(listing) === "agent").length,
     team: matchingListings.filter((listing) => hubCategoryFor(listing) === "team").length,
-    plugin: matchingListings.filter((listing) => hubCategoryFor(listing) === "plugin").length,
     graph: matchingListings.filter((listing) => hubCategoryFor(listing) === "graph").length,
   };
   const activeListings = category === "all"
@@ -761,14 +778,13 @@ function MarketplacePage() {
           </div>
 
           <div className="hub-market-toolbar" aria-label={ko ? "마켓 필터" : "Market filters"}>
-            <div className="hub-market-filters" role="group" aria-label={ko ? "인재·도구 유형" : "Talent and tool type"}>
-              {([
+            <div className="hub-market-filters" role="group" aria-label={ko ? "인재 유형" : "Talent type"}>
+              {(([
                 ["all", ko ? "전체" : "All"],
                 ["agent", ko ? "에이전트" : "Agents"],
                 ["team", ko ? "팀" : "Teams"],
-                ["plugin", ko ? "플러그인" : "Plugins"],
                 ["graph", ko ? "그래프" : "Graphs"],
-              ] as Array<[HubCategory, string]>).map(([value, label]) => (
+              ] satisfies Array<[HubCategory, string]>)).map(([value, label]) => (
                 <button
                   key={value}
                   type="button"

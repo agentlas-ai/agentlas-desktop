@@ -93,6 +93,7 @@ import { classifyOneRequestIntent } from "@shared/one-request-intent";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import { useJudgedOneDecision } from "@/lib/one-decision-judged";
 import { visibleDecisionReceipt } from "@/lib/one-decision-receipt";
+import { alwaysApprovedChatIds, grantAlwaysApproval, subscribeAlwaysApproved } from "@/lib/always-approved-chats";
 import type { OneRecurrenceSelectionV1 } from "@shared/one-recurrence";
 import { shouldPresentOneWeeklyReflection } from "@shared/one-weekly-reflection";
 import {
@@ -257,6 +258,15 @@ const DECISION_REJECT_FALLBACK = {
   ko: "거절과 나중에 결정은 승인이나 외부 실행을 시작하지 않습니다.",
   en: "Rejecting or deciding later does not approve or start an external action.",
 } as const;
+
+/**
+ * 자동 승인이 보낼 답. 시트가 보여 주던 첫 승인 선택지를 그대로 쓴다 —
+ * 사람이 눌렀을 때와 같은 문자열이어야 기록이 갈라지지 않는다.
+ */
+function firstApprovalLabel(confirmation: PendingConfirmation): string | null {
+  const option = confirmation.options?.find((item) => Boolean(item?.label));
+  return option?.label ?? null;
+}
 
 function decisionRejectCopy(locale: "ko" | "en"): string {
   const key = "one.shell.decision.reject_hint" as const;
@@ -745,6 +755,12 @@ export function OneShell() {
   const [keyRequestSheet, setKeyRequestSheet] = useState<McpRunKeyRequest | null>(null);
   const [dismissedDecisionId, setDismissedDecisionId] = useState<string | null>(null);
   const [committedAnswers, setCommittedAnswers] = useState<CommittedQuestionAnswer[]>([]);
+  /**
+   * "항상 승인"을 받은 대화들. 저장소는 승인 채널 셋이 공유한다 — 결정 시트에서 준
+   * 허락이 런타임 도구 승인 카드에도 그대로 적용돼야 "항상"이 말 그대로가 된다.
+   */
+  const [alwaysApprovedChats, setAlwaysApprovedChats] = useState<readonly string[]>(alwaysApprovedChatIds);
+  useEffect(() => subscribeAlwaysApproved(setAlwaysApprovedChats), []);
   const [updaterState, setUpdaterState] = useState<UpdaterState | null>(null);
   const [mobileStatus, setMobileStatus] = useState<MobileBridgeRuntimeStatus | null>(null);
   const [oneProfile, setOneProfile] = useState<OneProfile | null>(null);
@@ -3096,6 +3112,35 @@ export function OneShell() {
     }
   }, [busy, conversation?.id, conversation?.originSurface, projections, startRun]);
 
+  /*
+   * "항상 승인"은 그 대화 안에서만 산다.
+   *
+   * 승인 시트가 물어보는 것은 "이 대화에서 지금 하려는 일을 해도 되느냐"이므로, 한 번
+   * 준 허락도 그 대화를 넘지 않는다. 전역으로 두면 사용자가 다른 맥락에서 기억하지 못하는
+   * 허락이 남는다(오너 결정 2026-08-15: 승인은 묻는 순간, 그 대화 안에서만).
+   *
+   * 저장이 화면 상태가 아니라 localStorage 인 이유: 앱을 껐다 켜면 잊는 허락은 사용자
+   * 입장에서 "눌렀는데 또 묻는다"가 되고, 그러면 아무도 두 번째부터 신뢰하지 않는다.
+   */
+  const markChatAlwaysApproved = useCallback((chatId: string) => {
+    grantAlwaysApproval(chatId);
+  }, []);
+
+  /*
+   * 허락을 이미 준 대화에 새 결정 요청이 오면 사람을 다시 세우지 않는다.
+   *
+   * 이 자동 승인이 없으면 "항상 승인"은 버튼 이름만 그럴싸한 1회 승인이 된다 — 즉
+   * 배선 없는 선언이다. 자동으로 처리한 요청도 committedAnswers 에 그대로 남으므로
+   * 무엇이 언제 승인됐는지는 대화 기록에서 사라지지 않는다.
+   */
+  useEffect(() => {
+    if (busy || alwaysApprovedChats.length === 0) return;
+    const auto = confirmations.find((item) => alwaysApprovedChats.includes(item.chatId));
+    if (!auto) return;
+    const reply = firstApprovalLabel(auto) ?? "Approve. Proceed with the proposed action.";
+    void answerConfirmation(auto, reply);
+  }, [alwaysApprovedChats, answerConfirmation, busy, confirmations]);
+
   const snoozeConfirmation = useCallback(async (confirmation: PendingConfirmation) => {
     const api = ipc();
     if (!api) {
@@ -4913,6 +4958,7 @@ export function OneShell() {
             locale={appLocale}
             disabled={busy || selectedReadOnly}
             onAnswer={answerConfirmation}
+            onAlwaysApprove={(confirmation) => markChatAlwaysApproved(confirmation.chatId)}
             onClarify={clarifyConfirmation}
             onSnooze={snoozeConfirmation}
             onDismiss={() => setDismissedDecisionId(visibleSelectedConfirmation.sourceMessageId)}
@@ -5091,12 +5137,13 @@ function decisionFieldValue(field: OneDecisionField, locale: "ko" | "en"): strin
     : tFor(locale, "one.shell.decision.not_stated");
 }
 
-function DecisionBottomSheet({ confirmation, taskId, locale, disabled, onAnswer, onClarify, onSnooze, onDismiss }: {
+function DecisionBottomSheet({ confirmation, taskId, locale, disabled, onAnswer, onAlwaysApprove, onClarify, onSnooze, onDismiss }: {
   confirmation: PendingConfirmation;
   taskId: string | null;
   locale: "ko" | "en";
   disabled: boolean;
   onAnswer: (confirmation: PendingConfirmation, label: string, shouldStart?: boolean) => void;
+  onAlwaysApprove: (confirmation: PendingConfirmation) => void;
   onClarify: (confirmation: PendingConfirmation) => void;
   onSnooze: (confirmation: PendingConfirmation) => void;
   onDismiss: () => void;
@@ -5119,6 +5166,7 @@ function DecisionBottomSheet({ confirmation, taskId, locale, disabled, onAnswer,
           locale={locale}
           disabled={disabled}
           onAnswer={onAnswer}
+          onAlwaysApprove={onAlwaysApprove}
           onClarify={onClarify}
           onSnooze={onSnooze}
         />
@@ -5127,12 +5175,13 @@ function DecisionBottomSheet({ confirmation, taskId, locale, disabled, onAnswer,
   );
 }
 
-function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onClarify, onSnooze }: {
+function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onAlwaysApprove, onClarify, onSnooze }: {
   confirmation: PendingConfirmation;
   taskId: string | null;
   locale: "ko" | "en";
   disabled: boolean;
   onAnswer: (confirmation: PendingConfirmation, label: string, shouldStart?: boolean) => void;
+  onAlwaysApprove: (confirmation: PendingConfirmation) => void;
   onClarify: (confirmation: PendingConfirmation) => void;
   onSnooze: (confirmation: PendingConfirmation) => void;
 }) {
@@ -5146,10 +5195,32 @@ function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onClar
   const blockedOptions = decision.options.filter((option) => option.blockedReason !== null);
   const approvalBlocked = blockedOptions.some((option) => option.blockedReason === "unstructured_high_risk");
   const [multiSelection, setMultiSelection] = useState<number[]>([]);
-  useEffect(() => setMultiSelection([]), [confirmation.sourceMessageId]);
+  const [chosenIndex, setChosenIndex] = useState<number | null>(null);
+  useEffect(() => { setMultiSelection([]); setChosenIndex(null); }, [confirmation.sourceMessageId]);
   const selectedMultiLabels = directOptions
     .filter((option) => multiSelection.includes(option.index))
     .map((option) => option.label);
+
+  /*
+   * 승인 버튼이 실제로 무엇을 승인하는가.
+   *
+   * 위험 판정이 막아 둔 선택지(blockedOptions)도 여기서는 후보로 되살린다. 판정의 역할은
+   * 사용자에게 경고하는 것이지 승인 경로를 없애는 것이 아니다 — 없애면 사용자는 자기가
+   * 시작한 일을 끝낼 방법을 잃는다.
+   */
+  const selectableOptions = decision.options.filter((option) =>
+    option.disposition !== "reject" && option.disposition !== "modify");
+  const approvalReply = confirmation.multiSelect
+    ? (selectedMultiLabels.length > 0 ? selectedMultiLabels.join(" · ") : null)
+    : selectableOptions.length > 1
+      ? (chosenIndex !== null
+          ? selectableOptions.find((option) => option.index === chosenIndex)?.label ?? null
+          : null)
+      : selectableOptions[0]?.label
+        ?? decision.action.value
+        ?? tFor(locale, "one.shell.decision.approve");
+  const approvalSummary = approvalReply ?? tFor(locale, "one.shell.decision.approve");
+  const approvalDescription = selectableOptions[0]?.description ?? null;
   const rejectLabel = decision.controls.reject.source === "explicit_option"
     ? decision.controls.reject.reply
     : tFor(locale, "one.shell.decision.reject_default");
@@ -5249,73 +5320,83 @@ function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onClar
         </div>
       )}
 
+      {/*
+        고를 것이 실제로 여럿일 때만 선택 칩을 둔다.
+        아래 액션은 언제나 승인·항상 승인·거절 셋뿐이고, 칩은 "무엇을" 승인할지만 고른다.
+      */}
+      {selectableOptions.length > 1 && (
+        <div className={styles.decisionMultiOptions} role="group" aria-label={tFor(locale, "one.shell.decision.multi_select")}>
+          {selectableOptions.map((option) => {
+            const selected = confirmation.multiSelect
+              ? multiSelection.includes(option.index)
+              : chosenIndex === option.index;
+            return (
+              <button
+                key={`${option.index}:${option.label}`}
+                type="button"
+                className={styles.decisionMultiOption}
+                aria-pressed={selected}
+                disabled={disabled}
+                title={option.description ?? undefined}
+                onClick={() => {
+                  if (confirmation.multiSelect) {
+                    setMultiSelection((current) => selected
+                      ? current.filter((index) => index !== option.index)
+                      : [...current, option.index]);
+                  } else {
+                    setChosenIndex(option.index);
+                  }
+                }}
+              >
+                <span aria-hidden="true">{selected ? "✓" : ""}</span>{option.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       <div className={styles.decisionActionGroup}>
         <p className={styles.decisionSectionLabel}>{tFor(locale, "one.shell.decision.choose_action")}</p>
+        {/*
+          ★버튼은 셋뿐이다 — 승인 · 항상 승인 · 거절 (오너 지시 2026-08-19).
+
+          이전에는 위험도가 높고 판정이 모호하면 승인 버튼이 통째로 사라지고 거절·되묻기·
+          미루기만 남았다. 즉 사용자가 하려던 일을 **승인할 방법이 화면에 없었다**(실측:
+          X 게시 승인 요청에서 Reject / Ask what is missing / Remind me in 24 hours 세 개만
+          렌더됨). 위험을 알리는 방법은 승인 경로를 지우는 것이 아니라 무엇을 승인하는지
+          똑똑히 보여주는 것이다 — 경고는 위 가드 배너가 계속 말한다.
+        */}
         <div className={styles.decisionOptions}>
-          {confirmation.multiSelect && !approvalBlocked ? (
-            <>
-              <div className={styles.decisionMultiOptions} role="group" aria-label={tFor(locale, "one.shell.decision.multi_select")}>
-                {directOptions.map((option) => {
-                  const selected = multiSelection.includes(option.index);
-                  return (
-                    <button
-                      key={`${option.index}:${option.label}`}
-                      type="button"
-                      className={styles.decisionMultiOption}
-                      aria-pressed={selected}
-                      disabled={disabled}
-                      title={option.description ?? undefined}
-                      onClick={() => setMultiSelection((current) => selected
-                        ? current.filter((index) => index !== option.index)
-                        : [...current, option.index])}
-                    >
-                      <span aria-hidden="true">{selected ? "✓" : ""}</span>{option.label}
-                    </button>
-                  );
-                })}
-              </div>
-              <button
-                type="button"
-                className={styles.decisionPrimaryButton}
-                disabled={disabled || selectedMultiLabels.length === 0}
-                onClick={() => onAnswer(confirmation, selectedMultiLabels.join(" · "))}
-              >
-                {tFor(locale, "one.shell.decision.confirm_selection_and_run")}
-              </button>
-            </>
-          ) : directOptions.map((option) => (
-            <button
-              key={`${option.index}:${option.label}`}
-              type="button"
-              className={styles.decisionPrimaryButton}
-              disabled={disabled}
-              onClick={() => onAnswer(confirmation, option.label)}
-            >
-              <span>{riskRank >= 2
-                ? tFor(locale, "one.shell.decision.approve_and_run", { action: option.label })
-                : option.label}</span>
-              {option.description && <small>{option.description}</small>}
-            </button>
-          ))}
+          <button
+            type="button"
+            className={styles.decisionPrimaryButton}
+            disabled={disabled || approvalReply === null}
+            onClick={() => approvalReply !== null && onAnswer(confirmation, approvalReply)}
+          >
+            <span>{riskRank >= 2
+              ? tFor(locale, "one.shell.decision.approve_and_run", { action: approvalSummary })
+              : tFor(locale, "one.shell.decision.approve")}</span>
+            {selectableOptions.length <= 1 && approvalDescription && <small>{approvalDescription}</small>}
+          </button>
         </div>
         <div className={styles.decisionSecondaryActions}>
-          <button type="button" className={styles.decisionRejectButton} disabled={disabled} onClick={() => onAnswer(confirmation, rejectReply, false)}>
-            <span>{rejectLabel}</span>
-            {rejectOption?.description && <small>{rejectOption.description}</small>}
-          </button>
-          {(approvalBlocked || hasModifyOption) && (
-            <button type="button" className={styles.decisionButton} disabled={disabled} onClick={() => onClarify(confirmation)}>
-              {tFor(locale, approvalBlocked ? "one.shell.decision.change_scope" : "one.shell.decision.adjust_conditions")}
-            </button>
-          )}
           <button
             type="button"
             className={styles.decisionButton}
-            disabled={disabled}
-            title={tFor(locale, "one.shell.decision.remind_24h")}
-            onClick={() => onSnooze(confirmation)}
+            disabled={disabled || approvalReply === null}
+            title={tFor(locale, "one.shell.decision.always_approve_hint")}
+            onClick={() => {
+              if (approvalReply === null) return;
+              onAlwaysApprove(confirmation);
+              onAnswer(confirmation, approvalReply);
+            }}
           >
-            {tFor(locale, "one.shell.decision.remind_24h")}
+            <span>{tFor(locale, "one.shell.decision.always_approve")}</span>
+            <small>{tFor(locale, "one.shell.decision.always_approve_hint")}</small>
+          </button>
+          <button type="button" className={styles.decisionRejectButton} disabled={disabled} onClick={() => onAnswer(confirmation, rejectReply, false)}>
+            <span>{rejectLabel}</span>
+            {rejectOption?.description && <small>{rejectOption.description}</small>}
           </button>
         </div>
       </div>

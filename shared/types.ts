@@ -1036,7 +1036,54 @@ export interface MarketplaceListing {
   iconUrl?: string;
   brandGlyphUrl?: string;
   brandColor?: string;
+  /**
+   * 플러그인 행이 "연결해야 쓰는 MCP"인지 "연결할 것이 없는 스킬 묶음"인지.
+   * 웹 `/api/plugins`의 `pluginKind`를 그대로 옮긴다 — 판정의 정본은 카탈로그
+   * (mcp 행/connectSetup/skills 유무)이고 데스크탑은 재유도하지 않는다.
+   * 구버전 허브 응답에는 없으므로 optional이며, 없으면 로컬 폴백이 추정한다.
+   */
+  pluginKind?: PluginKind;
+  /** 번들된 스킬 수(스킬 묶음 판정의 근거). */
+  skillCount?: number;
+  /** 매니페스트가 검증한 MCP 서버 행 수. 0이면 붙일 서버가 없다. */
+  mcpServerCount?: number;
+  /** 실서버는 있으나 연결이 계정별로 발급되어 자동 설치가 불가능한 항목. */
+  connectSetupRequired?: boolean;
+  /**
+   * 이 도구가 요구하는 인증 종류. 설치 뒤 무엇을 더 해야 하는지가 여기서 갈린다.
+   * 구버전 허브 응답에는 없으므로 optional — 없으면 화면은 종류를 단정하지 않는다.
+   */
+  authKind?: PluginAuthKind;
+  /**
+   * 허브가 대표로 고른 항목. 온보딩의 첫 화면은 140개를 다 못 보여주므로 이 표시로
+   * 추린다 — 설치수·인기 같은 로컬 추정이 아니라 카탈로그가 선언한 값이다.
+   */
+  featured?: boolean;
 }
+
+/**
+ * 플러그인 한 줄의 종류.
+ *
+ * 왜 나누는가: Slack은 계정과 살아 있는 서버가 있어야 도구가 생기고, Computer Use나
+ * Sales는 연결할 것이 아예 없는 스킬 묶음이다. 한 격자에 섞어 놓으면 사용자는
+ * "왜 Sales는 API 키를 안 물어보지?"를 제품 결함으로 읽는다. 두 섹터로 나누면
+ * 그 차이가 화면에서 먼저 설명된다.
+ */
+export type PluginKind = "mcp" | "skill";
+
+/**
+ * 이 도구를 쓰려면 사용자가 무엇을 해야 하는가. 허브 카탈로그의 `auth`를 그대로 옮긴다.
+ *
+ * 왜 나누는가: 셋은 사용자에게 요구하는 것이 완전히 다른데 지금까지 한 줄로 취급됐다.
+ *  · none    — 아무것도 필요 없다. 고르면 그 자리에서 끝난다.
+ *  · oauth   — 그 서비스에 로그인해 권한을 준다. 우리가 대신 처리할 수 있는 유일한 갈래다
+ *              (Agentlas 전용 Chrome에 이미 로그인돼 있으면 동의만 누르면 된다).
+ *  · api_key
+ *  · token   — 사용자가 다른 사이트에서 키를 발급받아 와야 한다. 우리가 줄여줄 수 있는
+ *              건 발급 페이지를 열어 주는 것까지다 — 그러니 "지금 말고 나중에"가
+ *              1급 선택지여야 한다.
+ */
+export type PluginAuthKind = "none" | "oauth" | "api_key" | "token";
 
 /** slug 하나에 대한 Hub 브랜드 자산(로고). 웹 카탈로그의 거울이며 정본이 아니다. */
 export interface PluginBrandAsset {
@@ -6359,6 +6406,24 @@ export interface AgentlasIpc {
       args: string[];
       envKeys: string[];
     }>>;
+    /**
+     * 이 원격 서버가 로그인(OAuth)을 요구하는가, 그리고 이미 연결됐는가.
+     * 읽기만 한다 — 부작용 없이 화면이 상태를 말할 수 있게 하는 용도다.
+     */
+    oauthStatus: (serverId: string) => Promise<
+      | { supported: true; connected: boolean; resource?: string; expiresAt?: number | null }
+      | { supported: false; connected: false; reason: string; message?: string }
+    >;
+    /**
+     * 인가 흐름을 돌린다. 동의 창은 Agentlas 전용 Chrome(브라우저 자격증명 프로필)에서
+     * 열리므로, 이미 그 서비스에 로그인해 둔 사용자는 동의만 누르면 끝난다.
+     * Chrome을 못 열었으면 `manualUrl` 로 사람이 직접 열 주소를 돌려준다.
+     */
+    oauthConnect: (serverId: string) => Promise<
+      { ok: true; manualUrl: string | null } | { ok: false; error: string }
+    >;
+    /** 저장된 토큰과 세션을 지운다. */
+    oauthDisconnect: (serverId: string) => Promise<{ ok: true }>;
     /** 실제로 붙어서 tools/list 해보고 상태 반환 */
     test: (id: string) => Promise<McpServerStatus>;
     /** 활성화된 모든 서버 상태 (env 부족분 포함) */

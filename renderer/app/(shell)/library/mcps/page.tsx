@@ -10,6 +10,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { PluginLogo, usePluginBrandMap } from "@/components/PluginLogo";
+import { PluginPickerDialog } from "@/components/plugins/PluginPickerDialog";
 import { useT } from "@/lib/i18n";
 import type {
   InstalledMcpServer,
@@ -33,6 +34,7 @@ export default function LibraryMcpsPage() {
   const router = useRouter();
   const brandMap = usePluginBrandMap();
   const [tab, setTab] = useState<Tab>("installed");
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [catalog, setCatalog] = useState<McpToolCatalogEntry[]>([]);
   const [installed, setInstalled] = useState<InstalledMcpServer[]>([]);
   const [statuses, setStatuses] = useState<Record<string, McpServerStatus>>({});
@@ -222,26 +224,40 @@ export default function LibraryMcpsPage() {
             </button>
           );
         })}
+        {/* 예전에는 이 자리가 마켓플레이스로 나가는 문이었다. 도구 하나를 붙이려던
+            사람이 에이전트·팀·그래프가 섞인 장터로 튕겨 나가 하려던 일을 잃었으므로,
+            고르는 화면을 이 자리에 띄운다(라우팅 없음). */}
         <button
-          onClick={() => router.push("/marketplace?category=plugin")}
-          title={t("mcps.tab.hub_note")}
+          onClick={() => setPickerOpen(true)}
           style={{
             padding: "6px 14px",
             borderRadius: 999,
             fontSize: 12.5,
-            fontWeight: 500,
-            background: "var(--paper-2)",
-            color: "var(--ink-soft)",
-            border: "1px solid var(--paper-edge)",
+            fontWeight: 600,
+            background: "var(--accent)",
+            color: "#fff",
+            border: "1px solid transparent",
             display: "inline-flex",
             alignItems: "center",
             gap: 5,
           }}
         >
-          {t("mcps.tab.hub")}
-          <span aria-hidden style={{ opacity: 0.6 }}>→</span>
+          {locale === "en" ? "Add MCP & plugins" : "MCP · 플러그인 추가"}
         </button>
       </div>
+
+      {pickerOpen && (
+        <PluginPickerDialog
+          ko={locale !== "en"}
+          onClose={() => setPickerOpen(false)}
+          onCompleted={() => {
+            // 팝업이 등록한 서버는 이 목록에 즉시 나타나야 한다. 새로고침을 사용자가
+            // 직접 하게 두면 "추가했는데 없다"로 읽힌다.
+            void refresh();
+            setTab("installed");
+          }}
+        />
+      )}
 
       {tab === "installed" ? (
         !loaded ? (
@@ -439,10 +455,10 @@ export default function LibraryMcpsPage() {
           )}
         </div>
 
-        {/* 카탈로그는 허브가 정본이다 — 여기 사본을 두면 웹에 도구가 늘 때마다
-            사람이 손으로 옮겨야 한다. 문만 열어 준다. */}
+        {/* 카탈로그의 정본은 여전히 허브다 — 사본을 두지 않고 그 목록을 팝업으로
+            읽어 온다. 달라진 것은 화면을 떠나지 않는다는 점뿐이다. */}
         <button
-          onClick={() => router.push("/marketplace?category=plugin")}
+          onClick={() => setPickerOpen(true)}
           style={{
             width: "100%",
             textAlign: "left",

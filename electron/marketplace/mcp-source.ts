@@ -13,6 +13,8 @@ import type {
   CloudAgentRevisionIdentity,
   FirmListing,
   MarketplaceListing,
+  PluginAuthKind,
+  PluginKind,
   TeamBundle,
 } from "../../shared/types";
 import type { MarketplaceSource, SeedListingFull } from "./source";
@@ -789,6 +791,53 @@ function absoluteHubAssetUrl(value: unknown, origin: string): string | undefined
   return `${origin}${raw}`;
 }
 
+/**
+ * 허브가 알려준 플러그인 종류를 그대로 읽는다. 판정의 정본은 웹 카탈로그이고
+ * (mcp 행 / connectSetup / skills 유무), 데스크탑은 그 답을 옮기기만 한다.
+ *
+ * 구버전 허브는 이 필드를 안 내려준다. 그때 화면을 비우거나 전부 한 통에 넣는
+ * 대신, 같은 근거의 축소판(서버 수·스킬 수)이 있으면 그걸로 판정하고, 그것마저
+ * 없으면 `undefined`를 돌려 "모른다"를 그대로 표현한다 — 추측을 사실처럼
+ * 저장하지 않는다. 화면은 종류 미상 행을 연결 섹터에 두고 그 사실을 밝힌다.
+ */
+function readPluginKind(raw: Record<string, unknown>): {
+  pluginKind?: PluginKind;
+  skillCount?: number;
+  mcpServerCount?: number;
+  connectSetupRequired?: boolean;
+} {
+  const declared = cleanString(raw.pluginKind);
+  const skillCount = Number.isFinite(Number(raw.skillCount)) ? Number(raw.skillCount) : undefined;
+  const mcpServerCount = Number.isFinite(Number(raw.mcpServerCount)) ? Number(raw.mcpServerCount) : undefined;
+  const connectSetupRequired = typeof raw.connectSetupRequired === "boolean" ? raw.connectSetupRequired : undefined;
+  const counts = {
+    ...(skillCount === undefined ? {} : { skillCount }),
+    ...(mcpServerCount === undefined ? {} : { mcpServerCount }),
+    ...(connectSetupRequired === undefined ? {} : { connectSetupRequired }),
+  };
+  if (declared === "mcp" || declared === "skill") return { pluginKind: declared, ...counts };
+  if (mcpServerCount !== undefined || connectSetupRequired !== undefined) {
+    const connectable = (mcpServerCount ?? 0) > 0 || connectSetupRequired === true;
+    if (connectable) return { pluginKind: "mcp", ...counts };
+    if ((skillCount ?? 0) > 0) return { pluginKind: "skill", ...counts };
+    return { pluginKind: "mcp", ...counts };
+  }
+  return counts;
+}
+
+/**
+ * 허브가 선언한 인증 종류. 값이 없거나 모르는 문자열이면 아무것도 돌려주지 않는다 —
+ * 임의로 "none"으로 채우면 화면이 "설치만 하면 끝"이라 말하게 되고, 그건 사용자가
+ * 아무리 눌러도 도구가 안 붙는 이유를 영영 못 찾게 만든다.
+ */
+function readAuthKind(raw: Record<string, unknown>): { authKind?: PluginAuthKind } {
+  const value = cleanString(raw.auth);
+  if (value === "none" || value === "oauth" || value === "api_key" || value === "token") {
+    return { authKind: value };
+  }
+  return {};
+}
+
 function marketPublicPluginToListing(
   raw: Record<string, unknown>,
   origin = "https://agentlas.cloud",
@@ -828,6 +877,9 @@ function marketPublicPluginToListing(
     ...(absoluteHubAssetUrl(raw.icon, origin) ? { iconUrl: absoluteHubAssetUrl(raw.icon, origin) } : {}),
     ...(absoluteHubAssetUrl(raw.brandGlyph, origin) ? { brandGlyphUrl: absoluteHubAssetUrl(raw.brandGlyph, origin) } : {}),
     ...(cleanString(raw.brandColor) ? { brandColor: cleanString(raw.brandColor) } : {}),
+    ...(typeof raw.featured === "boolean" ? { featured: raw.featured } : {}),
+    ...readAuthKind(raw),
+    ...readPluginKind(raw),
   };
 }
 

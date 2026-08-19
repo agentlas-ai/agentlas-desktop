@@ -15,6 +15,7 @@ import { app } from "electron";
 import { ensureDefaultMcpPluginsInstalled } from "./defaults";
 import { listInstalledServers } from "./registry";
 import { readEnvVar } from "../secrets/vault";
+import { resolveMcpOAuthAccessToken } from "./oauth";
 import {
   OPENCRAB_CATALOG_ID,
   isOpenCrabCredentialUrl,
@@ -475,7 +476,18 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
       }
       resolvedEnv.set(envKey, value);
     }
-    if (missingRequiredValue) continue;
+    if (missingRequiredValue) {
+      /*
+       * 선언된 키가 비었다고 무조건 빼면, OAuth로 이미 연결을 마친 서버가 사라진다.
+       *
+       * 허브 매니페스트는 그 서버를 수동 토큰으로 쓰는 길을 envKeys 로 적어 두는데,
+       * 사용자가 OAuth로 연결했다면 그 칸은 영원히 빈 채로 남는다. 그 상태를 "값이
+       * 없다"로 읽어 서버를 통째로 빼면, 사용자는 방금 로그인까지 마쳤는데 도구가
+       * 안 붙는 일을 겪는다. 실제로 붙일 자격증명이 있는지로 판정한다.
+       */
+      const authorized = s.transport !== "stdio" && await resolveMcpOAuthAccessToken(s.id);
+      if (!authorized) continue;
+    }
 
     const key = mcpConfigKey(s);
     if (s.transport === "stdio" && s.command) {
@@ -592,8 +604,27 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
       }
       const headers: Record<string, string> = {};
       let codexBearerAlias: string | null = null;
+      /*
+       * OAuth로 연결한 서버의 토큰은 envKeys를 지나지 않는다.
+       *
+       * vault의 env 네임스페이스는 전역이라 키 이름이 곧 헤더 이름이다. 즉 서버 둘이
+       * 모두 `Authorization`을 선언하면 같은 값을 나눠 갖게 된다 — 서로 다른 계정의
+       * 토큰인데 말이다. OAuth 토큰은 서버 id로 격리된 시크릿에서 직접 읽어 여기서
+       * 헤더로 만든다. 만료가 가까우면 이 호출 안에서 갱신되고, 갱신마저 실패하면
+       * null이 와서 이 서버는 이번 실행에 실리지 않는다(만료 토큰으로 401을 맞아
+       * 실행 도중 죽는 것보다 낫다).
+       */
+      const oauthAccessToken = await resolveMcpOAuthAccessToken(s.id);
+      if (oauthAccessToken) {
+        const alias = mcpRuntimeSecretAlias(key, "AUTHORIZATION");
+        runtimeEnv[alias] = oauthAccessToken;
+        headers.Authorization = `Bearer ${envReference(alias)}`;
+        codexBearerAlias = alias;
+      }
       // URL 자체의 vault 키는 헤더 자격증명이 아니므로 헤더 직렬화에서 제외한다.
       const headerKeys = s.envKeys.filter((headerKey) => headerKey !== vaultKey);
+      // 선언된 헤더가 없는 원격 http 서버는 Codex가 표현할 수 있다. OAuth 토큰만 실린
+      // 경우도 여기에 해당하고, 그때는 위에서 잡아 둔 codexBearerAlias 가 함께 나간다.
       let codexRemoteSupported = s.transport === "http" && headerKeys.length === 0;
       for (const rawHeader of headerKeys) {
         const header = validateEnvKey(rawHeader);

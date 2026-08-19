@@ -1,0 +1,436 @@
+/* MCP·플러그인 고르기 팝업.
+   토큰은 앱 전역 변수를 쓴다 — 이 파일이 색을 새로 정하면 테마가 바뀔 때 이 화면만
+   남겨진다. */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 20px;
+  background: rgba(15, 16, 20, 0.5);
+  backdrop-filter: blur(6px);
+}
+
+.panel,
+.keyPanel {
+  display: flex;
+  flex-direction: column;
+  width: min(880px, 100%);
+  max-height: min(760px, 100%);
+  border-radius: 18px;
+  border: 1px solid var(--glass-border, rgba(0, 0, 0, 0.12));
+  background: var(--paper, #fff);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.24);
+  overflow: hidden;
+}
+
+.keyPanel {
+  width: min(520px, 100%);
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 22px 24px 0;
+}
+
+.keyHeader {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 24px 24px 0;
+}
+
+.title {
+  margin: 0;
+  font-family: var(--font-head, inherit);
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.subtitle {
+  margin: 8px 24px 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-soft, #666);
+}
+
+.keySub {
+  margin: 6px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-soft, #666);
+}
+
+.close {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink-soft, #666);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.close:hover {
+  background: var(--paper-edge, rgba(0, 0, 0, 0.06));
+}
+
+/* toolbar */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 24px 12px;
+}
+
+.filterWrap {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.filterButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--paper-edge, rgba(0, 0, 0, 0.12));
+  border-radius: 9px;
+  background: transparent;
+  color: var(--ink, #111);
+  cursor: pointer;
+}
+
+.filterButton:hover {
+  background: var(--paper-edge, rgba(0, 0, 0, 0.05));
+}
+
+.filterMenu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 2;
+  min-width: 210px;
+  padding: 6px;
+  border: 1px solid var(--paper-edge, rgba(0, 0, 0, 0.12));
+  border-radius: 12px;
+  background: var(--paper, #fff);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.16);
+}
+
+.filterGroupLabel {
+  padding: 8px 10px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-soft, #888);
+}
+
+.filterItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink, #111);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.filterItem:hover {
+  background: var(--paper-edge, rgba(0, 0, 0, 0.06));
+}
+
+.check {
+  color: var(--accent, #3b6cf6);
+  font-size: 12px;
+}
+
+.search {
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--paper-edge, rgba(0, 0, 0, 0.12));
+  border-radius: 9px;
+  background: transparent;
+  color: var(--ink, #111);
+  font-size: 13px;
+}
+
+.search:focus {
+  outline: 2px solid var(--accent, #3b6cf6);
+  outline-offset: -1px;
+}
+
+/* body */
+
+.body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 24px 16px;
+}
+
+.hint,
+.error {
+  margin: 24px 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-soft, #666);
+  text-align: center;
+}
+
+.error {
+  color: var(--danger, #c0392b);
+  text-align: left;
+}
+
+.group {
+  margin-top: 18px;
+}
+
+.groupTitle {
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-soft, #888);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 8px;
+}
+
+.card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--paper-edge, rgba(0, 0, 0, 0.1));
+  border-radius: 12px;
+  background: transparent;
+  color: var(--ink, #111);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.card:hover {
+  border-color: var(--accent, #3b6cf6);
+}
+
+.card[data-selected] {
+  border-color: var(--accent, #3b6cf6);
+  background: color-mix(in srgb, var(--accent, #3b6cf6) 8%, transparent);
+}
+
+/* 이미 붙어 있는 도구는 고를 수는 있어도(다시 눌러 확인) 새것처럼 보이면 안 된다. */
+.card[data-installed] .cardAction {
+  color: var(--ok, #2e7d32);
+}
+
+.cardText {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.cardName {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.cardTagline {
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ink-soft, #666);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 고르기 전에 "그다음에 무슨 일이 생기는지"를 말하는 줄. 색으로도 구분되지만 색만으로
+   구분되지는 않는다 — 문구가 항상 함께 있다. */
+.cardHint {
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--ink-soft, #777);
+}
+
+.cardHint[data-tone="ready"] {
+  color: var(--ok, #2e7d32);
+}
+
+.cardHint[data-tone="login"] {
+  color: var(--accent, #3b6cf6);
+}
+
+.cardHint[data-tone="key"] {
+  color: var(--warn, #a8712a);
+}
+
+.cardAction {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-soft, #666);
+}
+
+.card[data-selected] .cardAction {
+  color: var(--accent, #3b6cf6);
+}
+
+.more {
+  display: block;
+  width: 100%;
+  margin-top: 18px;
+  padding: 10px;
+  border: 1px dashed var(--paper-edge, rgba(0, 0, 0, 0.2));
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ink-soft, #555);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.more:hover {
+  border-color: var(--accent, #3b6cf6);
+  color: var(--accent, #3b6cf6);
+}
+
+/* key step */
+
+.keyFields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px 24px 0;
+}
+
+.keyField {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.keyLabel {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  color: var(--ink-soft, #666);
+}
+
+.keyInput {
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--paper-edge, rgba(0, 0, 0, 0.12));
+  border-radius: 9px;
+  background: transparent;
+  color: var(--ink, #111);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 13px;
+}
+
+.keyInput:focus {
+  outline: 2px solid var(--accent, #3b6cf6);
+  outline-offset: -1px;
+}
+
+.keyNote {
+  margin: 14px 24px 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-soft, #777);
+}
+
+/* footer */
+
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 24px;
+  border-top: 1px solid var(--paper-edge, rgba(0, 0, 0, 0.08));
+}
+
+.count {
+  font-size: 12px;
+  color: var(--ink-soft, #666);
+}
+
+.footerActions {
+  display: flex;
+  gap: 8px;
+}
+
+.ghost,
+.primary {
+  height: 34px;
+  padding: 0 16px;
+  border-radius: 9px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ghost {
+  border: 1px solid var(--paper-edge, rgba(0, 0, 0, 0.14));
+  background: transparent;
+  color: var(--ink, #111);
+}
+
+.ghost:hover:not(:disabled) {
+  background: var(--paper-edge, rgba(0, 0, 0, 0.05));
+}
+
+.primary {
+  border: 1px solid transparent;
+  background: var(--accent, #3b6cf6);
+  color: #fff;
+}
+
+.primary:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+
+.ghost:disabled,
+.primary:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+@media (max-width: 640px) {
+  .grid {
+    grid-template-columns: 1fr;
+  }
+
+  .overlay {
+    padding: 12px;
+  }
+}

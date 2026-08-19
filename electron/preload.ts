@@ -397,6 +397,9 @@ const api: AgentlasIpc = {
     installHubPlugin: (input: { slug: string; manifestUrl: string; approveLocalExecution?: boolean }) =>
       ipcRenderer.invoke("mcpTools:installHubPlugin", input),
     pendingHubApprovals: () => ipcRenderer.invoke("mcpTools:pendingHubApprovals"),
+    oauthStatus: (serverId: string) => ipcRenderer.invoke("mcpTools:oauthStatus", serverId),
+    oauthConnect: (serverId: string) => ipcRenderer.invoke("mcpTools:oauthConnect", serverId),
+    oauthDisconnect: (serverId: string) => ipcRenderer.invoke("mcpTools:oauthDisconnect", serverId),
     test: (id: string) => ipcRenderer.invoke("mcpTools:test", id),
     status: () => ipcRenderer.invoke("mcpTools:status"),
     recommendForBuild: (input) => ipcRenderer.invoke("mcpTools:recommendForBuild", input),

@@ -4,12 +4,38 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
+import { CredentialImportDialog } from "@/components/connect/CredentialImportDialog";
+import { PluginPickerDialog } from "@/components/plugins/PluginPickerDialog";
 import styles from "./WorkFirstRunOnboarding.module.css";
 
 type Experience = "beginner" | "intermediate" | "expert";
 type Provider = "codex" | "claude-code" | "antigravity";
 
-const STORAGE_KEY = "agentlas.work.firstRunOnboarding.v2";
+/**
+ * 온보딩의 두 국면.
+ *
+ * 예전에는 "tour" 하나뿐이었고, 마지막 화면에서 다음이나 건너뛰기를 누르면 창이 그냥
+ * 닫혔다. 즉 앱을 처음 연 사람은 제품 설명만 듣고 아무것도 연결되지 않은 빈 앱 앞에
+ * 남겨졌다 — 그다음에 무엇을 해야 하는지는 스스로 찾아야 했고, 브라우저 로그인과 도구
+ * 연결은 설정 화면 깊숙이 있어 대부분 그대로 지나갔다.
+ *
+ * 그래서 설명이 끝나는 자리를 종료가 아니라 세팅의 시작으로 바꾼다. 건너뛰기도
+ * 마찬가지다 — 설명을 건너뛴 사람일수록 빨리 쓰고 싶은 사람이라 세팅이 더 필요하다.
+ * 세팅 각 단계는 여전히 건너뛸 수 있다(강제하지 않는다).
+ */
+type Phase = "tour" | "credentials" | "plugins";
+
+/**
+ * 버전을 v2에서 올린 이유: 이 세팅 흐름은 기존 사용자도 한 번은 거쳐야 한다. 기존 키를
+ * 그대로 두면 이미 앱을 쓰던 사람은 브라우저 자격증명도 도구 선택도 영영 못 본다.
+ * 키가 바뀌면 업데이트 후 첫 실행에서 한 번 뜨고, 끝내면 다시 뜨지 않는다.
+ */
+const STORAGE_KEY = "agentlas.work.firstRunOnboarding.v3";
+/**
+ * 못 끝낸 지점. 세팅 도중 앱을 닫은 사람에게 제품 설명을 처음부터 다시 보게 하면
+ * 그 사람은 두 번째에도 끝까지 가지 않는다 — 멈춘 자리에서 다시 연다.
+ */
+const PHASE_KEY = "agentlas.work.firstRunOnboarding.v3.phase";
 
 const PROVIDERS: Array<{ id: Provider; label: string; logo: string; cli: "codex" | "claude-code" | "antigravity" }> = [
   { id: "codex", label: "GPT / Codex", logo: "/brand/llm/openai.svg", cli: "codex" },
@@ -22,6 +48,7 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
   const router = useRouter();
   const ko = locale === "ko";
   const [open, setOpen] = useState(false);
+  const [phase, setPhase] = useState<Phase>("tour");
   const [step, setStep] = useState(1);
   const [experience, setExperience] = useState<Experience | null>(null);
   const [provider, setProvider] = useState<Provider | null>(null);
@@ -31,8 +58,14 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
 
   useEffect(() => {
     let seen = false;
-    try { seen = window.localStorage.getItem(STORAGE_KEY) === "1"; } catch { /* private mode */ }
-    if (!seen) setOpen(true);
+    let saved: string | null = null;
+    try {
+      seen = window.localStorage.getItem(STORAGE_KEY) === "1";
+      saved = window.localStorage.getItem(PHASE_KEY);
+    } catch { /* private mode */ }
+    if (seen) return;
+    if (saved === "credentials" || saved === "plugins") setPhase(saved);
+    setOpen(true);
   }, []);
 
   useEffect(() => onVisibilityChange?.(open), [onVisibilityChange, open]);
@@ -59,9 +92,22 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
     s6: "Agentlas also works on mobile.", s6sub: "Install Agentlas from the App Store or Play Store, then choose Connect new device in Settings and scan the QR code.",
   }, [ko]);
 
+  /** 온보딩 전체가 끝났다. 이 표시가 있어야만 다음 실행에서 다시 뜨지 않는다. */
   const finish = useCallback(() => {
-    try { window.localStorage.setItem(STORAGE_KEY, "1"); } catch { /* ignore */ }
+    try {
+      window.localStorage.setItem(STORAGE_KEY, "1");
+      window.localStorage.removeItem(PHASE_KEY);
+    } catch { /* ignore */ }
     setOpen(false);
+  }, []);
+
+  /**
+   * 설명이 끝났거나 건너뛰어졌다 — 창을 닫는 대신 세팅으로 넘어간다.
+   * 도달 지점을 남겨 두므로, 여기서 앱을 닫아도 다음에는 설명을 다시 보지 않는다.
+   */
+  const goTo = useCallback((next: Exclude<Phase, "tour">) => {
+    try { window.localStorage.setItem(PHASE_KEY, next); } catch { /* ignore */ }
+    setPhase(next);
   }, []);
 
   const chooseExperience = (next: Experience) => {
@@ -95,6 +141,32 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
   };
 
   if (!open) return null;
+
+  // 1단계 세팅 — 평소 쓰는 브라우저의 로그인을 가져온다. 이걸 설정 화면 안쪽에만
+  // 두었을 때는 사실상 아무도 도달하지 못했다(주소를 손으로 치고 전용 창에서 다시
+  // 로그인하는 길만 남았다).
+  if (phase === "credentials") {
+    return (
+      <CredentialImportDialog
+        ko={ko}
+        onClose={() => goTo("plugins")}
+        onDone={() => goTo("plugins")}
+      />
+    );
+  }
+
+  // 2단계 세팅 — 자주 쓰는 도구를 고른다. 여기서 고른 것은 모든 에이전트가 공유한다.
+  if (phase === "plugins") {
+    return (
+      <PluginPickerDialog
+        ko={ko}
+        variant="onboarding"
+        onClose={finish}
+        onCompleted={finish}
+      />
+    );
+  }
+
   const menuItems = [
     [copy.workspace, copy.workspaceSub], [copy.agentHub, copy.agentHubSub], [copy.automationNav, copy.automationNavSub],
     [copy.site, copy.siteSub], [copy.connectNav, copy.connectNavSub], [copy.cloud, copy.cloudSub], [copy.settings, copy.settingsSub],
@@ -105,7 +177,10 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
         <header className={styles.header}>
           <div className={styles.brand}><strong>Agentlas</strong><span>Work</span></div>
           <div className={styles.headerCenter}><span className={styles.eyebrow}>{copy.label}</span><div className={styles.progress}>{[1, 2, 3, 4, 5, 6].map((item) => <span key={item} data-current={step === item} data-done={step > item} />)}</div></div>
-          <div className={styles.headerActions}><button className={styles.language} type="button">EN · KO</button><button className={styles.close} onClick={finish} aria-label={copy.close}>×</button></div>
+          {/* × 는 설명을 그만 보겠다는 뜻이지 세팅을 건너뛰겠다는 뜻이 아니다 —
+              설명을 빨리 지나치는 사람일수록 연결은 더 필요하다. 세팅 각 단계는
+              거기서 다시 건너뛸 수 있다. */}
+          <div className={styles.headerActions}><button className={styles.language} type="button">EN · KO</button><button className={styles.close} onClick={() => goTo("credentials")} aria-label={copy.close}>×</button></div>
         </header>
         <main className={styles.content}>
           {step === 1 && <><h1 id="work-onboarding-title">{copy.s1}</h1><p>{copy.s1sub}</p><div className={styles.choiceGrid}>{(["beginner", "intermediate", "expert"] as Experience[]).map((item) => <button key={item} className={`${styles.choice} ${experience === item ? styles.selected : ""}`} onClick={() => chooseExperience(item)}><div className={styles.choiceIllustration}>{item === "beginner" ? "01" : item === "intermediate" ? "02" : "03"}</div><strong>{copy[item]}</strong><small>{copy[`${item}Sub` as "beginnerSub" | "intermediateSub" | "expertSub"]}</small></button>)}</div></>}
@@ -115,7 +190,7 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
           {step === 5 && <><h1>{copy.s5}</h1><div className={styles.menuTour}><div className={styles.menuMock}>{menuItems.map(([title]) => <div key={title} className={styles.menuMockItem}>{title}</div>)}</div><div className={styles.menuDescriptions}>{menuItems.map(([title, body], index) => <div key={title} className={styles.menuDescription} style={{ animationDelay: `${index * 180}ms` }}><b>{title}</b><span>{body}</span></div>)}</div></div></>}
           {step === 6 && <><h1>{copy.s6}</h1><p>{copy.s6sub}</p><div className={styles.mobileCard}><div className={styles.mobileIcon}>QR</div><div><strong>Agentlas Mobile</strong><span>iOS · Android</span></div></div></>}
         </main>
-        <footer className={styles.footer}><button className={styles.back} onClick={() => setStep((current) => current === 5 && experience !== "beginner" ? 1 : Math.max(1, current - 1))} disabled={step === 1}>{copy.back}</button>{step < 6 ? <button className={styles.next} onClick={() => setStep((current) => current === 3 ? 4 : current + 1)} disabled={step === 1 && !experience}>{copy.next}</button> : <button className={styles.next} onClick={finish}>{copy.finish}</button>}</footer>
+        <footer className={styles.footer}><button className={styles.back} onClick={() => setStep((current) => current === 5 && experience !== "beginner" ? 1 : Math.max(1, current - 1))} disabled={step === 1}>{copy.back}</button>{step < 6 ? <button className={styles.next} onClick={() => setStep((current) => current === 3 ? 4 : current + 1)} disabled={step === 1 && !experience}>{copy.next}</button> : <button className={styles.next} onClick={() => goTo("credentials")}>{copy.finish}</button>}</footer>
         <nav className={styles.productNav} aria-label="Agentlas product navigation">
           {([["⌂", "One"], ["◎", "Agents"], ["◉", "Work"], ["ϟ", "Automations"], ["⚙", "Settings"]] as const).map(([icon, label]) => <span key={label} className={label === "Work" ? styles.activeNav : ""}><b aria-hidden="true">{icon}</b>{label}</span>)}
         </nav>

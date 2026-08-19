@@ -99,6 +99,7 @@ import {
 } from "./mcp/registry";
 import { MCP_TOOL_CATALOG, getCatalogEntry } from "./mcp-tools/catalog";
 import {
+  getServer,
   installCustomServer,
   installFromCatalog,
   listInstalledServers,
@@ -110,6 +111,12 @@ import {
   listPendingHubPluginApprovals,
   previewHubPlugin,
 } from "./mcp-tools/hub-plugin-bridge";
+import {
+  authorizeMcpServer,
+  discoverMcpOAuth,
+  forgetMcpOAuth,
+  readMcpOAuthSession,
+} from "./mcp-tools/oauth";
 import { getPluginBrandMap } from "./mcp-tools/plugin-brand";
 import {
   closeHubProfileView,
@@ -2958,6 +2965,61 @@ export function registerIpcHandlers(): void {
   // 자동 브리지가 등록해 두고 승인을 기다리는 stdio 서버. 실행 중 채팅에 한 줄 지나가는
   // needs-approval 영수증을 놓치면 사용자는 어디서 무엇을 켜는지 알 수 없었다.
   ipcMain.handle("mcpTools:pendingHubApprovals", () => listPendingHubPluginApprovals());
+  /*
+   * 원격 MCP OAuth.
+   *
+   * `authStatus` 는 이 서버가 무엇을 요구하는지 읽기만 한다(연결 시도 없음) — 화면이
+   * "로그인 필요"인지 "이미 연결됨"인지 "인증 불필요"인지 말할 수 있어야 하기 때문이다.
+   * `connect` 는 실제 인가 흐름을 돌린다. 값(토큰)은 이 채널로 오가지 않는다: 저장은
+   * Keychain vault, 화면에는 성공 여부와 사람이 직접 열어야 할 URL만 돌려준다.
+   */
+  ipcMain.handle("mcpTools:oauthStatus", async (_e, serverId: string) => {
+    const id = String(serverId ?? "");
+    const server = getServer(id);
+    if (!server || !server.url) return { supported: false as const, connected: false, reason: "not_remote" };
+    const session = await readMcpOAuthSession(id);
+    if (session) {
+      return {
+        supported: true as const,
+        connected: true,
+        resource: session.resource,
+        expiresAt: session.expiresAt ?? null,
+      };
+    }
+    try {
+      const discovery = await discoverMcpOAuth(server.url);
+      return discovery
+        ? { supported: true as const, connected: false, resource: discovery.resource }
+        : { supported: false as const, connected: false, reason: "no_authorization_required" };
+    } catch (error) {
+      return {
+        supported: false as const,
+        connected: false,
+        reason: "discovery_failed",
+        message: error instanceof Error ? error.message.slice(0, 240) : "discovery failed",
+      };
+    }
+  });
+  ipcMain.handle("mcpTools:oauthConnect", async (_e, serverId: string) => {
+    const id = String(serverId ?? "");
+    const server = getServer(id);
+    if (!server?.url) return { ok: false as const, error: "this server has no remote URL to authorize" };
+    try {
+      const result = await authorizeMcpServer({ serverId: id, serverUrl: server.url });
+      // 연결이 끝났으면 다음 실행부터 이 서버가 실려야 한다. 꺼져 있던 행을 켜 준다.
+      if (!server.enabled) setServerEnabled(id, true);
+      return { ok: true as const, manualUrl: result.manualUrl };
+    } catch (error) {
+      return {
+        ok: false as const,
+        error: error instanceof Error ? error.message.slice(0, 300) : "authorization failed",
+      };
+    }
+  });
+  ipcMain.handle("mcpTools:oauthDisconnect", async (_e, serverId: string) => {
+    await forgetMcpOAuth(String(serverId ?? ""));
+    return { ok: true as const };
+  });
   ipcMain.handle("mcpTools:test", (_e, id: string) => testServerById(id));
   ipcMain.handle("mcpTools:status", () => statusAllServers());
   ipcMain.handle("mcpTools:recommendForBuild", (_e, input) => recommendMcpBuildPlan(input));
