@@ -1558,6 +1558,7 @@ export async function runMcpInvocation(
               graphJson ? `현재 graph: ${graphJson}` : "현재 graph: (없음 — 단일 프롬프트 자동화)",
               "터미널 graph CLI(`agentlas graph`, hep-graph 스킬)는 다른 저장소를 편집하므로 이 자동화에는 절대 사용하지 마세요. 그것으로는 이 자동화가 바뀌지 않습니다.",
               "적용했다고 말하기 전에 반드시 블록을 방출하세요 — 방출 없는 적용 보고는 거짓이 됩니다.",
+              "등록 게이트: 반복 실행 자동화의 action 단계 프롬프트에 80자 이상 고정 인용문을 박으면 **거부되어 아무것도 바뀌지 않습니다**(같은 글이 매번 나가면 플랫폼이 중복으로 막습니다). 사용자가 특정 문구를 주더라도, 그 문구는 지켜야 할 **사실·링크·해시태그**로 옮기고 매 실행 새 문안을 짓도록 프롬프트를 쓰세요. 고정 인용을 고집해야 한다면 적용됐다고 말하지 말고, 왜 거부되는지 먼저 알리고 선택지를 제시하세요.",
               "[/Agentlas 자동화 편집 계약]",
             ].join("\n")
           : [
@@ -1566,6 +1567,7 @@ export async function runMcpInvocation(
               graphJson ? `Current graph: ${graphJson}` : "Current graph: (none — single-prompt automation)",
               "Never use the terminal graph CLI (`agentlas graph`, the hep-graph skill) for this purpose — it edits a different store and this automation will not change.",
               "Emit the block before claiming the change was applied — a claim without the block is false.",
+              "Registration gate: pinning a quoted payload of 80+ characters inside an action step's prompt on a recurring automation is **refused, and nothing changes** (posting identical text every run gets blocked as duplicate content). Even when the user hands you exact copy, carry it as the facts, links and hashtags that must survive, and have the prompt compose fresh wording each run. If exact pinned text is truly required, do not claim the change was applied — say why it is refused and offer the choice.",
               "[/Agentlas automation edit contract]",
             ].join("\n");
         effectiveUserPrompt = `${editContract}
@@ -4226,6 +4228,10 @@ ${effectiveUserPrompt}`;
     // 에이전트가 "## Automation" 블록을 넣었으면 → 현재 chat의 타깃(firm/agent)으로 자동화 등록 + 블록 제거.
     // (백그라운드 automation 실행 세션은 제외 → 자동화가 자동화를 만드는 재귀 방지)
     const automationRegistrations: AutomationRegistrationResult[] = [];
+    // 거부 사유. 모델의 본문은 이미 확정된 뒤에 게이트가 도는 구조라, 모델은 "바꿨다"고
+    // 써 놓고 호스트가 거부하는 조합이 나온다(실측 2026-08-19: 831자 고정 문구 교체 지시에
+    // 답변은 "replaced", graph_json은 무변경). 그러면 **호스트가 직접 말해야** 한다.
+    const automationRefusals: string[] = [];
     let automationPermissionRequired = false;
     if (req.agentAppMode) {
       // Browser output is untrusted display text. Strip host control envelopes
@@ -4273,6 +4279,7 @@ ${effectiveUserPrompt}`;
           // automationRegistrationGateProblems (순수 함수, 하네스와 동일 코드 객체).
           const gateProblems = automationRegistrationGateProblems(a);
           if (gateProblems.length > 0) {
+            automationRefusals.push(`${a.name}: ${gateProblems.join(" / ")}`);
             sink({
               kind: "tool-use",
               tool: {
@@ -4406,6 +4413,20 @@ ${effectiveUserPrompt}`;
             en: automationFinalSummary(automationRegistrations, "en"),
           },
           code: "automation-registered",
+        },
+      });
+    }
+    // 거부는 성공보다 더 크게 말해야 한다 — 본문이 "바꿨다"고 주장하는 동안 아무것도 안 바뀐 상태다.
+    if (automationRefusals.length > 0) {
+      const ko = `요청한 변경은 적용되지 않았습니다 — 등록 게이트가 거부했습니다.\n${automationRefusals.join("\n")}\n답변 본문이 적용됐다고 말하더라도 자동화는 그대로입니다.`;
+      const en = `The requested change was NOT applied — the registration gate refused it.\n${automationRefusals.join("\n")}\nEven if the reply says it was applied, the automation is unchanged.`;
+      sink({
+        kind: "notice",
+        notice: {
+          level: "warning",
+          message: locale === "ko" ? ko : en,
+          i18n: { ko, en },
+          code: "automation-registration-refused",
         },
       });
     }
