@@ -36,6 +36,7 @@
     "prepare:embedded-core": "node scripts/prepare-embedded-core.mjs",
     "daemon": "cross-env ELECTRON_RUN_AS_NODE=1 electron dist/electron/daemon/main.js",
     "test:daemon-autostart": "npm run build:electron && node scripts/test-daemon-autostart.cjs",
+    "test:process-pool": "npm run build:electron && node scripts/test-process-pool.cjs",
     "test:daemon-boot": "npm run build:electron && node scripts/test-daemon-boot.cjs",
     "test:ensure-engine": "node scripts/test-ensure-engine.cjs",
     "test:runtime-paths": "npm run build:electron && node scripts/test-runtime-paths.cjs",

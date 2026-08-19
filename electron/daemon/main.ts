@@ -31,6 +31,7 @@ import path from "node:path";
 import { runHostShutdownHooks } from "../host-lifecycle";
 import { setUserDataDir, userDataDir } from "../runtime-paths";
 import { startControlSocket, type ControlSocketHandle } from "./control-socket";
+import { WarmProcessPool } from "./process-pool";
 
 /**
  * 데몬이 쓸 사용자 데이터 경로. **추측하지 않는다** — 잘못 고르면 사용자의 실제 DB 가
@@ -79,13 +80,33 @@ function daemonVersion(): string {
 
 let controlSocket: ControlSocketHandle | null = null;
 
+/*
+ * ★웜 프로세스 풀 (Phase 5). 데몬이 CLI 프로세스를 붙들었다가 다음 턴에 재사용하는
+ * 메커니즘. 데몬이 소유하므로 (1) host-lifecycle 종료 훅에 dispose 가 걸려 데몬이 죽으면
+ * 붙든 프로세스가 함께 죽고(좀비 없음), (2) 제어 소켓의 daemon.ping 이 풀 상태를 실어
+ * 관측 가능하다. 재사용 자체의 안전성(체크아웃 배타성·서명 분리·유휴 축출·죽은 프로세스
+ * 차단)은 process-pool.ts 가 설계로 보장하고 test-process-pool.cjs 가 실측한다.
+ *
+ * 일회성 `-p` CLI 실행(claude/codex 의 현재 형태)은 끝나면 스스로 죽으므로 이 풀로 이득이
+ * 없다 — 다음 턴에 이어 쓰려면 양방향 stream-json 입력(claude·kimi 전용)이 필요하고,
+ * 그건 별도 기능이다. 이 풀은 그 기능이 붙을 자리에서 이미 대기하고 있다.
+ */
+const processPool = new WarmProcessPool();
+
 /**
  * 제어 소켓의 메서드 처리. **터미널이 실제로 필요로 하는 것부터** 연다 —
  * 쓰이지 않을 메서드를 미리 만드는 것은 배선이 아니라 선언이다.
  */
 async function handleControlMethod(method: string, params: unknown): Promise<unknown> {
   if (method === "daemon.ping") {
-    return { ok: true, version: daemonVersion(), pid: process.pid };
+    return {
+      ok: true,
+      version: daemonVersion(),
+      pid: process.pid,
+      // 풀 관측 — 붙든 프로세스 수/유휴 수. "재사용이 실제로 되고 있나"의 유일한 창.
+      warmProcesses: processPool.size(),
+      warmIdle: processPool.idleCount(),
+    };
   }
   if (method === "automations.get") {
     const id = (params as { id?: string })?.id;
@@ -141,6 +162,8 @@ function installSignalHandlers(): void {
       void controlSocket.close();
       controlSocket = null;
     }
+    // 붙든 프로세스를 전부 죽인다(host-lifecycle 도 부르지만, 순서와 무관하게 멱등).
+    processPool.dispose();
     if (keepAlive) {
       clearInterval(keepAlive);
       keepAlive = null;
