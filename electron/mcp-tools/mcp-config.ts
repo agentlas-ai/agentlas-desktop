@@ -359,6 +359,16 @@ function ensureMcpChildEnvWrapper(dir: string): string {
   return wrapperPath;
 }
 
+function argsWithCdpEndpoint(args: string[], endpoint: string): string[] {
+  const next = args.filter((arg, i, all) =>
+    arg !== "--user-data-dir" && !arg.startsWith("--user-data-dir=") && all[i - 1] !== "--user-data-dir");
+  const flagIndex = next.findIndex((arg) => arg === "--cdp-endpoint" || arg.startsWith("--cdp-endpoint="));
+  if (flagIndex < 0) return [...next, "--cdp-endpoint", endpoint];
+  if (next[flagIndex] === "--cdp-endpoint") next[flagIndex + 1] = endpoint;
+  else next[flagIndex] = `--cdp-endpoint=${endpoint}`;
+  return next;
+}
+
 function argsWithBrowserProfile(key: string, args: string[], opts?: McpConfigBuildOptions): string[] {
   if (key !== "playwright" || !opts?.browserProfileKey) return args;
   const profileDir = userDataPath("mcp", "browser-profiles", safeProfileKey(opts.browserProfileKey));
@@ -384,6 +394,24 @@ function argsWithBrowserProfile(key: string, args: string[], opts?: McpConfigBui
  * Playwright가 설치돼 있어도 config/allowedTools에 싣지 않아 브라우저 우회를 막는다.
  */
 export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<McpConfigResult | null> {
+  // ★자동화의 브라우저는 자격증명 있는 창을 잡아야 한다. browserProfileKey가
+  // automation-* 이면 지금까지는 실행마다 빈 전용 프로필을 만들어 줬다 — 실측
+  // 2026-08-19: X 자동화의 playwright가 --user-data-dir .../automation-<id> 로
+  // 떠서 로그인 0개짜리 창(가입 페이지)을 조작했고, 같은 순간 자격증명이 실린
+  // Agentlas CDP Chrome(9222, 소유 표식 검증)은 옆에서 놀고 있었다. 소유가
+  // 확인된 CDP 브라우저가 살아 있으면 거기 붙고, 없을 때만 전용 프로필로
+  // 폴백한다(그 프로필은 사용자가 한 번 로그인하면 유지된다).
+  let automationCdpEndpoint: string | null = null;
+  if (opts?.browserProfileKey?.startsWith("automation-")) {
+    try {
+      const { browserCdpOwnerIsLive, browserCdpPort } = await import("./browser-cdp-launcher");
+      if (await browserCdpOwnerIsLive()) {
+        automationCdpEndpoint = `http://127.0.0.1:${browserCdpPort()}`;
+      }
+    } catch {
+      automationCdpEndpoint = null;
+    }
+  }
   if (!opts?.skipDefaultSeed) ensureDefaultMcpPluginsInstalled();
   const dir = userDataPath("mcp");
   const configPath = path.join(
@@ -446,7 +474,9 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     const key = mcpConfigKey(s);
     if (s.transport === "stdio" && s.command) {
       let command = resolveStdioCommand(s);
-      let args = argsWithBrowserProfile(key, (s.args ?? []).map(expandHome), opts);
+      let args = key === "playwright" && automationCdpEndpoint
+        ? argsWithCdpEndpoint((s.args ?? []).map(expandHome), automationCdpEndpoint)
+        : argsWithBrowserProfile(key, (s.args ?? []).map(expandHome), opts);
       let builtInEnv: Record<string, string> =
         s.catalogId === "agentlas-browser"
           ? { [BROWSER_APPROVAL_FILE_ENV]: browserApprovalInfoPath() }
