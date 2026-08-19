@@ -53,6 +53,7 @@ import {
   isJudgmentUnavailable,
   type AutomationResultStatus,
 } from "./automation-result";
+import { observedToolActivity } from "./store/run-events";
 import {
   recordMcpInvocationEvent,
   tryRecordFailureEvent,
@@ -753,7 +754,11 @@ async function runOne(
         // 두 값은 서로 다른 질문의 답이라 한 칸에 겹쳐 담을 수 없다:
         //   status  = 끝까지 돌았는가 (커널이 안다)
         //   outcome = 나온 결과물이 쓸 만한가 (판정이 본다)
-        const classified = await classifyAutomationOutcome(output);
+        // ★판정에 **호스트가 센 도구 호출**을 함께 준다. 모델이 "게시했다"고 써도
+        //   도구 호출이 0건이면 바깥은 그대로다 — 그 사실은 지어낼 수 없다.
+        const classified = await classifyAutomationOutcome(output, {
+          ...(currentRunId ? { toolActivity: observedToolActivity(currentRunId) } : {}),
+        });
         judgmentUnavailableRun = isJudgmentUnavailable(classified);
         runOutcome = judgmentUnavailableRun ? "unjudged" : outcomeOf(classified.outcome);
         runOutcomeReason = classified.reason ?? null;
@@ -907,7 +912,11 @@ async function runOne(
         output = result.finalText;
         if (runnerError) throw new Error(runnerError);
         if (!output?.trim()) throw new Error("Automation finished without an assistant result");
-        const classified = await classifyAutomationOutcome(output);
+        // ★판정에 **호스트가 센 도구 호출**을 함께 준다. 모델이 "게시했다"고 써도
+        //   도구 호출이 0건이면 바깥은 그대로다 — 그 사실은 지어낼 수 없다.
+        const classified = await classifyAutomationOutcome(output, {
+          ...(currentRunId ? { toolActivity: observedToolActivity(currentRunId) } : {}),
+        });
         judgmentUnavailableRun = isJudgmentUnavailable(classified);
         // 그래프 경로와 같은 규율 — 판정의 답은 자기 칸으로 간다.
         // 여기서 runStatus를 덮으면 "끝까지 돌았다"는 사실이 다시 지워진다.

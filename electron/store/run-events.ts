@@ -584,6 +584,37 @@ export function countAgentSteeringEvents(agentId: string, chatId?: string | null
   return Number(row?.n ?? 0);
 }
 
+/**
+ * 이 실행에서 **호스트가 관측한** 도구 호출. 모델의 산문이 아니라 원장에서 읽는다.
+ *
+ * ★왜 필요한가(실측 2026-08-19): X 게시 자동화가 "successfully posted and confirmed"
+ * 라고 답했고 판정기가 그 문장만 읽어 12연속 accepted 를 냈다. 실제 게시 0건, 그리고
+ * 그 실행들의 도구 호출도 0건이었다. 도구를 하나도 안 부르고 바깥을 바꿀 수는 없다.
+ */
+export function observedToolActivity(runId: string): { callCount: number; toolNames: string[] } {
+  if (!runId) return { callCount: 0, toolNames: [] };
+  const rows = getDb()
+    .prepare("SELECT title, payload_json FROM run_events WHERE run_id = ? AND kind = 'mcp_tool-use' ORDER BY seq ASC LIMIT 500")
+    .all(runId) as { title: string | null; payload_json: string | null }[];
+  const names = new Set<string>();
+  for (const row of rows) {
+    // 이름은 title 이 정본이고, 없으면 payload 의 tool 칸을 본다. 둘 다 없으면 세기만 한다.
+    const fromTitle = row.title?.trim();
+    if (fromTitle) {
+      names.add(fromTitle.slice(0, 120));
+      continue;
+    }
+    try {
+      const payload = row.payload_json ? JSON.parse(row.payload_json) : null;
+      const name = payload?.tool?.name ?? payload?.name;
+      if (typeof name === "string" && name.trim()) names.add(name.trim().slice(0, 120));
+    } catch {
+      /* payload 가 깨졌어도 호출이 있었다는 사실은 남는다 */
+    }
+  }
+  return { callCount: rows.length, toolNames: [...names] };
+}
+
 export function listRunEvents(runId: string, limit?: number): RunEventUi[] {
   if (!runId) return [];
   const capped = normalizeLimit(limit, 200);

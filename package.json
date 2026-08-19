@@ -35,6 +35,7 @@
     "ensure:engine": "node scripts/ensure-engine.mjs",
     "prepare:embedded-core": "node scripts/prepare-embedded-core.mjs",
     "test:ensure-engine": "node scripts/test-ensure-engine.cjs",
+    "test:tool-receipt-judgment": "npm run build:electron && node scripts/test-tool-receipt-judgment.cjs",
     "test:ask-user": "npm run build:electron && node scripts/test-ask-user.cjs",
     "test:mcp-proxy": "node scripts/test-mcp-proxy.cjs",
     "test:builtin-tools": "npm run build:electron && node scripts/test-builtin-tools.cjs",
