@@ -83,8 +83,12 @@ const assertNoApprovalCodes = (res, label) => {
 
     for (const approval of ["ask", "ask_once"]) {
       const seen = [];
-      mcpClient.runMcpInvocation = async (payload) => {
+      // 이 계약이 재는 것은 "승인 선언이 멈추는가" 하나다. 변경 노드의 관측 계약
+      // (바깥을 실제로 건드렸는가 — NODE_CLAIMED_WITHOUT_TOOLS)은 별개이므로,
+      // 대역이 실제 러너처럼 도구를 알려 그 계약이 이 결과를 흐리지 않게 한다.
+      mcpClient.runMcpInvocation = async (payload, sink) => {
         seen.push(payload.userPrompt);
+        sink?.({ kind: "tool-use", tool: { name: "mcp__browser__post" } });
         return { finalText: `result-${payload.userPrompt}`, stormbreakerContinueRequested: false };
       };
       const a = mkAutomation(
