@@ -281,19 +281,12 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
     category: "web",
     transport: "stdio",
     command: process.execPath,
-    // The exact MCP host ships inside Desktop. Do not assume a public user's
-    // machine has Node/npm or resolve `latest` during an unattended run.
-    // --user-data-dir: 영속 프로파일(persistent context). 매번 새 임시 브라우저(쿠키·로그인 날아감)
-    // 대신 디스크의 프로파일로 띄워, 한 번 로그인하면 다음 실행에도 세션이 유지된다(expandHome가 ~ 확장).
-    // --output-dir: 스크린샷 정본을 os.tmpdir() 기본값(리핑됨 + agentlas://localfile 서빙 불가)
-    // 대신 ~/.agentlas/captures/browser 에 남긴다 — 채팅 마크다운 이미지가 실제로 렌더되는 경로.
-    // --output-max-size 로 playwright 가 스스로 오래된 출력을 비운다.
-    args: [
-      playwrightMcpCliPath(),
-      "--user-data-dir", "~/.agentlas/browser-profile",
-      "--output-dir", "~/.agentlas/captures/browser",
-      "--output-max-size", "268435456",
-    ],
+    // ★자격증명 서랍은 하나다. 예전에는 이 항목이 `--user-data-dir ~/.agentlas/browser-profile`
+    // 로 **두 번째 프로필**을 만들었다. 그래서 사용자가 Agentlas 브라우저에 로그인해 둬도
+    // playwright 가 선택되는 실행은 로그인 0개짜리 창을 몰았다(2026-08-19 X 자동화 실측).
+    // 지금은 두 항목 모두 같은 런처를 실행한다 — 전용 Chrome 하나를 띄우고 @playwright/mcp 를
+    // CDP 로 붙이므로, 어느 쪽이 선택되든 같은 로그인 상태를 본다.
+    args: ["~/.agentlas/agentlas-browser-cdp.mjs"],
     trust: "official",
     docsUrl: "https://github.com/microsoft/playwright-mcp",
     brandColor: "#2EAD33",

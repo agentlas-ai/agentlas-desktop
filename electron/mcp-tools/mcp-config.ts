@@ -369,22 +369,19 @@ function argsWithCdpEndpoint(args: string[], endpoint: string): string[] {
   return next;
 }
 
-function argsWithBrowserProfile(key: string, args: string[], opts?: McpConfigBuildOptions): string[] {
-  if (key !== "playwright" || !opts?.browserProfileKey) return args;
-  const profileDir = userDataPath("mcp", "browser-profiles", safeProfileKey(opts.browserProfileKey));
-  // A persistent browser profile contains cookies, login sessions and local
-  // storage. Treat the directory itself as credential material, including when
-  // an older build already created it with the process umask (commonly 0755).
-  ensurePrivateDir(profileDir);
-  const next = args.slice();
-  const flagIndex = next.findIndex((arg) => arg === "--user-data-dir" || arg.startsWith("--user-data-dir="));
-  if (flagIndex < 0) return [...next, "--user-data-dir", profileDir];
-  if (next[flagIndex] === "--user-data-dir") {
-    next[flagIndex + 1] = profileDir;
-  } else {
-    next[flagIndex] = `--user-data-dir=${profileDir}`;
-  }
-  return next;
+/**
+ * ★자격증명 서랍은 하나다 — 실행 키마다 프로필을 새로 파지 않는다.
+ *
+ * 예전에는 `browserProfileKey` 마다 `<userData>/mcp/browser-profiles/<key>` 를 만들어 줬다.
+ * 그 결과 사용자는 Agentlas 브라우저에 로그인해 두고도 실행마다 로그인 0개짜리 창을 받았고,
+ * 자격증명이 여러 서랍으로 갈라졌다(2026-08-19 실측: 전용 프로필·browser-profile·per-key 등
+ * 서랍 다섯). 지금은 브라우저 도구가 전부 같은 런처를 통해 전용 Chrome 하나에 CDP 로 붙는다.
+ *
+ * 사용자가 직접 등록한 커스텀 서버가 자기 `--user-data-dir` 을 들고 오면 그건 그대로 존중한다 —
+ * 우리가 만든 인자가 아니므로 말없이 바꾸지 않는다.
+ */
+function argsWithBrowserProfile(_key: string, args: string[], _opts?: McpConfigBuildOptions): string[] {
+  return args;
 }
 
 /**

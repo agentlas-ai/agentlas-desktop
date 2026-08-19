@@ -861,7 +861,27 @@ function reconcileOwnerWithRetry(attempts = 4, delayMs = 90) {
 }
 `;
 
+/**
+ * 이 런처 파일(~/.agentlas/agentlas-browser-cdp.mjs)은 **두 프로그램이 쓴다** — 데스크탑의
+ * materializeBrowserCdpLauncher 와 Agentlas-OS 의 agentlas_browser.py:materialize_launcher.
+ * 둘 다 "내용이 다르면 덮어쓴다"였기 때문에 나중에 실행된 쪽이 이겼고, 사용자 머신에서는
+ * 자기도 모르게 동작이 오락가락했다(한쪽은 개인 Chrome 의 쿠키·저장된 비밀번호까지 시드한다).
+ *
+ * 그래서 파일이 자기 계약 번호를 들고 다닌다. 두 writer 모두 **자기보다 높거나 같은 번호가
+ * 이미 설치돼 있으면 덮어쓰지 않는다.** 낮은 번호나 남이 만든 파일만 갱신한다.
+ */
+export const BROWSER_CDP_LAUNCHER_CONTRACT = 2;
+
+/** 설치된 런처 파일에서 계약 번호를 읽는다. 표식이 없으면 null(= 계약 이전 파일). */
+export function readLauncherContractVersion(source: string): number | null {
+  const match = source.match(/@agentlas-browser-cdp-contract\s+(\d+)/);
+  if (!match) return null;
+  const parsed = Number.parseInt(match[1], 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 const LAUNCHER_SOURCE = String.raw`#!/usr/bin/env node
+// @agentlas-browser-cdp-contract ${BROWSER_CDP_LAUNCHER_CONTRACT}
 // Agentlas Browser (CDP) — 범용 엔진. Agentlas 전용 Chrome 프로필을 원격 디버깅 포트로 띄우고
 // @playwright/mcp 를 CDP 로 붙여 MCP 브라우저 도구를 제공한다. 이 프로세스가 client ↔ @playwright/mcp
 // 사이를 stdio 로 프록시하며 (1) 되돌릴 수 없는 행동 승인 게이트, (2) learn-and-replay 스킬 레이어를 얹는다.
@@ -1224,7 +1244,16 @@ export function materializeBrowserCdpLauncher(): string {
   try {
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     const existing = fs.existsSync(dest) ? fs.readFileSync(dest, "utf8") : null;
-    if (existing !== LAUNCHER_SOURCE) fs.writeFileSync(dest, LAUNCHER_SOURCE, "utf8");
+    if (existing === LAUNCHER_SOURCE) return dest;
+    // 설치된 쪽이 더 높은 계약이면 그대로 둔다 — 다운그레이드는 침묵의 동작 변경이다.
+    const installed = existing ? readLauncherContractVersion(existing) : null;
+    if (installed !== null && installed > BROWSER_CDP_LAUNCHER_CONTRACT) {
+      console.warn(
+        `[agentlas-browser] keeping installed launcher (contract ${installed} > ${BROWSER_CDP_LAUNCHER_CONTRACT})`,
+      );
+      return dest;
+    }
+    fs.writeFileSync(dest, LAUNCHER_SOURCE, "utf8");
   } catch (err) {
     console.error("[agentlas-browser] materialize failed:", err);
   }
