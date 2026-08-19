@@ -125,9 +125,10 @@ export const RUNTIME_CAPABILITIES: Record<RuntimeKind, RuntimeCapabilityDescript
     },
     distinctiveContextFiles: ["GEMINI.md"],
     hook: {
-      config: "~/.gemini/config/hooks.json (PreInvocation et al)",
-      failMode: "unprobed",
-      evidence: "live file on this machine carries agentlas-memory PreInvocation + agentlas-one Stop entries; deny semantics not yet probed",
+      config: "~/.gemini/config/hooks.json — PreInvocation and Stop work (our own hooks run there); PreToolUse does NOT fire on the headless path",
+      failMode: "open",
+      evidence:
+        "measured 2026-08-19 (agy 1.1.14): a PreToolUse hook returning permissionDecision deny never ran (hook script produced no output at all) and write_file created the file anyway. Tried twice — env-prefixed command and a plain wrapper script — same result. The binary contains the PreToolUse string, but a symbol is not a chokepoint. PreInvocation/Stop are proven by our own shipped hooks in that same file",
     },
   },
   grok: {
@@ -143,9 +144,10 @@ export const RUNTIME_CAPABILITIES: Record<RuntimeKind, RuntimeCapabilityDescript
     // grok reads CLAUDE.md/AGENTS.md too (vendor docs) — shared, so not distinctive.
     distinctiveContextFiles: [],
     hook: {
-      config: "--plugin-dir <DIR> (always-trusted per-process injection point)",
+      config: "grok agent --plugin-dir <DIR> — the flag exists ONLY on the agent subcommand, which is the path grok runs on here (ACP)",
       failMode: "open",
-      evidence: "capability matrix 2026-08-18; fail-open on hook crash per vendor docs — the cross broker must treat hook failure as run-abort, not pass",
+      evidence:
+        "measured 2026-08-19 (grok 1.0.5): `grok agent --plugin-dir <DIR> stdio` starts and answers initialize (exit 0); wired in electron/runtime/acp.ts. Two wrong placements measured first — the top-level flag refuses to start, and a project-scope .grok/config.toml hook never fired on the headless path. Vendor docs: that scope is always trusted, and a PreToolUse deny in stdout JSON is honored regardless of exit code; a crashed hook still fails open, so the broker treats hook failure as run-abort",
     },
   },
   cursor: {

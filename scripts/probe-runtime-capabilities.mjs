@@ -126,6 +126,21 @@ for (const surface of COMMAND_SURFACES) {
   console.log(`${existsSync(surface.dir) ? "DIR   " : "ABSENT"} ${surface.kind} command surface ${surface.dir}`);
 }
 
+/*
+ * ★훅 강제 상태 — 이건 플래그 유무가 아니라 **실측 결과**라서 프로브가 재측정하지
+ * 않는다(도구를 실제로 실행시켜야 알 수 있다). 대신 서술자에 적힌 판정을 그대로
+ * 보고해, "아직 안 한 것"이 사람 기억이 아니라 출력에 남게 한다.
+ */
+const HOOK_STATUS = [
+  ["claude-code", "WIRED   PreToolUse via --settings (measured 2026-08-04)"],
+  ["grok", "WIRED   grok agent --plugin-dir (measured 2026-08-19)"],
+  ["antigravity", "REFUTED PreToolUse does not fire on the headless path (measured 2026-08-19) — MCP tools still gated by the proxy"],
+  ["codex", "UNPROBED enforcement re-probe blocked until the usage limit clears"],
+  ["cursor", "UNMEASURABLE cursor-agent is not installed on this machine"],
+  ["kimi", "UNMEASURABLE kimi is not installed on this machine"],
+];
+console.log("");
+for (const [kind, status] of HOOK_STATUS) console.log(`HOOK  ${kind}: ${status}`);
 console.log(`\nprobe summary: drift=${drift} skipped=${skipped}`);
 if (check && drift > 0) {
   console.error("probe-runtime-capabilities: descriptor drifted from installed CLIs (see DRIFT lines)");
