@@ -492,6 +492,9 @@ const api: AgentlasIpc = {
     scanCredentials: (profileId?: string | null) => ipcRenderer.invoke("browser:scanCredentials", profileId ?? null),
     importCredentials: (profileId: string, domains: string[]) =>
       ipcRenderer.invoke("browser:importCredentials", profileId, domains),
+    credentialConsent: () => ipcRenderer.invoke("browser:credentialConsent"),
+    revokeCredentialConsent: () => ipcRenderer.invoke("browser:revokeCredentialConsent"),
+    refreshCredentials: () => ipcRenderer.invoke("browser:refreshCredentials"),
     listPermissions: () => ipcRenderer.invoke("browser:listPermissions"),
     revokePermission: (site: string, actionType: string) =>
       ipcRenderer.invoke("browser:revokePermission", site, actionType),

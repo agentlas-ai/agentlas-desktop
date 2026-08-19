@@ -6,6 +6,7 @@ import type {
   MultimodalSettings,
 } from "./multimodal";
 import type {
+  BrowserCredentialConsent,
   BrowserCredentialImportResult,
   BrowserCredentialScanResult,
 } from "./browser-credentials";
@@ -6465,6 +6466,13 @@ export interface AgentlasIpc {
     scanCredentials: (profileId?: string | null) => Promise<BrowserCredentialScanResult>;
     /** 고른 도메인의 세션만 전용 프로필로 가져오고 Connect 목록에 등록한다. */
     importCredentials: (profileId: string, domains: string[]) => Promise<BrowserCredentialImportResult>;
+    /** 지금 승인 상태와, 아직 승인이 없다면 물어볼 만한 로그인이 몇 개인지. */
+    credentialConsent: () => Promise<
+      { consent: BrowserCredentialConsent; pending: boolean; profileId: string | null; count: number }
+    >;
+    revokeCredentialConsent: () => Promise<BrowserCredentialConsent>;
+    /** 주기를 기다리지 않고 지금 갱신 — 자동 갱신과 같은 경로. */
+    refreshCredentials: () => Promise<BrowserCredentialConsent>;
     listPermissions: () => Promise<BrowserPermissionEntry[]>;
     revokePermission: (site: string, actionType: string) => Promise<{ ok: true }>;
     resolveApproval: (requestId: string, decision: BrowserApprovalDecision) => Promise<{ ok: boolean }>;

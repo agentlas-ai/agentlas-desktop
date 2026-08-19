@@ -1059,6 +1059,11 @@ app.whenReady().then(async () => {
     }
   };
   ensureDefaultMcpPluginsInstalled();
+  // 승인된 브라우저 로그인은 앱이 뜰 때 한 번 스스로 최신이 된다(주기 미도래면 즉시 반환).
+  // 창을 띄우기 전에 붙들지 않는다 — 자격증명 갱신 때문에 앱이 늦게 뜨면 안 된다.
+  void import("./browser/credential-sync")
+    .then(({ refreshBrowserCredentialsIfDue }) => refreshBrowserCredentialsIfDue())
+    .catch(() => { /* 갱신 실패는 시작을 막지 않는다 */ });
   traceStartup("local-data-ready");
   // Provider CLI updates are main-owned and independent of the Dashboard
   // renderer. This starts after the store/bootstrap gates so the maintenance

@@ -17,6 +17,7 @@ export default function BrowserPage() {
   const [tab, setTab] = useState<Tab>("sites");
   const [editing, setEditing] = useState<BrowserSite | "new" | null>(null);
   const [importing, setImporting] = useState(false);
+  const [consentPrompt, setConsentPrompt] = useState<{ count: number } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [openingSite, setOpeningSite] = useState<string | null>(null);
 
@@ -32,6 +33,13 @@ export default function BrowserPage() {
     setStatus(st);
     setSites(ss);
     setLogs(lg);
+    // 승인 상태는 목록과 함께 다시 읽는다 — 가져오기 직후 배너가 스스로 사라져야 한다.
+    try {
+      const c = await api.browser.credentialConsent();
+      setConsentPrompt(c.pending && c.count > 0 ? { count: c.count } : null);
+    } catch {
+      setConsentPrompt(null);
+    }
   }, [api]);
 
   useEffect(() => {
@@ -173,6 +181,27 @@ export default function BrowserPage() {
 
       {tab === "sites" && (
         <section className="browser-sites">
+          {/* ★승인 전 한 번만 묻는다. 승인하면 그 뒤로는 제품이 알아서 갱신하므로 이 줄은 사라진다.
+              물어볼 로그인이 실제로 있을 때만 나온다 — 빈 제안은 소음이다. */}
+          {consentPrompt && (
+            <div className="sites-consent">
+              <div>
+                <strong>
+                  {ko
+                    ? `평소 쓰는 브라우저에 로그인된 곳 ${consentPrompt.count}개를 찾았습니다.`
+                    : `Found ${consentPrompt.count} places you are already signed in to.`}
+                </strong>
+                <span>
+                  {ko
+                    ? "가져오면 에이전트가 그 로그인으로 일합니다. 이후에는 자동으로 최신 상태를 유지합니다."
+                    : "Import them and agents work with those logins. They are kept fresh automatically afterwards."}
+                </span>
+              </div>
+              <button className="browser-btn accent" onClick={() => setImporting(true)}>
+                {ko ? "골라서 가져오기" : "Choose what to import"}
+              </button>
+            </div>
+          )}
           <div className="sites-toolbar">
             {/* ★주 행동은 "가져오기"다. 평소 브라우저에 이미 있는 로그인을 고르기만 하면 되는데
                 주소를 손으로 치고 다시 로그인하는 쪽이 기본일 이유가 없다. */}
@@ -304,6 +333,30 @@ export default function BrowserPage() {
       {toast && <div className="browser-toast">{toast}</div>}
 
       <style jsx>{`
+        .sites-consent {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 14px;
+          padding: 12px 14px;
+          margin-bottom: 12px;
+          border: 1px solid var(--paper-edge);
+          border-radius: 11px;
+          background: var(--paper);
+        }
+        .sites-consent > div {
+          display: flex;
+          flex-direction: column;
+          gap: 3px;
+        }
+        .sites-consent strong {
+          font-size: 13px;
+        }
+        .sites-consent span {
+          font-size: 12px;
+          opacity: 0.72;
+          line-height: 1.5;
+        }
         .browser-root {
           width: 100%;
           max-width: 920px;

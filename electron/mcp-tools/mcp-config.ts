@@ -410,6 +410,15 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     }
   }
   if (!opts?.skipDefaultSeed) ensureDefaultMcpPluginsInstalled();
+  // ★승인된 자격증명은 실행 직전에 스스로 최신이 된다. 이 함수는 모든 런타임 실행이 지나는
+  //   길목이라(모든 채널·그래프 노드 포함), 여기 한 번 걸면 어디서 브라우저를 쓰든 로그인이 있다.
+  //   승인이 없으면 즉시 반환하고 아무것도 복사하지 않는다. 실패해도 실행을 막지 않는다.
+  try {
+    const { refreshBrowserCredentialsIfDue } = await import("../browser/credential-sync");
+    await refreshBrowserCredentialsIfDue();
+  } catch {
+    /* 자격증명 갱신 실패가 도구 설정 작성을 막아서는 안 된다 */
+  }
   const dir = userDataPath("mcp");
   const configPath = path.join(
     dir,

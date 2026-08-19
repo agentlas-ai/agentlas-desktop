@@ -641,6 +641,13 @@ import {
 } from "./browser/connect";
 import type { BrowserPermissionDecision } from "./browser/connect";
 import { importBrowserCredentials, scanBrowserCredentials } from "./browser/credential-import";
+import {
+  browserCredentialConsentIsPending,
+  getBrowserCredentialConsent,
+  recordBrowserCredentialConsent,
+  refreshBrowserCredentialsIfDue,
+  revokeBrowserCredentialConsent,
+} from "./browser/credential-sync";
 import { captureBrowserLiveFrame, focusBrowserLiveTarget } from "./browser/live-view";
 import { captureComputerUsePreview } from "./computer-use/preview";
 import {
@@ -3248,9 +3255,43 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("browser:scanCredentials", (_e, profileId?: string | null) =>
     scanBrowserCredentials(typeof profileId === "string" ? profileId : null),
   );
-  ipcMain.handle("browser:importCredentials", (_e, profileId: string, domains: string[]) =>
-    importBrowserCredentials(String(profileId || ""), Array.isArray(domains) ? domains.map(String) : []),
-  );
+  ipcMain.handle("browser:importCredentials", async (_e, profileId: string, domains: string[]) => {
+    const id = String(profileId || "");
+    const list = Array.isArray(domains) ? domains.map(String) : [];
+    const result = await importBrowserCredentials(id, list);
+    // 사용자가 실제로 가져온 그 선택이 곧 승인이다. 별도 동의 화면을 한 번 더 띄우지 않는다 —
+    // 승인은 "묻는 순간"에 한 번(오너결정 2026-08-15), 그 뒤로는 이 집합만 자동 갱신한다.
+    if (result.ok && result.linkedSites.length > 0) {
+      // linkedSites 는 정규화된 사이트 문자열이고 스킴이 없을 수 있다("x.com"). new URL 에
+      // 그대로 넣으면 던져서 승인 도메인이 통째로 빈 배열이 됐다 — 그러면 승인은 기록되는데
+      // 자동 갱신은 영영 아무것도 하지 않는 반쪽 배선이 된다(실측으로 잡음).
+      const granted = result.linkedSites
+        .map((s) => {
+          const raw = String(s || "").trim();
+          if (!raw) return "";
+          try {
+            const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`;
+            return new URL(withScheme).hostname.replace(/^www\./, "").toLowerCase();
+          } catch {
+            return "";
+          }
+        })
+        .filter(Boolean);
+      if (granted.length > 0) recordBrowserCredentialConsent(id, granted);
+    }
+    return result;
+  });
+  ipcMain.handle("browser:credentialConsent", () => ({
+    consent: getBrowserCredentialConsent(),
+    ...browserCredentialConsentIsPending(),
+  }));
+  ipcMain.handle("browser:revokeCredentialConsent", () => revokeBrowserCredentialConsent());
+  // 주기를 기다리지 않고 지금 갱신. 사용자가 방금 어딘가에 새로 로그인했을 때 필요하고,
+  // 자동 갱신과 **같은 코드 경로**를 쓰므로 이 버튼이 도는지가 곧 자동 갱신이 도는지다.
+  ipcMain.handle("browser:refreshCredentials", async () => {
+    await refreshBrowserCredentialsIfDue({ force: true });
+    return getBrowserCredentialConsent();
+  });
   ipcMain.handle("browser:listPermissions", () => browserListPermissions());
   ipcMain.handle("browser:revokePermission", (_e, site: string, actionType: string) =>
     browserRevokePermission(site, actionType),
