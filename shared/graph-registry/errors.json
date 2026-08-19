@@ -7,12 +7,382 @@
   },
   "errors": [
     {
-      "code": "NODE_TYPE_UNSUPPORTED",
+      "code": "APPROVAL_REJECTED",
       "since": "1.0",
       "severity": "node",
       "retryable": false,
+      "cardKey": "approval_rejected",
+      "nextActions": [
+        "edit_graph"
+      ],
+      "status": "specified",
+      "note": "승인 게이트 폐지(오너 이사회 결정 2026-08-10)로 커널이 더 이상 내지 않는다. 옛 실행 기록(automation_node_approvals)에 남은 코드를 읽기 위한 어휘로만 유지."
+    },
+    {
+      "code": "APPROVAL_REQUIRED",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": false,
+      "cardKey": "approval_required",
+      "nextActions": [
+        "approve",
+        "reject"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "APPROVAL_TIMED_OUT",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": false,
+      "cardKey": "approval_timed_out",
+      "nextActions": [
+        "approve",
+        "reject",
+        "edit_graph"
+      ],
+      "status": "implemented",
+      "note": "기다림이 약속한 시간을 넘었다. 타임아웃 문이 이어져 있으면 그리로 가고, 없으면 계속 기다린다."
+    },
+    {
+      "code": "ARCHITECT_NO_CHANGE",
+      "since": "1.1",
+      "severity": "run",
+      "retryable": true,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "설계가 바꿀 것을 하나도 내지 않았다. ★게이트 스캔 범위 밖이라 오래 미등재로 살아 있었다(2026-08-05 범위 확대로 드러남)."
+    },
+    {
+      "code": "ARCHITECT_NO_REQUEST",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": false,
       "verbatim": true,
       "status": "implemented"
+    },
+    {
+      "code": "ARCHITECT_OUTPUT_MALFORMED",
+      "since": "1.1",
+      "severity": "run",
+      "retryable": true,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "설계 결과의 모양이 계약과 다르다. ★게이트 스캔 범위 밖이라 오래 미등재로 살아 있었다(2026-08-05 범위 확대로 드러남)."
+    },
+    {
+      "code": "ARCHITECT_OUTPUT_TOO_LARGE",
+      "since": "1.1",
+      "severity": "run",
+      "retryable": true,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "설계 결과가 한 번에 다루기에 너무 크다. ★게이트 스캔 범위 밖이라 오래 미등재로 살아 있었다(2026-08-05 범위 확대로 드러남)."
+    },
+    {
+      "code": "ARCHITECT_OUTPUT_UNREADABLE",
+      "since": "1.1",
+      "severity": "run",
+      "retryable": true,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "설계 결과를 읽지 못했다. 못 읽은 것을 그래프로 만들지 않는다. ★게이트 스캔 범위 밖이라 오래 미등재로 살아 있었다(2026-08-05 범위 확대로 드러남)."
+    },
+    {
+      "code": "ARCHITECT_UNAVAILABLE",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": true,
+      "cardKey": "architect_unavailable",
+      "nextActions": [
+        "retry"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "AUTOMATION_NOT_CONNECTED",
+      "since": "1.0",
+      "severity": "graph",
+      "retryable": false,
+      "cardKey": "not_connected",
+      "nextActions": [
+        "open_connections"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "BLOB_UNRESOLVED",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": false,
+      "cardKey": "blob_unresolved",
+      "nextActions": [
+        "open_session"
+      ],
+      "status": "specified",
+      "spec": "06 §4.6",
+      "note": "큰 값은 실행을 세우지 않는다 — 참조 해석 실패만 이 코드다."
+    },
+    {
+      "code": "BUDGET_EXHAUSTED",
+      "since": "1.0",
+      "severity": "run",
+      "retryable": false,
+      "cardKey": "budget_exceeded",
+      "nextActions": [
+        "raise_budget",
+        "open_session"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "CODE_DEPENDENCY_MISSING",
+      "since": "1.1",
+      "severity": "node",
+      "retryable": true,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "코드가 쓰는 파이썬 패키지가 이 컴퓨터에 없고 자동 설치도 실패했다. 원문 traceback을 사람에게 그대로 던지던 것(실측: yfinance ModuleNotFoundError)을 기계 코드+설치 안내로 바꾼 자리. 설치는 스텝 샌드박스 밖에서 커널이 한다 — 스텝의 네트워크 차단과 충돌하지 않는다."
+    },
+    {
+      "code": "CODE_NODE_EMPTY",
+      "since": "1.1",
+      "severity": "node",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "코드 단계에 실행할 스크립트가 없다. '코드로 하겠다'고 해 놓고 빈 채로 저장되면 실행에서 죽는다 — 저작 시점에 막는다."
+    },
+    {
+      "code": "CODE_PRODUCED_NOTHING",
+      "since": "1.1",
+      "severity": "node",
+      "retryable": true,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "코드 단계가 값을 넘기겠다고 선언(produces)해 놓고 아무것도 돌려주지 않았다 — 예전에는 성공으로 넘어가 다음 단계가 빈 값을 정상 입력으로 받았다. 스크립트가 마지막에 result를 안 넣은 경우가 대부분이다."
+    },
+    {
+      "code": "CODE_STEP_FAILED",
+      "since": "1.1",
+      "severity": "node",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "AI가 짠 스크립트가 오류로 끝났다. stderr 원문을 보존한다 — 지어내지 않는다."
+    },
+    {
+      "code": "CONFORMANCE_GATE_FAILED",
+      "since": "1.0",
+      "severity": "build",
+      "retryable": false,
+      "verbatim": true,
+      "status": "tooling",
+      "spec": "06 §13.3",
+      "note": "게이트 러너가 내는 코드다 — 제품 코드에는 없다(C2 대상 아님)."
+    },
+    {
+      "code": "CREATE_INPUT_INVALID",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented"
+    },
+    {
+      "code": "EDGE_CONDITION_UNRESOLVED",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": false,
+      "cardKey": "condition_unresolved",
+      "nextActions": [
+        "edit_graph"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "EVAL_FAILED",
+      "since": "1.1",
+      "severity": "node",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "검증이 떨어졌는데 그 실패를 받을 곳이 없다 — fail 핸들 간선도, 이 노드를 다시 돌릴 반복도, 판정 변수를 읽는 하류도 없다. 예전에는 변수에만 적히고 실행이 계속 흘러 ok 로 끝났다(실측 2026-08-19): 검증을 붙여 놓고 통과했다고 보고하는 거짓 성공이라 여기서 멈춘다."
+    },
+    {
+      "code": "EVAL_INCOMPLETE",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": false,
+      "cardKey": "eval_incomplete",
+      "nextActions": [
+        "edit_node"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "EVAL_STUCK",
+      "since": "1.1",
+      "severity": "node",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "같은 채점 항목으로 연속 2회 실패 — 더 돌려도 같은 이유로 떨어진다. 기준이 산출물과 안 맞을 수 있으므로 상한 전에 멈추고 사람에게 넘긴다(Anthropic 'failed' 상태의 UX화, 재시도 낭비 방지)."
+    },
+    {
+      "code": "EVAL_UNAVAILABLE",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": true,
+      "cardKey": "eval_unavailable",
+      "nextActions": [
+        "rerun"
+      ],
+      "status": "implemented",
+      "note": "판정 불가는 실패가 아니다 — 일어나지 않은 판정을 결과로 쓰지 않는다."
+    },
+    {
+      "code": "INPUT_MAPPING_INVALID",
+      "since": "1.0",
+      "severity": "graph",
+      "retryable": false,
+      "cardKey": "input_mapping_invalid",
+      "nextActions": [
+        "edit_graph"
+      ],
+      "status": "specified",
+      "spec": "06 §4.5"
+    },
+    {
+      "code": "INTERVIEW_BLUEPRINT_INVALID",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": false,
+      "verbatim": true,
+      "status": "specified",
+      "note": "★2026-08-04 자기 수정 루프를 넣으면서 **쓰이지 않게 됐다**. 물어서 채울 수 있는 문제는 질문으로, 형식 문제는 재시도로 되돌아가므로 이 막다른 길에 도달하지 않는다. 지우지 않고 남겨 둔다 — 옛 기록에 이 코드가 있고, 되살아나면 그건 막다른 길이 돌아왔다는 뜻이다."
+    },
+    {
+      "code": "INTERVIEW_MODEL_UNAVAILABLE",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": true,
+      "cardKey": "interview_unavailable",
+      "nextActions": [
+        "retry"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "INTERVIEW_OUTPUT_UNREADABLE",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": true,
+      "cardKey": "interview_unreadable",
+      "nextActions": [
+        "retry"
+      ],
+      "status": "implemented",
+      "note": "모델 답에서 읽을 수 있는 형태를 못 찾았다. ★스캔 범위를 넓히고서야 드러난 코드 — 게이트가 안 보던 파일에 있었다."
+    },
+    {
+      "code": "INTERVIEW_REPEATED_QUESTIONS",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": true,
+      "cardKey": "interview_repeated",
+      "nextActions": [
+        "retry",
+        "rephrase"
+      ],
+      "status": "implemented",
+      "note": "이미 답한 것만 다시 물으려 했다. asked[] id 기반 재질문 감지 — 조사한 다른 구현에는 이 방어가 없었다."
+    },
+    {
+      "code": "INTERVIEW_SELF_CORRECTION_EXHAUSTED",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": false,
+      "cardKey": "interview_stuck",
+      "nextActions": [
+        "rephrase",
+        "open_canvas"
+      ],
+      "status": "implemented",
+      "note": "정해진 횟수만큼 스스로 고쳐 봤지만 같은 자리에서 막혔다. 무엇을 시도했는지 함께 보여준다 — 사람이 그 다음을 정한다."
+    },
+    {
+      "code": "INTERVIEW_STATE_INVALID",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented"
+    },
+    {
+      "code": "LOOP_BOUND_INVALID",
+      "since": "1.0",
+      "severity": "graph",
+      "retryable": false,
+      "cardKey": "loop_bound_missing",
+      "nextActions": [
+        "set_loop_bound"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "LOOP_BOUND_UNDECLARED",
+      "since": "1.0",
+      "severity": "graph",
+      "retryable": false,
+      "cardKey": "loop_bound_missing",
+      "nextActions": [
+        "set_loop_bound"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "LOOP_LIMIT_REACHED",
+      "since": "1.0",
+      "severity": "graph",
+      "retryable": false,
+      "cardKey": "loop_limit",
+      "nextActions": [
+        "raise_loop_bound",
+        "open_session"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "LOOP_WITHOUT_EXIT",
+      "since": "1.0",
+      "severity": "graph",
+      "retryable": false,
+      "cardKey": "loop_no_exit",
+      "nextActions": [
+        "edit_graph"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "MUTATION_UNVERIFIED",
+      "since": "1.0",
+      "severity": "run",
+      "retryable": false,
+      "cardKey": "mutation_unverified",
+      "nextActions": [
+        "reconcile_nodes"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "NODE_CLAIMED_WITHOUT_TOOLS",
+      "since": "1.1",
+      "severity": "node",
+      "retryable": true,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "바깥을 바꾸는 단계인데 외부 도구를 한 번도 부르지 않았다 — 그 답은 일어난 일이 아니라 주장이다. 호스트 자신의 예비 조회는 근거로 세지 않는다(정본 shared/tool-activity). 일시적 신호로 보고 재시도 차선을 태운 뒤에도 관측이 없으면 실패로 정산한다."
     },
     {
       "code": "NODE_FAILED",
@@ -23,18 +393,6 @@
       "nextActions": [
         "open_session",
         "rerun"
-      ],
-      "status": "implemented"
-    },
-    {
-      "code": "NODE_TIMEOUT",
-      "since": "1.0",
-      "severity": "node",
-      "retryable": true,
-      "cardKey": "node_timeout",
-      "nextActions": [
-        "rerun",
-        "raise_timeout"
       ],
       "status": "implemented"
     },
@@ -74,14 +432,23 @@
       "note": "2026-08-04 신설. 이전에는 사유 없는 Error('finished without an assistant result')였다."
     },
     {
-      "code": "EDGE_CONDITION_UNRESOLVED",
+      "code": "NODE_TIMEOUT",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": true,
+      "cardKey": "node_timeout",
+      "nextActions": [
+        "rerun",
+        "raise_timeout"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "NODE_TYPE_UNSUPPORTED",
       "since": "1.0",
       "severity": "node",
       "retryable": false,
-      "cardKey": "condition_unresolved",
-      "nextActions": [
-        "edit_graph"
-      ],
+      "verbatim": true,
       "status": "implemented"
     },
     {
@@ -96,168 +463,97 @@
       "status": "implemented"
     },
     {
-      "code": "REDUCER_WRITE_CONFLICT",
-      "since": "1.0",
-      "severity": "graph",
-      "retryable": false,
-      "cardKey": "reducer_conflict",
-      "nextActions": [
-        "rename_output",
-        "use_append"
-      ],
-      "status": "implemented"
-    },
-    {
-      "code": "REDUCER_MERGE_CONFLICT",
-      "since": "1.0",
+      "code": "OUTPUT_NODE_EMPTY",
+      "since": "1.1",
       "severity": "node",
       "retryable": false,
-      "cardKey": "reducer_conflict",
-      "nextActions": [
-        "change_reducer",
-        "add_transform"
-      ],
-      "status": "implemented"
-    },
-    {
-      "code": "LOOP_BOUND_UNDECLARED",
-      "since": "1.0",
-      "severity": "graph",
-      "retryable": false,
-      "cardKey": "loop_bound_missing",
-      "nextActions": [
-        "set_loop_bound"
-      ],
-      "status": "implemented"
-    },
-    {
-      "code": "LOOP_BOUND_INVALID",
-      "since": "1.0",
-      "severity": "graph",
-      "retryable": false,
-      "cardKey": "loop_bound_missing",
-      "nextActions": [
-        "set_loop_bound"
-      ],
-      "status": "implemented"
-    },
-    {
-      "code": "LOOP_WITHOUT_EXIT",
-      "since": "1.0",
-      "severity": "graph",
-      "retryable": false,
-      "cardKey": "loop_no_exit",
-      "nextActions": [
-        "edit_graph"
-      ],
-      "status": "implemented"
-    },
-    {
-      "code": "LOOP_LIMIT_REACHED",
-      "since": "1.0",
-      "severity": "graph",
-      "retryable": false,
-      "cardKey": "loop_limit",
-      "nextActions": [
-        "raise_loop_bound",
-        "open_session"
-      ],
-      "status": "implemented"
-    },
-    {
-      "code": "APPROVAL_REQUIRED",
-      "since": "1.0",
-      "severity": "node",
-      "retryable": false,
-      "cardKey": "approval_required",
-      "nextActions": [
-        "approve",
-        "reject"
-      ],
-      "status": "implemented"
-    },
-    {
-      "code": "APPROVAL_REJECTED",
-      "since": "1.0",
-      "severity": "node",
-      "retryable": false,
-      "cardKey": "approval_rejected",
-      "nextActions": [
-        "edit_graph"
-      ],
-      "status": "specified",
-      "note": "승인 게이트 폐지(오너 이사회 결정 2026-08-10)로 커널이 더 이상 내지 않는다. 옛 실행 기록(automation_node_approvals)에 남은 코드를 읽기 위한 어휘로만 유지."
-    },
-    {
-      "code": "MUTATION_UNVERIFIED",
-      "since": "1.0",
-      "severity": "run",
-      "retryable": false,
-      "cardKey": "mutation_unverified",
-      "nextActions": [
-        "reconcile_nodes"
-      ],
-      "status": "implemented"
-    },
-    {
-      "code": "BUDGET_EXHAUSTED",
-      "since": "1.0",
-      "severity": "run",
-      "retryable": false,
-      "cardKey": "budget_exceeded",
-      "nextActions": [
-        "raise_budget",
-        "open_session"
-      ],
-      "status": "implemented"
-    },
-    {
-      "code": "RESUME_CONFLICT",
-      "since": "1.0",
-      "severity": "run",
-      "retryable": false,
-      "cardKey": "resume_conflict",
-      "nextActions": [
-        "reload"
-      ],
-      "status": "implemented"
-    },
-    {
-      "code": "EVAL_INCOMPLETE",
-      "since": "1.0",
-      "severity": "node",
-      "retryable": false,
-      "cardKey": "eval_incomplete",
-      "nextActions": [
-        "edit_node"
-      ],
-      "status": "implemented"
-    },
-    {
-      "code": "EVAL_UNAVAILABLE",
-      "since": "1.0",
-      "severity": "node",
-      "retryable": true,
-      "cardKey": "eval_unavailable",
-      "nextActions": [
-        "rerun"
-      ],
+      "verbatim": true,
       "status": "implemented",
-      "note": "판정 불가는 실패가 아니다 — 일어나지 않은 판정을 결과로 쓰지 않는다."
+      "note": "내보낼 내용이 비어 있다. 예전에는 자동화 기본 프롬프트로 대체돼, 사람이 안 적은 것이 엉뚱하게 나갔다."
     },
     {
-      "code": "AUTOMATION_NOT_CONNECTED",
-      "since": "1.0",
-      "severity": "graph",
+      "code": "PATCH_CODE_EMPTY",
+      "since": "1.1",
+      "severity": "authoring",
+      "retryable": true,
+      "status": "implemented",
+      "note": "AI 제안 패치의 코드 단계에 스크립트 없음 — CODE_NODE_EMPTY로 실행에서 죽기 전에 저장 시점에 막는다.",
+      "verbatim": true
+    },
+    {
+      "code": "PATCH_EDGE_CONFLICT",
+      "since": "1.1",
+      "severity": "node",
       "retryable": false,
-      "cardKey": "not_connected",
-      "nextActions": [
-        "open_connections"
-      ],
-      "status": "implemented"
+      "verbatim": true,
+      "status": "implemented",
+      "note": "이미 있는 연결 id로 새로 이으려 했다. ★게이트 스캔 범위 밖이라 오래 미등재로 살아 있었다(2026-08-05 범위 확대로 드러남)."
     },
     {
-      "code": "SWAP_UNKNOWN_PROVIDER",
+      "code": "PATCH_EDGE_DANGLING",
+      "since": "1.1",
+      "severity": "node",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "없는 노드를 가리키는 연결. 그리면 실행이 도달 못 하는 섬이 생긴다. ★게이트 스캔 범위 밖이라 오래 미등재로 살아 있었다(2026-08-05 범위 확대로 드러남)."
+    },
+    {
+      "code": "PATCH_EDGE_HANDLE_MISSING",
+      "since": "1.1",
+      "severity": "authoring",
+      "retryable": true,
+      "status": "implemented",
+      "note": "AI 제안 패치의 갈림길 연결이 참/거짓 미선언 — 청사진 경로처럼 저장 시점에 막는다(실행에서 EDGE_CONDITION_UNRESOLVED로 죽기 전에).",
+      "verbatim": true
+    },
+    {
+      "code": "PATCH_EDGE_MISSING",
+      "since": "1.1",
+      "severity": "node",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "고치거나 지우려는 연결이 그래프에 없다. ★게이트 스캔 범위 밖이라 오래 미등재로 살아 있었다(2026-08-05 범위 확대로 드러남)."
+    },
+    {
+      "code": "PATCH_EMPTY",
+      "since": "1.1",
+      "severity": "node",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "고칠 내용이 하나도 없는 수정 요청. ★게이트 스캔 범위 밖이라 오래 미등재로 살아 있었다(2026-08-05 범위 확대로 드러남)."
+    },
+    {
+      "code": "PATCH_LOOP_BOUND_MISSING",
+      "since": "1.1",
+      "severity": "authoring",
+      "retryable": true,
+      "status": "implemented",
+      "note": "AI 제안 패치의 되돌아가는 연결에 반복 상한 없음 — 저장은 되고 실행에서 거절되는 모양을 막는다.",
+      "verbatim": true
+    },
+    {
+      "code": "PATCH_NODE_CONFLICT",
+      "since": "1.1",
+      "severity": "node",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "이미 있는 노드 id로 새로 만들려 했다. ★게이트 스캔 범위 밖이라 오래 미등재로 살아 있었다(2026-08-05 범위 확대로 드러남)."
+    },
+    {
+      "code": "PATCH_NODE_MISSING",
+      "since": "1.1",
+      "severity": "node",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "고치거나 지우려는 노드가 그래프에 없다. ★게이트 스캔 범위 밖이라 오래 미등재로 살아 있었다(2026-08-05 범위 확대로 드러남)."
+    },
+    {
+      "code": "PATCH_NO_GRAPH",
       "since": "1.0",
       "severity": "edit",
       "retryable": false,
@@ -265,65 +561,13 @@
       "status": "implemented"
     },
     {
-      "code": "SWAP_CAPABILITY_MISMATCH",
-      "since": "1.0",
-      "severity": "edit",
+      "code": "PATCH_OP_UNKNOWN",
+      "since": "1.1",
+      "severity": "node",
       "retryable": false,
       "verbatim": true,
-      "status": "implemented"
-    },
-    {
-      "code": "SWAP_NO_MATCH",
-      "since": "1.0",
-      "severity": "edit",
-      "retryable": false,
-      "verbatim": true,
-      "status": "implemented"
-    },
-    {
-      "code": "SWAP_NODE_NOT_FOUND",
-      "since": "1.0",
-      "severity": "edit",
-      "retryable": false,
-      "verbatim": true,
-      "status": "implemented"
-    },
-    {
-      "code": "SWAP_NOT_AGENT_NODE",
-      "since": "1.0",
-      "severity": "edit",
-      "retryable": false,
-      "verbatim": true,
-      "status": "implemented"
-    },
-    {
-      "code": "SWAP_HUB_RELEASE_UNPINNED",
-      "since": "1.0",
-      "severity": "edit",
-      "retryable": false,
-      "verbatim": true,
-      "status": "implemented"
-    },
-    {
-      "code": "SCHEMA_UNSUPPORTED_MAJOR",
-      "since": "1.0",
-      "severity": "channel",
-      "retryable": false,
-      "cardKey": "update_required",
-      "nextActions": [
-        "update_app"
-      ],
-      "status": "specified",
-      "spec": "06 §2.3"
-    },
-    {
-      "code": "WIRE_KIND_UNKNOWN",
-      "since": "1.0",
-      "severity": "message",
-      "retryable": false,
-      "verbatim": true,
-      "status": "specified",
-      "spec": "06 §2.3"
+      "status": "implemented",
+      "note": "모르는 수정 동작. 조용히 무시하면 사람은 고쳐진 줄 안다. ★게이트 스캔 범위 밖이라 오래 미등재로 살아 있었다(2026-08-05 범위 확대로 드러남)."
     },
     {
       "code": "PATH_ROOT_UNKNOWN",
@@ -347,226 +591,38 @@
       "spec": "06 §4.5"
     },
     {
-      "code": "INPUT_MAPPING_INVALID",
+      "code": "REDUCER_MERGE_CONFLICT",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": false,
+      "cardKey": "reducer_conflict",
+      "nextActions": [
+        "change_reducer",
+        "add_transform"
+      ],
+      "status": "implemented"
+    },
+    {
+      "code": "REDUCER_WRITE_CONFLICT",
       "since": "1.0",
       "severity": "graph",
       "retryable": false,
-      "cardKey": "input_mapping_invalid",
+      "cardKey": "reducer_conflict",
       "nextActions": [
-        "edit_graph"
-      ],
-      "status": "specified",
-      "spec": "06 §4.5"
-    },
-    {
-      "code": "BLOB_UNRESOLVED",
-      "since": "1.0",
-      "severity": "node",
-      "retryable": false,
-      "cardKey": "blob_unresolved",
-      "nextActions": [
-        "open_session"
-      ],
-      "status": "specified",
-      "spec": "06 §4.6",
-      "note": "큰 값은 실행을 세우지 않는다 — 참조 해석 실패만 이 코드다."
-    },
-    {
-      "code": "CONFORMANCE_GATE_FAILED",
-      "since": "1.0",
-      "severity": "build",
-      "retryable": false,
-      "verbatim": true,
-      "status": "tooling",
-      "spec": "06 §13.3",
-      "note": "게이트 러너가 내는 코드다 — 제품 코드에는 없다(C2 대상 아님)."
-    },
-    {
-      "code": "PATCH_NO_GRAPH",
-      "since": "1.0",
-      "severity": "edit",
-      "retryable": false,
-      "verbatim": true,
-      "status": "implemented"
-    },
-    {
-      "code": "ARCHITECT_NO_REQUEST",
-      "since": "1.0",
-      "severity": "edit",
-      "retryable": false,
-      "verbatim": true,
-      "status": "implemented"
-    },
-    {
-      "code": "ARCHITECT_UNAVAILABLE",
-      "since": "1.0",
-      "severity": "edit",
-      "retryable": true,
-      "cardKey": "architect_unavailable",
-      "nextActions": [
-        "retry"
+        "rename_output",
+        "use_append"
       ],
       "status": "implemented"
     },
     {
-      "code": "INTERVIEW_STATE_INVALID",
+      "code": "RESUME_CONFLICT",
       "since": "1.0",
-      "severity": "edit",
+      "severity": "run",
       "retryable": false,
-      "verbatim": true,
-      "status": "implemented"
-    },
-    {
-      "code": "INTERVIEW_MODEL_UNAVAILABLE",
-      "since": "1.0",
-      "severity": "edit",
-      "retryable": true,
-      "cardKey": "interview_unavailable",
+      "cardKey": "resume_conflict",
       "nextActions": [
-        "retry"
+        "reload"
       ],
-      "status": "implemented"
-    },
-    {
-      "code": "INTERVIEW_BLUEPRINT_INVALID",
-      "since": "1.0",
-      "severity": "edit",
-      "retryable": false,
-      "verbatim": true,
-      "status": "specified",
-      "note": "★2026-08-04 자기 수정 루프를 넣으면서 **쓰이지 않게 됐다**. 물어서 채울 수 있는 문제는 질문으로, 형식 문제는 재시도로 되돌아가므로 이 막다른 길에 도달하지 않는다. 지우지 않고 남겨 둔다 — 옛 기록에 이 코드가 있고, 되살아나면 그건 막다른 길이 돌아왔다는 뜻이다."
-    },
-    {
-      "code": "CREATE_INPUT_INVALID",
-      "since": "1.0",
-      "severity": "edit",
-      "retryable": false,
-      "verbatim": true,
-      "status": "implemented"
-    },
-    {
-      "code": "TOOL_NODE_UNCONFIGURED",
-      "since": "1.0",
-      "severity": "node",
-      "retryable": false,
-      "cardKey": "tool_node_unconfigured",
-      "nextActions": [
-        "edit_node"
-      ],
-      "status": "implemented",
-      "note": "도구 단계인데 무슨 도구인지가 없다. 조용히 통과시키면 사용자는 붙였다고 믿는다."
-    },
-    {
-      "code": "TOOL_NODE_UNATTACHED",
-      "since": "1.0",
-      "severity": "node",
-      "retryable": false,
-      "cardKey": "tool_node_unattached",
-      "nextActions": [
-        "edit_graph"
-      ],
-      "status": "implemented",
-      "note": "어느 에이전트에도 안 이어져 아무 데도 안 쓰인다. 커넥터 C06이 성립하지 않는 상태."
-    },
-    {
-      "code": "APPROVAL_TIMED_OUT",
-      "since": "1.0",
-      "severity": "node",
-      "retryable": false,
-      "cardKey": "approval_timed_out",
-      "nextActions": [
-        "approve",
-        "reject",
-        "edit_graph"
-      ],
-      "status": "implemented",
-      "note": "기다림이 약속한 시간을 넘었다. 타임아웃 문이 이어져 있으면 그리로 가고, 없으면 계속 기다린다."
-    },
-    {
-      "code": "INTERVIEW_SELF_CORRECTION_EXHAUSTED",
-      "since": "1.0",
-      "severity": "edit",
-      "retryable": false,
-      "cardKey": "interview_stuck",
-      "nextActions": [
-        "rephrase",
-        "open_canvas"
-      ],
-      "status": "implemented",
-      "note": "정해진 횟수만큼 스스로 고쳐 봤지만 같은 자리에서 막혔다. 무엇을 시도했는지 함께 보여준다 — 사람이 그 다음을 정한다."
-    },
-    {
-      "code": "SUBGRAPH_NOT_FOUND",
-      "since": "1.0",
-      "severity": "node",
-      "retryable": false,
-      "cardKey": "subgraph_not_found",
-      "nextActions": [
-        "edit_node"
-      ],
-      "status": "implemented",
-      "note": "부르려는 그래프가 없다. 지워졌거나 이름이 바뀐 것 — id로 고정하는 이유다."
-    },
-    {
-      "code": "SUBGRAPH_DEPTH_EXCEEDED",
-      "since": "1.0",
-      "severity": "graph",
-      "retryable": false,
-      "cardKey": "subgraph_depth",
-      "nextActions": [
-        "edit_graph"
-      ],
-      "status": "implemented",
-      "note": "★그래프가 그래프를 부르는 깊이가 상한을 넘었다. 서로 부르면 무한 재귀가 되므로 상한이 필수다."
-    },
-    {
-      "code": "SUBGRAPH_SELF_CALL",
-      "since": "1.0",
-      "severity": "node",
-      "retryable": false,
-      "cardKey": "subgraph_self",
-      "nextActions": [
-        "edit_node"
-      ],
-      "status": "implemented",
-      "note": "자기 자신을 부른다. 깊이 상한 전에 바로 잡는다 — 사유가 더 정확하다."
-    },
-    {
-      "code": "SUBGRAPH_FAILED",
-      "since": "1.0",
-      "severity": "node",
-      "retryable": true,
-      "cardKey": "subgraph_failed",
-      "nextActions": [
-        "open_inner_run",
-        "rerun"
-      ],
-      "status": "implemented",
-      "note": "안쪽 그래프가 실패했다. 안쪽 사유를 그대로 들고 온다 — 바깥에서 '그냥 실패'로 뭉개지 않는다."
-    },
-    {
-      "code": "RUN_REQUEST_REF_MISSING",
-      "since": "1.0",
-      "severity": "request",
-      "retryable": false,
-      "verbatim": true,
-      "status": "implemented"
-    },
-    {
-      "code": "RUN_REQUEST_REF_AMBIGUOUS",
-      "since": "1.0",
-      "severity": "request",
-      "retryable": false,
-      "verbatim": true,
-      "status": "implemented",
-      "note": "이름이 겹친다. ★이름으로 부른 것이 어느 날 다른 그래프를 켜면 조용한 사고다 — 지어내지 않고 거절한다."
-    },
-    {
-      "code": "RUN_REQUEST_NOT_FOUND",
-      "since": "1.0",
-      "severity": "request",
-      "retryable": false,
-      "verbatim": true,
       "status": "implemented"
     },
     {
@@ -594,38 +650,165 @@
       "note": "값 없이 시작하면 {{구멍}}이 빈 문자열로 메꿔져 지어낸 결과가 정상 완료로 기록된다."
     },
     {
-      "code": "INTERVIEW_OUTPUT_UNREADABLE",
+      "code": "RUN_REQUEST_NOT_FOUND",
       "since": "1.0",
-      "severity": "edit",
-      "retryable": true,
-      "cardKey": "interview_unreadable",
-      "nextActions": [
-        "retry"
-      ],
-      "status": "implemented",
-      "note": "모델 답에서 읽을 수 있는 형태를 못 찾았다. ★스캔 범위를 넓히고서야 드러난 코드 — 게이트가 안 보던 파일에 있었다."
+      "severity": "request",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented"
     },
     {
-      "code": "INTERVIEW_REPEATED_QUESTIONS",
-      "since": "1.0",
-      "severity": "edit",
+      "code": "RUN_REQUEST_QUEUE_UNAVAILABLE",
+      "since": "1.1",
+      "severity": "run",
       "retryable": true,
-      "cardKey": "interview_repeated",
-      "nextActions": [
-        "retry",
-        "rephrase"
-      ],
+      "verbatim": true,
       "status": "implemented",
-      "note": "이미 답한 것만 다시 물으려 했다. asked[] id 기반 재질문 감지 — 조사한 다른 구현에는 이 방어가 없었다."
+      "note": "C47·C48 — 요청은 옳은데 대기열에 적지 못했다. 접수 못 한 것을 접수했다고 답하지 않는다."
     },
     {
-      "code": "TOOL_BROKER_TOOL_NOT_DECLARED",
+      "code": "RUN_REQUEST_REF_AMBIGUOUS",
+      "since": "1.0",
+      "severity": "request",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "이름이 겹친다. ★이름으로 부른 것이 어느 날 다른 그래프를 켜면 조용한 사고다 — 지어내지 않고 거절한다."
+    },
+    {
+      "code": "RUN_REQUEST_REF_MISSING",
+      "since": "1.0",
+      "severity": "request",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented"
+    },
+    {
+      "code": "SCHEMA_UNSUPPORTED_MAJOR",
+      "since": "1.0",
+      "severity": "channel",
+      "retryable": false,
+      "cardKey": "update_required",
+      "nextActions": [
+        "update_app"
+      ],
+      "status": "specified",
+      "spec": "06 §2.3"
+    },
+    {
+      "code": "SUBGRAPH_DEPTH_EXCEEDED",
+      "since": "1.0",
+      "severity": "graph",
+      "retryable": false,
+      "cardKey": "subgraph_depth",
+      "nextActions": [
+        "edit_graph"
+      ],
+      "status": "implemented",
+      "note": "★그래프가 그래프를 부르는 깊이가 상한을 넘었다. 서로 부르면 무한 재귀가 되므로 상한이 필수다."
+    },
+    {
+      "code": "SUBGRAPH_FAILED",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": true,
+      "cardKey": "subgraph_failed",
+      "nextActions": [
+        "open_inner_run",
+        "rerun"
+      ],
+      "status": "implemented",
+      "note": "안쪽 그래프가 실패했다. 안쪽 사유를 그대로 들고 온다 — 바깥에서 '그냥 실패'로 뭉개지 않는다."
+    },
+    {
+      "code": "SUBGRAPH_NOT_FOUND",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": false,
+      "cardKey": "subgraph_not_found",
+      "nextActions": [
+        "edit_node"
+      ],
+      "status": "implemented",
+      "note": "부르려는 그래프가 없다. 지워졌거나 이름이 바뀐 것 — id로 고정하는 이유다."
+    },
+    {
+      "code": "SUBGRAPH_NO_RESULT",
+      "since": "1.1",
+      "severity": "node",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "안쪽 그래프가 끝까지 돌았는데 가져올 결과가 없다. 빈 문자열을 바깥으로 흘리면 바깥 단계가 빈 구멍으로 실행되고 정상 완료로 기록된다."
+    },
+    {
+      "code": "SUBGRAPH_SELF_CALL",
+      "since": "1.0",
+      "severity": "node",
+      "retryable": false,
+      "cardKey": "subgraph_self",
+      "nextActions": [
+        "edit_node"
+      ],
+      "status": "implemented",
+      "note": "자기 자신을 부른다. 깊이 상한 전에 바로 잡는다 — 사유가 더 정확하다."
+    },
+    {
+      "code": "SWAP_CAPABILITY_MISMATCH",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented"
+    },
+    {
+      "code": "SWAP_HUB_RELEASE_UNPINNED",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented"
+    },
+    {
+      "code": "SWAP_NODE_NOT_FOUND",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented"
+    },
+    {
+      "code": "SWAP_NOT_AGENT_NODE",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented"
+    },
+    {
+      "code": "SWAP_NO_MATCH",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented"
+    },
+    {
+      "code": "SWAP_UNKNOWN_PROVIDER",
+      "since": "1.0",
+      "severity": "edit",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented"
+    },
+    {
+      "code": "TOOL_BROKER_CALL_UNREADABLE",
       "since": "1.1",
       "severity": "tool",
       "retryable": false,
       "verbatim": true,
       "status": "implemented",
-      "note": "C38 — 이 단계에 이어 붙이지 않은 MCP 도구를 부르려 해 호출 직전에 막았다."
+      "note": "C38 — 어떤 도구를 부르려는지 못 읽었다. 모르는 호출은 통과시키지 않는다."
     },
     {
       "code": "TOOL_BROKER_MUTATION_IN_SIMULATION",
@@ -646,40 +829,37 @@
       "note": "C38 — 관문이 이 단계의 도구 규칙을 못 읽었다. 관문이 고장 나면 열지 않고 닫는다."
     },
     {
-      "code": "TOOL_BROKER_CALL_UNREADABLE",
+      "code": "TOOL_BROKER_TOOL_NOT_DECLARED",
       "since": "1.1",
       "severity": "tool",
       "retryable": false,
       "verbatim": true,
       "status": "implemented",
-      "note": "C38 — 어떤 도구를 부르려는지 못 읽었다. 모르는 호출은 통과시키지 않는다."
+      "note": "C38 — 이 단계에 이어 붙이지 않은 MCP 도구를 부르려 해 호출 직전에 막았다."
     },
     {
-      "code": "RUN_REQUEST_QUEUE_UNAVAILABLE",
-      "since": "1.1",
-      "severity": "run",
-      "retryable": true,
-      "verbatim": true,
-      "status": "implemented",
-      "note": "C47·C48 — 요청은 옳은데 대기열에 적지 못했다. 접수 못 한 것을 접수했다고 답하지 않는다."
-    },
-    {
-      "code": "OUTPUT_NODE_EMPTY",
-      "since": "1.1",
+      "code": "TOOL_NODE_UNATTACHED",
+      "since": "1.0",
       "severity": "node",
       "retryable": false,
-      "verbatim": true,
+      "cardKey": "tool_node_unattached",
+      "nextActions": [
+        "edit_graph"
+      ],
       "status": "implemented",
-      "note": "내보낼 내용이 비어 있다. 예전에는 자동화 기본 프롬프트로 대체돼, 사람이 안 적은 것이 엉뚱하게 나갔다."
+      "note": "어느 에이전트에도 안 이어져 아무 데도 안 쓰인다. 커넥터 C06이 성립하지 않는 상태."
     },
     {
-      "code": "TRANSFORM_NODE_UNCONFIGURED",
-      "since": "1.1",
+      "code": "TOOL_NODE_UNCONFIGURED",
+      "since": "1.0",
       "severity": "node",
       "retryable": false,
-      "verbatim": true,
+      "cardKey": "tool_node_unconfigured",
+      "nextActions": [
+        "edit_node"
+      ],
       "status": "implemented",
-      "note": "★from/to가 없으면 조용히 아무것도 안 하고 성공으로 남았다. 값이 없어 죽는 것은 다음 단계라, 화면에서는 성공한 단계 다음이 실패하는 모양이 됐다."
+      "note": "도구 단계인데 무슨 도구인지가 없다. 조용히 통과시키면 사용자는 붙였다고 믿는다."
     },
     {
       "code": "TRANSFORM_MODE_UNKNOWN",
@@ -691,184 +871,22 @@
       "note": "모르는 가공 방식은 복사로 조용히 대체됐다 — 사람이 고른 가공이 사라진 채 통과한다."
     },
     {
-      "code": "SUBGRAPH_NO_RESULT",
+      "code": "TRANSFORM_NODE_UNCONFIGURED",
       "since": "1.1",
       "severity": "node",
       "retryable": false,
       "verbatim": true,
       "status": "implemented",
-      "note": "안쪽 그래프가 끝까지 돌았는데 가져올 결과가 없다. 빈 문자열을 바깥으로 흘리면 바깥 단계가 빈 구멍으로 실행되고 정상 완료로 기록된다."
+      "note": "★from/to가 없으면 조용히 아무것도 안 하고 성공으로 남았다. 값이 없어 죽는 것은 다음 단계라, 화면에서는 성공한 단계 다음이 실패하는 모양이 됐다."
     },
     {
-      "code": "PATCH_EMPTY",
-      "since": "1.1",
-      "severity": "node",
+      "code": "WIRE_KIND_UNKNOWN",
+      "since": "1.0",
+      "severity": "message",
       "retryable": false,
       "verbatim": true,
-      "status": "implemented",
-      "note": "고칠 내용이 하나도 없는 수정 요청. ★게이트 스캔 범위 밖이라 오래 미등재로 살아 있었다(2026-08-05 범위 확대로 드러남)."
-    },
-    {
-      "code": "PATCH_OP_UNKNOWN",
-      "since": "1.1",
-      "severity": "node",
-      "retryable": false,
-      "verbatim": true,
-      "status": "implemented",
-      "note": "모르는 수정 동작. 조용히 무시하면 사람은 고쳐진 줄 안다. ★게이트 스캔 범위 밖이라 오래 미등재로 살아 있었다(2026-08-05 범위 확대로 드러남)."
-    },
-    {
-      "code": "PATCH_NODE_CONFLICT",
-      "since": "1.1",
-      "severity": "node",
-      "retryable": false,
-      "verbatim": true,
-      "status": "implemented",
-      "note": "이미 있는 노드 id로 새로 만들려 했다. ★게이트 스캔 범위 밖이라 오래 미등재로 살아 있었다(2026-08-05 범위 확대로 드러남)."
-    },
-    {
-      "code": "PATCH_NODE_MISSING",
-      "since": "1.1",
-      "severity": "node",
-      "retryable": false,
-      "verbatim": true,
-      "status": "implemented",
-      "note": "고치거나 지우려는 노드가 그래프에 없다. ★게이트 스캔 범위 밖이라 오래 미등재로 살아 있었다(2026-08-05 범위 확대로 드러남)."
-    },
-    {
-      "code": "PATCH_EDGE_CONFLICT",
-      "since": "1.1",
-      "severity": "node",
-      "retryable": false,
-      "verbatim": true,
-      "status": "implemented",
-      "note": "이미 있는 연결 id로 새로 이으려 했다. ★게이트 스캔 범위 밖이라 오래 미등재로 살아 있었다(2026-08-05 범위 확대로 드러남)."
-    },
-    {
-      "code": "PATCH_EDGE_DANGLING",
-      "since": "1.1",
-      "severity": "node",
-      "retryable": false,
-      "verbatim": true,
-      "status": "implemented",
-      "note": "없는 노드를 가리키는 연결. 그리면 실행이 도달 못 하는 섬이 생긴다. ★게이트 스캔 범위 밖이라 오래 미등재로 살아 있었다(2026-08-05 범위 확대로 드러남)."
-    },
-    {
-      "code": "PATCH_EDGE_MISSING",
-      "since": "1.1",
-      "severity": "node",
-      "retryable": false,
-      "verbatim": true,
-      "status": "implemented",
-      "note": "고치거나 지우려는 연결이 그래프에 없다. ★게이트 스캔 범위 밖이라 오래 미등재로 살아 있었다(2026-08-05 범위 확대로 드러남)."
-    },
-    {
-      "code": "ARCHITECT_OUTPUT_UNREADABLE",
-      "since": "1.1",
-      "severity": "run",
-      "retryable": true,
-      "verbatim": true,
-      "status": "implemented",
-      "note": "설계 결과를 읽지 못했다. 못 읽은 것을 그래프로 만들지 않는다. ★게이트 스캔 범위 밖이라 오래 미등재로 살아 있었다(2026-08-05 범위 확대로 드러남)."
-    },
-    {
-      "code": "ARCHITECT_NO_CHANGE",
-      "since": "1.1",
-      "severity": "run",
-      "retryable": true,
-      "verbatim": true,
-      "status": "implemented",
-      "note": "설계가 바꿀 것을 하나도 내지 않았다. ★게이트 스캔 범위 밖이라 오래 미등재로 살아 있었다(2026-08-05 범위 확대로 드러남)."
-    },
-    {
-      "code": "ARCHITECT_OUTPUT_TOO_LARGE",
-      "since": "1.1",
-      "severity": "run",
-      "retryable": true,
-      "verbatim": true,
-      "status": "implemented",
-      "note": "설계 결과가 한 번에 다루기에 너무 크다. ★게이트 스캔 범위 밖이라 오래 미등재로 살아 있었다(2026-08-05 범위 확대로 드러남)."
-    },
-    {
-      "code": "ARCHITECT_OUTPUT_MALFORMED",
-      "since": "1.1",
-      "severity": "run",
-      "retryable": true,
-      "verbatim": true,
-      "status": "implemented",
-      "note": "설계 결과의 모양이 계약과 다르다. ★게이트 스캔 범위 밖이라 오래 미등재로 살아 있었다(2026-08-05 범위 확대로 드러남)."
-    },
-    {
-      "code": "CODE_NODE_EMPTY",
-      "since": "1.1",
-      "severity": "node",
-      "retryable": false,
-      "verbatim": true,
-      "status": "implemented",
-      "note": "코드 단계에 실행할 스크립트가 없다. '코드로 하겠다'고 해 놓고 빈 채로 저장되면 실행에서 죽는다 — 저작 시점에 막는다."
-    },
-    {
-      "code": "CODE_STEP_FAILED",
-      "since": "1.1",
-      "severity": "node",
-      "retryable": false,
-      "verbatim": true,
-      "status": "implemented",
-      "note": "AI가 짠 스크립트가 오류로 끝났다. stderr 원문을 보존한다 — 지어내지 않는다."
-    },
-    {
-      "code": "CODE_DEPENDENCY_MISSING",
-      "since": "1.1",
-      "severity": "node",
-      "retryable": true,
-      "verbatim": true,
-      "status": "implemented",
-      "note": "코드가 쓰는 파이썬 패키지가 이 컴퓨터에 없고 자동 설치도 실패했다. 원문 traceback을 사람에게 그대로 던지던 것(실측: yfinance ModuleNotFoundError)을 기계 코드+설치 안내로 바꾼 자리. 설치는 스텝 샌드박스 밖에서 커널이 한다 — 스텝의 네트워크 차단과 충돌하지 않는다."
-    },
-    {
-      "code": "PATCH_EDGE_HANDLE_MISSING",
-      "since": "1.1",
-      "severity": "authoring",
-      "retryable": true,
-      "status": "implemented",
-      "note": "AI 제안 패치의 갈림길 연결이 참/거짓 미선언 — 청사진 경로처럼 저장 시점에 막는다(실행에서 EDGE_CONDITION_UNRESOLVED로 죽기 전에).",
-      "verbatim": true
-    },
-    {
-      "code": "PATCH_LOOP_BOUND_MISSING",
-      "since": "1.1",
-      "severity": "authoring",
-      "retryable": true,
-      "status": "implemented",
-      "note": "AI 제안 패치의 되돌아가는 연결에 반복 상한 없음 — 저장은 되고 실행에서 거절되는 모양을 막는다.",
-      "verbatim": true
-    },
-    {
-      "code": "PATCH_CODE_EMPTY",
-      "since": "1.1",
-      "severity": "authoring",
-      "retryable": true,
-      "status": "implemented",
-      "note": "AI 제안 패치의 코드 단계에 스크립트 없음 — CODE_NODE_EMPTY로 실행에서 죽기 전에 저장 시점에 막는다.",
-      "verbatim": true
-    },
-    {
-      "code": "EVAL_STUCK",
-      "since": "1.1",
-      "severity": "node",
-      "retryable": false,
-      "verbatim": true,
-      "status": "implemented",
-      "note": "같은 채점 항목으로 연속 2회 실패 — 더 돌려도 같은 이유로 떨어진다. 기준이 산출물과 안 맞을 수 있으므로 상한 전에 멈추고 사람에게 넘긴다(Anthropic 'failed' 상태의 UX화, 재시도 낭비 방지)."
-    },
-    {
-      "code": "CODE_PRODUCED_NOTHING",
-      "since": "1.1",
-      "severity": "node",
-      "retryable": true,
-      "verbatim": true,
-      "status": "implemented",
-      "note": "코드 단계가 값을 넘기겠다고 선언(produces)해 놓고 아무것도 돌려주지 않았다 — 예전에는 성공으로 넘어가 다음 단계가 빈 값을 정상 입력으로 받았다. 스크립트가 마지막에 result를 안 넣은 경우가 대부분이다."
+      "status": "specified",
+      "spec": "06 §2.3"
     }
   ]
 }
