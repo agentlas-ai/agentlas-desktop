@@ -18,7 +18,7 @@
 import type { WorkflowGraph, WorkflowNode } from "./types";
 
 export type GraphContradiction = {
-  code: "EMPTY_ALLOWED_BUT_VERIFIED_NONEMPTY";
+  code: "EMPTY_ALLOWED_BUT_VERIFIED_NONEMPTY" | "SELF_LOOP_EDGE" | "LOOP_TAIL_NOT_A_BRANCH";
   nodeId: string;
   nodeLabel: string;
   /** 문제의 값 이름(검증 대상이자 갈림길의 판단 대상). */
@@ -71,6 +71,34 @@ function emptinessTestedVar(node: WorkflowNode): string | null {
   return looksLikeEmptinessTest ? names[0] : null;
 }
 
+/**
+ * 되돌아가는 연결(back edge)을 실제로 판정한다 — DFS 로 지금 내려온 길 위의 노드를
+ * 다시 가리키는 연결만 세운다.
+ *
+ * ★배열 순서로 "뒤로 감"을 판정하면 안 된다. 노드가 저장된 순서는 그릴 때의 순서일 뿐
+ *   실행 순서가 아니어서, 멀쩡한 앞으로 가는 연결을 반복으로 오폭한다. 오폭은 "당신의
+ *   자동화가 고장났다"고 거짓으로 말하는 것이라 못 잡는 것보다 나쁠 수 있다.
+ */
+function findBackEdgeIds(graph: WorkflowGraph): Set<string> {
+  const out = new Set<string>();
+  const outgoing = new Map<string, { id: string; target: string }[]>();
+  for (const node of graph.nodes) outgoing.set(node.id, []);
+  for (const edge of graph.edges) outgoing.get(edge.source)?.push({ id: edge.id, target: edge.target });
+
+  const state = new Map<string, 0 | 1 | 2>(); // 0=미방문 1=내려가는 중 2=끝
+  const walk = (id: string): void => {
+    state.set(id, 1);
+    for (const next of outgoing.get(id) ?? []) {
+      const seen = state.get(next.target) ?? 0;
+      if (seen === 1) out.add(next.id); // 지금 내려온 길 위 → 되돌아가는 연결
+      else if (seen === 0) walk(next.target);
+    }
+    state.set(id, 2);
+  };
+  for (const node of graph.nodes) if ((state.get(node.id) ?? 0) === 0) walk(node.id);
+  return out;
+}
+
 /** 앞뒤 관계 — 엣지를 따라 from 에서 to 에 닿는가(반복 엣지도 그대로 따른다). */
 function reaches(graph: WorkflowGraph, from: string, to: string): boolean {
   const seen = new Set<string>([from]);
@@ -96,6 +124,61 @@ function reaches(graph: WorkflowGraph, from: string, to: string): boolean {
 export function findGraphContradictions(graph: WorkflowGraph | null | undefined): GraphContradiction[] {
   if (!graph || !Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) return [];
   const found: GraphContradiction[] = [];
+
+  /*
+   * ★자기 자신으로 돌아오는 연결. 실측 2026-08-20: 체스 게임 생성 자동화에
+   *   `step2 → step2` 가 있어 실행이 LOOP_WITHOUT_EXIT 로 죽었다. 한 단계가 자기
+   *   다음으로 자기를 가리키는 것은 어떤 뜻으로도 읽히지 않는다 — 되돌아갈 앞 단계가
+   *   없으므로 다시 할 일도 없다. 애매하지 않으니 지우는 것이 안전하다.
+   */
+  for (const edge of graph.edges) {
+    if (edge.source !== edge.target) continue;
+    const node = graph.nodes.find((n) => n.id === edge.source);
+    const label = node?.label || edge.source;
+    found.push({
+      code: "SELF_LOOP_EDGE",
+      nodeId: edge.source,
+      nodeLabel: label,
+      subject: "",
+      branchNodeId: edge.source,
+      reason: `"${label}"가 자기 자신으로 되돌아가는 연결을 갖고 있습니다. 되돌아갈 앞 단계가 없어 실행이 여기서 멈춥니다.`,
+      fix: `"${label}"에서 자기 자신으로 가는 연결을 지우세요. 다시 해야 할 앞 단계가 있다면 그 단계로 연결하세요.`,
+    });
+  }
+
+  /*
+   * ★되돌아가는 연결의 꼬리는 갈림길이어야 한다(커널 계약, planGraphLoops). 액션이나
+   *   검증에서 곧장 되돌아가면 커널이 실행 자체를 거부한다 — 사람은 자동화를 켜 두고
+   *   있다가 실행할 때가 되어서야 안다. 실측 2026-08-20: 체스 게임 생성 자동화가 여기에
+   *   걸려 있었다(빌더의 지금 모델은 되돌이를 갈림길에만 붙이므로 그 이전 모양이다).
+   *
+   *   ★고치지 않는다. "무엇을 보고 다시 할지"는 사람이 정할 일이고, 여기서 지어내면
+   *     같은 것을 계속 다시 하는 반복이 되거나 사람이 원한 재시도가 사라진다.
+   *     미리 이름으로 말해 주는 데까지가 여기 몫이다.
+   */
+  const nodeIndex = new Map(graph.nodes.map((n) => [n.id, n] as const));
+  const backEdges = findBackEdgeIds(graph);
+  for (const edge of graph.edges) {
+    if (edge.source === edge.target) continue; // 자기루프는 위에서 이미 말했다
+    if (!backEdges.has(edge.id)) continue;
+    const tail = nodeIndex.get(edge.source);
+    const head = nodeIndex.get(edge.target);
+    if (!tail || !head || tail.type === "condition") continue;
+    found.push({
+      code: "LOOP_TAIL_NOT_A_BRANCH",
+      nodeId: tail.id,
+      nodeLabel: tail.label || tail.id,
+      subject: "",
+      branchNodeId: head.id,
+      reason:
+        `"${tail.label || tail.id}"에서 "${head.label || head.id}"(으)로 되돌아가는데, 되돌아갈지 말지를 `
+        + "정하는 갈림길이 없습니다. 이 자동화는 실행할 때마다 시작 전에 거부됩니다.",
+      fix:
+        `"${tail.label || tail.id}" 뒤에 갈림길 단계를 넣고, 참·거짓 중 한쪽만 `
+        + `"${head.label || head.id}"(으)로 되돌아가게 이으세요. 무엇을 보고 다시 할지는 `
+        + "그 자동화를 만든 사람만 정할 수 있어 자동으로 고치지 않습니다.",
+    });
+  }
 
   const branches = graph.nodes
     .map((node) => ({ node, subject: emptinessTestedVar(node) }))
@@ -152,6 +235,16 @@ export function repairGraphContradictions(
   const moved: string[] = [];
 
   for (const item of items) {
+    if (item.code === "SELF_LOOP_EDGE") {
+      const before = next.edges.length;
+      next.edges = next.edges.filter((e) => !(e.source === item.nodeId && e.target === item.nodeId));
+      if (next.edges.length !== before) moved.push(item.nodeId);
+      continue;
+    }
+    // 자동으로 고칠 수 있는 것만 고친다. 사람이 정해야 하는 것(LOOP_TAIL_NOT_A_BRANCH)은
+    // 말만 하고 지나간다 — 여기서 지어내면 사람이 원한 재시도가 사라지거나 같은 것을
+    // 계속 다시 하는 반복이 된다.
+    if (item.code !== "EMPTY_ALLOWED_BUT_VERIFIED_NONEMPTY") continue;
     const evalId = item.nodeId;
     const branchId = item.branchNodeId;
     const incoming = next.edges.filter((e) => e.target === evalId);

@@ -78,6 +78,28 @@ check(
   "이미 옳은 모양을 문제로 봅니다 — 오폭은 사람의 검증을 망가뜨립니다.",
 );
 
+// 자기 자신으로 돌아오는 연결 — 실측 2026-08-20, 체스 게임 생성 자동화가 이것으로
+// LOOP_WITHOUT_EXIT 로 죽었다. 되돌아갈 앞 단계가 없으므로 어떤 뜻으로도 읽히지 않는다.
+const selfLooped = {
+  version: 1,
+  nodes: [node("a", "agent", {}, "만들기"), node("save", "action", {}, "저장하기")],
+  edges: [edge("a", "save"), { id: "save->save", source: "save", target: "save", maxIterations: 1 }],
+};
+const loopFound = findGraphContradictions(selfLooped);
+check(
+  "finds-self-loop",
+  loopFound.some((f) => f.code === "SELF_LOOP_EDGE" && f.nodeId === "save"),
+  "자기 자신으로 되돌아가는 연결을 못 찾았습니다 — 그 자동화는 실행할 때마다 멈춥니다.",
+);
+const loopRepaired = repairGraphContradictions(selfLooped);
+check(
+  "repair-drops-only-the-self-loop",
+  loopRepaired.changed
+  && !loopRepaired.graph.edges.some((e) => e.source === e.target)
+  && loopRepaired.graph.edges.some((e) => e.source === "a" && e.target === "save"),
+  "자기루프를 못 지웠거나, 멀쩡한 연결까지 지웠습니다.",
+);
+
 for (const c of checks) console.log(`${c.ok ? "PASS" : "FAIL"} ${c.name}`);
 if (failures.length > 0) {
   console.error("\ngraph-contradictions 게이트 실패:");
