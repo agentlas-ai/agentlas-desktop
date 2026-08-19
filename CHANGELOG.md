@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+## 1.0.26 — 2026-08-19
+
+Bundled runtime: Agentlas OS v1.2.12 (2b075361f07f25577994f0ce87f46f33ac41ec64).
+
+- Automations built from a plugin (`hep-graph`) could not finish at all: one
+  keychain read froze the whole process. A macOS keychain item carries the ACL
+  of the program that created it, so another executable triggers an
+  authorization prompt — and on a host with no screen to show it, keytar never
+  returns and takes the event loop with it. A `setTimeout` in the same process
+  does not fire, so no in-process deadline can rescue it. Keychain calls now run
+  in a child process with a hard deadline wherever the prompt cannot be
+  answered; a read that times out reports "no value" and names the key instead
+  of going quiet, and writes fail loudly rather than pretending to save.
+- The judge never saw structured results. A step that returned JSON — the normal
+  shape, since later steps read its fields — reached the checklist as the literal
+  `[object Object]`, so correct output was graded as empty.
+- A failing check no longer finishes as success. Its verdict used to be written
+  to a variable while the run carried on, because every retry path depends on a
+  loop the graph may not have. A failure now stops the node unless something will
+  actually receive it.
+- The terminal and the desktop share one database and disagreed on a runtime's
+  name (`antigravity` vs `agy`), so a runtime the person had chosen was skipped as
+  unavailable and a fallback ran in its place while the screen still showed the
+  choice. Both directions now translate at the boundary.
+- The daemon reports which database it opened, and the terminal refuses to hand
+  it a graph meant for a different one.
+- Korean schedules read the way people say them: 매일 오전 8시, 매주 월요일 오전 9시.
+
+Source readiness does not prove a public installer or update feed; the
+Releases page stays the authority.
+
 ## 1.0.25 — 2026-08-19
 
 Bundled runtime: Agentlas OS v1.2.12 (2b075361f07f25577994f0ce87f46f33ac41ec64).
