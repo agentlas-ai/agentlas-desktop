@@ -64,9 +64,21 @@ jobs:
           cache-dependency-path: package-lock.json
 
       # keytar links against libsecret on Linux.
+      # ★이 한 줄이 릴리스를 두 번 통째로 죽였다(실측 2026-08-19/20). Linux 잡이 45분
+      #   타임아웃에 걸려 취소되고, 그 취소가 "All OS release gate barrier" 를 실패시켜
+      #   서명 빌드가 아예 시작되지 않았다. 7월까지 이 잡은 10분이었으니 느려진 것이
+      #   아니라 **멈춘 것**이다(apt 가 프롬프트나 죽은 미러를 기다린다).
+      #   그래서 셋을 건다: 대화형 금지, 받기 재시도·상한, 그리고 이 단계 자체의 상한 —
+      #   막히면 45분을 먹지 않고 여기서 이유를 말하며 끝난다.
       - name: Install Linux build deps
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev xvfb dbus-x11
+        timeout-minutes: 10
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
+          sudo -E apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends \
+            libsecret-1-dev xvfb dbus-x11
 
       - name: Verify release identity
         shell: bash
