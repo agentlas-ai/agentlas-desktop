@@ -1852,7 +1852,12 @@ return (
                   ))}
                   {/* ★실제 진행 — 커널이 보내는 사실을 시간순으로 다 적는다.
                       시각은 tabular-nums 로 자리를 고정한다(줄마다 흔들리면 못 읽는다). */}
-                  {activity.map((row, i) => {
+                  {/* ★최신이 먼저다. 시간순 정렬은 유지하되 역순으로 그린다 — 로그 창을
+                      연 사람이 찾는 것은 "방금 무슨 일이 있었나"이지 첫 줄이 아니다
+                      (실사용 지적: 열 때마다 맨 위 과거부터 보였다). gap 은 아래 줄
+                      (시간상 직전 행)과의 간격으로 계산해 의미를 지킨다. */}
+                  {[...activity].reverse().map((row, idx) => {
+                    const i = activity.length - 1 - idx;
                     const prev = i > 0 ? activity[i - 1] : null;
                     const gap = prev ? row.at - prev.at : 0;
                     return (

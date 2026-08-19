@@ -639,7 +639,12 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
                 {/* ★두 답을 한 칸에 뭉개지 않는다. 예전에는 판정 결과가 실행 상태를
                     덮어써서, 끝까지 잘 돈 실행이 목록에 "내 확인 필요"로만 보였다 —
                     사용자는 성공인지 실패인지 알 수 없었다. 이제 나란히 놓는다. */}
-                {outcomeChip(run, ko) ? (
+                {/* ★단, 두 답이 같은 말이면 나란히 둘 이유가 없다. outcome=needs_input
+                    /blocked 는 outcomeFirstLabel 이 이미 머리말로 쓰므로, 칩까지 찍으면
+                    "Needs your decision Needs your decision" 이 한 줄에 겹쳐 보인다
+                    (실측: 사용자 화면에서 제목 위로 칩이 포개짐). 머리말이 못 한 말이
+                    있을 때만 칩을 낸다. */}
+                {outcomeChip(run, ko) && outcomeChip(run, ko) !== outcomeFirstLabel(run, ko) ? (
                   <span className="automation-run-outcome">{outcomeChip(run, ko)}</span>
                 ) : null}
                 <span>{formatDateTime(run.ranAt, ko)}</span>

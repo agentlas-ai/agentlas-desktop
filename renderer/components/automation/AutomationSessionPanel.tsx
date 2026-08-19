@@ -153,6 +153,22 @@ export function AutomationSessionPanel({
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages.length, streamText, status]);
 
+  // ★열리는 순간에도 하단 고정. 이 패널은 부모가 display:none 으로 숨겨둔 채
+  // 메시지를 로드하므로, 위 효과는 scrollHeight=0 인 동안 무효로 끝난다 — 사용자가
+  // 탭을 열면 가장 오래된 메시지부터 보였다(실사용 지적). 대화창의 기대 동작은
+  // "열면 최신이 보인다"이고, 그것은 새 메시지가 아니라 가시성 이벤트다.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) el.scrollTop = el.scrollHeight;
+      }
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
   useEffect(() => () => unsubRef.current?.(), []);
 
   // 자동화 실행과 이 대화는 **같은 chat**을 공유한다. 예약 실행이 도는 중에 사용자가 말을
