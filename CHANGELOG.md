@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+## 1.0.27 — 2026-08-19
+
+Bundled runtime: Agentlas OS v1.2.12 (2b075361f07f25577994f0ce87f46f33ac41ec64).
+
+- A step that declares it consumes a value now actually receives it. Code steps
+  always did; agent and output steps only ever saw `{{name}}` substitution, so a
+  step could declare an input and get nothing. Measured on a threshold watcher
+  whose reporting step said "using only the numbers in the report you are given"
+  and was handed none, while the step before it had computed every number
+  correctly.
+- A threshold watcher no longer fails on the days nothing crossed the threshold.
+  The builder was putting a check that demanded content on the very value a
+  branch tests for emptiness, so the automation failed on exactly the ordinary
+  days. Blueprints carrying that shape are sent back with the specific move to
+  make, and the rule stops firing once the check sits on the side that has a
+  value — a first version rejected its own repair and the builder gave up after
+  four tries, leaving no automation at all.
+- "No runtime here can grade" is answered differently from "try again in a
+  minute". Measured across every runtime installed here: claude-code,
+  antigravity, grok and ollama return a verdict; codex refuses before spawning,
+  so a codex-only person cannot finish an automation that has a check and was
+  being told to retry, which will never work.
+
+Source readiness does not prove a public installer or update feed; the
+Releases page stays the authority.
+
 ## 1.0.26 — 2026-08-19
 
 Bundled runtime: Agentlas OS v1.2.12 (2b075361f07f25577994f0ce87f46f33ac41ec64).
