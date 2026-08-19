@@ -99,10 +99,16 @@ const processPool = new WarmProcessPool();
  */
 async function handleControlMethod(method: string, params: unknown): Promise<unknown> {
   if (method === "daemon.ping") {
+    const { openedStorePath } = await import("../store/db");
     return {
       ok: true,
       version: daemonVersion(),
       pid: process.pid,
+      // ★어느 DB 를 열었는지 말한다. 터미널은 `AGENTLAS_STORE_PATH` 로 사본을 열 수 있는데
+      //   그 값은 이 프로세스까지 오지 않는다 — 서로 다른 DB 를 보면서 일을 주고받으면
+      //   한쪽은 사본에, 다른 쪽은 라이브에 쓰는 상태가 조용히 성립한다. 넘기기 전에
+      //   비교할 수 있게 이 값을 실어 보낸다(경로는 비밀이 아니다).
+      storePath: openedStorePath(),
       // 풀 관측 — 붙든 프로세스 수/유휴 수. "재사용이 실제로 되고 있나"의 유일한 창.
       warmProcesses: processPool.size(),
       warmIdle: processPool.idleCount(),

@@ -1082,11 +1082,23 @@ function ensureWalJournal(db: Database.Database, dbPath: string): void {
   );
 }
 
+/**
+ * 이 프로세스가 실제로 연 DB 파일. **호스트끼리 "우리가 같은 DB 를 보고 있나" 를
+ * 물을 수 있어야 한다** — 터미널이 `AGENTLAS_STORE_PATH` 로 사본을 지정해도 그 값은
+ * 데몬까지 가지 않으므로, 일을 넘기기 전에 서로 확인하지 않으면 한쪽은 사본에 쓰고
+ * 다른 쪽은 라이브에 쓰는 상태가 조용히 성립한다.
+ */
+export function openedStorePath(): string | null {
+  return _openedStorePath;
+}
+let _openedStorePath: string | null = null;
+
 export function initStore(options: StoreInitOptions = {}): void {
   if (_db) return;
   const migrationRole = resolveMigrationRole(options);
   try {
   const dbPath = resolveStorePath();
+  _openedStorePath = dbPath;
   preparePrivateStorePath(dbPath);
   _db = new Database(dbPath);
   // ★busy_timeout 이 journal_mode 보다 **먼저** 와야 한다 (2026-08-18 실측).
