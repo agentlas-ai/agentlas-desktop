@@ -1,6 +1,7 @@
 // Kimi Code CLI runtime — official Moonshot CLI (`@moonshot-ai/kimi-code`).
 // Headless contract: `kimi -p <prompt> --output-format stream-json`.
 import path from "node:path";
+import { RuntimeJudgmentRefusal } from "./judgment-refusal";
 import { StringDecoder } from "node:string_decoder";
 import os from "node:os";
 import fs from "node:fs/promises";
@@ -336,7 +337,8 @@ export const runKimi: Runner = async (req, events): Promise<RunnerResult> => {
   // Kimi prompt mode exposes built-in file/shell tools and currently has no
   // verified zero-tool switch. Do not widen browser or restricted-read authority.
   if (req.untrustedNoTools || req.restrictedReadBoundary) {
-    throw new Error(req.locale === "ko"
+    // 표식을 단다 — 판정이 전멸했을 때 "기다리면 풀리는 사유"와 구분되어야 한다.
+    throw new RuntimeJudgmentRefusal("kimi", req.locale === "ko"
       ? "Kimi Code는 현재 검증된 무도구 격리 모드를 지원하지 않습니다. Claude Code, Ollama 또는 API 런타임을 선택하세요."
       : "Kimi Code does not currently support verified tool-less isolation. Select Claude Code, Ollama, or an API runtime.");
   }

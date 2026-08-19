@@ -2135,7 +2135,13 @@ export async function runGraph(
               reason: list.reasonText
                 ? `검증을 수행하지 못했습니다 — ${list.reasonText}`
                 : "검증을 수행하지 못했습니다(판정 엔진이 채점표에 답하지 못했습니다).",
-              nextAction: "잠시 뒤 다시 실행해 주세요.",
+              // ★"기다리면 풀리는 사유"와 "런타임을 하나 붙여야 풀리는 사유"의 다음 행동은
+              //   다르다. 거절(refused)에 "잠시 뒤 다시 실행"을 붙이면, 그 사용자는 영원히
+              //   같은 자리에서 같은 버튼을 누른다(실측 2026-08-19: 설치된 5종 중 codex 만
+              //   판정을 거절 — codex 단독 사용자는 검증이 있는 자동화를 끝낼 수 없다).
+              nextAction: list.failureKind === "refused"
+                ? "이 컴퓨터의 런타임이 채점을 수행하지 못합니다. 판정할 수 있는 런타임(Claude Code·Antigravity·Grok·Ollama 중 하나)을 연결한 뒤 다시 실행해 주세요."
+                : "잠시 뒤 다시 실행해 주세요.",
             });
             return;
           }

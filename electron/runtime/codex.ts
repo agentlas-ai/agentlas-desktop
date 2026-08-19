@@ -4,6 +4,7 @@
 // 호출 형식: codex exec "<prompt>"  (—— Codex CLI의 exec 모드)
 // V0는 single-turn; 이전 대화를 user 입력에 inline.
 import path from "node:path";
+import { RuntimeJudgmentRefusal } from "./judgment-refusal";
 import os from "node:os";
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
@@ -687,7 +688,11 @@ export const runCodex: Runner = async (
   // packages, Agent Apps, and Workforce turns must stop before CLI discovery or
   // process spawn rather than minting a false no-authority receipt.
   if (req.untrustedNoTools) {
-    throw new Error(
+    // 표식을 단다 — 이 거절은 시간이 지나도 풀리지 않는다. codex 만 설치한 사용자는
+    // 판정이 필요한 자동화를 하나도 끝낼 수 없으므로, 화면이 "다시 눌러 보세요" 대신
+    // "판정할 수 있는 런타임을 하나 연결하세요"라고 말할 수 있어야 한다.
+    throw new RuntimeJudgmentRefusal(
+      "codex",
       req.locale === "ko"
         ? "현재 Codex CLI에서 서브에이전트 협업 권한을 완전히 제거할 수 없어 격리된 Agent App/Workforce 실행을 차단했습니다."
         : "The current Codex CLI still exposes collaboration/delegation authority after tool features are disabled. Isolated Agent App and Workforce execution is blocked before process spawn.",

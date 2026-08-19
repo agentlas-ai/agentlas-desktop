@@ -14,6 +14,7 @@
 // 둘 중 어느 것도 만족시키지 못한다. 권한→모드 매핑은 ACP 경로의 session/set_mode 가
 // 맡는다(read → plan/ask).
 import path from "node:path";
+import { RuntimeJudgmentRefusal } from "./judgment-refusal";
 import { StringDecoder } from "node:string_decoder";
 import os from "node:os";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
@@ -184,7 +185,9 @@ export const runCursor: Runner = async (req: RunnerRequest, events: RunnerEvents
   // verified zero-tool switch. Browser-originated and restricted invocations
   // must therefore fail before probing or spawning the CLI.
   if (req.untrustedNoTools || req.restrictedReadBoundary) {
-    throw new Error(
+    // 표식을 단다 — 판정이 전멸했을 때 "기다리면 풀리는 사유"와 구분되어야 한다.
+    throw new RuntimeJudgmentRefusal(
+      "cursor",
       req.locale === "ko"
         ? "Cursor Agent CLI는 현재 검증된 무도구 격리 모드를 지원하지 않습니다. Claude Code, Ollama 또는 API 런타임을 선택하세요."
         : "Cursor Agent CLI does not currently support verified tool-less isolation. Select Claude Code, Ollama, or an API runtime.",

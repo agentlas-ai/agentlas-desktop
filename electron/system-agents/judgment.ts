@@ -16,10 +16,11 @@
 // is genuinely correct.
 
 import { detectRuntimes } from "../runtime/detect";
+import { isJudgmentRefusal } from "../runtime/judgment-refusal";
 import { pickActive, pickRecoveryRunner, pickRunner } from "../runtime/selection";
 import { readRuntimeSelectionMirror } from "../runtime/selection-mirror";
 import type { RuntimeLocale } from "../runtime/status-i18n";
-import type { RunnerFailure } from "../runtime/runner";
+import type { RunnerFailure, RunnerFailureKind } from "../runtime/runner";
 import { looksSecret, redactSecrets } from "../../shared/secret-patterns";
 import type { RuntimeStatus } from "../../shared/types";
 
@@ -406,7 +407,10 @@ async function callJudgmentModelDetailed(opts: {
         // merely cannot isolate just yields to the next candidate.
         // ★빈 catch 금지 — 사유를 기록해야 전멸 시 "왜"가 남는다.
         lastFailure = {
-          kind: "exit",
+          // ★"이 런타임은 판정을 못 한다"와 "한도·오류로 실패했다"는 다음 행동이 다르다.
+          //   앞의 것은 기다려도 안 풀리고 다른 런타임을 하나 연결해야 풀린다. 문장을
+          //   읽어 짐작하지 않고 표식(RuntimeJudgmentRefusal)으로 가른다.
+          kind: isJudgmentRefusal(error) ? "refused" : "exit",
           message: error instanceof Error ? error.message.slice(0, 2000) : String(error),
           runtime: runtime.kind,
           source: "exit",
@@ -915,6 +919,11 @@ export interface ChecklistVerdict {
   /** 사람이 읽을 실패 요약 — "실패한 항목 + 항목별 지적". 재시도 주입에 그대로 쓴다. */
   reasonText: string;
   source: "llm" | "unavailable";
+  /**
+   * 판정이 불가였을 때 **무엇 때문인지**. `refused` 는 "이 컴퓨터의 런타임이 판정을
+   * 수행할 수 없다" — 기다려도 안 풀리므로 화면의 다음 행동이 달라야 한다.
+   */
+  failureKind?: RunnerFailureKind;
 }
 
 interface ChecklistJudgeSpec {
@@ -1055,7 +1064,10 @@ export async function judgeChecklist(spec: ChecklistJudgeSpec): Promise<Checklis
   if (text === null) {
     // ★reasonText를 비우지 않는다 — 채점표 실행이 왜 판정 불가였는지 여기서만 알 수 있다.
     const reasonText = detailed.failure ? detailed.failure.message.slice(0, 300) : "";
-    return { verdict: null, items: [], reasonText, source: "unavailable" };
+    return {
+      verdict: null, items: [], reasonText, source: "unavailable",
+      ...(detailed.failure ? { failureKind: detailed.failure.kind } : {}),
+    };
   }
   const verdicts = parseChecklistJson(text, spec.items);
   if (!verdicts) {
