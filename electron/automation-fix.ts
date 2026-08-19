@@ -16,7 +16,7 @@ import type {
   AutomationFixPlan,
   AutomationFixResult,
 } from "../shared/types";
-import { findGraphContradictions } from "../shared/graph-contradictions";
+import { findGraphContradictions, requiredPermissionFor } from "../shared/graph-contradictions";
 import { judgeRequiredAction, secretValueFloor, type RequiredActionOption } from "./system-agents/judgment";
 import { checkComputerUsePermissions } from "./mac-permissions";
 import { getBrowserStatus, browserListSites, browserOpenLogin } from "./browser/connect";
@@ -182,6 +182,35 @@ async function capabilities(automationId: string): Promise<Capability[]> {
       return [];
     }
   })();
+  /*
+   * ★읽기 전용으로 저장된 자동화가 "바깥을 바꾸는" 단계를 갖고 있으면, 그 단계는 부를 수
+   *   있는 도구가 하나도 없는 상태로 매번 실행된다. 실측 2026-08-20: 저장된 10개 중 3개가
+   *   이 상태였고, 실패 문구는 모델을 탓하고 있었다("도구를 한 번도 호출하지 않았습니다").
+   *   실행 중에 사람을 세워 물을 일이 아니라, 여기서 한 번 받아 저장할 일이다.
+   */
+  const permissionGap = (() => {
+    try {
+      const row = getAutomation(automationId);
+      return requiredPermissionFor(row?.graph ?? null, row?.executionPermission ?? null);
+    } catch {
+      return null;
+    }
+  })();
+  if (permissionGap) {
+    list.push({
+      kind: "grant_execution_permission",
+      relevantTo: "always",
+      option: {
+        id: "grant_execution_permission",
+        evidence:
+          `This automation is saved as read-only, but ${permissionGap.because.length} step(s) declare that they change `
+          + `things outside (${permissionGap.because.slice(0, 3).join(", ")}). Those steps run with no tool they are allowed `
+          + "to call, so the run fails every time. Granting write once, here, settles it — the run is never interrupted to ask.",
+        authority: "local-reversible",
+      },
+    });
+  }
+
   if (shapeIssues.length > 0) {
     list.push({
       kind: "repair_graph_shape",
@@ -427,6 +456,31 @@ export async function applyAutomationFix(
         ? ko ? "실행 환경을 복구했습니다." : "The runtime is repaired."
         : recovery.presentation?.summary
           || (ko ? "실행 환경을 자동으로 고치지 못했습니다." : "The runtime could not be repaired automatically."),
+      navigate: null,
+      plan: null,
+    };
+  }
+
+  if (cap.kind === "grant_execution_permission") {
+    const row = getAutomation(automationId);
+    const gap = requiredPermissionFor(row?.graph ?? null, row?.executionPermission ?? null);
+    if (!gap) {
+      return {
+        ok: false,
+        message: ko
+          ? "권한을 올릴 이유를 찾지 못했습니다 — 이미 충분하거나, 바깥을 바꾸는 단계가 없습니다."
+          : "No permission gap found — it is already sufficient, or no step changes anything outside.",
+        navigate: null,
+        plan: null,
+      };
+    }
+    const { updateAutomation } = await import("./store/automations");
+    updateAutomation(automationId, { executionPermission: gap.needs });
+    return {
+      ok: true,
+      message: ko
+        ? `이 자동화에 쓰기를 허용했습니다. ${gap.because.length}개 단계가 이제 도구를 부를 수 있고, 다음부터는 실행 중에 묻지 않습니다.`
+        : `Write is granted for this automation. ${gap.because.length} step(s) can now call tools, and runs are no longer interrupted to ask.`,
       navigate: null,
       plan: null,
     };

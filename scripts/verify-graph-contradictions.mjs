@@ -17,7 +17,7 @@
 //  2) 고치면 모순이 사라진다.
 //  3) 이미 옳은 모양(갈림길 뒤에 놓인 검증)은 건드리지 않는다 — 오폭은 사람의 검증을
 //     망가뜨린다.
-import { findGraphContradictions, repairGraphContradictions } from "../dist/shared/graph-contradictions.js";
+import { findGraphContradictions, repairGraphContradictions, requiredPermissionFor } from "../dist/shared/graph-contradictions.js";
 
 const checks = [];
 const failures = [];
@@ -98,6 +98,28 @@ check(
   && !loopRepaired.graph.edges.some((e) => e.source === e.target)
   && loopRepaired.graph.edges.some((e) => e.source === "a" && e.target === "save"),
   "자기루프를 못 지웠거나, 멀쩡한 연결까지 지웠습니다.",
+);
+
+// 읽기 전용으로 저장됐는데 바깥을 바꾸는 단계가 있는 자동화 — 부를 수 있는 도구가 없는
+// 상태로 매번 실행된다. 실측 2026-08-20: 저장된 10개 중 3개가 이 상태였고, 실패 문구는
+// 모델을 탓하고 있었다. 실행 중에 물을 일이 아니라 시작에서 한 번 받아 둘 일이다.
+const mutatingGraph = {
+  version: 1,
+  nodes: [node("write", "action", { effect: "mutation" }, "파일로 저장"), node("say", "agent", { effect: "read" }, "요약")],
+  edges: [edge("say", "write")],
+};
+const gap = requiredPermissionFor(mutatingGraph, "read");
+check(
+  "read-only-with-a-mutating-step-is-named",
+  gap?.needs === "write" && gap.because.includes("파일로 저장"),
+  "읽기 전용인데 바깥을 바꾸는 단계가 있는 자동화를 못 찾았습니다 — 그 자동화는 매번 실패하고, "
+  + "사람은 모델 탓이라는 문구만 봅니다.",
+);
+check(
+  "sufficient-permission-is-not-nagged",
+  requiredPermissionFor(mutatingGraph, "write") === null
+  && requiredPermissionFor({ version: 1, nodes: [node("say", "agent", { effect: "read" })], edges: [] }, "read") === null,
+  "이미 충분한 권한이나, 바깥을 바꾸지 않는 자동화에까지 허용을 요구합니다 — 승인은 최소한이어야 합니다.",
 );
 
 for (const c of checks) console.log(`${c.ok ? "PASS" : "FAIL"} ${c.name}`);

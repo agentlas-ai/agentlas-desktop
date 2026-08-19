@@ -5,7 +5,7 @@
 // (promptTemplate이 늘 약속했던 파라미터화, 설계 한계 #12).
 //
 // 실행 엔진은 손대지 않는다 — 러너는 "어떤 요청을 어떤 순서로 runMcpInvocation에 넘길지"만 결정.
-import { isHostPreflightTool } from "../../shared/tool-activity";
+import { isHostPreflightTool, couldHaveChangedTheOutsideWorld } from "../../shared/tool-activity";
 import { findGraphContradictions } from "../../shared/graph-contradictions";
 import type {
   Automation,
@@ -2796,7 +2796,14 @@ export async function runGraph(
               if (ev.kind === "tool-use" && ev.tool?.name) {
                 // 호스트 자신의 예비 조회(Agentlas Plugins ·, workforce 감사)는 "일했다"의
                 // 근거가 아니다 — 세지 않는다. 정본은 shared/tool-activity.
-                if (!isHostPreflightTool(ev.tool.name)) {
+                /*
+                 * ★"불렀다"가 아니라 "바꿨을 수 있다"를 센다. 실측 2026-08-20:
+                 *   "요약을 파일로 저장" 단계를 가진 자동화가 ok:true 로 끝났는데 파일은
+                 *   없었다 — 그 실행이 부른 것은 웹 조회뿐이었고, 커널은 호출 수만 봤다.
+                 *   읽기만 하고 "저장했다"고 적은 답을 관측이 보증해 준 셈이다.
+                 *   모르는 이름은 여전히 "바꿨을 수 있음"으로 센다(정본: shared/tool-activity).
+                 */
+                if (couldHaveChangedTheOutsideWorld(ev.tool.name)) {
                   externalToolCallsByNode.set(
                     node.id,
                     (externalToolCallsByNode.get(node.id) ?? 0) + 1,

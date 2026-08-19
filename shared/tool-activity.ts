@@ -29,6 +29,32 @@ export function isHostPreflightTool(toolName: string | null | undefined): boolea
 }
 
 /**
+ * 널리 쓰이는 **읽기 전용** 도구들. 부른 것이 이것뿐이면 바깥은 그대로다.
+ *
+ * 실측 2026-08-20: "요약을 파일로 저장" 단계를 가진 자동화가 `ok:true` 로 끝났는데
+ * 파일은 만들어지지 않았다. 그 단계는 바깥을 바꾼다고 선언돼 있었고, 커널은 "도구를
+ * 한 번이라도 불렀는가"만 봤다 — 그 실행이 부른 것은 웹 조회뿐이었다. 읽기만 하고
+ * "저장했다"고 적은 답이 관측으로 보증받은 셈이다.
+ *
+ * ★모르는 이름은 **바꿨을 수 있는 것**으로 둔다. 여기 목록은 좁게 유지한다 —
+ *   넓히면 진짜로 일한 실행을 거짓 실패로 만든다. 못 잡는 쪽이 오폭보다 낫다.
+ */
+const WELL_KNOWN_READ_ONLY_TOOLS = new Set([
+  "read", "grep", "glob", "ls", "notebookread",
+  "webfetch", "websearch", "todoread", "listmcpresources", "readmcpresource",
+]);
+
+/** 이 도구 호출이 바깥을 바꿨을 수 있는가. 모르면 "그렇다"(보수적). */
+export function couldHaveChangedTheOutsideWorld(toolName: string | null | undefined): boolean {
+  const name = String(toolName ?? "").trim();
+  if (!name) return false;
+  if (isHostPreflightTool(name)) return false;
+  // MCP 도구는 `서버 · 도구` / `mcp__서버__도구` 처럼 접두사가 붙는다 — 마지막 조각으로 본다.
+  const leaf = name.split(/__|·|\//).pop()?.trim().toLowerCase() ?? "";
+  return !WELL_KNOWN_READ_ONLY_TOOLS.has(leaf) && !WELL_KNOWN_READ_ONLY_TOOLS.has(name.toLowerCase());
+}
+
+/**
  * 실행이 남긴 도구 이름들 중 **바깥을 건드렸을 수 있는 것만** 남긴다.
  * 이름이 없는 이벤트(상태 표시 등)도 근거가 아니므로 버린다 — 근거는 이름이 있어야 한다.
  */

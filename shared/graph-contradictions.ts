@@ -276,6 +276,35 @@ export function repairGraphContradictions(
   return { changed: true, graph: next, movedNodeIds: moved };
 }
 
+/**
+ * 이 자동화가 **자기 권한 때문에** 구조적으로 실패하는가.
+ *
+ * 실측 2026-08-20: 저장된 자동화 10개 중 3개가 `execution_permission = "read"` 인데
+ * 그래프에 "바깥을 바꾼다"고 선언된 단계를 갖고 있었다(주간 요약의 이메일 전송,
+ * 해커뉴스의 파일 저장 등). 읽기 권한은 쓰기 도구를 이름으로 막으므로, 그 단계는
+ * **부를 수 있는 도구가 하나도 없는 상태**로 실행된다. 그리고 실패 문구는 모델을
+ * 탓한다 — "도구를 한 번도 호출하지 않았습니다".
+ *
+ * 사람에게 실행 중에 물어서 풀 일이 아니다. 필요한 권한은 **시작할 때 한 번** 받아
+ * 저장해 두면 그 뒤로는 묻지 않는다(오너 지시 2026-08-20: 승인은 최소한으로,
+ * 필요한 것은 그래프 시작에서 항상허용으로).
+ *
+ * 돌려주는 것: 필요한 권한과 그 근거가 되는 단계들. 없으면 null.
+ */
+export function requiredPermissionFor(
+  graph: WorkflowGraph | null | undefined,
+  current: string | null | undefined,
+): { needs: "write"; current: string; because: string[] } | null {
+  const now = String(current ?? "").trim().toLowerCase();
+  if (now !== "read") return null; // write·full 은 이미 충분하다
+  if (!graph || !Array.isArray(graph.nodes)) return null;
+  const because = graph.nodes
+    .filter((n) => str(n.config, "effect") === "mutation")
+    .map((n) => n.label || n.id);
+  if (because.length === 0) return null;
+  return { needs: "write", current: now, because };
+}
+
 /** 사람이 읽는 한 화면. 무엇이 왜 틀렸고 어디로 옮기면 되는지까지 말한다. */
 export function renderGraphContradictions(name: string, items: GraphContradiction[]): string {
   if (items.length === 0) return `${name}: 평상시 실패로 이어지는 모양은 없습니다.`;
