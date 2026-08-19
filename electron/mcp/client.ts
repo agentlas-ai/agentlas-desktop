@@ -4236,7 +4236,13 @@ ${effectiveUserPrompt}`;
         // Malformed blocks remain ordinary text and never reach registration.
       }
       displayText = parseMemoryEvents(displayText).cleanedText;
-    } else if (chat.kind !== "division") {
+    } else if (
+      chat.kind !== "division" ||
+      // 자동화 세션 채팅은 division 이다 — 편집 계약(위 req.automationId 주입)이 시킨
+      // `## Automation` 방출을 여기서 소비하지 않으면 계약 전체가 죽은 경로가 된다.
+      // (백그라운드 자동화 실행이 자동화를 낳는 재귀는 executionContext 로 계속 차단)
+      (req.automationId && executionContext?.source !== "automation")
+    ) {
       try {
         const { automations: autos, cleanedText, errors } = parseAutomations(displayText);
         if (errors.length > 0) {
@@ -4291,12 +4297,19 @@ ${effectiveUserPrompt}`;
           );
           if (dup) {
             const updated = updateAutomation(dup.id, {
-              scheduleHuman: a.schedule,
-              targetType,
-              targetId,
-              promptTemplate: a.prompt,
-              // schedule_json은 항상 방출값으로 — stale spec이 새 토큰을 덮는 것 방지.
-              scheduleJson: a.scheduleSpec ? JSON.stringify(a.scheduleSpec) : null,
+              // schedule 은 방출됐을 때만 — 미방출(graph-only 세션 편집)의 schedule 은
+              // resolveSchedule 폴백("daily-09:00")이라, 그대로 쓰면 진짜 스케줄을 지워버린다.
+              ...(a.scheduleEmitted
+                ? {
+                    scheduleHuman: a.schedule,
+                    // schedule_json은 항상 방출값으로 — stale spec이 새 토큰을 덮는 것 방지.
+                    scheduleJson: a.scheduleSpec ? JSON.stringify(a.scheduleSpec) : null,
+                  }
+                : {}),
+              // 타깃은 방출이 실행 주체를 실었을 때만 재계산 — graph-only 편집이 기존 타깃을
+              // 현재 챗 타깃으로 몰래 바꾸면 안 된다.
+              ...(a.agent || a.hubAgent || a.prompt ? { targetType, targetId } : {}),
+              ...(a.prompt ? { promptTemplate: a.prompt } : {}),
               // tz는 방출됐을 때만 갱신(미방출 재방출이 기존 tz를 시스템 tz로 되돌리지 않게).
               ...(a.tz && a.tz.trim() ? { timezone: a.tz } : {}),
             });
@@ -4324,6 +4337,17 @@ ${effectiveUserPrompt}`;
                   graph: registration.graph,
                 }),
                 result: automationRegistrationResultText(registration, locale),
+              },
+            });
+          } else if (!a.prompt.trim() && a.graph) {
+            // graph-only 방출(세션 편집 계약)이 이름 불일치로 여기 떨어지면, 빈 프롬프트·폴백
+            // 스케줄의 반쪽 자동화가 생긴다. 만들지 말고 이름이 틀렸다고 말한다.
+            sink({
+              kind: "tool-use",
+              tool: {
+                name: "automation-registration-refused",
+                isError: true,
+                result: `No automation named "${a.name}" exists to update — a graph-only block must keep the session automation's exact name.`,
               },
             });
           } else {

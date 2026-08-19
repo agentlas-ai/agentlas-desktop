@@ -48,6 +48,8 @@ export interface ParsedAutomation {
   name: string;
   /** daily-HH:MM | weekday-HH:MM | weekly-<mon..sun>-HH:MM | monthly-<day>-HH:MM (레거시 미러) */
   schedule: string;
+  /** 방출 JSON 에 schedule 칸이 실제로 있었는가 — false 면 schedule 은 폴백값이라 기존 저장값을 덮으면 안 된다. */
+  scheduleEmitted?: boolean;
   prompt: string;
   /** 이 자동화를 실행할 에이전트(id/slug/표시명). 미지정이면 현재 챗 타깃.
    *  오케스트레이터 챗에서 만든 자동화가 항상 오케스트레이터에 묶여 매 실행
@@ -409,8 +411,11 @@ export function parseAutomations(text: string): ParseAutomationsResult {
 
   if (fence) {
     try {
-      const data = JSON.parse(fence[1].trim());
-      if (Array.isArray(data)) {
+      const raw = JSON.parse(fence[1].trim());
+      // 자동화 세션 편집 계약(client.ts)은 "name + 전체 graph" **단일 객체**를 방출시킨다.
+      // 배열만 받으면 그 계약의 방출이 통째로 버려진다 — 객체도 1원소 배열로 받는다.
+      const data = Array.isArray(raw) ? raw : raw && typeof raw === "object" ? [raw] : null;
+      if (data) {
         automations = data
           .map((d): ParsedAutomation | null => {
             if (!d || typeof d !== "object") {
@@ -423,11 +428,27 @@ export function parseAutomations(text: string): ParseAutomationsResult {
             const agent = typeof o.agent === "string" ? o.agent.trim() : "";
             const hubAgent = typeof o.hubAgent === "string" ? o.hubAgent.trim() : "";
 
+            const scheduleEmitted = o.schedule !== undefined && o.schedule !== null;
             const { spec, token, tz } = resolveSchedule(o.schedule, errors);
 
             // steps[] → 그래프 합성.
             let steps: EmittedStep[] | undefined;
             let graph: WorkflowGraph | null = null;
+            // 세션 편집 계약은 graph 를 통째로 방출한다 — steps 가 없으면 그 graph 를 그대로 쓴다.
+            const g = o.graph as { nodes?: unknown; edges?: unknown } | undefined;
+            const directGraph =
+              g &&
+              typeof g === "object" &&
+              Array.isArray(g.nodes) &&
+              g.nodes.length > 0 &&
+              g.nodes.every(
+                (n) => !!n && typeof n === "object" && typeof (n as { id?: unknown }).id === "string" && typeof (n as { type?: unknown }).type === "string",
+              )
+                ? (o.graph as WorkflowGraph)
+                : null;
+            if (o.graph !== undefined && !directGraph) {
+              errors.push(`Automation "${name || "(unnamed)"}" carried a graph that is not a valid workflow graph`);
+            }
             if (Array.isArray(o.steps) && o.steps.length > 0) {
               steps = (o.steps as unknown[])
                 .filter((s): s is EmittedStep => !!s && typeof s === "object")
@@ -441,8 +462,10 @@ export function parseAutomations(text: string): ParseAutomationsResult {
               }
               graph = stepsToGraph(steps);
             }
+            if (!graph && directGraph) graph = directGraph;
 
-            if (!name || !prompt) {
+            // graph 를 실은 방출(세션 편집)은 prompt 가 없어도 유효하다 — 프롬프트는 그래프 노드가 갖는다.
+            if (!name || (!prompt && !graph)) {
               errors.push(`Automation "${name || "(unnamed)"}" missing name/prompt`);
               return null;
             }
@@ -450,6 +473,7 @@ export function parseAutomations(text: string): ParseAutomationsResult {
             return {
               name,
               schedule: token,
+              scheduleEmitted,
               prompt,
               ...(agent ? { agent } : {}),
               ...(hubAgent ? { hubAgent } : {}),
@@ -461,7 +485,7 @@ export function parseAutomations(text: string): ParseAutomationsResult {
           })
           .filter((a): a is ParsedAutomation => a !== null);
       } else {
-        errors.push("Automation block was not a JSON array");
+        errors.push("Automation block was neither a JSON array nor a JSON object");
       }
     } catch (err) {
       errors.push(`Automation JSON parse failed: ${err instanceof Error ? err.message : String(err)}`);
