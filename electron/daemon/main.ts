@@ -93,6 +93,31 @@ async function handleControlMethod(method: string, params: unknown): Promise<unk
     const { getAutomation } = await import("../store/automations");
     return getAutomation(id) ?? null;
   }
+  if (method === "graph.run") {
+    /*
+     * ★터미널이 코어를 로드하는 **유일한 무거운 이유**가 이 호출이다(graph.cjs:509).
+     * 터미널은 완주를 기다렸다가 결과 JSON 을 찍는다 — 이 소켓의 요청/응답 형태와
+     * 정확히 일치해서, 스트리밍 채널 없이도 손실 없이 옮겨진다.
+     * (라이브 이벤트가 필요한 채팅 실행은 다르다 — 그건 여기로 옮기지 않았다.)
+     */
+    const { automationId, automation: fallbackRow, graph, initialVars } = (params ?? {}) as {
+      automationId?: string;
+      automation?: Record<string, unknown>;
+      graph?: unknown;
+      initialVars?: Record<string, unknown>;
+    };
+    if (!graph) throw new Error("graph.run requires a graph");
+    const { getAutomation } = await import("../store/automations");
+    const stored = automationId ? getAutomation(automationId) : null;
+    const automation = stored ?? fallbackRow;
+    if (!automation) throw new Error("graph.run requires automationId or an automation row");
+    const { runGraph } = await import("../workflow/run-graph");
+    return runGraph(
+      { ...(automation as object), graph } as never,
+      graph as never,
+      { ...(initialVars ? { initialVars } : {}) } as never,
+    );
+  }
   throw new Error(`unknown method: ${method}`);
 }
 

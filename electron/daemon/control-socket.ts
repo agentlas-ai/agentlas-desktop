@@ -18,7 +18,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 export interface ControlSocketRequest {
   id: string | number;
@@ -39,14 +39,26 @@ export interface ControlSocketHandle {
   close(): Promise<void>;
 }
 
-/** 이 머신의 기본 제어 소켓 주소. 클라이언트도 같은 함수를 써야 서로 찾는다. */
+/**
+ * 이 머신의 기본 제어 소켓 주소. 클라이언트도 같은 함수를 써야 서로 찾는다.
+ * (터미널 engine/core/daemon-client.cjs 가 같은 계산을 든다 — 어긋나면 영영 못 찾는다.)
+ *
+ * ★유닉스 도메인 소켓 경로에는 **~104바이트 한계**가 있다(sockaddr_un). 실측
+ * 2026-08-19: 128바이트 경로에서 서버 bind 는 조용히 지나갔는데 클라이언트 connect 가
+ * EINVAL 로 죽었다 — 한쪽만 성공한 것처럼 보이는 최악의 형태다. userData 가 길면
+ * tmpdir 아래 해시 이름으로 폴백한다. 해시가 userData 에서 결정되므로 양쪽 계산이
+ * 항상 같은 곳을 가리키고, 소켓 자체는 0600 이라 사용자 경계는 유지된다.
+ */
 export function defaultControlSocketPath(userDataDir: string): string {
   if (process.platform === "win32") {
     // 파이프 이름에는 경로를 못 쓴다. userData 를 짧게 접어 넣어 인스턴스를 가른다.
     const tag = Buffer.from(userDataDir).toString("base64url").slice(-16);
     return `\\\\.\\pipe\\agentlas-daemon-${tag}`;
   }
-  return path.join(userDataDir, "daemon.sock");
+  const preferred = path.join(userDataDir, "daemon.sock");
+  if (Buffer.byteLength(preferred, "utf8") <= 100) return preferred;
+  const tag = createHash("sha256").update(userDataDir).digest("hex").slice(0, 16);
+  return path.join(os.tmpdir(), `agentlas-daemon-${tag}.sock`);
 }
 
 function jsonLine(value: unknown): string {
