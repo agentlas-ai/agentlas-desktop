@@ -139,8 +139,12 @@ const HOOK_STATUS = [
   ["cursor", "UNMEASURABLE cursor-agent is not installed on this machine"],
   ["kimi", "UNMEASURABLE kimi is not installed on this machine"],
 ];
-console.log("");
-for (const [kind, status] of HOOK_STATUS) console.log(`HOOK  ${kind}: ${status}`);
+// ★게이트 모드(--check)에서는 조용하다. 이 줄들은 사람이 상태를 보러 직접 돌렸을 때만
+// 쓸모가 있고, 매 실행 6줄씩 찍으면 정작 봐야 할 DRIFT 가 묻힌다.
+if (!check) {
+  console.log("");
+  for (const [kind, status] of HOOK_STATUS) console.log(`HOOK  ${kind}: ${status}`);
+}
 console.log(`\nprobe summary: drift=${drift} skipped=${skipped}`);
 if (check && drift > 0) {
   console.error("probe-runtime-capabilities: descriptor drifted from installed CLIs (see DRIFT lines)");
