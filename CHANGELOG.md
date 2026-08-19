@@ -1,6 +1,23 @@
 # Changelog
 
-## Unreleased
+## 1.0.28 — 2026-08-20
+
+Bundled runtime: Agentlas OS v1.2.12 (2b075361f07f25577994f0ce87f46f33ac41ec64).
+Source readiness does not prove a public installer or update feed; the
+Releases page stays the authority.
+
+- A freshly installed CLI could never obtain the graph engine: the download
+  function existed but nothing called it, so every automation failed with
+  "vendored Desktop Core is unavailable". The run command now fetches on a
+  cache miss, and a gate pins that the run path can reach the fetch.
+- The keychain host looked for keytar only beside itself. The downloaded engine
+  omits it on purpose, so the lookup threw and killed the node. The host now
+  supplies the path, and not finding it is reported as unavailable.
+- A threshold watcher no longer fails on quiet days. Saved graphs are checked
+  for a verification that demands content on a value a branch tests for
+  emptiness; the recovery panel moves it inside the branch instead of deleting
+  it. A step wired back to itself is dropped; a loop with no branch to leave it
+  is explained before the run rather than at it.
 
 - Onboarding no longer ends by closing. The last step now leads into setup —
   browser credentials, then plugins — and Skip leads there too. The key moved to
