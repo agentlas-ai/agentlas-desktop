@@ -101,6 +101,18 @@ export interface RunnerRequest {
    * memory, avoid session persistence, and fail closed if they cannot prove it.
    */
   untrustedNoTools?: boolean;
+  /**
+   * 이 무도구 실행이 **판정**인가(사용자가 이미 가진 텍스트를 라벨/채점표로 분류).
+   *
+   * untrustedNoTools 하나로는 두 가지가 구분되지 않아, 세션 영속을 이유로 Agent App 을
+   * 거절하던 런타임(grok)이 판정까지 함께 막았다. 그 결과 그 런타임만 쓰는 사용자는 제품의
+   * 모든 검증이 죽는다 — 자동화가 산출물을 정확히 만들어도 채점에서 EVAL_UNAVAILABLE 로
+   * 떨어져 실행 전체가 error 가 된다(agy 에서 실측, 2026-08-19).
+   *
+   * 판정은 브라우저 입력을 대신 실행하는 것이 아니라 분류 한 번이라, 세션 기록이 남는
+   * 런타임에도 허용된다. 도구 경계는 여전히 인자로 강제한다.
+   */
+  judgmentOnly?: boolean;
   /** Exact main-minted read-only MCP tools allowed despite the zero-builtins boundary. */
   untrustedAllowedMcpTools?: string[];
   /**

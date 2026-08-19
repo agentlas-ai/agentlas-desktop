@@ -317,7 +317,22 @@ export function isGrokQuotaExhausted(value: string): boolean {
 }
 
 export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents): Promise<RunnerResult> => {
-  if (req.untrustedNoTools) {
+  /*
+   * ★판정(untrustedNoTools)은 grok 으로도 수행한다 — 단, Agent App 의 무상태 격리는 계속 거절한다.
+   *
+   * 이 거절의 사유는 "grok 이 대화 기록을 로컬에 저장한다"였는데, 그 문장은 **Agent App**
+   * (사용자 대신 앱이 도는 무상태 실행)에는 맞지만 **판정**에는 과했다. 판정은 사용자가 이미
+   * 가진 텍스트를 라벨 하나로 분류하는 일이고, 그것까지 막으면 grok 만 쓰는 사용자는 제품의
+   * 모든 검증이 죽는다 — 자동화가 산출물을 정확히 만들어도 마지막 채점에서 EVAL_UNAVAILABLE 로
+   * 떨어져 실행 전체가 error 가 된다(같은 병을 agy 에서 실측했다, 2026-08-19).
+   *
+   * 정말 되는지부터 확인했다: `--deny "*"` 로 도구를 끄고 채점표 프롬프트를 주자 grok 이
+   * 도구를 못 쓴다는 것을 스스로 인지하고("All tools are denied") 규격 JSON 을 정확히 냈다.
+   * 반면 `--disallowed-tools` 만으로는 파일을 찾아다녔다 — 그래서 아래 인자는 deny 규칙이다.
+   *
+   * Agent App 경계(agentAppMode)는 그대로 거절한다: 거기서 문제는 도구가 아니라 세션 영속이다.
+   */
+  if (req.untrustedNoTools && !req.judgmentOnly) {
     throw new Error(
       req.locale === "ko"
         ? "Grok CLI는 대화 기록을 로컬에 자동 저장하므로 Agent App의 무상태 격리 모드에서 사용할 수 없습니다. Claude Code, Ollama 또는 API 런타임을 선택하세요."
@@ -390,6 +405,12 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
     // 처음부터 풀어 둔다(claude 형제 규칙: acceptEdits 는 셸·웹을 여전히 묻는다).
     // grok --help 실측: `--allow <RULE>` (compat alias: --allowedTools).
     args.push("--permission-mode", "acceptEdits", "--allow", "Bash", "--allow", "WebFetch", "--allow", "WebSearch");
+  }
+  if (req.untrustedNoTools) {
+    // ★도구 0개는 선언이 아니라 인자로 만든다. 실측 2026-08-19: `--disallowed-tools` 로
+    //   이름을 열거하면 grok 이 여전히 파일을 찾아다녔고, `--deny "*"` 를 주자 스스로
+    //   "All tools are denied" 를 인지하고 근거만으로 규격 JSON 판정을 냈다.
+    args.push("--deny", "*", "--disable-web-search");
   }
 
   const truncate = (s: string, max = 12000): string => (s.length > max ? `${s.slice(0, max)}…` : s);

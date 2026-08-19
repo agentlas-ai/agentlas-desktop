@@ -367,6 +367,9 @@ async function callJudgmentModelDetailed(opts: {
             // prove that. A runtime that refuses is skipped, never downgraded —
             // the judge must not lower its own boundary to get an answer.
             untrustedNoTools: true,
+            // 이 무도구 실행은 판정이다 — 세션 영속을 이유로 Agent App 을 막는 런타임도
+            // 판정은 수행할 수 있어야 한다(그러지 않으면 그 런타임 단독 사용자는 검증 전멸).
+            judgmentOnly: true,
             signal: controller.signal,
             locale: opts.locale ?? "en",
           },
@@ -427,6 +430,9 @@ async function callJudgmentModelDetailed(opts: {
               effort: "low",
               permission: "read",
               untrustedNoTools: true,
+            // 이 무도구 실행은 판정이다 — 세션 영속을 이유로 Agent App 을 막는 런타임도
+            // 판정은 수행할 수 있어야 한다(그러지 않으면 그 런타임 단독 사용자는 검증 전멸).
+            judgmentOnly: true,
               signal: controller.signal,
               locale: opts.locale ?? "en",
             },
