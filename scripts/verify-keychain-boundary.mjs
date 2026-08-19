@@ -46,8 +46,10 @@ const ALLOWED = new Set([
 ]);
 
 // 1) keytar 를 아는 파일은 둘뿐이다.
+// shared/ 도 훑는다 — 거기 들어간 import 는 renderer 번들까지 따라가므로
+// "메인만 비밀을 만진다"는 계약 자체가 깨진다.
 const importers = [];
-for (const file of walk(path.join(root, "electron"))) {
+for (const file of [...walk(path.join(root, "electron")), ...walk(path.join(root, "shared"))]) {
   const src = fs.readFileSync(file, "utf8");
   if (/from\s+["']keytar["']|require\(\s*["']keytar["']\s*\)/.test(src)) importers.push(file);
 }
