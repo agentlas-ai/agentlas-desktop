@@ -2593,7 +2593,40 @@ export async function runGraph(
             }
           }
         }
-        const prompt = substituted.text + feedbackBlock;
+        /*
+         * ★`consumes` 는 선언이 아니라 **전달**이어야 한다.
+         *
+         *   코드 노드는 이미 그렇게 돈다 — `consumes` 에 적힌 값을 스크립트 변수로 넣어 준다
+         *   (아래 code 케이스의 codeVars). 그런데 에이전트/출력 노드는 `{{이름}}` 치환에만
+         *   의존해서, 지시문이 그 자리를 안 적으면 선언해 둔 값이 **한 글자도 안 간다**.
+         *
+         *   실측 2026-08-19: 임계값 감시 자동화의 보고 단계가 `consumes: "summary"` 를 달고
+         *   "Using only the numbers in the report you are given …" 라고 썼다. 사람에게도
+         *   모델에게도 "값이 온다"고 읽히는 문장이다. 실제로는 안 왔고, 모델은 정직하게
+         *   "No report was provided in this run" 이라고 답했다. 앞 단계는 환율·임계값·결과를
+         *   전부 정확히 계산해 둔 상태였다.
+         *
+         *   그래서 지시문이 그 값을 참조하지 않으면 커널이 **이름표를 붙여 덧붙인다**.
+         *   이미 `{{이름}}` 으로 적어 둔 그래프는 그대로다(중복해서 두 번 넣지 않는다).
+         */
+        let consumedBlock = "";
+        {
+          const declared = String(node.config?.consumes ?? "").trim();
+          const names = declared ? [declared] : [];
+          const lines: string[] = [];
+          for (const name of names) {
+            if (!name || !(name in vars)) continue;
+            const referenced = new RegExp(`\\{\\{\\s*${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\}\\}`).test(rawPrompt);
+            if (referenced) continue;
+            const rendered = judgeableText(vars[name]);
+            if (!rendered.trim()) continue;
+            lines.push(`--- ${name} ---\n${rendered}`);
+          }
+          if (lines.length > 0) {
+            consumedBlock = `\n\n[이 단계가 받기로 선언한 값]\n${lines.join("\n\n")}`;
+          }
+        }
+        const prompt = substituted.text + consumedBlock + feedbackBlock;
         // 참조한 값이 없으면 실행하지 않는다. 예전에는 프롬프트가 **통째로** 비었을 때만
         // 막았다. 그래서 "'{{topic}}' 주제로 계획을 세워줘"처럼 나머지 문장이 남아 있으면
         // 빈 구멍인 채로 실행돼, 주제 없이 지어낸 결과가 정상 완료로 기록됐다.
