@@ -1,3 +1,4 @@
+import { isHostPreflightTool } from "../../shared/tool-activity";
 import { createHash } from "node:crypto";
 import { agentRunCwd } from "../runtime/exec";
 import { resolveInvocationRunId } from "../runtime/run-id";
@@ -534,7 +535,7 @@ export function invocationEventPromotesTask(event: McpInvocationEvent): boolean 
   // an actual tool payload proves that execution crossed the conversation
   // boundary.
   const toolName = event.tool?.name.trim() ?? "";
-  const hostPluginPreflight = toolName.startsWith("Agentlas Plugins ·");
+  const hostPluginPreflight = isHostPreflightTool(toolName);
   return (event.kind === "tool-use" && Boolean(event.tool) && !hostPluginPreflight) ||
     event.kind === "surface" ||
     (Boolean(event.agentId) && (event.phase === "delegate" || (event.tier ?? 1) > 1)) ||

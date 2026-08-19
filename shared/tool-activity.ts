@@ -1,0 +1,44 @@
+// "이 도구 호출이 바깥 세상을 실제로 건드린 일인가"를 한 곳에서 판단한다.
+//
+// 왜 정본이 필요한가 (2026-08-19 실측):
+// X 자동화 실행이 `ok` 로 끝났고 판정은 "계획한 답글 3건을 모두 게시했고, **실제 도구 활동이
+// 그 주장을 뒷받침한다**"고 적었다. 그런데 X 에는 아무것도 올라가지 않았고, 그 실행이 남긴
+// 도구 이벤트는 정확히 6건 — 전부 Agentlas 자신의 플러그인 조회였다:
+//   Agentlas Plugins · universe / auto-select / Hub bridge (각 2회)
+// 브라우저 조작은 0건. 즉 "도구를 썼으니 일했다"는 근거가 **제품 자신의 예비 조회**로 충족돼,
+// 거짓 성공을 오히려 보증해 줬다.
+//
+// 같은 규칙이 이미 두 곳에 손코딩돼 있었는데(run-graph 의 replay-safe 판정, invocation/service 의
+// task 승격 판정) 정작 완주 판정만 그 지식을 못 봤다. 한 곳에서 판단하고 셋이 같이 쓴다.
+
+/** 호스트가 실행 전에 스스로 부르는 조회들의 접두사. 사용자 작업이 아니다. */
+const HOST_PREFLIGHT_PREFIX = "Agentlas Plugins";
+
+/** 편성 감사용 읽기 전용 호출 — 바깥을 바꾸지 않는다. */
+const READ_ONLY_WORKFORCE_TOOLS = /^workforce\.(?:search_candidates|validate_selection)\b/i;
+
+/**
+ * 이 도구 이름이 **호스트의 예비 조회**인가.
+ * 참이면 "일이 실제로 일어났다"의 근거로 세면 안 된다.
+ */
+export function isHostPreflightTool(toolName: string | null | undefined): boolean {
+  const name = String(toolName ?? "").trim();
+  if (!name) return false;
+  if (name.toLowerCase().startsWith(HOST_PREFLIGHT_PREFIX.toLowerCase())) return true;
+  return READ_ONLY_WORKFORCE_TOOLS.test(name);
+}
+
+/**
+ * 실행이 남긴 도구 이름들 중 **바깥을 건드렸을 수 있는 것만** 남긴다.
+ * 이름이 없는 이벤트(상태 표시 등)도 근거가 아니므로 버린다 — 근거는 이름이 있어야 한다.
+ */
+export function externalToolNames(names: Array<string | null | undefined>): string[] {
+  const out: string[] = [];
+  for (const raw of names) {
+    const name = String(raw ?? "").trim();
+    if (!name) continue;
+    if (isHostPreflightTool(name)) continue;
+    out.push(name);
+  }
+  return out;
+}

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { externalToolNames } from "../../shared/tool-activity";
 import { getDb } from "./db";
 import type {
   FailureEventUi,
@@ -597,18 +598,22 @@ export function observedToolActivity(runId: string): { callCount: number; toolNa
   const rows = getDb()
     .prepare("SELECT payload_json FROM run_events WHERE run_id = ? AND kind = 'mcp_tool-use' ORDER BY seq ASC LIMIT 500")
     .all(runId) as { payload_json: string | null }[];
-  const names = new Set<string>();
+  const raw: string[] = [];
   for (const row of rows) {
     try {
       const payload = row.payload_json ? JSON.parse(row.payload_json) : null;
       // 실측 payload 는 {"eventKind":"tool-use","toolName":…} — toolName 이 정본, 옛 모양은 폴백.
       const name = payload?.toolName ?? payload?.tool?.name ?? payload?.name;
-      if (typeof name === "string" && name.trim()) names.add(name.trim().slice(0, 120));
+      if (typeof name === "string" && name.trim()) raw.push(name.trim().slice(0, 120));
     } catch {
-      /* payload 가 깨졌어도 호출이 있었다는 사실은 남는다 */
+      /* payload 가 깨졌어도 이름 없는 이벤트는 근거가 못 된다 — 세지 않는다 */
     }
   }
-  return { callCount: rows.length, toolNames: [...names] };
+  // ★호스트 자신의 예비 조회는 "일했다"의 근거가 아니다. 2026-08-19 실측: 게시 0건인 실행이
+  //   Agentlas Plugins · universe/auto-select/Hub bridge 6건만 남겼는데 판정이 그걸 근거로
+  //   "3건 모두 게시했고 도구 활동이 뒷받침한다"고 확인해 줬다. 판단은 shared/tool-activity 정본.
+  const external = externalToolNames(raw);
+  return { callCount: external.length, toolNames: [...new Set(external)] };
 }
 
 export function listRunEvents(runId: string, limit?: number): RunEventUi[] {

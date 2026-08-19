@@ -5,6 +5,7 @@
 // (promptTemplate이 늘 약속했던 파라미터화, 설계 한계 #12).
 //
 // 실행 엔진은 손대지 않는다 — 러너는 "어떤 요청을 어떤 순서로 runMcpInvocation에 넘길지"만 결정.
+import { isHostPreflightTool } from "../../shared/tool-activity";
 import type {
   Automation,
   WorkflowGraph,
@@ -568,8 +569,9 @@ function isReadOnlyCheckpointTool(name: string): boolean {
   // search/validate are digest-bound transaction operations. Preparation may
   // fetch a metered runtime bundle, so it is never considered replay-safe
   // without a provider idempotency receipt.
-  return READ_ONLY_WORKFORCE_AUDIT_TOOLS.has(name) ||
-    /^(?:workforce\.(?:search_candidates|validate_selection)|Agentlas Plugins\b)/i.test(name);
+  // 예비 조회 판단은 shared/tool-activity 정본을 쓴다 — 같은 규칙이 세 곳에 손코딩돼 있었고,
+  // 완주 판정만 그 지식을 못 봐서 게시 0건 실행이 "도구 활동이 뒷받침한다"로 통과했다.
+  return READ_ONLY_WORKFORCE_AUDIT_TOOLS.has(name) || isHostPreflightTool(name);
 }
 
 function isReplaySafeGraphToolReceipt(
