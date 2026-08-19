@@ -1570,7 +1570,15 @@ export async function runGraph(
    *   `FOREIGN KEY constraint failed`. 사람은 자기가 지운 에이전트 이야기라는 걸
    *   알 방법이 없고, 자동화 이름조차 없는 문장을 본다.
    */
-  if (automation.targetType === "agent" || automation.targetType === "firm") {
+  /*
+   * ★대상 id 가 **비어 있는 것**과 **없어진 것**은 다르다. 실측 2026-08-20: 처음 판이
+   *   빈 id 를 "지워졌다"고 말해, 기본 대상으로 도는 멀쩡한 자동화를 죽였다
+   *   (`쓰던 에이전트 ""을(를) 찾을 수 없습니다`). 이름을 댈 수 없으면 없어졌다고 말하지 않는다.
+   */
+  if (
+    (automation.targetType === "agent" || automation.targetType === "firm")
+    && String(automation.targetId ?? "").trim() !== ""
+  ) {
     const table = automation.targetType === "firm" ? "firms" : "installed_agents";
     const present = (() => {
       try {
