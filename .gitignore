@@ -190,6 +190,7 @@ renderer/public/trex-samples/
 .agentlas/
 .agentlas/project-soul-memory.md
 .agentlas/sitemap.json
+.agentlas/feature-map.json
 .agentlas/memory-map.json
 .agentlas/memory-tickets.jsonl
 .agentlas/vault-references.json
@@ -208,7 +209,6 @@ renderer/public/trex-samples/
 .agentlas/career-graph-inbox/
 .agentlas/career-graph.sqlite*
 .agentlas/experience-relations.jsonl
-.agentlas/super-ontology-*
 .agentlas/stormbreaker/
 .agentlas/pipeline/
 .agentlas/*.lock
