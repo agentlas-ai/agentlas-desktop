@@ -568,14 +568,35 @@ export function validateBlueprint(
   for (const check of bp.checks ?? []) {
     const subject = String(check.subject ?? "").trim();
     if (!subject || !emptinessTestedVars.has(subject)) continue;
+    const branch = (bp.branches ?? []).find((b) => String(b.var ?? "").trim() === subject);
+    if (!branch) continue;
+    const yesStep = typeof branch.yesStep === "number" ? branch.yesStep : null;
+    /*
+     * ★**위치**를 본다. 갈림길 뒤의 값-있는 쪽에 놓인 검증은 비어 있는 날 아예 돌지 않으므로
+     *   문제가 아니다 — 그게 우리가 하라고 안내하는 바로 그 모양이다. 위치를 안 보면
+     *   고친 청사진도 계속 되돌려 보내게 되고, 빌더는 같은 지적을 받으며 영원히 돈다
+     *   (실측: 안내를 따라도 문제가 남아 네 번 시도 끝에 포기했다).
+     */
+    const at = typeof check.afterStep === "number" ? check.afterStep : -1;
+    const runsBeforeTheBranchDecides = at <= (branch.afterStep ?? 0);
+    const sitsOnTheEmptySide = typeof branch.noStep === "number" && at === branch.noStep;
+    if (!runsBeforeTheBranchDecides && !sitsOnTheEmptySide) continue;
+    /*
+     * ★사람에게 묻지 않는다. 이건 사람이 정할 일이 아니라 **모양이 틀린 것**이고, 고치는 법도
+     *   하나로 정해진다. 처음에는 질문(ask)으로 냈다가 실측에서 실패했다: 빌더가 네 번
+     *   고쳐 보다 "could not pin it down" 으로 포기해, 사용자는 틀린 그래프 대신 **아무
+     *   그래프도** 못 받았다. 되돌리려면 무엇을 어디로 옮기라고 정확히 말해야 한다.
+     */
     push(
-      `"${subject}"은(는) 비어 있을 수 있다고 갈림길이 말하는데, 그 앞의 검증은 비어 있지 않기를 요구합니다. `
-      + "비어 있는 것이 정상인 날마다 이 자동화는 실패합니다.",
-      {
-        id: `check-${subject}-may-be-empty`,
-        question: `"${subject}"이(가) 비어 있는 것이 정상인 경우가 있나요? 그렇다면 이 검증을 값이 있는 쪽 가지 안으로 옮길까요?`,
-        why: "임계값 감시처럼 '알릴 것이 없는 날'이 정상인 자동화는, 그 날마다 실패하면 쓸 수 없습니다.",
-      },
+      `"${subject}"은(는) 갈림길이 비어 있을 수 있다고 말하는 값인데, 그 앞의 검증이 비어 있지 않기를 요구합니다. `
+      + "임계값 감시처럼 '알릴 것이 없는 날'이 정상인 자동화는 그 날마다 실패합니다. "
+      + `검증을 지우지 말고 **값이 있는 쪽에서만 돌게** 옮기세요: 이 검증의 afterStep 을 `
+      + (yesStep !== null
+        ? `갈림길의 yes 쪽 단계(${yesStep})나 그 뒤 단계로 바꾸면 됩니다.`
+        : "갈림길의 yes 쪽 단계나 그 뒤 단계로 바꾸면 됩니다.")
+      + ` 값이 비었는지 자체를 확인하고 싶다면, "${subject}"을(를) 만든 비교 단계가 `
+      + "무엇을 읽고 어떤 임계값을 적용했는지 보고하게 하고 그 보고를 subject 로 삼으세요 "
+      + "— 그 보고는 알릴 것이 없는 날에도 비지 않습니다.",
     );
   }
 
