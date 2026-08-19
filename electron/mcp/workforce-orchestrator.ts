@@ -3953,6 +3953,11 @@ export async function runWorkforceSelection(p: RunWorkforceSelectionParams): Pro
         prepareAttempt,
         projectDir: p.projectDir || process.cwd(),
         ...(p.goalId ? { goalId: p.goalId } : {}),
+        // validateExecutionPreparation recomputes bundleDigest over whole
+        // roster rows, so this machine verifier needs the self-contained
+        // shape. The Core default (prepare.v2) dedupes directiveBundle/
+        // executionGraph into bundleContents for host-LLM callers.
+        fullDossier: true,
       };
       const prepareResult = await hubStage("workforce.prepare_execution", prepareArgs);
       prepared = validateExecutionPreparation(
