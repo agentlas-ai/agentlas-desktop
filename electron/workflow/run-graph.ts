@@ -1359,6 +1359,11 @@ export async function runGraph(
   const varWriters = new Map<string, string[]>();
   /** 노드 id → 이번 실행에서 시도한 횟수(재시도 판정용). */
   const nodeAttempts = new Map<string, number>();
+  // 노드가 실제로 부른 **바깥 도구** 수. 호스트 자신의 예비 조회는 세지 않는다
+  // (판단은 shared/tool-activity 정본). 이 수가 0이면 그 노드의 답은 주장일 뿐이다.
+  const externalToolCallsByNode = new Map<string, number>();
+  // 도구 0건으로 되돌린 노드 — 재시도 프롬프트에 그 사실을 실어 보낸다.
+  const toolProofRetryNodes = new Set<string>();
   /** 저널 한 줄. 관측 실패가 실행을 멈추지는 않는다. */
   const journal = (
     kind: Parameters<typeof appendGraphJournal>[1],
@@ -2557,7 +2562,15 @@ export async function runGraph(
           return;
         }
         const nodeChat = node.type === "agent" ? chatForNode(node) : chat;
-        const executionPrompt = buildNodeContinuityPrompt(nodeChat.id, prompt, strategyDirective);
+        // ★바깥을 바꾸는 노드가 도구를 하나도 안 쓰고 "했다"고 답한 뒤의 재시도에는 그 사실을
+        //   말해 준다. 근거 없이 같은 프롬프트를 다시 보내면 같은 소설이 한 번 더 나온다.
+        const toolProofNudge = toolProofRetryNodes.has(node.id)
+          ? "\n\n[Agentlas 호스트 관측] 직전 시도는 도구를 한 번도 호출하지 않았습니다. 그래서 바깥에서는 아무 일도 일어나지 않았고, 그때의 답은 사실이 아닙니다."
+            + " 이 단계는 실제로 무언가를 바꾸는 단계입니다 — 붙어 있는 도구로 직접 수행하세요."
+            + " 도구를 쓸 수 없으면 수행했다고 쓰지 말고, 무엇이 없어서 못 했는지 한 줄로 적으세요."
+          : "";
+        const executionPrompt =
+          buildNodeContinuityPrompt(nodeChat.id, prompt, strategyDirective) + toolProofNudge;
         beginNode(node, executionPrompt);
         let checkpointPersistenceError: Error | null = null;
         let unsafeToolObserved = false;
@@ -2647,6 +2660,14 @@ export async function runGraph(
               // 진짜 실행을 캡처 파일로만 구분해야 했다. 관측 없는 성공은
               // 성공이 아니라는 규칙(판정기·완주 루프)이 읽을 사실이 이 행이다.
               if (ev.kind === "tool-use" && ev.tool?.name) {
+                // 호스트 자신의 예비 조회(Agentlas Plugins ·, workforce 감사)는 "일했다"의
+                // 근거가 아니다 — 세지 않는다. 정본은 shared/tool-activity.
+                if (!isHostPreflightTool(ev.tool.name)) {
+                  externalToolCallsByNode.set(
+                    node.id,
+                    (externalToolCallsByNode.get(node.id) ?? 0) + 1,
+                  );
+                }
                 tryRecordRunEvent({
                   runId,
                   kind: "mcp_tool-use",
@@ -2740,6 +2761,27 @@ export async function runGraph(
             persistWorkforcePrepareReceipt(result.workforcePrepareReceipt);
           }
           settleBudget(node, result.tokens);
+          // ★바깥을 바꾸는 노드는 **도구를 부른 사실**이 있어야 성공일 수 있다.
+          //
+          // 실측 2026-08-19: X 자동화가 gemini 와 claude/opus 두 런타임에서 모두 4/4 로 끝나며
+          // "답글 3건 게시 완료"라고 적었는데, 그 실행이 부른 도구는 Agentlas 자신의 플러그인
+          // 조회뿐이었고 X 에는 아무것도 올라가지 않았다. 브라우저 도구는 정상이었다(직접 띄워
+          // 27개 도구 확인) — 없어서가 아니라 안 부른 것이다. 실행 전체가 끝난 뒤 판정에서
+          // 뒤집는 것만으로는 사용자가 원한 일이 되지 않는다. 그 노드 자리에서 잡아 다시 시킨다.
+          //
+          // 재시도가 안전한 이유는 관측 그 자체다: 외부 도구 호출이 0건이면 부수효과도 0건이라
+          // 이중 실행이 구조적으로 불가능하다(아래 catch 의 noObservedSideEffect 와 같은 근거).
+          if (nodeEffect(node) === "mutation" && (externalToolCallsByNode.get(node.id) ?? 0) === 0) {
+            toolProofRetryNodes.add(node.id);
+            throw new GraphContractError({
+              code: "NODE_CLAIMED_WITHOUT_TOOLS",
+              reason:
+                `"${node.label || node.id}"은(는) 바깥을 바꾸는 단계인데 도구를 한 번도 호출하지 않았습니다 — `
+                + "그 답은 실제로 일어난 일이 아닙니다.",
+              nextAction:
+                "이 단계에 필요한 도구(브라우저·컴퓨터 유즈 등)가 붙어 있는지 확인하고, 지시에 '무엇을 어떤 도구로 하라'를 한 줄 적어 주세요.",
+            });
+          }
           if (checkpointPersistenceError) throw checkpointPersistenceError;
           if (runnerError) throw new Error(runnerError);
           if (result.toolBroker) toolBrokerByNode.set(node.id, result.toolBroker);
@@ -2820,20 +2862,38 @@ export async function runGraph(
           // slot, not silently suspend the whole automation for reconciliation.
           const noObservedSideEffect = receipts.length === 0 &&
             (checkpoint!.prepareReceipts[node.id]?.length ?? 0) === 0;
+          // ★관측된 호출이 **전부 읽기 전용**이면 바깥은 하나도 안 바뀌었다 — 호출이 아예
+          //   없었던 것과 안전성이 같다. 이 조건이 없어서, 호스트 자신의 예비 조회
+          //   (Agentlas Plugins ·)만 남긴 실패가 "모호"로 잠겨 사람 확인을 요구했다.
+          //   실측 2026-08-19: 도구 0건으로 멈춘 노드가 ambiguousNodeIds 에 들어가
+          //   다음 실행이 automation_reconciliation_pending 으로 막혔다.
           const replaySafeFailure = effectivePermission === "read" ||
-            replaySafeTypedFailure || replaySafePreparedFailure || noObservedSideEffect;
+            replaySafeTypedFailure || replaySafePreparedFailure || noObservedSideEffect ||
+            replaySafeObservedReceipts;
           const ambiguous = checkpointPersistenceError !== null || unsafeToolObserved || !replaySafeFailure;
           // 재시도 레인 — 부수효과가 **확실히 없었을 때만** 다시 시도한다. 모호하면
           // 재시도가 곧 이중 실행이므로, 그 판단은 사람에게 넘긴다.
+          const claimedWithoutTools = graphFailureOf(nodeErr)?.code === "NODE_CLAIMED_WITHOUT_TOOLS";
           const attempts = (nodeAttempts.get(node.id) ?? 0) + 1;
           nodeAttempts.set(node.id, attempts);
-          const maxAttempts = nodeMaxAttempts(node);
-          const contractStop = graphFailureOf(nodeErr) !== null;
+          // 변경 단계는 멱등키 없이 재시도하지 않는다(이중 발행). 그 금지의 근거는 "이미
+          // 발행했는지 모른다"인데, '도구 0건 주장'은 **아무것도 부르지 않았음이 관측된**
+          // 경우라 그 근거가 성립하지 않는다. 한 번은 다시 시켜야 사용자가 원한 일이 일어난다.
+          const maxAttempts = claimedWithoutTools
+            ? Math.max(2, nodeMaxAttempts(node))
+            : nodeMaxAttempts(node);
+          // 계약 실패는 원칙적으로 재시도하지 않는다 — 다만 '도구 0건 주장'은 예외다.
+          // 그 실패의 근거 자체가 '아무 일도 일어나지 않았다'이므로 다시 시키는 것이 안전하고,
+          // 여기서 멈추면 사용자가 원한 일이 끝내 일어나지 않는다.
+          const contractStop = graphFailureOf(nodeErr) !== null && !claimedWithoutTools;
           // 재시도의 근거는 "부수효과가 없었다"가 아니라 "일시 오류였다"여야 한다.
           // 부수효과 부재만으로 즉시 다시 두드리면, 영구 고장 자동화가 매 스케줄마다
           // 몇 배의 호출을 태운다(이 제품의 기존 설계는 다음 슬롯 재시도였다).
           // 근거는 둘 중 하나다: 런타임이 타입으로 일시 오류라고 알렸거나, 사용자가 켰거나.
-          const transientSignal = receipts.some((receipt) =>
+          // "도구 0건 주장"은 일시 오류는 아니지만 **관측으로 부수효과 0이 증명된** 실패다.
+          // 다시 시키는 것이 이중 실행을 만들 수 없고, 그대로 두면 사용자가 원한 일이 영영
+          // 일어나지 않는다(오너 원칙: 목적은 실패를 잘 보고하는 게 아니라 완주하는 것).
+          const transientSignal = claimedWithoutTools || receipts.some((receipt) =>
             receipt.name.startsWith("error:") &&
             isTypedReplaySafeInvocationError(receipt.name.slice("error:".length)),
           ) || retriesDeclared(node);

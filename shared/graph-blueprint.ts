@@ -478,6 +478,59 @@ export function validateBlueprint(
     });
   }
 
+  /*
+   * ★바깥을 바꾼 mutation의 **결과**는 독립 재조회로 확인해야 한다(입력이 아니라 결과).
+   *
+   * 위 블록은 mutation이 **소비하는 입력값**을 검증하게 한다(게시할 목록이 채워졌나).
+   * 하지만 "게시가 실제로 됐나"는 그것으로 답이 안 된다 — 모델이 "게시 완료"라고 써도
+   * 바깥에는 아무것도 없을 수 있다(실측 2026-08-19: X 자동화가 두 런타임에서 4/4로 끝나며
+   * "3건 게시"라고 적었지만 X엔 0건). 결과가 실제로 반영됐는지는 **바깥을 다시 관측한
+   * 근거**로만 판정된다.
+   *
+   * 규칙: 바깥을 바꾸는 mutation 단계가 결과값(produces)을 내면, 그 값을 subject로 하고
+   * **evidence(독립 재조회 단계의 결과)를 가진** check가 있어야 한다. evidence 없는 check는
+   * 결과만 보고 판정하는 자기 채점이라 인정하지 않는다.
+   */
+  {
+    const resultChecks = new Map<string, BlueprintCheck>();
+    for (const check of bp.checks ?? []) {
+      const subj = check.subject?.trim();
+      if (subj) resultChecks.set(subj, check);
+    }
+    steps.forEach((step, index) => {
+      if (step.effect !== "mutation") return;
+      const result = String(step.produces ?? "").trim();
+      // 결과값을 안 내는 mutation은 관측할 대상이 없다 — 빌더가 produces를 붙이게 프롬프트가
+      // 지시하며, 그래도 없으면 여기서 그 사실을 지적한다(관측 불가능한 발행은 검증 불가능).
+      if (!result) {
+        push(
+          `"${step.title || `${index + 1}번째 단계`}"는 바깥을 바꾸는데 결과값(produces)이 없습니다. `
+          + `무엇이 반영됐는지(게시된 URL·저장된 경로·갱신된 행 id 등)를 produces로 내보내야 `
+          + `그 결과가 실제로 일어났는지 확인할 수 있습니다.`,
+        );
+        return;
+      }
+      const check = resultChecks.get(result);
+      const hasEvidence = !!check && !!String(check.evidence ?? "").trim();
+      if (!hasEvidence) {
+        const madeBy = steps.findIndex(
+          (s, i) => i > index && s.effect === "read" && (s.consumes ?? []).map((v) => String(v).trim()).includes(result),
+        );
+        const evName = `${result}_observed`;
+        push(
+          `"${step.title || `${index + 1}번째 단계`}"는 바깥을 바꿨지만, 그 결과가 실제로 반영됐는지 `
+          + `**독립적으로 다시 관측해** 확인하는 검증이 없습니다. 모델이 "완료"라고 써도 바깥은 그대로일 수 `
+          + `있습니다. 단계를 지우지 말고: (1) 이 단계 뒤에 결과를 바깥에서 다시 보는 read 단계`
+          + `(게시 URL 열기·파일 다시 읽기·행 재조회)를 두어 그 관측을 "${evName}"으로 내보내고, `
+          + `(2) top-level checks[]에 {"afterStep":${madeBy >= 0 ? madeBy : index + 1},"subject":"${result}",`
+          + `"criteria":"${result}이(가) 바깥에 실제로 반영됐다","evidence":"${evName}",`
+          + `"produces":"${result}_ok","items":[{"text":"관측된 결과가 반영하려던 것과 일치한다","kind":"must"},`
+          + `{"text":"관측되지 않았거나 지어낸 확인이 아니다","kind":"mustNot"}]} 를 추가하세요.`,
+        );
+      }
+    });
+  }
+
   // ★반복이 있는데 검증이 없으면, "마음에 들 때까지"를 글자 찾기로 흉내 내게 된다.
   //   실사용 실측: 만들어진 반복 그래프가 전부 **글 쓰는 노드가 자기 결과에 "좋음"을 붙이고
   //   갈림길이 그 글자를 찾는** 모양이었다 — 만든 놈이 자기를 채점하는 단어장 판정이다.

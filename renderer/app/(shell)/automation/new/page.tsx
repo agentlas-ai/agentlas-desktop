@@ -19,6 +19,7 @@ import type {
   MarketplaceListing,
   OneSuggestionReviewSeed,
   Project,
+  RuntimeStatus,
   ScheduleSpec,
   Trigger,
   TriggerKind,
@@ -58,6 +59,10 @@ function NewAutomationPage() {
   const [error, setError] = useState("");
   const [triggerType, setTriggerType] = useState<TriggerKind>("schedule");
   const [toolMode, setToolMode] = useState<AutomationToolMode>("auto");
+  // 빈 문자열 = "활성 런타임 따라가기"(runtimeSelection null). 그 외에는 kind:backend:source 키.
+  const [runtimeKey, setRuntimeKey] = useState("");
+  const [runtimeTouched, setRuntimeTouched] = useState(false);
+  const [runtimeOptions, setRuntimeOptions] = useState<RuntimeStatus[]>([]);
   const [toolModeTouched, setToolModeTouched] = useState(false);
   const [hubMode, setHubMode] = useState<AutomationHubMode>("hub-allowed");
   const [fsPath, setFsPath] = useState("");
@@ -86,6 +91,12 @@ function NewAutomationPage() {
     setName(seed.name);
     return "applied";
   }, [chainAfter, editId, fsPath, initialSpec, loaded, name, prompt, toolModeTouched]);
+
+  useEffect(() => {
+    const api = ipc();
+    if (!api?.runtime?.detect) return;
+    void api.runtime.detect(false).then((list) => setRuntimeOptions(list ?? [])).catch(() => setRuntimeOptions([]));
+  }, []);
 
   useEffect(() => {
     const api = ipc();
@@ -120,6 +131,8 @@ function NewAutomationPage() {
           setProjectContextChoice(existing.projectId ?? "__none__");
           setTriggerType(existing.triggerType ?? "schedule");
           setToolMode(existing.toolMode ?? "auto");
+          const sel = existing.runtimeSelection;
+          setRuntimeKey(sel ? `${sel.kind}:${sel.backend}:${sel.source}` : "");
           setToolModeTouched(true);
           setHubMode(existing.hubMode ?? "hub-allowed");
           setInitialSpec(existing.scheduleSpec ?? null);
@@ -207,12 +220,37 @@ function NewAutomationPage() {
         triggerType,
         trigger: buildTrigger(),
       };
+      // 사용자가 실행 AI를 건드렸을 때만 보낸다. 만들기는 null 을 받지 않으므로(활성 런타임을
+      // 따라가는 것이 기본) 값이 있을 때만 싣고, 편집은 null 로 "따라가기"로 되돌릴 수 있다.
+      const pickedRuntime = runtimeKey
+        ? runtimeOptions.find((r) => `${r.kind}:${r.backend}:${r.source}` === runtimeKey)
+        : undefined;
       if (editId) {
-        await api.automations.update(editId, commonPatch);
+        await api.automations.update(editId, {
+          ...commonPatch,
+          ...(runtimeTouched
+            ? {
+                runtimeSelection: pickedRuntime
+                  ? { kind: pickedRuntime.kind, backend: pickedRuntime.backend, source: pickedRuntime.source }
+                  : null,
+              }
+            : {}),
+        });
         navigate(`/automation/flow?id=${encodeURIComponent(editId)}`, "replace");
         return;
       }
-      const created = await api.automations.create(commonPatch);
+      const created = await api.automations.create({
+        ...commonPatch,
+        ...(runtimeTouched && pickedRuntime
+          ? {
+              runtimeSelection: {
+                kind: pickedRuntime.kind,
+                backend: pickedRuntime.backend,
+                source: pickedRuntime.source,
+              },
+            }
+          : {}),
+      });
       if (blankCanvas) {
         navigate(`/automation/flow?id=${encodeURIComponent(created.id)}`, "replace");
       } else {
@@ -392,6 +430,31 @@ function NewAutomationPage() {
               </select>
             )
           )}
+        </Field>
+
+        {/* ★어떤 AI가 이 자동화를 돌리는지. 값은 예전부터 자동화마다 저장되고 있었는데(runtime_selection_json)
+            자동화 화면 어디에도 보이지도 바꾸지도 못했다 — 사용자가 대시보드나 채팅에서 런타임을 바꿔도
+            자동화는 자기 것을 계속 썼고, 그 사실이 화면에 없어 "바꿨는데 왜 그대로냐"가 됐다(오너 실측). */}
+        <Field label={locale === "ko" ? "실행 AI" : "Run with"}>
+          <select
+            value={runtimeKey}
+            onChange={(e) => {
+              setRuntimeTouched(true);
+              setRuntimeKey(e.target.value);
+            }}
+            style={inputStyle}
+          >
+            <option value="">
+              {locale === "ko" ? "지금 활성 런타임 따라가기" : "Follow the active runtime"}
+            </option>
+            {runtimeOptions.map((r) => (
+              <option key={`${r.kind}:${r.backend}:${r.source}`} value={`${r.kind}:${r.backend}:${r.source}`}>
+                {r.kind}
+                {r.version ? ` (${r.version})` : ""}
+                {r.active ? (locale === "ko" ? " · 현재 활성" : " · active now") : ""}
+              </option>
+            ))}
+          </select>
         </Field>
 
         <Field label={locale === "ko" ? "실행 도구" : "Run tool"}>
