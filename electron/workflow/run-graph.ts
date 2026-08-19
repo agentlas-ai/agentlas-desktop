@@ -6,6 +6,7 @@
 //
 // 실행 엔진은 손대지 않는다 — 러너는 "어떤 요청을 어떤 순서로 runMcpInvocation에 넘길지"만 결정.
 import { isHostPreflightTool } from "../../shared/tool-activity";
+import { findGraphContradictions } from "../../shared/graph-contradictions";
 import type {
   Automation,
   WorkflowGraph,
@@ -2060,10 +2061,35 @@ export async function runGraph(
         const value = vars[subject];
         const subjectText = judgeableText(value);
         if (value == null || subjectText.trim() === "") {
+          /*
+           * ★"값이 비어 있다" 와 "값이 없다" 는 다르다. 앞 단계가 **정상적으로 돌아
+           *   빈 결과를 냈을 때** 이 자리에서 "앞 단계가 만들어 주지 않았습니다" 라고
+           *   말하면 사실과 다르고, 사람은 있지도 않은 배선 문제를 찾게 된다.
+           *
+           *   실측 2026-08-20: 임계값 감시 자동화가 조용한 날(=대부분의 날)마다 여기서
+           *   죽었다. 계산은 정확했고 결과도 옳았다. 진짜 원인은 그래프의 모양이었다 —
+           *   갈림길이 "비어 있을 수 있다"고 말한 값에 그 앞의 검증이 "비어 있으면
+           *   안 된다"고 하고 있었다. 그 모순을 여기서 이름으로 말해 준다.
+           */
+          const contradiction = value != null
+            ? findGraphContradictions(graph).find((c) => c.nodeId === node.id)
+            : undefined;
+          if (contradiction) {
+            failGraphNode(node, {
+              code: "EVAL_CONTRADICTS_BRANCH",
+              reason: contradiction.reason,
+              nextAction: contradiction.fix,
+            });
+            return;
+          }
           failGraphNode(node, {
             code: "NODE_INPUT_MISSING",
-            reason: `검증할 "${subject}" 값을 앞 단계가 만들어 주지 않았습니다.`,
-            nextAction: "앞 단계가 이 값을 만들어 내는지 확인하세요.",
+            reason: value == null
+              ? `검증할 "${subject}" 값을 앞 단계가 만들어 주지 않았습니다.`
+              : `검증할 "${subject}" 값을 앞 단계가 만들기는 했지만 비어 있습니다.`,
+            nextAction: value == null
+              ? "앞 단계가 이 값을 만들어 내는지 확인하세요."
+              : "비어 있는 것이 정상인 값이라면, 이 검증을 값이 있는 쪽 가지 안으로 옮기세요.",
           });
           return;
         }

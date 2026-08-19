@@ -16,6 +16,7 @@ import type {
   AutomationFixPlan,
   AutomationFixResult,
 } from "../shared/types";
+import { findGraphContradictions } from "../shared/graph-contradictions";
 import { judgeRequiredAction, secretValueFloor, type RequiredActionOption } from "./system-agents/judgment";
 import { checkComputerUsePermissions } from "./mac-permissions";
 import { getBrowserStatus, browserListSites, browserOpenLogin } from "./browser/connect";
@@ -167,6 +168,34 @@ async function capabilities(automationId: string): Promise<Capability[]> {
       return false;
     }
   })();
+  /*
+   * ★"평상시마다 실패하는 모양"은 다시 실행해도 낫지 않는 유일한 부류다.
+   *   실측 2026-08-20: 임계값 감시 자동화가 조용한 날(=대부분의 날)마다 죽었는데,
+   *   계산은 매번 정확했다. 갈림길이 "비어 있을 수 있다"고 말한 값에 그 앞의 검증이
+   *   "비어 있으면 안 된다"고 하고 있었다. 이 상태에서 재실행을 권하면 사람은
+   *   같은 실패를 계속 다시 만들 뿐이다 — 그래서 사실로 모아 조치로 낸다.
+   */
+  const shapeIssues = (() => {
+    try {
+      return findGraphContradictions(getAutomation(automationId)?.graph ?? null);
+    } catch {
+      return [];
+    }
+  })();
+  if (shapeIssues.length > 0) {
+    list.push({
+      kind: "repair_graph_shape",
+      relevantTo: "always",
+      option: {
+        id: "repair_graph_shape",
+        evidence:
+          `This automation fails on ordinary days by construction: ${shapeIssues[0].reason} `
+          + "Re-running cannot help. The repair moves that verification inside the branch that has a value.",
+        authority: "local-reversible",
+      },
+    });
+  }
+
   if (!reconciliationPending) {
     list.push({
       kind: "retry_run",
@@ -398,6 +427,31 @@ export async function applyAutomationFix(
         ? ko ? "실행 환경을 복구했습니다." : "The runtime is repaired."
         : recovery.presentation?.summary
           || (ko ? "실행 환경을 자동으로 고치지 못했습니다." : "The runtime could not be repaired automatically."),
+      navigate: null,
+      plan: null,
+    };
+  }
+
+  if (cap.kind === "repair_graph_shape") {
+    const { repairGraphContradictions } = await import("../shared/graph-contradictions");
+    const repair = repairGraphContradictions(getAutomation(automationId)?.graph ?? null);
+    if (!repair.changed || !repair.graph) {
+      return {
+        ok: false,
+        message: ko
+          ? "고칠 모양을 찾지 못했습니다 — 이미 고쳐졌거나, 자동으로 옮길 수 없는 형태입니다."
+          : "Nothing to repair — it is already fixed, or the shape cannot be moved automatically.",
+        navigate: null,
+        plan: null,
+      };
+    }
+    const { updateAutomationGraph } = await import("./store/automations");
+    updateAutomationGraph(automationId, repair.graph, { note: "평상시 실패로 이어지던 검증 위치를 고쳤습니다." });
+    return {
+      ok: true,
+      message: ko
+        ? `검증 ${repair.movedNodeIds.length}개를 값이 있는 쪽 가지 안으로 옮겼습니다. 이제 알릴 것이 없는 날에도 정상으로 끝납니다.`
+        : `Moved ${repair.movedNodeIds.length} verification step(s) inside the branch that has a value. Quiet days now finish normally.`,
       navigate: null,
       plan: null,
     };
