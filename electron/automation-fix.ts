@@ -475,7 +475,22 @@ export async function applyAutomationFix(
       };
     }
     const { updateAutomation } = await import("./store/automations");
-    updateAutomation(automationId, { executionPermission: gap.needs });
+    const updated = updateAutomation(automationId, { executionPermission: gap.needs });
+    /*
+     * ★권한은 실행 digest 에 들어 있다(graph-execution-digest.ts:45). 그래서 허용만 해도
+     *   digest 가 바뀌고, 이미 부수효과를 낸 실행이 있으면 다음 실행이 곧바로
+     *   `automation_partial_graph_changed` 로 막힌다 — 방금 고친 사람이 한 발도 못 나간다
+     *   (실측 2026-08-20: 이 조치를 만든 직후 그대로 재현됐다).
+     *
+     *   권한을 올리는 것은 **일이 바뀐 것이 아니라 사람이 허락한 것**이다. 단계도,
+     *   하는 일도 그대로다. 그러니 그 사실을 재개 좌표에 반영해 준다 — 사람의 결정이
+     *   그래프를 바꾼 것처럼 취급되지 않게(같은 교훈: 승인은 실행 밖 기록에 남긴다).
+     */
+    if (updated?.graph) {
+      const { graphExecutionDigest } = await import("../shared/graph-execution-digest");
+      const { rebaseGraphDigestAfterAuthorization } = await import("./store/automations");
+      rebaseGraphDigestAfterAuthorization(automationId, graphExecutionDigest(updated, updated.graph));
+    }
     return {
       ok: true,
       message: ko

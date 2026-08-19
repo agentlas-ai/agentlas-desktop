@@ -1959,6 +1959,47 @@ export function saveGraphRunFailures(
  * 실패 스냅샷을 두 곳(스케줄 발화와 수동 실행 등)이 동시에 집으면 둘 다 재개해, 이미
  * 끝난 단계가 두 번 실행될 수 있었다.
  */
+/**
+ * 집었지만 **한 단계도 돌리지 못한** 재개 좌표를 놓는다.
+ *
+ * 실측 2026-08-20: 재개 직전 검사(그래프 변경·재조정 필요 등)에 걸려 나가는 길들이
+ * 좌표를 쥔 채 나갔고, 그 표식은 아무도 대신 풀어 주지 않아 다음 시도가 곧바로
+ * RESUME_CONFLICT 로 거절됐다. 사람 눈에는 "고쳤는데 또 안 된다"로 보인다.
+ *
+ * ★이미 이어서 돈 실행이 있으면 놓지 않는다 — 그 좌표는 지금 진짜로 쓰이고 있다.
+ */
+export function releaseGraphResumeCoordinate(checkpointRunId: string): void {
+  getDb().prepare(
+    `UPDATE automation_runs SET resume_consumed_at = NULL
+      WHERE id = ?
+        AND NOT EXISTS (SELECT 1 FROM automation_runs successor WHERE successor.resume_of_run_id = ?)`,
+  ).run(checkpointRunId, checkpointRunId);
+}
+
+/**
+ * 사람이 **권한만** 허락했을 때, 그것이 "그래프가 바뀌었다"로 읽히지 않게 재개 좌표의
+ * digest 를 새 값으로 맞춰 준다.
+ *
+ * 권한은 실행 digest 에 들어 있어서(graph-execution-digest.ts), 허용만 해도 digest 가
+ * 바뀌고 이미 부수효과를 낸 실행이 있으면 다음 실행이 `automation_partial_graph_changed`
+ * 로 막힌다. 그런데 권한을 올리는 것은 **일이 바뀐 것이 아니라 사람이 허락한 것**이다 —
+ * 단계도, 하는 일도, 노드 정체성도 그대로다.
+ *
+ * ★그래프 자체를 바꿀 때는 절대 부르면 안 된다. 그때는 재조정이 옳다.
+ */
+export function rebaseGraphDigestAfterAuthorization(automationId: string, newDigest: string): void {
+  getDb().prepare(
+    `UPDATE automation_runs SET graph_digest = ?
+      WHERE automation_id = ? AND graph_digest IS NOT NULL`,
+  ).run(newDigest, automationId);
+}
+
+/**
+ * 재개 좌표를 집고 나서 그 실행 행이 나타나기까지 기다려 주는 폭.
+ * 살아 있음의 판정이 아니라 **시작 유예**다 — 버려진 행을 거두는 임계값과 단위가 다르다.
+ */
+const RESUME_STARTUP_GRACE_MS = 2 * 60 * 1000;
+
 export function consumeGraphResumeCoordinate(checkpointRunId: string): boolean {
   /*
    * ★소비는 **점유**이지 낙인이 아니다.
@@ -1976,21 +2017,60 @@ export function consumeGraphResumeCoordinate(checkpointRunId: string): boolean {
    *   동시성은 그대로 지킨다: 조건부 UPDATE 한 문장이라 둘이 같이 들어와도 한쪽만
    *   changes===1 을 받는다(진 쪽의 조건은 방금 갱신된 시각 때문에 더는 성립하지 않는다).
    */
-  const now = Date.now();
-  const cutoff = new Date(now - AUTOMATION_RUN_STALE_AFTER_MS).toISOString();
-  const result = getDb().prepare(
-    `UPDATE automation_runs SET resume_consumed_at = ?
-      WHERE id = ?
-        AND (
-          resume_consumed_at IS NULL
-          OR (
-            status <> 'running'
-            AND resume_consumed_at < ?
-          )
-          OR COALESCE(last_activity_at, started_at) < ?
-        )`,
-  ).run(new Date(now).toISOString(), checkpointRunId, cutoff, cutoff);
-  return result.changes === 1;
+  const db = getDb();
+  const nowIso = new Date().toISOString();
+  const row = db.prepare(
+    "SELECT status, last_activity_at, started_at, resume_consumed_at FROM automation_runs WHERE id = ?",
+  ).get(checkpointRunId) as
+    | { status: string; last_activity_at: string | null; started_at: string; resume_consumed_at: string | null }
+    | undefined;
+  if (!row) return false;
+
+  if (row.resume_consumed_at === null) {
+    const first = db.prepare(
+      "UPDATE automation_runs SET resume_consumed_at = ? WHERE id = ? AND resume_consumed_at IS NULL",
+    ).run(nowIso, checkpointRunId);
+    return first.changes === 1;
+  }
+
+  /*
+   * 이미 집혀 있다. 집은 실행이 **아직 살아 있는가**만 본다.
+   *
+   * ★끝난 실행(status ≠ running)에는 경합이 없다 — 그 실행은 더 이상 아무 단계도 돌리지
+   *   않는다. 처음에는 여기에도 시간 조건을 걸었는데, 이 저장소의 정본 임계값은 4시간
+   *   2분이라 **8분 전에 끝난 실행 때문에 4시간을 기다려야 했다**(실측 2026-08-20:
+   *   그 상태로 재시도가 계속 RESUME_CONFLICT 로 거절됐다). 상태만 running 인 채 오래
+   *   조용한 좀비에만 시간 기준이 필요하다.
+   *
+   * 동시성은 시간이 아니라 **비교-교환**으로 지킨다: 내가 본 그 값일 때만 바꾼다.
+   * 둘이 같이 들어오면 한쪽만 changes===1 을 받는다.
+   */
+  /*
+   * ★"집었다"와 "정말로 이어서 돌았다"는 다르다. 이어서 돈 실행은 이 좌표를 가리키는
+   *   **후속 실행 행**을 남긴다(resume_of_run_id). 그 행이 없다면 집기만 하고 시작하지
+   *   못한 것이고, 그 표식은 아무도 대신 풀어 주지 않는다.
+   *
+   *   시간으로 판정하지 않는다. 이 저장소의 정본 임계값은 4시간 2분이라, 8분 전에 끝난
+   *   실행 때문에 사람이 4시간을 기다려야 했다(실측 2026-08-20). 기다림의 길이를 새로
+   *   정하는 대신 **일이 실제로 일어났는지**를 본다.
+   */
+  const successor = db.prepare(
+    "SELECT id FROM automation_runs WHERE resume_of_run_id = ? LIMIT 1",
+  ).get(checkpointRunId) as { id: string } | undefined;
+  if (successor) return false;
+  /*
+   * 후속 실행이 아직 없다 — 방금 집어서 이제 막 시작하는 중일 수도 있다. 그 짧은 사이에
+   * 두 번째가 들어오면 같은 단계가 두 번 돈다. 그래서 **시작 유예**만큼은 기다린다.
+   * 이건 "살아 있는가"의 판정이 아니라 "집고 나서 실행 행이 생기기까지"의 폭이므로,
+   * 버려진 행을 거두는 4시간짜리 임계값과는 단위가 다르다.
+   */
+  const claimedAtMs = Date.parse(row.resume_consumed_at);
+  if (Number.isFinite(claimedAtMs) && Date.now() - claimedAtMs < RESUME_STARTUP_GRACE_MS) return false;
+
+  const retaken = db.prepare(
+    "UPDATE automation_runs SET resume_consumed_at = ? WHERE id = ? AND resume_consumed_at = ?",
+  ).run(nowIso, checkpointRunId, row.resume_consumed_at);
+  return retaken.changes === 1;
 }
 
 // ── 입력 트리거 값 ─────────────────────────────────────────────────────────

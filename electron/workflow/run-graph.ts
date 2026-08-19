@@ -41,6 +41,7 @@ import {
   finishGraphRun,
   saveGraphRunFailures,
   consumeGraphResumeCoordinate,
+  releaseGraphResumeCoordinate,
   appendGraphJournal,
 } from "../store/automations";
 import { getAgentById } from "../mcp/registry";
@@ -1225,12 +1226,25 @@ export async function runGraph(
         nextAction: "진행 중인 실행이 끝난 뒤 결과를 확인하고, 필요하면 그때 다시 실행하세요.",
       });
     }
+    /*
+     * ★여기서부터는 좌표를 쥔 상태다. 아래 검사들 중 하나라도 걸리면 **한 단계도 돌지
+     *   않고** 나가는데, 그때 좌표를 쥔 채 나가면 그 표식은 아무도 대신 풀어 주지
+     *   않는다. 실측 2026-08-20: 그렇게 남은 표식 때문에 다음 시도가 곧바로
+     *   RESUME_CONFLICT 로 거절됐다 — 사람 눈에는 "고쳤는데 또 안 된다"로 보인다.
+     *   집은 쪽이 시작하지 못했으면 집은 쪽이 놓는다.
+     */
+    const releaseCoordinateIfNotStarted = (): void => {
+      try {
+        releaseGraphResumeCoordinate(latestFailed.runId);
+      } catch { /* 놓지 못해도 원래 오류를 가리지 않는다 */ }
+    };
     const completedEffectFromSnapshot = latestFailed.graphDigest === graphDigest
       ? Object.entries(latestFailed.nodeStates)
         .some(([nodeId, state]) => state === "done" && effectNodeIds.has(nodeId))
       : failedRunHasCommittedEffect(latestFailed);
     if (latestFailed.graphDigest && latestFailed.graphDigest !== graphDigest) {
       if (completedEffectFromSnapshot) {
+        releaseCoordinateIfNotStarted();
         throw new Error(
           "automation_partial_graph_changed: a prior occurrence committed side effects under a different graph; reconciliation is required before replay.",
         );
@@ -1245,6 +1259,7 @@ export async function runGraph(
         effectNodeIds,
       );
       if (!checkpoint && completedEffectFromSnapshot) {
+        releaseCoordinateIfNotStarted();
         throw new Error(
           "automation_partial_reconciliation_required: a legacy partial occurrence has committed nodes but no resumable output receipt.",
         );
@@ -1252,6 +1267,7 @@ export async function runGraph(
       if (checkpoint) {
         reconcileReplaySafePreparedWorkforceNodes(checkpoint);
         if (checkpoint.inFlightNodeIds.length > 0 || checkpoint.ambiguousNodeIds.length > 0) {
+          releaseCoordinateIfNotStarted();
           throw new Error(
             `automation_ambiguous_side_effect: reconciliation required for node(s) ${[
               ...checkpoint.inFlightNodeIds,
