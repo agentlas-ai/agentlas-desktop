@@ -196,7 +196,22 @@ function actionBody(action, args) {
     ...(args.source_id || activeSourceId ? { sourceId: args.source_id || activeSourceId } : {}),
   };
 }
+// ★신원 없는 입력 금지 — 서버측 강제.
+// 스키마는 이미 app 을 필수로 선언하지만, 스키마 검증은 클라이언트(런타임)의 성의에
+// 달려 있다. app 없이 도착한 입력은 frontmost 창에 그대로 들어간다 — 실측
+// 2026-08-19: 자동화가 로그아웃된 다른 X 창을 잡아 입력을 시도했다(캡처 존재).
+// 입력·클릭류는 app 이 있어야만 실행되고, 그러면 control-server 가 pid 기반
+// 재포커스로 대상 신원을 보장한다. 관측(get_screen/scroll/move)은 자유다.
+const IDENTITY_REQUIRED_ACTIONS = new Set([
+  "typeText", "key", "selectText", "click", "drag",
+]);
 async function callAction(body) {
+  if (IDENTITY_REQUIRED_ACTIONS.has(body.action) && !body.app) {
+    return errorResult({
+      message:
+        "This action needs an explicit `app` target. Input without a named app lands on whatever window happens to be frontmost — pass app (e.g. \"Google Chrome\") so the driver can focus and verify the target first.",
+    });
+  }
   const result = await controlRequest("/action", body, body.action === "drag" ? 12000 : 8000);
   return result && result.ok ? textResult(result) : errorResult(result);
 }
