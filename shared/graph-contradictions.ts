@@ -260,6 +260,23 @@ export function repairGraphContradictions(
       const gateId = `${item.nodeId}-gate`;
       if (next.nodes.some((n) => n.id === gateId)) continue;
       const tail = next.nodes.find((n) => n.id === item.nodeId);
+      /*
+       * ★갈림길에는 **양쪽 갈 곳**이 있어야 한다. 커널은 출구가 아예 없는 갈림길은
+       *   허용하지만(거기서 끝), 한쪽만 있으면 NO_MATCHING_EDGE 로 죽인다.
+       *   실측 2026-08-20: 첫 판이 되돌아가는 쪽(거짓)만 잇고 통과하는 쪽(참)을 비워 둬,
+       *   고친 그래프가 "통과했는데 갈 곳이 없다"로 죽었다 — 수리가 새 결함을 만들었다.
+       *
+       *   통과했을 때 갈 곳은 그 단계의 원래 다음 단계다. 그런데 되돌아가는 연결이
+       *   그 단계의 **유일한** 출구라면(=거기서 끝나는 그래프) 통과 쪽에 이을 곳이 없다.
+       *   그때는 갈림길을 만들지 않고 되돌아가는 연결만 걷어낸다 — 돌아가 봐야 아무것도
+       *   달라지지 않는 자리이고, 남겨 두면 그 자동화는 아예 실행되지 않는다.
+       */
+      const forward = next.edges.find((e) => e.source === item.nodeId && e.target !== head.id);
+      if (!forward) {
+        next.edges = next.edges.filter((e) => e !== backEdge);
+        moved.push(item.nodeId);
+        continue;
+      }
       next.nodes.push({
         id: gateId,
         type: "condition",
@@ -271,13 +288,22 @@ export function repairGraphContradictions(
       backEdge.target = gateId;
       backEdge.sourceHandle = undefined;
       delete (backEdge as { maxIterations?: number }).maxIterations;
+      const rounds = typeof backEdge.maxIterations === "number" ? backEdge.maxIterations : 1;
       next.edges.push({
         id: `${gateId}-retry`,
         source: gateId,
         target: head.id,
         sourceHandle: "false",
-        maxIterations: typeof backEdge.maxIterations === "number" ? backEdge.maxIterations : 1,
+        maxIterations: rounds,
       });
+      // 통과하면 원래 가던 곳으로 — 갈림길에 한쪽만 이으면 커널이 거절한다.
+      next.edges.push({
+        id: `${gateId}-pass`,
+        source: gateId,
+        target: forward.target,
+        sourceHandle: "true",
+      });
+      next.edges = next.edges.filter((e) => e !== forward);
       moved.push(gateId);
       continue;
     }

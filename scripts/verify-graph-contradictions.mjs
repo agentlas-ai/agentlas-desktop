@@ -122,6 +122,52 @@ check(
   "이미 충분한 권한이나, 바깥을 바꾸지 않는 자동화에까지 허용을 요구합니다 — 승인은 최소한이어야 합니다.",
 );
 
+// 갈림길 없는 되돌이 — 되돌아갈 곳이 판정이고 그 판정이 값을 만들 때만 고친다.
+// ★고친 결과가 **또 죽으면 안 된다.** 실측 2026-08-20: 첫 판이 되돌아가는 쪽만 잇고
+//   통과하는 쪽을 비워 둬, 고친 그래프가 NO_MATCHING_EDGE 로 죽었다. 커널은 출구가 아예
+//   없는 갈림길은 허용하지만 한쪽만 있으면 거절한다.
+const loopNoBranch = {
+  version: 1,
+  nodes: [
+    node("gen", "agent", { produces: "html" }, "만들기"),
+    node("chk", "eval", { subject: "html", produces: "verdict" }, "검증"),
+    node("save", "action", {}, "저장"),
+    node("tell", "output", { effect: "read", text: "끝" }, "알리기"),
+  ],
+  edges: [edge("gen", "chk"), edge("chk", "save"), edge("save", "tell"),
+    { id: "save->chk", source: "save", target: "chk", maxIterations: 1 }],
+};
+const loopFixed = repairGraphContradictions(loopNoBranch);
+const gateOut = loopFixed.graph.edges.filter((e) => e.source === "save-gate");
+check(
+  "loop-repair-wires-both-sides",
+  loopFixed.changed
+  && gateOut.some((e) => String(e.sourceHandle) === "false" && e.target === "chk")
+  && gateOut.some((e) => String(e.sourceHandle) === "true" && e.target === "tell"),
+  "고친 갈림길에 한쪽 길만 있습니다 — 그 판정이 나오면 실행이 NO_MATCHING_EDGE 로 죽습니다.",
+);
+check(
+  "loop-repair-clears-it",
+  findGraphContradictions(loopFixed.graph).length === 0,
+  "고쳤다는데 같은 모순이 남아 있습니다.",
+);
+
+// 되돌아가는 연결이 그 단계의 유일한 출구면(=거기서 끝나는 그래프) 통과 쪽에 이을 곳이
+// 없다. 그때는 갈림길을 만들지 않고 되돌아가는 연결만 걷어낸다.
+const loopAtTheEnd = {
+  version: 1,
+  nodes: [node("gen", "agent", { produces: "html" }, "만들기"), node("chk", "eval", { subject: "html", produces: "verdict" }, "검증"), node("save", "action", {}, "저장")],
+  edges: [edge("gen", "chk"), edge("chk", "save"), { id: "save->chk", source: "save", target: "chk", maxIterations: 1 }],
+};
+const endFixed = repairGraphContradictions(loopAtTheEnd);
+check(
+  "a-loop-with-nowhere-to-pass-to-is-simply-removed",
+  endFixed.changed
+  && !endFixed.graph.nodes.some((n) => n.id === "save-gate")
+  && !endFixed.graph.edges.some((e) => e.source === "save" && e.target === "chk"),
+  "이을 곳이 없는데 갈림길을 만들었습니다 — 통과 쪽이 비어 실행이 죽습니다.",
+);
+
 for (const c of checks) console.log(`${c.ok ? "PASS" : "FAIL"} ${c.name}`);
 if (failures.length > 0) {
   console.error("\ngraph-contradictions 게이트 실패:");
