@@ -99,6 +99,24 @@ export const AUTOMATION_PROTOCOL = [
   "```",
   "",
   'For irregular cadence use raw cron instead: "schedule": { "cron": "*/30 9-18 * * 1-5", "tz": "Asia/Seoul" }.',
+  "",
+  // ★반복 × 고정 페이로드는 시한폭탄이다. 실측 2026-08-19: 매시 정각 X 댓글
+  // 자동화가 "exactly this text, unchanged"로 지어졌고, 첫 성공이 X의 중복
+  // 콘텐츠 차단을 깨워 이후 모든 실행이 막혔다. 메일 스팸 필터·커뮤니티 도배
+  // 제한·API rate limit 도 같은 계열이다 — 반복 게시물은 변형이 기본값이어야 한다.
+  "RECURRING MUTATIONS MUST VARY. If each run posts, sends or publishes content, never pin the exact",
+  "same text for every run — platforms reject duplicates (X blocks identical posts after the first",
+  "success; mail and community platforms rate-limit or spam-filter repeats). Write the prompt so each",
+  "run composes a fresh variant around the fixed facts (name, link, dates), e.g. \"write a short",
+  "reply tailored to the post, always including <link> and <deadline>\" — not \"post exactly this text\".",
+  "",
+  // ★밖을 바꾸는 스텝은 어떤 도구로 바꾸는지 선언해야 한다. 선언이 없으면 강제도
+  // 검사도 불가능하고(실측: 도구 미배선 런타임에서 12연속 거짓 성공), 선언이 있으면
+  // 프록시가 노드별로 관문을 세운다.
+  "MUTATING STEPS MUST NAME THEIR TOOL. Any step that changes the world outside the chat (posts,",
+  "sends, edits files, browses) must say which tool family does it — a tool step with its catalog id,",
+  "or an action step whose prompt names the concrete surface (browser, file, shell). A mutation with",
+  "no named tool cannot be enforced or verified and will be judged unsupported.",
   "Registering is idempotent by name: emitting a block with the SAME \"name\" UPDATES the existing",
   "automation instead of creating a new one. When you refine a job you already registered, reuse the",
   "exact same name — NEVER register a second automation for the same job under a new name.",
