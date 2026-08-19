@@ -103,9 +103,14 @@ if (!host) {
   );
   check(
     "host-without-a-screen-takes-the-bounded-path",
-    /process\.versions\.electron/.test(host),
-    "화면이 있는 호스트와 없는 호스트를 가르지 않습니다. 승인 창에 답할 수 있는 곳에서 상한을 걸면 "
-    + "사용자가 창을 읽는 동안 정상 요청이 취소됩니다.",
+    /\.type === "browser"/.test(host),
+    "화면 유무를 `process.type === \"browser\"` 로 가르지 않습니다. `process.versions.electron` 은 "
+    + "데몬(ELECTRON_RUN_AS_NODE=1)에서도 참이라, 창이 없는 데몬이 직접 호출 경로로 새어 멈춥니다.",
+  );
+  check(
+    "electron-version-alone-is-not-the-test",
+    !/return Boolean\(process\.versions\.electron\)/.test(host),
+    "`process.versions.electron` 만으로 판정하는 코드가 돌아왔습니다 — 데몬이 그 판정을 통과하며 멈춥니다.",
   );
   check(
     "secret-value-never-rides-argv",

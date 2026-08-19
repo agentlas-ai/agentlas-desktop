@@ -26,9 +26,17 @@ export type KeychainCredential = { account: string };
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_TIMEOUT_MS = 120_000;
 
-/** 이 호스트가 키체인 승인 프롬프트에 답할 수 있는가 = 화면이 있는가. */
+/**
+ * 이 호스트가 키체인 승인 프롬프트에 답할 수 있는가 = 화면이 있는가.
+ *
+ * ★`process.versions.electron` 로 판정하면 안 된다. 데몬(agentlasd)은
+ *   `ELECTRON_RUN_AS_NODE=1 electron …` 로 도는데(daemon/main.ts 참고), 그때도
+ *   그 값은 그대로 있으면서 **창도 app 객체도 없다**. 즉 "Electron 이다" 는
+ *   "물어볼 수 있다" 를 뜻하지 않는다 — 데몬이 정확히 이 착각으로 멈춘다.
+ *   `process.type === "browser"` 는 GUI 메인 프로세스일 때만 참이다.
+ */
 export function keychainPromptsAreAnswerable(): boolean {
-  return Boolean(process.versions.electron);
+  return (process as NodeJS.Process & { type?: string }).type === "browser";
 }
 
 export function keychainCallTimeoutMs(): number {
