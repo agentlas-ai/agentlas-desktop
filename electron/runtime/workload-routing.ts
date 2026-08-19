@@ -788,7 +788,14 @@ export function workloadAllocationReceipt(
         ? "resolved"
         : "unresolved";
   return {
-    schemaVersion: "agentlas.model-allocation-receipt.v1",
+    // v2: `role` joined the receipt around 2026-07-28 and `resolved.effort` can
+    // now be null, both without a version bump — so the 46 receipts on this
+    // machine are three different shapes all stamped v1, and a reader has no way
+    // to tell which it holds. Measured: the 26 receipts written before
+    // 2026-07-27 have no `role` key at all, which reads as "role unknown" and is
+    // easy to mistake for "role was never assigned" (I made exactly that
+    // mistake). A shape change needs a version, or the version is decoration.
+    schemaVersion: "agentlas.model-allocation-receipt.v2",
     decisionId: `desktop:model-allocation:${featureHash.slice(0, 24)}`,
     packetId: null,
     role: modelRoleForWorkloadPhase(resolution.allocation.phase),
@@ -804,7 +811,20 @@ export function workloadAllocationReceipt(
       provider: resolution.runtime.backend ?? resolution.runtime.kind,
       modelId: resolvedModelId,
       sessionId: resolution.resolvedRuntimeId,
-      effort: resolution.runtime.effort ?? "none",
+      // `?? "none"` turned an unknown into a value. Measured across the 46 live
+      // receipts on this machine: 17 asked for medium/high and recorded
+      // `resolved.effort: "none"`, and every one of those 17 carries NO
+      // effort-* reason code — they are `missing-ai-allocation` +
+      // `parent-runtime-model-pair-missing-active-preserved`, i.e. no
+      // allocation happened at all and the active runtime was preserved with
+      // whatever effort it never reported. The receipt read as "we deliberately
+      // ran at no effort"; the truth was "nobody decided, and we do not know".
+      //
+      // The resolver already distinguishes the real cases with codes
+      // (effort-clamped-to-capability, effort-below-capability-unavailable,
+      // effort-capability-unavailable), so the only thing missing was for the
+      // field to stop answering a question it had not been asked.
+      effort: resolution.runtime.effort ?? null,
     },
     reasonCodes: receiptReasonCodes,
     inputFeatureHash: `sha256:${featureHash}`,
