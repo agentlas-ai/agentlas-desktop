@@ -307,6 +307,15 @@ async function callJudgmentModelDetailed(opts: {
   signal?: AbortSignal;
   locale?: RuntimeLocale;
   onPartial?: (text: string) => void;
+  /**
+   * ★출력이 **쓸 만한가**를 이 콜백이 정한다. 판정은 텍스트가 왔다고 끝이 아니라
+   *   그 텍스트가 파싱돼야 답이다 — 채점표는 규격 JSON, 라벨 판정은 라벨 하나.
+   *   실측 2026-08-19: agy(Gemini)가 채점표 판정에서 텍스트는 냈지만 규격 JSON을 못 맞춰
+   *   parseChecklistJson이 null이 됐고, 그 순간 다음 런타임(claude)을 시도하지 않고
+   *   EVAL_UNAVAILABLE로 끝났다. 즉 실행은 agy로 되는데 판정만 죽어 자동화가 error가 났다.
+   *   accept가 false를 내면 그 런타임은 실패로 치고 다음 후보로 넘어간다.
+   */
+  accept?: (text: string) => boolean;
 }): Promise<{ text: string | null; failure?: RunnerFailure }> {
   /** 마지막으로 본 실패 — 전멸 시 이것이 "왜"의 전부다. */
   let lastFailure: RunnerFailure | undefined;
@@ -376,7 +385,19 @@ async function callJudgmentModelDetailed(opts: {
           lastFailure = result.failure;
           continue;
         }
-        return { text: result.text ?? "" };
+        const text = result.text ?? "";
+        // ★파싱 안 되는 출력도 답이 아니다 — 다음 후보로 간다. agy가 채점표 JSON을 못 맞추면
+        //   여기서 걸러 claude 등 규격을 지키는 런타임으로 넘어간다(실측 2026-08-19).
+        if (opts.accept && !opts.accept(text)) {
+          lastFailure = {
+            kind: "exit",
+            message: `runtime ${runtime.kind} returned output the judge could not parse`,
+            runtime: runtime.kind,
+            source: "exit",
+          };
+          continue;
+        }
+        return { text };
       } catch (error) {
         // Timeout or caller cancellation ends the whole judgment; a runtime that
         // merely cannot isolate just yields to the next candidate.
@@ -414,7 +435,17 @@ async function callJudgmentModelDetailed(opts: {
           if (result.failure) {
             lastFailure = result.failure;
           } else {
-            return { text: result.text ?? "" };
+            const recoveredText = result.text ?? "";
+            if (opts.accept && !opts.accept(recoveredText)) {
+              lastFailure = {
+                kind: "exit",
+                message: `recovery runtime ${selection.kind} returned output the judge could not parse`,
+                runtime: selection.kind,
+                source: "exit",
+              };
+            } else {
+              return { text: recoveredText };
+            }
           }
         } catch (error) {
           lastFailure = {

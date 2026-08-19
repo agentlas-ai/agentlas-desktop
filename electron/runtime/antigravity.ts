@@ -985,9 +985,37 @@ export const runAntigravity: Runner = async (
   req: RunnerRequest,
   events: RunnerEvents,
 ): Promise<RunnerResult> => {
+  /*
+   * ★판정(untrustedNoTools)은 agy 로도 수행한다 — 예전에는 여기서 무조건 throw 했다.
+   *
+   * 그 거절의 근거는 "호스트 파일시스템·도구 경계가 릴리스 검증되지 않았다"였는데, 그 결과는
+   * **agy만 쓰는 사용자의 모든 판정이 죽는 것**이었다. 실측 2026-08-19: 파일 저장 자동화가
+   * 산출물을 정확히 만들고 독립 재조회까지 끝냈는데, 마지막 채점만 EVAL_UNAVAILABLE 로 떨어져
+   * 자동화 전체가 error 로 끝났다. claude 가 깔린 기계에서는 폴백으로 가려지고, agy 단독
+   * 사용자에게만 제품이 통째로 안 되는 모양이었다.
+   *
+   * 실제로 되는지부터 확인했다: 같은 채점표 프롬프트를 agy 에 그대로 주자 도구를 한 번도
+   * 부르지 않고 규격 JSON(`{"items":[{"id","verdict","why"}]}`)을 정확히 냈다. 못 하는 게
+   * 아니라 막아 둔 것이었다.
+   *
+   * 경계는 선언이 아니라 인자로 만든다:
+   *  · 도구 승인 자동허용 플래그(--dangerously-skip-permissions)를 **주지 않는다** → 승인 없이
+   *    도구가 실행될 수 없다. permission을 "read"로 낮춰 그 상태를 강제한다.
+   *  · --sandbox 로 터미널 제한을 켠다.
+   *  · --disable-slash-commands 로 입력 안의 슬래시 명령/스킬 확장을 끈다(판정 대상은
+   *    신뢰할 수 없는 데이터라 확장 자체가 경계 구멍이다).
+   *  · 작업 디렉터리를 붙이지 않는다(--add-dir 없음) → 워크스페이스가 열리지 않는다.
+   */
   if (req.untrustedNoTools) {
-    throw new Error(
-      "Antigravity is not enabled for untrusted no-tools execution because its host filesystem and tool boundary is not release-verified.",
+    const bin = await getBin({ source: req.runtimeSource });
+    if (!bin) throw new Error(tStatus(req.locale, "errCliMissingAntigravity"));
+    return runPreparedAntigravity(
+      // permission:"read" 가 곧 도구 경계다 — buildAntigravitySpawnArgs 는 read 에
+      // 자동승인 플래그를 주지 않고, MCP 배선(agyToolsAllowed)도 붙지 않는다.
+      { ...req, permission: "read" },
+      events,
+      bin,
+      [],
     );
   }
   if (req.restrictedReadBoundary) {
