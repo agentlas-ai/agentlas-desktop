@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- Onboarding no longer ends by closing. The last step now leads into setup —
+  browser credentials, then plugins — and Skip leads there too. The key moved to
+  v3 so existing users see it once after updating, and an interrupted setup
+  resumes where it stopped instead of replaying the tour.
+- Adding an MCP or plugin opens a dialog in place instead of navigating to the
+  marketplace. Search, filters, multi-select, one card per tool; Settings and
+  onboarding share it. Plugins are gone from the marketplace listing entirely,
+  not just its tab.
+- Cards say what a pick will ask for before it is picked: ready to use,
+  sign-in required, already signed in, or API key needed (which can be added
+  later). The hub already published this; the desktop had been discarding it.
+- Remote MCP servers can authenticate with OAuth. Discovery, dynamic client
+  registration, PKCE with the resource parameter, loopback callback and refresh.
+  The consent window opens in the Agentlas browser profile, so a service you are
+  already signed in to asks for consent rather than a password. Tokens are keyed
+  per server instead of sharing one global vault entry.
+- The approval sheet always offers Approve, Always approve and Reject. A
+  high-risk request with an ambiguous verdict used to hide every approving
+  option, leaving only reject, ask and remind — no way to approve the thing you
+  had just asked for.
+- Always approve now covers every approval channel in that conversation. One
+  task used to ask three separate times because the decision sheet, the browser
+  action and the runtime tool call each kept their own permission. Payments and
+  browser code execution still ask every time.
+
 ## 1.0.27 — 2026-08-19
 
 Bundled runtime: Agentlas OS v1.2.12 (2b075361f07f25577994f0ce87f46f33ac41ec64).
