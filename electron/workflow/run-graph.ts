@@ -568,6 +568,66 @@ const READ_ONLY_WORKFORCE_AUDIT_TOOLS = new Set([
   "agentlas.workforce.benchmark_selection_artifacts",
 ]);
 
+/**
+ * 실패한 코드 단계를 **한 번** 다시 짠다. 실패하면 null — 지어내지 않는다.
+ *
+ * 저장된 그래프는 건드리지 않는다. 돌려주는 스크립트는 그 실행 안에서만 쓴다.
+ */
+async function rewriteFailedCodeStep(input: {
+  instruction: string;
+  lang: "python" | "js";
+  code: string;
+  failure: string;
+  varNames: string[];
+  signal?: AbortSignal;
+}): Promise<string | null> {
+  try {
+    const { callConnectedModel } = await import("../system-agents/judgment");
+    const answer = await callConnectedModel({
+      systemPrompt:
+        "You repair one automation step's script. Return ONLY the corrected script — no prose, no fences.\n"
+        + "The previous script failed for the reason given. Keep the same job, the same variable names, and the\n"
+        + "same output shape. If the failure is a data source rejecting the request, use a different source that\n"
+        + "does not need a key. Never invent values: if the data cannot be fetched, raise so the run fails honestly.",
+      input: [
+        `Language: ${input.lang}`,
+        `What this step is for: ${input.instruction}`,
+        `Variables available to the script: ${input.varNames.join(", ") || "(none)"}`,
+        "",
+        "--- script that failed ---",
+        input.code,
+        "",
+        "--- how it failed ---",
+        input.failure.slice(0, 2000),
+      ].join("\n"),
+      timeoutMs: 120_000,
+      ...(input.signal ? { signal: input.signal } : {}),
+    });
+    if (!answer) return null;
+    // 모델이 코드 울타리를 붙이는 경우가 있다 — 벗겨서 실행 가능한 본문만 남긴다.
+    const fenced = answer.match(/```(?:python|js|javascript)?\s*\n([\s\S]*?)```/);
+    return (fenced ? fenced[1] : answer).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 코드 단계 실패에서 **사람이 읽을 한 줄**을 앞으로 꺼낸다.
+ *
+ * 파이썬 트레이스백은 마지막 비어 있지 않은 줄이 실제 예외다("HTTPError: HTTP Error 403").
+ * 그 위 수십 줄은 인터프리터 내부 경로라 사용자에게 아무 정보가 없다. 그렇다고 버리지는
+ * 않는다 — 뒤에 붙여 필요한 사람이 보게 둔다.
+ */
+function codeFailureHeadline(raw: string | null | undefined): string {
+  const text = String(raw ?? "").trim();
+  if (!text) return "코드 단계가 실패했습니다.";
+  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
+  const last = lines[lines.length - 1] ?? text;
+  if (lines.length <= 3 || !/^traceback/i.test(lines[0])) return text;
+  return `${last}\n\n(자세한 내용)\n${text.slice(-600)}`;
+}
+
 function isReadOnlyCheckpointTool(name: string): boolean {
   // search/validate are digest-bound transaction operations. Preparation may
   // fetch a metered runtime bundle, so it is never considered replay-safe
@@ -1300,7 +1360,18 @@ export async function runGraph(
       checkpointDigest: "sha256:" + "0".repeat(64),
     });
   }
-  const vars: Record<string, unknown> = structuredClone(checkpoint.vars);
+  /*
+   * ★이번에 **사람이 새로 준 값**은 지난 실행이 들고 있던 값을 이긴다.
+   *
+   *   실측 2026-08-20: 시작 값을 잘못 넣어 첫 단계에서 실패한 뒤, 올바른 값을 넣어 다시
+   *   실행했는데 그 값이 **조용히 버려지고** 예전의 틀린 값으로 또 돌았다(재개가 지난
+   *   실행의 vars 를 통째로 복원하기 때문). 오타 한 번이면 그 자동화는 영원히 같은 실패를
+   *   반복하고, 사용자는 자기가 준 값이 무시된 줄도 모른다.
+   *
+   *   재개가 복원해야 하는 것은 **이미 한 일의 결과**이지 사람이 준 요청이 아니다.
+   *   그래서 initialVars 로 명시된 칸만 새 값으로 덮는다 — 나머지 진행 상황은 그대로 둔다.
+   */
+  const vars: Record<string, unknown> = { ...structuredClone(checkpoint.vars), ...initialVars };
   const outputs: Record<string, string> = { ...checkpoint.outputs };
   /**
    * 노드가 낸 것의 **기계 채널**(agentlas.node-output.v1). `outputs`는 사람이 읽는 칸이고
@@ -1429,6 +1500,8 @@ export async function runGraph(
   // 노드가 실제로 부른 **바깥 도구** 수. 호스트 자신의 예비 조회는 세지 않는다
   // (판단은 shared/tool-activity 정본). 이 수가 0이면 그 노드의 답은 주장일 뿐이다.
   const externalToolCallsByNode = new Map<string, number>();
+  // 코드 재작성은 노드당 한 번만 — 두 번째도 실패하면 그건 코드 문제가 아니다.
+  const codeRepairAttempted = new Set<string>();
   // 도구 0건으로 되돌린 노드 — 재시도 프롬프트에 그 사실을 실어 보낸다.
   const toolProofRetryNodes = new Set<string>();
   /** 저널 한 줄. 관측 실패가 실행을 멈추지는 않는다. */
@@ -2422,8 +2495,8 @@ export async function runGraph(
 
         const lang = str(node.config, "codeLang") === "js" ? "js" : "python";
         const { runCodeStep } = await import("./code-runner");
-        const run = await runCodeStep({
-          code: codeText, lang,
+        const runOnce = (script: string) => runCodeStep({
+          code: script, lang,
           vars: codeVars,
           effect: codeEffect === "mutation" ? "mutation" : codeEffect === "pure" ? "pure" : "read",
           // 선언된 서드파티 패키지 — 커널이 실행 전에 설치한다(code-runner의 배경 주석 참고).
@@ -2435,6 +2508,35 @@ export async function runGraph(
           timeoutSeconds: nodeTimeoutMs(node) / 1000,
           ...(runSignal ? { signal: runSignal } : {}),
         });
+        let run = await runOnce(codeText);
+        /*
+         * ★빌더가 짠 스크립트는 **한 번도 돌아 본 적이 없다.** 실측 2026-08-20: 새로 만든
+         *   환율 자동화의 첫 단계가 자료원에서 HTTP 403 을 받고 죽었다. 사람에게는 파이썬
+         *   스택만 남고, 예전 문구는 "AI가 스크립트를 다시 짭니다"라고 **약속만** 했다 —
+         *   그렇게 하는 코드가 이 경로에 없었다.
+         *
+         *   그래서 실제로 한 번 다시 짜고 다시 돌린다(오너 결정 2026-08-19: 자동 복구가
+         *   피드백의 기준이다). 한 번만 한다 — 두 번째도 실패하면 그건 코드 문제가 아니다.
+         *
+         *   ★저장된 그래프는 건드리지 않는다. 고친 스크립트는 **이 실행 안에서만** 쓴다 —
+         *     그래프를 말없이 바꾸면 멈춘 실행의 재개가 digest 불일치로 거부된다.
+         *   ★의존성 결손은 다시 짜서 될 일이 아니다(패키지 선언 문제) — 그대로 둔다.
+         */
+        if (!run.ok && run.failureCode !== "CODE_DEPENDENCY_MISSING" && !codeRepairAttempted.has(node.id)) {
+          codeRepairAttempted.add(node.id);
+          const rewritten = await rewriteFailedCodeStep({
+            instruction: str(node.config, "note") || node.label || node.id,
+            lang,
+            code: codeText,
+            failure: String(run.reason ?? ""),
+            varNames: Object.keys(codeVars),
+            signal: runSignal,
+          });
+          if (rewritten && rewritten.trim() && rewritten.trim() !== codeText.trim()) {
+            journal("node_intent", node.id, { codeRepair: "rewrote the script after it failed once" });
+            run = await runOnce(rewritten);
+          }
+        }
         if (run.stdout?.trim()) journal("node_intent", node.id, { codeLog: run.stdout.slice(0, 500) });
         if (!run.ok) {
           failGraphNode(node, run.failureCode === "CODE_DEPENDENCY_MISSING"
@@ -2448,8 +2550,20 @@ export async function runGraph(
             }
             : {
               code: "CODE_STEP_FAILED",
-              reason: run.reason ?? "코드 단계가 실패했습니다.",
-              nextAction: "이 단계에 무엇을 하려는지 더 구체적으로 적어 주세요 — AI가 스크립트를 다시 짭니다.",
+              /*
+               * ★파이썬 트레이스백을 통째로 내면 사람이 읽을 것이 없다. 실측 2026-08-20:
+               *   환율 조회 단계가 40줄짜리 스택을 냈고, 그 안에서 사람에게 쓸모 있는 것은
+               *   마지막 줄 하나(`HTTPError: HTTP Error 403: Forbidden`)뿐이었다.
+               *   그 한 줄을 앞에 세우고 스택은 뒤에 붙인다.
+               */
+              reason: codeFailureHeadline(run.reason),
+              /*
+               * ★없는 기능을 약속하지 않는다. 예전 문구는 "AI가 스크립트를 다시 짭니다"였는데
+               *   **그렇게 하는 코드가 이 경로에 없다**(실측 2026-08-20). 사람은 기다렸다가
+               *   아무 일도 안 일어나는 것을 본다. 지금 실제로 할 수 있는 것만 적는다.
+               */
+              nextAction: "이 단계가 무엇을 어디서 가져와야 하는지 한 줄 더 적어 주고 다시 실행하세요"
+                + " — 다른 자료원이 필요할 수도 있습니다.",
             });
           return;
         }
