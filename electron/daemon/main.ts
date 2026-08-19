@@ -62,6 +62,20 @@ export function resolveDaemonUserDataDir(
   return path.join(env.XDG_CONFIG_HOME?.trim() || path.join(home, ".config"), appName);
 }
 
+/**
+ * 데몬이 보고하는 버전. Electron 의 `app.getVersion()` 을 못 쓰므로 package.json 을
+ * 읽는다 — 모바일이 호환성을 이 값으로 판단하므로 "unknown" 을 보내면 안 된다.
+ */
+function daemonVersion(): string {
+  try {
+    // dist/electron/daemon/main.js 기준 저장소 루트.
+    const pkg = path.join(__dirname, "..", "..", "..", "package.json");
+    return JSON.parse(fs.readFileSync(pkg, "utf8")).version ?? "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
 /** 프로세스를 살려 두는 핸들. 종료 시 풀어 준다 — 안 그러면 exit 이 걸린다. */
 let keepAlive: NodeJS.Timeout | null = null;
 
@@ -103,6 +117,27 @@ export async function startDaemon(): Promise<void> {
   const { initStore } = await import("../store/db");
   initStore();
   console.log("[agentlasd] store ready");
+
+  /*
+   * ★모바일 브리지 — Phase 2 의 첫 조각이자, 데몬이 존재하는 이유 그 자체.
+   *
+   * 지금은 데스크탑 앱이 켜져 있어야만 폰에서 보낸 요청이 도착한다. 앱을 닫으면
+   * 브리지도 함께 죽는다. 이 서버가 데몬 안에서 돌면 창 없이도 폰이 붙는다.
+   *
+   * 새 프로토콜을 만들지 않는다 — 이미 60개 메서드 계약(invoke/chats/projects/
+   * automations/runtime/build)이 모바일용으로 살아 있고, 기획서가 데몬 제어면으로
+   * 그걸 재사용하기로 정했다. 페어링·TLS·리플레이 방지가 이미 그 안에 있다.
+   *
+   * 실패해도 데몬은 산다: 브리지가 못 떠도 store 는 열려 있고 자동화는 돈다.
+   * 여기서 죽으면 폰이 안 붙는 것보다 나쁜 일이 된다.
+   */
+  try {
+    const { startAgentlasMobileBridge } = await import("../mobile-bridge/runtime");
+    await startAgentlasMobileBridge({ userDataPath: userDataDir(), appVersion: daemonVersion() });
+    console.log("[agentlasd] mobile bridge ready");
+  } catch (error) {
+    console.error("[agentlasd] mobile bridge failed to start:", error);
+  }
 
   /*
    * ★살아 있어야 데몬이다.
