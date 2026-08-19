@@ -1232,7 +1232,7 @@ async function runOne(
         console.error(
           `[automation] ${a.id} claimed success with zero tool calls — retrying once on ${fallback.kind}/${fallback.model}`,
         );
-        return await runOne(
+        const retried = await runOne(
           { ...a, runtimeSelection: fallback },
           {
             claim: opts?.claim,
@@ -1242,6 +1242,23 @@ async function runOne(
             zeroToolRetried: true,
           },
         );
+        // ★사전 확인의 관측 기반 완결 — 재시도가 도구로 실제 완주했다면 그 사실을
+        // 자동화에 영속한다. 다음 발사부터는 사후 재시도가 아니라 처음부터 검증된
+        // 런타임으로 나간다(단어장·능력표 추측 없이, 이 기계에서 실측된 결과만).
+        if (
+          retried.accepted &&
+          !(typeof retried.error === "string" && retried.error.includes("[claimed_without_tools]"))
+        ) {
+          try {
+            updateAutomation(a.id, { runtimeSelection: fallback });
+            console.error(
+              `[automation] ${a.id} learned runtime ${fallback.kind}/${fallback.model} from a tool-proven retry`,
+            );
+          } catch (err) {
+            console.error("[automation] failed to persist learned runtime:", err);
+          }
+        }
+        return retried;
       } catch (err) {
         console.error("[automation] zero-tool retry failed:", err);
       }
