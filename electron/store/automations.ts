@@ -1960,9 +1960,36 @@ export function saveGraphRunFailures(
  * 끝난 단계가 두 번 실행될 수 있었다.
  */
 export function consumeGraphResumeCoordinate(checkpointRunId: string): boolean {
+  /*
+   * ★소비는 **점유**이지 낙인이 아니다.
+   *
+   *   실측 2026-08-20: 이 저장소에 소비된 좌표가 302건 있었고 그중 **아직 도는 것은
+   *   0건**이었다. 좌표를 집은 실행이 죽으면 표식만 남아, 아무것도 돌지 않는데
+   *   "다른 실행이 이미 같은 지점에서 이어서 돌고 있습니다" 라며 그 자동화를
+   *   **영구히 거부**했다. 사람이 할 수 있는 일이 없다 — 실행할 때마다 같은 말을 듣는다.
+   *
+   *   막으려던 것은 "동시에 두 실행이 같은 좌표를 재개하는 것"이지 "다시는 재개하지
+   *   않는 것"이 아니다. 그러니 집은 실행이 더 이상 살아 있지 않으면 다시 집을 수 있다.
+   *   살아 있음의 기준은 이 저장소의 정본(AUTOMATION_RUN_STALE_AFTER_MS)을 쓴다 —
+   *   여기서 새 임계값을 지어내면 규칙이 둘로 갈린다.
+   *
+   *   동시성은 그대로 지킨다: 조건부 UPDATE 한 문장이라 둘이 같이 들어와도 한쪽만
+   *   changes===1 을 받는다(진 쪽의 조건은 방금 갱신된 시각 때문에 더는 성립하지 않는다).
+   */
+  const now = Date.now();
+  const cutoff = new Date(now - AUTOMATION_RUN_STALE_AFTER_MS).toISOString();
   const result = getDb().prepare(
-    "UPDATE automation_runs SET resume_consumed_at = ? WHERE id = ? AND resume_consumed_at IS NULL",
-  ).run(new Date().toISOString(), checkpointRunId);
+    `UPDATE automation_runs SET resume_consumed_at = ?
+      WHERE id = ?
+        AND (
+          resume_consumed_at IS NULL
+          OR (
+            status <> 'running'
+            AND resume_consumed_at < ?
+          )
+          OR COALESCE(last_activity_at, started_at) < ?
+        )`,
+  ).run(new Date(now).toISOString(), checkpointRunId, cutoff, cutoff);
   return result.changes === 1;
 }
 
