@@ -573,7 +573,7 @@ const READ_ONLY_WORKFORCE_AUDIT_TOOLS = new Set([
  *
  * 저장된 그래프는 건드리지 않는다. 돌려주는 스크립트는 그 실행 안에서만 쓴다.
  */
-async function rewriteFailedCodeStep(input: {
+export async function rewriteFailedCodeStep(input: {
   instruction: string;
   lang: "python" | "js";
   code: string;

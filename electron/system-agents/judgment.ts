@@ -292,6 +292,11 @@ export async function callConnectedModelDetailed(opts: {
   signal?: AbortSignal;
   locale?: RuntimeLocale;
   onPartial?: (text: string) => void;
+  /**
+   * 짓는 일이면 켠다 — 조회 도구가 함께 간다. 판정에는 절대 켜지 않는다.
+   * 자세한 배경은 callJudgmentModelDetailed 의 같은 이름 옵션 주석에 있다.
+   */
+  authoring?: boolean;
 }): Promise<{ text: string | null; failure?: RunnerFailure }> {
   return callJudgmentModelDetailed(opts);
 }
@@ -317,6 +322,19 @@ async function callJudgmentModelDetailed(opts: {
    *   accept가 false를 내면 그 런타임은 실패로 치고 다음 후보로 넘어간다.
    */
   accept?: (text: string) => boolean;
+  /**
+   * ★**짓는 일**은 판정이 아니다 — 이 통로를 열면 조회 도구와 이미 동의된 MCP 가 함께 간다.
+   *
+   * 배경(2026-08-20 실측): 그래프 빌더가 이 함수를 그대로 쓰고 있었다. 이 함수의 기본은
+   * `untrustedNoTools: true` — "순수 분류" 를 위해 **도구를 0개로 못 박은** 설정이다.
+   * 판정에는 맞지만, 그래프를 짓는 일에 쓰면 빌더는 눈 감고 손 묶인 채 10단계를 받아쓴다.
+   * 그래서 자기가 쓴 스크립트가 도는지도 모르고 403 짜리를 그대로 저장했다.
+   *
+   * 이 깃발은 **조회만** 연다(permission 은 계속 "read" — 만드는 중에 메일이 나가거나
+   * 글이 올라가면 안 된다). 판정 호출부는 이 깃발을 절대 켜지 않는다: 판정이 도구를
+   * 얻으면 자기가 판정할 대상을 스스로 만들어 낼 수 있다.
+   */
+  authoring?: boolean;
 }): Promise<{ text: string | null; failure?: RunnerFailure }> {
   /** 마지막으로 본 실패 — 전멸 시 이것이 "왜"의 전부다. */
   let lastFailure: RunnerFailure | undefined;
@@ -367,10 +385,10 @@ async function callJudgmentModelDetailed(opts: {
             // session persistence, and the runner fails closed if it cannot
             // prove that. A runtime that refuses is skipped, never downgraded —
             // the judge must not lower its own boundary to get an answer.
-            untrustedNoTools: true,
+            untrustedNoTools: !opts.authoring,
             // 이 무도구 실행은 판정이다 — 세션 영속을 이유로 Agent App 을 막는 런타임도
             // 판정은 수행할 수 있어야 한다(그러지 않으면 그 런타임 단독 사용자는 검증 전멸).
-            judgmentOnly: true,
+            judgmentOnly: !opts.authoring,
             signal: controller.signal,
             locale: opts.locale ?? "en",
           },
@@ -433,10 +451,10 @@ async function callJudgmentModelDetailed(opts: {
               longContext: false,
               effort: "low",
               permission: "read",
-              untrustedNoTools: true,
+              untrustedNoTools: !opts.authoring,
             // 이 무도구 실행은 판정이다 — 세션 영속을 이유로 Agent App 을 막는 런타임도
             // 판정은 수행할 수 있어야 한다(그러지 않으면 그 런타임 단독 사용자는 검증 전멸).
-            judgmentOnly: true,
+            judgmentOnly: !opts.authoring,
               signal: controller.signal,
               locale: opts.locale ?? "en",
             },

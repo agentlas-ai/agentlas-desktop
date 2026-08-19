@@ -4486,6 +4486,8 @@ export function registerIpcHandlers(): void {
     const detailed = await callConnectedModelDetailed({
       systemPrompt: architect.buildGraphArchitectPrompt(automation.graph, automation.goal),
       input: sentence.slice(0, 4_000),
+      // 짓는 일이다 — 조회 도구를 연다(판정 통로의 무도구 잠금은 그대로).
+      authoring: true,
     });
     const text = detailed.text;
     if (text === null) {
@@ -4569,6 +4571,9 @@ export function registerIpcHandlers(): void {
           systemPrompt: "You return only compact JSON. No prose.",
           input: buildInterviewPrompt(attempt, currentUiLocale()),
           timeoutMs: 120_000,
+          // 그래프를 **짓는** 호출이다 — 조회 도구와 이미 동의된 MCP 가 함께 간다.
+          // (판정 호출부는 이 깃발을 켜지 않으므로 무도구 잠금이 그대로 유지된다.)
+          authoring: true,
           onPartial: (chunk) => {
             partialBuf += chunk;
             for (const m of partialBuf.matchAll(/"title"\s*:\s*"([^"\\]{1,80})"/g)) {
