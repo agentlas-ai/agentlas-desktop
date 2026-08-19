@@ -5192,8 +5192,15 @@ function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onAlwa
   const decision: OneDecisionViewV1 = normalizeOneDecision(confirmation, taskId, judgedReaders);
   const riskRank = Number(decision.risk.level.slice(1));
   const directOptions = decision.options.filter((option) => option.enabled && option.disposition !== "reject" && option.disposition !== "modify");
-  const blockedOptions = decision.options.filter((option) => option.blockedReason !== null);
-  const approvalBlocked = blockedOptions.some((option) => option.blockedReason === "unstructured_high_risk");
+  /*
+   * 경고를 띄울 상황인가 — 승인을 막을 상황인가가 아니다.
+   *
+   * 계약이 더 이상 옵션을 잠그지 않으므로(shared/one-decision.ts) 여기서는 위험 자체를
+   * 읽어 배너를 결정한다. 배너는 사용자가 무엇을 승인하는지 알려 주고, 승인 버튼은
+   * 그대로 남는다.
+   */
+  const highRiskNotice = Number(decision.risk.level.slice(1)) >= 2
+    && (decision.risk.certainty === "ambiguous" || modelUnavailable);
   const [multiSelection, setMultiSelection] = useState<number[]>([]);
   const [chosenIndex, setChosenIndex] = useState<number | null>(null);
   useEffect(() => { setMultiSelection([]); setChosenIndex(null); }, [confirmation.sourceMessageId]);
@@ -5204,9 +5211,7 @@ function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onAlwa
   /*
    * 승인 버튼이 실제로 무엇을 승인하는가.
    *
-   * 위험 판정이 막아 둔 선택지(blockedOptions)도 여기서는 후보로 되살린다. 판정의 역할은
-   * 사용자에게 경고하는 것이지 승인 경로를 없애는 것이 아니다 — 없애면 사용자는 자기가
-   * 시작한 일을 끝낼 방법을 잃는다.
+   * 계약이 옵션을 잠그지 않으므로 여기서는 성격만 보고 고른다(거절·수정 제외).
    */
   const selectableOptions = decision.options.filter((option) =>
     option.disposition !== "reject" && option.disposition !== "modify");
@@ -5240,7 +5245,7 @@ function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onAlwa
   const supportingFields = candidateSupportingFields.filter(([, field]) => (
     field.status === "stated" && Boolean(field.value)
   ));
-  const lightweightChoice = riskRank === 0 && !approvalBlocked && !confirmation.multiSelect;
+  const lightweightChoice = riskRank === 0 && !highRiskNotice && !confirmation.multiSelect;
 
   if (lightweightChoice) {
     return (
@@ -5308,7 +5313,7 @@ function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onAlwa
         </dl>
       )}
 
-      {approvalBlocked && (
+      {highRiskNotice && (
         <div className={styles.decisionGuard} role="status">
           <strong>{tFor(locale, modelUnavailable
             ? "one.shell.decision.model_review_pending"
@@ -5316,7 +5321,7 @@ function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onAlwa
           <span>{tFor(locale, modelUnavailable
             ? "one.shell.decision.model_review_pending_body"
             : "one.shell.decision.approval_unavailable_body")}</span>
-          {blockedOptions.length > 0 && <small>{tFor(locale, "one.shell.decision.choices_requiring_review")}: {blockedOptions.map((option) => option.label).join(" · ")}</small>}
+          {selectableOptions.length > 0 && <small>{tFor(locale, "one.shell.decision.choices_requiring_review")}: {selectableOptions.map((option) => option.label).join(" · ")}</small>}
         </div>
       )}
 

@@ -267,6 +267,24 @@ export function normalizeOneDecision(
   const deadline: OneDecisionField = matchedField(combined, DEADLINE_RE, "question")
     ?? { status: "not_stated", value: null, source: "policy" as const };
 
+  /*
+   * ★이 잠금은 **이 계약을 읽는 모바일이 강제한다** — 데스크탑 편의로 풀 수 없다.
+   *
+   * 문제 자체는 실재한다: 위험도 R2+ 이고 판정이 모호하면 승인 성격의 옵션이 전부
+   * 잠겨, 사용자에게 거절·되묻기·미루기만 남는다(2026-08-19 실측, X 게시 승인에서
+   * 데스크탑 시트 버튼 셋 중 승인이 하나도 없었다). 그래서 여기서 잠금을 없애 봤다가
+   * 되돌렸다. 이유:
+   *
+   *   mobile/app/lib/core/models/one_decision_models.dart 의 파서는
+   *     R2|R3|R4 && certainty=="ambiguous" && grantsAuthority && enabled
+   *   조합을 만나면 FormatException 을 던져 **결정 카드 전체를 거절한다.** 즉 여기서
+   *   열면 폰에서는 카드가 아예 안 뜬다. 게다가 그 파서는 옵션 키 목록을 exactKeys 로
+   *   대조하므로 새 필드를 얹어 신구 공존을 만들 수도 없다 — 이미 배포된 앱이 거절한다.
+   *
+   * 따라서 이 잠금을 푸는 일은 **데스크탑과 모바일을 함께 배포하는 변경**이다. 그때까지
+   * 데스크탑은 렌더러에서 승인 경로를 되살려 쓰고(OneShell 의 selectableOptions),
+   * 모바일은 잠긴 상태로 남는다 — 폰에서는 "Work 에서 검토"가 그 탈출구다.
+   */
   const options: OneDecisionOption[] = rawOptions.map((option, index) => {
     const disposition = dispositions[index];
     const grantsAuthority = disposition === "approve" || (unstructuredHighRisk && disposition === "choice");
