@@ -453,6 +453,42 @@ export function getAutomationGraphReconciliation(
  * checkpoint, and an outbox peer can never claim between checkpoint and event
  * updates.
  */
+/**
+ * 그래프를 고친 뒤 **실행도 재조정도 안 되는** 상태를 사람이 스스로 푼다.
+ *
+ * 실측 2026-08-20. 부수효과를 남기고 실패한 실행이 있는 상태에서 그래프를 고치면:
+ *   · 실행 → `automation_partial_graph_changed` (바뀐 그래프로 재생할 수 없다)
+ *   · 재조정 → `automation_graph_reconciliation_graph_drift` (좌표가 그 그래프의 것이 아니다)
+ * 둘 다 옳은 거절인데, 합치면 **그 자동화는 영구히 잠긴다.** 그래프를 편집한 사람은
+ * 누구나 이 상태에 빠질 수 있고, 빠져나갈 문이 없었다.
+ *
+ * 문은 하나면 된다 — 사람이 "이전 실행은 잊고 처음부터"라고 말하는 것. 그건 위험을
+ * 아는 사람만 할 수 있는 결정이라 자동으로 하지 않는다. 부르는 쪽이 그 뜻을 사용자에게
+ * 분명히 말한 뒤에만 부른다: **이전 실행이 이미 한 일은 다시 일어날 수 있다.**
+ *
+ * 그래프가 실제로 바뀌지 않았으면 거절한다 — 그때는 재조정이 옳은 길이고, 이 문으로
+ * 나가면 이미 일어난 일을 한 번 더 하게 된다.
+ */
+export function forgetStaleGraphCheckpoint(
+  automationId: string,
+  currentGraphDigest: string,
+): { forgot: boolean; reason?: string } {
+  const db = getDb();
+  const row = db.prepare(
+    "SELECT id, status, graph_digest FROM automation_runs WHERE automation_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1",
+  ).get(automationId) as { id: string; status: string; graph_digest: string | null } | undefined;
+  if (!row) return { forgot: false, reason: "no_run" };
+  if (row.status !== "error") return { forgot: false, reason: "latest_run_did_not_fail" };
+  if (!row.graph_digest) return { forgot: false, reason: "no_recorded_graph" };
+  if (row.graph_digest === currentGraphDigest) return { forgot: false, reason: "graph_unchanged" };
+  db.prepare(
+    `UPDATE automation_runs
+        SET node_states_json = '{}', checkpoint_json = NULL, graph_digest = ?, resume_consumed_at = NULL
+      WHERE id = ?`,
+  ).run(currentGraphDigest, row.id);
+  return { forgot: true };
+}
+
 export function reconcileAutomationGraph(
   input: AutomationGraphReconcileInput & { now?: Date },
 ): AutomationGraphReconcileResult {
