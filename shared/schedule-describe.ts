@@ -5,6 +5,23 @@
 import type { ScheduleSpec } from "./types";
 
 const KO_DOW = ["일", "월", "화", "수", "목", "금", "토"];
+
+/**
+ * 한국어 시각 — 사람이 말하는 대로 "오전 8시", "오후 2시 30분" (오너 결정 2026-08-19).
+ *
+ * ★`08:00` 은 기계가 저장한 모양이지 사람이 말하는 모양이 아니다. 이 문장은 자동화 목록·
+ *   미리보기·폰 알림에 그대로 나가므로, 한국어 표면은 한국어 시각 표기를 쓴다.
+ *   영어는 `08:00` 그대로 둔다 — 그쪽은 원래 그렇게 읽는다.
+ */
+function koClock(hh: string, mm: string): string {
+  const hour = Number(hh);
+  const minute = Number(mm);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return `${hh}:${mm}`;
+  const half = hour < 12 ? "오전" : "오후";
+  // 0시와 12시는 12시간제에서 둘 다 "12시"다 — 0시를 "0시"로 적으면 사람 말이 아니다.
+  const display = hour % 12 === 0 ? 12 : hour % 12;
+  return minute === 0 ? `${half} ${display}시` : `${half} ${display}시 ${minute}분`;
+}
 const EN_DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 /** 사람이 읽을 스케줄 설명(표시 전용, 파싱 아님). locale=ko|en. */
@@ -75,6 +92,8 @@ export function describeCronExpression(
   const time = /^\d+$/.test(hh) && /^\d+$/.test(mm)
     ? `${hh.padStart(2, "0")}:${mm.padStart(2, "0")}`
     : null;
+  // 같은 시각의 한국어 표기. 영어는 기존 `HH:MM` 그대로 쓴다.
+  const koAt = time ? koClock(hh, mm) : null;
 
   // ── 간격형 (*/N) ────────────────────────────────────────────────────────
   const everyMinutes = /^\*\/(\d+)$/.exec(mm);
@@ -91,12 +110,12 @@ export function describeCronExpression(
   }
 
   // ── 시각형 ──────────────────────────────────────────────────────────────
-  if (time && dom === "*" && dow === "*") return ko ? `매일 ${time}` : `Daily at ${time}`;
-  if (time && dom === "*" && dow === "1-5") return ko ? `평일 ${time}` : `Weekdays at ${time}`;
-  if (time && dom === "*" && dow === "0,6") return ko ? `주말 ${time}` : `Weekends at ${time}`;
+  if (time && dom === "*" && dow === "*") return ko ? `매일 ${koAt}` : `Daily at ${time}`;
+  if (time && dom === "*" && dow === "1-5") return ko ? `평일 ${koAt}` : `Weekdays at ${time}`;
+  if (time && dom === "*" && dow === "0,6") return ko ? `주말 ${koAt}` : `Weekends at ${time}`;
   if (time && dom === "*" && /^\d$/.test(dow)) {
     const label = ko ? `매주 ${KO_DOW[Number(dow)]}요일` : `Every ${EN_DOW[Number(dow)]}`;
-    return `${label} ${time}`;
+    return `${label} ${ko ? koAt : time}`;
   }
   // 요일 목록: 0,2,4 → "매주 일·화·목"
   if (time && dom === "*" && /^\d(,\d)+$/.test(dow)) {
@@ -104,19 +123,20 @@ export function describeCronExpression(
     const label = ko
       ? `매주 ${days.map((day) => KO_DOW[day]).join("·")}요일`
       : `Every ${days.map((day) => EN_DOW[day]).join(", ")}`;
-    return `${label} ${time}`;
+    return `${label} ${ko ? koAt : time}`;
   }
   if (time && /^\d+$/.test(dom) && dow === "*") {
-    return ko ? `매월 ${dom}일 ${time}` : `Monthly on day ${dom} at ${time}`;
+    return ko ? `매월 ${dom}일 ${koAt}` : `Monthly on day ${dom} at ${time}`;
   }
   // ── 시각 목록·범위 ────────────────────────────────────────────────────
   // `0 9,18 * * *`(하루 두 번), `0 9-18 * * *`(업무시간 매시)는 흔한데 예전에는
   // 전부 null 이라 폰 화면 제목에 크론 원문이 그대로 올라갔다.
   if (/^\d+$/.test(mm) && /^\d+(,\d+)+$/.test(hh) && dom === "*" && dow === "*") {
-    const times = hh
-      .split(",")
-      .map((hour) => `${hour.padStart(2, "0")}:${mm.padStart(2, "0")}`);
-    return ko ? `매일 ${times.join(", ")}` : `Daily at ${times.join(", ")}`;
+    const hours = hh.split(",");
+    const times = hours.map((hour) => `${hour.padStart(2, "0")}:${mm.padStart(2, "0")}`);
+    return ko
+      ? `매일 ${hours.map((hour) => koClock(hour, mm)).join(", ")}`
+      : `Daily at ${times.join(", ")}`;
   }
   const hourRange = /^(\d+)-(\d+)$/.exec(hh);
   if (hourRange && /^\d+$/.test(mm) && dom === "*" && dow === "*") {
@@ -165,7 +185,7 @@ export function humanizeScheduleLabel(
   const daily = /^daily-(\d{1,2}):(\d{2})$/.exec(raw);
   if (daily) {
     const time = `${daily[1].padStart(2, "0")}:${daily[2]}`;
-    return ko ? `매일 ${time}` : `Daily at ${time}`;
+    return ko ? `매일 ${koClock(daily[1], daily[2])}` : `Daily at ${time}`;
   }
   const every = /^every-(\d+)(m|h)$/.exec(raw);
   if (every) {
@@ -178,7 +198,7 @@ export function humanizeScheduleLabel(
     const day = Number(weekly[1]);
     const time = `${weekly[2].padStart(2, "0")}:${weekly[3]}`;
     return ko
-      ? `매주 ${KO_DOW[day]}요일 ${time}`
+      ? `매주 ${KO_DOW[day]}요일 ${koClock(weekly[2], weekly[3])}`
       : `Every ${EN_DOW[day]} ${time}`;
   }
   return raw;
