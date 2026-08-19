@@ -5,6 +5,7 @@ import { checkComputerUsePermissions } from "./mac-permissions";
 import type { IpcMainInvokeEvent } from "electron";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type {
@@ -4178,6 +4179,38 @@ export function registerIpcHandlers(): void {
   });
   ipcMain.handle("automations:get", (_e, id: string) => getAutomation(id));
   ipcMain.handle("automations:listRuns", (_e, id: string, limit?: number) => listRunHistory(id, limit ?? 50));
+  // ★실패의 물증 — 실행 창(ranAt±10분)에 cua-driver가 저장한 화면 캡처를 그 실행의
+  // 증거로 돌려준다. 실측 2026-08-19: 모델이 "글자수 초과"를 지어내는 동안 진짜
+  // 원인(중복 차단으로 비활성화된 Reply 버튼)은 이미 캡처에 찍혀 있었다 — 디스크에만
+  // 있고 화면엔 없었을 뿐이다. 지어낸 사유 대신 이 파일을 보여준다.
+  ipcMain.handle("automations:runCaptures", (_e, ranAtIso: string, limit?: number) => {
+    try {
+      const dir = path.join(os.homedir(), ".agentlas", "captures", "screen");
+      if (!fs.existsSync(dir)) return [];
+      const anchor = Date.parse(String(ranAtIso || ""));
+      if (!Number.isFinite(anchor)) return [];
+      const windowMs = 10 * 60 * 1000;
+      return fs.readdirSync(dir)
+        .filter((name) => name.startsWith("screen-") && name.endsWith(".png"))
+        .map((name) => {
+          const stamp = name.slice(7, 31).replace(/-(\d{2})-(\d{2})-(\d{3})Z$/, ":$1:$2.$3Z");
+          const at = Date.parse(stamp);
+          return { name, at, path: path.join(dir, name) };
+        })
+        .filter((row) => Number.isFinite(row.at) && Math.abs(row.at - anchor) <= windowMs)
+        .sort((a, b) => a.at - b.at)
+        .slice(0, Math.max(1, Math.min(limit ?? 3, 6)))
+        // dev 렌더러는 http 오리진이라 file:// 이미지가 막힌다 — dataURL로 전달한다.
+        // 호출은 카드 확장 시 1회뿐이고 상한 6장이라 페이로드는 유한하다.
+        .map((row) => ({
+          name: row.name,
+          at: new Date(row.at).toISOString(),
+          dataUrl: `data:image/png;base64,${fs.readFileSync(row.path).toString("base64")}`,
+        }));
+    } catch {
+      return [];
+    }
+  });
   // 확인필요 카드 닫기 — 기록은 남기고 "지금 조치하라"는 요구만 끈다.
   ipcMain.handle("automations:acknowledgeRun", (_e, id: string, runId: string) =>
     acknowledgeAutomationRun(id, runId));

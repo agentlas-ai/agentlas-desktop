@@ -6893,6 +6893,8 @@ export interface AgentlasIpc {
       decision: "approved" | "rejected" | "always",
     ) => Promise<{ ok: boolean; occurrenceId: string | null; always?: boolean }>;
     listRuns: (id: string, limit?: number) => Promise<AutomationRunRecord[]>;
+    /** 실행 창(ranAt±10분)의 호스트 캡처 — 지어낸 사유 대신 보여줄 물증. */
+    runCaptures: (ranAtIso: string, limit?: number) => Promise<{ name: string; at: string; dataUrl: string }[]>;
     /** 확인필요 카드 닫기 — 기록은 남고 "지금 조치하라"는 요구만 꺼진다. */
     acknowledgeRun: (id: string, runId: string) => Promise<boolean>;
     /** 실행 id 없이 지금까지의 확인 요구를 전부 닫는다 — 어떤 카드든 끝낼 수 있는 종결 행동. */

@@ -653,6 +653,13 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
               {run.error || run.outcomeReason ? (
                 <>
                   <p>{plainRun(run, ko).body}</p>
+                  {/* ★말보다 물증 — 정상 종료가 아닌 실행은 그 시각의 화면 캡처를
+                      함께 보여준다. 실측: 모델이 "글자수 초과"를 지어내는 동안 진짜
+                      원인(비활성 Reply 버튼)은 캡처에 이미 찍혀 있었다. 사용자는
+                      개발자가 아니다 — 문장 해석 대신 스크린샷 한 장이 답이다. */}
+                  {run.outcome && run.outcome !== "accepted" ? (
+                    <RunCaptureStrip ranAt={run.ranAt} ko={ko} />
+                  ) : null}
                   <details className="automation-raw-record">
                     <summary>{ko ? "기록 원문 보기" : "Show the raw record"}</summary>
                     <p>{stripReasonCode(run.error ?? run.outcomeReason ?? "")}</p>
@@ -802,6 +809,34 @@ function plainOutcome(status: AutomationRunRecord["status"], ko: boolean): { tit
 }
 
 /** `[controller_judged] …` 같은 내부 판정 코드 접두사 제거 — 사용자가 쓸 수 없는 정보다. */
+
+function RunCaptureStrip({ ranAt, ko }: { ranAt: string | null | undefined; ko: boolean }): React.JSX.Element | null {
+  const [shots, setShots] = useState<{ name: string; at: string; dataUrl: string }[] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    if (!ranAt) { setShots([]); return; }
+    const api = (window as unknown as { agentlas?: { automations?: { runCaptures?: (iso: string, limit?: number) => Promise<{ name: string; at: string; dataUrl: string }[]> } } }).agentlas;
+    const call = api?.automations?.runCaptures;
+    if (!call) { setShots([]); return; }
+    void call(ranAt, 3).then((rows) => { if (!cancelled) setShots(rows); }).catch(() => { if (!cancelled) setShots([]); });
+    return () => { cancelled = true; };
+  }, [ranAt]);
+  if (!shots || shots.length === 0) return null;
+  return (
+    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", margin: "6px 0" }}>
+      {shots.map((shot) => (
+        <img
+          key={shot.name}
+          src={shot.dataUrl}
+          alt={ko ? `실행 당시 화면 (${shot.at})` : `Screen at ${shot.at}`}
+          title={shot.at}
+          style={{ width: 180, borderRadius: 6, border: "1px solid var(--paper-edge)" }}
+        />
+      ))}
+    </div>
+  );
+}
+
 function stripReasonCode(error: string): string {
   return error.replace(/^\s*\[[a-z0-9_.:-]+\]\s*/i, "").trim();
 }

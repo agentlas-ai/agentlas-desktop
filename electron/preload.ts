@@ -754,6 +754,10 @@ const api: AgentlasIpc = {
     decideNodeApproval: (id: string, nodeId: string, decision: "approved" | "rejected" | "always") =>
       ipcRenderer.invoke("automations:decideNodeApproval", id, nodeId, decision),
     listRuns: (id: string, limit?: number) => ipcRenderer.invoke("automations:listRuns", id, limit),
+    runCaptures: (ranAtIso: string, limit?: number) =>
+      ipcRenderer.invoke("automations:runCaptures", ranAtIso, limit) as Promise<
+        { name: string; at: string; dataUrl: string }[]
+      >,
     acknowledgeRun: (id: string, runId: string) =>
       ipcRenderer.invoke("automations:acknowledgeRun", id, runId) as Promise<boolean>,
     // 실행 id 없이 지금까지의 확인 요구를 전부 닫는다 — 어떤 카드든 끝낼 수 있는 행동.
