@@ -13,6 +13,7 @@ import type {
   CloudAgentRevisionIdentity,
   RuntimeBackend,
 } from "../../shared/types";
+import { userDataDir } from "../runtime-paths";
 
 const JOURNAL_SCHEMA_VERSION = 1;
 
@@ -951,11 +952,11 @@ function assertReplaceableManagedDirectory(directory: string): void {
 }
 
 function agentsRoot(): string {
-  return path.resolve(app.getPath("userData"), "agents");
+  return path.resolve(userDataDir(), "agents");
 }
 
 function journalRoot(): string {
-  return path.resolve(app.getPath("userData"), "agent-cloud-registry-journal");
+  return path.resolve(userDataDir(), "agent-cloud-registry-journal");
 }
 
 function readJournal(file: string): CloudRegistryJournal {

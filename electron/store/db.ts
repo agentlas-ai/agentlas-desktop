@@ -9,6 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { app } from "electron";
+import { userDataPath } from "../runtime-paths";
 import { publicAgentVisibility } from "../agents/policy";
 import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
 import { materializeTeamMemberCells, type MaterializableFirmNode } from "./team-member-cells";
@@ -170,7 +171,7 @@ function tableExists(db: Database.Database, table: string): boolean {
 function readAgentRouteSourcesForMigration(): Map<string, string> {
   const out = new Map<string, string>();
   try {
-    const file = path.join(app.getPath("userData"), "agent-routes.json");
+    const file = userDataPath("agent-routes.json");
     const raw = fs.readFileSync(file, "utf8");
     const parsed = JSON.parse(raw) as Record<string, { source?: unknown }>;
     if (parsed && typeof parsed === "object") {
@@ -1024,7 +1025,16 @@ function resolveStorePath(): string {
   const explicit = process.env.AGENTLAS_STORE_PATH?.trim();
   if (explicit) return explicit;
 
-  if (!app.isPackaged) {
+  /*
+   * ★"패키지된 앱인가" 는 Electron 만 답할 수 있는 질문이다. 데몬(Electron 없음)에는
+   * `app` 이 없으므로, 그 호스트는 위 AGENTLAS_STORE_PATH 로 열 DB 를 **명시해야** 한다.
+   * 여기서 임의로 홈 밑을 고르면 사용자의 실제 DB 가 아닌 빈 DB 를 열어 놓고
+   * "데이터가 없다" 고 말하는 사고가 난다.
+   */
+  const packaged = (() => {
+    try { return app.isPackaged; } catch { return true; }
+  })();
+  if (!packaged) {
     const entry = process.argv[1] ?? "";
     const sandbox = path.join(
       os.tmpdir(),
@@ -1038,7 +1048,7 @@ function resolveStorePath(): string {
     return sandbox;
   }
 
-  return path.join(app.getPath("userData"), "agentlas.sqlite");
+  return userDataPath("agentlas.sqlite");
 }
 
 /**

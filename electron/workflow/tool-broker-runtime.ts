@@ -15,6 +15,7 @@ import {
   type ToolBrokerInput,
   type ToolBrokerPlan,
 } from "../../shared/graph-tool-broker";
+import { userDataPath } from "../runtime-paths";
 
 export interface MaterializedToolBroker {
   plan: ToolBrokerPlan;
@@ -47,7 +48,7 @@ export interface MaterializedToolBroker {
 }
 
 function brokerDir(runId: string, nodeId: string): string {
-  const base = path.join(app.getPath("userData"), "graph-tool-broker", runId);
+  const base = userDataPath("graph-tool-broker", runId);
   fs.mkdirSync(base, { recursive: true });
   return path.join(base, `${nodeId.replace(/[^A-Za-z0-9_-]/g, "_")}`);
 }
@@ -132,7 +133,7 @@ export function materializeToolBroker(
 /** 실행이 끝나면 이번 실행의 계획 파일을 치운다. 남겨 둘 이유가 없다. */
 export function clearToolBrokerArtifacts(runId: string): void {
   try {
-    fs.rmSync(path.join(app.getPath("userData"), "graph-tool-broker", runId), {
+    fs.rmSync(userDataPath("graph-tool-broker", runId), {
       recursive: true,
       force: true,
     });

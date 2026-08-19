@@ -11,6 +11,7 @@ import {
   operationalRuntimeOverlayIsRuntimeSafe,
   renderDesktopOperationalRuntimeDirective,
 } from "./operational-runtime-contract";
+import { userDataDir } from "../runtime-paths";
 
 interface RuntimeClient {
   resolveRuntimeSession?: (input: {
@@ -87,7 +88,7 @@ export async function resolveDesktopOperationalRuntimeSession(input: {
   const resolution = (async (): Promise<DesktopOperationalRuntimeSnapshot | null> => {
     const before = getInstalledAgentHubBinding(input.installedAgentId);
     if (!before) return null;
-    const client = input.client ?? getDefaultOntologyHubClient(app.getPath("userData"));
+    const client = input.client ?? getDefaultOntologyHubClient(userDataDir());
     let snapshot: DesktopOperationalRuntimeSnapshot | null = null;
     try {
       if (client.resolveRuntimeSession) {

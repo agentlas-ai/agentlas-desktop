@@ -11,6 +11,7 @@ import type {
   OberonMotionAdRequest,
 } from "../../shared/types";
 import { currentUiLocale } from "../ui-locale";
+import { userDataPath } from "../runtime-paths";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_DURATION = 30;
@@ -39,7 +40,7 @@ export function startOberonMotionAd(request: OberonMotionAdRequest): OberonMotio
   const outputDir =
     request.outputDir && path.isAbsolute(request.outputDir)
       ? request.outputDir
-      : path.join(app.getPath("userData"), "oberon-motion", `${safeSlug(title)}-${id.slice(0, 8)}`);
+      : userDataPath("oberon-motion", `${safeSlug(title)}-${id.slice(0, 8)}`);
   const now = Date.now();
   const job: OberonMotionAdJob = {
     id,

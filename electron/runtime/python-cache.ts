@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { app } from "electron";
+import { userDataPath } from "../runtime-paths";
 
 const PYTHON_CACHE_RELATIVE = ["cache", "python-bytecode"];
 
@@ -30,7 +31,7 @@ function applicationRoots(): string[] {
 export function pythonCachePrefix(): string {
   let preferred: string | null = null;
   try {
-    preferred = path.join(app.getPath("userData"), ...PYTHON_CACHE_RELATIVE);
+    preferred = userDataPath(...PYTHON_CACHE_RELATIVE);
   } catch {
     // Fall through to the process-scoped temp cache below.
   }

@@ -36,6 +36,7 @@ import type {
   CloudAgentSecurityFinding,
   CloudAgentVisibility,
 } from "../../shared/types";
+import { userDataPath } from "../runtime-paths";
 
 const MAX_TOTAL_BYTES = 3 * 1024 * 1024;
 const MAX_UNCOMPRESSED_TOTAL_BYTES = 4 * (3 * 1024 * 1024);
@@ -3079,7 +3080,7 @@ function inferAgentKind(snapshot: PackageSnapshot): "agent" | "team" | "repo" {
 function packageOutputDir(slug: string): string {
   const root =
     process.env.AGENTLAS_CLOUD_PACKAGE_DIR ||
-    path.join(app.getPath("userData"), "cloud-agent-packages");
+    userDataPath("cloud-agent-packages");
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   return path.join(root, `${slug}-${stamp}`);
 }

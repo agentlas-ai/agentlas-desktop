@@ -26,6 +26,7 @@ import { getGrokUsage } from "./grok";
 import { localTokensFor } from "./local-logs";
 import { readProviderHealth } from "./provider-health";
 import { UsageRetryGate } from "./retry-policy";
+import { userDataPath } from "../runtime-paths";
 
 // 하이브리드 사용량(ccusage + agentcat 절충):
 //  - 서버 usage API = 정확한 리밋 %·리셋 시각. 단 rate limit이 짜서 자주 못 친다.
@@ -117,7 +118,7 @@ function lastGoodFile(): string | null {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { app } = require("electron") as typeof import("electron");
-    return path.join(app.getPath("userData"), "usage-last-good.json");
+    return userDataPath("usage-last-good.json");
   } catch {
     return null; // electron 밖(헤드리스 스크립트) — 영속화 생략
   }

@@ -21,6 +21,7 @@ import type {
 } from "../../shared/types";
 import { grokAuthSource } from "../multimodal/availability";
 import { resolveGrokBin, runGrokImagine } from "../multimodal/grok-imagine";
+import { userDataPath } from "../runtime-paths";
 
 // provider별 허용 env 키 — 멀티모달 레지스트리(shared/multimodal.ts) 키명을 먼저,
 // 레거시/실동작 키명을 폴백으로. "멀티모달로 연결한 키"를 animate가 그대로 인식하도록 정렬.
@@ -81,7 +82,7 @@ export function startOberonAnimate(request: OberonAnimateRequest): OberonAnimate
   const provider: OberonAnimateProvider = request.provider ?? "runway";
   const model = request.model || DEFAULT_MODELS[provider];
   const title = request.title || "Oberon Animation";
-  const outputDir = path.join(app.getPath("userData"), "oberon-animate", `${safeSlug(title)}-${id.slice(0, 8)}`);
+  const outputDir = userDataPath("oberon-animate", `${safeSlug(title)}-${id.slice(0, 8)}`);
   const now = Date.now();
   const job: OberonAnimateJob = {
     id,

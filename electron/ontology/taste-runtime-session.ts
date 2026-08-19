@@ -13,6 +13,7 @@ import {
   renderTasteRuntimeDirective,
   tasteRuntimeOverlayIsRuntimeSafe,
 } from "./taste-runtime-contract";
+import { userDataDir } from "../runtime-paths";
 
 interface ProjectionClient {
   query(
@@ -99,7 +100,7 @@ export async function resolveDesktopTasteRuntimeSession(input: {
   const resolution = (async (): Promise<DesktopTasteRuntimeSnapshot | null> => {
     const before = getInstalledAgentHubBinding(input.installedAgentId);
     if (!before) return null;
-    const client = input.client ?? getDefaultOntologyHubClient(app.getPath("userData"));
+    const client = input.client ?? getDefaultOntologyHubClient(userDataDir());
     let snapshot: DesktopTasteRuntimeSnapshot | null = null;
     try {
       // force=true means a pinned release is usable only after this new session

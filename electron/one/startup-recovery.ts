@@ -3,11 +3,12 @@ import path from "node:path";
 import { app, shell } from "electron";
 import { judgeRequiredAction, secretValueFloor, type RequiredActionOption } from "../system-agents/judgment";
 import type { RuntimeLocale } from "../runtime/status-i18n";
+import { userDataDir } from "../runtime-paths";
 
 const DISPOSABLE_DIRS = ["Cache", "Code Cache", "GPUCache"] as const;
 
 function containedDisposableDirs(): string[] {
-  const root = path.resolve(app.getPath("userData"));
+  const root = path.resolve(userDataDir());
   const prefix = `${root}${path.sep}`;
   const out: string[] = [];
   for (const name of DISPOSABLE_DIRS) {
@@ -26,7 +27,7 @@ function containedDisposableDirs(): string[] {
 
 function filesystemEvidence(): Record<string, number | null> {
   try {
-    const stat = fs.statfsSync(app.getPath("userData"));
+    const stat = fs.statfsSync(userDataDir());
     return {
       availableBytes: Number(stat.bavail) * Number(stat.bsize),
       totalBytes: Number(stat.blocks) * Number(stat.bsize),
@@ -111,7 +112,7 @@ export async function recoverDesktopStartup(input: {
     const actionId = decision.actionId ?? selectedByPerson;
     if (!actionId || !actions.some((action) => action.id === actionId)) return false;
     if (actionId === "open_app_data_folder") {
-      await shell.openPath(app.getPath("userData")).catch(() => undefined);
+      await shell.openPath(userDataDir()).catch(() => undefined);
       continue;
     }
     if (actionId === "clear_disposable_app_caches") clearDisposableCaches(cacheTargets);

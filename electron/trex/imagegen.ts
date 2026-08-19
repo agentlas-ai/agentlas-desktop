@@ -8,6 +8,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { app } from "electron";
+import { userDataPath } from "../runtime-paths";
 
 export type TrexImageModel = "codex" | "gemini" | "auto";
 export interface TrexImageResult {
@@ -232,7 +233,7 @@ export async function generateTrexImage(model: TrexImageModel, prompt: string): 
   try {
     const clean = (prompt || "").trim().slice(0, 1200);
     if (!clean) return { ok: false, reason: "empty-prompt" };
-    const dir = path.join(app.getPath("userData"), "trex-images");
+    const dir = userDataPath("trex-images");
     fs.mkdirSync(dir, { recursive: true });
     const target = path.join(dir, `trex_${Date.now()}_${Math.floor(Math.random() * 1e6)}.png`);
 

@@ -14,6 +14,7 @@
 // 포트·승인 창을 덮어쓰지 않는다.
 import path from "node:path";
 import { app } from "electron";
+import { userDataPath } from "../runtime-paths";
 
 export const MCP_PROXY_CONTROL_FILE_ENV = "AGENTLAS_MCP_PROXY_CONTROL";
 /** 프록시가 감쌀 실제 서버 스펙(JSON)을 담는 환경변수. */
@@ -29,5 +30,5 @@ export const MCP_PROXY_SESSION_ENV = "AGENTLAS_MCP_PROXY_SESSION";
 export const MCP_PROXY_PLAN_ENV = "AGENTLAS_MCP_PROXY_PLAN";
 
 export function mcpProxyControlInfoPath(): string {
-  return path.join(app.getPath("userData"), "mcp", "proxy-control.json");
+  return userDataPath("mcp", "proxy-control.json");
 }

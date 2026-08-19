@@ -23,6 +23,7 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import type { AuthSession } from "../shared/types";
+import { userDataPath } from "./runtime-paths";
 
 const COOKIE_NAME = "agentlas_session";
 const AUTH_PARTITION = "persist:agentlas-auth";
@@ -198,7 +199,7 @@ export async function settleAuthRestoreAttempt<T>(
 }
 
 function authCookiePath(): string {
-  return path.join(app.getPath("userData"), "auth", "session-cookie.v1.json");
+  return userDataPath("auth", "session-cookie.v1.json");
 }
 
 function parseStoredAuthCookie(raw: string): { ciphertext: Buffer; durableIdentity: string } | null {

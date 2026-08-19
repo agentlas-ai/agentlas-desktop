@@ -2,6 +2,7 @@
 // 원문 오류·프롬프트·토큰은 저장하지 않고, 허용된 짧은 상태 코드만 원자적으로 기록한다.
 import fs from "node:fs";
 import path from "node:path";
+import { userDataPath } from "../runtime-paths";
 
 export type ProviderHealthCode =
   | "grok_quota_exhausted";
@@ -25,7 +26,7 @@ export function providerHealthFile(): string | null {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { app } = require("electron") as typeof import("electron");
-    return path.join(app.getPath("userData"), "provider-health.json");
+    return userDataPath("provider-health.json");
   } catch {
     // 헤드리스/테스트 환경은 명시적 override가 없으면 디스크를 건드리지 않는다.
     return null;

@@ -10,6 +10,7 @@ import path from "node:path";
 import type { FsPathGrant, FsReadScope } from "../../shared/types";
 import { getDb } from "../store/db";
 import { captureArtifactsRoot } from "../media/capture-artifacts";
+import { userDataPath, userDataDir } from "../runtime-paths";
 
 type GrantMode = "tree" | "file";
 
@@ -122,7 +123,7 @@ function looksLikeDeclaredPastedAttachment(mediaType: string, bytes: Buffer): bo
 
 /** One 첨부 스테이징 루트 바깥의 전용 비공개 디렉터리(안이면 첨부가 자기 파일로 보고 거부한다). */
 function ensurePastedAttachmentRoot(): string {
-  const root = path.join(app.getPath("userData"), "one-pasted-attachments-v1");
+  const root = userDataPath("one-pasted-attachments-v1");
   const stat = fs.existsSync(root) ? fs.lstatSync(root) : null;
   if (stat && !stat.isDirectory()) {
     throw new FsAccessDeniedError("The pasted-attachment staging path is not a directory.");
@@ -158,7 +159,7 @@ export class FsAccessDeniedError extends Error {
 }
 
 function grantStorePath(): string {
-  return process.env.AGENTLAS_FS_GRANT_STORE?.trim() || path.join(app.getPath("userData"), GRANT_FILE);
+  return process.env.AGENTLAS_FS_GRANT_STORE?.trim() || userDataPath(GRANT_FILE);
 }
 
 function isInsidePath(child: string, parent: string): boolean {
@@ -339,7 +340,7 @@ export function pathFromGrant(grant: FsPathGrant, expectedKind?: FsPathGrant["ki
 }
 
 function generatedRootRules(): RootRule[] {
-  const userData = app.getPath("userData");
+  const userData = userDataDir();
   return GENERATED_ROOT_NAMES.map((name) => ({ path: path.join(userData, name), mode: "tree" }));
 }
 

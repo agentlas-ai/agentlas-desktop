@@ -4,9 +4,10 @@
 // wrong window and database.
 import path from "node:path";
 import { app } from "electron";
+import { userDataDir } from "../runtime-paths";
 
 export const BROWSER_APPROVAL_FILE_ENV = "AGENTLAS_BROWSER_APPROVAL_FILE";
 
-export function browserApprovalInfoPath(userDataPath = app.getPath("userData")): string {
+export function browserApprovalInfoPath(userDataPath = userDataDir()): string {
   return path.join(userDataPath, "browser", "approval.json");
 }

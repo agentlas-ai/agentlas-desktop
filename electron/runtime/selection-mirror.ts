@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { app } from "electron";
 import type { RuntimeSelection, RuntimeStatus } from "../../shared/types";
+import { userDataPath } from "../runtime-paths";
 
 const CONTRACT = "agentlas.runtime-selection-mirror.v1";
 
@@ -12,7 +13,7 @@ type RuntimeMirror = {
 };
 
 function mirrorPath(): string {
-  return path.join(app.getPath("userData"), "runtime-selection.v1.json");
+  return userDataPath("runtime-selection.v1.json");
 }
 
 function portableSelection(value: RuntimeSelection | RuntimeStatus): RuntimeSelection {

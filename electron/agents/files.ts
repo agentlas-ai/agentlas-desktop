@@ -20,6 +20,7 @@ import {
   type DirListing,
   type TextFilePreview,
 } from "../fs/workspace";
+import { userDataPath } from "../runtime-paths";
 
 interface AgentRow {
   id: string;
@@ -36,7 +37,7 @@ interface AgentRow {
 }
 
 function agentsRoot(): string {
-  return path.join(app.getPath("userData"), "agents");
+  return userDataPath("agents");
 }
 
 /** 이 에이전트의 파일이 실제로 사는 폴더. 로컬 임포트면 원본 폴더, 아니면 userData/agents/<slug>. */

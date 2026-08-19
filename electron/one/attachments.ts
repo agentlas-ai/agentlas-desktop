@@ -17,6 +17,7 @@ import {
   type PrepareOneAttachmentsInput,
   type PreparedOneAttachments,
 } from "../../shared/one-attachments";
+import { userDataPath } from "../runtime-paths";
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const SHA256_RE = /^sha256:[0-9a-f]{64}$/;
@@ -98,7 +99,7 @@ export class OneAttachmentError extends Error {
 
 function attachmentRoot(): string {
   return process.env.AGENTLAS_ONE_ATTACHMENT_ROOT?.trim()
-    || path.join(app.getPath("userData"), "one-attachments-v1");
+    || userDataPath("one-attachments-v1");
 }
 
 function ensureCanonicalPrivateDirectory(directory: string, recursive: boolean): string {

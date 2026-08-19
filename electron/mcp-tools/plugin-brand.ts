@@ -20,6 +20,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { normalizePluginSlug } from "../../shared/plugin-slug";
 import type { PluginBrandAsset } from "../../shared/types";
+import { userDataPath } from "../runtime-paths";
 
 const BRAND_CACHE_TTL_MS = 6 * 60 * 60_000;
 const FETCH_TIMEOUT_MS = 12_000;
@@ -59,11 +60,11 @@ function absoluteAssetUrl(value: unknown, origin: string): string | undefined {
 }
 
 function brandCacheFile(): string {
-  return path.join(app.getPath("userData"), "plugin-brands.v1.json");
+  return userDataPath("plugin-brands.v1.json");
 }
 
 function iconCacheDir(): string {
-  return path.join(app.getPath("userData"), "plugin-icons");
+  return userDataPath("plugin-icons");
 }
 
 function readDiskBrandMap(): { map: BrandMap; fetchedAt: number } | null {

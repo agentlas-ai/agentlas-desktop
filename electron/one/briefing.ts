@@ -23,6 +23,7 @@ import {
 import type { Automation, AutomationRunRecord, CanonicalTask, FailureEventUi, InvocationRunReceipt, Project } from "../../shared/types";
 import { tryRecordOneDomainEvent } from "./domain-events";
 import { resolveMainOwnedReadPath } from "../fs/access";
+import { userDataDir } from "../runtime-paths";
 
 const STATE_VERSION = 1 as const;
 const DAY_MS = 24 * 60 * 60 * 1_000;
@@ -526,7 +527,7 @@ function statePath(): string {
   if (explicit) return path.resolve(explicit);
   const root = process.env.AGENTLAS_STORE_PATH?.trim()
     ? path.dirname(path.resolve(process.env.AGENTLAS_STORE_PATH))
-    : app.getPath("userData");
+    : userDataDir();
   return path.join(root, "one", "briefing-state.v1.json");
 }
 

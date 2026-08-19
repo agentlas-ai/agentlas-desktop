@@ -10,6 +10,7 @@ import path from "node:path";
 import os from "node:os";
 import { app } from "electron";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
+import { userDataPath } from "../runtime-paths";
 
 /**
  * 패키지된 GUI 앱(Finder/Dock 실행)은 로그인 셸의 PATH를 상속받지 못해 PATH가
@@ -140,7 +141,7 @@ export function nodeExecPathForCode(): string {
 
 export function agentRunCwd(): string {
   if (_runCwd) return _runCwd;
-  const dir = path.join(app.getPath("userData"), "agent-cwd");
+  const dir = userDataPath("agent-cwd");
   try {
     fs.mkdirSync(dir, { recursive: true });
     _runCwd = dir;

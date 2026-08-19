@@ -13,6 +13,7 @@ import { detectRuntimes } from "./detect";
 import { clearCliVersionProbeCache, probeCliVersion } from "./exec";
 import { updateCli, type InstallableCli, type ManageableCli } from "./install-cli";
 import { tryAcquireRuntimeMaintenance } from "./run-slots";
+import { userDataPath } from "../runtime-paths";
 
 const CLI_KINDS: ManageableCli[] = ["claude-code", "codex", "antigravity", "kimi", "grok"];
 const PACKAGE_BY_KIND: Record<InstallableCli, string> = {
@@ -73,7 +74,7 @@ function stateFile(): string | null {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { app } = require("electron") as typeof import("electron");
     if (!app || typeof app.getPath !== "function") return null;
-    return path.join(app.getPath("userData"), "cli-auto-update.v1.json");
+    return userDataPath("cli-auto-update.v1.json");
   } catch {
     return null;
   }

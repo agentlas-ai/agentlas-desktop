@@ -26,6 +26,7 @@ import {
   inspectMacInstalledAppTrust,
   repairMacInstalledAppGeneratedPythonCaches,
 } from "./updater/mac-app-trust";
+import { userDataDir, userDataPath } from "./runtime-paths";
 
 // electron-updater is CommonJS in the main process bundle.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -65,7 +66,7 @@ function broadcast(state: UpdaterState): void {
 }
 
 function databasePath(): string {
-  return process.env.AGENTLAS_STORE_PATH?.trim() || path.join(app.getPath("userData"), "agentlas.sqlite");
+  return process.env.AGENTLAS_STORE_PATH?.trim() || userDataPath("agentlas.sqlite");
 }
 
 function installJournalPath(userDataPath: string): string {
@@ -110,7 +111,7 @@ export interface UpdaterStartupPreflight {
  * durable journal and already-captured recovery copies so a migration cannot
  * begin without a reachable fallback.
  */
-export function preflightUpdaterStartup(userDataPath = app.getPath("userData")): UpdaterStartupPreflight {
+export function preflightUpdaterStartup(userDataPath = userDataDir()): UpdaterStartupPreflight {
   if (process.env.NODE_ENV === "development" || process.env.AGENTLAS_QA_USER_DATA_DIR?.trim()) {
     return { pendingInstall: false, recoveryBackupAvailable: false };
   }
@@ -161,7 +162,7 @@ export function preflightUpdaterStartup(userDataPath = app.getPath("userData")):
 }
 
 /** Marks that this startup already attempted an automatic post-update repair. */
-function bootRepairMarkerPath(userDataPath = app.getPath("userData")): string {
+function bootRepairMarkerPath(userDataPath = userDataDir()): string {
   return path.join(userDataPath, "updater", "post-update-boot-repair.json");
 }
 
@@ -181,7 +182,7 @@ function bootRepairMarkerPath(userDataPath = app.getPath("userData")): string {
 export async function handleUpdaterBootstrapFailure(error: unknown): Promise<boolean> {
   if (!startupRecovery) return false;
   console.error("[updater] guarded startup failed", error);
-  const userDataPath = app.getPath("userData");
+  const userDataPath = userDataDir();
   const marker = bootRepairMarkerPath(userDataPath);
 
   let alreadyRepaired = false;
@@ -227,7 +228,7 @@ export async function handleUpdaterBootstrapFailure(error: unknown): Promise<boo
 }
 
 /** Clears the one-shot marker once the app has actually reached a healthy start. */
-export function noteHealthyStartup(userDataPath = app.getPath("userData")): void {
+export function noteHealthyStartup(userDataPath = userDataDir()): void {
   try {
     fs.rmSync(bootRepairMarkerPath(userDataPath), { force: true });
   } catch {
@@ -294,7 +295,7 @@ export async function initAutoUpdater(options: AutoUpdaterInitOptions = {}): Pro
     return;
   }
 
-  const userDataPath = app.getPath("userData");
+  const userDataPath = userDataDir();
   const dbPath = databasePath();
   const sourceRoot = path.resolve(__dirname, "../..");
   controller = new DesktopUpdaterController({

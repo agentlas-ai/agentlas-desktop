@@ -18,6 +18,7 @@ import { installFromCatalog, listInstalledServers } from "./registry";
 import { installHubPlugin } from "./hub-plugin-bridge";
 import { installedServerMatchesPluginSlug } from "../../shared/plugin-slug";
 import { runtimeKindSupportsMcpTransport } from "../../shared/runtime-mcp";
+import { userDataPath } from "../runtime-paths";
 
 export interface InternalMcpBuildCandidate {
   public: McpBuildCandidate;
@@ -531,7 +532,7 @@ export function emptyMcpBuildReceipt(planId: string): McpBuildAttachmentReceipt 
 
 /** Host-local receipt. Never place this runtime/account state inside an agent package. */
 export function persistHostMcpBuildReceipt(receipt: McpBuildAttachmentReceipt): string {
-  const dir = path.join(app.getPath("userData"), "mcp", "build-receipts");
+  const dir = userDataPath("mcp", "build-receipts");
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (process.platform !== "win32") fs.chmodSync(dir, 0o700);
   const safeId = receipt.planId.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 100) || "unknown";

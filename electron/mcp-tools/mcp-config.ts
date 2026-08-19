@@ -40,6 +40,7 @@ import {
   mcpProxyControlInfoPath,
 } from "./proxy-channel";
 import { mcpProxyApprovalPort } from "./proxy-server";
+import { userDataPath } from "../runtime-paths";
 
 function expandHome(arg: string): string {
   if (arg === "~") return os.homedir();
@@ -318,7 +319,7 @@ function overwriteAndRemovePrivateFile(file: string): void {
  * recreated from the current registry on the next runtime invocation.
  */
 export function scrubLegacyOpenCrabMcpConfig(): boolean {
-  const dir = path.join(app.getPath("userData"), "mcp");
+  const dir = userDataPath("mcp");
   if (!fs.existsSync(dir)) return false;
   let entries: string[];
   try {
@@ -360,7 +361,7 @@ function ensureMcpChildEnvWrapper(dir: string): string {
 
 function argsWithBrowserProfile(key: string, args: string[], opts?: McpConfigBuildOptions): string[] {
   if (key !== "playwright" || !opts?.browserProfileKey) return args;
-  const profileDir = path.join(app.getPath("userData"), "mcp", "browser-profiles", safeProfileKey(opts.browserProfileKey));
+  const profileDir = userDataPath("mcp", "browser-profiles", safeProfileKey(opts.browserProfileKey));
   // A persistent browser profile contains cookies, login sessions and local
   // storage. Treat the directory itself as credential material, including when
   // an older build already created it with the process umask (commonly 0755).
@@ -384,7 +385,7 @@ function argsWithBrowserProfile(key: string, args: string[], opts?: McpConfigBui
  */
 export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<McpConfigResult | null> {
   if (!opts?.skipDefaultSeed) ensureDefaultMcpPluginsInstalled();
-  const dir = path.join(app.getPath("userData"), "mcp");
+  const dir = userDataPath("mcp");
   const configPath = path.join(
     dir,
     opts?.configKey ? `agentlas-mcp-${safeProfileKey(opts.configKey)}.json` : "agentlas-mcp.json",

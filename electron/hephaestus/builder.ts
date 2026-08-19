@@ -48,6 +48,7 @@ import { stageAttachments, type ResolvedHephaestusBuildAttachment } from "./buil
 import { contractTargetRoot, verifiedCompletedPackageRoot } from "./build-result-path";
 import { deriveOpenCrabMatchSignal, queryOpenCrabContext } from "../opencrab/ontology";
 import { runBuildRunnerWithMcpRecovery } from "./mcp-runtime-retry";
+import { userDataPath } from "../runtime-paths";
 
 export type BuildSink = (ev: HephaestusBuildEvent) => void;
 
@@ -1018,7 +1019,7 @@ export async function runHephaestusBuild(
         .slice(1)
         .map((entry) => entry.text.trim())
         .filter(Boolean);
-      workBriefPath = path.join(app.getPath("userData"), "build-work-briefs", `${runId}.json`);
+      workBriefPath = userDataPath("build-work-briefs", `${runId}.json`);
       fs.mkdirSync(path.dirname(workBriefPath), { recursive: true });
       fs.writeFileSync(workBriefPath, `${JSON.stringify({
         schemaVersion: "work-brief/1.0",

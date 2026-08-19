@@ -24,6 +24,7 @@ import {
 import { readCloudAgentRestoreMarker } from "../cloud-agents/restore";
 import { getAgentById } from "../mcp/registry";
 import { getDb } from "../store/db";
+import { userDataDir } from "../runtime-paths";
 
 export const ONE_HUB_DERIVATIVE_META_KEY = "agentlas.one.hub-derivative-drafts.v1";
 
@@ -139,7 +140,7 @@ function ensurePrivateDirectory(parent: string, name: string): string {
 }
 
 function oneHubDerivativeParentPath(): string {
-  const requestedUserData = path.resolve(app.getPath("userData"));
+  const requestedUserData = path.resolve(userDataDir());
   fs.mkdirSync(requestedUserData, { recursive: true, mode: 0o700 });
   const userData = fs.realpathSync.native(requestedUserData);
   const one = ensurePrivateDirectory(userData, "one");
@@ -660,7 +661,7 @@ export function getOneHubDerivativeDraft(rawInput: unknown): OneHubDerivativeDra
   } catch (error) {
     const code = record(error) && typeof error.code === "string" ? error.code : null;
     const message = error instanceof Error ? error.message : String(error);
-    const userData = path.resolve(app.getPath("userData"));
+    const userData = path.resolve(userDataDir());
     if (code || message.includes(userData)) {
       throw new Error("The local Hub derivative review draft could not be read safely");
     }

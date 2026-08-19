@@ -15,6 +15,7 @@ import { withCliPath } from "../runtime/exec";
 import { withPythonCacheBoundary } from "../runtime/python-cache";
 import { resolveHephaestusPython } from "./engine";
 import { currentUiLocale } from "../ui-locale";
+import { userDataDir } from "../runtime-paths";
 
 let cachedRoot: string | null | undefined;
 let proc: ChildProcess | null = null;
@@ -124,13 +125,13 @@ export function studioRoot(): string | null {
  * (2) .studio-runtime 을 번들에 포함하지 않으므로 데모/목업 없이 블랭크로 시작한다(런처가 {} 서빙 → 아이디어 히어로).
  */
 function ensureWritablePack(bundled: string): string {
-  let userDataDir: string;
+  let baseDir: string;
   try {
-    userDataDir = app.getPath("userData");
+    baseDir = userDataDir();
   } catch {
-    return bundled; // app 미가용(테스트 등) — 번들(dev 경로) 그대로.
+    return bundled; // 경로를 아는 호스트가 아니다(테스트 등) — 번들(dev 경로) 그대로.
   }
-  const dest = path.join(userDataDir, "startup-studio");
+  const dest = path.join(baseDir, "startup-studio");
   const destLauncher = path.join(dest, "scripts", "open-studio-gui.py");
   let needCopy = !fs.existsSync(destLauncher);
   if (!needCopy) {

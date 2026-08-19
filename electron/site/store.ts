@@ -28,9 +28,10 @@ import type {
 import { normalizeSiteAgentAppContract } from "./agent-app-contract";
 import { normalizeSiteAgentAppMcpConsentReceipt } from "./agent-app-mcp-consent";
 import { defaultSiteAgentAppVisual, normalizeSiteAgentAppVisual } from "./agent-app-visual";
+import { userDataPath } from "../runtime-paths";
 
 function projectsRoot(): string {
-  return path.join(app.getPath("userData"), "site-projects");
+  return userDataPath("site-projects");
 }
 
 export function siteAgentAppsRoot(): string {

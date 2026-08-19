@@ -17,6 +17,7 @@ import {
   queryOpenCrabContext,
   type OpenCrabMatchSignal,
 } from "../opencrab/ontology";
+import { userDataPath } from "../runtime-paths";
 
 const RUNTIMES: Record<OberonPlanRuntime, { label: string; runner: Runner }> = {
   "claude-code": { label: "Claude Code", runner: runClaudeCode },
@@ -54,7 +55,7 @@ export async function planOberonWithCli(request: OberonPlanRequest): Promise<Obe
     const timer = setTimeout(() => controller.abort(), 90_000);
     let rawText = "";
     try {
-      const cwd = path.join(app.getPath("userData"), "oberon", "planner");
+      const cwd = userDataPath("oberon", "planner");
       await fs.mkdir(cwd, { recursive: true });
       const result = await entry.runner(
         {

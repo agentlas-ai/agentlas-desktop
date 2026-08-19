@@ -22,6 +22,7 @@ import type {
   ResolvedDivision,
   ResolvedOrg,
 } from "../../shared/types";
+import { userDataPath } from "../runtime-paths";
 
 interface TeamProfile {
   name: string;
@@ -78,7 +79,7 @@ export function createCommerceAgentTeam(input: MetaAgentTeamFactoryRequest): Met
     input.baseDir ||
     getChatWorkingFolder(chat.id) ||
     project?.folderPath ||
-    path.join(app.getPath("userData"), "generated-teams");
+    userDataPath("generated-teams");
   const profile = profileFromManifest(input.manifest);
   const rootPath = path.join(baseDir, ".agentlas", "generated-teams", profile.slug);
   fs.mkdirSync(rootPath, { recursive: true });

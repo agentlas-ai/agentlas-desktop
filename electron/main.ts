@@ -103,6 +103,7 @@ import {
   startAgentlasMobileBridge,
   stopAgentlasMobileBridge,
 } from "./mobile-bridge/runtime";
+import { userDataDir } from "./runtime-paths";
 
 export { currentUiLocale } from "./ui-locale";
 
@@ -903,7 +904,7 @@ app.whenReady().then(async () => {
       // leave every recovery copy untouched. Never run this from the headless
       // path, which deliberately does not own post-update verification.
       const recoveryScrub = scrubInactiveUpdaterRecoveryOpenCrabCredentialUrls({
-        userDataPath: app.getPath("userData"),
+        userDataPath: userDataDir(),
       });
       if (recoveryScrub.scrubbedDatabases > 0) {
         console.warn(
@@ -978,7 +979,7 @@ app.whenReady().then(async () => {
     // revokes nothing while signed out; the bridge simply stops serving until
     // the user signs back in. Wiping on plain TTL expiry is what left this
     // machine with 39 of 39 paired devices revoked and zero usable.
-    reconcileMobileBridgeDevicesForAccount(app.getPath("userData"));
+    reconcileMobileBridgeDevicesForAccount(userDataDir());
     failCloseActiveHubBookmarks();
     broadcastHubBookmarkSnapshot();
     broadcastSignedOutSession();
@@ -1074,7 +1075,7 @@ app.whenReady().then(async () => {
   const startMobileBridgeAfterAuth = async () => {
     try {
       await startAgentlasMobileBridge({
-        userDataPath: app.getPath("userData"),
+        userDataPath: userDataDir(),
         appVersion: app.getVersion(),
       });
     } catch (err) {

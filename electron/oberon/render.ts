@@ -19,6 +19,7 @@ import { mergeContinuityNegative } from "../../shared/oberon-sheets";
 import { composeTitledDelivery } from "./titlecards";
 import { currentUiLocale } from "../ui-locale";
 import { runGrokImagine } from "../multimodal/grok-imagine";
+import { userDataPath } from "../runtime-paths";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_MODEL = "veo-3.1-lite-generate-001";
@@ -44,7 +45,7 @@ export function startOberonRender(request: OberonRenderRequest): OberonRenderJob
   const id = randomUUID();
   const provider = request.provider ?? "google-enterprise-veo";
   const model = request.model || DEFAULT_MODEL;
-  const outputDir = path.join(app.getPath("userData"), "oberon", `${safeSlug(request.title)}-${id.slice(0, 8)}`);
+  const outputDir = userDataPath("oberon", `${safeSlug(request.title)}-${id.slice(0, 8)}`);
   const clips = planClips(shots, provider, model, request.takesPerShot);
   const now = Date.now();
   const job: OberonRenderJob = {

@@ -7,6 +7,7 @@ import { agentFolderPath } from "../agents/files";
 import { resolveActiveProvider } from "../multimodal/availability";
 import { getMultimodalSettings } from "../multimodal/settings";
 import { readEnvVar } from "../secrets/vault";
+import { userDataPath } from "../runtime-paths";
 
 const DOTENV_FILES = [".env", ".env.local"];
 
@@ -222,7 +223,7 @@ export async function buildRunnerEnv(
     for (const key of mergeRunnerEnvValues(env, values, overwrite)) injected.add(key);
   };
 
-  apply(readDotEnvFile(path.join(app.getPath("userData"), "credentials.env")), false);
+  apply(readDotEnvFile(userDataPath("credentials.env")), false);
   apply(readDotEnvFile(path.join(os.homedir(), ".agentlas", "credentials.env")), false);
   if (cwd) apply(readDotEnvFiles(cwd), true);
 

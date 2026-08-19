@@ -25,6 +25,7 @@ import type {
   MetaAgentTeamFactoryResult,
   SurfaceAssetPackRecord,
 } from "../../shared/types";
+import { userDataPath } from "../runtime-paths";
 
 type EventSink = (ev: McpInvocationEvent) => void;
 
@@ -247,7 +248,7 @@ function resolveBaseDir(chat: Chat, workingFolder?: string | null): string {
   const project = chat.projectId ? getProject(chat.projectId) : null;
   if (project?.folderPath) return project.folderPath;
   try {
-    return path.join(app.getPath("userData"), "generated-agent-os");
+    return userDataPath("generated-agent-os");
   } catch {
     return path.join(process.cwd(), ".agentlas", "generated-agent-os");
   }

@@ -6,6 +6,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { app } from "electron";
+import { userDataPath } from "../runtime-paths";
 
 interface HephaestusSettings {
   supervisorEnabled: boolean;
@@ -28,7 +29,7 @@ const DEFAULTS: HephaestusSettings = {
 let cache: HephaestusSettings | null = null;
 
 function settingsPath(): string {
-  return path.join(app.getPath("userData"), "hephaestus-settings.json");
+  return userDataPath("hephaestus-settings.json");
 }
 
 function load(): HephaestusSettings {

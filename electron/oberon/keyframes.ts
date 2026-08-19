@@ -17,6 +17,7 @@ import { readEnvVar } from "../secrets/vault";
 import { currentUiLocale } from "../ui-locale";
 import { runGrokImagine } from "../multimodal/grok-imagine";
 import { withPythonCacheBoundary } from "../runtime/python-cache";
+import { userDataPath } from "../runtime-paths";
 
 const DEFAULT_PROVIDER: OberonKeyframeProvider = "codex-imagegen-cli";
 const DEFAULT_CODEX_MODEL = "image_gen.imagegen";
@@ -84,7 +85,7 @@ export function startOberonKeyframes(request: OberonKeyframeRequest): OberonKeyf
       : provider === "google-imagen"
         ? DEFAULT_GOOGLE_MODEL
         : DEFAULT_CODEX_MODEL);
-  const outputDir = path.join(app.getPath("userData"), "oberon", `${safeSlug(request.title)}-${id.slice(0, 8)}`, "keyframes");
+  const outputDir = userDataPath("oberon", `${safeSlug(request.title)}-${id.slice(0, 8)}`, "keyframes");
   const now = Date.now();
   const job: OberonKeyframeJob = {
     id,

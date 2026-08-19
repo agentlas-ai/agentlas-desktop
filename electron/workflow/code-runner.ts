@@ -24,6 +24,7 @@ import { spawn } from "node:child_process";
 import { resolveHephaestusPython } from "../hephaestus/engine";
 import { withPythonCacheBoundary } from "../runtime/python-cache";
 import { agentRunCwd, killCliTree, nodeExecPathForCode } from "../runtime/exec";
+import { userDataPath } from "../runtime-paths";
 
 export type CodeLang = "python" | "js";
 export type CodeIsolationLevel = "os-sandboxed" | "process-isolated" | "unavailable";
@@ -132,7 +133,7 @@ function pythonDepsDir(): string {
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { app } = require("electron") as { app?: { getPath?: (k: string) => string } };
-    if (app?.getPath) return path.join(app.getPath("userData"), "code-deps", "py");
+    if (app?.getPath) return userDataPath("code-deps", "py");
   } catch { /* 테스트·CLI 컨텍스트 */ }
   return path.join(os.tmpdir(), "agentlas-code-deps", "py");
 }

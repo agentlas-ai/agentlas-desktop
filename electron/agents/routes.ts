@@ -7,6 +7,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { app } from "electron";
 import { computeLocalAgentDefinitionHash } from "./definition-hash";
+import { userDataPath } from "../runtime-paths";
 
 export type RuntimeLabel = "claude-code" | "codex" | "gemini" | "cursor" | "generic";
 
@@ -44,7 +45,7 @@ export interface AgentRoute {
 }
 
 function routesFile(): string {
-  return path.join(app.getPath("userData"), "agent-routes.json");
+  return userDataPath("agent-routes.json");
 }
 
 function readAll(): Record<string, AgentRoute> {

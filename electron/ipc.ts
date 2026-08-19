@@ -87,6 +87,7 @@ import {
   saveApiKey,
   setEnvVar,
 } from "./secrets/vault";
+import { userDataPath, userDataDir } from "./runtime-paths";
 import {
   installAgent,
   installMyAgent,
@@ -1364,7 +1365,7 @@ export function registerIpcHandlers(): void {
       const chatAvailable = Boolean(task.originChatId && getChat(task.originChatId));
       if (!oneProjectionHostRef) {
         try {
-          oneProjectionHostRef = loadOrCreateMobileBridgeHostIdentity(app.getPath("userData")).hostId;
+          oneProjectionHostRef = loadOrCreateMobileBridgeHostIdentity(userDataDir()).hostId;
         } catch {
           // A Desktop-only install can still expose an honest local authority ref.
           oneProjectionHostRef = "desktop:local";
@@ -2317,7 +2318,7 @@ export function registerIpcHandlers(): void {
       // Only phones bound to a DIFFERENT workspace lose their credential. The
       // same account signing in again keeps every pairing — revoking there was
       // a large part of why no pairing ever survived.
-      reconcileMobileBridgeDevicesForAccount(app.getPath("userData"));
+      reconcileMobileBridgeDevicesForAccount(userDataDir());
       // Replace any mounted previous-account slice immediately from B's local
       // cache (often []); network reconciliation may take up to the timeout.
       failCloseActiveHubBookmarks();
@@ -2329,7 +2330,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("auth:signInWithBrowser", async () => {
     const session = await signInWithBrowser();
     if (session.signedIn) {
-      reconcileMobileBridgeDevicesForAccount(app.getPath("userData"));
+      reconcileMobileBridgeDevicesForAccount(userDataDir());
       failCloseActiveHubBookmarks();
       broadcastHubBookmarkSnapshot();
       void syncHubBookmarks({ rerunIfBusy: true });
@@ -2341,7 +2342,7 @@ export function registerIpcHandlers(): void {
     // does not delete pairings: signing back into the same account must restore
     // them. A different account signing in revokes them at that point.
     await signOut();
-    reconcileMobileBridgeDevicesForAccount(app.getPath("userData"));
+    reconcileMobileBridgeDevicesForAccount(userDataDir());
     failCloseActiveHubBookmarks();
     broadcastHubBookmarkSnapshot();
     void syncHubBookmarks();
@@ -3736,7 +3737,7 @@ export function registerIpcHandlers(): void {
         // Memory review is optional.
       }
       try {
-        const hostId = loadOrCreateMobileBridgeHostIdentity(app.getPath("userData")).hostId;
+        const hostId = loadOrCreateMobileBridgeHostIdentity(userDataDir()).hostId;
         tryProduceAcceptedResultSuggestion({
           hostId,
           taskId: accepted.id,
@@ -4933,7 +4934,7 @@ export function registerIpcHandlers(): void {
     const baseDir =
       getChatWorkingFolder(chat.id) ??
       project?.folderPath ??
-      path.join(app.getPath("userData"), "generated-assets");
+      userDataPath("generated-assets");
     const result = await materializeSurfaceAssetPack(input, { baseDir, downloadRemoteAssets: true });
     const record = recordMaterializedSurfaceAssetPack({
       chatId: chat.id,
@@ -4975,7 +4976,7 @@ export function registerIpcHandlers(): void {
     const baseDir =
       getChatWorkingFolder(chat.id) ??
       project?.folderPath ??
-      path.join(app.getPath("userData"), "generated-apps");
+      userDataPath("generated-apps");
     const result = await scaffoldServiceApp(input, { baseDir });
     const record = recordScaffoldedApp({
       chatId: chat.id,
@@ -5171,7 +5172,7 @@ export function registerIpcHandlers(): void {
     const baseDir =
       getChatWorkingFolder(chat.id) ??
       project?.folderPath ??
-      path.join(app.getPath("userData"), "generated-tools");
+      userDataPath("generated-tools");
     const result = await scaffoldAgentTool(input, { baseDir });
     const record = recordScaffoldedTool({
       chatId: chat.id,

@@ -12,6 +12,7 @@ import {
   type OntologyHubProjectionResult,
 } from "../mobile-bridge/ontology-hub-client";
 import { getInstalledAgentHubBinding } from "./hub-bindings";
+import { userDataDir } from "../runtime-paths";
 
 interface ProjectionClient {
   query(
@@ -63,7 +64,7 @@ export async function getAgentOntologyHubProjection(
     agentDefinitionId: before.agentDefinitionId,
     agentReleaseId: before.agentReleaseId,
   };
-  const client = options.client ?? getDefaultOntologyHubClient(app.getPath("userData"));
+  const client = options.client ?? getDefaultOntologyHubClient(userDataDir());
   const result = await client.query([binding], options.force === true);
   const after = getInstalledAgentHubBinding(installedAgentId);
   if (!sameExactBinding(binding, after)) {
@@ -120,7 +121,7 @@ export async function resolveAgentOntologyHubAttach(
     agentDefinitionId: before.agentDefinitionId,
     agentReleaseId: before.agentReleaseId,
   };
-  const client = options.client ?? getDefaultOntologyHubClient(app.getPath("userData"));
+  const client = options.client ?? getDefaultOntologyHubClient(userDataDir());
   const current = await client.query([binding], true);
   const afterQuery = getInstalledAgentHubBinding(installedAgentId);
   if (!sameExactBinding(binding, afterQuery)) throw new Error("The agent connection changed. Refresh before deciding.");

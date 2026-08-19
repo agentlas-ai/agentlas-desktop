@@ -16,6 +16,7 @@ import os from "node:os";
 import path from "node:path";
 import { insertMemoryEntry } from "./store";
 import type { CurationContext } from "./curator";
+import { userDataPath } from "../runtime-paths";
 
 const INTAKE_MARKER = "[compaction-intake]";
 
@@ -33,7 +34,7 @@ function harvestedFile(): string | null {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { app } = require("electron") as typeof import("electron");
-    return path.join(app.getPath("userData"), "compaction-harvested.json");
+    return userDataPath("compaction-harvested.json");
   } catch {
     return null; // electron 밖(테스트) — 영속화 생략
   }
