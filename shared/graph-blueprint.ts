@@ -545,6 +545,40 @@ export function validateBlueprint(
     }
   }
 
+  /*
+   * ★"비어 있을 수 있다"고 갈림길이 말한 값에, 검증이 "비어 있으면 안 된다"고 하면
+   *   그 그래프는 **평상시마다 실패한다**.
+   *
+   *   실측 2026-08-19: 환율이 임계값을 안 넘으면 알림 줄을 만들지 않는 자동화를 지었는데,
+   *   빌더가 `alertline` 에 "비어있지 않고 채워졌다" 검사를 걸고 **바로 다음에**
+   *   `alertline` 에 값이 있는지로 분기했다. 임계값을 안 넘은 날(=대부분의 날)
+   *   alertline 은 정당하게 비고, 검증이 그 값을 못 찾아 실행이 NODE_INPUT_MISSING 으로
+   *   죽었다. 계산은 정확했고 결과도 옳았는데 자동화는 실패로 남았다.
+   *
+   *   임계값 감시는 가장 흔한 자동화 모양 중 하나다 — "알릴 것이 없는 날"이 정상이어야 한다.
+   *   비어 있을 수 있는 값의 검증은 값이 있는 쪽 가지 **안에서** 해야 하므로,
+   *   저작 시점에 되돌린다.
+   */
+  const emptinessTestedVars = new Set(
+    (bp.branches ?? [])
+      .filter((branch) => branch.op === "truthy" || branch.op === "falsy")
+      .map((branch) => String(branch.var ?? "").trim())
+      .filter(Boolean),
+  );
+  for (const check of bp.checks ?? []) {
+    const subject = String(check.subject ?? "").trim();
+    if (!subject || !emptinessTestedVars.has(subject)) continue;
+    push(
+      `"${subject}"은(는) 비어 있을 수 있다고 갈림길이 말하는데, 그 앞의 검증은 비어 있지 않기를 요구합니다. `
+      + "비어 있는 것이 정상인 날마다 이 자동화는 실패합니다.",
+      {
+        id: `check-${subject}-may-be-empty`,
+        question: `"${subject}"이(가) 비어 있는 것이 정상인 경우가 있나요? 그렇다면 이 검증을 값이 있는 쪽 가지 안으로 옮길까요?`,
+        why: "임계값 감시처럼 '알릴 것이 없는 날'이 정상인 자동화는, 그 날마다 실패하면 쓸 수 없습니다.",
+      },
+    );
+  }
+
   // 갈림길·반복
   for (const branch of bp.branches ?? []) {
     const at = `${(branch.afterStep ?? 0) + 1}번째 단계 뒤의 갈림길`;
