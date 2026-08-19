@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { CredentialImportDialog } from "@/components/connect/CredentialImportDialog";
 import { useT } from "@/lib/i18n";
 import { ipc } from "@/lib/ipc";
 import type { BrowserStatus, BrowserSite, BrowserActionLog } from "@/lib/types";
@@ -15,6 +16,7 @@ export default function BrowserPage() {
   const [logs, setLogs] = useState<BrowserActionLog[]>([]);
   const [tab, setTab] = useState<Tab>("sites");
   const [editing, setEditing] = useState<BrowserSite | "new" | null>(null);
+  const [importing, setImporting] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [openingSite, setOpeningSite] = useState<string | null>(null);
 
@@ -172,8 +174,13 @@ export default function BrowserPage() {
       {tab === "sites" && (
         <section className="browser-sites">
           <div className="sites-toolbar">
-            <button className="browser-btn accent" onClick={() => setEditing("new")}>
-              {ko ? "+ 사이트 추가" : "+ Add site"}
+            {/* ★주 행동은 "가져오기"다. 평소 브라우저에 이미 있는 로그인을 고르기만 하면 되는데
+                주소를 손으로 치고 다시 로그인하는 쪽이 기본일 이유가 없다. */}
+            <button className="browser-btn accent" onClick={() => setImporting(true)}>
+              {ko ? "브라우저에서 가져오기" : "Import from your browser"}
+            </button>
+            <button className="browser-btn" onClick={() => setEditing("new")}>
+              {ko ? "+ 직접 추가" : "+ Add manually"}
             </button>
           </div>
           {sites.length === 0 && (
@@ -279,6 +286,18 @@ export default function BrowserPage() {
             void refresh();
           }}
           ko={ko}
+        />
+      )}
+
+      {importing && (
+        <CredentialImportDialog
+          ko={ko}
+          onClose={() => setImporting(false)}
+          onDone={(msg) => {
+            setImporting(false);
+            flash(msg);
+            void refresh();
+          }}
         />
       )}
 

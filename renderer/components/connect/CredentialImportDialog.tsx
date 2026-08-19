@@ -1,0 +1,392 @@
+"use client";
+
+// 평소 쓰는 브라우저에서 이미 로그인된 도메인을 목록으로 보여주고, 체크한 것만 Agentlas
+// 전용 프로필로 가져온다. 가져온 도메인은 곧바로 Connect 사이트 목록에 나타나므로,
+// 사용자는 주소를 손으로 치고 전용 창에서 다시 로그인하는 일을 하지 않아도 된다.
+//
+// 화면이 보여주는 것은 도메인·페이지 이름·쿠키 개수뿐이다. 쿠키 값은 이 화면도, 메인 프로세스도
+// 복호화하지 않는다. 비밀번호·결제수단 저장소는 아예 읽지 않는다.
+
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { ipc } from "@/lib/ipc";
+import type {
+  DiscoveredBrowserProfile,
+  DiscoveredCredentialDomain,
+} from "@/lib/types";
+
+export function CredentialImportDialog({
+  ko,
+  onClose,
+  onDone,
+}: {
+  ko: boolean;
+  onClose: () => void;
+  onDone: (message: string) => void;
+}) {
+  const api = ipc();
+  const [profiles, setProfiles] = useState<DiscoveredBrowserProfile[]>([]);
+  const [profileId, setProfileId] = useState<string | null>(null);
+  const [domains, setDomains] = useState<DiscoveredCredentialDomain[]>([]);
+  const [checked, setChecked] = useState<Set<string>>(new Set());
+  const [query, setQuery] = useState("");
+  const [scanning, setScanning] = useState(true);
+  const [importingNow, setImportingNow] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // 1단계: 어떤 브라우저 프로필이 있는지.
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      if (!api) return;
+      const res = await api.browser.scanCredentials(null);
+      if (!alive) return;
+      setProfiles(res.profiles);
+      const first = res.profiles.find((p) => p.readable) ?? null;
+      setProfileId(first?.id ?? null);
+      if (!first) {
+        setScanning(false);
+        setError(
+          ko
+            ? "이 컴퓨터에서 Chrome 계열 브라우저 프로필을 찾지 못했습니다."
+            : "No Chrome-family browser profile was found on this computer.",
+        );
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [api, ko]);
+
+  // 2단계: 고른 프로필의 도메인 목록.
+  const loadDomains = useCallback(
+    async (id: string) => {
+      if (!api) return;
+      setScanning(true);
+      setError(null);
+      const res = await api.browser.scanCredentials(id);
+      setDomains(res.domains);
+      setChecked(new Set());
+      if (!res.ok && res.error) setError(res.error);
+      setScanning(false);
+    },
+    [api],
+  );
+
+  useEffect(() => {
+    if (profileId) void loadDomains(profileId);
+  }, [profileId, loadDomains]);
+
+  const visible = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return domains;
+    return domains.filter(
+      (d) => d.domain.includes(q) || (d.title ?? "").toLowerCase().includes(q),
+    );
+  }, [domains, query]);
+
+  const selectable = useMemo(() => visible.filter((d) => !d.alreadyLinked), [visible]);
+  const allVisibleChecked = selectable.length > 0 && selectable.every((d) => checked.has(d.domain));
+
+  const toggle = (domain: string) => {
+    setChecked((prev) => {
+      const next = new Set(prev);
+      if (next.has(domain)) next.delete(domain);
+      else next.add(domain);
+      return next;
+    });
+  };
+
+  const run = async () => {
+    if (!api || !profileId || checked.size === 0) return;
+    setImportingNow(true);
+    setError(null);
+    const res = await api.browser.importCredentials(profileId, [...checked]);
+    setImportingNow(false);
+    if (!res.ok) {
+      setError(res.error ?? (ko ? "가져오지 못했습니다." : "Import failed."));
+      return;
+    }
+    // 부분 실패를 성공으로 뭉개지 않는다 — 건너뛴 도메인이 있으면 개수를 함께 말한다.
+    const linked = res.linkedSites.length;
+    const skipped = res.skipped.length;
+    const msg = ko
+      ? `${linked}개 연동됨${skipped > 0 ? ` · ${skipped}개 건너뜀` : ""}`
+      : `Linked ${linked}${skipped > 0 ? ` · skipped ${skipped}` : ""}`;
+    if (skipped > 0) {
+      setError(
+        (ko ? "건너뛴 항목: " : "Skipped: ") +
+          res.skipped.map((s) => `${s.domain} (${s.reason})`).join(", "),
+      );
+      // 사유를 읽을 수 있게 창은 열어 두고, 목록만 새로 고친다.
+      void loadDomains(profileId);
+      return;
+    }
+    onDone(msg);
+  };
+
+  return (
+    <div className="cid-backdrop" onClick={onClose}>
+      <div className="cid-panel" onClick={(e) => e.stopPropagation()}>
+        <header className="cid-head">
+          <h2>{ko ? "브라우저에서 로그인 가져오기" : "Import logins from your browser"}</h2>
+          <p>
+            {ko
+              ? "평소 쓰는 브라우저에 이미 로그인된 곳입니다. 고른 곳의 세션만 Agentlas 전용 프로필로 복사합니다. 비밀번호와 결제수단은 가져오지 않습니다."
+              : "These are places you are already signed in to. Only the sessions you pick are copied into the Agentlas profile. Passwords and payment methods are never imported."}
+          </p>
+        </header>
+
+        {profiles.length > 1 && (
+          <div className="cid-profiles">
+            {profiles.map((p) => (
+              <button
+                key={p.id}
+                className={p.id === profileId ? "on" : ""}
+                disabled={!p.readable}
+                title={p.reason ?? p.path}
+                onClick={() => setProfileId(p.id)}
+              >
+                <span className="pname">{p.displayName}</span>
+                <span className="pmeta">{p.accountEmail ?? p.browser}</span>
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div className="cid-tools">
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder={ko ? "도메인·이름으로 찾기" : "Filter by domain or name"}
+          />
+          <button
+            className="cid-linkbtn"
+            disabled={selectable.length === 0}
+            onClick={() => {
+              setChecked((prev) => {
+                const next = new Set(prev);
+                if (allVisibleChecked) selectable.forEach((d) => next.delete(d.domain));
+                else selectable.forEach((d) => next.add(d.domain));
+                return next;
+              });
+            }}
+          >
+            {allVisibleChecked ? (ko ? "전체 해제" : "Clear all") : ko ? "전체 선택" : "Select all"}
+          </button>
+        </div>
+
+        <div className="cid-list">
+          {scanning && <div className="cid-note">{ko ? "찾는 중…" : "Scanning…"}</div>}
+          {!scanning && visible.length === 0 && (
+            <div className="cid-note">
+              {ko ? "표시할 로그인이 없습니다." : "No logins to show."}
+            </div>
+          )}
+          {!scanning &&
+            visible.map((d) => (
+              <label key={d.domain} className={d.alreadyLinked ? "cid-row linked" : "cid-row"}>
+                <input
+                  type="checkbox"
+                  checked={checked.has(d.domain)}
+                  disabled={d.alreadyLinked}
+                  onChange={() => toggle(d.domain)}
+                />
+                <span className="cid-title">{d.title ?? d.domain}</span>
+                <span className="cid-domain">{d.domain}</span>
+                <span className="cid-meta">
+                  {d.alreadyLinked
+                    ? ko
+                      ? "연동됨"
+                      : "Linked"
+                    : ko
+                      ? `쿠키 ${d.cookieCount}`
+                      : `${d.cookieCount} cookies`}
+                </span>
+              </label>
+            ))}
+        </div>
+
+        {error && <div className="cid-error">{error}</div>}
+
+        <footer className="cid-foot">
+          <span className="cid-count">
+            {ko ? `${checked.size}개 선택됨` : `${checked.size} selected`}
+          </span>
+          <div className="cid-actions">
+            <button onClick={onClose}>{ko ? "닫기" : "Close"}</button>
+            <button className="accent" disabled={checked.size === 0 || importingNow} onClick={run}>
+              {importingNow ? (ko ? "연동 중…" : "Linking…") : ko ? "연동하기" : "Link selected"}
+            </button>
+          </div>
+        </footer>
+      </div>
+
+      <style jsx>{`
+        .cid-backdrop {
+          position: fixed;
+          inset: 0;
+          z-index: 70;
+          background: rgba(0, 0, 0, 0.32);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 24px;
+        }
+        .cid-panel {
+          width: min(620px, 100%);
+          max-height: 82vh;
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+          background: var(--paper);
+          border: var(--hairline);
+          border-radius: 14px;
+          padding: 20px;
+        }
+        .cid-head h2 {
+          margin: 0 0 6px;
+          font-family: var(--font-head);
+          font-size: 16px;
+        }
+        .cid-head p {
+          margin: 0;
+          font-size: 12.5px;
+          line-height: 1.55;
+          opacity: 0.75;
+        }
+        .cid-profiles {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .cid-profiles button {
+          display: flex;
+          flex-direction: column;
+          align-items: flex-start;
+          gap: 2px;
+          padding: 7px 11px;
+          border-radius: 9px;
+          border: 1px solid var(--paper-edge);
+          background: transparent;
+          cursor: pointer;
+          font-size: 12px;
+        }
+        .cid-profiles button.on {
+          border-color: var(--accent, #6b7cff);
+        }
+        .cid-profiles button:disabled {
+          opacity: 0.45;
+          cursor: not-allowed;
+        }
+        .pname {
+          font-weight: 600;
+        }
+        .pmeta {
+          opacity: 0.6;
+          font-size: 11px;
+        }
+        .cid-tools {
+          display: flex;
+          gap: 8px;
+        }
+        .cid-tools input {
+          flex: 1;
+          padding: 7px 11px;
+          border-radius: 9px;
+          border: 1px solid var(--paper-edge);
+          background: var(--paper);
+          font-size: 12.5px;
+          outline: none;
+        }
+        .cid-linkbtn {
+          border: 1px solid var(--paper-edge);
+          background: transparent;
+          border-radius: 9px;
+          padding: 7px 11px;
+          font-size: 12px;
+          cursor: pointer;
+        }
+        .cid-list {
+          flex: 1;
+          min-height: 140px;
+          overflow-y: auto;
+          border: 1px solid var(--paper-edge);
+          border-radius: 10px;
+        }
+        .cid-row {
+          display: grid;
+          grid-template-columns: auto 1fr auto auto;
+          align-items: center;
+          gap: 10px;
+          padding: 8px 11px;
+          border-bottom: 1px solid var(--paper-edge);
+          font-size: 12.5px;
+          cursor: pointer;
+        }
+        .cid-row:last-child {
+          border-bottom: 0;
+        }
+        .cid-row.linked {
+          opacity: 0.5;
+          cursor: default;
+        }
+        .cid-title {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .cid-domain {
+          opacity: 0.62;
+          font-size: 11.5px;
+        }
+        .cid-meta {
+          opacity: 0.55;
+          font-size: 11px;
+          white-space: nowrap;
+        }
+        .cid-note {
+          padding: 22px 12px;
+          text-align: center;
+          font-size: 12.5px;
+          opacity: 0.6;
+        }
+        .cid-error {
+          font-size: 12px;
+          line-height: 1.5;
+          color: var(--danger, #c0392b);
+        }
+        .cid-foot {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+        }
+        .cid-count {
+          font-size: 12px;
+          opacity: 0.7;
+        }
+        .cid-actions {
+          display: flex;
+          gap: 8px;
+        }
+        .cid-actions button {
+          padding: 8px 14px;
+          border-radius: 9px;
+          border: 1px solid var(--paper-edge);
+          background: transparent;
+          font-size: 12.5px;
+          cursor: pointer;
+        }
+        .cid-actions button.accent {
+          background: var(--accent, #6b7cff);
+          border-color: transparent;
+          color: #fff;
+        }
+        .cid-actions button:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+        }
+      `}</style>
+    </div>
+  );
+}

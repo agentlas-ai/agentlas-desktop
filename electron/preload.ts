@@ -489,6 +489,9 @@ const api: AgentlasIpc = {
     deleteSite: (site: string) => ipcRenderer.invoke("browser:deleteSite", site),
     openLogin: (site: string) => ipcRenderer.invoke("browser:openLogin", site),
     markSession: (site: string, status) => ipcRenderer.invoke("browser:markSession", site, status),
+    scanCredentials: (profileId?: string | null) => ipcRenderer.invoke("browser:scanCredentials", profileId ?? null),
+    importCredentials: (profileId: string, domains: string[]) =>
+      ipcRenderer.invoke("browser:importCredentials", profileId, domains),
     listPermissions: () => ipcRenderer.invoke("browser:listPermissions"),
     revokePermission: (site: string, actionType: string) =>
       ipcRenderer.invoke("browser:revokePermission", site, actionType),

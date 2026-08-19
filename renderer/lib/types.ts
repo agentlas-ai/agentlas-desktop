@@ -504,6 +504,16 @@ export type {
   WorkspaceNode,
 } from "@shared/types";
 
+// Connect의 브라우저 자격증명 가져오기 계약은 별도 파일에 산다(렌더러·메인 공용).
+export type {
+  BrowserCredentialConsent,
+  BrowserCredentialImportRequest,
+  BrowserCredentialImportResult,
+  BrowserCredentialScanResult,
+  DiscoveredBrowserProfile,
+  DiscoveredCredentialDomain,
+} from "@shared/browser-credentials";
+
 export type LocalizedItem = {
   name: string;
   nameEn?: string;

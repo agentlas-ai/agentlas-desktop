@@ -5,6 +5,10 @@ import type {
   MultimodalProviderStatus,
   MultimodalSettings,
 } from "./multimodal";
+import type {
+  BrowserCredentialImportResult,
+  BrowserCredentialScanResult,
+} from "./browser-credentials";
 import type { OberonTitleSpec } from "./oberon-titles";
 import type { OneSurfaceManifestV1 } from "./one-surface";
 import type { DurableOneSurfaceResult } from "./one-surface-durable";
@@ -6457,6 +6461,10 @@ export interface AgentlasIpc {
     deleteSite: (site: string) => Promise<{ ok: true }>;
     openLogin: (site: string) => Promise<{ ok: boolean; error?: string }>;
     markSession: (site: string, status: BrowserSessionStatus) => Promise<{ ok: true }>;
+    /** 평소 브라우저 프로필 목록과, profileId 를 주면 그 프로필에 로그인된 도메인 목록. */
+    scanCredentials: (profileId?: string | null) => Promise<BrowserCredentialScanResult>;
+    /** 고른 도메인의 세션만 전용 프로필로 가져오고 Connect 목록에 등록한다. */
+    importCredentials: (profileId: string, domains: string[]) => Promise<BrowserCredentialImportResult>;
     listPermissions: () => Promise<BrowserPermissionEntry[]>;
     revokePermission: (site: string, actionType: string) => Promise<{ ok: true }>;
     resolveApproval: (requestId: string, decision: BrowserApprovalDecision) => Promise<{ ok: boolean }>;

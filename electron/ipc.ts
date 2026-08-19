@@ -640,6 +640,7 @@ import {
   browserListLogs,
 } from "./browser/connect";
 import type { BrowserPermissionDecision } from "./browser/connect";
+import { importBrowserCredentials, scanBrowserCredentials } from "./browser/credential-import";
 import { captureBrowserLiveFrame, focusBrowserLiveTarget } from "./browser/live-view";
 import { captureComputerUsePreview } from "./computer-use/preview";
 import {
@@ -3241,6 +3242,14 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("browser:openLogin", (_e, site: string) => browserOpenLogin(site));
   ipcMain.handle("browser:markSession", (_e, site: string, status: "valid" | "expired" | "none") =>
     browserMarkSession(site, status),
+  );
+  // 평소 브라우저에서 이미 로그인된 도메인을 목록으로 주고(scan), 고른 것만 전용 프로필로
+  // 가져온다(import). 가져오면 Connect 목록에 사이트로 올라가므로 주소를 손으로 칠 일이 없다.
+  ipcMain.handle("browser:scanCredentials", (_e, profileId?: string | null) =>
+    scanBrowserCredentials(typeof profileId === "string" ? profileId : null),
+  );
+  ipcMain.handle("browser:importCredentials", (_e, profileId: string, domains: string[]) =>
+    importBrowserCredentials(String(profileId || ""), Array.isArray(domains) ? domains.map(String) : []),
   );
   ipcMain.handle("browser:listPermissions", () => browserListPermissions());
   ipcMain.handle("browser:revokePermission", (_e, site: string, actionType: string) =>
