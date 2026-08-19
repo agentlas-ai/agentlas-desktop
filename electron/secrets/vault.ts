@@ -15,6 +15,12 @@ import {
   configuredIdentity,
   requireConfiguredInstallIdentity,
 } from "../install-identity";
+import {
+  keychainDelete,
+  keychainGet,
+  keychainListAccounts,
+  keychainSet,
+} from "./keychain-host";
 
 const BYOK_PREFIX = "byok:";
 const BYOK_META_PREFIX = "byok-meta:";
@@ -39,10 +45,18 @@ function keychainService(): string {
   return requireConfiguredInstallIdentity().keychainService;
 }
 
+/*
+ * ★키체인 호출은 전부 keychain-host 를 지난다(그 파일에 사유가 적혀 있다).
+ *   화면이 있는 호스트에서는 예전 그대로 직접 부르고, 화면이 없는 호스트
+ *   (플러그인 CLI·hep-graph·cron)에서는 죽일 수 있는 자식 프로세스로 옮긴다.
+ *   여기서 직접 `keytar.*` 를 부르는 새 코드를 만들지 말 것 — 그 한 줄이
+ *   헤드리스 호스트에서 제품 전체를 멈춘다(2026-08-19 실측).
+ */
 async function getPassword(account: string): Promise<string | null> {
   if (USE_MEMORY_VAULT) return memoryVault.get(account) ?? null;
   if (keychainCache.has(account)) return keychainCache.get(account) ?? null;
-  const value = await keytar.getPassword(keychainService(), account);
+  const service = keychainService();
+  const value = await keychainGet(service, account, () => keytar.getPassword(service, account));
   keychainCache.set(account, value);
   return value;
 }
@@ -51,7 +65,8 @@ async function setPassword(account: string, value: string): Promise<void> {
   if (USE_MEMORY_VAULT) {
     memoryVault.set(account, value);
   } else {
-    await keytar.setPassword(keychainService(), account, value);
+    const service = keychainService();
+    await keychainSet(service, account, value, () => keytar.setPassword(service, account, value));
   }
   keychainCache.set(account, value);
 }
@@ -60,7 +75,8 @@ async function deletePassword(account: string): Promise<void> {
   if (USE_MEMORY_VAULT) {
     memoryVault.delete(account);
   } else {
-    await keytar.deletePassword(keychainService(), account);
+    const service = keychainService();
+    await keychainDelete(service, account, async () => { await keytar.deletePassword(service, account); });
   }
   keychainCache.delete(account);
 }
@@ -218,11 +234,12 @@ export async function previewEnvVar(key: string): Promise<string | null> {
 /** keychain에 저장된 env 키 전체 — keytar.findCredentials로 prefix filter */
 export async function listEnvKeys(): Promise<string[]> {
   if (envKeyCache) return envKeyCache;
-  const creds = USE_MEMORY_VAULT
-    ? [...memoryVault.keys()].map((account) => ({ account, password: memoryVault.get(account) ?? "" }))
-    : await keytar.findCredentials(keychainService());
-  envKeyCache = creds
-    .map((c) => c.account)
+  const service = keychainService();
+  const accounts = USE_MEMORY_VAULT
+    ? [...memoryVault.keys()]
+    : await keychainListAccounts(service, async () =>
+        (await keytar.findCredentials(service)).map((c) => c.account));
+  envKeyCache = accounts
     .filter((a) => a.startsWith(ENV_PREFIX))
     .map((a) => a.slice(ENV_PREFIX.length));
   return envKeyCache;

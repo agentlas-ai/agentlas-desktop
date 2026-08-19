@@ -1,0 +1,167 @@
+// Keychain 접근을 "죽일 수 있는 곳"으로 옮기는 얇은 층.
+//
+// ★왜 있나 (실측 2026-08-19). macOS 키체인 항목에는 그것을 만든 프로그램의 ACL 이 붙는다.
+//   다른 실행 파일이 같은 항목을 읽으려 하면 OS 가 "접근을 허용하시겠습니까" 를 띄우는데,
+//   **띄울 화면이 없는 호스트**(플러그인 CLI, hep-graph, cron, 데몬 없는 터미널)에서는
+//   그 물음에 답할 사람이 없어 `keytar.getPassword` 가 **영영 돌아오지 않는다**.
+//
+//   그리고 이건 "느린 호출" 이 아니라 **이벤트 루프 정지**다. 같은 프로세스에 걸어 둔
+//   `setTimeout` 조차 발화하지 않는 것을 측정했다(25s 타이머가 2분 넘게 안 돎). 그래서
+//   `Promise.race([call, timeout])` 같은 자바스크립트 상한은 **원리적으로 이 상황을 못 구한다** —
+//   상한을 세는 코드 자체가 같이 멈춘다.
+//
+//   실제 피해: 자동화 그래프의 에이전트 노드가 도구를 고르며 자격증명 유무를 확인하는데
+//   (mcp-tools/auto-select → vault.readEnvVar), 그 한 번의 읽기에서 실행 전체가 멈췄다.
+//   화면에는 "실행 중"만 남고, 노드 상한(1시간)이 지나야 겨우 죽는다.
+//
+// 그래서 답할 화면이 없는 호스트에서는 키체인 호출을 **자식 프로세스**에서 한다.
+// 자식이 멈추면 부모는 멀쩡하므로 상한이 실제로 동작하고, 시간이 지나면 죽여서 회수한다.
+// Electron 안(데스크탑 앱·데몬)에서는 사람이 그 물음에 답할 수 있으므로 예전처럼 직접 부른다 —
+// 여기서 상한을 걸면 사용자가 프롬프트를 읽는 동안 정상 요청이 취소된다.
+import { execFile } from "node:child_process";
+import { createRequire } from "node:module";
+
+export type KeychainCredential = { account: string };
+
+const DEFAULT_TIMEOUT_MS = 10_000;
+const MAX_TIMEOUT_MS = 120_000;
+
+/** 이 호스트가 키체인 승인 프롬프트에 답할 수 있는가 = 화면이 있는가. */
+export function keychainPromptsAreAnswerable(): boolean {
+  return Boolean(process.versions.electron);
+}
+
+export function keychainCallTimeoutMs(): number {
+  const raw = Number(process.env.AGENTLAS_KEYCHAIN_TIMEOUT_MS);
+  if (Number.isFinite(raw) && raw > 0) return Math.min(Math.floor(raw), MAX_TIMEOUT_MS);
+  return DEFAULT_TIMEOUT_MS;
+}
+
+export class KeychainUnavailableError extends Error {
+  readonly account: string | null;
+  constructor(operation: string, account: string | null, reason: string) {
+    super(
+      `keychain_unavailable: ${operation}${account ? ` ${account}` : ""} — ${reason}. `
+      + "이 호스트에는 macOS 키체인 승인 창을 띄울 화면이 없습니다. "
+      + "데스크탑 앱에서 한 번 실행해 접근을 허용하거나, 해당 값을 환경변수로 넘겨 주세요.",
+    );
+    this.name = "KeychainUnavailableError";
+    this.account = account;
+  }
+}
+
+/**
+ * 자식 프로세스 한 번. 비밀 값은 **stdin 으로만** 넘긴다 —
+ * argv 는 같은 사용자의 `ps` 에 그대로 보이므로 저장할 값을 실을 수 없다.
+ * 읽은 값은 stdout(파이프)으로만 돌아온다.
+ */
+function runKeychainChild(
+  op: "get" | "set" | "delete" | "find",
+  service: string,
+  account: string,
+  stdinValue: string | null,
+): Promise<{ value?: string | null; accounts?: string[]; error?: string }> {
+  const keytarPath = createRequire(__filename).resolve("keytar");
+  const script = `
+const [modPath, op, service, account] = process.argv.slice(1);
+const keytar = require(modPath);
+let stdin = "";
+const done = (payload) => { process.stdout.write(JSON.stringify(payload)); process.exit(0); };
+const fail = (e) => done({ error: e && e.message ? e.message : String(e) });
+const go = async () => {
+  if (op === "get") return done({ value: await keytar.getPassword(service, account) });
+  if (op === "set") { await keytar.setPassword(service, account, stdin); return done({ ok: true }); }
+  if (op === "delete") { await keytar.deletePassword(service, account); return done({ ok: true }); }
+  if (op === "find") {
+    const rows = await keytar.findCredentials(service);
+    return done({ accounts: rows.map((r) => r.account) });
+  }
+  return fail(new Error("unknown op"));
+};
+process.stdin.on("data", (c) => { stdin += c.toString("utf8"); });
+process.stdin.on("end", () => { go().catch(fail); });
+`;
+  return new Promise((resolve) => {
+    const child = execFile(
+      process.execPath,
+      ["-e", script, keytarPath, op, service, account],
+      { timeout: keychainCallTimeoutMs(), killSignal: "SIGKILL", maxBuffer: 1024 * 1024 },
+      (error, stdout) => {
+        if (error) {
+          resolve({ error: error.killed ? "timed out" : (error.message || "child failed") });
+          return;
+        }
+        try {
+          resolve(JSON.parse(String(stdout || "{}")));
+        } catch {
+          resolve({ error: "child returned unreadable output" });
+        }
+      },
+    );
+    child.stdin?.end(stdinValue ?? "");
+  });
+}
+
+/**
+ * 읽기. 답할 화면이 없는 호스트에서 상한을 넘기면 **없는 것으로 본다** —
+ * 제품에는 이미 "키가 없다" 는 정직한 갈래(missing-key → 그 도구 없이 진행)가 있고,
+ * 멈춰 서는 것보다 그 갈래로 가는 편이 낫다. 대신 조용히 넘어가지 않고 사유를 남긴다.
+ */
+export async function keychainGet(
+  service: string,
+  account: string,
+  direct: () => Promise<string | null>,
+): Promise<string | null> {
+  if (keychainPromptsAreAnswerable()) return direct();
+  const result = await runKeychainChild("get", service, account, null);
+  if (result.error) {
+    reportKeychainUnavailable("read", account, result.error);
+    return null;
+  }
+  return result.value ?? null;
+}
+
+/** 쓰기·삭제는 실패를 삼키지 않는다 — 저장했다고 착각하는 쪽이 더 나쁘다. */
+export async function keychainSet(
+  service: string,
+  account: string,
+  value: string,
+  direct: () => Promise<void>,
+): Promise<void> {
+  if (keychainPromptsAreAnswerable()) return direct();
+  const result = await runKeychainChild("set", service, account, value);
+  if (result.error) throw new KeychainUnavailableError("write", account, result.error);
+}
+
+export async function keychainDelete(
+  service: string,
+  account: string,
+  direct: () => Promise<void>,
+): Promise<void> {
+  if (keychainPromptsAreAnswerable()) return direct();
+  const result = await runKeychainChild("delete", service, account, null);
+  if (result.error) throw new KeychainUnavailableError("delete", account, result.error);
+}
+
+/** 계정 목록. 비밀 값은 자식이 아예 돌려주지 않는다 — 필요한 건 이름뿐이다. */
+export async function keychainListAccounts(
+  service: string,
+  direct: () => Promise<string[]>,
+): Promise<string[]> {
+  if (keychainPromptsAreAnswerable()) return direct();
+  const result = await runKeychainChild("find", service, "", null);
+  if (result.error) {
+    reportKeychainUnavailable("list", null, result.error);
+    return [];
+  }
+  return result.accounts ?? [];
+}
+
+/** 같은 사유를 매 호출마다 반복하지 않는다 — 한 번은 반드시 보이게 한다. */
+const reported = new Set<string>();
+function reportKeychainUnavailable(operation: string, account: string | null, reason: string): void {
+  const key = `${operation}:${account ?? "*"}:${reason}`;
+  if (reported.has(key)) return;
+  reported.add(key);
+  console.error(new KeychainUnavailableError(operation, account, reason).message);
+}
