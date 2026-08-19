@@ -593,20 +593,16 @@ export function countAgentSteeringEvents(agentId: string, chatId?: string | null
  */
 export function observedToolActivity(runId: string): { callCount: number; toolNames: string[] } {
   if (!runId) return { callCount: 0, toolNames: [] };
+  // run_events 에 title 컬럼은 없다(db.ts 의 CREATE TABLE 이 정본) — 이름은 payload 에만 있다.
   const rows = getDb()
-    .prepare("SELECT title, payload_json FROM run_events WHERE run_id = ? AND kind = 'mcp_tool-use' ORDER BY seq ASC LIMIT 500")
-    .all(runId) as { title: string | null; payload_json: string | null }[];
+    .prepare("SELECT payload_json FROM run_events WHERE run_id = ? AND kind = 'mcp_tool-use' ORDER BY seq ASC LIMIT 500")
+    .all(runId) as { payload_json: string | null }[];
   const names = new Set<string>();
   for (const row of rows) {
-    // 이름은 title 이 정본이고, 없으면 payload 의 tool 칸을 본다. 둘 다 없으면 세기만 한다.
-    const fromTitle = row.title?.trim();
-    if (fromTitle) {
-      names.add(fromTitle.slice(0, 120));
-      continue;
-    }
     try {
       const payload = row.payload_json ? JSON.parse(row.payload_json) : null;
-      const name = payload?.tool?.name ?? payload?.name;
+      // 실측 payload 는 {"eventKind":"tool-use","toolName":…} — toolName 이 정본, 옛 모양은 폴백.
+      const name = payload?.toolName ?? payload?.tool?.name ?? payload?.name;
       if (typeof name === "string" && name.trim()) names.add(name.trim().slice(0, 120));
     } catch {
       /* payload 가 깨졌어도 호출이 있었다는 사실은 남는다 */
