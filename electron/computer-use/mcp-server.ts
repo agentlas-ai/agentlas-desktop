@@ -209,7 +209,7 @@ async function callAction(body) {
   if (IDENTITY_REQUIRED_ACTIONS.has(body.action) && !body.app) {
     return errorResult({
       message:
-        "This action needs an explicit `app` target. Input without a named app lands on whatever window happens to be frontmost — pass app (e.g. \"Google Chrome\") so the driver can focus and verify the target first.",
+        "This action needs an explicit app target. Input without a named app lands on whatever window happens to be frontmost. Pass app (for example Google Chrome) so the driver can focus and verify the target first.",
     });
   }
   const result = await controlRequest("/action", body, body.action === "drag" ? 12000 : 8000);

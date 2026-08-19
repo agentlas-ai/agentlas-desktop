@@ -2,7 +2,7 @@
 // 실행 = 타깃(firm/agent)의 백그라운드(division) chat을 만들어 runMcpInvocation로 promptTemplate을 돌린다.
 // (M1: 인프로세스 타이머. 앱이 꺼져 있으면 안 돎 — launchd persistent 데몬은 후속 작업.)
 import { app, Notification } from "electron";
-import type { Automation, AutomationRunRecord } from "../shared/types";
+import type { Automation, AutomationRunRecord, RuntimeSelection } from "../shared/types";
 import {
   dueAutomations,
   getAutomation,
@@ -448,6 +448,8 @@ async function runOne(
      *  last_run_at with wall-clock now while next_run_at advances from the slot,
      *  leaving next_run_at < last_run_at. Defaults to now for run-now/triggers. */
     fireTime?: Date;
+    /** 완주 루프 ④의 1회 재시도 표식 — 재시도의 재시도를 막는다. */
+    zeroToolRetried?: boolean;
   },
 ): Promise<TriggerDispatchResult> {
   if (installQuiescing) return { accepted: false };
@@ -1200,6 +1202,48 @@ async function runOne(
         });
       } catch {
         /* best-effort */
+      }
+    }
+  }
+  // ── 완주 루프 ④: 도구 0건 성공 주장은 재실행이 안전하다 ─────────────────
+  // `claimed_without_tools` 는 "외부에 어떤 부작용도 관측되지 않았다"는 호스트의
+  // 사실 판정이므로, 같은 발사를 도구가 실측된 런타임으로 한 번 더 돌려도 이중
+  // 게시가 구조적으로 불가능하다. 실측 배경: agy 도구 미배선 기간, 자동화가
+  // "게시했다"는 소설로 12연속 accepted — 사용자는 실패 화면 대신 애초에
+  // 완주된 결과를 받았어야 했다. 재시도는 1회뿐이고(표식), 스케줄은 이미
+  // 전진했으므로 advanceSchedule=false, 리스는 새로 잡는다.
+  if (
+    !opts?.zeroToolRetried &&
+    !opts?.dryRun &&
+    typeof runError === "string" &&
+    runError.includes("[claimed_without_tools]")
+  ) {
+    const fallback: RuntimeSelection = {
+      kind: "claude-code",
+      backend: "anthropic",
+      source: "claude",
+      model: "sonnet",
+      longContext: false,
+    };
+    const sameKind =
+      a.runtimeSelection?.kind === fallback.kind && a.runtimeSelection?.model === fallback.model;
+    if (!sameKind) {
+      try {
+        console.error(
+          `[automation] ${a.id} claimed success with zero tool calls — retrying once on ${fallback.kind}/${fallback.model}`,
+        );
+        return await runOne(
+          { ...a, runtimeSelection: fallback },
+          {
+            claim: opts?.claim,
+            advanceSchedule: false,
+            allowDisabledLease: opts?.allowDisabledLease,
+            triggerContext: opts?.triggerContext,
+            zeroToolRetried: true,
+          },
+        );
+      } catch (err) {
+        console.error("[automation] zero-tool retry failed:", err);
       }
     }
   }
