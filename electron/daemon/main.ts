@@ -30,6 +30,7 @@ import os from "node:os";
 import path from "node:path";
 import { runHostShutdownHooks } from "../host-lifecycle";
 import { setUserDataDir, userDataDir } from "../runtime-paths";
+import { startControlSocket, type ControlSocketHandle } from "./control-socket";
 
 /**
  * 데몬이 쓸 사용자 데이터 경로. **추측하지 않는다** — 잘못 고르면 사용자의 실제 DB 가
@@ -76,6 +77,25 @@ function daemonVersion(): string {
   }
 }
 
+let controlSocket: ControlSocketHandle | null = null;
+
+/**
+ * 제어 소켓의 메서드 처리. **터미널이 실제로 필요로 하는 것부터** 연다 —
+ * 쓰이지 않을 메서드를 미리 만드는 것은 배선이 아니라 선언이다.
+ */
+async function handleControlMethod(method: string, params: unknown): Promise<unknown> {
+  if (method === "daemon.ping") {
+    return { ok: true, version: daemonVersion(), pid: process.pid };
+  }
+  if (method === "automations.get") {
+    const id = (params as { id?: string })?.id;
+    if (!id) throw new Error("automations.get requires an id");
+    const { getAutomation } = await import("../store/automations");
+    return getAutomation(id) ?? null;
+  }
+  throw new Error(`unknown method: ${method}`);
+}
+
 /** 프로세스를 살려 두는 핸들. 종료 시 풀어 준다 — 안 그러면 exit 이 걸린다. */
 let keepAlive: NodeJS.Timeout | null = null;
 
@@ -90,6 +110,11 @@ function installSignalHandlers(): void {
       runHostShutdownHooks();
     } catch (error) {
       console.error("[agentlasd] shutdown hooks failed:", error);
+    }
+    if (controlSocket) {
+      // 유닉스 소켓 파일을 남기면 다음 데몬이 EADDRINUSE 로 못 뜬다.
+      void controlSocket.close();
+      controlSocket = null;
     }
     if (keepAlive) {
       clearInterval(keepAlive);
@@ -131,6 +156,26 @@ export async function startDaemon(): Promise<void> {
    * 실패해도 데몬은 산다: 브리지가 못 떠도 store 는 열려 있고 자동화는 돈다.
    * 여기서 죽으면 폰이 안 붙는 것보다 나쁜 일이 된다.
    */
+  /*
+   * ★로컬 제어 소켓 — 같은 머신의 터미널·데스크탑이 데몬에 일을 시키는 문(Phase 3).
+   *
+   * 터미널은 지금 데스크탑 코어를 **자기 프로세스에서** 돌린다(64MB 벤더 사본).
+   * 그래서 같은 머신에 코어가 두 벌 있고, DB 를 여는 주인도 둘이다. 이 소켓이 있으면
+   * 터미널은 코어를 로드하지 않고 "이거 해 줘" 라고 말하기만 하면 된다.
+   *
+   * 모바일 브리지를 안 쓰는 이유는 그게 **다른 기기**용이라 페어링·TLS 가 붙기 때문이다.
+   * 같은 사용자의 CLI 한 줄에 그 절차를 요구하면 아무도 안 쓰고, 그러면 벤더 사본이
+   * 영원히 남는다. 경계는 파일 권한이 맡는다(control-socket.ts 주석 참조).
+   */
+  try {
+    const socket = await startControlSocket(dir, { handle: handleControlMethod });
+    controlSocket = socket;
+    console.log(`[agentlasd] control socket: ${socket.address}`);
+  } catch (error) {
+    // 소켓이 없으면 터미널이 예전처럼 자기 안에서 코어를 돌린다 — 느릴 뿐 막히지 않는다.
+    console.error("[agentlasd] control socket failed to start:", error);
+  }
+
   try {
     const { startAgentlasMobileBridge } = await import("../mobile-bridge/runtime");
     await startAgentlasMobileBridge({ userDataPath: userDataDir(), appVersion: daemonVersion() });
