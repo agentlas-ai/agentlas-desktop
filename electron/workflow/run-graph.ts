@@ -2637,6 +2637,29 @@ export async function runGraph(
               ...(dryRun ? { simulation: true as const } : {}),
             },
             (ev) => {
+              // ★도구 호출은 호스트 관측 사실이므로 원장(run_events)에 남긴다.
+              // 지금까지 노드 실행의 tool-use는 notes(표시용)에만 담겨, 제품
+              // 스스로도 "이 노드가 실제로 도구를 썼는가"를 대답할 수 없었다 —
+              // 실측: X 자동화의 노드 실행들이 화면을 실제로 조작(캡처 존재)
+              // 했는데 run_events에는 mcp_tool-use 0건이라, 지어낸 실행과
+              // 진짜 실행을 캡처 파일로만 구분해야 했다. 관측 없는 성공은
+              // 성공이 아니라는 규칙(판정기·완주 루프)이 읽을 사실이 이 행이다.
+              if (ev.kind === "tool-use" && ev.tool?.name) {
+                tryRecordRunEvent({
+                  runId,
+                  kind: "mcp_tool-use",
+                  chatId: nodeChat.id,
+                  automationId: automation.id,
+                  nodeId: node.id,
+                  payload: {
+                    eventKind: "tool-use",
+                    toolName: ev.tool.name,
+                    toolId: ev.tool.id,
+                    toolIsError: ev.tool.isError,
+                    toolArgs: ev.tool.args,
+                  },
+                });
+              }
               // 소음은 소음 칸으로. 이 칸은 다음 노드의 입력이 되는 길이 아예 없다.
               if (ev.kind === "tool-use" && ev.tool?.name) {
                 notes.push({ at: "tool", name: ev.tool.name, text: ev.status ?? ev.tool.name });

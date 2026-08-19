@@ -73,6 +73,7 @@ export const MOBILE_BRIDGE_METHODS = [
   "automations.get",
   "automations.toggle",
   "automations.runNow",
+  "automations.setRuntime",
   "automations.listRuns",
   "usage.snapshot",
   "runtime.detect",
@@ -121,6 +122,7 @@ export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new 
   "browser.resolveApproval",
   "automations.toggle",
   "automations.runNow",
+  "automations.setRuntime",
   "runtime.setActive",
   "runtime.setRoleMembers",
   "ontology.attach.resolve",
@@ -2319,6 +2321,12 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
     case "automations.get":
     case "automations.runNow":
       return hasOnlyKeys(params, ["id"]) ? requiredString(params, "id") : `${method} accepts only id`;
+    case "automations.setRuntime":
+      // runtimeSelection은 null(기본 복귀) 또는 {kind,...} 객체. 세부 형태는
+      // 메인의 updateAutomation이 검증하므로 여기서는 키 경계만 지킨다.
+      return hasOnlyKeys(params, ["id", "runtimeSelection"])
+        ? requiredString(params, "id")
+        : "automations.setRuntime accepts only id and runtimeSelection";
     case "automations.toggle":
       return hasOnlyKeys(params, ["id", "enabled"])
         ? firstError(requiredString(params, "id"), params.enabled === true || params.enabled === false ? null : "enabled must be a boolean")

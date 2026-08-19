@@ -2166,6 +2166,25 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         this.scheduleSnapshotUpdated(id);
         return asJsonValue(projectMobileBridgeAutomation(automation), request.method);
       }
+      case "automations.setRuntime": {
+        // ★모바일에서 자동화 런타임을 바꾸는 액션은 지금까지 없었다 — 원격 UI가
+        // 무엇을 바꾸든 automations.runtime_selection_json 에 닿지 않았고, 오너가
+        // 원격으로 소넷 전환 후 실행했는데 antigravity 로 돈 실측이 그 증거다.
+        // 채팅 런타임(setChatRuntimeSelection)과 자동화 런타임은 다른 칸이다.
+        const params = guardedParams(request, ["id", "runtimeSelection"]);
+        const id = requiredIdentifier(params, "id");
+        if (!getAutomation(id)) throw new Error(`Automation not found: ${id}`);
+        const selection = params.runtimeSelection;
+        if (selection !== null && (typeof selection !== "object" || Array.isArray(selection) || typeof (selection as { kind?: unknown }).kind !== "string")) {
+          throw new Error("runtimeSelection must be null or an object with a string `kind`");
+        }
+        const { updateAutomation } = await import("../store/automations");
+        const automation = updateAutomation(id, {
+          runtimeSelection: (selection ?? undefined) as import("../../shared/types").RuntimeSelection | undefined,
+        });
+        this.scheduleSnapshotUpdated(id);
+        return asJsonValue(projectMobileBridgeAutomation(automation), request.method);
+      }
       case "automations.runNow": {
         const params = guardedParams(request, ["id"]);
         const id = requiredIdentifier(params, "id");
