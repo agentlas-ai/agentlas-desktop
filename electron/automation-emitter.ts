@@ -208,6 +208,45 @@ function presetToLegacyToken(preset: SchedulePreset, time: string, o: EmittedSch
  * ordered steps[] → WorkflowGraph. 결정적 좌→우 레이아웃(x=i*280, y=120), 연속 노드마다 엣지 1개.
  * consumes가 상류 produces를 참조하면 엣지에 변수명을 라벨(sourceHandle)로 스탬프("wire=data").
  */
+/**
+ * 등록 시점 구조 게이트 (정본 규칙 #3·#4) — 실측 2026-08-19의 두 치명 형태를 거절한다.
+ * 판정은 구조뿐이다: 스케줄 유무, 80자 이상 고정 인용 스팬, 그래프 인접성.
+ * 순수 함수로 둔 이유: client.ts 등록 루프와 테스트가 같은 코드 객체를 부른다 —
+ * 하네스가 사본을 재면 사본만 초록이 된다(mock rot).
+ */
+export function automationRegistrationGateProblems(a: ParsedAutomation): string[] {
+  const recurring = Boolean(a.scheduleSpec || (a.schedule && a.schedule.trim()));
+  const graphNodes = Array.isArray(a.graph?.nodes) ? a.graph.nodes : [];
+  const problems: string[] = [];
+  for (const node of graphNodes) {
+    if (String(node?.type) !== "action") continue;
+    const cfg = (node?.config ?? {}) as Record<string, unknown>;
+    const nodePrompt = typeof cfg.prompt === "string" ? cfg.prompt : "";
+    if (recurring) {
+      const quoted = nodePrompt.match(/"([^"]{80,})"|“([^”]{80,})”/);
+      if (quoted) {
+        problems.push(
+          `node "${node.id}": a recurring schedule repeats an identical ${
+            (quoted[1] ?? quoted[2] ?? "").length
+          }-char quoted payload every run — platforms reject duplicates after the first success. Rewrite the prompt to compose a fresh variant around the fixed facts instead of pinning exact text.`,
+        );
+      }
+    }
+    const hasRef = typeof cfg.ref === "string" && cfg.ref.trim().length > 0;
+    const hasCatalog = typeof cfg.catalog === "string" && cfg.catalog.trim().length > 0;
+    const hasAdjacentTool = Array.isArray(a.graph?.edges) && a.graph.edges.some((edge) => {
+      const other = edge?.source === node.id ? edge?.target : edge?.target === node.id ? edge?.source : null;
+      return other != null && graphNodes.some((n2) => n2?.id === other && String(n2?.type) === "tool");
+    });
+    if (!hasRef && !hasCatalog && !hasAdjacentTool) {
+      problems.push(
+        `node "${node.id}": an action step with no executor — no agent ref, no tool catalog, no adjacent tool node. Name what performs this action.`,
+      );
+    }
+  }
+  return problems;
+}
+
 export function stepsToGraph(steps: EmittedStep[]): WorkflowGraph {
   const nodes: WorkflowNode[] = [];
   const producedBy: Record<string, string> = {}; // produces 변수명 → 만든 노드 id

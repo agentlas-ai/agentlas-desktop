@@ -129,7 +129,7 @@ import { harvestCompactionSummaries } from "../memory/compaction-harvest";
 import { parseMemoryEvents } from "../memory/events";
 import { APP_BUILDER_SLUG } from "../architecture/manifest";
 import { memoryEmitterPromptFor } from "../system-agents/memory";
-import { AUTOMATION_PROTOCOL, parseAutomations } from "../automation-emitter";
+import { AUTOMATION_PROTOCOL, parseAutomations, automationRegistrationGateProblems } from "../automation-emitter";
 import { isAutomationSetupRequest } from "../../shared/automation-request";
 import { SURFACE_CLOSE_FENCE, SURFACE_OPEN_FENCE, parseSurfaces } from "../surface-emitter";
 import { applyFinalDisplayBackstop } from "./final-display-backstop";
@@ -4263,47 +4263,9 @@ ${effectiveUserPrompt}`;
           });
         }
         for (const a of canWrite ? autos : []) {
-          // ── 등록 시점 구조 게이트 (정본 규칙 #3·#4, 산문 계약의 하드 훅화) ────
-          // 실측 2026-08-19: 매시 정각 X 자동화가 "exactly this text, unchanged"
-          // 고정 인용문으로 지어졌고, 첫 성공이 X 중복 차단을 깨워 이후 전 실행이
-          // 죽었다. 프로토콜 문구만으로는 못 막는다 — 등록 자체를 거절해야 빌더가
-          // 고쳐서 재방출한다. 판정은 의미가 아니라 구조다: (a) 반복 스케줄 여부,
-          // (b) 그래프 action 노드의 프롬프트에 80자 이상 "고정 인용 블록"이 있고
-          // 그 전체를 그대로 쓰라는 형태인지(따옴표 스팬 길이), (c) action 노드가
-          // 실행 수단(ref·catalog·인접 tool 노드) 없이 떠 있는지.
-          const recurring = Boolean(a.scheduleSpec || (a.schedule && a.schedule.trim()));
-          const graphNodes = Array.isArray(a.graph?.nodes) ? a.graph.nodes : [];
-          const gateProblems: string[] = [];
-          for (const node of graphNodes) {
-            if (String(node?.type) !== "action") continue;
-            const cfg = (node?.config ?? {}) as Record<string, unknown>;
-            const nodePrompt = typeof cfg.prompt === "string" ? cfg.prompt : "";
-            // (#4) 반복 × 장문 고정 인용 — 80자 이상 따옴표 스팬은 문장 인용이 아니라
-            // 페이로드 박제다. 짧은 인용(제품명·링크)은 통과한다.
-            if (recurring) {
-              const quoted = nodePrompt.match(/"([^"]{80,})"|“([^”]{80,})”/);
-              if (quoted) {
-                gateProblems.push(
-                  `node "${node.id}": a recurring schedule repeats an identical ${
-                    (quoted[1] ?? quoted[2] ?? "").length
-                  }-char quoted payload every run — platforms reject duplicates after the first success. Rewrite the prompt to compose a fresh variant around the fixed facts instead of pinning exact text.`,
-                );
-              }
-            }
-            // (#3) 실행 수단 없는 mutation — ref도 catalog도 인접 tool 노드도 없으면
-            // 이 노드를 실행할 것이 세상에 없다. 등록해 봐야 소설만 남는다.
-            const hasRef = typeof cfg.ref === "string" && cfg.ref.trim().length > 0;
-            const hasCatalog = typeof cfg.catalog === "string" && cfg.catalog.trim().length > 0;
-            const hasAdjacentTool = Array.isArray(a.graph?.edges) && a.graph.edges.some((edge) => {
-              const other = edge?.source === node.id ? edge?.target : edge?.target === node.id ? edge?.source : null;
-              return other != null && graphNodes.some((n2) => n2?.id === other && String(n2?.type) === "tool");
-            });
-            if (!hasRef && !hasCatalog && !hasAdjacentTool) {
-              gateProblems.push(
-                `node "${node.id}": an action step with no executor — no agent ref, no tool catalog, no adjacent tool node. Name what performs this action.`,
-              );
-            }
-          }
+          // 등록 시점 구조 게이트 — 정의·사유는 automation-emitter의
+          // automationRegistrationGateProblems (순수 함수, 하네스와 동일 코드 객체).
+          const gateProblems = automationRegistrationGateProblems(a);
           if (gateProblems.length > 0) {
             sink({
               kind: "tool-use",
