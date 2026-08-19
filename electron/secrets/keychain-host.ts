@@ -59,6 +59,36 @@ export class KeychainUnavailableError extends Error {
 }
 
 /**
+ * 자식에게 넘길 keytar 의 **실물 경로**.
+ *
+ * ★내 옆에서만 찾으면 안 된다. 실측 2026-08-20: 터미널이 내려받아 쓰는 벤더 코어에는
+ *   keytar 가 **일부러 빠져 있다**(네이티브 ABI 라 호스트가 자기 것을 갖는다 —
+ *   vendor-desktop-core.cjs 의 skip 목록). 그 트리 안에서 도는 이 파일이
+ *   `createRequire(__filename).resolve("keytar")` 를 부르면 던지고, 그 예외가
+ *   `Cannot find module 'keytar'` 로 새어 나가 **그래프 노드를 죽였다**.
+ *   호스트의 모듈 훅은 `require` 를 가로채지만 `resolve` 는 가로채지 않으므로,
+ *   호스트가 자기 경로를 이 봉투(AGENTLAS_KEYTAR_PATH)에 담아 알려 준다.
+ *
+ * 찾지 못하는 것은 오류가 아니라 **사실**이다 — 그때는 keychain_unavailable 로
+ * 말하고, 부르는 쪽이 비밀 없이 갈 수 있으면 가게 둔다.
+ */
+function resolveKeytarPath(): string | null {
+  const declared = String(process.env.AGENTLAS_KEYTAR_PATH || "").trim();
+  if (declared) {
+    try {
+      return createRequire(__filename).resolve(declared);
+    } catch {
+      /* 봉투가 낡았을 수 있다 — 아래 기본 해석으로 넘어간다 */
+    }
+  }
+  try {
+    return createRequire(__filename).resolve("keytar");
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 자식 프로세스 한 번. 비밀 값은 **stdin 으로만** 넘긴다 —
  * argv 는 같은 사용자의 `ps` 에 그대로 보이므로 저장할 값을 실을 수 없다.
  * 읽은 값은 stdout(파이프)으로만 돌아온다.
@@ -69,7 +99,12 @@ function runKeychainChild(
   account: string,
   stdinValue: string | null,
 ): Promise<{ value?: string | null; accounts?: string[]; error?: string }> {
-  const keytarPath = createRequire(__filename).resolve("keytar");
+  const keytarPath = resolveKeytarPath();
+  if (!keytarPath) {
+    return Promise.resolve({
+      error: "keytar 모듈을 찾을 수 없습니다(이 호스트에 키체인 백엔드가 없음)",
+    });
+  }
   const script = `
 const [modPath, op, service, account] = process.argv.slice(1);
 const keytar = require(modPath);

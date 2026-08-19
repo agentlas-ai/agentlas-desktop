@@ -17,8 +17,16 @@
 //  2) vault.ts 의 모든 keytar 호출은 keychain-host 의 래퍼를 **통해서만** 나간다.
 //  3) keychain-host 는 화면 없는 호스트에서 자식 프로세스 + 하드 상한을 쓴다.
 //  4) 저장할 비밀 값은 argv 가 아니라 stdin 으로 넘어간다(argv 는 같은 사용자의 ps 에 보인다).
+//  5) keytar 를 **찾지 못하는 것은 오류가 아니라 사실**이다. 터미널이 내려받아 쓰는
+//     벤더 코어에는 keytar 가 일부러 빠져 있어(네이티브 ABI — 호스트가 자기 것을 갖는다),
+//     그 트리에서 도는 keychain-host 가 자기 옆만 뒤지면 해석에 실패한다.
+//     실측 2026-08-20: 그 실패가 `Cannot find module 'keytar'` 로 새어 나가
+//     **그래프 노드를 죽였다**(step7, 새로 설치한 CLI 에서 100% 재현).
+//     호스트는 AGENTLAS_KEYTAR_PATH 로 자기 것을 알려 주고, 그래도 없으면
+//     keychain_unavailable 로 말한다 — 원시 MODULE_NOT_FOUND 는 새어 나가지 않는다.
 import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -124,6 +132,50 @@ if (!host) {
     /throw new KeychainUnavailableError\("write"/.test(host),
     "쓰기가 상한을 넘겼는데 조용히 성공으로 돌아옵니다 — 저장됐다고 착각하는 쪽이 더 나쁩니다.",
   );
+}
+
+// ── 5) keytar 가 닿지 않는 트리에서도 그래프를 죽이지 않는다 ────────────────────
+// 텍스트로 보지 않고 **실제로 그 상황을 만들어** 부른다: keychain-host.js 만 빈 곳으로
+// 복사해 keytar 가 어느 상위에도 없게 하고, 봉투도 비운 채 읽기를 시킨다.
+// 통과 조건은 "성공"이 아니라 **정직한 실패** — 원시 MODULE_NOT_FOUND 가 나오면 안 된다.
+{
+  const built = path.join(root, "dist", "electron", "secrets", "keychain-host.js");
+  if (!fs.existsSync(built)) {
+    check(
+      "unreachable-keytar-does-not-kill-the-node",
+      false,
+      "dist 가 없어 확인하지 못했습니다 — `npm run build:electron` 뒤에 다시 도세요(못 잰 것을 통과로 적지 않습니다).",
+    );
+  } else {
+    const sandbox = fs.mkdtempSync(path.join(fs.realpathSync(process.env.TMPDIR || "/tmp"), "keychain-gate-"));
+    fs.copyFileSync(built, path.join(sandbox, "keychain-host.js"));
+    let out = "";
+    try {
+      out = execFileSync(
+        process.execPath,
+        ["-e", `const h=require("${path.join(sandbox, "keychain-host.js").replace(/\\/g, "\\\\")}");`
+          + `if(typeof h.keychainGet!=="function"){console.log("THREW:이 게이트가 부르는 이름이 "`
+          + `+"없습니다(keychainGet). API 가 바뀌었으면 게이트를 같이 고치세요.");process.exit(0);}`
+          + `h.keychainGet("agentlas-gate-probe","no-such-account")`
+          + `.then((v)=>console.log("RESOLVED:"+JSON.stringify(v)))`
+          + `.catch((e)=>console.log("THREW:"+(e&&e.message?e.message:String(e))));`],
+        { env: { ...process.env, AGENTLAS_KEYTAR_PATH: "", AGENTLAS_KEYCHAIN_TIMEOUT_MS: "4000" },
+          encoding: "utf8", timeout: 30_000 },
+      );
+    } catch (error) {
+      out = `THREW:${error?.stdout || ""}${error?.stderr || error?.message || ""}`;
+    }
+    // 통과하려면 **부른 흔적**이 있어야 한다 — 아무 말도 없는 출력은 통과가 아니라
+    // 못 잰 것이다(없는 이름을 불러 조용히 초록이 되는 사고를 여기서 막는다).
+    const reached = /RESOLVED:|keychain_unavailable|찾을 수 없습니다/.test(out);
+    check(
+      "unreachable-keytar-does-not-kill-the-node",
+      reached && !/Cannot find module ['"]keytar['"]/.test(out),
+      "keytar 를 못 찾은 사실이 원시 MODULE_NOT_FOUND 로 새어 나가거나, 이 게이트가 실제로 부르지 "
+      + `못했습니다 — 내려받은 엔진으로 도는 사용자의 그래프 노드가 여기서 죽습니다. 관측: ${out.trim().slice(0, 200)}`,
+    );
+    try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch { /* 임시 폴더 — 남아도 무해 */ }
+  }
 }
 
 for (const c of checks) console.log(`${c.ok ? "PASS" : "FAIL"} ${c.name}`);
