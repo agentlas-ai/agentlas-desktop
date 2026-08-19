@@ -280,6 +280,9 @@ export function AutomationSessionPanel({
         chatId: targetChatId,
         userPrompt: prompt,
         locale,
+        // 이 대화는 자동화의 세션이다. 메인이 이 id로 실시간 수정 계약(이름·현재
+        // 그래프·제어블록 경로)을 주입해, 채팅으로 한 지시가 **이 자동화**에 꽂힌다.
+        automationId,
         // 예약 실행과 같은 권한으로 — read로 떨어지면 자기 자동화의 스크립트조차 못 돌린다.
         permissions: (executionPermission === "read" ? "read" : "write") as "read" | "write",
         ...(toolMode ? { toolMode } : {}),

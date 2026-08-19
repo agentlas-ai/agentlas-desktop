@@ -1539,6 +1539,43 @@ export async function runMcpInvocation(
         ].join("\n");
     effectiveUserPrompt = `${lockedBoundary}\n\n${effectiveUserPrompt}`;
   }
+  // 자동화 세션에서 온 사용자 채팅: 이 자동화의 실시간 수정 계약을 앞에 세운다.
+  // 오너 결정 2026-08-19: 채팅 리얼타임 수정이 본선이고 편집 버튼은 보조다. 실측:
+  // 사용자가 "view 10k 이상만" 지시 → 모델이 hephaestus graph CLI(터미널 저장소)를
+  // 만지고 "업데이트했다"고 답했지만 이 자동화의 graph_json은 그대로였다. 그래프
+  // 저장소가 둘인데 모델에게는 둘 다 "그래프 편집"으로 보인 것. 유일하게 이 자동화를
+  // 바꾸는 경로(## Automation 블록, 아래 소비부가 즉시 적용)를 이름·현재 그래프와
+  // 함께 명시하고, CLI는 이 목적에 금지한다.
+  if (req.automationId && executionContext?.source !== "automation") {
+    try {
+      const target = listAutomations().find((a) => a.id === req.automationId);
+      if (target) {
+        const graphJson = target.graph ? JSON.stringify(target.graph) : null;
+        const editContract = locale === "ko"
+          ? [
+              "[Agentlas 자동화 편집 계약]",
+              `이 대화는 자동화 "${target.name}"의 세션입니다. 사용자가 이 자동화의 동작·조건·스케줄·단계를 바꾸라고 지시하면, 답변 끝에 \`## Automation\` 블록을 방출하세요 — name을 정확히 "${target.name}"으로 두고, 바뀐 전체 graph를 함께 실으면 호스트가 즉시 이 자동화에 적용합니다. 이것이 이 자동화를 바꾸는 유일한 경로입니다.`,
+              graphJson ? `현재 graph: ${graphJson}` : "현재 graph: (없음 — 단일 프롬프트 자동화)",
+              "터미널 graph CLI(`agentlas graph`, hep-graph 스킬)는 다른 저장소를 편집하므로 이 자동화에는 절대 사용하지 마세요. 그것으로는 이 자동화가 바뀌지 않습니다.",
+              "적용했다고 말하기 전에 반드시 블록을 방출하세요 — 방출 없는 적용 보고는 거짓이 됩니다.",
+              "[/Agentlas 자동화 편집 계약]",
+            ].join("\n")
+          : [
+              "[Agentlas automation edit contract]",
+              `This chat is the session of automation "${target.name}". When the user asks to change its behavior, filters, schedule or steps, emit an \`## Automation\` block at the end of your reply — keep name exactly "${target.name}" and include the full updated graph; the host applies it to THIS automation immediately. That block is the only path that changes this automation.`,
+              graphJson ? `Current graph: ${graphJson}` : "Current graph: (none — single-prompt automation)",
+              "Never use the terminal graph CLI (`agentlas graph`, the hep-graph skill) for this purpose — it edits a different store and this automation will not change.",
+              "Emit the block before claiming the change was applied — a claim without the block is false.",
+              "[/Agentlas automation edit contract]",
+            ].join("\n");
+        effectiveUserPrompt = `${editContract}
+
+${effectiveUserPrompt}`;
+      }
+    } catch {
+      // 계약 주입 실패가 대화 자체를 막으면 안 된다.
+    }
+  }
   if (executionContext?.source === "automation") {
     const availableProjects = listProjects().map((project) => ({
       name: project.name,

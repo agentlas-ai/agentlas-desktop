@@ -3826,6 +3826,10 @@ export interface McpInvocationRequest {
   promptOrigin?: "user" | "system";
   /** One may begin as general conversation and promote only on real work signals. */
   taskIntent?: "task" | "conversation";
+  /** Chat sent from an automation's session panel. Main injects that
+   *  automation's live-edit contract (name + current graph + the control-block
+   *  path) so an instruction typed in chat lands on THIS automation. */
+  automationId?: string;
   /** Renderer signal selecting the One product surface. Main derives all approved context itself. */
   oneMode?: boolean;
   /** Opaque, Main-issued one-time Memory capability. Main consumes it only after durable start acceptance. */
