@@ -11,6 +11,7 @@ import os from "node:os";
 import { app } from "electron";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { userDataPath } from "../runtime-paths";
+import { onHostShutdown } from "../host-lifecycle";
 
 /**
  * 패키지된 GUI 앱(Finder/Dock 실행)은 로그인 셸의 PATH를 상속받지 못해 PATH가
@@ -333,14 +334,18 @@ export function trackRunChild(child: ChildProcess): void {
   }
   if (!quitHookInstalled) {
     quitHookInstalled = true;
-    try {
-      app.once("will-quit", () => {
-        for (const c of liveRunChildren) killCliTree(c, 500);
-        liveRunChildren.clear();
-      });
-    } catch {
-      // 테스트 등 app 부재 환경 — 무시
-    }
+    /*
+     * ★"호스트가 곧 죽는다" 는 호스트가 알려 준다 — 여기서 Electron 을 부르지 않는다.
+     *
+     * 예전에는 `app.once("will-quit", …)` 였고, 그 한 줄이 이 러너를 Electron 전용으로
+     * 만들었다. 데몬(agentlasd)에는 `app` 이 없으므로 그대로 두면 데몬이 죽어도 CLI
+     * 자식들이 살아남아 사용자 머신에 좀비가 쌓인다. 이제 Electron 은 will-quit 에서,
+     * 데몬은 SIGTERM/SIGINT 에서 같은 함수를 부른다(electron/host-lifecycle.ts).
+     */
+    onHostShutdown(() => {
+      for (const c of liveRunChildren) killCliTree(c, 500);
+      liveRunChildren.clear();
+    });
   }
 }
 

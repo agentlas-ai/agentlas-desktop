@@ -34,6 +34,8 @@
     "postinstall": "electron-rebuild --force",
     "ensure:engine": "node scripts/ensure-engine.mjs",
     "prepare:embedded-core": "node scripts/prepare-embedded-core.mjs",
+    "daemon": "cross-env ELECTRON_RUN_AS_NODE=1 electron dist/electron/daemon/main.js",
+    "test:daemon-boot": "npm run build:electron && node scripts/test-daemon-boot.cjs",
     "test:ensure-engine": "node scripts/test-ensure-engine.cjs",
     "test:runtime-paths": "npm run build:electron && node scripts/test-runtime-paths.cjs",
     "test:tool-receipt-judgment": "npm run build:electron && node scripts/test-tool-receipt-judgment.cjs",

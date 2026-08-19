@@ -104,6 +104,7 @@ import {
   stopAgentlasMobileBridge,
 } from "./mobile-bridge/runtime";
 import { userDataDir } from "./runtime-paths";
+import { runHostShutdownHooks } from "./host-lifecycle";
 
 export { currentUiLocale } from "./ui-locale";
 
@@ -663,6 +664,9 @@ async function prepareAutomaticUpdateQuit(): Promise<void> {
 function finishQuitCleanup(): void {
   if (quitCleanupDone) return;
   quitCleanupDone = true;
+  // ★호스트 공통 정리 — 실행 중인 CLI 자식 트리 킬이 여기 등록돼 있다.
+  //   데몬(agentlasd)은 같은 함수를 SIGTERM/SIGINT 에서 부른다(host-lifecycle.ts).
+  try { runHostShutdownHooks(); } catch {}
   try { stopCliRuntimeAutoUpdate(); } catch {}
   void stopQuitServices().catch(() => {});
   try { disposeAutoUpdater(); } catch {}
