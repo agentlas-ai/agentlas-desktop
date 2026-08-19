@@ -241,9 +241,47 @@ export function repairGraphContradictions(
       if (next.edges.length !== before) moved.push(item.nodeId);
       continue;
     }
-    // 자동으로 고칠 수 있는 것만 고친다. 사람이 정해야 하는 것(LOOP_TAIL_NOT_A_BRANCH)은
-    // 말만 하고 지나간다 — 여기서 지어내면 사람이 원한 재시도가 사라지거나 같은 것을
-    // 계속 다시 하는 반복이 된다.
+    if (item.code === "LOOP_TAIL_NOT_A_BRANCH") {
+      /*
+       * ★무엇을 보고 다시 할지는 **되돌아가는 그 단계 자신이 말해 준다.** 되돌아갈 곳이
+       *   판정 단계이고 그 판정이 값을 만든다면(`produces`), 그 값이 곧 "다시 할까"의 근거다.
+       *   커널이 스스로 안내하는 모양이 정확히 이것이다 — "갈림길 단계를 넣고, 참·거짓 중
+       *   한쪽만 되돌아가게 이으세요"(planGraphLoops 의 nextAction).
+       *
+       *   근거가 없으면(판정이 아니거나 값을 안 만들면) **고치지 않는다.** 그때는 지어내는
+       *   것이 되고, 사람이 원한 재시도가 사라지거나 같은 것을 계속 다시 하는 반복이 된다.
+       */
+      const head = next.nodes.find((n) => n.id === item.branchNodeId);
+      const verdict = head && head.type === "eval" ? str(head.config, "produces") : "";
+      if (!head || !verdict) continue;
+      const backEdge = next.edges.find((e) => e.source === item.nodeId && e.target === head.id);
+      if (!backEdge) continue;
+
+      const gateId = `${item.nodeId}-gate`;
+      if (next.nodes.some((n) => n.id === gateId)) continue;
+      const tail = next.nodes.find((n) => n.id === item.nodeId);
+      next.nodes.push({
+        id: gateId,
+        type: "condition",
+        position: { x: (tail?.position.x ?? 0) + 220, y: tail?.position.y ?? 0 },
+        config: { var: verdict, op: "truthy" },
+        label: `${head.label || head.id} 통과했나?`,
+      });
+      // 되돌아가던 연결을 갈림길 뒤로 옮긴다 — 통과 못 했을 때만 되돌아간다.
+      backEdge.target = gateId;
+      backEdge.sourceHandle = undefined;
+      delete (backEdge as { maxIterations?: number }).maxIterations;
+      next.edges.push({
+        id: `${gateId}-retry`,
+        source: gateId,
+        target: head.id,
+        sourceHandle: "false",
+        maxIterations: typeof backEdge.maxIterations === "number" ? backEdge.maxIterations : 1,
+      });
+      moved.push(gateId);
+      continue;
+    }
+    // 나머지 자동 수리는 "비어도 되는 값에 걸린 검증" 하나뿐이다.
     if (item.code !== "EMPTY_ALLOWED_BUT_VERIFIED_NONEMPTY") continue;
     const evalId = item.nodeId;
     const branchId = item.branchNodeId;

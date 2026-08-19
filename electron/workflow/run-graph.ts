@@ -7,6 +7,7 @@
 // 실행 엔진은 손대지 않는다 — 러너는 "어떤 요청을 어떤 순서로 runMcpInvocation에 넘길지"만 결정.
 import { isHostPreflightTool, couldHaveChangedTheOutsideWorld } from "../../shared/tool-activity";
 import { findGraphContradictions } from "../../shared/graph-contradictions";
+import { getDb } from "../store/db";
 import type {
   Automation,
   WorkflowGraph,
@@ -1561,6 +1562,34 @@ export async function runGraph(
     // execute a node when its occurrence row could not be created.
     detachCallerAbort();
     throw snapshotError;
+  }
+
+  /*
+   * ★이 자동화가 가리키는 대상이 아직 있는가. 실측 2026-08-20: 지워진 에이전트를 가리키는
+   *   자동화를 실행하면 세션을 만들다 SQLite 가 그대로 튀어나왔다 —
+   *   `FOREIGN KEY constraint failed`. 사람은 자기가 지운 에이전트 이야기라는 걸
+   *   알 방법이 없고, 자동화 이름조차 없는 문장을 본다.
+   */
+  if (automation.targetType === "agent" || automation.targetType === "firm") {
+    const table = automation.targetType === "firm" ? "firms" : "installed_agents";
+    const present = (() => {
+      try {
+        return Boolean(
+          getDb().prepare(`SELECT 1 FROM ${table} WHERE id = ?`).get(automation.targetId),
+        );
+      } catch {
+        // 표를 못 읽으면 여기서 단정하지 않는다 — 아래 원래 경로가 사실을 말하게 둔다.
+        return true;
+      }
+    })();
+    if (!present) {
+      detachCallerAbort();
+      throw new Error(
+        `automation_target_missing: "${automation.name}"이(가) 쓰던 `
+        + `${automation.targetType === "firm" ? "회사" : "에이전트"} "${automation.targetId}"을(를) 찾을 수 없습니다. `
+        + "지워졌거나 다른 곳에 설치돼 있습니다. 자동화를 열어 대상을 다시 고르세요.",
+      );
+    }
   }
 
   try {
