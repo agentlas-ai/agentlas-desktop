@@ -1,11 +1,19 @@
 # Changelog
 
-## 1.0.28 — 2026-08-20
+## 1.0.29 — 2026-08-21
 
 Bundled runtime: Agentlas OS v1.2.12 (2b075361f07f25577994f0ce87f46f33ac41ec64).
 Source readiness does not prove a public installer or update feed; the
 Releases page stays the authority.
 
+- Only a boundary can stop a run now. A verification that backs its judgment with
+  an independent observation — "does the file it says it moved exist on disk" —
+  still fails the run when the world disagrees. A verification that only weighs a
+  value's quality does not: it does not know the goal, and it was stopping runs
+  that had done exactly what the person asked. Its finding is recorded and handed
+  to the completion judgment, which is the one place that holds the approved goal.
+  When the record cannot settle whether the goal was met, the run asks a person
+  instead of guessing in either direction.
 - A correct automation could be recorded as failed. The completion judgment saw
   only the last node's output — in a graph that ends in verifications, the single
   word "pass" — so a run that filed three attachments and a run that had nothing
@@ -35,6 +43,13 @@ Releases page stays the authority.
 - An empty result is no longer failed on sight. Work that ran and found nothing
   to do — a quiet day, everything already processed, a condition not met — passes
   when the step says why it is empty; an unexplained empty result still fails.
+
+## 1.0.28 — 2026-08-20
+
+Bundled runtime: Agentlas OS v1.2.12 (2b075361f07f25577994f0ce87f46f33ac41ec64).
+Source readiness does not prove a public installer or update feed; the
+Releases page stays the authority.
+
 - A freshly installed CLI could never obtain the graph engine: the download
   function existed but nothing called it, so every automation failed with
   "vendored Desktop Core is unavailable". The run command now fetches on a
