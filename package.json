@@ -430,9 +430,9 @@
     "test:runtime-surface-parity": "node scripts/test-runtime-surface-parity.cjs",
     "test:upload-scan-catalog": "node scripts/upload-scan-catalog-parity.cjs",
     "test:upload-exclusion-parity": "npm run build:electron && node scripts/test-upload-exclusion-parity.cjs",
-    "test:graph-matrix": "npm run build:electron && node scripts/verify-graph-matrix.mjs",
+    "test:graph-matrix": "npm run build:electron && cross-env ELECTRON_RUN_AS_NODE=1 electron scripts/verify-graph-matrix.mjs",
     "test:graph-contradictions": "npm run build:electron && node scripts/verify-graph-contradictions.mjs",
-    "test:resume-coordinate-lease": "npm run build:electron && node scripts/verify-resume-coordinate-is-a-lease.mjs",
+    "test:resume-coordinate-lease": "npm run build:electron && cross-env ELECTRON_RUN_AS_NODE=1 electron scripts/verify-resume-coordinate-is-a-lease.mjs",
     "test:authoring-has-tools": "node scripts/verify-authoring-has-tools.mjs"
   },
   "dependencies": {

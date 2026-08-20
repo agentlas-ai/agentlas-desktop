@@ -23,9 +23,20 @@ import path from "node:path";
 import { createRequire } from "node:module";
 
 const require_ = createRequire(import.meta.url);
-try { require_("better-sqlite3"); } catch (error) {
-  console.log("SKIP graph-matrix — better-sqlite3 가 이 Node 의 ABI 로 빌드돼 있지 않습니다:");
+/*
+ * ★`require("better-sqlite3")`는 ABI 가 어긋나도 **성공한다** — 실제 .node 적재는
+ *   첫 Database 를 만들 때 bindings() 안에서 일어난다. 그래서 require 만 보는 가드는
+ *   아무것도 못 막고, 스크립트는 한참 뒤 raw 스택으로 죽는다(실측 2026-08-20).
+ *   재려면 진짜로 하나 열어 봐야 한다.
+ *
+ *   이 매트릭스는 커널 게이트들과 같은 방식으로 electron 의 Node 에서 돈다
+ *   (package.json: ELECTRON_RUN_AS_NODE=1 electron). 저장소의 better-sqlite3 는
+ *   postinstall 의 electron-rebuild 로 그 ABI 에 맞춰져 있다.
+ */
+try { new (require_("better-sqlite3"))(":memory:").close(); } catch (error) {
+  console.log("SKIP graph-matrix — better-sqlite3 가 이 런타임의 ABI 로 빌드돼 있지 않습니다:");
   console.log("  " + String(error && error.message).split("\n")[0].slice(0, 160));
+  console.log("  고치는 법: npx electron-rebuild --force --only better-sqlite3");
   console.log("  (통과로 세지 않습니다.)");
   process.exit(0);
 }
@@ -632,6 +643,61 @@ const outPath = path.join(dir, "written.txt");
     sends <= 4,
     `되돌이 안의 되돌이가 상한(2×2=4)을 넘어 ${sends}번 바깥으로 나갔습니다 — 상한이 안쪽에 `
     + `안 걸립니다(ok=${nestedRun.ok}, 사유: ${String(nestedRun.error ?? "").slice(0, 140)}).`,
+  );
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * ⑪ 연결 축의 마지막 칸 — 양쪽이 이어진 갈림길
+ *
+ * 한쪽만 이어진 갈림길은 이미 지켰다(⑤). 양쪽이 이어진 갈림길에서 지켜야 할 것은
+ * 두 가지고, 둘 다 사람을 다치게 한 적이 있다:
+ *   1. 안 고른 쪽이 **돌면 안 된다** — 돌면 두 갈래가 다 실행돼 바깥으로 두 번 나간다.
+ *   2. 안 고른 쪽의 하류가 "닿지 못했다"로 **실패하면 안 된다** — 갈림길은 원래
+ *      한쪽을 안 가는 것이고, 그걸 실패로 적으면 정상 실행이 매번 빨간불이 된다.
+ * ──────────────────────────────────────────────────────────────────────────── */
+{
+  const taken = path.join(dir, "branch-taken.txt");
+  const notTaken = path.join(dir, "branch-not-taken.txt");
+  const writer = (id, file, label) => node(id, "code", {
+    effect: "mutation", produces: `${id}out`, codeLang: "python",
+    code: [
+      "import pathlib",
+      `pathlib.Path(${JSON.stringify(file)}).write_text('ran', encoding='utf8')`,
+      `result = ${JSON.stringify(id)}`,
+    ].join("\n"),
+  }, label);
+
+  const graph = {
+    version: 1,
+    nodes: [
+      node("start", "trigger", { kind: "input", produces: "seed" }),
+      node("gate", "condition", { var: "seed", op: "truthy" }, "값이 있나?"),
+      writer("yes", taken, "있으면 이쪽"),
+      writer("no", notTaken, "없으면 저쪽"),
+      node("after", "code", {
+        effect: "read", produces: "summary", codeLang: "python",
+        code: "result = 'done'",
+      }, "고른 쪽 다음"),
+    ],
+    edges: [
+      edge("start", "gate"),
+      edge("gate", "yes", { sourceHandle: "true" }),
+      edge("gate", "no", { sourceHandle: "false" }),
+      edge("yes", "after"),
+    ],
+  };
+  const run = await runGraph(saveAutomation(graph, "two-sided-branch"), graph, { initialVars: { seed: "있다" } });
+  check(
+    "only-the-chosen-side-of-a-branch-runs",
+    existsSync(taken) && !existsSync(notTaken),
+    "갈림길에서 안 고른 쪽도 돌았습니다 — 두 갈래가 다 실행되면 바깥으로 두 번 나갑니다"
+    + `(고른 쪽 ${existsSync(taken) ? "돎" : "안 돎"}, 안 고른 쪽 ${existsSync(notTaken) ? "돎" : "안 돎"}).`,
+  );
+  check(
+    "the-road-not-taken-is-not-reported-as-a-failure",
+    run.ok,
+    "갈림길이 정상으로 한쪽을 안 갔는데 실행이 실패로 끝났습니다 — 갈림길을 쓴 자동화가 "
+    + `매번 빨간불이 됩니다(사유: ${String(run.error ?? "").slice(0, 160)}).`,
   );
 }
 

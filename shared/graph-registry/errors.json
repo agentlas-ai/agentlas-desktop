@@ -221,6 +221,15 @@
       "status": "implemented"
     },
     {
+      "code": "EVAL_CONTRADICTS_BRANCH",
+      "since": "1.2",
+      "severity": "node",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "검증할 값이 비어 있는데, 그 값을 만드는 앞의 갈림길이 \"비어 있을 수 있다\"고 말한다 — 그래프 자신이 모순이다. 예전에는 \"앞 단계가 값을 만들어 주지 않았습니다\"로 나가서, 계산도 결과도 옳은데 사람이 있지도 않은 배선 문제를 찾았다(실측 2026-08-20: 임계값 감시 자동화가 조용한 날마다 여기서 죽었다). 모순을 이름으로 말해 고칠 곳을 가리킨다."
+    },
+    {
       "code": "EVAL_STUCK",
       "since": "1.1",
       "severity": "node",
