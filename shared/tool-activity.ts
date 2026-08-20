@@ -1,3 +1,5 @@
+import { classifyTool } from "./tool-taxonomy";
+
 // "이 도구 호출이 바깥 세상을 실제로 건드린 일인가"를 한 곳에서 판단한다.
 //
 // 왜 정본이 필요한가 (2026-08-19 실측):
@@ -44,14 +46,37 @@ const WELL_KNOWN_READ_ONLY_TOOLS = new Set([
   "webfetch", "websearch", "todoread", "listmcpresources", "readmcpresource",
 ]);
 
-/** 이 도구 호출이 바깥을 바꿨을 수 있는가. 모르면 "그렇다"(보수적). */
+/**
+ * 이 도구 호출이 바깥을 바꿨을 수 있는가. 모르면 "그렇다"(보수적).
+ *
+ * ★이 한 술어가 **방향이 반대인 두 질문**에 답한다는 것을 알고 써야 한다:
+ *   · "재생해도 되나?" — 모르면 "바꿨을 수 있다" → 재생 금지. 보수적이 안전하다.
+ *   · "정말 일했나?"   — 모르면 "바꿨을 수 있다" → **성공 인정**. 보수적이 위험하다.
+ *   같은 "모름"이 한쪽에서는 막고 한쪽에서는 통과시킨다. 그래서 기본값을 뒤집는 것으로는
+ *   못 고친다 — 뒤집으면 이름 모르는 MCP 도구로 진짜 일한 자동화가 전부 거짓 실패한다.
+ *   고칠 수 있는 것은 **모르는 이름을 줄이는 것**뿐이다.
+ *
+ * ★그래서 손 목록 대신 저장소의 정본 분류표(shared/tool-taxonomy.ts)에 묻는다.
+ *   실측 2026-08-20 (agy 라이브 실행): 도구를 하나도 안 붙인 "메일 보내기" 단계가
+ *   `ok:true` 로 끝났다. 그 실행이 부른 것은 `list_dir` 두 번과 호스트 예비 조회뿐 —
+ *   읽기만 한 도구가 발송의 증거로 쓰였다. 분류표는 `list_dir` 을 이미 "read" 로 알고
+ *   있었는데, 이 파일이 자기만의 10개짜리 목록을 들고 있어서 묻지 않았다.
+ *   런타임마다 이름이 다르므로(claude Read / grok list_dir / agy view_file) 손 목록은
+ *   구조적으로 못 따라간다. 새 런타임의 읽기 도구는 분류표 한 곳에만 더하면 된다.
+ */
 export function couldHaveChangedTheOutsideWorld(toolName: string | null | undefined): boolean {
   const name = String(toolName ?? "").trim();
   if (!name) return false;
   if (isHostPreflightTool(name)) return false;
   // MCP 도구는 `서버 · 도구` / `mcp__서버__도구` 처럼 접두사가 붙는다 — 마지막 조각으로 본다.
   const leaf = name.split(/__|·|\//).pop()?.trim().toLowerCase() ?? "";
-  return !WELL_KNOWN_READ_ONLY_TOOLS.has(leaf) && !WELL_KNOWN_READ_ONLY_TOOLS.has(name.toLowerCase());
+  if (WELL_KNOWN_READ_ONLY_TOOLS.has(leaf) || WELL_KNOWN_READ_ONLY_TOOLS.has(name.toLowerCase())) {
+    return false;
+  }
+  // 분류표가 읽기·검색·조회라고 아는 이름은 바깥을 바꾸지 않았다.
+  // 모르는 이름은 "other" 로 떨어지고, 그건 여전히 "바꿨을 수 있다"이다.
+  const action = classifyTool(leaf || name);
+  return action !== "read" && action !== "search" && action !== "fetch";
 }
 
 /**

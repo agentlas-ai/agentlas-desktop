@@ -635,7 +635,17 @@ function isReadOnlyCheckpointTool(name: string): boolean {
   // without a provider idempotency receipt.
   // 예비 조회 판단은 shared/tool-activity 정본을 쓴다 — 같은 규칙이 세 곳에 손코딩돼 있었고,
   // 완주 판정만 그 지식을 못 봐서 게시 0건 실행이 "도구 활동이 뒷받침한다"로 통과했다.
-  return READ_ONLY_WORKFORCE_AUDIT_TOOLS.has(name) || isHostPreflightTool(name);
+  //
+  // ★그런데 여기는 **호스트 예비 조회만** 알고 있었다. 그래서 런타임의 평범한 읽기 도구
+  //   (agy `list_dir`, claude `Read`, grok `read_file`)를 부른 실패가 "바깥에 나갔을 수도
+  //   있다"는 영수증을 남겼고, 그게 automation_ambiguous_side_effect 로 굳어 **자동화가
+  //   잠겼다** — 사람이 재조정하기 전까지 다시 안 돈다.
+  //
+  //   실측 2026-08-20 (agy 라이브, 2회 재현): 발행 도구가 없는 출력 단계가 거절되는 것은
+  //   옳은데(글이 안 올라갔으니), 그 실행이 부른 것은 `list_dir` 둘과 예비 조회뿐이었다.
+  //   읽기만 한 실행은 바깥이 그대로라 다시 시도해도 안전하다. 거절만 있고 나갈 문이
+  //   없으면 영구 잠김이다 — 이 저장소가 이미 이름 붙인 병이다.
+  return READ_ONLY_WORKFORCE_AUDIT_TOOLS.has(name) || !couldHaveChangedTheOutsideWorld(name);
 }
 
 function isReplaySafeGraphToolReceipt(
