@@ -19,6 +19,10 @@
 //     상주 형태를 아직 못 가지는 런타임(일회성 `-p` CLI)을 "상주 중"이라고 말하지 않기
 //     위해서다 — 예산은 붙든 것(holdsSession)만 센다.
 import { onHostShutdown } from "../host-lifecycle";
+import type {
+  AgentProcessLifecycleReason,
+  AgentProcessState,
+} from "../../shared/types";
 
 /** One 은 리퍼 면제다(오너 비전: "One 제외 마지막 메시지 후 12시간 무입력이면 자동 종료"). */
 export const ONE_AGENT_ID = "builtin-agentlas-one";
@@ -29,10 +33,24 @@ export const AGENT_RESIDENCY_IDLE_REAP_MS = 12 * 60 * 60_000;
 /** 어디서 온 에이전트인가 — 로컬 설치 / 오너 Agent Cloud / 공개 Hub. */
 export type AgentResidencySource = "local" | "cloud" | "hub";
 
+export interface AgentResidencyChange {
+  /** Only real resident CLI resources emit changes; activity-only rows do not. */
+  state: Extract<AgentProcessState, "running" | "idle" | "closed">;
+  reason: AgentProcessLifecycleReason;
+  agentId: string | null;
+  /** Resolved firm/org node id; falls back to agentId for solo runs. */
+  nodeId: string | null;
+  chatId: string | null;
+  runtimeKind: string;
+  source: AgentResidencySource;
+  holdsSession: true;
+}
+
 export interface AgentResidencyEntry {
   /** 등록 키. 상주 세션은 풀 키(chatId × runtime × fingerprint), 활동 기록은 실행 키. */
   key: string;
   agentId: string | null;
+  nodeId: string | null;
   chatId: string | null;
   runtimeKind: string;
   source: AgentResidencySource;
@@ -49,6 +67,7 @@ export interface AgentResidencyEntry {
 }
 
 const entries = new Map<string, AgentResidencyEntry>();
+const changeListeners = new Set<(change: AgentResidencyChange) => void>();
 let shutdownDetach: (() => void) | null = null;
 let sweepTimer: NodeJS.Timeout | null = null;
 
@@ -120,6 +139,33 @@ export function agentResidencyBudget(): number {
 let sourceResolver: ((agentId: string) => AgentResidencySource | null) | null = null;
 const sourceCache = new Map<string, AgentResidencySource>();
 
+/** Subscribe to actual resident CLI lifecycle changes. Activity-only rows never emit. */
+export function onAgentResidencyChange(listener: (change: AgentResidencyChange) => void): () => void {
+  changeListeners.add(listener);
+  return () => changeListeners.delete(listener);
+}
+
+function emitAgentResidencyChange(
+  entry: AgentResidencyEntry,
+  state: Extract<AgentProcessState, "running" | "idle" | "closed">,
+  reason: AgentProcessLifecycleReason,
+): void {
+  if (!entry.holdsSession) return;
+  const change: AgentResidencyChange = {
+    state,
+    reason,
+    agentId: entry.agentId,
+    nodeId: entry.nodeId,
+    chatId: entry.chatId,
+    runtimeKind: entry.runtimeKind,
+    source: entry.source,
+    holdsSession: true,
+  };
+  for (const listener of changeListeners) {
+    try { listener(change); } catch { /* observability must never break a CLI */ }
+  }
+}
+
 /** 테스트·대체 구현이 출처 판정을 갈아끼운다. */
 export function setAgentResidencySourceResolver(
   resolver: ((agentId: string) => AgentResidencySource | null) | null,
@@ -167,6 +213,7 @@ export function isResidencyExemptAgent(agentId: string | null | undefined): bool
 export interface RegisterAgentResidencyInput {
   key: string;
   agentId?: string | null;
+  nodeId?: string | null;
   chatId?: string | null;
   runtimeKind: string;
   source?: AgentResidencySource;
@@ -187,6 +234,7 @@ export function registerAgentResidency(input: RegisterAgentResidencyInput): Agen
   const entry: AgentResidencyEntry = {
     key: input.key,
     agentId,
+    nodeId: input.nodeId ?? agentId,
     chatId: input.chatId ?? null,
     runtimeKind: input.runtimeKind,
     source: input.source ?? resolveAgentResidencySource(agentId),
@@ -197,6 +245,9 @@ export function registerAgentResidency(input: RegisterAgentResidencyInput): Agen
     ...(input.close ? { close: input.close } : existing?.close ? { close: existing.close } : {}),
   };
   entries.set(input.key, entry);
+  if (entry.holdsSession && !existing?.holdsSession) {
+    emitAgentResidencyChange(entry, "running", "spawned");
+  }
   return entry;
 }
 
@@ -220,12 +271,25 @@ export function touchAgentResidency(key: string, patch?: { inUse?: boolean; now?
   if (!entry) return;
   entry.lastActivityAt = patch?.now ?? Date.now();
   if (patch?.inUse !== undefined) entry.inUse = patch.inUse;
+  if (entry.holdsSession && patch?.inUse !== undefined) {
+    emitAgentResidencyChange(
+      entry,
+      entry.inUse ? "running" : "idle",
+      entry.inUse ? "turn-started" : "turn-complete",
+    );
+  }
 }
 
 /** 등록을 지운다. `close: true` 면 붙든 자원도 놓는다. */
-export function dropAgentResidency(key: string, opts?: { close?: boolean }): void {
+export function dropAgentResidency(
+  key: string,
+  opts?: { close?: boolean; reason?: AgentProcessLifecycleReason },
+): void {
   const entry = entries.get(key);
   if (!entry) return;
+  if (entry.holdsSession) {
+    emitAgentResidencyChange(entry, "closed", opts?.reason ?? "process-exit");
+  }
   entries.delete(key);
   if (opts?.close && entry.close) {
     try { entry.close(); } catch { /* 이미 죽었을 수 있다 */ }
@@ -245,7 +309,7 @@ export function sweepIdleAgentResidency(maxIdleMs = AGENT_RESIDENCY_IDLE_REAP_MS
   for (const entry of [...entries.values()]) {
     if (entry.inUse || entry.reaperExempt) continue;
     if (entry.lastActivityAt > cutoff) continue;
-    dropAgentResidency(entry.key, { close: true });
+    dropAgentResidency(entry.key, { close: true, reason: "reaped" });
     reaped += 1;
   }
   return reaped;
@@ -263,6 +327,7 @@ export interface AgentResidencySnapshot {
   budget: number;
   agents: Array<{
     agentId: string | null;
+    nodeId: string | null;
     chatId: string | null;
     runtimeKind: string;
     source: AgentResidencySource;
@@ -286,6 +351,7 @@ export function agentResidencySnapshot(now = Date.now()): AgentResidencySnapshot
       .sort((a, b) => b.lastActivityAt - a.lastActivityAt)
       .map((e) => ({
         agentId: e.agentId,
+        nodeId: e.nodeId,
         chatId: e.chatId,
         runtimeKind: e.runtimeKind,
         source: e.source,
@@ -304,7 +370,9 @@ export function holdingAgentResidency(): AgentResidencyEntry[] {
 
 /** 호스트 종료 — 붙든 상주를 전부 놓는다(면제도 예외 없음). */
 export function disposeAgentResidency(): void {
-  for (const entry of [...entries.values()]) dropAgentResidency(entry.key, { close: true });
+  for (const entry of [...entries.values()]) {
+    dropAgentResidency(entry.key, { close: true, reason: "shutdown" });
+  }
   stopSweeper();
   if (shutdownDetach) {
     shutdownDetach();

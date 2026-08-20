@@ -768,6 +768,7 @@ const runClaudeTurn = async (
         poolKey,
         {
           agentId: runReq.agentId ?? null,
+          nodeId: runReq.orchestrationAgentId ?? runReq.agentId ?? null,
           chatId: runReq.chatId ?? null,
           runtimeKind: KIND,
           source: resolveAgentResidencySource(runReq.agentId),

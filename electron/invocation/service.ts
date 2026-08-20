@@ -3,6 +3,10 @@ import { createHash } from "node:crypto";
 import { agentRunCwd } from "../runtime/exec";
 import { resolveInvocationRunId } from "../runtime/run-id";
 import {
+  onAgentResidencyChange,
+  type AgentResidencyChange,
+} from "../runtime/agent-residency";
+import {
   InvocationLifecycleRegistry,
   registerDurableInvocationStart,
 } from "../runtime/invocation-lifecycle";
@@ -149,6 +153,8 @@ export interface InvocationSettledEnvelope {
 interface RunRecord {
   controller: AbortController;
   chatId: string;
+  /** Main-memory request used to persist late resident-CLI lifecycle events. */
+  request: McpInvocationRequest;
   startedAt: string;
   cancelRequestedAt: string | null;
   events: McpInvocationEvent[];
@@ -606,6 +612,14 @@ export class InvocationService {
   private readonly settledListeners = new Set<InvocationSettledListener>();
   private readonly steerQueues = new Map<string, QueuedSteer[]>();
 
+  constructor() {
+    // A resident CLI can close independently of the current runner callback.
+    // Bridge that fact into the same run event stream while the run is alive;
+    // the renderer then sees a real `closed` state instead of guessing from a
+    // missing answer.
+    onAgentResidencyChange((change) => this.publishAgentResidencyChange(change));
+  }
+
   onEvent(listener: InvocationEventListener): () => void {
     this.eventListeners.add(listener);
     return () => this.eventListeners.delete(listener);
@@ -918,6 +932,7 @@ export class InvocationService {
     const record: RunRecord = {
       controller,
       chatId: req.chatId,
+      request: runReq,
       startedAt,
       cancelRequestedAt: null,
       events: [],
@@ -1875,6 +1890,43 @@ export class InvocationService {
 
   history(chatId: string) {
     return listChatMessages(chatId);
+  }
+
+  private publishAgentResidencyChange(change: AgentResidencyChange): void {
+    if (!change.chatId || !change.agentId) return;
+    for (const [runId, record] of this.activeRuns.entries()) {
+      if (record.chatId !== change.chatId) continue;
+      const locale = pickLocale(record.request);
+      const status = change.state === "running"
+        ? locale === "ko" ? "CLI 프로세스 실행 중" : "CLI process running"
+        : change.state === "idle"
+          ? locale === "ko" ? "CLI 프로세스 대기 중" : "CLI process idle"
+          : locale === "ko" ? "CLI 프로세스 닫힘" : "CLI process closed";
+      const displayAgentId = change.nodeId ?? change.agentId;
+      const sequence = record.events.reduce((max, event) => Math.max(max, event.sequence ?? 0), 0) + 1;
+      const event: McpInvocationEvent = {
+        kind: "tool-use",
+        status,
+        agentId: displayAgentId,
+        runtimeAgentId: change.agentId,
+        nodeId: displayAgentId,
+        agentName: displayAgentId,
+        agentLifecycle: {
+          source: "cli-process",
+          state: change.state,
+          reason: change.reason,
+          runtime: change.runtimeKind,
+        },
+        sequence,
+        observedAt: new Date().toISOString(),
+      };
+      record.events.push(event);
+      if (record.events.length > MAX_BUFFERED_EVENTS) {
+        record.events.splice(0, record.events.length - MAX_BUFFERED_EVENTS);
+      }
+      recordMcpInvocationEvent(runId, record.request, event);
+      this.publishEvent({ runId, chatId: record.chatId, event });
+    }
   }
 
   private publishEvent(envelope: InvocationEventEnvelope): void {

@@ -873,6 +873,7 @@ async function runCodexResidentTurn(input: {
       poolKey,
       {
         agentId: req.agentId ?? null,
+        nodeId: req.orchestrationAgentId ?? req.agentId ?? null,
         chatId,
         runtimeKind: KIND,
         source: resolveAgentResidencySource(req.agentId),

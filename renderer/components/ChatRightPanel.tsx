@@ -225,7 +225,7 @@ export function ChatRightPanel({
         )}
         {activeTab === "agent" && (
           <div style={agentTabStyle}>
-            {(Object.values(liveAgents).some((entry) => entry.active) || timeline.length > 0 || hasPipeline) ? <AgentNetworkPanel
+            {(Object.values(liveAgents).some((entry) => entry.active || entry.processState === "closed" || entry.processState === "failed") || timeline.length > 0 || hasPipeline) ? <AgentNetworkPanel
               embedded
               firm={firm}
               org={org}

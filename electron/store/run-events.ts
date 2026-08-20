@@ -364,6 +364,18 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     reasoningDurationMs: ev.reasoning?.durationMs,
     // end에만 전문이 온다(delta는 live 전용 — 아래에서 원장에 안 남긴다).
     reasoningText: ev.reasoning?.phase === "end" ? ev.reasoning?.text : undefined,
+    // Worker messaging and CLI process lifecycle are explicit durable facts.
+    // Keep them flat in the diagnostic payload so old ledger readers can
+    // replay the event without needing to understand a new nested schema.
+    agentProcessSource: ev.agentLifecycle?.source,
+    agentProcessState: ev.agentLifecycle?.state,
+    agentProcessReason: ev.agentLifecycle?.reason,
+    agentProcessRuntime: ev.agentLifecycle?.runtime,
+    agentMessageId: ev.agentMessage?.messageId,
+    agentMessageDirection: ev.agentMessage?.direction,
+    agentMessageFrom: ev.agentMessage?.fromAgentId,
+    agentMessageTo: ev.agentMessage?.toAgentId,
+    agentMessageText: ev.agentMessage?.text,
     permissions: req.permissions,
     toolMode: req.toolMode,
     hubMode: req.hubMode,

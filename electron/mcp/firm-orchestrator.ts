@@ -5,6 +5,7 @@
 //   모든 이벤트는 agentId/role/tier/phase로 태깅 → 렌더러 네트워크 패널 실시간 텔레메트리.
 import { randomUUID } from "node:crypto";
 import type {
+  AgentMessageDirection,
   ChatHistoryEntry,
   InstalledAgent,
   McpInvocationEvent,
@@ -263,6 +264,63 @@ function verificationResultOk(text: string, sessionOk: boolean): boolean {
 
 function stripVerificationVerdict(text: string): string {
   return text.replace(/<verification_verdict>\s*(?:PASS|FAIL)\s*<\/verification_verdict>/gi, "").trim();
+}
+
+const AGENT_MESSAGE_MAX_CHARS = 720;
+
+function boundedAgentMessage(text: string): string {
+  const compact = text.replace(/\s+/g, " ").trim();
+  if (!compact) return "";
+  return compact.length > AGENT_MESSAGE_MAX_CHARS
+    ? `${compact.slice(0, AGENT_MESSAGE_MAX_CHARS - 1)}…`
+    : compact;
+}
+
+/** Emit an explicit worker envelope. The full result remains in the parent
+ * prompt; only a bounded excerpt is exposed to the activity UI and ledger. */
+function emitAgentMessage(
+  p: FirmRunParams,
+  from: ResolvedNode,
+  to: ResolvedNode,
+  direction: AgentMessageDirection,
+  tier: 1 | 2 | 3,
+  text: string,
+): void {
+  const excerpt = boundedAgentMessage(text);
+  if (!excerpt) return;
+  const outgoing = direction === "orchestrator-to-worker";
+  p.sink({
+    kind: "tool-use",
+    status: p.locale === "ko"
+      ? outgoing ? `${from.name} → ${to.name} 메시지 전송` : `${from.name} → ${to.name} 결과 전달`
+      : outgoing ? `${from.name} → ${to.name} message sent` : `${from.name} → ${to.name} result sent`,
+    agentId: from.id,
+    runtimeAgentId: from.agentId ?? from.id,
+    nodeId: from.id,
+    agentName: from.name,
+    role: from.role,
+    tier,
+    phase: "delegate",
+    ...(outgoing ? { delegateTo: [to.id] } : {}),
+    agentMessage: {
+      messageId: randomUUID(),
+      direction,
+      fromAgentId: from.id,
+      toAgentId: to.id,
+      text: excerpt,
+    },
+  });
+}
+
+function emitDelegationMessages(
+  p: FirmRunParams,
+  from: ResolvedNode,
+  tier: 1 | 2,
+  targets: Array<{ node: ResolvedNode; brief: string }>,
+): void {
+  for (const target of targets) {
+    emitAgentMessage(p, from, target.node, "orchestrator-to-worker", tier, target.brief);
+  }
 }
 
 function latestTeamResultsAllOk(results: Array<{ node: ResolvedNode; result: string; ok: boolean }>): boolean {
@@ -613,6 +671,8 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
         : phase === "plan" && Boolean(turn.reports?.length)
           ? undefined
           : turn.chatId ?? undefined,
+      agentId: memoryOwnerId,
+      orchestrationAgentId: node.id,
       mcpConfigPath: phase === "plan" && Boolean(turn.reports?.length)
         ? undefined
         : p.req.agentAppMode
@@ -799,6 +859,7 @@ async function runDivision(
       phase: "delegate",
       delegateTo: matched.map((m) => m.node.id),
     });
+    emitDelegationMessages(p, division, 2, matched);
     const specResults = await parallelCap(matched, getAgentConcurrency(), async (m) => {
       const r = await runNodeTurnSafe(p, {
         node: m.node,
@@ -810,6 +871,7 @@ async function runDivision(
         divisionId: division.id,
         allocation: m.allocation,
       });
+      emitAgentMessage(p, m.node, division, "worker-to-orchestrator", 3, r.text);
       return { name: m.node.name, role: m.node.role, text: r.text, ok: r.ok };
     });
     // 실패한 전문가의 텍스트는 "(이름 응답 실패: …)" 같은 오류 문자열이다. status 없이 넘기면
@@ -950,6 +1012,7 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
     phase: "delegate",
     delegateTo: matched.map((m) => m.node.id),
   });
+  emitDelegationMessages(p, org.ceo, 1, matched);
   const initialStages = stageMatched(matched);
   mainStatus(
     initialStages.verification.length > 0
@@ -987,6 +1050,7 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
           divisionId: divisions[0]?.id,
           allocation: m.allocation,
         });
+        emitAgentMessage(p, m.node, org.ceo, "worker-to-orchestrator", 3, r.text);
         return {
           node: m.node,
           result: stripVerificationVerdict(r.text),
@@ -998,6 +1062,7 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
     return parallelCap(targets, getAgentConcurrency(), async (m) => {
       const brief = stagedPrompt(m.brief);
       const result = await runDivision(p, m.node as ResolvedDivision, brief, m.allocation);
+      emitAgentMessage(p, result.node, org.ceo, "worker-to-orchestrator", 2, result.result);
       return {
         ...result,
         result: stripVerificationVerdict(result.result),
@@ -1061,6 +1126,7 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
       usedDivisionIds.add(item.node.id);
       divisionAttempts.set(item.node.id, (divisionAttempts.get(item.node.id) ?? 0) + 1);
     }
+    emitDelegationMessages(p, org.ceo, 1, followupMatched);
     mainStatus(ko
       ? `추가로 필요한 ${followupMatched.length}개 작업 슬롯 실행 중…`
       : `Running ${followupMatched.length} newly required work slot(s)…`);

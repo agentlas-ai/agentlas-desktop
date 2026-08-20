@@ -21,7 +21,19 @@ import type {
   ToolFactoryScaffoldResult,
   ToolFactoryToolRecord,
 } from "@/lib/types";
-import type { ChatGoalContext, InvocationRunReceipt, OrchestrationTarget, Recommendation, RecExecChoice, RecRouterAgent, RecStage, RunEventUi, RuntimeSelection } from "@shared/types";
+import type {
+  AgentMessageDirection,
+  AgentProcessState,
+  ChatGoalContext,
+  InvocationRunReceipt,
+  OrchestrationTarget,
+  Recommendation,
+  RecExecChoice,
+  RecRouterAgent,
+  RecStage,
+  RunEventUi,
+  RuntimeSelection,
+} from "@shared/types";
 import { ChatStream, type StreamMessage, type StreamStep, type PipelineStage } from "@/components/ChatStream";
 import { ToolApprovalInline } from "@/components/ToolApprovalInline";
 import { normalizeToolCall } from "@shared/tool-call-detail";
@@ -454,6 +466,13 @@ const DURABLE_WORKFLOW_EVENT_RE =
 
 function durableWorkflowLabel(event: RunEventUi, locale: "ko" | "en"): string {
   const ko = locale === "ko";
+  const processState = typeof event.payload.agentProcessState === "string"
+    ? event.payload.agentProcessState
+    : "";
+  if (processState === "closed") return ko ? "CLI 프로세스 닫힘" : "CLI process closed";
+  if (processState === "failed") return ko ? "CLI 프로세스 실패" : "CLI process failed";
+  if (processState === "idle") return ko ? "CLI 프로세스 대기 중" : "CLI process idle";
+  if (processState === "running") return ko ? "CLI 프로세스 실행 중" : "CLI process running";
   const status = typeof event.payload.status === "string" ? event.payload.status.trim() : "";
   const state = typeof event.payload.state === "string" ? event.payload.state.trim() : "";
   if (status) return status;
@@ -483,11 +502,22 @@ function workflowSnapshotFromLedger(
   const liveAgents: Record<string, LiveAgent> = {};
   const timeline: NetTimelineItem[] = [];
   for (const event of events) {
-    if (!DURABLE_WORKFLOW_EVENT_RE.test(event.kind)) continue;
-    const agentId = event.nodeId || event.agentId;
+    const processState = typeof event.payload.agentProcessState === "string"
+      ? event.payload.agentProcessState as AgentProcessState
+      : undefined;
+    const messageText = typeof event.payload.agentMessageText === "string"
+      ? event.payload.agentMessageText.trim()
+      : "";
+    const isDurableMcpAgentEvent = event.kind.startsWith("mcp_") && Boolean(
+      event.agentId || event.nodeId || processState || messageText,
+    );
+    if (!DURABLE_WORKFLOW_EVENT_RE.test(event.kind) && !isDurableMcpAgentEvent) continue;
+    const agentId = event.nodeId || event.agentId || (typeof event.payload.agentMessageFrom === "string" ? event.payload.agentMessageFrom : "");
     if (!agentId) continue;
     const role =
-      typeof event.payload.phase === "string"
+      typeof event.payload.role === "string"
+        ? event.payload.role
+        : typeof event.payload.phase === "string"
         ? event.payload.phase
         : typeof event.payload.modelRole === "string"
           ? event.payload.modelRole
@@ -495,22 +525,33 @@ function workflowSnapshotFromLedger(
     const model = typeof event.payload.model === "string" ? event.payload.model : undefined;
     const tokensValue = Number(event.payload.tokens);
     const tokens = Number.isFinite(tokensValue) && tokensValue > 0 ? tokensValue : undefined;
-    const text = durableWorkflowLabel(event, locale);
+    const direction = event.payload.agentMessageDirection === "orchestrator-to-worker" || event.payload.agentMessageDirection === "worker-to-orchestrator"
+      ? event.payload.agentMessageDirection as AgentMessageDirection
+      : undefined;
+    const text = messageText || durableWorkflowLabel(event, locale);
     liveAgents[agentId] = {
-      name: event.agentId || event.nodeId || agentId,
+      ...(liveAgents[agentId] ?? {}),
+      name: typeof event.payload.agentName === "string" ? event.payload.agentName : event.agentId || event.nodeId || agentId,
       role,
-      active: false,
+      active: processState === "running",
       status: text,
       model,
+      ...(processState ? { processState } : {}),
+      ...(typeof event.payload.agentProcessRuntime === "string" ? { processRuntime: event.payload.agentProcessRuntime } : {}),
     };
     timeline.push({
       key: `ledger:${event.id}`,
       agentId,
-      name: event.agentId || event.nodeId || agentId,
+      name: typeof event.payload.agentName === "string" ? event.payload.agentName : event.agentId || event.nodeId || agentId,
       role,
-      kind: event.kind === "workload_allocation" ? "tool" : "status",
+      kind: messageText
+        ? "message"
+        : event.kind === "workload_allocation" ? "tool" : "status",
       text,
       tokens,
+      ...(direction ? { messageDirection: direction } : {}),
+      ...(typeof event.payload.agentMessageFrom === "string" ? { messageFrom: event.payload.agentMessageFrom } : {}),
+      ...(typeof event.payload.agentMessageTo === "string" ? { messageTo: event.payload.agentMessageTo } : {}),
     });
   }
   return { liveAgents, timeline: timeline.slice(-80) };
@@ -1226,12 +1267,57 @@ function ChatPage() {
       };
 
       // ── 속성(agentId) 이벤트 → 네트워크 패널 (메인 버블 안 건드림) ──
-      if (ev.agentId) {
-        const aid = ev.agentId;
+      if (ev.agentId || ev.agentMessage?.fromAgentId) {
+        const aid = ev.agentId ?? ev.agentMessage!.fromAgentId;
+        if (ev.agentMessage) {
+          appendTimeline(setNetTimeline, {
+            key: uid(),
+            agentId: aid,
+            name: ev.agentName ?? aid,
+            role: ev.role ?? "",
+            tier: ev.tier,
+            kind: "message",
+            text: ev.agentMessage.text,
+            messageDirection: ev.agentMessage.direction,
+            messageFrom: ev.agentMessage.fromAgentId,
+            messageTo: ev.agentMessage.toAgentId,
+            delegateTo: ev.delegateTo,
+          });
+        }
+        if (ev.agentLifecycle) {
+          const lifecycleText = ev.status?.trim() || (
+            ev.agentLifecycle.state === "closed"
+              ? locale === "ko" ? "CLI 프로세스 닫힘" : "CLI process closed"
+              : ev.agentLifecycle.state === "idle"
+                ? locale === "ko" ? "CLI 프로세스 대기 중" : "CLI process idle"
+                : ev.agentLifecycle.state === "failed"
+                  ? locale === "ko" ? "CLI 프로세스 실패" : "CLI process failed"
+                  : locale === "ko" ? "CLI 프로세스 실행 중" : "CLI process running"
+          );
+          appendTimeline(setNetTimeline, {
+            key: uid(),
+            agentId: aid,
+            name: ev.agentName ?? aid,
+            role: ev.role ?? "",
+            tier: ev.tier,
+            kind: "status",
+            text: lifecycleText,
+            tokens: ev.tokens,
+          });
+        }
         // per-node 완료 신호 — 그 노드만 비활성(▶→✓)으로 정리하고 종료. (전체 active 리셋과 별개)
         if (ev.done) {
           setLiveAgents((prev) =>
-            prev[aid] ? { ...prev, [aid]: { ...prev[aid], active: false } } : prev,
+            prev[aid]
+              ? {
+                  ...prev,
+                  [aid]: {
+                    ...prev[aid],
+                    active: false,
+                    ...(ev.agentLifecycle ? { processState: ev.agentLifecycle.state, processRuntime: ev.agentLifecycle.runtime } : {}),
+                  },
+                }
+              : prev,
           );
           appendTimeline(setNetTimeline, {
             key: uid(),
@@ -1252,13 +1338,22 @@ function ChatPage() {
             name: ev.agentName ?? prev[aid]?.name ?? aid,
             role: ev.role ?? prev[aid]?.role ?? "",
             tier: ev.tier ?? prev[aid]?.tier,
-            active: true,
+            active: ev.agentLifecycle
+              ? ev.agentLifecycle.state === "running"
+              : ev.agentMessage
+                ? Boolean(prev[aid]?.active)
+                : true,
             status: ev.status ?? prev[aid]?.status,
             delegateTo: ev.delegateTo ?? prev[aid]?.delegateTo,
             model: ev.model ?? prev[aid]?.model,
+            ...(ev.agentLifecycle
+              ? { processState: ev.agentLifecycle.state, processRuntime: ev.agentLifecycle.runtime }
+              : prev[aid]?.processState
+                ? { processState: prev[aid].processState, processRuntime: prev[aid].processRuntime }
+                : {}),
           },
         }));
-        if (ev.kind === "tool-use") {
+        if (!ev.agentMessage && !ev.agentLifecycle && ev.kind === "tool-use") {
           const label = ev.tool ? toolWorkflowText(ev.tool, locale) : ev.status?.trim() ?? "";
           if (label) {
             appendTimeline(setNetTimeline, {
@@ -1275,7 +1370,7 @@ function ChatPage() {
                 delegateTo: ev.delegateTo,
             });
           }
-        } else if (ev.kind === "thinking" && ev.status?.trim()) {
+        } else if (!ev.agentMessage && !ev.agentLifecycle && ev.kind === "thinking" && ev.status?.trim()) {
           appendTimeline(setNetTimeline, {
               key: uid(),
               agentId: aid,
@@ -1301,6 +1396,25 @@ function ChatPage() {
               delegateTo: ev.delegateTo,
               activity: activityForEvent(ev),
             };
+            if (ev.agentMessage) {
+              const directionLabel = ev.agentMessage.direction === "orchestrator-to-worker"
+                ? (locale === "ko" ? "메시지 전송됨" : "Message sent")
+                : (locale === "ko" ? "결과 전달됨" : "Result sent");
+              return {
+                ...msg,
+                steps: [
+                  ...steps,
+                  {
+                    id: uid(),
+                    kind: "thinking",
+                    text: `${directionLabel} · ${ev.agentMessage.text}`,
+                    createdAt: Date.now(),
+                    ...meta,
+                    activity: "handoff",
+                  },
+                ],
+              };
+            }
             if (ev.kind === "tool-use" && ev.tool) {
               return {
                 ...msg,

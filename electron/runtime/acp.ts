@@ -728,6 +728,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       if (poolKey) {
         lease = await pool.acquire(poolKey, {
           agentId: req.agentId ?? null,
+          nodeId: req.orchestrationAgentId ?? req.agentId ?? null,
           chatId: req.chatId ?? null,
           runtimeKind: spec.id,
           source: resolveAgentResidencySource(req.agentId),

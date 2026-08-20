@@ -21,6 +21,9 @@ export interface LiveAgent {
   delegateTo?: string[];
   /** 이 에이전트가 실행 중인 모델/런타임 라벨 (예: "grok-4.3", "claude") */
   model?: string;
+  /** Resident CLI process state. This is deliberately separate from `active` turn state. */
+  processState?: "running" | "idle" | "closed" | "failed";
+  processRuntime?: string;
 }
 
 /** 타임라인 항목 — discrete 활동/위임. */
@@ -30,7 +33,7 @@ export interface NetTimelineItem {
   name: string;
   role: string;
   tier?: 1 | 2 | 3;
-  kind: "status" | "tool" | "handoff";
+  kind: "status" | "tool" | "handoff" | "message";
   text: string;
   // ── 영수증(receipt)용 실측 필드 — 이벤트가 줄 때만 채워진다. 없으면 생략(지어내지 않음). ──
   /** 사용한 도구 이름 — tool 이벤트의 tool.name */
@@ -39,6 +42,9 @@ export interface NetTimelineItem {
   tokens?: number;
   /** 위임/핸드오프 대상 노드 id 들 — handoff 카드의 "to" */
   delegateTo?: string[];
+  messageDirection?: "orchestrator-to-worker" | "worker-to-orchestrator";
+  messageFrom?: string;
+  messageTo?: string;
 }
 
 interface Props {
@@ -146,7 +152,12 @@ export function AgentNetworkPanel({
   ), [agent, agents, liveAgents, locale]);
   const visibleTimeline = useMemo<NetTimelineItem[]>(() => timeline.flatMap((item) => {
     if (isInternalSystemRole(item.agentId, item.name, item.role)) return [];
-    const text = cleanAgentStatus(item.text);
+    // Agent messages are user-facing bounded excerpts, not runtime status. Do
+    // not run them through the status scrubber, which intentionally removes
+    // words such as "read" and "write" from internal CLI chatter.
+    const text = item.kind === "message"
+      ? item.text.replace(/\s+/g, " ").trim()
+      : cleanAgentStatus(item.text);
     return text ? [{ ...item, text }] : [];
   }), [timeline]);
 
@@ -416,7 +427,15 @@ function LiveBadge({ label }: { label: string }) {
   );
 }
 
-type SoloRosterEntry = { key: string; name: string; role?: string; active: boolean; borrowed: boolean; primary: boolean };
+type SoloRosterEntry = {
+  key: string;
+  name: string;
+  role?: string;
+  active: boolean;
+  borrowed: boolean;
+  primary: boolean;
+  processState?: LiveAgent["processState"];
+};
 
 /**
  * Solo-view roster: the primary (main) agent plus any additional/borrowed
@@ -439,6 +458,7 @@ function soloAgentRoster(liveAgents: Record<string, LiveAgent>, agentName?: stri
       active: agent.active,
       borrowed,
       primary: !borrowed && (agent.tier ?? 1) === 1,
+      processState: agent.processState,
     });
   }
   const boundName = agentName?.trim();
@@ -471,10 +491,19 @@ function SoloAgentSummary({
   const roster = soloAgentRoster(liveAgents, agentName);
   const primary = roster.find((entry) => entry.primary) ?? roster[0];
   const additional = roster.filter((entry) => entry !== primary);
-  const isRunning = Boolean(primary?.active || busy);
+  const processClosed = primary?.processState === "closed";
+  const processFailed = primary?.processState === "failed";
+  const processIdle = primary?.processState === "idle";
+  const isRunning = Boolean(!processClosed && !processFailed && !processIdle && (primary?.active || busy));
   const hasHistory = timeline.length > 0;
   const hasFailureSignal = timelineHasFailureSignal(timeline);
-  const stateWord = isRunning
+  const stateWord = processClosed
+    ? (locale === "ko" ? "CLI 닫힘" : "CLI closed")
+    : processFailed
+      ? (locale === "ko" ? "CLI 실패" : "CLI failed")
+      : processIdle
+        ? (locale === "ko" ? "CLI 대기 중" : "CLI idle")
+      : isRunning
     ? (locale === "ko" ? "실행 중" : "Running")
     : hasFailureSignal
       ? (locale === "ko" ? "검토 필요" : "Needs review")
@@ -503,6 +532,7 @@ function SoloAgentSummary({
               {additional.map((entry) => (
                 <span key={entry.key} style={soloAgentChipStyle(entry.active)} title={entry.role}>
                   {entry.borrowed && <span aria-hidden style={soloBorrowMarkStyle}>↗</span>}
+                  {entry.processState === "closed" && <span aria-hidden style={soloBorrowMarkStyle}>×</span>}
                   {entry.name}
                 </span>
               ))}
@@ -577,13 +607,17 @@ function soloWaterfallItems(timeline: NetTimelineItem[], locale: "ko" | "en"): S
   return timeline
     .slice(-14)
     .map<SoloWaterfallItem | null>((item) => {
-      const text = cleanSoloStatus(item.text, locale, true);
+      const text = item.kind === "message"
+        ? item.text.replace(/\s+/g, " ").trim()
+        : cleanSoloStatus(item.text, locale, true);
       if (!text) return null;
       const label =
         item.kind === "tool"
           ? locale === "ko" ? "툴 액션" : "Tool action"
           : item.kind === "handoff"
             ? locale === "ko" ? "위임" : "Handoff"
+            : item.kind === "message"
+              ? locale === "ko" ? "메시지" : "Message"
             : /skill|스킬/i.test(item.text)
               ? locale === "ko" ? "스킬 사용" : "Skill use"
               : /완료|done|completed/i.test(item.text)
@@ -596,7 +630,9 @@ function soloWaterfallItems(timeline: NetTimelineItem[], locale: "ko" | "en"): S
 
 function latestSoloTimelineText(timeline: NetTimelineItem[], locale: "ko" | "en", busy: boolean): string {
   for (let i = timeline.length - 1; i >= 0; i -= 1) {
-    const cleaned = cleanSoloStatus(timeline[i].text, locale, busy);
+    const cleaned = timeline[i].kind === "message"
+      ? timeline[i].text.replace(/\s+/g, " ").trim()
+      : cleanSoloStatus(timeline[i].text, locale, busy);
     if (cleaned) return cleaned;
   }
   return busy ? (locale === "ko" ? "응답 준비 중" : "Preparing response") : (locale === "ko" ? "메시지를 보내면 상태가 표시됩니다" : "Send a message to show status");
@@ -619,7 +655,7 @@ function cleanSoloStatus(value: string, locale: "ko" | "en", busy: boolean): str
  * 한 그룹에서 2개 이상의 워커가 동시 실행이거나 본부가 2개 이상 동시 실행이면 `∥` 병렬 마커를 단다.
  * 팀/조직(roster)이 없으면(단일 에이전트) 병렬 프레이밍을 쓰지 않고 단독 작업 뷰로 표시한다.
  */
-type OrchStatus = "running" | "done" | "pending";
+type OrchStatus = "running" | "idle" | "done" | "pending" | "closed" | "failed";
 
 function OrchestrationTree({
   roster,
@@ -640,6 +676,10 @@ function OrchestrationTree({
 
   // per-agent 라이프사이클: active 플래그(라이브) + 과거 이벤트(=실행됨=완료). done 이벤트가 active를 끈다.
   const statusOf = (key: string): OrchStatus => {
+    const processState = liveAgents[key]?.processState;
+    if (processState === "failed") return "failed";
+    if (processState === "closed") return "closed";
+    if (processState === "idle") return "idle";
     if (liveAgents[key]?.active) return "running";
     const seen = liveAgents[key] !== undefined || timeline.some((it) => it.agentId === key);
     return seen ? "done" : "pending";
@@ -663,10 +703,14 @@ function OrchestrationTree({
   // 실행 이벤트를 안 내므로, 자식이 일하는데 부모만 회색으로 멈춰 보이는 모순을 막는다.)
   const groupStatusOf = (div: RosterDivision): OrchStatus => {
     const own = statusOf(div.key);
+    if (own === "failed" || own === "closed") return own;
     if (own === "running") return "running";
     const childStatuses = div.specialists.map((s) => statusOf(s.key));
+    if (childStatuses.some((s) => s === "failed")) return "failed";
     if (childStatuses.some((s) => s === "running")) return "running";
     const seen = childStatuses.filter((s) => s !== "pending");
+    if (seen.length > 0 && seen.every((s) => s === "closed")) return "closed";
+    if (seen.length > 0 && seen.every((s) => s === "idle")) return "idle";
     if (div.specialists.length > 0 && seen.length === div.specialists.length) return "done";
     if (seen.length > 0) return "running"; // 일부 진행했지만 전부 완료 전 → 아직 작업 중
     return own; // pending(또는 본부 자체 done)
@@ -699,12 +743,18 @@ function OrchestrationTree({
   const isEmpty = !hasRoster && flatNodes.length === 0 && !busy;
   const hasHistoricalActivity = !busy && activeCount === 0 && timeline.length > 0;
   const hasFailureSignal = timelineHasFailureSignal(timeline);
+  const hasClosedProcess = Object.values(liveAgents).some((agent) => agent.processState === "closed");
+  const hasIdleProcess = Object.values(liveAgents).some((agent) => agent.processState === "idle");
 
   const statusWord =
     activeCount > 0
       ? ko ? "실행 중" : "running"
       : busy
         ? ko ? "위임 중…" : "delegating…"
+        : hasClosedProcess
+          ? ko ? "CLI 닫힘" : "CLI closed"
+        : hasIdleProcess
+          ? ko ? "CLI 대기 중" : "CLI idle"
         : hasFailureSignal
           ? ko ? "검토 필요" : "needs review"
           : hasHistoricalActivity
@@ -814,6 +864,31 @@ function OrchestrationTree({
           ))}
         </div>
       )}
+      <AgentMessageFeed timeline={timeline} locale={locale} />
+    </section>
+  );
+}
+
+function AgentMessageFeed({ timeline, locale }: { timeline: NetTimelineItem[]; locale: "ko" | "en" }) {
+  const messages = timeline.filter((item) => item.kind === "message").slice(-6);
+  if (messages.length === 0) return null;
+  const ko = locale === "ko";
+  return (
+    <section style={agentMessageFeedStyle} aria-label={ko ? "에이전트 메시지" : "Agent messages"}>
+      <div style={agentMessageFeedTitleStyle}>{ko ? "메시지 흐름" : "Message flow"}</div>
+      {messages.map((item) => {
+        const outbound = item.messageDirection === "orchestrator-to-worker";
+        return (
+          <article key={item.key} style={agentMessageCardStyle(outbound)}>
+            <div style={agentMessageMetaStyle}>
+              <span>{outbound ? "↗" : "↙"}</span>
+              <span>{item.name}</span>
+              <span style={{ color: RETRO.muted }}>→ {item.messageTo || (ko ? "상위 에이전트" : "parent")}</span>
+            </div>
+            <div style={agentMessageTextStyle}>{item.text}</div>
+          </article>
+        );
+      })}
     </section>
   );
 }
@@ -906,13 +981,21 @@ function PixelAvatar({
   // 비비드 캐릭터 — 에이전트마다 시드 기반 선명한 hue (라이트/다크 양쪽에서 잘 보임).
   const hue = hashSeed(`${seed}:hue`) % 360;
   const tone =
-    status === "pending"
+    status === "pending" || status === "closed"
       ? "var(--muted)"
+      : status === "failed"
+        ? "#EF4444"
       : kind === "orchestrator"
         ? "#F59E0B"
         : `hsl(${hue} 72% 52%)`;
   const pip =
-    status === "running" ? RETRO.amber : status === "done" ? RETRO.green : RETRO.muted;
+    status === "running"
+      ? RETRO.amber
+      : status === "done"
+        ? RETRO.green
+        : status === "failed"
+          ? "#EF4444"
+          : RETRO.muted;
   return (
     <span style={avatarChipStyle(status, size)}>
       <svg
@@ -920,7 +1003,7 @@ function PixelAvatar({
         height={inner}
         viewBox={`0 0 ${N} ${N}`}
         shapeRendering="crispEdges"
-        style={{ display: "block", imageRendering: "pixelated", opacity: status === "pending" ? 0.7 : 1 }}
+        style={{ display: "block", imageRendering: "pixelated", opacity: status === "pending" || status === "closed" ? 0.7 : 1 }}
         aria-hidden
       >
         {grid.flatMap((row, y) =>
@@ -970,7 +1053,17 @@ function AgentRow({
 }) {
   const ko = locale === "ko";
   const code = codenameFor(node.key);
-  const statusWord = status === "done" ? (ko ? "✓ 완료" : "✓ done") : status === "running" ? (ko ? "작업 중" : "working") : (ko ? "대기" : "idle");
+  const statusWord = status === "done"
+    ? (ko ? "✓ 완료" : "✓ done")
+      : status === "running"
+        ? (ko ? "작업 중" : "working")
+        : status === "idle"
+          ? (ko ? "CLI 대기" : "CLI idle")
+        : status === "closed"
+        ? (ko ? "× CLI 닫힘" : "× CLI closed")
+        : status === "failed"
+          ? (ko ? "! 실패" : "! failed")
+          : (ko ? "대기" : "idle");
   const roleLabel =
     node.role ||
     (kind === "orchestrator"
@@ -1007,6 +1100,7 @@ function workflowActivityRows(timeline: NetTimelineItem[], locale: "ko" | "en") 
   const handoff = timeline.filter((item) => item.kind === "handoff").length;
   const tool = timeline.filter((item) => item.kind === "tool").length;
   const status = timeline.filter((item) => item.kind === "status").length;
+  const message = timeline.filter((item) => item.kind === "message").length;
   const command = Math.max(0, tool - handoff);
   const read = timeline.filter((item) => /read|읽기|파일/i.test(item.text)).length;
   const primary =
@@ -1015,8 +1109,8 @@ function workflowActivityRows(timeline: NetTimelineItem[], locale: "ko" | "en") 
       : `Read ${read} file${read === 1 ? "" : "s"}, ran ${command} command${command === 1 ? "" : "s"}, used ${tool} tool${tool === 1 ? "" : "s"}`;
   const secondary =
     locale === "ko"
-      ? `위임 ${handoff}개, 상태 ${status}개`
-      : `${handoff} delegation${handoff === 1 ? "" : "s"}, ${status} update${status === 1 ? "" : "s"}`;
+      ? `위임 ${handoff}개, 메시지 ${message}개, 상태 ${status}개`
+      : `${handoff} delegation${handoff === 1 ? "" : "s"}, ${message} message${message === 1 ? "" : "s"}, ${status} update${status === 1 ? "" : "s"}`;
   return [
     { label: primary },
     { label: secondary },
@@ -1509,6 +1603,50 @@ const orchWrapStyle: CSSProperties = {
   overflow: "hidden",
 };
 
+const agentMessageFeedStyle: CSSProperties = {
+  display: "grid",
+  gap: 6,
+  marginTop: 10,
+  paddingTop: 10,
+  borderTop: `1px dashed ${RETRO.edge}`,
+};
+
+const agentMessageFeedTitleStyle: CSSProperties = {
+  color: RETRO.inkSoft,
+  fontSize: 9.5,
+  fontWeight: 800,
+  letterSpacing: 1.1,
+  textTransform: "uppercase",
+  fontFamily: RETRO_MONO,
+};
+
+function agentMessageCardStyle(outbound: boolean): CSSProperties {
+  return {
+    borderRadius: 8,
+    border: `1px solid ${outbound ? RETRO.edgeRun : RETRO.edgeDone}`,
+    background: outbound ? RETRO.cardRun : RETRO.cardDone,
+    padding: "7px 8px",
+  };
+}
+
+const agentMessageMetaStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 5,
+  color: RETRO.inkSoft,
+  fontSize: 9.5,
+  fontWeight: 750,
+  fontFamily: RETRO_MONO,
+};
+
+const agentMessageTextStyle: CSSProperties = {
+  marginTop: 4,
+  color: RETRO.inkSoft,
+  fontSize: 10.8,
+  lineHeight: 1.45,
+  overflowWrap: "anywhere",
+};
+
 const orchHeaderStyle: CSSProperties = {
   display: "flex",
   alignItems: "center",
@@ -1572,20 +1710,24 @@ const orchWorkersStyle: CSSProperties = {
 function agentRowStyle(kind: "orchestrator" | "group" | "worker", status: OrchStatus): CSSProperties {
   const running = status === "running";
   const done = status === "done";
+  const closed = status === "closed";
+  const failed = status === "failed";
   return {
     display: "flex",
     alignItems: "center",
     gap: 9,
     borderRadius: 9,
     // 상태 3단 구분: 실행 중=앰버, 완료=그린 톤, 대기=흐림 — 어느 단계인지 색만으로 읽히게.
-    border: `1px solid ${
+    border: `${closed ? "1px dashed" : "1px solid"} ${
       kind === "orchestrator"
         ? RETRO.edgeRun
         : running
           ? RETRO.edgeRun
           : done
             ? RETRO.edgeDone
-            : RETRO.edge
+            : failed
+              ? "color-mix(in srgb, #EF4444 42%, var(--paper-edge))"
+              : RETRO.edge
     }`,
     background:
       kind === "orchestrator"
@@ -1594,14 +1736,20 @@ function agentRowStyle(kind: "orchestrator" | "group" | "worker", status: OrchSt
           ? RETRO.cardRun
           : done
             ? RETRO.cardDone
-            : RETRO.card,
+            : failed
+              ? "color-mix(in srgb, #EF4444 7%, var(--paper))"
+              : closed
+                ? "color-mix(in srgb, var(--muted-deep) 5%, var(--paper))"
+                : RETRO.card,
     padding: kind === "worker" ? "6px 8px" : "8px 9px",
-    opacity: status === "pending" ? 0.6 : 1,
+    opacity: status === "pending" || status === "closed" ? 0.68 : 1,
   };
 }
 
 function avatarChipStyle(status: OrchStatus, size: number): CSSProperties {
   const running = status === "running";
+  const failed = status === "failed";
+  const closed = status === "closed";
   return {
     position: "relative",
     flexShrink: 0,
@@ -1611,8 +1759,12 @@ function avatarChipStyle(status: OrchStatus, size: number): CSSProperties {
     display: "inline-flex",
     alignItems: "center",
     justifyContent: "center",
-    background: running ? "color-mix(in srgb, #F59E0B 13%, var(--paper-2))" : "var(--paper-2)",
-    border: `1px solid ${running ? RETRO.edgeRun : RETRO.edge}`,
+    background: running
+      ? "color-mix(in srgb, #F59E0B 13%, var(--paper-2))"
+      : failed
+        ? "color-mix(in srgb, #EF4444 10%, var(--paper-2))"
+        : "var(--paper-2)",
+    border: `1px ${closed ? "dashed" : "solid"} ${running ? RETRO.edgeRun : failed ? "color-mix(in srgb, #EF4444 42%, var(--paper-edge))" : RETRO.edge}`,
     boxShadow: running ? `0 0 10px -3px color-mix(in srgb, ${RETRO.amber} 45%, transparent)` : undefined,
   };
 }
@@ -1631,7 +1783,11 @@ function agentNameStyle(kind: "orchestrator" | "group" | "worker", status: OrchS
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
-    color: status === "pending" ? RETRO.inkSoft : kind === "orchestrator" ? RETRO.amber : RETRO.ink,
+    color: status === "pending" || status === "closed"
+      ? RETRO.inkSoft
+      : status === "failed"
+        ? "#EF4444"
+        : kind === "orchestrator" ? RETRO.amber : RETRO.ink,
     fontSize: kind === "worker" ? 12 : 12.5,
     fontWeight: 800,
     letterSpacing: 0.3,
@@ -1720,7 +1876,13 @@ function modelPillStyle(status: OrchStatus): CSSProperties {
 // 상태 워드 — 작업 중(앰버) · 완료(그린) · 대기(muted).
 function statusWordStyle(status: OrchStatus): CSSProperties {
   return {
-    color: status === "running" ? RETRO.amber : status === "done" ? RETRO.green : RETRO.muted,
+    color: status === "running"
+      ? RETRO.amber
+      : status === "done"
+        ? RETRO.green
+        : status === "failed"
+          ? "#EF4444"
+          : RETRO.muted,
     fontWeight: 700,
   };
 }

@@ -142,6 +142,8 @@ export interface RunnerRequest {
    * 에이전트 스코프 능력 규칙(capability_grants)의 대상이 된다.
    */
   agentId?: string;
+  /** Firm/resolved-org node identity used only to map runtime lifecycle events back to the UI tree. */
+  orchestrationAgentId?: string;
   /**
    * 임시/비채팅 표면(Build 등)이 직접 넘기는 CLI 세션 id. 설정되면 러너는 가능한 경우 이 세션에서
    * 이어가고, 결과의 sessionId를 호출자가 다음 턴에 보관한다.

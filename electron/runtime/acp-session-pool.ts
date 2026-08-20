@@ -23,9 +23,11 @@ import {
   touchAgentResidency,
   type AgentResidencySource,
 } from "./agent-residency";
+import type { AgentProcessLifecycleReason } from "../../shared/types";
 
 export interface AcpPoolMeta {
   agentId?: string | null;
+  nodeId?: string | null;
   chatId?: string | null;
   runtimeKind: string;
   source?: AgentResidencySource;
@@ -102,7 +104,7 @@ export class AcpSessionPool<S> {
       if (entry.inUse) continue;
       let alive = false;
       try { alive = this.opts.alive(entry.session); } catch { alive = false; }
-      if (!alive) this.remove(entry, { close: true });
+      if (!alive) this.remove(entry, { close: true, reason: "process-exit" });
     }
   }
 
@@ -118,7 +120,7 @@ export class AcpSessionPool<S> {
       // 전부 사용 중이면 더 닫을 것이 없다 — 실행 슬롯(run-slots)이 이미 동시 실행을
       // 같은 예산으로 막고 있으므로, 여기서 실행을 거절하지는 않는다.
       if (!victim) return;
-      this.remove(victim, { close: true });
+      this.remove(victim, { close: true, reason: "evicted" });
     }
   }
 
@@ -155,6 +157,7 @@ export class AcpSessionPool<S> {
     registerAgentResidency({
       key: entry.residencyKey,
       agentId: meta.agentId ?? null,
+      nodeId: meta.nodeId ?? meta.agentId ?? null,
       chatId: meta.chatId ?? null,
       runtimeKind: meta.runtimeKind,
       ...(meta.source ? { source: meta.source } : {}),
@@ -163,7 +166,7 @@ export class AcpSessionPool<S> {
       inUse: true,
       // 리퍼(12h)와 호스트 종료가 이 세션을 놓는 방법 — 등록소는 이것만 안다.
       // 풀 목록에서도 함께 빠진다(등록소만 지우면 죽은 항목이 재사용 후보로 남는다).
-      close: () => this.remove(entry, { close: true }),
+      close: () => this.remove(entry, { close: true, reason: "shutdown" }),
       now: entry.lastActivityAt,
     });
     const lease: AcpSessionLease<S> = { key, session, fresh: true };
@@ -179,7 +182,7 @@ export class AcpSessionPool<S> {
     let alive = false;
     try { alive = this.opts.alive(entry.session); } catch { alive = false; }
     if (!alive) {
-      this.remove(entry, { close: true });
+      this.remove(entry, { close: true, reason: "process-exit" });
       return;
     }
     entry.inUse = false;
@@ -196,7 +199,7 @@ export class AcpSessionPool<S> {
     const entry = this.leases.get(lease);
     if (!entry) return;
     this.leases.delete(lease);
-    this.remove(entry, { close: true });
+    this.remove(entry, { close: true, reason: "error" });
   }
 
   /** 12h 무입력 리퍼. 사용 중·면제(One)는 건드리지 않는다. 반환: 닫은 수. */
@@ -206,7 +209,7 @@ export class AcpSessionPool<S> {
     for (const entry of [...this.entries]) {
       if (entry.inUse || entry.reaperExempt) continue;
       if (entry.lastActivityAt > cutoff) continue;
-      this.remove(entry, { close: true });
+      this.remove(entry, { close: true, reason: "reaped" });
       closed += 1;
     }
     return closed;
@@ -214,7 +217,7 @@ export class AcpSessionPool<S> {
 
   /** 붙든 세션 전부를 닫는다(호스트 종료·런타임 교체). */
   disposeAll(): void {
-    for (const entry of [...this.entries]) this.remove(entry, { close: true });
+    for (const entry of [...this.entries]) this.remove(entry, { close: true, reason: "shutdown" });
   }
 
   /** 진단용 — 붙든 수 / 유휴 수. */
@@ -226,12 +229,15 @@ export class AcpSessionPool<S> {
     try { this.opts.close(entry.session); } catch { /* 이미 죽었을 수 있다 */ }
   }
 
-  private remove(entry: PoolEntry<S>, opts: { close: boolean }): void {
+  private remove(
+    entry: PoolEntry<S>,
+    opts: { close: boolean; reason?: AgentProcessLifecycleReason },
+  ): void {
     const index = this.entries.indexOf(entry);
     if (index >= 0) this.entries.splice(index, 1);
     // 등록소 항목을 먼저 지운다 — close 를 두 번 부르지 않기 위해서(등록소의 close 가
     // 곧 이 세션을 닫는 함수다).
-    dropAgentResidency(entry.residencyKey);
+    dropAgentResidency(entry.residencyKey, { reason: opts.reason });
     if (opts.close) this.closeEntry(entry);
   }
 }
