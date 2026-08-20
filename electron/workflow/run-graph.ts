@@ -1382,6 +1382,76 @@ export async function runGraph(
   const completed = new Set(checkpoint.completedNodeIds);
   const skipped = new Set(checkpoint.skippedNodeIds);
   const blockedEdges = new Set(checkpoint.blockedEdgeIds);
+  /*
+   * ★**요청이 바뀌면 그 요청을 쓴 단계는 다시 해야 한다.**
+   *
+   *   위에서 새 입력이 지난 값을 이기게 했는데(vars 병합), 그것만으로는 반쪽이었다.
+   *   실측 2026-08-20: 값을 잘못 넣어 실패한 뒤 올바른 값으로 다시 실행하면
+   *     · 커널의 vars 에는 **새 값이 제대로 들어가 있고**
+   *     · 그 값을 읽는 단계는 "지난번에 끝났다"고 건너뛰어져 **옛 산출물이 재사용**됐다.
+   *   그래서 화면에는 새 값이 보이는데 결과물은 옛 값으로 만들어진다 — 가장 헷갈리는 실패다.
+   *   (PPT 자동화 실측: vars.summary 는 "제대로 된 요약 문장", 파일 안은 빈 문자열.)
+   *
+   *   재개가 복원해야 하는 것은 **이미 한 일의 결과**이지, 그 일이 근거로 삼은 요청이
+   *   아니다. 요청이 달라졌으면 그 요청을 읽은 단계의 결과는 더 이상 그 요청의 결과가
+   *   아니다. 그래서 값이 **실제로 달라진** 칸을 읽는 단계만 완료에서 되돌린다.
+   *   값이 같으면 아무것도 되돌리지 않는다 — 멀쩡한 진행을 버리지 않기 위해서다.
+   */
+  {
+    const changedNames = Object.keys(initialVars).filter(
+      (name) => JSON.stringify(checkpoint.vars[name]) !== JSON.stringify(initialVars[name]),
+    );
+    if (changedNames.length > 0) {
+      /*
+       * ★"이 단계가 그 값을 읽는가"의 판별은 **정본 하나로**.
+       *
+       *   첫 판에서 `text.includes('"이름"')` 같은 문자열 매칭을 여기 새로 짰다. 그건 이
+       *   저장소가 명시적으로 금지한 것이다 — graph-code-vars.ts 의 규칙:
+       *   "코드가 읽는 값의 판별은 이 함수 하나뿐이다. 정규식을 다른 곳에 복제하지 않는다."
+       *   복제하면 `vars.get("x")` 를 못 읽던 그 결함이 되살아나고, 여기서는 반대로
+       *   코드 안에 우연히 같은 낱말이 있으면 멀쩡한 단계를 되돌리는 오폭이 난다.
+       */
+      const { codeReferencedVars } = await import("../../shared/graph-code-vars");
+      const readsAnyOf = (node: WorkflowNode, names: Set<string>): boolean => {
+        const cfg = node.config ?? {};
+        // 선언으로 읽는 것 — consumes/subject/var/evidence 는 그 자체가 값 이름이다.
+        for (const key of ["consumes", "subject", "var", "evidence"]) {
+          const declared = str(cfg, key);
+          if (declared && names.has(declared)) return true;
+        }
+        // 코드가 읽는 것 — 정본 판별기에게 묻는다.
+        for (const referenced of codeReferencedVars(str(cfg, "code"))) {
+          if (names.has(referenced)) return true;
+        }
+        // 지시문이 읽는 것 — 치환 문법은 {{이름}} 하나뿐이다.
+        const prose = ["text", "prompt", "criteria"].map((k) => str(cfg, k) ?? "").join("\n");
+        for (const name of names) if (prose.includes(`{{${name}}}`)) return true;
+        return false;
+      };
+      /*
+       * ★한 칸만 되돌리면 반쪽이다. 되돌린 단계가 만들던 값을 읽는 단계도 옛 결과를 들고
+       *   있으므로 함께 되돌려야 한다 — 그 값은 이제 다른 요청의 결과이기 때문이다.
+       *
+       *   실측 2026-08-20: summary 가 바뀌어 step1 만 되돌렸더니, step1 이 만드는
+       *   deckfile 을 읽는 step2·verify2 가 옛 결과를 그대로 써서 검증이 계속 실패했다.
+       *   무효화는 **하류로 번져야** 한다.
+       */
+      const stale = new Set(changedNames);
+      for (let pass = 0; pass < graph.nodes.length; pass += 1) {
+        let grew = false;
+        for (const node of graph.nodes) {
+          if (!completed.has(node.id) && !skipped.has(node.id)) continue;
+          if (!readsAnyOf(node, stale)) continue;
+          completed.delete(node.id);
+          skipped.delete(node.id);
+          delete outputs[node.id];
+          const produced = str(node.config ?? {}, "produces");
+          if (produced && !stale.has(produced)) { stale.add(produced); grew = true; }
+        }
+        if (!grew) break;
+      }
+    }
+  }
   // ★재개할 때, **다시 돌 노드가 지난번에 막아 둔 출구**는 풀어 준다.
   //
   //   막힘은 지난 실행의 판단이다. 그 노드를 다시 돌리기로 한 이상 판단도 다시 해야 하는데,

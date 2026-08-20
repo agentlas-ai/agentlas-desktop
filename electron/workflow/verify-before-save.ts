@@ -49,43 +49,25 @@ function str(config: Record<string, unknown> | undefined, key: string): string {
 }
 
 /**
- * 파이썬·JS 실패에서 **사람이 읽을 한 문장**을 만든다.
+ * 실패에서 **사람이 읽을 한 줄**을 앞으로 꺼낸다.
  *
- * ★여기서 하는 것은 원인 분류가 아니라 **번역**이다. 마지막 예외 줄에 사실이 들어 있고,
- *   그 사실을 사람의 말로 바꾼다. 모르는 모양이면 지어내지 않고 그 줄을 그대로 보여준다 —
- *   틀린 설명보다 낫다.
+ * ★여기서 원인을 **분류하지 않는다.** 첫 판은 403·429·타임아웃… 을 정규식으로 갈라
+ *   각각 한국어 문장을 붙였다. 그건 이 저장소가 이미 버린 방식이다 — 오류는 무한하고,
+ *   단어장·정규식으로 판정하면 새 모양마다 구멍이 생기며 다국어에서 전멸한다.
+ *   (오너 결정 2026-08-12: capability-widening content 판정 폐지, 같은 이유.)
+ *
+ *   그래서 하는 일은 **자르기**뿐이다: 트레이스백의 마지막 예외 줄이 사실이고, 그 위
+ *   수십 줄은 인터프리터 내부 경로라 사람에게 정보가 없다. 사실을 앞에 세우고 나머지는
+ *   뒤에 붙인다. "이게 무슨 뜻인지"를 사람 말로 옮기는 일은 이 파일이 아니라 복구
+ *   서비스가 한다 — 코드는 사실만 모으고, 가능한 행동은 유한 목록으로 만들고, 문구는
+ *   모델이 쓴다(automation-fix.ts 의 계약).
  */
 export function humanCauseOf(rawFailure: string | null | undefined): string {
   const text = String(rawFailure ?? "").trim();
   if (!text) return "이 단계가 실행되지 않았습니다.";
   const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
   const last = lines[lines.length - 1] ?? text;
-
-  if (/HTTP Error 4(01|03)\b/i.test(last) || /\b(Forbidden|Unauthorized)\b/i.test(last)) {
-    return "자료를 가져오려는 곳이 이 요청을 거절합니다 — 열려 있는 다른 자료원이 필요하거나, 로그인·API 키가 있어야 합니다.";
-  }
-  if (/HTTP Error 429\b/i.test(last) || /rate.?limit/i.test(last)) {
-    return "자료원이 요청이 너무 잦다며 막고 있습니다 — 실행 간격을 늘리거나 다른 자료원이 필요합니다.";
-  }
-  if (/HTTP Error 5\d\d\b/i.test(last)) {
-    return "자료원 쪽이 지금 응답하지 못하고 있습니다 — 그쪽이 복구되면 됩니다.";
-  }
-  if (/(getaddrinfo|Name or service not known|nodename nor servname|ENOTFOUND|URLError)/i.test(last)) {
-    return "그 주소에 닿지 못했습니다 — 주소가 틀렸거나 인터넷이 막혀 있습니다.";
-  }
-  if (/(timed? ?out|TimeoutError)/i.test(last)) {
-    return "자료원이 제때 답하지 않았습니다.";
-  }
-  if (/(FileNotFoundError|No such file or directory|ENOENT)/i.test(last)) {
-    return "읽으려는 파일이 그 자리에 없습니다.";
-  }
-  if (/(PermissionError|EACCES)/i.test(last)) {
-    return "그 파일이나 폴더에 접근할 권한이 없습니다.";
-  }
-  if (/(ModuleNotFoundError|ImportError|Cannot find module)/i.test(last)) {
-    return "이 단계가 쓰는 라이브러리가 준비되지 않았습니다.";
-  }
-  // 모르는 모양 — 지어내지 않고 사실을 그대로 준다.
+  if (lines.length <= 3 || !/^traceback/i.test(lines[0])) return text;
   return last;
 }
 
