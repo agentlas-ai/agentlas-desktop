@@ -365,6 +365,18 @@ function AutomationFlowPage() {
         selectable: true,
       })),
     );
+    /*
+     * ★분기 노드(eval·condition)는 핸들이 **`true`/`false` 둘뿐**이고 `out-b` 가 없다.
+     *   그래서 핸들을 안 적은 엣지를 `out-b` 로 붙이면 **없는 자리를 가리켜 선이
+     *   통째로 사라진다.** 실측 2026-08-20 (캠페인 E3): 8노드 7엣지로 사슬이 완전한
+     *   그래프가 화면에서는 두 덩어리로 끊어져 보였고, 오너가 "연결이 다 안 되어
+     *   있는데"라고 지적했다. 데이터는 멀쩡한데 화면이 거짓말한 것이다.
+     *
+     *   커널은 검증을 통과하면 참 쪽으로 간다 — 그러니 핸들이 없으면 `true` 다.
+     */
+    const branchy = new Set(
+      seedGraph.nodes.filter((n) => n.type === "eval" || n.type === "condition").map((n) => n.id),
+    );
     setRfEdges(
       seedGraph.edges.map((e) => ({
         id: e.id,
@@ -373,7 +385,7 @@ function AutomationFlowPage() {
         // ★핸들을 안 적은 옛 엣지는 기본 자리(아래→위)로 붙인다. 노드에 핸들이 여러 개가
         //   된 뒤로는 붙일 자리를 안 정해 주면 **선이 통째로 안 그려진다** — 잘 돌던
         //   그래프가 화면에서만 사라지는 최악의 모양이다. 저장 시에는 원래 값을 다시 쓴다.
-        sourceHandle: e.sourceHandle ?? "out-b",
+        sourceHandle: e.sourceHandle ?? (branchy.has(e.source) ? "true" : "out-b"),
         targetHandle: "in-t",
         // ★되돌아가는 반복의 상한은 **엣지에** 붙어 있다. 여기서 안 들고 오면 저장할 때
         //   같이 사라지고, 잘 돌던 그래프가 그때부터 LOOP_BOUND_UNDECLARED로 거절된다

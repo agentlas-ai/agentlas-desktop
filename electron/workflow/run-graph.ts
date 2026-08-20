@@ -64,7 +64,11 @@ import {
   defaultNodeEffect,
   nodeCouldHaveActedOutside,
   requiredExecutionPermission,
+  valueIsReadAsData,
+  type ValueReader,
 } from "../../shared/graph-node-protocol";
+// 코드가 읽는 값의 판별은 이 정본 하나뿐이다(`vars.get("x")` 눈먼 지점의 수리).
+import { codeReferencedVars as codeReferencedVarsSync } from "../../shared/graph-code-vars";
 
 type EventSink = (ev: McpInvocationEvent) => void;
 
@@ -678,6 +682,62 @@ export function unwrapFencedJson(text: string): string {
     .replace(/```/g, "")
     .trim();
   return outside.length === 0 ? body : text;
+}
+
+/**
+ * 텍스트 안에서 **혼자 서는 JSON 값**을 찾는다. 문자열 리터럴을 존중하며 균형을 센다.
+ * 파싱되는 첫 덩어리만 돌려준다 — 이름을 계산해 읽는 코드처럼, 모르면 모른다고 둔다.
+ */
+function firstBalancedJson(text: string): string | null {
+  for (let i = 0; i < text.length; i += 1) {
+    const opener = text[i];
+    if (opener !== "[" && opener !== "{") continue;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let j = i; j < text.length; j += 1) {
+      const ch = text[j];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (ch === "\\") escaped = true;
+        else if (ch === "\"") inString = false;
+        continue;
+      }
+      if (ch === "\"") { inString = true; continue; }
+      if (ch === "[" || ch === "{") depth += 1;
+      else if (ch === "]" || ch === "}") {
+        depth -= 1;
+        if (depth > 0) continue;
+        const span = text.slice(i, j + 1);
+        try { return JSON.parse(span) !== undefined ? span : null; } catch { break; }
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * 기계가 읽는 값에서 **읽을 수 있는 값**을 꺼낸다.
+ *
+ * ★부탁은 약속이고, 꺼내는 것은 보장이다. 프롬프트에 "JSON 만 내라"라고 못 박아도
+ *   모델은 앞에 한 줄을 붙인다. 실측 2026-08-20 (캠페인 E3):
+ *
+ *     I'll read the three attachment files.
+ *     [ { "mailId": "m-1", ... } ]
+ *
+ *   다음 코드가 `json.loads` 에 실패했고 **그 실패를 삼켜** 빈 목록을 냈다. 첨부 3개가
+ *   그대로 있는데 실행은 9/9 초록에 "완료"였다 — 이 저장소가 가장 싫어하는 모양이다.
+ *
+ * ★사람이 읽는 값에는 손대지 않는다. 그 판정은 `valueIsReadAsData` 하나가 한다 —
+ *   저작이 형식 계약을 붙이는 기준과 **같은 질문**이어야 한다.
+ */
+export function machineReadableValue(rawText: string, readAsData: boolean): string {
+  const unfenced = unwrapFencedJson(rawText);
+  if (!readAsData) return unfenced;
+  const trimmed = String(unfenced ?? "").trim();
+  if (!trimmed) return unfenced;
+  try { JSON.parse(trimmed); return unfenced; } catch { /* 산문이 섞였다 — 꺼내 본다 */ }
+  return firstBalancedJson(trimmed) ?? unfenced;
 }
 
 function isReadOnlyCheckpointTool(name: string): boolean {
@@ -1627,6 +1687,33 @@ export async function runGraph(
   const reachability = buildReachability(graph);
   /** 변수 이름 → 이번 실행에서 그 변수를 쓴 노드들. */
   const varWriters = new Map<string, string[]>();
+  /*
+   * 이 그래프에서 **기계가 읽는 값**들. 판정은 `valueIsReadAsData` 하나가 하고, 여기서는
+   * 그래프 모양을 읽는 이의 모양으로 옮기기만 한다(저작 쪽 graph-blueprint 과 같은 질문).
+   *   · 코드 노드 — 선언한 consumes + 본문이 실제로 읽는 이름(codeReferencedVars 정본).
+   *   · 판정 노드 — 대상 값. 셀 수 있어야 판정할 수 있다.
+   *   · 그 밖 — 사람이 읽는 값. 산문이 정답이므로 손대지 않는다.
+   */
+  const machineReadVars = new Set<string>();
+  {
+    const namesOf = (v: unknown): string[] =>
+      Array.isArray(v) ? v.map((x) => String(x ?? "")) : (typeof v === "string" ? [v] : []);
+    const readers: ValueReader[] = graph.nodes.map((node) => {
+      const cfg = (node.config ?? {}) as Record<string, unknown>;
+      if (node.type === "code") {
+        return {
+          kind: "code" as const,
+          reads: [...namesOf(cfg.consumes), ...codeReferencedVarsSync(String(cfg.code ?? ""))],
+        };
+      }
+      if (node.type === "eval") return { kind: "judgment" as const, reads: namesOf(cfg.subject) };
+      return { kind: "prose" as const, reads: namesOf(cfg.consumes) };
+    });
+    for (const node of graph.nodes) {
+      const produced = String(((node.config ?? {}) as Record<string, unknown>).produces ?? "").trim();
+      if (produced && valueIsReadAsData(readers, produced)) machineReadVars.add(produced);
+    }
+  }
   /** 노드 id → 이번 실행에서 시도한 횟수(재시도 판정용). */
   const nodeAttempts = new Map<string, number>();
   // 노드가 실제로 부른 **바깥 도구** 수. 호스트 자신의 예비 조회는 세지 않는다
@@ -2070,7 +2157,7 @@ export async function runGraph(
      *   **통째로 하나의 펜스**이고 그 안이 실제로 JSON 일 때만 벗긴다 — 사람이 읽는 글
      *   안의 예시 코드 블록은 건드리지 않는다.
      */
-    const text = unwrapFencedJson(rawText);
+    const text = machineReadableValue(rawText, machineReadVars.has(produces));
     const policy = reducerPolicyOf(node);
     const writers = varWriters.get(produces) ?? [];
     if (policy === "overwrite") {

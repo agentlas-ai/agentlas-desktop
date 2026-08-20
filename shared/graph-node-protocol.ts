@@ -420,3 +420,46 @@ export function nodeCouldHaveActedOutside(node: NodeShape): boolean {
   return node?.type === "agent" || node?.type === "action" || node?.type === "output";
 }
 
+
+/**
+ * ③ 이 값을 **기계가 읽는가**.
+ *
+ * ★①②가 "이 단계가 무엇을 하는가"를 물었다면, 이건 "이 값이 어디로 가는가"를 묻는다.
+ *   사람만 읽는 값은 산문이어도 좋다. 그런데 다음 코드가 파싱하거나 판정이 목록을 세는
+ *   값이라면, 산문은 **읽을 수 없는 값**이다.
+ *
+ * ★실측 2026-08-20 (캠페인 E3): 같은 그래프가 이 질문 때문에 두 번 죽었다.
+ *   · 저작 쪽 — 판정이 읽는 값에 형식 계약이 안 붙어, 에이전트가 산문으로 답했고
+ *     판정이 목록을 못 찾아 5/7 에서 멈췄다.
+ *   · 실행 쪽 — 계약을 붙였더니 에이전트가 `"I'll read the three files."` 한 줄을
+ *     JSON 앞에 붙여 냈다. 코드가 `json.loads` 에 실패했고, **그 실패를 삼켜**
+ *     빈 목록을 냈다. 파일 3개가 그대로 있는데 실행은 9/9 초록에 "완료"였다.
+ *
+ *   같은 질문이 저작과 실행 두 곳에서 필요하다. 갈리면 한쪽이 계약을 붙이고 다른 쪽이
+ *   그 계약을 모르는 채 값을 넘긴다 — 이 저장소가 이미 이름 붙인 "사본" 병이다.
+ *   그래서 판정은 여기 하나, 읽는 이의 모양만 각자 맞춰 넣는다.
+ *
+ * `kind`:
+ *   · `code`     — 코드가 파싱한다. 산문이 섞이면 못 읽는다.
+ *   · `judgment` — 판정이 대상으로 삼는다. 셀 수 있어야 한다.
+ *   · `prose`    — 사람이 읽는다. 산문이 정답이다.
+ */
+export type ValueReader = {
+  kind: "code" | "judgment" | "prose";
+  reads: readonly (string | null | undefined)[];
+};
+
+export function valueIsReadAsData(
+  readers: Iterable<ValueReader>,
+  produced: string | null | undefined,
+): boolean {
+  const want = String(produced ?? "").trim();
+  if (!want) return false;
+  for (const reader of readers) {
+    if (reader.kind === "prose") continue;
+    for (const name of reader.reads) {
+      if (String(name ?? "").trim() === want) return true;
+    }
+  }
+  return false;
+}

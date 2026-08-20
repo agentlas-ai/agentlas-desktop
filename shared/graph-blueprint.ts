@@ -12,6 +12,7 @@ import type { WorkflowGraph, WorkflowNode, WorkflowEdge } from "./types";
 import { layoutGraph, needsLayout } from "./graph-layout";
 import { CAPABILITIES, CAPABILITY_LABEL, findProvider, providersFor } from "./graph-tool-binding";
 import { humanizeScheduleLabel } from "./schedule-describe";
+import { valueIsReadAsData, type ValueReader } from "./graph-node-protocol";
 
 export const BLUEPRINT_SCHEMA = "agentlas.graph-blueprint.v1";
 
@@ -219,11 +220,31 @@ export function autofillOutputChecks(bp: GraphBlueprint): GraphBlueprint {
       checks.push({
         afterStep: madeAt,
         subject: name,
-        criteria: `${name}이(가) 비어있지 않고 요청대로 채워졌다`,
+        /*
+         * ★"비면 실패"만으로는 **정직한 빈 결과**를 죽인다.
+         *
+         *   실측 2026-08-20 (캠페인 E3): "이미 처리한 건 다시 하지 마"라고 지은 자동화가
+         *   첫 실행에서 첨부 3건을 정확히 정리했다. 그리고 **두 번째 실행에서 실패했다** —
+         *   할 일이 없어서 0건이었는데, 이 검증이 "비었으니 실패"라고 했다.
+         *   E5 도 같았다: 사람이 "아무것도 자동 반영하지 마라"를 골랐더니 apply 가 비었고,
+         *   그것이 설계대로인데 실패로 찍혔다.
+         *
+         *   빈 결과에는 두 종류가 있다:
+         *     · 일을 안 하고 빈손 — 이건 실패다(초록인데 결과만 빈 실행 금지).
+         *     · 일을 했는데 대상이 0건 — 조용한 날, 이미 처리됨, 조건 미충족. 이건 정상이다.
+         *   그 둘을 가르는 것은 **앞 단계가 왜 비었는지 함께 보고했는가**이지 단어가 아니다.
+         *   그래서 단어장·정규식이 아니라 판정 기준으로 적는다 — 모델이 관찰 위에서 가른다.
+         */
+        criteria:
+          `${name}이(가) 요청대로 채워졌다. 다만 앞 단계가 정상으로 끝났고 왜 0건인지`
+          + `(해당 없음·이미 처리됨·조건 미충족 등)를 함께 보고했다면, 빈 것도 정직한 결과다`,
         produces: `${name}_ok`,
         items: [
-          { text: `${name}이(가) 실제 내용으로 채워졌다`, kind: "must" },
-          { text: "빈 값·자리표시자·지어낸 값이 아니다", kind: "mustNot" },
+          {
+            text: `${name}이(가) 실제 내용으로 채워졌다 — 또는 0건인 이유가 앞 단계 결과에 분명히 적혀 있다`,
+            kind: "must",
+          },
+          { text: "이유 없이 비어 있거나, 자리표시자·지어낸 값이다", kind: "mustNot" },
         ],
       });
       checked.add(name);
@@ -470,9 +491,14 @@ export function validateBlueprint(
           `"${step.title || `${index + 1}번째 단계`}"는 바깥으로 나가는데, 그 앞에서 만든 `
           + `"${name}" 값이 쓸 만한지 확인하는 단계가 없습니다. 단계는 하나도 지우지 말고, `
           + `top-level checks[]에 이 항목을 그대로 추가하세요: `
-          + `{"afterStep":${madeAt},"subject":"${name}","criteria":"${name}이(가) 비어있지 않고 요청대로 채워졌다",`
-          + `"produces":"${name}_ok","items":[{"text":"${name}이(가) 실제 내용으로 채워졌다","kind":"must"},`
-          + `{"text":"빈 값·자리표시자·지어낸 값이 아니다","kind":"mustNot"}]}`,
+          // ★문구는 autofillOutputChecks 와 **같아야 한다**. 두 곳이 갈리면 모델이 만든 것과
+          //   호스트가 채운 것이 서로 다른 기준으로 판정돼, 같은 그래프가 경로에 따라 다르게 끝난다.
+          + `{"afterStep":${madeAt},"subject":"${name}",`
+          + `"criteria":"${name}이(가) 요청대로 채워졌다. 다만 앞 단계가 정상으로 끝났고 왜 0건인지`
+          + `(해당 없음·이미 처리됨·조건 미충족 등)를 함께 보고했다면, 빈 것도 정직한 결과다",`
+          + `"produces":"${name}_ok","items":[`
+          + `{"text":"${name}이(가) 실제 내용으로 채워졌다 — 또는 0건인 이유가 앞 단계 결과에 분명히 적혀 있다","kind":"must"},`
+          + `{"text":"이유 없이 비어 있거나, 자리표시자·지어낸 값이다","kind":"mustNot"}]}`,
         );
       }
     });
@@ -735,12 +761,23 @@ export function buildGraphFromBlueprint(
 function promptWithHandoffContract(
   step: { instruction: string; produces?: string | null },
   all: Array<{ kind?: string; consumes?: string[] | null }>,
+  checkSubjects: ReadonlySet<string>,
 ): string {
   const produces = step.produces?.trim();
   if (!produces) return step.instruction;
-  const readByCode = all.some((other) => other.kind === "code"
-    && (other.consumes ?? []).some((name) => String(name).trim() === produces));
-  if (!readByCode) return step.instruction;
+  /*
+   * ★이 값을 기계가 읽는가 — 판정은 `shared/graph-node-protocol` 하나뿐이다.
+   *   실행 쪽(run-graph)도 **같은 질문**으로 값에서 JSON 을 꺼낸다. 두 곳이 갈리면
+   *   한쪽은 계약을 붙이고 다른 쪽은 그 계약을 모르는 채 값을 넘긴다.
+   */
+  const readers: ValueReader[] = [
+    ...all.map((other) => ({
+      kind: other.kind === "code" ? ("code" as const) : ("prose" as const),
+      reads: (other.consumes ?? []).map((name) => String(name)),
+    })),
+    { kind: "judgment" as const, reads: [...checkSubjects] },
+  ];
+  if (!valueIsReadAsData(readers, produces)) return step.instruction;
   return [
     step.instruction,
     "",
@@ -752,6 +789,10 @@ function promptWithHandoffContract(
 }
 
   const stepId = (index: number): string => `step${index + 1}`;
+  // 검증이 보는 값도 기계가 읽는 값이다 — 그 이름을 미리 모아 둔다.
+  const checkSubjects = new Set(
+    (bp.checks ?? []).map((c) => String(c.subject ?? "").trim()).filter(Boolean),
+  );
   bp.steps.forEach((step, index) => {
     const isCode = step.kind === "code";
     // 다른 자동화를 한 단계로 부른다(커넥터 C46). 캔버스엔 있는데 말로는 못 만들던 구멍.
@@ -773,7 +814,7 @@ function promptWithHandoffContract(
               ? { packages: step.packages.map((v) => String(v).trim()).filter(Boolean) }
               : {}),
           }
-          : { prompt: promptWithHandoffContract(step, bp.steps) }),
+          : { prompt: promptWithHandoffContract(step, bp.steps, checkSubjects) }),
         effect: step.effect,
         /* ★승인 게이트 폐지(오너 이사회 결정 2026-08-10): 컴파일러는 approval 선언을
            그래프에 싣지 않는다 — 커널이 읽지 않는 잠금을 실으면 "잠갔다고 믿는데 안
@@ -803,24 +844,66 @@ function promptWithHandoffContract(
   branches.forEach((branch) => branchAt.set(branch.afterStep, branch));
   // ★한 단계 뒤에 검증 여럿 — "주가 재확인 + 형식 검사"를 검증 2개로 표현한다.
   const checkAt = new Map<number, BlueprintCheck[]>();
+  /*
+   * ★검증은 **자기 근거를 만드는 단계 뒤**에 놓인다.
+   *
+   *   실측 2026-08-20 (캠페인 E3): "옮겼다고 한 파일이 정말 그 자리에 있는가"를 판정하는
+   *   검증이 근거로 `observed`(폴더 재확인 결과)를 선언했는데, 그 재확인 단계보다 **앞에**
+   *   놓였다. 파일 3건은 정확히 정리됐는데 실행은 5/8 에서 멈췄다:
+   *     NODE_INPUT_MISSING — 판정 근거로 선언된 "observed" 값을 앞 단계가 만들어 주지 않았습니다.
+   *   일은 다 해 놓고 "했다고 말하지 못하는" 모양이고, 사용자가 고칠 방법도 없다 —
+   *   순서는 사용자가 적은 것이 아니라 컴파일러가 정하는 것이기 때문이다.
+   *
+   *   afterStep 은 "무엇을 검증하는가"를 가리키고, 근거는 "무엇으로 검증하는가"다.
+   *   둘 다 있어야 판정이 서므로, 놓이는 자리는 **둘 중 뒤**다.
+   */
+  const producerIndex = new Map<string, number>();
+  bp.steps.forEach((step, index) => {
+    const name = String(step.produces ?? "").trim();
+    if (name && !producerIndex.has(name)) producerIndex.set(name, index);
+  });
   for (const check of bp.checks ?? []) {
-    const list = checkAt.get(check.afterStep) ?? [];
+    const evidence = String(check.evidence ?? "").trim();
+    const evidenceAt = evidence ? producerIndex.get(evidence) : undefined;
+    const at = typeof evidenceAt === "number"
+      ? Math.max(check.afterStep, evidenceAt)
+      : check.afterStep;
+    const list = checkAt.get(at) ?? [];
     list.push(check);
-    checkAt.set(check.afterStep, list);
+    checkAt.set(at, list);
   }
   const checkId = (index: number, ordinal = 0): string =>
     ordinal === 0 ? `verify${index + 1}` : `verify${index + 1}-${ordinal + 1}`;
 
   let edgeSeq = 0;
+  /*
+   * ★분기 노드(검증·갈림길)에서 나가는 엣지는 **어느 쪽인지 적어야 한다.**
+   *   화면의 분기 노드는 핸들이 `true`/`false` 둘뿐이라, 안 적힌 엣지는 붙을 자리가
+   *   없어 **선이 통째로 사라진다.** 실측 2026-08-20 (캠페인 E3): 8노드 7엣지로
+   *   사슬이 완전한 그래프가 캔버스에서 두 덩어리로 끊어져 보였다 — 데이터는 멀쩡한데
+   *   사람 눈에는 "연결이 다 안 되어 있는" 그래프였다.
+   *   검증을 통과하면 가는 길이 참이므로, 안 적힌 것은 `true` 로 못 박는다.
+   */
+  const branchSources = new Set<string>();
   const link = (source: string, target: string, handle?: string, maxIterations?: number): void => {
+    const resolved = handle ?? (branchSources.has(source) ? "true" : undefined);
     edges.push({
       id: `e${edgeSeq += 1}`,
       source,
       target,
-      ...(handle ? { sourceHandle: handle } : {}),
+      ...(resolved ? { sourceHandle: resolved } : {}),
       ...(typeof maxIterations === "number" ? { maxIterations } : {}),
     });
   };
+
+  // 분기 핸들을 가진 노드를 먼저 모은다 — link 가 기본 핸들을 정할 때 읽는다.
+  for (const [afterStep, list] of checkAt) {
+    if (!bp.steps[afterStep]) continue;
+    list.forEach((_check, ordinal) => branchSources.add(checkId(afterStep, ordinal)));
+  }
+  for (const branch of branches) {
+    if (bp.steps[branch.afterStep]) branchSources.add(`branch${branch.afterStep + 1}`);
+  }
 
   link("start", stepId(0));
   // 검증 노드를 먼저 세운다 — 갈림길은 검증 결과를 읽는다.

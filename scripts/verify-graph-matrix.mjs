@@ -821,6 +821,40 @@ for (const c of guardCases) {
     "코드 단계가 읽는 값인데 에이전트 프롬프트에 형식이 안 박혔습니다 — 모델이 글로 "
     + `답하면 다음 코드가 빈손을 냅니다(프롬프트: ${promptOf("메일을 분류한다").slice(0, 120)}).`,
   );
+  /*
+   * ★검증이 읽는 값도 기계가 읽는 값이다. 실측 2026-08-20 (캠페인 E3): "옮겼다고 보고한
+   *   파일이 실제로 그 자리에 있는가"를 판정하려면 목록이 있어야 하는데, 그 값을 만드는
+   *   단계가 산문으로 답해 판정이 값을 못 찾았다. 자동화는 파일을 정확히 정리하고
+   *   대화에서 정확히 보고했는데 그래프는 "값이 안 넘어왔다"로 멈췄다.
+   */
+  const withCheck = buildGraphFromBlueprint({
+    name: "검증이 읽는 값", goal: "파일을 옮기고 확인한다",
+    trigger: { kind: "input", label: "시작", varName: "seed" },
+    steps: [
+      { kind: "agent", title: "파일을 옮긴다", instruction: "파일을 옮겨라",
+        effect: "mutation", produces: "filed", consumes: [] },
+      // ★코드는 이 값을 **안 읽는다** — 읽으면 "코드가 읽으면 계약" 규칙에 걸려
+      //   "검증이 읽으면 계약" 규칙을 시험하지 못한다.
+      { kind: "code", title: "폴더를 다시 본다", instruction: "재확인",
+        code: "import os\nresult = os.listdir('.')",
+        codeLang: "python", effect: "read", produces: "ondisk", consumes: [] },
+    ],
+    checks: [
+      // 빌더는 바깥을 바꾼 결과를 **독립적으로 다시 관측한** 증거를 요구한다(옳다).
+      { afterStep: 1, subject: "filed", criteria: "filed이(가) 바깥에 실제로 반영됐다",
+        evidence: "ondisk", produces: "filed_ok",
+        items: [{ text: "보고한 파일이 관측에도 있다", kind: "must" }] },
+    ],
+  });
+  const movedPrompt = String(
+    (withCheck.graph?.nodes ?? []).find((n) => n.label === "파일을 옮긴다")?.config?.prompt ?? "",
+  );
+  check(
+    "a-value-a-check-reads-gets-a-format-contract",
+    withCheck.ok === true && /ONLY JSON/.test(movedPrompt),
+    "검증이 보는 값인데 형식이 안 박혔습니다 — 판정이 목록을 못 찾아, 일은 다 해 놓고 "
+    + `"값이 안 넘어왔다"로 멈춥니다(ok=${withCheck.ok}, 프롬프트: ${movedPrompt.slice(0, 90)}).`,
+  );
   check(
     "a-value-only-a-person-reads-stays-prose",
     !/ONLY JSON/.test(promptOf("사람에게 요약한다")),
@@ -855,6 +889,187 @@ for (const c of guardCases) {
     typeof unwrapFencedJson !== "function"
       ? "펜스 벗기기 함수가 없습니다 — 모델이 감싸 내면 다음 단계가 못 읽습니다."
       : `펜스 판정이 틀립니다: ${wrong.map((c) => `${c.why} → ${JSON.stringify(unwrapFencedJson(c.input)).slice(0, 60)}`).join(" / ")}`,
+  );
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * ⑭ 저작 축 — **정직한 빈 결과**를 실패로 부르지 않는가
+ *
+ * 실측 2026-08-20 (캠페인 E3): "이미 처리한 건 다시 하지 마"라고 지은 자동화가 첫
+ * 실행에서 첨부 3건을 정확히 정리했고, **두 번째 실행에서 실패했다** — 할 일이 없어
+ * 0건이었는데 자동 생성된 검증이 "비었으니 실패"라고 했다. E5 도 같았다: 사람이
+ * "아무것도 자동 반영하지 마라"를 골랐더니 apply 가 비었고 그게 설계대로인데 실패였다.
+ *
+ * 빈 결과에는 두 종류가 있다 — 일을 안 해서 빈손(실패)과, 일을 했는데 대상이 0건인
+ * 것(정상). 그 둘을 가르는 것은 **왜 비었는지 함께 보고했는가**이지 단어가 아니다.
+ * ──────────────────────────────────────────────────────────────────────────── */
+{
+  const { autofillOutputChecks } = await import("../dist/shared/graph-blueprint.js");
+  const filled = autofillOutputChecks({
+    name: "빈 결과", goal: "이미 처리한 건 건너뛴다",
+    trigger: { kind: "input", label: "시작", varName: "seed" },
+    steps: [
+      { kind: "code", title: "새 것만 고른다", instruction: "이미 처리한 건 뺀다",
+        code: "result = []", codeLang: "python", effect: "read", produces: "picked", consumes: [] },
+      { kind: "code", title: "파일을 옮긴다", instruction: "옮긴다", code: "result = 1",
+        codeLang: "python", effect: "mutation", produces: "moved", consumes: ["picked"] },
+    ],
+  });
+  const auto = (filled.checks ?? []).find((c) => c.subject === "picked");
+  const criteria = String(auto?.criteria ?? "");
+  const must = String(auto?.items?.find((i) => i.kind === "must")?.text ?? "");
+  check(
+    "an-empty-value-check-is-added-at-all",
+    Boolean(auto),
+    "바깥으로 나가는 단계가 쓰는 값에 확인이 안 붙었습니다 — 값을 넘기기로 해놓고 빈손이면 "
+    + "초록인데 결과만 빈 실행이 됩니다.",
+  );
+  check(
+    "an-honest-empty-result-is-not-called-a-failure",
+    /0건|정직한 결과/.test(criteria) && /0건인 이유/.test(must),
+    "\"비면 실패\"만 적혀 있습니다 — 이미 처리했거나 조용한 날이라 0건인 자동화가 매번 "
+    + `실패로 찍힙니다(criteria: ${criteria.slice(0, 100)}).`,
+  );
+  check(
+    "an-unexplained-empty-result-is-still-a-failure",
+    /이유 없이 비어/.test(String(auto?.items?.find((i) => i.kind === "mustNot")?.text ?? "")),
+    "이유 없이 빈 것까지 통과시키면 \"일을 안 하고 빈손\"이 성공이 됩니다 — 그건 이 "
+    + "저장소가 이미 이름 붙인 거짓 성공입니다.",
+  );
+}
+
+// ── 축: 갈림길에서 나가는 선은 화면이 아는 핸들을 달고 나가야 한다 ──────────────
+// 실측 2026-08-20(E3): 데이터는 8노드 7엣지로 멀쩡한데 캔버스가 두 덩어리로 끊겼다.
+// 분기 노드가 내주는 핸들은 `true`/`false` 둘뿐이라, 핸들 없는 엣지는 붙을 자리가
+// 없어 **선이 통째로 사라진다.** 사용자에게는 "연결이 다 안 된 그래프"로 보인다.
+{
+  const { buildGraphFromBlueprint, autofillOutputChecks } =
+    await import("../dist/shared/graph-blueprint.js");
+  const bp = autofillOutputChecks({
+    name: "분기 핸들", goal: "갈림길에서 나가는 선",
+    trigger: { kind: "input", label: "시작", varName: "seed" },
+    steps: [
+      { kind: "agent", title: "본다", instruction: "본다", effect: "read",
+        produces: "seen", consumes: ["seed"] },
+      { kind: "code", title: "적는다", instruction: "적는다",
+        code: "result = 1", codeLang: "python", effect: "read",
+        produces: "wrote", consumes: ["seen"] },
+      // 검증이 근거(wrote) 뒤로 옮겨 앉아도 **그 뒤에 갈 곳이 있어야** 이 축이 무언가를
+      // 잰다. 마지막 칸에 놓인 검증은 나가는 선이 아예 없다.
+      { kind: "code", title: "마무리", instruction: "마무리",
+        code: "result = 2", codeLang: "python", effect: "read",
+        produces: "done", consumes: ["wrote"] },
+    ],
+    checks: [{ afterStep: 0, subject: "seen", criteria: "본 것이 있다", evidence: "wrote" }],
+  });
+  const built = buildGraphFromBlueprint(bp);
+  const typeOf = built.ok
+    ? Object.fromEntries(built.graph.nodes.map((n) => [n.id, String(n.type)]))
+    : {};
+  const branchy = built.ok
+    ? built.graph.edges.filter((e) => typeOf[e.source] === "eval" || typeOf[e.source] === "branch")
+    : [];
+  const handleless = branchy.filter((e) => e.sourceHandle !== "true" && e.sourceHandle !== "false");
+  check(
+    "every-edge-out-of-a-fork-carries-a-handle-the-canvas-knows",
+    built.ok && branchy.length > 0 && handleless.length === 0,
+    branchy.length === 0
+      ? "이 픽스처는 갈림길을 만들지 못했습니다 — 축이 아무것도 재지 못합니다."
+      : `갈림길에서 나가는 선 ${branchy.length}개 중 ${handleless.length}개가 화면이 모르는 `
+        + "핸들로 나갑니다. 데이터는 이어져 있어도 사용자 눈에는 끊어져 보입니다.",
+  );
+}
+
+// ── 축: 기계가 읽는 값에서는 산문에 싸인 JSON 을 꺼낸다 ────────────────────────
+// 실측 2026-08-20(E3): 형식 계약을 붙였더니 모델이 `I'll read the three files.` 한 줄을
+// JSON 앞에 붙여 냈다. 다음 코드가 json.loads 에 실패했고 그 실패를 삼켜 빈 목록을 냈다 —
+// 첨부 3개가 그대로인데 실행은 9/9 초록에 "완료"였다.
+{
+  const { machineReadableValue } = await import("../dist/electron/workflow/run-graph.js");
+  const { valueIsReadAsData } = await import("../dist/shared/graph-node-protocol.js");
+  const dirty = "I'll read the three attachment files.\n[{\"mailId\":\"m-1\",\"note\":\"has ] and { inside\"}]";
+  check(
+    "prose-wrapped-json-is-recovered-for-a-machine-read-value",
+    (() => { try { return JSON.parse(machineReadableValue(dirty, true))[0].mailId === "m-1"; }
+             catch { return false; } })(),
+    "산문 한 줄이 앞에 붙었다고 값이 통째로 못 읽는 값이 되면, 다음 코드는 빈손을 내고 "
+    + "그 빈손이 초록으로 끝납니다.",
+  );
+  check(
+    "a-value-only-people-read-is-left-as-prose",
+    machineReadableValue(dirty, false) === dirty
+      && machineReadableValue("3건 처리했습니다.", true) === "3건 처리했습니다.",
+    "사람이 읽는 값에서 문장을 잘라내면, 보고서가 답 대신 조각이 됩니다 — 이 저장소가 "
+    + "이미 겪은 \"최종 표시 정제기가 답을 편집\"과 같은 병입니다.",
+  );
+  check(
+    "the-same-question-decides-contract-and-extraction",
+    valueIsReadAsData([{ kind: "code", reads: ["x"] }], "x")
+      && valueIsReadAsData([{ kind: "judgment", reads: ["y"] }], "y")
+      && !valueIsReadAsData([{ kind: "prose", reads: ["z"] }], "z"),
+    "저작이 계약을 붙이는 기준과 실행이 값을 꺼내는 기준이 갈리면, 한쪽은 형식을 요구하고 "
+    + "다른 쪽은 그 형식을 모르는 채 값을 넘깁니다.",
+  );
+}
+
+// ── 축: 검증은 자기 근거를 만드는 단계 뒤에 놓인다 ────────────────────────────
+// 실측 2026-08-20(E3): "옮겼다고 한 파일이 정말 있는가"를 판정하는 검증이 근거로 삼는
+// 폴더 재확인 단계보다 앞에 놓였다. 파일 3건은 정확히 정리됐는데 실행은
+// NODE_INPUT_MISSING("근거로 선언된 observed 를 앞 단계가 만들어 주지 않았습니다")로
+// 멈췄다 — 일은 다 하고 "했다고 말하지 못하는" 모양이고, 순서는 사용자가 정한 것이 아니라
+// 컴파일러가 정한 것이라 사용자에게는 고칠 길도 없다.
+{
+  const { buildGraphFromBlueprint } = await import("../dist/shared/graph-blueprint.js");
+  const built = buildGraphFromBlueprint({
+    name: "근거 순서", goal: "판정은 근거 뒤에",
+    trigger: { kind: "input", label: "시작", varName: "seed" },
+    steps: [
+      { kind: "code", title: "고른다", instruction: "고른다", code: "result = 1",
+        codeLang: "python", effect: "read", produces: "picked", consumes: ["seed"] },
+      { kind: "code", title: "옮긴다", instruction: "옮긴다", code: "result = 2",
+        codeLang: "python", effect: "mutation", produces: "filed", consumes: ["picked"] },
+      { kind: "code", title: "폴더를 다시 본다", instruction: "재확인", code: "result = 3",
+        codeLang: "python", effect: "read", produces: "observed", consumes: [] },
+      { kind: "agent", title: "요약", instruction: "요약한다", effect: "read",
+        produces: "summary", consumes: ["filed"] },
+    ],
+    // afterStep 은 "무엇을 검증하는가"(filed), 근거는 "무엇으로"(observed) — 근거가 뒤에 있다.
+    checks: [
+      // 바깥으로 나가기 전에 입력을 확인하라는 규칙을 지킨다(이 축의 대상이 아니다).
+      { afterStep: 0, subject: "picked", criteria: "고른 것이 있다", produces: "picked_ok" },
+      { afterStep: 1, subject: "filed", criteria: "옮겼다고 한 파일이 실제로 있다",
+        evidence: "observed", produces: "filecheck" },
+    ],
+  });
+  // ★배열 순서가 아니라 **사슬**로 잰다. 노드 배열은 선언 순서라 어디에 놓든 그대로다 —
+  //   실측: 배열로 재는 첫 판은 수리를 되돌려도 초록이었다(축이 아무것도 재지 못했다).
+  const reaches = (from, to) => {
+    const seen = new Set([from]);
+    const queue = [from];
+    while (queue.length) {
+      const at = queue.shift();
+      if (at === to) return true;
+      for (const e of built.graph.edges) {
+        if (e.source !== at || seen.has(e.target)) continue;
+        seen.add(e.target);
+        queue.push(e.target);
+      }
+    }
+    return false;
+  };
+  const evidenceStep = built.ok
+    ? built.graph.nodes.find((n) => String(n.config?.produces ?? "") === "observed")?.id
+    : null;
+  const filedCheck = built.ok
+    ? built.graph.nodes.find((n) => String(n.config?.subject ?? "") === "filed")?.id
+    : null;
+  check(
+    "a-check-is-placed-after-the-step-that-makes-its-evidence",
+    built.ok && !!evidenceStep && !!filedCheck && reaches(evidenceStep, filedCheck),
+    built.ok
+      ? `근거를 만드는 ${evidenceStep} 에서 판정 ${filedCheck} 로 가는 길이 없습니다 — `
+        + "판정이 근거보다 먼저 서면, 일을 다 해 놓고도 NODE_INPUT_MISSING 으로 멈춥니다."
+      : "그래프가 만들어지지 않아 순서를 잴 수 없습니다.",
   );
 }
 
