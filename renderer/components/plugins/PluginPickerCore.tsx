@@ -172,6 +172,40 @@ async function alreadyConnects(
   }
 }
 
+/**
+ * 다음 단계를 정한다 — **서버에게 직접 묻고**, 못 물을 때만 선언값으로 떨어진다.
+ *
+ * 왜 이렇게까지 하나 (2026-08-20 라이브 허브 115항목 실측):
+ *   원격 행 49 / stdio+키 49 / 안내형 6 / stdio인데 키 선언 없음 11.
+ * 원격 서버는 자기가 인가를 요구하는지 **프로토콜로 말해 준다**(oauthStatus 는 연결을
+ * 시도하지 않고 discovery 만 읽는다). 그러니 원격은 카탈로그의 auth 값을 고칠 문제가
+ * 아니라 물어볼 문제다 — 실제로 그 선언은 자주 어긋난다(railway·datadog 은 auth="token"
+ * 인데 원격이고, notion 은 auth="oauth" 인데 stdio 다).
+ *
+ * stdio 는 물어볼 상대가 없다. 그때만 매니페스트가 선언한 envKeys 가 유일한 근거다.
+ */
+async function resolveSetupStep(input: {
+  api: NonNullable<ReturnType<typeof ipc>>;
+  listing: MarketplaceListing;
+  rows: Array<{ transport: string; envKeys?: string[] }>;
+  serverId: string | null;
+}): Promise<"login" | "keys" | "none"> {
+  const { api, listing, rows, serverId } = input;
+  const remote = rows.some((row) => row.transport === "http" || row.transport === "sse");
+  if (remote && serverId) {
+    try {
+      const status = await api.mcpTools.oauthStatus(serverId);
+      // 이미 인가돼 있으면 더 물을 것이 없다. 인가를 요구하면 선언과 무관하게 로그인이다.
+      if (status?.supported) return status.connected ? "none" : "login";
+      // supported=false 는 "인증이 필요 없다" 또는 "discovery 실패"다. 전자면 끝이고,
+      // 후자면 아래 선언값 판단이 받는다 — 둘 다 여기서 단정하지 않는다.
+    } catch {
+      /* 물어보지 못했을 뿐이다. 아래 선언값 판단으로 내려간다. */
+    }
+  }
+  return nextSetupStepFor({ listing, rows });
+}
+
 export async function installPlugins(input: {
   chosen: MarketplaceListing[];
   ko: boolean;
@@ -235,7 +269,9 @@ export async function installPlugins(input: {
           const serverId = connected.find((row) => row.serverId)
             ?? pending.find((row) => row.serverId)
             ?? null;
-          const step = nextSetupStepFor({ listing, rows: preview.rows });
+          const step = await resolveSetupStep({
+            api, listing, rows: preview.rows, serverId: serverId?.serverId ?? null,
+          });
 
           if (step === "login" && serverId?.serverId) {
             needLogin.push({ slug: listing.slug, name: listing.name, serverId: serverId.serverId });
@@ -696,6 +732,12 @@ export function setupHintFor(input: {
   hasLogin: boolean;
 }): { tone: "ready" | "login" | "key"; text: string } | null {
   const { listing, ko, hasLogin } = input;
+  // 계정마다 연결이 다른 것은 auth 가 무엇이든 **안내형**이다. 이 검사가 아래에 있던
+  // 탓에 Salesforce(auth=oauth, 실제로는 머신의 sf CLI 로그인)가 "로그인 필요"로 보였고,
+  // 눌러도 앱이 대신 해 줄 수 있는 로그인이 없었다.
+  if (listing.connectSetupRequired) {
+    return { tone: "key", text: ko ? "제공사 안내에 따라 직접 연결" : "Connect via the provider's guide" };
+  }
   const kind = setupKindFor(listing);
   if (kind === "unknown") return null;
   if (kind === "ready") {
