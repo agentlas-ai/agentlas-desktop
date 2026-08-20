@@ -4824,6 +4824,61 @@ export function registerIpcHandlers(): void {
 
 
   // 인터뷰가 끝난 뒤 실제로 만든다. **꺼진 상태로** 들어온다 — 사람이 보고 켜야 돈다.
+  /**
+   * 저장 전에 한 번 돌려 보고, 안 되면 **이어갈 길을 함께 준다**.
+   *
+   * ★실측 2026-08-20: 저장 전 검증(verify-before-save)은 터미널에만 붙어 있었고
+   *   데스크탑 빌더는 아예 부르지 않았다 — 사람이 가장 많이 쓰는 표면에서 그 안전장치가
+   *   통째로 없었다. 그리고 터미널에서도 막히면 문장 한 줄로 끝났다. 오너 지시:
+   *   *"50% 정도 완성하다 실패했을 때도 이어갈 수 있어야지, 대안을 제시한다거나."*
+   *
+   *   그래서 이 문은 두 가지를 돌려준다: **무엇이 막혔는지(사실)** 와
+   *   **지금 무엇을 하면 이어갈 수 있는지(칩)**. 저장은 하지 않는다 — 사람이 고른다.
+   */
+  ipcMain.handle("automations:checkBlueprintBeforeSave", async (_e, payload: unknown) => {
+    const input = payload as { graph?: unknown; goal?: string; initialVars?: Record<string, unknown> } | null;
+    if (!input?.graph) {
+      return { ok: false as const, code: "CREATE_INPUT_INVALID", blocked: null, recovery: null };
+    }
+    const graph = input.graph as import("../shared/types").WorkflowGraph;
+    const { verifyGraphBeforeSaveWithKernel } = await import("./workflow/verify-before-save");
+    const verification = await verifyGraphBeforeSaveWithKernel(
+      graph,
+      input.initialVars && typeof input.initialVars === "object" ? input.initialVars : undefined,
+    );
+    const blocked = verification.steps.find((step) => step.state === "blocked") ?? null;
+    const repaired = verification.steps
+      .filter((step) => step.state === "repaired")
+      .map((step) => ({ nodeId: step.nodeId, label: step.label, code: step.repairedCode ?? "" }));
+    if (!blocked) {
+      return { ok: true as const, blocked: null, recovery: null, repaired };
+    }
+    const { planGraphBuildRecovery, blockedStepFactsFrom } = await import("./workflow/build-recovery");
+    const facts = blockedStepFactsFrom({
+      graph,
+      nodeId: blocked.nodeId,
+      label: blocked.label,
+      cause: blocked.cause ?? "",
+      availableVars: blocked.facts?.availableVars ?? [],
+      upstreamSample: blocked.facts?.upstreamSample ?? null,
+    });
+    const ranBefore = verification.steps
+      .filter((step) => step.state === "ran" || step.state === "repaired")
+      .map((step) => step.label);
+    const recovery = await planGraphBuildRecovery({
+      graph,
+      goal: String(input.goal ?? ""),
+      blocked: facts,
+      ranBefore,
+    });
+    return {
+      ok: false as const,
+      blocked: { nodeId: blocked.nodeId, label: blocked.label, cause: blocked.cause ?? "" },
+      recovery,
+      repaired,
+    };
+  });
+
   ipcMain.handle("automations:createFromBlueprint", (_e, payload: unknown) => {
     const input = payload as {
       name?: string; graph?: unknown; scheduleHuman?: string; targetId?: string; goal?: string;

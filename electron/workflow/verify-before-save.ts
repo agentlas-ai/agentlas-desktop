@@ -35,6 +35,20 @@ export interface PreSaveStepResult {
   repairedCode?: string;
   /** skipped 일 때만 — 왜 못 쟀는지. 못 잰 것을 통과로 세지 않는다. */
   skippedBecause?: string;
+  /**
+   * blocked 일 때만 — 복구를 계획하는 쪽이 쓸 **관측된 사실**.
+   *
+   * ★이걸 안 남기면 다음 층(build-recovery)이 원인을 **추측**하게 된다. 실측 2026-08-20
+   *   (캠페인 E5): 에이전트가 마크다운 표로 답했고 다음 코드가 구조화된 값을 기대해
+   *   빈손을 냈다. "무슨 값을 읽으려 했고 그때 무엇이 있었는가"가 없으면 그 사실을
+   *   아무도 모른다 — 사람에게도, 모델에게도.
+   */
+  facts?: {
+    /** 이 단계가 돌 때 실제로 있던 값 이름. */
+    availableVars: string[];
+    /** 바로 앞 단계가 낸 값의 생김새(앞부분). 형식 불일치가 가장 흔한 원인이다. */
+    upstreamSample: string | null;
+  };
 }
 
 export interface PreSaveVerification {
@@ -99,6 +113,8 @@ export async function verifyGraphBeforeSave(
 
   // 앞 단계가 만든 값을 뒤 단계에 넘긴다 — 실제 실행과 같은 순서라야 의미가 있다.
   const vars: Record<string, unknown> = { ...(deps.initialVars ?? {}) };
+  // 막혔을 때 "바로 앞이 무엇을 냈는가"를 말할 수 있어야 한다 — 형식 불일치가 가장 흔하다.
+  let lastProduced: unknown = null;
 
   for (const node of graph.nodes) {
     if (!isCheapAndSafeToRun(node)) continue;
@@ -136,7 +152,9 @@ export async function verifyGraphBeforeSave(
 
     if (run.ok) {
       const produces = str(node.config, "produces");
-      if (produces) vars[produces] = run.result ?? run.stdout ?? "";
+      const value = run.result ?? run.stdout ?? "";
+      if (produces) vars[produces] = value;
+      lastProduced = value;
       steps.push({
         nodeId: node.id,
         label: node.label || node.id,
@@ -151,6 +169,10 @@ export async function verifyGraphBeforeSave(
       label: node.label || node.id,
       state: "blocked",
       cause: humanCauseOf(run.reason),
+      facts: {
+        availableVars: Object.keys(vars).sort(),
+        upstreamSample: lastProduced === null ? null : String(lastProduced).slice(0, 400),
+      },
     });
     /*
      * ★막힌 뒤로는 더 돌리지 않는다. 뒤 단계는 이 단계의 값을 기다리므로, 값 없이 돌리면

@@ -411,6 +411,97 @@ const elapsed = () => `${Math.round((Date.now() - started) / 1000)}s`;
   console.log(`   [${elapsed()}] 발행 1회차 ok=${first.ok} · 2회차 사유=${secondWhy.slice(0, 90)}`);
 }
 
+/* ────────────────────────────────────────────────────────────────────────────
+ * ⑥ 짓다 막혔을 때 **이어갈 길이 나오는가** (오너 지시 2026-08-20)
+ *
+ * 저장 전에 돌려 봤는데 안 되면, 지금까지는 문장 한 줄로 끝났다. 오너의 말:
+ *   *"50% 정도 완성하다 실패를 했을 때도 이어갈 수 있어야지, 대안을 제시한다거나."*
+ *
+ * 그리고 막히는 이유는 두 갈래다 — **내가 고칠 수 있는 것**과 **사람만 가진 것이
+ * 필요한 것**. 그 판단은 하드코딩된 조건문이 아니라 모델이 해야 하므로, 여기서만
+ * 잴 수 있다. 둘이 **같은 답을 내면** 그건 판단이 아니라 상수다.
+ * ──────────────────────────────────────────────────────────────────────────── */
+{
+  const { planGraphBuildRecovery, blockedStepFactsFrom } =
+    await import("../dist/electron/workflow/build-recovery.js");
+
+  const draft = (label, prompt, code) => ({
+    version: 1,
+    nodes: [
+      node("start", "trigger", { kind: "input", produces: "seed" }),
+      node("upstream", "agent", { effect: "read", produces: "payload", prompt }, label),
+      node("downstream", "code", {
+        effect: "read", consumes: "payload", produces: "rows", codeLang: "python", code,
+      }, "그 값을 표로 만든다"),
+    ],
+    edges: [edge("start", "upstream"), edge("upstream", "downstream")],
+  });
+  const planFor = async (graph, goal, sample) => planGraphBuildRecovery({
+    graph,
+    goal,
+    blocked: blockedStepFactsFrom({
+      graph,
+      nodeId: "downstream",
+      label: "그 값을 표로 만든다",
+      cause: "TypeError: string indices must be integers",
+      availableVars: ["seed", "payload"],
+      upstreamSample: sample,
+    }),
+    ranBefore: ["앞 단계"],
+  });
+
+  // ㉮ 값의 형식이 안 맞는다 — 호스트가 혼자 고칠 수 있어야 한다.
+  const fixable = await planFor(
+    draft("메일을 읽고 정리한다", "메일을 읽고 각 요청을 정리해라", "rows = vars.get('payload')['items']\nresult = rows"),
+    "매일 메일을 확인해 미팅 요청을 정리한다",
+    "## 정리\n\n| 보낸 사람 | 요청 |\n|---|---|\n| lee@haneul.kr | 미팅 |",
+  );
+  const fixableKinds = fixable.options.map((o) => o.kind);
+  check(
+    "a-fixable-build-block-is-fixed-not-handed-back",
+    !fixable.unavailable && fixableKinds.includes("repair_step"),
+    "앞 단계가 넘긴 값의 **형식**이 안 맞는 것은 호스트가 혼자 고칠 수 있는 부류인데 "
+    + `그 길을 안 냈습니다 — 사용자가 대신 고쳐야 합니다(고른 것: ${JSON.stringify(fixableKinds)}, `
+    + `요약: ${String(fixable.summary).slice(0, 120)}).`,
+  );
+
+  // ㉯ 로그인 벽 — 사람만 가진 것이 필요하다. 혼자 고치겠다고 하면 안 된다.
+  const needsPerson = await planFor(
+    draft("가격 페이지를 연다", "https://competitor.example/pricing 을 열어 가격을 읽어라", "rows = vars.get('payload')['prices']\nresult = rows"),
+    "10분마다 경쟁사 가격 페이지를 열어 변경을 기록한다",
+    "Sign in to continue. You must be logged in to view pricing for your plan.",
+  );
+  const personKinds = needsPerson.options.map((o) => o.kind);
+  check(
+    "a-block-only-a-person-can-clear-asks-the-person",
+    !needsPerson.unavailable
+      && (needsPerson.question !== null || personKinds.some((k) => k !== "repair_step"))
+      && !(personKinds.length === 1 && personKinds[0] === "repair_step"),
+    "로그인 벽에 막혔는데 혼자 고치겠다고 합니다 — 사람만 가진 것이 필요한 부류를 "
+    + `못 가릅니다(고른 것: ${JSON.stringify(personKinds)}, 질문: ${JSON.stringify(needsPerson.question)}).`,
+  );
+
+  // ★두 상황이 같은 답을 내면 그건 판단이 아니라 상수다.
+  check(
+    "the-two-kinds-of-block-get-different-answers",
+    JSON.stringify(fixableKinds) !== JSON.stringify(personKinds),
+    `서로 다른 두 막힘에 **같은 조치**를 냈습니다(${JSON.stringify(fixableKinds)}) — `
+    + "원인을 안 보고 정해진 답을 내고 있다는 뜻입니다.",
+  );
+
+  // ★어떤 경우에도 만든 것이 날아가지 않는다.
+  check(
+    "the-half-built-graph-can-always-be-kept",
+    [...fixable.options, ...needsPerson.options].some((o) => o.kind === "save_switched_off")
+      || fixableKinds.includes("repair_step"),
+    "막힌 두 경우 어디에도 '지금 상태로 저장(꺼둠)'이 없습니다 — 50% 만든 것이 날아가면 "
+    + "사용자는 처음부터 다시 해야 합니다.",
+  );
+
+  console.log(`   [${elapsed()}] 고칠 수 있는 막힘 → ${JSON.stringify(fixableKinds)}`);
+  console.log(`   [${elapsed()}] 사람이 필요한 막힘 → ${JSON.stringify(personKinds)} · 질문=${needsPerson.question ? "있음" : "없음"}`);
+}
+
 try { getDb().close(); } catch { /* noop */ }
 try { rmSync(dir, { recursive: true, force: true }); } catch { /* noop */ }
 
