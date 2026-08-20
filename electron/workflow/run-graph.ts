@@ -2268,7 +2268,7 @@ export async function runGraph(
            *   안 된다"고 하고 있었다. 그 모순을 여기서 이름으로 말해 준다.
            */
           const contradiction = value != null
-            ? findGraphContradictions(graph).find((c) => c.nodeId === node.id)
+            ? findGraphContradictions(graph, planGraphLoops).find((c) => c.nodeId === node.id)
             : undefined;
           if (contradiction) {
             failGraphNode(node, {

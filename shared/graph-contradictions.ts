@@ -121,7 +121,19 @@ function reaches(graph: WorkflowGraph, from: string, to: string): boolean {
  * 잡는 모양은 하나다: 갈림길이 비어 있어도 된다고 말한 값에, **그 갈림길이 정하기 전에**
  * 도는 검증이 "비어 있으면 안 된다"고 말한다.
  */
-export function findGraphContradictions(graph: WorkflowGraph | null | undefined): GraphContradiction[] {
+/**
+ * 커널의 되돌이 판정. `shared/` 가 `electron/` 을 직접 import 하면 순환이 되므로 주입받는다.
+ * 안 주면 아래의 자체 판정으로 내려가지만, 그건 **사본**이라 커널과 어긋날 수 있다 —
+ * 부르는 쪽은 되도록 커널 것을 넘긴다(electron/workflow/run-graph 의 planGraphLoops).
+ */
+export type LoopPlanner = (graph: WorkflowGraph) =>
+  | { ok: true }
+  | { ok: false; nodeId: string; failure: { code: string; reason: string; nextAction: string } };
+
+export function findGraphContradictions(
+  graph: WorkflowGraph | null | undefined,
+  planLoops?: LoopPlanner,
+): GraphContradiction[] {
   if (!graph || !Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) return [];
   const found: GraphContradiction[] = [];
 
@@ -157,8 +169,34 @@ export function findGraphContradictions(graph: WorkflowGraph | null | undefined)
    *     미리 이름으로 말해 주는 데까지가 여기 몫이다.
    */
   const nodeIndex = new Map(graph.nodes.map((n) => [n.id, n] as const));
+  /*
+   * ★규칙을 베끼지 않고 **커널에게 묻는다.**
+   *
+   *   첫 판은 `tail.type === "condition"` 를 여기 손으로 다시 적었다. 그러면 같은 사실을
+   *   아는 곳이 세 곳이 된다 — 커널(planGraphLoops), 여기, 청사진. 실측 2026-08-20:
+   *   이미 세 곳이 각자 알고 있었고, 실행을 실제로 거부하는 권위는 **커널 하나뿐**이다.
+   *   나머지가 베낀 사본이면 커널이 규칙을 바꾸는 날 조용히 어긋난다.
+   *
+   *   이 저장소가 반복해서 앓은 병이 정확히 이것이라("구현 두 벌"), 판정은 커널의 답을
+   *   그대로 옮긴다. 여기 몫은 **그 거부를 실행 전에 미리 말해 주는 것**뿐이다.
+   */
+  const loopPlan = planLoops ? planLoops(graph) : null;
+  if (loopPlan && loopPlan.ok === false && loopPlan.failure?.code === "LOOP_WITHOUT_EXIT") {
+    const tail = nodeIndex.get(loopPlan.nodeId);
+    const head = graph.edges.find((e) => e.source === loopPlan.nodeId && e.target !== e.source);
+    found.push({
+      code: "LOOP_TAIL_NOT_A_BRANCH",
+      nodeId: loopPlan.nodeId,
+      nodeLabel: tail?.label || loopPlan.nodeId,
+      subject: "",
+      branchNodeId: head?.target ?? loopPlan.nodeId,
+      // 커널이 이미 사람 말로 적어 둔 사유를 그대로 쓴다 — 두 번째 문장을 짓지 않는다.
+      reason: loopPlan.failure.reason,
+      fix: loopPlan.failure.nextAction,
+    });
+  }
   const backEdges = findBackEdgeIds(graph);
-  for (const edge of graph.edges) {
+  for (const edge of loopPlan ? [] : graph.edges) {
     if (edge.source === edge.target) continue; // 자기루프는 위에서 이미 말했다
     if (!backEdges.has(edge.id)) continue;
     const tail = nodeIndex.get(edge.source);

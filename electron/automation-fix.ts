@@ -177,7 +177,9 @@ async function capabilities(automationId: string): Promise<Capability[]> {
    */
   const shapeIssues = (() => {
     try {
-      return findGraphContradictions(getAutomation(automationId)?.graph ?? null);
+      // ★되돌이 판정은 커널의 것을 그대로 쓴다 — 규칙 사본을 두지 않는다.
+      const { planGraphLoops } = require("./workflow/run-graph") as typeof import("./workflow/run-graph");
+      return findGraphContradictions(getAutomation(automationId)?.graph ?? null, planGraphLoops);
     } catch {
       return [];
     }

@@ -168,6 +168,41 @@ check(
   "이을 곳이 없는데 갈림길을 만들었습니다 — 통과 쪽이 비어 실행이 죽습니다.",
 );
 
+/*
+ * ★규칙은 한 벌이어야 한다 — "되돌이가 옳은가"를 아는 곳이 늘면 조용히 갈린다.
+ *
+ * 실측 2026-08-20: 같은 사실을 **세 곳**이 각자 손으로 알고 있었다.
+ *   · 커널 run-graph.planGraphLoops  ← 실행을 실제로 거부하는 유일한 권위
+ *   · 이 판정기(저장된 그래프를 미리 봄)
+ *   · 청사진 graph-blueprint(만들 때)
+ * 나머지 둘이 커널을 베낀 사본이면, 커널이 규칙을 바꾸는 날 아무도 모르게 어긋난다.
+ * 이 저장소가 반복해서 앓은 "구현 두 벌"이 정확히 이것이다.
+ *
+ * 그래서 판정기는 커널의 답을 **그대로 옮기고**, 그 배선이 살아 있는지 여기서 지킨다.
+ */
+{
+  const { planGraphLoops } = await import("../dist/electron/workflow/run-graph.js");
+  const loopy = {
+    version: 1,
+    nodes: [
+      node("gen", "agent", { produces: "html" }, "만들기"),
+      node("chk", "eval", { subject: "html", produces: "verdict" }, "검증"),
+      node("save", "action", {}, "저장"),
+    ],
+    edges: [edge("gen", "chk"), edge("chk", "save"),
+      { id: "save->chk", source: "save", target: "chk", maxIterations: 1 }],
+  };
+  const kernelSaid = planGraphLoops(loopy);
+  const viaKernel = findGraphContradictions(loopy, planGraphLoops);
+  check(
+    "the-kernel-is-the-single-authority-on-loops",
+    kernelSaid.ok === false
+    && viaKernel.some((f) => f.code === "LOOP_TAIL_NOT_A_BRANCH" && f.reason === kernelSaid.failure.reason),
+    "되돌이 판정이 커널의 답을 그대로 옮기지 않습니다 — 규칙 사본이 생겼다는 뜻이고, "
+    + "커널이 규칙을 바꾸는 날 조용히 어긋납니다.",
+  );
+}
+
 for (const c of checks) console.log(`${c.ok ? "PASS" : "FAIL"} ${c.name}`);
 if (failures.length > 0) {
   console.error("\ngraph-contradictions 게이트 실패:");

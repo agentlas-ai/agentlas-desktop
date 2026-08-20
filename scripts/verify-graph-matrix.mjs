@@ -221,7 +221,116 @@ const outPath = path.join(dir, "written.txt");
   );
 }
 
-// ── ④ 연결 축: 갈림길 한쪽만 이어져 있으면 실행이 죽는다(수리가 만들면 안 되는 모양) ──
+// ── ④ 되돌이 축 — 오늘 결함이 제일 많이 나온 자리 ────────────────────────────────
+//
+// 되돌이는 상태를 곱셈으로 늘린다: 몇 바퀴 돌았는지, 그 안에서 바깥을 바꿨는지,
+// 빠져나갈 판단이 있는지. 그래서 여기만 따로 센다.
+{
+  // ④-1 상한이 있는 정상 되돌이는 **끝난다**. 안 끝나면 사람이 안 보는 새 토큰이 샌다.
+  {
+    const graph = {
+      version: 1,
+      nodes: [
+        node("start", "trigger", { kind: "input", produces: "seed" }),
+        node("work", "code", {
+          effect: "read", produces: "tries", codeLang: "python",
+          produces: 'keepgoing', code: "result = 'yes'",
+        }, "한 바퀴"),
+        node("gate", "condition", { var: "keepgoing", op: "falsy" }, "끝났나?"),
+        node("done", "code", { effect: "read", produces: "final", codeLang: "python", code: "result = 'done'" }),
+      ],
+      edges: [
+        edge("start", "work"), edge("work", "gate"),
+        edge("gate", "done", { sourceHandle: "true" }),
+        // 거짓이면 되돌아간다 — 상한 2바퀴.
+        { id: "gate->work", source: "gate", target: "work", sourceHandle: "false", maxIterations: 2 },
+      ],
+    };
+    const automation = saveAutomation(graph, "bounded-loop");
+    const started = Date.now();
+    const run = await runGraph(automation, automation.graph, { initialVars: { seed: "go" } });
+    check(
+      "a-bounded-loop-terminates",
+      Date.now() - started < 120_000 && typeof run.ok === "boolean",
+      "상한이 있는 되돌이가 끝나지 않았습니다 — 사람이 안 보는 동안 계속 돕니다.",
+    );
+  }
+
+  // ④-2 상한이 없는 되돌이는 **실행 전에 거부**된다. 돌기 시작하면 멈출 사람이 없다.
+  {
+    const graph = {
+      version: 1,
+      nodes: [
+        node("start", "trigger", { kind: "input", produces: "seed" }),
+        node("work", "code", { effect: "read", produces: "w", codeLang: "python", code: "result = 'w'" }),
+        node("gate", "condition", { var: "keepgoing", op: "falsy" }, "끝났나?"),
+        node("done", "code", { effect: "read", produces: "d", codeLang: "python", code: "result = 'd'" }),
+      ],
+      edges: [
+        edge("start", "work"), edge("work", "gate"),
+        edge("gate", "done", { sourceHandle: "true" }),
+        // 상한 없음 — 커널이 실행 자체를 막아야 한다.
+        edge("gate", "work", { sourceHandle: "false" }),
+      ],
+    };
+    const automation = saveAutomation(graph, "unbounded-loop");
+    const run = await runGraph(automation, automation.graph, { initialVars: { seed: "go" } });
+    /*
+     * ★"실패했다"가 아니라 **"그 이유로 실패했다"** 를 잰다.
+     *
+     *   실측 2026-08-20: 첫 판은 `!run.ok` 만 봤다. 그런데 이 그래프는 조건이 읽는 값이
+     *   없어 되돌이 검사에 **닿기도 전에** 다른 이유로 죽었고, 그래서 상한 방어를 통째로
+     *   제거해도 통과하는 공짜 초록이었다. 실패의 이유를 안 보면 시험은 아무것도 안 지킨다.
+     */
+    const why = String(run.error ?? "") + JSON.stringify(run.nodeFailures ?? {});
+    check(
+      "an-unbounded-loop-is-refused-before-it-starts",
+      !run.ok && /LOOP_BOUND_UNDECLARED|LOOP_BOUND_INVALID|LOOP_WITHOUT_EXIT/.test(why),
+      "상한 없는 되돌이가 **그 이유로** 거부되지 않았습니다 — 자동화는 사람이 안 볼 때 도는 것이라 "
+      + `멈출 사람이 없습니다. 실제 사유: ${why.slice(0, 200)}`,
+    );
+  }
+
+  // ④-3 ★되돌이 **안에 바깥을 바꾸는 단계**가 있으면, 바퀴 수만큼 나간다.
+  //      발송·결제였다면 그 횟수가 그대로 피해다. 상한이 지켜지는지 줄 수로 잰다.
+  {
+    const ledger = path.join(dir, "loop-ledger.txt");
+    const graph = {
+      version: 1,
+      nodes: [
+        node("start", "trigger", { kind: "input", produces: "seed" }),
+        node("send", "code", {
+          effect: "mutation", produces: "sent", codeLang: "python",
+          code: [
+            "import pathlib",
+            `p = pathlib.Path(${JSON.stringify(ledger)})`,
+            "with p.open('a', encoding='utf8') as fh:",
+            "    fh.write('x\\n')",
+            "result = 'sent'",
+          ].join("\n"),
+        }, "바깥으로 보낸다"),
+        node("gate", "condition", { var: "keepgoing", op: "falsy" }, "그만할까?"),
+        node("done", "code", { effect: "read", produces: "d", codeLang: "python", code: "result = 'd'" }),
+      ],
+      edges: [
+        edge("start", "send"), edge("send", "gate"),
+        edge("gate", "done", { sourceHandle: "true" }),
+        { id: "gate->send", source: "gate", target: "send", sourceHandle: "false", maxIterations: 2 },
+      ],
+    };
+    const automation = saveAutomation(graph, "mutation-inside-loop");
+    await runGraph(automation, automation.graph, { initialVars: { seed: "go" } });
+    const sends = existsSync(ledger) ? readFileSync(ledger, "utf8").trim().split("\n").filter(Boolean).length : 0;
+    check(
+      "a-loop-cannot-send-more-times-than-its-cap",
+      sends > 0 && sends <= 3,
+      `되돌이 안의 발송이 상한을 넘었습니다(${sends}회, 상한 2바퀴 → 최대 3회). `
+      + "이 숫자가 메일·결제였다면 그대로 피해입니다.",
+    );
+  }
+}
+
+// ── ⑤ 연결 축: 갈림길 한쪽만 이어져 있으면 실행이 죽는다(수리가 만들면 안 되는 모양) ──
 {
   const graph = {
     version: 1,
