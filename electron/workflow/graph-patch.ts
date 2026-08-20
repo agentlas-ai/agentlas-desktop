@@ -1,3 +1,4 @@
+import { nodeCanChangeTheOutsideWorld } from "../../shared/graph-node-protocol";
 // Graph Architect 패치 계약 — 자연어로 그래프를 고칠 때 **모델이 그래프를 직접 쓰지 못하게** 막는다.
 //
 // 계약(설계 D8): 모델은 GraphPatch를 *제안*만 한다. 코드가 (1) 형태를 검증하고,
@@ -52,11 +53,22 @@ const OP_KINDS = new Set<string>([
 const ENDPOINT_KEYS = ["apiEndpoint", "url", "webhookUrl"];
 const VAULT_KEY_RE = /(token|secret|password|apikey|api_key|credential|vault)/i;
 
-/** 이 설정이 어떤 위험을 걸고 있는가. 모르는 형태는 위험 없음으로 치지 않는다. */
-function risksOfConfig(config: Record<string, unknown> | undefined): GraphPatchRisk[] {
-  if (!config) return [];
+/**
+ * 이 단계가 어떤 위험을 걸고 있는가. 모르는 형태는 위험 없음으로 치지 않는다.
+ *
+ * ★`config.effect === "mutation"` 만 보던 자리였다. 그런데 emitter 가 만드는 출력 노드는
+ *   그 칸을 아예 안 쓰고, 그 노드의 기본값이 "바깥으로 나감"이다. 그래서 **발행 단계를
+ *   추가하는 패치가 위험 없음으로 읽혀 승인 없이 적용**됐다. 판정은 정본 하나를 쓴다.
+ *   타입을 못 받는 시그니처가 사본을 강제하고 있었으므로 시그니처부터 고친다.
+ */
+function risksOfNode(
+  node: { type?: string; config?: Record<string, unknown> | undefined } | undefined,
+): GraphPatchRisk[] {
+  const config = node?.config;
+  if (!config && !node?.type) return [];
   const risks: GraphPatchRisk[] = [];
-  if (config.effect === "mutation") risks.push("mutation");
+  if (nodeCanChangeTheOutsideWorld({ type: node?.type, config })) risks.push("mutation");
+  if (!config) return risks;
   if (Object.keys(config).some((key) => VAULT_KEY_RE.test(key))) risks.push("vault");
   if (ENDPOINT_KEYS.some((key) => typeof config[key] === "string" && config[key])) risks.push("endpoint");
   if (config.maxTokens !== undefined) risks.push("budget");
@@ -101,14 +113,17 @@ export function evaluateGraphPatch(graph: WorkflowGraph, patch: GraphPatch): Gra
       }
       nodes.push(op.node);
       added.push(op.node.label || op.node.id);
-      for (const risk of risksOfConfig(op.node.config)) risks.add(risk);
+      for (const risk of risksOfNode(op.node)) risks.add(risk);
     } else if (op.op === "editNode") {
       const index = nodes.findIndex((n) => n.id === op.nodeId);
       if (index < 0) return fail("PATCH_NODE_MISSING", `고치려는 단계 "${op.nodeId}"를 찾지 못했습니다.`, "화면을 새로고침한 뒤 다시 시도해 주세요.");
       const merged = { ...nodes[index], config: { ...(nodes[index].config ?? {}), ...(op.config ?? {}) } };
+      // 이미 갖고 있던 위험은 이 패치가 새로 거는 것이 아니다 — **늘어난 것만** 센다.
+      // (안 그러면 발송 단계의 문구 한 줄 고치는 데도 승인이 뜬다.)
+      const before = new Set(risksOfNode(nodes[index]));
       nodes[index] = merged;
       changed.push(merged.label || merged.id);
-      for (const risk of risksOfConfig(op.config)) risks.add(risk);
+      for (const risk of risksOfNode(merged)) if (!before.has(risk)) risks.add(risk);
     } else if (op.op === "removeNode") {
       const index = nodes.findIndex((n) => n.id === op.nodeId);
       if (index < 0) return fail("PATCH_NODE_MISSING", `지우려는 단계 "${op.nodeId}"를 찾지 못했습니다.`, "화면을 새로고침한 뒤 다시 시도해 주세요.");
@@ -142,9 +157,10 @@ export function evaluateGraphPatch(graph: WorkflowGraph, patch: GraphPatch): Gra
       // setPolicy
       const index = nodes.findIndex((n) => n.id === op.nodeId);
       if (index < 0) return fail("PATCH_NODE_MISSING", `설정을 바꾸려는 단계 "${op.nodeId}"를 찾지 못했습니다.`, "화면을 새로고침한 뒤 다시 시도해 주세요.");
+      const policyBefore = new Set(risksOfNode(nodes[index]));
       nodes[index] = { ...nodes[index], config: { ...(nodes[index].config ?? {}), ...(op.config ?? {}) } };
       changed.push(nodes[index].label || nodes[index].id);
-      for (const risk of risksOfConfig(op.config)) risks.add(risk);
+      for (const risk of risksOfNode(nodes[index])) if (!policyBefore.has(risk)) risks.add(risk);
       // 승인 등급을 낮추는 변경은 그 자체가 승인받아야 하는 변경이다.
       if (op.config?.approval === "auto") risks.add("mutation");
     }

@@ -1,3 +1,4 @@
+import { nodeCanChangeTheOutsideWorld } from "../../shared/graph-node-protocol";
 /**
  * 그래프를 Hub에 올리고, Hub에서 받아 설치한다.
  *
@@ -88,7 +89,7 @@ function describeGraphCode(graph: WorkflowGraph): CloudAgentSecurityFinding[] {
           + ` · ${code.split("\n").length}줄`,
       });
     }
-    if (cfg.effect === "mutation") {
+    if (nodeCanChangeTheOutsideWorld({ type: node.type, config: cfg })) {
       out.push({
         id: `graph-outward:${node.id}`,
         severity: "info",

@@ -510,6 +510,9 @@ export const runClaudeCode: Runner = async (
    * 없어서 강제 불가를 사용자에게 말한다). 읽기·검색·분석은 그대로 가능하다.
    */
   const READ_ONLY_DENIED_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "BashOutput", "KillShell"];
+  // judgment-exempt: 관측된 이름을 **분류**하는 게 아니라, 이 런타임에 **줄 도구를
+  //   열거**하는 목록이다. 분류기는 이름을 받아 답할 뿐 열거를 못 한다.
+  //   그리고 이건 벤더 CLI 플래그라 이름도 그 벤더의 것이어야 한다.
   /** write 모드에서 acceptEdits 가 여전히 묻는 내장 도구 — 헤드리스는 답할 수 없으니 미리 허용. */
   const WRITE_MODE_PRE_ALLOWED_TOOLS = ["Bash", "BashOutput", "KillShell", "WebFetch", "WebSearch"];
   const permArgs = runReq.untrustedNoTools

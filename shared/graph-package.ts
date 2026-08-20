@@ -1,3 +1,4 @@
+import { nodeCanChangeTheOutsideWorld } from "./graph-node-protocol";
 /**
  * `.agentgraph` 패키징 — 그래프를 **남에게 줄 수 있는 형태**로 만든다.
  *
@@ -178,6 +179,9 @@ export function buildGraphPackage(input: {
     // 에이전트 참조는 핀으로 남긴다 — 받는 사람이 무엇을 빌려야 하는지 알아야 한다.
     // 노드가 ref를 선언하지 않으면 자동화의 대상 에이전트를 상속한다(제품의 실제 동작).
     // 그 경우를 빼면 패키지가 "채울 것 없음"이라고 거짓말한다.
+    // judgment-exempt: 이건 "바깥을 바꾸나"가 아니라 "이 단계가 **에이전트를 굴리나**"다.
+    //   받는 사람이 무엇을 빌려야 하는지 정하는 질문이라, mutation 인 code 노드는
+    //   여기 해당되지 않는다(빌릴 에이전트가 없다). 정본과 답이 다른 게 정상이다.
     const isAgentish = node.type === "agent" || node.type === "action" || node.type === "output";
     const cfg = node.config as Record<string, unknown> | undefined;
     const ref = typeof cfg?.ref === "string" && cfg.ref ? cfg.ref : null;
@@ -201,7 +205,9 @@ export function buildGraphPackage(input: {
   if (blockers.length > 0) return { blocked: true, blockers, findings };
 
   const mutationNodes = nodes
-    .filter((n) => (n.config as Record<string, unknown> | undefined)?.effect === "mutation")
+    // 받는 사람에게 "바깥으로 나가는 단계"를 알리는 목록이다. 선언된 effect 만 보면
+    // 발행용 출력 노드가 빠져 설치 전 경고가 조용히 새다.
+    .filter((n) => nodeCanChangeTheOutsideWorld(n as { type?: string; config?: Record<string, unknown> }))
     .map((n) => ({ nodeId: n.id, label: n.label || n.id }));
 
   const scrubbedGraph = {

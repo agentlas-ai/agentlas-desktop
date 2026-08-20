@@ -325,12 +325,11 @@ export function parseNodeEnvelope(raw: unknown): NodeOutputEnvelope | null {
 export function requiredExecutionPermission(
   graph: { nodes?: { type?: string; config?: Record<string, unknown> | null }[] } | null | undefined,
 ): "read" | "write" {
-  const reachesOutside = (graph?.nodes ?? []).some((node) => {
-    const declared = node?.config?.effect;
-    if (declared === "mutation") return true;
-    if (declared === "read" || declared === "pure") return false;
-    return defaultNodeEffect(String(node?.type ?? "")) === "mutation";
-  });
+  // 판정은 정본 하나뿐이다 — 여기 인라인 사본이 있었고, 글자 그대로 같은 규칙이었다.
+  const reachesOutside = (graph?.nodes ?? []).some((node) => nodeCanChangeTheOutsideWorld({
+    type: node?.type,
+    config: (node?.config ?? undefined) as Record<string, unknown> | undefined,
+  }));
   return reachesOutside ? "write" : "read";
 }
 
@@ -366,3 +365,43 @@ export function defaultNodeEffect(nodeType: string): "pure" | "read" | "mutation
   // 시뮬레이션이 실제로 발행하고, 승인도 재시도 정책도 조회 기준으로 돈다.
   return nodeType === "output" ? "mutation" : "read";
 }
+
+/*
+ * ★이 판정의 **자리**가 여기인 이유. 아침에는 shared/graph-code-vars.ts 에 뒀는데,
+ *   그 파일은 `vars.get()` 파싱이 사는 곳이라 이 질문과 아무 상관이 없었다. 그때
+ *   내가 거기 서 있었기 때문에 거기 쓴 것이고, 사본이 생기는 이유가 정확히 그것이다.
+ *   판정은 자기가 의지하는 규칙(defaultNodeEffect) 옆에 산다.
+ */
+/**
+ * 이 노드가 **바깥을 바꿀 수 있는가** — 재개·재조정·발행이 함께 쓰는 단 하나의 판정.
+ *
+ * ★실측 2026-08-20. 이 판정이 네 곳에 손으로 복제돼 있었고, 넷 다 같은 목록이었다:
+ *     `type === "agent" || type === "action" || type === "output"`
+ *   그런데 **`code` 노드가 빠져 있다.** code 노드는 `effect: "mutation"` 으로 파일을 쓰고
+ *   메일을 보낸다 — 오늘 만든 자동화는 전부 그 방식이다.
+ *
+ *   결과: 부수효과를 낸 뒤 실패한 자동화의 그래프를 사람이 고치면, 커널이 "이미 나간 일이
+ *   있다"를 **못 보고 그대로 재생**한다. 매트릭스로 재현했다 — 파일이 v1 에서 v2 로 다시
+ *   쓰였다. 발송·결제였다면 두 번 나갔다.
+ *
+ *   그래서 판정을 한 곳으로 올린다. 선언된 효과가 있으면 그것을 믿고, 없으면 노드 종류로
+ *   본다(옛 그래프에는 effect 칸이 없다). **모르면 바꿀 수 있는 것으로 센다** — 이 판정의
+ *   오탐은 "한 번 더 조심"이고, 누락은 "두 번 발송"이다.
+ */
+export function nodeCanChangeTheOutsideWorld(node: {
+  type?: string;
+  config?: Record<string, unknown> | undefined;
+}): boolean {
+  const declared = typeof node.config?.effect === "string" ? node.config.effect.trim() : "";
+  if (declared === "mutation") return true;
+  if (declared === "read" || declared === "pure") return false;
+  /*
+   * ★여기서 노드 종류를 **다시 적으면 안 된다.** 처음 판이 그랬고, 그러자 이 함수가
+   *   `defaultNodeEffect` 의 사본이 됐다 — 정본을 만들면서 정본을 복제한 것이다.
+   *   (막다른 길 게이트가 요구하던 `defaultNodeEffect(` 호출이 정확히 이 이유였고,
+   *    나는 그 게이트를 "구현 못박기"라고 판단해 느슨하게 바꿨다가 규칙이 갈라졌다.
+   *    게이트가 옳았고, 다만 글자가 아니라 동작으로 물어야 했다 — 지금은 둘 다 됐다.)
+   */
+  return defaultNodeEffect(String(node.type ?? "")) === "mutation";
+}
+

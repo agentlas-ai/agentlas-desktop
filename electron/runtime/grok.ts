@@ -404,6 +404,8 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
     // ★오너 결정(2026-08-15) — 헤드리스는 답할 사람이 없으니 권한 범위 안의 도구는
     // 처음부터 풀어 둔다(claude 형제 규칙: acceptEdits 는 셸·웹을 여전히 묻는다).
     // grok --help 실측: `--allow <RULE>` (compat alias: --allowedTools).
+    // judgment-exempt: 위 claude 와 같다 — grok CLI 에 넘길 --allow **열거** 목록이지
+    //   관측된 호출의 분류가 아니다.
     args.push("--permission-mode", "acceptEdits", "--allow", "Bash", "--allow", "WebFetch", "--allow", "WebSearch");
   }
   if (req.untrustedNoTools) {

@@ -1,3 +1,4 @@
+import { nodeCanChangeTheOutsideWorld } from "./graph-node-protocol";
 import type { AutomationToolMode } from "./types";
 
 // The English+Korean wordlists that used to live here are GONE.
@@ -54,7 +55,9 @@ export function shouldPreferComputerUseForAutomation(
 export function graphTouchesOutside(graph: unknown): boolean {
   const nodes = (graph as { nodes?: Array<{ config?: Record<string, unknown> }> } | null)?.nodes;
   if (!Array.isArray(nodes) || nodes.length === 0) return true; // 모르면 좁히지 않는다
-  return nodes.some((node) => node?.config?.effect === "mutation");
+  // ★선언된 effect 만 보면 emitter 가 만든 출력 노드(칸이 아예 없음)가 안 보인다 —
+  //   그 노드의 기본값은 "바깥으로 나감"이라, 발행 자동화가 "안 나간다"로 읽혔다.
+  return nodes.some((node) => nodeCanChangeTheOutsideWorld(node as { type?: string; config?: Record<string, unknown> }));
 }
 
 export function resolveAutomationToolMode(input: {

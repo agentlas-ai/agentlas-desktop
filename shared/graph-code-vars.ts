@@ -40,29 +40,3 @@ export function codeReferencedVars(code: string | null | undefined): string[] {
   for (const m of text.matchAll(/vars\s*\.\s*([A-Za-z_$][\w$]*)/g)) add(m[1]);
   return out;
 }
-
-/**
- * 이 노드가 **바깥을 바꿀 수 있는가** — 재개·재조정·발행이 함께 쓰는 단 하나의 판정.
- *
- * ★실측 2026-08-20. 이 판정이 네 곳에 손으로 복제돼 있었고, 넷 다 같은 목록이었다:
- *     `type === "agent" || type === "action" || type === "output"`
- *   그런데 **`code` 노드가 빠져 있다.** code 노드는 `effect: "mutation"` 으로 파일을 쓰고
- *   메일을 보낸다 — 오늘 만든 자동화는 전부 그 방식이다.
- *
- *   결과: 부수효과를 낸 뒤 실패한 자동화의 그래프를 사람이 고치면, 커널이 "이미 나간 일이
- *   있다"를 **못 보고 그대로 재생**한다. 매트릭스로 재현했다 — 파일이 v1 에서 v2 로 다시
- *   쓰였다. 발송·결제였다면 두 번 나갔다.
- *
- *   그래서 판정을 한 곳으로 올린다. 선언된 효과가 있으면 그것을 믿고, 없으면 노드 종류로
- *   본다(옛 그래프에는 effect 칸이 없다). **모르면 바꿀 수 있는 것으로 센다** — 이 판정의
- *   오탐은 "한 번 더 조심"이고, 누락은 "두 번 발송"이다.
- */
-export function nodeCanChangeTheOutsideWorld(node: {
-  type?: string;
-  config?: Record<string, unknown> | undefined;
-}): boolean {
-  const declared = typeof node.config?.effect === "string" ? node.config.effect.trim() : "";
-  if (declared === "mutation") return true;
-  if (declared === "read" || declared === "pure") return false;
-  return node.type === "agent" || node.type === "action" || node.type === "output";
-}
