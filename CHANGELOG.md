@@ -6,6 +6,26 @@ Bundled runtime: Agentlas OS v1.2.12 (2b075361f07f25577994f0ce87f46f33ac41ec64).
 Source readiness does not prove a public installer or update feed; the
 Releases page stays the authority.
 
+- An automation could file every attachment correctly and still be recorded as
+  complete while nothing had moved. The model prefixed one sentence to the JSON
+  it was asked for, the next step could not parse it, swallowed the failure and
+  produced an empty list — and "every file it says it moved really exists" is
+  vacuously true of nothing. Whether a value is read by a machine is now decided
+  in one place, and both the author (which values get a format contract) and the
+  run (which values get their JSON recovered from surrounding prose) ask it.
+  Values only people read are left as prose.
+- A verification could be placed before the step that produces the evidence it
+  was told to judge on. The run filed everything correctly and then stopped at
+  five of eight steps because the evidence did not exist yet — and the order is
+  chosen by the compiler, so there was nothing the user could fix. A check is
+  now placed after both the step it judges and the step that makes its evidence.
+- Edges leaving a fork were not drawn. A graph whose chain was complete appeared
+  on the canvas as two disconnected clusters, because a branch node offers only
+  a true and a false handle and an edge with neither pointed at a handle that
+  does not exist. Both the authoring side and the canvas now name the side.
+- An empty result is no longer failed on sight. Work that ran and found nothing
+  to do — a quiet day, everything already processed, a condition not met — passes
+  when the step says why it is empty; an unexplained empty result still fails.
 - A freshly installed CLI could never obtain the graph engine: the download
   function existed but nothing called it, so every automation failed with
   "vendored Desktop Core is unavailable". The run command now fetches on a
