@@ -785,6 +785,25 @@ function promptWithHandoffContract(
     "markdown, no code fences. Use a JSON array when there are several items and a JSON",
     "object when there is one. Every field you were asked for becomes a key. If a value",
     "cannot be read from the input, use null — never guess it and never leave a placeholder.",
+    /*
+     * ★고친 값을 읽은 값인 척 넘기지 마라.
+     *
+     *   실측 2026-08-21 (캠페인 E3): `Amount: -99,999,999 KRW` 와 `Date: 2026-13-45` 를
+     *   읽은 단계가 부호를 떼고 날짜를 메일 날짜로 바꿔 `amount: 99999999,
+     *   date: 2026-08-19` 만 넘겼다. 다음 코드는 정상 청구서로 보고 accounting 에 넣었고,
+     *   사용자가 "이상한 건 review 로"라고 말한 그 건이 8/8 accepted 로 끝났다.
+     *
+     *   판정기를 다시 돌려 확인한 것(같은 기록, 판정만 교체):
+     *     · 원본값이 기록에 있으면 → partial. "부호가 음수고 날짜가 불가능하니 review 로
+     *       갔어야 한다"까지 정확히 말한다. 목표만 있으면 판정은 이미 잡는다.
+     *     · 원본값이 없으면 → ok. 판정을 아무리 고쳐도 **없는 사실은 볼 수 없다.**
+     *
+     *   그래서 고칠 자리는 판정이 아니라 여기다. 값을 손댔다는 것 자체가 다음 단계와
+     *   판정이 알아야 할 사실이고, 그 사실을 만들 수 있는 것은 손댄 단계뿐이다.
+     */
+    "If a value you report is not what the source literally says — you corrected, normalized,",
+    "reformatted, inferred or filled it — keep the source's literal text in the same entry and",
+    "say what you changed. A corrected value must never arrive looking like a value you read.",
   ].join("\n");
 }
 

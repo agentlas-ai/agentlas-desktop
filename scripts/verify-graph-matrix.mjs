@@ -995,6 +995,31 @@ for (const c of guardCases) {
     "산문 한 줄이 앞에 붙었다고 값이 통째로 못 읽는 값이 되면, 다음 코드는 빈손을 내고 "
     + "그 빈손이 초록으로 끝납니다.",
   );
+  const { buildGraphFromBlueprint: buildBp, autofillOutputChecks: autofillBp } =
+    await import("../dist/shared/graph-blueprint.js");
+  check(
+    "a-corrected-value-must-not-arrive-looking-like-a-read-one",
+    (() => {
+      const bp = autofillBp({
+        name: "고친 값", goal: "읽은 것과 고친 것을 가른다",
+        trigger: { kind: "input", label: "시작", varName: "seed" },
+        steps: [
+          { kind: "agent", title: "읽는다", instruction: "첨부에서 금액을 읽는다",
+            effect: "read", produces: "ex", consumes: ["seed"] },
+          { kind: "code", title: "쓴다", instruction: "적는다", code: "result = 1",
+            codeLang: "python", effect: "read", produces: "y", consumes: ["ex"] },
+        ],
+      });
+      const built = buildBp(bp);
+      const prompt = built.ok
+        ? String(built.graph.nodes.find((n) => n.id === "step1")?.config?.prompt ?? "")
+        : "";
+      return /literally says/.test(prompt) && /say what you changed/.test(prompt);
+    })(),
+    "값을 손댔다는 사실을 손댄 단계가 안 남기면 아무도 못 만듭니다 — 판정기를 다시 돌려 "
+    + "확인했습니다: 원본값이 기록에 있으면 잡고(partial), 없으면 통과합니다(ok). "
+    + "판정을 고쳐서 풀 수 있는 문제가 아닙니다.",
+  );
   check(
     "a-value-only-people-read-is-left-as-prose",
     machineReadableValue(dirty, false) === dirty
