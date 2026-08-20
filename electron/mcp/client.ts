@@ -456,19 +456,40 @@ function cleanPathCandidate(raw: string | undefined): string | null {
 /** reasoning 전문 상한 — 원장 payload와 IPC를 지킨다(Claude thinking은 수만 자가 될 수 있다). */
 const REASONING_SPAN_TEXT_CAP = 6_000;
 
-export function inferWorkingFolderFromPrompt(prompt: string): string | null {
+/**
+ * 사람이 "이 폴더에서 일해"라고 적었을 때 그 폴더를 잡는다.
+ *
+ * ★두 가지를 못 박는다. 실측 2026-08-20 (E2E 캠페인 E1, 다운로드 폴더 정리 자동화):
+ *   사용자 폴더에 `IMG_9931/` 이라는 **없던 폴더**가 생기고 그 안에 `.agentlas`
+ *   프로젝트 뼈대 516KB(.env.example · .gitignore · credentials/ · signing/)가 깔렸다.
+ *
+ *   ① **추측한 경로를 만들지 않는다.** 예전에는 `mkdirSync(candidate, {recursive:true})`
+ *      로 없는 폴더를 **만들었다**. 추측이 틀렸을 때 흔적이 남는 쪽으로 틀린 것이다.
+ *      이미 있는 폴더만 잡는다 — 없으면 그건 작업 폴더 선언이 아니었다.
+ *
+ *   ② **기계가 쓴 문장에서는 추측하지 않는다.** 자동화 노드의 프롬프트에는 다루는
+ *      파일 경로가 데이터로 들어간다("group key IMG_9931 · target folder …/IMG_9931").
+ *      그 경로는 "여기서 일해"가 아니라 "이걸 처리해"다.
+ *      실측: 사용자가 쓴 원문은 이 정규식에 **안 걸렸고**, 제품이 스스로 만든 노드
+ *      프롬프트가 걸렸다. 즉 사용자가 쓰지도 않은 폴더가 사용자 폴더에 생긴다.
+ */
+export function inferWorkingFolderFromPrompt(
+  prompt: string,
+  opts?: { authored: "human" | "machine" },
+): string | null {
+  if (opts?.authored === "machine") return null;
   const explicit = prompt.match(
     /(?:(?:project|working|workspace|target|output)?\s*(?:folder|directory|dir)|(?:작업|프로젝트|워크스페이스|대상|출력)\s*(?:루트|폴더|디렉터리|경로))\s*(?:only|전용|만)?[^/]*(\/(?:Volumes|Users|tmp|private\/tmp)\/[^\s`"'<>]+)/i,
   );
   const candidate = cleanPathCandidate(explicit?.[1]);
   if (!candidate) return null;
   try {
-    fs.mkdirSync(candidate, { recursive: true });
-    return candidate;
-  } catch (err) {
-    console.error("[workspace] failed to create inferred working folder:", err);
+    if (!fs.statSync(candidate).isDirectory()) return null;
+  } catch {
+    // 없는 경로다. 만들지 않는다 — 추측으로 사용자 폴더에 흔적을 남기지 않는다.
     return null;
   }
+  return candidate;
 }
 
 function refreshCareerGraphInBackground(projectPath: string, sink: EventSink, locale: "ko" | "en"): void {
@@ -1902,7 +1923,11 @@ ${effectiveUserPrompt}`;
   const inferredWorkingFolder =
     workspaceBinding || !canWrite || existingWorkingFolder || projectWorkingFolder
       ? null
-      : inferWorkingFolderFromPrompt(req.userPrompt);
+      : inferWorkingFolderFromPrompt(req.userPrompt, {
+        // 자동화·사이트·트렉 실행의 프롬프트는 제품이 조립한 것이다. 거기 담긴 경로는
+        // 작업 폴더 선언이 아니라 처리 대상이다(위 주석의 실측 참고).
+        authored: isUnattendedExecution(executionContext) ? "machine" : "human",
+      });
   if (inferredWorkingFolder) setChatWorkingFolder(chat.id, inferredWorkingFolder);
   const targetAppWorkingFolder = !workspaceBinding && !suppressProjectBinding && targetApp
     ? path.resolve(targetApp.rootPath)
