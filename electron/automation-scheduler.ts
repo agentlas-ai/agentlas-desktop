@@ -752,6 +752,23 @@ async function runOne(
       // 그래프 outputs 중 마지막 노드 출력을 체인 페이로드로 노출.
       const outVals = Object.values(result.outputs ?? {});
       output = outVals.length ? outVals[outVals.length - 1] : undefined;
+      /*
+       * ★판정에게 **마지막 글 한 줄**이 아니라 실행 기록을 준다.
+       *   실측 2026-08-20 (캠페인 E3): 검증으로 끝나는 그래프의 마지막 출력은 `"pass"` 라,
+       *   첨부 3건을 정확히 정리한 실행과 이미 다 처리돼 할 일이 없던 실행이 판정 눈에
+       *   똑같았다. 후자가 "pass 라고만 하고 한 일이 없다"로 거절됐다 — "이미 한 건 다시
+       *   하지 마"로 만든 자동화는 조용한 날마다 실패로 찍힌다.
+       *   기록은 호스트가 적는다. 요약도 해석도 하지 않고, 노드 이름과 그 노드가 낸 값을
+       *   선언 순서대로 옮긴다.
+       */
+      const runRecord = {
+        steps: (a.graph?.nodes ?? [])
+          .map((node) => ({
+            label: String(node.label || node.id),
+            output: String(result.outputs?.[node.id] ?? ""),
+          }))
+          .filter((step) => step.output.trim().length > 0),
+      };
       if (runStatus === "ok") {
         // ★두 답을 두 칸에 남긴다.
         //
@@ -765,6 +782,9 @@ async function runOne(
         //   도구 호출이 0건이면 바깥은 그대로다 — 그 사실은 지어낼 수 없다.
         const classified = await classifyAutomationOutcome(output, {
           ...(currentRunId ? { toolActivity: observedToolActivity(currentRunId) } : {}),
+          ...(runRecord.steps.length > 0 ? { runRecord } : {}),
+          // 사람이 승인한 목표 — 이것 없이는 "시킨 대로 한 것"과 "다 못 한 것"을 못 가른다.
+          declaredGoal: { name: a.name ?? null, goal: a.goal ?? null },
         });
         judgmentUnavailableRun = isJudgmentUnavailable(classified);
         runOutcome = judgmentUnavailableRun ? "unjudged" : outcomeOf(classified.outcome);
@@ -924,6 +944,7 @@ async function runOne(
         //   도구 호출이 0건이면 바깥은 그대로다 — 그 사실은 지어낼 수 없다.
         const classified = await classifyAutomationOutcome(output, {
           ...(currentRunId ? { toolActivity: observedToolActivity(currentRunId) } : {}),
+          declaredGoal: { name: a.name ?? null, goal: a.goal ?? null },
         });
         judgmentUnavailableRun = isJudgmentUnavailable(classified);
         // 그래프 경로와 같은 규율 — 판정의 답은 자기 칸으로 간다.

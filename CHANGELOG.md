@@ -6,6 +6,15 @@ Bundled runtime: Agentlas OS v1.2.12 (2b075361f07f25577994f0ce87f46f33ac41ec64).
 Source readiness does not prove a public installer or update feed; the
 Releases page stays the authority.
 
+- A correct automation could be recorded as failed. The completion judgment saw
+  only the last node's output — in a graph that ends in verifications, the single
+  word "pass" — so a run that filed three attachments and a run that had nothing
+  to do looked identical, and the quiet one was rejected for "no evidence the
+  task was completed". It is now given the host's record of what each step
+  produced. That alone was not enough: told the details, it rejected a run for
+  setting an unreadable invoice aside — which is exactly what the person's saved
+  goal asked for. The judgment had never been told the goal. It is now, and it
+  accepts both the working run and the quiet one.
 - An automation could file every attachment correctly and still be recorded as
   complete while nothing had moved. The model prefixed one sentence to the JSON
   it was asked for, the next step could not parse it, swallowed the failure and

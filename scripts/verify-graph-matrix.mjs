@@ -1073,6 +1073,49 @@ for (const c of guardCases) {
   );
 }
 
+// ── 축: 완주 판정은 마지막 글이 아니라 실행 기록을 본다 ───────────────────────
+// 실측 2026-08-20(E3): 검증으로 끝나는 그래프의 마지막 출력은 "pass" 한 낱말이라,
+// 첨부 3건을 정확히 정리한 실행과 이미 다 처리돼 할 일이 없던 실행이 판정 눈에 똑같았다.
+// 후자는 "pass 라고만 하고 한 일이 없다"로 거절됐다 — "이미 한 건 다시 하지 마"로 만든
+// 자동화가 조용한 날마다 실패로 찍힌다는 뜻이다.
+{
+  const { automationJudgeInput } = await import("../dist/electron/automation-result.js");
+  const record = { steps: [
+    { label: "메일함을 읽고 이미 처리한 건은 건너뛴다",
+      output: '{"candidates":[],"skipped_already_processed":2}' },
+  ] };
+  const withRecord = automationJudgeInput("pass", { runRecord: record });
+  const without = automationJudgeInput("pass", {});
+  check(
+    "the-completion-judge-sees-what-each-step-produced",
+    withRecord.includes("skipped_already_processed")
+      && withRecord.includes("메일함을 읽고 이미 처리한 건은 건너뛴다")
+      && !without.includes("HOST-OBSERVED RUN RECORD"),
+    "판정에게 마지막 글 한 낱말만 주면, 일한 실행과 할 일이 없던 실행을 가를 수가 없습니다 — "
+    + "그러면 조용한 날이 실패가 됩니다.",
+  );
+  check(
+    "the-judge-is-told-what-the-person-approved",
+    (() => {
+      const withGoal = automationJudgeInput("pass", { declaredGoal: {
+        name: "청구서 정리",
+        goal: "읽을 수 없는 금액의 첨부는 검토 폴더로 보낸다" } });
+      return withGoal.includes("검토 폴더로 보낸다")
+        && withGoal.includes("AUTOMATION GOAL")
+        && !automationJudgeInput("pass", {}).includes("AUTOMATION GOAL");
+    })(),
+    "판정에게 목표를 안 주면 \"시킨 대로 한 것\"과 \"다 못 한 것\"을 가를 수 없습니다 — "
+    + "실측: 읽을 수 없는 청구서를 목표대로 검토 폴더에 넣은 실행이 rejected 로 찍혔습니다.",
+  );
+  check(
+    "measured-tool-activity-still-outranks-the-story",
+    automationJudgeInput("게시했습니다", { toolActivity: { callCount: 0, toolNames: [] } })
+      .includes("tool calls: 0"),
+    "실행 기록을 더하면서 도구 관측을 잃으면, \"게시했다\"는 소설이 다시 통과합니다 — "
+    + "이 저장소가 12연속 accepted 로 겪은 그 병입니다.",
+  );
+}
+
 try { getDb().close(); } catch { /* noop */ }
 try { rmSync(dir, { recursive: true, force: true }); } catch { /* noop */ }
 
