@@ -35,6 +35,15 @@ export default function LibraryMcpsPage() {
   const brandMap = usePluginBrandMap();
   const [tab, setTab] = useState<Tab>("installed");
   const [pickerOpen, setPickerOpen] = useState(false);
+  /**
+   * 마지막 추가에서 **못 붙은 것들**. 화면에 안 나오면 "추가했는데 없다"가 된다.
+   *
+   * 실측(2026-08-20): 팝업이 돌려주던 skipped 를 이 페이지가 통째로 버리고 있었다.
+   * 허브 목록에는 있지만 연결 정보(mcp 행)가 아직 없는 항목이 적지 않고, 그런 것을
+   * 고르면 팝업이 조용히 닫히고 목록은 그대로였다 — 사용자에게는 아무 일도 안 일어난
+   * 것처럼 보이고, 왜인지 알 길이 없었다.
+   */
+  const [addSkipped, setAddSkipped] = useState<Array<{ slug: string; reason: string }>>([]);
   const [catalog, setCatalog] = useState<McpToolCatalogEntry[]>([]);
   const [installed, setInstalled] = useState<InstalledMcpServer[]>([]);
   const [statuses, setStatuses] = useState<Record<string, McpServerStatus>>({});
@@ -249,14 +258,54 @@ export default function LibraryMcpsPage() {
       {pickerOpen && (
         <PluginPickerDialog
           ko={locale !== "en"}
-          onClose={() => setPickerOpen(false)}
-          onCompleted={() => {
+          // 닫기로도 새로고침한다. 로그인·키 단계에서 X 나 Esc 로 나가면 onCompleted 가
+          // 오지 않는데, 그때도 서버는 이미 등록돼 있다 — 새로고침을 안 하면 방금 깐 것이
+          // 목록에 없는 것처럼 보인다.
+          onClose={() => { setPickerOpen(false); void refresh(); }}
+          onCompleted={(result) => {
             // 팝업이 등록한 서버는 이 목록에 즉시 나타나야 한다. 새로고침을 사용자가
             // 직접 하게 두면 "추가했는데 없다"로 읽힌다.
             void refresh();
             setTab("installed");
+            setAddSkipped(result?.skipped ?? []);
           }}
         />
+      )}
+
+      {addSkipped.length > 0 && (
+        <div
+          role="status"
+          style={{
+            marginBottom: 12,
+            padding: "12px 14px",
+            borderRadius: "var(--radius-md)",
+            border: "1px solid var(--paper-edge)",
+            background: "var(--paper)",
+            fontSize: 12.5,
+            lineHeight: 1.55,
+          }}
+        >
+          <strong style={{ display: "block", marginBottom: 6 }}>
+            {locale === "en"
+              ? `${addSkipped.length} of the tools you picked could not be connected`
+              : `고른 것 중 ${addSkipped.length}개는 연결하지 못했어요`}
+          </strong>
+          <ul style={{ margin: 0, paddingLeft: 16, color: "var(--ink-soft)" }}>
+            {addSkipped.map((row) => (
+              <li key={row.slug}>{`${row.slug} — ${row.reason}`}</li>
+            ))}
+          </ul>
+          <button
+            type="button"
+            onClick={() => setAddSkipped([])}
+            style={{
+              marginTop: 8, border: 0, background: "transparent",
+              color: "var(--ink-soft)", cursor: "pointer", padding: 0, fontSize: 12.5,
+            }}
+          >
+            {locale === "en" ? "Dismiss" : "닫기"}
+          </button>
+        </div>
       )}
 
       {tab === "installed" ? (

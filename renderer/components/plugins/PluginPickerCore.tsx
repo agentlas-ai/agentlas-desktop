@@ -149,6 +149,29 @@ export interface PluginInstallOutcome {
  * 실패는 그 항목에서 멈추고 나머지를 계속한다 — 하나가 안 붙었다고 나머지 선택을
  * 버리면 사용자는 무엇이 됐고 무엇이 안 됐는지 모른 채 처음부터 다시 골라야 한다.
  */
+/**
+ * 이 서버가 지금 이미 붙는가. 붙으면 키를 물을 이유가 없다.
+ *
+ * 못 재면 **false** 를 돌려 원래대로 묻는다 — 확인 실패를 "괜찮다"로 읽으면 키가 정말
+ * 필요한 도구가 조용히 죽은 채 남는다.
+ */
+async function alreadyConnects(
+  api: NonNullable<ReturnType<typeof ipc>>,
+  serverId: string | null,
+): Promise<boolean> {
+  if (!serverId) return false;
+  try {
+    const status = await api.mcpTools.test(serverId);
+    // 도구를 실제로 받아 왔을 때만 "된다"로 본다. connected 만 보면 붙자마자 아무것도
+    // 못 내주는 서버까지 통과시킨다. missingEnv 가 남아 있으면 당연히 물어야 한다.
+    return Boolean(status?.connected)
+      && (status.tools?.length ?? 0) > 0
+      && (status.missingEnv?.length ?? 0) === 0;
+  } catch {
+    return false;
+  }
+}
+
 export async function installPlugins(input: {
   chosen: MarketplaceListing[];
   ko: boolean;
@@ -201,21 +224,29 @@ export async function installPlugins(input: {
         if (connected.length > 0 || pending.length > 0) {
           result.installed.push(listing.slug);
           /*
-           * 여기서 두 갈래가 갈린다.
-           *
-           * 로그인(OAuth) 도구는 키를 물어봐야 할 것이 없다 — 물어보면 사용자는
-           * 있지도 않은 토큰을 찾으러 간다. 대신 인가 흐름을 돌린다.
-           * 키 도구만 키 시트로 간다. 그것도 "나중에"가 늘 열려 있다.
+           * 다음에 무엇을 물을지는 **실제로 깔린 것**이 정한다 — 허브가 선언한 auth 가
+           * 아니다. 그 둘은 갈린다(2026-08-20 실측):
+           *   Notion — 허브 auth="oauth" 인데 우리가 까는 것은 stdio + NOTION_TOKEN.
+           *     그래서 로그인 갈래로 새고, 메인은 "this server has no remote URL to
+           *     authorize" 로 거절하고, 정작 필요한 토큰은 묻지도 않았다.
+           * 원격(http/sse) 행이 있어야 인가할 대상이 있다. stdio 뿐이면 인가할 URL 자체가
+           * 없으므로 로그인은 물어볼 수 없는 것이고, 필요한 것은 키다.
            */
-          if (setupKindFor(listing) === "login") {
-            const serverId = connected.find((row) => row.serverId)?.serverId
-              ?? pending.find((row) => row.serverId)?.serverId
-              ?? null;
-            if (serverId) needLogin.push({ slug: listing.slug, name: listing.name, serverId });
+          const serverId = connected.find((row) => row.serverId)
+            ?? pending.find((row) => row.serverId)
+            ?? null;
+          const step = nextSetupStepFor({ listing, rows: preview.rows });
+
+          if (step === "login" && serverId?.serverId) {
+            needLogin.push({ slug: listing.slug, name: listing.name, serverId: serverId.serverId });
             continue;
           }
+          if (step !== "keys") continue;
+          // 키를 묻기 전에 **이미 되는지 본다.** 제공사가 토큰을 선언해도 익명으로 붙는
+          // 서버가 있다. 되는 것에 키를 물으면 사용자는 없는 숙제를 받는다.
+          if (await alreadyConnects(api, serverId?.serverId ?? null)) continue;
           const envKeys = [...new Set(preview.rows.flatMap((row) => row.envKeys ?? []))];
-          if (envKeys.length > 0) needKeys.push({ slug: listing.slug, name: listing.name, envKeys });
+          needKeys.push({ slug: listing.slug, name: listing.name, envKeys });
         } else if (failed.length > 0) {
           result.skipped.push({
             slug: listing.slug,
@@ -565,6 +596,28 @@ export function isPluginListing(listing: MarketplaceListing): boolean {
  */
 export type PluginSetupKind = "ready" | "login" | "key" | "unknown";
 
+/**
+ * 설치가 끝난 뒤 **무엇을 더 물어야 하는가** — 허브가 선언한 auth 가 아니라 실제로 깔린
+ * 행(rows)이 정한다.
+ *
+ * 두 근거가 갈린다는 것을 실측했다(2026-08-20, 라이브 허브 324항목 중):
+ *   notion          auth=oauth  → 행은 stdio, envKeys 0개
+ *   huggingface-mcp auth=token  → 행은 http,  envKeys 0개
+ * 예전 코드는 auth 만 보고 notion 을 로그인 갈래로 보냈고, 메인은 stdio 서버에 인가할
+ * URL 이 없다며 거절했다("this server has no remote URL to authorize"). 필요한 토큰은
+ * 묻지도 않았다. 인가는 **원격 행이 있을 때만** 가능한 일이다.
+ */
+export function nextSetupStepFor(input: {
+  listing: MarketplaceListing;
+  rows: Array<{ transport: string; envKeys?: string[] }>;
+}): "login" | "keys" | "none" {
+  const { listing, rows } = input;
+  const authorizable = rows.some((row) => row.transport === "http" || row.transport === "sse");
+  if (authorizable && setupKindFor(listing) === "login") return "login";
+  const envKeys = new Set(rows.flatMap((row) => row.envKeys ?? []));
+  return envKeys.size > 0 ? "keys" : "none";
+}
+
 export function setupKindFor(listing: MarketplaceListing): PluginSetupKind {
   const auth: PluginAuthKind | undefined = listing.authKind;
   if (auth === "none") return "ready";
@@ -656,5 +709,9 @@ export function setupHintFor(input: {
   if (listing.connectSetupRequired) {
     return { tone: "key", text: ko ? "제공사 안내에 따라 직접 연결" : "Connect via the provider's guide" };
   }
-  return { tone: "key", text: ko ? "API 키 필요 (나중에 입력 가능)" : "API key needed (can add later)" };
+  // "필요"가 아니라 "필요할 수 있음"이다. 이 문구의 근거는 허브가 선언한 auth 인데, 실제로
+  // 깔리는 매니페스트와 어긋난다(2026-08-20 실측: Hugging Face 는 auth="token" 인데 행은
+  // http + envKeys 0개였고, 키 없이 도구 4개를 내줬다). 실제로 물을지는 설치 뒤에 정해지고,
+  // 안 물어도 되면 안 묻는다 — 그러니 여기서 단정하지 않는다.
+  return { tone: "key", text: ko ? "API 키가 필요할 수 있어요" : "May need an API key" };
 }
