@@ -7,6 +7,12 @@ import {
   type BuildInterviewQuestion,
 } from "../../shared/build-turn";
 import {
+  listPendingToolApprovals,
+  onToolApprovalRequested,
+  onToolApprovalResolved,
+  resolveToolApproval,
+} from "../runtime/tool-approval";
+import {
   browserResolveApproval,
   listPendingBrowserApprovals,
   onBrowserApprovalLifecycle,
@@ -188,6 +194,8 @@ import type {
 const REQUEST_ID_RE = /^[^\u0000-\u001f]{1,128}$/;
 const IDENTIFIER_RE = /^[^\u0000-\u001f]{1,256}$/;
 const RUN_ID_RE = /^[^\u0000-\u001f]{1,160}$/;
+/** 도구 승인 id — tool-approval 이 발급하는 `approval:<t>:<rand>` / `denied:<t>:<rand>`. */
+const TOOL_APPROVAL_ID_RE = /^(approval|denied):[a-z0-9]{1,16}:[a-z0-9]{1,16}$/;
 const EVENT_TEXT_MAX_BYTES = 200_000;
 const EVENT_DELTA_MAX_BYTES = 64_000;
 const TOOL_COUNT_CAP = 1_000;
@@ -2147,6 +2155,25 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         return asJsonValue(result, request.method);
       }
 
+      /*
+       * 런타임 도구 승인 — 데스크탑 승인 칩과 **같은 결정**을 폰이 답한다.
+       * 결정은 tool-approval 의 단일 등록소로 가므로, allow_always 는 여기서도
+       * 능력 규칙을 영구 기록한다(데스크탑과 다른 경로를 만들지 않는다).
+       */
+      case "runtime.resolveToolApproval": {
+        const params = guardedParams(request, ["id", "decision"]);
+        const id = requiredIdentifier(params, "id", TOOL_APPROVAL_ID_RE);
+        const decision = requiredEnum(
+          params,
+          "decision",
+          ["allow_once", "allow_session", "allow_always", "deny"] as const,
+        );
+        const resolved = resolveToolApproval(id, decision);
+        this.scheduleSnapshotUpdated();
+        // live 요청이 아니면(이미 지나간 고지) 대기 중인 실행은 없다 — 그 사실을 그대로 돌려준다.
+        return asJsonValue({ resolved }, request.method);
+      }
+
       // DESKTOP_MOBILE_BRIDGE: Automation reads/writes use the same SQLite store
       // and scheduler as IPC; prompt/graph/trigger secrets stay in the projector.
       case "automations.list": {
@@ -3138,6 +3165,22 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     const activeChatIds = invocationService.activeChatIds();
     const pendingBrowserApprovals = listPendingBrowserApprovals().map((approval) =>
       this.projectBrowserApproval(approval));
+    // live 요청만 폰에 보낸다 — 사후 고지(post-denial)는 데스크탑에서도 카드가 아니다.
+    const pendingToolApprovals = listPendingToolApprovals()
+      .filter((approval) => approval.mode === "live")
+      .map((approval) => ({
+        id: approval.id,
+        runtime: approval.runtime,
+        tool: approval.tool,
+        ...(approval.detail ? { detail: approval.detail.slice(0, 2_000) } : {}),
+        ...(approval.cwd ? { cwd: approval.cwd } : {}),
+        mode: approval.mode,
+        ...(approval.deniedBy ? { deniedBy: approval.deniedBy } : {}),
+        requestedAt: approval.requestedAt,
+        ...(approval.chatId ? { chatId: approval.chatId } : {}),
+        ...(approval.capability ? { capability: approval.capability } : {}),
+        ...(approval.agentId ? { agentId: approval.agentId } : {}),
+      }));
     const ontology = await this.projectOntology(this.ontologyRefreshRequested);
     return projectMobileBridgeSnapshot({
       hostIdentity: this.options.hostIdentity,
@@ -3146,6 +3189,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       activeChatIds,
       includeMessagesForChatIds: activeChatIds,
       pendingBrowserApprovals,
+      pendingToolApprovals,
       ontology,
     });
   }
@@ -3204,6 +3248,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         this.scheduleSnapshotUpdated();
       }),
       onBrowserApprovalLifecycle((event) => this.forwardBrowserApproval(event)),
+      onToolApprovalRequested(() => this.scheduleSnapshotUpdated()),
+      onToolApprovalResolved(() => this.scheduleSnapshotUpdated()),
       onDesktopStoreChange((change) => {
         this.scheduleSnapshotUpdated(change.entity === "automation" ? change.id : undefined);
       }),

@@ -6,17 +6,20 @@ import type {
 } from "../../shared/site-studio";
 
 /**
- * Policy-approved MCP inventory for untrusted Site Agent Apps. Keep this list
- * separate from the global MCP registry: a globally installed tool is not an
- * Agent App capability until this boundary explicitly admits it.
+ * MCP admission for Site Agent Apps.
+ *
+ * ★오너 결정 2026-08-20 — Site 축 전부 개방. 예전에는 Agentlas 소유·콘텐츠 고정
+ * 아티팩트 1종(agentlas-time)만 이 경계를 넘을 수 있었다. 이제 어떤 카탈로그
+ * 항목이든 **앱 소유자가 네이티브 동의 리뷰에서 명시적으로 승인한 것**은 넘는다.
+ * 정적 allowlist 가 아니라 동의 영수증(recommendation/readiness digest 바인딩)이
+ * 유일한 승인 관문이다 — 카탈로그 id 하나만으로는 여전히 권위가 아니다.
  */
-// Only Agentlas-owned, content-pinned artifacts may execute for an untrusted
-// Agent App. Brave's catalog entry currently installs through unpinned npx, so
-// it remains visible in the global MCP catalog but cannot cross this boundary.
-export const SITE_AGENT_APP_READONLY_MCP_CATALOG_IDS = ["agentlas-time"] as const;
-export const SITE_AGENT_APP_READONLY_MCP_ALLOWLIST = new Set<string>(
-  SITE_AGENT_APP_READONLY_MCP_CATALOG_IDS,
-);
+export const SITE_AGENT_APP_READONLY_MCP_CATALOG_IDS: readonly string[] = [];
+export const SITE_AGENT_APP_READONLY_MCP_ALLOWLIST = {
+  has(id: string): boolean {
+    return typeof id === "string" && SAFE_ID_RE.test(id);
+  },
+};
 
 const CONSENT_POLICY_VERSION = "site-agent-app-readonly-mcp-consent.v1";
 const SAFE_ID_RE = /^[a-z0-9][a-z0-9_-]{0,79}$/;

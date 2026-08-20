@@ -25,6 +25,7 @@ const ACTION_INTENTS = new Set<OneSurfaceSemanticActionIntent>([
   "resume_task", "save_result", "change_conditions", "view_details", "edit_asset",
   "disable_asset", "use_once", "delete_asset", "reopen_intro", "connect_desktop",
   "try_result", "open_asset", "refine_result", "reuse_result", "prepare_share",
+  "run_automation", "open_automation", "open_build", "toggle_mcp_server",
 ]);
 const EXECUTABLE_OR_TRANSPORT_RE = /(?:<|javascript\s*:|data\s*:|\b(?:https?|file):\/\/|dangerouslySetInnerHTML|\bon(?:error|load|click)\s*=)/i;
 const POSIX_ABSOLUTE_PATH_RE = /(^|[\s("'=:\[{])\/[^\s,;:"'`<>|}\]]+/m;
@@ -193,6 +194,36 @@ function isBlock(value: unknown): value is Record<string, unknown> & { blockId: 
     case "ImprovementProof":
       return hasOnlyKeys(value, ["blockId", "type", "title", "improvementProofRef", "collapsedByDefault"])
         && isSafeId(value.improvementProofRef) && value.collapsedByDefault === true;
+    case "Automation":
+      return hasOnlyKeys(value, ["blockId", "type", "title", "automationId", "status", "schedule", "nodes", "lastRun"])
+        && isSafeId(value.automationId)
+        && ["registered", "running", "failed"].includes(String(value.status))
+        && (value.schedule == null || typeof value.schedule === "string")
+        && Array.isArray(value.nodes) && value.nodes.length <= 64 && value.nodes.every((node) => isRecord(node)
+          && hasOnlyKeys(node, ["nodeRef", "label"]) && isSafeId(node.nodeRef) && typeof node.label === "string")
+        && (value.lastRun == null || (isRecord(value.lastRun)
+          && hasOnlyKeys(value.lastRun, ["at", "status", "summary"])
+          && (value.lastRun.at == null || typeof value.lastRun.at === "string")
+          && ["completed", "failed", "cancelled", "running"].includes(String(value.lastRun.status))
+          && (value.lastRun.summary == null || typeof value.lastRun.summary === "string")));
+    case "AgentBuild":
+      return hasOnlyKeys(value, ["blockId", "type", "title", "buildSessionId", "agentName", "agentSlug", "stages", "request"])
+        && isSafeId(value.buildSessionId)
+        && typeof value.agentName === "string"
+        && (value.request == null || (typeof value.request === "string" && value.request.length <= 4000))
+        && (value.agentSlug == null || isSafeId(value.agentSlug))
+        && Array.isArray(value.stages) && value.stages.length <= 64 && value.stages.every((stage) => isRecord(stage)
+          && hasOnlyKeys(stage, ["stageRef", "label", "status"]) && isSafeId(stage.stageRef)
+          && typeof stage.label === "string"
+          && ["waiting", "working", "completed", "failed"].includes(String(stage.status)));
+    case "McpSetup":
+      return hasOnlyKeys(value, ["blockId", "type", "title", "servers"])
+        && Array.isArray(value.servers) && value.servers.length > 0 && value.servers.length <= 64
+        && value.servers.every((server) => isRecord(server)
+          && hasOnlyKeys(server, ["catalogId", "name", "enabled", "keyState"])
+          && isSafeId(server.catalogId) && typeof server.name === "string"
+          && typeof server.enabled === "boolean"
+          && ["not_required", "missing", "configured"].includes(String(server.keyState)));
   }
 }
 

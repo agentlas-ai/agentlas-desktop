@@ -425,6 +425,53 @@
   cursor: default;
 }
 
+/* 이미 열려 있는 화면(온보딩 전체화면) 안에 그대로 놓이는 후속 단계.
+   온보딩 도중에는 모달을 또 띄우지 않는다 — 흐름이 거기서 끊긴다.
+   온보딩 판은 항상 밝은 종이색이라 색을 토큰에 맡기지 않고 직접 적는다(테마가
+   어두울 때 흰 판 위에 밝은 글자가 얹히는 사고를 막는다). */
+.inlineStage {
+  display: flex;
+  flex-direction: column;
+  width: min(560px, 100%);
+  margin: 8px auto 0;
+  overflow: hidden;
+  border: 1px solid #e3e3de;
+  border-radius: 16px;
+  background: #fff;
+  color: #161918;
+  text-align: left;
+}
+
+.inlineStage .title {
+  font-size: 20px;
+}
+
+.inlineStage .keySub,
+.inlineStage .keyNote,
+.inlineStage .count,
+.inlineStage .keyLabel {
+  color: #6d746f;
+}
+
+.inlineStage .keyInput {
+  border-color: #dedfd9;
+  background: #fff;
+  color: #161918;
+}
+
+.inlineStage .ghost {
+  border-color: #dedfd9;
+  color: #161918;
+}
+
+.inlineStage .primary {
+  background: #111;
+}
+
+.inlineStage .footer {
+  border-top-color: #ecece8;
+}
+
 @media (max-width: 640px) {
   .grid {
     grid-template-columns: 1fr;

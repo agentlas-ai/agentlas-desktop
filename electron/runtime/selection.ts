@@ -27,7 +27,8 @@ import { runOllama } from "./ollama";
 import { runLMStudio } from "./lmstudio";
 import { runMLX } from "./mlx";
 import { acquireRunSlot } from "./run-slots";
-import { acpOrLegacyRunner, createAcpRunner } from "./acp";
+import { agentActivityKey, registerAgentResidency, touchAgentResidency } from "./agent-residency";
+import { acpOrLegacyRunner, acpSessionKind, createAcpRunner } from "./acp";
 import { resolveAcpAgentSpec } from "./acp-agents";
 import { acquireLocalInferenceSlot } from "./local-inference-run-slots";
 import type { Runner } from "./runner";
@@ -40,18 +41,51 @@ import type { Runner } from "./runner";
  * HTTP로 호출하지만 로컬 CPU/GPU를 쓰므로 아래 withLocalInferenceSlot으로 별도 래핑한다.
  * 주의: 러너 내부 재시도(runClaudeCode의 세션 복구 재귀)는 래핑 밖이라 이중 획득이 없다.
  */
-function withRunSlot(runner: Runner): Runner {
+function withRunSlot(runner: Runner, runtimeKind: string): Runner {
   return async (req, events) => {
+    // 우선순위: 요청 명시값 → 호출 문맥(withRunPriority) → interactive.
+    // 자동화 스케줄러·데몬 graph.run 이 background 문맥을 깔고, 채팅 턴은 기본값이다.
     const release = await acquireRunSlot(req.signal, () => {
       events.onStatus(
         req.locale === "ko"
           ? "다른 에이전트 실행이 끝나기를 기다리는 중... (동시 실행 한도)"
           : "Waiting for a free run slot... (concurrency limit)",
       );
+    }, req.runPriority);
+    /*
+     * ★상주 등록 — 여기가 **공용 실행 경로**다.
+     *
+     * 채팅·firm·swarm·워크플로우·자동화, 그리고 network/cloud 로 소환된 에이전트의 로컬
+     * 서브런(borrowed task force)까지 CLI 실행은 전부 이 래퍼를 지난다. 그래서 "누가
+     * 언제 마지막으로 돌았는가"를 여기서 한 번만 적으면 12시간 스위퍼와 스웜 예산이
+     * 같은 사실을 본다 — 호출부마다 적으면 언젠가 한 곳이 빠지고, 빠진 곳의 에이전트는
+     * 등록소에서 영영 보이지 않는다.
+     *
+     * 이 행은 **활동 기록**이지 상주 세션이 아니다(holdsSession=false). 살아 있는
+     * 프로세스를 실제로 붙드는 것은 ACP 세션 풀뿐이고, 그것만 예산을 소비한다 —
+     * 일회성 `-p` CLI 를 "상주 중"이라고 말하지 않기 위한 구분이다.
+     */
+    const residencyKey = agentActivityKey({
+      agentId: req.agentId ?? null,
+      chatId: req.chatId ?? null,
+      runtimeKind,
     });
+    try {
+      registerAgentResidency({
+        key: residencyKey,
+        agentId: req.agentId ?? null,
+        chatId: req.chatId ?? null,
+        runtimeKind,
+        holdsSession: false,
+        inUse: true,
+      });
+    } catch {
+      // 등록소 실패가 실행을 막지 않는다 — 관측은 실행보다 뒤에 선다.
+    }
     try {
       return await runner(req, events);
     } finally {
+      try { touchAgentResidency(residencyKey, { inUse: false }); } catch { /* 관측 실패 무시 */ }
       release();
     }
   };
@@ -80,16 +114,16 @@ function withLocalInferenceSlot(runner: Runner): Runner {
   };
 }
 
-const runClaudeCodeSlotted = withRunSlot(runClaudeCode);
-const runCodexSlotted = withRunSlot(runCodex);
-const runAntigravitySlotted = withRunSlot(runAntigravity);
+const runClaudeCodeSlotted = withRunSlot(runClaudeCode, "claude-code");
+const runCodexSlotted = withRunSlot(runCodex, "codex");
+const runAntigravitySlotted = withRunSlot(runAntigravity, "antigravity");
 // B-grade runtimes route through the generic ACP runner (PRD 2026-08-15 D-5):
 // cursor showed no tool calls, grok guessed tool kinds from `type` strings,
 // kimi was absent from the terminal. `AGENTLAS_DISABLE_ACP=1` (or a kind list)
 // restores the legacy hand drivers without a rebuild.
-const runKimiSlotted = withRunSlot(acpOrLegacyRunner("kimi", runKimi));
-const runGrokSlotted = withRunSlot(acpOrLegacyRunner("grok", runGrok));
-const runCursorSlotted = withRunSlot(acpOrLegacyRunner("cursor", runCursor));
+const runKimiSlotted = withRunSlot(acpOrLegacyRunner("kimi", runKimi), "kimi");
+const runGrokSlotted = withRunSlot(acpOrLegacyRunner("grok", runGrok), "grok");
+const runCursorSlotted = withRunSlot(acpOrLegacyRunner("cursor", runCursor), "cursor");
 const runOllamaSlotted = withLocalInferenceSlot(runOllama);
 const runLMStudioSlotted = withLocalInferenceSlot(runLMStudio);
 const runMLXSlotted = withLocalInferenceSlot(runMLX);
@@ -186,7 +220,7 @@ export function pickRunner(active: RuntimeStatus): { runner: Runner; label: stri
     const spec = resolveAcpAgentSpec(active.acpAgentId);
     if (!spec) return null;
     return {
-      runner: bindRuntimeSource(withRunSlot(createAcpRunner(spec)), active.source),
+      runner: bindRuntimeSource(withRunSlot(createAcpRunner(spec), acpSessionKind(spec.id)), active.source),
       label: `${active.label ?? spec.label}${active.model ? ` · ${active.model}` : ""}`,
     };
   }

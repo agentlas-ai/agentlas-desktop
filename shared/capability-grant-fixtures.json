@@ -1,0 +1,99 @@
+{
+  "schema": "agentlas.capability-grant-fixtures.v1",
+  "why": "능력 승인 규칙 엔진이 데스크탑(TS)과 터미널(CJS) 두 벌로 존재한다. 터미널은 벤더 코어의 정적 require 폐쇄에 이 모듈이 없어 재구현이 불가피했다. 두 벌이 갈리면 '데스크탑에서 항상 허용한 것이 터미널에서 다시 묻는' 조용한 드리프트가 생기므로, 판정 규칙은 이 픽스처 한 벌을 두 제품이 함께 통과하는 것으로 고정한다(Runtime Doctor 3제품 싱크와 같은 방식).",
+  "cases": [
+    {
+      "name": "규칙 없음 → 미결정",
+      "rules": [],
+      "ask": { "capability": "execute", "tool": "bash", "detail": "git push origin main" },
+      "expect": null
+    },
+    {
+      "name": "도구 규칙 + 프리픽스 일치",
+      "rules": [{ "capability": "tool:bash", "pattern": "git push *", "decision": "allow", "scope": "global" }],
+      "ask": { "capability": "execute", "tool": "bash", "detail": "git push origin main" },
+      "expect": "allow"
+    },
+    {
+      "name": "프리픽스 불일치는 넓히지 않는다",
+      "rules": [{ "capability": "tool:bash", "pattern": "git push *", "decision": "allow", "scope": "global" }],
+      "ask": { "capability": "execute", "tool": "bash", "detail": "rm -rf build" },
+      "expect": null
+    },
+    {
+      "name": "패턴 없는 규칙은 인자 무관",
+      "rules": [{ "capability": "tool:write_file", "pattern": null, "decision": "allow", "scope": "global" }],
+      "ask": { "capability": "edit", "tool": "write_file", "detail": "/tmp/anything.txt" },
+      "expect": "allow"
+    },
+    {
+      "name": "능력 클래스 규칙",
+      "rules": [{ "capability": "edit", "pattern": null, "decision": "allow", "scope": "global" }],
+      "ask": { "capability": "edit", "tool": "write_file" },
+      "expect": "allow"
+    },
+    {
+      "name": "같은 스코프에서 deny 가 allow 를 이긴다",
+      "rules": [
+        { "capability": "edit", "pattern": null, "decision": "allow", "scope": "global" },
+        { "capability": "tool:write_file", "pattern": null, "decision": "deny", "scope": "global" }
+      ],
+      "ask": { "capability": "edit", "tool": "write_file" },
+      "expect": "deny"
+    },
+    {
+      "name": "chat 스코프가 global 을 이긴다",
+      "rules": [
+        { "capability": "tool:write_file", "pattern": null, "decision": "deny", "scope": "global" },
+        { "capability": "tool:write_file", "pattern": null, "decision": "allow", "scope": "chat:c1" }
+      ],
+      "ask": { "capability": "edit", "tool": "write_file", "chatId": "c1" },
+      "expect": "allow"
+    },
+    {
+      "name": "다른 대화는 global 규칙을 그대로 받는다",
+      "rules": [
+        { "capability": "tool:write_file", "pattern": null, "decision": "deny", "scope": "global" },
+        { "capability": "tool:write_file", "pattern": null, "decision": "allow", "scope": "chat:c1" }
+      ],
+      "ask": { "capability": "edit", "tool": "write_file", "chatId": "c2" },
+      "expect": "deny"
+    },
+    {
+      "name": "agent 스코프가 global 을 이긴다",
+      "rules": [
+        { "capability": "execute", "pattern": null, "decision": "deny", "scope": "global" },
+        { "capability": "execute", "pattern": null, "decision": "allow", "scope": "agent:a1" }
+      ],
+      "ask": { "capability": "execute", "tool": "bash", "agentId": "a1" },
+      "expect": "allow"
+    },
+    {
+      "name": "chat 이 agent 보다 구체적이다",
+      "rules": [
+        { "capability": "execute", "pattern": null, "decision": "allow", "scope": "agent:a1" },
+        { "capability": "execute", "pattern": null, "decision": "deny", "scope": "chat:c1" }
+      ],
+      "ask": { "capability": "execute", "tool": "bash", "agentId": "a1", "chatId": "c1" },
+      "expect": "deny"
+    },
+    {
+      "name": "'*' 는 그 대화의 모든 승인을 통과시킨다",
+      "rules": [{ "capability": "*", "pattern": null, "decision": "allow", "scope": "chat:cX" }],
+      "ask": { "capability": "execute", "tool": "anything", "chatId": "cX" },
+      "expect": "allow"
+    },
+    {
+      "name": "'*' 는 그 대화 밖으로 새지 않는다",
+      "rules": [{ "capability": "*", "pattern": null, "decision": "allow", "scope": "chat:cX" }],
+      "ask": { "capability": "execute", "tool": "anything", "chatId": "cY" },
+      "expect": null
+    },
+    {
+      "name": "detail 이 없으면 패턴 규칙은 맞지 않는다",
+      "rules": [{ "capability": "tool:bash", "pattern": "git push *", "decision": "allow", "scope": "global" }],
+      "ask": { "capability": "execute", "tool": "bash" },
+      "expect": null
+    }
+  ]
+}

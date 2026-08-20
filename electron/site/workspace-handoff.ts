@@ -197,6 +197,23 @@ export function handoffSiteProjectToWorkspace(input: {
         "THIRD_PARTY_NOTICES.md",
         "# Third-party notices\n\nAstryx is Copyright (c) Meta Platforms, Inc. and affiliates and is used under the MIT License. Preserve the copyright and permission notice when distributing copies or substantial portions. Source: https://github.com/facebook/astryx\n",
       );
+      /*
+       * ★생성된 React 소스를 함께 넘긴다. 예전에는 README 가 "Astryx 로 구현하라"고
+       * 계약만 적고 HTML 미리보기만 복사해, 이미 디스크에 존재하는 실제 React 앱
+       * (~/.agentlas/site/agentapp/<appId>/astryx-app)을 사람이 다시 만들게 했다.
+       * node_modules·빌드 산출물은 제외한다 — 넘길 것은 소스이지 캐시가 아니다.
+       */
+      const artifactRoot = meta.agentAppArtifact?.rootPath;
+      const sourceRoot = artifactRoot ? path.join(artifactRoot, "astryx-app") : null;
+      if (sourceRoot && fs.existsSync(sourceRoot) && fs.statSync(sourceRoot).isDirectory()) {
+        const skip = new Set(["node_modules", "dist", ".vite", ".git", ".DS_Store"]);
+        const destination = path.join(stagingDir, "astryx-app");
+        fs.cpSync(sourceRoot, destination, {
+          recursive: true,
+          dereference: false,
+          filter: (source) => !skip.has(path.basename(source)),
+        });
+      }
     }
     fs.renameSync(stagingDir, finalDir);
     committed = true;

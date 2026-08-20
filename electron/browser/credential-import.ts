@@ -7,7 +7,12 @@
 //  1) **값을 복호화하지 않는다.** 쿠키는 암호화된 바이트 그대로 옮긴다. 복호화 키는 OS 저장소
 //     (macOS Keychain / Windows DPAPI)에 있고 우리는 꺼내지 않는다.
 //  2) **비밀번호와 결제수단은 만지지 않는다.** `Login Data`·`Web Data`는 읽지도 복사하지도 않는다.
-//     (Agentlas-OS 레일의 seedProfile 은 이 둘까지 복사한다 — 여기서는 하지 않는다.)
+//     이유는 보안 위생이 아니라 손익이다: (a) 로그인 성공률에 거의 기여하지 않는다(로그인은
+//     쿠키 + `Local State` 암호화 키로 된다) (b) `Login Data`+`Local State` 동시 접근은
+//     인포스틸러 시그니처라 백신·EDR 에 걸려 배포가 막힐 수 있다 (c) 마켓플레이스 플러그인이
+//     그 폴더를 읽으면 피해가 "세션 탈취"에서 "전부"로 커진다.
+//     Agentlas-OS 레일의 seedProfile(agentlas_cloud/research/adapters/agentlas_browser_launcher.mjs)
+//     도 같은 기준이다 — 두 레일 모두 `Local State`·쿠키·`Preferences` 까지만 옮긴다.
 //  3) **원본 DB에 연결하지 않는다.** 실행 중인 브라우저가 mmap 한 SQLite에 외부 연결을 붙이면
 //     그 브라우저가 SIGBUS 로 죽을 수 있다(2026-08-19 Agentlas 앱에서 2회 실측). 그래서
 //     파일을 먼저 복사하고 **사본만** 연다. 사본은 무결성 검사를 통과해야 쓰인다 — 깨졌으면
@@ -25,6 +30,7 @@ import type {
   DiscoveredBrowserProfile,
   DiscoveredCredentialDomain,
 } from "../../shared/browser-credentials";
+import { registrableDomain } from "../../shared/registrable-domain";
 import {
   browserCdpOwnerIsLive,
   browserCdpProfilePath,
@@ -176,27 +182,46 @@ function removeWorkDir(dir: string): void {
   }
 }
 
-/** host_key(".x.com") → 등록 도메인("x.com"). */
+/**
+ * host_key → **사이트 한 줄**(등록 가능 도메인).
+ *
+ * ★앞의 점만 떼면 안 된다(2026-08-20 실측): `.mongodb.com`(쿠키 19, 로그인 후보 0)과
+ * `auth.mongodb.com`(4, 4)이 다른 줄로 남으면, 로그인 쿠키 필터가 **쿠키를 제일 많이 가진
+ * 줄을 떨어뜨리고** 엉뚱한 서브도메인만 남긴다. 그걸 고르면 4개만 복사돼 로그인이 깨진다.
+ * `.railway.com`/`backboard.railway.com`, `.google.com`/`play.google.com` 도 같은 모양.
+ */
 function normalizeHostKey(hostKey: string): string {
-  return hostKey.replace(/^\./, "").trim().toLowerCase();
+  return registrableDomain(hostKey);
 }
 
-/** 방문 기록에서 도메인별 대표 제목을 뽑는다. 없으면 그 도메인은 제목 없이 남는다(지어내지 않음). */
-function readDomainTitles(profileDir: string, workDir: string, wanted: Set<string>): Map<string, string> {
-  const titles = new Map<string, string>();
+/** 한 도메인의 방문 기록 요약 — 대표 제목과 방문 횟수 합. */
+interface DomainHistory {
+  /** 방문 수가 가장 많은 URL 의 제목. 없으면 null — 지어내지 않는다. */
+  title: string | null;
+  /** 이 도메인(및 하위 도메인) URL 들의 visit_count 합. 자주 쓰는 사이트일수록 크다. */
+  visits: number;
+}
+
+/**
+ * 방문 기록에서 도메인별 대표 제목과 방문 횟수 합을 뽑는다.
+ * 방문 횟수는 목록 정렬의 1순위다 — "쿠키가 많은 곳"이 아니라 "자주 쓰는 곳"을 위로 올린다.
+ * 기록을 못 읽으면 빈 맵 — 그때는 제목도 방문수도 없이 도메인만 나간다(목록 자체는 나가야 한다).
+ */
+function readDomainHistory(profileDir: string, workDir: string, wanted: Set<string>): Map<string, DomainHistory> {
+  const out = new Map<string, DomainHistory>();
   const historySrc = path.join(profileDir, "History");
-  if (!fs.existsSync(historySrc)) return titles;
+  if (!fs.existsSync(historySrc)) return out;
   const snap = snapshotSqlite(historySrc, workDir, "History.snapshot");
-  if (!snap) return titles;
+  if (!snap) return out;
   try {
     const db = new Database(snap, { readonly: true });
     const rows = db
       .prepare(
         `SELECT url, title, visit_count FROM urls
-         WHERE title IS NOT NULL AND title <> '' AND visit_count > 0
+         WHERE visit_count > 0
          ORDER BY visit_count DESC LIMIT 20000`,
       )
-      .all() as Array<{ url: string; title: string; visit_count: number }>;
+      .all() as Array<{ url: string; title: string | null; visit_count: number }>;
     db.close();
     for (const row of rows) {
       let host: string;
@@ -205,18 +230,29 @@ function readDomainTitles(profileDir: string, workDir: string, wanted: Set<strin
       } catch {
         continue;
       }
-      // 서브도메인 방문도 등록 도메인 후보에 붙인다(mail.google.com → google.com 목록의 제목).
-      for (const domain of wanted) {
-        if (host !== domain && !host.endsWith(`.${domain}`)) continue;
-        if (!titles.has(domain)) titles.set(domain, row.title.trim().slice(0, 80));
-        break;
-      }
+      // 방문 호스트도 같은 규칙으로 접는다(mail.google.com → google.com 줄의 제목·방문수).
+      const domain = registrableDomain(host);
+      if (!wanted.has(domain)) continue;
+      const prev = out.get(domain) ?? { title: null, visits: 0 };
+      const title = (row.title ?? "").trim();
+      out.set(domain, {
+        // 행은 visit_count 내림차순이라 먼저 잡히는 제목이 가장 많이 방문한 페이지의 것이다.
+        title: prev.title ?? (title ? title.slice(0, 80) : null),
+        visits: prev.visits + Number(row.visit_count || 0),
+      });
     }
   } catch {
-    /* 제목은 편의 정보다 — 못 읽어도 도메인 목록은 나가야 한다 */
+    /* 제목·방문수는 순서를 좋게 하는 정보다 — 못 읽어도 도메인 목록은 나가야 한다 */
   }
-  return titles;
+  return out;
 }
+
+/**
+ * 필터를 통과한 후보가 이 수보다 적으면 필터를 푼다.
+ * 목록이 비면 사용자는 "가져올 게 없다"고 읽고 기능 자체를 버린다 — 적게 잡히는 쪽이
+ * 과하게 잡히는 쪽보다 훨씬 나쁘다. 풀었다는 사실은 응답에 표식으로 싣는다.
+ */
+const LOGIN_FILTER_MIN_RESULTS = 5;
 
 export function scanBrowserCredentials(profileId?: string | null): BrowserCredentialScanResult {
   const profiles = listDiscoverableProfiles();
@@ -244,32 +280,46 @@ export function scanBrowserCredentials(profileId?: string | null): BrowserCreden
       };
     }
     const db = new Database(snap, { readonly: true });
+    // 이 프로필의 쿠키 테이블에 로그인 쿠키를 가릴 플래그 칸이 실제로 있는가.
+    // 없으면(아주 오래된/변형 스키마) 필터를 걸 근거가 없으므로 아예 걸지 않는다.
+    const cookieColumns = new Set(
+      (db.pragma("table_info(cookies)") as Array<{ name: string }>).map((c) => c.name),
+    );
+    const canJudgeLogin = cookieColumns.has("is_httponly") && cookieColumns.has("is_secure");
+    // ★값(value·encrypted_value)은 SELECT 하지 않는다. 세는 것은 행 수와 플래그뿐이다.
+    const loginExpr = canJudgeLogin
+      ? "SUM(CASE WHEN is_httponly = 1 AND is_secure = 1 THEN 1 ELSE 0 END)"
+      : "0";
     const rows = db
       .prepare(
         `SELECT host_key, COUNT(*) AS n,
-                SUM(CASE WHEN has_expires = 1 THEN 1 ELSE 0 END) AS persistent
+                SUM(CASE WHEN has_expires = 1 THEN 1 ELSE 0 END) AS persistent,
+                ${loginExpr} AS login_like
          FROM cookies GROUP BY host_key`,
       )
-      .all() as Array<{ host_key: string; n: number; persistent: number }>;
+      .all() as Array<{ host_key: string; n: number; persistent: number; login_like: number }>;
     db.close();
 
-    const byDomain = new Map<string, { count: number; persistent: number }>();
+    const byDomain = new Map<string, { count: number; persistent: number; login: number }>();
     for (const row of rows) {
       const domain = normalizeHostKey(row.host_key);
       if (!domain || !domain.includes(".")) continue;
-      const prev = byDomain.get(domain) ?? { count: 0, persistent: 0 };
+      const prev = byDomain.get(domain) ?? { count: 0, persistent: 0, login: 0 };
       byDomain.set(domain, {
         count: prev.count + Number(row.n || 0),
         persistent: prev.persistent + Number(row.persistent || 0),
+        login: prev.login + Number(row.login_like || 0),
       });
     }
 
-    const titles = readDomainTitles(profile.path, workDir, new Set(byDomain.keys()));
+    const history = readDomainHistory(profile.path, workDir, new Set(byDomain.keys()));
+    // 이미 Connect 에 있는 사이트도 같은 규칙으로 접어야 한 줄과 맞붙는다
+    // (등록된 것이 `www.notion.so` 여도 목록의 `notion.so` 줄이 '연동됨'이 되어야 한다).
     const linked = new Set(
       listBrowserSites()
         .map((s) => {
           try {
-            return new URL(s.site).hostname.replace(/^www\./, "").toLowerCase();
+            return registrableDomain(new URL(s.site).hostname);
           } catch {
             return "";
           }
@@ -277,22 +327,35 @@ export function scanBrowserCredentials(profileId?: string | null): BrowserCreden
         .filter(Boolean),
     );
 
-    const domains: DiscoveredCredentialDomain[] = [...byDomain.entries()]
+    // 정렬: ① 자주 쓰는 사이트(방문 수 합) ② 로그인 쿠키 후보 수 ③ 세션 지속 쿠키 유무 ④ 이름.
+    // 쿠키 개수는 정렬에 쓰지 않는다 — 그 축은 광고·분석 도메인을 1등으로 올린다.
+    const byRelevance = (a: DiscoveredCredentialDomain, b: DiscoveredCredentialDomain): number => {
+      if (b.visitCount !== a.visitCount) return b.visitCount - a.visitCount;
+      if (b.loginCookieCount !== a.loginCookieCount) return b.loginCookieCount - a.loginCookieCount;
+      if (a.hasPersistentCookie !== b.hasPersistentCookie) return a.hasPersistentCookie ? -1 : 1;
+      return a.domain.localeCompare(b.domain);
+    };
+
+    const all: DiscoveredCredentialDomain[] = [...byDomain.entries()]
       .map(([domain, agg]) => ({
         domain,
-        title: titles.get(domain) ?? null,
+        title: history.get(domain)?.title ?? null,
         cookieCount: agg.count,
+        loginCookieCount: agg.login,
+        visitCount: history.get(domain)?.visits ?? 0,
         hasPersistentCookie: agg.persistent > 0,
         alreadyLinked: linked.has(domain),
       }))
-      // 세션이 살아 있을 법한 것(만료 있는 쿠키 보유)을 위로, 그다음 쿠키 많은 순.
-      .sort((a, b) => {
-        if (a.hasPersistentCookie !== b.hasPersistentCookie) return a.hasPersistentCookie ? -1 : 1;
-        if (b.cookieCount !== a.cookieCount) return b.cookieCount - a.cookieCount;
-        return a.domain.localeCompare(b.domain);
-      });
+      .sort(byRelevance);
 
-    return { ok: true, profiles, domains, profileId };
+    // "로그인 쿠키가 있는 사이트"만 남긴다. 광고·분석 도메인은 httpOnly+Secure 세션 쿠키를
+    // 두지 않으므로 여기서 떨어진다.
+    const filtered = canJudgeLogin ? all.filter((d) => d.loginCookieCount > 0) : [];
+    if (canJudgeLogin && filtered.length >= LOGIN_FILTER_MIN_RESULTS) {
+      return { ok: true, profiles, domains: filtered, profileId };
+    }
+    // 너무 적게 잡혔다(또는 판단할 칸이 없다) — 필터를 풀고, 풀었다는 사실을 말한다.
+    return { ok: true, profiles, domains: all, profileId, loginFilterRelaxed: true };
   } finally {
     removeWorkDir(workDir);
   }
@@ -395,7 +458,10 @@ export async function importBrowserCredentials(
   domains: string[],
 ): Promise<BrowserCredentialImportResult> {
   const skipped: Array<{ domain: string; reason: string }> = [];
-  const wanted = [...new Set(domains.map((d) => d.trim().toLowerCase()).filter(Boolean))];
+  // 목록의 한 줄과 같은 단위(등록 가능 도메인)로 접는다. 예전 승인 기록이 서브도메인을
+  // 담고 있어도 여기서 사이트 단위로 넓어진다 — 좁게 복사해 반쯤 깨진 로그인을 만드느니
+  // 그 사이트 쿠키를 전부 옮기는 쪽이 옳다(오너 결정 2026-08-20).
+  const wanted = [...new Set(domains.map((d) => registrableDomain(d)).filter(Boolean))];
   if (wanted.length === 0) {
     return { ok: false, cookiesAdded: 0, linkedSites: [], skipped, error: "가져올 도메인을 하나 이상 골라 주세요." };
   }

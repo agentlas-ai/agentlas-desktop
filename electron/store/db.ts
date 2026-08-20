@@ -18,7 +18,7 @@ import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-p
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 97;
+const SCHEMA_VERSION = 98;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -4676,6 +4676,33 @@ export function initStore(options: StoreInitOptions = {}): void {
       updated_at TEXT NOT NULL,
       PRIMARY KEY (project_id, slug)
     );
+  `);
+
+  /*
+   * v98 — 통합 능력 승인(capability grants). 오너 결정 2026-08-20:
+   * 에이전트 능력을 정적 권한으로 제한하지 않는다. 행동 시점에 칩으로 묻고,
+   * "항상 허용"은 여기 영구 기록되어 다시는 묻지 않는다.
+   *
+   * capability — 능력 클래스(execute|edit|delete|network|other), 도구 규칙(tool:<name>),
+   *              또는 '*'(그 스코프의 모든 승인 채널 통과 — 기존 대화 단위 "항상 승인"의 이관처).
+   * pattern    — 선택적 인자 프리픽스(Claude Code 스타일: "git push *"). NULL = 인자 무관.
+   * scope      — 'global' | 'agent:<id>' | 'chat:<id>'. 구체성 chat > agent > global,
+   *              같은 구체성에서 deny > allow.
+   * 결제·브라우저 위험코드는 이 표로 뚫리지 않는다(각 채널이 매번 확인 — 기존 예외 유지).
+   * 사다리 끝 append — 이미 지나간 단계에 끼우면 기존 설치가 못 받는다.
+   */
+  _db.exec(`
+    CREATE TABLE IF NOT EXISTS capability_grants (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      capability TEXT NOT NULL,
+      pattern TEXT,
+      decision TEXT NOT NULL CHECK(decision IN ('allow','deny')),
+      scope TEXT NOT NULL DEFAULT 'global',
+      source TEXT NOT NULL DEFAULT 'chip',
+      created_at TEXT NOT NULL,
+      UNIQUE(capability, pattern, scope)
+    );
+    CREATE INDEX IF NOT EXISTS idx_capability_grants_scope ON capability_grants(scope);
   `);
 
   if (userVersion < SCHEMA_VERSION) _db.pragma(`user_version = ${SCHEMA_VERSION}`);

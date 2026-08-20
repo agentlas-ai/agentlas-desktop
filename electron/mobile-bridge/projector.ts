@@ -92,6 +92,7 @@ import {
   type MobileBridgeAgentDto,
   type MobileBridgeAutomationDto,
   type MobileBridgeBrowserApprovalDto,
+  type MobileBridgeToolApprovalDto,
   type MobileBridgeChatDto,
   type MobileBridgeChatMessageDto,
   type MobileBridgeFirmDto,
@@ -161,6 +162,8 @@ export interface MobileBridgeProjectionOptions {
   includeMessagesForChatIds?: readonly string[];
   maxMessagesPerChat?: number;
   pendingBrowserApprovals?: readonly MobileBridgeBrowserApprovalDto[];
+  /** 실행 전에 사람을 기다리는 런타임 도구 승인(live 만). 없으면 빈 배열로 내려 낡은 카드를 지운다. */
+  pendingToolApprovals?: readonly MobileBridgeToolApprovalDto[];
   now?: Date;
   ontology?: {
     supported: boolean;
@@ -1537,6 +1540,7 @@ export async function projectMobileBridgeSnapshot(
     messages: {},
     pendingConfirmations: projectMobileBridgeConfirmations(pendingConfirmations),
     pendingBrowserApprovals: [...(options.pendingBrowserApprovals ?? [])],
+    pendingToolApprovals: [...(options.pendingToolApprovals ?? [])],
     automations: automationsDto(),
     usage: projectMobileBridgeUsage(usage),
     activeChatIds,

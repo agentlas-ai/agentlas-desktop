@@ -15,7 +15,7 @@
     "minimumSourceAppVersion": "0.7.0",
     "minimumRuntimeVersion": "1.0.4",
     "minimumSchemaVersion": 35,
-    "targetSchemaVersion": 97,
+    "targetSchemaVersion": 98,
     "bundledRuntimeVersion": "1.2.12"
   },
   "agentlasBundledRuntimeSource": {
@@ -37,6 +37,9 @@
     "daemon": "cross-env ELECTRON_RUN_AS_NODE=1 electron dist/electron/daemon/main.js",
     "test:daemon-autostart": "npm run build:electron && node scripts/test-daemon-autostart.cjs",
     "test:process-pool": "npm run build:electron && node scripts/test-process-pool.cjs",
+    "test:agent-residency": "npm run build:electron && node scripts/test-agent-residency.cjs",
+    "test:claude-residency": "npm run build:electron && node scripts/test-claude-residency.cjs",
+    "test:codex-residency": "npm run build:electron && node scripts/test-codex-residency.cjs",
     "test:daemon-boot": "npm run build:electron && node scripts/test-daemon-boot.cjs",
     "test:ensure-engine": "node scripts/test-ensure-engine.cjs",
     "test:runtime-paths": "npm run build:electron && node scripts/test-runtime-paths.cjs",
@@ -75,6 +78,7 @@
     "test:goal-loop": "npm run build:electron && node scripts/goal-loop-contract.cjs && electron scripts/goal-reinjection-contract.cjs",
     "test:runtime-pin-precedence": "npm run build:electron && node scripts/test-runtime-pin-precedence.cjs",
     "test:browser-approval-gate": "npm run build:electron && node scripts/test-browser-approval-gate.cjs",
+    "test:credential-scan-filter": "npm run build:electron && node scripts/test-credential-scan-filter.cjs",
     "test:ontology-retirement": "npm run build:electron && npm run prepare:embedded-core && node scripts/ontology-retirement-contract.mjs",
     "test:cloud-app-manifest": "npm run build:electron && electron scripts/test-cloud-app-manifest.cjs",
     "test:cloud-agent-package": "npm run build:electron && electron scripts/test-cloud-agent-package.cjs",
@@ -430,11 +434,15 @@
     "test:runtime-surface-parity": "node scripts/test-runtime-surface-parity.cjs",
     "test:upload-scan-catalog": "node scripts/upload-scan-catalog-parity.cjs",
     "test:upload-exclusion-parity": "npm run build:electron && node scripts/test-upload-exclusion-parity.cjs",
+    "test:capability-grants": "npm run build:electron && node scripts/test-capability-grants.cjs",
+    "test:capability-grant-parity": "npm run build:electron && node scripts/test-capability-grant-parity.cjs",
+    "test:site-design-export": "npm run build:electron && node scripts/test-site-design-export.cjs",
     "test:graph-matrix": "npm run build:electron && cross-env ELECTRON_RUN_AS_NODE=1 electron scripts/verify-graph-matrix.mjs",
     "test:graph-contradictions": "npm run build:electron && node scripts/verify-graph-contradictions.mjs",
     "test:resume-coordinate-lease": "npm run build:electron && cross-env ELECTRON_RUN_AS_NODE=1 electron scripts/verify-resume-coordinate-is-a-lease.mjs",
     "test:authoring-has-tools": "node scripts/verify-authoring-has-tools.mjs",
     "test:graph-live": "npm run build:electron && cross-env ELECTRON_RUN_AS_NODE=1 electron scripts/verify-graph-live-runtime.mjs",
+    "test:login-step-advances": "node scripts/test-login-step-advances.cjs",
     "test:one-judgment": "node scripts/verify-one-judgment-one-place.mjs"
   },
   "dependencies": {

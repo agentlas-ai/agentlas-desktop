@@ -4,8 +4,11 @@
 // 전용 프로필로 가져온다. 가져온 도메인은 곧바로 Connect 사이트 목록에 나타나므로,
 // 사용자는 주소를 손으로 치고 전용 창에서 다시 로그인하는 일을 하지 않아도 된다.
 //
-// 화면이 보여주는 것은 도메인·페이지 이름·쿠키 개수뿐이다. 쿠키 값은 이 화면도, 메인 프로세스도
-// 복호화하지 않는다. 비밀번호·결제수단 저장소는 아예 읽지 않는다.
+// 목록은 "로그인 쿠키가 있는 사이트"만, **사이트 이름과 주소만** 보여준다(오너 결정 2026-08-20).
+// 쿠키 개수·"로그인됨"·"연동됨" 같은 메타 배지는 렌더하지 않는다 — 그 숫자로 줄을 세우면
+// 광고·분석 도메인이 1등이 되고(googleadservices 23개 실측), 사용자에게도 아무 의미가 없다.
+// 한 줄은 호스트가 아니라 사이트(등록 가능 도메인)이고, 고르면 그 사이트 쿠키가 전부 복사된다.
+// 쿠키 값은 이 화면도, 메인 프로세스도 복호화하지 않는다. 비밀번호·결제수단 저장소는 아예 읽지 않는다.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ipc } from "@/lib/ipc";
@@ -30,6 +33,8 @@ export function CredentialImportDialog({
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
   const [scanning, setScanning] = useState(true);
+  // 로그인 쿠키 필터가 너무 적게 잡아 메인이 필터를 푼 경우 — 화면이 그 사실을 말한다.
+  const [relaxed, setRelaxed] = useState(false);
   const [importingNow, setImportingNow] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -65,6 +70,7 @@ export function CredentialImportDialog({
       setError(null);
       const res = await api.browser.scanCredentials(id);
       setDomains(res.domains);
+      setRelaxed(Boolean(res.loginFilterRelaxed));
       setChecked(new Set());
       if (!res.ok && res.error) setError(res.error);
       setScanning(false);
@@ -175,6 +181,14 @@ export function CredentialImportDialog({
           </button>
         </div>
 
+        {!scanning && relaxed && domains.length > 0 && (
+          <div className="cid-relaxed">
+            {ko
+              ? "로그인 쿠키가 뚜렷한 사이트가 적게 잡혀서, 이 프로필의 사이트를 모두 보여줍니다."
+              : "Few sites showed clear login cookies, so every site in this profile is listed."}
+          </div>
+        )}
+
         <div className="cid-list">
           {scanning && <div className="cid-note">{ko ? "찾는 중…" : "Scanning…"}</div>}
           {!scanning && visible.length === 0 && (
@@ -191,17 +205,13 @@ export function CredentialImportDialog({
                   disabled={d.alreadyLinked}
                   onChange={() => toggle(d.domain)}
                 />
+                {/*
+                  주소와 사이트명만(오너 결정 2026-08-20). 쿠키 개수·"로그인됨"·"연동됨" 같은
+                  메타 배지는 렌더하지 않는다 — 그 숫자들은 순서와 필터를 정하는 내부 신호다.
+                  제목이 없으면 도메인이 이름 자리에 오고, 부제는 비운다(같은 값 두 번 금지).
+                */}
                 <span className="cid-title">{d.title ?? d.domain}</span>
-                <span className="cid-domain">{d.domain}</span>
-                <span className="cid-meta">
-                  {d.alreadyLinked
-                    ? ko
-                      ? "연동됨"
-                      : "Linked"
-                    : ko
-                      ? `쿠키 ${d.cookieCount}`
-                      : `${d.cookieCount} cookies`}
-                </span>
+                <span className="cid-domain">{d.title ? d.domain : ""}</span>
               </label>
             ))}
         </div>
@@ -306,6 +316,11 @@ export function CredentialImportDialog({
           font-size: 12px;
           cursor: pointer;
         }
+        .cid-relaxed {
+          font-size: 11.5px;
+          line-height: 1.5;
+          opacity: 0.7;
+        }
         .cid-list {
           flex: 1;
           min-height: 140px;
@@ -315,7 +330,7 @@ export function CredentialImportDialog({
         }
         .cid-row {
           display: grid;
-          grid-template-columns: auto 1fr auto auto;
+          grid-template-columns: auto 1fr auto;
           align-items: center;
           gap: 10px;
           padding: 8px 11px;
@@ -338,11 +353,6 @@ export function CredentialImportDialog({
         .cid-domain {
           opacity: 0.62;
           font-size: 11.5px;
-        }
-        .cid-meta {
-          opacity: 0.55;
-          font-size: 11px;
-          white-space: nowrap;
         }
         .cid-note {
           padding: 22px 12px;

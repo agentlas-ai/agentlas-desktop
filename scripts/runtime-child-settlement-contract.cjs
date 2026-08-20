@@ -164,10 +164,28 @@ async function main() {
 
     assert.ok(spawning.length >= 6, `스폰 러너를 ${spawning.length}개만 찾았다 — 탐지가 깨졌다`);
 
-    const missing = spawning
-      .filter(({ src }) => !/\bensureChildCloseAfterExit\(child/.test(src) || !/\bstartCliHeartbeat\(child/.test(src))
+    // 계약은 "자식에 정산 헬퍼가 걸렸는가"이지 "한 줄로 썼는가"가 아니다 — 인자 사이
+    // 줄바꿈에 게이트가 눈이 멀면, 옳은 수리가 서식 때문에 막힌다(실측 2026-08-20).
+    //
+    // ★계약은 두 조각이고, 그 둘이 사는 자리가 다르다(상주 도입 2026-08-20):
+    //   · close 정산(ensureChildCloseAfterExit)은 **자식을 띄운 곳**의 책임이다.
+    //     없으면 그 자식이 손자에게 파이프를 물려주고 죽는 순간 실행이 영영 안 끝난다.
+    //   · 심장박동(startCliHeartbeat)은 **턴을 도는 러너**의 책임이다. 박동은 이번 턴의
+    //     onStatus 로 나가므로 RunnerEvents 를 든 쪽만 가질 수 있다.
+    // 상주 세션은 이 둘이 다른 파일에 있다 — 프로세스를 여는 곳(claude-session.ts)과
+    // 그 프로세스로 턴을 도는 곳(claude-code.ts). 한 파일에 둘 다 있기를 요구하면
+    // 옳은 배선이 파일 경계 때문에 막힌다(= 구현 문장을 못박는 게이트).
+    const missingClose = spawning
+      .filter(({ src }) => !/\bensureChildCloseAfterExit\(\s*child/.test(src))
       .map(({ name }) => name);
-    assert.deepEqual(missing, [], `자식 정산이 빠진 러너: ${missing.join(", ")}`);
+    assert.deepEqual(missingClose, [], `close 정산이 빠진 스폰 지점: ${missingClose.join(", ")}`);
+
+    const drivers = spawning.filter(({ src }) => /RunnerEvents/.test(src));
+    assert.ok(drivers.length >= 6, `턴을 도는 러너를 ${drivers.length}개만 찾았다 — 탐지가 깨졌다`);
+    const missingBeat = drivers
+      .filter(({ src }) => !/\bstartCliHeartbeat\(\s*child/.test(src))
+      .map(({ name }) => name);
+    assert.deepEqual(missingBeat, [], `심장박동이 빠진 러너: ${missingBeat.join(", ")}`);
   });
 
   /*

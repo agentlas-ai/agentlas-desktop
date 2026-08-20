@@ -59,8 +59,33 @@ export interface RuntimeToolPermissionAsk {
   mutating: boolean;
   /** 이 실행이 붙어 있는 대화 — 승인 카드는 그 대화 안에서만 뜬다(오너 결정 2026-08-15). */
   chatId?: string;
+  /** 실행 중인 에이전트 — 에이전트 스코프 능력 규칙(capability_grants)의 대상. */
+  agentId?: string;
   /** 자동화·그래프처럼 답할 사람이 없는 실행 — 묻지 않고 즉시 거부한다. */
   unattended?: boolean;
+}
+
+/**
+ * 능력 클래스 — "항상 허용"이 영구 부여하는 단위(오너 결정 2026-08-20).
+ * ACP 도구 kind 와 내장 도구 성격에서 도출한다. 모르면 other.
+ */
+export function capabilityClassFor(kind: string, tool: string): string {
+  if (kind === "execute" || tool === "bash") return "execute";
+  if (kind === "delete") return "delete";
+  if (kind === "edit") return "edit";
+  if (kind === "fetch" || kind === "network") return "network";
+  return "other";
+}
+
+/**
+ * "항상 허용"이 저장할 인자 패턴 — Claude Code 의 프리픽스 규칙과 같은 일반화.
+ * 명령줄(detail)이 있으면 앞 두 토큰 + " *" ("git push *"), 없으면 도구 전체(null).
+ */
+export function generalizeDetailPattern(detail: string | undefined): string | null {
+  if (!detail) return null;
+  const tokens = detail.trim().split(/\s+/);
+  if (tokens.length <= 2) return detail.trim();
+  return `${tokens[0]} ${tokens[1]} *`;
 }
 
 export type RuntimeToolPermissionDecision = "allow_once" | "allow_session" | "deny";
@@ -72,6 +97,42 @@ let runtimeToolPermissionArbiter: RuntimeToolPermissionArbiter | null = null;
 
 export function setRuntimeToolPermissionArbiter(arbiter: RuntimeToolPermissionArbiter | null): void {
   runtimeToolPermissionArbiter = arbiter;
+}
+
+/*
+ * ── "항상 허용" 영속 훅 ──────────────────────────────────────────────────
+ * 이 파일은 Electron/store 를 import 하지 않는다(러너 단독 테스트 계약). 그래서
+ * allow_always 의 영구 기록은 ipc.ts 가 주입한 persister 가 맡는다. persister 가
+ * 없으면 allow_always 는 allow_session 과 같게 동작한다 — 조용히 넓어지지 않는다.
+ */
+export interface AlwaysAllowGrant {
+  capability: string;
+  pattern: string | null;
+  scope: string;
+  tool: string;
+}
+export type CapabilityGrantPersister = (grant: AlwaysAllowGrant) => void;
+
+let capabilityGrantPersister: CapabilityGrantPersister | null = null;
+
+export function setCapabilityGrantPersister(persister: CapabilityGrantPersister | null): void {
+  capabilityGrantPersister = persister;
+}
+
+function persistAlwaysGrant(request: ToolApprovalRequest): void {
+  if (!capabilityGrantPersister) return;
+  try {
+    capabilityGrantPersister({
+      capability: `tool:${request.tool}`,
+      pattern: generalizeDetailPattern(request.detail),
+      // 규칙은 에이전트들이 공유한다(비전 + Claude Code parity). 에이전트 한정이
+      // 필요해지면 request.agentId 로 scope 를 좁히는 선택지를 카드에 더한다.
+      scope: "global",
+      tool: request.tool,
+    });
+  } catch {
+    /* 영속 실패가 이번 호출의 허용을 깨지는 않는다 — 다음에 다시 묻게 될 뿐이다. */
+  }
 }
 
 export function getRuntimeToolPermissionArbiter(): RuntimeToolPermissionArbiter | null {
@@ -173,7 +234,10 @@ export function requestToolApproval(
       request,
       timer,
       resolve: (outcome) => {
-        if (outcome.decision === "allow_session") rememberSessionGrant(sessionKey, request);
+        if (outcome.decision === "allow_session" || outcome.decision === "allow_always") {
+          rememberSessionGrant(sessionKey, request);
+        }
+        if (outcome.decision === "allow_always") persistAlwaysGrant(request);
         resolve(outcome);
       },
     });
@@ -226,11 +290,12 @@ export function resolveToolApproval(id: string, decision: ToolApprovalDecision):
     clearTimeout(entry.timer);
     pending.delete(id);
     entry.resolve(outcome);
-  } else if (decision === "allow_session") {
+  } else if (decision === "allow_session" || decision === "allow_always") {
     // 이미 거부된 호출이라 이번 실행은 되살릴 수 없다 — 그래서 이 선택이 뜻하는 바는
     // 오직 "다음부터는 묻지 말고 허용하라"이고, 그것만은 반드시 남아야 한다.
     const known = announced.get(id);
     if (known?.sessionKey) rememberSessionGrant(known.sessionKey, known.request);
+    if (known && decision === "allow_always") persistAlwaysGrant(known.request);
   }
   for (const fn of resolvedListeners) { try { fn(id, outcome); } catch { /* 같은 이유 */ } }
   return Boolean(entry);

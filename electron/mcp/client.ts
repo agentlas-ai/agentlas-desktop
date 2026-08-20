@@ -130,7 +130,6 @@ import { parseMemoryEvents } from "../memory/events";
 import { APP_BUILDER_SLUG } from "../architecture/manifest";
 import { memoryEmitterPromptFor } from "../system-agents/memory";
 import { AUTOMATION_PROTOCOL, parseAutomations, automationRegistrationGateProblems } from "../automation-emitter";
-import { isAutomationSetupRequest } from "../../shared/automation-request";
 import { SURFACE_CLOSE_FENCE, SURFACE_OPEN_FENCE, parseSurfaces } from "../surface-emitter";
 import { applyFinalDisplayBackstop } from "./final-display-backstop";
 import {
@@ -1155,38 +1154,111 @@ function isUnattendedExecution(executionContext?: InvocationExecutionContext): b
   );
 }
 
+// ── One 태스크 Surface 레시피 — 선택은 판정기(LLM) 경유 ──────────────────────
+// 2026-08-20: 사용자 프롬프트를 6개 정규식(여행/풀이/문서/엑셀/미디어/조사)으로 분기해
+// 레시피를 확정하던 단어장 게이트를 제거했다. 어떤 레시피가 맞는지는 연결된 모델이
+// 뜻으로 판정한다(shared/one-request-intent.ts · mcp-tools/need-resolver.ts와 같은 계약).
+// 판정이 없으면 중립(레시피 없음)이다 — 단어장 폴백은 없다.
+//
+// 전달 경로가 둘인 이유: 경계 블록 조립(아래 oneTaskSurfaceRecipe 호출부)은 동기라
+// 이미 판정된 캐시를 peek만 할 수 있다. 비동기 본선(resolveOneTaskSurfaceRecipe)은
+// 시스템 프롬프트 조립 단계(턴 컨텍스트)에서 판정을 확정해 같은 턴에 전달한다.
+const ONE_TASK_SURFACE_RECIPE_JUDGMENT_KIND = "one-task-surface-recipe";
+const ONE_TASK_SURFACE_RECIPE_LABELS = [
+  "travel",
+  "study",
+  "document",
+  "spreadsheet",
+  "media",
+  "research",
+  "none",
+] as const;
+type OneTaskSurfaceRecipeLabel = (typeof ONE_TASK_SURFACE_RECIPE_LABELS)[number];
+
+const ONE_TASK_SURFACE_RECIPE_QUESTION =
+  "Which result-surface recipe fits the main deliverable this request asks for: " +
+  "travel (a trip plan with schedule/route/budget), study (explaining problems, worksheets, or a learning plan), " +
+  "document (a written document/report file), spreadsheet (tabular data or a spreadsheet file), " +
+  "media (photo/image/video work), research (research, comparison, strategy, marketing, or how-to recommendations), " +
+  "or none of these?";
+
+const ONE_TASK_SURFACE_RECIPE_GUIDANCE =
+  "Judge the request's meaning in any language. Mentioning a topic in passing is not the task; " +
+  "choose the recipe for the primary deliverable, and 'none' when no single recipe clearly fits.";
+
+// 동기 peek 를 위한 지연 로드 핸들 — 비동기 resolver 가 최초 1회 채운다.
+let oneTaskSurfaceJudgmentModule: typeof import("../system-agents/judgment") | null = null;
+
+function oneTaskSurfaceRecipeCopy(kind: OneTaskSurfaceRecipeLabel, ko: boolean): string | null {
+  switch (kind) {
+    case "travel":
+      return ko
+        ? "이 여행 결과의 Surface에는 data.schedule={type:'timeline',items:[{title,detail,status,evidenceIds}]}와 widgets.timeline, data.costs={type:'pricing',currency:'KRW',limit,items:[{label,amount,verificationStatus,evidenceIds}]}와 widgets.cost-summary, data.checklist={type:'launch-checklist',items:[{label,status}]}와 widgets.launch-checklist를 반드시 각각 넣으세요. 숫자·날짜가 있는 일정/비용 항목에는 반드시 Surface evidence에 존재하는 id를 evidenceIds로 연결하고, 출처 없는 추정값에는 trust:'estimated'를 넣으세요. 일정·예산·체크리스트를 markdown이나 하나의 table로 합치지 마세요. 좌표를 실제로 확인했을 때만 data.routes={type:'routes',items:[{label,latitude,longitude,evidenceIds}]}와 widgets.map을 추가하세요."
+        : "This travel Surface must separately include data.schedule={type:'timeline',items:[{title,detail,status,evidenceIds}]} with widgets.timeline, data.costs={type:'pricing',currency,limit,items:[{label,amount,verificationStatus,evidenceIds}]} with widgets.cost-summary, and data.checklist={type:'launch-checklist',items:[{label,status}]} with widgets.launch-checklist. Every schedule or cost item containing a number or date must reference ids that exist in Surface evidence; use trust:'estimated' for an unsupported estimate. Do not flatten the schedule, budget, and checklist into markdown or one table. Add data.routes={type:'routes',items:[{label,latitude,longitude,evidenceIds}]} with widgets.map only for coordinates actually verified.";
+    case "study":
+      return ko
+        ? "학습 결과는 핵심 설명을 data.summary markdown으로, 풀이·학습 단계를 data.steps table로, 사용자가 할 일을 data.checklist launch-checklist로 분리하세요. 정답만 쓰지 말고 단계의 순서를 보존하세요."
+        : "Separate the learning result into a concise data.summary markdown explanation, ordered data.steps table, and data.checklist launch-checklist for practice. Preserve the reasoning steps instead of returning only the answer.";
+    case "document":
+      return ko
+        ? "문서 결과는 data.summary markdown과, 실제 파일 생성에 성공한 경우에만 data.artifacts={type:'artifacts',items:[{label,type}]} 및 widgets.report를 사용하세요. 존재하지 않는 파일을 선언하지 마세요."
+        : "Use data.summary markdown for the document result and data.artifacts={type:'artifacts',items:[{label,type}]} only when the file was actually created. Never declare a nonexistent file.";
+    case "spreadsheet":
+      return ko
+        ? "스프레드시트 결과는 실제 행·열을 data.table과 widgets.table로 보존하고, 실제 파일 생성에 성공한 경우에만 data.artifacts를 추가하세요."
+        : "Preserve actual rows and columns in data.table with widgets.table, and add data.artifacts only if the spreadsheet file was actually created.";
+    case "media":
+      return ko
+        ? "미디어 결과는 실제 입력·생성 자산만 data.media와 widgets.asset-board로 보존하고, 자막·장면·출력 파일은 각각 별도 데이터로 두세요. 생성하지 않은 이미지를 미리보기처럼 선언하지 마세요."
+        : "Use data.media with widgets.asset-board only for actual input or generated assets, keeping scenes, captions, and output files separate. Never declare media that was not created.";
+    case "research":
+      return ko
+        ? "조사·전략 결과는 일반론 요약으로 끝내지 마세요. data.summary에는 사용자가 바로 판단할 결론과 추천 이유를 쓰고, data.table에는 우선순위·대상·채널/방법·바로 할 행동·필요 자원·위험/제약·검증 상태를 넣어 구체적인 선택지를 비교하세요. 정확히 한 행만 recommended로 표시하고, data.checklist에는 추천안을 실제로 시작할 첫 3~7단계를 순서대로 넣으세요. 준비만 한 일을 실행했다고 쓰지 마세요. 이 결과를 document로 판단하고 inspectable, editable, reusable capability에 맞는 후속 행동 2~3개를 반드시 제안하세요. 예를 들어 추천안 실행계획 구체화, 채널별 초안 작성, 측정 기준 설계처럼 방금 결과에서 바로 이어지는 행동이어야 하며 '원본 보기'나 '마무리'는 제안하지 마세요."
+        : "Do not end research or strategy work with generic summary prose. Put the decision-ready conclusion and rationale in data.summary, and compare concrete options in data.table with priority, audience, channel or method, immediate action, required resources, risks or constraints, and verification state. Mark exactly one row recommended. Add the first 3–7 ordered launch steps in data.checklist. Never claim an unexecuted preparation was completed. Treat this result as a document with inspectable, editable, and reusable capabilities and always propose 2–3 next actions that continue directly from the result, such as detailing the recommended execution plan, drafting channel-specific copy, or defining measurement criteria. Never propose viewing an original or finishing here.";
+    default:
+      return null;
+  }
+}
+
+/**
+ * 동기 자리(경계 블록 조립)용 — 이미 판정된 verdict 를 peek 만 한다.
+ * 판정이 아직 없으면 null(중립): 이 턴의 레시피는 아래 비동기 resolver 가
+ * 턴 컨텍스트로 전달한다. 어떤 경우에도 단어장으로 되돌아가지 않는다.
+ */
 function oneTaskSurfaceRecipe(prompt: string, ko: boolean): string | null {
-  if (/(?:여행|trip|itinerary)/i.test(prompt) && /(?:일정|동선|예산|schedule|route|budget)/i.test(prompt)) {
-    return ko
-      ? "이 여행 결과의 Surface에는 data.schedule={type:'timeline',items:[{title,detail,status,evidenceIds}]}와 widgets.timeline, data.costs={type:'pricing',currency:'KRW',limit,items:[{label,amount,verificationStatus,evidenceIds}]}와 widgets.cost-summary, data.checklist={type:'launch-checklist',items:[{label,status}]}와 widgets.launch-checklist를 반드시 각각 넣으세요. 숫자·날짜가 있는 일정/비용 항목에는 반드시 Surface evidence에 존재하는 id를 evidenceIds로 연결하고, 출처 없는 추정값에는 trust:'estimated'를 넣으세요. 일정·예산·체크리스트를 markdown이나 하나의 table로 합치지 마세요. 좌표를 실제로 확인했을 때만 data.routes={type:'routes',items:[{label,latitude,longitude,evidenceIds}]}와 widgets.map을 추가하세요."
-      : "This travel Surface must separately include data.schedule={type:'timeline',items:[{title,detail,status,evidenceIds}]} with widgets.timeline, data.costs={type:'pricing',currency,limit,items:[{label,amount,verificationStatus,evidenceIds}]} with widgets.cost-summary, and data.checklist={type:'launch-checklist',items:[{label,status}]} with widgets.launch-checklist. Every schedule or cost item containing a number or date must reference ids that exist in Surface evidence; use trust:'estimated' for an unsupported estimate. Do not flatten the schedule, budget, and checklist into markdown or one table. Add data.routes={type:'routes',items:[{label,latitude,longitude,evidenceIds}]} with widgets.map only for coordinates actually verified.";
+  const judgment = oneTaskSurfaceJudgmentModule;
+  if (!judgment || !prompt.trim()) return null;
+  const hit = judgment.peekJudgment<OneTaskSurfaceRecipeLabel>(
+    ONE_TASK_SURFACE_RECIPE_JUDGMENT_KIND,
+    prompt,
+  );
+  if (!hit || hit.source !== "llm") return null;
+  return oneTaskSurfaceRecipeCopy(hit.verdict, ko);
+}
+
+/** 비동기 본선: 판정기를 통해 레시피를 결정한다. 판정 불가/none → null(중립). */
+async function resolveOneTaskSurfaceRecipe(
+  prompt: string,
+  ko: boolean,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  if (!prompt.trim()) return null;
+  try {
+    oneTaskSurfaceJudgmentModule ??= await import("../system-agents/judgment");
+    const verdict = await oneTaskSurfaceJudgmentModule.judgeRequired<OneTaskSurfaceRecipeLabel>({
+      kind: ONE_TASK_SURFACE_RECIPE_JUDGMENT_KIND,
+      question: ONE_TASK_SURFACE_RECIPE_QUESTION,
+      labels: ONE_TASK_SURFACE_RECIPE_LABELS,
+      input: prompt,
+      guidance: ONE_TASK_SURFACE_RECIPE_GUIDANCE,
+      timeoutMs: 8_000,
+      signal,
+    });
+    if (verdict.source !== "llm" || verdict.verdict === null) return null;
+    return oneTaskSurfaceRecipeCopy(verdict.verdict, ko);
+  } catch {
+    return null;
   }
-  if (/(?:문제(?:집)?\s*해설|풀이|영어\s*(?:공부|회화|학습)|worksheet|study\s+plan|explain\s+the\s+(?:problem|answer))/i.test(prompt)) {
-    return ko
-      ? "학습 결과는 핵심 설명을 data.summary markdown으로, 풀이·학습 단계를 data.steps table로, 사용자가 할 일을 data.checklist launch-checklist로 분리하세요. 정답만 쓰지 말고 단계의 순서를 보존하세요."
-      : "Separate the learning result into a concise data.summary markdown explanation, ordered data.steps table, and data.checklist launch-checklist for practice. Preserve the reasoning steps instead of returning only the answer.";
-  }
-  if (/(?:문서|워드|word\s+(?:문서|file|document)|report)/i.test(prompt)) {
-    return ko
-      ? "문서 결과는 data.summary markdown과, 실제 파일 생성에 성공한 경우에만 data.artifacts={type:'artifacts',items:[{label,type}]} 및 widgets.report를 사용하세요. 존재하지 않는 파일을 선언하지 마세요."
-      : "Use data.summary markdown for the document result and data.artifacts={type:'artifacts',items:[{label,type}]} only when the file was actually created. Never declare a nonexistent file.";
-  }
-  if (/(?:엑셀|excel|스프레드시트|spreadsheet)/i.test(prompt)) {
-    return ko
-      ? "스프레드시트 결과는 실제 행·열을 data.table과 widgets.table로 보존하고, 실제 파일 생성에 성공한 경우에만 data.artifacts를 추가하세요."
-      : "Preserve actual rows and columns in data.table with widgets.table, and add data.artifacts only if the spreadsheet file was actually created.";
-  }
-  if (/(?:사진|이미지|영상|비디오|photo|image|video)/i.test(prompt)) {
-    return ko
-      ? "미디어 결과는 실제 입력·생성 자산만 data.media와 widgets.asset-board로 보존하고, 자막·장면·출력 파일은 각각 별도 데이터로 두세요. 생성하지 않은 이미지를 미리보기처럼 선언하지 마세요."
-      : "Use data.media with widgets.asset-board only for actual input or generated assets, keeping scenes, captions, and output files separate. Never declare media that was not created.";
-  }
-  if (/(?:찾아|조사|리서치|홍보|마케팅|전략|방법|research|marketing|promotion|strategy|find\s+(?:ways|methods))/i.test(prompt)) {
-    return ko
-      ? "조사·전략 결과는 일반론 요약으로 끝내지 마세요. data.summary에는 사용자가 바로 판단할 결론과 추천 이유를 쓰고, data.table에는 우선순위·대상·채널/방법·바로 할 행동·필요 자원·위험/제약·검증 상태를 넣어 구체적인 선택지를 비교하세요. 정확히 한 행만 recommended로 표시하고, data.checklist에는 추천안을 실제로 시작할 첫 3~7단계를 순서대로 넣으세요. 준비만 한 일을 실행했다고 쓰지 마세요. 이 결과를 document로 판단하고 inspectable, editable, reusable capability에 맞는 후속 행동 2~3개를 반드시 제안하세요. 예를 들어 추천안 실행계획 구체화, 채널별 초안 작성, 측정 기준 설계처럼 방금 결과에서 바로 이어지는 행동이어야 하며 '원본 보기'나 '마무리'는 제안하지 마세요."
-      : "Do not end research or strategy work with generic summary prose. Put the decision-ready conclusion and rationale in data.summary, and compare concrete options in data.table with priority, audience, channel or method, immediate action, required resources, risks or constraints, and verification state. Mark exactly one row recommended. Add the first 3–7 ordered launch steps in data.checklist. Never claim an unexecuted preparation was completed. Treat this result as a document with inspectable, editable, and reusable capabilities and always propose 2–3 next actions that continue directly from the result, such as detailing the recommended execution plan, drafting channel-specific copy, or defining measurement criteria. Never propose viewing an original or finishing here.";
-  }
-  return null;
 }
 
 function deterministicOneCompletionCopy(
@@ -1237,18 +1309,26 @@ export async function runMcpInvocation(
   // content-free memory curation receipts are not silently lost.
   if (!req.runId) req = { ...req, runId: `direct-${randomUUID()}` };
   if (req.agentAppMode) {
-    // Browser-shaped input can never widen the main-owned Site runtime
-    // authority. Normalize before any goal, Hub, routing, or App branch.
+    /*
+     * ★오너 결정 2026-08-20 — Site 축 전부 개방.
+     *
+     * 예전에는 이 자리에서 permissions 를 read 로 못박고 브라우저 프로필까지 지워
+     * Site 앱이 브라우저·MCP·셸을 하나도 쓸 수 없었다. 이제 Site 는 다른 축과 같은
+     * 도구 표면을 받는다: 권한은 **소유자가 앱에 설정한 값**(agent-app-runtime 이
+     * 프로젝트 계약에서 읽어 싣는다)이고, 경계는 정적 박탈이 아니라 행동 시점
+     * 승인(tool-approval 중재자 + capability_grants)이 지킨다.
+     *
+     * 여전히 지우는 것: **방문자의 브라우저 입력이 스스로 넓힐 수 있는 것들**.
+     * 편성(borrow/taskForce/pipeline/router)과 앱 조작 대상은 요청 본문에서 오면
+     * 안 된다 — 이건 권한 강등이 아니라 위조 방지다.
+     */
     req = {
       ...req,
-      permissions: "read",
-      toolMode: "auto",
-      hubMode: "local-only",
+      toolMode: req.toolMode ?? "auto",
       borrowAgents: [],
       taskForceTargets: undefined,
       pipelineStages: undefined,
       routerAgent: undefined,
-      mcpBrowserProfileKey: undefined,
       planMode: false,
       goalMode: false,
       appsGenerateMode: false,
@@ -2133,7 +2213,9 @@ ${effectiveUserPrompt}`;
    * 파일·셸 경계는 각 러너의 권한 플래그(claude READ_ONLY_DENIED_TOOLS 등)가 계속
    * 지키고, 여기서는 승인된 MCP 서버만 전달한다.
    */
-  if (runtimeCanUseMcp && !req.agentAppMode && !workforceOwnsCapabilityChoice && !explicitWorkforceGoal) {
+  // ★Site 도 같은 자동 선택을 지난다(오너 결정 2026-08-20). 예전에는 agentAppMode 가
+  // 여기서 통째로 빠져 JIT 인라인 grant 밖의 도구를 하나도 못 받았다.
+  if (runtimeCanUseMcp && !workforceOwnsCapabilityChoice && !explicitWorkforceGoal) {
     try {
       const autoSelectInput = {
         userPrompt: effectiveUserPrompt,
@@ -3511,9 +3593,23 @@ ${effectiveUserPrompt}`;
   // 사용자 채팅에서만 자동화 생성 protocol 주입 (백그라운드 automation 실행 세션은 제외 → 재귀 방지)
   if (chat.kind !== "division" && canWrite) {
     systemPrompt = `${systemPrompt}\n\n${AUTOMATION_PROTOCOL}`;
-    // 자동화형 요청이면 턴 컨텍스트로도 전달 — read 권한으로 시작해 protocol 없이 생성된
-    // resume 세션에서도 자동화 계약이 이번 턴에 도달하게 한다.
-    if (isAutomationSetupRequest(req.userPrompt)) turnContextParts.push(AUTOMATION_PROTOCOL);
+    // 2026-08-20: 단어장 게이트(isAutomationSetupRequest — ko/en AND 매칭) 제거.
+    // 제3언어 자동화 요청은 그 게이트에 영구 미도달이었다. write 권한의 사용자 턴에는
+    // 계약을 턴 컨텍스트로도 무조건 전달한다 — read 권한으로 시작해 protocol 없이
+    // 생성된 resume 세션에서도 계약이 이번 턴에 도달하고, 이 턴이 자동화 요청인지는
+    // 모델이 스스로 판단해 ## Automation 블록을 낼지 결정한다. 단어장 판정은 없다.
+    turnContextParts.push(AUTOMATION_PROTOCOL);
+  }
+  // One 실행 경계의 태스크 Surface 레시피 — 선택은 판정기(LLM) 경유. 경계 블록 조립은
+  // 동기라 캐시 peek만 가능했으므로, 여기(비동기)에서 판정을 확정해 같은 턴의 턴
+  // 컨텍스트로 전달한다. 판정 불가/none이면 중립(레시피 없음) — 단어장 폴백 없음.
+  if (oneTeamExecutionPolicy && !oneTaskSurfaceRecipe(req.userPrompt, locale === "ko")) {
+    const judgedTaskSurfaceRecipe = await resolveOneTaskSurfaceRecipe(
+      req.userPrompt,
+      locale === "ko",
+      signal,
+    );
+    if (judgedTaskSurfaceRecipe) turnContextParts.push(judgedTaskSurfaceRecipe);
   }
   // 무인 실행은 질문을 받을 사람이 없다. ASK_PROTOCOL(래퍼가 앞에 주입)보다 뒤에 오는 최종
   // 지침으로 질문 fence를 금지하고, 안전한 기본값이 없으면 "NEEDS-INPUT:"으로 명시적 실패를
@@ -3649,6 +3745,8 @@ ${effectiveUserPrompt}`;
       // 세션 resume 키 — CLI 러너가 (chatId, kind)별 세션을 재사용해
       // 시스템 프롬프트/히스토리를 매 턴 재전송하지 않게 한다.
       chatId: req.agentAppMode ? `site-agent-app:${req.runId ?? randomUUID()}` : chat.id,
+      // 도구 승인의 에이전트 스코프 규칙 대상 — 누가 이 도구를 부르는지.
+      agentId: agent.id,
       mcpConfigPath,
       ...(isolatedMcpConfig ? { isolatedMcpConfig: true as const } : {}),
       mcpAllowedTools,
@@ -3660,14 +3758,17 @@ ${effectiveUserPrompt}`;
       // grok 은 같은 훅 스크립트를 자기 플러그인 디렉터리로 받는다(claude --settings 와 같은 자리).
       ...(toolBroker?.pluginDirPath ? { toolBrokerPluginDir: toolBroker.pluginDirPath } : {}),
       env: runnerEnv.env,
-      untrustedNoTools: req.agentAppMode === true,
-      untrustedAllowedMcpTools: req.agentAppMode ? mcpAllowedTools : undefined,
+      // ★오너 결정 2026-08-20 — Site 도 도구를 전부 쓴다. 예전에는 agentAppMode 가
+      // 곧 "내장 도구 0개"(--tools "")였다. 이제 도구는 배선되고, 무엇이 실제로
+      // 실행되는지는 행동 시점 승인 규칙(capability_grants)이 정한다.
+      untrustedNoTools: false,
+      untrustedAllowedMcpTools: undefined,
       onAgentAppMcpRuntimeUnavailable: req.agentAppMode
         ? markAgentAppMcpRuntimeUnavailable
         : undefined,
       // 사용자가 지정한 워킹 폴더(프로젝트)에서 에이전트를 실행 — 빌드/파일 생성이 거기서 일어난다.
       // 활성화(2회 방문) 게이팅과 무관하게, 폴더가 지정돼 있으면 즉시 cwd로 사용한다.
-      cwd: req.agentAppMode ? undefined : workingFolder ?? undefined,
+      cwd: workingFolder ?? undefined,
       locale,
       // A confirmed One Task is a result surface, not an ordinary chat turn.
       // Force the declarative protocol while casual One conversation remains

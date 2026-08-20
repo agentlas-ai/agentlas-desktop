@@ -12,6 +12,8 @@ import { app } from "electron";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { userDataPath } from "../runtime-paths";
 import { onHostShutdown } from "../host-lifecycle";
+import { currentRunPriority, nicenessForPriority } from "./run-priority";
+import { AGENTLAS_SPAWN_MARKER_ENV, recordSpawnedRunChild } from "./spawn-registry";
 
 /**
  * 패키지된 GUI 앱(Finder/Dock 실행)은 로그인 셸의 PATH를 상속받지 못해 PATH가
@@ -85,7 +87,12 @@ export function spawnCli(
 ): ChildProcess {
   return crossSpawn(command, args, {
     ...options,
-    env: withCliPath(options.env ?? process.env),
+    env: {
+      ...withCliPath(options.env ?? process.env),
+      // 우리가 띄운 트리라는 표식 — ps 로 사람이 식별하고, 고아 수거(spawn-registry)의
+      // 부가 증거가 된다. 손자(MCP/빌드)에도 상속되므로 트리 전체가 표식을 가진다.
+      [AGENTLAS_SPAWN_MARKER_ENV]: `agentlas:${process.pid}`,
+    },
   });
 }
 
@@ -318,16 +325,25 @@ const liveRunChildren = new Set<ChildProcess>();
 let quitHookInstalled = false;
 
 /**
- * LLM 실행 자식 등록: 종료 시 자동 해제 + 앱 will-quit 일괄 트리킬 + 낮은 우선순위(nice 5).
+ * LLM 실행 자식 등록: 종료 시 자동 해제 + 앱 will-quit 일괄 트리킬 + 차등 nice.
  * 우선순위는 손자(빌드/MCP)에도 상속돼 장시간 에이전트 작업 중에도 UI가 응답성을 유지한다.
+ *
+ * nice 차등(예전 일괄 5): interactive(사람이 기다리는 턴) 2, background(자동화·그래프·
+ * 스웜) 10. 우선순위는 호출 문맥(run-priority.ts 의 withRunPriority)에서 읽는다 —
+ * 자동화 스케줄러가 background 문맥을 깔면 그 안에서 스폰된 트리 전체가 물려받는다.
+ *
+ * 그리고 스폰 사실을 디스크 원장(spawn-registry)에 남긴다 — 호스트가 크래시로 죽으면
+ * 이 함수의 close 훅도 host-lifecycle 도 못 돌므로, 데몬 스위퍼가 원장을 보고 고아를
+ * 수거한다.
  */
 export function trackRunChild(child: ChildProcess): void {
   liveRunChildren.add(child);
   child.once("close", () => liveRunChildren.delete(child));
   child.once("error", () => liveRunChildren.delete(child));
+  recordSpawnedRunChild(child);
   if (child.pid != null) {
     try {
-      os.setPriority(child.pid, 5);
+      os.setPriority(child.pid, nicenessForPriority(currentRunPriority()));
     } catch {
       // 이미 종료됐거나 권한 문제 — 무시
     }

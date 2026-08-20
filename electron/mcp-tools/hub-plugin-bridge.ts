@@ -12,6 +12,10 @@
 //    즉 "원격 MCP 연결은 사람이 명시적으로 해야 한다"는 요건은 값 단계에서 이미 지켜지고
 //    있고, 여기서 자동화하는 건 등록(연결 가능하다는 사실)뿐이다.
 // 이 모듈의 실패는 런을 오염시키지 않는다(전부 격리, 결과는 영수증으로 보고).
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { createHash } from "node:crypto";
 import type { HubPluginCandidate } from "./auto-select";
 import { installCustomServer, listInstalledServers, setServerEnabled } from "./registry";
 
@@ -24,10 +28,22 @@ export interface HubPluginBridgeReceipt {
   serverId?: string;
 }
 
+/** 스킬 번들 설치 결과 — mcp_servers가 아니라 ~/.agentlas/plugins/<slug>/ 파일시스템 기록. */
+export interface HubPluginSkillInstallSummary {
+  /** 스킬 파일이 착지한 디렉터리 (plugin.json 마커 포함). */
+  dir: string;
+  installed: string[];
+  failed: Array<{ name: string; reason: string }>;
+  /** 매니페스트가 sha256을 선언했고 모든 설치 파일이 검증을 통과했는가. */
+  verified: boolean;
+}
+
 export interface HubPluginBridgeResult {
   receipts: HubPluginBridgeReceipt[];
   /** 이번 런 config에 포함할 신규/기존 http·sse 서버 row id들. */
   liveServerIds: string[];
+  /** manifest.skills 가 실콘텐츠를 실었을 때만 존재 — 스킬 번들 설치 결과. */
+  skills?: HubPluginSkillInstallSummary;
 }
 
 const BRIDGE_CANDIDATE_LIMIT = 3;
@@ -100,7 +116,185 @@ function normalizeManifestMcpRows(raw: unknown): HubManifestMcpRow[] {
   return rows;
 }
 
-export async function fetchHubPluginManifest(manifestUrl: string): Promise<{ mcp: HubManifestMcpRow[] } | null> {
+// ── 스킬 번들 (플러그인 = MCP와 별개의 능력 패키지, 오너 결정 2026-08-20) ──────
+//
+// manifest.skills 행이 files[]에 실콘텐츠를 실으면 설치 대상이다. 설치는
+// mcp_servers 등록이 아니라 ~/.agentlas/plugins/<slug>/ 아래 파일 착지 +
+// plugin.json 마커(schema agentlas.local-plugin/v1)로 남는다 — 터미널·Agentlas-OS·
+// 데스크탑이 같은 파일시스템 규약으로 공유한다(터미널 동형: engine/hub/plugins.cjs).
+
+export interface HubManifestSkillFile {
+  /** 스킬 디렉터리 기준 상대 경로 (SKILL.md, references/x.md …). */
+  path: string;
+  content: string;
+  /** 매니페스트가 선언한 콘텐츠 해시 — 있으면 설치 전에 검증한다. */
+  sha256?: string;
+}
+
+export interface HubManifestSkillRow {
+  name: string;
+  description?: string;
+  /** 빈 배열 = 이름뿐인 레거시 행(설치할 것 없음). */
+  files: HubManifestSkillFile[];
+}
+
+const SKILL_SLUG_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
+const SKILL_FILE_MAX_BYTES = 512 * 1024;
+
+/** 스킬 파일 상대 경로 검증 — 절대경로·상위 탈출·널바이트·백슬래시 거부. */
+export function isSafeSkillRelativePath(value: string): boolean {
+  if (typeof value !== "string" || !value || value.length > 260) return false;
+  if (value.includes("\0") || value.includes("\\")) return false;
+  if (value.startsWith("/") || value.endsWith("/")) return false;
+  const parts = value.split("/");
+  return parts.every((part) => part.length > 0 && part !== "." && part !== ".." && !part.startsWith("~"));
+}
+
+function normalizeManifestSkillRows(raw: unknown): HubManifestSkillRow[] {
+  if (!Array.isArray(raw)) return [];
+  const rows: HubManifestSkillRow[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    const name = typeof row.name === "string" ? row.name.trim() : "";
+    if (!name || !SKILL_SLUG_RE.test(name)) continue;
+    const description = typeof row.description === "string" ? row.description.trim() : undefined;
+    const files: HubManifestSkillFile[] = [];
+    if (Array.isArray(row.files)) {
+      for (const fileItem of row.files) {
+        if (!fileItem || typeof fileItem !== "object") continue;
+        const file = fileItem as Record<string, unknown>;
+        const filePath = typeof file.path === "string" ? file.path.trim() : "";
+        const content = typeof file.content === "string" ? file.content : "";
+        if (!isSafeSkillRelativePath(filePath) || !content.trim()) continue;
+        if (Buffer.byteLength(content, "utf8") > SKILL_FILE_MAX_BYTES) continue;
+        const sha256 = typeof file.sha256 === "string" && /^[0-9a-f]{64}$/i.test(file.sha256)
+          ? file.sha256.toLowerCase()
+          : undefined;
+        files.push({ path: filePath, content, ...(sha256 ? { sha256 } : {}) });
+      }
+    }
+    rows.push({ name, ...(description ? { description } : {}), files });
+  }
+  return rows;
+}
+
+/** 세 채널이 공유하는 로컬 플러그인 저장소 루트. */
+export function agentlasPluginsDir(): string {
+  return path.join(os.homedir(), ".agentlas", "plugins");
+}
+
+function pluginMarkerPath(slug: string): string {
+  return path.join(agentlasPluginsDir(), slug, "plugin.json");
+}
+
+/** ~/.agentlas/plugins/<slug>/plugin.json 마커가 이미 있는가. */
+export function isSkillBundleInstalled(slug: string): boolean {
+  if (!SKILL_SLUG_RE.test(slug)) return false;
+  try {
+    return fs.existsSync(pluginMarkerPath(slug));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * manifest.skills 의 실콘텐츠를 ~/.agentlas/plugins/<slug>/skills/<name>/ 에 쓴다.
+ *
+ * 무결성: 행이 sha256을 선언하면 쓰기 전에 검증하고, 불일치 파일은 설치하지 않는다
+ * (그 스킬만 failed로 남고 나머지는 계속). 해시가 아예 없으면 매니페스트 URL을
+ * 출처로 기록만 한다 — 해시와 콘텐츠가 같은 응답으로 오므로 이 검증은 전송 무결성이지
+ * 발행자 서명이 아니다(서명 체계는 아직 없음, 정직한 한계).
+ */
+export function installSkillBundle(input: {
+  slug: string;
+  manifestUrl: string;
+  skills: HubManifestSkillRow[];
+  meta?: { name?: string; family?: string; version?: string | null };
+  installedBy?: string;
+}): HubPluginSkillInstallSummary {
+  if (!SKILL_SLUG_RE.test(input.slug)) {
+    return { dir: "", installed: [], failed: [{ name: input.slug, reason: "invalid plugin slug" }], verified: false };
+  }
+  const pluginDir = path.join(agentlasPluginsDir(), input.slug);
+  const installed: string[] = [];
+  const failed: Array<{ name: string; reason: string }> = [];
+  const markerSkills: Array<{ name: string; files: Array<{ path: string; sha256: string; verified: boolean }> }> = [];
+  let allDeclared = true;
+  for (const skill of input.skills) {
+    if (skill.files.length === 0) continue; // 이름뿐인 레거시 행 — 설치할 것 없음
+    if (!SKILL_SLUG_RE.test(skill.name)) {
+      failed.push({ name: skill.name, reason: "invalid skill name" });
+      continue;
+    }
+    const skillDir = path.join(pluginDir, "skills", skill.name);
+    const writtenFiles: Array<{ path: string; sha256: string; verified: boolean }> = [];
+    let skillFailed: string | null = null;
+    for (const file of skill.files) {
+      const actual = createHash("sha256").update(file.content, "utf8").digest("hex");
+      if (file.sha256 && file.sha256 !== actual) {
+        skillFailed = `sha256 mismatch for ${file.path}`;
+        break;
+      }
+      if (!file.sha256) allDeclared = false;
+      writtenFiles.push({ path: file.path, sha256: actual, verified: Boolean(file.sha256) });
+    }
+    if (skillFailed) {
+      failed.push({ name: skill.name, reason: skillFailed });
+      continue;
+    }
+    try {
+      for (let i = 0; i < skill.files.length; i++) {
+        const target = path.join(skillDir, skill.files[i].path);
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.writeFileSync(target, skill.files[i].content, "utf8");
+      }
+      installed.push(skill.name);
+      markerSkills.push({ name: skill.name, files: writtenFiles });
+    } catch (error) {
+      failed.push({
+        name: skill.name,
+        reason: error instanceof Error ? error.message.slice(0, 160) : "write failed",
+      });
+    }
+  }
+  const verified = installed.length > 0 && allDeclared;
+  if (installed.length > 0) {
+    // 마커는 마지막에 쓴다 — 마커가 있으면 스킬 파일도 있다는 뜻이어야 한다.
+    const marker = {
+      schema: "agentlas.local-plugin/v1",
+      slug: input.slug,
+      name: input.meta?.name ?? input.slug,
+      family: input.meta?.family ?? null,
+      version: input.meta?.version ?? null,
+      installedAt: new Date().toISOString(),
+      installedBy: input.installedBy ?? "agentlas-desktop",
+      // 해시는 매니페스트와 같은 응답에서 왔다 — 무결성 출처는 이 URL이다.
+      source: { manifestUrl: input.manifestUrl, contentVerification: verified ? "manifest-sha256" : "none" },
+      skills: markerSkills,
+    };
+    try {
+      fs.mkdirSync(pluginDir, { recursive: true });
+      fs.writeFileSync(pluginMarkerPath(input.slug), `${JSON.stringify(marker, null, 2)}\n`, "utf8");
+    } catch (error) {
+      failed.push({
+        name: "plugin.json",
+        reason: error instanceof Error ? error.message.slice(0, 160) : "marker write failed",
+      });
+    }
+  }
+  return { dir: pluginDir, installed, failed, verified };
+}
+
+export interface HubPluginManifestPayload {
+  mcp: HubManifestMcpRow[];
+  skills: HubManifestSkillRow[];
+  name?: string;
+  family?: string;
+  version?: string | null;
+}
+
+export async function fetchHubPluginManifest(manifestUrl: string): Promise<HubPluginManifestPayload | null> {
   let url: URL;
   try {
     url = new URL(manifestUrl);
@@ -118,8 +312,20 @@ export async function fetchHubPluginManifest(manifestUrl: string): Promise<{ mcp
     if (!response.ok) return null;
     const text = await response.text();
     if (Buffer.byteLength(text, "utf8") > MANIFEST_MAX_BYTES) return null;
-    const parsed = JSON.parse(text) as { mcp?: unknown };
-    return { mcp: normalizeManifestMcpRows(parsed?.mcp) };
+    const parsed = JSON.parse(text) as {
+      mcp?: unknown;
+      skills?: unknown;
+      name?: unknown;
+      family?: unknown;
+      version?: unknown;
+    };
+    return {
+      mcp: normalizeManifestMcpRows(parsed?.mcp),
+      skills: normalizeManifestSkillRows(parsed?.skills),
+      ...(typeof parsed?.name === "string" ? { name: parsed.name } : {}),
+      ...(typeof parsed?.family === "string" ? { family: parsed.family } : {}),
+      ...(typeof parsed?.version === "string" ? { version: parsed.version } : { version: null }),
+    };
   } catch {
     return null;
   } finally {
@@ -198,10 +404,24 @@ function findEquivalentServer(
 export async function previewHubPlugin(
   manifestUrl: string,
   deps: { fetchManifest?: typeof fetchHubPluginManifest } = {},
-): Promise<{ rows: HubManifestMcpRow[]; needsLocalExecution: boolean; alreadyInstalledIds: string[] }> {
+): Promise<{
+  rows: HubManifestMcpRow[];
+  needsLocalExecution: boolean;
+  alreadyInstalledIds: string[];
+  /** 실콘텐츠가 실린 설치 가능한 스킬들 — MCP 행과 별개의 능력 패키지 절반. */
+  skills: Array<{ name: string; description?: string; fileCount: number }>;
+  skillsAlreadyInstalled: boolean;
+}> {
   const fetchManifest = deps.fetchManifest ?? fetchHubPluginManifest;
   const manifest = await fetchManifest(manifestUrl);
   const rows = manifest?.mcp ?? [];
+  const skills = (manifest?.skills ?? [])
+    .filter((skill) => skill.files.length > 0)
+    .map((skill) => ({
+      name: skill.name,
+      ...(skill.description ? { description: skill.description } : {}),
+      fileCount: skill.files.length,
+    }));
   let installed: ReturnType<typeof listInstalledServers>;
   try {
     installed = listInstalledServers();
@@ -213,10 +433,21 @@ export async function previewHubPlugin(
     const existing = findEquivalentServer(installed, row);
     if (existing) alreadyInstalledIds.push(existing.id);
   }
+  // slug는 매니페스트 URL의 마지막 경로 조각이다(/api/plugins/<slug>).
+  const slugFromUrl = (() => {
+    try {
+      const segments = new URL(manifestUrl).pathname.split("/").filter(Boolean);
+      return segments[segments.length - 1] ?? "";
+    } catch {
+      return "";
+    }
+  })();
   return {
     rows,
     needsLocalExecution: rows.some((row) => row.transport === "stdio"),
     alreadyInstalledIds,
+    skills,
+    skillsAlreadyInstalled: skills.length > 0 && isSkillBundleInstalled(slugFromUrl),
   };
 }
 
@@ -236,16 +467,55 @@ export async function installHubPlugin(input: {
   const fetchManifest = deps.fetchManifest ?? fetchHubPluginManifest;
   const manifest = await fetchManifest(input.manifestUrl);
   const rows = manifest?.mcp ?? [];
+  const installableSkills = (manifest?.skills ?? []).filter((skill) => skill.files.length > 0);
   const receipts: HubPluginBridgeReceipt[] = [];
   const liveServerIds: string[] = [];
+
+  // ── 스킬 번들 절반 — mcp_servers가 아니라 ~/.agentlas/plugins/<slug>/ 에 착지 ──
+  // 과거에는 skills-only 매니페스트가 여기서 "no machine-connectable MCP endpoint"로
+  // 전멸했다(스키마만 분리되고 실행이 MCP 등록으로 붕괴돼 있던 결함). 이제 스킬은
+  // 스킬대로 설치되고, mcp[]가 함께 있으면 아래 서버 등록도 그대로 진행된다.
+  let skillSummary: HubPluginSkillInstallSummary | undefined;
+  if (installableSkills.length > 0) {
+    skillSummary = installSkillBundle({
+      slug: input.slug,
+      manifestUrl: input.manifestUrl,
+      skills: installableSkills,
+      meta: { name: manifest?.name, family: manifest?.family, version: manifest?.version ?? null },
+    });
+    if (skillSummary.installed.length > 0) {
+      receipts.push({
+        slug: input.slug,
+        serverName: `${input.slug}:skills(${skillSummary.installed.join(", ")})`.slice(0, 120),
+        transport: "skills",
+        action: "connected",
+        reason: skillSummary.verified
+          ? undefined
+          : "installed without a declared content hash — manifest URL recorded as provenance",
+      });
+    }
+    for (const failure of skillSummary.failed) {
+      receipts.push({
+        slug: input.slug,
+        serverName: `${input.slug}:${failure.name}`.slice(0, 120),
+        transport: "skills",
+        action: "skipped",
+        reason: failure.reason,
+      });
+    }
+  }
+
   if (rows.length === 0) {
+    if (skillSummary) {
+      return { receipts, liveServerIds: [], skills: skillSummary };
+    }
     return {
       receipts: [{
         slug: input.slug,
         serverName: input.slug,
         transport: "unknown",
         action: "skipped",
-        reason: "no machine-connectable MCP endpoint in the Hub manifest",
+        reason: "no machine-connectable MCP endpoint or installable skill payload in the Hub manifest",
       }],
       liveServerIds: [],
     };
@@ -322,7 +592,7 @@ export async function installHubPlugin(input: {
       });
     }
   }
-  return { receipts, liveServerIds: [...new Set(liveServerIds)] };
+  return { receipts, liveServerIds: [...new Set(liveServerIds)], ...(skillSummary ? { skills: skillSummary } : {}) };
 }
 
 /**
@@ -360,12 +630,18 @@ export async function bridgeHubPluginCandidates(
     }
     const manifest = await fetchManifest(candidate.manifestUrl);
     if (!manifest || manifest.mcp.length === 0) {
+      // 스킬 번들은 자동 브리지가 설치하지 않는다 — 원격 메타데이터가 사람 확인 없이
+      // 로컬 파일(에이전트 지시문)을 쓰게 두면 stdio 자동 실행 금지와 같은 계열의
+      // 구멍이 된다. 마켓플레이스/터미널의 명시적 설치 경로로 정직하게 안내한다.
+      const hasSkillPayload = (manifest?.skills ?? []).some((skill) => skill.files.length > 0);
       receipts.push({
         slug: candidate.slug,
         serverName: candidate.name,
-        transport: "unknown",
-        action: "skipped",
-        reason: "no machine-connectable MCP endpoint in the Hub manifest",
+        transport: hasSkillPayload ? "skills" : "unknown",
+        action: hasSkillPayload ? "needs-approval" : "skipped",
+        reason: hasSkillPayload
+          ? "skill bundle — install it explicitly from the marketplace (files are never written from run-time metadata)"
+          : "no machine-connectable MCP endpoint in the Hub manifest",
       });
       continue;
     }

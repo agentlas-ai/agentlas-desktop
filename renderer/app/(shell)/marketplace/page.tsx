@@ -1,5 +1,5 @@
 "use client";
-import { Suspense, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { visibleAgents } from "@/lib/agent-visibility";
@@ -247,6 +247,16 @@ function MarketplacePage() {
     const urlQ = searchParams.get("q");
     if (urlQ != null) setQ(urlQ);
   }, [searchParams]);
+
+  /*
+   * 허브 웹의 설치 버튼 → agentlas://plugin/<family>/<slug> → main 이 이 라우트로 보낸다
+   * (?install=<slug>). 그 플러그인을 검색어로 띄우고, 카드가 승인 화면을 한 번 연다.
+   * 설치 자체는 여전히 사용자가 승인 화면에서 눌러야 일어난다 — 링크는 설치가 아니다.
+   */
+  const deepLinkInstallSlug = (searchParams.get("install") || "").trim().toLowerCase() || null;
+  useEffect(() => {
+    if (deepLinkInstallSlug) setQ(deepLinkInstallSlug);
+  }, [deepLinkInstallSlug]);
 
   useEffect(() => {
     setPage(1);
@@ -865,6 +875,10 @@ function MarketplacePage() {
                       bookmarked={bookmarkedIdentities.has(hubListingIdentityKey(listing))}
                       bookmarking={bookmarking === hubListingIdentityKey(listing)}
                       leasedUntil={leaseUntilBySlug.get((listing.slug || "").toLowerCase()) ?? null}
+                      autoOpenInstall={
+                        deepLinkInstallSlug !== null
+                        && (listing.slug || "").toLowerCase() === deepLinkInstallSlug
+                      }
                       onBookmark={() => void bookmarkOne(listing)}
                       onCopyCall={() => void copyHubCall(listing)}
                       onLease={() => setLeaseDialog({
@@ -1180,6 +1194,21 @@ type HubPluginPreviewRow = {
   envKeys?: string[];
 };
 
+// 스킬 번들 절반 — 플러그인은 MCP 서버와 별개의 능력 패키지일 수 있다(오너 결정
+// 2026-08-20). 브리지가 preview/install 결과에 얹는 확장 필드로, preload 계약
+// (shared/types.ts)이 프리즈된 동안 렌더러는 이 로컬 타입으로 캐스팅해 읽는다.
+type HubPluginPreviewSkill = { name: string; description?: string; fileCount: number };
+type HubPluginPreviewExtras = {
+  skills?: HubPluginPreviewSkill[];
+  skillsAlreadyInstalled?: boolean;
+};
+type HubPluginInstallSkillsSummary = {
+  dir: string;
+  installed: string[];
+  failed: Array<{ name: string; reason: string }>;
+  verified: boolean;
+};
+
 /** 승인 화면에 보여줄 한 줄 — 원격은 접속할 주소, 로컬은 실행될 명령 원문. */
 function describeHubPluginRow(row: HubPluginPreviewRow): string {
   if (row.transport === "stdio") {
@@ -1196,6 +1225,7 @@ function AgentCard({
   bookmarked,
   bookmarking,
   leasedUntil = null,
+  autoOpenInstall = false,
   onBookmark,
   onCopyCall,
   onOpenProfile,
@@ -1204,6 +1234,8 @@ function AgentCard({
   listing: MarketplaceListing;
   locale: Locale;
   sameSlugInstalled: boolean;
+  /** 허브 딥링크(agentlas://plugin/…)로 지목된 카드 — 승인 화면을 한 번 자동으로 연다. */
+  autoOpenInstall?: boolean;
   /** 이 플러그인의 MCP 서버가 이미 이 Mac에 등록돼 있는가(Hub/Desktop 이름 차이 무시). */
   pluginServerInstalled: boolean;
   bookmarked: boolean;
@@ -1238,11 +1270,60 @@ function AgentCard({
   const [install, setInstall] = useState<
     | { phase: "idle" }
     | { phase: "loading" }
-    | { phase: "confirm"; rows: HubPluginPreviewRow[]; needsLocalExecution: boolean }
+    | { phase: "confirm"; rows: HubPluginPreviewRow[]; needsLocalExecution: boolean; skills: HubPluginPreviewSkill[] }
     | { phase: "installing" }
     | { phase: "done"; message: string }
     | { phase: "error"; message: string }
   >({ phase: "idle" });
+  /*
+   * 설치 미리보기 열기 — 버튼 클릭과 허브 딥링크(agentlas://plugin/…)가 **같은** 경로를
+   * 쓴다. 딥링크가 별도 경로를 타면 승인 화면을 건너뛰는 설치가 생긴다.
+   */
+  const openPluginInstallPreview = useCallback(() => {
+    setInstall((current) => {
+      if (current.phase === "loading" || current.phase === "installing") return current;
+      return { phase: "loading" };
+    });
+    void window.agentlas.mcpTools
+      .previewHubPlugin(listing.manifestUrl)
+      .then((preview) => {
+        // 스킬 번들은 더 이상 거절 사유가 아니다 — 실콘텐츠가 실린
+        // 스킬은 ~/.agentlas/plugins/<slug>/ 에 설치되는 능력 패키지다.
+        const skills = (preview as typeof preview & HubPluginPreviewExtras).skills ?? [];
+        if (preview.rows.length === 0 && skills.length === 0) {
+          setInstall({
+            phase: "error",
+            message: ko
+              ? "이 플러그인에는 설치할 내용이 없습니다 (연결할 서버도, 스킬 콘텐츠도 없음)."
+              : "This plugin ships nothing installable (no connectable server and no skill content).",
+          });
+          return;
+        }
+        setInstall({
+          phase: "confirm",
+          rows: preview.rows,
+          needsLocalExecution: preview.needsLocalExecution,
+          skills,
+        });
+      })
+      .catch((error: unknown) => {
+        setInstall({
+          phase: "error",
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
+  }, [listing.manifestUrl, ko]);
+  /*
+   * 허브 웹의 설치 버튼이 연 딥링크로 들어온 경우 — 그 플러그인의 승인 화면을 한 번 연다.
+   * 여는 것까지가 전부다. 설치는 사용자가 승인 화면에서 눌러야 일어난다.
+   */
+  const deepLinkOpenedRef = useRef(false);
+  useEffect(() => {
+    if (!autoOpenInstall || !plugin || deepLinkOpenedRef.current) return;
+    if (isDesktopCatalogListing(listing)) return; // 로컬 카탈로그는 미리보기가 없다.
+    deepLinkOpenedRef.current = true;
+    openPluginInstallPreview();
+  }, [autoOpenInstall, plugin, listing, openPluginInstallPreview]);
   // 그래프는 서버가 뭐라 광고했든 호출형이 아니다 — 낡은 인덱스 스냅샷이
   // callable:true를 실어 와도 여기서 끊는다(서버 normalizeEntry와 같은 경계).
   const callable = !plugin && !graph && isCallableHubListing(listing);
@@ -1382,7 +1463,9 @@ function AgentCard({
           <div className="hub-plugin-approval-title">
             {install.needsLocalExecution
               ? (ko ? "이 명령이 이 Mac에서 실행됩니다" : "This command will run on this Mac")
-              : (ko ? "이 주소에 연결합니다" : "This endpoint will be connected")}
+              : install.rows.length > 0
+                ? (ko ? "이 주소에 연결합니다" : "This endpoint will be connected")
+                : (ko ? "이 스킬들이 이 Mac에 설치됩니다" : "These skills will be installed on this Mac")}
           </div>
           {install.rows.map((row) => (
             <div key={row.name} className="hub-plugin-approval-row">
@@ -1396,6 +1479,27 @@ function AgentCard({
               ) : null}
             </div>
           ))}
+          {install.skills.length > 0 ? (
+            <>
+              {install.skills.map((skill) => (
+                <div key={`skill:${skill.name}`} className="hub-plugin-approval-row">
+                  <code>
+                    {ko
+                      ? `스킬 ${skill.name} (파일 ${skill.fileCount}개)`
+                      : `skill ${skill.name} (${skill.fileCount} file${skill.fileCount === 1 ? "" : "s"})`}
+                  </code>
+                  {skill.description ? (
+                    <div className="hub-plugin-approval-note">{skill.description}</div>
+                  ) : null}
+                </div>
+              ))}
+              <div className="hub-plugin-approval-note">
+                {ko
+                  ? "스킬 파일은 ~/.agentlas/plugins/ 아래에 설치되어 데스크탑·터미널·OS 런타임이 함께 사용합니다."
+                  : "Skill files land under ~/.agentlas/plugins/ and are shared by the desktop, terminal, and OS runtimes."}
+              </div>
+            </>
+          ) : null}
           <div className="hub-card-actions">
             <button
               type="button"
@@ -1412,19 +1516,28 @@ function AgentCard({
                     const connected = result.receipts.filter((r) => r.action === "connected").length;
                     const already = result.receipts.filter((r) => r.action === "already-installed").length;
                     const failed = result.receipts.filter((r) => r.action === "skipped");
-                    if (connected === 0 && already === 0) {
+                    const skillSummary = (result as typeof result & { skills?: HubPluginInstallSkillsSummary }).skills;
+                    const skillsInstalled = skillSummary?.installed.length ?? 0;
+                    if (connected === 0 && already === 0 && skillsInstalled === 0) {
                       setInstall({
                         phase: "error",
                         message: failed[0]?.reason
-                          ?? (ko ? "연결 정보를 찾지 못했습니다." : "No connection info was found."),
+                          ?? (ko ? "설치할 내용을 찾지 못했습니다." : "Nothing installable was found."),
                       });
                       return;
                     }
+                    // 스킬만 설치된 경우와 서버 연결이 섞인 경우를 구분해 말한다 —
+                    // "연결됨"은 서버가 붙었을 때만 정직한 문장이다.
+                    const serverPart = connected - (skillsInstalled > 0 ? 1 : 0) > 0 || already > 0;
                     setInstall({
                       phase: "done",
-                      message: ko
-                        ? `연결됨 — 다음 대화부터 바로 쓸 수 있습니다${already ? " (이미 설치된 항목 포함)" : ""}.`
-                        : `Connected — usable from your next conversation${already ? " (some were already installed)" : ""}.`,
+                      message: skillsInstalled > 0 && !serverPart
+                        ? (ko
+                          ? `스킬 ${skillsInstalled}개 설치됨 — 모든 채널(데스크탑·터미널·OS)에서 바로 쓸 수 있습니다.`
+                          : `${skillsInstalled} skill${skillsInstalled === 1 ? "" : "s"} installed — available to every channel (desktop, terminal, OS).`)
+                        : ko
+                          ? `연결됨 — 다음 대화부터 바로 쓸 수 있습니다${already ? " (이미 설치된 항목 포함)" : ""}${skillsInstalled ? ` (스킬 ${skillsInstalled}개 포함)` : ""}.`
+                          : `Connected — usable from your next conversation${already ? " (some were already installed)" : ""}${skillsInstalled ? ` (plus ${skillsInstalled} skill${skillsInstalled === 1 ? "" : "s"})` : ""}.`,
                     });
                   })
                   .catch((error: unknown) => {
@@ -1527,34 +1640,7 @@ function AgentCard({
                     });
                 }
               : plugin
-              ? () => {
-                  if (install.phase === "loading" || install.phase === "installing") return;
-                  setInstall({ phase: "loading" });
-                  void window.agentlas.mcpTools
-                    .previewHubPlugin(listing.manifestUrl)
-                    .then((preview) => {
-                      if (preview.rows.length === 0) {
-                        setInstall({
-                          phase: "error",
-                          message: ko
-                            ? "이 플러그인에는 연결할 서버가 없습니다 (스킬 묶음입니다)."
-                            : "This plugin ships no connectable server (it is a skill bundle).",
-                        });
-                        return;
-                      }
-                      setInstall({
-                        phase: "confirm",
-                        rows: preview.rows,
-                        needsLocalExecution: preview.needsLocalExecution,
-                      });
-                    })
-                    .catch((error: unknown) => {
-                      setInstall({
-                        phase: "error",
-                        message: error instanceof Error ? error.message : String(error),
-                      });
-                    });
-                }
+              ? openPluginInstallPreview
               : bookmarked
                 ? undefined
                 : onBookmark

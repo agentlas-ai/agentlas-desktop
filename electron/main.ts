@@ -393,7 +393,57 @@ if (!singleInstanceLock) {
   app.exit(0);
 }
 
-app.on("second-instance", () => {
+/*
+ * ── agentlas:// 딥링크 ────────────────────────────────────────────────────────
+ * 허브(웹)의 "설치" 버튼이 여는 주소다: agentlas://plugin/<family>/<slug>.
+ * 등록하지 않으면 OS 가 이 스킴을 아무 앱에도 넘기지 않아 버튼이 조용히 죽는다
+ * (2026-08-20 감사: 허브 상세가 설치 안내문만 띄우던 이유).
+ *
+ * 이 스킴은 렌더러가 내부적으로도 쓰지만(agentlas://app/index.html), 그건
+ * protocol.handle 이 앱 안에서 처리하는 것이고 여기 등록은 **OS → 앱** 전달용이라
+ * 서로 간섭하지 않는다. 링크는 항해가 아니라 라우팅 신호로만 소비한다 —
+ * 바깥에서 온 URL 로 창을 항해시키지 않는다.
+ */
+const PLUGIN_DEEP_LINK_RE = /^agentlas:\/\/plugin\/([a-z0-9][a-z0-9-]{0,63})\/([a-z0-9][a-z0-9-]{0,79})\/?$/i;
+
+function routeAgentlasDeepLink(rawUrl: string): void {
+  const match = PLUGIN_DEEP_LINK_RE.exec(rawUrl.trim());
+  if (!match) return; // 모르는 모양은 무시한다 — 바깥 입력이 임의 경로를 열 수 없다.
+  const route = `/marketplace?install=${encodeURIComponent(match[2])}&family=${encodeURIComponent(match[1])}`;
+  const deliver = (): void => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+    mainWindow.webContents.send("menu:navigate", route);
+  };
+  if (mainWindow && !mainWindow.isDestroyed()) deliver();
+  else void app.whenReady().then(() => setTimeout(deliver, 1_500));
+}
+
+function registerAgentlasProtocolClient(): void {
+  try {
+    // dev 실행은 electron 바이너리 + 스크립트 경로를 함께 등록해야 OS 가 되돌려준다.
+    if (process.defaultApp && process.argv.length >= 2) {
+      app.setAsDefaultProtocolClient("agentlas", process.execPath, [path.resolve(process.argv[1])]);
+    } else {
+      app.setAsDefaultProtocolClient("agentlas");
+    }
+  } catch {
+    // 등록 실패는 앱 기동을 막지 않는다 — 딥링크만 동작하지 않는다.
+  }
+}
+
+// macOS 는 전용 이벤트로 준다.
+app.on("open-url", (event, url) => {
+  event.preventDefault();
+  routeAgentlasDeepLink(url);
+});
+
+app.on("second-instance", (_event, argv) => {
+  // Windows/Linux 는 두 번째 인스턴스의 argv 에 URL 을 실어 보낸다.
+  const link = argv.find((arg) => typeof arg === "string" && arg.startsWith("agentlas://"));
+  if (link) routeAgentlasDeepLink(link);
   if (!mainWindow || mainWindow.isDestroyed()) return;
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
@@ -647,6 +697,20 @@ function stopQuitServices(): Promise<void> {
     stopAgentlasMobileBridge().catch((error) => {
       console.error("[mobile-bridge] shutdown failed", error);
     }),
+    /*
+     * ★상주는 "앱이 켜져 있는 동안"이다(오너 규칙 2026-08-20). 이 프로세스가 붙든
+     * 상주 CLI 는 아래 finishQuitCleanup 의 host-lifecycle 훅이 죽인다. 데몬이 붙든
+     * 것은 다른 프로세스라 훅이 닿지 않으므로, 소켓으로 놓아 달라고 부탁한다
+     * (데몬 자신은 계속 산다 — 예약 자동화는 앱과 무관하게 돌아야 한다).
+     */
+    import("./daemon/app-launcher")
+      .then((module) => module.releaseDaemonAgentResidency(userDataDir()))
+      .then((released) => {
+        if (released && released.released > 0) {
+          console.log(`[daemon] released ${released.released} resident agent session(s) on app quit`);
+        }
+      })
+      .catch(() => {}),
   ]).then(() => undefined);
   return quitServicesStopPromise;
 }
@@ -822,6 +886,13 @@ app.whenReady().then(async () => {
   }
 
   registerRendererProtocol();
+  // OS 에 agentlas:// 를 이 앱으로 등록한다(허브 웹의 설치 버튼이 여는 스킴).
+  registerAgentlasProtocolClient();
+  // 앱이 딥링크로 **처음** 켜진 경우(Windows/Linux 는 첫 argv 에 실려 온다).
+  {
+    const initialLink = process.argv.find((arg) => typeof arg === "string" && arg.startsWith("agentlas://plugin/"));
+    if (initialLink) routeAgentlasDeepLink(initialLink);
+  }
   // [보안] 권한 deny — 우리 렌더러가 실제로 쓰는 건 clipboard(복사 버튼)뿐. device/sensor 류
   // (geolocation/media/usb/serial/hid/midi/display-capture 등)는 main-side에서 거부하고,
   // clipboard·notifications 등 무해한 권한은 허용한다(부작용 없이 공격면만 닫음).
@@ -1122,6 +1193,39 @@ app.whenReady().then(async () => {
     console.error("[mcp] proxy approval server failed:", err),
   );
   startAutomationScheduler(); // 자동화 스케줄러 — 60초마다 due 자동화를 백그라운드로 실행
+  /*
+   * ★데몬 자동 기동 (설계 §6 Phase 2 — "앱이 켜지면 데몬을 찾고, 없으면 자기가 띄운다").
+   *
+   * 순서가 계약이다: 이 지점은 initStore()(마이그레이션 사다리)가 이미 끝난 뒤라,
+   * 데몬은 follower 로 떠서 절대 두 번째 마이그레이션 주인이 되지 않는다(store/db.ts
+   * 의 STORE_MIGRATION_AUTHORITY). 스폰은 detached+unref — 앱을 꺼도 데몬은 산다.
+   * 버전 스큐(업데이트 직후의 옛 데몬)는 launcher 가 정중히 내려보내고 재스폰한다.
+   * 실패해도 앱은 그대로다: 데몬 없는 앱 = 기존 동작. AGENTLAS_DISABLE_DAEMON=1 로 끈다.
+   */
+  void import("./daemon/app-launcher")
+    .then(async ({ ensureDaemonRunning, reconcileDaemonAutostart }) => {
+      const outcome = await ensureDaemonRunning({
+        userDataDir: userDataDir(),
+        appVersion: app.getVersion(),
+      });
+      if (outcome.status === "failed") console.error("[daemon] ensure failed:", outcome.reason);
+      else console.info(`[daemon] ${outcome.status}`);
+      // 자동 시작(로그인 기동)은 기본 off — store 의 daemon_autostart 가 켜져 있을 때만
+      // 설치하고, 꺼져 있으면 남은 파일을 걷는다(설정 UI 는 아직 없음, store 함수가 자리).
+      try {
+        const { getDaemonAutostartEnabled } = await import("./store/daemon-autostart");
+        const reconciled = reconcileDaemonAutostart(getDaemonAutostartEnabled(), {
+          executable: process.execPath,
+          entry: path.join(__dirname, "daemon", "main.js"),
+        });
+        if (reconciled.changed) {
+          console.info(`[daemon] autostart ${reconciled.installed ? "installed" : "removed"}`);
+        }
+      } catch (err) {
+        console.error("[daemon] autostart reconcile failed:", err);
+      }
+    })
+    .catch((err) => console.error("[daemon] launcher wiring failed:", err));
   void import("./telegram/connect")
     .then(({ reconcileTelegramWorkers }) => {
       if (!shellReadyForWindows) return;

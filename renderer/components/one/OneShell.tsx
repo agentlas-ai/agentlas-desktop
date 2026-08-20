@@ -3523,6 +3523,33 @@ export function OneShell() {
       else void openWork();
       return;
     }
+    if (action.intent === "run_automation" || action.intent === "open_automation") {
+      // targetRef carries the registered automation id (optionally namespaced
+      // "automation:<id>"). Run reuses the automations preload API the list
+      // screen uses; both intents land on the live flow canvas.
+      const rawRef = action.targetRef ?? "";
+      const automationId = rawRef.startsWith("automation:") ? rawRef.slice("automation:".length) : rawRef;
+      if (!automationId) {
+        router.push("/automation");
+        return;
+      }
+      if (action.intent === "run_automation") {
+        const api = ipc();
+        void api?.automations.runNow(automationId).catch(() => undefined);
+      }
+      router.push(`/automation/flow?id=${encodeURIComponent(automationId)}`);
+      return;
+    }
+    if (action.intent === "open_build") {
+      router.push("/build");
+      return;
+    }
+    if (action.intent === "toggle_mcp_server") {
+      // The MCP card carries its own per-server toggle; the semantic action is
+      // the fallback route to the library screen where keys/toggles live.
+      router.push("/library/mcps");
+      return;
+    }
     if (!["try_result", "refine_result", "reuse_result", "prepare_share"].includes(action.intent)) {
       void openWork();
       return;

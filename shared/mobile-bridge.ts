@@ -69,6 +69,9 @@ export const MOBILE_BRIDGE_METHODS = [
   "invoke.activeChats",
   "confirm.listPending",
   "browser.resolveApproval",
+  // 런타임 도구 승인 — 데스크탑의 승인 칩과 같은 결정을 폰에서도 답한다.
+  // 투영만 하고 답을 못 하게 두면 "보이는데 누를 수 없는" 반쪽 배선이 된다.
+  "runtime.resolveToolApproval",
   "automations.list",
   "automations.get",
   "automations.toggle",
@@ -120,6 +123,7 @@ export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new 
   "invoke.steer",
   "invoke.cancel",
   "browser.resolveApproval",
+  "runtime.resolveToolApproval",
   "automations.toggle",
   "automations.runNow",
   "automations.setRuntime",
@@ -1356,6 +1360,22 @@ export interface MobileBridgeBrowserApprovalDto {
   expiresAt: number;
 }
 
+/** 데스크탑 ToolApprovalRequestEvent(shared/types.ts)의 폰 투영 — 값 그대로, 경로·비밀 없음. */
+export interface MobileBridgeToolApprovalDto {
+  id: string;
+  runtime: string;
+  tool: string;
+  detail?: string;
+  cwd?: string;
+  mode: "live" | "post-denial";
+  deniedBy?: "runtime-headless" | "sandbox";
+  requestedAt: string;
+  chatId?: string;
+  /** 능력 클래스(execute|edit|delete|network|other) — "항상 허용"이 무엇을 여는지 카드가 말한다. */
+  capability?: string;
+  agentId?: string;
+}
+
 export interface MobileBridgeAutomationDto {
   id: string;
   name: string;
@@ -1700,6 +1720,11 @@ export interface MobileBridgeSnapshot {
   messages: Record<string, MobileBridgeChatMessageDto[]>;
   pendingConfirmations: MobileBridgePendingConfirmationDto[];
   pendingBrowserApprovals: MobileBridgeBrowserApprovalDto[];
+  /**
+   * 실행 전에 사람을 기다리는 런타임 도구 승인. 옛 Desktop 빌드에는 없으므로 optional 이고,
+   * 새 빌드는 대기가 없을 때 빈 배열을 보내 폰이 낡은 카드를 지울 수 있게 한다.
+   */
+  pendingToolApprovals?: MobileBridgeToolApprovalDto[];
   automations: MobileBridgeAutomationDto[];
   usage: MobileBridgeUsageProviderDto[];
   activeChatIds: string[];
@@ -2318,6 +2343,15 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
             validateEnum(params, "decision", ["once", "always", "deny"], false),
           )
         : "browser.resolveApproval accepts only requestId and decision";
+    case "runtime.resolveToolApproval":
+      // 결정 4종은 데스크탑 ToolApprovalDecision 과 **같은 값**이다(shared/types.ts).
+      // allow_always 는 능력 규칙을 영구 기록하므로 폰에서도 같은 무게를 갖는다.
+      return hasOnlyKeys(params, ["id", "decision"])
+        ? firstError(
+            requiredString(params, "id", 160),
+            validateEnum(params, "decision", ["allow_once", "allow_session", "allow_always", "deny"], false),
+          )
+        : "runtime.resolveToolApproval accepts only id and decision";
     case "automations.get":
     case "automations.runNow":
       return hasOnlyKeys(params, ["id"]) ? requiredString(params, "id") : `${method} accepts only id`;

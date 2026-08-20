@@ -30,6 +30,13 @@ import os from "node:os";
 import path from "node:path";
 import { runHostShutdownHooks } from "../host-lifecycle";
 import { setUserDataDir, userDataDir } from "../runtime-paths";
+import { withRunPriority } from "../runtime/run-priority";
+import {
+  AGENT_RESIDENCY_IDLE_REAP_MS,
+  agentResidencySnapshot,
+  sweepIdleAgentResidency,
+} from "../runtime/agent-residency";
+import { sweepOrphanedRunChildren } from "../runtime/spawn-registry";
 import { startControlSocket, type ControlSocketHandle } from "./control-socket";
 import { WarmProcessPool } from "./process-pool";
 
@@ -112,7 +119,48 @@ async function handleControlMethod(method: string, params: unknown): Promise<unk
       // 풀 관측 — 붙든 프로세스 수/유휴 수. "재사용이 실제로 되고 있나"의 유일한 창.
       warmProcesses: processPool.size(),
       warmIdle: processPool.idleCount(),
+      // 상주 관측 — 이 프로세스가 들고 있는 에이전트 수(자세한 목록은 agents.residency).
+      residentAgents: agentResidencySnapshot().holding,
     };
+  }
+  if (method === "agents.residency") {
+    /*
+     * ★상주 관측 — "앱이 켜져 있는 동안 유지된다"를 **실측 가능한 사실**로 만든다.
+     *
+     * 경계를 분명히 해 둔다: 이 응답은 **이 프로세스(데몬)가 들고 있는 상주**다.
+     * 데스크탑 앱이 자기 프로세스에서 돌리는 채팅 세션은 앱의 등록소에 있고, 여기서는
+     * 보이지 않는다. 두 프로세스의 목록을 합쳐 하나인 척하면 그 숫자는 아무도 못 고친다.
+     */
+    const { agentResidencySnapshot: snapshot } = await import("../runtime/agent-residency");
+    return { ...snapshot(), pid: process.pid, warmProcesses: processPool.size() };
+  }
+  if (method === "agents.releaseResidency") {
+    /*
+     * ★상주는 "앱이 켜져 있는 동안"이다 — 오너 규칙(2026-08-20).
+     *
+     * 데몬은 앱보다 오래 산다(그게 존재 이유다). 하지만 데몬이 붙들고 있는 상주 CLI 는
+     * 앱이 나가는 순간 함께 놓는다: 남겨서 얻는 것(다음 앱 실행의 첫 턴이 조금 빠른 것)
+     * 보다 사용자 머신에 살아 있는 LLM 프로세스가 쌓이는 위험이 크다는 판단이다.
+     * 데몬 자신은 죽지 않는다 — 예약 자동화는 계속 돌아야 하므로 세션만 놓는다.
+     * 연속성은 손실되지 않는다: 다음 턴은 지금처럼 세션 id + 히스토리로 이어진다.
+     */
+    const { agentResidencySnapshot: snapshot, disposeAgentResidency } =
+      await import("../runtime/agent-residency");
+    const before = snapshot().holding;
+    disposeAgentResidency();
+    return { ok: true, pid: process.pid, released: before, holding: snapshot().holding };
+  }
+  if (method === "daemon.shutdown") {
+    /*
+     * ★정중한 종료 — 버전 스큐 교체용 (앱 app-launcher.ts 가 부른다).
+     *
+     * 앱이 업데이트되면 소켓 너머의 데몬은 옛 바이너리다. 그 데몬을 SIGKILL 로 치우면
+     * 붙들고 있던 자식 CLI 들이 고아가 된다 — 그래서 소켓으로 부탁하고, 데몬은 정상
+     * 종료 경로(shutdown hooks → 풀 dispose → exit)를 그대로 돈다. 응답을 먼저 쓰고
+     * 다음 틱에 죽는다 — 그래야 요청자가 "부탁이 접수됐다"를 안다.
+     */
+    setTimeout(() => performShutdown("daemon.shutdown rpc"), 50).unref?.();
+    return { ok: true, pid: process.pid, version: daemonVersion() };
   }
   if (method === "automations.get") {
     const id = (params as { id?: string })?.id;
@@ -139,10 +187,14 @@ async function handleControlMethod(method: string, params: unknown): Promise<unk
     const automation = stored ?? fallbackRow;
     if (!automation) throw new Error("graph.run requires automationId or an automation row");
     const { runGraph } = await import("../workflow/run-graph");
-    return runGraph(
-      { ...(automation as object), graph } as never,
-      graph as never,
-      { ...(initialVars ? { initialVars } : {}) } as never,
+    // 데몬으로 들어온 그래프 실행은 정의상 무인 작업이다 — 실행 슬롯 2단 큐와 자식 nice
+    // 차등이 이 문맥 표식으로 동작한다(사람이 기다리는 채팅 턴이 항상 앞선다).
+    return withRunPriority("background", () =>
+      runGraph(
+        { ...(automation as object), graph } as never,
+        graph as never,
+        { ...(initialVars ? { initialVars } : {}) } as never,
+      ),
     );
   }
   throw new Error(`unknown method: ${method}`);
@@ -151,34 +203,40 @@ async function handleControlMethod(method: string, params: unknown): Promise<unk
 /** 프로세스를 살려 두는 핸들. 종료 시 풀어 준다 — 안 그러면 exit 이 걸린다. */
 let keepAlive: NodeJS.Timeout | null = null;
 
+let closing = false;
+
+/**
+ * 단일 종료 경로 — 신호(SIGTERM/SIGINT/SIGHUP)든 RPC(daemon.shutdown)든 같은 정리를
+ * 정확히 한 번 돈다. 두 경로가 각자 정리를 들고 있으면 언젠가 한쪽만 고쳐진다.
+ */
+function performShutdown(reason: string): void {
+  if (closing) return;
+  closing = true;
+  console.log(`[agentlasd] ${reason} — running shutdown hooks`);
+  try {
+    runHostShutdownHooks();
+  } catch (error) {
+    console.error("[agentlasd] shutdown hooks failed:", error);
+  }
+  if (controlSocket) {
+    // 유닉스 소켓 파일을 남기면 다음 데몬이 EADDRINUSE 로 못 뜬다.
+    void controlSocket.close();
+    controlSocket = null;
+  }
+  // 붙든 프로세스를 전부 죽인다(host-lifecycle 도 부르지만, 순서와 무관하게 멱등).
+  processPool.dispose();
+  if (keepAlive) {
+    clearInterval(keepAlive);
+    keepAlive = null;
+  }
+  // 정리가 끝난 뒤에만 나간다. 여기서 즉시 exit 하면 자식 트리 킬이 잘린다.
+  process.exit(0);
+}
+
 /** 종료 신호 한 벌 — 어느 신호로 죽든 자식 CLI 가 함께 정리돼야 한다. */
 function installSignalHandlers(): void {
-  let closing = false;
-  const shutdown = (signal: string): void => {
-    if (closing) return;
-    closing = true;
-    console.log(`[agentlasd] ${signal} — running shutdown hooks`);
-    try {
-      runHostShutdownHooks();
-    } catch (error) {
-      console.error("[agentlasd] shutdown hooks failed:", error);
-    }
-    if (controlSocket) {
-      // 유닉스 소켓 파일을 남기면 다음 데몬이 EADDRINUSE 로 못 뜬다.
-      void controlSocket.close();
-      controlSocket = null;
-    }
-    // 붙든 프로세스를 전부 죽인다(host-lifecycle 도 부르지만, 순서와 무관하게 멱등).
-    processPool.dispose();
-    if (keepAlive) {
-      clearInterval(keepAlive);
-      keepAlive = null;
-    }
-    // 정리가 끝난 뒤에만 나간다. 여기서 즉시 exit 하면 자식 트리 킬이 잘린다.
-    process.exit(0);
-  };
   for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
-    process.on(signal, () => shutdown(signal));
+    process.on(signal, () => performShutdown(signal));
   }
 }
 
@@ -239,17 +297,55 @@ export async function startDaemon(): Promise<void> {
   }
 
   /*
-   * ★살아 있어야 데몬이다.
+   * ★살아 있어야 데몬이다 — 그리고 살아 있는 동안 **치운다**.
    *
-   * 실측 2026-08-19: 이 줄이 없을 때 데몬은 store 를 열고 "ready" 를 찍은 뒤 **스스로
-   * 종료했다**. 이벤트 루프에 붙잡을 것이 없으면 Node 는 그냥 나간다. 그래서 종료
-   * 신호를 재던 테스트는 이미 죽은 프로세스를 재고 있었고, 핸들러가 안 돈 게 아니라
-   * 부를 프로세스가 없었다 — "떴다" 는 로그만 보고 넘어갔으면 못 봤을 결함이다.
+   * 실측 2026-08-19: keepAlive 인터벌이 없을 때 데몬은 store 를 열고 "ready" 를 찍은 뒤
+   * 스스로 종료했다(이벤트 루프에 붙잡을 것이 없으면 Node 는 그냥 나간다). 이 인터벌은
+   * 그 keepAlive 역할을 유지하면서(절대 unref 하지 않는다), 같은 주기에 스위퍼 둘을 돈다:
    *
-   * Phase 2 에서 제어 서버가 뜨면 그 소켓이 프로세스를 붙잡으므로 이 타이머는 사라진다.
-   * 그때까지는 이것이 "데몬은 요청을 기다린다" 의 최소 구현이다.
+   *  (a) 12h 유휴 리퍼 — 자기가 붙든 상주/워밍 프로세스 중 마지막 활동 후 12시간 지난
+   *      것을 종료한다. WarmProcessPool 의 짧은 idle TTL(5분)은 일회용 워밍용이고, 이
+   *      리퍼는 resident 로 붙든 상주 세션(추후 기능)의 상한이다. One 관련 프로세스는
+   *      acquire 의 reaperExempt 표식으로 면제된다(process-pool.ts 계약 참조).
+   *
+   *  (b) 고아 수거 — 앱/데몬이 크래시로 죽으면 host-lifecycle 훅이 못 돌아 자식 CLI/MCP
+   *      트리가 살아남는다. exec.ts 의 trackRunChild 가 스폰 사실을 디스크 원장
+   *      (spawn-registry)에 남기므로, 여기서 "호스트 PID 는 죽었는데 자식은 살아 있는"
+   *      항목을 확인 사살한다(정체 확인 후 SIGTERM → 다음 패스 SIGKILL).
    */
-  keepAlive = setInterval(() => {}, 60_000);
+  const SWEEP_INTERVAL_MS = 10 * 60_000;
+  const RESIDENT_IDLE_REAP_MS = 12 * 60 * 60_000;
+  keepAlive = setInterval(() => {
+    try {
+      const reaped = processPool.sweepIdle(RESIDENT_IDLE_REAP_MS);
+      if (reaped > 0) console.log(`[agentlasd] idle reaper: terminated ${reaped} process(es) idle >12h`);
+    } catch (error) {
+      console.error("[agentlasd] idle reaper failed:", error);
+    }
+    try {
+      // 같은 12시간 규칙을 상주 에이전트 세션(ACP 세션 풀)에도 적용한다 — 프로세스 풀과
+      // 상주 등록소가 각자 다른 시계를 들면 하나만 고쳐지고 다른 하나는 영영 안 죽는다.
+      const closed = sweepIdleAgentResidency(AGENT_RESIDENCY_IDLE_REAP_MS);
+      if (closed > 0) console.log(`[agentlasd] residency reaper: closed ${closed} agent session(s) idle >12h`);
+    } catch (error) {
+      console.error("[agentlasd] residency reaper failed:", error);
+    }
+    void sweepOrphanedRunChildren()
+      .then((sweep) => {
+        if (sweep.signaled > 0 || sweep.prunedMismatched > 0) {
+          console.log(
+            `[agentlasd] orphan sweep: signaled=${sweep.signaled} prunedDead=${sweep.prunedDead} ` +
+            `keptLive=${sweep.keptLive} prunedMismatched=${sweep.prunedMismatched}`,
+          );
+        }
+      })
+      .catch((error) => console.error("[agentlasd] orphan sweep failed:", error));
+  }, SWEEP_INTERVAL_MS);
+  // 부팅 직후 한 번은 빨리 돈다 — 직전 크래시의 고아를 10분씩 기다리게 하지 않는다.
+  const firstSweep = setTimeout(() => {
+    void sweepOrphanedRunChildren().catch(() => { /* 다음 주기가 다시 시도한다 */ });
+  }, 30_000);
+  firstSweep.unref?.();
 }
 
 // 직접 실행됐을 때만 시작한다(테스트는 위 함수들만 부른다).

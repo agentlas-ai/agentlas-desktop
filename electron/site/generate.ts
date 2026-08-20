@@ -15,6 +15,13 @@ import {
   validateSiteAgentAppPreview,
 } from "./agent-app";
 import type { SiteAgentAppContext } from "./agent-app";
+import {
+  buildExportPrompt,
+  parseExportedFiles,
+  validateExportedFiles,
+  type SiteExportResult,
+  type SiteExportTarget,
+} from "./design-export";
 
 /** 사이트 앱에 붙은 Hub 에이전트 슬러그 (cloud-callable, hep-call로 빌림). */
 export const SITE_DESIGN_AGENT_SLUG = "web-master";
@@ -120,7 +127,17 @@ async function runSiteAgentPrompt(
         chatId: chat.id,
         userPrompt: prompt,
         borrowAgents: [SITE_DESIGN_AGENT_SLUG],
-        permissions: "read",
+        /*
+         * ★오너 결정 2026-08-20 — Site 는 도구를 쓸 수 있어야 한다(DB·Railway MCP 등).
+         *
+         * 예전에는 여기가 "read" 였고, 그 값이 MCP 설정과 **반대되는 지시문**을 낳았다:
+         * 러너가 시스템 프롬프트에 "현재 권한에서는 도구 호출을 하지 않습니다 —
+         * 브라우저/MCP 가 필요하면 write 나 full 로 실행하세요"(status-i18n sysToolsOff)를
+         * 넣어, 서버는 붙어 있는데 모델은 쓰지 말라는 말을 듣는 상태였다.
+         * 파일·셸 경계는 이제 행동 시점 승인(capability_grants)이 지키므로, 디자인 실행은
+         * 도구를 쓸 수 있는 권한으로 돈다.
+         */
+        permissions: "write",
         locale,
       },
       (ev) => {
@@ -153,7 +170,7 @@ async function runSiteAgentPrompt(
  * 출력 계약(하드 룰)만 — 디자인 방향/품질 지시는 넣지 않는다. 그건 에이전트의 영역.
  * 이 계약은 산출물이 sandbox iframe에서 결정적으로 렌더되기 위한 기술 조건이다.
  */
-function outputContract(opts: { allowPartial?: boolean } = {}): string {
+function outputContract(opts: { allowPartial?: boolean; surface?: SiteSurface } = {}): string {
   return [
     "OUTPUT CONTRACT (hard technical rules — a validator rejects violations; everything the contract does not constrain is governed by YOUR own design doctrine and skills):",
     "- First output exactly one <agentlas-feedback>…</agentlas-feedback> block. Write 2–4 concise, user-facing sentences: what you changed, why it improves this design, and what you intentionally preserved. Never expose private chain-of-thought, hidden reasoning, tool logs, or internal instructions.",
@@ -163,7 +180,11 @@ function outputContract(opts: { allowPartial?: boolean } = {}): string {
     "- ALL CSS inline in <style> tag(s) in <head>. No external resources of any kind: no CDN, no <link href>, no <script src>, no <img src=\"http…\">, no @import, no url(http…), no iframes, no web fonts.",
     "- Fonts: system font stacks only. Images/graphics: inline SVG or pure CSS only (no image files, no heavy base64 photos).",
     "- JavaScript: small inline <script> for light interactions only. No fetch/XHR/WebSocket/polling.",
-    "- The design must render correctly at 375px and 1280px viewports.",
+    opts.surface === "mobile"
+      // 앱 디자인은 "좁은 웹페이지"가 아니다. 기기 프레임 안에서 네이티브 앱 화면처럼
+      // 읽혀야 하므로 뷰포트 기준과 안전영역을 계약으로 못박는다.
+      ? "- This is an APP screen, not a narrow web page. The primary viewport is 393x852 (modern phone). Fill exactly that height with no page scroll unless the screen is genuinely a scrolling list; respect safe areas (top status area ~47px, bottom home indicator ~34px) with padding rather than drawing OS chrome yourself."
+      : "- The design must render correctly at 375px and 1280px viewports.",
   ].join("\n");
 }
 
@@ -176,10 +197,13 @@ function buildGeneratePrompt(
   agentAppContext: SiteAgentAppContext | null,
 ): string {
   return [
-    "TASK: design ONE production-grade web screen for the brief below, at the level of your best award-grade work.",
+    surface === "mobile"
+      ? "TASK: design ONE production-grade native app screen for the brief below, at the level of your best award-grade work."
+      : "TASK: design ONE production-grade web screen for the brief below, at the level of your best award-grade work.",
     `BRIEF: ${brief}`,
     surface === "mobile"
-      ? "SURFACE: Mobile. Design mobile-first for a 375px viewport, then add a deliberate responsive desktop state without changing the product's information architecture."
+      // 앱 디자인 — 반응형 웹의 좁은 상태가 아니라 네이티브 앱 화면의 관용구로.
+      ? "SURFACE: Mobile app. Design a native app screen (iOS/Android idioms): a real navigation model (tab bar, nav bar with back affordance, or sheet), touch targets of at least 44px, native-feeling controls, and content that respects the device safe areas. Do not design a responsive website; there is no desktop state."
       : surface === "web"
         ? "SURFACE: Web. Use the existing responsive Site layout pipeline and make the 1280px state primary while remaining usable at 375px."
         : "SURFACE: Agent App. The selected agent's capability contract, not a generic dashboard, determines every visible input and output.",
@@ -191,7 +215,7 @@ function buildGeneratePrompt(
     retryErrors && retryErrors.length
       ? `YOUR PREVIOUS OUTPUT WAS REJECTED by the validator for these reasons — fix them all and output the corrected document:\n- ${retryErrors.join("\n- ")}`
       : "",
-    outputContract(),
+    outputContract({ surface }),
     "Now output the required feedback block followed by the single fenced HTML document.",
   ]
     .filter(Boolean)
@@ -265,6 +289,7 @@ function buildEditPrompt(
   selection: { tagName: string; snippet: string } | null,
   retryErrors: string[] | null,
   agentAppContext: SiteAgentAppContext | null,
+  surface: SiteSurface = "web",
 ): string {
   return [
     "TASK: modify the screen below according to the instruction. Preserve the existing art direction and keep everything else pixel-identical — do not re-theme unless the instruction asks for it.",
@@ -287,7 +312,7 @@ function buildEditPrompt(
     agentAppContext
       ? `${siteAgentAppDesignContext(agentAppContext)}\n- Preserve the exact declared input/output contract during this edit. Visual changes may not add, remove, rename, or reinterpret contract fields.`
       : "",
-    outputContract({ allowPartial: Boolean(selection) && !agentAppContext }),
+    outputContract({ allowPartial: Boolean(selection) && !agentAppContext, surface }),
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -368,6 +393,8 @@ export async function editSiteScreen(input: {
   instruction: string;
   selectionId?: string | null;
   agentAppContext?: SiteAgentAppContext | null;
+  /** 앱 화면 편집은 웹과 계약이 다르다(안전영역·기기 뷰포트). 미지정은 web. */
+  surface?: SiteSurface;
   locale?: SiteLocale;
   activity?: SiteRunActivity;
 }): Promise<SiteEditResult> {
@@ -380,7 +407,7 @@ export async function editSiteScreen(input: {
   const promptSelection = selection ? { tagName: selection.tagName, snippet: selection.snippet } : null;
   const first = await runSiteAgentPrompt(
     input.projectId,
-    buildEditPrompt(sourceHtml, instruction, promptSelection, null, input.agentAppContext ?? null),
+    buildEditPrompt(sourceHtml, instruction, promptSelection, null, input.agentAppContext ?? null, input.surface ?? "web"),
     locale,
     input.activity,
   );
@@ -391,7 +418,7 @@ export async function editSiteScreen(input: {
 
   const retryRun = await runSiteAgentPrompt(
     input.projectId,
-    buildEditPrompt(sourceHtml, instruction, promptSelection, [applied.reason || "contract violation"], input.agentAppContext ?? null),
+    buildEditPrompt(sourceHtml, instruction, promptSelection, [applied.reason || "contract violation"], input.agentAppContext ?? null, input.surface ?? "web"),
     locale,
     input.activity,
   );
@@ -400,13 +427,63 @@ export async function editSiteScreen(input: {
   return retried.ok ? { ...retried, feedback: retryRun.feedback } : { ...retried, reason: retried.reason || applied.reason };
 }
 
+/**
+ * 승인된 화면을 개발자가 가져갈 코드로 내보낸다 — 웹은 React/HTML, 앱은 Flutter/React Native.
+ * 디자인 생성과 같은 에이전트·같은 재시도 규율을 쓴다(형태 계약 위반은 한 번 되돌려 준다).
+ * 파일을 디스크에 쓰지는 않는다 — 어디에 쓸지는 호출자(사용자가 고른 폴더)가 정한다.
+ */
+export async function exportSiteScreenCode(input: {
+  projectId: string;
+  html: string;
+  target: SiteExportTarget;
+  surface?: SiteSurface;
+  locale?: SiteLocale;
+  activity?: SiteRunActivity;
+}): Promise<SiteExportResult> {
+  const locale: SiteLocale = input.locale === "en" ? "en" : "ko";
+  const surface: SiteSurface = input.surface === "mobile" ? "mobile" : "web";
+  const html = (input.html || "").trim();
+  if (!html) return { ok: false, target: input.target, reason: "empty-source" };
+
+  const attempt = async (retryErrors: string[] | null): Promise<SiteExportResult> => {
+    const run = await runSiteAgentPrompt(
+      input.projectId,
+      buildExportPrompt(html, input.target, surface, retryErrors),
+      locale,
+      input.activity,
+    );
+    if (!run.text) return { ok: false, target: input.target, engine: run.engine, reason: run.reason || "no-final-text" };
+    const parsed = parseExportedFiles(run.text);
+    const errors = [...parsed.errors, ...validateExportedFiles(input.target, parsed.files)];
+    if (errors.length) {
+      return { ok: false, target: input.target, engine: run.engine, reason: errors.join("; ") };
+    }
+    return { ok: true, target: input.target, files: parsed.files, notes: run.feedback, engine: run.engine };
+  };
+
+  const first = await attempt(null);
+  if (first.ok || !first.reason || first.reason === "no-final-text") return first;
+  const retried = await attempt([first.reason]);
+  return retried.ok ? retried : { ...retried, reason: retried.reason || first.reason };
+}
+
 /** UI 게이팅 — 활성 런타임 존재 여부 + 붙어 있는 Hub 에이전트 슬러그. */
-export async function siteEngineStatus(): Promise<{ ready: boolean; agent: string }> {
+export async function siteEngineStatus(): Promise<{ ready: boolean; agent: string; reason?: string }> {
   try {
     const { pickActiveRunner } = await import("../mcp/client");
     const picked = await pickActiveRunner();
-    return { ready: !!picked, agent: SITE_DESIGN_AGENT_SLUG };
+    if (!picked) return { ready: false, agent: SITE_DESIGN_AGENT_SLUG, reason: "no-runtime" };
+    /*
+     * 런타임만 보고 ready 를 말하면 거짓말이 된다 — 디자인 두뇌는 로컬이 아니라
+     * Hub 에이전트(web-master)이고, 그게 북마크돼 있지 않으면 실행 중반에
+     * borrowed-agent-unavailable 로 터진다. 화면이 "준비됨"이라고 말한 뒤
+     * 몇 분 기다렸다 실패하는 것보다, 시작 전에 이유를 아는 편이 낫다.
+     */
+    const { listHubAgentBookmarks } = await import("../store/hub-bookmarks");
+    const bookmarked = listHubAgentBookmarks().some((row) => row.slug === SITE_DESIGN_AGENT_SLUG);
+    if (!bookmarked) return { ready: false, agent: SITE_DESIGN_AGENT_SLUG, reason: "design-agent-not-bookmarked" };
+    return { ready: true, agent: SITE_DESIGN_AGENT_SLUG };
   } catch {
-    return { ready: false, agent: SITE_DESIGN_AGENT_SLUG };
+    return { ready: false, agent: SITE_DESIGN_AGENT_SLUG, reason: "status-check-failed" };
   }
 }

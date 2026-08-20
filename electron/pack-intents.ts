@@ -7,9 +7,11 @@
 // Now both pack intents are one judgeSubset call per One request (the subset
 // cache keys on kind+labels+input, so the creative and ecommerce seeds share a
 // single model verdict for the same prompt). The prefilters are demoted to
-// hints and remain only the labeled fallback (today's verdicts) when no model
-// answers — a lexical miss can still seed when the model says so, and "empty
-// selection" from the model genuinely means "neither pack".
+// hints ONLY (they ride along in the judge guidance). Contract unified
+// 2026-08-20: with NO connected model the resolution is NEUTRAL — an empty
+// selection with source:"fallback". The lexical prefilter never appears as a
+// selection, so no future consumer can seed a pack surface from a keyword
+// guess by forgetting to branch on `source`.
 
 import type { ImageAttachment } from "../shared/types";
 import { judgeSubset, type SubsetSpec, type SubsetVerdict } from "./system-agents/judgment";
@@ -49,7 +51,7 @@ export async function resolveOnePackIntents(input: {
     ...(shouldSeedCreativeAdPack(input.prompt, input.images) ? ["creative-ad-pack" as const] : []),
     ...(shouldSeedEcommerceOps(input.prompt) ? ["ecommerce-ops" as const] : []),
   ];
-  if (!input.prompt.trim()) return { selected: lexical, source: "fallback", reason: "empty prompt" };
+  if (!input.prompt.trim()) return { selected: [], source: "fallback", reason: "empty prompt" };
   let verdict: SubsetVerdict<OnePackIntent>;
   try {
     verdict = await (input.judgeSubsetFn ?? judgeSubset)({
@@ -82,10 +84,11 @@ export async function resolveOnePackIntents(input: {
       timeoutMs: input.timeoutMs ?? 8_000,
     });
   } catch {
-    return { selected: lexical, source: "fallback", reason: "judge failed" };
+    // 판정 실패 = 중립. 단어장 후보는 힌트였을 뿐 선택으로 승격되지 않는다.
+    return { selected: [], source: "fallback", reason: "judge failed" };
   }
   if (verdict.source !== "llm") {
-    return { selected: lexical, source: "fallback", reason: verdict.reason };
+    return { selected: [], source: "fallback", reason: verdict.reason };
   }
   return { selected: verdict.selected, source: "llm", reason: verdict.reason };
 }

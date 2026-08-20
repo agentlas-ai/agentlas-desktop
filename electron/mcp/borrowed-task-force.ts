@@ -673,16 +673,26 @@ function permissionInvocationReceipt(
 }
 
 function taskForcePermission(p: BorrowedTaskForceParams): RunnerRequest["permission"] {
-  return p.req.agentAppMode || p.req.appsGenerateMode ? "read" : p.req.permissions;
+  // ★오너 결정 2026-08-20 — Site 도 소유자가 준 권한 그대로 실행한다(read 강등 폐지).
+  // 앱 생성 모드만 여전히 읽기다(스캐폴딩이 남의 프로젝트를 건드릴 이유가 없다).
+  return p.req.appsGenerateMode ? "read" : p.req.permissions;
 }
 
-function taskForceAllowsTools(p: BorrowedTaskForceParams): boolean {
-  const permission = taskForcePermission(p);
-  return permission === "write" || permission === "full";
+/*
+ * ★오너 결정 2026-08-20 — 권한과 능력의 정합. 예전에는 write/full 권한일 때만
+ * 도구(MCP)를 배선해, read 실행의 빌린 에이전트는 조회 도구조차 받지 못했다
+ * (커널 결정 "read 실행도 MCP를 받는다"와 모순). 이제 도구는 항상 배선하고,
+ * 경계는 정적 박탈이 아니라 **행동 시점 승인**(tool-approval 중재자 + capability_grants)
+ * 이 지킨다. 공개 웹 경계인 Agent App(untrusted browser 입력)만 예외로 남는다.
+ */
+function taskForceAllowsTools(_p: BorrowedTaskForceParams): boolean {
+  // 도구는 항상 배선된다. 무엇이 실제로 실행되는지는 행동 시점 승인이 정한다.
+  return true;
 }
 
 function taskForceProjectReadOnly(p: BorrowedTaskForceParams): boolean {
-  return p.restrictedReadBoundary === true || !taskForceAllowsTools(p);
+  // 프로젝트 마운트의 읽기 전용 여부는 도구 유무가 아니라 실행 권한을 따른다.
+  return p.restrictedReadBoundary === true || taskForcePermission(p) === "read";
 }
 
 function taskForceMemoryTurnId(

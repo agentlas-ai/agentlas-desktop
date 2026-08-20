@@ -33,6 +33,26 @@ import {
   getRuntimeSession,
   saveRuntimeSession,
 } from "../store/runtime-sessions";
+import { AcpRpcError } from "./acp-protocol";
+import {
+  CODEX_APP_SERVER_ARGS,
+  answerCodexApproval,
+  codexApprovalCapability,
+  codexAppServerSupported,
+  codexPoolKey,
+  codexProtocolReceipt,
+  codexResidentSessionAlive,
+  codexSessionPool,
+  isCodexApprovalRequest,
+  looksLikeMissingAppServer,
+  markCodexAppServerUnsupported,
+  openCodexResidentSession,
+  type CodexResidentSession,
+  type CodexTurnSink,
+} from "./codex-session";
+import { residencyDisabledFor } from "./claude-session";
+import { isResidencyExemptAgent, resolveAgentResidencySource } from "./agent-residency";
+import type { AcpSessionLease } from "./acp-session-pool";
 
 const KIND = "codex";
 
@@ -272,6 +292,45 @@ export function resolveCodexRunFailure(input: {
   if (input.terminalFailure) return input.terminalFailure;
   if (input.code === 0 && input.turnCompleted && input.text.trim()) return null;
   return input.itemFailure;
+}
+
+/**
+ * app-server 의 턴 실패 표식 → RunnerFailure — 순수 함수(게이트가 픽스처 주입).
+ *
+ * `turn/completed` 는 `turn.status`(completed|failed|interrupted)와, 실패일 때
+ * `turn.error{message, codexErrorInfo}` 를 싣는다(실측 스키마). `codexErrorInfo` 는
+ * 기계 표식이므로 **문구가 아니라 그 코드로** 종류를 정한다 — 한도 소진이 "실패"로만
+ * 보이던 자리를 여기서 되찾는다(exec 경로는 표식이 없어 휴리스틱에 기댔다).
+ */
+export function codexFailureFromTurn(turn: {
+  status?: string;
+  error?: { message?: unknown; additionalDetails?: unknown; codexErrorInfo?: unknown } | null;
+} | null | undefined): RunnerFailure | null {
+  if (!turn || turn.status !== "failed") return null;
+  const raw = typeof turn.error?.message === "string" && turn.error.message.trim()
+    ? turn.error.message.trim()
+    : "codex turn failed";
+  const detail = typeof turn.error?.additionalDetails === "string" && turn.error.additionalDetails.trim()
+    ? ` — ${turn.error.additionalDetails.trim()}`
+    : "";
+  const info = turn.error?.codexErrorInfo;
+  const code = typeof info === "string"
+    ? info
+    : info && typeof info === "object"
+      ? Object.keys(info as Record<string, unknown>)[0] ?? ""
+      : "";
+  const kind: RunnerFailure["kind"] =
+    code === "usageLimitExceeded" || code === "sessionBudgetExceeded" ? "quota"
+      : code === "unauthorized" ? "auth"
+      : code === "cyberPolicy" || code === "misalignmentPolicyViolation" ? "refused"
+      : code === "contextWindowExceeded" ? "exit"
+      : "exit";
+  return {
+    kind,
+    message: `${raw}${detail}`.slice(0, 2000),
+    runtime: "codex",
+    source: "marker",
+  };
 }
 
 function runCodexProcess(
@@ -662,6 +721,578 @@ function runCodexProcess(
   });
 }
 
+/* ───────────────────────── 상주 경로 (`codex app-server`) ───────────────────────── */
+
+/**
+ * 권한 → 스레드/턴 정책. exec 경로의 `permissionArgs` 와 **같은 경계**를 프로토콜의
+ * 타입 있는 칸으로 옮긴 것이다(문자열 `-c` 오버라이드가 아니라 스키마가 검증한다).
+ *
+ * ★write 의 network_access=true 는 실측으로 얻은 것이다(exec 경로 주석 참고):
+ * workspace-write Seatbelt 샌드박스는 기본적으로 네트워크를 전면 차단해, 자기 기계의
+ * 127.0.0.1:9222(브라우저)조차 못 두드린다. 파일 경계는 유지하고 네트워크만 연다.
+ *
+ * ★approvalPolicy: read/write 는 `on-request` 다 — 이것이 이번 작업의 요지다. codex 는
+ * 지금까지 헤드리스라 실행 **전에** 물어볼 수 없었고(post-denial 만 가능), 이제 서버가
+ * 우리에게 물어본다. full 은 예전 `--dangerously-bypass-approvals-and-sandbox` 와 같게
+ * `never` 다 — 사용자가 이미 경계를 내려놓은 모드다.
+ */
+export function codexThreadPolicy(permission: RunnerRequest["permission"]): {
+  sandbox: string;
+  approvalPolicy: string;
+  sandboxPolicy: Record<string, unknown>;
+} {
+  if (permission === "full") {
+    return { sandbox: "danger-full-access", approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } };
+  }
+  if (permission === "write") {
+    return {
+      sandbox: "workspace-write",
+      approvalPolicy: "on-request",
+      sandboxPolicy: { type: "workspaceWrite", networkAccess: true },
+    };
+  }
+  return { sandbox: "read-only", approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } };
+}
+
+/** 아이템 하나 → 도구 이벤트. 아는 종류만 옮긴다(모르는 것을 도구라고 부르지 않는다). */
+export function codexToolEventFromItem(item: any, completed: boolean): {
+  name: string;
+  args?: string;
+  result?: string;
+  isError: boolean;
+  artifactPaths?: string[];
+} | null {
+  if (!item || typeof item !== "object") return null;
+  const cut = (s: string, max = 12000): string => (s.length > max ? `${s.slice(0, max)}…` : s);
+  const asText = (value: unknown): string | undefined => {
+    if (value == null) return undefined;
+    if (typeof value === "string") return cut(value);
+    try { return cut(JSON.stringify(value)); } catch { return cut(String(value)); }
+  };
+  switch (item.type) {
+    case "commandExecution": {
+      const failed = item.status === "failed" || item.status === "declined"
+        || (typeof item.exitCode === "number" && item.exitCode !== 0);
+      return {
+        name: "bash",
+        args: asText({ command: item.command, cwd: item.cwd }),
+        result: completed
+          ? (asText(item.aggregatedOutput) ?? (typeof item.exitCode === "number" ? `exit ${item.exitCode}` : String(item.status ?? "completed")))
+          : undefined,
+        isError: completed && failed,
+      };
+    }
+    case "fileChange": {
+      const changes: any[] = Array.isArray(item.changes) ? item.changes : [];
+      const paths = changes.map((c) => String(c?.path ?? "")).filter((p) => p && path.isAbsolute(p));
+      return {
+        name: "apply_patch",
+        args: asText({ changes: changes.map((c) => ({ path: c?.path, kind: c?.kind })) }),
+        result: completed ? asText({ status: item.status, changes: paths }) : undefined,
+        isError: completed && (item.status === "failed" || item.status === "declined"),
+        // 호스트가 구조화해 준 변경 경로만 산출물 레일로 — 모델 산문에서 뽑지 않는다.
+        ...(completed && paths.length > 0 ? { artifactPaths: paths } : {}),
+      };
+    }
+    case "mcpToolCall":
+      return {
+        name: item.server ? `${item.server}.${item.tool}` : String(item.tool ?? "mcp"),
+        args: asText(item.arguments),
+        result: completed ? (asText(item.error) ?? asText(item.result) ?? String(item.status ?? "completed")) : undefined,
+        isError: completed && (item.status === "failed" || item.error != null),
+      };
+    case "dynamicToolCall":
+      return {
+        name: String(item.tool ?? "tool"),
+        args: asText(item.arguments),
+        result: completed ? (asText(item.contentItems) ?? String(item.status ?? "completed")) : undefined,
+        isError: completed && (item.status === "failed" || item.success === false),
+      };
+    case "webSearch":
+      return {
+        name: "web_search",
+        args: asText(item.query ?? item.action),
+        result: completed ? "completed" : undefined,
+        isError: false,
+      };
+    default:
+      return null;
+  }
+}
+
+interface ResidentTurnOutcome {
+  /** 완주했다 — 이 결과를 그대로 돌려준다(성공이든 표식 실패든). */
+  result?: RunnerResult;
+  /** 화면에 아무것도 나가지 않았다 — 이 턴을 1회성 exec 경로로 **한 번** 다시 시도한다. */
+  retryOneShot?: true;
+}
+
+/**
+ * 상주 턴 하나. 실패하면 세션을 버리고 `retryOneShot` 을 돌려준다 — 바깥은 기존 exec
+ * 경로로 **한 번** 더 간다(그 경로는 상주를 쓰지 않으므로 무한 재시도가 불가능하다).
+ *
+ * ★사용자에게는 아무 차이도 없어야 한다: 상태줄 문구는 기존 `[runtime-session]` 영수증과
+ * 기존 resume/created 문구 그대로다. 상주는 속도·비용 최적화이지 연속성의 근거가 아니다
+ * (연속성은 threadId 와 대화 히스토리 재주입이 잇는다).
+ */
+async function runCodexResidentTurn(input: {
+  bin: string;
+  req: RunnerRequest;
+  events: RunnerEvents;
+  chatId: string;
+  fingerprint: string;
+  resumeThreadId: string | null;
+  gapContext: string;
+  mcpArgs: string[];
+  appliedEffort: string | null;
+}): Promise<ResidentTurnOutcome> {
+  const { bin, req, events, chatId, fingerprint, resumeThreadId, gapContext, mcpArgs, appliedEffort } = input;
+  const cwd = req.cwd ?? agentRunCwd();
+  const env = req.env ?? process.env;
+  const policy = codexThreadPolicy(req.permission);
+  /*
+   * 스폰 형상 — `-c` 는 app-server 하위 명령의 옵션이다(실측 `codex app-server --help`).
+   * reasoning summary 를 켜는 것은 exec 경로와 같은 이유다(끄면 요약 아이템이 비어 온다).
+   */
+  const args = [...CODEX_APP_SERVER_ARGS, "-c", "model_reasoning_summary=auto", ...mcpArgs];
+  const pool = codexSessionPool();
+  const poolKey = codexPoolKey({
+    chatId,
+    fingerprint,
+    cwd,
+    bin,
+    ...(req.mcpConfigPath ? { mcpConfigPath: req.mcpConfigPath } : {}),
+    ...(req.toolBrokerSettingsPath ? { toolBrokerSettingsPath: req.toolBrokerSettingsPath } : {}),
+    args,
+    env,
+  });
+
+  let lease: AcpSessionLease<CodexResidentSession> | null = null;
+  try {
+    lease = await pool.acquire(
+      poolKey,
+      {
+        agentId: req.agentId ?? null,
+        chatId,
+        runtimeKind: KIND,
+        source: resolveAgentResidencySource(req.agentId),
+        reaperExempt: isResidencyExemptAgent(req.agentId),
+      },
+      () => openCodexResidentSession({ bin, args, cwd, env, label: req.backendLabel || "codex" }),
+    );
+  } catch (err) {
+    // 구형 CLI 는 `app-server` 하위 명령 자체가 없다 — 프로세스 수명 동안 1회 학습해 영구 강등.
+    if (looksLikeMissingAppServer("", err)) {
+      markCodexAppServerUnsupported(err instanceof Error ? err.message : String(err));
+      events.onStatus(`[residency] disabled kind=${KIND} reason=app-server-unsupported`);
+    }
+    return { retryOneShot: true };
+  }
+
+  const session = lease.session;
+  const reusing = !lease.fresh && Boolean(session.threadId);
+  let broken = false;
+  /** 이 턴에서 화면으로 나간 본문이 있는가 — 있으면 1회성 재시도는 답을 두 번 쓰는 짓이다. */
+  let emitted = false;
+
+  /* ── 이번 턴의 수신 상태 ── */
+  const messageOrder: string[] = [];
+  const messages = new Map<string, string>();
+  const startedTools = new Set<string>();
+  let thinkingOpen = false;
+  let thinkingStartedAt = 0;
+  let estChars = 0;
+  let lastEmit = 0;
+  let turnId = "";
+  /*
+   * 사용량은 알림 콜백에서 채워진다 — 홀더 객체에 담는다(let 변수는 TS 흐름 분석이
+   * 콜백 대입을 못 봐서 항상 null 로 좁혀진다).
+   */
+  const usage: {
+    last: { inputTokens: number; outputTokens: number } | null;
+    total: { outputTokens: number; inputTokens: number; cachedInputTokens: number } | null;
+  } = { last: null, total: null };
+  let failure: RunnerFailure | null = null;
+  let interrupted = false;
+  let settleTurn: ((reason: "completed" | "closed") => void) | null = null;
+  let closedReason = "";
+
+  const openThinking = (): void => {
+    if (thinkingOpen) return;
+    thinkingOpen = true;
+    thinkingStartedAt = Date.now();
+    events.onThinking?.("start");
+  };
+  const closeThinking = (): void => {
+    if (!thinkingOpen) return;
+    thinkingOpen = false;
+    events.onThinking?.("end", Date.now() - thinkingStartedAt);
+  };
+  const bodyText = (): string => messageOrder.map((id) => messages.get(id) ?? "").filter(Boolean).join("\n");
+  const emitPartial = (force = false): void => {
+    const now = Date.now();
+    if (!force && now - lastEmit <= 60) return;
+    lastEmit = now;
+    emitted = true;
+    events.onPartial(bodyText());
+  };
+
+  const onNotification = (method: string, params: any): void => {
+    switch (method) {
+      case "thread/started":
+        if (typeof params?.thread?.id === "string") session.threadId = params.thread.id;
+        break;
+      case "turn/started":
+        // 이 자리는 exec 경로와 같은 의미다 — 모델이 생각을 시작했다는 가장 이른 신호.
+        if (typeof params?.turn?.id === "string" && !turnId) turnId = params.turn.id;
+        openThinking();
+        break;
+      case "item/started": {
+        const item = params?.item;
+        if (item?.type === "reasoning") { openThinking(); break; }
+        const tool = codexToolEventFromItem(item, false);
+        if (tool) {
+          closeThinking();
+          if (bodyText()) emitPartial(true);
+          startedTools.add(String(item.id ?? ""));
+          events.onTool?.(tool.name, tool.args, undefined, String(item.id ?? ""), false);
+        }
+        break;
+      }
+      case "item/agentMessage/delta": {
+        const id = String(params?.itemId ?? "");
+        const delta = typeof params?.delta === "string" ? params.delta : "";
+        if (!id || !delta) break;
+        closeThinking();
+        if (!messages.has(id)) { messages.set(id, ""); messageOrder.push(id); }
+        messages.set(id, (messages.get(id) ?? "") + delta);
+        estChars += delta.length;
+        events.onUsage?.(Math.ceil(estChars / 4));
+        emitPartial();
+        break;
+      }
+      case "item/completed": {
+        const item = params?.item;
+        if (item?.type === "agentMessage") {
+          closeThinking();
+          const id = String(item.id ?? "");
+          if (id) {
+            // 완결 아이템의 text 가 권위다 — 델타 누락/중복이 있어도 여기서 자가 교정된다.
+            if (!messages.has(id)) messageOrder.push(id);
+            messages.set(id, typeof item.text === "string" ? item.text : messages.get(id) ?? "");
+          }
+          emitPartial(true);
+          break;
+        }
+        if (item?.type === "reasoning") {
+          openThinking();
+          const summary = [
+            ...(Array.isArray(item.summary) ? item.summary : []),
+            ...(Array.isArray(item.content) ? item.content : []),
+          ].filter((s) => typeof s === "string" && s.trim()).join("\n");
+          if (summary) events.onThinking?.("delta", undefined, summary.endsWith("\n") ? summary : `${summary}\n`);
+          closeThinking();
+          break;
+        }
+        const tool = codexToolEventFromItem(item, true);
+        if (tool) {
+          closeThinking();
+          if (bodyText()) emitPartial(true);
+          events.onTool?.(
+            tool.name,
+            tool.args,
+            tool.result,
+            String(item.id ?? ""),
+            tool.isError,
+            tool.artifactPaths,
+          );
+        }
+        break;
+      }
+      case "thread/tokenUsage/updated": {
+        // `last` 는 **이번 턴**, `total` 은 스레드 누적이다(실측). exec 경로가 누적에서
+        // 빼서 구하던 값을 프로토콜이 직접 준다 — baseline 산수가 필요 없다.
+        const last = params?.tokenUsage?.last;
+        const total = params?.tokenUsage?.total;
+        if (last && typeof last.inputTokens === "number" && typeof last.outputTokens === "number") {
+          usage.last = { inputTokens: last.inputTokens, outputTokens: last.outputTokens };
+          events.onUsage?.(last.outputTokens);
+        }
+        if (total && typeof total.outputTokens === "number") {
+          usage.total = {
+            outputTokens: total.outputTokens,
+            inputTokens: typeof total.inputTokens === "number" ? total.inputTokens : 0,
+            cachedInputTokens: typeof total.cachedInputTokens === "number" ? total.cachedInputTokens : 0,
+          };
+        }
+        if (last && typeof last.inputTokens === "number" && typeof last.cachedInputTokens === "number" && last.inputTokens > 0) {
+          events.onStatus(`[cache] read=${last.cachedInputTokens} fresh=${last.inputTokens - last.cachedInputTokens} hit=${Math.round((last.cachedInputTokens / last.inputTokens) * 100)}%`);
+        }
+        break;
+      }
+      case "warning": {
+        const message = typeof params?.message === "string" ? params.message : "";
+        if (message) events.onStatus(`codex: ${message.slice(0, 400)}`);
+        break;
+      }
+      case "error": {
+        // 턴이 재시도할 수 있는 오류는 실패가 아니다 — 서버가 willRetry 로 말해 준다.
+        const message = typeof params?.error?.message === "string" ? params.error.message : "";
+        if (message) events.onStatus(`codex: ${message.slice(0, 400)}`);
+        if (params?.willRetry !== true && !failure) {
+          failure = codexFailureFromTurn({ status: "failed", error: params?.error }) ?? failure;
+        }
+        break;
+      }
+      case "turn/completed": {
+        const turn = params?.turn;
+        if (!turn || (turnId && String(turn.id ?? "") !== turnId)) break;
+        if (turn.status === "interrupted") interrupted = true;
+        failure = codexFailureFromTurn(turn) ?? failure;
+        settleTurn?.("completed");
+        break;
+      }
+      default:
+        break;
+    }
+  };
+
+  const approvalCtx = {
+    runtime: KIND,
+    sessionKey: `${KIND}:${req.sessionFingerprintSeed ?? chatId}`,
+    cwd,
+    chatId,
+    ...(req.agentId ? { agentId: req.agentId } : {}),
+    permission: req.permission,
+    unattended: req.unattended === true,
+  };
+  const sink: CodexTurnSink = {
+    onNotification,
+    onServerRequest: async (method, params) => {
+      /*
+       * ★실행 **전** 승인 — codex 가 처음으로 승인 칩에 참여하는 자리.
+       * 계약은 ACP `answerPermission` 과 같다: 중재자가 없으면 보수적 기본값,
+       * 중재자가 던지면 거부(fail-closed). 결정은 상태줄에 사실로 남긴다.
+       */
+      if (!isCodexApprovalRequest(method)) {
+        throw new AcpRpcError({ code: -32601, message: `Method not found: ${method}` });
+      }
+      const { reply, decision, ask } = await answerCodexApproval(method, params, approvalCtx);
+      events.onStatus(
+        `[tool-approval] runtime=${KIND} capability=${codexApprovalCapability(ask)} tool=${ask.tool} decision=${decision}`,
+      );
+      return reply;
+    },
+    onStatus: (status) => events.onStatus(status),
+    onTransportClosed: (reason) => {
+      closedReason = reason;
+      settleTurn?.("closed");
+    },
+  };
+
+  /** 취소가 보낸 `turn/interrupt` 의 응답 — 세션을 죽이기 **전에** 이것을 기다린다. */
+  let interruptAck: Promise<unknown> | null = null;
+  const onAbort = (): void => {
+    broken = true;
+    interrupted = true;
+    /*
+     * 취소는 프로토콜 1급이다 — 먼저 `turn/interrupt` 로 이 턴을 멈추고, **그 다음** 세션을
+     * 버린다(상태를 모르는 세션을 다음 턴에 물려주지 않는다).
+     *
+     * ★순서가 계약이다. 보내자마자 프로세스 그룹을 죽이면 자식이 그 줄을 읽기 전에 죽어
+     * 취소가 프로토콜에 도달하지 못한다(게이트에서 실측한 경합). 그래서 응답을 기다리는
+     * 약속을 남기고, 폐기하는 finally 가 그것을 (상한을 두고) 먼저 기다린다.
+     */
+    if (session.threadId && turnId && codexResidentSessionAlive(session)) {
+      interruptAck = session.conn
+        .request("turn/interrupt", { threadId: session.threadId, turnId }, { timeoutMs: 5_000 })
+        .catch(() => { /* 이미 끝났거나 죽었다 */ });
+    }
+    settleTurn?.("closed");
+  };
+  req.signal?.addEventListener("abort", onAbort, { once: true });
+
+  try {
+    session.active = sink;
+    /* ── 스레드: 살아 있는 세션이면 그대로, 새 프로세스면 resume 또는 start ── */
+    if (!reusing) {
+      const startParams: Record<string, unknown> = {
+        cwd,
+        approvalPolicy: policy.approvalPolicy,
+        sandbox: policy.sandbox,
+        ...(req.model ? { model: req.model } : {}),
+      };
+      let resumed = false;
+      if (resumeThreadId) {
+        try {
+          await session.conn.request(
+            "thread/resume",
+            { threadId: resumeThreadId, ...startParams },
+            { timeoutMs: 120_000, signal: req.signal },
+          );
+          session.threadId = resumeThreadId;
+          resumed = true;
+        } catch (err) {
+          if (req.signal?.aborted) throw new Error(tStatus(req.locale, "aborted"));
+          events.onStatus(`[runtime-session] resume_failed kind=${KIND}`);
+          if (req.unattended) {
+            // 무인 실행은 조용히 새 대화를 만들지 않는다(exec 경로와 같은 규칙).
+            broken = true;
+            throw new Error(`Automation runtime session resume failed for ${KIND}; refusing to create a fresh CLI session.`);
+          }
+          clearRuntimeSession(chatId, KIND);
+        }
+      }
+      if (!resumed) {
+        const started = await session.conn.request("thread/start", startParams, { timeoutMs: 120_000, signal: req.signal });
+        const id = String(started?.thread?.id ?? "");
+        if (!id) throw new Error("codex app-server thread/start returned no thread id");
+        session.threadId = id;
+      }
+      // 버전 스큐 관측 — 이 세션이 어떤 app-server 였는지 영수증에 남긴다.
+      events.onStatus(codexProtocolReceipt(session.init));
+    }
+    if (!session.threadId) throw new Error("codex app-server session has no thread");
+
+    /* ── 턴 ── */
+    // 새 스레드면 시스템+히스토리 시드, 이어가는 스레드면 사용자 턴만(+gap/turn 컨텍스트).
+    const continuing = reusing || Boolean(resumeThreadId && session.threadId === resumeThreadId);
+    const promptText = continuing
+      ? composeResumeTurnPrompt(
+        req.userPrompt,
+        [gapContext, req.turnContext ?? ""].filter(Boolean).join("\n\n"),
+        req.locale,
+      )
+      : buildPrompt(req);
+    const turnParams: Record<string, unknown> = {
+      threadId: session.threadId,
+      input: [{ type: "text", text: promptText }],
+      cwd,
+      sandboxPolicy: policy.sandboxPolicy,
+      ...(req.model ? { model: req.model } : {}),
+      ...(appliedEffort ? { effort: appliedEffort } : {}),
+      // ★출력 형태 계약 — app-server 는 스키마를 **인라인**으로 받는다(exec 은 파일 경로만).
+      ...(req.outputSchema ? { outputSchema: req.outputSchema.schema } : {}),
+    };
+    const settled = new Promise<"completed" | "closed">((resolve) => {
+      settleTurn = (reason) => { settleTurn = null; resolve(reason); };
+    });
+    const started = await session.conn.request("turn/start", turnParams, { timeoutMs: 120_000, signal: req.signal });
+    if (typeof started?.turn?.id === "string") turnId = started.turn.id;
+    events.onStatus(`[runtime-session] ${continuing ? "resumed" : "created"} kind=${KIND}`);
+    const reason = await settled;
+    closeThinking();
+
+    if (req.signal?.aborted) {
+      // 취소여도 스레드가 생겼으면 저장 → 이어지는 steering 메시지가 문맥을 유지한다.
+      saveRuntimeSession(chatId, KIND, session.threadId, fingerprint, {
+        ...(usage.total ? {
+          reportedOutputTokens: usage.total.outputTokens,
+          reportedInputTokens: usage.total.inputTokens,
+          reportedCachedInputTokens: usage.total.cachedInputTokens,
+        } : {}),
+      });
+      broken = true;
+      throw new Error(tStatus(req.locale, "aborted"));
+    }
+    if (reason === "closed") {
+      // 전송이 죽었다 — 우리가 물려준 세션의 문제다. 조용히 버리고 1회성으로 한 번 더.
+      broken = true;
+      if (looksLikeMissingAppServer(session.conn.lastStderr, new Error(closedReason))) {
+        markCodexAppServerUnsupported(closedReason || session.conn.lastStderr);
+        events.onStatus(`[residency] disabled kind=${KIND} reason=app-server-unsupported`);
+      }
+      if (!emitted && !bodyText()) return { retryOneShot: true };
+      return {
+        result: {
+          text: bodyText().trim(),
+          failure: failure ?? {
+            kind: "empty",
+            message: (closedReason || session.conn.lastStderr.slice(-500) || "codex app-server closed mid-turn"),
+            runtime: KIND,
+            source: "marker",
+          },
+          sessionId: session.threadId,
+          appliedEffort,
+        },
+      };
+    }
+    if (interrupted) {
+      broken = true;
+      throw new Error(tStatus(req.locale, "aborted"));
+    }
+
+    session.completedTurns += 1;
+    const text = bodyText().trim();
+    /*
+     * ★표식 없이 완주했는데 산출물이 거절 고지문인 경우 — exec 경로와 같은 한 자리에서만
+     * 텍스트 판별을 허용하고 출처를 heuristic 으로 남긴다(규칙은 runtime-refusal.ts 한 곳).
+     * app-server 는 대부분의 한도 소진을 codexErrorInfo=usageLimitExceeded 로 말하지만,
+     * 모델이 거절문을 답으로 내는 갈래는 exec 과 동일하게 남아 있다.
+     */
+    if (!failure) {
+      const refusal = detectRuntimeRefusal(text);
+      if (refusal) failure = { kind: refusal.kind, message: refusal.message, runtime: KIND, source: "heuristic" };
+    }
+    if (!saveRuntimeSession(chatId, KIND, session.threadId, fingerprint, {
+      ...(usage.total ? {
+        reportedOutputTokens: usage.total.outputTokens,
+        reportedInputTokens: usage.total.inputTokens,
+        reportedCachedInputTokens: usage.total.cachedInputTokens,
+      } : {}),
+    })) {
+      events.onStatus(`[runtime-session] store_failed kind=${KIND}`);
+    }
+    if (!text && !failure) {
+      // 빈 답은 실패다 — 표식으로 말한다(텍스트 길이로 판정하는 소비자를 만들지 않는다).
+      return {
+        result: {
+          text: "",
+          failure: { kind: "empty", message: session.conn.lastStderr.slice(-500) || "codex app-server returned no message", runtime: KIND, source: "marker" },
+          sessionId: session.threadId,
+          appliedEffort,
+        },
+      };
+    }
+    return {
+      result: {
+        text,
+        ...(failure ? { failure } : {}),
+        sessionId: session.threadId,
+        ...(usage.last ? { tokens: usage.last.outputTokens, observedUsage: usage.last } : {}),
+        appliedEffort,
+      },
+    };
+  } catch (err) {
+    broken = true;
+    if (req.signal?.aborted) throw err;
+    if (req.unattended && /refusing to create a fresh CLI session/.test(err instanceof Error ? err.message : "")) {
+      throw err;
+    }
+    if (looksLikeMissingAppServer(session.conn?.lastStderr ?? "", err)) {
+      markCodexAppServerUnsupported(err instanceof Error ? err.message : String(err));
+      events.onStatus(`[residency] disabled kind=${KIND} reason=app-server-unsupported`);
+    }
+    // 프로토콜 이상 — 화면에 아무것도 안 나갔으면 1회성 경로로 한 번 더(사용자에겐 무차이).
+    if (!emitted && !bodyText()) return { retryOneShot: true };
+    throw err;
+  } finally {
+    req.signal?.removeEventListener("abort", onAbort);
+    closeThinking();
+    // 취소가 프로토콜에 도달한 뒤에 죽인다(상한 2초 — 응답이 없어도 폐기는 반드시 일어난다).
+    if (interruptAck) {
+      await Promise.race([
+        interruptAck,
+        new Promise((resolve) => { setTimeout(resolve, 2_000).unref?.(); }),
+      ]).catch(() => { /* 폐기를 막지 않는다 */ });
+    }
+    // 수신자를 먼저 뗀다 — 유휴 세션이 지난 턴의 events 로 상태를 흘리면 안 된다.
+    session.active = null;
+    if (broken || req.signal?.aborted) pool.discard(lease);
+    else pool.release(lease);
+  }
+}
+
 export const runCodex: Runner = async (
   req: RunnerRequest,
   events: RunnerEvents,
@@ -783,6 +1414,39 @@ export const runCodex: Runner = async (
   const canResume = !!resumeSessionId;
   if (existing && fingerprint && existing.fingerprint !== fingerprint) {
     events.onStatus(`[runtime-session] fingerprint_changed kind=${KIND}`);
+  }
+
+  /*
+   * ★상주 — 이 턴이 끝나도 프로세스를 죽이지 않는다(`codex app-server`, 오너 규칙 2026-08-20).
+   *
+   * 대화에 속한(= chatId·지문이 있는) 실행만 풀에서 빌린다. chatId 없는 일회성 실행
+   * (Build 등)은 이어 쓸 다음 턴이 정의상 없으므로 예전 그대로 `codex exec` 로 간다.
+   * 상주 경로가 열리지 않거나 프로토콜 이상으로 실패하면 **조용히** 아래 exec 경로가
+   * 이 턴을 한 번 처리한다 — 사용자 화면에는 아무 차이도 남지 않아야 한다.
+   */
+  if (
+    codexAppServerSupported() &&
+    !residencyDisabledFor(KIND, runReq.env ?? process.env) &&
+    !runReq.untrustedNoTools &&
+    runReq.chatId &&
+    fingerprint
+  ) {
+    // gap-replay — 이 스레드가 마지막으로 본 이후 다른 경로로 진행된 턴을 메운다(exec 과 같은 규칙).
+    const gapContext = !runReq.runtimeSessionId && storedSessionId && existing
+      ? renderGapContext(unseenHistoryGap(runReq.history, existing.updatedAt), runReq.locale)
+      : "";
+    const attempt = await runCodexResidentTurn({
+      bin,
+      req: runReq,
+      events,
+      chatId: runReq.chatId,
+      fingerprint,
+      resumeThreadId: resumeSessionId ?? null,
+      gapContext,
+      mcpArgs,
+      appliedEffort,
+    });
+    if (attempt.result) return attempt.result;
   }
 
   /*

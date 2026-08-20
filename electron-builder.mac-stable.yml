@@ -6,6 +6,12 @@ appId: com.agentlas.desktop
 productName: Agentlas
 copyright: © 2026 Agentlas
 
+# agentlas:// URL 스킴 — 베이스 설정과 반드시 같은 값으로 유지한다(이 파일은 extends 하지 않는다).
+protocols:
+  - name: Agentlas
+    schemes:
+      - agentlas
+
 directories:
   output: release
   buildResources: build-resources

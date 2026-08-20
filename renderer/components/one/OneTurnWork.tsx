@@ -2,7 +2,8 @@
 
 import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
 import { IconChevronDown } from "@/components/Icon";
-import type { OneActivityState } from "@/lib/one-activity";
+import { extractAutomationRegistrations, type OneActivityState } from "@/lib/one-activity";
+import { OneAutomationRegistrationCard } from "./OneAdaptiveResult";
 import {
   CONNECTED_TOOL_LABEL,
   buildOneWorkPresentation,
@@ -316,6 +317,7 @@ export function OneTurnWork({
 }) {
   const ko = locale === "ko";
   const presentation = useMemo(() => buildOneWorkPresentation(state, locale, workspacePath), [state, locale, workspacePath]);
+  const automationRegistrations = useMemo(() => extractAutomationRegistrations(state), [state]);
   const active = busy || preparing;
   const [expanded, setExpanded] = useState(active);
   useEffect(() => {
@@ -397,6 +399,17 @@ export function OneTurnWork({
         </div>
       )}
     </section>
+    {/* 자동화 등록 영수증(automation.create/update)은 접힌 작업 행 안의 한 줄이
+        아니라 대화의 1급 결과 카드다 — 호스트가 확인한 등록만 여기 승격된다. */}
+    {automationRegistrations.map((registration) => (
+      <OneAutomationRegistrationCard
+        key={`automation-registration:${registration.itemId}`}
+        name={registration.name}
+        action={registration.action}
+        schedule={registration.schedule}
+        locale={locale}
+      />
+    ))}
     <OneTurnWorkDividers presentation={presentation} />
     </>
   );

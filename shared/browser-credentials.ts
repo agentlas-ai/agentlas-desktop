@@ -5,7 +5,8 @@
 // 로그인된 도메인을 목록으로 보여주고, 고른 것만 전용 프로필로 가져온다"를 표현한다.
 //
 // 경계: 값은 절대 복호화하지 않는다. 쿠키는 암호화된 채로 옮기고, 저장된 비밀번호(Login Data)와
-// 결제수단(Web Data)은 **아예 건드리지 않는다**. 화면에 나가는 것은 도메인·표시이름·개수뿐이다.
+// 결제수단(Web Data)은 **아예 건드리지 않는다**. 화면에 나가는 것은 도메인·표시이름과
+// 쿠키의 개수·플래그 집계뿐이다(이름도 값도 나가지 않는다).
 
 /** 사용자의 평소 Chrome 계열 브라우저에서 발견한 프로필 하나. */
 export interface DiscoveredBrowserProfile {
@@ -26,20 +27,50 @@ export interface DiscoveredBrowserProfile {
   reason?: string;
 }
 
-/** 한 프로필에서 발견한, 로그인 흔적이 있는 도메인 하나. */
+/**
+ * 목록의 한 줄 = **사이트 하나**(등록 가능 도메인).
+ *
+ * ★한 줄은 호스트가 아니라 사이트다. `.mongodb.com`(쿠키 19, 로그인 후보 0)과
+ * `auth.mongodb.com`(4, 4)을 따로 두면 로그인 쿠키 필터가 쿠키 대부분을 가진 줄을
+ * 떨어뜨리고, 그걸 고른 사용자는 반쯤만 복사된 채 로그인에 실패한다(2026-08-20 실측).
+ *
+ * ★화면이 렌더하는 것은 `title`(없으면 `domain`)과 `domain` **둘뿐**이다.
+ * 아래 숫자 세 개는 순서와 필터를 정하는 내부 신호이고, UI 에 찍지 않는다(오너 결정).
+ */
 export interface DiscoveredCredentialDomain {
-  /** 등록 가능 도메인(호스트에서 선행 점 제거). 예: "x.com". */
+  /**
+   * 등록 가능 도메인(eTLD+1). 예: "x.com", "mongodb.com", "fastcampus.co.kr".
+   * 이 줄을 고르면 이 사이트의 **모든** 호스트 쿠키가 복사된다 — 로그인 쿠키만 골라 옮기면
+   * x.com 의 `ct0`(CSRF, httpOnly 아님) 같은 필수 쿠키가 빠져 로그인이 반쯤 깨진다.
+   */
   domain: string;
   /**
-   * 사람이 알아보는 페이지 이름. 방문 기록의 제목에서 가장 자주 쓰인 것을 고른다.
+   * 사람이 알아보는 사이트 이름. 방문 기록에서 가장 많이 방문한 페이지의 제목을 쓴다.
    * 없으면 null — 그때 화면은 도메인만 보여준다(지어내지 않는다).
    */
   title: string | null;
-  /** 이 도메인에 딸린 쿠키 행 수. 값은 읽지 않는다. */
+  /**
+   * 이 사이트(모든 하위 호스트 합)의 쿠키 행 수. 값은 읽지 않는다.
+   * ★UI 에 렌더 금지, 정렬 키로도 쓰지 않는다. 쿠키가 많은 곳은 로그인한 곳이 아니라
+   * 광고·분석 도메인이다(www.googleadservices.com 23개 실측). 진단·게이트용으로만 남긴다.
+   */
   cookieCount: number;
-  /** 세션 지속에 쓰이는 만료 있는 쿠키가 있는가 — "로그인된 것 같다"의 근거. */
+  /**
+   * 로그인 쿠키 후보 수 — `is_httponly = 1 AND is_secure = 1` 인 행의 수(사이트 합계).
+   * 세션 쿠키는 JS 에서 못 읽게(httpOnly) https 로만 보내게(secure) 하는 것이 관행이라,
+   * 이 둘을 함께 만족하는 행은 "여기 로그인돼 있다"의 실질적 근거다. 이름·플래그만 세고
+   * 값은 절대 읽지 않는다. 0이면 목록에서 제외된다(단 폴백 참조).
+   * ★필터·정렬 전용 — UI 에 렌더 금지.
+   */
+  loginCookieCount: number;
+  /**
+   * 방문 기록(History)의 이 사이트 visit_count 합. 1순위 정렬 키.
+   * ★정렬 전용 — UI 에 렌더 금지.
+   */
+  visitCount: number;
+  /** 세션 지속에 쓰이는 만료 있는 쿠키가 있는가. 정렬 보조 신호 — UI 에 렌더 금지. */
   hasPersistentCookie: boolean;
-  /** 이미 Connect 목록에 있는 사이트인가. 화면에서 '연동됨'으로 표시. */
+  /** 이미 Connect 목록에 있는 사이트인가. 화면은 배지 대신 흐리게+선택 불가로만 표현한다. */
   alreadyLinked: boolean;
 }
 
@@ -50,6 +81,12 @@ export interface BrowserCredentialScanResult {
   domains: DiscoveredCredentialDomain[];
   /** 스캔 대상이었던 프로필 id. */
   profileId: string | null;
+  /**
+   * "로그인 쿠키가 있는 사이트"만 남기는 필터가 너무 세서 목록이 거의 비었을 때 true.
+   * 그때 domains 는 필터를 푼 전체 목록이며, 화면은 "적게 잡혀서 전부 보여준다"고 말해야 한다.
+   * 조용히 빈 목록을 내놓는 것보다 이유를 말하는 쪽이 낫다.
+   */
+  loginFilterRelaxed?: boolean;
   error?: string;
 }
 

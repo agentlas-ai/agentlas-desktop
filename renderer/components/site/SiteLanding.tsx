@@ -90,6 +90,8 @@ type SiteLandingProps = {
     brief: string;
     surface: SiteSurface;
     agentAppTarget?: SiteAgentAppTargetRef;
+    /** 한 번에 만들 시안 수(1~3). 디자인은 비교해서 고르는 일이라 여러 안이 기본값이다. */
+    variantCount?: number;
   }) => void;
   onOpenProject: (project: SiteProjectPublicMeta) => void;
   onExit: () => void;
@@ -292,6 +294,12 @@ export function SiteLanding({
   const ko = locale === "ko";
   const [brief, setBrief] = useState("");
   const [surface, setSurface] = useState<SiteSurface>("web");
+  /*
+   * 시안 수 — 엔진은 처음부터 1~3안을 만들고 결과 토스트도 "시안 N개"를 말하는데,
+   * 렌더러가 1로 못박아 두어 그 기능에 도달할 방법이 없었다(반쪽 배선).
+   * 디자인은 비교해서 고르는 일이라 기본값을 2안으로 둔다.
+   */
+  const [variantCount, setVariantCount] = useState(2);
   const [target, setTarget] = useState<AgentChoice | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerTab, setPickerTab] = useState<"mine" | "multi">("mine");
@@ -465,6 +473,8 @@ export function SiteLanding({
       brief: text,
       surface,
       agentAppTarget: surface === "agent-app" && target ? { kind: target.kind, id: target.id } : undefined,
+      // Agent App 은 계약·스캐폴딩이 화면 하나에 묶여 있어 시안 분기를 지원하지 않는다.
+      variantCount: surface === "agent-app" ? 1 : variantCount,
     });
   };
 
@@ -522,6 +532,21 @@ export function SiteLanding({
               </button>
             ))}
           </div>
+          {surface !== "agent-app" && (
+            <div className={styles.surfaceSwitch} aria-label={ko ? "시안 수" : "Variants"}>
+              {[1, 2, 3].map((count) => (
+                <button
+                  type="button"
+                  key={count}
+                  data-selected={variantCount === count ? "true" : "false"}
+                  onClick={() => setVariantCount(count)}
+                  title={ko ? "한 번에 만들 시안 수" : "How many variants to generate"}
+                >
+                  {ko ? `시안 ${count}` : `${count} variant${count > 1 ? "s" : ""}`}
+                </button>
+              ))}
+            </div>
+          )}
           <textarea
             ref={inputRef}
             value={brief}

@@ -193,6 +193,8 @@ interface LocalToolApprovalContext {
   permission: RunnerRequest["permission"];
   cwd?: string;
   chatId?: string;
+  /** 실행 중인 에이전트 — 에이전트 스코프 능력 규칙의 대상. */
+  agentId?: string;
   unattended: boolean;
   /** 내장 bash 도구가 취소를 따르도록 — 실행 중단이 도구까지 닿아야 한다. */
   signal?: AbortSignal;
@@ -226,6 +228,7 @@ async function approveLocalToolCall(
     // MCP 도구는 여전히 전부 변이로 본다 — 증명할 수 없는 무해함은 허용 근거가 못 된다.
     mutating: builtinKind ? builtinKind !== "read" : true,
     ...(ctx.chatId ? { chatId: ctx.chatId } : {}),
+    ...(ctx.agentId ? { agentId: ctx.agentId } : {}),
     ...(ctx.unattended ? { unattended: true as const } : {}),
   };
   const arbiter = getRuntimeToolPermissionArbiter();
@@ -475,6 +478,7 @@ export async function runLocalOpenAiChat(
     permission: req.permission,
     ...(req.cwd ? { cwd: req.cwd } : {}),
     ...(req.chatId ? { chatId: req.chatId } : {}),
+    ...(req.agentId ? { agentId: req.agentId } : {}),
     unattended: req.unattended === true,
     ...(req.signal ? { signal: req.signal } : {}),
   };

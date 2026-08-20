@@ -5825,6 +5825,19 @@ export interface AgentlasIpc {
   /** 도구 승인 결정 — live 요청만 대기 중인 실행을 푼다. post-denial 은 다음 실행에 반영. */
   resolveToolApproval: (id: string, decision: ToolApprovalDecision) => Promise<boolean>;
   listToolApprovals: () => Promise<ToolApprovalRequestEvent[]>;
+  /** 데몬 자동 시작(로그인 기동) — 기본 off. 켜면 부팅 항목까지 같은 턴에 정합된다. */
+  getDaemonAutostart: () => Promise<{ enabled: boolean }>;
+  setDaemonAutostart: (enabled: boolean) => Promise<{ enabled: boolean; reconciled?: boolean; reason?: string }>;
+  /** 능력 규칙(capability_grants) — "항상 허용"의 영구 원장(오너 결정 2026-08-20). */
+  listCapabilityGrants: (scope?: string) => Promise<Array<{
+    id: number; capability: string; pattern: string | null;
+    decision: "allow" | "deny"; scope: string; source: string; createdAt: string;
+  }>>;
+  revokeCapabilityGrant: (id: number) => Promise<boolean>;
+  /** 대화 단위 "항상 승인" — renderer localStorage 에서 공유 DB 로 이관됐다. */
+  listAlwaysApprovedChats: () => Promise<string[]>;
+  grantChatAlwaysApproval: (chatId: string) => Promise<string[]>;
+  revokeChatAlwaysApproval: (chatId: string) => Promise<string[]>;
   /** Electron 메인이 알려주는 OS 환경 정보 (Apple/Codex/Claude 데스크톱과 동일 패턴) */
   app: {
     /** macOS 시스템 설정의 1순위 언어 — "ko-KR" / "en-US" 등. i18n 자동 감지에 사용 */
@@ -5948,6 +5961,12 @@ export interface AgentlasIpc {
     /** 창 좌표(rect, CSS px) 크롭 스크린샷 — 선택 요소 썸네일용. */
     captureRect: (payload: { x: number; y: number; width: number; height: number }) => Promise<{ ok: boolean; dataUrl?: string; reason?: string }>;
     exportScreen: (payload: { projectId: string; screenId: string }) => Promise<{ ok: boolean; path?: string; canceled?: boolean; reason?: string }>;
+    /** 이 프로젝트 표면에서 고를 수 있는 코드 내보내기 대상(웹: react|html, 앱: flutter|react-native|…). */
+    exportTargets: (payload: { projectId: string }) => Promise<{ ok: boolean; targets?: string[]; reason?: string }>;
+    /** 승인된 화면을 코드로 옮겨 사용자가 고른 폴더에 쓴다. 배포는 하지 않는다. */
+    exportScreenCode: (payload: { projectId: string; screenId: string; target: string }) => Promise<{
+      ok: boolean; path?: string; files?: string[]; notes?: string; engine?: string; canceled?: boolean; reason?: string;
+    }>;
     exportProjectZip: (payload: { projectId: string }) => Promise<{ ok: boolean; path?: string; canceled?: boolean; reason?: string }>;
     /** 사용자가 직접 고른 작업공간에 디자인 리비전을 기록하고 Build 입력으로 이어간다. */
     handoffToWorkspace: (payload: {
@@ -7290,9 +7309,20 @@ export interface ToolApprovalRequestEvent {
    * 확인필요 배지만 남는다(오너 결정 2026-08-15). 없으면(대화 없는 실행) 전역 배지.
    */
   chatId?: string;
+  /**
+   * 이 호출의 능력 클래스(execute|edit|delete|network|other). "항상 허용"이 무엇을
+   * 영구 부여하는지 카드가 정확히 말할 수 있게 한다(오너 결정 2026-08-20).
+   */
+  capability?: string;
+  /** 실행 중인 에이전트 — 에이전트 스코프 규칙의 대상. */
+  agentId?: string;
 }
 
-export type ToolApprovalDecision = "allow_once" | "allow_session" | "deny";
+/**
+ * allow_always — 능력 규칙을 영구 기록해 **다시는 묻지 않는다**(오너 결정 2026-08-20).
+ * 대기 중인 이번 호출에는 allow_session 과 같게 작용하고, 기록은 capability_grants 로 간다.
+ */
+export type ToolApprovalDecision = "allow_once" | "allow_session" | "allow_always" | "deny";
 
 /** One's durable memory row as the renderer may see it: bounded content, project slug only, never a local path. */
 export interface OneDurableMemoryEntryUi {

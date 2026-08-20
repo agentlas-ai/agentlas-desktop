@@ -13,6 +13,9 @@ import { detectRuntimes } from "./detect";
 import { clearCliVersionProbeCache, probeCliVersion } from "./exec";
 import { updateCli, type InstallableCli, type ManageableCli } from "./install-cli";
 import { tryAcquireRuntimeMaintenance } from "./run-slots";
+import { disposeAcpSessionPool } from "./acp";
+import { disposeClaudeSessionPool } from "./claude-session";
+import { disposeCodexSessionPool } from "./codex-session";
 import { userDataPath } from "../runtime-paths";
 
 const CLI_KINDS: ManageableCli[] = ["claude-code", "codex", "antigravity", "kimi", "grok"];
@@ -392,7 +395,22 @@ async function runCycle(initialRuntimes: readonly RuntimeStatus[]): Promise<void
         : "update-failed";
       records.set(kind, record);
       saveState();
-      if (verified.verified) runtimes = await detectRuntimes();
+      if (verified.verified) {
+        /*
+         * ★상주 세션은 자기가 뜰 때의 **바이너리**를 평생 쓴다.
+         *
+         * 파일을 갈아 끼워도 이미 떠 있는 ACP 에이전트는 옛 실행본 그대로 돌고, 다음 턴이
+         * 그 세션을 이어 쓰면 사용자는 업데이트했는데도 옛 CLI 를 계속 쓴다 — One 소유
+         * 세션은 12h 리퍼 면제라 그 상태가 영원할 수도 있다. 그래서 갱신이 검증된 순간
+         * 붙든 세션을 놓는다(사용 중인 실행은 없다 — 유지보수 잠금이 그것을 보장한다).
+         */
+        disposeAcpSessionPool();
+        // claude-code 도 같은 병을 앓는다 — 상주 CLI 는 자기가 뜰 때의 바이너리를 평생 쓴다.
+        disposeClaudeSessionPool();
+        // codex 상주(`codex app-server`)도 같은 병 — 갱신된 바이너리는 새 세션부터 쓴다.
+        disposeCodexSessionPool();
+        runtimes = await detectRuntimes();
+      }
     } catch {
       record.state = "update-failed";
       if (antigravity) record.latestVersion = record.installedVersion;

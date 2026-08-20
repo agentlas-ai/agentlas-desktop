@@ -711,23 +711,22 @@ export class InvocationService {
         : {}),
     };
     if (requestedOneMode) {
-      // Every ordinary One turn is fail-closed to its selected local agent.
-      // A team roster can only be restored below from an exact Main-issued
-      // preflight capability; renderer-supplied candidates never survive.
+      /*
+       * ★오너 결정 2026-08-20 — One 잠금해제. 예전에는 모든 일반 One 턴을
+       * solo_locked + local-only 로 강등해 One 이 Work 의 기능(라우팅·워크포스·
+       * 파이프라인)을 쓸 수 없었다. One 은 최고권한자다: Work 대화와 같은 실행
+       * 계약을 그대로 받는다. 경계는 정적 강등이 아니라 행동 시점 승인
+       * (tool-approval 중재자 + capability_grants)과 편성 동의 UI 가 지킨다.
+       *
+       * 유지되는 것: 렌더러가 지어낼 수 없는 Main 전용 값들은 여전히 폐기된다 —
+       * oneTeamExecutionPolicy / oneTeamRuntimeBinding 은 위 _untrusted 구조분해로
+       * 이미 벗겨졌고, 정확한 로스터 바인딩은 아래 Main 발행 preflight capability
+       * 로만 복원된다.
+       */
       invocationRequest = {
         ...invocationRequest,
-        sessionRouting: false,
-        hubMode: "local-only",
-        borrowAgents: [],
-        borrowVersions: undefined,
-        taskForceTargets: undefined,
-        pipelineStages: undefined,
-        routerAgent: undefined,
-        oneTeamExecutionPolicy: "solo_locked",
+        oneTeamExecutionPolicy: undefined,
         oneTeamRuntimeBinding: undefined,
-        // Desktop One accepts files only through a Main-minted attachment
-        // capability. Mobile One keeps its separately bounded image wire.
-        ...(!workspaceBinding ? { images: undefined } : {}),
       };
     }
     if (typeof req.runId === "string" && hasInvocationRunReceipt(req.runId)) {

@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import type { Automation, InstalledMcpServer } from "@/lib/types";
 import type {
   InvocationRunReceipt,
   OneExperienceReuseRecord,
@@ -12,8 +14,10 @@ import type {
 import type { OneTaskProjection } from "@/lib/one-task-adapter";
 import {
   ONE_SURFACE_BLOCK_TYPES,
+  type OneSurfaceAgentBuildBlock,
   type OneSurfaceArtifactSummary,
   type OneSurfaceArtifactListBlock,
+  type OneSurfaceAutomationBlock,
   type OneSurfaceBudgetBlock,
   type OneSurfaceBlock,
   type OneSurfaceChecklistBlock,
@@ -24,6 +28,7 @@ import {
   type OneSurfaceMediaBlock,
   type OneSurfaceManifestV1,
   type OneSurfaceMapBlock,
+  type OneSurfaceMcpSetupBlock,
   type OneSurfaceMetricBlock,
   type OneSurfaceNarrativeBlock,
   type OneSurfaceSourceListBlock,
@@ -41,6 +46,7 @@ import {
 import { redactSecrets } from "@shared/secret-patterns";
 import { stripAgentIdentityBadges } from "@shared/agent-control-blocks";
 import { ipc } from "@/lib/ipc";
+import { setRequest as setBuildRequest } from "@/lib/build-session";
 import { tFor } from "@/lib/i18n";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import styles from "./OneAdaptiveResult.module.css";
@@ -63,6 +69,9 @@ const DESKTOP_NATIVE_BLOCK_TYPES = new Set<OneSurfaceBlockType>([
   "Checklist",
   "ValueClosure",
   "ImprovementProof",
+  "Automation",
+  "AgentBuild",
+  "McpSetup",
 ]);
 const DESKTOP_FALLBACK_BLOCK_TYPES = new Set<OneSurfaceBlockType>(
   ONE_SURFACE_BLOCK_TYPES.filter((type) => !DESKTOP_NATIVE_BLOCK_TYPES.has(type)),
@@ -85,6 +94,9 @@ const DEDICATED_RESULT_BLOCK_TYPES = new Set<OneSurfaceBlockType>([
   "Gallery",
   "Media",
   "Document",
+  "Automation",
+  "AgentBuild",
+  "McpSetup",
 ]);
 
 /**
@@ -422,6 +434,9 @@ function NativeBlock({
       {block.type === "Status" && <StatusBlock block={block} locale={locale} />}
       {block.type === "Budget" && <BudgetBlock block={block} locale={locale} />}
       {block.type === "Checklist" && <ChecklistBlock block={block} locale={locale} />}
+      {block.type === "Automation" && <AutomationBlock block={block} locale={locale} />}
+      {block.type === "AgentBuild" && <AgentBuildBlock block={block} locale={locale} />}
+      {block.type === "McpSetup" && <McpSetupBlock block={block} locale={locale} />}
     </section>
   );
 }
@@ -989,6 +1004,348 @@ function ChecklistBlock({ block, locale }: { block: OneSurfaceChecklistBlock; lo
   );
 }
 
+/* ────────────────────────────────────────────────────────────────────────────
+ * Automation / AgentBuild / McpSetup — One renders the product objects it
+ * produced (registered automation, agent build session, MCP servers) as
+ * operable cards. The run/toggle actions reuse the exact preload APIs the
+ * dedicated screens already use (automation list page's runNow, OneShell's
+ * mcpTools.setEnabled) — no parallel wiring, no new design language.
+ * ──────────────────────────────────────────────────────────────────────── */
+
+function automationStatusLabel(status: OneSurfaceAutomationBlock["status"], locale: "ko" | "en"): string {
+  if (status === "running") return locale === "ko" ? "실행 중" : "Running";
+  if (status === "failed") return locale === "ko" ? "실패" : "Failed";
+  return locale === "ko" ? "등록됨" : "Registered";
+}
+
+function automationLastRunLabel(status: NonNullable<OneSurfaceAutomationBlock["lastRun"]>["status"], locale: "ko" | "en"): string {
+  if (status === "completed") return locale === "ko" ? "성공" : "Succeeded";
+  if (status === "failed") return locale === "ko" ? "실패" : "Failed";
+  if (status === "cancelled") return locale === "ko" ? "취소됨" : "Cancelled";
+  return locale === "ko" ? "실행 중" : "Running";
+}
+
+/**
+ * The exact "지금 실행" behavior of renderer/app/(shell)/automation/page.tsx:122
+ * — fire runNow without awaiting completion, surface the refusal reason if the
+ * start is rejected, and open the live flow canvas to watch the run.
+ */
+function useAutomationActions(locale: "ko" | "en") {
+  const router = useRouter();
+  const [message, setMessage] = useState("");
+  const runNow = useCallback((automationId: string) => {
+    const api = ipc();
+    if (!api) return;
+    setMessage(locale === "en" ? "Starting the run. Opening the live flow..." : "실행을 시작하고 라이브 플로우를 엽니다...");
+    api.automations.runNow(automationId).catch((error: unknown) => {
+      // 거절에는 언제나 사유가 실려 온다 — 버리지 않는다(자동화 목록 화면과 같은 규칙).
+      const reason = error instanceof Error
+        ? error.message.replace(/^Error invoking remote method '[^']+':\s*Error:\s*/, "")
+        : "";
+      setMessage(reason || (locale === "en" ? "Test run did not start." : "테스트 실행을 시작하지 못했습니다."));
+    });
+    router.push(`/automation/flow?id=${encodeURIComponent(automationId)}`);
+  }, [locale, router]);
+  const openCanvas = useCallback((automationId: string) => {
+    router.push(`/automation/flow?id=${encodeURIComponent(automationId)}`);
+  }, [router]);
+  return { message, runNow, openCanvas };
+}
+
+function AutomationCardFrame({
+  locale,
+  statusState,
+  statusLabel,
+  scheduleLine,
+  nodes,
+  lastRunLine,
+  automationId,
+  actionMessage,
+  onRunNow,
+  onOpenCanvas,
+}: {
+  locale: "ko" | "en";
+  statusState: "completed" | "working" | "failed";
+  statusLabel: string;
+  scheduleLine: string;
+  nodes: Array<{ nodeRef: string; label: string }>;
+  lastRunLine: string;
+  automationId: string | null;
+  actionMessage: string;
+  onRunNow: (automationId: string) => void;
+  onOpenCanvas: (automationId: string) => void;
+}) {
+  const ko = locale === "ko";
+  return (
+    <div className={styles.statusBlock} data-one-automation-card="true">
+      <p>
+        <span className={styles.statusPill} data-task-state={statusState}>{statusLabel}</span>
+        {scheduleLine && <span>{displayValue(scheduleLine)}</span>}
+      </p>
+      {nodes.length > 0 && (
+        <ol>
+          {nodes.map((node) => (
+            <li key={node.nodeRef} data-step-status="completed">
+              <i aria-hidden="true" />
+              <div><strong>{displayValue(node.label)}</strong></div>
+            </li>
+          ))}
+        </ol>
+      )}
+      {lastRunLine && <p>{displayValue(lastRunLine)}</p>}
+      <div className={styles.actions} aria-label={ko ? "자동화 동작" : "Automation actions"}>
+        <button
+          type="button"
+          className={styles.actionPrimary}
+          disabled={!automationId}
+          onClick={() => automationId && onRunNow(automationId)}
+        >
+          <span>{ko ? "지금 실행" : "Run now"}</span>
+        </button>
+        <button
+          type="button"
+          className={styles.action}
+          disabled={!automationId}
+          onClick={() => automationId && onOpenCanvas(automationId)}
+        >
+          <span>{ko ? "캔버스 열기" : "Open canvas"}</span>
+        </button>
+      </div>
+      {actionMessage && <p role="status">{displayValue(actionMessage)}</p>}
+    </div>
+  );
+}
+
+function AutomationBlock({ block, locale }: { block: OneSurfaceAutomationBlock; locale: "ko" | "en" }) {
+  const ko = locale === "ko";
+  const { message, runNow, openCanvas } = useAutomationActions(locale);
+  const lastRunLine = block.lastRun
+    ? [
+        ko ? "최근 실행" : "Last run",
+        automationLastRunLabel(block.lastRun.status, locale),
+        block.lastRun.at ? formatTimelineAt(block.lastRun.at, locale) : "",
+        block.lastRun.summary ?? "",
+      ].filter(Boolean).join(" · ")
+    : "";
+  return (
+    <AutomationCardFrame
+      locale={locale}
+      statusState={block.status === "failed" ? "failed" : block.status === "running" ? "working" : "completed"}
+      statusLabel={automationStatusLabel(block.status, locale)}
+      scheduleLine={block.schedule ?? ""}
+      nodes={block.nodes}
+      lastRunLine={lastRunLine}
+      automationId={block.automationId}
+      actionMessage={message}
+      onRunNow={runNow}
+      onOpenCanvas={openCanvas}
+    />
+  );
+}
+
+/**
+ * Promotion of the host's automation registration receipt (`automation.create`
+ * / `automation.update` tool events, renderer/lib/one-activity.ts extractor)
+ * into a first-class Automation card in the One conversation. The receipt args
+ * carry no automation id, so the card resolves the registered row by its
+ * host-idempotent name through the same preload automations API the list
+ * screen uses, and enriches status/schedule from the live record.
+ */
+export function OneAutomationRegistrationCard({
+  name,
+  action,
+  schedule,
+  locale,
+}: {
+  name: string;
+  action: "created" | "updated";
+  schedule?: string;
+  locale: "ko" | "en";
+}) {
+  const ko = locale === "ko";
+  const { message, runNow, openCanvas } = useAutomationActions(locale);
+  const [record, setRecord] = useState<Automation | null>(null);
+  useEffect(() => {
+    const api = ipc();
+    if (!api) return;
+    let active = true;
+    void api.automations.list().then((rows) => {
+      if (!active) return;
+      const normalized = name.trim().toLowerCase();
+      setRecord(rows.find((row) => row.name.trim().toLowerCase() === normalized) ?? null);
+    }).catch(() => {
+      if (active) setRecord(null);
+    });
+    return () => {
+      active = false;
+    };
+  }, [name]);
+  const scheduleLine = record?.scheduleHuman || schedule || "";
+  const lastRunLine = record?.nextRunAt
+    ? `${ko ? "다음 실행" : "Next run"} · ${formatTimelineAt(record.nextRunAt, locale)}`
+    : "";
+  return (
+    <section className={styles.root} aria-label={ko ? "등록된 자동화" : "Registered automation"} data-one-automation-registration="true">
+      <article className={styles.result}>
+        <div className={styles.body}>
+          <section className={styles.block} data-block-kind="Automation">
+            <h4>{displayValue(name)}</h4>
+            <p className={styles.summary}>
+              {action === "created"
+                ? (ko ? "자동화를 등록했어요." : "This automation is registered.")
+                : (ko ? "자동화를 업데이트했어요." : "This automation is updated.")}
+            </p>
+            <AutomationCardFrame
+              locale={locale}
+              statusState={record && !record.enabled ? "working" : "completed"}
+              statusLabel={record && !record.enabled
+                ? (ko ? "꺼짐" : "Off")
+                : automationStatusLabel("registered", locale)}
+              scheduleLine={scheduleLine}
+              nodes={[]}
+              lastRunLine={lastRunLine}
+              automationId={record?.id ?? null}
+              actionMessage={message}
+              onRunNow={runNow}
+              onOpenCanvas={openCanvas}
+            />
+          </section>
+        </div>
+      </article>
+    </section>
+  );
+}
+
+function agentBuildStageLabel(status: OneSurfaceAgentBuildBlock["stages"][number]["status"], locale: "ko" | "en"): string {
+  if (status === "working") return locale === "ko" ? "진행 중" : "Working";
+  if (status === "completed") return locale === "ko" ? "완료" : "Completed";
+  if (status === "failed") return locale === "ko" ? "실패" : "Failed";
+  return locale === "ko" ? "대기" : "Waiting";
+}
+
+function AgentBuildBlock({ block, locale }: { block: OneSurfaceAgentBuildBlock; locale: "ko" | "en" }) {
+  const ko = locale === "ko";
+  const router = useRouter();
+  return (
+    <div className={styles.statusBlock} data-one-agent-build-card="true">
+      <p>
+        <span
+          className={styles.statusPill}
+          data-task-state={block.stages.some((stage) => stage.status === "failed") ? "failed" : "completed"}
+        >
+          {displayValue(block.agentName)}
+        </span>
+        {block.agentSlug && <span>{displayValue(block.agentSlug)}</span>}
+      </p>
+      <ol>
+        {block.stages.map((stage) => (
+          <li key={stage.stageRef} data-step-status={stage.status}>
+            <i aria-hidden="true" />
+            <div>
+              <strong>{displayValue(stage.label)}</strong>
+              <span>{agentBuildStageLabel(stage.status, locale)}</span>
+            </div>
+          </li>
+        ))}
+      </ol>
+      <div className={styles.actions} aria-label={ko ? "빌드 동작" : "Build actions"}>
+        <button
+          type="button"
+          className={styles.actionPrimary}
+          onClick={() => {
+            // 방금 One 과 합의한 사양을 Build 요청 칸에 실어 보낸다 — 빈 화면을 열면
+            // 사용자가 같은 내용을 손으로 다시 쓰게 된다.
+            if (block.request) setBuildRequest(block.request);
+            router.push("/build");
+          }}
+        >
+          <span>{ko ? "빌드 열기" : "Open build"}</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function mcpKeyStateLabel(keyState: OneSurfaceMcpSetupBlock["servers"][number]["keyState"], locale: "ko" | "en"): string {
+  if (keyState === "missing") return locale === "ko" ? "키 필요" : "Key required";
+  if (keyState === "configured") return locale === "ko" ? "키 설정됨" : "Key configured";
+  return locale === "ko" ? "키 불필요" : "No key needed";
+}
+
+function McpSetupBlock({ block, locale }: { block: OneSurfaceMcpSetupBlock; locale: "ko" | "en" }) {
+  const ko = locale === "ko";
+  const router = useRouter();
+  const [installed, setInstalled] = useState<InstalledMcpServer[] | null>(null);
+  useEffect(() => {
+    const api = ipc();
+    if (!api?.mcpTools) return;
+    let active = true;
+    void api.mcpTools.listInstalled().then((plugins) => {
+      if (active) setInstalled(plugins);
+    }).catch(() => {
+      if (active) setInstalled(null);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+  return (
+    <div className={styles.cardGrid} data-one-mcp-setup-card="true">
+      {block.servers.map((server) => {
+        const record = installed?.find((plugin) => plugin.catalogId === server.catalogId || plugin.id === server.catalogId) ?? null;
+        const enabled = record ? record.enabled : server.enabled;
+        const needsKey = server.keyState === "missing" || record?.configurationValid === false;
+        return (
+          <article className={styles.artifactCard} key={server.catalogId} data-mcp-catalog-id={server.catalogId} data-mcp-enabled={enabled ? "true" : "false"}>
+            <div>
+              <strong>{displayValue(server.name)}</strong>
+              <span>
+                {enabled ? (ko ? "켜짐" : "On") : (ko ? "꺼짐" : "Off")} · {mcpKeyStateLabel(server.keyState, locale)}
+              </span>
+            </div>
+            {needsKey ? (
+              // 설정이 덜 끝난 서버는 여기서 켜 봐야 동작하지 않는다 — 스위치를
+              // 흉내 내는 대신 키를 넣을 수 있는 화면으로 보낸다(OneShell과 동일).
+              <button type="button" onClick={() => router.push("/library/mcps")}>
+                {ko ? "키 설정" : "Set key"}
+              </button>
+            ) : (
+              <button
+                type="button"
+                disabled={!record}
+                onClick={() => {
+                  const api = ipc();
+                  if (!api || !record) return;
+                  const nextEnabled = !enabled;
+                  // 낙관적 반영 — 왕복을 기다리면 스위치가 한 박자 늦게 움직인다.
+                  setInstalled((current) => current?.map((plugin) => (
+                    plugin.id === record.id ? { ...plugin, enabled: nextEnabled } : plugin
+                  )) ?? current);
+                  void api.mcpTools.setEnabled(record.id, nextEnabled)
+                    .then(() => api.mcpTools.listInstalled())
+                    .then((plugins) => setInstalled(plugins))
+                    .catch(() => {
+                      // 실패하면 되돌린다 — 꺼진 도구가 켜진 것처럼 남으면 안 된다.
+                      setInstalled((current) => current?.map((plugin) => (
+                        plugin.id === record.id ? { ...plugin, enabled: record.enabled } : plugin
+                      )) ?? current);
+                    });
+                }}
+              >
+                {!record
+                  ? (ko ? "설치 필요" : "Not installed")
+                  : enabled
+                    ? (ko ? "끄기" : "Turn off")
+                    : (ko ? "켜기" : "Turn on")}
+              </button>
+            )}
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
 function inspectSurfaceForDesktop(surface: OneSurfaceManifestV1, expectedTaskId: string): { native: boolean; blocks: OneSurfaceBlock[]; reasons: string[] } {
   const reasons: string[] = [];
   const blocks: unknown[] = Array.isArray(surface.blocks) ? surface.blocks : [];
@@ -1212,6 +1569,47 @@ function isSafeNativeBlock(block: Record<string, unknown>, type: OneSurfaceBlock
       && SAFE_IDENTIFIER_RE.test(block.improvementProofRef)
       && block.collapsedByDefault === true;
   }
+  if (type === "Automation") {
+    const allowedBlockKeys = new Set(["blockId", "type", "title", "automationId", "status", "schedule", "nodes", "lastRun"]);
+    if (!Object.keys(block).every((key) => allowedBlockKeys.has(key))) return false;
+    if (typeof block.automationId !== "string" || !SAFE_IDENTIFIER_RE.test(block.automationId)) return false;
+    if (!["registered", "running", "failed"].includes(String(block.status))) return false;
+    if (block.schedule != null && typeof block.schedule !== "string") return false;
+    if (!Array.isArray(block.nodes) || block.nodes.length > 64) return false;
+    if (!block.nodes.every((node) => isPlainRecord(node)
+      && typeof node.nodeRef === "string" && SAFE_IDENTIFIER_RE.test(node.nodeRef)
+      && typeof node.label === "string")) return false;
+    if (block.lastRun == null) return true;
+    return isPlainRecord(block.lastRun)
+      && Object.keys(block.lastRun).every((key) => ["at", "status", "summary"].includes(key))
+      && (block.lastRun.at == null || typeof block.lastRun.at === "string")
+      && ["completed", "failed", "cancelled", "running"].includes(String(block.lastRun.status))
+      && (block.lastRun.summary == null || typeof block.lastRun.summary === "string");
+  }
+  if (type === "AgentBuild") {
+    const allowedBlockKeys = new Set(["blockId", "type", "title", "buildSessionId", "agentName", "agentSlug", "stages", "request"]);
+    return Object.keys(block).every((key) => allowedBlockKeys.has(key))
+      && typeof block.buildSessionId === "string" && SAFE_IDENTIFIER_RE.test(block.buildSessionId)
+      && typeof block.agentName === "string"
+      && (block.request == null || (typeof block.request === "string" && block.request.length <= 4000))
+      && (block.agentSlug == null || (typeof block.agentSlug === "string" && SAFE_IDENTIFIER_RE.test(block.agentSlug)))
+      && Array.isArray(block.stages) && block.stages.length > 0 && block.stages.length <= 64
+      && block.stages.every((stage) => isPlainRecord(stage)
+        && typeof stage.stageRef === "string" && SAFE_IDENTIFIER_RE.test(stage.stageRef)
+        && typeof stage.label === "string"
+        && ["waiting", "working", "completed", "failed"].includes(String(stage.status)));
+  }
+  if (type === "McpSetup") {
+    const allowedBlockKeys = new Set(["blockId", "type", "title", "servers"]);
+    return Object.keys(block).every((key) => allowedBlockKeys.has(key))
+      && Array.isArray(block.servers) && block.servers.length > 0 && block.servers.length <= 64
+      && block.servers.every((server) => isPlainRecord(server)
+        && Object.keys(server).every((key) => ["catalogId", "name", "enabled", "keyState"].includes(key))
+        && typeof server.catalogId === "string" && SAFE_IDENTIFIER_RE.test(server.catalogId)
+        && typeof server.name === "string"
+        && typeof server.enabled === "boolean"
+        && ["not_required", "missing", "configured"].includes(String(server.keyState)));
+  }
   return false;
 }
 
@@ -1238,6 +1636,7 @@ function isSafeSemanticAction(value: unknown): boolean {
   return value === null || (isPlainRecord(value)
     && [
       "open_work", "try_result", "open_asset", "refine_result", "reuse_result", "prepare_share",
+      "run_automation", "open_automation", "open_build", "toggle_mcp_server",
     ].includes(String(value.intent))
     && typeof value.actionId === "string"
     && typeof value.label === "string"

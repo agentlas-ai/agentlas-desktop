@@ -73,6 +73,10 @@ export function planAutostart(
         // ELECTRON_RUN_AS_NODE 가 없으면 창을 띄우려 한다 — 자동 시작에서 그건 결함이다.
         "    <key>ELECTRON_RUN_AS_NODE</key>",
         "    <string>1</string>",
+        // 부팅 데몬은 절대 마이그레이션 주인이 아니다 — 스키마 승급은 앱(GUI)이 한다.
+        // 업데이트 직후 앱보다 먼저 뜬 데몬이 낡은/새 사다리를 돌리는 조합을 막는다.
+        "    <key>AGENTLAS_STORE_MIGRATION_ROLE</key>",
+        "    <string>follower</string>",
         "  </dict>",
         "  <key>RunAtLoad</key>",
         "  <true/>",
@@ -96,6 +100,7 @@ export function planAutostart(
       contents: [
         "@echo off",
         "set ELECTRON_RUN_AS_NODE=1",
+        "set AGENTLAS_STORE_MIGRATION_ROLE=follower",
         `start "" /b "${command.executable}" "${command.entry}"`,
         "",
       ].join("\r\n"),
@@ -113,6 +118,7 @@ export function planAutostart(
       "",
       "[Service]",
       "Environment=ELECTRON_RUN_AS_NODE=1",
+      "Environment=AGENTLAS_STORE_MIGRATION_ROLE=follower",
       `ExecStart=${command.executable} ${command.entry}`,
       "Restart=always",
       "RestartSec=5",

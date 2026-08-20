@@ -36,6 +36,9 @@ export const ONE_SURFACE_BLOCK_TYPES = [
   "Checklist",
   "ValueClosure",
   "ImprovementProof",
+  "Automation",
+  "AgentBuild",
+  "McpSetup",
 ] as const;
 
 export type OneSurfaceBlockType = (typeof ONE_SURFACE_BLOCK_TYPES)[number];
@@ -65,7 +68,11 @@ export type OneSurfaceSemanticActionIntent =
   | "open_asset"
   | "refine_result"
   | "reuse_result"
-  | "prepare_share";
+  | "prepare_share"
+  | "run_automation"
+  | "open_automation"
+  | "open_build"
+  | "toggle_mcp_server";
 
 export interface OneSurfaceSemanticAction {
   actionId: string;
@@ -290,6 +297,63 @@ export interface OneSurfaceImprovementProofBlock {
   collapsedByDefault: true;
 }
 
+/**
+ * A registered automation as a first-class One result. The host registers the
+ * automation first; the block only mirrors that receipt (never a promise).
+ */
+export interface OneSurfaceAutomationBlock {
+  blockId: string;
+  type: "Automation";
+  title: string;
+  /** The registered automation's id — the run/open actions target exactly it. */
+  automationId: string;
+  status: "registered" | "running" | "failed";
+  /** Human schedule text, e.g. "매일 9시" / "daily-09:00". */
+  schedule?: string;
+  /** Workflow node summary — what the automation does, step by step. */
+  nodes: Array<{ nodeRef: string; label: string }>;
+  /** The most recent execution, if one has happened. */
+  lastRun?: {
+    at?: string;
+    status: "completed" | "failed" | "cancelled" | "running";
+    summary?: string;
+  };
+}
+
+/** An agent build session's produced/in-progress stages as a One result. */
+export interface OneSurfaceAgentBuildBlock {
+  blockId: string;
+  type: "AgentBuild";
+  title: string;
+  buildSessionId: string;
+  agentName: string;
+  agentSlug?: string;
+  /**
+   * 사람이 읽는 빌드 사양. One 의 [빌드 열기] 가 이 문장을 Build 화면의 요청 칸에
+   * 실어 보낸다 — 이게 없으면 카드를 눌러도 빈 화면이 열려 사용자가 방금 One 과
+   * 합의한 사양을 손으로 다시 쓰게 된다.
+   */
+  request?: string;
+  stages: Array<{
+    stageRef: string;
+    label: string;
+    status: "waiting" | "working" | "completed" | "failed";
+  }>;
+}
+
+/** MCP server setup state — which connectors are on and which need keys. */
+export interface OneSurfaceMcpSetupBlock {
+  blockId: string;
+  type: "McpSetup";
+  title: string;
+  servers: Array<{
+    catalogId: string;
+    name: string;
+    enabled: boolean;
+    keyState: "not_required" | "missing" | "configured";
+  }>;
+}
+
 export type OneSurfaceBlock =
   | OneSurfaceNarrativeBlock
   | OneSurfaceMetricBlock
@@ -307,7 +371,10 @@ export type OneSurfaceBlock =
   | OneSurfaceBudgetBlock
   | OneSurfaceChecklistBlock
   | OneSurfaceValueClosureBlock
-  | OneSurfaceImprovementProofBlock;
+  | OneSurfaceImprovementProofBlock
+  | OneSurfaceAutomationBlock
+  | OneSurfaceAgentBuildBlock
+  | OneSurfaceMcpSetupBlock;
 
 export interface OneSurfaceManifestV1 {
   contractVersion: "1.0.0";

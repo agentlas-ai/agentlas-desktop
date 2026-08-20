@@ -43,6 +43,8 @@ import {
   type RuntimeToolPermissionArbiter,
   type RuntimeToolPermissionDecision,
 } from "./tool-approval";
+import { AcpSessionPool, type AcpSessionLease } from "./acp-session-pool";
+import { resolveAgentResidencySource, isResidencyExemptAgent } from "./agent-residency";
 import { classifyDiscovery, type DiscoveryOutcome } from "../../shared/model-discovery";
 import { schemaFallbackInstruction } from "../../shared/runtime-capabilities";
 
@@ -147,7 +149,7 @@ class AcpSessionClient {
     private readonly events: RunnerEvents,
     private readonly permission: RunnerRequest["permission"],
     private readonly locale: "ko" | "en",
-    private readonly approval: { runtime: string; sessionKey: string; cwd?: string; chatId?: string; unattended?: boolean } = { runtime: "acp", sessionKey: "acp" },
+    private readonly approval: { runtime: string; sessionKey: string; cwd?: string; chatId?: string; agentId?: string; unattended?: boolean } = { runtime: "acp", sessionKey: "acp" },
   ) {}
 
   /** Everything between these two calls is history replay, not this turn. */
@@ -258,6 +260,7 @@ class AcpSessionClient {
           permission: this.permission,
           mutating,
           chatId: this.approval.chatId,
+          agentId: this.approval.agentId,
           unattended: this.approval.unattended,
         });
       } catch {
@@ -290,10 +293,33 @@ function numberOf(v: unknown): number | undefined {
   return typeof v === "number" && Number.isFinite(v) ? v : undefined;
 }
 
+/**
+ * 이번 턴의 수신자. ★세션이 여러 턴을 살아남게 되면서(acp-session-pool) 핸들러를
+ * 생성 시점에 고정할 수 없게 됐다 — 턴마다 다른 client/events 가 받아야 하므로
+ * 연결은 **지금 활성인 sink** 를 따라간다. active 가 없는 동안(유휴 세션) 들어오는
+ * 알림은 버려진다(그 시점엔 볼 사람이 없다).
+ */
+export interface AcpTurnSink {
+  onNotification?: (method: string, params: any) => void;
+  onRequest?: (method: string, params: any) => any;
+  onStatus?: (status: string) => void;
+}
+
+interface AcpSessionState {
+  active: AcpTurnSink | null;
+  /** 전송이 닫혔는가 — 죽은 세션을 재사용 후보로 세지 않기 위한 표식. */
+  closed: boolean;
+}
+
 interface Session {
   child: ChildProcess;
   conn: AcpConnection;
   init: any;
+  state: AcpSessionState;
+  /** 이 세션이 들고 있는 ACP sessionId — 다음 턴이 그대로 이어 쓴다. */
+  acpSessionId?: string;
+  /** 생존 신호 정지 — 세션을 놓을 때 부른다. */
+  stopHeartbeat: () => void;
 }
 
 async function openAcp(
@@ -302,10 +328,7 @@ async function openAcp(
     command?: string;
     cwd: string;
     env: NodeJS.ProcessEnv;
-    handlers: { onNotification?: (m: string, p: any) => void; onRequest?: (m: string, p: any) => any };
     timeoutMs: number;
-    /** 있으면 생존 신호와 고아 stdio 통지를 이 채널로 낸다(실행 경로). */
-    onStatus?: (status: string) => void;
     label?: string;
     /**
      * grok 전용 도구 관문 — `grok agent --plugin-dir <DIR>`.
@@ -324,6 +347,7 @@ async function openAcp(
       ? // `agent` 바로 뒤에 넣는다 — 하위 명령의 플래그이므로 자리를 지켜야 한다.
         ["agent", "--plugin-dir", opts.toolBrokerPluginDir, ...spec.args.slice(1)]
       : spec.args;
+  const state: AcpSessionState = { active: null, closed: false };
   const child = spawnCli(opts.command ?? spec.command, spawnArgs, {
     stdio: ["pipe", "pipe", "pipe"],
     cwd: opts.cwd,
@@ -341,21 +365,31 @@ async function openAcp(
    * Node 계약상 `close` 는 자식의 stdio 가 전부 닫혀야 오는데, 에이전트가 파이프를
    * 상속한 손자를 남기고 죽으면 영영 오지 않는다 — runner.ts 주석 참고.
    */
-  const stopAcpHeartbeat = opts.onStatus
-    ? startCliHeartbeat(child, opts.onStatus, opts.label ?? spec.id)
-    : () => {};
+  // 생존 신호는 **지금 활성인 턴**으로 간다 — 세션이 여러 턴을 살기 때문이다.
+  const heartbeatStatus = (status: string): void => { state.active?.onStatus?.(status); };
+  const stopAcpHeartbeat = startCliHeartbeat(child, heartbeatStatus, opts.label ?? spec.id);
   ensureChildCloseAfterExit(child, () => {
-    opts.onStatus?.(`${opts.label ?? spec.id}: agent exited without closing its output — settling the session`);
+    state.active?.onStatus?.(`${opts.label ?? spec.id}: agent exited without closing its output — settling the session`);
   });
-  child.on("close", () => stopAcpHeartbeat());
-  child.on("error", () => stopAcpHeartbeat());
-  const conn = new AcpConnection(child, opts.handlers);
+  child.on("close", () => { state.closed = true; stopAcpHeartbeat(); });
+  child.on("error", () => { state.closed = true; stopAcpHeartbeat(); });
+  const conn = new AcpConnection(child, {
+    onNotification: (method, params) => state.active?.onNotification?.(method, params),
+    onRequest: (method, params) => {
+      const handler = state.active?.onRequest;
+      // 유휴 세션에 요청이 오면 답할 사람이 없다 — 조용히 삼키지 않고 규격 오류로 답한다.
+      if (!handler) throw new AcpRpcError({ code: -32601, message: `Method not found: ${method}` });
+      return handler(method, params);
+    },
+    onClose: () => { state.closed = true; },
+  });
   const init = await conn.request("initialize", {
     protocolVersion: ACP_PROTOCOL_VERSION,
     clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
     clientInfo: { name: "agentlas-desktop", version: "1.0" },
   }, { timeoutMs: opts.timeoutMs });
   if (init?.protocolVersion !== ACP_PROTOCOL_VERSION) {
+    stopAcpHeartbeat();
     killCliTree(child);
     throw new Error(`ACP protocolVersion ${String(init?.protocolVersion)} unsupported (client speaks v${ACP_PROTOCOL_VERSION} only)`);
   }
@@ -371,7 +405,129 @@ async function openAcp(
       }
     }
   }
-  return { child, conn, init };
+  return { child, conn, init, state, stopHeartbeat: stopAcpHeartbeat };
+}
+
+/**
+ * 이 세션은 아직 쓸 수 있는가. 프로세스가 죽었거나 전송이 닫혔으면 재사용 후보에서
+ * 빠진다 — 죽은 세션을 물려주면 사용자에게 원인 없는 실패가 된다.
+ */
+function acpSessionAlive(session: Session): boolean {
+  return !session.state.closed
+    && !session.child.killed
+    && session.child.exitCode === null
+    && session.child.signalCode === null;
+}
+
+/** 세션을 놓는 유일한 경로 — 프로토콜 close + 프로세스 트리 종료 + 생존 신호 정지. */
+function closeAcpSession(session: Session): void {
+  session.state.active = null;
+  session.state.closed = true;
+  try { session.stopHeartbeat(); } catch { /* ignore */ }
+  try { session.conn.close(); } catch { /* ignore */ }
+  try { killCliTree(session.child); } catch { /* ignore */ }
+}
+
+/*
+ * ★상주 세션 풀 — 이 파일의 핵심 변경.
+ *
+ * 예전에는 매 실행의 finally 가 conn.close() + killCliTree() 를 불렀다. ACP 는 여러 턴을
+ * 살 수 있는 프로토콜인데, 우리가 매번 끊고 있었다는 뜻이다. 이제 실행이 끝나면 세션을
+ * **풀에 반납**하고, 다음 턴이 같은 키(chatId × 런타임 × 지문 × cwd × MCP × 실행파일)면
+ * 그대로 이어 쓴다. 수명·예산·리퍼는 acp-session-pool.ts + agent-residency.ts 가 맡는다.
+ */
+let sessionPool: AcpSessionPool<Session> | null = null;
+export function acpSessionPool(): AcpSessionPool<Session> {
+  if (!sessionPool) {
+    sessionPool = new AcpSessionPool<Session>({
+      alive: acpSessionAlive,
+      close: closeAcpSession,
+      /*
+       * ★유휴 상주가 호스트의 종료를 막으면 안 된다. 자식의 stdio 파이프는 부모의
+       * 이벤트 루프를 붙잡으므로, 붙들기만 하고 unref 하지 않으면 일을 끝낸 터미널·
+       * 스크립트가 영영 안 끝난다(실측: 기존 ACP 게이트가 정확히 그렇게 멈췄다).
+       * 창을 가진 앱/데몬은 어차피 계속 사는 프로세스라 차이가 없다.
+       */
+      // 파이프는 런타임에 Socket 이라 ref/unref 를 갖지만 타입(Readable/Writable)에는 없다.
+      unref: (session) => {
+        session.child.unref?.();
+        for (const pipe of [session.child.stdin, session.child.stdout, session.child.stderr]) {
+          (pipe as unknown as { unref?: () => void } | null)?.unref?.();
+        }
+      },
+      ref: (session) => {
+        session.child.ref?.();
+        for (const pipe of [session.child.stdin, session.child.stdout, session.child.stderr]) {
+          (pipe as unknown as { ref?: () => void } | null)?.ref?.();
+        }
+      },
+    });
+    /*
+     * ★그리고 그 호스트가 나갈 때는 붙든 자식을 데려간다. unref 만 하고 여기를 비우면
+     * 종료가 곧 고아 생성이 된다(스폰 원장 스위퍼가 최대 10분 뒤 치우는 좀비).
+     * 'exit' 훅은 동기 구간이라 SIGTERM 만 보낸다 — 그거면 ACP 에이전트는 내려간다.
+     */
+    process.once("exit", () => {
+      try { sessionPool?.disposeAll(); } catch { /* 종료 중이다 */ }
+    });
+  }
+  return sessionPool;
+}
+
+/** 테스트/런타임 교체용 — 붙든 세션을 전부 놓는다. */
+export function disposeAcpSessionPool(): void {
+  sessionPool?.disposeAll();
+  sessionPool = null;
+}
+
+/**
+ * 재사용 키. 세션 지문(모델·시스템프롬프트·권한)은 기존 계약 그대로 쓰고, 그 위에
+ * **프로세스 정체성**(cwd·MCP 설정·실행 파일·도구 관문)을 더한다 — 지문이 같아도 이
+ * 넷 중 하나가 다르면 그 세션은 다른 프로세스여야 하기 때문이다(MCP 서버는 session/new
+ * 때 붙으므로 나중에 바꿀 수 없다).
+ */
+export function acpPoolKey(input: {
+  specId: string;
+  chatId: string;
+  fingerprint: string;
+  cwd: string;
+  mcpConfigPath?: string;
+  runtimeSource?: string;
+  toolBrokerPluginDir?: string;
+  /**
+   * 실행 환경변수. ★프로세스는 자기가 뜰 때의 env 를 평생 들고 산다 — 자격증명이 갱신돼도
+   * 이미 떠 있는 에이전트는 옛 값을 쓴다. 그래서 env 가 바뀌면 이어 쓰지 않는다(다이제스트만
+   * 쓰므로 값 자체는 어디에도 남지 않는다). env 에 매 실행 달라지는 값이 들어 있으면 재사용이
+   * 안 될 뿐, 예전과 똑같이 동작한다 — 안전한 쪽으로 실패한다.
+   */
+  env?: NodeJS.ProcessEnv;
+}): string {
+  const envDigest = createHash("sha256");
+  for (const name of Object.keys(input.env ?? {}).sort()) {
+    envDigest.update(name).update("\0").update(String((input.env ?? {})[name] ?? "")).update("\0");
+  }
+  return createHash("sha256")
+    .update("acp-pool-v1\0")
+    .update(input.specId).update("\0")
+    .update(input.chatId).update("\0")
+    .update(input.fingerprint).update("\0")
+    .update(input.cwd).update("\0")
+    .update(input.mcpConfigPath ?? "").update("\0")
+    .update(input.runtimeSource ?? "").update("\0")
+    .update(input.toolBrokerPluginDir ?? "").update("\0")
+    .update(envDigest.digest("hex"))
+    .digest("hex");
+}
+
+/**
+ * 재사용하려던 세션이 못 쓰게 됐다는 표식. 밖에서 조용히 새 세션으로 한 번 더 시도한다
+ * (사용자에게는 아무 차이가 없어야 한다 — 새 문구도, 실패도 없다).
+ */
+class StaleAcpSessionError extends Error {
+  constructor(readonly cause: unknown) {
+    super("ACP pooled session was stale — retrying with a fresh session");
+    this.name = "StaleAcpSessionError";
+  }
 }
 
 /**
@@ -385,7 +541,7 @@ export async function probeAcpModels(
   const timeoutMs = opts?.timeoutMs ?? 20_000;
   let session: Session | null = null;
   try {
-    session = await openAcp(spec, { command: opts?.command, cwd: opts?.cwd ?? agentRunCwd(), env: opts?.env ?? process.env, handlers: {}, timeoutMs });
+    session = await openAcp(spec, { command: opts?.command, cwd: opts?.cwd ?? agentRunCwd(), env: opts?.env ?? process.env, timeoutMs });
     const created = await session.conn.request("session/new", { cwd: opts?.cwd ?? agentRunCwd(), mcpServers: [] }, { timeoutMs });
     const rows = modelOptionsFromNewSession(created);
     const outcome = classifyDiscovery({ stdout: rows.length ? rows.map((r) => r.id).join("\n") : "", models: rows.map((r) => r.id), source: "acp" });
@@ -403,10 +559,8 @@ export async function probeAcpModels(
     const detail = data == null ? "" : (typeof data === "string" ? data : JSON.stringify(data));
     return { status: "failed", models: [], rawLineCount: 0, reason: `acp:${detail && !raw.includes(detail) ? `${raw}: ${detail}` : raw}`, source: "acp" };
   } finally {
-    if (session) {
-      try { session.conn.close(); } catch { /* ignore */ }
-      try { killCliTree(session.child, 500); } catch { /* ignore */ }
-    }
+    // 탐지용 세션은 풀에 넣지 않는다 — 대화가 아니라 한 번의 질문이다.
+    if (session) closeAcpSession(session);
   }
 }
 
@@ -488,7 +642,13 @@ async function readMcpConfig(mcpConfigPath: string | undefined): Promise<unknown
 
 /** Runner factory — one Runner per ACP agent spec. */
 export function createAcpRunner(spec: AcpAgentSpec): Runner {
-  return async (req: RunnerRequest, events: RunnerEvents): Promise<RunnerResult> => {
+  /**
+   * 한 턴. `allowStaleRetry` 가 true 인 첫 시도에서만, 재사용 세션이 아무 출력도 내지
+   * 못하고 실패했을 때 StaleAcpSessionError 를 던진다 — 바깥이 새 세션으로 한 번 더
+   * 시도한다(사용자에게는 차이가 없다). 두 번째 시도는 이 표식을 던지지 않으므로
+   * 무한 재시도가 원천적으로 불가능하다.
+   */
+  const runTurn = async (req: RunnerRequest, events: RunnerEvents, allowStaleRetry: boolean): Promise<RunnerResult> => {
     const locale = pickLocale(req);
     events.onStatus(tStatus(locale, "callingBackend", { backend: req.backendLabel || spec.label }));
     const cwd = req.cwd ?? agentRunCwd();
@@ -497,6 +657,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       sessionKey: `${spec.id}:${req.sessionFingerprintSeed ?? req.cwd ?? "default"}`,
       cwd,
       chatId: req.chatId,
+      agentId: req.agentId,
       unattended: req.unattended === true,
     });
     const sessionKind = acpSessionKind(spec.id);
@@ -518,27 +679,68 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
     const savedSession = req.chatId ? getRuntimeSession(req.chatId, sessionKind) : null;
     const storedSessionId = savedSession && fingerprint && savedSession.fingerprint === fingerprint ? savedSession.sessionId : null;
     const resumeSessionId = req.runtimeSessionId ?? storedSessionId;
+
+    /*
+     * ★상주 — 이 턴이 끝나도 세션을 닫지 않는다.
+     *
+     * 키가 있는(=대화에 속한) 실행은 풀에서 빌린다. 같은 키의 다음 턴은 이미 떠 있는
+     * 프로세스와 이미 열린 ACP 세션을 그대로 이어 쓴다. 키가 없으면(chatId 없는 일회성
+     * 실행) 예전 그대로 열고 닫는다 — 이어 쓸 다음 턴이 정의상 없기 때문이다.
+     */
+    const pool = acpSessionPool();
+    const poolKey = req.chatId && fingerprint
+      ? acpPoolKey({
+        specId: spec.id,
+        chatId: req.chatId,
+        fingerprint,
+        cwd,
+        ...(req.mcpConfigPath ? { mcpConfigPath: req.mcpConfigPath } : {}),
+        ...(req.runtimeSource ? { runtimeSource: req.runtimeSource } : {}),
+        ...(req.toolBrokerPluginDir ? { toolBrokerPluginDir: req.toolBrokerPluginDir } : {}),
+        env: req.env ?? process.env,
+      })
+      : null;
+    const turnSink: AcpTurnSink = {
+      onNotification: (method, params) => { if (method === "session/update") client.onUpdate(params); },
+      onRequest: async (method, params) => {
+        if (method === "session/request_permission") return client.answerPermission(params);
+        throw new AcpRpcError({ code: -32601, message: `Method not found: ${method}` });
+      },
+      onStatus: (s) => events.onStatus(s),
+    };
+    const openSession = () => openAcp(spec, {
+      command: req.runtimeSource,
+      cwd,
+      env: req.env ?? process.env,
+      timeoutMs: 60_000,
+      label: req.backendLabel || spec.label,
+      // 도구 관문 — grok 의 `agent` 하위 명령만 이 플래그를 받는다(openAcp 주석 참조).
+      ...(req.toolBrokerPluginDir ? { toolBrokerPluginDir: req.toolBrokerPluginDir } : {}),
+    });
+
     let session: Session | null = null;
-    const onAbort = () => { if (session) killCliTree(session.child); };
+    let lease: AcpSessionLease<Session> | null = null;
+    /** 이 세션을 풀에 되돌리면 안 되는가(취소·오류·프로토콜 파손). */
+    let broken = false;
+    const onAbort = () => { broken = true; if (session) killCliTree(session.child); };
     req.signal?.addEventListener("abort", onAbort, { once: true });
     try {
-      session = await openAcp(spec, {
-        command: req.runtimeSource,
-        cwd,
-        env: req.env ?? process.env,
-        timeoutMs: 60_000,
-        onStatus: (s) => events.onStatus(s),
-        label: req.backendLabel || spec.label,
-        // 도구 관문 — grok 의 `agent` 하위 명령만 이 플래그를 받는다(openAcp 주석 참조).
-        ...(req.toolBrokerPluginDir ? { toolBrokerPluginDir: req.toolBrokerPluginDir } : {}),
-        handlers: {
-          onNotification: (method, params) => { if (method === "session/update") client.onUpdate(params); },
-          onRequest: async (method, params) => {
-            if (method === "session/request_permission") return client.answerPermission(params);
-            throw new AcpRpcError({ code: -32601, message: `Method not found: ${method}` });
-          },
-        },
-      });
+      if (poolKey) {
+        lease = await pool.acquire(poolKey, {
+          agentId: req.agentId ?? null,
+          chatId: req.chatId ?? null,
+          runtimeKind: spec.id,
+          source: resolveAgentResidencySource(req.agentId),
+          reaperExempt: isResidencyExemptAgent(req.agentId),
+        }, openSession);
+        session = lease.session;
+      } else {
+        session = await openSession();
+      }
+      // 이번 턴의 수신자를 꽂는다 — 세션은 여러 턴을 살고, 받는 사람은 턴마다 다르다.
+      session.state.active = turnSink;
+      /** 살아 있는 세션을 이어 쓰는 턴인가(= 기존 resume 경로와 같은 의미). */
+      const reusing = Boolean(lease && !lease.fresh && session.acpSessionId);
       /*
        * ★MCP — 예전에는 이 자리가 항상 `mcpServers: []` 였다.
        * 그래서 사용자가 승인한 MCP 서버는 ACP 경로(=cursor·grok·kimi 의 실제 실행 경로)로
@@ -546,10 +748,14 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
        * 전송이 안 되는 서버는 조용히 버리지 않고 상태줄로 말한다.
        */
       const agentCaps = session.init?.agentCapabilities ?? {};
-      const mcp: AcpMcpTranslation = acpMcpServersFromConfig(
-        await readMcpConfig(req.mcpConfigPath),
-        agentCaps.mcpCapabilities ?? null,
-      );
+      // 이어 쓰는 턴에는 MCP 를 다시 붙이지 않는다 — 서버는 session/new 때 붙고, 설정이
+      // 바뀌면 풀 키가 달라져 애초에 이 세션을 재사용하지 않는다.
+      const mcp: AcpMcpTranslation = reusing
+        ? { servers: [], unsupported: [], malformed: [] }
+        : acpMcpServersFromConfig(
+          await readMcpConfig(req.mcpConfigPath),
+          agentCaps.mcpCapabilities ?? null,
+        );
       if (mcp.servers.length > 0) {
         events.onStatus(locale === "ko" ? `MCP 서버 ${mcp.servers.length}개 연결됨` : `${mcp.servers.length} MCP server(s) attached`);
       }
@@ -575,7 +781,17 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       let sessionId = "";
       let resumed = false;
       let created: any = null;
-      if (resumeSessionId && canLoadSession) {
+      if (reusing) {
+        /*
+         * ★상주 세션을 이어 쓴다 — session/load 조차 필요 없다(그 세션이 이 프로세스
+         * 메모리에 그대로 살아 있다). 상태줄 문구는 **기존 resume 경로와 같은 것**을
+         * 쓴다: 사용자가 보는 화면에 새 단어를 만들지 않는 것이 이 기능의 계약이다.
+         */
+        sessionId = session.acpSessionId!;
+        resumed = true;
+        events.onStatus(`[runtime-session] resumed kind=${sessionKind}`);
+      }
+      if (!sessionId && resumeSessionId && canLoadSession) {
         client.beginReplay();
         try {
           await session.conn.request(
@@ -595,7 +811,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         } finally {
           client.endReplay();
         }
-      } else if (resumeSessionId) {
+      } else if (!sessionId && resumeSessionId) {
         events.onStatus(locale === "ko"
           ? "이 런타임은 세션 복원을 지원하지 않아 대화 기록을 다시 실어 새 세션으로 진행합니다"
           : "This runtime does not advertise session resume — starting a fresh session with the conversation re-attached");
@@ -606,7 +822,9 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         if (!sessionId) throw new Error("ACP session/new returned no sessionId");
         events.onStatus(`[runtime-session] created kind=${sessionKind}`);
       }
-      if (req.model) {
+      // 세션은 이제 이 프로세스의 것이다 — 다음 턴이 그대로 이어 쓸 수 있게 붙여 둔다.
+      session.acpSessionId = sessionId;
+      if (!reusing && req.model) {
         // Best effort: not every agent implements session/set_model.
         try { await session.conn.request("session/set_model", { sessionId, modelId: req.model }, { timeoutMs: 10_000 }); } catch { /* optional */ }
       }
@@ -706,7 +924,18 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       // observedUsage intentionally absent: ACP v1 gives context occupancy, not tokens.
       return { text, sessionId };
     } catch (err) {
+      // 실패한 세션은 풀에 되돌리지 않는다 — 상태를 모르는 세션을 물려주면 다음 턴이
+      // 원인 없는 실패를 겪는다. 다시 여는 비용이 그보다 싸다.
+      broken = true;
       if (req.signal?.aborted) throw abortReasonError(req);
+      /*
+       * ★재사용 세션이 아무 말도 못 하고 실패했으면, 그건 사용자의 문제가 아니라
+       * 우리가 물려준 세션의 문제다(에이전트가 죽었거나 프로토콜이 깨졌다). 조용히
+       * 버리고 새 세션으로 한 번 더 — 화면에는 아무 차이도 남기지 않는다.
+       */
+      if (allowStaleRetry && lease && !lease.fresh && client.text === "") {
+        throw new StaleAcpSessionError(err);
+      }
       /*
        * ★사유는 `message` 가 아니라 `data` 에 온다.
        *
@@ -760,10 +989,26 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       throw err;
     } finally {
       req.signal?.removeEventListener("abort", onAbort);
-      if (session) {
-        try { session.conn.close(); } catch { /* ignore */ }
-        try { killCliTree(session.child); } catch { /* ignore */ }
+      // 수신자를 먼저 뗀다 — 유휴 세션이 지난 턴의 events 로 상태를 흘리면 안 된다.
+      if (session) session.state.active = null;
+      if (lease) {
+        // 취소·오류면 버리고, 아니면 반납한다(다음 턴이 이어 쓴다).
+        if (broken || req.signal?.aborted) pool.discard(lease);
+        else pool.release(lease);
+      } else if (session) {
+        // 풀에 들어가지 않는 일회성 실행 — 예전 그대로 닫는다.
+        closeAcpSession(session);
       }
+    }
+  };
+
+  return async (req: RunnerRequest, events: RunnerEvents): Promise<RunnerResult> => {
+    try {
+      return await runTurn(req, events, true);
+    } catch (err) {
+      // 죽은 상주 세션은 사용자에게 보이지 않는다 — 새 세션으로 조용히 다시 한 번.
+      if (err instanceof StaleAcpSessionError) return runTurn(req, events, false);
+      throw err;
     }
   };
 }

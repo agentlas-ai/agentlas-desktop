@@ -159,6 +159,15 @@ export default function SettingsPage() {
   const [multimodalRefreshing, setMultimodalRefreshing] = useState(false);
   const [runtimeMessage, setRuntimeMessage] = useState("");
   const [concurrency, setConcurrency] = useState<AgentConcurrencyInfo | null>(null);
+  // 데몬 자동 시작(로그인 기동) — 기본 off. 값과 부팅 항목이 어긋나면 사유를 그대로 보여준다.
+  const [daemonAutostart, setDaemonAutostart] = useState(false);
+  const [daemonAutostartBusy, setDaemonAutostartBusy] = useState(false);
+  const [daemonAutostartNotice, setDaemonAutostartNotice] = useState<string | null>(null);
+  useEffect(() => {
+    void ipc()?.getDaemonAutostart?.()
+      .then((result) => setDaemonAutostart(Boolean(result?.enabled)))
+      .catch(() => {});
+  }, []);
   const [interviewMode, setInterviewMode] = useState<"smart" | "build-only" | "off">("build-only");
 
   const refreshMultimodal = useCallback(async () => {
@@ -562,6 +571,57 @@ export default function SettingsPage() {
             </div>
           </>
         )}
+
+        {/* 백그라운드 데몬 — 앱을 닫아도 자동화·에이전트가 계속 돌게 한다(기본 off) */}
+        <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "24px 0 12px" }}>
+          {locale === "ko" ? "백그라운드 데몬" : "Background daemon"}
+        </h2>
+        <div
+          style={{
+            padding: 14,
+            marginBottom: 12,
+            border: "1px solid var(--paper-edge)",
+            borderRadius: "var(--radius-md)",
+            background: "var(--paper)",
+          }}
+        >
+          <p style={{ fontSize: 12, color: "var(--muted-deep)", margin: "0 0 12px" }}>
+            {locale === "ko"
+              ? "켜면 로그인할 때 데몬이 자동으로 떠서, 앱을 닫아도 예약 자동화와 상주 에이전트가 계속 동작합니다. 끄면 이 기계의 부팅 항목에서 제거합니다."
+              : "When on, the daemon starts at login so scheduled automations and resident agents keep running with the app closed. Turning it off removes the login item from this machine."}
+          </p>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+            <input
+              type="checkbox"
+              checked={daemonAutostart}
+              disabled={daemonAutostartBusy}
+              onChange={(event) => {
+                const next = event.target.checked;
+                setDaemonAutostartBusy(true);
+                setDaemonAutostart(next);
+                void ipc()?.setDaemonAutostart?.(next)
+                  .then((result) => {
+                    setDaemonAutostart(Boolean(result?.enabled));
+                    // 값은 저장됐는데 부팅 항목을 못 고친 경우를 조용히 넘기지 않는다.
+                    if (result && result.reconciled === false) {
+                      setDaemonAutostartNotice(
+                        (locale === "ko" ? "설정은 저장했지만 부팅 항목을 바꾸지 못했습니다: " : "Saved, but the login item could not be updated: ")
+                        + (result.reason ?? ""),
+                      );
+                    } else {
+                      setDaemonAutostartNotice(null);
+                    }
+                  })
+                  .catch(() => setDaemonAutostart(!next))
+                  .finally(() => setDaemonAutostartBusy(false));
+              }}
+            />
+            {locale === "ko" ? "로그인할 때 자동으로 시작" : "Start automatically at login"}
+          </label>
+          {daemonAutostartNotice && (
+            <p style={{ fontSize: 11, color: "var(--warn-deep, #b8860b)", margin: "8px 0 0" }}>{daemonAutostartNotice}</p>
+          )}
+        </div>
 
         {/* 브리핑 인터뷰 모드 — 모호한 요청 앞에 배치 질문을 강제할지 (smart/build-only/off) */}
         <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "24px 0 12px" }}>

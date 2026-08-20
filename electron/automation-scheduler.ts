@@ -72,6 +72,7 @@ import {
 import { recoverStaleAutomationRuns } from "./store/db";
 import { detectRuntimes } from "./runtime/detect";
 import { pickActive } from "./runtime/selection";
+import { withRunPriority } from "./runtime/run-priority";
 import { synthesizeLegacyGraph } from "./automation-emitter";
 import { suspendAutomationForGraphReconciliation } from "./store/graph-reconciliation";
 import { getSource as getMarketSource } from "./marketplace";
@@ -375,7 +376,8 @@ function handleAutomationFailure(a: Automation, error: string): void {
       if (optimizerTimer.unref) optimizerTimer.unref();
       // Promise.resolve().then은 동기 throw까지 같은 실패 경로로 수렴시킨다. abortGate를
       // race에 넣어 runner가 AbortSignal을 무시해도 cancel/timeout 시 lifecycle은 끝난다.
-      const optimizerRun = Promise.resolve().then(() =>
+      // System Optimizer 복구 런도 무인 배경 작업이다 — 채팅 턴을 밀어내면 안 된다.
+      const optimizerRun = Promise.resolve().then(() => withRunPriority("background", () =>
         runMcpInvocation(
           req,
           (ev) => recordMcpInvocationEvent(runId, req, ev),
@@ -383,7 +385,7 @@ function handleAutomationFailure(a: Automation, error: string): void {
           undefined,
           { source: "automation" },
         ),
-      );
+      ));
       void Promise.race([optimizerRun, abortGate])
         .catch((err) => {
           console.error("[automation] system optimizer run failed:", err);
@@ -696,7 +698,10 @@ async function runOne(
       let result;
       let acceptGraphEvents = true;
       try {
-        const graphRun = Promise.resolve().then(() =>
+        // ★background 우선순위 — 이 실행에서 스폰되는 모든 러너/자식(run-graph 내부 포함)이
+        //   실행 슬롯 2단 큐에서 사람이 기다리는 채팅 턴 뒤로 서고, nice 10 을 받는다.
+        //   run-graph.ts 를 고치지 않고도 문맥(AsyncLocalStorage)으로 전파된다.
+        const graphRun = Promise.resolve().then(() => withRunPriority("background", () =>
           runGraph(a, a.graph!, {
             signal: controller.signal,
             ...(opts?.dryRun ? { dryRun: true } : {}),
@@ -724,7 +729,7 @@ async function runOne(
               }
             },
           }),
-        );
+        ));
         result = await awaitAutomationRunnerWithAbortGrace(graphRun, controller.signal);
       } catch (err) {
         // abort로 runGraph가 던지면 스톨 메시지로 바꿔 닥터 timeout 분류에 태운다.
@@ -876,7 +881,8 @@ async function runOne(
         let result;
         let acceptInvocationEvents = true;
         try {
-          const invocationRun = Promise.resolve().then(() =>
+          // background 우선순위 — 그래프 경로와 같은 규율(사람이 기다리는 턴이 앞선다).
+          const invocationRun = Promise.resolve().then(() => withRunPriority("background", () =>
             runMcpInvocation(
               req,
               (ev) => {
@@ -897,7 +903,7 @@ async function runOne(
               undefined,
               { source: "automation" },
             ),
-          );
+          ));
           result = await awaitAutomationRunnerWithAbortGrace(invocationRun, controller.signal);
         } catch (err) {
           if (stallDecision) {

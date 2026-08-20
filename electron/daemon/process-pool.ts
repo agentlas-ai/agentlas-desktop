@@ -26,6 +26,26 @@ export interface PooledProcessHandle {
   /** 마지막으로 반납된 시각(유휴 축출 계산용). */
   idleSince: number | null;
   idleTimer: NodeJS.Timeout | null;
+  /**
+   * 상주 프로세스 표식 — 짧은 idle TTL(기본 5분)로 죽이지 않고 붙들어 둔다.
+   * 대신 데몬의 장기 스위퍼(sweepIdle, 기본 12시간)가 수명을 관리한다.
+   * 앞으로 붙을 상주 세션(양방향 stream-json 대화)이 이 표식으로 들어온다.
+   */
+  resident: boolean;
+  /**
+   * 장기 스위퍼 면제 표식 — One 처럼 "항상 살아 있어야 하는" 프로세스가 단다.
+   * 면제여도 데몬 종료(dispose)에는 함께 죽는다 — 좀비 방지가 항상 이긴다.
+   */
+  reaperExempt: boolean;
+  /** 마지막 활동(획득/반납) 시각 — 12h 유휴 리퍼의 기준 시계. */
+  lastActivityAt: number;
+}
+
+export interface AcquireOptions {
+  /** true 면 idle TTL 로 죽이지 않는 상주 프로세스로 붙든다(스위퍼가 수명 관리). */
+  resident?: boolean;
+  /** true 면 장기 유휴 스위퍼(sweepIdle)에서 면제한다 — One 관련 프로세스용 계약 칸. */
+  reaperExempt?: boolean;
 }
 
 export interface ProcessPoolOptions {
@@ -64,7 +84,7 @@ export class WarmProcessPool {
    * 빌린 동안 그 프로세스는 다른 누구에게도 안 나간다(배타적).
    * 반드시 `release()` 로 돌려줘야 한다 — try/finally 로 감쌀 것.
    */
-  acquire(signature: string, spawn: SpawnFn): PooledProcessHandle {
+  acquire(signature: string, spawn: SpawnFn, opts: AcquireOptions = {}): PooledProcessHandle {
     if (this.disposed) throw new Error("WarmProcessPool: acquire after dispose");
     // 죽은 프로세스를 먼저 걷어낸다 — 죽은 것을 재사용 후보로 세면 안 된다.
     this.reap();
@@ -75,6 +95,10 @@ export class WarmProcessPool {
     if (reusable) {
       reusable.inUse = true;
       reusable.idleSince = null;
+      reusable.lastActivityAt = this.now();
+      // 표식은 최신 요청이 이긴다 — 같은 서명이라도 이번 사용자가 상주를 원치 않으면 강등.
+      reusable.resident = opts.resident === true;
+      reusable.reaperExempt = opts.reaperExempt === true;
       if (reusable.idleTimer) {
         clearTimeout(reusable.idleTimer);
         reusable.idleTimer = null;
@@ -93,6 +117,9 @@ export class WarmProcessPool {
       exited: false,
       idleSince: null,
       idleTimer: null,
+      resident: opts.resident === true,
+      reaperExempt: opts.reaperExempt === true,
+      lastActivityAt: this.now(),
     };
     // 프로세스가 스스로 죽으면 즉시 표시한다 — 다음 acquire 가 죽은 걸 안 넘기도록.
     child.once("exit", () => {
@@ -119,9 +146,35 @@ export class WarmProcessPool {
       return;
     }
     handle.idleSince = this.now();
+    handle.lastActivityAt = handle.idleSince;
+    // 상주 프로세스는 짧은 idle TTL 로 죽이지 않는다 — 수명은 sweepIdle(기본 12h)이 맡는다.
+    if (handle.resident) return;
     handle.idleTimer = setTimeout(() => this.remove(handle), this.idleTtlMs);
     // 데몬 프로세스가 이 타이머 때문에 종료를 못 하는 일이 없도록.
     handle.idleTimer.unref?.();
+  }
+
+  /**
+   * ★12h 유휴 리퍼 (데몬 keepAlive 스위퍼가 주기 호출).
+   *
+   * 마지막 활동(반납) 후 maxIdleMs 가 지난 **유휴** 프로세스를 죽인다 — 상주(resident)로
+   * 붙든 것도 여기서는 예외가 아니다. 예외는 단 하나, reaperExempt(One 관련 상주)뿐이고,
+   * 그마저 dispose(데몬 종료)에는 함께 죽는다. 사용 중(inUse)인 것은 절대 건드리지 않는다.
+   *
+   * 반환: 이번 패스에 죽인 수.
+   */
+  sweepIdle(maxIdleMs: number): number {
+    const cutoff = this.now() - Math.max(1_000, maxIdleMs);
+    let reaped = 0;
+    for (const handle of [...this.handles]) {
+      if (handle.inUse || handle.reaperExempt) continue;
+      const idleSince = handle.idleSince ?? handle.lastActivityAt;
+      if (idleSince <= cutoff) {
+        this.remove(handle);
+        reaped += 1;
+      }
+    }
+    return reaped;
   }
 
   /** 죽은(exited) 프로세스를 목록에서 걷어낸다. */

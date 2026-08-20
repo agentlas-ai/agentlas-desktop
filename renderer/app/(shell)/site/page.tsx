@@ -82,6 +82,12 @@ export default function SiteStudioPage() {
   const [addOpen, setAddOpen] = useState(false);
   const [addBrief, setAddBrief] = useState("");
   const [addSameStyle, setAddSameStyle] = useState(true);
+  /*
+   * 스타일 방향 — preload→IPC→프롬프트(STYLE DIRECTION)까지 전부 배선돼 있었는데
+   * 렌더러가 한 번도 보내지 않아 죽어 있던 칸이다. 디자인 도구에서 "톤을 이렇게"는
+   * 브리프와 다른 축이라 입력을 따로 준다.
+   */
+  const [addStyleHint, setAddStyleHint] = useState("");
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
 
@@ -104,6 +110,8 @@ export default function SiteStudioPage() {
   const generatingProjectRef = useRef<string | null>(null);
 
   const project = useMemo(() => projects.find((p) => p.id === projectId) ?? null, [projects, projectId]);
+  /* 앱 디자인 프로젝트인가 — 미리보기 기기 프레임과 내보내기 대상이 여기서 갈린다. */
+  const appPreview = project?.surface === "mobile";
   const publishProject = useMemo(
     () => projects.find((candidate) => candidate.id === publishProjectId) ?? null,
     [projects, publishProjectId],
@@ -344,6 +352,8 @@ export default function SiteStudioPage() {
       briefText: string;
       variantCount: number;
       baseScreenId?: string;
+      /** 브리프와 별개의 스타일 방향 — 프롬프트의 STYLE DIRECTION 으로 간다. */
+      styleHint?: string;
       surface?: SiteSurface;
       agentAppTarget?: SiteAgentAppTargetRef;
     }) => {
@@ -399,6 +409,7 @@ export default function SiteStudioPage() {
           brief: text,
           variants: opts.variantCount,
           baseScreenId: opts.baseScreenId,
+          styleHint: opts.styleHint,
           locale: ko ? "ko" : "en",
         });
         if (!res?.ok || !res.screens?.length) {
@@ -564,6 +575,37 @@ export default function SiteStudioPage() {
     if (res?.ok && res.path) showToast((ko ? "저장됨: " : "Saved: ") + res.path);
   }, [activeScreenId, ko, projectId, showToast, siteBusy]);
 
+  /*
+   * 디자인 → 코드. Site 는 디자인 생성기이므로(오너 정의 2026-08-20) 산출물의 마지막 칸은
+   * 개발자가 가져갈 소스다: 웹은 React, 앱은 Flutter/React Native. 배포는 여기서 하지 않는다.
+   */
+  const [exportTargets, setExportTargets] = useState<string[]>([]);
+  const [exportingTarget, setExportingTarget] = useState<string | null>(null);
+  useEffect(() => {
+    if (!projectId) { setExportTargets([]); return; }
+    let alive = true;
+    void ipc()?.site?.exportTargets?.({ projectId })
+      .then((res) => { if (alive && res?.ok && Array.isArray(res.targets)) setExportTargets(res.targets); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [projectId]);
+
+  const exportCode = useCallback(async (target: string) => {
+    if (!projectId || !activeScreenId || siteBusy || operationRef.current || exportingTarget) return;
+    setExportingTarget(target);
+    try {
+      const res = await ipc()?.site?.exportScreenCode?.({ projectId, screenId: activeScreenId, target });
+      if (res?.ok && res.path) {
+        const count = res.files?.length ?? 0;
+        showToast((ko ? `${target} 코드 ${count}개 파일 저장됨: ` : `Saved ${count} ${target} file(s): `) + res.path);
+      } else if (res?.reason) {
+        showToast((ko ? "코드 내보내기 실패: " : "Code export failed: ") + res.reason);
+      }
+    } finally {
+      setExportingTarget(null);
+    }
+  }, [activeScreenId, exportingTarget, ko, projectId, showToast, siteBusy]);
+
   const exportZip = useCallback(async () => {
     if (!projectId || siteBusy || operationRef.current) return;
     const res = await ipc()?.site?.exportProjectZip?.({ projectId });
@@ -664,11 +706,12 @@ export default function SiteStudioPage() {
             });
           }}
           onDismissFailure={() => setCreateFailure(null)}
-          onCreate={({ brief: nextBrief, surface, agentAppTarget }) => {
+          onCreate={({ brief: nextBrief, surface, agentAppTarget, variantCount }) => {
             void runGenerate({
               pid: null,
               briefText: nextBrief,
-              variantCount: 1,
+              // 랜딩에서 고른 시안 수를 그대로 쓴다(엔진 상한 3은 main 이 클램프).
+              variantCount: variantCount ?? 1,
               surface,
               agentAppTarget,
             });
@@ -808,6 +851,25 @@ export default function SiteStudioPage() {
         <button type="button" style={ghostBtn} onClick={() => void exportScreen()} disabled={!activeScreenId || siteBusy}>
           HTML
         </button>
+        {/* 디자인 → 코드. 표면이 허용하는 대상만 뜬다(웹: React, 앱: Flutter·React Native). */}
+        {exportTargets.filter((target) => target !== "html").map((target) => (
+          <button
+            key={target}
+            type="button"
+            style={ghostBtn}
+            onClick={() => void exportCode(target)}
+            disabled={!activeScreenId || siteBusy || Boolean(exportingTarget)}
+            title={ko ? "이 화면을 코드로 내보냅니다" : "Export this screen as code"}
+          >
+            {exportingTarget === target
+              ? (ko ? "변환 중…" : "Converting…")
+              : target === "react"
+                ? "React"
+                : target === "flutter"
+                  ? "Flutter"
+                  : "React Native"}
+          </button>
+        ))}
         <button type="button" style={ghostBtn} onClick={() => void exportZip()} disabled={siteBusy}>
           ZIP
         </button>
@@ -1043,6 +1105,13 @@ export default function SiteStudioPage() {
                 style={newVersionInput}
                 disabled={siteBusy}
               />
+              <input
+                value={addStyleHint}
+                onChange={(e) => setAddStyleHint(e.target.value)}
+                placeholder={ko ? "스타일 방향(선택): 예) 차분한 뉴트럴, 큰 여백" : "Style direction (optional): e.g. calm neutrals, generous spacing"}
+                style={newVersionInput}
+                disabled={siteBusy}
+              />
               <label style={newVersionCheckbox}>
                 <input type="checkbox" checked={addSameStyle} disabled={siteBusy} onChange={(e) => setAddSameStyle(e.target.checked)} />
                 {ko ? "현재 버전의 스타일 유지" : "Match current version"}
@@ -1053,12 +1122,15 @@ export default function SiteStudioPage() {
                 disabled={siteBusy || !addBrief.trim()}
                 onClick={() => {
                   const text = addBrief;
+                  const hint = addStyleHint.trim();
                   setAddBrief("");
+                  setAddStyleHint("");
                   setAddOpen(false);
                   void runGenerate({
                     pid: projectId,
                     briefText: text,
                     variantCount: 1,
+                    styleHint: hint || undefined,
                     baseScreenId: addSameStyle && activeScreenId ? activeScreenId : undefined,
                   });
                 }}
@@ -1077,15 +1149,25 @@ export default function SiteStudioPage() {
               </div>
             )}
             {srcDoc ? (
-              <div style={{ ...frameHolder, width: device.width }}>
-                <iframe
-                  key={renderKey}
-                  ref={iframeRef}
-                  title="site-preview"
-                  sandbox="allow-scripts"
-                  srcDoc={srcDoc}
-                  style={{ ...frameStyle, cursor: selectMode ? "crosshair" : "auto" }}
-                />
+              /*
+               * 앱 디자인은 기기 프레임 안에서 본다 — "좁은 웹페이지"로 보이면 사람도
+               * 모델도 앱 화면으로 판단하지 못한다(Site 는 웹과 앱 디자인을 함께 만든다).
+               */
+              <div style={{ ...frameHolder, width: appPreview ? APP_FRAME_WIDTH : device.width }}>
+                <div style={appPreview ? appDeviceFrame : undefined}>
+                  <iframe
+                    key={renderKey}
+                    ref={iframeRef}
+                    title="site-preview"
+                    sandbox="allow-scripts"
+                    srcDoc={srcDoc}
+                    style={{
+                      ...frameStyle,
+                      ...(appPreview ? appDeviceScreen : null),
+                      cursor: selectMode ? "crosshair" : "auto",
+                    }}
+                  />
+                </div>
               </div>
             ) : (
               <div style={canvasEmptyState}>
@@ -1158,6 +1240,13 @@ const newVersionCheckbox: CSSProperties = { display: "inline-flex", alignItems: 
 
 const canvasWrap: CSSProperties = { flex: 1, minWidth: 0, minHeight: 0, overflow: "auto", display: "flex", justifyContent: "center", alignItems: "stretch", padding: 18, background: "var(--fill-1, rgba(0,0,0,.035))", position: "relative" };
 const frameHolder: CSSProperties = { maxWidth: "100%", minHeight: 0, display: "flex", flexShrink: 0, margin: "0 auto" };
+/* 앱 미리보기 — 최신 폰 기준(393x852). 생성 계약(outputContract)의 뷰포트와 같은 값이다. */
+const APP_FRAME_WIDTH = 393;
+const appDeviceFrame: CSSProperties = {
+  width: APP_FRAME_WIDTH, height: 852, padding: 12, borderRadius: 44,
+  background: "#111", boxShadow: "0 18px 48px rgba(0,0,0,.28)", flexShrink: 0,
+};
+const appDeviceScreen: CSSProperties = { height: "100%", minHeight: 0, borderRadius: 32, border: "none" };
 const frameStyle: CSSProperties = { width: "100%", height: "100%", minHeight: 480, border: "1px solid var(--paper-edge)", borderRadius: 10, background: "#fff", boxShadow: "var(--rd-shadow-1, 0 6px 24px rgba(0,0,0,.08))" };
 const busyOverlay: CSSProperties = { position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "color-mix(in srgb, var(--paper) 55%, transparent)", zIndex: 5 };
 const busyCard: CSSProperties = { padding: "10px 18px", borderRadius: 10, background: "var(--paper)", border: "1px solid var(--paper-edge)", fontSize: 13, fontWeight: 800, color: "var(--ink)" };

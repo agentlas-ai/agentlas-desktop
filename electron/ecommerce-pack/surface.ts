@@ -20,9 +20,31 @@ interface CommerceProfile {
   tone: string;
 }
 
+// 판정기가 고르는 카테고리 열거. "commerce"가 중립 기본값이다 — 판정 불가/미연결이면
+// 항상 중립으로 남고, 어떤 단어장도 카테고리를 확정하지 않는다.
+export const COMMERCE_CATEGORY_LABELS = ["womens-clothing", "fashion", "beauty", "commerce"] as const;
+export type CommerceCategory = (typeof COMMERCE_CATEGORY_LABELS)[number];
+
+export const COMMERCE_CATEGORY_JUDGMENT_KIND = "ecommerce-ops-category";
+
+export type CommerceCategoryJudge = (spec: {
+  kind: string;
+  question: string;
+  labels: readonly CommerceCategory[];
+  input: string;
+  guidance?: string;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}) => Promise<{ verdict: CommerceCategory | null; source: "llm" | "unavailable"; confidence: number; reason: string }>;
+
 const COMMERCE_TERMS =
   /(shop|store|commerce|ecommerce|e-commerce|mall|boutique|catalog|checkout|payment|orders|inventory|fashion|clothing|apparel|쇼핑몰|커머스|이커머스|스토어|상점|결제|주문|재고|의류|옷|패션|여성복|여자옷)/i;
 
+/**
+ * Lexical prefilter — a HINT for the pack-intent judge, never a gate and never
+ * a seed source. Contract (unified 2026-08-20): with NO connected model the
+ * seed is NEUTRAL — the pack does not appear, regardless of what this matches.
+ */
 export function shouldSeedEcommerceOps(prompt: string): boolean {
   return COMMERCE_TERMS.test(prompt);
 }
@@ -31,6 +53,7 @@ export async function prepareEcommerceOpsManifest(input: {
   prompt: string;
   now?: string;
   judgeSubsetFn?: import("../pack-intents").OnePackIntentJudge;
+  judgeCategoryFn?: CommerceCategoryJudge;
 }): Promise<AgentlasSurfaceManifest | null> {
   // ONE judged pack-intent decision shared with the creative seed (subset cache):
   // "make the font small", "restore my backup" hit the commerce wordlist and used
@@ -47,12 +70,51 @@ export async function prepareEcommerceOpsManifest(input: {
   return buildEcommerceOpsManifest({
     prompt: input.prompt,
     now: input.now,
+    category: await resolveCommerceCategory(input.prompt, input.judgeCategoryFn),
   });
 }
 
-export function buildEcommerceOpsManifest(input: { prompt: string; now?: string }): AgentlasSurfaceManifest {
+/**
+ * 2026-08-20: 정규식(inferCommerceProfile)이 사업 카테고리를 확정해 산출물 내용에
+ * 쓰던 것을 판정기 경유로 교체. 판정 불가면 null → 중립 "commerce" 프로필.
+ */
+export async function resolveCommerceCategory(
+  prompt: string,
+  judgeFn?: CommerceCategoryJudge,
+  opts: { signal?: AbortSignal; timeoutMs?: number } = {},
+): Promise<CommerceCategory | null> {
+  if (!prompt.trim()) return null;
+  try {
+    let judge = judgeFn;
+    if (!judge) {
+      const { judgeRequired } = await import("../system-agents/judgment");
+      judge = judgeRequired as unknown as CommerceCategoryJudge;
+    }
+    const verdict = await judge({
+      kind: COMMERCE_CATEGORY_JUDGMENT_KIND,
+      question:
+        "Which commerce category does this business intent describe: womens-clothing (an online store for women's clothing), fashion (clothing/apparel in general), beauty (cosmetics/beauty products), or commerce (any other or unclear category)?",
+      labels: COMMERCE_CATEGORY_LABELS,
+      input: prompt.slice(0, 2_000),
+      guidance:
+        "Judge the business the user actually wants to run, in any language. When the niche is unclear or mixed, choose commerce.",
+      timeoutMs: opts.timeoutMs ?? 8_000,
+      signal: opts.signal,
+    });
+    return verdict.source === "llm" ? verdict.verdict : null;
+  } catch {
+    return null;
+  }
+}
+
+export function buildEcommerceOpsManifest(input: {
+  prompt: string;
+  now?: string;
+  /** Judged category; null/omitted → neutral "commerce" profile. */
+  category?: CommerceCategory | null;
+}): AgentlasSurfaceManifest {
   const now = input.now ?? new Date().toISOString();
-  const profile = inferCommerceProfile(input.prompt);
+  const profile = commerceProfileFor(input.category ?? null, input.prompt);
   const evidence = [
     {
       id: "user_business_intent",
@@ -441,35 +503,47 @@ export function buildEcommerceOpsManifest(input: { prompt: string; now?: string 
   };
 }
 
-function inferCommerceProfile(prompt: string): CommerceProfile {
+/**
+ * Deterministic copy per JUDGED category. No regex reads the prompt here:
+ * the category is a judgment-service verdict (resolveCommerceCategory) or
+ * null, and null yields the neutral "commerce" profile. Language detection
+ * (isPrimarilyKorean) only picks the region copy, never the category.
+ */
+function commerceProfileFor(category: CommerceCategory | null, prompt: string): CommerceProfile {
   const isKorean = isPrimarilyKorean(prompt);
-  const category =
-    /여자옷|여성복/i.test(prompt)
-      ? "women's clothing"
-      : /fashion|clothing|apparel|옷|의류|패션/i.test(prompt)
-        ? "fashion"
-        : /beauty|cosmetic|뷰티|화장품/i.test(prompt)
-          ? "beauty"
-          : "commerce";
-  const business =
-    category === "women's clothing"
-      ? "Women's Clothing"
-      : category === "fashion"
-        ? "Fashion"
-        : category === "beauty"
-          ? "Beauty"
-          : "Commerce";
-  return {
-    business,
-    category,
-    audience:
-      category === "women's clothing"
-        ? "Women shopping online for curated everyday and seasonal outfits."
-        : "Online shoppers in the declared niche.",
-    region: isKorean ? "Korea-first, global-ready" : "Global-ready",
-    tone:
-      category === "women's clothing" || category === "fashion"
-        ? "editorial, clean, conversion-focused"
-        : "clear, trustworthy, conversion-focused",
-  };
+  const region = isKorean ? "Korea-first, global-ready" : "Global-ready";
+  switch (category) {
+    case "womens-clothing":
+      return {
+        business: "Women's Clothing",
+        category: "women's clothing",
+        audience: "Women shopping online for curated everyday and seasonal outfits.",
+        region,
+        tone: "editorial, clean, conversion-focused",
+      };
+    case "fashion":
+      return {
+        business: "Fashion",
+        category: "fashion",
+        audience: "Online shoppers in the declared niche.",
+        region,
+        tone: "editorial, clean, conversion-focused",
+      };
+    case "beauty":
+      return {
+        business: "Beauty",
+        category: "beauty",
+        audience: "Online shoppers in the declared niche.",
+        region,
+        tone: "clear, trustworthy, conversion-focused",
+      };
+    default:
+      return {
+        business: "Commerce",
+        category: "commerce",
+        audience: "Online shoppers in the declared niche.",
+        region,
+        tone: "clear, trustworthy, conversion-focused",
+      };
+  }
 }

@@ -98,6 +98,10 @@ const api: AgentlasIpc = {
     deleteScreen: (payload: { projectId: string; screenId: string }) => ipcRenderer.invoke("site:deleteScreen", payload),
     captureRect: (payload: { x: number; y: number; width: number; height: number }) => ipcRenderer.invoke("site:captureRect", payload),
     exportScreen: (payload: { projectId: string; screenId: string }) => ipcRenderer.invoke("site:exportScreen", payload),
+  // 디자인 → 코드: 웹은 react|html, 앱은 flutter|react-native|html|react.
+  exportTargets: (payload: { projectId: string }) => ipcRenderer.invoke("site:exportTargets", payload),
+  exportScreenCode: (payload: { projectId: string; screenId: string; target: string }) =>
+    ipcRenderer.invoke("site:exportScreenCode", payload),
     exportProjectZip: (payload: { projectId: string }) => ipcRenderer.invoke("site:exportProjectZip", payload),
     handoffToWorkspace: (payload: { projectId: string; workspaceGrant: import("../shared/types").FsPathGrant; locale?: "ko" | "en" }) =>
       ipcRenderer.invoke("site:handoffToWorkspace", payload),
@@ -485,6 +489,15 @@ const api: AgentlasIpc = {
   resolveToolApproval: (id: string, decision: ToolApprovalDecision) =>
     ipcRenderer.invoke("runtime:resolveToolApproval", id, decision),
   listToolApprovals: () => ipcRenderer.invoke("runtime:listToolApprovals"),
+  // 데몬 자동 시작(로그인 기동) — 기본 off. 값 변경 시 main 이 부팅 항목까지 정합시킨다.
+  getDaemonAutostart: () => ipcRenderer.invoke("daemon:getAutostart"),
+  setDaemonAutostart: (enabled: boolean) => ipcRenderer.invoke("daemon:setAutostart", enabled),
+  // 능력 규칙(capability grants) — "항상 허용"의 영구 원장 + 대화 단위 "항상 승인" 이관처.
+  listCapabilityGrants: (scope?: string) => ipcRenderer.invoke("capability:listGrants", scope),
+  revokeCapabilityGrant: (id: number) => ipcRenderer.invoke("capability:revokeGrant", id),
+  listAlwaysApprovedChats: () => ipcRenderer.invoke("capability:listAlwaysApprovedChats"),
+  grantChatAlwaysApproval: (chatId: string) => ipcRenderer.invoke("capability:grantChatAlwaysApproval", chatId),
+  revokeChatAlwaysApproval: (chatId: string) => ipcRenderer.invoke("capability:revokeChatAlwaysApproval", chatId),
   browser: {
     status: () => ipcRenderer.invoke("browser:status"),
     listSites: () => ipcRenderer.invoke("browser:listSites"),

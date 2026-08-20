@@ -776,3 +776,54 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
   }
   return state;
 }
+
+/**
+ * Host automation-registration receipts, promoted out of the collapsed work
+ * rows. `electron/mcp/client.ts` confirms each `## Automation` block with an
+ * `automation.create` / `automation.update` tool event whose args carry
+ * { name, schedule, targetType, targetId, graph }; the One conversation renders
+ * those receipts as first-class Automation cards instead of a generic notice
+ * line. Pure projection — this never invents a registration the host did not
+ * report, and a refused registration (isError) stays a plain error row.
+ */
+export interface OneAutomationRegistration {
+  /** Stable per-turn identity — the source activity item's id. */
+  itemId: string;
+  action: "created" | "updated";
+  name: string;
+  schedule?: string;
+  targetType?: string;
+  targetId?: string;
+  graph?: boolean;
+}
+
+const AUTOMATION_REGISTRATION_TOOL_RE = /^automation\.(create|update)$/;
+
+export function extractAutomationRegistrations(state: OneActivityState): OneAutomationRegistration[] {
+  const registrations: OneAutomationRegistration[] = [];
+  for (const item of state.items) {
+    if (item.kind !== "tool" || !item.tool || item.tool.isError) continue;
+    const match = AUTOMATION_REGISTRATION_TOOL_RE.exec(item.tool.name.trim());
+    if (!match) continue;
+    let args: Record<string, unknown>;
+    try {
+      const parsed: unknown = JSON.parse(item.tool.args ?? "");
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+      args = parsed as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const name = typeof args.name === "string" ? args.name.trim() : "";
+    if (!name) continue;
+    registrations.push({
+      itemId: item.id,
+      action: match[1] === "create" ? "created" : "updated",
+      name,
+      ...(typeof args.schedule === "string" && args.schedule.trim() ? { schedule: args.schedule.trim() } : {}),
+      ...(typeof args.targetType === "string" ? { targetType: args.targetType } : {}),
+      ...(typeof args.targetId === "string" ? { targetId: args.targetId } : {}),
+      ...(typeof args.graph === "boolean" ? { graph: args.graph } : {}),
+    });
+  }
+  return registrations;
+}

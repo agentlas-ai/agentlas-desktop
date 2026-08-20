@@ -767,12 +767,23 @@ import {
 } from "./store/graph-reconciliation";
 import {
   announceToolDenied,
+  capabilityClassFor,
   listPendingToolApprovals,
   onToolApprovalRequested,
   requestToolApproval,
   resolveToolApproval,
+  setCapabilityGrantPersister,
   setRuntimeToolPermissionArbiter,
 } from "./runtime/tool-approval";
+import {
+  getCapabilityDecision,
+  grantChatAlwaysApproval,
+  listAlwaysApprovedChatIds,
+  listCapabilityGrants,
+  recordCapabilityGrant,
+  revokeCapabilityGrant,
+  revokeChatAlwaysApproval,
+} from "./store/capability-grants";
 import type { ToolApprovalDecision } from "../shared/types";
 
 // DESKTOP_MOBILE_BRIDGE: live invocation authority moved to invocation/service.ts.
@@ -1907,6 +1918,9 @@ export function registerIpcHandlers(): void {
           instruction,
           selectionId: payload?.selectionId ? String(payload.selectionId) : null,
           agentAppContext,
+          // 앱 화면은 편집도 앱 계약(393x852·안전영역)으로 해야 한다. 이걸 빼면 한 번
+          // 수정하는 순간 "375/1280 반응형" 웹 계약으로 조용히 드리프트한다.
+          surface: project.surface,
           locale,
           activity: {
             onStatus: status,
@@ -2048,6 +2062,73 @@ export function registerIpcHandlers(): void {
       if (res.canceled || !res.filePath) return { ok: false, canceled: true };
       fs.writeFileSync(res.filePath, html, "utf8");
       return { ok: true, path: res.filePath };
+    } catch (err) {
+      return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  /*
+   * 디자인 → 코드 내보내기(오너 정의 2026-08-20: Site 는 디자인 생성기다).
+   * 승인된 화면을 React/HTML(웹) 또는 Flutter/React Native(앱) 소스로 옮겨,
+   * 사용자가 고른 폴더에 파일 트리로 쓴다. 배포는 하지 않는다.
+   */
+  ipcMain.handle("site:exportScreenCode", async (e, payload: {
+    projectId?: string;
+    screenId?: string;
+    target?: string;
+  }) => {
+    try {
+      const { getSiteProject, readSiteScreenHtml } = await import("./site/store");
+      const { exportSiteScreenCode } = await import("./site/generate");
+      const { exportTargetsFor } = await import("./site/design-export");
+      const projectId = String(payload?.projectId ?? "");
+      const screenId = String(payload?.screenId ?? "");
+      const meta = getSiteProject(projectId);
+      const allowed = exportTargetsFor(meta.surface);
+      const target = allowed.find((candidate) => candidate === payload?.target);
+      if (!target) return { ok: false, reason: `unsupported export target for this surface (allowed: ${allowed.join(", ")})` };
+      const html = readSiteScreenHtml(projectId, screenId);
+      const screen = meta.screens.find((s) => s.id === screenId);
+
+      const win = BrowserWindow.fromWebContents(e.sender);
+      // 폴더를 **먼저** 고르게 한다 — 몇 분짜리 변환을 돌린 뒤에 "어디 쓸까요"를 묻고
+      // 취소당하면 그 실행이 통째로 버려진다.
+      const picked = await dialog.showOpenDialog(win ?? undefined!, {
+        title: "내보낼 폴더 선택",
+        properties: ["openDirectory", "createDirectory"],
+      });
+      if (picked.canceled || !picked.filePaths[0]) return { ok: false, canceled: true };
+      const root = picked.filePaths[0];
+
+      const result = await exportSiteScreenCode({
+        projectId,
+        html,
+        target,
+        surface: meta.surface,
+      });
+      if (!result.ok || !result.files) return { ok: false, reason: result.reason ?? "export-failed" };
+
+      const folderName = `${(screen?.name ?? "screen").replace(/[^\w가-힣 .-]+/g, "_")}-${target}`;
+      const outDir = path.join(root, folderName);
+      const written: string[] = [];
+      for (const file of result.files) {
+        const destination = path.join(outDir, file.path);
+        // 경로 탈출 재확인 — 파서가 이미 걸렀지만, 쓰기 직전이 마지막 경계다.
+        const relative = path.relative(outDir, destination);
+        if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) continue;
+        fs.mkdirSync(path.dirname(destination), { recursive: true });
+        fs.writeFileSync(destination, file.content, "utf8");
+        written.push(file.path);
+      }
+      return { ok: true, path: outDir, files: written, notes: result.notes, engine: result.engine };
+    } catch (err) {
+      return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  ipcMain.handle("site:exportTargets", async (_e, payload: { projectId?: string }) => {
+    try {
+      const { getSiteProject } = await import("./site/store");
+      const { exportTargetsFor } = await import("./site/design-export");
+      return { ok: true, targets: exportTargetsFor(getSiteProject(String(payload?.projectId ?? "")).surface) };
     } catch (err) {
       return { ok: false, reason: err instanceof Error ? err.message : String(err) };
     }
@@ -3367,6 +3448,47 @@ export function registerIpcHandlers(): void {
    * 화면으로 나른다. 예전에는 어느 쪽도 화면에 도달하지 않아, 사용자는 파일 편집은 되는데
    * 셸 명령만 조용히 안 되는 상태를 원인 없이 겪었다.
    */
+  // 능력 규칙(capability grants) — "항상 허용"의 영구 원장. 대화 단위 "항상 승인"도
+  // 여기로 이관됐다(renderer localStorage 폐지, 오너 결정 2026-08-20).
+  /*
+   * 데몬 자동 시작 토글. 설정과 부팅 동작이 어긋난 채 남지 않도록, 값을 바꾼 **직후**
+   * 파일시스템(launchd/시작프로그램/systemd)을 같은 턴에 정합시킨다.
+   */
+  ipcMain.handle("daemon:getAutostart", async () => {
+    const { getDaemonAutostartEnabled } = await import("./store/daemon-autostart");
+    return { enabled: getDaemonAutostartEnabled() };
+  });
+  ipcMain.handle("daemon:setAutostart", async (_e, enabled: boolean) => {
+    const { setDaemonAutostartEnabled, getDaemonAutostartEnabled } = await import("./store/daemon-autostart");
+    setDaemonAutostartEnabled(enabled === true);
+    try {
+      const { reconcileDaemonAutostart } = await import("./daemon/app-launcher");
+      // main.ts 부팅 경로와 **같은** 커맨드로 정합시킨다(경로가 갈리면 부팅 항목이 둘이 된다).
+      reconcileDaemonAutostart(getDaemonAutostartEnabled(), {
+        executable: process.execPath,
+        entry: path.join(__dirname, "daemon", "main.js"),
+      });
+    } catch (error) {
+      // 값은 저장됐지만 부팅 항목을 못 고쳤다 — 조용히 성공이라고 말하지 않는다.
+      return {
+        enabled: getDaemonAutostartEnabled(),
+        reconciled: false,
+        reason: error instanceof Error ? error.message : String(error),
+      };
+    }
+    return { enabled: getDaemonAutostartEnabled(), reconciled: true };
+  });
+  ipcMain.handle("capability:listGrants", (_e, scope?: string) => listCapabilityGrants(scope));
+  ipcMain.handle("capability:revokeGrant", (_e, id: number) => revokeCapabilityGrant(Number(id)));
+  ipcMain.handle("capability:listAlwaysApprovedChats", () => listAlwaysApprovedChatIds());
+  ipcMain.handle("capability:grantChatAlwaysApproval", (_e, chatId: string) => {
+    if (typeof chatId === "string" && chatId) grantChatAlwaysApproval(chatId.slice(0, 128), "chip");
+    return listAlwaysApprovedChatIds();
+  });
+  ipcMain.handle("capability:revokeChatAlwaysApproval", (_e, chatId: string) => {
+    if (typeof chatId === "string" && chatId) revokeChatAlwaysApproval(chatId.slice(0, 128));
+    return listAlwaysApprovedChatIds();
+  });
   ipcMain.handle("runtime:listToolApprovals", () => listPendingToolApprovals());
   ipcMain.handle("runtime:resolveToolApproval", (_e, id: string, decision: ToolApprovalDecision) =>
     resolveToolApproval(id, decision),
@@ -3400,7 +3522,33 @@ export function registerIpcHandlers(): void {
   // ★한 벌뿐이다 — ACP 의 session/request_permission 과 우리 in-process 도구 루프
   // (ollama/lmstudio/mlx)가 **같은** 이 함수를 지난다. 정책을 두 벌 쓰면 갈라지고,
   // 갈라진 쪽은 반드시 "묻지 않고 실행"으로 기운다(local-tool-loop 이 실제로 그랬다).
+  // "항상 허용" 칩의 영구 기록(capability_grants) — tool-approval.ts 는 store 를 모르므로
+  // 여기서 주입한다(오너 결정 2026-08-20: 항상 허용은 다시는 묻지 않는다).
+  setCapabilityGrantPersister((grant) => {
+    recordCapabilityGrant({
+      capability: grant.capability,
+      pattern: grant.pattern,
+      decision: "allow",
+      scope: grant.scope,
+      source: "chip",
+    });
+  });
   setRuntimeToolPermissionArbiter(async (ask) => {
+    /*
+     * 저장된 능력 규칙이 최우선이다(deny > allow, chat > agent > global).
+     * "항상 허용"으로 영구 부여된 행동은 권한 등급과 무관하게 통과하고,
+     * 영구 거부된 행동은 full 권한으로도 뚫리지 않는다.
+     */
+    const capability = capabilityClassFor(ask.kind, ask.tool);
+    const ruled = getCapabilityDecision({
+      capability,
+      tool: ask.tool,
+      detail: ask.detail,
+      agentId: ask.agentId,
+      chatId: ask.chatId,
+    });
+    if (ruled === "deny") return "deny";
+    if (ruled === "allow") return "allow_session";
     if (ask.permission === "full") return "allow_session";
     if (!ask.mutating) return "allow_once";
     if (ask.permission === "write") return "allow_session";
@@ -3431,9 +3579,12 @@ export function registerIpcHandlers(): void {
       detail: ask.detail,
       cwd: ask.cwd,
       chatId: ask.chatId,
+      capability,
+      agentId: ask.agentId,
     });
     if (outcome.decision === "deny") recentUserDenials.set(denialKey(ask), Date.now());
-    return outcome.decision;
+    // allow_always 는 tool-approval 이 이미 영속했다 — 러너 계약에는 세션 허용으로 답한다.
+    return outcome.decision === "allow_always" ? "allow_session" : outcome.decision;
   });
 
   onToolApprovalRequested((request) => {

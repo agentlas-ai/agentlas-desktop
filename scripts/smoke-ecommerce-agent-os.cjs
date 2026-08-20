@@ -116,7 +116,9 @@ function seedAgent() {
       },
       { baseDir, now: "2026-05-31T00:00:00.000Z" },
     );
-    assert.equal(app.appName, "Women's Clothing Commerce OS");
+    // 2026-08-20: 카테고리는 더 이상 정규식이 확정하지 않는다 — 판정기(LLM) 판정이며,
+    // 판정 불가 시 중립 "Commerce OS"다. 이름의 접미 계약만 고정한다.
+    assert.match(app.appName, /Commerce OS$/);
     assert.ok(fs.existsSync(app.previewPath));
     assert.ok(fs.existsSync(path.join(app.rootPath, "data/operations.json")));
     assert.ok(fs.existsSync(path.join(app.rootPath, "src/data/operations.json")));

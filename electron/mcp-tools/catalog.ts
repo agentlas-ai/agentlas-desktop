@@ -180,6 +180,34 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
       },
     ],
   },
+  {
+    // Railway 는 이 제품에서 오래 **배포 provider** 로만 존재했다(site/agent-app-publish).
+    // 그래서 에이전트가 프로젝트·서비스·변수·로그를 조회하려 해도 붙일 도구가 없었다.
+    // 오너 지시 2026-08-20: Site 디자인 작업에 DB·Railway MCP 를 연결할 수 있어야 한다.
+    id: "railway",
+    name: "Railway",
+    nameEn: "Railway",
+    description: "Railway 프로젝트·서비스·배포·변수·로그 조회 및 관리",
+    descriptionEn: "Inspect and manage Railway projects, services, deployments, variables, and logs",
+    category: "dev",
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "@railway/mcp-server"],
+    trust: "official",
+    docsUrl: "https://docs.railway.com/guides/mcp",
+    brandColor: "#0B0D0E",
+    mark: "RW",
+    envRequirements: [
+      {
+        key: "RAILWAY_API_TOKEN",
+        label: "Railway API 토큰",
+        labelEn: "Railway API token",
+        required: true,
+        hint: "railway.com/account/tokens → Create Token",
+        hintEn: "railway.com/account/tokens → Create Token",
+      },
+    ],
+  },
 
   // ── 생산성 ────────────────────────────────────────────────
   {

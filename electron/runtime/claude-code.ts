@@ -20,6 +20,20 @@ import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
 import { detectApprovalRequired } from "./runtime-refusal";
 import { announceToolDenied } from "./tool-approval";
 import {
+  claudePoolKey,
+  claudeResidentSessionAlive,
+  claudeSessionPool,
+  createNdjsonLineReader,
+  openClaudeResidentSession,
+  residencyDisabledFor,
+  writeClaudeResidentTurn,
+  type AcpSessionLease,
+  type ClaudeResidentSession,
+  type ClaudeStreamEvent,
+  type ClaudeTurnSink,
+} from "./claude-session";
+import { isResidencyExemptAgent, resolveAgentResidencySource } from "./agent-residency";
+import {
   CLI_HISTORY_CONTEXT_TOKENS,
   composeResumeTurnPrompt,
   renderConversationContext,
@@ -374,9 +388,21 @@ export function claudeFailureFromEvent(
   return prior;
 }
 
-export const runClaudeCode: Runner = async (
+/**
+ * 이 CLI 는 `--input-format stream-json` 을 모른다(구형) — 프로세스 수명 동안 1회 학습해
+ * 영구히 1회성 `-p` 경로로 강등한다. `--include-partial-messages` 학습과 같은 모양.
+ */
+let residencySupported = true;
+
+/** 구형 CLI 판별 — 상주 스폰이 아무 이벤트도 못 내고 죽었을 때 stderr 로만 판정한다. */
+function looksLikeUnknownInputFormat(stderr: string): boolean {
+  return /input-format/i.test(stderr);
+}
+
+const runClaudeTurn = async (
   req: RunnerRequest,
   events: RunnerEvents,
+  allowResidency: boolean,
 ): Promise<RunnerResult> => {
   if (req.restrictedReadBoundary) {
     throw new Error(
@@ -455,13 +481,12 @@ export const runClaudeCode: Runner = async (
     : "";
   // resume 턴: 시스템 프롬프트가 재전송되지 않으므로 gap+턴 컨텍스트를 사용자 메시지에 싣는다.
   // 새 세션: 턴 컨텍스트를 시스템 프롬프트 뒤에 붙여 세션을 시드한다.
-  const flatUser = resumeSessionId
-    ? composeResumeTurnPrompt(
-        runReq.userPrompt,
-        [gapContext, runReq.turnContext ?? ""].filter(Boolean).join("\n\n"),
-        runReq.locale,
-      )
-    : flattenHistory(runReq);
+  const continuationPrompt = composeResumeTurnPrompt(
+    runReq.userPrompt,
+    [gapContext, runReq.turnContext ?? ""].filter(Boolean).join("\n\n"),
+    runReq.locale,
+  );
+  const flatUser = resumeSessionId ? continuationPrompt : flattenHistory(runReq);
   /*
    * 읽기 전용 실행이면 그 사실을 말해 준다 — 도구를 조용히 빼기만 하면 모델은 그것을
    * 일시적 장애로 읽고 우회를 찾는다. 실측: 서브에이전트 위임 → 다른 도구 대체 →
@@ -647,29 +672,19 @@ export const runClaudeCode: Runner = async (
     if (!stableSysKey) void fs.unlink(sysPromptFile).catch(() => {});
   };
 
-  return new Promise<RunnerResult>((resolve, reject) => {
-    const rejectRuntime = (error: unknown) => {
-      reject(
-        runReq.untrustedNoTools
-          ? createUntrustedRuntimeFailure()
-          : error instanceof Error
-            ? error
-            : new Error(String(error)),
-      );
-    };
-    // stream-json + verbose: tool_use / 텍스트 / 토큰(usage) 이벤트를 NDJSON으로 받아
-    // Claude Code식 tool-use 블록 + 토큰 표시를 가능하게 한다.
-    // --include-partial-messages: 텍스트를 메시지 블록 덩어리가 아니라 토큰 델타로 받아
-    // 타자기 스트리밍을 가능하게 한다(미지원 구형 CLI는 close 핸들러에서 자동 폴백).
-    const partialFlagArgs = includePartialMessagesSupported ? ["--include-partial-messages"] : [];
-    const systemPromptFileFlag = runReq.untrustedNoTools
-      ? "--system-prompt-file"
-      : "--append-system-prompt-file";
-    // --fork-session 제거(2026-08-18 실측): fork는 재개 스폰마다 요청 프리픽스를 바꿔
-    // 세션 캐시를 영원히 못 잇게 한다(fork 재개 3턴 연속 write 8.6K+ vs no-fork 3턴째
-    // write 360). `-p` 재개는 fork 없이도 매 스폰 새 세션 파일을 만들므로(D실측: 재개마다
-    // 새 session_id 반환) 원본 세션 훼손·동시성 문제도 없다.
-    const args = resumeSessionId
+  // stream-json + verbose: tool_use / 텍스트 / 토큰(usage) 이벤트를 NDJSON으로 받아
+  // Claude Code식 tool-use 블록 + 토큰 표시를 가능하게 한다.
+  // --include-partial-messages: 텍스트를 메시지 블록 덩어리가 아니라 토큰 델타로 받아
+  // 타자기 스트리밍을 가능하게 한다(미지원 구형 CLI는 close 핸들러에서 자동 폴백).
+  const partialFlagArgs = includePartialMessagesSupported ? ["--include-partial-messages"] : [];
+  const systemPromptFileFlag = runReq.untrustedNoTools
+    ? "--system-prompt-file"
+    : "--append-system-prompt-file";
+  // --fork-session 제거(2026-08-18 실측): fork는 재개 스폰마다 요청 프리픽스를 바꿔
+  // 세션 캐시를 영원히 못 잇게 한다(fork 재개 3턴 연속 write 8.6K+ vs no-fork 3턴째
+  // write 360). `-p` 재개는 fork 없이도 매 스폰 새 세션 파일을 만들므로(D실측: 재개마다
+  // 새 session_id 반환) 원본 세션 훼손·동시성 문제도 없다.
+  const args = resumeSessionId
       ? [
           "--resume",
           resumeSessionId,
@@ -707,42 +722,128 @@ export const runClaudeCode: Runner = async (
           ...allowedToolArgs,
           ...toolBrokerArgs,
         ];
-    let child: ReturnType<typeof spawnCli>;
+
+  /*
+   * ★상주 — 이 턴이 끝나도 프로세스를 죽이지 않는다(Phase 5, 오너 최우선 요구).
+   *
+   * 예전에는 매 턴이 `-p`(단발)로 새 프로세스를 띄우고 `--resume` 으로 문맥만 이었다.
+   * `--input-format stream-json` 을 붙이면 같은 프로세스가 stdin 으로 여러 턴을 받는다
+   * (실측: 두 턴이 같은 pid·같은 session_id). 키가 있는(=대화에 속한) 실행만 풀에서
+   * 빌린다 — chatId 가 없는 일회성 실행은 이어 쓸 다음 턴이 정의상 없다.
+   *
+   * ★상주는 **속도·비용 최적화이지 연속성의 근거가 아니다**(오너 규칙 2026-08-20).
+   * 프로세스가 사라져도 손실이 아니다: 연속성은 지금 그대로 세션 id(`--resume`)와
+   * 대화 히스토리 재주입이 잇는다. 그래서 아래 모든 실패 경로가 조용히 1회성 경로로
+   * 떨어지고, 사용자 화면에는 아무 차이도 남지 않는다.
+   */
+  const runCwd = req.cwd ?? agentRunCwd();
+  const runEnv = req.env ?? process.env;
+  const residencyEligible =
+    allowResidency &&
+    residencySupported &&
+    !residencyDisabledFor(KIND, runEnv) &&
+    !runReq.untrustedNoTools &&
+    Boolean(runReq.chatId) &&
+    Boolean(fingerprint);
+  const poolKey =
+    residencyEligible && runReq.chatId && fingerprint
+      ? claudePoolKey({
+          chatId: runReq.chatId,
+          fingerprint,
+          cwd: runCwd,
+          bin,
+          ...(runReq.mcpConfigPath ? { mcpConfigPath: runReq.mcpConfigPath } : {}),
+          ...(runReq.toolBrokerSettingsPath ? { toolBrokerSettingsPath: runReq.toolBrokerSettingsPath } : {}),
+          args,
+          env: runEnv,
+        })
+      : null;
+  const pool = claudeSessionPool();
+  let lease: AcpSessionLease<ClaudeResidentSession> | null = null;
+  /** 이 세션을 풀에 되돌리면 안 되는가(취소·오류·프로토콜 파손). */
+  let broken = false;
+  if (poolKey) {
     try {
-      child = spawnCli(bin, args, {
-        stdio: ["pipe", "pipe", "pipe"],
-        env: req.env ?? process.env,
-        // 사용자가 워킹 폴더(프로젝트)를 지정했으면 거기서 실행 — 빌드/파일 생성이 프로젝트에 일어난다.
-        // 미지정이면 쓰기 가능한 전용 폴더(packaged 앱은 cwd가 비쓰기/루트라 claude가 exit 1).
-        cwd: req.cwd ?? agentRunCwd(),
-        // POSIX 그룹킬 대상 — 취소/앱종료 시 CLI가 띄운 MCP 서버·빌드 손자까지 정리.
-        ...detachedSpawnOpts(),
-      });
-    } catch (error) {
-      cleanupSysFile();
-      cleanupAgentAppMcpConfig();
-      rejectRuntime(error);
-      return;
+      lease = await pool.acquire(
+        poolKey,
+        {
+          agentId: runReq.agentId ?? null,
+          chatId: runReq.chatId ?? null,
+          runtimeKind: KIND,
+          source: resolveAgentResidencySource(runReq.agentId),
+          reaperExempt: isResidencyExemptAgent(runReq.agentId),
+        },
+        async () =>
+          openClaudeResidentSession({
+            bin,
+            // `--input-format stream-json` 은 `--print` 와 함께만 동작한다(claude --help).
+            // args 에는 `-p` 가 이미 들어 있다.
+            args: [...args, "--input-format", "stream-json"],
+            // 사용자가 워킹 폴더(프로젝트)를 지정했으면 거기서 실행 — 빌드/파일 생성이 프로젝트에 일어난다.
+            // 미지정이면 쓰기 가능한 전용 폴더(packaged 앱은 cwd가 비쓰기/루트라 claude가 exit 1).
+            cwd: runCwd,
+            env: runEnv,
+          }),
+      );
+    } catch {
+      // 상주 세션을 못 열었으면 조용히 1회성 경로로 — 사용자에게 차이가 없어야 한다.
+      lease = null;
     }
-    trackRunChild(child);
-    writeStdin(child, flatUser);
+  }
+  const session = lease?.session ?? null;
+
+  try {
+    return await new Promise<RunnerResult>((resolve, reject) => {
+    const rejectRuntime = (error: unknown) => {
+      reject(
+        runReq.untrustedNoTools
+          ? createUntrustedRuntimeFailure()
+          : error instanceof Error
+            ? error
+            : new Error(String(error)),
+      );
+    };
+    let child: ReturnType<typeof spawnCli>;
+    if (session) {
+      child = session.child;
+    } else {
+      try {
+        child = spawnCli(bin, args, {
+          stdio: ["pipe", "pipe", "pipe"],
+          env: runEnv,
+          cwd: runCwd,
+          // POSIX 그룹킬 대상 — 취소/앱종료 시 CLI가 띄운 MCP 서버·빌드 손자까지 정리.
+          ...detachedSpawnOpts(),
+        });
+      } catch (error) {
+        cleanupSysFile();
+        cleanupAgentAppMcpConfig();
+        rejectRuntime(error);
+        return;
+      }
+      trackRunChild(child);
+      writeStdin(child, flatUser);
+    }
     // ★호스트 소유 생존 신호 — 러너 공통 규칙(runner.ts startCliHeartbeat 주석 참고).
     //   stream-json이라도 긴 생각/도구 구간은 수 분 침묵할 수 있고, 그 침묵은
     //   무활동 워치독에게 사망과 구별되지 않는다.
     const stopHeartbeat = startCliHeartbeat(child, events.onStatus, "claude");
     // ★죽은 자식이 close를 안 보내면 이 실행은 영영 안 끝난다 — runner.ts 주석 참고.
-    ensureChildCloseAfterExit(child, () => {
-      events.onStatus("claude: process exited without closing its output — settling the run");
-    });
+    // 상주 세션은 열 때 한 번만 건다(턴마다 걸면 리스너가 쌓인다).
+    if (!session) {
+      ensureChildCloseAfterExit(child, () => {
+        events.onStatus("claude: process exited without closing its output — settling the run");
+      });
+    }
 
     // 취소 — 사용자가 Stop을 누르면 자식 프로세스 트리 종료. 병렬 세션 각각 독립 취소.
-    const onAbort = () => killCliTree(child);
+    // 상주 세션은 취소와 함께 버린다(상태를 모르는 세션을 다음 턴에 물려주지 않는다).
+    const onAbort = () => { broken = true; killCliTree(child); };
     if (req.signal) {
-      if (req.signal.aborted) killCliTree(child);
+      if (req.signal.aborted) onAbort();
       else req.signal.addEventListener("abort", onAbort, { once: true });
     }
 
-    let buffer = "";
     let acc = "";
     // 현재 메시지의 토큰 델타(stream_event) 누적분 — assistant 메시지 이벤트가 오면
     // 그 권위 전문으로 acc에 폴드되고 비워진다(델타 누락/중복이 있어도 자가 교정).
@@ -1143,43 +1244,48 @@ export const runClaudeCode: Runner = async (
       }
     }
 
-    const bufferDecoder = new StringDecoder("utf8");
-    child.stdout?.on("data", (chunk: Buffer) => {
-      buffer += bufferDecoder.write(chunk);
-      let nl: number;
-      while ((nl = buffer.indexOf("\n")) >= 0) {
-        const line = buffer.slice(0, nl).trim();
-        buffer = buffer.slice(nl + 1);
-        if (!line) continue;
-        try {
-          handleEvent(JSON.parse(line));
-        } catch {
-          // 비-JSON 라인은 무시
-        }
+    /** 이 턴은 한 번만 정산된다 — 상주 경로는 result 이벤트와 프로세스 사망 둘 다 올 수 있다. */
+    let settled = false;
+    /** 이 턴이 result 까지 갔는가(상주 세션을 되돌려도 되는가의 판정). */
+    let sawResult = false;
+    const detachTurn = () => {
+      stopHeartbeat();
+      if (session) {
+        // 유휴 세션이 지난 턴의 events 로 상태를 흘리면 안 된다(ACP 와 같은 계약).
+        if (session.active === turnSink) session.active = null;
+      } else {
+        // 프로세스 종료 시 stdout/stderr data 리스너를 제거해 누수 방지.
+        child.stdout?.removeAllListeners("data");
+        child.stderr?.removeAllListeners("data");
       }
-    });
-
-    const stderrDecoder = new StringDecoder("utf8");
-    child.stderr?.on("data", (chunk: Buffer) => {
-      stderr += stderrDecoder.write(chunk);
-    });
-
-    child.on("error", (err) => {
-      // 프로세스 종료 시 stdout/stderr data 리스너를 제거해 누수 방지.
-      stopHeartbeat();
-      child.stdout?.removeAllListeners("data");
-      child.stderr?.removeAllListeners("data");
       cleanupSysFile();
       cleanupAgentAppMcpConfig();
+    };
+
+    /** 줄 하나 → 이벤트 소비. 일회성/상주 두 경로가 같은 소비자를 쓴다. */
+    const dispatchEvent = (ev: ClaudeStreamEvent): void =>
+      handleEvent(ev as unknown as Parameters<typeof handleEvent>[0]);
+
+    if (!session) {
+      child.stdout?.on("data", createNdjsonLineReader(dispatchEvent));
+      const stderrDecoder = new StringDecoder("utf8");
+      child.stderr?.on("data", (chunk: Buffer) => {
+        stderr += stderrDecoder.write(chunk);
+      });
+    }
+
+    const onProcessError = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      broken = true;
+      detachTurn();
       rejectRuntime(err);
-    });
-    child.on("close", (code) => {
-      // 프로세스 종료 시 stdout/stderr data 리스너를 제거해 누수 방지.
-      stopHeartbeat();
-      child.stdout?.removeAllListeners("data");
-      child.stderr?.removeAllListeners("data");
-      cleanupSysFile();
-      cleanupAgentAppMcpConfig();
+    };
+    const settle = (code: number | null) => {
+      if (settled) return;
+      settled = true;
+      if (code !== 0) broken = true;
+      detachTurn();
       req.signal?.removeEventListener("abort", onAbort);
       if (req.signal?.aborted) {
         // 취소여도 CLI가 이미 세션을 디스크에 남겼으면 저장한다 → 사용자가 이어서 보내는
@@ -1188,6 +1294,24 @@ export const runClaudeCode: Runner = async (
           saveRuntimeSession(req.chatId, KIND, sessionId, fingerprint);
         }
         rejectRuntime(abortReasonError(req));
+        return;
+      }
+      /*
+       * ★상주 턴이 `result` 를 못 봤다 — 세션이 죽었거나 프로토콜이 깨졌다. 이건 사용자의
+       * 문제가 아니라 우리가 물려준 세션의 문제다. 조용히 버리고 기존 1회성 `-p --resume`
+       * 경로로 **한 번** 다시 간다(그 호출은 상주를 쓰지 않으므로 무한 재시도가 불가능하다).
+       * 이미 본문이 나온 뒤라면 재시도가 화면에 답을 두 번 쓰게 되므로 하지 않는다.
+       */
+      if (session && !sawResult && !combined() && !finalText) {
+        broken = true;
+        const why = (stderr || session.stderrTail).slice(-500);
+        if (session.completedTurns === 0 && looksLikeUnknownInputFormat(why)) {
+          // 구형 CLI 는 `--input-format` 자체를 모른다 — 영구 강등(프로세스 수명 동안 1회 학습).
+          residencySupported = false;
+          console.warn(`[residency] claude-code degraded to one-shot: ${why.trim().slice(0, 200)}`);
+          events.onStatus(`[residency] disabled kind=${KIND} reason=input-format-unsupported`);
+        }
+        void runClaudeTurn(req, events, false).then(resolve, reject);
         return;
       }
       if (
@@ -1200,14 +1324,14 @@ export const runClaudeCode: Runner = async (
           rejectRuntime(new Error("workforce_runtime_tool_inventory_init_unverified"));
           return;
         }
-        void runClaudeCode({
+        void runClaudeTurn({
           ...runReq,
           mcpConfigPath: undefined,
           mcpAllowedTools: undefined,
           untrustedAllowedMcpTools: undefined,
           env: stripAgentAppMcpSecretAliases(runReq.env),
           agentAppMcpFallbackAttempted: true,
-        }, events).then(resolve, reject);
+        }, events, false).then(resolve, reject);
         return;
       }
       if (code === 0) {
@@ -1260,7 +1384,7 @@ export const runClaudeCode: Runner = async (
         // 델타 스트리밍만 포기하고 채팅 자체는 살린다(전역 1회 학습).
         if (includePartialMessagesSupported && /include-partial-messages/i.test(stderr)) {
           includePartialMessagesSupported = false;
-          void runClaudeCode(req, events).then(resolve, reject);
+          void runClaudeTurn(req, events, false).then(resolve, reject);
           return;
         }
         // Build continuation recovery is Main-owned and can change the exact
@@ -1282,11 +1406,59 @@ export const runClaudeCode: Runner = async (
             return;
           }
           // Interactive chat may recover with full durable history after the receipt.
-          void runClaudeCode({ ...req, runtimeSessionId: undefined }, events).then(resolve, reject);
+          void runClaudeTurn({ ...req, runtimeSessionId: undefined }, events, false).then(resolve, reject);
           return;
         }
         reject(new Error(`claude CLI exit ${code}${stderr ? `\n${stderr.slice(0, 500)}` : ""}`));
       }
+    };
+
+    /**
+     * 이번 턴의 수신자. 세션은 여러 턴을 살고 받는 사람은 턴마다 다르다 — 정산 신호가
+     * close(종료코드)가 아니라 `result` 이벤트라는 점만 일회성 경로와 다르다.
+     */
+    const turnSink: ClaudeTurnSink = {
+      onEvent: (ev) => {
+        dispatchEvent(ev);
+        if (ev.type === "result") {
+          sawResult = true;
+          if (session) session.completedTurns += 1;
+          // 같은 청크에 뒤따라오는 줄까지 소비한 뒤 정산한다.
+          queueMicrotask(() => settle(structuredRuntimeError ? 1 : 0));
+        }
+      },
+      onStderr: (chunk) => { stderr += chunk; },
+      onDeath: (code) => settle(code),
+    };
+
+    if (session) {
+      /*
+       * ★상주 턴 — 프로세스는 이미 살아 있고, 우리는 stdin 으로 한 줄을 보낸 뒤
+       * 이 턴의 `result` 까지 읽는다.
+       */
+      session.active = turnSink;
+      const turnText = lease && !lease.fresh ? continuationPrompt : flatUser;
+      if (!claudeResidentSessionAlive(session) || !writeClaudeResidentTurn(session, turnText)) {
+        // 빌린 순간과 쓰는 순간 사이에 죽었거나 stdin 이 닫혔다 — 조용히 1회성 경로로.
+        settle(null);
+      }
+    } else {
+      child.on("error", onProcessError);
+      child.on("close", (code) => settle(typeof code === "number" ? code : null));
+    }
     });
-  });
+  } finally {
+    if (lease) {
+      // 취소·오류면 버리고, 아니면 반납한다(다음 턴이 이어 쓴다).
+      if (broken || req.signal?.aborted) pool.discard(lease);
+      else pool.release(lease);
+    }
+  }
 };
+
+/**
+ * Claude Code 러너. 상주(프로세스 재사용)를 먼저 시도하고, 그 경로가 막히면 조용히
+ * 기존 1회성 `-p --resume` 경로로 떨어진다 — 사용자에게는 아무 차이가 없어야 한다.
+ */
+export const runClaudeCode: Runner = (req: RunnerRequest, events: RunnerEvents): Promise<RunnerResult> =>
+  runClaudeTurn(req, events, true);

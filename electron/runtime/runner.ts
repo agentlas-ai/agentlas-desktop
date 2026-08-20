@@ -44,6 +44,13 @@ export interface RunnerRequest {
   };
   /** 실행 취소 신호 — abort 시 CLI 러너는 자식 프로세스 kill, API 러너는 fetch abort. */
   signal?: AbortSignal;
+  /**
+   * 실행 슬롯 우선순위 — interactive(사람이 기다리는 채팅 턴) > background(자동화·그래프·스웜).
+   * 미설정이면 호출 문맥(runtime/run-priority.ts 의 withRunPriority)에서 읽고, 그마저 없으면
+   * interactive 다. 자동화 스케줄러 같은 무인 진입점만 background 를 단다 — 렌더러/모델
+   * 입력에서 파생하지 않는다(사람 턴을 스스로 강등하는 요청은 없어야 한다).
+   */
+  runPriority?: import("./run-priority").RunPriority;
   /** 도구 사용 권한 — read(읽기) / write(편집) / full(셸·외부). 런타임 권한 모드로 매핑. */
   permission?: "read" | "write" | "full";
   /**
@@ -130,6 +137,11 @@ export interface RunnerRequest {
    * 재사용해 시스템 프롬프트/히스토리를 매 턴 재전송하지 않도록 한다. 미설정이면 매번 full-context.
    */
   chatId?: string;
+  /**
+   * 실행 중인 에이전트 — 도구 승인 요청(RuntimeToolPermissionAsk)에 실려
+   * 에이전트 스코프 능력 규칙(capability_grants)의 대상이 된다.
+   */
+  agentId?: string;
   /**
    * 임시/비채팅 표면(Build 등)이 직접 넘기는 CLI 세션 id. 설정되면 러너는 가능한 경우 이 세션에서
    * 이어가고, 결과의 sessionId를 호출자가 다음 턴에 보관한다.

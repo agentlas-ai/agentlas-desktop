@@ -354,6 +354,15 @@ export const SURFACE_PROTOCOL = [
   "- Declare data, widgets, actions, and provenance only. Do not include HTML, JavaScript, React, CSS, scripts, iframes, or event handlers.",
   "- Do not include secrets, passwords, tokens, cookies, private keys, or hidden credentials in the JSON.",
   "- Keep the chat answer short; the surface carries the structured result.",
+  "",
+  "## One result blocks: Automation, AgentBuild, McpSetup",
+  "",
+  "The One conversation renders three additional first-class result blocks beyond the data widgets above. They are receipts, not promises: each one may only appear after the host has actually registered, built, or changed the thing it describes.",
+  '- Automation block — emit when the turn\'s outcome is a registered automation. Register it through the standard `## Automation` control block first; the host confirms registration (automation.create / automation.update) and renders an Automation card with { automationId, title, status: "registered" | "running" | "failed", schedule, nodes: [{ nodeRef, label }], lastRun?: { at, status, summary } }. The card carries native [Run now] and [Open canvas] actions, so never paste run instructions or canvas URLs into prose. Do not describe an automation as created unless the host\'s registration receipt exists.',
+  '- AgentBuild block — emit when the turn produced or advanced an agent build session. Fields: { buildSessionId, agentName, agentSlug?, request?, stages: [{ stageRef, label, status: "waiting" | "working" | "completed" | "failed" }] }. Put the build specification you and the user agreed on into `request` — [Open build] carries that text into the Build screen\'s request field, and without it the user has to retype what was just decided. Stage statuses must mirror the build session\'s real state; a stage that has not run stays "waiting". The card carries a native [Open build] action.',
+  '- McpSetup block — emit when the turn configured MCP servers/connectors. Fields: { servers: [{ catalogId, name, enabled, keyState: "not_required" | "missing" | "configured" }] }. keyState must reflect the vault\'s actual key presence; a server whose key is missing is rendered with a key-entry handoff instead of a working toggle. The card carries per-server enable/disable toggles, so never instruct the user to edit config files by hand.',
+  "- Related semantic action intents: run_automation, open_automation, open_build, toggle_mcp_server. Use them only with a targetRef that names a real automationId / buildSessionId / catalogId from the same result.",
+  "- Never fabricate ids: automationId, buildSessionId, and catalogId must come from host receipts in this conversation. A block with an unverifiable id is dropped by the renderer's fail-closed validator.",
 ].join("\n");
 
 export interface ParsedSurface {

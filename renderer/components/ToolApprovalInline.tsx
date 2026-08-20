@@ -40,11 +40,12 @@ export function ToolApprovalCard({ request, compact = false }: { request: ToolAp
       {!compact && request.cwd && <div className="tac-row"><span className="tac-key">{ko ? "작업 폴더" : "Folder"}</span><span className="tac-val mono">{request.cwd}</span></div>}
       <p className="tac-note">
         {ko
-          ? "허용하지 않으면 이 호출만 거부되고 나머지는 그대로 진행됩니다."
-          : "Denying rejects only this call; the rest of the run proceeds."}
+          ? "허용하지 않으면 이 호출만 거부되고 나머지는 그대로 진행됩니다. \"항상 허용\"은 이 도구를 영구 허용해 어떤 에이전트에서도 다시 묻지 않습니다."
+          : "Denying rejects only this call; the rest of the run proceeds. \"Always allow\" permanently allows this tool for every agent — it will never ask again."}
       </p>
       <div className="tac-actions">
         <button type="button" className="deny" onClick={() => decideToolApproval(request.id, "deny")}>{ko ? "거부" : "Deny"}</button>
+        <button type="button" onClick={() => decideToolApproval(request.id, "allow_always")}>{ko ? "항상 허용" : "Always allow"}</button>
         <button type="button" onClick={() => decideToolApproval(request.id, "allow_session")}>{ko ? "이 작업에서 계속 허용" : "Allow for this task"}</button>
         <button type="button" className="primary" onClick={() => decideToolApproval(request.id, "allow_once")}>{ko ? "이번만 허용" : "Allow once"}</button>
       </div>

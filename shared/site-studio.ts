@@ -371,16 +371,28 @@ export type SiteAgentAppCapabilityIssue = {
 };
 
 /**
+ * 소유자가 이 Agent App 실행에 준 권한 등급(오너 결정 2026-08-20: Site 전부 개방).
+ * 방문자의 브라우저 입력에서는 절대 오지 않는다 — 프로젝트 설정(소유자)만이 출처다.
+ * 미설정이면 `write`(파일 편집·MCP·브라우저 가능, 셸은 행동 승인 규칙이 있을 때만).
+ */
+export type SiteAgentAppPermission = "read" | "write" | "full";
+
+/**
  * Persisted declaration only. Availability is re-checked in Electron main for
  * every run, so this snapshot never carries a config path or credential.
  */
 export type SiteAgentAppCapabilityProfile = {
   schemaVersion: 1;
   source: "none" | "declared-package" | "declared-routing-card" | "composed-target";
-  /** Exact, policy-approved read-only MCP catalog ids requested by the package. */
+  /**
+   * 이 앱이 쓰는 MCP 카탈로그 id. 예전에는 정책 고정 allowlist(agentlas-time 1종)만
+   * 유효했으나, 오너 결정 2026-08-20 이후로는 소유자 동의 영수증이 유일한 관문이다.
+   */
   readonlyMcpCatalogIds: string[];
   /** Unsafe or unsupported declared capabilities, using value-free reasons. */
   unavailable: SiteAgentAppCapabilityIssue[];
+  /** 소유자가 고른 실행 권한. 미설정이면 write. */
+  permission?: SiteAgentAppPermission;
 };
 
 /**
