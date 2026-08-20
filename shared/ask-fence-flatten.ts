@@ -61,7 +61,10 @@ export function flattenAskFences(text: string, replyLocale: "ko" | "en"): string
     const afterOpen = rest.slice(open + AGENT_ASK_OPEN.length);
     const close = afterOpen.indexOf(AGENT_ASK_CLOSE);
     if (close < 0) {
-      result += afterOpen;
+      // 닫는 펜스가 아직 없다(스트리밍 중). 본문을 남기면 안 된다 — 그것은 사람이 읽을
+      // 글이 아니라 JSON 와이어 포맷이라, 실측(2026-08-20)에서 휴대폰에 `{"question":`
+      // 조각이 그대로 떴다. 완성된 텍스트는 다음 투영에서 통째로 다시 오므로, 여기서는
+      // 열림 마커부터 끝까지 버린다(다 온 뒤에 질문이 평문으로 보인다).
       break;
     }
     const flat = flattenAskFenceBody(afterOpen.slice(0, close), replyLocale);
