@@ -1,3 +1,4 @@
+import { nodeCanChangeTheOutsideWorld } from "../../shared/graph-code-vars";
 import {
   canonicalJsonValue,
   graphExecutionDigest,
@@ -156,7 +157,7 @@ function synthesizeLegacyCheckpoint(
   nodeStates: Record<string, WorkflowNodeRunState>,
 ): GraphCheckpoint | null {
   const effectNodeIds = graph.nodes
-    .filter((node) => node.type === "agent" || node.type === "action" || node.type === "output")
+    .filter((node) => nodeCanChangeTheOutsideWorld(node))
     .map((node) => node.id)
     .sort();
   const effects = new Set(effectNodeIds);
@@ -255,7 +256,7 @@ function loadReconciliation(
   const edgeIds = new Set(graph.edges.map((edge) => edge.id));
   const effectNodeIds = new Set(
     graph.nodes
-      .filter((node) => node.type === "agent" || node.type === "action" || node.type === "output")
+      .filter((node) => nodeCanChangeTheOutsideWorld(node))
       .map((node) => node.id),
   );
   const nodeStates = parseNodeStates(run.node_states_json, nodeIds);

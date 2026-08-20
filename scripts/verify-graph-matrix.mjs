@@ -44,7 +44,18 @@ setUserDataDir(dir);
 const { initStore, getDb } = await import("../dist/electron/store/db.js");
 initStore();
 const store = await import("../dist/electron/store/automations.js");
-const { runGraph } = await import("../dist/electron/workflow/run-graph.js");
+const { runGraph: runGraphRaw } = await import("../dist/electron/workflow/run-graph.js");
+
+// 커널의 거절은 두 모양으로 온다: 반환된 {ok:false}, 그리고 throw. 제품의 실행 경로도
+// 둘 다 실패로 기록한다. 시험이 한 모양만 보면 다른 모양은 시험 자체를 죽여서
+// "고장을 못 잡은" 게 아니라 "시험이 안 끝난" 상태가 된다 — 두 모양을 같은 결과로 받는다.
+const runGraph = async (...args) => {
+  try {
+    return await runGraphRaw(...args);
+  } catch (err) {
+    return { ok: false, error: String(err?.message ?? err), threw: true };
+  }
+};
 
 const checks = [];
 const failures = [];
@@ -343,10 +354,368 @@ const outPath = path.join(dir, "written.txt");
   };
   const automation = saveAutomation(graph, "one-sided-branch");
   const run = await runGraph(automation, automation.graph, { initialVars: { seed: "" } });
+  // 실패를 기대하는 단언은 **사유까지** 본다 — 아무 이유로든 실패하면 통과하는 시험은
+  // 아무것도 지키지 않는다(오늘 세 번 당했다).
+  const whyBranch = String(run.error ?? "") + JSON.stringify(run.nodeFailures ?? {});
   check(
     "a-one-sided-branch-fails-loudly-not-silently",
-    !run.ok,
-    "한쪽만 이어진 갈림길에서 판정이 반대로 나왔는데 실행이 조용히 성공했습니다 — 그 실행은 아무것도 안 한 것입니다.",
+    !run.ok && /NO_MATCHING_EDGE/.test(whyBranch),
+    "한쪽만 이어진 갈림길에서 판정이 반대로 나왔는데 그 사유로 멈추지 않았습니다 — "
+    + `그 실행은 아무것도 안 한 것입니다. 실제 사유: ${whyBranch.slice(0, 180)}`,
+  );
+}
+
+// ── ⑥ 상태 축: 그래프를 고친 뒤 — 실행도 재조정도 안 되는 잠김이 없어야 한다 ──────
+//
+// 실측 2026-08-20: 부수효과를 남기고 실패한 실행이 있는 상태에서 그래프를 고치면
+//   · 실행   → automation_partial_graph_changed
+//   · 재조정 → automation_graph_reconciliation_graph_drift
+// 둘 다 옳은 거절인데 합치면 그 자동화는 **영구히 잠긴다**. 그래프를 편집한 사람은
+// 누구나 이 상태에 빠질 수 있으므로, 나갈 문이 실재하는지 여기서 지킨다.
+{
+  const ledger = path.join(dir, "edited-ledger.txt");
+  const makeGraph = (marker) => ({
+    version: 1,
+    nodes: [
+      node("start", "trigger", { kind: "input", produces: "seed" }),
+      node("send", "code", {
+        effect: "mutation", produces: "sent", codeLang: "python",
+        code: [
+          "import pathlib",
+          `p = pathlib.Path(${JSON.stringify(ledger)})`,
+          `p.write_text(${JSON.stringify(marker)}, encoding='utf8')`,
+          "result = 'sent'",
+        ].join("\n"),
+      }, "바깥으로 보낸다"),
+      node("boom", "code", {
+        effect: "read", consumes: "sent", produces: "never", codeLang: "python",
+        code: "raise RuntimeError('boundary crash')",
+      }, "보낸 직후 죽는다"),
+    ],
+    edges: [edge("start", "send"), edge("send", "boom")],
+  });
+
+  const automation = saveAutomation(makeGraph("v1"), "edited-after-effects");
+  const crashed = await runGraph(automation, automation.graph, { initialVars: { seed: "go" } });
+  check(
+    "an-edited-graph-starts-from-a-real-partial-failure",
+    !crashed.ok && existsSync(ledger),
+    "부수효과를 남긴 실패를 만들지 못했습니다 — 이 시험이 잠김 상황에 닿지 못합니다.",
+  );
+
+  // 사람이 그래프를 고친다(라벨 한 글자만 바꿔도 digest 가 달라진다).
+  const edited = makeGraph("v2");
+  const { updateAutomationGraph } = store;
+  updateAutomationGraph(automation.id, edited, { note: "matrix: 사람이 고쳤다" });
+  const afterEdit = store.getAutomation(automation.id);
+
+  const blocked = await runGraph(afterEdit, afterEdit.graph, { initialVars: { seed: "go" } });
+  const whyBlocked = String(blocked.error ?? "");
+  check(
+    "an-edited-graph-refuses-to-replay-committed-effects",
+    !blocked.ok && /partial_graph_changed|reconciliation_required|ambiguous_side_effect/.test(whyBlocked),
+    `그래프를 고쳤는데 이미 나간 부수효과를 그대로 재생했습니다 — 두 번 나갑니다. 사유: ${whyBlocked.slice(0, 180)}`,
+  );
+
+  /*
+   * ★그리고 거기서 **나갈 문이 있어야 한다.** 거절만 있고 문이 없으면 영구 잠김이다.
+   *   사람이 "이전 실행은 잊고 처음부터"라고 말하는 것 — 그래프가 실제로 바뀐 경우에만 응한다.
+   */
+  const gr = await import("../dist/electron/store/graph-reconciliation.js");
+  const { graphExecutionDigest } = await import("../dist/shared/graph-execution-digest.js");
+  const forgot = gr.forgetStaleGraphCheckpoint(automation.id, graphExecutionDigest(afterEdit, afterEdit.graph));
+  check(
+    "an-edited-graph-has-a-way-out",
+    forgot.forgot === true,
+    `그래프를 고친 뒤 잠긴 자동화를 사람이 풀 수단이 없습니다(사유: ${forgot.reason}) — 실행도 재조정도 `
+    + "거절되는 상태가 영구히 남습니다.",
+  );
+
+  const unlocked = await runGraph(store.getAutomation(automation.id), afterEdit.graph, { initialVars: { seed: "go" } });
+  check(
+    "after-forgetting-the-automation-runs-again",
+    existsSync(ledger) && readFileSync(ledger, "utf8") === "v2",
+    `문을 지났는데도 자동화가 새 그래프로 돌지 않았습니다(파일: ${existsSync(ledger) ? readFileSync(ledger, "utf8") : "없음"}, ok=${unlocked.ok}).`,
+  );
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * ⑦ 값 가공 축 — transform
+ *
+ * transform 은 모델 없이 도는 유일한 "값을 만드는" 노드다. 이 저장소가 이미 두 번
+ * 고친 병이 여기 산다: **초록불인데 값은 안 생긴다.** 그러면 다음 단계가
+ * NODE_INPUT_MISSING 으로 죽고, 사람 화면에서는 성공한 단계 **다음**이 실패한다 —
+ * 원인을 의심할 곳이 없다. 그래서 두 가지를 지킨다: 가공한 값이 실제로 다음 단계에
+ * 닿는가, 그리고 가공이 불가능하면 그 단계 자신이 실패하는가.
+ * ──────────────────────────────────────────────────────────────────────────── */
+{
+  const out = path.join(dir, "transform-out.txt");
+  const graph = {
+    version: 1,
+    nodes: [
+      node("start", "trigger", { kind: "input", produces: "raw" }),
+      node("shape", "transform", {
+        effect: "pure", mode: "format", from: "raw", to: "shaped",
+        template: "받은 값은 [{{raw}}] 입니다",
+      }, "값을 다듬는다"),
+      node("write", "code", {
+        effect: "mutation", consumes: "shaped", produces: "written", codeLang: "python",
+        code: [
+          "import pathlib",
+          `pathlib.Path(${JSON.stringify(out)}).write_text(str(vars.get('shaped','')), encoding='utf8')`,
+          "result = 'ok'",
+        ].join("\n"),
+      }, "다듬은 값을 쓴다"),
+    ],
+    edges: [edge("start", "shape"), edge("shape", "write")],
+  };
+  const run = await runGraph(saveAutomation(graph, "transform-flows"), graph, { initialVars: { raw: "안녕" } });
+  check(
+    "a-transformed-value-reaches-the-next-step",
+    run.ok && existsSync(out) && readFileSync(out, "utf8") === "받은 값은 [안녕] 입니다",
+    `가공한 값이 다음 단계에 닿지 않았습니다(파일: ${existsSync(out) ? readFileSync(out, "utf8") : "없음"}, `
+    + `ok=${run.ok}, 사유: ${String(run.error ?? "").slice(0, 140)}).`,
+  );
+
+  // 가공할 대상이 없는 transform. 조용히 지나가면 안 된다.
+  const broken = {
+    version: 1,
+    nodes: [
+      node("start", "trigger", { kind: "input", produces: "raw" }),
+      node("shape", "transform", { effect: "pure", mode: "format", to: "shaped" }, "무엇을 다듬을지가 없다"),
+      node("after", "code", { effect: "read", consumes: "shaped", produces: "done", codeLang: "python", code: "result = 1" }),
+    ],
+    edges: [edge("start", "shape"), edge("shape", "after")],
+  };
+  const brokenRun = await runGraph(saveAutomation(broken, "transform-silent"), broken, { initialVars: { raw: "x" } });
+  const failedNode = Object.keys(brokenRun.nodeFailures ?? {}).join(",");
+  check(
+    "a-transform-that-cannot-produce-fails-on-itself",
+    !brokenRun.ok && failedNode === "shape",
+    "값을 못 만드는 가공 단계가 초록불로 지나갔습니다 — 사람 화면에서는 **성공한 단계 다음**이 "
+    + `실패해 원인을 의심할 곳이 없습니다(실패한 단계: ${failedNode || "없음"}, ok=${brokenRun.ok}).`,
+  );
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * ⑧ 자동화가 자동화를 부르는 축 — subgraph
+ *
+ * 안쪽 그래프가 바깥으로 나가는 일(파일 쓰기·발송)을 하면, 그 효과는 **바깥 그래프의
+ * 체크포인트에도 이미 나간 것으로** 잡혀야 한다. 안 그러면 바깥이 재개될 때 안쪽이
+ * 통째로 다시 돌아 두 번 나간다 — 오늘 code 노드에서 고친 것과 같은 계열이다.
+ * ──────────────────────────────────────────────────────────────────────────── */
+{
+  const tally = path.join(dir, "subgraph-tally.txt");
+  const innerGraph = {
+    version: 1,
+    nodes: [
+      node("in", "trigger", { kind: "input", produces: "payload" }),
+      node("send", "code", {
+        effect: "mutation", produces: "sent", codeLang: "python",
+        code: [
+          "import pathlib",
+          `p = pathlib.Path(${JSON.stringify(tally)})`,
+          "p.write_text(('x' * 0) + (p.read_text(encoding='utf8') if p.exists() else '') + 'x', encoding='utf8')",
+          "result = 'sent'",
+        ].join("\n"),
+      }, "안쪽에서 바깥으로 보낸다"),
+    ],
+    edges: [edge("in", "send")],
+  };
+  const inner = saveAutomation(innerGraph, "subgraph-inner");
+
+  const outerGraph = {
+    version: 1,
+    nodes: [
+      node("start", "trigger", { kind: "input", produces: "seed" }),
+      node("call", "subgraph", { graphRef: inner.id, input: "{{seed}}", produces: "innerResult" }, "안쪽 자동화를 부른다"),
+      node("boom", "code", {
+        effect: "read", consumes: "innerResult", produces: "never", codeLang: "python",
+        code: "raise RuntimeError('outer crash after inner sent')",
+      }, "부른 직후 죽는다"),
+    ],
+    edges: [edge("start", "call"), edge("call", "boom")],
+  };
+  const outer = saveAutomation(outerGraph, "subgraph-outer");
+  const first = await runGraph(outer, outerGraph, { initialVars: { seed: "go" } });
+  const afterFirst = existsSync(tally) ? readFileSync(tally, "utf8").length : 0;
+  check(
+    "an-inner-graph-really-sent-once-before-the-outer-crash",
+    !first.ok && afterFirst === 1,
+    `안쪽 자동화가 한 번 나가고 바깥이 죽는 상황을 못 만들었습니다(보낸 횟수: ${afterFirst}, ok=${first.ok}).`,
+  );
+
+  const resumed = await runGraph(store.getAutomation(outer.id), outerGraph, { initialVars: { seed: "go" } });
+  const afterResume = existsSync(tally) ? readFileSync(tally, "utf8").length : 0;
+  check(
+    "a-resume-does-not-re-send-through-a-subgraph",
+    afterResume === 1,
+    `바깥 그래프를 재개하자 안쪽 자동화가 **다시 보냈습니다**(보낸 횟수 ${afterFirst}→${afterResume}). `
+    + `자동화가 자동화를 부르면 중복 발송 보호가 사라집니다(ok=${resumed.ok}).`,
+  );
+
+  // 자기 자신을 부르는 것은 깊이 상한이 아니라 **이유가 있는 거절**로 막혀야 한다.
+  const selfGraph = {
+    version: 1,
+    nodes: [
+      node("start", "trigger", { kind: "input", produces: "seed" }),
+      node("call", "subgraph", { graphRef: "SELF", input: "{{seed}}", produces: "r" }, "자기를 부른다"),
+    ],
+    edges: [edge("start", "call")],
+  };
+  const selfAuto = saveAutomation(selfGraph, "subgraph-self");
+  selfGraph.nodes[1].config.graphRef = selfAuto.id;
+  store.updateAutomationGraph(selfAuto.id, selfGraph, { note: "matrix: self ref" });
+  const selfRun = await runGraph(store.getAutomation(selfAuto.id), selfGraph, { initialVars: { seed: "go" } });
+  check(
+    "an-automation-that-calls-itself-is-refused-with-a-reason",
+    !selfRun.ok && /SUBGRAPH_SELF_CALL/.test(JSON.stringify(selfRun)),
+    `자기를 부르는 자동화가 이유 없이 돌거나 다른 사유로 죽었습니다: ${JSON.stringify(selfRun).slice(0, 200)}`,
+  );
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * ⑨ 연결 축의 남은 칸 — 자기루프와 중첩 되돌이
+ *
+ * 되돌이는 커널의 planGraphLoops 하나가 판정한다(게이트
+ * the-kernel-is-the-single-authority-on-loops). 상한 있는 단순 되돌이는 이미
+ * 지켰다. 남은 두 모양 — 노드가 자기에게 돌아오는 것, 되돌이 안의 되돌이 — 도
+ * **시작 전에** 판정돼야 한다. 돌다가 죽으면 이미 나간 것이 남는다.
+ * ──────────────────────────────────────────────────────────────────────────── */
+{
+  const selfLoop = {
+    version: 1,
+    nodes: [
+      node("start", "trigger", { kind: "input", produces: "seed" }),
+      node("spin", "code", {
+        effect: "pure", produces: "keepgoing", codeLang: "python",
+        code: "result = True",
+      }, "자기에게 돌아온다"),
+    ],
+    edges: [edge("start", "spin"), edge("spin", "spin", { condition: "keepgoing" })],
+  };
+  const selfLoopRun = await runGraph(saveAutomation(selfLoop, "self-loop"), selfLoop, { initialVars: { seed: "go" } });
+  check(
+    "a-self-loop-without-a-cap-is-refused-before-it-starts",
+    !selfLoopRun.ok,
+    "상한 없이 자기에게 돌아오는 단계가 그냥 시작했습니다 — 끝나지 않거나, 끝날 때까지 "
+    + `바깥으로 계속 나갑니다(ok=${selfLoopRun.ok}).`,
+  );
+
+  const capped = path.join(dir, "nested-loop.txt");
+  const nested = {
+    version: 1,
+    nodes: [
+      node("start", "trigger", { kind: "input", produces: "seed" }),
+      node("outer", "code", { effect: "pure", produces: "again", codeLang: "python", code: "result = True" }, "바깥 되돌이"),
+      node("innerStep", "code", {
+        effect: "mutation", produces: "tick", codeLang: "python", maxIterations: 2,
+        code: [
+          "import pathlib",
+          `p = pathlib.Path(${JSON.stringify(capped)})`,
+          "p.write_text((p.read_text(encoding='utf8') if p.exists() else '') + 'x', encoding='utf8')",
+          "result = True",
+        ].join("\n"),
+      }, "안쪽 되돌이 — 돌 때마다 바깥으로 나간다"),
+    ],
+    edges: [
+      edge("start", "outer"),
+      edge("outer", "innerStep"),
+      edge("innerStep", "innerStep", { condition: "tick", maxIterations: 2 }),
+      edge("innerStep", "outer", { condition: "again", maxIterations: 2 }),
+    ],
+  };
+  const nestedRun = await runGraph(saveAutomation(nested, "nested-loops"), nested, { initialVars: { seed: "go" } });
+  const sends = existsSync(capped) ? readFileSync(capped, "utf8").length : 0;
+  check(
+    "nested-loops-cannot-send-more-than-their-caps-allow",
+    sends <= 4,
+    `되돌이 안의 되돌이가 상한(2×2=4)을 넘어 ${sends}번 바깥으로 나갔습니다 — 상한이 안쪽에 `
+    + `안 걸립니다(ok=${nestedRun.ok}, 사유: ${String(nestedRun.error ?? "").slice(0, 140)}).`,
+  );
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * ⑩ 남은 노드 종류 — agent / tool / action / output / eval
+ *
+ * 이 다섯은 **실행하려면** 모델이나 런타임이 필요하다. 그래서 여기 넣지 않는다.
+ * 그러나 이들이 **잘못 설정됐을 때의 거절**은 모델을 부르기 전에 일어나고, 그래서
+ * 모델 없이 재현된다. 그리고 그게 이 종류들에서 가장 사람을 다치게 하는 결함이다:
+ *   초록불인데 아무 일도 안 일어난다 — 도구를 붙였다고 믿는데 어디에도 안 붙었고,
+ *   내보냈다고 믿는데 내용이 비었다.
+ * 그래서 이 축은 "실행"이 아니라 "**거절이 실재하는가**"를 지킨다.
+ * ──────────────────────────────────────────────────────────────────────────── */
+const guardCases = [
+  {
+    name: "an-output-with-nothing-to-say-is-refused",
+    expect: "OUTPUT_NODE_EMPTY",
+    // ★자동화에 프롬프트가 남아 있으면 출력 노드는 **그것**을 내용으로 삼는다(설계된 되돌아보기).
+    //   그래서 "정말 아무 데도 적힌 게 없는" 상태를 만들려면 프롬프트까지 비워야 한다.
+    emptyPrompt: true,
+    nodes: [node("out", "output", { effect: "read" }, "무엇을 내보낼지가 없다")],
+    hurt: "내보낼 내용이 없는 출력 단계가 초록불로 끝납니다 — 사람은 결과가 나갔다고 믿습니다.",
+  },
+  {
+    name: "an-output-whose-value-nobody-made-is-refused",
+    expect: "NODE_INPUT_MISSING",
+    nodes: [node("out", "output", { effect: "read", text: "결과는 {{nobodyMakesThis}} 입니다" }, "빈 구멍이 있는 출력")],
+    hurt: "앞 단계가 안 만든 값을 빈칸으로 내보내고 성공으로 남습니다 — 빈 보고서가 나갑니다.",
+  },
+  {
+    name: "a-tool-nobody-chose-is-refused",
+    expect: "TOOL_NODE_UNCONFIGURED",
+    nodes: [node("t", "tool", {}, "어떤 도구인지가 없다")],
+    hurt: "무엇을 쓸지 안 고른 도구 단계가 지나갑니다.",
+  },
+  {
+    name: "a-tool-attached-to-nothing-is-refused",
+    expect: "TOOL_NODE_UNATTACHED",
+    nodes: [node("t", "tool", { catalog: "gmail" }, "아무 에이전트에도 안 붙었다")],
+    hurt: "도구를 붙였다고 믿는데 어느 에이전트에도 안 이어져, 실제로는 아무 데도 안 쓰입니다.",
+  },
+  {
+    name: "an-eval-with-no-criteria-is-refused",
+    expect: "EVAL_INCOMPLETE",
+    nodes: [node("v", "eval", { subject: "seed" }, "무엇을 기준으로 볼지가 없다")],
+    hurt: "기준 없는 검증 단계가 통과합니다 — 검증했다는 표시만 남습니다.",
+  },
+];
+for (const c of guardCases) {
+  const graph = {
+    version: 1,
+    nodes: [node("start", "trigger", { kind: "input", produces: "seed" }), ...c.nodes],
+    edges: c.nodes.map((n) => edge("start", n.id)),
+  };
+  const saved = saveAutomation(graph, c.name);
+  if (c.emptyPrompt) {
+    getDb().prepare("UPDATE automations SET prompt_template = '' WHERE id = ?").run(saved.id);
+  }
+  const run = await runGraph(store.getAutomation(saved.id), graph, { initialVars: { seed: "go" } });
+  const codes = Object.values(run.nodeFailures ?? {}).map((f) => f.code).join(",");
+  check(
+    c.name,
+    !run.ok && codes.includes(c.expect),
+    `${c.hurt} (기대한 사유 ${c.expect}, 실제 ok=${run.ok} 사유=${codes || String(run.error ?? "없음").slice(0, 120)})`,
+  );
+}
+
+// 거절만 있고 도는 길이 없으면 그 노드 종류는 쓸모가 없다 — output 은 모델 없이도
+// 끝까지 돌아야 한다(내용이 선언돼 있고 바깥으로 안 나가는 경우).
+{
+  const graph = {
+    version: 1,
+    nodes: [
+      node("start", "trigger", { kind: "input", produces: "count" }),
+      node("out", "output", { effect: "read", text: "오늘 처리한 건수: {{count}}", produces: "report" }, "결과로 남긴다"),
+    ],
+    edges: [edge("start", "out")],
+  };
+  const run = await runGraph(saveAutomation(graph, "output-declared"), graph, { initialVars: { count: 12 } });
+  check(
+    "a-declared-output-passes-its-content-through-untouched",
+    run.ok && String(run.outputs?.out ?? "") === "오늘 처리한 건수: 12",
+    "사람이 적어 둔 결과 문장이 그대로 안 나갔습니다 — 내용이 지시문으로 오해되면 모델이 "
+    + `다시 써 버립니다(실제: ${JSON.stringify(run.outputs?.out ?? null)}, ok=${run.ok}).`,
   );
 }
 
