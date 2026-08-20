@@ -1116,6 +1116,39 @@ for (const c of guardCases) {
   );
 }
 
+// ── 축: 멈추는 것은 금지선뿐이다 ──────────────────────────────────────────────
+// 오너 결정 2026-08-20. 근거를 대고 주장과 세상을 맞대 본 검증(=금지선)이 떨어지면 멈춘다.
+// 근거 없이 값의 품질만 본 검증은 "목표에 얼마나 닿았나"이고, 그 판단은 사용자가 승인한
+// 목표를 들고 있는 완주 판정이 한다 — 실측(E3): 목표를 모르는 검증이 "읽을 수 없는
+// 청구서를 검토 폴더로"(=시킨 그대로)를 미충족으로 적었다.
+{
+  const { evalIsBoundary } = await import("../dist/shared/graph-node-protocol.js");
+  check(
+    "only-a-check-that-compares-a-claim-with-the-world-can-stop-the-run",
+    evalIsBoundary({ type: "eval", config: { subject: "filed", evidence: "observed" } })
+      && !evalIsBoundary({ type: "eval", config: { subject: "filed", criteria: "잘 채워졌다" } })
+      && !evalIsBoundary({ type: "eval", config: { subject: "filed", evidence: "   " } }),
+    "근거 없이 값만 본 검증이 실행을 멈추면, 시킨 대로 한 자동화가 실패로 찍힙니다. "
+    + "반대로 근거를 댄 검증까지 통과시키면 \"옮겼다는데 없다\"가 지나갑니다.",
+  );
+  const src = readFileSync(new URL("../electron/workflow/run-graph.ts", import.meta.url), "utf8");
+  const stops = [...src.matchAll(/code:\s*"EVAL_FAILED"/g)].length;
+  const guarded = [...src.matchAll(/if \(evalIsBoundary\(node\)\) \{/g)].length;
+  check(
+    "every-place-that-stops-on-a-failed-check-asks-the-same-question",
+    stops > 0 && guarded === stops,
+    `실행을 멈추는 자리 ${stops}곳 중 ${guarded}곳만 금지선인지 묻습니다 — 한 곳이라도 빠지면 `
+    + "그 경로로 들어온 자동화만 예전처럼 멈춥니다.",
+  );
+  check(
+    "when-it-cannot-tell-it-asks-a-person",
+    /needs_input and say in one sentence/.test(
+      readFileSync(new URL("../electron/automation-result.ts", import.meta.url), "utf8")),
+    "알 수 없는 것을 실패로 찍으면 사용자는 고칠 것이 없는 실패를 보고, 성공으로 찍으면 "
+    + "안 된 일이 된 일로 기록됩니다 — 모르면 사람 앞에 올려야 합니다.",
+  );
+}
+
 try { getDb().close(); } catch { /* noop */ }
 try { rmSync(dir, { recursive: true, force: true }); } catch { /* noop */ }
 

@@ -62,6 +62,7 @@ import {
   type NodeOutputEnvelope,
   automationRuntimePermission,
   defaultNodeEffect,
+  evalIsBoundary,
   nodeCouldHaveActedOutside,
   requiredExecutionPermission,
   valueIsReadAsData,
@@ -2574,12 +2575,27 @@ export async function runGraph(
             // ★떨어졌는데 그것을 받을 곳이 없으면 여기서 멈춘다 — 아무도 안 읽는 fail 을
             //   지나쳐 `ok: true` 로 끝나면, 검증을 붙인 사람에게 통과했다고 거짓말하는 것이다.
             if (!evalFailureIsHandled(node.id, produces)) {
-              failGraphNode(node, {
-                code: "EVAL_FAILED",
-                reason: `검증 "${node.label || node.id}"이(가) 통과하지 못했습니다:\n${list.reasonText}`,
-                nextAction: "앞 단계의 지시를 고치거나, 이 검증이 떨어졌을 때 다시 시도할 경로를 그려 주세요.",
+              /*
+               * ★멈추는 것은 **금지선**뿐이다(오너 결정 2026-08-20).
+               *   근거를 대고 주장과 세상을 맞대 본 검증이 떨어졌다면 세상이 다르다 —
+               *   여기서 멈춘다. 근거 없이 값의 품질을 본 검증이 떨어진 것은 "목표에
+               *   얼마나 닿았나"이고, 그 판단은 **사용자가 승인한 목표를 들고 있는**
+               *   완주 판정이 한다. 여기서 멈추면 시킨 대로 한 자동화가 실패로 찍힌다.
+               *   떨어진 사실은 사라지지 않는다 — 아래에서 실행 기록에 그대로 남는다.
+               */
+              if (evalIsBoundary(node)) {
+                failGraphNode(node, {
+                  code: "EVAL_FAILED",
+                  reason: `검증 "${node.label || node.id}"이(가) 통과하지 못했습니다:\n${list.reasonText}`,
+                  nextAction: "앞 단계의 지시를 고치거나, 이 검증이 떨어졌을 때 다시 시도할 경로를 그려 주세요.",
+                });
+                return;
+              }
+              journal("node_settled", node.id, {
+                verdict: "fail",
+                goalCheckUnmet: true,
+                reason: list.reasonText.slice(0, 600),
               });
-              return;
             }
             // 실패 항목 id 집합 — 반복 주입과 EVAL_STUCK(같은 항목 연속 2회) 판정에 쓴다.
             const failedIds = list.items.filter((v) => v.verdict === "no").map((v) => v.id).sort();
@@ -2657,12 +2673,20 @@ export async function runGraph(
         journal("node_settled", node.id, { verdict: verdict.verdict });
         // 채점표 경로와 같은 규칙 — 아무도 안 받는 fail 은 지나칠 수 없다.
         if (verdict.verdict === "fail" && !evalFailureIsHandled(node.id, produces)) {
-          failGraphNode(node, {
-            code: "EVAL_FAILED",
-            reason: `검증 "${node.label || node.id}"이(가) 통과하지 못했습니다${verdict.reason ? `: ${verdict.reason}` : "."}`,
-            nextAction: "앞 단계의 지시를 고치거나, 이 검증이 떨어졌을 때 다시 시도할 경로를 그려 주세요.",
+          // 위와 같은 규칙 — 금지선만 멈춘다. (한 문장 기준 경로)
+          if (evalIsBoundary(node)) {
+            failGraphNode(node, {
+              code: "EVAL_FAILED",
+              reason: `검증 "${node.label || node.id}"이(가) 통과하지 못했습니다${verdict.reason ? `: ${verdict.reason}` : "."}`,
+              nextAction: "앞 단계의 지시를 고치거나, 이 검증이 떨어졌을 때 다시 시도할 경로를 그려 주세요.",
+            });
+            return;
+          }
+          journal("node_settled", node.id, {
+            verdict: "fail",
+            goalCheckUnmet: true,
+            ...(verdict.reason ? { reason: verdict.reason.slice(0, 600) } : {}),
           });
-          return;
         }
         completeNode(node.id);
         status.set(node.id, "done");

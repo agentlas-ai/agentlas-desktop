@@ -463,3 +463,28 @@ export function valueIsReadAsData(
   }
   return false;
 }
+
+/**
+ * ④ 이 검증이 **넘으면 안 되는 선**인가, 아니면 **목표에 얼마나 닿았나**인가.
+ *
+ * ★오너 결정 2026-08-20 — 실패로 멈추는 것은 금지선뿐이다.
+ *
+ *   실측(캠페인 E3)이 두 종류를 갈라 보여 줬다:
+ *     · `observed`(폴더를 다시 읽은 결과)를 근거로 삼은 검증이 "옮겼다고 한 파일이
+ *       디스크에 없다"를 잡았다 — 세상과 주장이 어긋났다. **여기서 멈추는 게 맞다.**
+ *     · 반면 `filed 가 요청대로 채워졌다` 류는 근거 없이 값의 품질을 본다. 이게 떨어져
+ *       실행이 멈췄는데, 실제로는 사용자가 시킨 그대로였다(읽을 수 없는 청구서를
+ *       검토 폴더로). 목표를 모르는 검증이 목표 달성을 실패로 찍은 것이다.
+ *
+ *   가르는 것은 단어가 아니라 **구조**다: 독립된 관측을 근거로 대는 검증은 주장과 세상을
+ *   맞대 본다(금지선). 근거 없이 값을 보는 검증은 "얼마나 잘 됐나"를 본다(목표 판정).
+ *   목표 대비 판단은 이 노드가 아니라 **완주 판정**이 한다 — 그쪽만 사용자가 승인한
+ *   목표를 들고 있기 때문이다(`classifyAutomationOutcome`).
+ *
+ *   경영 문헌의 이름으로는 Simons 의 boundary system 과 diagnostic control 의 구분이고,
+ *   재는 것이 쉬운 쪽을 실패 기준으로 삼는 것이 Kerr 의 "A 를 보상하며 B 를 바라는" 함정이다.
+ */
+export function evalIsBoundary(node: NodeShape): boolean {
+  const config = (node?.config ?? {}) as Record<string, unknown>;
+  return String(config.evidence ?? "").trim().length > 0;
+}
