@@ -48,6 +48,12 @@ export interface PreSaveStepResult {
     availableVars: string[];
     /** 바로 앞 단계가 낸 값의 생김새(앞부분). 형식 불일치가 가장 흔한 원인이다. */
     upstreamSample: string | null;
+    /**
+     * 그 시점의 **값 자체**(길이 제한). 고친 코드를 증명하려면 이게 있어야 한다 —
+     * 이름만 있으면 복구기가 빈 값으로 돌려 보고 "아직 안 된다"고 잘못 말한다(실측
+     * 2026-08-20: 첫 배선이 정확히 그랬다). 비밀값은 바닥선에서 걸러 담는다.
+     */
+    varsSnapshot: Record<string, unknown>;
   };
 }
 
@@ -85,6 +91,23 @@ export function humanCauseOf(rawFailure: string | null | undefined): string {
   return last;
 }
 
+/**
+ * 막힌 시점의 값 사본. 복구기가 고친 코드를 **실제로 돌려 증명**하는 데 쓴다.
+ * 값 하나당 길이를 제한한다 — 큰 값을 통째로 실어 나르면 관찰이 못 쓸 만큼 커진다.
+ */
+function snapshotOf(vars: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [name, value] of Object.entries(vars)) {
+    if (typeof value === "string") out[name] = value.slice(0, 4_000);
+    else if (value === null || ["number", "boolean"].includes(typeof value)) out[name] = value;
+    else {
+      try { out[name] = JSON.parse(JSON.stringify(value).slice(0, 4_000)); }
+      catch { out[name] = String(value).slice(0, 4_000); }
+    }
+  }
+  return out;
+}
+
 /** 이 단계를 저장 전에 돌려 봐도 되는가. 바깥을 바꾸는 것은 절대 돌리지 않는다. */
 function isCheapAndSafeToRun(node: WorkflowNode): boolean {
   if (node.type !== "code") return false;
@@ -102,8 +125,11 @@ export async function verifyGraphBeforeSave(
   deps: {
     runCode: (input: { code: string; lang: "python" | "js"; vars: Record<string, unknown> })
       => Promise<{ ok: boolean; reason?: string | null; result?: unknown; stdout?: string }>;
-    rewrite?: (input: { instruction: string; lang: "python" | "js"; code: string; failure: string; varNames: string[] })
-      => Promise<string | null>;
+    rewrite?: (input: {
+      instruction: string; lang: "python" | "js"; code: string; failure: string; varNames: string[];
+      /** 그 값들이 실제로 어떻게 생겼는가 — 이름만 주면 모델이 옛 가정을 반복한다. */
+      varSamples?: Record<string, string>;
+    }) => Promise<string | null>;
     /** 트리거가 주는 시작 값(있으면). 없으면 빈 값으로 둔다 — 그래프가 그렇게 안내한다면 그것이 정상이다. */
     initialVars?: Record<string, unknown>;
   },
@@ -140,6 +166,11 @@ export async function verifyGraphBeforeSave(
         code,
         failure: String(run.reason ?? ""),
         varNames: Object.keys(vars),
+        // 이름만 주면 모델이 옛 가정을 반복한다(실측 2026-08-20) — 생김새를 함께 준다.
+        varSamples: Object.fromEntries(Object.entries(snapshotOf(vars)).map(([k, v]) => [
+          k,
+          `${typeof v === "string" ? "text" : typeof v}: ${String(typeof v === "string" ? v : JSON.stringify(v)).slice(0, 300)}`,
+        ])),
       });
       if (rewritten && rewritten.trim() && rewritten.trim() !== code.trim()) {
         const second = await deps.runCode({ code: rewritten, lang, vars });
@@ -172,6 +203,7 @@ export async function verifyGraphBeforeSave(
       facts: {
         availableVars: Object.keys(vars).sort(),
         upstreamSample: lastProduced === null ? null : String(lastProduced).slice(0, 400),
+        varsSnapshot: snapshotOf(vars),
       },
     });
     /*

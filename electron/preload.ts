@@ -749,6 +749,15 @@ const api: AgentlasIpc = {
     ) => ipcRenderer.invoke("automations:swapAgent", id, input),
     interviewGraph: (state: unknown) => ipcRenderer.invoke("automations:interviewGraph", state),
     createFromBlueprint: (payload: unknown) => ipcRenderer.invoke("automations:createFromBlueprint", payload),
+    /**
+     * 저장 전에 한 번 돌려 보고, 막히면 **이어갈 길**을 함께 받는다.
+     * 저장하지 않는다 — 무엇을 할지는 사람이 고른다.
+     */
+    checkBlueprintBeforeSave: (payload: unknown) =>
+      ipcRenderer.invoke("automations:checkBlueprintBeforeSave", payload),
+    /** 짓는 중 복구 칩을 실제로 실행한다. */
+    applyBuildRecovery: (payload: unknown) =>
+      ipcRenderer.invoke("automations:applyBuildRecovery", payload),
     stopRun: (id: string) => ipcRenderer.invoke("automations:stopRun", id),
     requestGraphPatch: (id: string, request: string) =>
       ipcRenderer.invoke("automations:requestGraphPatch", id, request),

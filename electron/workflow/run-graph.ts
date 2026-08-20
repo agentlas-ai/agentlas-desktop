@@ -580,6 +580,15 @@ export async function rewriteFailedCodeStep(input: {
   code: string;
   failure: string;
   varNames: string[];
+  /**
+   * 그 값들이 **실제로 어떻게 생겼는가**(앞부분).
+   *
+   * ★이름만 주면 모델은 자기가 기대하던 모양을 그대로 다시 가정한다. 실측 2026-08-20:
+   *   앞 단계가 마크다운 표를 문자열로 넘겼는데, 재작성기는 `varNames: ["report"]` 만
+   *   받고 여전히 `report['items']` 를 전제한 코드를 냈다 — 두 번 연속 같은 이유로 실패.
+   *   생김새를 함께 주면 "이건 글이구나"를 보고 다르게 쓴다.
+   */
+  varSamples?: Record<string, string>;
   signal?: AbortSignal;
 }): Promise<string | null> {
   try {
@@ -594,6 +603,14 @@ export async function rewriteFailedCodeStep(input: {
         `Language: ${input.lang}`,
         `What this step is for: ${input.instruction}`,
         `Variables available to the script: ${input.varNames.join(", ") || "(none)"}`,
+        ...(input.varSamples && Object.keys(input.varSamples).length > 0
+          ? [
+            "",
+            "--- what those variables actually look like (truncated) ---",
+            ...Object.entries(input.varSamples).map(([name, sample]) => `${name} = ${sample}`),
+            "Write the script for the shape shown above, not for the shape the failed script assumed.",
+          ]
+          : []),
         "",
         "--- script that failed ---",
         input.code,

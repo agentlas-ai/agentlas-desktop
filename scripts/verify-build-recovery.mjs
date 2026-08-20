@@ -151,6 +151,61 @@ check(
   + "표면에서 그 안전장치가 통째로 빠집니다(실측: 터미널에만 붙어 있었다).",
 );
 
+/* ── ④ 칩이 **화면에 있고 눌리는가** — 배선이 없으면 계획은 아무 데도 안 닿는다 ───── */
+const preload = readFileSync(path.join(root, "electron/preload.ts"), "utf8");
+check(
+  "the-bridge-carries-both-check-and-apply",
+  /checkBlueprintBeforeSave/.test(preload) && /applyBuildRecovery/.test(preload),
+  "preload 에 다리가 없습니다 — Main 이 계획을 세워도 화면이 부를 수 없습니다.",
+);
+check(
+  "the-apply-handler-exists",
+  /automations:applyBuildRecovery/.test(ipc),
+  "칩을 누르면 실행할 핸들러가 없습니다 — 눌러도 아무 일이 없는 버튼이 됩니다.",
+);
+
+const ui = readFileSync(path.join(root, "renderer/components/automation/DescribeAutomation.tsx"), "utf8");
+check(
+  "the-save-button-checks-before-saving",
+  /checkBlueprintBeforeSave/.test(ui),
+  "저장 버튼이 저장 전에 확인하지 않습니다 — 안 되는 그래프가 그대로 저장됩니다.",
+);
+check(
+  "the-chips-are-rendered-and-clickable",
+  /recovery\.plan\.options\.map/.test(ui) && /applyRecovery\(option\.actionId\)/.test(ui),
+  "복구 칩이 화면에 안 그려지거나 눌러도 실행되지 않습니다 — 계획만 있고 손이 닿지 않습니다.",
+);
+check(
+  "a-repaired-graph-is-carried-forward",
+  /setGraphOverride\(res\.graph\)/.test(ui),
+  "호스트가 고친 그래프를 화면이 안 받습니다 — 고쳐 놓고 옛 그래프를 저장하게 됩니다.",
+);
+check(
+  "a-self-repaired-step-is-what-gets-saved",
+  /pre\.repaired[\s\S]{0,400}setGraphOverride\(patched\)/.test(ui)
+    && /createWith\(patched\)/.test(ui),
+  "확인이 스스로 고친 단계를 저장에 안 씁니다 — 고쳐 놓고 안 되는 원본을 저장하게 되고, "
+  + "사용자는 왜 여전히 안 되는지 알 수 없습니다.",
+);
+check(
+  "the-repaired-graph-is-passed-not-awaited-from-state",
+  /async function createWith\(graph: WorkflowGraph\)/.test(ui)
+    && /createFromBlueprint\(\{[\s\S]{0,160}graph,/.test(ui),
+  "저장이 React 상태가 갱신되기를 기다립니다 — 그 사이에 옛 그래프가 저장됩니다."
+  + " 고친 그래프를 인자로 넘겨야 합니다.",
+);
+check(
+  "the-rewriter-is-told-what-the-values-look-like",
+  /varSamples/.test(readFileSync(path.join(root, "electron/workflow/run-graph.ts"), "utf8")),
+  "재작성기가 값 **이름만** 받습니다 — 그러면 모델이 자기가 기대하던 모양을 그대로 다시 "
+  + "가정합니다(실측 2026-08-20: 마크다운 표를 넘겼는데 두 번 연속 dict 로 가정해 실패).",
+);
+check(
+  "keeping-the-work-actually-saves-it",
+  /res\.saveNow[\s\S]{0,80}create\(true\)/.test(ui),
+  "'지금 상태로 저장'을 골라도 저장이 안 됩니다 — 만든 것을 지키겠다는 약속이 빈말이 됩니다.",
+);
+
 if (failures.length > 0) {
   console.error("\nbuild-recovery 실패:");
   for (const f of failures) console.error(" - " + f);

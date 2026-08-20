@@ -1360,6 +1360,32 @@ export type ProjectAgentPoolMember = ProjectAgentPoolAgentMember | ProjectAgentP
  * 무엇을 해야 할지 알 수 없다. 행동 id는 Main이 만든 유한 집합이며, 모델은 그중에서만
  * 고른다(자유 문자열 실행 없음). 문구는 모델이 쓰고, 실행 권한은 코드가 가진다.
  */
+/** 짓다 막혔을 때 할 수 있는 일. **유한하고 각각 호스트가 실제로 실행한다.** */
+export type GraphBuildFixKind =
+  | "repair_step"
+  | "browser_login"
+  | "open_browser_setup"
+  | "open_mac_permissions"
+  | "agentlas_sign_in"
+  | "save_switched_off"
+  | "ask_in_session";
+
+export interface GraphBuildFixOption {
+  actionId: string;
+  kind: GraphBuildFixKind;
+  /** 모델이 쓴 사용자 문구. 내부 코드·경로·스택은 들어가지 않는다. */
+  label: string;
+  site?: string;
+}
+
+export interface GraphBuildRecoveryPlan {
+  summary: string;
+  question: string | null;
+  options: GraphBuildFixOption[];
+  /** 판정 런타임이 없어 고르지 못했다. 이때만 화면이 일반 안내로 내려간다. */
+  unavailable: boolean;
+}
+
 export type AutomationFixKind =
   /** 저장된 사이트의 로그인 창을 자동화 전용 브라우저 프로필로 연다. */
   | "browser_login"
@@ -6915,6 +6941,44 @@ export interface AgentlasIpc {
     createFromBlueprint: (payload: { name: string; graph: WorkflowGraph; scheduleHuman: string; targetId?: string; goal?: string }) => Promise<
       { ok: true; id: string; name: string; renamed: boolean } | { ok: false; code: string; reason: string; nextAction: string }
     >;
+    /**
+     * 저장 **전에** 한 번 돌려 보고, 막히면 이어갈 길을 함께 받는다. 저장하지 않는다.
+     *
+     * ★막힌 것을 문장 한 줄로 알리고 끝내면 사용자는 거기서 멈춘다(오너 2026-08-20).
+     *   `recovery.options` 는 **호스트가 실제로 실행할 수 있는 것만** 담긴다 —
+     *   모델이 지어낸 조치는 여기 오지 못한다.
+     */
+    checkBlueprintBeforeSave: (payload: {
+      graph: WorkflowGraph;
+      goal?: string;
+      initialVars?: Record<string, unknown>;
+    }) => Promise<{
+      ok: boolean;
+      blocked: {
+        nodeId: string; label: string; cause: string;
+        availableVars: string[]; upstreamSample: string | null;
+        varsSnapshot: Record<string, unknown>;
+      } | null;
+      recovery: GraphBuildRecoveryPlan | null;
+      repaired?: Array<{ nodeId: string; label: string; code: string }>;
+    }>;
+    /** 짓는 중 복구 칩을 실제로 실행한다. 사람이 누른 순간에만 부른다. */
+    applyBuildRecovery: (payload: {
+      graph: WorkflowGraph;
+      goal?: string;
+      blocked: {
+        nodeId: string; label: string; cause: string;
+        availableVars: string[]; upstreamSample: string | null;
+        varsSnapshot: Record<string, unknown>;
+      };
+      actionId: string;
+    }) => Promise<{
+      ok: boolean;
+      message: string;
+      graph?: WorkflowGraph;
+      saveNow?: boolean;
+      continueInChat?: boolean;
+    }>;
     /**
      * 도는 실행을 멈춘다. `stopped: false`면 멈출 것이 없었다는 뜻 — 멈춘 척하지 않는다.
      * 커널이 진행 중 노드를 정리한 뒤, 바깥에 반영됐는지 모르는 단계는 재조정 대기로 남는다.

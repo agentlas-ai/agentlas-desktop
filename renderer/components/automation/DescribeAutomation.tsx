@@ -10,7 +10,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ipc, ipcEvents } from "@/lib/ipc";
-import type { WorkflowGraph } from "@/lib/types";
+import type { GraphBuildRecoveryPlan, WorkflowGraph } from "@/lib/types";
 import { humanSchedule } from "@shared/graph-blueprint";
 
 interface Question { id: string; question: string; why: string; choices?: string[] }
@@ -36,6 +36,20 @@ export function DescribeAutomation({ locale, onCreated }: {
   const [ready, setReady] = useState<Ready | null>(null);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<{ reason: string; nextAction: string } | null>(null);
+  /**
+   * 짓다 막혔을 때 **이어갈 길**. 문장 한 줄로 끝내지 않는다 — 오너 2026-08-20:
+   * "50% 정도 완성하다 실패를 했을 때도 이어갈 수 있어야지, 대안을 제시한다거나."
+   */
+  const [recovery, setRecovery] = useState<{
+    plan: GraphBuildRecoveryPlan;
+    blocked: {
+      nodeId: string; label: string; cause: string;
+      availableVars: string[]; upstreamSample: string | null;
+      varsSnapshot: Record<string, unknown>;
+    };
+  } | null>(null);
+  const [applying, setApplying] = useState<string | null>(null);
+  const [graphOverride, setGraphOverride] = useState<WorkflowGraph | null>(null);
   // ★저장 후 상태 — 실측: 저장이 조용히 끝나고 화면 전환이 늦자 사람이 버튼을 8번 눌러
   //   같은 그래프 사본이 8개 쌓였다. 저장했으면 "저장했고 이동 중"이라고 말해야 한다.
   const [saved, setSaved] = useState(false);
@@ -112,14 +126,70 @@ export function DescribeAutomation({ locale, onCreated }: {
     });
   }
 
-  async function create() {
+  /**
+   * 저장 전에 한 번 돌려 본다. 막히면 **저장하지 않고** 이어갈 길을 보여준다.
+   * `force` 는 사람이 "지금 상태로 저장(꺼둠)"을 고른 경우다.
+   */
+  async function create(force = false) {
     const api = ipc();
     if (!api || !ready || saved) return;
     setBusy(true);
     try {
+      const graph = graphOverride ?? ready.graph;
+      if (!force) {
+        setProblem(null);
+        setRecovery(null);
+        const pre = await api.automations.checkBlueprintBeforeSave({
+          graph,
+          goal: ready.blueprint.goal,
+        });
+        /*
+         * ★확인이 스스로 고친 단계가 있으면 **그 코드로 저장한다.** 안 그러면 고쳐 놓고
+         *   안 되는 원본을 저장하게 되고, 사용자는 왜 여전히 안 되는지 알 수 없다
+         *   (실측 2026-08-20: 첫 배선이 정확히 그랬다 — 고친 코드가 그냥 버려졌다).
+         */
+        if (pre.repaired && pre.repaired.length > 0) {
+          const fixes = new Map(pre.repaired.map((r) => [r.nodeId, r.code]));
+          const patched: WorkflowGraph = {
+            ...graph,
+            nodes: graph.nodes.map((n) => (
+              fixes.has(n.id) ? { ...n, config: { ...(n.config ?? {}), code: fixes.get(n.id)! } } : n
+            )),
+          };
+          setGraphOverride(patched);
+          if (pre.ok) { void createWith(patched); return; }
+        }
+        if (!pre.ok && pre.blocked) {
+          // ★고쳐진 단계가 있으면 그것부터 그래프에 반영한다 — 사람이 다시 안 하게.
+          if (pre.recovery && !pre.recovery.unavailable) {
+            // ★사실을 그대로 들고 있는다 — 칩을 누를 때 이 값으로 수리를 증명한다.
+            setRecovery({ plan: pre.recovery, blocked: pre.blocked });
+            return;
+          }
+          setProblem({
+            reason: pre.blocked.cause || (ko ? "아직 안 되는 단계가 있습니다." : "A step does not work yet."),
+            nextAction: ko ? "대화에서 이어서 봐 주세요." : "Let us look at it together in chat.",
+          });
+          return;
+        }
+      }
+      await createWith(graphOverride ?? ready.graph);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /**
+   * 실제 저장. **넘겨받은 그래프 그대로** 저장한다 — setState 를 기다리면 그 사이에
+   * 옛 그래프가 저장된다(React 상태는 다음 렌더에야 보인다).
+   */
+  async function createWith(graph: WorkflowGraph) {
+    const api = ipc();
+    if (!api || !ready) return;
+    try {
       const res = await api.automations.createFromBlueprint({
         name: ready.blueprint.name || (ko ? "새 자동화" : "New automation"),
-        graph: ready.graph,
+        graph,
         scheduleHuman: ready.scheduleHuman,
         // ★목적 문장 — 저장 안 하면 "이게 무슨 그래프인지"를 아는 유일한 문장이 여기서 사라진다.
         goal: ready.blueprint.goal,
@@ -139,6 +209,44 @@ export function DescribeAutomation({ locale, onCreated }: {
       });
     } finally {
       setBusy(false);
+    }
+  }
+
+  /** 칩을 눌렀을 때 — 호스트가 실제로 실행한다. 누를 수 없는 칩은 칩이 아니다. */
+  async function applyRecovery(actionId: string) {
+    const api = ipc();
+    if (!api || !ready || !recovery) return;
+    setApplying(actionId);
+    try {
+      const res = await api.automations.applyBuildRecovery({
+        graph: graphOverride ?? ready.graph,
+        goal: ready.blueprint.goal,
+        blocked: recovery.blocked,
+        actionId,
+      });
+      if (res.graph) {
+        // 고쳐진 그래프로 갈아 끼우고 다시 저장을 시도한다 — 사람이 같은 걸 또 누르지 않게.
+        setGraphOverride(res.graph);
+        setRecovery(null);
+        setProblem(null);
+        void create();
+        return;
+      }
+      if (res.saveNow) { setRecovery(null); void create(true); return; }
+      setRecovery(null);
+      setProblem({
+        reason: res.message,
+        nextAction: res.continueInChat
+          ? (ko ? "이 자동화의 대화에서 이어서 봅니다." : "Continuing in this automation's chat.")
+          : (ko ? "마친 뒤 다시 저장해 주세요." : "Finish that, then save again."),
+      });
+    } catch {
+      setProblem({
+        reason: ko ? "이 조치를 실행하지 못했습니다." : "Could not run that action.",
+        nextAction: ko ? "잠시 뒤 다시 시도해 주세요." : "Try again in a moment.",
+      });
+    } finally {
+      setApplying(null);
     }
   }
 
@@ -370,6 +478,39 @@ export function DescribeAutomation({ locale, onCreated }: {
         </div>
       ) : null}
 
+      {recovery ? (
+        <div data-testid="describe-recovery" style={{ display: "grid", gap: 10 }}>
+          <div style={{ fontSize: 13, color: "var(--ink)", lineHeight: 1.55 }}>{recovery.plan.summary}</div>
+          {recovery.plan.question ? (
+            <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ink)" }}>{recovery.plan.question}</div>
+          ) : null}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            {recovery.plan.options.map((option) => (
+              <button
+                key={option.actionId}
+                type="button"
+                data-testid={`recovery-chip-${option.kind}`}
+                disabled={applying !== null}
+                onClick={() => void applyRecovery(option.actionId)}
+                style={{
+                  borderRadius: 999,
+                  border: "1px solid var(--line)",
+                  padding: "7px 13px",
+                  fontSize: 12.5,
+                  background: "var(--surface)",
+                  color: "var(--ink)",
+                  cursor: applying ? "default" : "pointer",
+                  opacity: applying && applying !== option.actionId ? 0.5 : 1,
+                }}
+              >
+                {applying === option.actionId
+                  ? <SpinnerLabel text={ko ? "하는 중…" : "Working…"} />
+                  : option.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
       {problem ? (
         <div data-testid="describe-problem" style={{ display: "grid", gap: 4 }}>
           <div style={{ fontSize: 13, color: "var(--ink)" }}>{problem.reason}</div>

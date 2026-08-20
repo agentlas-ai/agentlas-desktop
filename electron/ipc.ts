@@ -4861,6 +4861,7 @@ export function registerIpcHandlers(): void {
       cause: blocked.cause ?? "",
       availableVars: blocked.facts?.availableVars ?? [],
       upstreamSample: blocked.facts?.upstreamSample ?? null,
+      varsSnapshot: blocked.facts?.varsSnapshot ?? {},
     });
     const ranBefore = verification.steps
       .filter((step) => step.state === "ran" || step.state === "repaired")
@@ -4873,10 +4874,49 @@ export function registerIpcHandlers(): void {
     });
     return {
       ok: false as const,
-      blocked: { nodeId: blocked.nodeId, label: blocked.label, cause: blocked.cause ?? "" },
+      blocked: {
+        nodeId: blocked.nodeId,
+        label: blocked.label,
+        cause: blocked.cause ?? "",
+        // ★화면이 이걸 그대로 돌려줘야 복구기가 고친 코드를 **증명**할 수 있다.
+        availableVars: blocked.facts?.availableVars ?? [],
+        upstreamSample: blocked.facts?.upstreamSample ?? null,
+        varsSnapshot: blocked.facts?.varsSnapshot ?? {},
+      },
       recovery,
       repaired,
     };
+  });
+
+  /** 짓는 중 복구 칩을 **사람이 누른 순간에만** 실행한다. 계획과 실행을 나눈 이유다. */
+  ipcMain.handle("automations:applyBuildRecovery", async (_e, payload: unknown) => {
+    const input = payload as {
+      graph?: unknown; goal?: string; actionId?: string;
+      blocked?: {
+        nodeId: string; label: string; cause: string;
+        availableVars?: string[]; upstreamSample?: string | null;
+        varsSnapshot?: Record<string, unknown>;
+      };
+    } | null;
+    if (!input?.graph || !input.actionId || !input.blocked?.nodeId) {
+      return { ok: false as const, message: "이 조치를 실행할 수 없습니다." };
+    }
+    const graph = input.graph as import("../shared/types").WorkflowGraph;
+    const { applyGraphBuildRecovery, blockedStepFactsFrom } = await import("./workflow/build-recovery");
+    return applyGraphBuildRecovery({
+      graph,
+      goal: String(input.goal ?? ""),
+      blocked: blockedStepFactsFrom({
+        graph,
+        nodeId: input.blocked.nodeId,
+        label: input.blocked.label,
+        cause: input.blocked.cause,
+        availableVars: input.blocked.availableVars ?? [],
+        upstreamSample: input.blocked.upstreamSample ?? null,
+        varsSnapshot: input.blocked.varsSnapshot ?? {},
+      }),
+      actionId: input.actionId,
+    });
   });
 
   ipcMain.handle("automations:createFromBlueprint", (_e, payload: unknown) => {

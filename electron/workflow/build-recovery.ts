@@ -28,7 +28,13 @@
 // ★실행 실패용(planAutomationFix)과 합치지 않는 이유: 그쪽은 저장된 자동화 id 와
 //   실행 기록을 전제한다. 여기는 아직 저장되지 않은 그래프다 — 기록이 없는 게 정상이고,
 //   그것을 "기록이 없다"는 사실로 넘겨야지 결함으로 취급하면 안 된다.
-import type { WorkflowGraph, WorkflowNode } from "../../shared/types";
+import type {
+  GraphBuildFixKind,
+  GraphBuildFixOption,
+  GraphBuildRecoveryPlan,
+  WorkflowGraph,
+  WorkflowNode,
+} from "../../shared/types";
 import { judgeRequiredAction, secretValueFloor, type RequiredActionOption } from "../system-agents/judgment";
 import { getBrowserStatus, browserListSites } from "../browser/connect";
 import type { BrowserSiteRow } from "../store/browser-vault";
@@ -42,40 +48,7 @@ import { nodeDeclaresOutwardEffect } from "../../shared/graph-node-protocol";
  * 짓는 중에 할 수 있는 일. **유한하고, 각각 호스트가 실제로 실행할 수 있다.**
  * 새 항목을 더하려면 그 항목을 실행하는 코드가 먼저 있어야 한다.
  */
-export type GraphBuildFixKind =
-  /** 막힌 단계의 스크립트를 다시 써서 재검증한다. 호스트가 혼자 할 수 있다. */
-  | "repair_step"
-  /** 이 그래프가 쓰겠다고 선언한 사이트의 로그인 창을 연다. 사람만 할 수 있다. */
-  | "browser_login"
-  /** 브라우저 자체가 없거나 설정이 안 됐다 — 커넥트 화면을 연다. */
-  | "open_browser_setup"
-  /** 화면을 조작하는 그래프인데 macOS 권한이 없다. */
-  | "open_mac_permissions"
-  /** Agentlas 계정 로그인이 필요하다. */
-  | "agentlas_sign_in"
-  /** 지금 상태 그대로 저장하되 꺼 둔다 — **만든 것을 버리지 않는다**. */
-  | "save_switched_off"
-  /** 대화에서 이어서 푼다. */
-  | "ask_in_session";
-
-export interface GraphBuildFixOption {
-  actionId: string;
-  kind: GraphBuildFixKind;
-  /** 모델이 쓴 사용자 문구. 내부 코드·경로·스택은 들어가지 않는다. */
-  label: string;
-  /** browser_login 전용. */
-  site?: string;
-}
-
-export interface GraphBuildRecoveryPlan {
-  /** 지금 상황을 사람 말로(모델 작성). */
-  summary: string;
-  /** 사람에게 물어야 할 때만 채워진다. */
-  question: string | null;
-  options: GraphBuildFixOption[];
-  /** 판정 런타임이 없어 고르지 못했다. 이때만 화면이 일반 안내로 내려간다. */
-  unavailable: boolean;
-}
+export type { GraphBuildFixKind, GraphBuildFixOption, GraphBuildRecoveryPlan };
 
 /** 막힌 단계에 대해 **관측된** 사실. 추측은 담지 않는다. */
 export interface BlockedStepFacts {
@@ -89,9 +62,30 @@ export interface BlockedStepFacts {
   availableVars: string[];
   /** 앞 단계가 낸 값의 생김새(앞부분만). 형식이 안 맞는 경우가 가장 흔하다. */
   upstreamSample: string | null;
+  /**
+   * 막힌 시점의 값 사본. **고친 코드를 실제로 돌려 증명**하는 데 쓴다.
+   * 모델에게 넘기는 관찰에는 담지 않는다 — 이름과 생김새면 판단에 충분하고,
+   * 값 전체를 실어 보내면 비밀이 샐 통로가 하나 더 생긴다.
+   */
+  varsSnapshot: Record<string, unknown>;
 }
 
 interface Capability { option: RequiredActionOption; kind: GraphBuildFixKind; site?: string }
+
+/**
+ * 값이 **어떻게 생겼는지** 한 줄로. 재작성기가 이름만 보고 옛 가정을 반복하지 않게 한다.
+ * 값 전체가 아니라 앞부분만 — 판단에는 모양이면 충분하고, 전체를 실으면 비밀이 샐 통로가 생긴다.
+ */
+function sampleShapes(vars: Record<string, unknown>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(vars ?? {})) {
+    const text = typeof value === "string" ? value : (() => {
+      try { return JSON.stringify(value); } catch { return String(value); }
+    })();
+    out[name] = `${typeof value === "string" ? "text" : typeof value}: ${String(text).slice(0, 300)}`;
+  }
+  return out;
+}
 
 function str(config: Record<string, unknown> | undefined, key: string): string {
   const value = config?.[key];
@@ -299,6 +293,7 @@ export function blockedStepFactsFrom(input: {
   cause: string;
   availableVars: string[];
   upstreamSample?: string | null;
+  varsSnapshot?: Record<string, unknown>;
 }): BlockedStepFacts {
   const node = (input.graph?.nodes ?? []).find((n) => n.id === input.nodeId) ?? null;
   const code = str(node?.config, "code");
@@ -313,5 +308,156 @@ export function blockedStepFactsFrom(input: {
     wantedVars: [...wanted].sort(),
     availableVars: [...input.availableVars].sort(),
     upstreamSample: input.upstreamSample ?? null,
+    varsSnapshot: input.varsSnapshot ?? {},
+  };
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * 칩을 **실제로 실행한다**. 누를 수 없는 칩은 칩이 아니다.
+ *
+ * ★계획(planGraphBuildRecovery)과 실행을 나눠 둔 이유: 계획은 화면을 여는 순간 돌고,
+ *   실행은 사람이 누른 순간에만 돈다. 합치면 화면을 보기만 해도 로그인 창이 뜬다.
+ * ──────────────────────────────────────────────────────────────────────────── */
+export interface GraphBuildFixResult {
+  ok: boolean;
+  /** 사람에게 할 말(모델 아님 — 호스트가 무엇을 했는지 사실대로). */
+  message: string;
+  /** repair_step 이 성공했을 때만 — 고쳐진 그래프. 화면이 이걸로 갈아 끼운다. */
+  graph?: WorkflowGraph;
+  /** save_switched_off 를 골랐을 때 — 화면이 저장을 진행해도 된다는 뜻. */
+  saveNow?: boolean;
+  /** ask_in_session 을 골랐을 때 — 대화로 이어간다. */
+  continueInChat?: boolean;
+}
+
+export async function applyGraphBuildRecovery(input: {
+  graph: WorkflowGraph | null | undefined;
+  goal: string;
+  blocked: BlockedStepFacts;
+  actionId: string;
+}): Promise<GraphBuildFixResult> {
+  const ko = currentUiLocale() === "ko";
+  const blockedNode = (input.graph?.nodes ?? []).find((n) => n.id === input.blocked.nodeId) ?? null;
+  const caps = await capabilities({ graph: input.graph, blocked: input.blocked, blockedNode });
+  const cap = caps.find((c) => c.option.id === input.actionId);
+  if (!cap) {
+    return {
+      ok: false,
+      message: ko ? "이 조치는 지금 실행할 수 없습니다." : "That action is not available right now.",
+    };
+  }
+
+  if (cap.kind === "repair_step" && blockedNode && input.graph) {
+    const { rewriteFailedCodeStep } = await import("./run-graph");
+    const { runCodeStep } = await import("./code-runner");
+    const code = str(blockedNode.config, "code");
+    const lang = str(blockedNode.config, "codeLang") === "js" ? "js" : "python";
+    const rewritten = await rewriteFailedCodeStep({
+      instruction: str(blockedNode.config, "note") || blockedNode.label || blockedNode.id,
+      lang,
+      code,
+      failure: input.blocked.cause,
+      varNames: input.blocked.availableVars,
+      varSamples: sampleShapes(input.blocked.varsSnapshot),
+    });
+    if (!rewritten || !rewritten.trim() || rewritten.trim() === code.trim()) {
+      return {
+        ok: false,
+        message: ko
+          ? "이 단계를 다르게 쓰는 방법을 못 찾았습니다. 대화에서 같이 봐 주세요."
+          : "I could not find a different way to write this step. Let us look at it together in chat.",
+      };
+    }
+    /*
+     * ★고쳤다고 말하기 전에 **돌려 본다.** 안 돌려 보고 "고쳤습니다"라고 하면 그건
+     *   주장이지 사실이 아니다 — 이 저장소가 반복해서 앓은 병이다.
+     */
+    /*
+     * ★고친 코드를 **막힌 그 시점의 값으로** 돌린다. 빈 값으로 돌리면 잘 고친 코드도
+     *   "아직 안 된다"가 되고, 사람은 멀쩡한 수리를 못 받는다(실측 2026-08-20: 첫 배선).
+     */
+    const proof = await runCodeStep({
+      code: rewritten,
+      lang,
+      vars: input.blocked.varsSnapshot,
+      effect: "read",
+      timeoutSeconds: 45,
+    });
+    if (!proof.ok) {
+      return {
+        ok: false,
+        message: ko
+          ? "다시 써 봤지만 아직 안 돕니다. 대화에서 같이 봐 주세요."
+          : "I rewrote it but it still does not run. Let us look at it together in chat.",
+      };
+    }
+    const graph: WorkflowGraph = {
+      ...input.graph,
+      nodes: input.graph.nodes.map((n) => (
+        n.id === blockedNode.id ? { ...n, config: { ...(n.config ?? {}), code: rewritten } } : n
+      )),
+    };
+    return {
+      ok: true,
+      graph,
+      message: ko
+        ? `"${blockedNode.label || blockedNode.id}" 단계를 다시 써서 돌려 봤고, 이번엔 돌았습니다.`
+        : `I rewrote "${blockedNode.label || blockedNode.id}" and ran it again — this time it worked.`,
+    };
+  }
+
+  if (cap.kind === "browser_login" && cap.site) {
+    const { browserOpenLogin } = await import("../browser/connect");
+    const result = await browserOpenLogin(cap.site);
+    return {
+      ok: result.ok,
+      message: result.ok
+        ? ko
+          ? `${cap.site} 로그인 창을 열었습니다. 로그인을 마치고 다시 저장해 주세요.`
+          : `Opened the sign-in window for ${cap.site}. Finish signing in, then save again.`
+        : ko ? "로그인 창을 열지 못했습니다." : "Could not open the sign-in window.",
+    };
+  }
+
+  if (cap.kind === "open_browser_setup") {
+    return { ok: true, message: ko ? "브라우저 설정 화면을 엽니다." : "Opening browser setup." };
+  }
+
+  if (cap.kind === "open_mac_permissions") {
+    const { shell } = await import("electron");
+    await shell.openExternal(
+      "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+    ).catch(() => undefined);
+    return {
+      ok: true,
+      message: ko ? "권한 화면을 열었습니다. 허용한 뒤 다시 저장해 주세요." : "Opened the permission screen. Allow it, then save again.",
+    };
+  }
+
+  if (cap.kind === "agentlas_sign_in") {
+    const { signInWithBrowser } = await import("../auth");
+    const session = await signInWithBrowser().catch(() => null);
+    return {
+      ok: session?.signedIn === true,
+      message: session?.signedIn
+        ? ko ? "로그인했습니다. 다시 저장해 주세요." : "Signed in. Save again."
+        : ko ? "로그인을 마치지 못했습니다." : "Sign-in did not complete.",
+    };
+  }
+
+  if (cap.kind === "save_switched_off") {
+    return {
+      ok: true,
+      saveNow: true,
+      message: ko
+        ? "지금 상태 그대로 저장합니다. 꺼진 채로 저장되니 켜기 전에는 돌지 않습니다."
+        : "Saving it exactly as it is, switched off. It will not run until you turn it on.",
+    };
+  }
+
+  return {
+    ok: true,
+    continueInChat: true,
+    message: ko ? "이 자동화의 대화에서 이어서 봅니다." : "Continuing in this automation's chat.",
   };
 }
