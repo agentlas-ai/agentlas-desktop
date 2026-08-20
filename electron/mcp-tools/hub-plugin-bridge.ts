@@ -72,6 +72,17 @@ export interface HubManifestMcpRow {
   envKeys?: string[];
 }
 
+/**
+ * 이 경로는 "이 호스트의 MCP 엔드포인트"라고 명시하는가.
+ *
+ * 저장소 호스트를 통째로 막으면 그 호스트가 **진짜로 운영하는** MCP 엔드포인트까지
+ * 함께 죽는다 — GitLab 공식 서버 `https://gitlab.com/api/v4/mcp` 가 그렇게 사라져
+ * 사용자에게 0개로 도달했다(2026-08-20 실측: 시드 1행 → 서빙 0행, 그 주소를 직접
+ * 찔러 보면 `{"message":"401 Unauthorized"}` 로 살아 있다).
+ * 막아야 할 것은 호스트가 아니라 `https://github.com/owner/repo` 같은 **페이지**다.
+ */
+const MCP_ENDPOINT_PATH = /(?:^|\/)(?:mcp|sse)(?:$|[/?#])|(?:^|\/)api\//i;
+
 /** 실 MCP 원격 엔드포인트인지 — https 필수, 저장소/패키지 HTML 페이지는 거부. */
 export function isLikelyRemoteMcpEndpoint(rawUrl: string): boolean {
   let url: URL;
@@ -81,7 +92,10 @@ export function isLikelyRemoteMcpEndpoint(rawUrl: string): boolean {
     return false;
   }
   if (url.protocol !== "https:") return false;
-  if (REPO_PAGE_HOSTS.has(url.hostname.toLowerCase())) return false;
+  if (REPO_PAGE_HOSTS.has(url.hostname.toLowerCase())) {
+    // 저장소 호스트에서는 경로가 스스로 MCP 엔드포인트임을 말할 때만 통과시킨다.
+    return MCP_ENDPOINT_PATH.test(url.pathname);
+  }
   return true;
 }
 
