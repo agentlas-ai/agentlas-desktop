@@ -326,7 +326,8 @@ export function requiredExecutionPermission(
   graph: { nodes?: { type?: string; config?: Record<string, unknown> | null }[] } | null | undefined,
 ): "read" | "write" {
   // 판정은 정본 하나뿐이다 — 여기 인라인 사본이 있었고, 글자 그대로 같은 규칙이었다.
-  const reachesOutside = (graph?.nodes ?? []).some((node) => nodeCanChangeTheOutsideWorld({
+  // 권한은 **선언된 효과**를 따른다(①). "했을 수도 있다"(②)는 재개가 묻는 다른 질문이다.
+  const reachesOutside = (graph?.nodes ?? []).some((node) => nodeDeclaresOutwardEffect({
     type: node?.type,
     config: (node?.config ?? undefined) as Record<string, unknown> | undefined,
   }));
@@ -372,36 +373,50 @@ export function defaultNodeEffect(nodeType: string): "pure" | "read" | "mutation
  *   내가 거기 서 있었기 때문에 거기 쓴 것이고, 사본이 생기는 이유가 정확히 그것이다.
  *   판정은 자기가 의지하는 규칙(defaultNodeEffect) 옆에 산다.
  */
+type NodeShape = { type?: string; config?: Record<string, unknown> | undefined };
+
 /**
- * 이 노드가 **바깥을 바꿀 수 있는가** — 재개·재조정·발행이 함께 쓰는 단 하나의 판정.
- *
- * ★실측 2026-08-20. 이 판정이 네 곳에 손으로 복제돼 있었고, 넷 다 같은 목록이었다:
- *     `type === "agent" || type === "action" || type === "output"`
- *   그런데 **`code` 노드가 빠져 있다.** code 노드는 `effect: "mutation"` 으로 파일을 쓰고
- *   메일을 보낸다 — 오늘 만든 자동화는 전부 그 방식이다.
- *
- *   결과: 부수효과를 낸 뒤 실패한 자동화의 그래프를 사람이 고치면, 커널이 "이미 나간 일이
- *   있다"를 **못 보고 그대로 재생**한다. 매트릭스로 재현했다 — 파일이 v1 에서 v2 로 다시
- *   쓰였다. 발송·결제였다면 두 번 나갔다.
- *
- *   그래서 판정을 한 곳으로 올린다. 선언된 효과가 있으면 그것을 믿고, 없으면 노드 종류로
- *   본다(옛 그래프에는 effect 칸이 없다). **모르면 바꿀 수 있는 것으로 센다** — 이 판정의
- *   오탐은 "한 번 더 조심"이고, 누락은 "두 번 발송"이다.
+ * 이 노드의 **효과**. 선언된 것이 있으면 그것을 믿고, 없으면 종류의 기본값이다.
+ * 아래 두 판정이 다 이 위에 선다 — 규칙을 다시 적는 곳이 없어야 한다.
  */
-export function nodeCanChangeTheOutsideWorld(node: {
-  type?: string;
-  config?: Record<string, unknown> | undefined;
-}): boolean {
-  const declared = typeof node.config?.effect === "string" ? node.config.effect.trim() : "";
-  if (declared === "mutation") return true;
-  if (declared === "read" || declared === "pure") return false;
-  /*
-   * ★여기서 노드 종류를 **다시 적으면 안 된다.** 처음 판이 그랬고, 그러자 이 함수가
-   *   `defaultNodeEffect` 의 사본이 됐다 — 정본을 만들면서 정본을 복제한 것이다.
-   *   (막다른 길 게이트가 요구하던 `defaultNodeEffect(` 호출이 정확히 이 이유였고,
-   *    나는 그 게이트를 "구현 못박기"라고 판단해 느슨하게 바꿨다가 규칙이 갈라졌다.
-   *    게이트가 옳았고, 다만 글자가 아니라 동작으로 물어야 했다 — 지금은 둘 다 됐다.)
-   */
-  return defaultNodeEffect(String(node.type ?? "")) === "mutation";
+export function resolveNodeEffect(node: NodeShape): "pure" | "read" | "mutation" {
+  const declared = typeof node?.config?.effect === "string" ? node.config.effect.trim() : "";
+  if (declared === "mutation" || declared === "read" || declared === "pure") return declared;
+  return defaultNodeEffect(String(node?.type ?? ""));
+}
+
+/**
+ * ① 이 노드가 **바깥으로 나간다고 선언돼 있는가**.
+ *
+ * 권한 유도 · 패키지 경고 · 발행 심사 · 패치 승인이 묻는 질문이다. 답은 그래프가
+ * 선언한 것에서 따라 나온다("이 단계는 발행한다"고 사람에게 말할 근거).
+ */
+export function nodeDeclaresOutwardEffect(node: NodeShape): boolean {
+  return resolveNodeEffect(node) === "mutation";
+}
+
+/**
+ * ② 이 노드가 **바깥에 뭔가 했을 수 있는가**.
+ *
+ * ★①과 다른 질문이고, 답도 더 넓다. 재개·재조정이 묻는 것은 "선언이 무엇이냐"가
+ *   아니라 "다시 돌리면 두 번 나가느냐"다. 모델을 부르는 단계(agent·action·output)는
+ *   선언이 read 여도 도구를 부를 수 있다 — **선언은 약속이고, 도구는 실제로 돈다.**
+ *   (이 저장소의 기록: "읽기 권한이 약속일 뿐 경계가 아니었다".)
+ *
+ * ★실측 2026-08-20 — 이 둘을 하나로 합쳤다가 두 번 데었다:
+ *   · 아침: 커널의 재생 보호 목록이 `agent||action||output` 뿐이라 **code 노드의
+ *     mutation** 이 빠졌다. 오늘 만들어지는 자동화는 발송을 전부 code 로 한다 →
+ *     그래프를 고친 뒤 재실행하면 이미 나간 발송이 다시 나갔다.
+ *   · 저녁: 그걸 고치면서 ①과 합쳐 버려, 이번엔 **선언 없는 action 노드**가 보호에서
+ *     빠졌다. 터미널 거울 대조 게이트가 잡았다.
+ *   그래서 이 판정은 ①의 **상위집합**이다. 좁히는 쪽으로 틀리면 두 번 나간다.
+ */
+export function nodeCouldHaveActedOutside(node: NodeShape): boolean {
+  if (nodeDeclaresOutwardEffect(node)) return true;
+  // judgment-exempt: 여기서 노드 종류를 나열하는 것은 사본이 아니라 **결정**이다.
+  //   ①(선언된 효과)을 이미 물은 뒤, 그보다 넓혀야 하는 이유를 코드로 적는 자리다.
+  //   모델을 부르는 단계는 선언이 read 여도 도구를 부를 수 있다. 이 목록을 줄이면
+  //   재개가 두 번 보낸다 — 좁히는 쪽의 오류만 사용자를 다치게 한다.
+  return node?.type === "agent" || node?.type === "action" || node?.type === "output";
 }
 

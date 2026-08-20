@@ -1,4 +1,4 @@
-import { nodeCanChangeTheOutsideWorld } from "./graph-node-protocol";
+import { nodeDeclaresOutwardEffect } from "./graph-node-protocol";
 /**
  * 이미 **저장된** 그래프에서 "평상시마다 실패하는 모양"을 찾아낸다.
  *
@@ -402,7 +402,7 @@ export function requiredPermissionFor(
   if (now !== "read") return null; // write·full 은 이미 충분하다
   if (!graph || !Array.isArray(graph.nodes)) return null;
   const because = graph.nodes
-    .filter((n) => nodeCanChangeTheOutsideWorld(n as { type?: string; config?: Record<string, unknown> }))
+    .filter((n) => nodeDeclaresOutwardEffect(n as { type?: string; config?: Record<string, unknown> }))
     .map((n) => n.label || n.id);
   if (because.length === 0) return null;
   return { needs: "write", current: now, because };

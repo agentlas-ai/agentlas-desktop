@@ -1,4 +1,4 @@
-import { nodeCanChangeTheOutsideWorld } from "../../shared/graph-node-protocol";
+import { nodeDeclaresOutwardEffect } from "../../shared/graph-node-protocol";
 // Graph Architect 패치 계약 — 자연어로 그래프를 고칠 때 **모델이 그래프를 직접 쓰지 못하게** 막는다.
 //
 // 계약(설계 D8): 모델은 GraphPatch를 *제안*만 한다. 코드가 (1) 형태를 검증하고,
@@ -67,7 +67,7 @@ function risksOfNode(
   const config = node?.config;
   if (!config && !node?.type) return [];
   const risks: GraphPatchRisk[] = [];
-  if (nodeCanChangeTheOutsideWorld({ type: node?.type, config })) risks.push("mutation");
+  if (nodeDeclaresOutwardEffect({ type: node?.type, config })) risks.push("mutation");
   if (!config) return risks;
   if (Object.keys(config).some((key) => VAULT_KEY_RE.test(key))) risks.push("vault");
   if (ENDPOINT_KEYS.some((key) => typeof config[key] === "string" && config[key])) risks.push("endpoint");

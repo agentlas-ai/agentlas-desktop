@@ -1,4 +1,4 @@
-import { nodeCanChangeTheOutsideWorld } from "./graph-node-protocol";
+import { nodeDeclaresOutwardEffect } from "./graph-node-protocol";
 /**
  * `.agentgraph` 패키징 — 그래프를 **남에게 줄 수 있는 형태**로 만든다.
  *
@@ -207,7 +207,7 @@ export function buildGraphPackage(input: {
   const mutationNodes = nodes
     // 받는 사람에게 "바깥으로 나가는 단계"를 알리는 목록이다. 선언된 effect 만 보면
     // 발행용 출력 노드가 빠져 설치 전 경고가 조용히 새다.
-    .filter((n) => nodeCanChangeTheOutsideWorld(n as { type?: string; config?: Record<string, unknown> }))
+    .filter((n) => nodeDeclaresOutwardEffect(n as { type?: string; config?: Record<string, unknown> }))
     .map((n) => ({ nodeId: n.id, label: n.label || n.id }));
 
   const scrubbedGraph = {

@@ -69,7 +69,7 @@ const PATTERNS = [
     id: "노드가 바깥을 바꾸나",
     // agent/action/output 조합으로 효과를 판정하는 손 목록.
     re: /type\s*===\s*"(?:agent|action|output)"[\s\S]{0,120}?type\s*===\s*"(?:agent|action|output)"/,
-    canonical: "nodeCanChangeTheOutsideWorld(node)  ← shared/graph-node-protocol",
+    canonical: "nodeDeclaresOutwardEffect(node) / nodeCouldHaveActedOutside(node)  ← shared/graph-node-protocol",
     why: "노드 종류 목록으로 효과를 판정하면 code 노드의 mutation 이 빠진다 "
       + "(오늘 실측: 이미 나간 발송이 그래프 편집 후 다시 나갔다).",
   },
@@ -77,7 +77,7 @@ const PATTERNS = [
     id: "노드가 바깥을 바꾸나",
     // 선언된 effect 만 보는 판정. 기본값이 mutation 인 출력 노드가 안 보인다.
     re: /(?:config\??\.\s*effect|str\(\s*\w+\.config\s*,\s*"effect"\s*\))\s*===\s*"mutation"/,
-    canonical: "nodeCanChangeTheOutsideWorld(node)  ← shared/graph-node-protocol",
+    canonical: "nodeDeclaresOutwardEffect(node) / nodeCouldHaveActedOutside(node)  ← shared/graph-node-protocol",
     why: "선언된 effect 만 보면 emitter 가 만든 출력 노드(칸 자체가 없음)가 "
       + "\"바깥에 안 나감\"으로 읽힌다. 그 노드의 기본값은 나가는 것이다.",
   },
@@ -157,7 +157,7 @@ const canonicalOffenders = [...CANONICAL].filter((rel) => {
 });
 if (canonicalOffenders.includes("shared/graph-node-protocol.ts")) {
   console.error("one-judgment-one-place: 정본이 자기 규칙을 손으로 다시 적고 있습니다:");
-  console.error("  - shared/graph-node-protocol.ts (defaultNodeEffect 를 부르지 않고 노드 종류를 나열)");
+  console.error("  - shared/graph-node-protocol.ts (resolveNodeEffect 를 거치지 않고 노드 종류를 나열)");
   process.exit(1);
 }
 

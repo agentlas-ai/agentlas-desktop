@@ -5,7 +5,6 @@
 // (promptTemplate이 늘 약속했던 파라미터화, 설계 한계 #12).
 //
 // 실행 엔진은 손대지 않는다 — 러너는 "어떤 요청을 어떤 순서로 runMcpInvocation에 넘길지"만 결정.
-import { nodeCanChangeTheOutsideWorld } from "../../shared/graph-code-vars";
 import { isHostPreflightTool, couldHaveChangedTheOutsideWorld } from "../../shared/tool-activity";
 import { findGraphContradictions } from "../../shared/graph-contradictions";
 import { getDb } from "../store/db";
@@ -63,6 +62,7 @@ import {
   type NodeOutputEnvelope,
   automationRuntimePermission,
   defaultNodeEffect,
+  nodeCouldHaveActedOutside,
   requiredExecutionPermission,
 } from "../../shared/graph-node-protocol";
 
@@ -1275,7 +1275,7 @@ export async function runGraph(
   const graphEdgeIds = new Set(graph.edges.map((edge) => edge.id));
   const effectNodeIds = new Set(
     graph.nodes
-      .filter((node) => nodeCanChangeTheOutsideWorld(node))
+      .filter((node) => nodeCouldHaveActedOutside(node))
       .map((node) => node.id),
   );
   const latestFailedCandidate = getLatestFailedGraphCheckpoint(automation.id);
