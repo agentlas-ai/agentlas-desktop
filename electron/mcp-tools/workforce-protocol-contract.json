@@ -31,20 +31,21 @@
   },
   "tools": {
     "requiredNames": [
-      "workforce.search_candidates",
-      "workforce.validate_selection",
-      "workforce.prepare_execution",
       "workforce.bind_goal",
+      "workforce.complete_goal",
+      "workforce.expand_candidates",
       "workforce.goal_context",
       "workforce.goal_runtime",
+      "workforce.preflight_work_order",
+      "workforce.prepare_execution",
       "workforce.record_goal_turn",
-      "workforce.complete_goal",
-      "workforce.validate_execution_receipt"
+      "workforce.search_candidates",
+      "workforce.validate_execution_receipt",
+      "workforce.validate_selection"
     ],
     "searchCandidates": {
       "name": "workforce.search_candidates",
       "requiredInputFields": [
-        "workOrder",
         "sourceScope"
       ],
       "sourceScopeValues": [
@@ -56,30 +57,27 @@
     },
     "validateSelection": {
       "name": "workforce.validate_selection",
-      "requiredInputFields": [
-        "workOrder",
-        "selection"
-      ]
+      "requiredInputFields": []
     },
     "prepareExecution": {
       "name": "workforce.prepare_execution",
       "requiredInputFields": [
-        "workOrder",
-        "selection",
-        "federatedSelection",
         "projectDir"
       ],
       "inputPropertyFields": [
         "workOrder",
         "candidateSet",
+        "decision",
         "selection",
         "validationReceipt",
         "federationResult",
         "federatedSelection",
+        "federatedSelectionDigest",
         "prepareAttempt",
         "projectDir",
         "goalId",
-        "turnId"
+        "turnId",
+        "fullDossier"
       ],
       "prepareAttemptRequiredFields": [
         "schemaVersion",

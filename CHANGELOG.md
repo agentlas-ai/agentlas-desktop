@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.0.30 — 2026-08-21
+
+Bundled runtime: Agentlas OS v1.2.16 (6d0d7e7eafaa96ebbed92e1a2223b01f13eed245).
+Source readiness does not prove a public installer or update feed; the
+Releases page stays the authority.
+
+- A resident CLI now shows up on screen as it actually is. A session that stays
+  alive after a turn ends was invisible: you could not tell what was still
+  running, and a process that had closed looked the same as one that never
+  started. Residency now reports running, idle and closed for real held
+  sessions only — a row with activity but no process is not drawn, because
+  drawing a process that does not exist is the failure this is meant to end.
+  The network panel and the cockpit read that through the run ledger and say
+  "CLI process closed" in as many words, and a closed node keeps its panel open
+  rather than disappearing: that it closed is precisely the thing worth seeing.
+- The Workforce protocol pin moved to 2026-08-21.1 so the newly released engine
+  is a match rather than a contract-drift warning on every staffing call.
+- An automation built by describing it could not have its name or schedule
+  changed. Its target is the built-in orchestrator, which the agent picker
+  hides as a system agent, so the automation's own editor found no valid target,
+  disabled Save, and left "run this every ten minutes" unreachable unless the
+  person reassigned the automation to a different agent. Hiding is a rule about
+  what you may newly pick; showing back what is already chosen does not conflict
+  with it — a stored value is only a person's choice if the person can see it.
+
 ## 1.0.29 — 2026-08-21
 
 Bundled runtime: Agentlas OS v1.2.12 (2b075361f07f25577994f0ce87f46f33ac41ec64).
