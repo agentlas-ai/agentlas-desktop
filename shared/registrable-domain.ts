@@ -84,3 +84,29 @@ export function registrableDomain(hostOrKey: string): string {
 
   return `${secondLast}.${last}`;
 }
+
+/**
+ * 도메인에서 사람이 읽는 사이트 이름을 만든다 — `mongodb.com` → "MongoDB".
+ *
+ * 왜 방문 기록 제목을 안 쓰는가 (2026-08-20 dev QA 실측): 제목은 "마지막에 본 페이지"의
+ * 것이라 사이트 이름 구실을 못 한다. 113줄 중 33줄이 도메인 브랜드를 안 담았고, 그중에는
+ *   google.com  → "받은편지함 (13,005) - <이메일> - Gmail"   ← 개인정보가 화면에 뜬다
+ *   google.co.kr→ "Two-factor authentication · GitHub"      ← 엉뚱한 사이트로 오인
+ *   brunch.co.kr→ "특허 청구항 작성방법"                      ← 이름이 아니다
+ * 가 있었다. 도메인에서 만들면 항상 맞고, 개인 데이터가 섞이지 않으며, 표도 필요 없다.
+ *
+ * 알려진 브랜드 표기(카멜케이스 등)는 별도로 두지 않는다 — 그건 다시 손 목록이 되고
+ * 빠진 사이트만 어색해진다. 첫 글자만 올리는 규칙이 전 사이트에 고르게 적용된다.
+ */
+export function siteDisplayName(hostOrKey: string): string {
+  const domain = registrableDomain(hostOrKey);
+  if (!domain) return "";
+  const first = domain.split(".")[0] ?? domain;
+  if (!first) return domain;
+  // 하이픈·언더바는 낱말 경계로 본다: `app-store` → "App Store".
+  return first
+    .split(/[-_]+/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}

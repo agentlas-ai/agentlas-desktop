@@ -183,8 +183,19 @@ function mockAgentlasBridge() {
     window.localStorage.setItem("agentlas.shellTour.dismissed.v1", "1");
     // 첫 실행 마법사·One 소개는 전 화면을 덮는다 — 억제 키가 빠지면 모든 라우트
     // 검사가 마법사 화면만 보고 죽는다(2026-08-10 실측, 컴포넌트 추가 후 목 미갱신).
-    window.localStorage.setItem("agentlas.work.firstRunOnboarding.v2", "1");
+    // 키의 버전은 컴포넌트가 정본이다 — v2 만 심어 두었더니 온보딩이 v3 로 올라간 뒤
+    // 이 게이트가 다시 마법사 화면만 보고 죽었다(2026-08-20 실측). 옛 버전도 함께 심는
+    // 이유는 옛 체크아웃에서도 이 게이트가 돌아야 하기 때문이다.
+    for (const version of ["v2", "v3"]) {
+      window.localStorage.setItem(`agentlas.work.firstRunOnboarding.${version}`, "1");
+    }
     window.localStorage.setItem("agentlas.one.acknowledgedIntroVersion", "qa-suppressed");
+    // 실행 시 계정 안내도 전 화면을 덮는다(role=presentation 백드롭이 클릭을 가로챈다).
+    // 스누즈 값은 "지금부터 한 주" 형태여야 컴포넌트의 상한 검사를 통과한다.
+    window.localStorage.setItem(
+      "agentlas.beta-economy-notice.snoozed-until",
+      String(Date.now() + 6 * 24 * 60 * 60 * 1000),
+    );
     for (const id of ["dashboard", "workspace", "build", "agents", "hub", "automation", "automation-new", "automation-detail", "environment"]) {
       window.localStorage.setItem(`agentlas.pageTour.${id}.dismissed.v2`, "1");
     }

@@ -15,6 +15,7 @@ import {
   type LoginStepState,
 } from "@/components/plugins/PluginPickerCore";
 import type { DiscoveredBrowserProfile, DiscoveredCredentialDomain } from "@/lib/types";
+import { siteDisplayName } from "@shared/registrable-domain";
 import styles from "./WorkFirstRunOnboarding.module.css";
 
 type Experience = "beginner" | "intermediate" | "expert";
@@ -47,6 +48,15 @@ const STEPS = [1, 2, 3, 4, 5, 6, 7, 8];
 
 /** 검색 전에 보여주는 도구 타일 수. 나머지는 "더 보기"가 맡는다. */
 const TOOL_TILES = 18;
+
+/**
+ * 검색 전에 보여주는 사이트 타일 수. 나머지는 "더 보기"가 맡는다.
+ *
+ * 실측(2026-08-20 dev QA): 이 오너의 Chrome 하나에서 113줄이 한꺼번에 그려져 화면을
+ * 여덟 번 넘게 굴려야 끝이 났다. 목록은 방문 횟수 순이라 실제로 쓰는 곳은 앞쪽에
+ * 모여 있고, 뒤쪽은 한 번 들어가 본 곳이다. 도구 스텝(18칸)과 같은 규칙으로 줄인다.
+ */
+const SITE_TILES = 18;
 
 /**
  * 버전을 v2에서 올린 이유: 이 세팅 흐름은 기존 사용자도 한 번은 거쳐야 한다. 기존 키를
@@ -96,6 +106,7 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
   const [sites, setSites] = useState<DiscoveredCredentialDomain[]>([]);
   const [sitePicked, setSitePicked] = useState<Set<string>>(new Set());
   const [siteQuery, setSiteQuery] = useState("");
+  const [siteExpanded, setSiteExpanded] = useState(false);
   const [siteScanning, setSiteScanning] = useState(false);
   const [siteBusy, setSiteBusy] = useState(false);
   const [siteError, setSiteError] = useState<string | null>(null);
@@ -152,7 +163,7 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
     s6: "Agentlas는 모바일에서도 사용할 수 있어요.", s6sub: "App Store와 Play Store에서 Agentlas를 설치한 뒤, 환경설정에서 새 기기 연결을 눌러 QR 코드로 연결하세요.",
     s7: "이미 로그인해 둔 사이트를 가져올까요?", s7sub: "평소 쓰는 브라우저에 로그인돼 있는 곳이에요. 고른 곳만 Agentlas로 넘어옵니다. 비밀번호와 결제수단은 가져오지 않아요.",
     s7search: "사이트 이름이나 주소로 찾기", s7scanning: "브라우저를 살펴보는 중…", s7empty: "가져올 로그인을 찾지 못했어요.", s7none: "찾는 이름과 맞는 사이트가 없어요.",
-    s7linked: "이미 연결됨", s7importing: "가져오는 중…", s7skip: "지금은 건너뛰기", s7profiles: "브라우저 프로필",
+    s7linked: "이미 연결됨", s7importing: "가져오는 중…", s7profiles: "브라우저 프로필", s7more: "더 보기",
     s8: "매일 쓰는 서비스가 뭐예요?", s8sub: "고른 것은 모든 에이전트가 함께 씁니다. 나중에 환경설정에서 더 추가할 수 있어요.",
     s8search: "서비스 이름으로 찾기", s8loading: "목록을 불러오는 중…", s8empty: "표시할 서비스가 없어요.", s8none: "찾는 이름과 맞는 서비스가 없어요.",
     s8installed: "이미 연결됨", s8adding: "추가하는 중…", s8skip: "이대로 시작하기", s8more: "더 보기",
@@ -168,7 +179,7 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
     s6: "Agentlas also works on mobile.", s6sub: "Install Agentlas from the App Store or Play Store, then choose Connect new device in Settings and scan the QR code.",
     s7: "Which sites are you already signed in to?", s7sub: "These are places your everyday browser is signed in to. Only the ones you pick come over. Passwords and payment methods stay behind.",
     s7search: "Find a site by name or address", s7scanning: "Looking through your browser…", s7empty: "No logins to bring over.", s7none: "No site matches that name.",
-    s7linked: "Already connected", s7importing: "Bringing them over…", s7skip: "Skip for now", s7profiles: "Browser profile",
+    s7linked: "Already connected", s7importing: "Bringing them over…", s7profiles: "Browser profile", s7more: "Show more",
     s8: "What do you use every day?", s8sub: "Every agent shares what you pick. You can add more later in Settings.",
     s8search: "Find a service by name", s8loading: "Loading…", s8empty: "Nothing to show yet.", s8none: "No service matches that name.",
     s8installed: "Already connected", s8adding: "Adding…", s8skip: "Start without any", s8more: "Show more",
@@ -268,12 +279,18 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
     void loadSites(siteProfileId);
   }, [siteProfileId, loadSites]);
 
-  const visibleSites = useMemo(() => {
+  const siteMatches = useMemo(() => {
     const needle = siteQuery.trim().toLowerCase();
     if (!needle) return sites;
     return sites.filter((entry) =>
-      entry.domain.toLowerCase().includes(needle) || (entry.title ?? "").toLowerCase().includes(needle));
+      entry.domain.toLowerCase().includes(needle) || siteDisplayName(entry.domain).toLowerCase().includes(needle));
   }, [sites, siteQuery]);
+
+  // 도구 스텝과 같은 규칙: 검색을 시작하면 축소는 의미가 없다(사용자가 이미 목표를 말했다).
+  const siteNarrowed = !siteExpanded && !siteQuery.trim();
+  const visibleSites = useMemo(
+    () => (siteNarrowed ? siteMatches.slice(0, SITE_TILES) : siteMatches),
+    [siteMatches, siteNarrowed]);
 
   const toggleSite = (domain: string) => {
     setSitePicked((current) => {
@@ -408,7 +425,9 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
       ? copy.s7importing
       : sitePicked.size > 0
         ? (ko ? `${sitePicked.size}개 가져오기` : `Bring ${sitePicked.size} over`)
-        : copy.s7skip)
+        // 아무것도 안 골랐을 때 "지금은 건너뛰기"라고 쓰면 이 스텝이 안 해도 되는 곁가지처럼
+        // 읽힌다. 하는 일은 다음 스텝으로 가는 것뿐이므로 다른 스텝과 같은 "다음"이다.
+        : copy.next)
     : step === LAST_STEP
       ? (toolBusy
         ? copy.s8adding
@@ -483,7 +502,11 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
                 <div className={styles.tileGrid}>
                   {visibleSites.map((entry) => {
                     const picked = sitePicked.has(entry.domain);
-                    const name = entry.title?.trim() || entry.domain;
+                    // 이름은 **도메인에서** 만든다. 방문 기록 제목(entry.title)은 "마지막에
+                    // 본 페이지"의 것이라 사이트 이름이 아니다 — 실측에서 google.com 줄에
+                    // 받은편지함 제목과 이메일 주소가 그대로 떴고, google.co.kr 줄에는
+                    // 엉뚱하게 GitHub 제목이 붙었다. 도메인은 언제나 맞고 개인정보가 없다.
+                    const name = siteDisplayName(entry.domain) || entry.domain;
                     return (
                       <button
                         key={entry.domain}
@@ -503,6 +526,12 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
                     );
                   })}
                 </div>
+              )}
+
+              {siteNarrowed && siteMatches.length > visibleSites.length && (
+                <button type="button" className={styles.moreButton} onClick={() => setSiteExpanded(true)}>
+                  {`${copy.s7more} (${siteMatches.length - visibleSites.length})`}
+                </button>
               )}
 
               {siteNote && <p className={styles.stepNote}>{siteNote}</p>}

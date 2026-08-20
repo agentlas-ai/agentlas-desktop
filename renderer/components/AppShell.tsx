@@ -32,6 +32,7 @@ import type {
   OneFeatureIntroResolution,
   OneFeatureIntroState,
 } from "@shared/one-feature-intro";
+import { resolveOneFeatureIntroBlocker } from "@shared/one-feature-intro";
 import { announceHubBookmarkChange } from "@/lib/hub-bookmark-events";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import {
@@ -72,6 +73,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [appUpdateBusy, setAppUpdateBusy] = useState(true);
   const [oneIntroState, setOneIntroState] = useState<OneFeatureIntroState | null>(null);
   const [workFirstRunVisible, setWorkFirstRunVisible] = useState(false);
+  const [betaNoticeVisible, setBetaNoticeVisible] = useState(false);
   const introDeferralInFlightRef = useRef<string | null>(null);
   const router = useRouter();
   const pathname = usePathname() ?? "/";
@@ -357,28 +359,25 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     oneIntroState
     && oneIntroState.acknowledgedIntroVersion < oneIntroState.currentIntroVersion,
   );
-  const oneIntroBlockingCategory: OneFeatureIntroBlockingStateCategory | null = !oneIntroPending
-    ? null
-    : pendingConfirmations > 0
-      ? "pending_approval"
-      : activeChatCount === null
-        ? "authority_unknown"
-        : activeChatCount > 0
-          ? "active_task"
-          : appUpdateBusy
-            ? "app_update"
-            : oberonJobs.some(isOberonBackgroundJobActive)
-              ? "active_background_work"
-              : importOpen
-                ? "import_flow"
-                : !featureUpdateRouteEligible
-                  ? "route_ineligible"
-                  : null;
+  // 순서를 정하는 곳은 shared 의 한 함수다 — 소개·온톨로지 안내·페이지 투어가 각자
+  // 판단하면 첫 실행에 모달이 겹친다(2026-08-20 dev QA 실측). 세팅이 가장 세다.
+  const oneIntroBlockingCategory: OneFeatureIntroBlockingStateCategory | null =
+    resolveOneFeatureIntroBlocker({
+      introPending: oneIntroPending,
+      firstRunSetupVisible: workFirstRunVisible,
+      launchNoticeVisible: betaNoticeVisible,
+      pendingConfirmations,
+      activeChatCount,
+      appUpdateBusy,
+      backgroundWorkActive: oberonJobs.some(isOberonBackgroundJobActive),
+      importFlowOpen: importOpen,
+      routeEligible: featureUpdateRouteEligible,
+    });
   const featureUpdateEligible = featureUpdateRouteEligible && oneIntroBlockingCategory === null;
   // First-run surfaces are ordered, never stacked. Main-owned One feature news
   // wins over the page tour; once it resolves (or is deferred by live work), the
   // current page tour may open normally.
-  const pageTourAutoOpenSuspended = workFirstRunVisible || oneIntroState === null
+  const pageTourAutoOpenSuspended = workFirstRunVisible || betaNoticeVisible || oneIntroState === null
     || (oneIntroPending && oneIntroBlockingCategory === null);
 
   useEffect(() => {
@@ -446,7 +445,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       )}
       {/* Mounted on the shell so it is seen once on launch, whatever screen the
           app opens on — the notice is about the account, not about a screen. */}
-      <BetaEconomyNotice />
+      <BetaEconomyNotice suspended={workFirstRunVisible} onVisibilityChange={setBetaNoticeVisible} />
       <BuildDoneToast />
       <BrowserActionApprovalSheet />
       <AskUserSheet />
@@ -457,6 +456,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         locale={locale}
         onOpen={() => router.push("/library/agents?tab=ontology")}
       />
+      {/*
+        첫 실행에 모달이 둘 겹치면 안 된다 — 실측(2026-08-20 dev QA)에서 대시보드에
+        들어가자 처음 실행 온보딩(8스텝)과 One 소개(1/4)가 **동시에** 떴다. 온보딩이
+        우선이고 소개는 그 뒤에 나온다. 그 판단은 위 first_run_setup 이 맡는다.
+      */}
       <OneFeatureIntro
         eligible={featureUpdateEligible && oneIntroPending}
         needsAcknowledgement={oneIntroPending}

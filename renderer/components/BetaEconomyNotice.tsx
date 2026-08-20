@@ -45,11 +45,25 @@ export function shouldShowNotice(storedValue: string | null, now: number, endsAt
   return now >= until;
 }
 
-export function BetaEconomyNotice() {
+/**
+ * @param suspended 처음 실행 세팅이 화면을 갖고 있는 동안 true. **감추는 게 아니라 미룬다** —
+ *   열림 상태와 스누즈 계산은 그대로 돌고, 세팅이 끝나면 그때 뜬다. 실측(2026-08-20 dev QA)
+ *   에서 첫 실행 대시보드에 온보딩과 이 안내가 겹쳐 떴다. 안내가 스누즈되지 않고 미뤄지는
+ *   것이 중요하다 — 여기 적힌 마감일은 안 본 사람에게는 없는 것과 같기 때문이다.
+ */
+export function BetaEconomyNotice({
+  suspended = false,
+  onVisibilityChange,
+}: {
+  suspended?: boolean;
+  /** 이 안내가 화면을 갖고 있는 동안 뒤에 있는 소개가 함께 뜨지 않도록 셸에 알린다. */
+  onVisibilityChange?: (visible: boolean) => void;
+} = {}) {
   const { locale } = useT();
   const ko = locale === "ko";
   const [open, setOpen] = useState(false);
   const primaryRef = useRef<HTMLButtonElement>(null);
+  const visible = open && !suspended;
 
   useEffect(() => {
     const endsAt = new Date(BETA_ENDS_AT).getTime();
@@ -69,16 +83,20 @@ export function BetaEconomyNotice() {
   }, []);
 
   useEffect(() => {
-    if (!open) return;
+    onVisibilityChange?.(visible);
+  }, [visible, onVisibilityChange]);
+
+  useEffect(() => {
+    if (!visible) return;
     primaryRef.current?.focus();
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") setOpen(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open]);
+  }, [visible]);
 
-  if (!open) return null;
+  if (!visible) return null;
 
   const snooze = () => {
     try {

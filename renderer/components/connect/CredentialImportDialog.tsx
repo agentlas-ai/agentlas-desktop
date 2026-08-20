@@ -16,6 +16,7 @@ import type {
   DiscoveredBrowserProfile,
   DiscoveredCredentialDomain,
 } from "@/lib/types";
+import { siteDisplayName } from "@shared/registrable-domain";
 
 export function CredentialImportDialog({
   ko,
@@ -86,7 +87,7 @@ export function CredentialImportDialog({
     const q = query.trim().toLowerCase();
     if (!q) return domains;
     return domains.filter(
-      (d) => d.domain.includes(q) || (d.title ?? "").toLowerCase().includes(q),
+      (d) => d.domain.includes(q) || siteDisplayName(d.domain).toLowerCase().includes(q),
     );
   }, [domains, query]);
 
@@ -208,10 +209,14 @@ export function CredentialImportDialog({
                 {/*
                   주소와 사이트명만(오너 결정 2026-08-20). 쿠키 개수·"로그인됨"·"연동됨" 같은
                   메타 배지는 렌더하지 않는다 — 그 숫자들은 순서와 필터를 정하는 내부 신호다.
-                  제목이 없으면 도메인이 이름 자리에 오고, 부제는 비운다(같은 값 두 번 금지).
+
+                  이름은 방문 기록 제목(d.title)이 아니라 **도메인에서** 만든다. 제목은 마지막에
+                  본 페이지의 것이라 사이트 이름 구실을 못 한다 — 온보딩 실측(2026-08-20)에서
+                  google.com 줄에 받은편지함 제목과 이메일 주소가 그대로 떴다. 온보딩 스텝 7과
+                  같은 함수를 쓴다(두 레일이 같은 이름을 보여야 한다).
                 */}
-                <span className="cid-title">{d.title ?? d.domain}</span>
-                <span className="cid-domain">{d.title ? d.domain : ""}</span>
+                <span className="cid-title">{siteDisplayName(d.domain) || d.domain}</span>
+                <span className="cid-domain">{d.domain}</span>
               </label>
             ))}
         </div>
