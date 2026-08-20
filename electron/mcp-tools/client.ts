@@ -18,6 +18,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { readEnvVar } from "../secrets/vault";
 import { listInstalledServers, getServer } from "./registry";
 import { withCliPath } from "../runtime/exec";
+import { withUvxPath } from "./uv-runtime";
 import {
   OPENCRAB_CATALOG_ID,
   OPENCRAB_MCP_URL_KEY,
@@ -485,7 +486,12 @@ async function createTransport(
   }
   if (server.transport === "stdio") {
     if (!server.command) throw new Error("stdio server has no command");
-    const baseEnv = withCliPath({ ...getDefaultEnvironment(), PATH: process.env.PATH ?? "" });
+    // uvx 로 도는 공식 벤더 서버가 13개다. uv 는 이 앱이 마련해 준다 — 사용자가 따로
+    // 깔아 두지 않았다는 이유로 그 13개가 전부 죽으면 안 된다(withUvxPath 안의 사유 참조).
+    const baseEnv = withUvxPath(
+      server.command,
+      withCliPath({ ...getDefaultEnvironment(), PATH: process.env.PATH ?? "" }),
+    );
     const stdioEnv = Object.fromEntries(
       Object.entries(baseEnv).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
     );
