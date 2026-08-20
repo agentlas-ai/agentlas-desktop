@@ -7,7 +7,7 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ipc } from "@/lib/ipc";
-import { visibleAgents } from "@/lib/agent-visibility";
+import { visibleAgents, withCurrentTarget } from "@/lib/agent-visibility";
 import { pickLocalized, useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import type {
@@ -115,7 +115,10 @@ function NewAutomationPage() {
         api.projects.list(),
       ]);
       const visible = visibleAgents(ag);
-      setAgents(visible);
+      // ★이 자동화가 이미 쓰고 있는 대상은 자기 편집기에서 빼지 않는다 — 빼면
+      //   "유효한 대상이 없다"로 자기 자신을 저장 불가로 만든다(agent-visibility 주석 참조).
+      const editingRow = editId ? autos.find((a) => a.id === editId) : null;
+      setAgents(withCurrentTarget(visible, ag, editingRow?.targetType, editingRow?.targetId));
       setFirms(fm);
       setAllAutomations(autos);
       setHubAgents(hub);

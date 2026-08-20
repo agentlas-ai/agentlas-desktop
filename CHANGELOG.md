@@ -6,6 +6,12 @@ Bundled runtime: Agentlas OS v1.2.12 (2b075361f07f25577994f0ce87f46f33ac41ec64).
 Source readiness does not prove a public installer or update feed; the
 Releases page stays the authority.
 
+- An automation built by describing it could never have its name or schedule
+  changed. Its target is the built-in orchestrator, which the picker hides as a
+  system agent — so opening that automation's own editor showed no valid target,
+  disabled Save, and left "run this every ten minutes" unreachable unless the
+  person switched the automation to a different agent. The editor now always
+  offers back the target the automation already uses; fresh choices stay filtered.
 - Only a boundary can stop a run now. A verification that backs its judgment with
   an independent observation — "does the file it says it moved exist on disk" —
   still fails the run when the world disagrees. A verification that only weighs a
