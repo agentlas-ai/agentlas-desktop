@@ -749,6 +749,8 @@ const api: AgentlasIpc = {
     ) => ipcRenderer.invoke("automations:swapAgent", id, input),
     interviewGraph: (state: unknown) => ipcRenderer.invoke("automations:interviewGraph", state),
     createFromBlueprint: (payload: unknown) => ipcRenderer.invoke("automations:createFromBlueprint", payload),
+    /** 그래프를 고친 뒤 이전 실패를 잊고 처음부터 — 그래프가 실제로 바뀐 경우에만 응한다. */
+    forgetFailedRun: (id: string) => ipcRenderer.invoke("automations:forgetFailedRun", id),
     /**
      * 저장 전에 한 번 돌려 보고, 막히면 **이어갈 길**을 함께 받는다.
      * 저장하지 않는다 — 무엇을 할지는 사람이 고른다.

@@ -646,6 +646,40 @@ function codeFailureHeadline(raw: string | null | undefined): string {
   return `${last}\n\n(자세한 내용)\n${text.slice(-600)}`;
 }
 
+/**
+ * 값이 **사실상 하나의 JSON 펜스 블록**이면 그 안을 꺼낸다. 아니면 원문 그대로.
+ *
+ * ★첫 판은 `^```...```$` 로 통째 일치를 봤는데, 실측한 모델 출력은 닫는 펜스 뒤에
+ *   빈 줄과 여는 펜스 잔해가 더 붙어 있었다(캠페인 E5):
+ *
+ *     ```json
+ *     {"apply":[],"review":[]}
+ *     ```
+ *
+ *     ```
+ *
+ *   그래서 앵커가 안 맞아 벗겨지지 않았고, 다음 코드 단계가 못 읽어 빈손을 냈다.
+ *   **모델 출력은 깔끔하지 않다** — 판정은 그 사실 위에 서야 한다.
+ *
+ * 규칙: 첫 펜스 블록의 내용이 JSON 이고, **펜스 밖에 뜻 있는 글이 없으면** 그것을 값으로
+ * 본다. 사람이 읽는 글 안의 예시 블록(앞뒤에 문장이 있는 경우)은 건드리지 않는다.
+ */
+export function unwrapFencedJson(text: string): string {
+  const raw = String(text ?? "");
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("```")) return text;
+  const match = trimmed.match(/```(?:[a-zA-Z]+)?\s*\n([\s\S]*?)\n?```/);
+  if (!match) return text;
+  const body = match[1].trim();
+  if (!body) return text;
+  try { JSON.parse(body); } catch { return text; }
+  // 펜스 밖에 남은 것이 공백·펜스 잔해뿐일 때만 벗긴다.
+  const outside = (trimmed.slice(0, match.index ?? 0) + trimmed.slice((match.index ?? 0) + match[0].length))
+    .replace(/```/g, "")
+    .trim();
+  return outside.length === 0 ? body : text;
+}
+
 function isReadOnlyCheckpointTool(name: string): boolean {
   // search/validate are digest-bound transaction operations. Preparation may
   // fetch a metered runtime bundle, so it is never considered replay-safe
@@ -2023,8 +2057,20 @@ export async function runGraph(
   const applyProduces = (
     node: WorkflowNode,
     produces: string,
-    text: string,
+    rawText: string,
   ): GraphNodeFailure | null => {
+    /*
+     * ★모델이 JSON 을 **코드 펜스로 감싸 낸다.** 프롬프트로 "펜스 쓰지 마라"라고 해도
+     *   쓴다 — 부탁은 약속이고, 벗기는 것은 보장이다.
+     *
+     *   실측 2026-08-20 (캠페인 E5): 저작 계약을 넣어 에이전트가 JSON 을 내게 만들었더니
+     *   이번엔 ```json 으로 감싸서 냈고, 다음 코드 단계가 그걸 못 읽어 빈 배열을 냈다.
+     *   같은 자리에서 두 번째로 막힌 것이다.
+     *
+     *   **통째로 하나의 펜스**이고 그 안이 실제로 JSON 일 때만 벗긴다 — 사람이 읽는 글
+     *   안의 예시 코드 블록은 건드리지 않는다.
+     */
+    const text = unwrapFencedJson(rawText);
     const policy = reducerPolicyOf(node);
     const writers = varWriters.get(produces) ?? [];
     if (policy === "overwrite") {

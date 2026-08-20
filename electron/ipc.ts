@@ -4919,6 +4919,33 @@ export function registerIpcHandlers(): void {
     });
   });
 
+  /**
+   * 그래프를 고친 뒤 **이전 실패는 잊고 처음부터** 돌린다.
+   *
+   * ★실측 2026-08-20 (캠페인 E3): 실행이 실패한 뒤 사람이 채팅으로 그래프를 고쳤더니
+   *   재실행이 거부됐다 — 화면은 "이전 그래프를 복원하거나 새 자동화로 분리하라"고만
+   *   말했다. 커널에는 나갈 문(forgetStaleGraphCheckpoint)이 있었는데 **화면에 없었다.**
+   *   그래서 고친 그래프로는 영원히 못 돌린다. 내는 오류에는 푸는 길이 있어야 한다.
+   *
+   *   그래프가 **실제로 바뀐 경우에만** 응한다 — 안 바뀌었으면 이전 실패는 여전히
+   *   그 그래프의 실패이고, 잊는 것은 이중 실행의 문을 여는 짓이다.
+   */
+  ipcMain.handle("automations:forgetFailedRun", (_e, id: unknown) => {
+    const automationId = String(id ?? "").trim();
+    if (!automationId) return { ok: false as const, forgot: false, reason: "no_automation" };
+    const automation = getAutomation(automationId);
+    if (!automation?.graph) return { ok: false as const, forgot: false, reason: "no_graph" };
+    const { forgetStaleGraphCheckpoint } = require("./store/graph-reconciliation") as
+      typeof import("./store/graph-reconciliation");
+    const { graphExecutionDigest } = require("../shared/graph-execution-digest") as
+      typeof import("../shared/graph-execution-digest");
+    const result = forgetStaleGraphCheckpoint(
+      automationId,
+      graphExecutionDigest(automation, automation.graph),
+    );
+    return { ok: true as const, ...result };
+  });
+
   ipcMain.handle("automations:createFromBlueprint", (_e, payload: unknown) => {
     const input = payload as {
       name?: string; graph?: unknown; scheduleHuman?: string; targetId?: string; goal?: string;

@@ -206,6 +206,46 @@ check(
   "'지금 상태로 저장'을 골라도 저장이 안 됩니다 — 만든 것을 지키겠다는 약속이 빈말이 됩니다.",
 );
 
+/* ── ⑤ 막다른 길을 만들지 않는다 ─────────────────────────────────────────── */
+check(
+  "a-failed-chip-does-not-erase-the-others",
+  /options: prev\.plan\.options\.filter\(\(o\) => o\.actionId !== actionId\)/.test(ui),
+  "칩 하나가 안 통하면 나머지 칩까지 사라집니다 — 그 순간 '지금 상태로 저장'도 함께 "
+  + "사라져 만든 것을 지킬 길이 없어집니다(실측 2026-08-20: 캠페인 E3).",
+);
+
+const vb = readFileSync(path.join(root, "electron/workflow/verify-before-save.ts"), "utf8");
+check(
+  "a-step-waiting-on-an-unrun-step-is-skipped-not-blocked",
+  /notRunProduces/.test(vb) && /state: "skipped"/.test(vb),
+  "바깥을 바꾸는 단계는 저장 전에 안 돌리면서, 그 값을 기다리는 뒷 단계는 돌려 **반드시** "
+  + "막히게 만듭니다 — 멀쩡한 그래프가 저장 전에 가짜로 실패합니다(실측 2026-08-20: "
+  + "'파일을 옮긴다' 다음의 '옮겼는지 확인한다'가 매번 막혔다).",
+);
+
+/* ── ⑥ 그래프를 고친 뒤 **다시 돌릴 길이 화면에 있는가** ──────────────────── */
+check(
+  "the-way-out-after-editing-a-graph-is-exposed",
+  /automations:forgetFailedRun/.test(ipc)
+    && /forgetFailedRun/.test(preload),
+  "그래프를 고친 뒤 이전 실패를 잊는 문이 커널에만 있고 화면으로 나오지 않습니다 — "
+  + "사용자는 고친 그래프로 영원히 못 돌립니다(실측 2026-08-20: 캠페인 E3).",
+);
+const runPanel = readFileSync(path.join(root, "renderer/components/automation/RunHistoryPanel.tsx"), "utf8");
+check(
+  "the-drift-message-comes-with-a-button",
+  /data-testid="forget-failed-run"/.test(runPanel)
+    && /forgetFailedRun\(\)/.test(runPanel),
+  "\"워크플로우가 바뀌었다\"는 거절만 있고 푸는 버튼이 없습니다 — 거절에는 푸는 길이 "
+  + "함께 있어야 합니다.",
+);
+check(
+  "forgetting-refuses-when-the-graph-did-not-change",
+  /graph_unchanged/.test(runPanel),
+  "그래프가 안 바뀌었는데도 이전 실패를 잊으면 이중 실행의 문이 열립니다 — 그 경우를 "
+  + "구분해 거절해야 합니다.",
+);
+
 if (failures.length > 0) {
   console.error("\nbuild-recovery 실패:");
   for (const f of failures) console.error(" - " + f);

@@ -715,6 +715,42 @@ export function buildGraphFromBlueprint(
       : { kind: "input", promptLabel: trigger.label, produces: trigger.varName },
   });
 
+/**
+ * 에이전트 단계가 만든 값을 **코드 단계가 읽는다면**, 그 값의 모양을 프롬프트에 못 박는다.
+ *
+ * ★실측 2026-08-20 (캠페인 E4 vs E5). 같은 빌더가 두 그래프를 만들었는데:
+ *   · E4 는 `Return a JSON list of objects: {id, is_invoice, vendor, ...}` 라고 적었고 —
+ *     다음 코드 단계가 그대로 읽어 **완주**했다.
+ *   · E5 는 `write down: the mail id, the sender, the type, ...` 라고만 적었고 —
+ *     모델이 마크다운 표로 답해 다음 코드가 **빈손**을 냈다(request_count: 0). 검증이
+ *     그걸 잡아 정직하게 실패했지만, 사용자에게는 그냥 안 되는 자동화다.
+ *
+ *   차이는 형식 한 줄이었다. 그리고 그 한 줄을 **매번 쓸지 말지는 모델의 그날 기분**에
+ *   달려 있었다. 사람에게 보이는 결과가 그렇게 정해지면 안 된다.
+ *
+ * ★모델 판단이 아니라 **그래프 모양**으로 결정한다: 에이전트가 낸 값을 코드가 소비하면
+ *   기계가 읽을 값이고, 사람이 읽는 곳으로만 가면 글이어도 된다. 그래서 조건문이지만
+ *   추측이 아니다 — 저작 시점에 그래프가 이미 답을 갖고 있다.
+ */
+function promptWithHandoffContract(
+  step: { instruction: string; produces?: string | null },
+  all: Array<{ kind?: string; consumes?: string[] | null }>,
+): string {
+  const produces = step.produces?.trim();
+  if (!produces) return step.instruction;
+  const readByCode = all.some((other) => other.kind === "code"
+    && (other.consumes ?? []).some((name) => String(name).trim() === produces));
+  if (!readByCode) return step.instruction;
+  return [
+    step.instruction,
+    "",
+    `A later step reads ${produces} as data, not as prose. Return ONLY JSON — no prose, no`,
+    "markdown, no code fences. Use a JSON array when there are several items and a JSON",
+    "object when there is one. Every field you were asked for becomes a key. If a value",
+    "cannot be read from the input, use null — never guess it and never leave a placeholder.",
+  ].join("\n");
+}
+
   const stepId = (index: number): string => `step${index + 1}`;
   bp.steps.forEach((step, index) => {
     const isCode = step.kind === "code";
@@ -737,7 +773,7 @@ export function buildGraphFromBlueprint(
               ? { packages: step.packages.map((v) => String(v).trim()).filter(Boolean) }
               : {}),
           }
-          : { prompt: step.instruction }),
+          : { prompt: promptWithHandoffContract(step, bp.steps) }),
         effect: step.effect,
         /* ★승인 게이트 폐지(오너 이사회 결정 2026-08-10): 컴파일러는 approval 선언을
            그래프에 싣지 않는다 — 커널이 읽지 않는 잠금을 실으면 "잠갔다고 믿는데 안

@@ -21,6 +21,7 @@
  * ★바깥을 바꾸는 단계는 돌리지 않는다 — 만들다가 메일이 나가면 안 된다.
  */
 
+import { codeReferencedVars } from "../../shared/graph-code-vars";
 import type { WorkflowGraph, WorkflowNode } from "../../shared/types";
 
 export type PreSaveStepState = "ran" | "repaired" | "blocked" | "skipped";
@@ -108,6 +109,15 @@ function snapshotOf(vars: Record<string, unknown>): Record<string, unknown> {
   return out;
 }
 
+/** 이 단계가 그 이름의 값을 읽는가 — consumes · vars.get · {{이름}} 어느 모양이든. */
+function stepReads(node: WorkflowNode, name: string): boolean {
+  if (str(node.config, "consumes") === name) return true;
+  const code = str(node.config, "code");
+  if (!code) return false;
+  if (codeReferencedVars(code).includes(name)) return true;
+  return new RegExp(`\\{\\{\\s*${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\}\\}`).test(code);
+}
+
 /** 이 단계를 저장 전에 돌려 봐도 되는가. 바깥을 바꾸는 것은 절대 돌리지 않는다. */
 function isCheapAndSafeToRun(node: WorkflowNode): boolean {
   if (node.type !== "code") return false;
@@ -142,8 +152,38 @@ export async function verifyGraphBeforeSave(
   // 막혔을 때 "바로 앞이 무엇을 냈는가"를 말할 수 있어야 한다 — 형식 불일치가 가장 흔하다.
   let lastProduced: unknown = null;
 
+  /*
+   * ★안 돌린 단계가 만들었을 값의 이름을 모아 둔다.
+   *
+   *   실측 2026-08-20 (캠페인 E3, 메일 첨부 정리): "파일을 옮긴다"(mutation)는 저장 전에
+   *   안 돌린다 — 옳다. 그런데 그 **뒤에 오는 "옮겼는지 확인한다"(read)** 는 돌렸고,
+   *   옮긴 결과가 없으니 반드시 막혔다. 그러고는 "이 단계는 아직 안 됩니다"라고 말했다.
+   *   **못 잰 것을 실패로 센 것이다.** 그 그래프는 멀쩡했다.
+   *
+   *   이 저장소가 이미 이름 붙인 규칙이 있다: *skipped 는 실패가 아니다(못 잰 것이다).*
+   *   그러니 안 돌린 단계의 값을 기다리는 단계도 **skipped** 여야 한다.
+   */
+  const notRunProduces = new Set<string>();
   for (const node of graph.nodes) {
-    if (!isCheapAndSafeToRun(node)) continue;
+    if (!isCheapAndSafeToRun(node)) {
+      const produces = str(node.config, "produces");
+      if (produces) notRunProduces.add(produces);
+      continue;
+    }
+    const waitsFor = [...notRunProduces].filter((name) => stepReads(node, name));
+    if (waitsFor.length > 0) {
+      const produces = str(node.config, "produces");
+      if (produces) notRunProduces.add(produces);
+      steps.push({
+        nodeId: node.id,
+        label: node.label || node.id,
+        state: "skipped",
+        skippedBecause:
+          `이 단계는 "${waitsFor.join(", ")}" 값을 기다리는데, 그 값을 만드는 단계는 `
+          + "바깥을 바꾸는 단계라 저장 전에는 돌리지 않습니다. 실제 실행에서 확인됩니다.",
+      });
+      continue;
+    }
     const code = str(node.config, "code");
     if (!code) {
       steps.push({

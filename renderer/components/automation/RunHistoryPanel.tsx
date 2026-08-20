@@ -42,6 +42,33 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
   const [nodeDecisions, setNodeDecisions] = useState<Record<string, NodeDecisionDraft>>({});
   const [message, setMessage] = useState("");
   const [recoveryError, setRecoveryError] = useState("");
+  const [forgetting, setForgetting] = useState(false);
+
+  /** 그래프를 고친 뒤 이전 실패를 잊는다. 그래프가 안 바뀌었으면 커널이 거절한다. */
+  async function forgetFailedRun() {
+    const api = ipc();
+    if (!api || forgetting) return;
+    setForgetting(true);
+    try {
+      const res = await api.automations.forgetFailedRun(automation.id);
+      if (res.forgot) {
+        setRecoveryError("");
+        setMessage(ko
+          ? "이전 실패를 정리했습니다. 이제 새 그래프로 다시 실행할 수 있습니다."
+          : "Cleared the earlier failure. You can run the new graph now.");
+        return;
+      }
+      setRecoveryError(res.reason === "graph_unchanged"
+        ? (ko
+          ? "그래프가 아직 그대로입니다. 먼저 고친 뒤 다시 눌러 주세요."
+          : "The graph has not changed yet. Change it first, then try again.")
+        : (ko ? "정리할 이전 실패가 없습니다." : "There is no earlier failure to clear."));
+    } catch {
+      setRecoveryError(ko ? "정리하지 못했습니다." : "Could not clear it.");
+    } finally {
+      setForgetting(false);
+    }
+  }
   const [reconciling, setReconciling] = useState(false);
   const [eventActionId, setEventActionId] = useState<string | null>(null);
   const [rerunning, setRerunning] = useState(false);
@@ -676,6 +703,32 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
       {recoveryError ? (
         <div className="automation-run-message" role="alert">
           {recoveryError}
+          {/*
+            ★거절에는 **푸는 길**이 함께 있어야 한다. 실측 2026-08-20 (캠페인 E3):
+              실행이 실패한 뒤 채팅으로 그래프를 고쳤더니 재조정이 거부됐고, 화면은
+              "이전 그래프를 복원하거나 새 자동화로 분리하라"고만 말했다. 커널에는
+              나갈 문이 있었는데 화면에 없어서, 고친 그래프로는 영원히 못 돌렸다.
+              그래프가 **실제로 바뀐 경우에만** 응하므로 이중 실행을 열지 않는다.
+          */}
+          {/graph_drift|워크플로우가 실패 후 변경|workflow changed after/.test(recoveryError) ? (
+            <div style={{ marginTop: 8 }}>
+              <button
+                type="button"
+                data-testid="forget-failed-run"
+                disabled={forgetting}
+                onClick={() => void forgetFailedRun()}
+                style={{
+                  borderRadius: 999, border: "1px solid var(--line)", padding: "6px 12px",
+                  fontSize: 12.5, background: "var(--surface)", color: "var(--ink)",
+                  cursor: forgetting ? "default" : "pointer",
+                }}
+              >
+                {forgetting
+                  ? (ko ? "정리하는 중…" : "Clearing…")
+                  : (ko ? "이전 실패는 잊고 새 그래프로 처음부터" : "Forget the earlier failure and start fresh")}
+              </button>
+            </div>
+          ) : null}
         </div>
       ) : null}
       {message ? (

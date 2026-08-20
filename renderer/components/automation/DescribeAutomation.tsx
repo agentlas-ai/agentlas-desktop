@@ -233,12 +233,20 @@ export function DescribeAutomation({ locale, onCreated }: {
         return;
       }
       if (res.saveNow) { setRecovery(null); void create(true); return; }
-      setRecovery(null);
+      /*
+       * ★한 칩이 안 통했다고 **나머지 칩을 지우지 않는다.** 실측 2026-08-20: 재작성이
+       *   실패하자 칩이 전부 사라지고 "대화에서 같이 봐 주세요"만 남았다 — 그 순간
+       *   "지금 상태로 저장(꺼둠)"도 함께 사라져, 만든 것을 지킬 길이 없어졌다.
+       *   막다른 길을 만들지 않는다: 안 통한 칩만 빼고 나머지는 남긴다.
+       */
+      setRecovery((prev) => (prev
+        ? { ...prev, plan: { ...prev.plan, options: prev.plan.options.filter((o) => o.actionId !== actionId) } }
+        : prev));
       setProblem({
         reason: res.message,
         nextAction: res.continueInChat
           ? (ko ? "이 자동화의 대화에서 이어서 봅니다." : "Continuing in this automation's chat.")
-          : (ko ? "마친 뒤 다시 저장해 주세요." : "Finish that, then save again."),
+          : (ko ? "다른 방법을 골라 주세요." : "Pick another way to continue."),
       });
     } catch {
       setProblem({

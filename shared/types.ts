@@ -4080,6 +4080,44 @@ export interface McpRunKeyRequest {
   tools: McpRunKeyRequestTool[];
 }
 
+/**
+ * A worker turn and the CLI process that hosts it have different lifecycles.
+ * A completed turn may leave a resident CLI idle, while a closed CLI may
+ * interrupt a turn before it produces a result. Keep those facts separate so
+ * the renderer never infers process death from a normal `done` event.
+ */
+export type AgentProcessState = "running" | "idle" | "closed" | "failed";
+
+export type AgentProcessLifecycleReason =
+  | "spawned"
+  | "turn-started"
+  | "turn-complete"
+  | "transport-closed"
+  | "process-exit"
+  | "reaped"
+  | "shutdown"
+  | "evicted"
+  | "error";
+
+export type AgentMessageDirection = "orchestrator-to-worker" | "worker-to-orchestrator";
+
+export interface AgentProcessLifecycleEvent {
+  source: "cli-process";
+  state: AgentProcessState;
+  reason: AgentProcessLifecycleReason;
+  /** Runtime kind only; no pid, command line, cwd, or environment is exposed. */
+  runtime?: string;
+}
+
+export interface AgentMessageEvent {
+  messageId: string;
+  direction: AgentMessageDirection;
+  fromAgentId: string;
+  toAgentId: string;
+  /** Bounded, user-visible brief/result excerpt. The full worker result stays internal. */
+  text: string;
+}
+
 export interface McpInvocationEvent {
   kind:
     | "lifecycle"
@@ -4222,6 +4260,10 @@ export interface McpInvocationEvent {
   done?: boolean;
   /** 이 노드가 실행 중인 모델/런타임 라벨(예: "grok-4.3", "claude", "gpt-5") — 트리에 "모델 사용 중" 표시. */
   model?: string;
+  /** Explicit orchestrator/worker envelope; separate from ordinary status prose. */
+  agentMessage?: AgentMessageEvent;
+  /** Actual CLI process lifecycle; never inferred from `done` or `final`. */
+  agentLifecycle?: AgentProcessLifecycleEvent;
   // ── 워크플로우 그래프 라이브 실행(설계 §5 P2) — run-graph.ts가 per-node 상태를 emit ──
   /** 이 이벤트가 겨냥한 워크플로우 노드 id(그래프 러너 라이브 오버레이용). */
   nodeId?: string;
@@ -6941,6 +6983,11 @@ export interface AgentlasIpc {
     createFromBlueprint: (payload: { name: string; graph: WorkflowGraph; scheduleHuman: string; targetId?: string; goal?: string }) => Promise<
       { ok: true; id: string; name: string; renamed: boolean } | { ok: false; code: string; reason: string; nextAction: string }
     >;
+    /**
+     * 그래프를 고친 뒤 **이전 실패를 잊고 처음부터** 돌릴 수 있게 한다.
+     * `forgot:false` 면 사유가 온다 — 그래프가 안 바뀌었으면 잊지 않는다(이중 실행 방지).
+     */
+    forgetFailedRun: (id: string) => Promise<{ ok: boolean; forgot: boolean; reason?: string }>;
     /**
      * 저장 **전에** 한 번 돌려 보고, 막히면 이어갈 길을 함께 받는다. 저장하지 않는다.
      *

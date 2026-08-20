@@ -785,6 +785,79 @@ for (const c of guardCases) {
   );
 }
 
+/* ────────────────────────────────────────────────────────────────────────────
+ * ⑫ 저작 축 — 에이전트가 코드에 넘기는 값의 **형식이 못 박히는가**
+ *
+ * 실측 2026-08-20 (캠페인 E4 vs E5): 같은 빌더가 한 그래프에는 "Return a JSON list of
+ * objects"를 적고(완주), 다른 그래프에는 "write down:"만 적었다(다음 코드가 빈손).
+ * 차이는 형식 한 줄이었고, 그 한 줄을 쓸지 말지가 **그날 모델 기분**에 달려 있었다.
+ * 사람에게 보이는 결과가 그렇게 정해지면 안 된다 — 그래프 모양으로 정한다.
+ * ──────────────────────────────────────────────────────────────────────────── */
+{
+  const { buildGraphFromBlueprint } = await import("../dist/shared/graph-blueprint.js");
+  const built = buildGraphFromBlueprint({
+    name: "형식 계약", goal: "메일을 정리한다",
+    trigger: { kind: "input", label: "시작", varName: "seed" },
+    steps: [
+      { kind: "agent", title: "메일을 분류한다", instruction: "각 메일을 분류하고 발신자와 종류를 적어라",
+        effect: "read", produces: "requests", consumes: [] },
+      { kind: "code", title: "표로 만든다", instruction: "요청을 표로", code: "result = 1",
+        codeLang: "python", effect: "read", produces: "rows", consumes: ["requests"] },
+      { kind: "agent", title: "사람에게 요약한다", instruction: "요약을 한 문단으로 써라",
+        effect: "read", produces: "summary", consumes: ["rows"] },
+    ],
+  });
+  const promptOf = (label) => String(
+    (built.graph?.nodes ?? []).find((n) => n.label === label)?.config?.prompt ?? "",
+  );
+  check(
+    "the-blueprint-compiles-at-all",
+    built.ok === true,
+    `청사진이 그래프가 되지 않았습니다 — 이 시험이 아무것도 못 잽니다(${JSON.stringify(built.problems ?? null).slice(0, 200)}).`,
+  );
+  check(
+    "a-value-a-code-step-reads-gets-a-format-contract",
+    /ONLY JSON/.test(promptOf("메일을 분류한다")),
+    "코드 단계가 읽는 값인데 에이전트 프롬프트에 형식이 안 박혔습니다 — 모델이 글로 "
+    + `답하면 다음 코드가 빈손을 냅니다(프롬프트: ${promptOf("메일을 분류한다").slice(0, 120)}).`,
+  );
+  check(
+    "a-value-only-a-person-reads-stays-prose",
+    !/ONLY JSON/.test(promptOf("사람에게 요약한다")),
+    "사람이 읽는 요약까지 JSON 으로 강제했습니다 — 읽으라고 만든 글이 기계 형식이 됩니다.",
+  );
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * ⑬ 모델이 JSON 을 코드 펜스로 감싸 내도 다음 단계가 읽는가
+ *
+ * 실측 2026-08-20 (캠페인 E5): 저작 계약을 넣어 에이전트가 JSON 을 내게 만들었더니
+ * 이번엔 ```json 으로 감싸서 냈고, 다음 코드가 못 읽어 빈 배열을 냈다 — 같은 자리에서
+ * 두 번째로 막혔다. 프롬프트로 "펜스 쓰지 마라"는 부탁이고, 벗기는 것이 보장이다.
+ *
+ * ★여기서는 **판정 함수만** 잰다. 펜스를 내는 것은 모델이고, 이 매트릭스에는 모델이
+ *   없다(코드 노드가 낸 문자열은 코드의 의도이므로 벗기면 안 된다 — 그건 다른 규칙이다).
+ *   실제 에이전트 경로는 라이브 스위트가 잰다.
+ * ──────────────────────────────────────────────────────────────────────────── */
+{
+  const { unwrapFencedJson } = await import("../dist/electron/workflow/run-graph.js");
+  const cases = [
+    { why: "펜스로 감싼 JSON 객체", input: "```json\n{\"a\":1}\n```", want: '{"a":1}' },
+    { why: "언어 표기 없는 펜스", input: "```\n[1,2]\n```", want: "[1,2]" },
+    { why: "펜스 안이 JSON 이 아니면 그대로", input: "```\n안녕하세요\n```", want: "```\n안녕하세요\n```" },
+    { why: "글 안의 예시 블록은 그대로", input: "설정은:\n```json\n{}\n```\n끝.", want: "설정은:\n```json\n{}\n```\n끝." },
+    { why: "펜스 없는 JSON 은 그대로", input: '{"a":1}', want: '{"a":1}' },
+  ];
+  const wrong = cases.filter((c) => unwrapFencedJson(c.input) !== c.want);
+  check(
+    "a-fenced-json-value-is-unwrapped-and-prose-is-not",
+    typeof unwrapFencedJson === "function" && wrong.length === 0,
+    typeof unwrapFencedJson !== "function"
+      ? "펜스 벗기기 함수가 없습니다 — 모델이 감싸 내면 다음 단계가 못 읽습니다."
+      : `펜스 판정이 틀립니다: ${wrong.map((c) => `${c.why} → ${JSON.stringify(unwrapFencedJson(c.input)).slice(0, 60)}`).join(" / ")}`,
+  );
+}
+
 try { getDb().close(); } catch { /* noop */ }
 try { rmSync(dir, { recursive: true, force: true }); } catch { /* noop */ }
 
