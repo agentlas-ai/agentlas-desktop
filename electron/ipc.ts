@@ -51,32 +51,12 @@ import {
   saveMultimodalSettings,
 } from "./multimodal/settings";
 import {
-  cancelOberonKeyframes,
-  getOberonKeyframeJob,
-  openOberonKeyframeOutput,
-  startOberonKeyframes,
-} from "./oberon/keyframes";
-import { planOberonWithCli } from "./oberon/planner";
-import { startOberonSheets } from "./oberon/sheets";
-import {
-  cancelOberonRenderJob,
-  getOberonRenderJob,
-  openOberonRenderOutput,
-  startOberonRender,
-} from "./oberon/render";
-import {
-  cancelOberonMotionAd,
-  getOberonMotionAdJob,
-  openOberonMotionAdOutput,
-  startOberonMotionAd,
-} from "./oberon/motion-graphics";
-import {
-  animateKeyStatus,
-  cancelOberonAnimate,
-  getOberonAnimateJob,
-  openOberonAnimateOutput,
-  startOberonAnimate,
-} from "./oberon/animate";
+  videoKeyStatus,
+  cancelVideoJob,
+  getVideoJob,
+  openVideoOutput,
+  startVideoJob,
+} from "./multimodal/video";
 import { runMigration, scanMigrationSources } from "./migrate";
 import {
   deleteApiKey,
@@ -1520,41 +1500,16 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("app:getVersion", () => app.getVersion());
 
   // ── T-rex 슬라이드 스튜디오 이미지 생성(키리스 CLI: codex image_gen / agy) ──
-  ipcMain.handle("trex:generateImage", async (_e, payload: { model?: "codex" | "gemini" | "auto"; prompt?: string }) => {
-    const { generateTrexImage } = await import("./trex/imagegen");
+  ipcMain.handle("multimodal:generateImage", async (_e, payload: { model?: "codex" | "gemini" | "auto"; prompt?: string }) => {
+    const { generateImage } = await import("./multimodal/image");
     const model = payload?.model === "gemini" ? "gemini" : payload?.model === "codex" ? "codex" : "auto";
-    return generateTrexImage(model, String(payload?.prompt ?? ""));
+    return generateImage(model, String(payload?.prompt ?? ""));
   });
-  ipcMain.handle("trex:imageProviders", async () => {
-    const { trexImageProviders } = await import("./trex/imagegen");
-    return trexImageProviders();
+  ipcMain.handle("multimodal:imageProviders", async () => {
+    const { imageProviders } = await import("./multimodal/image");
+    return imageProviders();
   });
   // T-rex 슬라이드 "내용" 생성 — 연결된 LLM(agy/codex)이 슬라이드별 실제 카피·수치를 JSON으로 작성.
-  ipcMain.handle("trex:generateContent", async (_e, payload: { topic?: string; count?: number; mode?: string; sources?: string; locale?: "ko" | "en"; useOpenCrab?: boolean }) => {
-    const { generateDeckContent } = await import("./trex/content");
-    return generateDeckContent(
-      String(payload?.topic ?? ""),
-      Number(payload?.count ?? 7),
-      payload?.mode,
-      payload?.sources,
-      payload?.locale ?? "en",
-      payload?.useOpenCrab === true,
-    );
-  });
-  ipcMain.handle("trex:contentAvailable", async () => {
-    const { trexContentAvailable } = await import("./trex/content");
-    return trexContentAvailable();
-  });
-  // 선택 요소 LLM 수정(select-to-edit) — 현재 텍스트 + 자연어 지시 → 다시 쓴 텍스트.
-  ipcMain.handle("trex:refineText", async (_e, payload: { current?: string; instruction?: string; context?: string }) => {
-    const { refineTrexText } = await import("./trex/content");
-    return refineTrexText(String(payload?.current ?? ""), String(payload?.instruction ?? ""), payload?.context);
-  });
-
-  // ── Site Studio ───────────────────────────────────────────────
-  // Web/mobile 프리뷰는 prepareRender + opaque-origin iframe에 한정한다.
-  // Agent App 실행/게시만 별도 main-owned Astryx artifact와 capability/consent
-  // 검증을 통과하며, preview HTML이나 renderer 지정 경로를 실행하지 않는다.
   ipcMain.handle("site:listProjects", async () => {
     const { listSiteProjectsForRenderer } = await import("./site/store");
     return listSiteProjectsForRenderer();
@@ -2855,34 +2810,11 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("multimodal:status", () => getMultimodalStatus());
 
   // ── Oberon real generation bridges ─────────────────────────
-  ipcMain.handle("oberon:planWithCli", (_e, request: OberonPlanRequest) =>
-    planOberonWithCli(request),
-  );
-  ipcMain.handle("oberon:startKeyframes", (_e, request: OberonKeyframeRequest) =>
-    startOberonKeyframes(request),
-  );
-  // 마스터 시트/콘티 시트 — 키프레임 잡 재사용 (조회/취소는 keyframe 채널로).
-  ipcMain.handle("oberon:startSheets", (_e, request: OberonSheetRequest) =>
-    startOberonSheets(request),
-  );
-  ipcMain.handle("oberon:getKeyframeJob", (_e, id: string) => getOberonKeyframeJob(id));
-  ipcMain.handle("oberon:cancelKeyframes", (_e, id: string) => cancelOberonKeyframes(id));
-  ipcMain.handle("oberon:openKeyframeOutput", (_e, id: string) => openOberonKeyframeOutput(id));
-  ipcMain.handle("oberon:startRender", (_e, request: OberonRenderRequest) =>
-    startOberonRender(request),
-  );
-  ipcMain.handle("oberon:getRenderJob", (_e, id: string) => getOberonRenderJob(id));
-  ipcMain.handle("oberon:cancelRender", (_e, id: string) => cancelOberonRenderJob(id));
-  ipcMain.handle("oberon:openRenderOutput", (_e, id: string) => openOberonRenderOutput(id));
-  ipcMain.handle("oberon:startMotionAd", (_e, request) => startOberonMotionAd(request));
-  ipcMain.handle("oberon:getMotionAdJob", (_e, id: string) => getOberonMotionAdJob(id));
-  ipcMain.handle("oberon:cancelMotionAd", (_e, id: string) => cancelOberonMotionAd(id));
-  ipcMain.handle("oberon:openMotionAdOutput", (_e, id: string) => openOberonMotionAdOutput(id));
-  ipcMain.handle("oberon:startAnimate", (_e, request) => startOberonAnimate(request));
-  ipcMain.handle("oberon:getAnimateJob", (_e, id: string) => getOberonAnimateJob(id));
-  ipcMain.handle("oberon:cancelAnimate", (_e, id: string) => cancelOberonAnimate(id));
-  ipcMain.handle("oberon:openAnimateOutput", (_e, id: string) => openOberonAnimateOutput(id));
-  ipcMain.handle("oberon:animateKeyStatus", () => animateKeyStatus());
+  ipcMain.handle("multimodal:startVideo", (_e, request) => startVideoJob(request));
+  ipcMain.handle("multimodal:getVideoJob", (_e, id: string) => getVideoJob(id));
+  ipcMain.handle("multimodal:cancelVideo", (_e, id: string) => cancelVideoJob(id));
+  ipcMain.handle("multimodal:openVideoOutput", (_e, id: string) => openVideoOutput(id));
+  ipcMain.handle("multimodal:videoKeyStatus", () => videoKeyStatus());
 
   // ── team (설치된 에이전트) ─────────────────────────────
   ipcMain.handle("team:list", () => listInstalledAgents());

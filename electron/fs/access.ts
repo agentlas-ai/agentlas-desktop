@@ -38,10 +38,8 @@ const GENERATED_ROOT_NAMES = [
   "generated-assets",
   "generated-teams",
   "generated-tools",
-  "oberon",
-  "oberon-animate",
-  "oberon-motion",
-  "trex-images",
+  "multimodal-images",
+  "multimodal-video",
 ] as const;
 const LOCAL_MEDIA_EXTS = new Set([
   ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".avif", ".bmp",

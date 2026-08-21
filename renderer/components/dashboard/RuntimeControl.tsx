@@ -207,6 +207,9 @@ export function RuntimeControl() {
     () => ({
       orchestrator: roleView(runtimes, "orchestrator"),
       worker: roleView(runtimes, "worker"),
+      // 멀티모달은 대화 역할이 아니다 — 이미지·영상을 실제로 그리는 CLI 를 앉히는 자리다.
+      // orchestrator 가 프롬프트를 쓰고, 이 슬롯의 런타임이 헤드리스로 그린다.
+      multimodal: roleView(runtimes, "multimodal"),
     }),
     [runtimes],
   );
@@ -857,8 +860,10 @@ export function RuntimeControl() {
     const title =
       role === "orchestrator"
         ? "Orchestrator"
-        : ko
-          ? "Worker"
+        : role === "multimodal"
+          ? ko
+            ? "멀티모달 (이미지·영상)"
+            : "Multimodal (image · video)"
           : "Worker";
     return (
       <section
@@ -941,6 +946,7 @@ export function RuntimeControl() {
           <div className="dashboard-runtime-library">
             {renderRole("orchestrator")}
             {renderRole("worker")}
+            {renderRole("multimodal")}
           </div>
           {message && (
             <div className="dashboard-runtime-message">{message}</div>

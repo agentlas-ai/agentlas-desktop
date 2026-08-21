@@ -930,6 +930,10 @@ async function mobileRuntimeRolePoolDto() {
     members: {
       orchestrator: listModelRoleMembers("orchestrator"),
       worker: listModelRoleMembers("worker"),
+      // 모바일은 대화 역할만 조작한다(MOBILE_RUNTIME_ROLES). 멀티모달 슬롯은
+      // 데스크탑에서 정하므로 여기서는 빈 목록으로 투영한다 —
+      // shared/runtime-roles.ts 의 mobileEditable=false 가 그 계약이다.
+      multimodal: [],
     },
     picks,
   });

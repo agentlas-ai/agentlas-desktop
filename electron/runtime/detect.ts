@@ -5,6 +5,7 @@ import { allocationAdvertisement } from "./model-advertisement";
 import { probeCodex } from "./codex";
 import { readCodexModelDiscovery } from "./codex-models";
 import { summarizeDiscovery, unsupportedDiscovery, type DiscoveryOutcome } from "../../shared/model-discovery";
+import { POOL_AUTOPICK_ROLES, RUNTIME_ROLES, type RuntimeRole } from "../../shared/runtime-roles";
 import { reportDiscoveryLoudly } from "./model-discovery-store";
 import { registerProbeModels } from "./model-catalog";
 import { ACP_AGENTS, acpDisabledFor, probeAcpModelsCached } from "./acp";
@@ -741,7 +742,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
   // 전원 스킵이면 1순위를 그대로 쓴다(조용한 하향 대체 금지, 스킵 내역은 유지).
   const gates = rolePoolGates(list);
   const roleAssignments = listResolvedModelRoles();
-  for (const role of ["orchestrator", "worker"] as const) {
+  for (const role of POOL_AUTOPICK_ROLES) {
     const pick = pickModelRoleFromPool(role, gates);
     if (pick) {
       roleAssignments[role] = {
@@ -753,7 +754,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     }
   }
   for (const runtime of list) {
-    const activeRoles = (["orchestrator", "worker"] as const).filter((role) => {
+    const activeRoles = RUNTIME_ROLES.filter((role) => {
       const selection = roleAssignments[role]?.selection;
       return selection ? runtimeMatchesSelection(runtime, selection) : false;
     });
@@ -823,8 +824,8 @@ export async function resolveRolePoolPicks(): Promise<
 > {
   const list = await detectRuntimes();
   const gates = rolePoolGates(list);
-  const picks: Partial<Record<"orchestrator" | "worker", ModelRolePoolPick>> = {};
-  for (const role of ["orchestrator", "worker"] as const) {
+  const picks: Partial<Record<RuntimeRole, ModelRolePoolPick>> = {};
+  for (const role of POOL_AUTOPICK_ROLES) {
     const pick = pickModelRoleFromPool(role, gates);
     if (pick) picks[role] = pick;
   }

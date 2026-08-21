@@ -5,6 +5,7 @@ import type {
   RuntimeSelection,
 } from "../../shared/types";
 import { RUNTIME_KINDS } from "../../shared/runtime-kinds";
+import { RUNTIME_ROLES } from "../../shared/runtime-roles";
 import { getDb } from "./db";
 
 interface ModelRoleRow {
@@ -62,7 +63,7 @@ interface ModelRoleMemberRow {
   updated_at: string;
 }
 
-const VALID_ROLES = new Set<RuntimeRole>(["orchestrator", "worker"]);
+const VALID_ROLES = new Set<RuntimeRole>(RUNTIME_ROLES);
 const VALID_KINDS = new Set<RuntimeKind>(RUNTIME_KINDS);
 
 function cleanText(value: string | null | undefined): string | null {
@@ -206,12 +207,13 @@ export function getResolvedModelRole(role: RuntimeRole): ResolvedModelRole | nul
 }
 
 export function listResolvedModelRoles(): Partial<Record<RuntimeRole, ResolvedModelRole>> {
-  const orchestrator = getResolvedModelRole("orchestrator");
-  const worker = getResolvedModelRole("worker");
-  return {
-    ...(orchestrator ? { orchestrator } : {}),
-    ...(worker ? { worker } : {}),
-  };
+  // 역할 목록은 정본에서 온다 — 손으로 두 줄 쓰면 새 역할이 조용히 빠진다.
+  const out: Partial<Record<RuntimeRole, ResolvedModelRole>> = {};
+  for (const role of RUNTIME_ROLES) {
+    const resolved = getResolvedModelRole(role);
+    if (resolved) out[role] = resolved;
+  }
+  return out;
 }
 
 function memberRowToMember(row: ModelRoleMemberRow): ModelRoleMember {

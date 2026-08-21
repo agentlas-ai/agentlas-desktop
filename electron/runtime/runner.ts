@@ -3,6 +3,7 @@
 import type { ChatHistoryEntry, ImageAttachment, McpInvocationEvent } from "../../shared/types";
 import { tStatus, type RuntimeLocale } from "./status-i18n";
 import { GLOBAL_CONNECTION_SKILL } from "./global-skill";
+import { pluginRouterPrompt } from "../plugins/router-prompt";
 import { SURFACE_PROTOCOL } from "../surface-emitter";
 import { selectModules } from "../system-agents";
 import { SURFACE_MODULE } from "../system-agents/desktop-chat/modules";
@@ -725,6 +726,10 @@ export function wrapSystemPrompt(
     GLOBAL_CONNECTION_SKILL,
     "",
   ];
+  // 설치된 플러그인의 라우터 — 파일이 있어도 모델이 모르면 없는 것과 같다.
+  // 목록은 항상, 라우터 전문은 이번 턴에 @멘션된 것만(§4.2 예산 규칙).
+  const pluginBlock = pluginRouterPrompt(userPrompt);
+  if (pluginBlock) parts.push(pluginBlock, "");
   if (includeSurface) {
     parts.push(SURFACE_PROTOCOL, "");
   } else {

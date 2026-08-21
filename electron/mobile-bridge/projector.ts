@@ -50,6 +50,7 @@ import type {
   RuntimeRolePoolState,
   RuntimeSelection,
   UsageSnapshot,
+  RuntimeRole,
 } from "../../shared/types";
 import {
   isOneProactiveBriefing,
@@ -1369,14 +1370,25 @@ export function projectMobileBridgeRuntimeSelection(
 export function projectMobileBridgeRuntimeRolePool(
   state: RuntimeRolePoolState,
 ): MobileBridgeRuntimeRolePoolDto {
-  const member = (item: RuntimeRolePoolState["members"]["orchestrator"][number]): MobileBridgeRuntimeRoleMemberDto => ({
-    role: item.role,
+  // 모바일 DTO 의 role 은 대화 역할 둘뿐이다(shared/runtime-roles.ts mobileEditable).
+  // 멀티모달 행이 들어오면 그것은 계약 위반이므로 조용히 넘기지 않고 걸러 낸다.
+  const conversationalRole = (role: RuntimeRole): "orchestrator" | "worker" | null =>
+    role === "orchestrator" || role === "worker" ? role : null;
+  const member = (item: RuntimeRolePoolState["members"]["orchestrator"][number]): MobileBridgeRuntimeRoleMemberDto | null => {
+    const role = conversationalRole(item.role);
+    if (!role) return null;
+    return {
+    role,
     position: item.position,
     selection: projectMobileBridgeRuntimeSelection(item.selection),
     updatedAt: item.updatedAt,
-  });
-  const pick = (item: NonNullable<RuntimeRolePoolState["picks"]["orchestrator"]>): MobileBridgeRuntimeRolePoolPickDto => ({
-    role: item.role,
+    };
+  };
+  const pick = (item: NonNullable<RuntimeRolePoolState["picks"]["orchestrator"]>): MobileBridgeRuntimeRolePoolPickDto | null => {
+    const role = conversationalRole(item.role);
+    if (!role) return null;
+    return {
+    role,
     selection: projectMobileBridgeRuntimeSelection(item.selection),
     position: item.position,
     inherited: item.inherited,
@@ -1386,15 +1398,18 @@ export function projectMobileBridgeRuntimeRolePool(
       model: entry.model,
       reason: entry.reason,
     })),
-  });
+    };
+  };
+  const orchestratorPick = state.picks.orchestrator ? pick(state.picks.orchestrator) : null;
+  const workerPick = state.picks.worker ? pick(state.picks.worker) : null;
   return {
     members: {
-      orchestrator: state.members.orchestrator.map(member),
-      worker: state.members.worker.map(member),
+      orchestrator: state.members.orchestrator.map(member).filter((m): m is MobileBridgeRuntimeRoleMemberDto => m !== null),
+      worker: state.members.worker.map(member).filter((m): m is MobileBridgeRuntimeRoleMemberDto => m !== null),
     },
     picks: {
-      ...(state.picks.orchestrator ? { orchestrator: pick(state.picks.orchestrator) } : {}),
-      ...(state.picks.worker ? { worker: pick(state.picks.worker) } : {}),
+      ...(orchestratorPick ? { orchestrator: orchestratorPick } : {}),
+      ...(workerPick ? { worker: workerPick } : {}),
     },
   };
 }

@@ -36,12 +36,12 @@ import { resolveOneFeatureIntroBlocker } from "@shared/one-feature-intro";
 import { announceHubBookmarkChange } from "@/lib/hub-bookmark-events";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import {
-  isOberonBackgroundJobActive,
-  startOberonBackgroundJobMonitor,
-  subscribeOberonBackgroundJobs,
-  visibleOberonBackgroundJobs,
-  type OberonBackgroundJob,
-} from "@/lib/oberon/jobs";
+  isMultimodalJobActive,
+  startMultimodalJobMonitor,
+  subscribeMultimodalJobs,
+  visibleMultimodalJobs,
+  type MultimodalJob,
+} from "@/lib/multimodal/jobs";
 
 const ONBOARDED_KEY = "agentlas.onboarded";
 const IMPORT_PROMPTED_KEY = "agentlas.import.prompted";
@@ -50,8 +50,8 @@ const ATTENTION_POLL_MS = 3_000;
 const ATTENTION_POLL_HIDDEN_MS = 15_000;
 
 // 표시 내용이 같으면 이전 배열 참조를 그대로 돌려줘야 셸이 리렌더되지 않는다.
-// visibleOberonBackgroundJobs()는 호출마다 새 배열을 만들므로 여기서 걸러 준다.
-function sameOberonJobList(prev: OberonBackgroundJob[], next: OberonBackgroundJob[]): boolean {
+// visibleMultimodalJobs()는 호출마다 새 배열을 만들므로 여기서 걸러 준다.
+function sameJobList(prev: MultimodalJob[], next: MultimodalJob[]): boolean {
   if (prev.length !== next.length) return false;
   for (let i = 0; i < prev.length; i += 1) {
     const a = prev[i];
@@ -69,7 +69,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [importOpen, setImportOpen] = useState(false);
   const [pendingConfirmations, setPendingConfirmations] = useState(0);
   const [activeChatCount, setActiveChatCount] = useState<number | null>(null);
-  const [oberonJobs, setOberonJobs] = useState<OberonBackgroundJob[]>([]);
+  const [multimodalJobs, setMultimodalJobs] = useState<MultimodalJob[]>([]);
   const [appUpdateBusy, setAppUpdateBusy] = useState(true);
   const [oneIntroState, setOneIntroState] = useState<OneFeatureIntroState | null>(null);
   const [workFirstRunVisible, setWorkFirstRunVisible] = useState(false);
@@ -301,17 +301,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     // 이 폴은 잡이 하나도 없어도 2초마다 새 배열로 setState 해 셸 전체(사이드바·
     // 투어·토스트 전부)를 상시 리렌더시키던 유일한 지점이다. 내용이 같으면 이전
     // 참조를 유지해 리렌더를 없애고, 창이 숨어 있는 동안은 틱을 쉰다(변화는
-    // subscribeOberonBackgroundJobs 이벤트가 즉시 반영한다).
-    const sync = () => setOberonJobs((prev) => {
-      const next = visibleOberonBackgroundJobs();
-      return sameOberonJobList(prev, next) ? prev : next;
+    // subscribeMultimodalJobs 이벤트가 즉시 반영한다).
+    const sync = () => setMultimodalJobs((prev) => {
+      const next = visibleMultimodalJobs();
+      return sameJobList(prev, next) ? prev : next;
     });
     const tick = () => {
       if (document.visibilityState !== "hidden") sync();
     };
     sync();
-    const stopMonitor = startOberonBackgroundJobMonitor();
-    const unsubscribe = subscribeOberonBackgroundJobs(sync);
+    const stopMonitor = startMultimodalJobMonitor();
+    const unsubscribe = subscribeMultimodalJobs(sync);
     const timer = window.setInterval(tick, 2_000);
     return () => {
       window.clearInterval(timer);
@@ -369,7 +369,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       pendingConfirmations,
       activeChatCount,
       appUpdateBusy,
-      backgroundWorkActive: oberonJobs.some(isOberonBackgroundJobActive),
+      backgroundWorkActive: multimodalJobs.some(isMultimodalJobActive),
       importFlowOpen: importOpen,
       routeEligible: featureUpdateRouteEligible,
     });
@@ -472,10 +472,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         onKeepWork={() => undefined}
       />
       <BackgroundWorkPill
-        jobs={oberonJobs}
+        jobs={multimodalJobs}
         avoidComposer={pathname.startsWith("/workspace/task")}
         locale={locale}
-        onOpen={() => router.push("/oberon")}
+        onOpen={() => router.push("/work")}
       />
       <ImportAgentsModal
         open={importOpen}
@@ -506,14 +506,14 @@ function BackgroundWorkPill({
   locale,
   onOpen,
 }: {
-  jobs: OberonBackgroundJob[];
+  jobs: MultimodalJob[];
   avoidComposer?: boolean;
   locale: string;
   onOpen: () => void;
 }) {
-  const job = jobs.find(isOberonBackgroundJobActive) ?? jobs[0];
+  const job = jobs.find(isMultimodalJobActive) ?? jobs[0];
   if (!job) return null;
-  const active = isOberonBackgroundJobActive(job);
+  const active = isMultimodalJobActive(job);
   const failed = job.status === "failed" || job.status === "cancelled";
   const ko = locale === "ko";
   const headline = active
@@ -530,7 +530,7 @@ function BackgroundWorkPill({
       className="background-work-pill titlebar-nodrag"
       style={{ bottom }}
       onClick={onOpen}
-      aria-label={`Oberon ${job.label} ${job.percent}%`}
+      aria-label={`Multimodal ${job.label} ${job.percent}%`}
     >
       <span
         className="background-work-ring"
@@ -541,7 +541,7 @@ function BackgroundWorkPill({
       </span>
       <span className="background-work-copy">
         <strong>{headline}</strong>
-        <span>{`Oberon · ${job.label} · ${job.title}`}</span>
+        <span>{`${job.kind} · ${job.label} · ${job.title}`}</span>
       </span>
     </button>
   );

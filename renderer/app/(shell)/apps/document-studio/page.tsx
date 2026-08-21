@@ -365,7 +365,7 @@ export default function DocumentStudioPage() {
     setFigureBusy(true);
     setStatusMsg({ kind: "info", text: locale === "en" ? "Generating figure…" : "도표 생성 중…" });
     try {
-      const r = await ipc()?.trex?.generateImage({
+      const r = await ipc()?.multimodal?.generateImage({
         model: "auto",
         prompt: `${prompt}. Clean editorial diagram or illustration for a document figure. No text, letters, or numbers anywhere in the image.`,
       });

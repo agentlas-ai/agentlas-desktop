@@ -76,6 +76,7 @@ import { migrateRegisteredAgents } from "./architecture/agent-migrations";
 import { seedBuiltinAgents } from "./architecture/seed";
 import { repairAllRootChatSurfaceControllers } from "./store/chats";
 import { ensureDefaultMcpPluginsInstalled } from "./mcp-tools/defaults";
+import { materializeBuiltinPlugins } from "./plugins/materialize";
 import { startHephaestusRuntimeAutoUpdate } from "./hephaestus/engine";
 import { startCliRuntimeAutoUpdate, stopCliRuntimeAutoUpdate } from "./runtime/auto-update";
 import { scrubLegacyOpenCrabMcpConfig } from "./mcp-tools/mcp-config";
@@ -864,6 +865,7 @@ app.whenReady().then(async () => {
     }
     try {
       initStore();
+      materializeBuiltinPlugins();
       ensureDefaultMcpPluginsInstalled();
       await startHephaestusRuntimeAutoUpdate();
       const openCrabScrub = scrubLegacyOpenCrabCredentialUrls();
@@ -1129,6 +1131,7 @@ app.whenReady().then(async () => {
       console.error("[experience] legacy learning reconciliation failed:", err);
     }
   };
+  materializeBuiltinPlugins();
   ensureDefaultMcpPluginsInstalled();
   // 승인된 브라우저 로그인은 앱이 뜰 때 한 번 스스로 최신이 된다(주기 미도래면 즉시 반환).
   // 창을 띄우기 전에 붙들지 않는다 — 자격증명 갱신 때문에 앱이 늦게 뜨면 안 된다.

@@ -586,7 +586,10 @@ export type {
  * agent a status row is: `RuntimeStatus.acpAgentId`; display name: `label`.
  */
 export type RuntimeKind = "claude-code" | "codex" | "antigravity" | "kimi" | "grok" | "cursor" | "byok" | "ollama" | "lmstudio" | "mlx" | "acp";
-export type RuntimeRole = "orchestrator" | "worker";
+// 역할 목록·성격의 정본은 shared/runtime-roles.ts 하나다(손으로 쓴 배열 금지).
+import type { RuntimeRole } from "./runtime-roles";
+export type { RuntimeRole };
+export { RUNTIME_ROLES, RUNTIME_ROLE_TRAITS, CONVERSATIONAL_ROLES, POOL_AUTOPICK_ROLES, isRuntimeRole } from "./runtime-roles";
 
 /**
  * 사용자 편집형 터미널 프로필 — Paseo식 "프로바이더". 하드코딩된 claude/codex/antigravity와
@@ -4832,13 +4835,13 @@ export interface OberonMotionAdJob {
 }
 
 // ── Oberon image-to-video (애니메이션 스튜디오) ──────────────
-export type OberonAnimateProvider = "runway" | "luma" | "veo" | "seedance" | "kling" | "grok";
-export type OberonAnimateJobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+export type MultimodalVideoProvider = "runway" | "luma" | "veo" | "seedance" | "kling" | "grok";
+export type MultimodalVideoJobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
-export interface OberonAnimateRequest {
+export interface MultimodalVideoRequest {
   productionId?: string;
   title?: string;
-  provider?: OberonAnimateProvider;
+  provider?: MultimodalVideoProvider;
   /** 입력 이미지 — 로컬 절대경로(runway는 base64 data-uri로 인라인). */
   imagePath?: string;
   /** 입력 이미지 — 공개 HTTPS URL(luma는 공개 URL만 허용). */
@@ -4849,7 +4852,7 @@ export interface OberonAnimateRequest {
   model?: string;
 }
 
-export interface OberonAnimateFile {
+export interface MultimodalVideoFile {
   id: string;
   kind: "animation_mp4";
   name: string;
@@ -4864,16 +4867,16 @@ export interface OberonAnimateProgress {
   percent: number;
 }
 
-export interface OberonAnimateJob {
+export interface MultimodalVideoJob {
   id: string;
   productionId?: string;
   title: string;
-  provider: OberonAnimateProvider;
+  provider: MultimodalVideoProvider;
   model: string;
-  status: OberonAnimateJobStatus;
+  status: MultimodalVideoJobStatus;
   outputDir: string;
   progress: OberonAnimateProgress;
-  files: OberonAnimateFile[];
+  files: MultimodalVideoFile[];
   message: string;
   error?: string;
   warnings: string[];
@@ -4881,7 +4884,17 @@ export interface OberonAnimateJob {
   updatedAtMs: number;
 }
 
-export interface OberonAnimateKeyStatus {
+/** 이미지 생성 1회의 결과 — data: URI 로 돌아와 채팅·사이드바가 바로 렌더한다. */
+export interface MultimodalImageResult {
+  ok: boolean;
+  /** data:image/png;base64,… */
+  src?: string;
+  /** 실제로 그림을 그린 엔진(codex | gemini | agy …) — 지어낸 값이 아니라 실행 결과다. */
+  engine?: string;
+  message?: string;
+}
+
+export interface MultimodalVideoKeyStatus {
   runway: boolean;
   luma: boolean;
   veo: boolean;
@@ -5920,14 +5933,6 @@ export interface AgentlasIpc {
     judgeSubset: (spec: RendererSubsetJudgmentSpec) => Promise<RendererSubsetJudgmentVerdict>;
   };
   /** T-rex 슬라이드 스튜디오 — 키리스 CLI 이미지 생성(codex image_gen / agy). */
-  trex: {
-    generateImage: (payload: { model?: "codex" | "gemini" | "auto"; prompt: string }) => Promise<{ ok: boolean; src?: string; reason?: string; engine?: "codex" | "gemini" }>;
-    imageProviders: () => Promise<{ codex: boolean; gemini: boolean }>;
-    generateContent: (payload: { topic: string; count?: number; mode?: string; sources?: string; locale?: "ko" | "en"; useOpenCrab?: boolean }) => Promise<{ ok: boolean; text?: string; engine?: "agent" | "agy" | "codex"; reason?: string; openCrab?: OpenCrabEnrichment }>;
-    contentAvailable: () => Promise<{ agy: boolean; codex: boolean }>;
-    /** 선택 요소 LLM 수정(select-to-edit) — 현재 텍스트 + 지시 → 다시 쓴 텍스트. */
-    refineText: (payload: { current: string; instruction: string; context?: string }) => Promise<{ ok: boolean; text?: string; reason?: string }>;
-  };
   /**
    * Site Studio: Web/mobile는 sandbox 디자인 프리뷰, Agent App은 별도 Astryx
    * 패키지 + main-owned 로컬 런타임/명시적 공개 배포 경로를 사용한다.
@@ -6352,30 +6357,16 @@ export interface AgentlasIpc {
     getSettings: () => Promise<MultimodalSettings>;
     saveSettings: (settings: Partial<MultimodalSettings>) => Promise<MultimodalSettings>;
     status: () => Promise<MultimodalProviderStatus[]>;
+    /** 생성 엔진 — Oberon/T-rex 스튜디오에서 적출(2026-08-21). */
+    generateImage: (payload: { model?: "codex" | "gemini" | "auto"; prompt: string }) => Promise<MultimodalImageResult>;
+    imageProviders: () => Promise<{ codex: boolean; gemini: boolean }>;
+    startVideo: (request: MultimodalVideoRequest) => Promise<MultimodalVideoJob>;
+    getVideoJob: (id: string) => Promise<MultimodalVideoJob | null>;
+    cancelVideo: (id: string) => Promise<MultimodalVideoJob | null>;
+    openVideoOutput: (id: string) => Promise<{ ok: boolean; message: string }>;
+    videoKeyStatus: () => Promise<MultimodalVideoKeyStatus>;
   };
   /** Oberon real render bridge — API keys stay in the Electron main process. */
-  oberon: {
-    planWithCli: (request: OberonPlanRequest) => Promise<OberonPlanResult>;
-    startKeyframes: (request: OberonKeyframeRequest) => Promise<OberonKeyframeJob>;
-    /** 마스터 시트/콘티 시트 생성 — 키프레임 잡을 재사용하므로 조회/취소는 keyframe API로. */
-    startSheets: (request: OberonSheetRequest) => Promise<OberonKeyframeJob>;
-    getKeyframeJob: (id: string) => Promise<OberonKeyframeJob | null>;
-    cancelKeyframes: (id: string) => Promise<OberonKeyframeJob | null>;
-    openKeyframeOutput: (id: string) => Promise<{ ok: boolean; message: string }>;
-    startRender: (request: OberonRenderRequest) => Promise<OberonRenderJob>;
-    getRenderJob: (id: string) => Promise<OberonRenderJob | null>;
-    cancelRender: (id: string) => Promise<OberonRenderJob | null>;
-    openRenderOutput: (id: string) => Promise<{ ok: boolean; message: string }>;
-    startMotionAd: (request: OberonMotionAdRequest) => Promise<OberonMotionAdJob>;
-    getMotionAdJob: (id: string) => Promise<OberonMotionAdJob | null>;
-    cancelMotionAd: (id: string) => Promise<OberonMotionAdJob | null>;
-    openMotionAdOutput: (id: string) => Promise<{ ok: boolean; message: string }>;
-    startAnimate: (request: OberonAnimateRequest) => Promise<OberonAnimateJob>;
-    getAnimateJob: (id: string) => Promise<OberonAnimateJob | null>;
-    cancelAnimate: (id: string) => Promise<OberonAnimateJob | null>;
-    openAnimateOutput: (id: string) => Promise<{ ok: boolean; message: string }>;
-    animateKeyStatus: () => Promise<OberonAnimateKeyStatus>;
-  };
   team: {
     list: () => Promise<InstalledAgent[]>;
     install: (slug: string) => Promise<InstalledAgent>;

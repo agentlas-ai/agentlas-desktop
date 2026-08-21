@@ -558,7 +558,7 @@ The host resolves all three into real paths. **Authors never write absolute path
 |---|---|---|
 | Plugin representation | `McpToolCatalogEntry` | no field can hold a procedure |
 | Agent assignment | `agent_mcp_servers` | **Desktop never reads it at run time** (only Terminal does) |
-| Skill delivery | lands in `~/.agentlas/plugins/<slug>/skills/` | **zero readers** — only directory names are counted |
+| Skill delivery | lands in `~/.agentlas/plugins/<slug>/skills/` | ~~zero readers~~ — **wired 2026-08-21**, see §4.4 |
 | Publishing | hard-coded array in `catalog.ts` | no third-party publishing |
 
 ### 4.2 The target
@@ -616,6 +616,29 @@ records which one:
 { "source": { "kind": "git", "url": "…", "ref": "v0.1.0" },
   "installedAt": "…", "verified": true, "manifestSha256": "…" }
 ```
+
+### 4.4 Router injection — how a plugin reaches the model
+
+A materialized skill bundle that nothing reads is not a plugin, it is a folder. `runner.ts`
+injects installed routers into every run's system prompt
+(`electron/plugins/router-prompt.ts`), under a budget that survives many plugins:
+
+| What | When | Size |
+|---|---|---|
+| **List** — mention, router `description`, router path, skill names | always | a few lines per plugin |
+| **Full router body** | only when this turn's prompt contains the plugin's `@mention` | that router's size |
+
+`implicit: "never"` plugins are left out of the list entirely — that value means "do not
+announce yourself", and announcing anyway would make the setting cosmetic.
+
+The block also states how a model resolves what it reads: `$name` is another skill
+(`<plugin>/skills/<name>/SKILL.md`) or a shared reference (`<plugin>/references/<name>.md`),
+`@name` is a host tool, and a skill needing an unavailable tool must say so and stop rather
+than describing work it could not carry out.
+
+Gate: `node scripts/plugin-router-injection-gate.cjs` — asserts the list appears, the full
+router appears only on mention, and the always-on list stays small next to a full router.
+It SKIPs loudly (never passes silently) when no installed plugin ships a router.
 
 ### 4.3 Migration
 

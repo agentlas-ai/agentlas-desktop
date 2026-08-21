@@ -1,0 +1,384 @@
+{
+  "schema": "agentlas.plugin/v2",
+  "slug": "design",
+  "name": "Agentlas Design",
+  "version": "0.1.0",
+  "builtin": true,
+  "publisher": {
+    "name": "Agentlas",
+    "url": "https://agentlas.cloud"
+  },
+  "surface": {
+    "displayName": "Agentlas Design",
+    "displayNameKo": "Agentlas 디자인",
+    "tagline": "Visual-first design ideation, target pinning, and faithful prototyping",
+    "taglineKo": "시각적 시안 탐색, 타겟 시안 고정 및 1:1 프로토타입 구현 플러그인",
+    "description": "Close the gap between product ideas and working software with rapid 3-concept visual ideation, target pinning, faithful side-by-side prototyping, UI motion engineering, and UX audits.",
+    "descriptionKo": "시각적 3종 시안 생성, 타겟 시안 고정, 시안 기반 1:1 대조 프로토타입 구현, UI 모션 엔지니어링 및 UX 흐름 감사를 제공합니다.",
+    "category": "design",
+    "brandColor": "#FF66AD",
+    "icon": "assets/icon.svg",
+    "defaultPrompts": [
+      "Generate 3 distinct visual design concepts for this idea",
+      "Audit the core UX flow and accessibility of this website",
+      "Recreate this screen into an interactive web prototype",
+      "Add smooth spring physics and micro-interactions to this component"
+    ]
+  },
+  "invocation": {
+    "mention": "@design",
+    "implicit": "router",
+    "standalone": true
+  },
+  "provides": {
+    "skills": {
+      "router": "skills/index/SKILL.md",
+      "workflows": [
+        "get-context",
+        "user-context",
+        "ideate",
+        "audit",
+        "image-to-code",
+        "motion",
+        "url-to-code",
+        "research",
+        "design-qa",
+        "share",
+        "seed-design",
+        "app-context"
+      ]
+    }
+  },
+  "requires": {
+    "tools": [
+      "browser"
+    ],
+    "prereq": [
+      {
+        "id": "node",
+        "provided-by": "app"
+      }
+    ],
+    "os": [
+      "darwin",
+      "win32",
+      "linux"
+    ]
+  },
+  "permissions": {
+    "fileWrite": "project-only",
+    "network": "ask",
+    "shell": "deny"
+  },
+  "state": {
+    "files": [
+      "user-context.md"
+    ],
+    "assets": true
+  },
+  "integrity": {
+    "algo": "sha256",
+    "files": [
+      {
+        "path": "assets/doctor-report.schema.json",
+        "sha256": "f2cf80dd873f636ac5e0814cbcecb7e6f0d4279fe97ab4fde72856dface50e5f",
+        "bytes": 11704
+      },
+      {
+        "path": "assets/icon.svg",
+        "sha256": "abd482daa364de77f9687e5690b5030a999b6805d936e6888a96af6e565a6e62",
+        "bytes": 618
+      },
+      {
+        "path": "assets/report-template.html",
+        "sha256": "4cef1d9a2463b67814c5dcb0490304a870214479178bc207614df37f38beeebd",
+        "bytes": 12793
+      },
+      {
+        "path": "README.md",
+        "sha256": "ce0d5a3d022e7249f22c6d7f89985fdd10cc110616532cb10b4d616760db4d01",
+        "bytes": 2448
+      },
+      {
+        "path": "references/board-runtime.md",
+        "sha256": "38ea183ca098647ed8c62747d753ded53576b7fb2e1ef062b7ecb8ace104d542",
+        "bytes": 75
+      },
+      {
+        "path": "references/communication-protocol.md",
+        "sha256": "01398971f2b6b57b8037ac5171ba33f45e2d08a4add41ab8fef0788f549b8ac1",
+        "bytes": 705
+      },
+      {
+        "path": "references/component-guidelines.md",
+        "sha256": "169eb0d53cfea15dbfc0a9926517af7d4c0a69604c472efd6c0d35264862115f",
+        "bytes": 5267
+      },
+      {
+        "path": "references/contracts/deterministic-exports.md",
+        "sha256": "195a8e04558998b71ea5137298df343194351b64efe4147f7eced5c8a8774c5a",
+        "bytes": 83
+      },
+      {
+        "path": "references/contracts/exact-content.md",
+        "sha256": "843fa9a601ae8d78859f5cc91e6d18524c16377d7d9cee869d1fd0febd40d2ea",
+        "bytes": 67
+      },
+      {
+        "path": "references/contracts/source-preservation.md",
+        "sha256": "2ac81f3a3a4bde3c48edd04d1c9c22a5c630711b3915cc605f38b737c4f4e69c",
+        "bytes": 79
+      },
+      {
+        "path": "references/critical-overrides.md",
+        "sha256": "db449b297076019710bc070f573901127f7ccc151abbcee8db9b6160585d6e96",
+        "bytes": 1740
+      },
+      {
+        "path": "references/design-audit-framework.md",
+        "sha256": "15a89b43a464d0547654502361d95fb41a15dbebf3f1f5fba826b32ec383d648",
+        "bytes": 205
+      },
+      {
+        "path": "references/doctor.md",
+        "sha256": "db34014b8c597577c42945465839ecff64a40697552b32d3b4da0d0a94603502",
+        "bytes": 18459
+      },
+      {
+        "path": "references/doctor-lynx.md",
+        "sha256": "e5536928064c98ab6d0863e0e742349d590cfc6b772be1f95cc08fecdfb29ea5",
+        "bytes": 3010
+      },
+      {
+        "path": "references/doctor-react.md",
+        "sha256": "661c1beaa701423990f35736e0812fc4f1148e103aed553398f6e1eec9e828b7",
+        "bytes": 2807
+      },
+      {
+        "path": "references/foundation-contract.md",
+        "sha256": "aa63e3e7ff83a68f03c09d86a30506f0271facad2e5f357f9c4d9ca7850d038f",
+        "bytes": 1886
+      },
+      {
+        "path": "references/library-authors.md",
+        "sha256": "f28d06bb268ceecad5d466cfbd1e6d0901949081732537e4c978006ae8c10543",
+        "bytes": 2126
+      },
+      {
+        "path": "references/migration.md",
+        "sha256": "35d532a4b2d5c5dbfc67d87e0e816c5974f6541c68a2db515bc23b95180f1cab",
+        "bytes": 2282
+      },
+      {
+        "path": "references/modes/ads.md",
+        "sha256": "a13f43c0e2e7c80a4b39ed73f24c4312c3e7304afaa01aa66c0fc8f57b047cb8",
+        "bytes": 59
+      },
+      {
+        "path": "references/modes/charts.md",
+        "sha256": "142c5dfe7a7e59ebc28345326e07d2ac70c34a4ed914f27782f5a31df53a2e5f",
+        "bytes": 65
+      },
+      {
+        "path": "references/modes/logos.md",
+        "sha256": "709ba810c47f7c0945fa860437484ffd13ba6f960de1f8aa55c90110b8e1d89e",
+        "bytes": 63
+      },
+      {
+        "path": "references/modes/offers.md",
+        "sha256": "531b252bc58f97abbd1ec019d1b4b3cd383996da4de5e610948d19c41e2043d5",
+        "bytes": 65
+      },
+      {
+        "path": "references/modes/positioning.md",
+        "sha256": "8611417a9fec8df479dd1c68e6ddd68f4ab58e6a2f08523822b83e1774f7c052",
+        "bytes": 75
+      },
+      {
+        "path": "references/modes/scenes.md",
+        "sha256": "cd5a7a18ad774af8052c85bff70f6e4fa079825fa7649d245c8ff1a85f684e01",
+        "bytes": 65
+      },
+      {
+        "path": "references/modes/shots.md",
+        "sha256": "9ba15b0df231b8f8c34ba339c44eea924a0a2c6985f742820f3a2323e9dbd5d9",
+        "bytes": 63
+      },
+      {
+        "path": "references/modes/styles.md",
+        "sha256": "2ae2b87b8e936271d5197be6e44ba6483da690daca8ad6d3f7ec1c88439b335a",
+        "bytes": 65
+      },
+      {
+        "path": "references/motion-system.md",
+        "sha256": "cc02bf8663123d2155dadac7b043379b97fd328b3adbb343888fe4b3943d76c5",
+        "bytes": 4003
+      },
+      {
+        "path": "references/no-deprecated-component.md",
+        "sha256": "d2fd66e0e2fc1ebdb5bb9bc02712e6c99ec538f31dd7630618e5cee039356ab8",
+        "bytes": 2418
+      },
+      {
+        "path": "references/outdated-version.md",
+        "sha256": "6069a929432828032f844240d5a65c575a68fd60851d576819e68895cbf57166",
+        "bytes": 1728
+      },
+      {
+        "path": "references/package-compatibility.md",
+        "sha256": "afeed1551106d7e1f6696080f94be2aeb84c221e0647901705b2569bca09d93d",
+        "bytes": 1855
+      },
+      {
+        "path": "references/project-config.md",
+        "sha256": "14f47a6609475fb2a20676a3c3e4d274284ffc88511f29d44ef7c5c35f10d226",
+        "bytes": 2518
+      },
+      {
+        "path": "references/project-setup.md",
+        "sha256": "e26ef6fd3642336a3d1b3dbe273bee03317a531b8a136023604d4d8401769709",
+        "bytes": 1693
+      },
+      {
+        "path": "references/qa-rubric.md",
+        "sha256": "f47f07e94af313d241792389d1f0eaf7ab36186a7cbfb0abd3fc426de06d5d40",
+        "bytes": 1285
+      },
+      {
+        "path": "references/review-renderer.md",
+        "sha256": "a1302ed5179fdb276e46f3f21349c10d4d82ecae2cc4797aa441f44766bee813",
+        "bytes": 80
+      },
+      {
+        "path": "references/snippet-compatibility.md",
+        "sha256": "af86bab9af0743434dd7ca2a3716704f1491640feb9f3f84e2078f38ff69b0c2",
+        "bytes": 1692
+      },
+      {
+        "path": "references/snippet-generation.md",
+        "sha256": "917e0f1255e379f596366b5af28f4c86d4c8aa6a23ffaf262d52d742380dd9a8",
+        "bytes": 1866
+      },
+      {
+        "path": "references/upgrade.md",
+        "sha256": "bfbc45f8774b8cef9ee9393fb0d4df936f1bb55272ace1d9c012726e2d8302c6",
+        "bytes": 3530
+      },
+      {
+        "path": "skills/app-context/SKILL.md",
+        "sha256": "98d78a0abbeaae4e3a25a93dc52568c1f5eca572e941f4ba1649b9a27d0f178c",
+        "bytes": 1244
+      },
+      {
+        "path": "skills/audit/SKILL.md",
+        "sha256": "ad30b628c7875f4521180c40f4a9783b005bf3f5427ecd499322a855ddb95660",
+        "bytes": 2141
+      },
+      {
+        "path": "skills/design-qa/SKILL.md",
+        "sha256": "b1ab0088fb4dbd6510cb08da44ac15690cd2c345d2ffa79c0bc64da560b9fa5e",
+        "bytes": 2952
+      },
+      {
+        "path": "skills/get-context/SKILL.md",
+        "sha256": "b956954fbf241fb8ac03f9c756f1ce3a7355eabcae82b92ac8906a2b0cf28b81",
+        "bytes": 1627
+      },
+      {
+        "path": "skills/ideate/SKILL.md",
+        "sha256": "0aa8663d13e69aab81bf96198ff586d418d1a68669dbe9a72c705f8f933b707e",
+        "bytes": 2910
+      },
+      {
+        "path": "skills/image-to-code/SKILL.md",
+        "sha256": "223bebe70f9c93a35469dea4e3fbdfd45e4effde3e77e3e85afe5c19a4cd16bc",
+        "bytes": 3065
+      },
+      {
+        "path": "skills/index/SKILL.md",
+        "sha256": "12c38e14339c0e539c1e1164f93d6effd4a991141ecf5871080637b54dc6782c",
+        "bytes": 2399
+      },
+      {
+        "path": "skills/motion/SKILL.md",
+        "sha256": "d55df491b7f6eeb9e21f9742bc027b816c719ec7bd2100d4965b2c982da65733",
+        "bytes": 2553
+      },
+      {
+        "path": "skills/research/SKILL.md",
+        "sha256": "ac186b80dc021f9f83b3affa3aada44eb37dc0825720aba8ba9e38f3805c3906",
+        "bytes": 1860
+      },
+      {
+        "path": "skills/seed-design/references/component-guidelines.md",
+        "sha256": "169eb0d53cfea15dbfc0a9926517af7d4c0a69604c472efd6c0d35264862115f",
+        "bytes": 5267
+      },
+      {
+        "path": "skills/seed-design/references/foundation-contract.md",
+        "sha256": "aa63e3e7ff83a68f03c09d86a30506f0271facad2e5f357f9c4d9ca7850d038f",
+        "bytes": 1886
+      },
+      {
+        "path": "skills/seed-design/references/library-authors.md",
+        "sha256": "f28d06bb268ceecad5d466cfbd1e6d0901949081732537e4c978006ae8c10543",
+        "bytes": 2126
+      },
+      {
+        "path": "skills/seed-design/references/no-deprecated-component.md",
+        "sha256": "d2fd66e0e2fc1ebdb5bb9bc02712e6c99ec538f31dd7630618e5cee039356ab8",
+        "bytes": 2418
+      },
+      {
+        "path": "skills/seed-design/references/outdated-version.md",
+        "sha256": "6069a929432828032f844240d5a65c575a68fd60851d576819e68895cbf57166",
+        "bytes": 1728
+      },
+      {
+        "path": "skills/seed-design/references/package-compatibility.md",
+        "sha256": "afeed1551106d7e1f6696080f94be2aeb84c221e0647901705b2569bca09d93d",
+        "bytes": 1855
+      },
+      {
+        "path": "skills/seed-design/references/project-config.md",
+        "sha256": "14f47a6609475fb2a20676a3c3e4d274284ffc88511f29d44ef7c5c35f10d226",
+        "bytes": 2518
+      },
+      {
+        "path": "skills/seed-design/references/project-setup.md",
+        "sha256": "e26ef6fd3642336a3d1b3dbe273bee03317a531b8a136023604d4d8401769709",
+        "bytes": 1693
+      },
+      {
+        "path": "skills/seed-design/references/snippet-compatibility.md",
+        "sha256": "af86bab9af0743434dd7ca2a3716704f1491640feb9f3f84e2078f38ff69b0c2",
+        "bytes": 1692
+      },
+      {
+        "path": "skills/seed-design/references/snippet-generation.md",
+        "sha256": "917e0f1255e379f596366b5af28f4c86d4c8aa6a23ffaf262d52d742380dd9a8",
+        "bytes": 1866
+      },
+      {
+        "path": "skills/seed-design/SKILL.md",
+        "sha256": "20a4962b2a461dbdf770903e79058d7eef7a5f08d66cb77346a188a59dc9fad0",
+        "bytes": 1747
+      },
+      {
+        "path": "skills/share/SKILL.md",
+        "sha256": "17cafcfc456887f75b8920af9e74fb29996e65b868c164c1013691d1950a440f",
+        "bytes": 1210
+      },
+      {
+        "path": "skills/url-to-code/SKILL.md",
+        "sha256": "a48a77034d48b7b045d88a5715189f2c1129108e02194b22ce5d6e8c5ac2ebeb",
+        "bytes": 2036
+      },
+      {
+        "path": "skills/user-context/SKILL.md",
+        "sha256": "029f4f78f9bc4a1c35919d8fec59af28c677148ac4dab34dda105c0a7d06ed2c",
+        "bytes": 1374
+      }
+    ]
+  }
+}

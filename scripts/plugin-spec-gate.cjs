@@ -70,8 +70,15 @@ function checkPackage(dir) {
   if (!fs.existsSync(manifestPath)) return [`G0: no plugin.json in ${dir}`];
 
   let m;
+  const rawManifest = fs.readFileSync(manifestPath);
+  // A UTF-8 BOM is not a style nit: JSON.parse rejects it, so every consumer that
+  // reads the manifest dies on a file that looks fine in an editor. Editors on
+  // Windows add it silently, so say exactly what happened and how to fix it.
+  if (rawManifest[0] === 0xef && rawManifest[1] === 0xbb && rawManifest[2] === 0xbf) {
+    return ["G0: plugin.json starts with a UTF-8 BOM — JSON.parse rejects it. Save the file as UTF-8 without BOM."];
+  }
   try {
-    m = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    m = JSON.parse(rawManifest.toString("utf8"));
   } catch (e) {
     return [`G0: plugin.json failed to parse — ${e.message}`];
   }

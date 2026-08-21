@@ -48,6 +48,10 @@ files:
   # detect.ts/byok.ts value-import it, so it MUST be packaged or the app crashes at launch.
   - dist/shared/**/*
   - dist/renderer/**/*
+  # dist/plugins/** holds the built-in plugin packages (manifest + SKILL.md + references).
+  # materializeBuiltinPlugins() copies them to ~/.agentlas/plugins at boot, so leaving them
+  # out ships an app whose plugins exist in dev and vanish in the packaged build.
+  - dist/plugins/**/*
   - package.json
   - "!**/*.map"
 

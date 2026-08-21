@@ -45,6 +45,22 @@ export interface BuiltinToolContext {
     options?: { label: string; description?: string }[];
     allowFreeText?: boolean;
   }) => Promise<{ status: "answered"; answer: string } | { status: string }>;
+  /**
+   * 멀티모달 슬롯으로 그림을 그린다. askUser 와 같은 이유로 주입이다 — 이 파일은
+   * electron 을 import 하지 않는다.
+   *
+   * 멀티모달은 대화 런타임과 **다른 자리**다. orchestrator 가 claude 여도 이 슬롯이
+   * codex 면 codex 의 image_gen 이 그린다(shared/runtime-roles.ts multimodal).
+   * 주입이 없으면 `generate_image` 는 목록에 뜨지 않는다.
+   */
+  generateImage?: (input: { prompt: string }) => Promise<{
+    ok: boolean;
+    /** data:image/…;base64,… — 채팅·사이드바가 그대로 렌더한다. */
+    src?: string;
+    /** 실제로 그린 엔진. 지어낸 값이 아니라 실행 결과다. */
+    engine?: string;
+    message?: string;
+  }>;
 }
 
 export interface BuiltinTool {
@@ -390,6 +406,35 @@ export const BUILTIN_TOOLS: readonly BuiltinTool[] = [
     },
   },
   {
+    name: "generate_image",
+    minPerm: "read",
+    description:
+      "Generate an image from a text prompt using the multimodal runtime slot. Returns the engine that drew it and a data: URI the chat renders inline. Write the prompt yourself — this tool does not rewrite it. Use it when the user asks for a picture, diagram, illustration, or mockup.",
+    parameters: {
+      type: "object",
+      properties: {
+        prompt: {
+          type: "string",
+          description:
+            "What to draw, in English, as concretely as you can. Say the subject, composition, and style. Do not ask for text inside the image — generators render letters badly.",
+          minLength: 1,
+          maxLength: 4000,
+        },
+      },
+      required: ["prompt"],
+      additionalProperties: false,
+    },
+    async run(args, ctx) {
+      if (!ctx.generateImage) return "No multimodal runtime is attached to this run.";
+      const prompt = String(args.prompt ?? "").trim();
+      if (!prompt) return "prompt is required.";
+      const r = await ctx.generateImage({ prompt });
+      // 실패는 실패라고 말한다 — 모델이 "그렸다"고 쓰지 않도록 결과 문장이 분명해야 한다.
+      if (!r.ok || !r.src) return `Image generation failed: ${r.message || "no image was produced"}`;
+      return JSON.stringify({ ok: true, engine: r.engine ?? "unknown", src: r.src });
+    },
+  },
+  {
     name: "bash",
     minPerm: "full",
     description: "Run a shell command in the working folder. Requires 'full' permission.",
@@ -469,13 +514,15 @@ const BY_NAME = new Map(BUILTIN_TOOLS.map((tool) => [tool.name, tool]));
 /** 이 권한에서 **존재하는** 도구들. 부족한 도구는 목록에 아예 없다. */
 export function allowedBuiltinTools(
   permission: ToolPermission,
-  opts: { canAskUser?: boolean } = {},
+  opts: { canAskUser?: boolean; canGenerateImage?: boolean } = {},
 ): BuiltinTool[] {
   const rank = PERM_RANK[permission] ?? 0;
   return BUILTIN_TOOLS.filter((tool) => {
     if (PERM_RANK[tool.minPerm] > rank) return false;
     // 물을 표면이 없으면 묻는 도구도 없다 — 있는데 못 쓰는 도구는 함정이다.
     if (tool.name === "ask_user" && !opts.canAskUser) return false;
+    // 멀티모달 슬롯이 비어 있으면 그리는 도구도 없다. "있는데 못 그림"은 함정이다.
+    if (tool.name === "generate_image" && !opts.canGenerateImage) return false;
     return true;
   });
 }
@@ -485,7 +532,7 @@ export function builtinToolByName(name: string): BuiltinTool | undefined {
 }
 
 /** OpenAI 함수 호출 형식. */
-export function builtinToolsAsOpenAi(permission: ToolPermission, opts: { canAskUser?: boolean } = {}): {
+export function builtinToolsAsOpenAi(permission: ToolPermission, opts: { canAskUser?: boolean; canGenerateImage?: boolean } = {}): {
   type: "function";
   function: { name: string; description: string; parameters: Record<string, unknown> };
 }[] {
@@ -496,7 +543,7 @@ export function builtinToolsAsOpenAi(permission: ToolPermission, opts: { canAskU
 }
 
 /** Anthropic 도구 형식. */
-export function builtinToolsAsAnthropic(permission: ToolPermission, opts: { canAskUser?: boolean } = {}): {
+export function builtinToolsAsAnthropic(permission: ToolPermission, opts: { canAskUser?: boolean; canGenerateImage?: boolean } = {}): {
   name: string;
   description: string;
   input_schema: Record<string, unknown>;

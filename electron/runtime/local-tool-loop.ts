@@ -32,6 +32,8 @@ import {
   type ToolPermission,
 } from "../../shared/builtin-tools";
 import { askUser } from "../confirm/ask-user";
+import { multimodalImageSlot } from "../multimodal/slot";
+import { generateImage } from "../multimodal/image";
 
 export type LocalChatContent =
   | { type: "text"; text: string }
@@ -112,6 +114,8 @@ async function loadOpenAiTools(
   permission: ToolPermission,
   /** 이 실행이 사람에게 물을 수 있는가 — 무인 실행이면 묻는 도구를 아예 안 준다. */
   canAskUser: boolean,
+  /** 멀티모달 슬롯이 그림을 그릴 수 있는가 — 없으면 generate_image 는 목록에 안 뜬다. */
+  canGenerateImage: boolean,
 ): Promise<{ tools: OpenAiToolDef[]; byName: Map<string, ResolvedTool> }> {
   const tools: OpenAiToolDef[] = [];
   const byName = new Map<string, ResolvedTool>();
@@ -119,7 +123,7 @@ async function loadOpenAiTools(
   // ★내장 도구 먼저. MCP 설정이 없어도(그게 흔한 경우다) 이 런타임은 일할 수 있어야
   // 한다. 권한 칩보다 위의 도구는 목록에 **아예 없다** — "있는데 거절"이 아니라 "없다".
   if (workspaceRoot) {
-    for (const def of builtinToolsAsOpenAi(permission, { canAskUser })) {
+    for (const def of builtinToolsAsOpenAi(permission, { canAskUser, canGenerateImage })) {
       tools.push(def);
       byName.set(def.function.name, { kind: "builtin", builtinName: def.function.name });
     }
@@ -284,6 +288,17 @@ export async function runOneToolCall(
           { ...input, askedBy: approval.runtimeKind, ...(approval.chatId ? { chatId: approval.chatId } : {}) },
           { unattended: approval.unattended, ...(approval.signal ? { signal: approval.signal } : {}) },
         ),
+      // 그리는 것은 대화 런타임이 아니라 멀티모달 슬롯이다. 슬롯이 비면 주입도 없고,
+      // 주입이 없으면 도구도 목록에 없다(위 canGenerateImage).
+      ...(multimodalImageSlot()
+        ? {
+            generateImage: async ({ prompt }: { prompt: string }) => {
+              const slot = multimodalImageSlot();
+              if (!slot) return { ok: false, message: "The multimodal slot became empty mid-run." };
+              return generateImage(slot.model, prompt);
+            },
+          }
+        : {}),
     });
     events.onTool?.(call.function.name, call.function.arguments, outcome.content, call.id, !outcome.ok);
     return {
@@ -487,6 +502,7 @@ export async function runLocalOpenAiChat(
     req.cwd,
     (req.permission ?? "read") as ToolPermission,
     req.unattended !== true,
+    multimodalImageSlot() !== null,
   );
   if (tools.length > 0) {
     events.onStatus(tStatus(req.locale, "mcpToolsAttached", { count: tools.length }));
