@@ -97,6 +97,19 @@ import type {
 } from "./one-memory";
 import type { OneMemoryMapSnapshot } from "./one-memory-map";
 import type {
+  AddOneOrgMemberInput,
+  ArchiveOneOrgMemberInput,
+  OneOrgCompletionSummary,
+  MarkOneOrgMemberReadInput,
+  OneOrgState,
+  ReorderOneOrgMembersInput,
+  ReplaceOneOrgMemberInput,
+  RenameOneOrgMemberInput,
+  SetOneOrgMemberToolsInput,
+  UpdateOneOrgMemberInput,
+} from "./one-org";
+import type { ComputerHistoryDraftPrompt, ComputerHistoryState } from "./computer-history";
+import type {
   AcceptOneSuggestionForReviewInput,
   DismissOneSuggestionInput,
   NeverAskOneSuggestionInput,
@@ -142,6 +155,28 @@ import type {
   OneTaskArchiveMutationInputV1,
   OneTaskArchiveMutationResultV1,
 } from "./one-search";
+export type {
+  AddOneOrgMemberInput,
+  ArchiveOneOrgMemberInput,
+  OneOrgMember,
+  OneOrgCompletionSummary,
+  MarkOneOrgMemberReadInput,
+  OneOrgSource,
+  OneOrgState,
+  OneOrgStatusKind,
+  OneOrgSlots,
+  ReorderOneOrgMembersInput,
+  ReplaceOneOrgMemberInput,
+  RenameOneOrgMemberInput,
+  UpdateOneOrgMemberInput,
+} from "./one-org";
+export type {
+  ComputerHistoryDraftPrompt,
+  ComputerHistoryEntry,
+  ComputerHistoryRecommendation,
+  ComputerHistorySource,
+  ComputerHistoryState,
+} from "./computer-history";
 export type {
   OneOperatingPrinciple,
   OneOperatingPrincipleCreateInput,
@@ -4119,6 +4154,15 @@ export interface AgentMessageEvent {
   toAgentId: string;
   /** Bounded, user-visible brief/result excerpt. The full worker result stays internal. */
   text: string;
+  /** Host-enforced typed-handoff facts. Depth is 1..3; a pair may round-trip at most 4 times. */
+  handoffDepth?: number;
+  handoffRoundtrip?: number;
+  /** Explicit child grant minted by Main; it is never copied from the parent. */
+  handoffPermission?: "read" | "write" | "full";
+  /** Always false for a successful typed handoff; present for auditability. */
+  permissionInherited?: false;
+  /** Set only when the host refused a handoff; the run must escalate to One. */
+  handoffBlocked?: "depth" | "roundtrip" | "permission";
 }
 
 export interface McpInvocationEvent {
@@ -6230,7 +6274,7 @@ export interface AgentlasIpc {
      * their process instead of only the latest run surviving a reload.
      */
     chatTimeline: (chatId: string, input?: { maxRuns?: number; eventsPerRun?: number }) => Promise<Array<{ receipt: InvocationRunReceipt; events: RunEventUi[] }>>;
-    failures: (input?: { runId?: string; automationId?: string; chatId?: string; limit?: number }) => Promise<FailureEventUi[]>;
+    failures: (input?: { runId?: string; automationId?: string; chatId?: string; agentId?: string; limit?: number }) => Promise<FailureEventUi[]>;
   };
   /** 에이전트 자가진화 proposal 원장 — 제안/승인/적용/측정/롤백 상태를 로컬 DB에 남긴다. */
   agentEvolution: {
@@ -6379,6 +6423,27 @@ export interface AgentlasIpc {
     importLocalFolder: (input: { path: string; scope: FsReadScope }) => Promise<InstalledAgent>;
     /** 팀 에이전트의 하위 서브에이전트 해석 — 즉시 결정적 + 백그라운드 LLM 정밀판정/자가교정. */
     resolveSubAgents: (agentId: string) => Promise<AgentTeamResolution | null>;
+  };
+  /** Durable One Team bindings; execution remains in canonical Work/Automation. */
+  oneOrg: {
+    get: () => Promise<OneOrgState>;
+    add: (input: AddOneOrgMemberInput) => Promise<OneOrgState>;
+    rename: (input: RenameOneOrgMemberInput) => Promise<OneOrgState>;
+    update: (input: UpdateOneOrgMemberInput) => Promise<OneOrgState>;
+    replace: (input: ReplaceOneOrgMemberInput) => Promise<OneOrgState>;
+    archive: (input: ArchiveOneOrgMemberInput) => Promise<OneOrgState>;
+    restore: (input: ArchiveOneOrgMemberInput) => Promise<OneOrgState>;
+    markRead: (input: MarkOneOrgMemberReadInput) => Promise<OneOrgState>;
+    reorder: (input: ReorderOneOrgMembersInput) => Promise<OneOrgState>;
+    setTools: (input: SetOneOrgMemberToolsInput) => Promise<OneOrgState>;
+  };
+  /** Opt-in local Computer History summaries and read-only recommendations. */
+  computerHistory: {
+    get: () => Promise<ComputerHistoryState>;
+    setConsent: (enabled: boolean) => Promise<ComputerHistoryState>;
+    clear: () => Promise<ComputerHistoryState>;
+    /** Explicit review handoff; the passive history list remains path-free. */
+    prepareDraft: (recommendationId: string, locale: "ko" | "en") => Promise<ComputerHistoryDraftPrompt>;
   };
   /** 에이전트 폴더 파일 — 라이브러리 우측 패널의 파일 목록 + 에디터.
    *  폴더(userData/agents/<slug>/) 내부로만 접근 제한. system-prompt.md 편집은 즉시 적용. */

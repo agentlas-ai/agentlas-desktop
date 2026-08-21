@@ -37,6 +37,8 @@ export const MOBILE_BRIDGE_METHODS = [
   "snapshot.get",
   "host.status",
   "team.list",
+  "one.org.get",
+  "one.org.add",
   "firms.list",
   "projects.list",
   "projects.get",
@@ -52,6 +54,15 @@ export const MOBILE_BRIDGE_METHODS = [
   "chats.setRuntimeSelection",
   "tasks.createProject",
   "tasks.latestResult",
+  // Mobile terminal is deliberately a separate, opt-in authority. The
+  // Desktop runtime must inject an existing terminal controller; the bridge
+  // never turns an arbitrary string into a shell command by itself.
+  "terminal.read",
+  "terminal.preview",
+  "terminal.takeover",
+  "terminal.release",
+  "terminal.dispatch",
+  "terminal.cancel",
   "one.artifact.imagePreview",
   "tasks.acceptResult",
   "one.suggestions.act",
@@ -113,8 +124,13 @@ export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new 
   "chats.clearContext",
   "chats.setRuntimeSelection",
   "projects.setAgentPool",
+  "one.org.add",
   "tasks.createProject",
   "tasks.acceptResult",
+  "terminal.takeover",
+  "terminal.release",
+  "terminal.dispatch",
+  "terminal.cancel",
   "one.suggestions.act",
   "workspace.setProject",
   "workspace.clear",
@@ -217,6 +233,94 @@ export interface MobileBridgeOneInvokeStartReceiptDto {
   authoritativeHostRef: string;
   chatId: string;
   runId: string;
+}
+
+/**
+ * The Mobile terminal is a capability projection, not a shell transport.
+ * Desktop may expose these DTOs only when it already has an authoritative
+ * terminal controller. In particular, no cwd, environment, executable path,
+ * provider session, or raw process handle crosses this contract.
+ */
+export type MobileBridgeTerminalOwner = "agent" | "mobile" | "none";
+export type MobileBridgeTerminalRisk = "safe" | "dangerous";
+export type MobileBridgeTerminalRefusalCode =
+  | "terminal_unavailable"
+  | "terminal_offline"
+  | "terminal_not_found"
+  | "terminal_owner_conflict"
+  | "terminal_epoch_conflict"
+  | "terminal_preview_required"
+  | "terminal_preview_expired"
+  | "terminal_approval_required"
+  | "terminal_request_not_found"
+  | "terminal_control_unavailable";
+
+export interface MobileBridgeTerminalRefusalDto {
+  schemaVersion: 1;
+  status: "refused";
+  code: MobileBridgeTerminalRefusalCode;
+  message: string;
+}
+
+export interface MobileBridgeTerminalLineDto {
+  seq: number;
+  stream: "stdout" | "stderr" | "system";
+  text: string;
+}
+
+export interface MobileBridgeTerminalReadDto {
+  schemaVersion: 1;
+  terminalId: string;
+  status: "ready" | "busy" | "unavailable";
+  owner: MobileBridgeTerminalOwner;
+  ownerEpoch: number;
+  lines: MobileBridgeTerminalLineDto[];
+  nextSeq: number;
+  truncated: boolean;
+  refusal?: MobileBridgeTerminalRefusalDto;
+}
+
+export interface MobileBridgeTerminalPreviewDto {
+  schemaVersion: 1;
+  terminalId: string;
+  previewId: string;
+  /** Present for dangerous commands that have an outstanding live approval. */
+  approvalId?: string;
+  command: string;
+  risk: MobileBridgeTerminalRisk;
+  requiresApproval: boolean;
+  ownerEpoch: number;
+  expiresAt: string;
+}
+
+export interface MobileBridgeTerminalTakeoverDto {
+  schemaVersion: 1;
+  terminalId: string;
+  owner: "mobile";
+  ownerEpoch: number;
+}
+
+export interface MobileBridgeTerminalReleaseDto {
+  schemaVersion: 1;
+  terminalId: string;
+  owner: "agent";
+  ownerEpoch: number;
+}
+
+export interface MobileBridgeTerminalDispatchDto {
+  schemaVersion: 1;
+  terminalId: string;
+  requestId: string;
+  status: "queued" | "running" | "completed" | "cancelled";
+  ownerEpoch: number;
+}
+
+export interface MobileBridgeTerminalCancelDto {
+  schemaVersion: 1;
+  terminalId: string;
+  requestId: string;
+  status: "cancelled";
+  ownerEpoch: number;
 }
 
 export interface MobileBridgeImageAttachmentDto {
@@ -1766,6 +1870,7 @@ const EMPTY_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
   "snapshot.get",
   "host.status",
   "team.list",
+  "one.org.get",
   "firms.list",
   "projects.list",
   "plugins.list",
@@ -2200,6 +2305,13 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
       return hasOnlyKeys(params, ["id"]) ? requiredString(params, "id") : `${method} accepts only id`;
     case "projects.setAgentPool":
       return validateProjectAgentPool(params);
+    case "one.org.add":
+      return hasOnlyKeys(params, ["installedAgentId", "displayName"])
+        ? firstError(
+            requiredString(params, "installedAgentId", 240),
+            optionalString(params, "displayName", 80),
+          )
+        : "one.org.add accepts only installedAgentId and displayName";
     case "tasks.createProject":
       return hasOnlyKeys(params, ["projectId", "title"])
         ? firstError(requiredString(params, "projectId"), optionalString(params, "title", 200))
@@ -2243,6 +2355,60 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
               : optionalInteger(params, "expectedVersion", 1, Number.MAX_SAFE_INTEGER),
           )
         : "tasks.latestResult accepts only taskId, chatId, and expectedVersion";
+    case "terminal.read":
+      return hasOnlyKeys(params, ["terminalId", "sinceSeq", "limit"])
+        ? firstError(
+            requiredString(params, "terminalId", 160),
+            optionalInteger(params, "sinceSeq", 0, Number.MAX_SAFE_INTEGER),
+            optionalInteger(params, "limit", 1, 500),
+          )
+        : "terminal.read accepts only terminalId, sinceSeq, and limit";
+    case "terminal.preview":
+      return hasOnlyKeys(params, ["terminalId", "command"])
+        ? firstError(
+            requiredString(params, "terminalId", 160),
+            requiredText(params, "command", 4_000),
+          )
+        : "terminal.preview accepts only terminalId and command";
+    case "terminal.takeover":
+      return hasOnlyKeys(params, ["terminalId", "expectedOwnerEpoch"])
+        ? firstError(
+            requiredString(params, "terminalId", 160),
+            params.expectedOwnerEpoch === undefined
+              ? "expectedOwnerEpoch is required"
+              : optionalInteger(params, "expectedOwnerEpoch", 0, Number.MAX_SAFE_INTEGER),
+          )
+        : "terminal.takeover accepts only terminalId and expectedOwnerEpoch";
+    case "terminal.release":
+      return hasOnlyKeys(params, ["terminalId", "ownerEpoch"])
+        ? firstError(
+            requiredString(params, "terminalId", 160),
+            params.ownerEpoch === undefined
+              ? "ownerEpoch is required"
+              : optionalInteger(params, "ownerEpoch", 1, Number.MAX_SAFE_INTEGER),
+          )
+        : "terminal.release accepts only terminalId and ownerEpoch";
+    case "terminal.dispatch":
+      return hasOnlyKeys(params, ["terminalId", "ownerEpoch", "previewId", "approvalId"])
+        ? firstError(
+            requiredString(params, "terminalId", 160),
+            params.ownerEpoch === undefined
+              ? "ownerEpoch is required"
+              : optionalInteger(params, "ownerEpoch", 1, Number.MAX_SAFE_INTEGER),
+            requiredString(params, "previewId", 160),
+            optionalString(params, "approvalId", 160),
+          )
+        : "terminal.dispatch accepts only terminalId, ownerEpoch, previewId, and approvalId";
+    case "terminal.cancel":
+      return hasOnlyKeys(params, ["terminalId", "ownerEpoch", "requestId"])
+        ? firstError(
+            requiredString(params, "terminalId", 160),
+            params.ownerEpoch === undefined
+              ? "ownerEpoch is required"
+              : optionalInteger(params, "ownerEpoch", 1, Number.MAX_SAFE_INTEGER),
+            requiredString(params, "requestId", 160),
+          )
+        : "terminal.cancel accepts only terminalId, ownerEpoch, and requestId";
     case "one.artifact.imagePreview":
       return hasOnlyKeys(params, ["taskId", "taskVersion", "chatId", "runId", "manifestId", "artifactRef"])
         ? firstError(

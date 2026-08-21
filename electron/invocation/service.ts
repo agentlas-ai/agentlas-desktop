@@ -102,6 +102,7 @@ import type {
   InstalledAgent,
 } from "../../shared/types";
 import { installMobileOneAutoRecovery } from "../one/mobile-auto-recovery";
+import { cacheOneOrgCompletionSummary, setOneOrgMemberStatus } from "../one/org";
 import { adaptLegacySurfaceToOneV1 } from "../../shared/one-surface";
 import { applyOneFriendlyFollowups } from "../../shared/one-friendly-followups";
 import {
@@ -143,8 +144,12 @@ export interface InvocationStartResult {
 export interface InvocationSettledEnvelope {
   runId: string;
   chatId: string;
+  /** Main-observed installed agent identity, if the runtime exposed one. */
+  agentId?: string;
   receipt: InvocationRunReceipt;
   oneMode: boolean;
+  /** Host-owned approval/input wait discovered from the terminal response. */
+  pendingQuestion?: boolean;
   /** Main-memory-only original goal; never projected as a wire receipt. */
   goal: string;
   workspaceBinding?: InvocationWorkspaceBinding;
@@ -164,6 +169,7 @@ interface RunRecord {
   workspaceBinding?: InvocationWorkspaceBinding;
   oneMode: boolean;
   goal: string;
+  pendingQuestion: boolean;
   settlementPublished: boolean;
 }
 
@@ -940,6 +946,7 @@ export class InvocationService {
       resultFolder,
       oneMode: requestedOneMode,
       goal: invocationRequest.userPrompt.slice(0, 4_000),
+      pendingQuestion: false,
       settlementPublished: false,
       ...(runWorkspaceBinding ? { workspaceBinding: runWorkspaceBinding } : {}),
     };
@@ -1314,6 +1321,7 @@ export class InvocationService {
 
         const terminalRequestsDecision = event.kind === "final" &&
           (event.text ?? record.partialText).includes("<<agentlas-ask");
+        if (terminalRequestsDecision) record.pendingQuestion = true;
         if (!taskMaterialized && (invocationEventPromotesTask(event) || terminalRequestsDecision)) {
           tryRecordRunEvent({
             runId,
@@ -1896,6 +1904,15 @@ export class InvocationService {
     if (!change.chatId || !change.agentId) return;
     for (const [runId, record] of this.activeRuns.entries()) {
       if (record.chatId !== change.chatId) continue;
+      if (record.oneMode) {
+        setOneOrgMemberStatus({
+          installedAgentId: change.agentId,
+          statusKind: change.state === "running" ? "working" : change.state === "closed" ? "failed" : "quiet",
+          statusLine: change.state === "running" ? "지금 작업 중" : change.state === "closed" ? "실행 실패 — 프로세스 종료" : "최근 작업 완료",
+          ...(change.state === "running" ? { unreadCount: 0 } : {}),
+          lastActivityAt: new Date().toISOString(),
+        });
+      }
       const locale = pickLocale(record.request);
       const status = change.state === "running"
         ? locale === "ko" ? "CLI 프로세스 실행 중" : "CLI process running"
@@ -1958,11 +1975,29 @@ export class InvocationService {
     const envelope: InvocationSettledEnvelope = {
       runId,
       chatId: record.chatId,
+      ...(record.oneMode && record.actualAgentId ? { agentId: record.actualAgentId } : {}),
       receipt,
       oneMode: record.oneMode,
+      pendingQuestion: record.pendingQuestion,
       goal: record.goal,
       ...(record.workspaceBinding ? { workspaceBinding: record.workspaceBinding } : {}),
     };
+    if (record.oneMode && record.actualAgentId) {
+      const failed = receipt.status === "failed" || receipt.status === "cancelled" || receipt.status === "interrupted";
+      const creditBlocked = receipt.errorCode === "insufficient_credits" || /insufficient[_ -]?credits/i.test(receipt.errorMessage || "");
+      cacheOneOrgCompletionSummary({ installedAgentId: record.actualAgentId, runId });
+      setOneOrgMemberStatus({
+        installedAgentId: record.actualAgentId,
+        statusKind: failed ? "failed" : record.pendingQuestion ? "waiting" : "quiet",
+        statusLine: failed
+          ? creditBlocked ? "크레딧 부족" : `실패 · ${receipt.errorCode || "실행 오류"}`
+          : "최근 작업 완료",
+        unreadCount: failed ? 0 : 1,
+        ...(creditBlocked ? { creditState: "insufficient" as const } : {}),
+        ...(record.pendingQuestion ? { pendingCount: 1, pendingKind: "input" as const } : { pendingCount: 0 }),
+        lastActivityAt: receipt.finishedAt || receipt.updatedAt,
+      });
+    }
     for (const listener of this.settledListeners) {
       try {
         void Promise.resolve(listener(envelope)).catch(() => undefined);

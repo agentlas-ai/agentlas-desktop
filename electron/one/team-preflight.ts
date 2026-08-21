@@ -14,6 +14,7 @@ import {
 } from "../store/tasks";
 import { hasInvocationRunReceipt } from "../store/run-events";
 import { tryRecordOneDomainEvent } from "./domain-events";
+import { oneOrgExecutionGuidance } from "./org";
 import type {
   CanonicalTask,
   Chat,
@@ -904,9 +905,10 @@ export async function prepareOneTeamPreflight(
   });
   const persisted = persist.immediate();
   if (persisted.proposalId !== proposal.proposalId) return { kind: "proposal", proposal: persisted };
+  const standingStaffGuidance = oneOrgExecutionGuidance(requestedAgentIds);
   PROCESS_PROMPTS.set(proposal.proposalId, {
     original: input.userPrompt,
-    execution: input.userPrompt,
+    execution: standingStaffGuidance ? `${input.userPrompt}\n\n${standingStaffGuidance}` : input.userPrompt,
     requestedAgentIds,
   });
 

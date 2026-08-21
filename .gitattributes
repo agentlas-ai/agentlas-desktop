@@ -1,0 +1,2 @@
+# Rive files are exported binaries; preserve their exact bytes across hosts.
+*.riv binary

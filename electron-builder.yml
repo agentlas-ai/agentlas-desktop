@@ -59,6 +59,10 @@ asar: true
 asarUnpack:
   - "**/node_modules/better-sqlite3/**/*"
   - "**/node_modules/keytar/**/*"
+  # node-pty loads its native addon and spawn-helper at runtime. Keep the
+  # complete package outside app.asar so both POSIX forkpty and Windows
+  # ConPTY assets remain executable in the packaged app.
+  - "**/node_modules/node-pty/**/*"
 
 # Required workers still need the globally enabled ELECTRON_RUN_AS_NODE fuse;
 # their internal call sites exact-gate command/argv. The fuse itself is not

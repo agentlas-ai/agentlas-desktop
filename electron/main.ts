@@ -113,7 +113,9 @@ const isDev = process.env.NODE_ENV === "development";
 const AUTH_SESSION_CHANGED_CHANNEL = "auth:sessionChanged";
 let disposeAuthSessionInvalidation: (() => void) | null = null;
 let disposeMobileBridgeStateChange: (() => void) | null = null;
+let disposeOneTeamNotificationBridge: (() => void) | null = null;
 let deferredAuthRestorePromise: Promise<AuthRestoreResult> | null = null;
+const oneTeamNotificationKeys = new Set<string>();
 
 function broadcastAuthSession(sessionSnapshot: ReturnType<typeof getAuthSession>): void {
   for (const window of BrowserWindow.getAllWindows()) {
@@ -357,6 +359,43 @@ function checkOneBriefingDesktopNotification(): void {
   } catch (error) {
     console.warn("[one-briefing] desktop notification check failed", error);
   }
+}
+
+/**
+ * One Team notifications are deliberately sparse: approvals, failures, and
+ * completions that took longer than five minutes.  The renderer remains the
+ * source of detail; the OS surface only says that One needs attention.  A
+ * durable settlement is the event boundary, so no polling or duplicate timer
+ * can emit the same notification twice in this process.
+ */
+function startOneTeamNotificationBridge(): void {
+  if (disposeOneTeamNotificationBridge) return;
+  disposeOneTeamNotificationBridge = invocationService.onSettled((envelope) => {
+    const receipt = envelope.receipt;
+    const reason = envelope.pendingQuestion
+      ? "approval"
+      : receipt.status === "failed"
+        ? "failure"
+        : receipt.status === "completed" && Date.parse(receipt.finishedAt || receipt.updatedAt) - Date.parse(receipt.startedAt) >= 5 * 60 * 1_000
+          ? "long-complete"
+          : null;
+    if (!reason || !getAuthSession().signedIn || !Notification.isSupported()) return;
+    // Focused Desktop is the foreground host and owns the in-app indication;
+    // avoid the duplicate OS toast. A hidden/minimized host gets one toast.
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused()) return;
+    const key = `${receipt.runId}:${reason}`;
+    if (oneTeamNotificationKeys.has(key)) return;
+    oneTeamNotificationKeys.add(key);
+    if (oneTeamNotificationKeys.size > 512) oneTeamNotificationKeys.delete(oneTeamNotificationKeys.values().next().value as string);
+    const body = reason === "approval"
+      ? "One needs your input to continue."
+      : reason === "failure"
+        ? "One had a failed run to review."
+        : "One finished a long-running task."
+    const notification = new Notification({ title: "Agentlas One", body, silent: true });
+    notification.on("click", () => { void openOneFromNotification(); });
+    notification.show();
+  });
 }
 
 function startOneBriefingScheduler(): void {
@@ -1152,6 +1191,7 @@ app.whenReady().then(async () => {
   // 창이 뜨고 초기 렌더러 IPC가 가라앉은 뒤에 레거시 정합을 돌린다.
   setTimeout(runDeferredLegacyLearningReconciliation, 3_000);
   startOneBriefingScheduler();
+  startOneTeamNotificationBridge();
   // Start only after update continuity and store bootstrap have passed. A
   // bridge failure must not make Desktop unusable; Settings exposes the exact
   // failure and can retry on the next launch.

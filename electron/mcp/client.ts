@@ -60,6 +60,7 @@ import {
   setChatWorkingFolder,
 } from "../store/chats";
 import { getProject, listProjects } from "../store/projects";
+import { getDb } from "../store/db";
 import { listRentAllowedSlugs } from "../store/project-agent-rent";
 import { activeLeasedSlugs } from "../cloud-agents/leases";
 import { findCanonicalTaskForChat } from "../store/tasks";
@@ -2242,6 +2243,22 @@ ${effectiveUserPrompt}`;
   // 여기서 통째로 빠져 JIT 인라인 grant 밖의 도구를 하나도 못 받았다.
   if (runtimeCanUseMcp && !workforceOwnsCapabilityChoice && !explicitWorkforceGoal) {
     try {
+      let oneMemberToolPolicy: { autoSelectTools: boolean; fixedServerIds: string[] } | null = null;
+      if (req.oneMode && !req.agentAppMode) {
+        try {
+          const row = getDb().prepare(
+            "SELECT auto_select_tools, installed_agent_id FROM one_org_members WHERE installed_agent_id = ? AND archived_at IS NULL LIMIT 1",
+          ).get(agent.id) as { auto_select_tools?: number; installed_agent_id?: string } | undefined;
+          if (row) {
+            oneMemberToolPolicy = {
+              autoSelectTools: row.auto_select_tools !== 0,
+              fixedServerIds: agent.mcpServers.slice(0, 100),
+            };
+          }
+        } catch {
+          // Older stores without One Team tables retain the normal auto mode.
+        }
+      }
       const autoSelectInput = {
         userPrompt: effectiveUserPrompt,
         systemPrompt: buildEffectiveAgentSystemPrompt(agent.id, agent.systemPrompt),
@@ -2251,6 +2268,7 @@ ${effectiveUserPrompt}`;
         hubMode: req.hubMode,
         // 같은 채팅의 후속 턴이면 지난 선택과 접속 확인을 재사용한다(auto-select 메모).
         conversationId: req.chatId,
+        ...(oneMemberToolPolicy ? oneMemberToolPolicy : {}),
       };
       let selectedContext = await autoSelectMcpTools(autoSelectInput);
       // ── 실행 전 API 키 요청 게이트 (대화형 렌더러 런 전용) ──────────────

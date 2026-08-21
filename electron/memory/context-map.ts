@@ -18,7 +18,18 @@ const SLICE_TIMEOUT_MS = 4_000;
 // error) before. Small projects still verify fully inside the budget.
 const SLICE_FRESHNESS_BUDGET_SECONDS = 0.4;
 const REFRESH_TIMEOUT_MS = 15_000;
-const refreshTriggered = new Set<string>();
+const NON_GIT_SIGNATURE_MAX_FILES = 5_000;
+const NON_GIT_SOURCE_RE = /\.(?:[cm]?[jt]sx?|json|mdx?|py|rs|go|java|kts?|swift|c|cc|cpp|h|hpp|cs|rb|php|scala|sh|zsh|bash|sql|toml|ya?ml|xml|html?|css|scss|sass|less|vue|svelte|dart|exs?|erl|hrl|lua|r|ipynb)$/i;
+const NON_GIT_IGNORED_DIRS = new Set([
+  ".agentlas", ".git", ".next", ".venv", "build", "coverage", "dist",
+  "node_modules", "out", "target", "vendor",
+]);
+// A map is refreshed once per unchanged source snapshot, not once per process.
+// The old Set made a long-lived Desktop session keep serving the first map even
+// after later turns edited the repository. A cheap Git/status signature lets us
+// avoid a full Core scan on every turn while reopening the refresh gate as soon
+// as tracked or untracked source changes are observed.
+const refreshTriggered = new Map<string, string>();
 
 type ContextSliceResult = {
   schemaVersion?: string;
@@ -38,6 +49,43 @@ type CodeMapResult = {
     graphDigest?: string;
   };
 };
+
+function nonGitProjectSourceSignature(projectPath: string): string {
+  const pending = [projectPath];
+  const rows: string[] = [];
+  let truncated = false;
+  while (pending.length > 0 && rows.length < NON_GIT_SIGNATURE_MAX_FILES) {
+    const current = pending.pop();
+    if (!current) break;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true })
+        .sort((left, right) => left.name.localeCompare(right.name));
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (rows.length >= NON_GIT_SIGNATURE_MAX_FILES) {
+        truncated = true;
+        break;
+      }
+      const absolute = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        if (!NON_GIT_IGNORED_DIRS.has(entry.name)) pending.push(absolute);
+        continue;
+      }
+      if (!entry.isFile() || !NON_GIT_SOURCE_RE.test(entry.name)) continue;
+      try {
+        const stat = fs.statSync(absolute);
+        rows.push(`${path.relative(projectPath, absolute)}:${stat.size}:${stat.mtimeMs}`);
+      } catch {
+        rows.push(`${path.relative(projectPath, absolute)}:missing`);
+      }
+    }
+  }
+  rows.sort();
+  return `non-git:${truncated || pending.length > 0 ? "truncated" : "complete"}\n${rows.join("\n")}`;
+}
 
 function contextLaunch(args: string[]): {
   command: string;
@@ -103,6 +151,51 @@ function hasCanonicalCodeMap(projectPath: string): boolean {
   }
 }
 
+export function projectSourceSignature(projectPath: string): string {
+  const parts: string[] = [];
+  try {
+    const git = spawnSync(
+      "git",
+      ["-C", projectPath, "status", "--porcelain=v1", "--untracked-files=all"],
+      { encoding: "utf8", timeout: 1_500, maxBuffer: 2_000_000, windowsHide: true },
+    );
+    if (git.status === 0) {
+      const head = spawnSync(
+        "git",
+        ["-C", projectPath, "rev-parse", "--verify", "HEAD"],
+        { encoding: "utf8", timeout: 1_500, maxBuffer: 64_000, windowsHide: true },
+      );
+      parts.push(head.status === 0 ? `HEAD:${String(head.stdout || "").trim()}` : "HEAD:unborn");
+      const status = String(git.stdout || "");
+      parts.push(status);
+      const paths = status.split(/\r?\n/)
+        .map((line) => line.slice(3).trim())
+        .filter(Boolean)
+        .map((value) => value.includes(" -> ") ? value.slice(value.lastIndexOf(" -> ") + 4) : value)
+        .map((value) => value.replace(/^"|"$/g, ""));
+      for (const relative of paths.slice(0, 2_000)) {
+        try {
+          const stat = fs.statSync(path.join(projectPath, relative));
+          parts.push(`${relative}:${stat.size}:${stat.mtimeMs}`);
+        } catch {
+          parts.push(`${relative}:missing`);
+        }
+      }
+      const diff = spawnSync(
+        "git",
+        ["-C", projectPath, "diff", "--numstat", "HEAD", "--"],
+        { encoding: "utf8", timeout: 2_500, maxBuffer: 2_000_000, windowsHide: true },
+      );
+      if (diff.status === 0) parts.push(String(diff.stdout || ""));
+    } else {
+      parts.push(nonGitProjectSourceSignature(projectPath));
+    }
+  } catch {
+    parts.push(nonGitProjectSourceSignature(projectPath));
+  }
+  return parts.join("\n");
+}
+
 /**
  * Refresh through the public Core command and return true only after the
  * canonical v3 manifest and its v2 compatibility map are present. Process creation
@@ -110,7 +203,8 @@ function hasCanonicalCodeMap(projectPath: string): boolean {
  */
 export function triggerProjectContextMapRefresh(projectPath: string): boolean {
   if (!verifyActivatedFolderIdentity(projectPath)) return false;
-  if (refreshTriggered.has(projectPath) && hasCanonicalCodeMap(projectPath)) return true;
+  const sourceSignature = projectSourceSignature(projectPath);
+  if (refreshTriggered.get(projectPath) === sourceSignature && hasCanonicalCodeMap(projectPath)) return true;
   const launch = contextLaunch(["refresh", "--project", projectPath]);
   if (!launch) return false;
   try {
@@ -133,7 +227,7 @@ export function triggerProjectContextMapRefresh(projectPath: string): boolean {
       );
       return false;
     }
-    refreshTriggered.add(projectPath);
+    refreshTriggered.set(projectPath, sourceSignature);
     return true;
   } catch {
     refreshTriggered.delete(projectPath);

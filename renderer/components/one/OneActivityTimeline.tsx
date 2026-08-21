@@ -29,6 +29,7 @@ import styles from "./OneActivityTimeline.module.css";
 
 const ONE_OUTPUT_SECTIONS_STORAGE_KEY = "agentlas.one.output-sections.v1";
 type OutputSectionKey = "files" | "agents" | "processes" | "computer" | "sources";
+type OutputRailView = "activity" | "terminal" | "browser";
 
 function readCollapsedOutputSections(): Set<OutputSectionKey> {
   if (typeof window === "undefined") return new Set();
@@ -459,6 +460,7 @@ export function OneActivityArtifactRail({
   defaultWidth?: number;
 }) {
   const [collapsedSections, setCollapsedSections] = useState<Set<OutputSectionKey>>(readCollapsedOutputSections);
+  const [railView, setRailView] = useState<OutputRailView>("activity");
   const resizeRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
   const [resizing, setResizing] = useState(false);
   const clampWidth = (value: number) => Math.min(maxWidth, Math.max(minWidth, Math.round(value)));
@@ -557,42 +559,63 @@ export function OneActivityArtifactRail({
           {onClose && <button type="button" onClick={onClose} aria-label={locale === "ko" ? "출력 패널 접기" : "Collapse output panel"}><IconClose size={15} /></button>}
         </div>
       </header>
+      <nav className={styles.artifactTabs} aria-label={locale === "ko" ? "출력 보기" : "Output views"} role="tablist">
+        {(["activity", "terminal", "browser"] as const).map((view) => (
+          <button
+            key={view}
+            type="button"
+            role="tab"
+            aria-selected={railView === view}
+            data-active={railView === view ? "true" : "false"}
+            onClick={() => setRailView(view)}
+          >
+            {view === "activity" ? (locale === "ko" ? "Activity" : "Activity") : view === "terminal" ? (locale === "ko" ? "Terminal" : "Terminal") : (locale === "ko" ? "Browser" : "Browser")}
+          </button>
+        ))}
+      </nav>
       <div className={styles.artifactList}>
-        <OutputDisclosure section="files" label={locale === "ko" ? "결과물" : "Artifacts"} count={items.length} expanded={sectionExpanded("files")} onToggle={toggleSection}>
-          {items.length === 0 && <p className={styles.artifactEmpty}>{locale === "ko" ? "만든 파일 또는 사이트가 여기에 표시됩니다" : "Files or sites you create appear here"}</p>}
-          {items.map((item) => (
-            <button key={item.id} type="button" className={styles.artifact} onClick={() => void openArtifact(item)} title={item.label}>
-              <span className={styles.artifactFileIcon}><IconFileUp size={16} /></span>
-              <span>
-                <strong>{item.label}</strong>
-                <small>{item.kind === "image" ? <><IconImage size={11} /> {locale === "ko" ? "이미지" : "Image"}</> : <><IconFolder size={11} /> {locale === "ko" ? "파일" : "File"}</>}</small>
-              </span>
-            </button>
-          ))}
-        </OutputDisclosure>
-        <OutputDisclosure section="agents" label={locale === "ko" ? "하위 에이전트" : "Subagents"} count={agents.length} expanded={sectionExpanded("agents")} onToggle={toggleSection}>
-          {agents.length === 0
-            ? <p className={styles.artifactEmpty}>{locale === "ko" ? "실행된 하위 에이전트 없음" : "No subagents used"}</p>
-            : agents.slice(-5).map((item) => <div key={item.id} className={styles.artifactRuntimeRow}><IconSparkles size={13} /><span>{item.agentName || (locale === "ko" ? "에이전트" : "Agent")}</span><small>{item.status === "completed" ? "✓" : ""}</small></div>)}
-        </OutputDisclosure>
-        {/* A completed shell tool is evidence of a command, not proof that a
-            persistent background process exists. The prior label fabricated
-            process lifetime from ordinary terminal events. */}
-        <OutputDisclosure section="processes" label={locale === "ko" ? "명령" : "Commands"} count={processes.length} expanded={sectionExpanded("processes")} onToggle={toggleSection}>
-          {processes.length === 0
-            ? <p className={styles.artifactEmpty}>{locale === "ko" ? "실행된 명령 없음" : "No commands run"}</p>
-            : processes.slice(-3).map((item) => <div key={item.id} className={styles.artifactRuntimeRow}><IconCode size={13} /><span>{item.tool?.name || (locale === "ko" ? "명령" : "Command")}</span><small>{item.status === "completed" ? "✓" : ""}</small></div>)}
-        </OutputDisclosure>
-        <OutputDisclosure section="computer" label={locale === "ko" ? "컴퓨터 사용" : "Computer use"} count={computerUse.length} expanded={sectionExpanded("computer")} onToggle={toggleSection}>
-          {computerUse.length === 0
-            ? <p className={styles.artifactEmpty}>{locale === "ko" ? "사용 기록 없음" : "No computer activity"}</p>
-            : computerUse.slice(-3).map((item) => <div key={item.id} className={styles.artifactRuntimeRow}><IconPanelRight size={13} /><span>{item.tool?.name || (locale === "ko" ? "컴퓨터 작업" : "Computer task")}</span><small>{item.status === "completed" ? "✓" : ""}</small></div>)}
-        </OutputDisclosure>
-        <OutputDisclosure section="sources" label={locale === "ko" ? "출처" : "Sources"} count={sources.length} expanded={sectionExpanded("sources")} onToggle={toggleSection}>
+        {railView === "activity" && <>
+          <OutputDisclosure section="files" label={locale === "ko" ? "결과물" : "Artifacts"} count={items.length} expanded={sectionExpanded("files")} onToggle={toggleSection}>
+            {items.length === 0 && <p className={styles.artifactEmpty}>{locale === "ko" ? "만든 파일 또는 사이트가 여기에 표시됩니다" : "Files or sites you create appear here"}</p>}
+            {items.map((item) => (
+              <button key={item.id} type="button" className={styles.artifact} onClick={() => void openArtifact(item)} title={item.label}>
+                <span className={styles.artifactFileIcon}><IconFileUp size={16} /></span>
+                <span>
+                  <strong>{item.label}</strong>
+                  <small>{item.kind === "image" ? <><IconImage size={11} /> {locale === "ko" ? "이미지" : "Image"}</> : <><IconFolder size={11} /> {locale === "ko" ? "파일" : "File"}</>}</small>
+                </span>
+              </button>
+            ))}
+          </OutputDisclosure>
+          <OutputDisclosure section="agents" label={locale === "ko" ? "하위 에이전트" : "Subagents"} count={agents.length} expanded={sectionExpanded("agents")} onToggle={toggleSection}>
+            {agents.length === 0
+              ? <p className={styles.artifactEmpty}>{locale === "ko" ? "실행된 하위 에이전트 없음" : "No subagents used"}</p>
+              : agents.slice(-5).map((item) => <div key={item.id} className={styles.artifactRuntimeRow}><IconSparkles size={13} /><span>{item.agentName || (locale === "ko" ? "에이전트" : "Agent")}</span><small>{item.status === "completed" ? <IconCheck size={12} /> : null}</small></div>)}
+          </OutputDisclosure>
+        </>}
+        {railView === "terminal" && <>
+          {/* A completed shell tool is evidence of a command, not proof that a
+              persistent background process exists. */}
+          <OutputDisclosure section="processes" label={locale === "ko" ? "명령" : "Commands"} count={processes.length} expanded={sectionExpanded("processes")} onToggle={toggleSection}>
+            {processes.length === 0
+              ? <p className={styles.artifactEmpty}>{locale === "ko" ? "실행된 명령 없음" : "No commands run"}</p>
+              : processes.slice(-3).map((item) => <div key={item.id} className={styles.artifactRuntimeRow}><IconCode size={13} /><span>{item.tool?.name || (locale === "ko" ? "명령" : "Command")}</span><small>{item.status === "completed" ? <IconCheck size={12} /> : null}</small></div>)}
+          </OutputDisclosure>
+          <OutputDisclosure section="computer" label={locale === "ko" ? "컴퓨터 사용" : "Computer use"} count={computerUse.length} expanded={sectionExpanded("computer")} onToggle={toggleSection}>
+            {computerUse.length === 0
+              ? <p className={styles.artifactEmpty}>{locale === "ko" ? "사용 기록 없음" : "No computer activity"}</p>
+              : computerUse.slice(-3).map((item) => <div key={item.id} className={styles.artifactRuntimeRow}><IconPanelRight size={13} /><span>{item.tool?.name || (locale === "ko" ? "컴퓨터 작업" : "Computer task")}</span><small>{item.status === "completed" ? <IconCheck size={12} /> : null}</small></div>)}
+          </OutputDisclosure>
+        </>}
+        {railView === "browser" && <OutputDisclosure section="sources" label={locale === "ko" ? "출처·브라우저" : "Sources & browser"} count={sources.length} expanded={sectionExpanded("sources")} onToggle={toggleSection}>
           {sources.length === 0
-            ? <p className={styles.artifactEmpty}>{locale === "ko" ? "사용된 출처 없음" : "No sources used"}</p>
+            ? <p className={styles.artifactEmpty}>{locale === "ko" ? "브라우저 출처 없음" : "No browser sources"}</p>
             : sources.slice(-5).map((source) => <SourceRow key={source.id} source={source} />)}
-        </OutputDisclosure>
+        </OutputDisclosure>}
+        <div className={styles.artifactSubrail} aria-label={locale === "ko" ? "기록과 추천" : "History and recommendations"}>
+          <div><strong>{locale === "ko" ? "History" : "History"}</strong><span>{locale === "ko" ? "Computer History에서 관리" : "Managed in Computer History"}</span></div>
+          <div><strong>{locale === "ko" ? "Recommendations" : "Recommendations"}</strong><span>{locale === "ko" ? "초안은 승인 후 실행" : "Drafts require approval"}</span></div>
+        </div>
       </div>
     </aside>
   );
@@ -600,6 +623,6 @@ export function OneActivityArtifactRail({
 
 function SourceRow({ source }: { source: OneActivitySource }) {
   return <a className={styles.artifactRuntimeRow} href={source.url} target="_blank" rel="noreferrer" title={source.url}>
-    <IconFileUp size={13} /><span>{source.label}</span><small>{source.status === "completed" ? "✓" : ""}</small>
+    <IconFileUp size={13} /><span>{source.label}</span><small>{source.status === "completed" ? <IconCheck size={12} /> : null}</small>
   </a>;
 }

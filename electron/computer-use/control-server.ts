@@ -6,6 +6,7 @@ import { screen } from "electron";
 import { checkComputerUsePermissions } from "../mac-permissions";
 import { captureComputerUsePreview } from "./preview";
 import { saveScreenCaptureArtifact } from "../media/capture-artifacts";
+import { recordComputerHistoryCapture, recordComputerHistorySummary } from "../one/computer-history";
 import { computerUseControlInfoPath } from "./channel";
 import {
   invokeNativeInputDriver,
@@ -83,6 +84,13 @@ function recordAudit(action: string, result: NativeInputResult, textLength?: num
     ...(typeof textLength === "number" ? { textLength } : {}),
   });
   if (auditRows.length > MAX_AUDIT_ROWS) auditRows.splice(0, auditRows.length - MAX_AUDIT_ROWS);
+  // Computer History is opt-in inside the summary writer. We record the
+  // observable action, never the screen pixels, coordinates, or credentials.
+  void recordComputerHistorySummary({
+    title: result.ok ? `Computer · ${action}` : `Computer action failed · ${action}`,
+    body: result.ok ? `컴퓨터에서 ${action} 작업이 수행되었습니다.` : `컴퓨터에서 ${action} 작업이 실패했습니다.`,
+    apps: [],
+  });
 }
 
 function safeString(value: unknown, max: number): string | null {
@@ -280,6 +288,10 @@ export function startComputerUseControlServer(): Promise<number> {
             // 저장해도 틱마다 디스크가 불지 않는다. 채팅에 보일 수 있는 캡처는
             // 반드시 정본 파일을 남기고, 그 절대경로(savedPath)를 모델에게 알린다.
             const savedPath = saveScreenCaptureArtifact(preview.dataUrl);
+            // Computer History has a separate, explicit-consent retention
+            // policy. General CUA evidence remains governed by its own 300-file
+            // cap; only an opted-in capture receives the seven-day local copy.
+            recordComputerHistoryCapture(preview.dataUrl);
             writeJson(res, 200, { ok: true, preview: savedPath ? { ...preview, savedPath } : preview });
           }, () => {
             writeJson(res, 500, { ok: false, error: "capture-failed" });

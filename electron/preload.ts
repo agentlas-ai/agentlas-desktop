@@ -325,6 +325,25 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("team:importLocalFolder", input),
     resolveSubAgents: (agentId: string) => ipcRenderer.invoke("team:resolveSubAgents", agentId),
   },
+  oneOrg: {
+    get: () => ipcRenderer.invoke("oneOrg:get"),
+    add: (input) => ipcRenderer.invoke("oneOrg:add", input),
+    rename: (input) => ipcRenderer.invoke("oneOrg:rename", input),
+    update: (input) => ipcRenderer.invoke("oneOrg:update", input),
+    replace: (input) => ipcRenderer.invoke("oneOrg:replace", input),
+    archive: (input) => ipcRenderer.invoke("oneOrg:archive", input),
+    restore: (input) => ipcRenderer.invoke("oneOrg:restore", input),
+    markRead: (input) => ipcRenderer.invoke("oneOrg:markRead", input),
+    reorder: (input) => ipcRenderer.invoke("oneOrg:reorder", input),
+    setTools: (input) => ipcRenderer.invoke("oneOrg:setTools", input),
+  },
+  computerHistory: {
+    get: () => ipcRenderer.invoke("computerHistory:get"),
+    setConsent: (enabled: boolean) => ipcRenderer.invoke("computerHistory:setConsent", enabled),
+    clear: () => ipcRenderer.invoke("computerHistory:clear"),
+    prepareDraft: (recommendationId: string, locale: "ko" | "en") =>
+      ipcRenderer.invoke("computerHistory:prepareDraft", recommendationId, locale),
+  },
   agentFiles: {
     list: (agentId: string) => ipcRenderer.invoke("agentFiles:list", agentId),
     read: (agentId: string, absPath: string) =>
@@ -337,7 +356,7 @@ const api: AgentlasIpc = {
     events: (runId: string, limit?: number) => ipcRenderer.invoke("runLedger:events", runId, limit),
     chatTimeline: (chatId: string, input?: { maxRuns?: number; eventsPerRun?: number }) =>
       ipcRenderer.invoke("runLedger:chatTimeline", chatId, input),
-    failures: (input?: { runId?: string; automationId?: string; chatId?: string; limit?: number }) =>
+    failures: (input?: { runId?: string; automationId?: string; chatId?: string; agentId?: string; limit?: number }) =>
       ipcRenderer.invoke("runLedger:failures", input),
   },
   agentEvolution: {

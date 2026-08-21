@@ -4,6 +4,7 @@ import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
 import { IconChevronDown } from "@/components/Icon";
 import { extractAutomationRegistrations, type OneActivityState } from "@/lib/one-activity";
 import { OneAutomationRegistrationCard } from "./OneAdaptiveResult";
+import { OneHandoffCard } from "./OneHandoffCard";
 import {
   CONNECTED_TOOL_LABEL,
   buildOneWorkPresentation,
@@ -305,6 +306,9 @@ export function OneTurnWork({
   startedAt,
   locale,
   workspacePath,
+  taskId,
+  runId,
+  onInterruptHandoff,
 }: {
   state: OneActivityState;
   /** True only for the live run this block belongs to. */
@@ -314,6 +318,11 @@ export function OneTurnWork({
   startedAt: number | null;
   locale: "ko" | "en";
   workspacePath: string | null;
+  /** Durable binding displayed by handoff receipts. */
+  taskId?: string | null;
+  runId?: string | null;
+  /** Reuses OneShell's existing run cancel authority; no handoff IPC exists. */
+  onInterruptHandoff?: () => void;
 }) {
   const ko = locale === "ko";
   const presentation = useMemo(() => buildOneWorkPresentation(state, locale, workspacePath), [state, locale, workspacePath]);
@@ -328,8 +337,9 @@ export function OneTurnWork({
   const liveElapsedMs = useElapsed(startedAt, active);
   const settledMs = presentation.durationMs ?? (startedAt != null && !active ? liveElapsedMs : undefined);
   const hasRows = presentation.cells.length > 0;
+  const hasHandoffs = state.handoffs.length > 0;
 
-  if (!active && !hasRows && !presentation.terminalMessage) {
+  if (!active && !hasRows && !hasHandoffs && !presentation.terminalMessage) {
     // Nothing happened beyond the answer itself (no thought, no tool). Codex
     // shows no work line for such a turn.
     return null;
@@ -385,9 +395,20 @@ export function OneTurnWork({
           <span className={styles.headerChevron} aria-hidden="true"><IconChevronDown size={12} /></span>
         </button>
       )}
-      {expanded && (hasRows || presentation.terminalMessage) && (
+      {expanded && (hasRows || hasHandoffs || presentation.terminalMessage) && (
         <div className={styles.rows}>
           {presentation.cells.map((cell) => <WorkRow key={cell.id} cell={cell} locale={locale} />)}
+          {state.handoffs.map((handoff) => (
+            <OneHandoffCard
+              key={handoff.id}
+              handoff={handoff}
+              taskId={taskId}
+              runId={runId}
+              locale={locale}
+              canInterrupt={busy && Boolean(onInterruptHandoff)}
+              onInterrupt={onInterruptHandoff}
+            />
+          ))}
           {presentation.terminalMessage && !presentation.cells.some((cell) => cell.kind === "notice" && cell.message === presentation.terminalMessage) && (
             <div className={styles.row} data-kind="notice" data-status="failed">
               <span className={styles.rowHead}>

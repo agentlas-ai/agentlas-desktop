@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
+import { IconCheck, IconClose } from "@/components/Icon";
 import { PluginLogo, usePluginBrandMap } from "@/components/PluginLogo";
 import {
   installPlugins,
@@ -442,10 +443,9 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
         <header className={styles.header}>
           <div className={styles.brand}><strong>Agentlas</strong><span>Work</span></div>
           <div className={styles.headerCenter}><span className={styles.eyebrow}>{copy.label}</span><div className={styles.progress}>{STEPS.map((item) => <span key={item} data-current={step === item} data-done={step > item} />)}</div></div>
-          {/* × 는 설명을 그만 보겠다는 뜻이지 세팅을 건너뛰겠다는 뜻이 아니다 —
-              설명을 빨리 지나치는 사람일수록 연결은 더 필요하다. 세팅 각 단계는
-              아무것도 고르지 않고 다음을 눌러 건너뛸 수 있다. */}
-          <div className={styles.headerActions}><button className={styles.language} type="button">EN · KO</button><button className={styles.close} onClick={() => setStep(7)} aria-label={copy.close}>×</button></div>
+          {/* 설명 중 × 는 세팅으로 이동하고, 세팅 중 × 는 "나중에"로 온보딩을 닫는다.
+              세팅 각 단계는 아무것도 고르지 않고 다음을 눌러 건너뛸 수도 있다. */}
+          <div className={styles.headerActions}><button className={styles.language} type="button">EN · KO</button><button className={styles.close} onClick={() => step < 7 ? setStep(7) : finish()} aria-label={copy.close}><IconClose size={16} /></button></div>
         </header>
         <main className={styles.content}>
           {step === 1 && <><h1 id="work-onboarding-title">{copy.s1}</h1><p>{copy.s1sub}</p><div className={styles.choiceGrid}>{(["beginner", "intermediate", "expert"] as Experience[]).map((item) => <button key={item} className={`${styles.choice} ${experience === item ? styles.selected : ""}`} onClick={() => chooseExperience(item)}><div className={styles.choiceIllustration}>{item === "beginner" ? "01" : item === "intermediate" ? "02" : "03"}</div><strong>{copy[item]}</strong><small>{copy[`${item}Sub` as "beginnerSub" | "intermediateSub" | "expertSub"]}</small></button>)}</div></>}
@@ -521,7 +521,7 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
                         <strong className={styles.tileName}>{name}</strong>
                         <small className={styles.tileMeta} title={entry.domain}>{entry.domain}</small>
                         {entry.alreadyLinked && <span className={styles.tileHint} data-tone="ready">{copy.s7linked}</span>}
-                        {picked && <span className={styles.tileCheck} aria-hidden="true">✓</span>}
+                        {picked && <span className={styles.tileCheck} aria-hidden="true"><IconCheck size={13} /></span>}
                       </button>
                     );
                   })}
@@ -586,7 +586,7 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
                           : hint
                             ? <span className={styles.tileHint} data-tone={hint.tone}>{hint.text}</span>
                             : <small className={styles.tileMeta} title={listing.tagline}>{listing.tagline}</small>}
-                        {picked && <span className={styles.tileCheck} aria-hidden="true">✓</span>}
+                        {picked && <span className={styles.tileCheck} aria-hidden="true"><IconCheck size={13} /></span>}
                       </button>
                     );
                   })}

@@ -1,9 +1,42 @@
-import type { McpInvocationEvent, RunEventUi } from "@shared/types";
+import type { AgentMessageDirection, McpInvocationEvent, RunEventUi } from "@shared/types";
 import type { OneArtifactBindingRequestV1 } from "@shared/one-artifacts";
 
 export type OneActivityStatus = "running" | "cancelling" | "completed" | "failed" | "cancelled" | "info";
 export type OneActivityKind = "run" | "reasoning" | "tool" | "agent" | "notice" | "result" | "terminal";
 export type OneActivityCode = "runtime_wait" | "recovery_retry" | "session_resume";
+
+export type OneHandoffStatus = "running" | "completed" | "failed" | "cancelled";
+
+/**
+ * A bounded, typed worker message. This is projected from the existing
+ * `agentMessage` envelope; it is not a second chat or a free-form transcript.
+ */
+export interface OneActivityHandoffMessage {
+  id: string;
+  direction: AgentMessageDirection;
+  fromAgentId: string;
+  toAgentId: string;
+  text: string;
+  observedAt: string;
+}
+
+/**
+ * One typed delegation edge and its messages. The edge is intentionally
+ * grouped by source/target because the protocol has no separate handoff id.
+ * Its task/run binding is supplied by the surrounding One turn block.
+ */
+export interface OneActivityHandoff {
+  id: string;
+  fromAgentId: string;
+  toAgentId: string;
+  fromAgentName?: string;
+  toAgentName?: string;
+  status: OneHandoffStatus;
+  createdAt: string;
+  updatedAt: string;
+  delegateObserved: boolean;
+  messages: OneActivityHandoffMessage[];
+}
 
 export interface OneActivityTool {
   name: string;
@@ -65,6 +98,7 @@ export interface OneActivityState {
   items: OneActivityItem[];
   artifacts: OneActivityArtifact[];
   sources: OneActivitySource[];
+  handoffs: OneActivityHandoff[];
   tokens?: number;
   lastSequence: number;
   activeReasoningId?: string;
@@ -79,7 +113,7 @@ export interface OneActivityState {
 const REASONING_TEXT_CAP = 6_000;
 
 export function initialOneActivityState(): OneActivityState {
-  return { items: [], artifacts: [], sources: [], lastSequence: 0 };
+  return { items: [], artifacts: [], sources: [], handoffs: [], lastSequence: 0 };
 }
 
 /**
@@ -102,6 +136,7 @@ export function beginOneActivityState(input: {
     }],
     artifacts: [],
     sources: [],
+    handoffs: [],
     lastSequence: 0,
     selectedPermissionMode: input.selectedPermissionMode,
     effectivePermission: input.effectivePermission,
@@ -181,6 +216,99 @@ function upsertItem(items: OneActivityItem[], item: OneActivityItem): OneActivit
   return next;
 }
 
+function handoffId(fromAgentId: string, toAgentId: string): string {
+  const pair = [fromAgentId, toAgentId].sort();
+  return `handoff:${encodeURIComponent(pair[0])}:${encodeURIComponent(pair[1])}`;
+}
+
+function nonEmptyAgentId(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+/**
+ * Project only the existing typed delegation/message fields. No status prose
+ * is parsed and no handoff is invented when the protocol lacks a source or
+ * target identity.
+ */
+function mergeHandoffs(
+  current: OneActivityHandoff[],
+  event: McpInvocationEvent,
+  observedAt: string,
+): OneActivityHandoff[] {
+  const sourceId = nonEmptyAgentId(event.agentMessage?.fromAgentId)
+    ?? nonEmptyAgentId(event.runtimeAgentId)
+    ?? nonEmptyAgentId(event.agentId);
+  if (!sourceId) return current;
+  const targets = new Set<string>();
+  for (const target of event.delegateTo ?? []) {
+    const id = nonEmptyAgentId(target);
+    if (id && id !== sourceId) targets.add(id);
+  }
+  const message = event.agentMessage;
+  const observedAgentId = nonEmptyAgentId(event.runtimeAgentId) ?? nonEmptyAgentId(event.agentId);
+  const observedAgentName = event.agentName?.trim() || undefined;
+  const messageTarget = nonEmptyAgentId(message?.toAgentId);
+  if (messageTarget && messageTarget !== sourceId) targets.add(messageTarget);
+  if (targets.size === 0) return current;
+
+  let next = current;
+  for (const targetId of targets) {
+    const id = handoffId(sourceId, targetId);
+    const existing = next.find((candidate) => candidate.id === id);
+    const isDelegate = (event.delegateTo ?? []).some((candidate) => candidate.trim() === targetId);
+    const matchingMessage = message
+      && message.fromAgentId.trim() === sourceId
+      && message.toAgentId.trim() === targetId
+      && message.messageId.trim()
+      && message.text.trim()
+        ? {
+            id: message.messageId.trim(),
+            direction: message.direction,
+            fromAgentId: sourceId,
+            toAgentId: targetId,
+            text: message.text.trim(),
+            observedAt,
+          } satisfies OneActivityHandoffMessage
+        : undefined;
+    const messages = existing?.messages ? [...existing.messages] : [];
+    if (matchingMessage && !messages.some((candidate) => candidate.id === matchingMessage.id)) {
+      messages.push(matchingMessage);
+    }
+    const nextStatus: OneHandoffStatus = event.tool?.isError
+      ? "failed"
+      : event.done === true
+        ? "completed"
+        : existing?.status ?? "running";
+    const nextHandoff: OneActivityHandoff = {
+      id,
+      fromAgentId: existing?.fromAgentId ?? sourceId,
+      toAgentId: existing?.toAgentId ?? targetId,
+      ...(existing?.fromAgentName || observedAgentName && (sourceId === observedAgentId || sourceId === message?.fromAgentId)
+        ? { fromAgentName: existing?.fromAgentName ?? observedAgentName }
+        : {}),
+      ...(existing?.toAgentName || observedAgentName && targetId === observedAgentId
+        ? { toAgentName: existing?.toAgentName ?? observedAgentName }
+        : {}),
+      status: nextStatus,
+      createdAt: existing?.createdAt ?? observedAt,
+      updatedAt: observedAt,
+      delegateObserved: Boolean(existing?.delegateObserved || isDelegate),
+      messages,
+    };
+    next = existing
+      ? next.map((candidate) => candidate.id === id ? nextHandoff : candidate)
+      : [...next, nextHandoff];
+  }
+  // Worker activity often arrives after the outgoing delegation envelope. Use
+  // its typed identity/name to label the target without parsing status copy.
+  if (observedAgentId && observedAgentName) {
+    next = next.map((candidate) => candidate.toAgentId === observedAgentId
+      ? { ...candidate, toAgentName: candidate.toAgentName ?? observedAgentName }
+      : candidate);
+  }
+  return next;
+}
+
 function mergeVerifiedSurfaceArtifacts(
   current: OneActivityArtifact[],
   event: McpInvocationEvent,
@@ -238,7 +366,16 @@ export function reduceOneActivity(
   let effectivePermission = state.effectivePermission;
   let selectedPermissionMode = state.selectedPermissionMode;
   let cwd = state.cwd;
+  let handoffs = state.handoffs;
   let terminalStatus: OneActivityState["terminalStatus"] = undefined;
+
+  // Delegation and worker-message envelopes are orthogonal to the event kind
+  // (`firm-orchestrator` emits them on tool-use), so project them before the
+  // ordinary activity branches. This keeps the existing runtime contract and
+  // gives the chat a read-only handoff projection.
+  if (event.delegateTo?.length || event.agentMessage) {
+    handoffs = mergeHandoffs(handoffs, event, observedAt);
+  }
 
   if (event.kind === "lifecycle" && event.lifecycle?.phase === "start") {
     effectivePermission = event.lifecycle.permission ?? effectivePermission;
@@ -506,10 +643,17 @@ export function reduceOneActivity(
     terminalStatus = status;
   }
 
+  if (terminalStatus) {
+    handoffs = handoffs.map((handoff) => handoff.status === "running"
+      ? { ...handoff, status: terminalStatus === "cancelled" ? "cancelled" : terminalStatus, updatedAt: observedAt }
+      : handoff);
+  }
+
   return {
     items,
     artifacts: mergeVerifiedSurfaceArtifacts(state.artifacts, event),
     sources: mergeSources(state.sources, event),
+    handoffs,
     ...(tokens !== undefined ? { tokens } : {}),
     lastSequence: sequence,
     ...(activeReasoningId ? { activeReasoningId } : {}),
@@ -528,6 +672,24 @@ function ledgerString(payload: Record<string, unknown>, key: string): string | u
 function ledgerBoolean(payload: Record<string, unknown>, key: string): boolean | undefined {
   const value = payload[key];
   return typeof value === "boolean" ? value : undefined;
+}
+
+function ledgerStringArray(payload: Record<string, unknown>, key: string): string[] | undefined {
+  const value = payload[key];
+  if (!Array.isArray(value)) return undefined;
+  const accepted = value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim());
+  return accepted.length > 0 ? [...new Set(accepted)] : undefined;
+}
+
+function ledgerAgentMessage(payload: Record<string, unknown>): NonNullable<McpInvocationEvent["agentMessage"]> | undefined {
+  const messageId = ledgerString(payload, "agentMessageId");
+  const direction = ledgerString(payload, "agentMessageDirection");
+  const fromAgentId = ledgerString(payload, "agentMessageFrom");
+  const toAgentId = ledgerString(payload, "agentMessageTo");
+  const text = ledgerString(payload, "agentMessageText");
+  if (!messageId || !fromAgentId || !toAgentId || !text) return undefined;
+  if (direction !== "orchestrator-to-worker" && direction !== "worker-to-orchestrator") return undefined;
+  return { messageId, direction, fromAgentId, toAgentId, text };
 }
 
 function ledgerHttpsUrls(payload: Record<string, unknown>, key: string): string[] | undefined {
@@ -654,6 +816,8 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
     if (row.kind === "mcp_tool-use") {
       const toolName = ledgerString(payload, "toolName");
       const toolId = ledgerString(payload, "toolId");
+      const delegateTo = ledgerStringArray(payload, "delegateTo");
+      const agentMessage = ledgerAgentMessage(payload);
       const toolIsError = ledgerBoolean(payload, "toolIsError") === true;
       const toolSourceUrls = ledgerHttpsUrls(payload, "toolSourceUrls");
       const oneArtifacts = ledgerOneArtifacts(payload);
@@ -681,6 +845,26 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
           ...(agentName ? { agentName } : {}),
           ...(role ? { role } : {}),
           ...(oneArtifacts ? { oneArtifacts } : {}),
+          ...(delegateTo ? { delegateTo } : {}),
+          ...(agentMessage ? { agentMessage } : {}),
+        }, row.ts);
+        continue;
+      }
+      if (delegateTo || agentMessage) {
+        const agentName = ledgerString(payload, "agentName");
+        const role = ledgerString(payload, "role");
+        const rawPhase = ledgerString(payload, "phase");
+        const phase = rawPhase === "plan" || rawPhase === "delegate" || rawPhase === "synthesize"
+          ? rawPhase
+          : undefined;
+        apply({
+          kind: "tool-use",
+          ...(row.agentId ? { agentId: row.agentId } : {}),
+          ...(agentName ? { agentName } : {}),
+          ...(role ? { role } : {}),
+          ...(phase ? { phase } : {}),
+          ...(delegateTo ? { delegateTo } : {}),
+          ...(agentMessage ? { agentMessage } : {}),
         }, row.ts);
         continue;
       }
@@ -711,6 +895,7 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
     if (row.kind === "mcp_thinking") {
       const agentName = ledgerString(payload, "agentName");
       const role = ledgerString(payload, "role");
+      const delegateTo = ledgerStringArray(payload, "delegateTo");
       const rawPhase = ledgerString(payload, "phase");
       const phase = rawPhase === "plan" || rawPhase === "delegate" || rawPhase === "synthesize"
         ? rawPhase
@@ -721,6 +906,7 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
         ...(agentName ? { agentName } : {}),
         ...(role ? { role } : {}),
         ...(phase ? { phase } : {}),
+        ...(delegateTo ? { delegateTo } : {}),
       }, row.ts);
       continue;
     }

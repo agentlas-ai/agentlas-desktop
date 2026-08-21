@@ -678,6 +678,24 @@ function taskForcePermission(p: BorrowedTaskForceParams): RunnerRequest["permiss
   return p.req.appsGenerateMode ? "read" : p.req.permissions;
 }
 
+/**
+ * Child turns do not inherit the parent's authority.  A task-force packet is
+ * the explicit grant: only an implementation packet may receive the bounded
+ * read-write worker mode, and even that is capped by the host mode.  `full`
+ * is deliberately never propagated to a child; shell/external authority is
+ * an owner/One decision, not a side effect of delegation.
+ */
+export function taskForceChildPermission(
+  p: Pick<BorrowedTaskForceParams, "req">,
+  inputType: BorrowedInputPacket["inputType"],
+  role: "worker" | "orchestrator",
+): RunnerRequest["permission"] {
+  const host = p.req.appsGenerateMode ? "read" : p.req.permissions;
+  if (host === "read") return "read";
+  if (role === "worker" && inputType === "implementation") return "write";
+  return "read";
+}
+
 /*
  * ★오너 결정 2026-08-20 — 권한과 능력의 정합. 예전에는 write/full 권한일 때만
  * 도구(MCP)를 배선해, read 실행의 빌린 에이전트는 조회 도구조차 받지 못했다
@@ -690,9 +708,12 @@ function taskForceAllowsTools(_p: BorrowedTaskForceParams): boolean {
   return true;
 }
 
-function taskForceProjectReadOnly(p: BorrowedTaskForceParams): boolean {
+function taskForceProjectReadOnly(
+  p: BorrowedTaskForceParams,
+  permission: RunnerRequest["permission"] = taskForcePermission(p),
+): boolean {
   // 프로젝트 마운트의 읽기 전용 여부는 도구 유무가 아니라 실행 권한을 따른다.
-  return p.restrictedReadBoundary === true || taskForcePermission(p) === "read";
+  return p.restrictedReadBoundary === true || permission === "read";
 }
 
 function taskForceMemoryTurnId(
@@ -856,6 +877,7 @@ async function taskForceMemoryContext(
   p: BorrowedTaskForceParams,
   agentId: string | null,
   task: string,
+  permission: RunnerRequest["permission"] = taskForcePermission(p),
 ): Promise<string> {
   if (p.req.agentAppMode) return "";
   try {
@@ -866,7 +888,7 @@ async function taskForceMemoryContext(
     });
     const ontology = p.memoryReadPath
       ? await queryWorkingFolderOntologyContext(p.memoryReadPath, task, {
-          readOnly: taskForceProjectReadOnly(p),
+          readOnly: taskForceProjectReadOnly(p, permission),
         })
       : null;
     return [memory, ontology?.used ? ontology.context : ""].filter(Boolean).join("\n\n");
@@ -892,10 +914,11 @@ async function curateOwnedTaskForceResult(input: {
   phase: string;
   attempt?: number;
   borrowedComponentId?: string;
+  permission?: RunnerRequest["permission"];
 }): Promise<string> {
   const { p, spec, text, installedAgent, nodeId, task, runtimeKind } = input;
   try {
-    const readOnly = taskForceProjectReadOnly(p);
+    const readOnly = taskForceProjectReadOnly(p, input.permission);
     const borrowedOwnerStillActive =
       !p.borrowedCareerOwnerScopeKey
       || p.borrowedCareerOwnerScopeKey === activeBorrowedOwnerScopeKey();
@@ -974,7 +997,10 @@ function taskForcePermissionLabel(permission: RunnerRequest["permission"]): stri
   return "runtime default";
 }
 
-function taskForceRunnerBase(p: BorrowedTaskForceParams): Pick<
+function taskForceRunnerBase(
+  p: BorrowedTaskForceParams,
+  childPermission: RunnerRequest["permission"] = taskForcePermission(p),
+): Pick<
   RunnerRequest,
   | "permission"
   | "restrictedReadBoundary"
@@ -986,7 +1012,7 @@ function taskForceRunnerBase(p: BorrowedTaskForceParams): Pick<
   | "untrustedAllowedMcpTools"
   | "onAgentAppMcpRuntimeUnavailable"
 > {
-  const permission = taskForcePermission(p);
+  const permission = childPermission;
   const agentAppAllowedTools = p.req.agentAppMode && p.mcpConfigPath && p.mcpAllowedTools?.length &&
     validSiteAgentAppMcpGrantTools(p.mcpAllowedTools)
     ? p.mcpAllowedTools
@@ -1070,6 +1096,7 @@ function restrictedTaskForceText(
     attempt?: number;
     agentId?: string | null;
   },
+  permission: RunnerRequest["permission"] = taskForcePermission(p),
 ): string {
   const context = {
     turnId: taskForceMemoryTurnId(p, input.nodeId, input.phase, input.attempt),
@@ -1081,7 +1108,7 @@ function restrictedTaskForceText(
     nodeId: input.nodeId,
     cwdAtRequest: p.workingFolder ?? null,
   };
-  const readOnly = taskForceProjectReadOnly(p);
+  const readOnly = taskForceProjectReadOnly(p, permission);
   try {
     const curated = readOnly
       ? stripReplyMemoryEventsReadOnly(text, context)
@@ -2377,7 +2404,8 @@ async function runBorrowedAgentTurn(
     tier: 2,
     phase: "delegate",
   });
-  const runnerBase = taskForceRunnerBase(p);
+  const workerPermission = taskForceChildPermission(p, packet.inputType, "worker");
+  const runnerBase = taskForceRunnerBase(p, workerPermission);
   const candidateRuntimes = taskForceCandidateRuntimes(p);
   const workerDefault = pickActive(candidateRuntimes, "worker") ?? p.active;
   const workerDefaultRunner = sameRuntime(workerDefault, p.active)
@@ -2449,7 +2477,7 @@ async function runBorrowedAgentTurn(
     model: modelLabel(active),
   }));
   const nodeTask = packet.brief || oneAttachmentExecutionPrompt(p.req);
-  const localNodeMemory = await taskForceMemoryContext(p, installedAgent?.id ?? null, nodeTask);
+  const localNodeMemory = await taskForceMemoryContext(p, installedAgent?.id ?? null, nodeTask, workerPermission);
   const borrowedNodeMemory =
     !p.req.agentAppMode
     && (!p.borrowedCareerOwnerScopeKey || p.borrowedCareerOwnerScopeKey === activeBorrowedOwnerScopeKey())
@@ -2515,6 +2543,10 @@ async function runBorrowedAgentTurn(
           ...p.req,
           userPrompt: authoritativePacketPrompt,
           images: undefined,
+          // The nested team is a child execution unit.  Bind the packet's
+          // explicit grant instead of letting the parent's permission flow
+          // through the recursive call.
+          permissions: workerPermission,
         },
         chat: { id: teamChat.id, projectId: p.chat.projectId, firmId: firm.id },
         org: getResolvedOrg(firm),
@@ -2554,6 +2586,10 @@ async function runBorrowedAgentTurn(
     if ((spec.source === "hub" || spec.source === "cloud" || !spec.source) && spec.entityKind === "team") {
       const graph = spec.executionGraph;
       if (!graph) throw new Error(`team_execution_graph_unavailable:${spec.slug}`);
+      // Manager planning/synthesis is a packet-only read grant.  Only the
+      // explicitly implementation-typed worker packet below may receive the
+      // bounded write grant.
+      const managerRunnerBase = taskForceRunnerBase(p, "read");
       // A direct borrowed team has two model classes inside one package:
       // manager plan/synthesis use the orchestrator default, while declared
       // workers use the packet's worker allocation. An exact prepared
@@ -2631,7 +2667,7 @@ async function runBorrowedAgentTurn(
             longContext: managerPlanActive.longContextEnabled ?? false,
             effort: managerPlanActive.effort ?? undefined,
             signal: link.signal,
-            ...runnerBase,
+            ...managerRunnerBase,
             ...packageBoundary,
             cwd: taskForceStageCwd(p, "nested-manager-plan", packageBoundary.mcpAllowedTools ?? []),
             chatId: managerPlanInvocationId,
@@ -2653,7 +2689,7 @@ async function runBorrowedAgentTurn(
             phase: "manager-plan",
             attempt,
             agentId: null,
-          }),
+          }, "read"),
         };
         try {
           parsedManagerPlan = parseStrictTeamManagerPlan(managerPlan.text, expectedWorkerIds);
@@ -2742,6 +2778,9 @@ async function runBorrowedAgentTurn(
                 effort: observedWorkerRuntime.effort ?? undefined,
                 signal: link.signal,
                 ...runnerBase,
+                // Same packet, different handoff role: the repair/escalation
+                // turn is read-only and never inherits a worker's write grant.
+                permission: role === "worker" ? workerPermission : "read",
                 ...packageBoundary,
                 cwd: taskForceStageCwd(p, "nested-worker", packageBoundary.mcpAllowedTools ?? []),
                 chatId: observedWorkerInvocationId,
@@ -2776,6 +2815,7 @@ async function runBorrowedAgentTurn(
             signal: link.signal,
             phase: outcome.role === "worker" ? "worker" : "worker-escalation",
             borrowedComponentId: worker.id,
+            permission: observedWorkerRole === "worker" ? workerPermission : "read",
           });
           const workerResolution = reconcileWorkloadRunnerResult(observedWorkerResolution, result);
           if (p.workforceSelectionReceipt && outcome.role === "worker") {
@@ -2902,7 +2942,7 @@ async function runBorrowedAgentTurn(
           longContext: managerSynthesisActive.longContextEnabled ?? false,
           effort: managerSynthesisActive.effort ?? undefined,
           signal: link.signal,
-          ...runnerBase,
+          ...managerRunnerBase,
           ...packageBoundary,
           cwd: taskForceStageCwd(p, "nested-manager-synthesis", packageBoundary.mcpAllowedTools ?? []),
           chatId: managerSynthesisInvocationId,
@@ -3060,9 +3100,10 @@ async function runBorrowedAgentTurn(
           effort: observedDirectRuntime.effort ?? undefined,
           signal: link.signal,
           ...runnerBase,
-          ...packageBoundary,
           // The package's declared ceiling narrows the host grant (never widens it). Spread after
           // runnerBase so this wins for this borrowed agent's own turn.
+          permission: role === "worker" ? workerPermission : "read",
+          ...packageBoundary,
           cwd: taskForceStageCwd(p, "direct-worker", packageBoundary.mcpAllowedTools ?? []),
           chatId: `${taskForceSessionId(p, `borrow:${spec.slug}`)}:${role}:${attempt}`,
           locale: p.locale,
@@ -3096,6 +3137,7 @@ async function runBorrowedAgentTurn(
       env: p.runnerEnv,
       signal: link.signal,
       phase: outcome.role === "worker" ? "worker" : "worker-escalation",
+      permission: observedDirectRole === "worker" ? workerPermission : "read",
     });
     const executedResolution = reconcileWorkloadRunnerResult(observedDirectResolution, result);
     if (p.workforceSelectionReceipt && outcome.role === "worker") {
@@ -3360,7 +3402,7 @@ async function runPlanner(
         untrustedAllowedMcpTools: undefined,
         onAgentAppMcpRuntimeUnavailable: undefined,
       }
-    : taskForceRunnerBase(p);
+    : taskForceRunnerBase(p, "read");
   const invokePlanner = async (
     invocationId: string,
     systemPrompt: string,
@@ -3443,7 +3485,7 @@ async function runPlanner(
         phase: "planner",
         attempt,
         agentId: p.orchestratorAgent.id,
-      });
+      }, "read");
       const outputDigest = `sha256:${createHash("sha256").update(attemptResult.text, "utf8").digest("hex")}`;
       const outputBytes = Buffer.byteLength(attemptResult.text, "utf8");
       try {
@@ -3612,7 +3654,7 @@ async function runPlanner(
       phase: "planner",
       attempt: 1,
       agentId: p.orchestratorAgent.id,
-    });
+    }, "read");
     const parsedPlan = parseBorrowedWorkloadPlan(plannerText);
     const normalized = normalizePacketsForRoster(parsedPlan.packets, specs, oneAttachmentExecutionPrompt(p.req));
     packets = normalized.packets;
@@ -3850,7 +3892,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         untrustedAllowedMcpTools: undefined,
         onAgentAppMcpRuntimeUnavailable: undefined,
       }
-    : taskForceRunnerBase(p);
+    : taskForceRunnerBase(p, "read");
   const synthesisImages = p.req.agentAppMode
     ? undefined
     : p.workforceSelectionReceipt

@@ -82,33 +82,52 @@
   height: 100%;
   min-height: 0;
   display: grid;
-  grid-template-columns: 252px minmax(0, 1fr);
+  grid-template-columns: 252px minmax(0, 1fr) 0;
   overflow: hidden;
   transition: grid-template-columns 180ms ease;
 }
 
 .body[data-rail-collapsed="true"] {
-  grid-template-columns: 0 minmax(0, 1fr);
+  grid-template-columns: 0 minmax(0, 1fr) 0;
 }
 
 .body[data-task-active="true"] {
-  grid-template-columns: 0 minmax(0, 1fr);
+  grid-template-columns: 252px minmax(0, 1fr) 0;
 }
 
-.body[data-task-active="true"][data-rail-open="true"] {
-  grid-template-columns: 252px minmax(0, 1fr);
+.body[data-task-active="true"][data-rail-collapsed="true"] {
+  grid-template-columns: 0 minmax(0, 1fr) 0;
+}
+
+.body[data-task-active="true"][data-context-rail="true"] {
+  grid-template-columns: 252px minmax(0, 1fr) minmax(300px, 360px);
+}
+
+.body[data-task-active="true"][data-rail-collapsed="true"][data-context-rail="true"] {
+  grid-template-columns: 0 minmax(0, 1fr) minmax(300px, 360px);
 }
 
 .body[data-task-active="true"] .rail {
-  transform: translateX(-100%);
-  opacity: 0;
-  pointer-events: none;
-}
-
-.body[data-task-active="true"][data-rail-open="true"] .rail {
   transform: translateX(0);
   opacity: 1;
   pointer-events: auto;
+}
+
+.body > [data-one-runtime-artifacts="true"] {
+  position: relative;
+  z-index: 1;
+  top: auto;
+  right: auto;
+  bottom: auto;
+  grid-column: 3;
+  width: auto !important;
+  height: 100%;
+  min-width: 0;
+  border-radius: 0;
+  border-top: 0;
+  border-right: 0;
+  border-bottom: 0;
+  box-shadow: none;
 }
 
 .rail {
@@ -597,6 +616,19 @@
   min-height: min(590px, calc(100vh - 218px));
 }
 
+.memoryHomeGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(360px, .8fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.memoryHomeMapColumn {
+  position: relative;
+  min-width: 0;
+  min-height: min(590px, calc(100vh - 218px));
+}
+
 .memoryHomeAlert {
   position: absolute;
   z-index: 6;
@@ -642,6 +674,11 @@
   display: flex;
   gap: 7px;
   margin-top: 2px;
+}
+
+@media (max-width: 1180px) {
+  .memoryHomeGrid { grid-template-columns: minmax(0, 1fr); }
+  .memoryHomeMapColumn { min-height: 480px; }
 }
 
 .memoryHomeAlert .primaryButton,
@@ -1036,8 +1073,10 @@
 @media (min-width: 1181px) {
   .workspace[data-runtime-artifacts="true"] .scroll { width: calc(100% - 300px); }
   .workspace[data-runtime-artifacts="true"] .composerDock { right: 300px; }
-  .workspace[data-context-rail="true"] .scroll { width: calc(100% - var(--one-rail-width, 420px) - 28px); }
-  .workspace[data-context-rail="true"] .composerDock { right: calc(var(--one-rail-width, 420px) + 28px); }
+  /* The context rail already occupies the third grid column. Subtracting it a
+     second time collapsed the conversation into one-character lines. */
+  .workspace[data-context-rail="true"] .scroll { width: 100%; }
+  .workspace[data-context-rail="true"] .composerDock { right: 0; }
   .body[data-task-active="true"] .composer,
   .body[data-task-active="true"] .steeringQueue,
   .body[data-task-active="true"] .oneTurnAgentChips { width: min(1040px, 100%); }
@@ -2281,3 +2320,424 @@
   cursor: pointer;
 }
 .steeringQueueRemove:hover { background: #f2f3f4; color: #303438; }
+
+.failureCard {
+  margin: 0 auto 16px;
+  width: min(720px, 100%);
+  padding: 14px 16px;
+  border: 1px solid rgba(191, 78, 58, 0.28);
+  border-radius: 14px;
+  background: rgba(255, 247, 244, 0.96);
+  color: #46211b;
+}
+.failureCardHeader { display: flex; align-items: center; gap: 8px; }
+.failureCardHeader strong { color: #b13b2a; }
+.failureCardHeader span { font: 11px/1.4 var(--font-mono, ui-monospace); color: #865d55; }
+.failureCard p { margin: 7px 0 10px; font-size: 13px; line-height: 1.5; }
+.failureCardActions { display: flex; flex-wrap: wrap; gap: 7px; }
+.failureCardActions button { border: 1px solid rgba(177, 59, 42, 0.28); border-radius: 8px; background: #fff; padding: 6px 10px; color: #6e2d24; cursor: pointer; }
+.failureCardActions button:disabled { opacity: .45; cursor: not-allowed; }
+.failureReceipt { margin: 10px 0 0; padding: 9px; overflow: auto; border-radius: 8px; background: rgba(75, 33, 27, 0.06); font: 11px/1.45 var(--font-mono, ui-monospace); }
+
+/* --------------------------------------------------------------------------
+ * One inbox shell — the desktop reference is a fixed organisation / chat /
+ * evidence layout. Home must not turn into a dashboard card grid.
+ * ----------------------------------------------------------------------- */
+.body {
+  grid-template-columns: 252px minmax(0, 1fr) 360px;
+}
+
+.body[data-rail-collapsed="true"] {
+  grid-template-columns: 0 minmax(0, 1fr) 360px;
+}
+
+.body[data-task-active="true"] {
+  grid-template-columns: 252px minmax(0, 1fr) 0;
+}
+
+.body[data-task-active="true"][data-rail-collapsed="true"] {
+  grid-template-columns: 0 minmax(0, 1fr) 0;
+}
+
+.body[data-task-active="true"][data-context-rail="true"] {
+  grid-template-columns: 252px minmax(0, 1fr) minmax(300px, 360px);
+}
+
+.body[data-task-active="true"][data-rail-collapsed="true"][data-context-rail="true"] {
+  grid-template-columns: 0 minmax(0, 1fr) minmax(300px, 360px);
+}
+
+.rail {
+  padding-right: 10px;
+  padding-left: 10px;
+  background: #f7f7f8;
+}
+
+/* The organisation rows are the inbox. Search in the organisation header
+   already spans people, conversations, and history, so a second navigation
+   stack only duplicates the reference hierarchy. */
+.railPrimaryActions,
+.railTop,
+.railList {
+  display: none;
+}
+
+.railFooter {
+  padding-top: 8px;
+}
+
+.railUtilities > button {
+  display: none;
+}
+
+.railUtilities > button:nth-child(2) {
+  min-height: 36px;
+  display: flex;
+  border-radius: 8px;
+  color: #44484b;
+  font-size: 11px;
+}
+
+.railFooter .connection {
+  padding-left: 10px;
+  color: #92979a;
+}
+
+.railBottomMenu {
+  margin-top: auto;
+  display: grid;
+  gap: 2px;
+  padding-top: 8px;
+  border-top: 1px solid #e4e4e5;
+}
+
+.railBottomMenu > button {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #4d5155;
+  font: inherit;
+  font-size: 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.railBottomMenu > button > span:first-child {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.railBottomMenu > button:hover,
+.railBottomMenu > button:focus-visible {
+  background: #ebebec;
+  outline: none;
+}
+
+.railAccountMark {
+  width: 23px;
+  height: 23px;
+  display: inline-grid !important;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 50%;
+  background: #ded8eb;
+  color: #6b599e;
+  font-size: 9px;
+  font-weight: 760;
+}
+
+.railBottomMenu .connection {
+  min-height: 25px;
+  padding: 2px 9px 0;
+  color: #979b9e;
+  font-size: 9px;
+}
+
+.body[data-rail-mode="settings"] .railProduct {
+  margin-bottom: 5px;
+}
+
+.homeContent {
+  width: 100%;
+  min-height: 100%;
+  margin: 0;
+  padding: 0 0 204px;
+}
+
+.homeChatHeader {
+  position: sticky;
+  z-index: 24;
+  top: 0;
+  min-height: 54px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 20px;
+  border-bottom: 1px solid #ececed;
+  background: rgba(255, 255, 255, .94);
+  backdrop-filter: blur(16px);
+}
+
+.body[data-home="true"] .windowBar { pointer-events: none; }
+.body[data-home="true"] .sidebarRevealButton { pointer-events: auto; }
+
+.homeChatHeader > div {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 8px auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 7px;
+}
+
+.homeChatHeader strong {
+  color: #202225;
+  font-size: 14px;
+  font-weight: 680;
+  letter-spacing: -.015em;
+}
+
+.homeChatHeader small {
+  overflow: hidden;
+  color: #989da1;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.homePresence {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #7f63c8;
+  box-shadow: 0 0 0 3px rgba(127, 99, 200, .1);
+}
+
+.homeChatHeader > button {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #777c80;
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.homeChatHeader > button:hover,
+.homeChatHeader > button:focus-visible,
+.homeChatHeader > button[data-active="true"] {
+  background: #f0f0f1;
+  color: #35383b;
+  outline: none;
+}
+
+.homeConversation {
+  width: min(680px, calc(100% - 48px));
+  display: grid;
+  align-content: start;
+  gap: 16px;
+  margin: 0 auto;
+  padding: 26px 0 96px;
+}
+
+.homeDate {
+  justify-self: center;
+  color: #a0a4a7;
+  font-size: 9px;
+  font-weight: 590;
+}
+
+.homeAssistantMessage {
+  max-width: min(540px, 84%);
+  display: grid;
+  justify-self: start;
+  gap: 5px;
+  padding: 12px 14px;
+  border-radius: 15px 15px 15px 4px;
+  background: #f1f1f2;
+  color: #282b2e;
+}
+
+.homeMessageAuthor {
+  color: #7e68ba;
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: .035em;
+}
+
+.homeAssistantMessage > small {
+  color: #8a8f93;
+  font-size: 9px;
+  font-weight: 680;
+}
+
+.homeAssistantMessage > strong {
+  font-size: 13px;
+  font-weight: 690;
+  letter-spacing: -.01em;
+}
+
+.homeAssistantMessage > p {
+  margin: 0;
+  color: #53585c;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.homeMessageActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.homeMessageActions .primaryButton,
+.homeMessageActions .ghostButton {
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 8px;
+  font-size: 10px;
+}
+
+.homePrompts {
+  width: min(560px, 88%);
+  justify-self: start;
+}
+
+.homeMemoryMapPanel {
+  min-height: 420px;
+  overflow: hidden;
+  border: 1px solid #e4e5e6;
+  border-radius: 14px;
+  background: #fff;
+}
+
+.homeHistoryRail {
+  position: relative;
+  grid-column: 3;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  border-left: 1px solid #ececed;
+  background: #fff;
+}
+
+/* Conversation fidelity: compact neutral bubbles with Markdown hierarchy
+   preserved inside the bubble instead of one oversized document column. */
+.body[data-task-active="true"] .threadContent {
+  width: min(760px, calc(100% - 56px));
+  padding-top: 82px;
+}
+
+.body[data-task-active="true"] .messages {
+  gap: 18px;
+}
+
+.body[data-task-active="true"] .messageBody {
+  max-width: min(640px, 88%);
+  font-size: 13.5px;
+  line-height: 1.58;
+}
+
+.message[data-role="assistant"] {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.message[data-role="assistant"] .messageBody {
+  padding: 10px 13px;
+  border-radius: 15px 15px 15px 4px;
+  background: #f1f1f2;
+  color: #282b2e;
+  --paper: #fff;
+  --paper-2: #e9eaeb;
+  --paper-edge: #dcdedf;
+  --ink: #282b2e;
+  --ink-soft: #656a6e;
+  --accent-soft: #aaa1c7;
+}
+
+.message[data-role="user"] .messageBody {
+  padding: 10px 14px;
+  border-radius: 15px 15px 4px 15px;
+  background: #171719;
+  color: #fff;
+}
+
+.messageBody > :global(div) {
+  font-size: 13.5px !important;
+  line-height: 1.58 !important;
+}
+
+.messageBody :global(h1) { margin: 10px 0 6px !important; font-size: 17px !important; line-height: 1.28 !important; }
+.messageBody :global(h2) { margin: 9px 0 5px !important; font-size: 15px !important; line-height: 1.32 !important; }
+.messageBody :global(h3) { margin: 8px 0 4px !important; font-size: 13.5px !important; line-height: 1.36 !important; }
+.messageBody :global(p) { margin: 4px 0 !important; }
+.messageBody :global(ul),
+.messageBody :global(ol) { margin: 5px 0 !important; padding-left: 20px !important; }
+.messageBody :global(blockquote) { margin: 7px 0 !important; padding: 7px 10px !important; }
+
+.body[data-task-active="true"] .composer,
+.body[data-task-active="true"] .steeringQueue,
+.body[data-task-active="true"] .oneTurnAgentChips,
+.composer {
+  width: min(720px, 100%);
+}
+
+.composer {
+  min-height: 88px;
+  grid-template-rows: minmax(30px, auto) 32px;
+  padding: 12px 12px 9px;
+  border-color: #dedfe0;
+  box-shadow: 0 3px 12px rgba(25, 31, 36, .035);
+}
+
+.composer textarea {
+  font-size: 13.5px;
+}
+
+@media (max-width: 1080px) {
+  .body,
+  .body[data-task-active="true"] {
+    grid-template-columns: 224px minmax(0, 1fr) 0;
+  }
+
+  .body[data-rail-collapsed="true"],
+  .body[data-task-active="true"][data-rail-collapsed="true"] {
+    grid-template-columns: 0 minmax(0, 1fr) 0;
+  }
+
+  .homeHistoryRail { display: none; }
+}
+
+@media (max-width: 760px) {
+  .body,
+  .body[data-rail-collapsed="true"],
+  .body[data-task-active="true"],
+  .body[data-task-active="true"][data-rail-collapsed="true"] {
+    grid-template-columns: 1fr;
+  }
+
+  .homeContent { width: 100%; padding: 0 0 194px; }
+  .homeConversation { width: calc(100% - 28px); padding-top: 20px; }
+  .homeAssistantMessage { max-width: 92%; }
+  .homeChatHeader { padding-left: 112px; }
+  .homeChatHeader small,
+  .homeChatHeader > button span { display: none; }
+  .body[data-task-active="true"] .threadContent { width: calc(100% - 28px); padding-top: 76px; }
+  .body[data-task-active="true"] .messageBody { max-width: 94%; }
+  .composer { min-height: 94px; }
+}

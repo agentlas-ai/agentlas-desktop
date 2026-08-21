@@ -329,6 +329,7 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     status: ev.status,
     activityCode: ev.activity?.code,
     phase: ev.phase,
+    delegateTo: ev.delegateTo,
     role: ev.role,
     modelRole: ev.modelRole,
     agentName: ev.agentName,
@@ -355,7 +356,12 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     textLen: ev.textLen ?? ev.text?.length,
     tokens: ev.tokens,
     lifecyclePhase: ev.lifecycle?.phase,
-    lifecycleCwd: ev.lifecycle?.cwd,
+    // A lifecycle event may carry the host's absolute workspace path. The
+    // ledger is renderer-visible and durable, so persist only the same
+    // one-way project identity used by context-source receipts.
+    lifecycleCwd: ev.lifecycle?.cwd
+      ? projectContextKey(undefined, ev.lifecycle.cwd)
+      : undefined,
     // The error row itself must say why — replay reads these to tell a user
     // stop ("cancelled") from a runtime failure.
     errorCode: ev.error?.code,
@@ -376,6 +382,11 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     agentMessageFrom: ev.agentMessage?.fromAgentId,
     agentMessageTo: ev.agentMessage?.toAgentId,
     agentMessageText: ev.agentMessage?.text,
+    handoffDepth: ev.agentMessage?.handoffDepth,
+    handoffRoundtrip: ev.agentMessage?.handoffRoundtrip,
+    handoffPermission: ev.agentMessage?.handoffPermission,
+    permissionInherited: ev.agentMessage?.permissionInherited,
+    handoffBlocked: ev.agentMessage?.handoffBlocked,
     permissions: req.permissions,
     toolMode: req.toolMode,
     hubMode: req.hubMode,
@@ -674,6 +685,7 @@ export function listFailureEvents(input: {
   runId?: string;
   automationId?: string;
   chatId?: string;
+  agentId?: string;
   limit?: number;
 } = {}): FailureEventUi[] {
   const capped = normalizeLimit(input.limit, 100);
@@ -690,6 +702,10 @@ export function listFailureEvents(input: {
   if (input.chatId) {
     clauses.push("chat_id = ?");
     params.push(input.chatId);
+  }
+  if (input.agentId) {
+    clauses.push("agent_id = ?");
+    params.push(input.agentId);
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   const rows = getDb()

@@ -15,7 +15,7 @@ import type {
   ResolvedOrg,
   RuntimeStatus,
 } from "../../shared/types";
-import type { Runner } from "../runtime/runner";
+import type { Runner, RunnerRequest } from "../runtime/runner";
 import type { RuntimeLocale } from "../runtime/status-i18n";
 import {
   appendChatMessage,
@@ -138,6 +138,8 @@ export interface FirmRunParams {
   signal?: AbortSignal;
   /** Nested teams return one result to their parent TF instead of emitting a user-visible final. */
   emitFinal?: boolean;
+  /** Main-owned typed handoff guard, initialized once per firm run. */
+  handoffGuard?: HandoffGuard;
 }
 
 export interface FirmRunResult {
@@ -153,8 +155,9 @@ function restrictedFirmText(
   agentId: string | null,
   chatId: string | null | undefined,
   projectPath: string | null,
+  permission: RunnerRequest["permission"] = p.req.permissions,
 ): string {
-  if (!firmProjectReadOnly(p)) return text;
+  if (!firmProjectReadOnly(p, permission)) return text;
   const context = {
     turnId: firmMemoryTurnId(p, nodeId, phase),
     projectPath: p.req.agentAppMode ? null : projectPath,
@@ -178,9 +181,27 @@ function restrictedFirmText(
   }
 }
 
-function firmProjectReadOnly(p: FirmRunParams): boolean {
-  return p.restrictedReadBoundary === true ||
-    (p.req.permissions !== "write" && p.req.permissions !== "full");
+function firmProjectReadOnly(
+  p: FirmRunParams,
+  permission: RunnerRequest["permission"] = p.req.permissions,
+): boolean {
+  return p.restrictedReadBoundary === true || (permission !== "write" && permission !== "full");
+}
+
+/**
+ * A firm node receives an explicit stage grant.  Child plan/synthesis turns
+ * are read-only; only a delegated implementation turn may receive bounded
+ * write access.  The CEO/root may retain the host mode, but `full` is never
+ * inherited by a child node.
+ */
+export function firmNodePermission(
+  p: Pick<FirmRunParams, "req" | "restrictedReadBoundary">,
+  turn: Pick<NodeTurn, "tier" | "phase">,
+): RunnerRequest["permission"] {
+  const host = p.req.permissions;
+  if (p.restrictedReadBoundary === true || host === "read") return "read";
+  if (turn.tier === 1) return host;
+  return turn.phase === "delegate" ? "write" : "read";
 }
 
 function firmMemoryTurnId(p: FirmRunParams, nodeId: string, phase: NodeTurn["phase"]): string {
@@ -268,6 +289,56 @@ function stripVerificationVerdict(text: string): string {
 
 const AGENT_MESSAGE_MAX_CHARS = 720;
 
+const MAX_HANDOFF_DEPTH = 3;
+const MAX_PAIR_ROUNDTRIPS = 4;
+
+type HandoffBlockReason = "depth" | "roundtrip" | "permission";
+
+interface HandoffGuard {
+  readonly maxDepth: number;
+  readonly maxRoundtrips: number;
+  readonly pairCounts: Map<string, number>;
+  blocked: { reason: HandoffBlockReason; from: string; to: string; depth: number; roundtrip: number } | null;
+}
+
+function handoffGuardFor(p: FirmRunParams): HandoffGuard {
+  if (!p.handoffGuard) {
+    p.handoffGuard = {
+      maxDepth: MAX_HANDOFF_DEPTH,
+      maxRoundtrips: MAX_PAIR_ROUNDTRIPS,
+      pairCounts: new Map(),
+      blocked: null,
+    };
+  }
+  return p.handoffGuard;
+}
+
+function handoffPairKey(from: ResolvedNode, to: ResolvedNode): string {
+  return [from.id, to.id].sort().join("::");
+}
+
+function handoffBlockedText(p: FirmRunParams, reason: HandoffBlockReason): string {
+  if (p.locale === "ko") {
+    return reason === "depth"
+      ? "핸드오프 깊이 제한(최대 3)에 걸려 One에게 에스컬레이션했습니다."
+      : reason === "roundtrip"
+        ? "같은 에이전트 쌍의 왕복 제한(최대 4)에 걸려 One에게 에스컬레이션했습니다."
+        : "핸드오프 권한 경계가 확인되지 않아 One에게 에스컬레이션했습니다.";
+  }
+  return reason === "depth"
+    ? "Handoff depth limit (3) reached; escalated to One."
+    : reason === "roundtrip"
+      ? "The pair round-trip limit (4) was reached; escalated to One."
+      : "The handoff permission boundary was not verified; escalated to One.";
+}
+
+function handoffFailure(p: FirmRunParams): FirmRunResult {
+  const reason = p.handoffGuard?.blocked?.reason ?? "permission";
+  const text = handoffBlockedText(p, reason);
+  p.sink({ kind: "error", error: firmFailure(p.req.agentAppMode, `handoff-${reason}`, text) });
+  return { ok: false, text };
+}
+
 function boundedAgentMessage(text: string): string {
   const compact = text.replace(/\s+/g, " ").trim();
   if (!compact) return "";
@@ -285,9 +356,51 @@ function emitAgentMessage(
   direction: AgentMessageDirection,
   tier: 1 | 2 | 3,
   text: string,
-): void {
+): boolean {
   const excerpt = boundedAgentMessage(text);
-  if (!excerpt) return;
+  if (!excerpt) return true;
+  const guard = handoffGuardFor(p);
+  const pair = handoffPairKey(from, to);
+  const nextRoundtrip = (guard.pairCounts.get(pair) ?? 0) + 1;
+  const blockedReason: HandoffBlockReason | null = tier > guard.maxDepth
+    ? "depth"
+    : nextRoundtrip > guard.maxRoundtrips
+      ? "roundtrip"
+      : null;
+  if (blockedReason) {
+    const blockedText = handoffBlockedText(p, blockedReason);
+    guard.blocked = { reason: blockedReason, from: from.id, to: to.id, depth: tier, roundtrip: nextRoundtrip };
+    p.sink({
+      kind: "tool-use",
+      status: blockedText,
+      agentId: from.id,
+      runtimeAgentId: from.agentId ?? from.id,
+      nodeId: from.id,
+      agentName: from.name,
+      role: from.role,
+      tier,
+      phase: "delegate",
+      agentMessage: {
+        messageId: randomUUID(),
+        direction,
+        fromAgentId: from.id,
+        toAgentId: to.id,
+        text: blockedText,
+        handoffDepth: tier,
+        handoffRoundtrip: nextRoundtrip,
+        handoffPermission: "read",
+        permissionInherited: false,
+        handoffBlocked: blockedReason,
+      },
+    });
+    return false;
+  }
+  guard.pairCounts.set(pair, nextRoundtrip);
+  // A handoff is a typed packet, not an authority transfer.  Child turns are
+  // bounded to write at most; the parent's `full` mode never crosses this
+  // edge.  The actual runner enforces the same grant independently.
+  const handoffPermission: RunnerRequest["permission"] =
+    p.req.permissions === "read" ? "read" : "write";
   const outgoing = direction === "orchestrator-to-worker";
   p.sink({
     kind: "tool-use",
@@ -308,8 +421,13 @@ function emitAgentMessage(
       fromAgentId: from.id,
       toAgentId: to.id,
       text: excerpt,
+      handoffDepth: tier,
+      handoffRoundtrip: nextRoundtrip,
+      handoffPermission,
+      permissionInherited: false,
     },
   });
+  return true;
 }
 
 function emitDelegationMessages(
@@ -317,10 +435,11 @@ function emitDelegationMessages(
   from: ResolvedNode,
   tier: 1 | 2,
   targets: Array<{ node: ResolvedNode; brief: string }>,
-): void {
+): boolean {
   for (const target of targets) {
-    emitAgentMessage(p, from, target.node, "orchestrator-to-worker", tier, target.brief);
+    if (!emitAgentMessage(p, from, target.node, "orchestrator-to-worker", tier, target.brief)) return false;
   }
+  return true;
 }
 
 function latestTeamResultsAllOk(results: Array<{ node: ResolvedNode; result: string; ok: boolean }>): boolean {
@@ -475,6 +594,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   synthesisAllocation: WorkloadAllocation | null;
 }> {
   const { node, tier, phase } = turn;
+  const nodePermission = firmNodePermission(p, turn);
   const memoryOwnerId = node.agentId ?? node.id;
   const tag = (ev: McpInvocationEvent): McpInvocationEvent => ({
     ...ev,
@@ -496,10 +616,10 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       : p.workingFolder ?? getChatWorkingFolder(p.chat.id);
   let activePath: string | null = null;
   if (!p.req.agentAppMode && workingFolder) {
-    if (p.req.permissions === "write" || p.req.permissions === "full") {
+    if (nodePermission === "write" || nodePermission === "full") {
       try {
         const v = await recordFolderVisit(workingFolder, undefined, {
-          permission: p.req.permissions,
+          permission: nodePermission,
           restrictedReadBoundary: p.restrictedReadBoundary,
           agentAppMode: p.req.agentAppMode,
         });
@@ -512,7 +632,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   const memoryReadPath = workingFolder && (
     activePath === workingFolder ||
     canReadActivatedFolderMemory(workingFolder, {
-      permission: p.req.permissions,
+      permission: nodePermission,
       restrictedReadBoundary: p.restrictedReadBoundary,
       agentAppMode: p.req.agentAppMode,
     })
@@ -542,7 +662,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       if (mem) systemPrompt += `\n\n${mem}`;
       if (memoryReadPath) {
         const ontologyContext = await queryWorkingFolderOntologyContext(memoryReadPath, turn.userPrompt, {
-          readOnly: firmProjectReadOnly(p),
+          readOnly: firmProjectReadOnly(p, nodePermission),
         });
         if (ontologyContext.used) systemPrompt += `\n\n${ontologyContext.context}`;
       }
@@ -588,7 +708,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       ].join("\n");
     }
   }
-  if (!p.req.agentAppMode && !firmProjectReadOnly(p)) {
+  if (!p.req.agentAppMode && !firmProjectReadOnly(p, nodePermission)) {
     systemPrompt += `\n\n${memoryEmitterPromptFor(turn.userPrompt)}`;
   }
 
@@ -663,7 +783,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       signal: turn.signal ?? p.signal,
       permission: p.req.agentAppMode || (phase === "plan" && Boolean(turn.reports?.length))
         ? "read"
-        : p.req.permissions,
+        : nodePermission,
       restrictedReadBoundary: p.restrictedReadBoundary,
       cwd: p.req.agentAppMode ? undefined : workingFolder ?? undefined,
       chatId: p.req.agentAppMode
@@ -702,7 +822,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
         if (turn.toMainBubble) p.sink({ kind: "tool-use", status });
       },
       onPartial: (text) => {
-        if (!p.req.agentAppMode && !firmProjectReadOnly(p)) {
+        if (!p.req.agentAppMode && !firmProjectReadOnly(p, nodePermission)) {
           emit({ kind: "partial", text });
           if (turn.toMainBubble) p.sink({ kind: "partial", text });
         }
@@ -723,10 +843,11 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
     memoryOwnerId,
     turn.chatId,
     memoryReadPath,
+    nodePermission,
   );
   const { delegations, synthesisAllocation, cleanedText } = parseDelegations(safeResultText);
   let display = p.req.agentAppMode ? cleanAgentAppControlBlocks(cleanedText) : cleanedText;
-  if (!p.req.agentAppMode && !firmProjectReadOnly(p)) {
+  if (!p.req.agentAppMode && !firmProjectReadOnly(p, nodePermission)) {
     try {
       const curationContext = {
         turnId: firmMemoryTurnId(p, node.id, phase),
@@ -859,7 +980,9 @@ async function runDivision(
       phase: "delegate",
       delegateTo: matched.map((m) => m.node.id),
     });
-    emitDelegationMessages(p, division, 2, matched);
+    if (!emitDelegationMessages(p, division, 2, matched)) {
+      return { node: division, result: handoffBlockedText(p, p.handoffGuard?.blocked?.reason ?? "permission"), ok: false };
+    }
     const specResults = await parallelCap(matched, getAgentConcurrency(), async (m) => {
       const r = await runNodeTurnSafe(p, {
         node: m.node,
@@ -874,6 +997,9 @@ async function runDivision(
       emitAgentMessage(p, m.node, division, "worker-to-orchestrator", 3, r.text);
       return { name: m.node.name, role: m.node.role, text: r.text, ok: r.ok };
     });
+    if (p.handoffGuard?.blocked) {
+      return { node: division, result: handoffBlockedText(p, p.handoffGuard.blocked.reason), ok: false };
+    }
     // 실패한 전문가의 텍스트는 "(이름 응답 실패: …)" 같은 오류 문자열이다. status 없이 넘기면
     // 본부가 그걸 정상 산출물로 읽고 종합한다. borrowed-task-force의 기존 패턴과 동일하게 표기.
     const synthPrompt =
@@ -905,6 +1031,7 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
   if (!p.req.runId) {
     p = { ...p, req: { ...p.req, runId: `firm-direct-${randomUUID()}` } };
   }
+  handoffGuardFor(p);
   const { req, chat, org, sink } = p;
   const ko = p.locale === "ko";
   // 메인 버블 진행 표시 (un-attributed → 메인 메시지 step). 네트워크 패널은 속성 이벤트로 별도.
@@ -1012,7 +1139,7 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
     phase: "delegate",
     delegateTo: matched.map((m) => m.node.id),
   });
-  emitDelegationMessages(p, org.ceo, 1, matched);
+  if (!emitDelegationMessages(p, org.ceo, 1, matched)) return handoffFailure(p);
   const initialStages = stageMatched(matched);
   mainStatus(
     initialStages.verification.length > 0
@@ -1087,6 +1214,7 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
     );
   }
   const teamResults = [...productionResults, ...integrationResults, ...verificationResults];
+  if (p.handoffGuard?.blocked) return handoffFailure(p);
   const usedDivisionIds = new Set(matched.map((item) => item.node.id));
   const divisionAttempts = new Map(matched.map((item) => [item.node.id, 1]));
 
@@ -1126,7 +1254,7 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
       usedDivisionIds.add(item.node.id);
       divisionAttempts.set(item.node.id, (divisionAttempts.get(item.node.id) ?? 0) + 1);
     }
-    emitDelegationMessages(p, org.ceo, 1, followupMatched);
+    if (!emitDelegationMessages(p, org.ceo, 1, followupMatched)) return handoffFailure(p);
     mainStatus(ko
       ? `추가로 필요한 ${followupMatched.length}개 작업 슬롯 실행 중…`
       : `Running ${followupMatched.length} newly required work slot(s)…`);
@@ -1145,6 +1273,7 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
       followupVerificationResults = await runMatched(followupStages.verification, resultStatusContext(upstream), "verification");
     }
     teamResults.push(...followupProductionResults, ...followupIntegrationResults, ...followupVerificationResults);
+    if (p.handoffGuard?.blocked) return handoffFailure(p);
     mainStatus(ko ? "추가 작업 결과를 종합하는 중…" : "Synthesizing the additional results…");
     finalTurn = await runNodeTurnSafe(p, {
       node: org.ceo,

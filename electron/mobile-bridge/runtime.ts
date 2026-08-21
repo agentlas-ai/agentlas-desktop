@@ -35,6 +35,10 @@ import {
   TerminalOntologyLoadoutFeedWriter,
   terminalOntologyLoadoutFeedPath,
 } from "../ontology/terminal-loadout-feed";
+import {
+  createDesktopMobileTerminalControl,
+  type DesktopMobileTerminalControl,
+} from "./terminal-control";
 
 interface MobileBridgeRuntimeOptions {
   userDataPath: string;
@@ -50,6 +54,7 @@ interface RunningBridge {
   relay: MobileBridgeCloudRelay;
   manifest: MobileBridgeEndpointManifest;
   terminalLoadoutFeedWriter: TerminalOntologyLoadoutFeedWriter;
+  terminalControl: DesktopMobileTerminalControl;
 }
 
 let running: RunningBridge | null = null;
@@ -210,6 +215,7 @@ async function startBridgeInternal(
   const ontologyHubClient = getDefaultOntologyHubClient(options.userDataPath);
   const terminalLoadoutFeedFile = terminalOntologyLoadoutFeedPath(options.userDataPath);
   const terminalLoadoutFeedWriter = new TerminalOntologyLoadoutFeedWriter(terminalLoadoutFeedFile);
+  const terminalControl = createDesktopMobileTerminalControl();
   const authority = createMobileBridgeAuthority({
     hostIdentity: identity,
     displayName,
@@ -217,6 +223,7 @@ async function startBridgeInternal(
     revokeDevice: (deviceId, cause) => pairing.revokeDevice(deviceId, cause ?? "device_requested"),
     ontologyHubClient,
     terminalOntologyLoadoutFeedWriter: terminalLoadoutFeedWriter,
+    terminalControl,
     onError: (error) => console.error("[mobile-bridge-authority]", error.message),
   });
   let server: AgentlasMobileBridgeServer | null = null;
@@ -271,7 +278,7 @@ async function startBridgeInternal(
       certificateDer: tls.certificateDer,
       onStatusChanged: () => emitMobileBridgeStateChange("runtime-started"),
     });
-    running = { authority, pairing, accountPairing, server, relay, manifest, terminalLoadoutFeedWriter };
+    running = { authority, pairing, accountPairing, server, relay, manifest, terminalLoadoutFeedWriter, terminalControl };
     relay.start();
     // Refresh once at Desktop startup even when no phone is connected. This is
     // a read-only Hub query; the independent Terminal still has to opt in with
@@ -307,6 +314,7 @@ async function startBridgeInternal(
     relay?.stop();
     if (server) await server.close().catch(() => {});
     terminalLoadoutFeedWriter.dispose();
+    await terminalControl.dispose();
     pairing.dispose();
     authority.dispose();
     throw error;
@@ -322,6 +330,7 @@ async function stopRunningBridge(emitStopped: boolean): Promise<void> {
     await state.server.close();
   } finally {
     state.terminalLoadoutFeedWriter.dispose();
+    await state.terminalControl.dispose();
     state.pairing.dispose();
     state.authority.dispose();
     if (emitStopped) emitMobileBridgeStateChange("runtime-stopped");

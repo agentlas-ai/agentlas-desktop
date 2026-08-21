@@ -13,6 +13,7 @@ export type DesktopStoreEntity =
   | "chat"
   | "task"
   | "one-profile"
+  | "one-org"
   | "automation";
 
 export interface DesktopStoreChange {

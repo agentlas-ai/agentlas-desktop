@@ -40,6 +40,7 @@ import {
 } from "../store/run-events";
 import {
   buildProjectContextSlice,
+  projectSourceSignature,
   triggerProjectContextMapRefresh,
 } from "./context-map";
 
@@ -76,7 +77,7 @@ const CODEMAP_MODULES = 8;
 const CODEMAP_ENTRIES = 4;
 const CODEMAP_SYMBOLS = 6;
 const CAREER_GRAPH_SOURCES = 6;
-const codeMapTriggered = new Set<string>();
+const codeMapFallbackTriggered = new Set<string>();
 
 // Every recall layer here fails by returning null inside a catch or a size
 // check, so a run that injected nothing looked exactly like a run that injected
@@ -135,7 +136,8 @@ function readCodeMapSeed(projectPath: string): CodeMapSeed | null {
   );
 }
 
-// Best-effort, non-blocking: generate the map once per project per session when
+// Best-effort, non-blocking: refresh the map once per unchanged source snapshot
+// (and reopen the gate after later edits) when
 // what we inject is missing OR unreadable.
 //
 // This used to check fs.existsSync on the full map, which made a map that had
@@ -145,17 +147,16 @@ function readCodeMapSeed(projectPath: string): CodeMapSeed | null {
 // means an unusable map repairs itself on the next attach.
 function ensureCodeMap(projectPath: string): void {
   try {
-    if (codeMapTriggered.has(projectPath)) return;
     // Core owns the canonical v2 map and fingerprint refresh. A readable seed
     // is not proof of freshness, so trigger Core before accepting it.
     if (triggerProjectContextMapRefresh(projectPath)) {
-      codeMapTriggered.add(projectPath);
       return;
     }
     if (readCodeMapSeed(projectPath)?.schemaVersion === "agentlas.code-map.v2") return;
+    if (codeMapFallbackTriggered.has(projectPath)) return;
     const gen = codeMapGenPath();
     if (!gen) return;
-    codeMapTriggered.add(projectPath);
+    codeMapFallbackTriggered.add(projectPath);
     const child = spawn(process.execPath, [gen, projectPath], {
       detached: true,
       stdio: "ignore",
@@ -205,12 +206,14 @@ function summarizeCodeMap(projectPath: string): string | null {
 // on the run path ever called it: refreshProjectSitemap was reachable only from
 // ontology provisioning. So projects sat on an empty 139-byte skeleton — or a
 // months-stale file — indefinitely while every turn quietly logged "missing or
-// too large to read". Refresh once per project per process, like the code map.
-const sitemapTriggered = new Set<string>();
+// too large to read". Refresh once per unchanged project source snapshot, like
+// the code map.
+const sitemapTriggered = new Map<string, string>();
 
 function ensureSitemap(projectPath: string): void {
-  if (sitemapTriggered.has(projectPath)) return;
-  sitemapTriggered.add(projectPath);
+  const sourceSignature = projectSourceSignature(projectPath);
+  if (sitemapTriggered.get(projectPath) === sourceSignature) return;
+  sitemapTriggered.set(projectPath, sourceSignature);
   // The refresh walks the project tree synchronously (~200ms on a large repo).
   // Never make a turn wait for it; this turn reads whatever is on disk now and
   // the next one picks up the fresh map.

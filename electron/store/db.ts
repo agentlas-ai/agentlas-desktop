@@ -18,7 +18,7 @@ import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-p
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 98;
+const SCHEMA_VERSION = 99;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -4704,6 +4704,59 @@ export function initStore(options: StoreInitOptions = {}): void {
     );
     CREATE INDEX IF NOT EXISTS idx_capability_grants_scope ON capability_grants(scope);
   `);
+
+  /*
+   * v99 — One Team durable organisation bindings.
+   *
+   * This is deliberately separate from Work's firm/org-spec tables.  A One
+   * row is a user-facing lease/identity binding; Work tasks still own the
+   * execution participants and receipts.  installed_agent_id + revision make
+   * replacement and stale renderer writes explicit instead of silently
+   * changing somebody else's row.
+   */
+  _db.exec(`
+    CREATE TABLE IF NOT EXISTS one_org_members (
+      id TEXT PRIMARY KEY,
+      agent_slug TEXT NOT NULL,
+      installed_agent_id TEXT NOT NULL,
+      display_name TEXT,
+      icon TEXT NOT NULL DEFAULT 'one-puppy',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      source TEXT NOT NULL CHECK(source IN ('local','cloud','hub')),
+      lease_expires_at TEXT,
+      added_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      archived_at TEXT,
+      status_kind TEXT NOT NULL DEFAULT 'new',
+      status_line TEXT NOT NULL DEFAULT '아직 맡은 일 없음',
+      last_activity_at TEXT,
+      pending_count INTEGER NOT NULL DEFAULT 0,
+      pending_kind TEXT NOT NULL DEFAULT 'approval' CHECK(pending_kind IN ('approval','review','input')),
+      unread_count INTEGER NOT NULL DEFAULT 0,
+      credit_state TEXT NOT NULL DEFAULT 'unknown' CHECK(credit_state IN ('ok','insufficient','unknown')),
+      auto_select_tools INTEGER NOT NULL DEFAULT 1 CHECK(auto_select_tools IN (0,1)),
+      collaboration_style TEXT NOT NULL DEFAULT 'default' CHECK(collaboration_style IN ('default','concise','warm','direct')),
+      handover_note TEXT,
+      revision INTEGER NOT NULL DEFAULT 1
+    );
+    CREATE TABLE IF NOT EXISTS one_org_completion_cache (
+      installed_agent_id TEXT PRIMARY KEY,
+      run_id TEXT,
+      summary_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_one_org_members_order
+      ON one_org_members(archived_at, sort_order, added_at);
+    CREATE INDEX IF NOT EXISTS idx_one_org_members_agent
+      ON one_org_members(installed_agent_id);
+  `);
+  // v99 was already shipped before the pending-kind/cache columns existed.
+  // Keep the schema version stable while making the append-only table upgrade
+  // safe for existing stores (SQLite has no IF NOT EXISTS for ADD COLUMN).
+  try { _db.exec("ALTER TABLE one_org_members ADD COLUMN pending_kind TEXT NOT NULL DEFAULT 'approval'"); } catch { /* already present */ }
+  try { _db.exec("ALTER TABLE one_org_members ADD COLUMN auto_select_tools INTEGER NOT NULL DEFAULT 1 CHECK(auto_select_tools IN (0,1))"); } catch { /* already present */ }
+  try { _db.exec("ALTER TABLE one_org_members ADD COLUMN collaboration_style TEXT NOT NULL DEFAULT 'default' CHECK(collaboration_style IN ('default','concise','warm','direct'))"); } catch { /* already present */ }
+  try { _db.exec("ALTER TABLE one_org_members ADD COLUMN handover_note TEXT"); } catch { /* already present */ }
 
   if (userVersion < SCHEMA_VERSION) _db.pragma(`user_version = ${SCHEMA_VERSION}`);
   } catch (error) {

@@ -77,6 +77,24 @@ import {
   setAgentLocalDisplayName,
   uninstallAgent,
 } from "./mcp/registry";
+import {
+  addOneOrgMember,
+  archiveOneOrgMember,
+  getOneOrgState,
+  markOneOrgMemberRead,
+  reorderOneOrgMembers,
+  renameOneOrgMember,
+  replaceOneOrgMember,
+  restoreOneOrgMember,
+  setOneOrgMemberTools,
+  updateOneOrgMember,
+} from "./one/org";
+import {
+  clearComputerHistory,
+  getComputerHistoryState,
+  prepareComputerHistoryDraftPrompt,
+  setComputerHistoryConsent,
+} from "./one/computer-history";
 import { MCP_TOOL_CATALOG, getCatalogEntry } from "./mcp-tools/catalog";
 import {
   getServer,
@@ -2848,6 +2866,25 @@ export function registerIpcHandlers(): void {
   );
   ipcMain.handle("team:resolveSubAgents", (_e, agentId: string) => resolveAgentTeam(agentId));
 
+  // ── One Team (durable identity bindings; Work still owns execution) ──
+  ipcMain.handle("oneOrg:get", () => getOneOrgState());
+  ipcMain.handle("oneOrg:add", (_e, input) => addOneOrgMember(input));
+  ipcMain.handle("oneOrg:rename", (_e, input) => renameOneOrgMember(input));
+  ipcMain.handle("oneOrg:update", (_e, input) => updateOneOrgMember(input));
+  ipcMain.handle("oneOrg:replace", (_e, input) => replaceOneOrgMember(input));
+  ipcMain.handle("oneOrg:archive", (_e, input) => archiveOneOrgMember(input));
+  ipcMain.handle("oneOrg:restore", (_e, input) => restoreOneOrgMember(input));
+  ipcMain.handle("oneOrg:markRead", (_e, input) => markOneOrgMemberRead(input));
+  ipcMain.handle("oneOrg:reorder", (_e, input) => reorderOneOrgMembers(input));
+  ipcMain.handle("oneOrg:setTools", (_e, input) => setOneOrgMemberTools(input));
+
+  // ── Computer History (explicit local opt-in; no raw history leaves disk) ──
+  ipcMain.handle("computerHistory:get", () => getComputerHistoryState());
+  ipcMain.handle("computerHistory:setConsent", (_e, enabled: boolean) => setComputerHistoryConsent(enabled === true));
+  ipcMain.handle("computerHistory:clear", () => clearComputerHistory());
+  ipcMain.handle("computerHistory:prepareDraft", (_e, recommendationId: string, locale: "ko" | "en") =>
+    prepareComputerHistoryDraftPrompt(recommendationId, locale === "ko" ? "ko" : "en"));
+
   // ── agentFiles (에이전트 폴더 파일 — 우측 패널 에디터) ──
   ipcMain.handle("agentFiles:list", (_e, agentId: string) => listAgentFiles(agentId));
   ipcMain.handle("agentFiles:read", (_e, agentId: string, absPath: string) =>
@@ -2869,7 +2906,7 @@ export function registerIpcHandlers(): void {
   );
   ipcMain.handle(
     "runLedger:failures",
-    (_e, input?: { runId?: string; automationId?: string; chatId?: string; limit?: number }) =>
+    (_e, input?: { runId?: string; automationId?: string; chatId?: string; agentId?: string; limit?: number }) =>
       listFailureEvents(input),
   );
 

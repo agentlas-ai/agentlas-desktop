@@ -80,6 +80,49 @@ export interface AutoSelectMcpDependencies {
   resolveNeeds: (input: { task: string; candidates: McpNeedCandidate[] }) => Promise<ResolvedMcpNeeds>;
 }
 
+/** Build a deterministic fixed-assignment result for an agent whose One Team
+ * tools toggle is off. No resident judge, Hub search, install, or probe is
+ * allowed in this mode; the member's declared MCP ids are the complete set. */
+async function fixedAssignmentContext(input: {
+  agentName: string;
+  userPrompt: string;
+  systemPrompt: string;
+  workingFolder?: string | null;
+  toolMode?: AutomationToolMode;
+  hubMode?: AutomationHubMode;
+  fixedServerIds: string[];
+  installedServers: InstalledMcpServer[];
+}): Promise<AutoSelectedMcpContext> {
+  const wanted = new Set(input.fixedServerIds.filter((id) => typeof id === "string" && id.trim()).map((id) => id.trim()));
+  const tools = input.installedServers
+    .filter((server) => wanted.has(server.id) || (server.catalogId ? wanted.has(server.catalogId) : false))
+    .map((server) => ({
+      id: server.catalogId || server.id,
+      name: server.nameEn || server.name,
+      reason: "fixed assignment from this One Team member",
+      installed: true,
+      missingEnv: [],
+      required: false,
+      state: server.enabled && server.configurationValid !== false ? "ready" as const : "disabled" as const,
+    }));
+  return {
+    effectiveToolMode: resolveAutomationToolMode({
+      toolMode: input.toolMode,
+      name: input.agentName,
+      promptTemplate: input.userPrompt,
+      targetLabel: input.workingFolder,
+      judged: judgedComputerUse,
+    }),
+    tools,
+    localInventory: input.installedServers.map((server) => server.catalogId || server.id).sort(),
+    localPluginCount: tools.length,
+    hubPluginCount: 0,
+    hubPlugins: [],
+    needsDecided: true,
+    needsNote: "Automatic MCP selection is off for this One Team member; only fixed assignments were attached.",
+  };
+}
+
 const DEFAULT_AUTO_SELECT_DEPS: AutoSelectMcpDependencies = {
   listInstalledServers,
   installFromCatalog,
@@ -298,6 +341,10 @@ export async function autoSelectMcpTools(input: {
   conversationId?: string | null;
   /** 자격 증명 입력 직후의 재선택 — 메모를 무시하고 처음부터 다시 고른다. */
   bypassSelectionMemo?: boolean;
+  /** One Team per-member tool policy. Omitted means the normal automatic mode. */
+  autoSelectTools?: boolean;
+  /** Installed MCP ids declared by the bound One Team member when auto mode is off. */
+  fixedServerIds?: string[];
 }, injectedDeps: Partial<AutoSelectMcpDependencies> = {}): Promise<AutoSelectedMcpContext> {
   const deps: AutoSelectMcpDependencies = { ...DEFAULT_AUTO_SELECT_DEPS, ...injectedDeps };
   // The task as written, not lowercased and not tokenized — the resident judge reads it.
@@ -316,6 +363,18 @@ export async function autoSelectMcpTools(input: {
     initialInstalledServers = deps.listInstalledServers();
   } catch {
     initialInstalledServers = [];
+  }
+  if (input.autoSelectTools === false) {
+    return fixedAssignmentContext({
+      agentName: input.agentName,
+      userPrompt: input.userPrompt,
+      systemPrompt: input.systemPrompt,
+      workingFolder: input.workingFolder,
+      toolMode: input.toolMode,
+      hubMode: input.hubMode,
+      fixedServerIds: input.fixedServerIds ?? [],
+      installedServers: initialInstalledServers,
+    });
   }
   const installedFingerprint = shortHash(
     initialInstalledServers
