@@ -84,6 +84,9 @@ output/playwright/
 # Internal working documents are local-only. New docs, plans, PRDs, research,
 # QA receipts, and private screenshots must never enter a release commit.
 /docs/**
+# 예외 — 제품 계약 문서. 플러그인 규격은 데스크탑·터미널·허브가 공유하는 정본이라
+# 릴리스 입력이다. 내부 작업 문서가 아니므로 /docs/** 에서 명시적으로 되살린다.
+!/docs/PLUGIN-SPEC.md
 
 # Other conventional local-only document roots and root-level PM receipts.
 /internal/

@@ -1,0 +1,73 @@
+{
+  "schema": "agentlas.plugin/v2",
+  "slug": "agentlas-time",
+  "name": "System Time",
+  "version": "1.0.0",
+  "builtin": true,
+  "publisher": {
+    "name": "Agentlas",
+    "url": "https://agentlas.cloud"
+  },
+  "surface": {
+    "displayName": "System Time",
+    "displayNameKo": "시스템 시간",
+    "tagline": "Current time and timezone conversion",
+    "taglineKo": "현재 시각과 타임존 변환",
+    "description": "Agentlas built-in read-only server for the current time and IANA timezone conversion. Nothing else.",
+    "descriptionKo": "현재 시각과 IANA 타임존 변환만 제공하는 Agentlas 내장 읽기 전용 서버입니다.",
+    "category": "data",
+    "brandColor": "#2563EB",
+    "icon": "assets/icon.svg",
+    "defaultPrompts": [
+      "지금 몇 시야?"
+    ]
+  },
+  "invocation": {
+    "mention": "@time",
+    "implicit": "always",
+    "standalone": false
+  },
+  "provides": {
+    "tools": [
+      {
+        "id": "agentlas-time",
+        "capability": "time",
+        "kind": "builtin",
+        "resolver": "system-time",
+        "envKeys": [],
+        "form": "inline",
+        "surface": {
+          "name": "시스템 시간",
+          "nameEn": "System Time",
+          "description": "현재 시각과 IANA 타임존 변환만 제공하는 Agentlas 내장 읽기 전용 MCP.",
+          "descriptionEn": "Agentlas built-in read-only MCP for current time and IANA timezone conversion only.",
+          "category": "data",
+          "brandColor": "#2563EB",
+          "mark": "T"
+        }
+      }
+    ]
+  },
+  "requires": {
+    "prereq": [
+      {
+        "id": "node",
+        "provided-by": "app"
+      }
+    ],
+    "os": [
+      "darwin",
+      "win32",
+      "linux"
+    ]
+  },
+  "permissions": {
+    "fileWrite": "none",
+    "network": "none",
+    "shell": "deny"
+  },
+  "state": {
+    "files": [],
+    "assets": false
+  }
+}

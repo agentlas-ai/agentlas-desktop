@@ -11,9 +11,7 @@ import {
   OPENCRAB_MCP_URL_KEY,
   OPENCRAB_MCP_URL_SENTINEL,
 } from "../opencrab/constants";
-import { systemTimeMcpLaunchArgs } from "./system-time-server";
-import { playwrightMcpCliPath } from "./browser-cdp-launcher";
-import { computerUseMcpLaunchArgs } from "../computer-use/mcp-server";
+import { builtinPluginCatalogEntry } from "../plugins/builtin";
 
 export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
   // ── 선택형 지식 그래프 ─────────────────────────────────────
@@ -281,68 +279,9 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
     mark: "HN",
     envRequirements: [],
   },
-  {
-    id: "cua-driver",
-    name: "Agentlas 컴퓨터 유즈",
-    nameEn: "Agentlas Computer Use",
-    description:
-      "Agentlas가 화면을 보고 macOS 앱의 마우스·키보드를 직접 조작 (모든 AI 엔진 공용, 키 불필요)",
-    descriptionEn:
-      "Agentlas-native screen, mouse, keyboard, drag, and scroll control shared by every AI engine (MCP, no key)",
-    category: "web",
-    transport: "stdio",
-    command: process.execPath,
-    args: computerUseMcpLaunchArgs(),
-    trust: "official",
-    docsUrl: "https://agentlas.cloud/desktop",
-    brandColor: "#F97316",
-    mark: "CU",
-    // 키 없음 — 앱에 동봉된 서명 드라이버와 OS Accessibility/Screen Recording 권한을 사용.
-    envRequirements: [],
-  },
-  {
-    id: "playwright",
-    name: "Playwright (브라우저)",
-    nameEn: "Playwright (browser)",
-    description: "실제 브라우저로 웹 탐색·클릭·입력·스크린샷 (컴퓨터 유즈, 키 불필요)",
-    descriptionEn: "Drive a real browser — navigate, click, type, screenshot (computer use, no key)",
-    category: "web",
-    transport: "stdio",
-    command: process.execPath,
-    // ★자격증명 서랍은 하나다. 예전에는 이 항목이 `--user-data-dir ~/.agentlas/browser-profile`
-    // 로 **두 번째 프로필**을 만들었다. 그래서 사용자가 Agentlas 브라우저에 로그인해 둬도
-    // playwright 가 선택되는 실행은 로그인 0개짜리 창을 몰았다(2026-08-19 X 자동화 실측).
-    // 지금은 두 항목 모두 같은 런처를 실행한다 — 전용 Chrome 하나를 띄우고 @playwright/mcp 를
-    // CDP 로 붙이므로, 어느 쪽이 선택되든 같은 로그인 상태를 본다.
-    args: ["~/.agentlas/agentlas-browser-cdp.mjs"],
-    trust: "official",
-    docsUrl: "https://github.com/microsoft/playwright-mcp",
-    brandColor: "#2EAD33",
-    mark: "PW",
-    // 키 없음 — 로컬 브라우저를 띄워 동작. 첫 실행 시 브라우저 바이너리를 받을 수 있음.
-    envRequirements: [],
-  },
-  {
-    id: "agentlas-browser",
-    name: "Agentlas 브라우저 (실제 로그인)",
-    nameEn: "Agentlas Browser (real login)",
-    description:
-      "Agentlas 전용 Chrome에서 사용자가 직접 로그인한 세션으로 웹 조작 (개인 Chrome 프로필은 복사하지 않음, 키 불필요)",
-    descriptionEn:
-      "Drive the web with sessions you sign in to inside Agentlas Chrome; your personal Chrome profile is never copied (general, no key)",
-    category: "web",
-    transport: "stdio",
-    // ~/.agentlas/agentlas-browser-cdp.mjs 는 부팅 시 materializeBrowserCdpLauncher() 가 씀.
-    // 전용 로그인 프로필을 원격 디버깅 포트로 띄우고 @playwright/mcp 를 CDP attach 한다.
-    command: process.execPath,
-    args: ["~/.agentlas/agentlas-browser-cdp.mjs"],
-    trust: "official",
-    docsUrl: "https://github.com/microsoft/playwright-mcp",
-    brandColor: "#1D7E67",
-    mark: "AB",
-    // 키 없음 — 로컬 Chrome 을 CDP 로 띄워 동작. 개인 프로필은 로컬에서만 사용.
-    envRequirements: [],
-  },
+  builtinPluginCatalogEntry("cua-driver"),
+  builtinPluginCatalogEntry("playwright"),
+  builtinPluginCatalogEntry("agentlas-browser"),
   {
     id: "brave-search",
     name: "Brave 검색",
@@ -416,24 +355,7 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
     mark: "sh",
     envRequirements: [],
   },
-  {
-    id: "agentlas-time",
-    name: "시스템 시간",
-    nameEn: "System Time",
-    description: "현재 시각과 IANA 타임존 변환만 제공하는 Agentlas 내장 읽기 전용 MCP.",
-    descriptionEn: "Agentlas built-in read-only MCP for current time and IANA timezone conversion only.",
-    category: "data",
-    transport: "stdio",
-    // The exact audited server is compressed into argv; no mutable executable
-    // file is opened after validation. Agent Apps reject any other command,
-    // payload, URL, environment, or tool list.
-    command: process.execPath,
-    args: systemTimeMcpLaunchArgs(),
-    trust: "official",
-    brandColor: "#2563EB",
-    mark: "T",
-    envRequirements: [],
-  },
+  builtinPluginCatalogEntry("agentlas-time"),
 ];
 
 export function getCatalogEntry(id: string): McpToolCatalogEntry | null {

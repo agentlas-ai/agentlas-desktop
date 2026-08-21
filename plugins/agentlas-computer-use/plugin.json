@@ -1,0 +1,90 @@
+{
+  "schema": "agentlas.plugin/v2",
+  "slug": "agentlas-computer-use",
+  "name": "Agentlas Computer Use",
+  "version": "1.0.0",
+  "builtin": true,
+  "publisher": {
+    "name": "Agentlas",
+    "url": "https://agentlas.cloud"
+  },
+  "surface": {
+    "displayName": "Agentlas Computer Use",
+    "displayNameKo": "Agentlas 컴퓨터 유즈",
+    "tagline": "See the screen and drive mouse and keyboard",
+    "taglineKo": "화면을 보고 마우스·키보드를 직접 조작합니다",
+    "description": "Agentlas-native screen capture, mouse, keyboard, drag, and scroll control for macOS apps. Shared by every AI engine, no key required. Uses the signed driver shipped with the app plus OS Accessibility and Screen Recording permission.",
+    "descriptionKo": "macOS 앱의 화면 캡처와 마우스·키보드·드래그·스크롤을 조작합니다. 모든 AI 엔진이 공용으로 쓰며 키가 필요 없습니다. 앱에 동봉된 서명 드라이버와 OS 손쉬운 사용·화면 기록 권한을 사용합니다.",
+    "category": "web",
+    "brandColor": "#F97316",
+    "icon": "assets/icon.svg",
+    "defaultPrompts": [
+      "이 앱 화면 열어서 확인해줘",
+      "지금 화면 캡처해서 뭐가 보이는지 알려줘"
+    ]
+  },
+  "invocation": {
+    "mention": "@computer-use",
+    "implicit": "always",
+    "standalone": true
+  },
+  "provides": {
+    "tools": [
+      {
+        "id": "cua-driver",
+        "capability": "computer-use",
+        "kind": "builtin",
+        "resolver": "computer-use",
+        "envKeys": [],
+        "form": "inline",
+        "surface": {
+          "name": "Agentlas 컴퓨터 유즈",
+          "nameEn": "Agentlas Computer Use",
+          "description": "Agentlas가 화면을 보고 macOS 앱의 마우스·키보드를 직접 조작 (모든 AI 엔진 공용, 키 불필요)",
+          "descriptionEn": "Agentlas-native screen, mouse, keyboard, drag, and scroll control shared by every AI engine (MCP, no key)",
+          "category": "web",
+          "brandColor": "#F97316",
+          "mark": "CU",
+          "docsUrl": "https://agentlas.cloud/desktop"
+        },
+        "hostChannels": [
+          {
+            "id": "control",
+            "env": "AGENTLAS_COMPUTER_USE_CONTROL_FILE",
+            "mode": "read-only"
+          }
+        ]
+      }
+    ]
+  },
+  "requires": {
+    "prereq": [
+      {
+        "id": "node",
+        "provided-by": "app"
+      },
+      {
+        "id": "os-accessibility",
+        "provided-by": "user",
+        "note": "System Settings > Privacy & Security > Accessibility"
+      },
+      {
+        "id": "os-screen-recording",
+        "provided-by": "user",
+        "note": "System Settings > Privacy & Security > Screen Recording"
+      }
+    ],
+    "os": [
+      "darwin"
+    ]
+  },
+  "permissions": {
+    "fileWrite": "none",
+    "network": "none",
+    "shell": "deny"
+  },
+  "state": {
+    "files": [],
+    "assets": false
+  }
+}

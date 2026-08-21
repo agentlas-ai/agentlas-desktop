@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { resolveMcpNeeds, type McpNeedCandidate, type ResolvedMcpNeeds } from "./need-resolver";
 import os from "node:os";
 import path from "node:path";
+import { supersededByLivePeer } from "../plugins/builtin";
 import { MCP_TOOL_CATALOG } from "./catalog";
 import { installFromCatalog, listInstalledServers } from "./registry";
 import { testServerConnection } from "./client";
@@ -396,6 +397,21 @@ export async function autoSelectMcpTools(input: {
     return false;
   };
 
+  // A same-capability peer that receives a host-injected channel makes this tool's
+  // capability a strict subset (PLUGIN-SPEC §2.9). `playwright` is the live case: same
+  // launcher, same Chrome profile, same 27 tools — but no AGENTLAS_BROWSER_APPROVAL_FILE,
+  // so its requestApproval always lands on "denied" and it can never complete an
+  // irreversible action. Offering it in auto mode lets judgment pick the strictly weaker
+  // twin and then fail at the approval step for a reason the model was never told.
+  //
+  // ★The peer must actually be usable. Dropping the subset when its superset is missing or
+  // disabled would delete the capability outright rather than upgrade it.
+  const liveServerIds = new Set(
+    initialInstalledServers
+      .filter((server) => server.enabled)
+      .map((server) => server.catalogId)
+      .filter((id): id is string => Boolean(id)),
+  );
   const pinnedReasons = new Map<string, string>();
   if (hubAllowed) {
     pinnedReasons.set("hephaestus-network", "always available routing/plugin resolver");
@@ -488,9 +504,25 @@ export async function autoSelectMcpTools(input: {
     if (neededIds.has(id)) return 1;
     return 2;
   };
-  const picked = MCP_TOOL_CATALOG.filter(
-    (entry) => (pinnedReasons.has(entry.id) || neededIds.has(entry.id)) && !blockedByHostBinding(entry.id),
-  )
+  const picked = MCP_TOOL_CATALOG.filter((entry) => {
+    if (!pinnedReasons.has(entry.id) && !neededIds.has(entry.id)) return false;
+    if (blockedByHostBinding(entry.id)) return false;
+    // An explicit pin is a settings-level decision and outranks this rule.
+    {
+      const peer = supersededByLivePeer({
+        toolId: entry.id,
+        pinned: pinnedReasons.has(entry.id),
+        liveServerIds,
+      });
+      if (peer) {
+        // Never drop something silently — a capability that vanished without a word reads
+        // as "the tool did not exist" the next time someone debugs this.
+        console.log(`[auto-select] dropped ${entry.id}: superseded by ${peer} (host channel)`);
+        return false;
+      }
+    }
+    return true;
+  })
     .sort((a, b) => pickRank(a.id) - pickRank(b.id))
     .slice(0, 10);
 
