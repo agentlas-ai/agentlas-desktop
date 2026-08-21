@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import type { InstalledAgent, InstalledMcpServer, McpServerStatus, McpToolCatalogEntry } from "@shared/types";
+import type { HubAgentBookmark, InstalledAgent, InstalledMcpServer, MarketplaceListing, McpServerStatus, McpToolCatalogEntry } from "@shared/types";
 import type { OneOrgCollaborationStyle, OneOrgMember, OneOrgState } from "@shared/one-org";
 import { OneAgentPortrait } from "./OneAgentPortrait";
 import { OneBottomSheet } from "./OneBottomSheet";
@@ -66,8 +66,11 @@ function leaseLabel(member: OneOrgMember, locale: string): string | null {
 export function OneOrgChart({
   state,
   installedAgents,
+  cloudListings,
+  hubBookmarks,
   locale,
   onAdd,
+  onMaterializeSource,
   onRename,
   onUpdate,
   onReplace,
@@ -77,6 +80,7 @@ export function OneOrgChart({
   onReorder,
   onFailure,
   onOpenMember,
+  activeMemberId,
   activeTaskForceIds,
   onBrowseTools,
   installedPlugins = [],
@@ -94,8 +98,11 @@ export function OneOrgChart({
 }: {
   state: OneOrgState | null;
   installedAgents: InstalledAgent[];
+  cloudListings: MarketplaceListing[];
+  hubBookmarks: HubAgentBookmark[];
   locale: string;
   onAdd: (installedAgentId: string, displayName?: string, leaseExpiresAt?: string | null) => Promise<void>;
+  onMaterializeSource: (source: "cloud" | "hub", listing: MarketplaceListing) => Promise<InstalledAgent>;
   onRename: (member: OneOrgMember, displayName: string) => Promise<void>;
   onUpdate?: (member: OneOrgMember, displayName: string, collaborationStyle: OneOrgCollaborationStyle) => Promise<void>;
   onReplace: (member: OneOrgMember, installedAgentId: string, handoverNote?: string) => Promise<void>;
@@ -105,6 +112,7 @@ export function OneOrgChart({
   onReorder: (orderedIds: string[], expectedRevision: number) => Promise<void>;
   onFailure?: (member: OneOrgMember) => void;
   onOpenMember?: (member: OneOrgMember) => void;
+  activeMemberId?: string | null;
   activeTaskForceIds?: string[];
   onBrowseTools?: (member: OneOrgMember) => void;
   installedPlugins?: InstalledMcpServer[];
@@ -120,12 +128,15 @@ export function OneOrgChart({
   onOpenConversation?: (id: string) => void;
   onOpenHistory?: (item: OneOrgSearchItem) => void;
 }) {
+  const ko = locale === "ko";
   const [addOpen, setAddOpen] = useState(false);
   const [addTab, setAddTab] = useState<"my" | "cloud" | "hub">("my");
+  const [addSearch, setAddSearch] = useState("");
   const [selectedAgent, setSelectedAgent] = useState("");
   const [name, setName] = useState("");
   const [leaseDays, setLeaseDays] = useState("0");
   const [busy, setBusy] = useState(false);
+  const [addError, setAddError] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [editorMember, setEditorMember] = useState<OneOrgMember | null>(null);
   const [editStyle, setEditStyle] = useState<OneOrgCollaborationStyle>("default");
@@ -134,6 +145,7 @@ export function OneOrgChart({
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const [roleFilter, setRoleFilter] = useState<string | null>(null);
   const [toolsMember, setToolsMember] = useState<OneOrgMember | null>(null);
+  const [toolsTab, setToolsTab] = useState<"plugins" | "mcp">("plugins");
   const [toolsBusy, setToolsBusy] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -142,22 +154,31 @@ export function OneOrgChart({
   const archived = state?.members.filter((member) => Boolean(member.archivedAt)) || [];
   const insufficientCredits = active.filter((member) => member.creditState === "insufficient");
   const usedIds = useMemo(() => new Set(active.map((member) => member.installedAgentId)), [active]);
+  const usedSlugs = useMemo(() => new Set(active
+    .map((member) => installedAgents.find((agent) => agent.id === member.installedAgentId)?.slug.toLocaleLowerCase())
+    .filter((slug): slug is string => Boolean(slug))), [active, installedAgents]);
   const roleTerms: Record<string, string[]> = {
     "개발": ["개발", "dev", "engineer", "code", "software", "build"],
     "마케팅": ["마케팅", "marketing", "growth", "sales", "content"],
     "리서치": ["리서치", "research", "analysis", "analyst", "조사"],
   };
+  const replacementCandidates = installedAgents.filter((agent) => !usedIds.has(agent.id));
+  const addSearchValue = addSearch.trim().toLocaleLowerCase();
   const candidates = installedAgents.filter((agent) => {
     if (usedIds.has(agent.id)) return false;
+    if (agent.assetSource === "agent-cloud" || agent.assetSource === "hub") return false;
     if (!roleFilter) return true;
     const haystack = `${agent.name} ${agent.nameEn} ${agent.tagline} ${agent.taglineEn} ${agent.slug}`.toLocaleLowerCase();
     return (roleTerms[roleFilter] || []).some((term) => haystack.includes(term));
-  });
+  }).filter((agent) => !addSearchValue || `${agent.name} ${agent.nameEn} ${agent.tagline} ${agent.taglineEn} ${agent.slug}`.toLocaleLowerCase().includes(addSearchValue));
   const taskForce = (activeTaskForceIds || []).map((id) => installedAgents.find((agent) => agent.id === id)).filter(Boolean);
-  const remoteCandidates = installedAgents.filter((agent) => {
-    const source = agent.assetSource === "agent-cloud" ? "cloud" : agent.assetSource === "hub" ? "hub" : null;
-    return source === addTab && !usedIds.has(agent.id);
-  });
+  const hubBookmarkListings = hubBookmarks
+    .filter((bookmark) => bookmark.bookmarked !== false)
+    .map((bookmark) => ({ ...bookmark.listing, slug: bookmark.slug || bookmark.listing.slug }))
+    .filter((listing) => listing.entityKind !== "plugin" && listing.source !== "hub-plugin");
+  const remoteCandidates = (addTab === "cloud" ? cloudListings : addTab === "hub" ? hubBookmarkListings : [])
+    .filter((listing) => !usedSlugs.has(listing.slug.toLocaleLowerCase()))
+    .filter((listing) => !addSearchValue || `${listing.name} ${listing.nameEn} ${listing.tagline} ${listing.taglineEn} ${listing.slug}`.toLocaleLowerCase().includes(addSearchValue));
   const searchValue = searchQuery.trim().toLocaleLowerCase();
   const peopleResults = active.filter((member) => !searchValue || `${member.displayName} ${member.nameEn} ${member.statusLine} ${member.statusLineEn}`.toLocaleLowerCase().includes(searchValue));
   const matchingConversations = conversationResults.filter((item) => !searchValue || `${item.title} ${item.detail}`.toLocaleLowerCase().includes(searchValue)).slice(0, 4);
@@ -171,8 +192,71 @@ export function OneOrgChart({
     people: "People", conversations: "Conversations", history: "History",
     noPeople: "No staff members match.", noConversations: "No conversations match.", noHistory: "No history matches.",
   };
+  const addCopy = ko ? {
+    slots: "슬롯", used: "사용 중", remaining: "자리 남음", sourceAria: "에이전트 출처",
+    myAgents: "내 에이전트", installed: "로컬 에이전트", choose: "에이전트를 선택하세요", search: "에이전트 검색",
+    matchingRole: (role: string) => `${role} 역할에 맞는 에이전트`, noMatch: "설치된 에이전트 중 일치하는 역할이 없습니다.", showAll: "전체 목록 보기",
+    displayName: "표시 이름(선택)", displayPlaceholder: "예: 리서치 스태프", lease: "대여 기간", permanent: "상주 · 만료 없음",
+    modelAuto: "모델 · 자동 배정", modelPreferred: (backend: string) => `에이전트 권장 엔진 ${backend}을 우선 사용합니다.`, modelDefault: "One이 작업과 사용 가능한 런타임에 맞춰 고릅니다.",
+    nameNote: "이름만 바뀌며 원본 에이전트와 실행 기록은 유지됩니다.", team: "팀", single: "단일", add: "추가", cancel: "취소",
+    localNote: "이 Mac에 설치된 에이전트입니다. 상주 직원으로 추가되며 대여 기간이 없습니다.",
+    cloudNote: "내 Agent Cloud에 저장된 에이전트가 바로 표시됩니다. 상주 직원으로 추가되며 대여 기간이 없습니다.",
+    hubNote: "Hub에서 북마크한 에이전트만 표시됩니다. 상주 좌석에 붙일 때만 대여 기간을 정합니다.",
+    cloudEmpty: "Agent Cloud에 저장된 에이전트가 없습니다.",
+    hubEmpty: "북마크한 Hub 에이전트가 없습니다.", cloudBrowse: "Agent Cloud 관리", hubBrowse: "Hub에서 북마크하기",
+  } : {
+    slots: "Slots", used: "used", remaining: "available", sourceAria: "Agent source",
+    myAgents: "My agents", installed: "Local agent", choose: "Choose an agent", search: "Search agents",
+    matchingRole: (role: string) => `Agents matching ${role}`, noMatch: "No installed agent matches this role.", showAll: "View all agents",
+    displayName: "Display name (optional)", displayPlaceholder: "e.g. Research Staff", lease: "Lease", permanent: "Standing · No expiry",
+    modelAuto: "Model · Automatic", modelPreferred: (backend: string) => `Prefers the agent's recommended ${backend} runtime.`, modelDefault: "One chooses for each task from the available runtimes.",
+    nameNote: "Only the display name changes. The source agent and execution history stay intact.", team: "Team", single: "Single", add: "Add", cancel: "Cancel",
+    localNote: "These agents are installed on this Mac. They join as standing staff with no lease term.",
+    cloudNote: "Agents saved in your Agent Cloud appear immediately. They join as standing staff with no lease term.",
+    hubNote: "Only agents you bookmarked in Hub appear here. Choose a lease only when attaching one to a standing seat.",
+    cloudEmpty: "No agents are saved in Agent Cloud.",
+    hubEmpty: "No Hub agents are bookmarked.", cloudBrowse: "Manage Agent Cloud", hubBrowse: "Bookmark in Hub",
+  };
+  const editorCopy = ko ? {
+    edit: "편집", defaultTitle: "조직원 편집", basic: "기본 정보", orgName: "이 조직에서 부를 이름", original: "원본 담당", originalFallback: "설치된 에이전트의 역할 정의를 사용합니다.",
+    style: "협업 말투", styleDetail: "One이 이 직원에게 일을 넘길 때 적용", modelTools: "모델과 도구", autoDefault: "자동 배정이 기본", modelAuto: "모델 · 자동",
+    modelPreferred: (backend: string) => `권장 엔진 ${backend} 우선`, modelDefault: "One이 작업마다 사용 가능한 런타임을 배정",
+    modelHint: "직원을 추가할 때 모델을 강제로 고정하지 않습니다. 모델 고정은 팀 전체 실행 계획과 충돌할 수 있어 One 오케스트레이터 모델만 설정 메뉴에서 지정합니다.", openTools: "도구 설정 열기",
+    replace: "담당 교체", replaceDetail: "이름·대화·산출물은 유지", otherAgent: "다른 에이전트", chooseReplacement: "교체할 에이전트 선택",
+    handover: "전임 담당의 인수인계 메모를 새 담당에게 전달", replaceHint: "교체하면 전임자의 경험·기억과 그 담당 전용 루틴은 이어지지 않습니다.", replaceAction: "선택한 담당으로 교체",
+    archive: "해고 대신 보관", cancel: "취소", save: "저장",
+  } : {
+    edit: "Edit", defaultTitle: "Edit staff member", basic: "Basic information", orgName: "Name in this organisation", original: "Source agent", originalFallback: "Uses the installed agent's role definition.",
+    style: "Collaboration style", styleDetail: "Used when One hands work to this staff member", modelTools: "Model and tools", autoDefault: "Assigned automatically", modelAuto: "Model · Automatic",
+    modelPreferred: (backend: string) => `Prefers recommended runtime ${backend}`, modelDefault: "One assigns an available runtime for each task",
+    modelHint: "A staff member does not pin a model. Per-agent model pins can conflict with the team execution plan, so only the One orchestrator model is selected in Settings.", openTools: "Open tool settings",
+    replace: "Replace assignee", replaceDetail: "Keep the name, conversation, and outputs", otherAgent: "Replacement agent", chooseReplacement: "Choose a replacement",
+    handover: "Pass a handover note from the previous assignee", replaceHint: "The previous assignee's experience, memory, and dedicated routines do not transfer automatically.", replaceAction: "Replace with selected agent",
+    archive: "Archive instead of dismissing", cancel: "Cancel", save: "Save",
+  };
+  const collaborationStyles: Array<[OneOrgCollaborationStyle, string, string]> = ko ? [
+    ["default", "에이전트 기본", "원본 역할과 말투를 그대로 사용"],
+    ["concise", "간결하게", "결론과 다음 행동을 먼저"],
+    ["warm", "따뜻하게", "협업적이되 위험은 숨기지 않음"],
+    ["direct", "직설적으로", "막힘과 선택지를 구체적으로"],
+  ] : [
+    ["default", "Agent default", "Use the source role and voice"],
+    ["concise", "Concise", "Lead with the conclusion and next action"],
+    ["warm", "Warm", "Collaborative without hiding risks"],
+    ["direct", "Direct", "State blockers and choices precisely"],
+  ];
+  const toolsCopy = ko ? {
+    auto: "자동 선택", autoDetail: "일에 맞는 도구를 실행 시점에 고릅니다.", on: "켜짐", off: "꺼짐",
+    plugins: "플러그인", mcp: "MCP", noPlugins: "이 에이전트에 배정된 플러그인이 없습니다.", noMcp: "이 에이전트에 배정된 MCP 서버가 없습니다.",
+    permissionNote: "플러그인과 MCP는 다른 목록이지만 실행 시 같은 권한 승인을 거칩니다.",
+  } : {
+    auto: "Automatic selection", autoDetail: "Chooses the right tools when a task runs.", on: "On", off: "Off",
+    plugins: "Plugins", mcp: "MCP", noPlugins: "No plugins are assigned to this agent.", noMcp: "No MCP servers are assigned to this agent.",
+    permissionNote: "Plugins and MCP are separate lists, but both use the same permission approval at run time.",
+  };
   const selectedInstalled = toolsMember ? installedAgents.find((agent) => agent.id === toolsMember.installedAgentId) : undefined;
-  const selectedCandidate = selectedAgent ? installedAgents.find((agent) => agent.id === selectedAgent) : undefined;
+  const selectedCandidate = addTab === "my" && selectedAgent ? installedAgents.find((agent) => agent.id === selectedAgent) : undefined;
+  const selectedListing = addTab !== "my" && selectedAgent ? remoteCandidates.find((listing) => listing.slug === selectedAgent) : undefined;
   const editorInstalled = editorMember ? installedAgents.find((agent) => agent.id === editorMember.installedAgentId) : undefined;
   const assignedTools = (selectedInstalled?.mcpServers ?? []).map((serverId) => {
     const installed = installedPlugins.find((server) => server.id === serverId || server.catalogId === serverId);
@@ -192,17 +276,26 @@ export function OneOrgChart({
             : ("ready" as const),
     };
   });
+  const visibleAssignedTools = assignedTools.filter((tool) => toolsTab === "plugins" ? tool.source === "plugin" : tool.source === "custom");
 
   const submitAdd = async () => {
-    if (!selectedAgent || busy || !state || state.slots.available <= 0 || addTab !== "my") return;
+    if (!selectedAgent || busy || !state || state.slots.available <= 0) return;
+    if (addTab !== "my" && !selectedListing) return;
     setBusy(true);
+    setAddError(null);
     try {
-      const days = Number.parseInt(leaseDays, 10);
-      const leaseExpiresAt = Number.isFinite(days) && days > 0
+      const installed = addTab === "my"
+        ? selectedCandidate
+        : await onMaterializeSource(addTab, selectedListing!);
+      if (!installed) throw new Error(ko ? "에이전트를 찾을 수 없습니다." : "The selected agent could not be found.");
+      const days = addTab === "hub" ? Number.parseInt(leaseDays, 10) : 0;
+      const leaseExpiresAt = addTab === "hub" && Number.isFinite(days) && days > 0
         ? new Date(Date.now() + days * 24 * 60 * 60 * 1_000).toISOString()
         : null;
-      await onAdd(selectedAgent, name.trim() || undefined, leaseExpiresAt);
-      setSelectedAgent(""); setName(""); setLeaseDays("0"); setRoleFilter(null); setAddOpen(false);
+      await onAdd(installed.id, name.trim() || undefined, leaseExpiresAt);
+      setSelectedAgent(""); setName(""); setLeaseDays("0"); setAddSearch(""); setRoleFilter(null); setAddOpen(false);
+    } catch (cause) {
+      setAddError(cause instanceof Error ? cause.message : String(cause));
     } finally { setBusy(false); }
   };
 
@@ -253,7 +346,7 @@ export function OneOrgChart({
           </div>
         </>}
         {active.map((member) => (
-          <div className={styles.row} key={member.id} data-status={member.statusKind} draggable role="button" tabIndex={0} aria-label={`${member.displayName} · ${statusLine(member, locale)}`} onClick={() => onOpenMember?.(member)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onOpenMember?.(member); } }} onDragStart={() => setDraggedId(member.id)} onDragEnd={() => setDraggedId(null)} onDragOver={(event) => event.preventDefault()} onDrop={() => {
+          <div className={styles.row} key={member.id} data-status={member.statusKind} data-active={activeMemberId === member.installedAgentId ? "true" : "false"} draggable role="button" tabIndex={0} aria-current={activeMemberId === member.installedAgentId ? "page" : undefined} aria-label={`${member.displayName} · ${statusLine(member, locale)}`} onClick={() => onOpenMember?.(member)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onOpenMember?.(member); } }} onDragStart={() => setDraggedId(member.id)} onDragEnd={() => setDraggedId(null)} onDragOver={(event) => event.preventDefault()} onDrop={() => {
             if (!draggedId || draggedId === member.id || !state) return;
             const ordered = active.map((item) => item.id);
             const from = ordered.indexOf(draggedId); const to = ordered.indexOf(member.id);
@@ -318,100 +411,127 @@ export function OneOrgChart({
         closeOnEscape={!busy}
         size="wide"
         eyebrow={locale === "ko" ? "조직원 설정" : "Staff settings"}
-        title={editorMember ? `${editorMember.displayName} 편집` : "조직원 편집"}
+        title={editorMember ? `${editorMember.displayName} · ${editorCopy.edit}` : editorCopy.defaultTitle}
         titleId="one-org-member-editor-title"
         ariaLabelledBy="one-org-member-editor-title"
         description={locale === "ko" ? "이름과 협업 방식은 이 조직에만 적용됩니다. 원본 에이전트 패키지는 바뀌지 않습니다." : "Name and collaboration style apply only to this organisation. The source agent package stays unchanged."}
       >
         {editorMember && <div className={styles.memberEditor}>
           <section className={styles.editorSection}>
-            <div className={styles.editorHeading}><strong>기본 정보</strong><span>{memberKind(editorMember, installedAgents, locale)} · {sourceLabel(editorMember.source, locale)}</span></div>
-            <label className={styles.editorField}>이 조직에서 부를 이름<input value={editName} onChange={(event) => setEditName(event.target.value)} maxLength={80} /></label>
-            <div className={styles.editorReadOnly}><span>원본 담당</span><strong>{editorInstalled?.localDisplayName || editorInstalled?.name || editorMember.agentSlug}</strong><small>{editorInstalled?.tagline || editorInstalled?.taglineEn || "설치된 에이전트의 역할 정의를 사용합니다."}</small></div>
+            <div className={styles.editorHeading}><strong>{editorCopy.basic}</strong><span>{memberKind(editorMember, installedAgents, locale)} · {sourceLabel(editorMember.source, locale)}</span></div>
+            <label className={styles.editorField}>{editorCopy.orgName}<input value={editName} onChange={(event) => setEditName(event.target.value)} maxLength={80} /></label>
+            <div className={styles.editorReadOnly}><span>{editorCopy.original}</span><strong>{editorInstalled?.localDisplayName || editorInstalled?.name || editorMember.agentSlug}</strong><small>{(ko ? editorInstalled?.tagline : editorInstalled?.taglineEn) || editorInstalled?.tagline || editorInstalled?.taglineEn || editorCopy.originalFallback}</small></div>
           </section>
 
           <section className={styles.editorSection}>
-            <div className={styles.editorHeading}><strong>협업 말투</strong><span>One이 이 직원에게 일을 넘길 때 적용</span></div>
-            <div className={styles.styleOptions} role="radiogroup" aria-label="협업 말투">
-              {([
-                ["default", "에이전트 기본", "원본 역할과 말투를 그대로 사용"],
-                ["concise", "간결하게", "결론과 다음 행동을 먼저"],
-                ["warm", "따뜻하게", "협업적이되 위험은 숨기지 않음"],
-                ["direct", "직설적으로", "막힘과 선택지를 구체적으로"],
-              ] as Array<[OneOrgCollaborationStyle, string, string]>).map(([value, label, detail]) => <button key={value} type="button" role="radio" aria-checked={editStyle === value} data-active={editStyle === value ? "true" : "false"} onClick={() => setEditStyle(value)}><span><strong>{label}</strong><small>{detail}</small></span>{editStyle === value && <span aria-hidden="true"><IconCheck size={13} /></span>}</button>)}
+            <div className={styles.editorHeading}><strong>{editorCopy.style}</strong><span>{editorCopy.styleDetail}</span></div>
+            <div className={styles.styleOptions} role="radiogroup" aria-label={editorCopy.style}>
+              {collaborationStyles.map(([value, label, detail]) => <button key={value} type="button" role="radio" aria-checked={editStyle === value} data-active={editStyle === value ? "true" : "false"} onClick={() => setEditStyle(value)}><span><strong>{label}</strong><small>{detail}</small></span>{editStyle === value && <span aria-hidden="true"><IconCheck size={13} /></span>}</button>)}
             </div>
           </section>
 
           <section className={styles.editorSection}>
-            <div className={styles.editorHeading}><strong>모델과 도구</strong><span>자동 배정이 기본</span></div>
+            <div className={styles.editorHeading}><strong>{editorCopy.modelTools}</strong><span>{editorCopy.autoDefault}</span></div>
             <div className={styles.modelPolicy}>
               <IconSparkles size={15} />
-              <div><strong>모델 · 자동</strong><span>{editorInstalled?.preferredBackend ? `권장 엔진 ${editorInstalled.preferredBackend} 우선` : "One이 작업마다 사용 가능한 런타임을 배정"}</span></div>
+              <div><strong>{editorCopy.modelAuto}</strong><span>{editorInstalled?.preferredBackend ? editorCopy.modelPreferred(editorInstalled.preferredBackend) : editorCopy.modelDefault}</span></div>
             </div>
-            <p className={styles.editorHint}>직원을 추가할 때 모델을 강제로 고정하지 않습니다. 모델 고정은 팀 전체 실행 계획과 충돌할 수 있어 One 오케스트레이터 모델만 설정 메뉴에서 지정합니다.</p>
-            {(onBrowseTools || onConnectTool) && <button type="button" className={styles.secondaryAction} onClick={() => { setToolsMember(editorMember); setEditorMember(null); }}>도구 설정 열기</button>}
+            <p className={styles.editorHint}>{editorCopy.modelHint}</p>
+            {(onBrowseTools || onConnectTool) && <button type="button" className={styles.secondaryAction} onClick={() => { setToolsMember(editorMember); setEditorMember(null); }}>{editorCopy.openTools}</button>}
           </section>
 
           <section className={styles.editorSection}>
-            <div className={styles.editorHeading}><strong>담당 교체</strong><span>이름·대화·산출물은 유지</span></div>
-            <label className={styles.editorField}>다른 에이전트<select value={replaceId} onChange={(event) => setReplaceId(event.target.value)}><option value="">교체할 에이전트 선택</option>{candidates.map((agent) => <option key={agent.id} value={agent.id}>{agent.localDisplayName || agent.name}</option>)}</select></label>
-            <label className={styles.editorCheck}><input type="checkbox" checked={handover} onChange={(event) => setHandover(event.target.checked)} /> 전임 담당의 인수인계 메모를 새 담당에게 전달</label>
-            <p className={styles.editorHint}>교체하면 전임자의 경험·기억과 그 담당 전용 루틴은 이어지지 않습니다.</p>
-            <button type="button" className={styles.secondaryAction} disabled={!replaceId || busy} onClick={() => void submitReplace(editorMember, replaceId)}>선택한 담당으로 교체</button>
+            <div className={styles.editorHeading}><strong>{editorCopy.replace}</strong><span>{editorCopy.replaceDetail}</span></div>
+            <label className={styles.editorField}>{editorCopy.otherAgent}<select value={replaceId} onChange={(event) => setReplaceId(event.target.value)}><option value="">{editorCopy.chooseReplacement}</option>{replacementCandidates.map((agent) => <option key={agent.id} value={agent.id}>{agent.localDisplayName || agent.name}</option>)}</select></label>
+            <label className={styles.editorCheck}><input type="checkbox" checked={handover} onChange={(event) => setHandover(event.target.checked)} /> {editorCopy.handover}</label>
+            <p className={styles.editorHint}>{editorCopy.replaceHint}</p>
+            <button type="button" className={styles.secondaryAction} disabled={!replaceId || busy} onClick={() => void submitReplace(editorMember, replaceId)}>{editorCopy.replaceAction}</button>
           </section>
 
           <div className={styles.editorActions}>
-            <button type="button" className={styles.archiveAction} disabled={busy} onClick={() => { void onArchive(editorMember).then(() => setEditorMember(null)); }}>해고 대신 보관</button>
+            <button type="button" className={styles.archiveAction} disabled={busy} onClick={() => { void onArchive(editorMember).then(() => setEditorMember(null)); }}>{editorCopy.archive}</button>
             <span />
-            <button type="button" className={styles.secondaryAction} disabled={busy} onClick={() => setEditorMember(null)}>취소</button>
-            <button type="button" className={styles.primaryAction} disabled={busy || !editName.trim()} onClick={() => void submitMemberUpdate()}>저장</button>
+            <button type="button" className={styles.secondaryAction} disabled={busy} onClick={() => setEditorMember(null)}>{editorCopy.cancel}</button>
+            <button type="button" className={styles.primaryAction} disabled={busy || !editName.trim()} onClick={() => void submitMemberUpdate()}>{editorCopy.save}</button>
           </div>
         </div>}
       </OneBottomSheet>
 
-      {addOpen && <div className={styles.overlay} role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) { setRoleFilter(null); setAddOpen(false); } }}>
-        <div className={styles.dialog} role="dialog" aria-modal="true" aria-labelledby="one-org-add-title">
-          <div className={styles.dialogHeader}><h3 id="one-org-add-title">{locale === "ko" ? "에이전트 추가" : "Add agent"}</h3><button type="button" aria-label={locale === "ko" ? "에이전트 추가 닫기" : "Close add agent"} onClick={() => { setRoleFilter(null); setAddOpen(false); }}><IconClose size={14} /></button></div>
-          <p className={styles.slotNote}>슬롯 {state?.slots.used ?? 1}/{state?.slots.capacity ?? 1} 사용 중 · {state?.slots.available ?? 0}자리 남음</p>
-          <div className={styles.tabs} role="tablist" aria-label="에이전트 출처">{([['my', 'My agents'], ['cloud', 'Cloud'], ['hub', 'Hub']] as const).map(([key, label]) => <button key={key} type="button" role="tab" aria-selected={addTab === key} data-active={addTab === key} onClick={() => setAddTab(key)}>{label}</button>)}</div>
-          {addTab === "my" ? <>
-            <label className={styles.field}>설치된 에이전트<select value={selectedAgent} onChange={(event) => setSelectedAgent(event.target.value)}><option value="">{roleFilter ? `${roleFilter} 역할에 맞는 에이전트` : "선택하세요"}</option>{candidates.map((agent) => <option key={agent.id} value={agent.id}>{agent.localDisplayName || agent.name}{agent.assetSource === "agent-cloud" ? " · Cloud" : agent.assetSource === "hub" ? " · Hub" : " · Local"}</option>)}</select></label>
-            {roleFilter && candidates.length === 0 && <p className={styles.note}>설치된 에이전트 중 일치하는 역할이 없습니다. <button type="button" className={styles.inlineLink} onClick={() => setRoleFilter(null)}>전체 목록 보기</button></p>}
-            <label className={styles.field}>표시 이름(선택)<input value={name} onChange={(event) => setName(event.target.value)} placeholder="예: 리서치 스태프" /></label>
-            <label className={styles.field}>대여 기간<select value={leaseDays} onChange={(event) => setLeaseDays(event.target.value)}><option value="0">상주 · 만료 없음</option><option value="7">7일</option><option value="30">30일</option></select></label>
-            {selectedCandidate && <div className={styles.modelPolicy}>
-              <IconSparkles size={15} />
-              <div><strong>모델 · 자동 배정</strong><span>{selectedCandidate.preferredBackend ? `에이전트 권장 엔진 ${selectedCandidate.preferredBackend}을 우선 사용합니다.` : "One이 작업과 사용 가능한 런타임에 맞춰 고릅니다."}</span></div>
-            </div>}
-            <p className={styles.note}>이름만 바뀌며 원본 에이전트와 실행 기록은 유지됩니다.</p>
-          </> : <div className={styles.remoteEmpty}>
-            {remoteCandidates.length > 0 ? <div className={styles.remoteList} role="list">{remoteCandidates.slice(0, 8).map((agent) => <div className={styles.remoteCard} role="listitem" key={agent.id}><OneAgentPortrait status="quiet" label={agent.name} tone={agent.tone} size="small" /><div><strong>{agent.localDisplayName || agent.name}</strong><small>{agent.kind === "team" ? "팀" : "단일"} · {addTab === "cloud" ? "Cloud" : "Hub"} · {agent.tagline || agent.taglineEn}</small></div><button type="button" onClick={() => { setSelectedAgent(agent.id); setName(agent.localDisplayName || agent.name); setLeaseDays(addTab === "hub" ? "7" : "0"); setAddTab("my"); }}>추가</button></div>)}</div> : <span>{addTab === "cloud" ? "Agent Cloud에 저장된 후보가 없습니다. 내 에이전트를 열어 설치한 뒤 붙일 수 있습니다." : "Hub 후보는 먼저 설치하거나 이번 작업에만 소환할 수 있습니다."}</span>}
-            <button type="button" onClick={() => onBrowseSource?.(addTab)}>{addTab === "cloud" ? "내 에이전트 열기" : "Hub 검색 열기"}</button>
-          </div>}
-          <div className={styles.dialogActions}><button type="button" onClick={() => { setRoleFilter(null); setAddOpen(false); }}>취소</button><button type="button" className={styles.primary} disabled={!selectedAgent || busy || addTab !== "my"} onClick={() => void submitAdd()}>추가</button></div>
+      <OneBottomSheet
+        open={addOpen}
+        onClose={() => { if (!busy) { setSelectedAgent(""); setName(""); setLeaseDays("0"); setAddSearch(""); setAddError(null); setRoleFilter(null); setAddOpen(false); } }}
+        closeLabel={locale === "ko" ? "에이전트 추가 닫기" : "Close add agent"}
+        closeDisabled={busy}
+        closeOnBackdrop={!busy}
+        closeOnEscape={!busy}
+        size="wide"
+        panelClassName={styles.addDialog}
+        bodyClassName={styles.addDialogBody}
+        eyebrow={`${addCopy.slots} ${state?.slots.used ?? 1}/${state?.slots.capacity ?? 1} ${addCopy.used} · ${state?.slots.available ?? 0} ${addCopy.remaining}`}
+        title={locale === "ko" ? "에이전트 추가" : "Add agent"}
+        titleId="one-org-add-title"
+        ariaLabelledBy="one-org-add-title"
+        description={addTab === "my" ? addCopy.localNote : addTab === "cloud" ? addCopy.cloudNote : addCopy.hubNote}
+      >
+        <div className={styles.addSheet}>
+          <div className={styles.tabs} role="tablist" aria-label={addCopy.sourceAria}>{([['my', addCopy.myAgents], ['cloud', 'Cloud'], ['hub', 'Hub']] as const).map(([key, label]) => <button key={key} type="button" role="tab" aria-selected={addTab === key} data-active={addTab === key} onClick={() => { setAddTab(key); setSelectedAgent(""); setName(""); setLeaseDays(key === "hub" ? "7" : "0"); setAddError(null); }}>{label}</button>)}</div>
+          <label className={styles.addSearch}><IconSearch size={15} /><input value={addSearch} onChange={(event) => setAddSearch(event.target.value)} placeholder={addCopy.search} aria-label={addCopy.search} />{addSearch && <button type="button" onClick={() => setAddSearch("")} aria-label={locale === "ko" ? "검색 지우기" : "Clear search"}><IconClose size={14} /></button>}</label>
+          <p className={styles.sourceNote}>{addTab === "my" ? addCopy.localNote : addTab === "cloud" ? addCopy.cloudNote : addCopy.hubNote}</p>
+
+          {addTab === "my" ? (
+            candidates.length > 0 ? <div className={styles.candidateGrid} role="list" aria-label={addCopy.installed}>{candidates.map((agent) => <button type="button" role="listitem" key={agent.id} data-active={selectedAgent === agent.id ? "true" : "false"} onClick={() => { setSelectedAgent(agent.id); setName(""); setAddError(null); }}><OneAgentPortrait status="quiet" label={agent.localDisplayName || agent.name} tone={agent.tone} size="small" /><span><strong>{agent.localDisplayName || (ko ? agent.name : agent.nameEn) || agent.name}</strong><small>{agent.kind === "team" ? addCopy.team : addCopy.single} · {ko ? "로컬" : "Local"}</small><em>{(ko ? agent.tagline : agent.taglineEn) || agent.tagline || agent.taglineEn}</em></span>{selectedAgent === agent.id && <IconCheck size={15} />}</button>)}</div>
+              : <div className={styles.sheetEmpty}>{roleFilter ? addCopy.noMatch : (ko ? "사용 가능한 로컬 에이전트가 없습니다." : "No local agents are available.")}{roleFilter && <button type="button" className={styles.inlineLink} onClick={() => setRoleFilter(null)}>{addCopy.showAll}</button>}</div>
+          ) : remoteCandidates.length > 0 ? (
+            <div className={styles.candidateGrid} role="list" aria-label={addTab === "cloud" ? "Cloud" : "Hub"}>{remoteCandidates.map((listing) => <button type="button" role="listitem" key={`${addTab}:${listing.entityKind || "agent"}:${listing.slug}`} data-active={selectedAgent === listing.slug ? "true" : "false"} onClick={() => { setSelectedAgent(listing.slug); setName(""); setLeaseDays(addTab === "hub" ? "7" : "0"); setAddError(null); }}><OneAgentPortrait status="quiet" label={(ko ? listing.name : listing.nameEn) || listing.name || listing.slug} size="small" /><span><strong>{(ko ? listing.name : listing.nameEn) || listing.name || listing.slug}</strong><small>{listing.entityKind === "team" || (listing.agentCount ?? 0) > 1 ? addCopy.team : addCopy.single} · {addTab === "cloud" ? "Cloud" : "Hub"}</small><em>{(ko ? listing.tagline : listing.taglineEn) || listing.tagline || listing.taglineEn}</em></span>{selectedAgent === listing.slug && <IconCheck size={15} />}</button>)}</div>
+          ) : <div className={styles.sheetEmpty}><span>{addTab === "cloud" ? addCopy.cloudEmpty : addCopy.hubEmpty}</span>{onBrowseSource && <button type="button" onClick={() => onBrowseSource(addTab)}>{addTab === "cloud" ? addCopy.cloudBrowse : addCopy.hubBrowse}</button>}</div>}
+
+          {(selectedCandidate || selectedListing) && <section className={styles.selectedAgentPanel}>
+            <label className={styles.editorField}>{addCopy.displayName}<input value={name} onChange={(event) => setName(event.target.value)} placeholder={addCopy.displayPlaceholder} /></label>
+            {addTab === "hub" && <label className={styles.editorField}>{addCopy.lease}<select value={leaseDays} onChange={(event) => setLeaseDays(event.target.value)}><option value="7">7 {ko ? "일" : "days"}</option><option value="30">30 {ko ? "일" : "days"}</option></select></label>}
+            <div className={styles.modelPolicy}><IconSparkles size={15} /><div><strong>{addCopy.modelAuto}</strong><span>{selectedCandidate?.preferredBackend ? addCopy.modelPreferred(selectedCandidate.preferredBackend) : addCopy.modelDefault}</span></div></div>
+            <p className={styles.note}>{addCopy.nameNote}</p>
+          </section>}
+          {addError && <p className={styles.addError} role="alert">{addError}</p>}
+          <div className={styles.sheetActions}><button type="button" disabled={busy} onClick={() => { setSelectedAgent(""); setName(""); setLeaseDays("0"); setAddSearch(""); setAddError(null); setRoleFilter(null); setAddOpen(false); }}>{addCopy.cancel}</button><button type="button" className={styles.primaryAction} disabled={!selectedAgent || busy} onClick={() => void submitAdd()}>{busy ? (ko ? "추가 중…" : "Adding…") : addCopy.add}</button></div>
         </div>
-      </div>}
-      {toolsMember && <div className={styles.overlay} role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setToolsMember(null); }}>
-        <div className={styles.dialog} role="dialog" aria-modal="true" aria-labelledby="one-org-tools-title">
-          <div className={styles.dialogHeader}><h3 id="one-org-tools-title">{toolsMember.displayName} · {locale === "ko" ? "도구" : "Tools"}</h3><button type="button" onClick={() => setToolsMember(null)} aria-label={locale === "ko" ? "도구 닫기" : "Close tools"}><IconClose size={14} /></button></div>
+      </OneBottomSheet>
+
+      <OneBottomSheet
+        open={Boolean(toolsMember)}
+        onClose={() => { if (!toolsBusy) setToolsMember(null); }}
+        closeLabel={locale === "ko" ? "도구 닫기" : "Close tools"}
+        closeDisabled={toolsBusy}
+        closeOnBackdrop={!toolsBusy}
+        closeOnEscape={!toolsBusy}
+        size="full"
+        panelClassName={styles.toolsDialog}
+        bodyClassName={styles.toolsDialogBody}
+        eyebrow={toolsMember?.displayName}
+        title={locale === "ko" ? "도구" : "Tools"}
+        titleId="one-org-tools-title"
+        ariaLabelledBy="one-org-tools-title"
+        description={locale === "ko" ? "플러그인과 MCP를 나눠 보고, 이 동료가 실행 시 사용할 도구를 관리합니다." : "Review Plugins and MCP separately, then manage the tools this teammate may use at run time."}
+      >
+        {toolsMember && <div className={styles.toolsSheet}>
           <div className={styles.autoSelectRow}>
-            <div><strong>자동 선택</strong><small>일에 맞는 도구를 실행 시점에 고릅니다.</small></div>
+            <div><strong>{toolsCopy.auto}</strong><small>{toolsCopy.autoDetail}</small></div>
             <button type="button" className={styles.toggle} data-on={toolsMember.autoSelectTools ? "true" : "false"} disabled={!onSetAutoSelect || toolsBusy} onClick={() => {
               if (!onSetAutoSelect) return;
               const next = !toolsMember.autoSelectTools;
               setToolsBusy(true);
               void onSetAutoSelect(toolsMember, next).then(() => setToolsMember((current) => current ? { ...current, autoSelectTools: next } : current)).finally(() => setToolsBusy(false));
-            }} aria-pressed={toolsMember.autoSelectTools}>{toolsMember.autoSelectTools ? "켜짐" : "꺼짐"}</button>
+            }} aria-pressed={toolsMember.autoSelectTools}>{toolsMember.autoSelectTools ? toolsCopy.on : toolsCopy.off}</button>
           </div>
+          <div className={styles.builtInTool}><span className={styles.toolMark}><IconCode size={15} /></span><div><strong>{locale === "ko" ? "파일 · 터미널" : "Files · Terminal"}</strong><small>{locale === "ko" ? "내장 도구 · 항상 사용 가능" : "Built-in tools · Always available"}</small></div><span className={styles.toolState}>{locale === "ko" ? "준비됨" : "Ready"}</span></div>
+          <div className={styles.toolTabs} role="tablist" aria-label={locale === "ko" ? "도구 종류" : "Tool type"}><button type="button" role="tab" aria-selected={toolsTab === "plugins"} data-active={toolsTab === "plugins" ? "true" : "false"} onClick={() => setToolsTab("plugins")}>{toolsCopy.plugins}</button><button type="button" role="tab" aria-selected={toolsTab === "mcp"} data-active={toolsTab === "mcp" ? "true" : "false"} onClick={() => setToolsTab("mcp")}>{toolsCopy.mcp}</button></div>
           <div className={styles.toolList}>
-            <div className={styles.toolRow}><span className={styles.toolMark}><IconCode size={14} /></span><div><strong>{locale === "ko" ? "파일 · 터미널" : "Files · Terminal"}</strong><small>{locale === "ko" ? "내장 · 항상 사용 가능" : "Built in · Always available"}</small></div><span className={styles.toolState}>{locale === "ko" ? "준비됨" : "Ready"}</span></div>
-            {assignedTools.length === 0 && <p className={styles.note}>이 에이전트에 배정된 외부 MCP 도구가 없습니다.</p>}
-            {assignedTools.map((tool) => <div className={styles.toolRow} key={tool.id}><span className={styles.toolMark}><IconApps size={14} /></span><div><strong>{locale === "ko" ? tool.name : tool.nameEn}</strong><small>{tool.source === "plugin" ? (locale === "ko" ? "플러그인" : "Plugin") : (locale === "ko" ? "내 MCP" : "My MCP")} · {tool.state === "ready" ? (locale === "ko" ? "연결됨" : "Connected") : tool.state === "disabled" ? (locale === "ko" ? "꺼짐" : "Off") : (locale === "ko" ? "연결 필요" : "Connection needed")}</small></div>{tool.state === "needs-connection" && <button type="button" className={styles.toolAction} onClick={() => onConnectTool?.(toolsMember, tool.id)}>{locale === "ko" ? "연결 필요" : "Connect"}</button>}<span className={styles.toolState}>{tool.state === "ready" ? (locale === "ko" ? "준비됨" : "Ready") : tool.state === "disabled" ? (locale === "ko" ? "꺼짐" : "Off") : (locale === "ko" ? "확인 필요" : "Review")}</span></div>)}
+            {visibleAssignedTools.length === 0 && <p className={styles.sheetEmpty}>{toolsTab === "plugins" ? toolsCopy.noPlugins : toolsCopy.noMcp}</p>}
+            {visibleAssignedTools.map((tool) => <div className={styles.toolRow} key={tool.id}><span className={styles.toolMark}><IconApps size={14} /></span><div><strong>{locale === "ko" ? tool.name : tool.nameEn}</strong><small>{toolsTab === "plugins" ? toolsCopy.plugins : toolsCopy.mcp} · {tool.state === "ready" ? (locale === "ko" ? "연결됨" : "Connected") : tool.state === "disabled" ? (locale === "ko" ? "꺼짐" : "Off") : (locale === "ko" ? "연결 필요" : "Connection needed")}</small></div>{tool.state === "needs-connection" && <button type="button" className={styles.toolAction} onClick={() => { const member = toolsMember; setToolsMember(null); onConnectTool?.(member, tool.id); }}>{locale === "ko" ? "연결" : "Connect"}</button>}<span className={styles.toolState}>{tool.state === "ready" ? (locale === "ko" ? "준비됨" : "Ready") : tool.state === "disabled" ? (locale === "ko" ? "꺼짐" : "Off") : (locale === "ko" ? "확인 필요" : "Review")}</span></div>)}
           </div>
-          <p className={styles.note}>플러그인과 내 MCP는 동일한 MCP 게이트와 권한 승인을 거칩니다.</p>
-          <div className={styles.dialogActions}><button type="button" onClick={() => onConnectTool?.(toolsMember)}><IconPlus size={13} />{locale === "ko" ? "도구 붙이기" : "Attach tool"}</button><button type="button" className={styles.primary} onClick={() => setToolsMember(null)}>{locale === "ko" ? "닫기" : "Close"}</button></div>
-        </div>
-      </div>}
+          <p className={styles.note}>{toolsCopy.permissionNote}</p>
+          <div className={styles.sheetActions}><button type="button" onClick={() => { const member = toolsMember; setToolsMember(null); if (toolsTab === "plugins") onBrowseTools?.(member); else onConnectTool?.(member); }}><IconPlus size={13} />{toolsTab === "plugins" ? (locale === "ko" ? "플러그인 관리" : "Manage plugins") : (locale === "ko" ? "MCP 관리" : "Manage MCP")}</button><button type="button" className={styles.primaryAction} onClick={() => setToolsMember(null)}>{locale === "ko" ? "닫기" : "Close"}</button></div>
+        </div>}
+      </OneBottomSheet>
     </section>
   );
 }

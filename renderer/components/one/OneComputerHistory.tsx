@@ -102,7 +102,7 @@ export function OneComputerHistory({
   state: ComputerHistoryState | null;
   locale: string;
   onConsent: (enabled: boolean) => Promise<void>;
-  onClear: () => Promise<void>;
+  onClear: () => void;
   onAsk: () => void;
   onReviewRecommendation?: (entry: ComputerHistoryEntry) => void;
   /** Browser-only visual fixture; the Desktop bridge always supplies real state. */
@@ -146,7 +146,7 @@ export function OneComputerHistory({
       <header className={styles.header}>
         <div><h2>{copy.title} <span title={copy.localOnly} aria-label={copy.localOnly}><IconShield size={10} /></span></h2><p>{copy.subtitle}</p></div>
         <div className={styles.headerActions}>
-          <button type="button" onClick={() => void onClear()} disabled={!state?.entries.length}>{copy.clear} <IconChevronDown size={10} /></button>
+          <button type="button" onClick={onClear} disabled={!state?.entries.length}>{copy.clear} <IconChevronDown size={10} /></button>
           <button type="button" onClick={onAsk}><IconChat size={12} /> {copy.ask}</button>
         </div>
       </header>

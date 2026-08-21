@@ -559,6 +559,7 @@ const api: AgentlasIpc = {
     listByFirm: (firmId: string) => ipcRenderer.invoke("chats:listByFirm", firmId),
     get: (id: string) => ipcRenderer.invoke("chats:get", id),
     create: (input) => ipcRenderer.invoke("chats:create", input),
+    openOneMember: (input) => ipcRenderer.invoke("chats:openOneMember", input),
     rename: (id: string, title: string) => ipcRenderer.invoke("chats:rename", id, title),
     archive: (id: string) => ipcRenderer.invoke("chats:archive", id),
     unarchive: (id: string) => ipcRenderer.invoke("chats:unarchive", id),

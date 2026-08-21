@@ -59,7 +59,7 @@ const DICT = {
       "사용자의 인터페이스 언어는 한국어입니다. 사용자가 어떤 언어로 입력하든 항상 한국어로 답변하세요. 사용자가 이번 메시지에서 다른 언어로 답하라고 명시적으로 요청할 때만 그 언어를 쓰세요.",
     sysHeader: "당신은 Agentlas Desktop에서 사용자가 설치한 전문 어시스턴트입니다.",
     sysToolsOff:
-      "현재 권한에서는 도구 호출이나 코드 실행을 하지 않습니다. 브라우저/MCP 도구가 필요하면 write 또는 full 권한으로 실행하세요.",
+      "읽기 전용 권한입니다. 현재 작업 폴더의 파일은 읽고 검색하고 분석할 수 있지만 파일이나 외부 상태를 바꾸면 안 됩니다. 읽기 전용 샌드박스 안에서 필요한 조회 도구를 사용하고, 쓰기가 필요할 때만 write 또는 full 권한이 필요하다고 말하세요.",
     sysAgentDef: "── 에이전트 정의 ──",
     histPrev: "── 이전 대화 ──",
     histThis: "── 이번 요청 ──",
@@ -118,7 +118,7 @@ const DICT = {
       "The user's interface language is English. Always reply in English, regardless of the language the user writes in. Only use another language if the user explicitly asks you to in this message.",
     sysHeader: "You are a specialist assistant installed by the user in Agentlas Desktop.",
     sysToolsOff:
-      "Do not invoke tools or execute code in the current permission mode. Switch to write or full permission when browser/MCP tools are needed.",
+      "Read-only permission is selected. You may read, search, and analyze files in the current working folder, but must not change files or external state. Use the available inspection tools inside the read-only sandbox; ask for write or full permission only when the task actually requires a change.",
     sysAgentDef: "── Agent definition ──",
     histPrev: "── Previous turns ──",
     histThis: "── Current request ──",

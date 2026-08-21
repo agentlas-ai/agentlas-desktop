@@ -24,7 +24,6 @@ import {
   IconCheck,
   IconClose,
   IconFileUp,
-  IconFolder,
   IconMoreHorizontal,
   IconPanelRight,
   IconPlus,
@@ -38,6 +37,8 @@ import {
 import { grantForDroppedFile, grantForPastedAttachment, grantForPastedImage, ipc, ipcEvents } from "@/lib/ipc";
 import { tFor, useT } from "@/lib/i18n";
 import { visibleAgents } from "@/lib/agent-visibility";
+import { loadViewData, readViewData, writeViewData } from "@/lib/view-data-cache";
+import { onHubBookmarkChange } from "@/lib/hub-bookmark-events";
 import { pickLocalized } from "@/lib/i18n";
 import { extractQuestions } from "@/lib/ask-question";
 import {
@@ -110,7 +111,7 @@ import {
   type OneAttachmentSafeItem,
   type PreparedOneAttachments,
 } from "@shared/one-attachments";
-import type { FsPathGrant, OrchestrationTarget, RuntimeSelection, RuntimeStatus } from "@shared/types";
+import type { FsPathGrant, HubAgentBookmark, MarketplaceListing, OrchestrationTarget, RuntimeSelection, RuntimeStatus } from "@shared/types";
 import { ONE_BRIEFING_CONTRACT_VERSION, isOneProactiveBriefing } from "@shared/one-briefing";
 import {
   isPendingConfirmationSnoozed,
@@ -143,11 +144,11 @@ import { OneMemorySheet } from "./OneMemorySheet";
 import { OneMemoryMap } from "./OneMemoryMap";
 import { OneMemoryCandidateCard } from "./OneMemoryCandidateCard";
 import { OneProfileSheet } from "./OneProfileSheet";
-import { OneProjectSessionSheet } from "./OneProjectSessionSheet";
 import { OneSuggestionCard } from "./OneSuggestionCard";
 import { OneGrowthCard } from "./OneGrowthCard";
 import { OneActivityArtifactRail } from "./OneActivityTimeline";
 import { OneOrgChart, type OneOrgSearchItem } from "./OneOrgChart";
+import { OneAgentPortrait } from "./OneAgentPortrait";
 import { OneComputerHistory } from "./OneComputerHistory";
 import { OneSettingsRail, OneSettingsSheet, type OneSettingsKey } from "./OneSettings";
 import { OneTeamUpgradeIntro } from "./OneTeamUpgradeIntro";
@@ -372,45 +373,6 @@ type UiMessage = {
   /** Durable rows only (ISO). Optimistic rows have none and sort after every durable row. */
   createdAt?: string;
 };
-
-const ONE_SEQUENCE_STEP_RE = /(?:^|\s)(?:ONE-SESSION-QA-[\w-]+\s*\/\s*)?0*(\d{1,3})\s*\/\s*(\d{1,3})(?:\s*(?:작업|task))?(?=\s*(?:[.:—-]|$))/i;
-const ONE_QA_SEQUENCE_STEP_RE = /(?:^|\s)ONE-SESSION-QA-[\w-]+\s*\/\s*0*(\d{1,3})(?=\s*(?:[.:—-]|$))/i;
-
-/**
- * A Task title is deliberately stable in the canonical store, but a long
- * One session can advance through many numbered turns. The toolbar is live
- * progress chrome, so it must never keep advertising the first turn after a
- * later user turn is already visible.
- */
-function oneToolbarTitle(messages: UiMessage[], fallback: string, locale: "ko" | "en"): string {
-  let sequenceTotal: string | null = null;
-  for (const message of messages) {
-    if (message.role !== "user") continue;
-    const candidate = ONE_SEQUENCE_STEP_RE.exec(message.text);
-    if (candidate) {
-      sequenceTotal = candidate[2];
-      break;
-    }
-  }
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message.role !== "user") continue;
-    const match = ONE_SEQUENCE_STEP_RE.exec(message.text);
-    const qaMatch = match ? null : ONE_QA_SEQUENCE_STEP_RE.exec(message.text);
-    if (!match && !qaMatch) continue;
-    const sequenceMatch = match ?? qaMatch;
-    if (!sequenceMatch) continue;
-    const current = Number(sequenceMatch[1]);
-    const total = Number(match?.[2] ?? sequenceTotal);
-    if (!Number.isSafeInteger(current) || !Number.isSafeInteger(total) || current < 1 || total < current) continue;
-    const prompt = message.text.slice((sequenceMatch.index ?? 0) + sequenceMatch[0].length)
-      .replace(/^\s*(?:[.:—-])\s*/, "")
-      .trim();
-    const summary = briefingSourceName(prompt || fallback, locale);
-    return `${current}/${total} · ${summary}`;
-  }
-  return fallback;
-}
 
 type DisplayBriefing = ReturnType<typeof chooseOneBriefing> & {
   proactive?: OneProactiveBriefing;
@@ -815,6 +777,7 @@ export function OneShell() {
   const [conversations, setConversations] = useState<Chat[]>([]);
   const [selected, setSelected] = useState<OneTaskProjection | null>(null);
   const [conversation, setConversation] = useState<Chat | null>(null);
+  const [activeThreadChat, setActiveThreadChat] = useState<Chat | null>(null);
   const [activeChatIds, setActiveChatIds] = useState<string[]>([]);
   const [confirmations, setConfirmations] = useState<PendingConfirmation[]>([]);
   const [keyRequestSheet, setKeyRequestSheet] = useState<McpRunKeyRequest | null>(null);
@@ -840,6 +803,8 @@ export function OneShell() {
   const [failureFocus, setFailureFocus] = useState<FailureEventUi | null>(null);
   const [failureReceiptOpen, setFailureReceiptOpen] = useState(false);
   const [computerHistory, setComputerHistory] = useState<ComputerHistoryState | null>(null);
+  const [historyClearConfirmOpen, setHistoryClearConfirmOpen] = useState(false);
+  const [historyClearBusy, setHistoryClearBusy] = useState(false);
   const [teamIntroVisible, setTeamIntroVisible] = useState(false);
   const [oneMemory, setOneMemory] = useState<OneMemoryState | null>(null);
   const [oneMemoryMap, setOneMemoryMap] = useState<OneMemoryMapSnapshot | null>(null);
@@ -853,7 +818,6 @@ export function OneShell() {
   const [oneIntroState, setOneIntroState] = useState<OneFeatureIntroState | null>(null);
   const [oneHomeSignals, setOneHomeSignals] = useState<OneHomeSignalsV1 | null>(null);
   const [automationSheetOpen, setAutomationSheetOpen] = useState(false);
-  const [projectSessionSheetOpen, setProjectSessionSheetOpen] = useState(false);
   const [oneActivationState, setOneActivationState] = useState<OneActivationState | null>(null);
   const [briefingSnapshot, setBriefingSnapshot] = useState<OneBriefingSnapshot | null>(null);
   const [briefingActionBusy, setBriefingActionBusy] = useState(false);
@@ -953,6 +917,8 @@ export function OneShell() {
     setStagedSteerState(next);
   }
   const [availableAgents, setAvailableAgents] = useState<InstalledAgent[]>([]);
+  const [cloudListings, setCloudListings] = useState<MarketplaceListing[]>(() => readViewData<MarketplaceListing[]>("dashboard.cloud-listings")?.value ?? []);
+  const [hubBookmarks, setHubBookmarks] = useState<HubAgentBookmark[]>(() => readViewData<HubAgentBookmark[]>("dashboard.hub-bookmarks")?.value ?? []);
   const [installedPlugins, setInstalledPlugins] = useState<InstalledMcpServer[]>([]);
   const [pluginCatalog, setPluginCatalog] = useState<McpToolCatalogEntry[]>([]);
   const [pluginStatuses, setPluginStatuses] = useState<McpServerStatus[]>([]);
@@ -1055,14 +1021,28 @@ export function OneShell() {
       api.mcpTools.listInstalled().catch(() => []),
       api.mcpTools.listCatalog().catch(() => []),
       api.mcpTools.status().catch(() => []),
-    ]).then(([agents, plugins, catalog, statuses]) => {
+      loadViewData("dashboard.cloud-listings", () => api.marketplace.listMine(), { maxAgeMs: 60_000 }).catch(() => readViewData<MarketplaceListing[]>("dashboard.cloud-listings")?.value ?? []),
+      loadViewData("dashboard.hub-bookmarks", () => api.marketplace.bookmarks(), { maxAgeMs: 15_000 }).catch(() => readViewData<HubAgentBookmark[]>("dashboard.hub-bookmarks")?.value ?? []),
+    ]).then(([agents, plugins, catalog, statuses, cloud, bookmarks]) => {
       if (cancelled) return;
       setAvailableAgents(visibleAgents(agents, { includeTeams: true }));
       setInstalledPlugins(plugins);
       setPluginCatalog(catalog);
       setPluginStatuses(statuses);
+      setCloudListings(cloud);
+      setHubBookmarks(bookmarks);
     });
-    return () => { cancelled = true; };
+    const reconcileBookmarks = () => {
+      void loadViewData("dashboard.hub-bookmarks", () => api.marketplace.bookmarks(), { maxAgeMs: 0, force: true })
+        .then((bookmarks) => { if (!cancelled) setHubBookmarks(bookmarks); })
+        .catch(() => undefined);
+    };
+    const unsubscribeLocal = onHubBookmarkChange(reconcileBookmarks);
+    const unsubscribeMain = api.marketplace.onBookmarksSnapshot((event) => {
+      writeViewData("dashboard.hub-bookmarks", event.bookmarks);
+      if (!cancelled) setHubBookmarks(event.bookmarks);
+    });
+    return () => { cancelled = true; unsubscribeLocal(); unsubscribeMain(); };
   }, []);
   const onePluginOptions = useMemo<OneComposerPluginOption[]>(() => {
     const catalogById = new Map(pluginCatalog.map((item) => [item.id, item]));
@@ -1564,6 +1544,18 @@ export function OneShell() {
     if (!api) return Promise.reject(new Error("Desktop bridge unavailable"));
     return api.oneOrg.add({ installedAgentId, ...(displayName ? { displayName } : {}), ...(leaseExpiresAt !== undefined ? { leaseExpiresAt } : {}) });
   }), [mutateOneOrg]);
+  const materializeOneOrgSource = useCallback(async (source: "cloud" | "hub", listing: MarketplaceListing) => {
+    const api = ipc();
+    if (!api) throw new Error("Desktop bridge unavailable");
+    const installed = source === "cloud"
+      ? await api.team.installMine(listing.slug)
+      : await api.team.install(listing.slug);
+    setAvailableAgents((current) => visibleAgents([
+      ...current.filter((agent) => agent.id !== installed.id),
+      installed,
+    ], { includeTeams: true }));
+    return installed;
+  }, []);
   const renameOneOrg = useCallback((member: OneOrgMember, displayName: string) => mutateOneOrg(() => {
     const api = ipc();
     if (!api) return Promise.reject(new Error("Desktop bridge unavailable"));
@@ -1652,8 +1644,16 @@ export function OneShell() {
   const clearComputerHistoryView = useCallback(async () => {
     const api = ipc();
     if (!api) return;
-    const next = await api.computerHistory.clear().catch(() => null);
-    if (next) setComputerHistory(next);
+    setHistoryClearBusy(true);
+    try {
+      const next = await api.computerHistory.clear();
+      setComputerHistory(next);
+      setHistoryClearConfirmOpen(false);
+    } catch (cause) {
+      requestOneOperationalRecovery("one-computer-history-clear", cause);
+    } finally {
+      setHistoryClearBusy(false);
+    }
   }, []);
   const dismissTeamIntro = useCallback(() => {
     setTeamIntroVisible(false);
@@ -2069,10 +2069,10 @@ export function OneShell() {
 
   const activeThreadChatId = selected?.chatId ?? conversation?.id ?? null;
   const activeThreadPromptFallback = selected?.display.title ?? conversation?.title ?? "";
-  const taskToolbarTitle = useMemo(
-    () => oneToolbarTitle(messages, activeThreadPromptFallback || "Agentlas One", appLocale),
-    [activeThreadPromptFallback, appLocale, messages],
-  );
+  const activeOneMember = useMemo(() => {
+    if (!activeThreadChat || activeThreadChat.originSurface !== "one") return null;
+    return oneOrgState?.members.find((member) => member.installedAgentId === activeThreadChat.agentId) ?? null;
+  }, [activeThreadChat, oneOrgState?.members]);
 
   useEffect(() => {
     const api = ipc();
@@ -2092,13 +2092,14 @@ export function OneShell() {
   const runtimeArtifacts = activity.artifacts;
   useEffect(() => {
     const api = ipc();
-    if (!api) return;
+    if (!api) { setActiveThreadChat(conversation); return; }
     let cancelled = false;
     void Promise.all([
       api.runtime.detect(),
       activeThreadChatId ? api.chats.get(activeThreadChatId).catch(() => null) : Promise.resolve(null),
     ]).then(([runtimes, chat]) => {
       if (cancelled) return;
+      setActiveThreadChat(chat);
       // A model chosen in One is a product preference, not disposable state on
       // the current route. Prefer a chat's durable override, then the last
       // explicit One choice, then the globally active runtime.
@@ -2115,13 +2116,14 @@ export function OneShell() {
       setOneRuntimeInventory(runtimes);
     }).catch(() => {
       if (!cancelled) {
+        setActiveThreadChat(null);
         setOneRuntime(null);
         setOneRuntimePinned(false);
         setOneRuntimeInventory([]);
       }
     });
     return () => { cancelled = true; };
-  }, [activeThreadChatId]);
+  }, [activeThreadChatId, conversation]);
 
   useEffect(() => {
     const api = ipc();
@@ -3484,7 +3486,7 @@ export function OneShell() {
     if (failure?.chatId) {
       setRailOpen(false);
       setSearchOpen(false);
-      router.push(`/one?chat=${encodeURIComponent(failure.chatId)}`);
+      router.replace(`/one?chat=${encodeURIComponent(failure.chatId)}`);
       return;
     }
     startNewConversation();
@@ -3494,12 +3496,24 @@ export function OneShell() {
   }, [appLocale, router, startNewConversation]);
 
   const openOneMember = useCallback((member: OneOrgMember) => {
-    startNewConversation();
-    setTurnAgentIds((current) => current.includes(member.installedAgentId) ? current : [...current, member.installedAgentId]);
-    setComposer(appLocale === "ko"
-      ? `${member.displayName}을(를) 이번 작업 담당으로 지정했어. 이 담당의 역량과 현재 상태를 반영해 다음 일을 함께 계획해줘. 현재 상태: ${member.statusLine}`
-      : `${member.displayName} is selected for this work. Plan the next task using this member's capabilities and current state: ${member.statusLineEn}`);
-  }, [appLocale, startNewConversation]);
+    const api = ipc();
+    if (!api?.chats?.openOneMember) {
+      requestOneOperationalRecovery("one-member-channel", new Error("Desktop bridge unavailable"));
+      return;
+    }
+    void api.chats.openOneMember({ agentId: member.installedAgentId, title: member.displayName })
+      .then((chat) => {
+        setRailOpen(false);
+        setSearchOpen(false);
+        selectedTaskIdRef.current = null;
+        selectedConversationIdRef.current = chat.id;
+        // Same-route push navigation in a static export can promote Next's
+        // `one.txt` RSC sidecar to the main document. Replace follows the same
+        // proven path used when a newly started run receives its chat binding.
+        router.replace(`/one?chat=${encodeURIComponent(chat.id)}`);
+      })
+      .catch((cause) => requestOneOperationalRecovery("one-member-channel", cause));
+  }, [router]);
 
   const retryFocusedFailure = useCallback(() => {
     const focus = failureFocus;
@@ -3521,13 +3535,13 @@ export function OneShell() {
   const openTask = useCallback((taskId: string) => {
     setRailOpen(false);
     setSearchOpen(false);
-    router.push(`/one?task=${encodeURIComponent(taskId)}`);
+    router.replace(`/one?task=${encodeURIComponent(taskId)}`);
   }, [router]);
 
   const openConversation = useCallback((chatId: string) => {
     setRailOpen(false);
     setSearchOpen(false);
-    router.push(`/one?chat=${encodeURIComponent(chatId)}`);
+    router.replace(`/one?chat=${encodeURIComponent(chatId)}`);
   }, [router]);
 
   const removeConversation = useCallback(async (chatId: string) => {
@@ -3643,7 +3657,13 @@ export function OneShell() {
   const reactiveBriefing = useMemo(() => chooseOneBriefing(projections, actionableConfirmations, appLocale), [actionableConfirmations, appLocale, projections]);
   // Deterministic observations remain private evidence. One may surface them
   // only after its model has authored the customer-facing diagnosis and action.
-  const rawBriefing: DisplayBriefing = reactiveBriefing;
+  // Active work already lives in its named teammate channel and organisation
+  // row. A generic floating "View progress" card duplicates that state and
+  // makes One look task/project based, so home only surfaces outcomes,
+  // failures, decisions, and authored proactive briefings.
+  const rawBriefing: DisplayBriefing = reactiveBriefing.kind === "working"
+    ? chooseOneBriefing([], [], appLocale)
+    : reactiveBriefing;
   const rawBriefingSignature = useMemo(() => briefingSignature(rawBriefing), [rawBriefing]);
   useEffect(() => {
     const expiresAt = readBriefingDismissal(rawBriefingSignature);
@@ -3982,6 +4002,15 @@ export function OneShell() {
     teamPreflight
     && ["proposed", "blocked", "team_reserved", "workforce_reserved", "solo_reserved", "deferred"].includes(teamPreflight.status),
   );
+  // A just-created home run briefly enters preflight before its chat binding
+  // arrives. Preflight and an attached live run are both interactive: the user
+  // may change the next turn's model/effort/permission and may queue a steering
+  // message without stopping the current work. Only settled read-only history
+  // (or a decision that must be resolved first) locks the composer.
+  const composerInteractionBlocked = (!busy && !teamPreflightBusy && selectedReadOnly) || teamDecisionPending;
+  // Attachments cannot be steered into an existing or still-preparing run in
+  // v1. Keep that single boundary explicit instead of dimming every control.
+  const composerAttachmentBlocked = busy || teamPreflightBusy || selectedReadOnly || teamDecisionPending;
   const oneDisplayName = oneProfile?.displayName.trim() || "One";
   const removeAttachmentDraft = useCallback((id: string) => {
     const current = attachmentDraftsRef.current;
@@ -4358,8 +4387,11 @@ export function OneShell() {
             <OneOrgChart
               state={oneOrgState ?? (!ipc() ? oneOrgBrowserPreviewState() : null)}
               installedAgents={availableAgents}
+              cloudListings={cloudListings}
+              hubBookmarks={hubBookmarks}
               locale={appLocale}
               onAdd={addOneOrg}
+              onMaterializeSource={materializeOneOrgSource}
               onRename={renameOneOrg}
               onUpdate={updateOneOrg}
               onReplace={replaceOneOrg}
@@ -4369,6 +4401,7 @@ export function OneShell() {
               onReorder={reorderOneOrg}
               onFailure={openOneFailure}
               onOpenMember={openOneMember}
+              activeMemberId={activeOneMember?.installedAgentId ?? null}
               activeTaskForceIds={turnAgentIds}
               installedPlugins={installedPlugins}
               pluginCatalog={pluginCatalog}
@@ -4447,8 +4480,20 @@ export function OneShell() {
                   }}
                 ><IconSidebar size={16} /></button>
                 <span className={styles.taskToolbarDivider} aria-hidden="true" />
-                <IconFolder size={15} />
-                <strong>{taskToolbarTitle}</strong>
+                <div className={styles.taskToolbarIdentity}>
+                  <OneAgentPortrait
+                    status={busy ? "working" : visibleSelectedConfirmation ? "waiting" : activeOneMember?.statusKind ?? "quiet"}
+                    label={activeOneMember?.displayName ?? "One"}
+                    tone={activeOneMember?.icon ?? "purple"}
+                    size="small"
+                  />
+                  <span>
+                    <strong>{activeOneMember?.displayName ?? "One"}</strong>
+                    <small>{activeOneMember
+                      ? (appLocale === "ko" ? "상주 동료 · 전용 터미널" : "Standing teammate · Dedicated terminal")
+                      : (appLocale === "ko" ? "CEO 오케스트레이터" : "CEO orchestrator")}</small>
+                  </span>
+                </div>
                 <div className={styles.taskToolbarMenu} data-one-task-menu="true">
                   <button
                     type="button"
@@ -4834,23 +4879,6 @@ export function OneShell() {
                 ><IconClose size={12} /></button>
               </div>
             )}
-            {workspacePath && (
-              <div className={styles.oneWorkspaceChip} role="status" data-one-workspace="connected">
-                <IconFolder size={14} aria-hidden="true" />
-                <span title={workspacePath}>{workspacePath.replace(/[\\/]+$/, "").split(/[\\/]/).filter(Boolean).at(-1) || workspacePath}</span>
-                <small>{appLocale === "ko" ? "작업 폴더" : "Working folder"}</small>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const api = ipc();
-                    setWorkspaceGrant(null);
-                    setWorkspacePath(null);
-                    if (api && activeThreadChatId) void api.workspace.set(activeThreadChatId, null);
-                  }}
-                  aria-label={appLocale === "ko" ? "작업 폴더 연결 해제" : "Disconnect working folder"}
-                ><IconClose size={12} /></button>
-              </div>
-            )}
             {attachmentDrafts.length > 0 && (
               <div className={styles.attachmentTray} aria-label={tFor(appLocale, "one.shell.composer.selected_attachments_aria")}>
                 {attachmentDrafts.map((item) => (
@@ -4902,6 +4930,7 @@ export function OneShell() {
                 plugins={onePluginOptions}
                 permission={onePermission}
                 turnOptions={turnOverrides}
+                localFilesConnected={Boolean(workspacePath)}
                 onMenuChange={setComposerMenu}
                 onAttach={() => {
                   setComposerMenu(null);
@@ -4919,9 +4948,12 @@ export function OneShell() {
                     window.setTimeout(() => composerInputRef.current?.focus(), 0);
                   }).catch(() => undefined);
                 }}
-                onOpenProjectSessions={() => {
+                onClearFolder={() => {
+                  const api = ipc();
                   setComposerMenu(null);
-                  setProjectSessionSheetOpen(true);
+                  setWorkspaceGrant(null);
+                  setWorkspacePath(null);
+                  if (api && activeThreadChatId) void api.workspace.set(activeThreadChatId, null);
                 }}
                 onOpenPlugins={() => {
                   setComposerMenu(null);
@@ -5108,7 +5140,7 @@ export function OneShell() {
                     ? tFor(appLocale, "one.shell.composer.placeholder_conversation")
                     : tFor(appLocale, "one.shell.composer.placeholder_default")}
                 aria-label={tFor(appLocale, "one.shell.composer.request_aria")}
-                disabled={selectedReadOnly || teamDecisionPending || teamPreflightBusy}
+                disabled={composerInteractionBlocked}
               />
               <div className={styles.composerBar}>
                 <div className={styles.composerTools}>
@@ -5116,7 +5148,7 @@ export function OneShell() {
                     type="button"
                     className={styles.attachmentButton}
                     data-one-composer-trigger="plus"
-                    disabled={busy || selectedReadOnly || teamDecisionPending || teamPreflightBusy}
+                    disabled={composerAttachmentBlocked}
                     onClick={() => setComposerMenu((current) => current === "plus" ? null : "plus")}
                     aria-expanded={composerMenu === "plus"}
                     aria-haspopup="dialog"
@@ -5130,7 +5162,7 @@ export function OneShell() {
                       type="button"
                       className={styles.composerChip}
                       data-one-composer-trigger="model"
-                      disabled={busy || selectedReadOnly || teamDecisionPending || teamPreflightBusy}
+                      disabled={composerInteractionBlocked}
                       aria-expanded={composerMenu === "model"}
                       aria-haspopup="dialog"
                       aria-controls={composerMenu === "model" ? "one-composer-popover" : undefined}
@@ -5149,7 +5181,7 @@ export function OneShell() {
                       type="button"
                       className={styles.composerChip}
                       data-one-composer-trigger="effort"
-                      disabled={busy || selectedReadOnly || teamDecisionPending || teamPreflightBusy}
+                      disabled={composerInteractionBlocked}
                       aria-expanded={composerMenu === "effort"}
                       aria-haspopup="dialog"
                       aria-controls={composerMenu === "effort" ? "one-composer-popover" : undefined}
@@ -5168,7 +5200,7 @@ export function OneShell() {
                     className={styles.composerChip}
                     data-one-composer-trigger="permission"
                     data-one-permission={onePermission}
-                    disabled={busy || selectedReadOnly || teamDecisionPending || teamPreflightBusy}
+                    disabled={composerInteractionBlocked}
                     aria-expanded={composerMenu === "permission"}
                     aria-haspopup="dialog"
                     aria-controls={composerMenu === "permission" ? "one-composer-popover" : undefined}
@@ -5185,7 +5217,7 @@ export function OneShell() {
                     type="button"
                     className={styles.composerQuickMode}
                     data-active={turnOverrides.fastMode ? "true" : "false"}
-                    disabled={busy || selectedReadOnly || teamDecisionPending || teamPreflightBusy}
+                    disabled={composerInteractionBlocked}
                     onClick={() => setTurnOverrides((current) => {
                       const next = { ...current };
                       if (next.fastMode) delete next.fastMode;
@@ -5201,14 +5233,14 @@ export function OneShell() {
                   <OneVoiceInputHelp
                     locale={appLocale}
                     composerRef={composerInputRef}
-                    disabled={busy || selectedReadOnly || teamDecisionPending || teamPreflightBusy}
+                    disabled={composerInteractionBlocked}
                   />
                   {(busy || composer.trim() || attachmentDrafts.length > 0) && (
                     <button
                       type="submit"
                       className={styles.sendButton}
                       data-one-steering-send={busy && composer.trim() ? "true" : undefined}
-                      disabled={!busy && ((!composer.trim() && attachmentDrafts.length === 0) || selectedReadOnly || teamDecisionPending || teamPreflightBusy)}
+                      disabled={!busy && ((!composer.trim() && attachmentDrafts.length === 0) || composerInteractionBlocked)}
                       aria-label={busy
                         ? composer.trim()
                           ? (appLocale === "ko" ? "모델 중단 없이 제출" : "Submit without stopping the model")
@@ -5224,7 +5256,7 @@ export function OneShell() {
                 </div>
               </div>
             </form>
-            {selectedReadOnly && (
+            {selectedReadOnly && !busy && (
               <p className={styles.composerNote}>{tFor(appLocale, "one.shell.composer.view_only")}</p>
             )}
           </div>
@@ -5283,7 +5315,7 @@ export function OneShell() {
               locale={appLocale}
               previewWhenUnavailable={!ipc()}
               onConsent={enableComputerHistory}
-              onClear={clearComputerHistoryView}
+              onClear={() => setHistoryClearConfirmOpen(true)}
               onAsk={() => {
                 startNewConversation();
                 setComposer(appLocale === "ko"
@@ -5355,7 +5387,32 @@ export function OneShell() {
         onSelectModel={(runtime, model) => applyOneRuntimeSelection({ model }, runtime)}
         onHistoryConsent={enableComputerHistory}
         onOpenMcpLibrary={() => { setSettingsSheet(null); router.push("/library/mcps"); }}
+        onToolTabChange={setSettingsSheet}
       />
+
+      <OneBottomSheet
+        open={historyClearConfirmOpen}
+        onClose={() => { if (!historyClearBusy) setHistoryClearConfirmOpen(false); }}
+        closeLabel={appLocale === "ko" ? "기록 지우기 확인 닫기" : "Close clear-history confirmation"}
+        closeDisabled={historyClearBusy}
+        closeOnBackdrop={!historyClearBusy}
+        closeOnEscape={!historyClearBusy}
+        dialogRole="alertdialog"
+        size="wide"
+        eyebrow="Computer History"
+        title={appLocale === "ko" ? "Computer History를 지울까요?" : "Clear Computer History?"}
+        titleId="one-computer-history-clear-title"
+        ariaLabelledBy="one-computer-history-clear-title"
+        description={appLocale === "ko" ? "One에 현재 표시된 기록을 모두 숨깁니다. 원본 앱의 기록이나 파일은 삭제하지 않습니다." : "This hides every history item currently shown in One. It does not delete files or history kept by the source apps."}
+      >
+        <div className={styles.historyClearConfirmation}>
+          <div className={styles.historyClearNote}><IconShield size={18} /><span>{appLocale === "ko" ? "이 작업은 One의 현재 기록 보기에서 되돌릴 수 없습니다." : "This cannot be undone in One's current history view."}</span></div>
+          <div className={styles.historyClearActions}>
+            <button type="button" disabled={historyClearBusy} onClick={() => setHistoryClearConfirmOpen(false)}>{appLocale === "ko" ? "취소" : "Cancel"}</button>
+            <button type="button" className={styles.historyClearDanger} disabled={historyClearBusy} onClick={() => void clearComputerHistoryView()}>{historyClearBusy ? (appLocale === "ko" ? "지우는 중…" : "Clearing…") : (appLocale === "ko" ? "기록 지우기" : "Clear history")}</button>
+          </div>
+        </div>
+      </OneBottomSheet>
 
       {keyRequestSheet && (
         <McpKeyRequestSheet
@@ -5365,25 +5422,6 @@ export function OneShell() {
           onResolved={() => setKeyRequestSheet(null)}
         />
       )}
-
-      <OneProjectSessionSheet
-        open={projectSessionSheetOpen}
-        locale={appLocale}
-        chatId={activeThreadChatId}
-        workspaceGrant={workspaceGrant}
-        workspacePath={workspacePath}
-        onClose={() => setProjectSessionSheetOpen(false)}
-        onWorkspaceSelected={async (grant) => {
-          setWorkspaceGrant(grant);
-          setWorkspacePath(grant.path);
-          const api = ipc();
-          if (api && activeThreadChatId) await api.workspace.set(activeThreadChatId, grant);
-        }}
-        onImported={async (target) => {
-          await refreshAll();
-          openTask(target.taskId);
-        }}
-      />
 
       <OneProfileSheet
         open={profileOpen}

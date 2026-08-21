@@ -2,11 +2,14 @@
 //
 // 모든 caller는 `getSource()`를 호출하고 인터페이스만 알면 됨.
 // MCP 호출 실패 시 하드코딩 카탈로그로 대체하지 않는다. Desktop Hub는 실제 Hub 결과만 표시한다.
+import fs from "node:fs";
+import path from "node:path";
 import { McpSource, PartialHubResultError } from "./mcp-source";
 import type { OwnerCloudShelfSnapshot } from "./mcp-source";
 import type { MarketplaceSource, SeedListingFull } from "./source";
-import { getSessionCookieHeader } from "../auth";
+import { getAuthenticatedActorIds, getSessionCookieHeader } from "../auth";
 import { isPublicDesktopAgent } from "../agents/policy";
+import { userDataPath } from "../runtime-paths";
 import type {
   FirmListing,
   MarketplaceListing,
@@ -204,6 +207,67 @@ let _statusRefreshInFlight: Promise<MarketplaceSourceStatus> | null = null;
 let _cargoSource: McpSource | null = null;
 let _myAgentsCache: TimedCache<{ cookie: string | null; agents: MarketplaceListing[] }> | null = null;
 
+const OWNER_CLOUD_SHELF_CACHE_SCHEMA = "agentlas.owner-cloud-shelf-cache.v1";
+
+type OwnerCloudShelfDiskCache = {
+  schema: typeof OWNER_CLOUD_SHELF_CACHE_SCHEMA;
+  workspaceId: string;
+  updatedAt: number;
+  agents: MarketplaceListing[];
+};
+
+function ownerCloudShelfCachePath(): string {
+  return userDataPath("cache", "owner-cloud-shelf-v1.json");
+}
+
+/**
+ * Cold-start cache for the signed-in owner's private Cloud shelf.
+ *
+ * The process-local SWR cache below makes route changes instant, but vanished
+ * on every Desktop restart. That made One briefly claim the Cloud shelf was
+ * empty even though the previous verified list was available moments earlier.
+ * Persist only public package metadata, keep the file private, and scope it to
+ * the authenticated workspace so switching accounts can never expose another
+ * owner's shelf.
+ */
+function readOwnerCloudShelfCache(workspaceId: string): TimedCache<MarketplaceListing[]> | null {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(ownerCloudShelfCachePath(), "utf8")) as Partial<OwnerCloudShelfDiskCache>;
+    if (
+      parsed.schema !== OWNER_CLOUD_SHELF_CACHE_SCHEMA
+      || parsed.workspaceId !== workspaceId
+      || !Number.isFinite(parsed.updatedAt)
+      || !Array.isArray(parsed.agents)
+    ) return null;
+    return {
+      value: publicListings(parsed.agents as MarketplaceListing[]),
+      at: Number(parsed.updatedAt),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeOwnerCloudShelfCache(workspaceId: string, agents: MarketplaceListing[]): void {
+  const target = ownerCloudShelfCachePath();
+  const parent = path.dirname(target);
+  const temporary = `${target}.${process.pid}.tmp`;
+  try {
+    fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(temporary, `${JSON.stringify({
+      schema: OWNER_CLOUD_SHELF_CACHE_SCHEMA,
+      workspaceId,
+      updatedAt: Date.now(),
+      agents,
+    } satisfies OwnerCloudShelfDiskCache)}\n`, { encoding: "utf8", mode: 0o600 });
+    fs.renameSync(temporary, target);
+    if (process.platform !== "win32") fs.chmodSync(target, 0o600);
+  } catch (error) {
+    try { fs.unlinkSync(temporary); } catch { /* best effort cache cleanup */ }
+    console.warn("[marketplace] owner Cloud shelf cache write skipped", error);
+  }
+}
+
 /** 내 에이전트(cargo) 호출용 raw 소스. */
 export function getCargoSource(): McpSource | null {
   getSource();
@@ -229,17 +293,32 @@ export async function listMyAgentsCached(): Promise<MarketplaceListing[]> {
   const source = getCargoSource();
   if (!source) return [];
   const cookie = getSessionCookieHeader();
-  const entry = _myAgentsCache;
-  const sameSession = entry?.value.cookie === cookie;
+  const actor = getAuthenticatedActorIds();
+  let entry = _myAgentsCache;
+  let sameSession = entry?.value.cookie === cookie;
   if (entry && sameSession && cacheFresh(entry)) return entry.value.agents;
   // 로그인 상태가 바뀌었으면 이전 세션의 선반은 남의 것이다 — 즉시 버린다.
   if (entry && !sameSession) {
     _myAgentsCache = null;
     _myAgentsShelfSnapshot = null;
     _myAgentsShelfWalkedAt = 0;
+    entry = null;
+    sameSession = false;
+  }
+  // Renderer route cache is process-local. Hydrate the last verified,
+  // account-scoped shelf before starting any network work so a cold launch is
+  // just as immediate as a route change.
+  if (!entry && cookie && actor?.workspaceId) {
+    const disk = readOwnerCloudShelfCache(actor.workspaceId);
+    if (disk) {
+      entry = { value: { cookie, agents: disk.value }, at: disk.at };
+      _myAgentsCache = entry;
+      sameSession = true;
+      if (cacheFresh(entry)) return entry.value.agents;
+    }
   }
   const stale = sameSession ? entry?.value.agents : undefined;
-  const refresh = refreshMyAgentsShelf(source, cookie);
+  const refresh = refreshMyAgentsShelf(source, cookie, actor?.workspaceId ?? null);
   // 오래된 값이라도 있으면 그것을 주고 갱신은 뒤에서 끝낸다. 없을 때만 기다린다.
   if (stale) {
     refresh.catch(() => {});
@@ -266,6 +345,7 @@ const OWNER_SHELF_FULL_WALK_MS = 30 * 60_000;
 function refreshMyAgentsShelf(
   source: McpSource,
   cookie: string | null,
+  workspaceId: string | null,
 ): Promise<MarketplaceListing[]> {
   const inFlight = _myAgentsInFlight;
   if (inFlight && inFlight.cookie === cookie) return inFlight.promise;
@@ -275,10 +355,16 @@ function refreshMyAgentsShelf(
   const promise = source
     .listMyCloudPackages(probe)
     .then((result) => {
+      const currentActor = getAuthenticatedActorIds();
+      if (
+        getSessionCookieHeader() !== cookie
+        || (workspaceId !== null && currentActor?.workspaceId !== workspaceId)
+      ) return [];
       _myAgentsShelfSnapshot = result.snapshot;
       if (!result.revalidatedOnly) _myAgentsShelfWalkedAt = Date.now();
       const agents = result.rows.filter((agent) => isPublicDesktopAgent(agent));
       _myAgentsCache = { value: { cookie, agents }, at: Date.now() };
+      if (workspaceId) writeOwnerCloudShelfCache(workspaceId, agents);
       return agents;
     })
     .finally(() => {
@@ -296,6 +382,7 @@ export function invalidateMyAgentsCache(): void {
   _myAgentsCache = null;
   _myAgentsShelfSnapshot = null;
   _myAgentsShelfWalkedAt = 0;
+  try { fs.unlinkSync(ownerCloudShelfCachePath()); } catch { /* absent or unavailable cache */ }
 }
 
 export function getSource(): MarketplaceSource {

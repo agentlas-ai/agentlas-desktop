@@ -4310,7 +4310,10 @@ export function initStore(options: StoreInitOptions = {}): void {
   // 임의 agent_id/firm_id를 받을 수 있어 상태줄뿐 아니라 실제 시스템 프롬프트·기억
   // 귀속·provider resume 세션까지 겹쳤다. 표시 문구만 바꾸지 않고 양쪽 원장을
   // 정규화하고, 신원이 바뀐 CLI resume 포인터도 함께 폐기한다.
-  if (tableExists(_db, "chats") && tableExists(_db, "installed_agents")) {
+  // This is a migration, not a startup reconciler. Re-running it on every
+  // launch rewrites newly created direct One-teammate channels back to the One
+  // root before the renderer can reopen them.
+  if (userVersion < 92 && tableExists(_db, "chats") && tableExists(_db, "installed_agents")) {
     const db = _db;
     const chatColumns = new Set(schemaColumns(db, "chats").map((column) => column.name));
     const canRepairSurfaceIdentity = chatColumns.has("origin_surface")

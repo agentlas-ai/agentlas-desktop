@@ -17,6 +17,10 @@
 .railCopy small { color: #92969a; font-size: 8px; }
 .railBadge { min-width: 19px; height: 19px; display: grid; place-items: center; padding: 0 5px; border-radius: 999px; background: #e5e0f1; color: #6e5ba5; font-size: 8px; font-weight: 760; }
 .sheetBody { display: grid; gap: 18px; min-height: 120px; }
+.toolTabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; padding: 4px; border-radius: 11px; background: var(--one-sheet-card-muted); }
+.toolTabs button { min-height: 38px; border: 0; border-radius: 8px; background: transparent; color: var(--one-sheet-muted); font: inherit; font-size: 12px; font-weight: 650; cursor: pointer; }
+.toolTabs button[data-active="true"] { background: var(--one-sheet-control-surface); color: var(--one-sheet-ink); box-shadow: 0 1px 5px rgba(30, 34, 31, .09); }
+.toolTabs button:focus-visible { outline: 0; box-shadow: var(--one-sheet-focus); }
 .emptyState { padding: 28px 16px; border: 1px solid var(--one-sheet-line); border-radius: var(--one-sheet-card-radius); background: var(--one-sheet-card-muted); color: var(--one-sheet-muted); font-size: 12px; line-height: 1.5; text-align: center; }
 .settingList { display: grid; gap: 8px; }
 .toolRow { min-height: 62px; display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; align-items: center; gap: 11px; padding: 9px 12px; border: 1px solid var(--one-sheet-control-border); border-radius: var(--one-sheet-card-radius); background: var(--one-sheet-control-surface); }
@@ -71,6 +75,7 @@
 .concurrency p, .inlineNote { margin: 0; color: var(--one-sheet-muted); font-size: 11px; line-height: 1.55; }
 .actionRow { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; align-items: center; padding-top: 3px; }
 .actionRow .primary { border-color: var(--one-sheet-primary); background: var(--one-sheet-primary); color: #fff; }
+.actionRow .primary:hover:not(:disabled) { border-color: var(--one-sheet-primary-hover); background: var(--one-sheet-primary-hover); }
 .historySettings { display: grid; gap: 15px; }
 .historyHero { background: #f4f5f5; color: #60666a; }
 .toggleRow { min-height: 70px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px; border: 1px solid var(--one-sheet-control-border); border-radius: var(--one-sheet-card-radius); }

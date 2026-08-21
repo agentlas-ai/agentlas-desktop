@@ -15,6 +15,7 @@ import { getMeta, setMeta } from "../store/meta";
 const ROOT = process.env.AGENTLAS_COMPUTER_HISTORY_ROOT?.trim()
   || path.join(os.homedir(), ".agentlas", "history");
 const CONSENT_KEY = "one_computer_history_consent_v1";
+const CLEARED_BEFORE_KEY = "one_computer_history_cleared_before_v1";
 const MAX_FILES_PER_BUCKET = 80;
 const MAX_BODY_CHARS = 360;
 const CAPTURE_DIR = "captures";
@@ -27,6 +28,25 @@ const RECURRENCE_STOP_WORDS = new Set([
   "관련", "그리고", "다시", "대한", "바탕", "사용", "작업", "진행", "확인",
 ]);
 const evidenceRefs = new Map<string, { summaryPath: string; eventPaths: string[] }>();
+
+// One owns ~/.agentlas/history, but an existing Codex Computer History install
+// already has compatible Skysight summaries. Read those local summaries in
+// place so opting in does not start with an inexplicably empty history. Writes,
+// captures, retention, and physical deletion remain confined to ROOT.
+const COMPATIBLE_READ_ROOTS = process.env.AGENTLAS_COMPUTER_HISTORY_ROOT?.trim() ? [] : [
+  path.join(os.homedir(), ".codex", "memories", "extensions", "skysight", "resources"),
+  path.join(os.homedir(), "codex", "memories", "extensions", "skysight", "resources"),
+];
+const SKYSIGHT_EVENT_ROOT = path.join(
+  os.homedir(),
+  "Library",
+  "Group Containers",
+  "2DC432GLL2.com.openai.sky.CUAService",
+  "Library",
+  "Caches",
+  "ComputerUse",
+  "Skysight",
+);
 
 function consent(): "off" | "on" {
   return getMeta(CONSENT_KEY) === "on" ? "on" : "off";
@@ -51,21 +71,47 @@ function citedEventPaths(raw: string): string[] {
     path.join(os.homedir(), ".agentlas"),
     path.join(os.homedir(), ".codex", "memories"),
     path.join(os.homedir(), "codex", "memories"),
+    SKYSIGHT_EVENT_ROOT,
   ];
-  const candidates = raw.match(/(?:\/(?:[^/\s"'`]+\/)*events\.jsonl|[A-Za-z]:\\(?:[^\\\s"'`]+\\)*events\.jsonl)/g) || [];
+  // Skysight's macOS path contains `Group Containers`, so whitespace cannot be
+  // used as a path delimiter. Its citations are line-oriented and terminate at
+  // events.jsonl, which gives us a bounded, root-checked extraction instead.
+  const candidates = raw.split(/\r?\n/).flatMap((line) => {
+    const unix = line.match(/(\/[^\r\n]*?events\.jsonl)(?=$|[\s`),;])/g) || [];
+    const windows = line.match(/([A-Za-z]:\\[^\r\n]*?events\.jsonl)(?=$|[\s`),;])/g) || [];
+    return [...unix, ...windows];
+  });
   return [...new Set(candidates.map((value) => path.resolve(value)).filter((value) => {
     if (!allowedRoots.some((root) => isInside(root, value))) return false;
     try { return fs.statSync(value).isFile(); } catch { return false; }
   }))].slice(0, 8);
 }
 
+function filesForRoot(root: string, source: ComputerHistorySource): string[] {
+  const files: string[] = [];
+  const bucketDir = path.join(root, source);
+  if (fs.existsSync(bucketDir)) {
+    files.push(...fs.readdirSync(bucketDir, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".md") && entry.name !== "instructions.md")
+      .map((entry) => path.join(bucketDir, entry.name)));
+  }
+  // Codex Skysight keeps both buckets flat in resources/ and encodes the
+  // source in each filename.
+  if (fs.existsSync(root)) {
+    const suffix = new RegExp(`-${source}-(?:memory-summary|[^/]+)\\.md$`);
+    files.push(...fs.readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && suffix.test(entry.name))
+      .map((entry) => path.join(root, entry.name)));
+  }
+  return files;
+}
+
 function filesFor(source: ComputerHistorySource): string[] {
-  const dir = path.join(ROOT, source);
-  if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith(".md") && entry.name !== "instructions.md")
-    .map((entry) => path.join(dir, entry.name))
-    .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)
+  const roots = [...new Set([ROOT, ...COMPATIBLE_READ_ROOTS])];
+  return [...new Set(roots.flatMap((root) => filesForRoot(root, source)))]
+    .sort((a, b) => {
+      try { return fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs; } catch { return 0; }
+    })
     .slice(0, MAX_FILES_PER_BUCKET);
 }
 
@@ -133,6 +179,24 @@ function frontmatter(raw: string): { body: string; values: Record<string, string
   return { body: raw.slice(end + 4), values };
 }
 
+function explicitSuggestion(raw: string): { name: string; description: string } | null {
+  if (!raw.startsWith("---")) return null;
+  const end = raw.indexOf("\n---", 3);
+  if (end < 0) return null;
+  const lines = raw.slice(3, end).split(/\r?\n/);
+  const start = lines.findIndex((line) => /^suggestion\s*:\s*$/.test(line));
+  if (start < 0) return null;
+  const values: Record<string, string> = {};
+  for (const line of lines.slice(start + 1)) {
+    if (/^[^\s]/.test(line)) break;
+    const match = line.match(/^\s+([A-Za-z][A-Za-z0-9_-]*)\s*:\s*(.*)$/);
+    if (match) values[match[1]] = match[2].replace(/^['"]|['"]$/g, "");
+  }
+  const name = safeText(values.name || "", 100);
+  const description = safeText(values.description || "", MAX_BODY_CHARS);
+  return name && description ? { name, description } : null;
+}
+
 function parseEntry(file: string, source: ComputerHistorySource): ComputerHistoryEntry | null {
   let raw: string;
   try { raw = fs.readFileSync(file, "utf8"); } catch { return null; }
@@ -140,16 +204,18 @@ function parseEntry(file: string, source: ComputerHistorySource): ComputerHistor
   const body = parsed.body.trim();
   const titleMatch = body.match(/^#{1,3}\s+(.+)$/m);
   const title = safeText(parsed.values.title || titleMatch?.[1] || path.basename(file, ".md"), 120);
-  const description = safeText(body.replace(/^#{1,3}\s+.+$/m, "").trim(), MAX_BODY_CHARS);
+  const description = safeText(parsed.values.description || body.replace(/^#{1,3}\s+.+$/m, "").trim(), MAX_BODY_CHARS);
   const occurredAtValue = parsed.values.occurredAt || parsed.values.occurred_at || parsed.values.createdAt;
   const stat = (() => { try { return fs.statSync(file); } catch { return null; } })();
   const occurredAt = Number.isFinite(Date.parse(occurredAtValue || ""))
     ? new Date(occurredAtValue).toISOString()
     : new Date(stat?.mtimeMs || Date.now()).toISOString();
-  const apps = (parsed.values.apps || parsed.values.app || "")
-    .split(/[,|]/).map((app) => safeText(app, 32)).filter(Boolean).slice(0, 6);
+  const apps = (parsed.values.applications || parsed.values.apps || parsed.values.app || "")
+    .replace(/^\s*\[|\]\s*$/g, "")
+    .split(/[,|]/).map((app) => safeText(app, 64)).filter(Boolean).slice(0, 6);
   const id = createHash("sha256").update(`${source}:${file}:${occurredAt}`).digest("hex").slice(0, 24);
   evidenceRefs.set(id, { summaryPath: file, eventPaths: citedEventPaths(raw) });
+  const suggestion = source === "6h" ? explicitSuggestion(raw) : null;
   return {
     id,
     occurredAt,
@@ -157,7 +223,13 @@ function parseEntry(file: string, source: ComputerHistorySource): ComputerHistor
     body: description || "기록된 설명이 없습니다.",
     apps,
     source,
-    recommendation: null,
+    recommendation: suggestion ? {
+      id: createHash("sha256").update(`${file}:${suggestion.name}:${suggestion.description}`).digest("hex").slice(0, 24),
+      title: suggestion.name,
+      body: suggestion.description,
+      evidence: [{ entryId: id, label: title, occurredAt, source }],
+      status: "draft",
+    } : null,
   };
 }
 
@@ -185,6 +257,8 @@ function sameRecurringWorkflow(left: ComputerHistoryEntry, right: ComputerHistor
 
 function buildRecommendation(entries: ComputerHistoryEntry[]): ComputerHistoryRecommendation | null {
   const sixHour = entries.filter((entry) => entry.source === "6h");
+  const explicit = sixHour.find((entry) => entry.recommendation)?.recommendation;
+  if (explicit) return explicit;
   const grouped: ComputerHistoryEntry[][] = [];
   for (const entry of sixHour) {
     // Summaries of the same routine are rarely byte-identical. Cluster only
@@ -200,7 +274,7 @@ function buildRecommendation(entries: ComputerHistoryEntry[]): ComputerHistoryRe
   const evidence = candidate.slice(0, 3).map((entry) => ({ entryId: entry.id, label: entry.title, occurredAt: entry.occurredAt, source: entry.source }));
   return {
     id: createHash("sha256").update(evidence.map((item) => item.label + item.occurredAt).join("|")).digest("hex").slice(0, 24),
-    title: `${candidate[0].title} 작업을 위한 에이전트 초안`,
+    title: candidate[0].title,
     body: "반복된 컴퓨터 기록을 근거로 에이전트·그래프 초안을 제안합니다. 자동으로 켜지지 않습니다.",
     evidence,
     status: "draft",
@@ -214,12 +288,15 @@ export function getComputerHistoryState(): ComputerHistoryState {
   if (currentConsent === "off") {
     return { schemaVersion: 1, consent: "off", entries: [], generatedAt: new Date().toISOString() };
   }
+  const clearedBefore = Date.parse(getMeta(CLEARED_BEFORE_KEY) || "");
   const entries = (["6h", "10min"] as ComputerHistorySource[])
     .flatMap((source) => filesFor(source).map((file) => parseEntry(file, source)).filter(Boolean) as ComputerHistoryEntry[])
+    .filter((entry) => !Number.isFinite(clearedBefore) || Date.parse(entry.occurredAt) > clearedBefore)
     .sort((a, b) => Date.parse(b.occurredAt) - Date.parse(a.occurredAt));
   const recommendation = buildRecommendation(entries);
   if (recommendation) {
-    const anchor = entries.find((entry) => entry.source === "6h");
+    const anchor = entries.find((entry) => recommendation.evidence.some((item) => item.entryId === entry.id))
+      || entries.find((entry) => entry.source === "6h");
     if (anchor) anchor.recommendation = recommendation;
   }
   return { schemaVersion: 1, consent: currentConsent, entries, generatedAt: new Date().toISOString() };
@@ -277,13 +354,17 @@ export function setComputerHistoryConsent(enabled: boolean): ComputerHistoryStat
 
 export function clearComputerHistory(): ComputerHistoryState {
   for (const source of ["10min", "6h"] as ComputerHistorySource[]) {
-    for (const file of filesFor(source)) {
+    for (const file of filesForRoot(ROOT, source)) {
       try { fs.rmSync(file, { force: true }); } catch { /* best effort; report remaining via next list */ }
     }
   }
   for (const file of captureFiles()) {
     try { fs.rmSync(file, { force: true }); } catch { /* report on next list */ }
   }
+  // Compatible history roots are owned by their producer. Hide their current
+  // records from One without deleting another product's data; newer summaries
+  // can appear normally after this point.
+  setMeta(CLEARED_BEFORE_KEY, new Date().toISOString());
   return getComputerHistoryState();
 }
 

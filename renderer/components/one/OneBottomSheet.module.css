@@ -1,4 +1,4 @@
-/* One bottom-sheet token. Feature sheets inherit this contract and own only their content styles. */
+/* One floating-dialog token. Feature dialogs inherit this contract and own only their content styles. */
 .layer {
   /* One's sheets follow the app's neutral surface language (the composer
      popovers, settings): white paper, hairline #e0e2e3, quiet gray labels.
@@ -7,7 +7,7 @@
   --one-sheet-surface: #ffffff;
   --one-sheet-ink: #202326;
   --one-sheet-muted: #7b8185;
-  --one-sheet-accent: #5d7a39;
+  --one-sheet-accent: #515956;
   --one-sheet-line: #e0e2e3;
   --one-sheet-scrim: rgba(20, 25, 20, 0.28);
   --one-sheet-control-surface: #ffffff;
@@ -23,15 +23,15 @@
   --one-sheet-title-size: 17px;
   --one-sheet-body-size: 13px;
   --one-sheet-label-size: 11px;
-  --one-sheet-focus: 0 0 0 3px rgba(93, 122, 57, 0.18);
-  --one-sheet-primary: #718b4e;
-  --one-sheet-primary-hover: #627b42;
+  --one-sheet-focus: 0 0 0 3px rgba(46, 52, 49, 0.16);
+  --one-sheet-primary: #303532;
+  --one-sheet-primary-hover: #202421;
   --one-sheet-danger: #9c3f35;
   --one-sheet-danger-surface: #fff3f1;
   --one-sheet-danger-line: #f0d0ca;
-  --one-sheet-success: #40522d;
-  --one-sheet-success-surface: #f4f8ef;
-  --one-sheet-success-line: #dfe6d7;
+  --one-sheet-success: #373d39;
+  --one-sheet-success-surface: #f4f4f3;
+  --one-sheet-success-line: #dedfdd;
   --one-sheet-radius: 16px;
   --one-sheet-horizontal-padding: clamp(24px, 3vw, 34px);
   --one-sheet-body-padding-top: 16px;
@@ -40,8 +40,8 @@
   inset: 0;
   z-index: 120;
   display: grid;
-  align-items: end;
-  justify-items: center;
+  place-items: center;
+  padding: 8px;
   pointer-events: auto;
 }
 
@@ -59,43 +59,33 @@
 .sheet {
   position: relative;
   z-index: 1;
-  width: min(880px, calc(100vw - 32px));
-  max-height: min(82vh, 760px);
+  width: min(880px, 100%);
+  max-height: min(calc(100dvh - 16px), 900px);
   min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  margin: 0 auto;
-  padding: 0 var(--one-sheet-horizontal-padding) max(18px, env(safe-area-inset-bottom));
+  margin: auto;
+  padding: 0 var(--one-sheet-horizontal-padding);
   border: 1px solid var(--one-sheet-line);
-  border-bottom: 0;
-  border-radius: var(--one-sheet-radius) var(--one-sheet-radius) 0 0;
+  border-radius: var(--one-sheet-radius);
   background: var(--one-sheet-surface);
   color: var(--one-sheet-ink);
-  box-shadow: 0 -14px 38px rgba(20, 25, 20, 0.12);
+  box-shadow: 0 24px 72px rgba(20, 25, 20, 0.2);
   outline: none;
-  animation: oneSheetRise 200ms cubic-bezier(0.22, 0.8, 0.28, 1) both;
+  animation: oneDialogEnter 180ms cubic-bezier(0.22, 0.8, 0.28, 1) both;
 }
 
 .compact {
-  width: min(560px, calc(100vw - 32px));
+  width: min(560px, 100%);
 }
 
 .wide {
-  width: min(880px, calc(100vw - 32px));
+  width: min(1120px, 100%);
 }
 
 .full {
-  width: min(1120px, calc(100vw - 32px));
-}
-
-.handle {
-  flex: 0 0 auto;
-  width: 44px;
-  height: 4px;
-  margin: 10px auto 4px;
-  border-radius: 999px;
-  background: #e0e2e3;
+  width: 100%;
 }
 
 .header {
@@ -104,7 +94,7 @@
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: start;
   gap: 20px;
-  padding: 14px 0 16px;
+  padding: 22px 0 18px;
   border-bottom: 1px solid var(--one-sheet-line);
 }
 
@@ -124,7 +114,7 @@
 .header h2 {
   margin: 0;
   color: var(--one-sheet-ink);
-  font-size: var(--one-sheet-title-size);
+  font-size: max(var(--one-sheet-title-size), 18px);
   font-weight: 650;
   letter-spacing: -0.01em;
   line-height: 1.25;
@@ -158,9 +148,9 @@
   height: 34px;
   display: grid;
   place-items: center;
-  border: 1px solid var(--one-sheet-line);
-  border-radius: 999px;
-  background: var(--one-sheet-control-surface);
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
   color: var(--one-sheet-ink);
   font: inherit;
   font-size: 20px;
@@ -169,7 +159,7 @@
 }
 
 .closeButton:hover {
-  background: color-mix(in srgb, var(--one-sheet-accent) 7%, var(--one-sheet-control-surface));
+  background: var(--one-sheet-card-muted);
 }
 
 .closeButton:focus-visible {
@@ -192,10 +182,10 @@
   }
 }
 
-@keyframes oneSheetRise {
+@keyframes oneDialogEnter {
   from {
     opacity: 0;
-    transform: translateY(18px);
+    transform: translateY(8px) scale(0.99);
   }
 
   to {
@@ -206,7 +196,7 @@
 
 @media (max-width: 700px) {
   .layer {
-    align-items: end;
+    padding: 8px;
   }
 
   .sheet,
@@ -214,11 +204,9 @@
   .wide,
   .full {
     width: 100%;
-    max-height: 88vh;
+    max-height: calc(100dvh - 16px);
     padding-inline: 20px;
-    border-right: 0;
-    border-left: 0;
-    border-radius: var(--one-sheet-radius) var(--one-sheet-radius) 0 0;
+    border-radius: var(--one-sheet-radius);
   }
 
   .header {

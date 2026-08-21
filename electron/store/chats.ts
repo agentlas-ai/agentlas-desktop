@@ -207,6 +207,14 @@ export function getChat(id: string): Chat | null {
   return row ? toChat(row) : null;
 }
 
+function isOneOrgMemberAgentId(agentId: string | null | undefined): boolean {
+  if (!agentId) return false;
+  const row = getDb()
+    .prepare("SELECT 1 FROM one_org_members WHERE installed_agent_id = ? LIMIT 1")
+    .get(agentId) as { 1?: number } | undefined;
+  return Boolean(row);
+}
+
 /**
  * Repair legacy root chats whose controller came from the other surface or a
  * reusable project tool. One is an owner-bound personal surface; project work
@@ -220,6 +228,13 @@ export function getChat(id: string): Chat | null {
 export function repairRootChatSurfaceController(chat: Chat): Chat {
   if (chat.kind === "division") return chat;
   const db = getDb();
+  // A named One teammate owns a durable direct conversation. These chats are
+  // still part of the One surface, but their controller is the installed
+  // teammate rather than the CEO root. Archived organisation seats remain
+  // valid so an old channel never silently changes identity after relaunch.
+  if (chat.originSurface === "one" && !chat.firmId && isOneOrgMemberAgentId(chat.agentId)) {
+    return chat;
+  }
   const current = db
     .prepare("SELECT slug FROM installed_agents WHERE id = ?")
     .get(chat.agentId) as { slug?: string } | undefined;
@@ -299,10 +314,12 @@ export function createChat(input: {
   const resolvedFirmId = input.kind !== "division" && originSurface === "work" && input.projectId
     ? null
     : input.firmId ?? null;
-  // Root surfaces own their controller identity. Project pool members and One
-  // specialists enter as reusable turn tools, never as the root chat owner.
+  // Root surfaces own their controller identity. The one exception is an
+  // explicit durable One teammate channel: the organisation binding is the
+  // Main-owned authority that allows that installed agent to own the chat.
   if (input.kind !== "division" && (originSurface === "one" || input.projectId)) {
-    resolvedAgentId = defaultRootAgentId(originSurface) ?? resolvedAgentId;
+    const keepOneMember = originSurface === "one" && isOneOrgMemberAgentId(resolvedAgentId);
+    if (!keepOneMember) resolvedAgentId = defaultRootAgentId(originSurface) ?? resolvedAgentId;
   }
   if (resolvedFirmId && !resolvedAgentId) {
     const firm = getFirm(resolvedFirmId);
@@ -357,6 +374,38 @@ export function createChat(input: {
   const chat = getChat(id) as Chat;
   emitDesktopStoreChange({ entity: "chat", id });
   return chat;
+}
+
+/**
+ * Resolve the canonical direct channel for one standing One teammate.
+ *
+ * Empty chats are intentionally included: listRecentChats hides them until a
+ * first message sets used_at, but clicking the teammate again must reopen the
+ * same channel instead of manufacturing another invisible session.
+ */
+export function getOrCreateOneMemberChat(agentId: string, title: string): Chat {
+  const ko = currentUiLocale() === "ko";
+  if (!isOneOrgMemberAgentId(agentId)) {
+    throw new Error(ko ? "One 조직에 없는 에이전트입니다" : "This agent is not a member of the One organisation");
+  }
+  const existing = getDb()
+    .prepare(
+      `SELECT * FROM chats
+       WHERE origin_surface = 'one'
+         AND kind = 'user'
+         AND archived_at IS NULL
+         AND agent_id = ?
+       ORDER BY updated_at DESC
+       LIMIT 1`,
+    )
+    .get(agentId) as ChatRow | undefined;
+  if (existing) return toChat(existing);
+  return createChat({
+    agentId,
+    title: title.trim(),
+    originSurface: "one",
+    taskMode: "conversation",
+  });
 }
 
 /** 본부(division) 지속 세션을 찾거나 만든다 — 부모 firm 채팅에 종속된 숨김 sub-chat.

@@ -60,10 +60,11 @@ type Props = {
   plugins: OneComposerPluginOption[];
   permission: OnePermissionMode;
   turnOptions: Partial<Record<OneTurnOptionKey, true>>;
+  localFilesConnected: boolean;
   onMenuChange: (menu: OneComposerMenuKey | null) => void;
   onAttach: () => void;
   onAddFolder: () => void;
-  onOpenProjectSessions: () => void;
+  onClearFolder: () => void;
   onOpenPlugins: () => void;
   /** 플러그인 행 자체가 켜기/끄기 스위치다. 설정이 덜 된 항목은 관리 화면으로 보낸다. */
   onTogglePlugin: (id: string) => void;
@@ -90,10 +91,11 @@ export function OneComposerControls({
   plugins,
   permission,
   turnOptions,
+  localFilesConnected,
   onMenuChange,
   onAttach,
   onAddFolder,
-  onOpenProjectSessions,
+  onClearFolder,
   onOpenPlugins,
   onTogglePlugin,
   onToggleAgent,
@@ -189,31 +191,34 @@ export function OneComposerControls({
           <ComposerRow icon={<IconFileUp size={15} />} title={locale === "ko" ? "사진 및 파일 추가" : "Add photos and files"} onClick={onAttach} />
           <ComposerRow
             icon={<IconFolder size={15} />}
-            title={locale === "ko" ? "작업 폴더 연결" : "Connect working folder"}
-            subtitle={locale === "ko"
-              ? "폴더 경로를 연결해 원본 위치에서 읽습니다. 파일을 업로드하거나 복사하지 않습니다"
-              : "Read files in place through a local folder path. Nothing is uploaded or copied"}
+            title={localFilesConnected
+              ? (locale === "ko" ? "로컬 파일 연결됨" : "Local files connected")
+              : (locale === "ko" ? "로컬 파일 연결" : "Connect local files")}
+            subtitle={localFilesConnected
+              ? (locale === "ko" ? "이번 대화의 실행 컨텍스트입니다. 눌러서 바꿀 수 있습니다" : "Execution context for this conversation. Select to change it")
+              : (locale === "ko" ? "필요할 때만 원본 위치에서 읽습니다. 업로드하거나 복사하지 않습니다" : "Read in place only when needed. Nothing is uploaded or copied")}
+            checked={localFilesConnected}
             onClick={onAddFolder}
           />
-          <ComposerRow
-            icon={<IconRoute size={15} />}
-            title={locale === "ko" ? "프로젝트 및 이전 세션" : "Project and prior session"}
-            subtitle={locale === "ko" ? "로컬 프로젝트를 연결하고 Codex 또는 Claude Code 대화를 이어오기" : "Connect a local project and continue a Codex or Claude Code conversation"}
-            onClick={onOpenProjectSessions}
-          />
+          {localFilesConnected ? <ComposerRow
+            icon={<IconShield size={15} />}
+            title={locale === "ko" ? "로컬 파일 접근 해제" : "Disconnect local files"}
+            subtitle={locale === "ko" ? "대화는 유지하고 로컬 파일 경로만 분리합니다" : "Keep the conversation and remove only its local file access"}
+            onClick={onClearFolder}
+          /> : null}
           <div className={styles.composerPopoverDivider} />
           <ComposerRow icon={<IconRoute size={15} />} title={locale === "ko" ? "플랜 모드" : "Plan mode"} toggle checked={Boolean(turnOptions.planMode)} onClick={() => onToggleTurnOption("planMode")} />
           <ComposerRow icon={<IconTarget size={15} />} title={locale === "ko" ? "목표 추진" : "Goal mode"} toggle checked={Boolean(turnOptions.goalMode)} onClick={() => onToggleTurnOption("goalMode")} />
           <div className={styles.composerPopoverDivider} />
           <ComposerRow icon={<IconAtSign size={15} />} title={locale === "ko" ? "특정 에이전트 지정 (선택)" : "Choose specific agents (optional)"} subtitle={locale === "ko" ? "이 턴에만 수동으로 추가" : "Add manually for this turn"} onClick={() => onMenuChange("agents")} />
           <div className={styles.composerPopoverDivider} />
-          <div className={styles.composerPopoverSectionLabel}>{locale === "ko" ? "플러그인" : "Plugins"}</div>
+          <div className={styles.composerPopoverSectionLabel}>{locale === "ko" ? "도구" : "Tools"}</div>
           <div className={styles.composerPluginList}>
             {plugins.length === 0 ? (
               <ComposerRow
                 icon={<IconLayers size={15} />}
-                title={locale === "ko" ? "연결된 플러그인 없음" : "No connected plugins"}
-                subtitle={locale === "ko" ? "MCP 및 플러그인 설정 열기" : "Open MCP and plugin settings"}
+                title={locale === "ko" ? "연결된 도구 없음" : "No connected tools"}
+                subtitle={locale === "ko" ? "도구 설정 열기" : "Open tool settings"}
                 trailing={<IconChevronRight size={13} />}
                 onClick={onOpenPlugins}
               />
@@ -243,7 +248,7 @@ export function OneComposerControls({
           </div>
           <ComposerRow
             icon={<IconLayers size={15} />}
-            title={locale === "ko" ? "MCP, Plugin" : "MCP, Plugin"}
+            title={locale === "ko" ? "도구 관리" : "Manage tools"}
             trailing={<IconChevronRight size={13} />}
             onClick={onOpenPlugins}
           />

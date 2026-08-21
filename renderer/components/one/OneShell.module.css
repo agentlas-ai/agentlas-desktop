@@ -530,12 +530,33 @@
   background: #e4e6e7;
 }
 
-.taskToolbar > strong {
+.taskToolbarIdentity {
   min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.taskToolbarIdentity > span:last-child {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.taskToolbarIdentity strong {
   overflow: hidden;
   color: #34383b;
-  font-size: 16px;
-  font-weight: 560;
+  font-size: 14px;
+  font-weight: 680;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.taskToolbarIdentity small {
+  overflow: hidden;
+  color: #8a9093;
+  font-size: 10px;
+  font-weight: 520;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1497,50 +1518,6 @@
 }
 .oneMemoryUseOnceChip button:hover,
 .oneMemoryUseOnceChip button:focus-visible { background: #e7eedf; outline: 2px solid #aebc9e; }
-
-.oneWorkspaceChip {
-  width: fit-content;
-  max-width: min(920px, 100%);
-  min-height: 34px;
-  display: grid;
-  grid-template-columns: auto minmax(0, auto) auto 44px;
-  align-items: center;
-  gap: 7px;
-  margin: 0 auto 7px;
-  padding: 0 0 0 11px;
-  border: 1px solid #dfe3e1;
-  border-radius: 999px;
-  background: #f7f8f7;
-  color: #495055;
-  font-size: 11px;
-  pointer-events: auto;
-}
-
-.oneWorkspaceChip > span {
-  max-width: min(42vw, 360px);
-  overflow: hidden;
-  font-weight: 680;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.oneWorkspaceChip > small { color: #858c90; font-size: 9px; white-space: nowrap; }
-.oneWorkspaceChip > svg { color: #788079; }
-.oneWorkspaceChip > button {
-  width: 44px;
-  min-height: 44px;
-  display: grid;
-  place-items: center;
-  padding: 0;
-  border: 0;
-  border-radius: 50%;
-  background: transparent;
-  color: #747b7f;
-  font-size: 17px;
-  cursor: pointer;
-}
-.oneWorkspaceChip > button:hover,
-.oneWorkspaceChip > button:focus-visible { background: #ecefed; outline: 2px solid #b6beb8; }
 
 .composer {
   width: min(920px, 100%);
@@ -2708,6 +2685,14 @@
 .composer textarea {
   font-size: 13.5px;
 }
+
+.historyClearConfirmation { display: grid; gap: 22px; }
+.historyClearNote { display: grid; grid-template-columns: 24px minmax(0, 1fr); align-items: start; gap: 11px; padding: 15px 16px; border: 1px solid var(--one-sheet-danger-line); border-radius: var(--one-sheet-card-radius); background: var(--one-sheet-danger-surface); color: var(--one-sheet-danger); }
+.historyClearNote span { color: #6d5551; font-size: 12px; line-height: 1.55; }
+.historyClearActions { display: flex; justify-content: flex-end; gap: 9px; }
+.historyClearActions button { min-height: var(--one-sheet-control-height); padding: 0 16px; border: 1px solid var(--one-sheet-control-border); border-radius: var(--one-sheet-control-radius); background: var(--one-sheet-control-surface); color: var(--one-sheet-ink); font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
+.historyClearActions button:disabled { cursor: wait; opacity: .55; }
+.historyClearActions .historyClearDanger { border-color: var(--one-sheet-danger); background: var(--one-sheet-danger); color: #fff; }
 
 @media (max-width: 1080px) {
   .body,

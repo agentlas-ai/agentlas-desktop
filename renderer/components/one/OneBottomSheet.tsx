@@ -1,4 +1,5 @@
 import { useEffect, useRef, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { IconClose } from "@/components/Icon";
 import styles from "./OneBottomSheet.module.css";
 
@@ -36,9 +37,11 @@ function getFocusableElements(root: HTMLElement): HTMLElement[] {
 }
 
 /**
- * The single visual and interaction contract for One's modal bottom sheets.
- * Content-specific sheets should provide only their body; geometry, scrim,
- * focus containment, Escape handling, and mobile anchoring live here.
+ * The single visual and interaction contract for One's floating dialogs.
+ * The legacy component name stays for call-site compatibility, but the visual
+ * surface is a centred modal with viewport breathing room, never a bottom
+ * sheet. Content-specific dialogs provide only their body; geometry, scrim,
+ * focus containment, and Escape handling live here.
  */
 export function OneBottomSheet({
   open,
@@ -145,7 +148,7 @@ export function OneBottomSheet({
 
   if (!open) return null;
 
-  return (
+  return createPortal(
     <div className={styles.layer} role="presentation">
       <button
         className={styles.scrim}
@@ -159,6 +162,7 @@ export function OneBottomSheet({
       <div
         ref={dialogRef}
         className={[styles.sheet, styles[size], panelClassName].filter(Boolean).join(" ")}
+        data-one-modal={size}
         data-one-bottom-sheet={size}
         role={dialogRole}
         aria-modal="true"
@@ -167,7 +171,6 @@ export function OneBottomSheet({
         aria-describedby={ariaDescribedBy}
         tabIndex={-1}
       >
-        <div className={styles.handle} aria-hidden="true" />
         {title !== undefined && (
           <header className={styles.header}>
             <div className={styles.headingCopy}>
@@ -195,6 +198,7 @@ export function OneBottomSheet({
           {children}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

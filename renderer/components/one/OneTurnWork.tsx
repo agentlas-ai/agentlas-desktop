@@ -101,6 +101,15 @@ function statusSuffix(cell: OneWorkCell, locale: "ko" | "en"): ReactNode {
   return null;
 }
 
+function normalizeLiveLabel(value: string): string {
+  return value.replace(/\s+/g, " ").trim().toLocaleLowerCase();
+}
+
+function liveThoughtLabel(cell: OneWorkCell, locale: "ko" | "en"): string {
+  if (cell.kind !== "thought") return "";
+  return cell.headline ?? (cell.status === "running" ? cellVerb(cell, locale) : "");
+}
+
 function WorkRow({ cell, locale }: { cell: OneWorkCell; locale: "ko" | "en" }) {
   const ko = locale === "ko";
   const verb = cellVerb(cell, locale);
@@ -336,7 +345,31 @@ export function OneTurnWork({
   }, [active]);
   const liveElapsedMs = useElapsed(startedAt, active);
   const settledMs = presentation.durationMs ?? (startedAt != null && !active ? liveElapsedMs : undefined);
-  const hasRows = presentation.cells.length > 0;
+  const recordedRows = presentation.cells.length > 0;
+  const headline = preparing && !recordedRows
+    ? (ko ? "준비하는 중" : "Preparing")
+    : presentation.headline;
+  // The active headline is a live projection of the latest thought. Do not
+  // echo that exact thought again as the first expanded row; older thoughts
+  // and the full settled ledger remain visible for audit.
+  let liveHeadlineCell = -1;
+  if (active) {
+    const normalizedHeadline = normalizeLiveLabel(headline);
+    for (let index = presentation.cells.length - 1; index >= 0; index -= 1) {
+      const cell = presentation.cells[index];
+      if (
+        cell.kind === "thought"
+        && normalizeLiveLabel(liveThoughtLabel(cell, locale)) === normalizedHeadline
+      ) {
+        liveHeadlineCell = index;
+        break;
+      }
+    }
+  }
+  const visibleCells = liveHeadlineCell < 0
+    ? presentation.cells
+    : presentation.cells.filter((_cell, index) => index !== liveHeadlineCell);
+  const hasRows = visibleCells.length > 0;
   const hasHandoffs = state.handoffs.length > 0;
 
   if (!active && !hasRows && !hasHandoffs && !presentation.terminalMessage) {
@@ -350,10 +383,6 @@ export function OneTurnWork({
   const workedFor = settledMs != null
     ? (ko ? `${formatWorkElapsed(settledMs)} 동안 작업` : `Worked for ${formatWorkElapsed(settledMs)}`)
     : (ko ? "작업" : "Work");
-  const headline = preparing && !hasRows
-    ? (ko ? "준비하는 중" : "Preparing")
-    : presentation.headline;
-
   return (
     <>
     <section
@@ -397,7 +426,7 @@ export function OneTurnWork({
       )}
       {expanded && (hasRows || hasHandoffs || presentation.terminalMessage) && (
         <div className={styles.rows}>
-          {presentation.cells.map((cell) => <WorkRow key={cell.id} cell={cell} locale={locale} />)}
+          {visibleCells.map((cell) => <WorkRow key={cell.id} cell={cell} locale={locale} />)}
           {state.handoffs.map((handoff) => (
             <OneHandoffCard
               key={handoff.id}

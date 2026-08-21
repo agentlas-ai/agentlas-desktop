@@ -370,6 +370,7 @@ import {
   clearChatContext,
   createChat,
   getChat,
+  getOrCreateOneMemberChat,
   getChatWorkingFolder,
   listArchivedChats,
   listChatMessages,
@@ -3738,6 +3739,11 @@ export function registerIpcHandlers(): void {
       ...input,
       originSurface: input?.originSurface === "one" ? "one" : "work",
     }),
+  );
+  ipcMain.handle(
+    "chats:openOneMember",
+    (_e, input: { agentId: string; title: string }) =>
+      getOrCreateOneMemberChat(input.agentId, input.title),
   );
   ipcMain.handle("chats:rename", (_e, id: string, title: string) => renameChat(id, title));
   ipcMain.handle("chats:remove", (_e, id: string) => {

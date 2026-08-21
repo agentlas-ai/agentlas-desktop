@@ -70,6 +70,7 @@ type SheetProps = {
   onSelectModel: (runtime: RuntimeStatus, model: string) => Promise<void>;
   onHistoryConsent: (enabled: boolean) => Promise<void>;
   onOpenMcpLibrary: () => void;
+  onToolTabChange: (tab: "plugins" | "mcp") => void;
 };
 
 const SETTINGS_META: Record<OneSettingsKey, { titleKo: string; titleEn: string; descriptionKo: string; descriptionEn: string }> = {
@@ -279,13 +280,22 @@ function HistorySettings({ locale, state, onConsent }: { locale: string; state: 
   </div>;
 }
 
-export function OneSettingsSheet({ open, locale, installedPlugins, pluginCatalog, pluginStatuses, permission, runtime, models, history, onClose, onTogglePlugin, onSelectPermission, onSelectModel, onHistoryConsent, onOpenMcpLibrary }: SheetProps) {
+export function OneSettingsSheet({ open, locale, installedPlugins, pluginCatalog, pluginStatuses, permission, runtime, models, history, onClose, onTogglePlugin, onSelectPermission, onSelectModel, onHistoryConsent, onOpenMcpLibrary, onToolTabChange }: SheetProps) {
   const ko = locale === "ko";
   const meta = open ? SETTINGS_META[open] : SETTINGS_META.mcp;
   const customServers = installedPlugins.filter((item) => !item.catalogId);
   const catalogPlugins = installedPlugins.filter((item) => Boolean(item.catalogId));
-  return <OneBottomSheet open={open !== null} onClose={onClose} closeLabel={ko ? "설정 닫기" : "Close settings"} size="wide" eyebrow={ko ? "One 설정" : "One settings"} title={ko ? meta.titleKo : meta.titleEn} description={ko ? meta.descriptionKo : meta.descriptionEn} titleId="one-settings-sheet-title" ariaLabelledBy="one-settings-sheet-title">
+  const toolsOpen = open === "plugins" || open === "mcp";
+  const title = toolsOpen ? (ko ? "도구" : "Tools") : (ko ? meta.titleKo : meta.titleEn);
+  const description = toolsOpen
+    ? (ko ? "플러그인은 카탈로그 도구이고 MCP는 직접 등록한 서버입니다. 서로 다른 목록으로 관리합니다." : "Plugins are catalog tools; MCP contains servers you registered yourself. They stay in separate lists.")
+    : (ko ? meta.descriptionKo : meta.descriptionEn);
+  return <OneBottomSheet open={open !== null} onClose={onClose} closeLabel={ko ? "설정 닫기" : "Close settings"} size="wide" eyebrow={ko ? "One 설정" : "One settings"} title={title} description={description} titleId="one-settings-sheet-title" ariaLabelledBy="one-settings-sheet-title">
     <div className={styles.sheetBody} data-setting={open || undefined}>
+      {toolsOpen && <div className={styles.toolTabs} role="tablist" aria-label={ko ? "도구 종류" : "Tool type"}>
+        <button type="button" role="tab" aria-selected={open === "plugins"} data-active={open === "plugins" ? "true" : "false"} onClick={() => onToolTabChange("plugins")}>{ko ? "플러그인" : "Plugins"}</button>
+        <button type="button" role="tab" aria-selected={open === "mcp"} data-active={open === "mcp" ? "true" : "false"} onClick={() => onToolTabChange("mcp")}>MCP</button>
+      </div>}
       {open === "mcp" && <><ToolRows items={customServers} catalog={pluginCatalog} statuses={pluginStatuses} locale={locale} onToggle={onTogglePlugin} empty={ko ? "직접 등록한 MCP 서버가 없습니다." : "No custom MCP servers are registered."} /><div className={styles.actionRow}><span /><button type="button" className={styles.primary} onClick={onOpenMcpLibrary}>{ko ? "MCP 추가·관리" : "Add or manage MCP"}</button></div></>}
       {open === "plugins" && <><ToolRows items={catalogPlugins} catalog={pluginCatalog} statuses={pluginStatuses} locale={locale} onToggle={onTogglePlugin} empty={ko ? "설치한 플러그인이 없습니다." : "No plugins are installed."} /><div className={styles.actionRow}><span /><button type="button" className={styles.primary} onClick={onOpenMcpLibrary}>{ko ? "플러그인 둘러보기" : "Browse plugins"}</button></div></>}
       {open === "permission" && <PermissionSettings locale={locale} value={permission} onChange={onSelectPermission} />}

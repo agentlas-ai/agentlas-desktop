@@ -6785,6 +6785,8 @@ export interface AgentlasIpc {
       /** 'one'이면 One 홈 전용 대화 — Work 사이드바에 나타나지 않는다. */
       originSurface?: "one" | "work";
     }) => Promise<Chat>;
+    /** Open the durable direct conversation owned by one standing One teammate. */
+    openOneMember: (input: { agentId: string; title: string }) => Promise<Chat>;
     rename: (id: string, title: string) => Promise<Chat>;
     /** 보관 — 사이드바에서 숨김. 채팅·메시지는 그대로 유지 */
     archive: (id: string) => Promise<Chat>;

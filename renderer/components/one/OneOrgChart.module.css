@@ -93,14 +93,14 @@
 .remoteEmpty button { justify-self: start; min-height: 28px; padding: 0 10px; border: 1px solid #d8e4dd; border-radius: 7px; background: #f7fbf8; color: #247c63; font-size: 9px; cursor: pointer; }
 .dialogActions { display: flex; justify-content: flex-end; gap: 7px; }
 .dialogActions button { min-height: 32px; display: inline-flex; align-items: center; gap: 5px; padding: 0 13px; border: 1px solid #dfe5e1; border-radius: 8px; background: #fff; color: #6f7873; font-size: 10px; cursor: pointer; }
-.dialogActions .primary { border-color: #258b70; background: #258b70; color: #fff; }
+.dialogActions .primary { border-color: #303532; background: #303532; color: #fff; }
 .dialogActions .primary:disabled { border-color: #cbd5d0; background: #d8dfdb; cursor: not-allowed; }
 .autoSelectRow { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 10px; border: 1px solid #e3ebe6; border-radius: 10px; background: #f8fcfa; }
 .autoSelectRow > div { display: grid; gap: 3px; }
 .autoSelectRow strong { color: #33413a; font-size: 10px; }
 .autoSelectRow small { color: #87918b; font-size: 8px; }
 .toggle { min-width: 46px; min-height: 25px; padding: 0 7px; border: 1px solid #cbdad2; border-radius: 999px; background: #fff; color: #718078; font-size: 8px; font-weight: 700; cursor: pointer; }
-.toggle[data-on="true"] { border-color: #27896d; background: #27896d; color: #fff; }
+.toggle[data-on="true"] { border-color: #343a37; background: #343a37; color: #fff; }
 .toolList { display: grid; gap: 5px; max-height: 240px; overflow: auto; }
 .toolRow { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto auto; align-items: center; gap: 7px; min-height: 38px; padding: 5px 7px; border: 1px solid #e6ece8; border-radius: 9px; background: #fff; }
 .toolRow > div { display: grid; min-width: 0; gap: 2px; }
@@ -171,11 +171,13 @@
 
 .row:hover,
 .row:focus-visible,
-.row[data-status="working"] {
+.row[data-status="working"],
+.row[data-active="true"] {
   border-color: transparent;
   background: #efeff0;
   outline: none;
 }
+.row[data-active="true"]::before { position: absolute; top: 11px; bottom: 11px; left: -4px; width: 3px; border-radius: 999px; background: #7564ad; content: ""; }
 
 .row[data-status="failed"] {
   border-color: transparent;
@@ -382,6 +384,7 @@
 .secondaryAction,
 .archiveAction { min-height: var(--one-sheet-control-height); padding: 0 15px; border-radius: var(--one-sheet-control-radius); font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
 .primaryAction { border: 1px solid var(--one-sheet-primary); background: var(--one-sheet-primary); color: #fff; }
+.primaryAction:hover:not(:disabled) { border-color: var(--one-sheet-primary-hover); background: var(--one-sheet-primary-hover); }
 .secondaryAction,
 .archiveAction { border: 1px solid var(--one-sheet-control-border); background: var(--one-sheet-control-surface); color: var(--one-sheet-ink); }
 .archiveAction { color: var(--one-sheet-danger); }
@@ -389,8 +392,71 @@
 .secondaryAction:disabled,
 .archiveAction:disabled { cursor: not-allowed; opacity: .5; }
 
+/* Add-agent and Tools use the large floating-dialog geometry from the supplied
+   reference. Their lists scroll inside the dialog so the action footer never
+   disappears below the viewport. */
+.addDialog,
+.toolsDialog { height: min(820px, calc(100dvh - 16px)); }
+.addDialogBody,
+.toolsDialogBody { display: flex; flex-direction: column; }
+.addSheet,
+.toolsSheet { min-height: 0; flex: 1; display: flex; flex-direction: column; gap: 16px; }
+.addSheet .tabs,
+.toolTabs { min-height: 46px; gap: 5px; padding: 4px; border-radius: 11px; background: var(--one-sheet-card-muted); }
+.addSheet .tabs button,
+.toolTabs button { min-height: 38px; border: 0; border-radius: 8px; background: transparent; color: var(--one-sheet-muted); font: inherit; font-size: 12px; font-weight: 650; cursor: pointer; }
+.addSheet .tabs button[data-active="true"],
+.toolTabs button[data-active="true"] { background: var(--one-sheet-control-surface); color: var(--one-sheet-ink); box-shadow: 0 1px 5px rgba(30, 34, 31, .09); }
+.addSheet .tabs button:focus-visible,
+.toolTabs button:focus-visible { outline: 0; box-shadow: var(--one-sheet-focus); }
+.toolTabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.addSearch { min-height: var(--one-sheet-control-height); display: grid; grid-template-columns: 22px minmax(0, 1fr) 28px; align-items: center; gap: 7px; padding: 0 11px; border: 1px solid var(--one-sheet-control-border); border-radius: var(--one-sheet-control-radius); background: var(--one-sheet-control-surface); color: var(--one-sheet-muted); }
+.addSearch input { min-width: 0; border: 0; outline: 0; background: transparent; color: var(--one-sheet-ink); font: inherit; font-size: 12px; }
+.addSearch > button { width: 28px; height: 28px; display: grid; place-items: center; border: 0; border-radius: 7px; background: transparent; color: var(--one-sheet-muted); cursor: pointer; }
+.addSearch > button:hover { background: var(--one-sheet-card-muted); }
+.sourceNote { margin: -4px 0 0; color: var(--one-sheet-muted); font-size: 11px; line-height: 1.5; }
+.candidateGrid { min-height: 0; flex: 1; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-content: start; gap: 8px; overflow-y: auto; padding-right: 2px; }
+.candidateGrid > button { min-height: 78px; display: grid; grid-template-columns: 36px minmax(0, 1fr) 18px; align-items: center; gap: 10px; padding: 11px 12px; border: 1px solid var(--one-sheet-control-border); border-radius: var(--one-sheet-card-radius); background: var(--one-sheet-control-surface); color: var(--one-sheet-ink); font: inherit; text-align: left; cursor: pointer; }
+.candidateGrid > button:hover,
+.candidateGrid > button:focus-visible { border-color: #c8cbd0; outline: 0; }
+.candidateGrid > button[data-active="true"] { border-color: var(--one-sheet-accent); background: color-mix(in srgb, var(--one-sheet-accent) 6%, #fff); box-shadow: var(--one-sheet-focus); color: var(--one-sheet-accent); }
+.candidateGrid > button > span { min-width: 0; display: grid; gap: 3px; }
+.candidateGrid strong,
+.candidateGrid small,
+.candidateGrid em { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.candidateGrid strong { color: var(--one-sheet-ink); font-size: 12px; font-style: normal; }
+.candidateGrid small { color: var(--one-sheet-muted); font-size: 9px; }
+.candidateGrid em { color: #686e72; font-size: 10px; font-style: normal; }
+.sheetEmpty { min-height: 88px; flex: 1; display: grid; place-items: center; gap: 8px; margin: 0; padding: 18px; border: 1px solid var(--one-sheet-line); border-radius: var(--one-sheet-card-radius); background: var(--one-sheet-card-muted); color: var(--one-sheet-muted); font-size: 11px; line-height: 1.5; text-align: center; }
+.sheetEmpty > button { min-height: 34px; padding: 0 12px; border: 1px solid var(--one-sheet-control-border); border-radius: var(--one-sheet-control-radius); background: var(--one-sheet-control-surface); color: var(--one-sheet-ink); font: inherit; font-size: 11px; font-weight: 650; cursor: pointer; }
+.selectedAgentPanel { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; padding: 16px; border: 1px solid var(--one-sheet-line); border-radius: var(--one-sheet-card-radius); background: #fafafa; }
+.selectedAgentPanel .modelPolicy,
+.selectedAgentPanel .note { grid-column: 1 / -1; }
+.addError { margin: 0; padding: 10px 12px; border: 1px solid var(--one-sheet-danger-line); border-radius: 10px; background: var(--one-sheet-danger-surface); color: var(--one-sheet-danger); font-size: 11px; line-height: 1.45; }
+.sheetActions { flex: 0 0 auto; display: flex; justify-content: flex-end; gap: 9px; padding-top: 4px; }
+.sheetActions > button { min-height: var(--one-sheet-control-height); display: inline-flex; align-items: center; gap: 6px; padding: 0 16px; border: 1px solid var(--one-sheet-control-border); border-radius: var(--one-sheet-control-radius); background: var(--one-sheet-control-surface); color: var(--one-sheet-ink); font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
+.sheetActions > button:disabled { cursor: not-allowed; opacity: .5; }
+.sheetActions > .primaryAction { border-color: var(--one-sheet-primary); background: var(--one-sheet-primary); color: #fff; }
+.builtInTool { min-height: 58px; display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; align-items: center; gap: 11px; padding: 10px 12px; border: 1px solid var(--one-sheet-success-line); border-radius: var(--one-sheet-card-radius); background: var(--one-sheet-success-surface); }
+.builtInTool > div { min-width: 0; display: grid; gap: 4px; }
+.builtInTool strong { color: var(--one-sheet-ink); font-size: 12px; }
+.builtInTool small { color: var(--one-sheet-muted); font-size: 10px; }
+.toolsSheet .toolList { min-height: 0; max-height: none; flex: 1; grid-template-columns: repeat(2, minmax(0, 1fr)); align-content: start; gap: 8px; overflow-y: auto; }
+.toolsSheet .toolRow { min-height: 62px; grid-template-columns: 30px minmax(0, 1fr) auto auto; padding: 9px 11px; border-color: var(--one-sheet-control-border); border-radius: var(--one-sheet-card-radius); }
+.toolsSheet .toolMark { width: 28px; height: 28px; }
+.toolsSheet .toolRow strong { font-size: 12px; }
+.toolsSheet .toolRow small,
+.toolsSheet .toolState,
+.toolsSheet .toolAction { font-size: 9px; }
+.toolsSheet .sheetEmpty { grid-column: 1 / -1; }
+
 @media (max-width: 620px) {
   .styleOptions { grid-template-columns: 1fr; }
   .editorActions { grid-template-columns: 1fr 1fr; }
   .editorActions > span { display: none; }
+  .candidateGrid,
+  .toolsSheet .toolList,
+  .selectedAgentPanel { grid-template-columns: 1fr; }
+  .selectedAgentPanel .modelPolicy,
+  .selectedAgentPanel .note { grid-column: 1; }
 }
