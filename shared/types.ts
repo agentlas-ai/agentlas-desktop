@@ -123,6 +123,19 @@ import type {
 } from "./one-suggestions";
 import type { OneSuggestionReviewSeed } from "./one-review-seed";
 import type {
+  PluginBuilderAnswers,
+  PluginBuilderDraftInput,
+  PluginBuilderPhase,
+  PluginBuilderProgressEvent,
+  PluginBuilderSeed,
+  PluginBuilderSession,
+  PluginBuilderSessionInput,
+  PluginDraftResult,
+  PluginGateReport,
+  PluginInstallReceipt,
+  PluginProofReceipt,
+} from "./plugin-builder";
+import type {
   GetOneHubDerivativeDraftInput,
   OneHubDerivativeDraft,
 } from "./one-hub-derivative";
@@ -364,6 +377,19 @@ export type {
   OneReviewSeedSurface,
   OneSuggestionReviewSeed,
 } from "./one-review-seed";
+export type {
+  PluginBuilderAnswers,
+  PluginBuilderDraftInput,
+  PluginBuilderPhase,
+  PluginBuilderProgressEvent,
+  PluginBuilderSeed,
+  PluginBuilderSession,
+  PluginBuilderSessionInput,
+  PluginDraftResult,
+  PluginGateReport,
+  PluginInstallReceipt,
+  PluginProofReceipt,
+} from "./plugin-builder";
 export type {
   CreateOneValueClosureInput,
   OneOriginalPreservationStatus,
@@ -7255,6 +7281,17 @@ export interface AgentlasIpc {
       requestedToolId?: string,
     ) => Promise<ToolFactoryToolRecord | null>;
     listOperations: (toolRecordId: string) => Promise<ToolFactoryOperationRecord[]>;
+  };
+  /** Conversation-driven local plugin builder. Packages are verified before install. */
+  pluginBuilder: {
+    start: (input: { chatId: string; seed: PluginBuilderSeed }) => Promise<PluginBuilderSession>;
+    draft: (input: PluginBuilderDraftInput) => Promise<PluginDraftResult>;
+    verify: (input: PluginBuilderSessionInput) => Promise<PluginGateReport>;
+    install: (input: PluginBuilderSessionInput) => Promise<PluginInstallReceipt>;
+    prove: (input: PluginBuilderSessionInput) => Promise<PluginProofReceipt>;
+    discard: (input: PluginBuilderSessionInput) => Promise<void>;
+    listDrafts: (chatId: string) => Promise<PluginBuilderSession[]>;
+    onProgress: (listener: (event: PluginBuilderProgressEvent) => void) => () => void;
   };
   /** OpenClaw / Hermes에서 페르소나·키·자동화·메모리를 가져온다.
    *  scan은 디스크를 읽어 preview(이름/개수만) 반환, import는 실제 적용. */

@@ -42,7 +42,7 @@ function reviewCopy(locale: Locale, key: ReviewFallbackKey): string {
 
 const SUGGESTION_ID_RE = /^one_suggestion_[a-f0-9]{32}$/;
 const REVIEW_ID_RE = /^one_suggestion_review_[a-f0-9]{32}$/;
-const DRAFT_ID_RE = /^one_(?:agent|team|automation|hub)_draft_[a-f0-9]{32}$/;
+const DRAFT_ID_RE = /^one_(?:plugin|agent|team|automation|hub)_draft_[a-f0-9]{32}$/;
 const SAFE_TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/;
 
 type ParsedHandoff =
@@ -81,6 +81,7 @@ function parseHandoffQuery(query: string): ParsedHandoff {
 }
 
 function reviewLabel(handoff: OneSuggestionReviewHandoff, locale: Locale): string {
+  if (handoff.type === "plugin_build") return locale === "ko" ? "플러그인 빌더" : "Plugin builder";
   if (handoff.type === "agent_build") return tFor(locale, "one.rev.label.agent");
   if (handoff.type === "retain_team") return tFor(locale, "one.rev.label.team");
   if (handoff.type === "automation") return tFor(locale, "one.rev.label.automation");
@@ -94,6 +95,11 @@ function permissionLabel(value: string, locale: Locale): string {
 }
 
 function seedPreview(seed: Exclude<OneSuggestionReviewSeed, { kind: "blocked" }>, locale: Locale): string {
+  if (seed.kind === "plugin_build") {
+    return locale === "ko"
+      ? `반복 절차 플러그인 · 도구 ${seed.observedToolCount}개 · 작업 종류 ${seed.taskKindRef}`
+      : `Repeated procedure plugin · ${seed.observedToolCount} tools · task kind ${seed.taskKindRef}`;
+  }
   if (seed.kind === "agent_build") {
     return tFor(locale, "one.rev.seed.agent", { name: seed.candidate.name });
   }

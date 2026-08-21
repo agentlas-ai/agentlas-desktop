@@ -725,6 +725,16 @@ function ChatInputComponent({
   function submit() {
     if (submitDisabled) return;
     const text = withAttachmentContext(input.trim());
+    const pluginMention = /(^|\s)@plugin-make\b/i.exec(text);
+    if (pluginMention) {
+      const request = text.replace(pluginMention[0], " ").trim();
+      const params = new URLSearchParams();
+      if (activeChatId) params.set("chat", activeChatId);
+      if (request) params.set("request", request);
+      finishComposerAfterSend();
+      router.push(`/build/plugin${params.toString() ? `?${params.toString()}` : ""}`);
+      return;
+    }
     if (busy) {
       // Codex-shaped steering: the round send control immediately queues the
       // next instruction. Main preserves the active model turn.

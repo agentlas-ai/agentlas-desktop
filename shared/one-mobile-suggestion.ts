@@ -50,6 +50,14 @@ export interface OneMobileAgentBuildScope {
   saved: false;
 }
 
+export interface OneMobilePluginBuildScope {
+  type: "plugin_build";
+  reviewMode: "plugin_builder";
+  observedToolCount: number;
+  sourceTaskCount: number;
+  saved: false;
+}
+
 export interface OneMobileRetainTeamScope {
   type: "retain_team";
   reviewMode: "team_draft";
@@ -89,6 +97,7 @@ export interface OneMobileHubDerivativeScope {
 }
 
 export type OneMobileSuggestionScope =
+  | OneMobilePluginBuildScope
   | OneMobileAgentBuildScope
   | OneMobileRetainTeamScope
   | OneMobileAutomationScope
@@ -150,7 +159,7 @@ export interface OneMobileSuggestionActionAcknowledgement {
   reviewOnly: true;
   executionStarted: false;
   reviewRequestId: string | null;
-  targetSurface: "build" | "automation" | "work" | null;
+  targetSurface: "build" | "plugin" | "automation" | "work" | null;
 }
 
 const HOST_REF_RE = /^host_[a-f0-9]{32}$/;
@@ -159,7 +168,7 @@ const REVIEW_REF_RE = /^one_suggestion_review_[a-f0-9]{32}$/;
 const CLOSURE_REF_RE = /^value_closure_[a-f0-9]{32}$/;
 const MEMBER_REF_RE = /^member_[a-f0-9]{32}$/;
 const ROLE_REF_RE = /^role_[a-f0-9]{32}$/;
-const TYPES = new Set<OneSuggestionType>(["agent_build", "retain_team", "automation", "hub_derivative"]);
+const TYPES = new Set<OneSuggestionType>(["plugin_build", "agent_build", "retain_team", "automation", "hub_derivative"]);
 const PERMISSIONS = new Set<OneAutomationPermissionPreview>([
   "read_only", "draft_only", "approval_before_external_change",
 ]);
@@ -237,6 +246,14 @@ function scope(
       && boundedCount(value.participantCount, 1, 16)
       && boundedCount(value.observedToolCount, 0, 64)
       && boundedCount(value.sourceTaskCount, 2, 16)
+      && value.sourceTaskCount === evidenceCount
+      && value.saved === false;
+  }
+  if (expectedType === "plugin_build") {
+    return exactKeys(value, ["type", "reviewMode", "observedToolCount", "sourceTaskCount", "saved"])
+      && value.reviewMode === "plugin_builder"
+      && boundedCount(value.observedToolCount, 2, 64)
+      && boundedCount(value.sourceTaskCount, 3, 16)
       && value.sourceTaskCount === evidenceCount
       && value.saved === false;
   }
@@ -353,7 +370,7 @@ export function isOneMobileSuggestionActionAcknowledgement(
     && (value.reviewRequestId === null
       || (typeof value.reviewRequestId === "string" && REVIEW_REF_RE.test(value.reviewRequestId)))
     && (value.targetSurface === null
-      || ["build", "automation", "work"].includes(String(value.targetSurface)))
+      || ["build", "plugin", "automation", "work"].includes(String(value.targetSurface)))
     && actionStatusMatches
     && (value.action === "review"
       ? value.status === "accepted_for_review" && value.reviewRequestId !== null && value.targetSurface !== null

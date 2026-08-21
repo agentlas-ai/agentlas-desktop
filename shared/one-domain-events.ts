@@ -44,6 +44,7 @@ export const ONE_DOMAIN_EVENT_RULES = {
   "suggestion.snoozed": { taskScoped: true, required: ["suggestionId", "resumeAfter"], optional: [] },
   "suggestion.dismissed": { taskScoped: true, required: ["suggestionId", "suppressionScope"], optional: [] },
   "agent.build_requested": { taskScoped: true, required: ["sourceTaskRefs", "agentDraftId"], optional: [] },
+  "plugin.build_requested": { taskScoped: true, required: ["patternKey", "taskKindRef", "toolRefs", "pluginDraftId"], optional: [] },
   "team.retention_requested": { taskScoped: true, required: ["assignmentRefs", "teamDraftId"], optional: [] },
   "automation.proposed": { taskScoped: true, required: ["triggerPreview", "approvalPolicy"], optional: [] },
   "automation.enabled": { taskScoped: true, required: ["automationId", "policy", "pauseControl"], optional: [] },

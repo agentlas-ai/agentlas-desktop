@@ -18,7 +18,7 @@ import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-p
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 99;
+const SCHEMA_VERSION = 100;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -4757,6 +4757,30 @@ export function initStore(options: StoreInitOptions = {}): void {
   try { _db.exec("ALTER TABLE one_org_members ADD COLUMN auto_select_tools INTEGER NOT NULL DEFAULT 1 CHECK(auto_select_tools IN (0,1))"); } catch { /* already present */ }
   try { _db.exec("ALTER TABLE one_org_members ADD COLUMN collaboration_style TEXT NOT NULL DEFAULT 'default' CHECK(collaboration_style IN ('default','concise','warm','direct'))"); } catch { /* already present */ }
   try { _db.exec("ALTER TABLE one_org_members ADD COLUMN handover_note TEXT"); } catch { /* already present */ }
+
+  // v100 — durable in-app plugin builder drafts.  The seed is retained so an
+  // agent-offer can be enforced once per conversation even after a restart or
+  // an abandoned draft.
+  if (userVersion < 100 || !tableExists(_db, "plugin_builder_sessions")) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS plugin_builder_sessions (
+        id TEXT PRIMARY KEY,
+        chat_id TEXT NOT NULL,
+        slug TEXT,
+        phase TEXT NOT NULL CHECK(phase IN ('interview','draft','verify','install','prove','discarded')),
+        staging_dir TEXT,
+        answers_json TEXT,
+        gate_report_json TEXT,
+        seed_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_plugin_builder_sessions_chat_updated
+        ON plugin_builder_sessions(chat_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_plugin_builder_sessions_slug_phase
+        ON plugin_builder_sessions(slug, phase);
+    `);
+  }
 
   if (userVersion < SCHEMA_VERSION) _db.pragma(`user_version = ${SCHEMA_VERSION}`);
   } catch (error) {

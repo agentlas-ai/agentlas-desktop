@@ -1,0 +1,54 @@
+{
+  "schema": "agentlas.plugin/v2",
+  "slug": "plugin-make",
+  "name": "Plugin Builder",
+  "version": "0.1.0",
+  "builtin": true,
+  "publisher": {
+    "name": "Agentlas",
+    "url": "https://agentlas.cloud"
+  },
+  "surface": {
+    "displayName": "Plugin Builder",
+    "displayNameKo": "플러그인 만들기",
+    "tagline": "Build a local procedure plugin from a conversation",
+    "taglineKo": "대화로 로컬 절차 플러그인 만들기",
+    "description": "Build and verify a local Agentlas procedure plugin from a short conversation.",
+    "descriptionKo": "짧은 대화로 Agentlas 절차 플러그인을 만들고 검증합니다.",
+    "category": "dev",
+    "brandColor": "#1F2937",
+    "icon": "assets/icon.svg",
+    "defaultPrompts": [
+      "반복 작업을 플러그인으로 만들어줘"
+    ]
+  },
+  "invocation": {
+    "mention": "@plugin-make",
+    "implicit": "router",
+    "standalone": true
+  },
+  "provides": {
+    "skills": {
+      "router": "skills/index/SKILL.md",
+      "workflows": ["interview", "draft", "verify", "install", "prove"]
+    }
+  },
+  "requires": {
+    "prereq": [
+      {
+        "id": "node",
+        "provided-by": "app"
+      }
+    ],
+    "os": ["darwin", "win32", "linux"]
+  },
+  "permissions": {
+    "fileWrite": "full",
+    "network": "none",
+    "shell": "deny"
+  },
+  "state": {
+    "files": [],
+    "assets": false
+  }
+}

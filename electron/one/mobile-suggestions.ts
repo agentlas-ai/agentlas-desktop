@@ -48,6 +48,16 @@ function safeDisplay(value: string | null | undefined, fallback: string): string
 }
 
 function copy(type: OneEcosystemSuggestion["type"]): OneMobileEcosystemSuggestionV1["copy"] {
+  if (type === "plugin_build") {
+    return {
+      titleKo: "반복 절차를 플러그인으로 만들까요?",
+      titleEn: "Turn this repeated procedure into a plugin?",
+      bodyKo: "같은 도구 순서를 세 번 이상 반복한 기록을 바탕으로 검토용 로컬 플러그인을 준비합니다.",
+      bodyEn: "Prepare a review-only local plugin from a repeated tool sequence observed at least three times.",
+      reviewOnly: true,
+      executionStarted: false,
+    };
+  }
   if (type === "agent_build") {
     return {
       titleKo: oneText("ko", "one.mob.agentBuildTitle"),
@@ -126,6 +136,15 @@ function teamMembers(suggestion: OneEcosystemSuggestion): OneMobileSuggestionMem
 
 function proposalScope(suggestion: OneEcosystemSuggestion): OneMobileSuggestionScope {
   const proposal = suggestion.proposal;
+  if (proposal.type === "plugin_build") {
+    return {
+      type: "plugin_build",
+      reviewMode: "plugin_builder",
+      observedToolCount: "signalSource" in proposal ? proposal.toolRefs.length : 0,
+      sourceTaskCount: suggestion.evidence.length,
+      saved: false,
+    };
+  }
   if (proposal.type === "agent_build") {
     const observedToolCount = "signalSource" in proposal ? proposal.toolRefs.length : 0;
     return {

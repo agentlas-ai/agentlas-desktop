@@ -4,6 +4,7 @@ export const ONE_SUGGESTION_CONTRACT_VERSION = "1.0.0" as const;
 export const ONE_SUGGESTION_REVIEW_HANDOFF_CONTRACT_VERSION = "1.0.0" as const;
 
 export const ONE_SUGGESTION_PRIORITY = [
+  "plugin_build",
   "agent_build",
   "retain_team",
   "automation",
@@ -29,6 +30,7 @@ export type OneSuggestionStatus =
   | "never_ask_again"
   | "ignored";
 export type OneSuggestionReviewKind =
+  | "plugin_definition_draft"
   | "agent_definition_draft"
   | "team_definition_draft"
   | "automation_proposal_draft"
@@ -105,6 +107,25 @@ export interface OneObservedAgentBuildSignal {
 
 export type OneAgentBuildSignal = OneDeclaredAgentBuildSignal | OneObservedAgentBuildSignal;
 
+export interface OneDeclaredPluginBuildSignal {
+  procedureRef: string;
+  toolRefs: string[];
+  reuseIntentRef: string;
+  userReuseIntentConfirmed: true;
+}
+
+export interface OneObservedPluginBuildSignal {
+  signalSource: "accepted_result_pattern";
+  patternKey: string;
+  taskKindRef: string;
+  toolRefs: string[];
+  observationRefs: string[];
+  acceptedResultCount: number;
+  reviewRequired: true;
+}
+
+export type OnePluginBuildSignal = OneDeclaredPluginBuildSignal | OneObservedPluginBuildSignal;
+
 export interface OneVerifiedRetainTeamSignal {
   teamSignatureRef: string;
   assignmentRefs: string[];
@@ -175,11 +196,14 @@ export interface OneHubDerivativeSignal {
 }
 
 export interface OneSuggestionCandidateSignals {
+  pluginBuild: OnePluginBuildSignal | null;
   agentBuild: OneAgentBuildSignal | null;
   retainTeam: OneRetainTeamSignal | null;
   automation: OneAutomationSignal | null;
   hubDerivative: OneHubDerivativeSignal | null;
 }
+
+export type OnePluginBuildProposal = OnePluginBuildSignal & { type: "plugin_build" };
 
 export type OneAgentBuildProposal = OneAgentBuildSignal & { type: "agent_build" };
 
@@ -194,6 +218,7 @@ export interface OneHubDerivativeProposal extends OneHubDerivativeSignal {
 }
 
 export type OneSuggestionProposal =
+  | OnePluginBuildProposal
   | OneAgentBuildProposal
   | OneRetainTeamProposal
   | OneAutomationProposal
@@ -230,6 +255,7 @@ export interface OneSuggestionReviewRequest {
 }
 
 export type OneSuggestionReviewSurface =
+  | "plugin"
   | "build"
   | "automation"
   | "work";
@@ -379,7 +405,7 @@ export interface OneSuggestionMutationResult<T> {
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/;
 const SUGGESTION_ID_RE = /^one_suggestion_[a-f0-9]{32}$/;
 const REVIEW_ID_RE = /^one_suggestion_review_[a-f0-9]{32}$/;
-const DRAFT_ID_RE = /^one_(?:agent|team|automation|hub)_draft_[a-f0-9]{32}$/;
+const DRAFT_ID_RE = /^one_(?:plugin|agent|team|automation|hub)_draft_[a-f0-9]{32}$/;
 const SUPPRESSION_ID_RE = /^one_suggestion_suppression_[a-f0-9]{32}$/;
 const POSIX_ABSOLUTE_PATH_RE = /(^|[\s("'=:\[{])\/[^\s,;:"'`<>|}\]]+/m;
 const WINDOWS_ABSOLUTE_PATH_RE = /\b[A-Za-z]:\\(?:[^\\,\r\n"'`<>|}\]]+\\)*[^\s\\,\r\n"'`<>|}\]]+/;
@@ -499,6 +525,29 @@ function isAgentBuildSignal(value: unknown): value is OneAgentBuildSignal {
     && value.userReuseIntentConfirmed === true;
 }
 
+export function isOnePluginBuildSignal(value: unknown): value is OnePluginBuildSignal {
+  if (!isRecord(value)) return false;
+  if (value.signalSource === "accepted_result_pattern") {
+    return exactKeys(value, [
+      "signalSource", "patternKey", "taskKindRef", "toolRefs", "observationRefs",
+      "acceptedResultCount", "reviewRequired",
+    ])
+      && isSafeOneSuggestionId(value.patternKey)
+      && isSafeOneSuggestionId(value.taskKindRef)
+      && uniqueSafeIds(value.toolRefs, 2, 64)
+      && uniqueSafeIds(value.observationRefs, 3, 16)
+      && Number.isSafeInteger(value.acceptedResultCount)
+      && Number(value.acceptedResultCount) === value.observationRefs.length
+      && Number(value.acceptedResultCount) >= 3
+      && value.reviewRequired === true;
+  }
+  return exactKeys(value, ["procedureRef", "toolRefs", "reuseIntentRef", "userReuseIntentConfirmed"])
+    && isSafeOneSuggestionId(value.procedureRef)
+    && uniqueSafeIds(value.toolRefs, 2, 64)
+    && isSafeOneSuggestionId(value.reuseIntentRef)
+    && value.userReuseIntentConfirmed === true;
+}
+
 function isRetainTeamSignal(value: unknown): value is OneRetainTeamSignal {
   if (!isRecord(value)) return false;
   if (value.signalSource === "accepted_result_pattern") {
@@ -589,6 +638,7 @@ function isHubDerivativeSignal(value: unknown): value is OneHubDerivativeSignal 
 function isProposal(value: unknown): value is OneSuggestionProposal {
   if (!isRecord(value) || typeof value.type !== "string" || !TYPES.has(value.type)) return false;
   const { type, ...signal } = value;
+  if (type === "plugin_build") return isOnePluginBuildSignal(signal);
   if (type === "agent_build") return isAgentBuildSignal(signal);
   if (type === "retain_team") return isRetainTeamSignal(signal);
   if (type === "automation") return isAutomationSignal(signal);
@@ -637,7 +687,7 @@ function isSuggestion(value: unknown): value is OneEcosystemSuggestion {
   const latestCompletedAt = Math.max(...evidence.map((item) => Date.parse(item.completedAt)));
   const origin = evidence.find((item) => item.taskId === value.originTaskId);
   if (!origin || Date.parse(origin.completedAt) !== latestCompletedAt) return false;
-  if (value.type === "automation" && value.evidence.length < 3) return false;
+  if ((value.type === "automation" || value.type === "plugin_build") && value.evidence.length < 3) return false;
   if (Date.parse(value.updatedAt) < Date.parse(value.createdAt)) return false;
   if (value.status === "open") {
     return value.reviewRequestId === null && value.resumeAfter === null && value.cooldownUntil === null && value.resolvedAt === null;
@@ -662,18 +712,20 @@ function isReviewRequest(value: unknown): value is OneSuggestionReviewRequest {
     && typeof value.suggestionId === "string" && SUGGESTION_ID_RE.test(value.suggestionId)
     && isSafeOneSuggestionId(value.originTaskId)
     && typeof value.type === "string" && TYPES.has(value.type)
-    && ["agent_definition_draft", "team_definition_draft", "automation_proposal_draft", "hub_derivative_draft"].includes(String(value.reviewKind))
+    && ["plugin_definition_draft", "agent_definition_draft", "team_definition_draft", "automation_proposal_draft", "hub_derivative_draft"].includes(String(value.reviewKind))
     && typeof value.draftId === "string" && DRAFT_ID_RE.test(value.draftId)
     && value.status === "review_required"
     && uniqueSafeIds(value.sourceTaskRefs, 2, 16)
     && isTimestamp(value.createdAt))) return false;
   const expectedKind: Record<OneSuggestionType, OneSuggestionReviewKind> = {
+    plugin_build: "plugin_definition_draft",
     agent_build: "agent_definition_draft",
     retain_team: "team_definition_draft",
     automation: "automation_proposal_draft",
     hub_derivative: "hub_derivative_draft",
   };
   const expectedDraftPrefix: Record<OneSuggestionType, string> = {
+    plugin_build: "one_plugin_draft_",
     agent_build: "one_agent_draft_",
     retain_team: "one_team_draft_",
     automation: "one_automation_draft_",

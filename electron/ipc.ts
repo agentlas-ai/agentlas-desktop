@@ -653,6 +653,17 @@ import { scaffoldServiceApp } from "./app-factory/scaffold";
 import { archiveSurfaceAssetPack, materializeSurfaceAssetPack, restoreSurfaceAssetPack } from "./surface-assets/materialize";
 import { archiveToolPackage, installToolMcp, restoreToolPackage } from "./tool-factory/operations";
 import { runToolFactorySmoke, scaffoldAgentTool } from "./tool-factory/scaffold";
+import {
+  discardPluginBuilder,
+  draftPluginBuilder,
+  installPluginBuilder,
+  listPluginBuilderDrafts,
+  provePluginBuilder,
+  startPluginBuilder,
+  subscribePluginBuilderProgress,
+  verifyPluginBuilder,
+} from "./plugins/builder";
+import type { PluginBuilderAnswers, PluginBuilderSeed } from "../shared/plugin-builder";
 import { createCommerceAgentTeam } from "./meta-agent/commerce-team";
 import { packageAndReviewCloudAgent } from "./cloud-agents/package";
 import { readAgentPrices, setAgentPrices } from "./cloud-agents/pricing";
@@ -1359,6 +1370,13 @@ async function seedProjectMapInBackground(folderPath: string, projectName?: stri
 
 export function registerIpcHandlers(): void {
   let oneProjectionHostRef: string | null = null;
+  subscribePluginBuilderProgress((event) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) {
+        try { window.webContents.send("pluginBuilder:progress", event); } catch { /* renderer may be closing */ }
+      }
+    }
+  });
   const oneTaskProjectionRuntime = createOneTaskProjectionRuntime({
     getAuthoritySnapshot: ({ taskId }) => {
       const task = getCanonicalTask(taskId);
@@ -5601,6 +5619,17 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("toolFactory:listOperations", (_e, toolRecordId: string) =>
     listAgentToolOperations(toolRecordId),
   );
+
+  // ── Plugin Builder (@plugin-make) ──────────────────────
+  ipcMain.handle("pluginBuilder:start", (_e, input: { chatId: string; seed: PluginBuilderSeed }) =>
+    startPluginBuilder(input));
+  ipcMain.handle("pluginBuilder:draft", (_e, input: { sessionId: string; answers: PluginBuilderAnswers }) =>
+    draftPluginBuilder(input));
+  ipcMain.handle("pluginBuilder:verify", (_e, input: { sessionId: string }) => verifyPluginBuilder(input));
+  ipcMain.handle("pluginBuilder:install", (_e, input: { sessionId: string }) => installPluginBuilder(input));
+  ipcMain.handle("pluginBuilder:prove", (_e, input: { sessionId: string }) => provePluginBuilder(input));
+  ipcMain.handle("pluginBuilder:discard", (_e, input: { sessionId: string }) => discardPluginBuilder(input));
+  ipcMain.handle("pluginBuilder:listDrafts", (_e, chatId: string) => listPluginBuilderDrafts(chatId));
 
   // ── migration (OpenClaw / Hermes → Agentlas) ────────────
   ipcMain.handle("migration:scan", () => scanMigrationSources());

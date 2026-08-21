@@ -127,6 +127,13 @@ export function pluginRouterPrompt(userPrompt?: string): string {
     "",
   ];
 
+  if (listed.some((plugin) => plugin.slug === "plugin-make")) {
+    lines.push(
+      "If the user is describing a procedure they expect to repeat and no installed plugin covers it, you may offer @plugin-make once. Offer it; do not start it.",
+      "",
+    );
+  }
+
   for (const p of listed) {
     lines.push(`### ${p.mention} — ${p.name}`);
     if (p.routerDescription) lines.push(p.routerDescription);

@@ -299,7 +299,32 @@ export function getOneSuggestionReviewSeed(input: OneSuggestionReviewHandoffInpu
 
   let seed: OneSuggestionReviewSeed;
   try {
-    if (suggestion.proposal.type === "agent_build") {
+    if (suggestion.proposal.type === "plugin_build") {
+      const proposal = suggestion.proposal;
+      if (!("signalSource" in proposal) || proposal.signalSource !== "accepted_result_pattern") {
+        seed = blockedSeed(base, "proposal_not_materializable");
+      } else {
+        const runs = observedRuns(suggestion);
+        const first = runs[0];
+        if (
+          !first
+          || runs.some((run) =>
+            run.taskKindRef !== proposal.taskKindRef
+            || !sameList(run.toolRefs, proposal.toolRefs))
+          || proposal.acceptedResultCount !== suggestion.evidence.length
+          || proposal.observationRefs.length !== suggestion.evidence.length
+        ) throw new ReviewSeedBlocked("source_evidence_changed");
+        seed = {
+          ...base,
+          kind: "plugin_build",
+          materialization: "plugin_builder",
+          targetSurface: "plugin",
+          signal: proposal,
+          taskKindRef: proposal.taskKindRef,
+          observedToolCount: proposal.toolRefs.length,
+        };
+      }
+    } else if (suggestion.proposal.type === "agent_build") {
       if (!isObservedAgentProposal(suggestion.proposal)) {
         seed = blockedSeed(base, "proposal_not_materializable");
       } else {

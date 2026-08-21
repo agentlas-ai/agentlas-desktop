@@ -68,6 +68,14 @@ function typeCopy(suggestion: OneEcosystemSuggestion, locale: Locale): {
     body: tFor(locale, "one.sug.auto.body", { basis }),
     cta: tFor(locale, "one.sug.auto.cta"),
   };
+  if (suggestion.type === "plugin_build") return {
+    eyebrow: locale === "ko" ? "플러그인 제안" : "Plugin suggestion",
+    title: locale === "ko" ? "반복 절차를 플러그인으로 만들까요?" : "Turn this repeated procedure into a plugin?",
+    body: locale === "ko"
+      ? `${basis} 같은 도구 순서를 반복한 기록만 사용합니다. 대화 원문·파일·기억은 제안에 넣지 않습니다.`
+      : `${basis} repeated the same tool sequence. Raw prompts, files, and memory are not included in the suggestion.`,
+    cta: locale === "ko" ? "플러그인 검토" : "Review plugin",
+  };
   return {
     eyebrow: tFor(locale, "one.sug.hub.eyebrow"),
     title: tFor(locale, "one.sug.hub.title"),

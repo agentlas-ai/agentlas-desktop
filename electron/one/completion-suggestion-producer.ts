@@ -8,6 +8,7 @@ import type {
   OneEcosystemSuggestion,
   OneAutomationSignal,
   OneObservedAgentBuildSignal,
+  OneObservedPluginBuildSignal,
   OneObservedRetainTeamSignal,
   OneSuggestionAcceptedResultEvidence,
   OneSuggestionArbitrationReason,
@@ -868,8 +869,21 @@ function stillCanonicalAutomation(observation: AcceptedAutomationObservation): b
 function signalsFor(observations: AcceptedCompletionObservation[]): OneSuggestionCandidateSignals {
   const latest = observations[observations.length - 1];
   if (!latest || observations.length < 2) {
-    return { agentBuild: null, retainTeam: null, automation: null, hubDerivative: null };
+    return { pluginBuild: null, agentBuild: null, retainTeam: null, automation: null, hubDerivative: null };
   }
+  const sameProcedure = observations.length >= 3
+    && latest.toolRefs.length >= 2
+    && observations.every((item) => item.taskKindRef === latest.taskKindRef)
+    && observations.every((item) => sameJson(item.toolRefs, latest.toolRefs));
+  const pluginBuild: OneObservedPluginBuildSignal | null = sameProcedure ? {
+    signalSource: "accepted_result_pattern",
+    patternKey: latest.patternKey,
+    taskKindRef: latest.taskKindRef,
+    toolRefs: latest.toolRefs,
+    observationRefs: observations.map((item) => item.observationId),
+    acceptedResultCount: observations.length,
+    reviewRequired: true,
+  } : null;
   if (latest.candidateType === "agent_build") {
     const signal: OneObservedAgentBuildSignal = {
       signalSource: "accepted_result_pattern",
@@ -881,7 +895,7 @@ function signalsFor(observations: AcceptedCompletionObservation[]): OneSuggestio
       acceptedResultCount: observations.length,
       reviewRequired: true,
     };
-    return { agentBuild: signal, retainTeam: null, automation: null, hubDerivative: null };
+    return { pluginBuild, agentBuild: signal, retainTeam: null, automation: null, hubDerivative: null };
   }
   const signal: OneObservedRetainTeamSignal = {
     signalSource: "accepted_result_pattern",
@@ -894,7 +908,7 @@ function signalsFor(observations: AcceptedCompletionObservation[]): OneSuggestio
     acceptedResultCount: observations.length,
     reviewRequired: true,
   };
-  return { agentBuild: null, retainTeam: signal, automation: null, hubDerivative: null };
+  return { pluginBuild, agentBuild: null, retainTeam: signal, automation: null, hubDerivative: null };
 }
 
 function automationSignalFor(observations: AcceptedAutomationObservation[]): OneAutomationSignal | null {
@@ -983,6 +997,7 @@ function arbitrateProductionObservations(
     .slice(-16);
   const reusableSignals = signalsFor(matching);
   const signals: OneSuggestionCandidateSignals = {
+    pluginBuild: reusableSignals.pluginBuild,
     agentBuild: reusableSignals.agentBuild,
     retainTeam: reusableSignals.retainTeam,
     automation: automationSignalFor(matchingAutomation),

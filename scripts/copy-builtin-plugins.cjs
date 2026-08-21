@@ -30,5 +30,12 @@ if (!fs.existsSync(from)) {
 }
 fs.rmSync(to, { recursive: true, force: true });
 const count = copyTree(from, to);
+// The packaged desktop runs the same canonical gate inside the builder flow.
+// Keep the executable beside the compiled plugin builder so a distributed app
+// does not silently fall back to a source-tree-only check.
+const gateSource = path.resolve(__dirname, "plugin-spec-gate.cjs");
+const gateTarget = path.resolve(__dirname, "..", "dist", "electron", "plugins", "plugin-spec-gate.cjs");
+fs.mkdirSync(path.dirname(gateTarget), { recursive: true });
+fs.copyFileSync(gateSource, gateTarget);
 const slugs = fs.readdirSync(to, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
 console.log(`[copy-builtin-plugins] ${slugs.length} package(s), ${count} file(s): ${slugs.join(", ")}`);

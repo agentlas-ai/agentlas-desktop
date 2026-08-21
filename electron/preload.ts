@@ -30,6 +30,7 @@ import type {
   AutomationUpdatePatch,
   ScheduleSpec,
 } from "../shared/types";
+import type { PluginBuilderProgressEvent } from "../shared/plugin-builder";
 import type {
   SiteActivityEvent,
   SiteAgentAppPublishBackendRequest,
@@ -874,6 +875,20 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("toolFactory:getToolBySurface", chatId, surfaceId, requestedToolId),
     listOperations: (toolRecordId) =>
       ipcRenderer.invoke("toolFactory:listOperations", toolRecordId),
+  },
+  pluginBuilder: {
+    start: (input) => ipcRenderer.invoke("pluginBuilder:start", input),
+    draft: (input) => ipcRenderer.invoke("pluginBuilder:draft", input),
+    verify: (input) => ipcRenderer.invoke("pluginBuilder:verify", input),
+    install: (input) => ipcRenderer.invoke("pluginBuilder:install", input),
+    prove: (input) => ipcRenderer.invoke("pluginBuilder:prove", input),
+    discard: (input) => ipcRenderer.invoke("pluginBuilder:discard", input),
+    listDrafts: (chatId) => ipcRenderer.invoke("pluginBuilder:listDrafts", chatId),
+    onProgress: (listener: (event: PluginBuilderProgressEvent) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, event: PluginBuilderProgressEvent) => listener(event);
+      ipcRenderer.on("pluginBuilder:progress", handler);
+      return () => ipcRenderer.removeListener("pluginBuilder:progress", handler);
+    },
   },
   migration: {
     scan: () => ipcRenderer.invoke("migration:scan"),

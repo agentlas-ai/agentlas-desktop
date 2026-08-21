@@ -1,8 +1,12 @@
-import { isSafeOneSuggestionId, isSafeOneSuggestionText } from "./one-suggestions";
+import {
+  isSafeOneSuggestionId,
+  isSafeOneSuggestionText,
+  type OneObservedPluginBuildSignal,
+} from "./one-suggestions";
 
 export const ONE_REVIEW_SEED_CONTRACT_VERSION = "1.0.0" as const;
 
-export type OneReviewSeedSurface = "build" | "automation" | "work";
+export type OneReviewSeedSurface = "build" | "plugin" | "automation" | "work";
 export type OneReviewSeedBlockedReason =
   | "source_evidence_changed"
   | "installed_agent_unavailable"
@@ -48,6 +52,15 @@ export interface OneAgentBuildReviewSeed extends OneReviewSeedBase {
   observedToolCount: number;
 }
 
+export interface OnePluginBuildReviewSeed extends OneReviewSeedBase {
+  kind: "plugin_build";
+  materialization: "plugin_builder";
+  targetSurface: "plugin";
+  signal: OneObservedPluginBuildSignal;
+  taskKindRef: string;
+  observedToolCount: number;
+}
+
 export interface OneRetainTeamReviewSeed extends OneReviewSeedBase {
   kind: "retain_team";
   materialization: "editor_prefill";
@@ -84,6 +97,7 @@ export interface OneBlockedReviewSeed extends OneReviewSeedBase {
 }
 
 export type OneSuggestionReviewSeed =
+  | OnePluginBuildReviewSeed
   | OneAgentBuildReviewSeed
   | OneRetainTeamReviewSeed
   | OneAutomationReviewSeed
@@ -177,6 +191,39 @@ export function isOneSuggestionReviewSeed(value: unknown): value is OneSuggestio
       && Number(value.observedToolCount) <= 64
       && Number(value.acceptedResultCount) >= 2;
   }
+  if (value.kind === "plugin_build") {
+    const signal = value.signal;
+    const signalToolCount = isRecord(signal) && Array.isArray(signal.toolRefs) ? signal.toolRefs.length : -1;
+    const signalIsSafe = isRecord(signal)
+      && exactKeys(signal, [
+        "signalSource", "patternKey", "taskKindRef", "toolRefs", "observationRefs",
+        "acceptedResultCount", "reviewRequired",
+      ])
+      && signal.signalSource === "accepted_result_pattern"
+      && isSafeOneSuggestionId(signal.patternKey)
+      && isSafeOneSuggestionId(signal.taskKindRef)
+      && Array.isArray(signal.toolRefs)
+      && signal.toolRefs.length >= 2
+      && signal.toolRefs.length <= 64
+      && signal.toolRefs.every(isSafeOneSuggestionId)
+      && new Set(signal.toolRefs).size === signal.toolRefs.length
+      && Array.isArray(signal.observationRefs)
+      && signal.observationRefs.length >= 3
+      && signal.observationRefs.length <= 16
+      && signal.observationRefs.every(isSafeOneSuggestionId)
+      && new Set(signal.observationRefs).size === signal.observationRefs.length
+      && Number.isSafeInteger(signal.acceptedResultCount)
+      && signal.acceptedResultCount === signal.observationRefs.length
+      && signal.reviewRequired === true;
+    return exactKeys(value, [...BASE_KEYS, "signal", "taskKindRef", "observedToolCount"])
+      && value.materialization === "plugin_builder"
+      && value.targetSurface === "plugin"
+      && signalIsSafe
+      && value.taskKindRef === signal.taskKindRef
+      && Number.isSafeInteger(value.observedToolCount)
+      && Number(value.observedToolCount) === signalToolCount
+      && Number(value.acceptedResultCount) >= 3;
+  }
   if (value.kind === "retain_team") {
     return exactKeys(value, [...BASE_KEYS, "candidates"])
       && value.materialization === "editor_prefill"
@@ -208,7 +255,7 @@ export function isOneSuggestionReviewSeed(value: unknown): value is OneSuggestio
   if (value.kind === "blocked") {
     return exactKeys(value, [...BASE_KEYS, "reason"])
       && value.materialization === "blocked"
-      && ["build", "automation", "work"].includes(String(value.targetSurface))
+      && ["build", "plugin", "automation", "work"].includes(String(value.targetSurface))
       && [
         "source_evidence_changed", "installed_agent_unavailable", "proposal_not_materializable",
         "unsupported_review_surface",

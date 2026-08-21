@@ -412,6 +412,7 @@
     "test:graph-package": "node scripts/test-graph-package-contract.cjs",
     "test:hub-plugin-install-ui": "npm run build:renderer && node scripts/test-hub-plugin-install-ui.cjs",
     "test:plugin-slug-contract": "node scripts/test-plugin-slug-contract.cjs",
+    "test:plugin-builder": "npm run build:electron && ELECTRON_RUN_AS_NODE=1 electron scripts/plugin-builder-gate.cjs",
     "test:tool-access-notice": "npm run build:electron && node scripts/test-tool-access-notice.cjs",
     "test:graph-reachability": "node scripts/test-graph-reachability.cjs",
     "test:graph-version-history": "electron scripts/test-graph-version-history.cjs",

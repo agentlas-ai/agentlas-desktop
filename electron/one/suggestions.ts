@@ -17,6 +17,7 @@ import {
   type OneEcosystemSuggestion,
   type OneHubDerivativeSignal,
   type OneHubPrivateExclusion,
+  type OnePluginBuildSignal,
   type OneRetainTeamSignal,
   type OneSuggestionArbitrationReason,
   type OneSuggestionArbitrationResult,
@@ -49,7 +50,7 @@ export const ONE_SUGGESTION_META_KEY = "agentlas.one.suggestions.v1";
 const SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/;
 const SUGGESTION_ID_RE = /^one_suggestion_[a-f0-9]{32}$/;
 const REVIEW_ID_RE = /^one_suggestion_review_[a-f0-9]{32}$/;
-const DRAFT_ID_RE = /^one_(?:agent|team|automation|hub)_draft_[a-f0-9]{32}$/;
+const DRAFT_ID_RE = /^one_(?:plugin|agent|team|automation|hub)_draft_[a-f0-9]{32}$/;
 const DEFAULT_SNOOZE_MS = 7 * 24 * 60 * 60 * 1_000;
 const MIN_SNOOZE_MS = DEFAULT_SNOOZE_MS;
 const DEFAULT_DISMISS_COOLDOWN_MS = 30 * 24 * 60 * 60 * 1_000;
@@ -128,9 +129,11 @@ function opaqueId(prefix: "one_suggestion" | "one_suggestion_review" | "one_sugg
 }
 
 function draftId(type: OneSuggestionType): string {
-  const prefix = type === "agent_build"
-    ? "one_agent_draft"
-    : type === "retain_team"
+  const prefix = type === "plugin_build"
+    ? "one_plugin_draft"
+    : type === "agent_build"
+      ? "one_agent_draft"
+      : type === "retain_team"
       ? "one_team_draft"
       : type === "automation"
         ? "one_automation_draft"
@@ -373,6 +376,47 @@ function normalizeAgentBuild(value: unknown): OneAgentBuildSignal | null {
   };
 }
 
+function normalizePluginBuild(value: unknown): OnePluginBuildSignal | null {
+  if (value === null) return null;
+  if (!isRecord(value)) throw new TypeError("signals.pluginBuild must be an object or null");
+  if (value.signalSource === "accepted_result_pattern") {
+    assertOnlyKeys(value, [
+      "signalSource", "patternKey", "taskKindRef", "toolRefs", "observationRefs",
+      "acceptedResultCount", "reviewRequired",
+    ], "signals.pluginBuild");
+    assertSafeId(value.patternKey, "signals.pluginBuild.patternKey");
+    assertSafeId(value.taskKindRef, "signals.pluginBuild.taskKindRef");
+    const toolRefs = normalizeUniqueSafeIds(value.toolRefs, "signals.pluginBuild.toolRefs", 2, 64);
+    const observationRefs = normalizeUniqueSafeIds(value.observationRefs, "signals.pluginBuild.observationRefs", 3, 16);
+    if (
+      !Number.isSafeInteger(value.acceptedResultCount)
+      || Number(value.acceptedResultCount) < 3
+      || Number(value.acceptedResultCount) !== observationRefs.length
+      || value.reviewRequired !== true
+    ) throw new TypeError("observed Plugin Build signal requires at least three accepted results and remains review-only");
+    return {
+      signalSource: "accepted_result_pattern",
+      patternKey: value.patternKey,
+      taskKindRef: value.taskKindRef,
+      toolRefs,
+      observationRefs,
+      acceptedResultCount: Number(value.acceptedResultCount),
+      reviewRequired: true,
+    };
+  }
+  assertOnlyKeys(value, ["procedureRef", "toolRefs", "reuseIntentRef", "userReuseIntentConfirmed"], "signals.pluginBuild");
+  assertSafeId(value.procedureRef, "signals.pluginBuild.procedureRef");
+  const toolRefs = normalizeUniqueSafeIds(value.toolRefs, "signals.pluginBuild.toolRefs", 2, 64);
+  assertSafeId(value.reuseIntentRef, "signals.pluginBuild.reuseIntentRef");
+  if (value.userReuseIntentConfirmed !== true) return null;
+  return {
+    procedureRef: value.procedureRef,
+    toolRefs,
+    reuseIntentRef: value.reuseIntentRef,
+    userReuseIntentConfirmed: true,
+  };
+}
+
 function normalizeRetainTeam(value: unknown): OneRetainTeamSignal | null {
   if (value === null) return null;
   if (!isRecord(value)) throw new TypeError("signals.retainTeam must be an object or null");
@@ -548,11 +592,12 @@ function normalizeHub(value: unknown): OneHubDerivativeSignal | null {
 
 function normalizeSignals(value: unknown): OneSuggestionCandidateSignals {
   if (!isRecord(value)) throw new TypeError("signals must be a closed candidate object");
-  assertOnlyKeys(value, ["agentBuild", "retainTeam", "automation", "hubDerivative"], "signals");
+  assertOnlyKeys(value, ["pluginBuild", "agentBuild", "retainTeam", "automation", "hubDerivative"], "signals");
   if (!["agentBuild", "retainTeam", "automation", "hubDerivative"].every((key) => key in value)) {
-    throw new TypeError("signals must explicitly contain every candidate key, using null when absent");
+    throw new TypeError("signals must explicitly contain every legacy candidate key, using null when absent");
   }
   return {
+    pluginBuild: "pluginBuild" in value ? normalizePluginBuild(value.pluginBuild) : null,
     agentBuild: normalizeAgentBuild(value.agentBuild),
     retainTeam: normalizeRetainTeam(value.retainTeam),
     automation: normalizeAutomation(value.automation),
@@ -561,6 +606,7 @@ function normalizeSignals(value: unknown): OneSuggestionCandidateSignals {
 }
 
 function proposalFor(type: OneSuggestionType, signals: OneSuggestionCandidateSignals): OneSuggestionProposal | null {
+  if (type === "plugin_build") return signals.pluginBuild ? { type, ...signals.pluginBuild } : null;
   if (type === "agent_build") return signals.agentBuild ? { type, ...signals.agentBuild } : null;
   if (type === "retain_team") return signals.retainTeam ? { type, ...signals.retainTeam } : null;
   if (type === "automation") return signals.automation ? { type, ...signals.automation } : null;
@@ -568,7 +614,7 @@ function proposalFor(type: OneSuggestionType, signals: OneSuggestionCandidateSig
 }
 
 function minimumEvidence(type: OneSuggestionType): number {
-  return type === "automation" ? 3 : 2;
+  return type === "automation" || type === "plugin_build" ? 3 : 2;
 }
 
 function activeSuppression(
@@ -682,6 +728,7 @@ function reviewSurface(type: OneSuggestionType): {
   baseRoute: string;
   fallbackReason: OneSuggestionReviewHandoff["fallbackReason"];
 } {
+  if (type === "plugin_build") return { surface: "plugin", baseRoute: "/build/plugin", fallbackReason: null };
   if (type === "agent_build") return { surface: "build", baseRoute: "/build", fallbackReason: null };
   if (type === "retain_team") return { surface: "work", baseRoute: "/workspace/task", fallbackReason: null };
   if (type === "automation") return { surface: "automation", baseRoute: "/automation/new", fallbackReason: null };
@@ -914,6 +961,7 @@ function exactSuggestion(
 }
 
 function reviewKind(type: OneSuggestionType): OneSuggestionReviewKind {
+  if (type === "plugin_build") return "plugin_definition_draft";
   if (type === "agent_build") return "agent_definition_draft";
   if (type === "retain_team") return "team_definition_draft";
   if (type === "automation") return "automation_proposal_draft";
@@ -933,6 +981,22 @@ function reviewEvent(
     version,
     visibility: "personal" as const,
   };
+  if (suggestion.type === "plugin_build") {
+    const proposal = suggestion.proposal.type === "plugin_build" ? suggestion.proposal : null;
+    if (!proposal || !("signalSource" in proposal) || proposal.signalSource !== "accepted_result_pattern") {
+      throw new Error("Plugin build suggestion proposal is inconsistent");
+    }
+    return {
+      ...base,
+      eventType: "plugin.build_requested",
+      entries: [
+        { name: "patternKey", value: proposal.patternKey },
+        { name: "taskKindRef", value: proposal.taskKindRef },
+        { name: "toolRefs", value: proposal.toolRefs },
+        { name: "pluginDraftId", value: review.draftId },
+      ],
+    };
+  }
   if (suggestion.type === "agent_build") {
     return {
       ...base,
