@@ -2,6 +2,7 @@
 // PRD §3.1 6단계 BYOC: 사용자 머신에서 사용자의 구독/키로 직접 호출.
 // chatId 기반 — chat에서 agent + project 컨텍스트 lookup.
 import fs from "node:fs";
+import { isCallOnlyHubAgent } from "../../shared/call-only-agent";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { detectRuntimes } from "../runtime/detect";
@@ -1548,6 +1549,19 @@ export async function runMcpInvocation(
   if (!agent) {
     sink({ kind: "error", error: { code: "no-agent", message: tStatus(locale, "errAgentNotFound") } });
     return earlyResult();
+  }
+  // A call-only Hub seat has no local instructions: its direct chat must run as
+  // a Hub borrow (BYOM bundle), never as a local empty-prompt spawn. Explicit
+  // targets/borrows and One-policy runs keep their own routing; only the plain
+  // single-agent path is redirected here.
+  if (
+    !req.oneMode
+    && !oneTeamExecutionPolicy
+    && req.taskForceTargets === undefined
+    && (req.borrowAgents?.length ?? 0) === 0
+    && isCallOnlyHubAgent(agent)
+  ) {
+    req = { ...req, borrowAgents: [agent.slug] };
   }
   const oneControllerOnlyCommand = req.oneMode
     ? oneControllerOnlyHephaestusCommand(req.userPrompt)

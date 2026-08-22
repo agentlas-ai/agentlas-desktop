@@ -4,7 +4,7 @@ import { getDb } from "../store/db";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import { getSource as getMarketSource, getCargoSource } from "../marketplace";
 import { agentFolderPath, materializeAgentFiles } from "../agents/files";
-import { getRoute, removeRoute, type AgentRoute, type RuntimeLabel } from "../agents/routes";
+import { getRoute, removeRoute, setRoute, type AgentRoute, type RuntimeLabel } from "../agents/routes";
 import { isPrivateWebOnlyAgent, publicAgentVisibility } from "../agents/policy";
 import { deriveListingEntityKind, entityKindAfterRefresh } from "../agents/entity-kind";
 import { readCloudAgentRestoreMarker } from "../cloud-agents/restore";
@@ -190,21 +190,51 @@ export async function installAgent(slug: string): Promise<InstalledAgent> {
   if (isPrivateWebOnlyAgent({ slug })) {
     throw new Error("This web-only agent is not available in Agentlas Desktop.");
   }
-  const listing = await getMarketSource().getListingBySlug(slug);
+  let listing = await getMarketSource().getListingBySlug(slug);
   if (!listing) throw new Error(`Unknown marketplace slug: ${slug}`);
   if (isPrivateWebOnlyAgent(listing)) {
     throw new Error("This web-only agent is not available in Agentlas Desktop.");
   }
 
-  // Public call-only Hub cards deliberately omit source instructions. They are
-  // borrowed through /hep-call and must never fall through to the local
-  // registry, where an absent prompt used to surface as a SQLite NOT NULL
-  // error. Owner package restore remains available through installMyAgent().
+  // Public call-only Hub cards deliberately omit source instructions. They must
+  // never fall through to local-prompt execution, but refusing them outright made
+  // it impossible to seat any public Hub agent in One Team (measured 2026-08-23:
+  // top live listings 6/6 refused). Instead we register a borrow seat: an empty
+  // prompt plus a hub route marker. Execution always goes through the Hub borrow
+  // path (OrchestrationTarget {source:"hub", slug} → borrowed task force) —
+  // discriminated by shared/call-only-agent.ts isCallOnlyHubAgent (hub asset with
+  // no local instructions). Owner package restore remains installMyAgent().
   if (typeof listing.systemPrompt !== "string" || !listing.systemPrompt.trim()) {
-    if (listing.callable === true || listing.kind === "cloud-callable") {
-      throw new Error(
-        "This Hub agent is call-only and cannot be installed locally. Bookmark it or use /hep-call; owners can restore their Agent Cloud package from My Agents.",
-      );
+    // The live manifest endpoint (marketplace.get_manifest) drops kind/callable
+    // (measured 2026-08-23: search row {kind:"cloud-callable", callable:true}
+    // vs manifest {} for the same slug), so the callable discrimination must
+    // fall back to the search row before concluding "corrupt package".
+    let callableCard = listing.callable === true || listing.kind === "cloud-callable";
+    if (!callableCard) {
+      const rows = await getMarketSource().searchAgents(slug).catch(() => []);
+      const row = rows.find((item) => item.slug === slug);
+      callableCard = Boolean(row && (row.callable === true || row.kind === "cloud-callable"));
+      if (row?.packageHash && !listing.packageHash) listing = { ...listing, packageHash: row.packageHash };
+    }
+    if (callableCard) {
+      if (listing.trustGrade !== "A" && listing.trustGrade !== "B") {
+        throw new Error(
+          `Trust grade ${listing.trustGrade} blocked. Sideloading requires explicit approval (V1+).`,
+        );
+      }
+      const seated = persistListing(slug, { ...listing, systemPrompt: "" }, "hub");
+      setRoute({
+        agentId: seated.id,
+        path: agentFolderPath(slug),
+        runtime: "generic",
+        labels: ["generic"],
+        kind: seated.kind === "team" ? "team" : "agent",
+        importedAt: new Date().toISOString(),
+        source: "hub",
+        ...(listing.packageHash ? { packageHash: listing.packageHash } : {}),
+      });
+      emitDesktopStoreChange({ entity: "agent", id: seated.id });
+      return getAgentById(seated.id)!;
     }
     throw new Error("This Hub package is missing the instructions required for a safe local install.");
   }

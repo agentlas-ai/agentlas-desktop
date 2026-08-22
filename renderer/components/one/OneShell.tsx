@@ -80,6 +80,7 @@ import type {
   PendingConfirmation,
   UpdaterState,
 } from "@/lib/types";
+import { isCallOnlyHubAgent } from "@shared/call-only-agent";
 import type { OneOrgCollaborationStyle, OneOrgMember, OneOrgState } from "@shared/one-org";
 import type { OneTaskforce } from "@shared/one-taskforces";
 import type { ComputerHistoryState } from "@shared/computer-history";
@@ -2492,6 +2493,17 @@ export function OneShell() {
     }
   }, [activeThreadChatId, oneRuntime]);
 
+  // 실행 타깃 결정: 좌석(설치행)이 call-only Hub 자산이면 로컬 프롬프트 실행이 아니라
+  // Hub borrow 경로로 보낸다({source:"hub", slug}) — 로컬 프롬프트가 없으므로 local 타깃은
+  // 빈 지시문 실행이 되어 항상 오답이다. 그 외에는 기존과 동일하게 local 타깃.
+  const orchestrationTargetForAgentId = useCallback((agentId: string): OrchestrationTarget => {
+    const agent = availableAgents.find((item) => item.id === agentId);
+    if (agent && isCallOnlyHubAgent(agent)) {
+      return { source: "hub", entityKind: agent.kind === "team" ? "team" : "agent", slug: agent.slug };
+    }
+    return { source: "local", entityKind: "agent", agentId };
+  }, [availableAgents]);
+
   const startRun = useCallback(async (
     chatId: string,
     taskId: string | null,
@@ -2536,11 +2548,7 @@ export function OneShell() {
               const member = memberByAgentId.get(agentId);
               return member && !member.archivedAt && member.statusKind !== "locked" && member.statusKind !== "failed";
             })
-            .map((agentId) => ({
-              source: "local" as const,
-              entityKind: "agent" as const,
-              agentId,
-            }));
+            .map((agentId) => orchestrationTargetForAgentId(agentId));
         })();
     const runId = options?.runId ?? uid();
     runIdRef.current = runId;
@@ -2721,7 +2729,7 @@ export function OneShell() {
         ));
       }
     }
-  }, [armedOneMemoryUseOnce, normalizedLocale, oneOrgState?.members, onePermission, oneRuntimeSelection, refreshAll, scrollToLatest, subscribeRun, taskforces]);
+  }, [armedOneMemoryUseOnce, normalizedLocale, oneOrgState?.members, onePermission, oneRuntimeSelection, orchestrationTargetForAgentId, refreshAll, scrollToLatest, subscribeRun, taskforces]);
 
   const autoStartTeamPreflight = useCallback(async (
     proposal: OneTeamPreflightProposal,
@@ -2904,11 +2912,7 @@ export function OneShell() {
     // boundary and made the composer feel like a form.
     const recurrenceSnapshot: OneRecurrenceSelectionV1 | null = null;
     const overrideSnapshot = { ...turnOverrides };
-    const taskForceTargetSnapshot: OrchestrationTarget[] = turnAgentIds.map((agentId) => ({
-      source: "local",
-      entityKind: "agent",
-      agentId,
-    }));
+    const taskForceTargetSnapshot: OrchestrationTarget[] = turnAgentIds.map((agentId) => orchestrationTargetForAgentId(agentId));
     const explicitValue = text.trim();
     if (!explicitValue && attachmentSnapshot.length === 0) return;
     const graphRequest = oneGraphRequest(explicitValue);
@@ -3241,7 +3245,7 @@ export function OneShell() {
       requestOneOperationalRecovery("one-submit", cause);
       setError(null);
     }
-  }, [activeTaskforceAgentIds, autoStartTeamPreflight, busy, clearAttachmentDrafts, conversation, appLocale, normalizedLocale, onePermission, oneRuntimeSelection, resolveActivationConcern, router, scrollToLatest, selected, startRun, teamPreflight, teamPreflightBusy, turnAgentIds, turnOverrides, workspaceGrant]);
+  }, [activeTaskforceAgentIds, autoStartTeamPreflight, busy, clearAttachmentDrafts, conversation, appLocale, normalizedLocale, onePermission, oneRuntimeSelection, orchestrationTargetForAgentId, resolveActivationConcern, router, scrollToLatest, selected, startRun, teamPreflight, teamPreflightBusy, turnAgentIds, turnOverrides, workspaceGrant]);
 
   const stopRun = useCallback(() => {
     // Stop is terminal for the visible work item: Main drops the directions

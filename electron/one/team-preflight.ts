@@ -1,4 +1,5 @@
 import { isPrimarilyKorean, preferredLocaleFromText } from "../../shared/detect-language";
+import { isCallOnlyHubAgent } from "../../shared/call-only-agent";
 import { createHash, randomUUID } from "node:crypto";
 import { detectRuntimes } from "../runtime/detect";
 import { pickActive, selectExactRuntime } from "../runtime/selection";
@@ -376,6 +377,11 @@ function eligibleRosterSpecialists(all: InstalledAgent[], coordinatorId: string)
     installed.id !== coordinatorId
     && installed.kind !== "team"
     && !installed.sourceMissingSince
+    // Call-only Hub seats have no local instructions; a local-roster slot would
+    // execute an empty prompt. They stay reachable through the external
+    // workforce door (unresolvedExternal → confirmed_external_workforce) and
+    // through non-preflight hub targets, never through the local-only roster.
+    && !isCallOnlyHubAgent(installed)
     && installed.visibility !== "background"
     && installed.visibility !== "private");
 }

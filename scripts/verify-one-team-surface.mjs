@@ -160,7 +160,7 @@ assert.match(oneShell, /onBrowserObserved=\{presentBrowserOutput\}/);
 assert.match(activity, /setFrame\(null\)[\s\S]*?if \(!effectiveUrl\)/);
 assert.match(oneShell, /browserScopeKey=\{activeThreadChatId \?\? selected\?\.taskId \?\? conversation\?\.id\}/);
 assert.match(activity, /data-mode=\{viewport\}/);
-assert.match(activity, /\[\.\.\.\(result \? \["result" as const\] : \[\]\), "activity" as const, "terminal" as const, "browser" as const\]/);
+assert.match(activity, /\[\.\.\.\(result\s*\|\|\s*openedArtifact \? \["result" as const\] : \[\]\), "activity" as const, "terminal" as const, "browser" as const\]/);
 assert.match(activity, /data-one-rail-resize="true"/);
 assert.match(activity, /window\.addEventListener\("pointermove", move/);
 assert.match(activity, /drag\.rawWidth <= collapseThreshold/);
@@ -175,5 +175,15 @@ assert.match(liveView, /width:\s*390/);
 assert.match(liveView, /height:\s*844/);
 assert.match(liveView, /finally\s*\{/);
 assert.match(liveView, /Emulation\.clearDeviceMetricsOverride/);
+
+// 2026-08-23: call-only Hub 좌석은 로컬 프롬프트 실행이 없으므로, 렌더러의 두 실행 타깃
+// 빌더(리허드레이션·컴포저 스냅샷)는 반드시 공용 판별기를 거쳐 hub 타깃을 낼 수 있어야 한다.
+// (계약: 좌석의 실행은 항상 Hub borrow 경로 — shared/call-only-agent.ts)
+assert.match(oneShell, /import \{ isCallOnlyHubAgent \} from "@shared\/call-only-agent"/);
+assert.match(oneShell, /const orchestrationTargetForAgentId = useCallback[\s\S]*?isCallOnlyHubAgent\(agent\)[\s\S]*?source: "hub"/);
+assert.match(oneShell, /\.map\(\(agentId\) => orchestrationTargetForAgentId\(agentId\)\)/);
+assert.match(oneShell, /turnAgentIds\.map\(\(agentId\) => orchestrationTargetForAgentId\(agentId\)\)/);
+// 로컬 하드코딩 타깃 스냅샷이 되살아나면 실패해야 한다(재출현 게이트).
+assert.doesNotMatch(oneShell, /turnAgentIds\.map\(\(agentId\) => \(\{\s*source: "local"/);
 
 console.log("One Team surface contract: PASS (horizontal taskforces; web and real phone browser evidence)");
