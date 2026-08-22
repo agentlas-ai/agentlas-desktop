@@ -189,13 +189,24 @@ function linkedFileArtifactFromPath(filePath: string): LinkedFileArtifact {
 }
 
 function fileUrlForToolPath(filePath: string): string {
-  // 이미지·영상·PDF 는 앱 안에서 직접 그린다 — `file://` 은 webSecurity 에 막힌다.
-  if (/\.(png|jpe?g|gif|webp|avif|svg|mp4|webm|mov|m4v|ogv|pdf)$/i.test(filePath)) {
+  // 인앱 바이너리 뷰어는 webSecurity를 우회하지 않고 Main이 승인한 바이트만 받는다.
+  if (/\.(png|jpe?g|gif|webp|avif|svg|mp4|webm|mov|m4v|ogv|mp3|mpeg|m4a|wav|ogg|oga|opus|flac|aac|weba|mid|midi|pdf|docx?|docm|dotx?|rtf|odt|pages|hwp|hwpx|pptx?|pptm|potx?|ppsx|odp|key|xlsx?|xlsm|xlsb|xltx?|csv|tsv|ods|numbers|zip)$/i.test(filePath)) {
     return `agentlas://localfile/?p=${encodeURIComponent(filePath)}`;
   }
   const normalized = filePath.replace(/\\/g, "/");
   const withSlash = normalized.startsWith("/") ? normalized : `/${normalized}`;
   return `file://${encodeURI(withSlash).replace(/#/g, "%23").replace(/\?/g, "%3F")}`;
+}
+
+function versionedPreviewUrl(source: string, revision: number): string {
+  if (!/^agentlas:\/\//i.test(source)) return source;
+  try {
+    const url = new URL(source);
+    url.searchParams.set("v", String(revision));
+    return url.toString();
+  } catch {
+    return source;
+  }
 }
 
 /**
@@ -234,7 +245,7 @@ function workspacePreviewFromLinkedFile(file: LinkedFileArtifact): WorkspaceFile
     name: file.name || basename(path),
     size: 0,
     viewerKind,
-    fileUrl: file.fileUrl,
+    fileUrl: isAbsoluteLocalPath(path) ? fileUrlForToolPath(path) : file.fileUrl,
     browserUrl: viewerKind === "browser" ? file.fileUrl : undefined,
     openTargets: uniqueStrings([file.path, ...(file.paths ?? []), file.href, file.fileUrl]),
     content: "",
@@ -250,8 +261,12 @@ function viewerKindFromName(name: string): WorkspaceFilePreview["viewerKind"] {
   if ([".html", ".htm", ".url", ".webloc"].includes(ext)) return "browser";
   if ([".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".svg"].includes(ext)) return "image";
   if ([".mp4", ".webm", ".mov", ".m4v", ".ogv"].includes(ext)) return "video";
+  if ([".mp3", ".mpeg", ".m4a", ".wav", ".ogg", ".oga", ".opus", ".flac", ".aac", ".weba", ".mid", ".midi"].includes(ext)) return "audio";
   if (ext === ".pdf") return "pdf";
-  if ([".doc", ".docx", ".rtf", ".pages", ".ppt", ".pptx", ".xls", ".xlsx"].includes(ext)) return "document";
+  if ([".ppt", ".pptx", ".pptm", ".pot", ".potx", ".ppsx", ".odp", ".key"].includes(ext)) return "presentation";
+  if ([".xls", ".xlsx", ".xlsm", ".xlsb", ".xlt", ".xltx", ".csv", ".tsv", ".ods", ".numbers"].includes(ext)) return "spreadsheet";
+  if (ext === ".zip") return "archive";
+  if ([".doc", ".docx", ".docm", ".dot", ".dotx", ".rtf", ".odt", ".pages", ".hwp", ".hwpx"].includes(ext)) return "document";
   return "text";
 }
 
@@ -357,12 +372,12 @@ const WORKSPACE_OPEN_KEY = "agentlas.workspace.open";
 const NETWORK_OPEN_KEY = "agentlas.network.open";
 const RIGHT_PANEL_STATE_KEY = "agentlas.chat.right_panel";
 const RIGHT_PANEL_WIDTH_KEY = "agentlas.chat.right_panel_width";
-// Codex desktop reference (1306px window): the inspector occupies 392px.
-// Keep that measured width as the default so opening the rail does not produce
-// a materially different chat/composer geometry from the reference app.
+// Agentlas rich output contract: ordinary inspector tabs may stay compact, but
+// a rendered result opens as the wide right-hand workspace from the reference.
 const RIGHT_PANEL_DEFAULT_WIDTH = 392;
-const RIGHT_PANEL_MIN_WIDTH = 300;
-const RIGHT_PANEL_MAX_WIDTH = 760;
+const RIGHT_PANEL_MIN_WIDTH = 320;
+const RIGHT_PANEL_MAX_WIDTH = 1280;
+const RIGHT_PANEL_RESULT_RATIO = 0.432;
 
 /** picker 모델 옵션 — runtime.listModels가 실시간 조회해 채워준다. */
 type ModelOption = { id: string; label: string; tag?: string };
@@ -411,7 +426,20 @@ function writeRightPanelPreference(open: boolean, tab: ChatRightPanelTab) {
 }
 
 function clampRightPanelWidth(width: number): number {
-  return Math.min(RIGHT_PANEL_MAX_WIDTH, Math.max(RIGHT_PANEL_MIN_WIDTH, Math.round(width)));
+  const viewportMax = typeof window === "undefined"
+    ? RIGHT_PANEL_MAX_WIDTH
+    : window.innerWidth <= 760
+      ? Math.max(RIGHT_PANEL_MIN_WIDTH, window.innerWidth - 40)
+      : Math.max(RIGHT_PANEL_MIN_WIDTH, window.innerWidth - 520);
+  return Math.min(RIGHT_PANEL_MAX_WIDTH, viewportMax, Math.max(RIGHT_PANEL_MIN_WIDTH, Math.round(width)));
+}
+
+function preferredRichResultWidth(): number {
+  if (typeof window === "undefined") return 720;
+  const requested = window.innerWidth <= 760
+    ? Math.round(window.innerWidth * 0.86)
+    : Math.round(window.innerWidth * RIGHT_PANEL_RESULT_RATIO);
+  return clampRightPanelWidth(requested);
 }
 
 function readRightPanelWidth(): number {
@@ -1024,8 +1052,79 @@ function ChatPage() {
   // 실행 전 API 키 요청 시트 — mcp-key-request 이벤트가 채우고, 응답/만료/런 종료가 비운다.
   const [keyRequestSheet, setKeyRequestSheet] = useState<McpRunKeyRequest | null>(null);
   const [mediaPreview, setMediaPreview] = useState<WorkspaceFilePreview | null>(null);
+  const watchedPreviewPath = useMemo(() => {
+    if (!mediaPreview) return null;
+    return [mediaPreview.path, ...(mediaPreview.openTargets ?? [])]
+      .find((candidate) => typeof candidate === "string" && isAbsoluteLocalPath(candidate)) ?? null;
+  }, [mediaPreview?.openTargets, mediaPreview?.path]);
+  useEffect(() => {
+    const bridge = ipc();
+    if (!bridge?.fs?.watchFile || !bridge.fs.onFileChanged || !watchedPreviewPath || !chatId) return;
+    let disposed = false;
+    let watchId: string | null = null;
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+    const refresh = async (snapshot: import("@shared/types").FsFileWatchSnapshot) => {
+      if (disposed || snapshot.watchId !== watchId) return;
+      if (!snapshot.exists) {
+        setMediaPreview((current) => current && current.path === watchedPreviewPath
+          ? { ...current, live: true, available: false, revision: snapshot.revision }
+          : current);
+        return;
+      }
+      const current = mediaPreview;
+      let textPreview: Awaited<ReturnType<NonNullable<typeof bridge.fs.readTextFile>>> | null = null;
+      if (current && ["markdown", "json", "text", "browser"].includes(current.viewerKind)) {
+        textPreview = await bridge.fs.readTextFile(watchedPreviewPath, { kind: "chat-assets", chatId }).catch(() => null);
+      }
+      setMediaPreview((value) => {
+        if (!value || value.path !== watchedPreviewPath) return value;
+        return {
+          ...value,
+          size: snapshot.size ?? value.size,
+          fileUrl: versionedPreviewUrl(value.fileUrl, snapshot.revision),
+          live: true,
+          available: true,
+          revision: snapshot.revision,
+          ...(textPreview ? {
+            content: textPreview.content,
+            truncated: textPreview.truncated,
+            reason: textPreview.reason,
+          } : {}),
+        };
+      });
+    };
+    const unsubscribe = bridge.fs.onFileChanged((snapshot) => {
+      if (snapshot.watchId !== watchId) return;
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => { void refresh(snapshot); }, 80);
+    });
+    void bridge.fs.watchFile(watchedPreviewPath, { kind: "chat-assets", chatId }).then((initial) => {
+      if (disposed) {
+        void bridge.fs.unwatchFile(initial.watchId);
+        return;
+      }
+      watchId = initial.watchId;
+      setMediaPreview((current) => current && current.path === watchedPreviewPath
+        ? { ...current, live: true, available: initial.exists, revision: initial.revision, size: initial.size ?? current.size }
+        : current);
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      unsubscribe();
+      if (refreshTimer) clearTimeout(refreshTimer);
+      if (watchId) void bridge.fs.unwatchFile(watchId);
+    };
+  // The watcher owns content/revision updates; remount only when the exact file or chat changes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatId, watchedPreviewPath]);
   const [scaffoldedApps, setScaffoldedApps] = useState<Record<string, AppFactoryScaffoldResult>>({});
   const [scaffoldedTools, setScaffoldedTools] = useState<Record<string, ToolFactoryScaffoldResult>>({});
+  const liveWorkbenchSurface = useMemo<WorkbenchSurface | null>(() => {
+    if (!surface) return null;
+    const appRecord = scaffoldedApps[surface.id]?.record
+      ?? allGeneratedApps.find((app) => app.surfaceId === surface.id && app.status !== "archived");
+    return appRecord ? { ...surface, liveAppId: appRecord.id } : surface;
+  }, [allGeneratedApps, scaffoldedApps, surface]);
   // 우측 패널 — file / agent / panel 탭을 하나의 rail 안에서 전환한다.
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [rightPanelTab, setRightPanelTab] = useState<ChatRightPanelTab>("agent");
@@ -1137,6 +1236,13 @@ function ChatPage() {
     setRightPanelTab(tab);
     setRightPanelOpen(true);
     writeRightPanelPreference(true, tab);
+    if (tab === "panel") {
+      setRightPanelWidth((current) => {
+        const next = Math.max(current, preferredRichResultWidth());
+        if (next !== current) writeRightPanelWidth(next);
+        return next;
+      });
+    }
   }, []);
   const closeRightPanel = useCallback(() => {
     setRightPanelOpen(false);
@@ -1153,6 +1259,13 @@ function ChatPage() {
        있으면 그걸로 읽는다. */
     const readablePath = [preview.path, ...(preview.openTargets ?? [])]
       .find((candidate) => typeof candidate === "string" && isAbsoluteLocalPath(candidate));
+    if (readablePath) {
+      next = {
+        ...next,
+        path: readablePath,
+        fileUrl: fileUrlForToolPath(readablePath),
+      };
+    }
     const shouldReadText =
       api &&
       Boolean(chatId) &&
@@ -1162,9 +1275,9 @@ function ChatPage() {
       const text = await api.fs.readTextFile(readablePath, { kind: "chat-assets", chatId }).catch(() => null);
       if (text) {
         next = {
-          ...preview,
+          ...next,
           path: readablePath,
-          size: text.size || preview.size,
+          size: text.size || next.size,
           content: text.content,
           truncated: text.truncated,
           reason: text.reason,
@@ -1176,6 +1289,24 @@ function ChatPage() {
     setMediaPreview(next);
     openPanelTab("panel");
   }, [chatId, openPanelTab]);
+
+  // Restore the latest rich result when a conversation is reopened. The
+  // transcript is durable, so this also covers route changes and app restarts
+  // where the live completion event is no longer available. A user close is
+  // respected until a different output key arrives.
+  const autoPresentedWorkspaceOutputRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!chatId || busy || linkedFiles.length === 0) return;
+    const candidate = [...linkedFiles].reverse().find((file) => (
+      ["markdown", "json", "text", "browser", "image", "video", "audio", "pdf", "document", "spreadsheet", "presentation", "archive"]
+        .includes(file.viewerKind)
+    ));
+    if (!candidate) return;
+    const key = `${chatId}\u0000${candidate.viewerKind}\u0000${candidate.path || candidate.fileUrl}`;
+    if (autoPresentedWorkspaceOutputRef.current === key) return;
+    autoPresentedWorkspaceOutputRef.current = key;
+    void openWorkspaceFilePreview(candidate);
+  }, [busy, chatId, linkedFiles, openWorkspaceFilePreview]);
   const openLinkedFile = useCallback((file: LinkedFileArtifact) => {
     void openWorkspaceFilePreview(workspacePreviewFromLinkedFile(file));
   }, [openWorkspaceFilePreview]);
@@ -1715,16 +1846,22 @@ function ChatPage() {
            우측 패널이 끝내 비어 있었고("열린 산출물이 아직 없습니다"), 사람은 뭐가
            만들어졌는지 알 수 없었다. 이미지를 우선하되, 없으면 이 답이 언급한 첫 파일을
            **내용까지 읽어서** 올린다. */
-        const pref = readRightPanelPreference();
-        if (!pref || pref.open) {
-          const autoMedia = firstMediaArtifactInText(ev.text ?? "", mediaBasePaths);
-          if (autoMedia) {
-            setSurface(null);
-            setArtifact(null);
-            setMediaPreview(workspacePreviewFromMedia(autoMedia));
-            openPanelTab("panel");
+        const resultText = ev.text ?? "";
+        const autoMedia = firstMediaArtifactInText(resultText, mediaBasePaths);
+        if (autoMedia) {
+          setSurface(null);
+          setArtifact(null);
+          setMediaPreview(workspacePreviewFromMedia(autoMedia));
+          openPanelTab("panel");
+        } else {
+          // A runnable local web result is the thing the user wants to inspect,
+          // not merely its source file. Keep it in this BrowserWindow's right
+          // rail through the native live-view host.
+          const liveUrl = localServerUrlsInText(resultText)[0];
+          if (liveUrl) {
+            void openWorkspaceFilePreview(workspacePreviewFromLocalServer(liveUrl));
           } else {
-            const produced = linkedFileArtifactsInText(ev.text ?? "", mediaBasePaths)[0];
+            const produced = linkedFileArtifactsInText(resultText, mediaBasePaths)[0];
             if (produced) void openWorkspaceFilePreview(workspacePreviewFromLinkedFile(produced));
           }
         }
@@ -1777,7 +1914,7 @@ function ChatPage() {
         subRef.current = null;
       }
     },
-    [agent, chat?.title, chatId, locale, mediaBasePaths, openPanelTab, project?.name, t],
+    [agent, chat?.title, chatId, locale, mediaBasePaths, openPanelTab, openWorkspaceFilePreview, project?.name, t],
   );
 
   // consumeEvent를 ref로 미러 — subscribeRun/메타데이터 effect가 consumeEvent identity 변화(agent·
@@ -3955,7 +4092,7 @@ function ChatPage() {
           onClose={closeRightPanel}
           chatId={chatId || null}
           artifact={artifact}
-          surface={surface}
+          surface={liveWorkbenchSurface}
           filePreview={mediaPreview}
           onHydrateFilePreview={openWorkspaceFilePreview}
           linkedFiles={linkedFiles}

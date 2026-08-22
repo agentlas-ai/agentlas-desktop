@@ -108,6 +108,13 @@ export interface CreateOneTeamAgentInput {
   title?: string;
   description?: string;
   avatar: OneTeamAgentAvatarInput;
+  /**
+   * Optional model chosen while creating the teammate. The binding is stored as
+   * the agent-scoped worker preference; when it is unavailable the runtime
+   * selector falls through to the configured worker pool and then another live
+   * connected runtime.
+   */
+  runtimeSelection?: import("./types").RuntimeSelection;
 }
 
 export interface CreateOneTeamAgentResult {

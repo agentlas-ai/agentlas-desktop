@@ -3,8 +3,20 @@ import { Suspense, useCallback, useEffect, useMemo, useState, type CSSProperties
 import { useSearchParams } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import type { AgentlasSurfaceAction, AgentlasSurfaceManifest, JsonObject } from "@/lib/types";
+import type { OneTaskProjection } from "@/lib/one-task-adapter";
 import { applySurfaceStatePatch } from "@/lib/surface-state";
+import { OneAdaptiveResult } from "@/components/one/OneAdaptiveResult";
+import { LiveOutputViewer, type LiveOutputKind } from "@/components/LiveOutputViewer";
 import { WorkbenchPanel, type SurfaceStatePatchHandler, type WorkbenchSurface } from "@/components/WorkbenchPanel";
+import type { OneSurfaceManifestV1 } from "@shared/one-surface";
+
+const LIVE_OUTPUT_KINDS = new Set<LiveOutputKind>([
+  "image", "video", "audio", "pdf", "document", "spreadsheet", "presentation", "archive", "data",
+]);
+
+function parseLiveOutputKind(value: string | null): LiveOutputKind | null {
+  return value && LIVE_OUTPUT_KINDS.has(value as LiveOutputKind) ? value as LiveOutputKind : null;
+}
 
 function asObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -28,33 +40,90 @@ function parseSurfaceManifest(input: string): AgentlasSurfaceManifest {
   return parsed as unknown as AgentlasSurfaceManifest;
 }
 
+function parsePreviewManifest(input: string):
+  | { kind: "work"; manifest: AgentlasSurfaceManifest }
+  | { kind: "one"; manifest: OneSurfaceManifestV1 } {
+  const parsed: unknown = JSON.parse(input);
+  if (asObject(parsed) && parsed.contractVersion === "1.0.0" && Array.isArray(parsed.blocks)) {
+    return { kind: "one", manifest: parsed as unknown as OneSurfaceManifestV1 };
+  }
+  return { kind: "work", manifest: parseSurfaceManifest(input) };
+}
+
+function developerPreviewProjection(manifest: OneSurfaceManifestV1): OneTaskProjection {
+  return {
+    contractVersion: "1.0.0",
+    taskId: manifest.taskId,
+    canonicalVersion: 1,
+    oneId: "one:developer-preview",
+    projectionSurface: "one",
+    projectionMode: "detailed",
+    display: { title: manifest.title, summary: manifest.summary },
+    status: { value: "completed", source: "authoritative_event", asOf: manifest.surfaceState.lastSyncedAt ?? new Date(0).toISOString() },
+    sync: {
+      connection: "online",
+      lastSyncedAt: manifest.surfaceState.lastSyncedAt ?? null,
+      authoritativeHostRef: "developer-preview",
+      executionAuthorityAvailable: false,
+      mutationMode: "read_only",
+      queuedOperationCount: 0,
+    },
+    truth: { mayStartExecution: false, mayClaimNewCompletion: false },
+    references: { manifestId: manifest.manifestId, decisionIds: [], artifactIds: [], receiptIds: [] },
+    availableActions: [],
+    pendingOperations: [],
+    canonicalStatus: "completed",
+    chatId: null,
+    chat: null,
+    latestReceipt: null,
+  };
+}
+
 function SurfacePreviewInner() {
   const searchParams = useSearchParams();
   const requestedSurfaceId = searchParams.get("surfaceId") || searchParams.get("id") || "";
+  const requestedAppId = searchParams.get("appId") || "";
   const encodedManifest = searchParams.get("manifest") || "";
+  const outputKind = parseLiveOutputKind(searchParams.get("outputKind"));
+  const outputSource = searchParams.get("outputSource") || "";
+  const outputName = searchParams.get("outputName") || "Live output";
+  const outputMime = searchParams.get("outputMime") || undefined;
   const [surface, setSurface] = useState<WorkbenchSurface | null>(null);
+  const [oneSurface, setOneSurface] = useState<OneSurfaceManifestV1 | null>(null);
   const [manifestText, setManifestText] = useState("");
   const [message, setMessage] = useState("No surface loaded.");
   const [lastAction, setLastAction] = useState<string | null>(null);
   const [open, setOpen] = useState(true);
 
   const status = useMemo(() => {
+    if (outputKind && outputSource) return `Live output · ${outputKind}`;
+    if (oneSurface) return `One · ${oneSurface.layoutProfile}`;
     if (!surface) return "idle";
     return `${surface.manifest.domain} · ${surface.manifest.layout}`;
-  }, [surface]);
+  }, [oneSurface, outputKind, outputSource, surface]);
+  const oneProjection = useMemo(
+    () => oneSurface ? developerPreviewProjection(oneSurface) : null,
+    [oneSurface],
+  );
 
   useEffect(() => {
     if (!encodedManifest) return;
     try {
-      const manifest = parseSurfaceManifest(encodedManifest);
-      setSurface({ id: `preview-${Date.now().toString(36)}`, manifest });
-      setManifestText(JSON.stringify(manifest, null, 2));
+      const preview = parsePreviewManifest(encodedManifest);
+      if (preview.kind === "one") {
+        setOneSurface(preview.manifest);
+        setSurface(null);
+      } else {
+        setSurface({ id: `preview-${Date.now().toString(36)}`, manifest: preview.manifest, ...(requestedAppId ? { liveAppId: requestedAppId } : {}) });
+        setOneSurface(null);
+      }
+      setManifestText(JSON.stringify(preview.manifest, null, 2));
       setMessage("Loaded developer preview manifest from URL.");
       setOpen(true);
     } catch (err: unknown) {
       setMessage(err instanceof Error ? err.message : String(err));
     }
-  }, [encodedManifest]);
+  }, [encodedManifest, requestedAppId]);
 
   useEffect(() => {
     if (!requestedSurfaceId) return;
@@ -72,7 +141,14 @@ function SurfacePreviewInner() {
           setMessage(`Surface not found: ${requestedSurfaceId}`);
           return;
         }
-      setSurface({ id: record.id, manifest: record.manifest, state: record.state, jobSummary: record.jobSummary });
+        setSurface({
+          id: record.id,
+          manifest: record.manifest,
+          state: record.state,
+          jobSummary: record.jobSummary,
+          ...(requestedAppId ? { liveAppId: requestedAppId } : {}),
+        });
+        setOneSurface(null);
         setManifestText(JSON.stringify(record.manifest, null, 2));
         setMessage("Loaded surface from registry.");
         setOpen(true);
@@ -83,22 +159,29 @@ function SurfacePreviewInner() {
     return () => {
       cancelled = true;
     };
-  }, [requestedSurfaceId]);
+  }, [requestedAppId, requestedSurfaceId]);
 
   const loadFromText = useCallback(() => {
     try {
-      const manifest = parseSurfaceManifest(manifestText);
-      setSurface({ id: `preview-${Date.now().toString(36)}`, manifest });
+      const preview = parsePreviewManifest(manifestText);
+      if (preview.kind === "one") {
+        setOneSurface(preview.manifest);
+        setSurface(null);
+      } else {
+        setSurface({ id: `preview-${Date.now().toString(36)}`, manifest: preview.manifest, ...(requestedAppId ? { liveAppId: requestedAppId } : {}) });
+        setOneSurface(null);
+      }
       setMessage("Manifest rendered.");
       setLastAction(null);
       setOpen(true);
     } catch (err: unknown) {
       setMessage(err instanceof Error ? err.message : String(err));
     }
-  }, [manifestText]);
+  }, [manifestText, requestedAppId]);
 
   const clearSurface = useCallback(() => {
     setSurface(null);
+    setOneSurface(null);
     setManifestText("");
     setLastAction(null);
     setMessage("No surface loaded.");
@@ -124,7 +207,13 @@ function SurfacePreviewInner() {
       void api.surfaces
         .updateState({ surfaceId: activeSurface.id, ...patch, actor: patch.actor || "user" })
         .then((record) => {
-          setSurface({ id: record.id, manifest: record.manifest, state: record.state, jobSummary: record.jobSummary });
+          setSurface({
+            id: record.id,
+            manifest: record.manifest,
+            state: record.state,
+            jobSummary: record.jobSummary,
+            ...(requestedAppId ? { liveAppId: requestedAppId } : {}),
+          });
           setMessage(`Saved state: ${patch.label || patch.path}`);
         })
         .catch((err: unknown) => setMessage(err instanceof Error ? err.message : String(err)));
@@ -140,7 +229,7 @@ function SurfacePreviewInner() {
         : cur,
     );
     setMessage(`Preview state patched: ${patch.label || patch.path}`);
-  }, []);
+  }, [requestedAppId]);
 
   return (
     <main className="agentlas-surface-preview-page" style={page}>
@@ -177,7 +266,7 @@ function SurfacePreviewInner() {
           value={manifestText}
           onChange={(event) => setManifestText(event.currentTarget.value)}
           spellCheck={false}
-          placeholder='Paste an Agentlas Surface Manifest JSON object with kind: "surface".'
+          placeholder='Paste a Work Surface (kind: "surface") or One Surface (contractVersion: "1.0.0").'
           style={editor}
         />
 
@@ -185,7 +274,7 @@ function SurfacePreviewInner() {
           <button onClick={loadFromText} style={primaryButton}>
             Render
           </button>
-          <button onClick={() => setOpen(true)} disabled={!surface} style={secondaryButton}>
+          <button onClick={() => setOpen(true)} disabled={!surface && !oneSurface} style={secondaryButton}>
             Open
           </button>
           <button onClick={clearSurface} style={secondaryButton}>
@@ -201,7 +290,26 @@ function SurfacePreviewInner() {
       </section>
 
       <section className="agentlas-surface-preview-stage" style={stage}>
-        {surface && open ? (
+        {outputKind && outputSource ? (
+          <div style={liveOutputPreviewStage} data-testid="live-output-preview-stage">
+            <LiveOutputViewer
+              source={outputSource}
+              name={outputName}
+              kind={outputKind}
+              mimeType={outputMime}
+              locale="ko"
+            />
+          </div>
+        ) : oneSurface && oneProjection && open ? (
+          <div style={onePreviewStage}>
+            <OneAdaptiveResult
+              manifest={oneSurface}
+              projection={oneProjection}
+              receipt={null}
+              locale="ko"
+            />
+          </div>
+        ) : surface && open ? (
           <WorkbenchPanel
             artifact={null}
             surface={surface}
@@ -365,4 +473,22 @@ const emptyStage = {
   color: "var(--muted-deep)",
   textAlign: "center",
   padding: 24,
+} satisfies CSSProperties;
+
+const onePreviewStage = {
+  flex: 1,
+  minWidth: 0,
+  minHeight: 0,
+  overflow: "auto",
+  padding: 24,
+  background: "var(--paper-2)",
+} satisfies CSSProperties;
+
+const liveOutputPreviewStage = {
+  flex: 1,
+  minWidth: 0,
+  minHeight: 0,
+  overflow: "auto",
+  padding: 24,
+  background: "var(--paper-2)",
 } satisfies CSSProperties;

@@ -342,8 +342,7 @@
 
 .mediaMeta button,
 .mediaOutput button,
-.mediaUnavailable button,
-.workFallbackButton {
+.mediaUnavailable button {
   min-height: 44px;
   padding: 0 12px;
   border: 1px solid #dfe3df;
@@ -360,17 +359,10 @@
 .mediaOutput button { flex: 0 0 auto; }
 .mediaMeta button:hover,
 .mediaOutput button:hover,
-.mediaUnavailable button:hover,
-.workFallbackButton:hover { background: #f4f6f3; }
+.mediaUnavailable button:hover { background: #f4f6f3; }
 .mediaMeta button:focus-visible,
 .mediaOutput button:focus-visible,
-.mediaUnavailable button:focus-visible,
-.workFallbackButton:focus-visible { outline: 3px solid rgba(96, 122, 54, 0.22); outline-offset: 2px; }
-
-.workFallbackButton {
-  width: calc(100% - 24px);
-  margin: 0 12px 12px;
-}
+.mediaUnavailable button:focus-visible { outline: 3px solid rgba(96, 122, 54, 0.22); outline-offset: 2px; }
 
 .mediaLayout {
   display: grid;
@@ -382,6 +374,7 @@
   border: 1px solid #e3e6e4;
   border-radius: 14px;
 }
+.primaryMedia > div { width: 100%; }
 
 .primaryMedia > img,
 .primaryMedia > video {
@@ -413,6 +406,7 @@
 .documentPreview button { margin-top: 11px; }
 .documentPreview small { display: block; margin-top: 7px; color: #975044; font-size: 9px; line-height: 1.45; }
 .documentPreview p { margin: 0; color: #515752; font-size: 12px; line-height: 1.65; }
+.documentFallback { min-height: 160px; display: grid; place-items: center; align-content: center; gap: 10px; padding: 20px; border-radius: 10px; background: #f2f4f2; text-align: center; }
 
 .sourceList { display: grid; gap: 1px; margin: 0; padding: 0; list-style: none; }
 .sourceDisclosure { border: 1px solid #e5e8e6; border-radius: 12px; background: #fff; }

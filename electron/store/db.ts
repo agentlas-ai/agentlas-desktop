@@ -4752,6 +4752,7 @@ export function initStore(options: StoreInitOptions = {}): void {
       id TEXT PRIMARY KEY,
       chat_id TEXT NOT NULL UNIQUE,
       title TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
       member_agent_ids_json TEXT NOT NULL DEFAULT '[]',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
@@ -4772,6 +4773,7 @@ export function initStore(options: StoreInitOptions = {}): void {
   try { _db.exec("ALTER TABLE one_org_members ADD COLUMN auto_select_tools INTEGER NOT NULL DEFAULT 1 CHECK(auto_select_tools IN (0,1))"); } catch { /* already present */ }
   try { _db.exec("ALTER TABLE one_org_members ADD COLUMN collaboration_style TEXT NOT NULL DEFAULT 'default' CHECK(collaboration_style IN ('default','concise','warm','direct'))"); } catch { /* already present */ }
   try { _db.exec("ALTER TABLE one_org_members ADD COLUMN handover_note TEXT"); } catch { /* already present */ }
+  try { _db.exec("ALTER TABLE one_taskforces ADD COLUMN description TEXT NOT NULL DEFAULT ''"); } catch { /* already present */ }
 
   // v100 — durable in-app plugin builder drafts.  The seed is retained so an
   // agent-offer can be enforced once per conversation even after a restart or

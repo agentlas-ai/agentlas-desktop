@@ -498,6 +498,7 @@ export async function finalizeWorkforceCapabilityBinding(input: {
       const expectedServerConfigKeys = [...new Set(row.entries.map((entry) => entry.serverConfigKey))].sort();
       let mcpConfigPath: string | undefined;
       let mcpAllowedTools: string[] | undefined;
+      let mcpCodexConfigArgs: string[] | undefined;
       let env: NodeJS.ProcessEnv | undefined;
       let canonicalConfigSha256: string | null = null;
       let cleanup = () => {};
@@ -513,6 +514,13 @@ export async function finalizeWorkforceCapabilityBinding(input: {
         const proof = stableConfigProof(config.configPath, expectedServerConfigKeys);
         mcpConfigPath = config.configPath;
         mcpAllowedTools = grantedToolIds;
+        // Codex does not consume Claude's per-run JSON config path. It needs
+        // the same Main-authored server rows as explicit `-c mcp_servers...`
+        // overrides or the provider-global Playwright row wins and opens a
+        // separate browser profile/window. Passing the exact generated args
+        // keeps the worker on Agentlas Browser's shared CDP session, which is
+        // also the session streamed into One's task-scoped Browser rail.
+        mcpCodexConfigArgs = config.codexConfigArgs;
         env = { ...config.runtimeEnv };
         canonicalConfigSha256 = proof.digest;
         cleanup = () => fs.rmSync(config.configPath, { force: true });
@@ -529,7 +537,7 @@ export async function finalizeWorkforceCapabilityBinding(input: {
         runner: {
           mcpConfigPath,
           mcpAllowedTools,
-          mcpCodexConfigArgs: undefined,
+          mcpCodexConfigArgs,
           env,
           untrustedNoTools: true,
           untrustedAllowedMcpTools: mcpAllowedTools,

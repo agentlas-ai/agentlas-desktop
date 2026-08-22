@@ -12,17 +12,13 @@ export interface OneArtifactBindingRequestV1 {
 export interface OneArtifactPreviewCapabilityV1 {
   capabilityUrl: string;
   mimeType: string;
-  kind: "image" | "video" | "audio";
+  kind: "image" | "video" | "audio" | "document" | "spreadsheet" | "archive" | "data";
   sizeBytes: number;
   expiresAt: string;
 }
 
 export interface OneArtifactPreviewRevokeV1 extends OneArtifactBindingRequestV1 {
   capabilityUrl: string;
-}
-
-export interface OneArtifactOpenResultV1 {
-  opened: boolean;
 }
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/;
@@ -67,7 +63,7 @@ export function isOneArtifactPreviewCapabilityV1(value: unknown): value is OneAr
     && CAPABILITY_URL_RE.test(value.capabilityUrl)
     && typeof value.mimeType === "string"
     && value.mimeType.length <= 80
-    && ["image", "video", "audio"].includes(String(value.kind))
+    && ["image", "video", "audio", "document", "spreadsheet", "archive", "data"].includes(String(value.kind))
     && Number.isSafeInteger(value.sizeBytes)
     && Number(value.sizeBytes) > 0
     && typeof value.expiresAt === "string"

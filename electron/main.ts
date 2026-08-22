@@ -54,6 +54,7 @@ import { createAutomaticQuitInstaller } from "./updater/automatic-quit-install";
 import { scrubInactiveUpdaterRecoveryOpenCrabCredentialUrls } from "./updater/continuity";
 import { resolveMacAppBundle } from "./updater/controller";
 import { disposeAppFactoryLaunches } from "./app-factory/operations";
+import { disposeAppFactoryLivePreviews } from "./app-factory/live-preview";
 import { disposeSiteAgentAppRuntimes } from "./site/agent-app-runtime";
 import {
   bootAuthFromKeychain,
@@ -735,6 +736,7 @@ function stopQuitServices(): Promise<void> {
   try { stopMcpProxyApprovalServer(); } catch {}
   try { stopComputerUseControlServer(); } catch {}
   try { disposeAppFactoryLaunches(); } catch {}
+  try { disposeAppFactoryLivePreviews(); } catch {}
   try { disposeSiteAgentAppRuntimes(); } catch {}
   try { disposeAuthSessionInvalidation?.(); } catch {}
   disposeAuthSessionInvalidation = null;

@@ -1,0 +1,29 @@
+.mediaStage { min-width: 0; min-height: 220px; position: relative; display: grid; place-items: center; overflow: hidden; border-radius: 12px; background: #101412; }
+.mediaStage[data-compact="true"] { min-height: 120px; border-radius: 9px; }
+.mediaStage[data-fill="true"] { width: 100%; height: 100%; min-height: 0; padding: 28px 0; border-radius: 0; background: #fff; }
+.mediaStage img, .mediaStage video { width: 100%; height: 100%; max-height: 620px; display: block; object-fit: contain; background: #101412; }
+.mediaStage[data-fill="true"] img { width: auto; max-width: 100%; height: auto; max-height: 100%; background: transparent; }
+.mediaStage[data-fill="true"] video { width: 100%; height: auto; max-height: 100%; aspect-ratio: 16 / 9; background: #10111d; }
+.mediaStage[data-fill="true"][data-media-kind="audio"] { padding: 30px; }
+.mediaStage[data-compact="true"] img, .mediaStage[data-compact="true"] video { max-height: 260px; }
+.audioStage { min-height: 150px; align-content: center; gap: 20px; padding: 20px; background: linear-gradient(145deg, #eef6f1, #f8fbf9); }
+.audioStage audio { width: min(560px, 100%); }
+.audioPulse { height: 42px; display: flex; align-items: center; gap: 5px; color: #23704d; }
+.audioPulse i { width: 4px; height: 16px; border-radius: 999px; background: currentColor; animation: output-wave 1.25s ease-in-out infinite; }
+.audioPulse i:nth-child(2), .audioPulse i:nth-child(4) { height: 30px; animation-delay: -250ms; }
+.audioPulse i:nth-child(3) { height: 40px; animation-delay: -500ms; }
+.mediaStatus { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 16px; background: rgba(15, 20, 17, .74); color: #f5f8f6; font-size: 12px; text-align: center; backdrop-filter: blur(4px); }
+.mediaStatus[data-state="error"] { background: rgba(64, 31, 31, .84); }
+.mediaStatus > span, .loading > span { width: 17px; height: 17px; border: 2px solid rgba(255,255,255,.35); border-top-color: #fff; border-radius: 50%; animation: output-spin .8s linear infinite; }
+.documentEngine { width: 100%; height: 100%; min-height: 420px; position: relative; overflow: hidden; background: #f5f7f5; }
+.documentEngineRoot { width: 100%; height: 100%; min-height: 420px; display: block; }
+.documentEngine[data-fill="true"], .documentEngine[data-fill="true"] .documentEngineRoot { height: 100%; min-height: 0; }
+.documentEngine[data-compact="true"], .documentEngine[data-compact="true"] .documentEngineRoot { min-height: 240px; max-height: 320px; }
+.documentError { position: absolute; inset: 0; z-index: 4; display: grid; place-items: center; align-content: center; gap: 7px; padding: 24px; background: rgba(250, 247, 247, .95); color: #724747; text-align: center; }
+.documentError strong { font-size: 13px; }
+.documentError small { max-width: 480px; overflow-wrap: anywhere; color: #8a6262; line-height: 1.45; }
+.loading { min-height: 420px; display: grid; place-items: center; background: #f2f5f3; }
+.loading > span { border-color: #c8d3cc; border-top-color: #26724e; }
+@keyframes output-spin { to { transform: rotate(360deg); } }
+@keyframes output-wave { 0%,100% { transform: scaleY(.55); opacity: .5; } 50% { transform: scaleY(1); opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .audioPulse i { animation: none; } .mediaStatus > span, .loading > span { animation-duration: 1.6s; } }

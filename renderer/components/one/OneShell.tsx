@@ -9,7 +9,6 @@ import {
   useMemo,
   useRef,
   useState,
-  useSyncExternalStore,
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
@@ -69,7 +68,6 @@ import type {
   OneExperienceReuseState,
   OneImprovementProofReadState,
   OneImprovementReusedAssetV1,
-  OneHomeSignalsV1,
   OneProfile,
   OneBriefingActionPacket,
   OneProactiveBriefing,
@@ -91,7 +89,6 @@ import {
   type OneFeatureIntroState,
 } from "@shared/one-feature-intro";
 import type {
-  OneActivationMobileResolution,
   OneActivationState,
 } from "@shared/one-activation";
 import { ONE_MEMORY_MAP_CONTRACT_VERSION } from "@shared/one-memory-map";
@@ -128,19 +125,12 @@ import {
   getOneTaskProjection,
   listOneTaskProjections,
   ONE_INTRO_ACK_KEY,
-  resolveOneTaskWorkTarget,
   type OneTaskProjection,
 } from "@/lib/one-task-adapter";
-import {
-  subscribe as buildSessionSubscribe,
-  getSnapshot as getBuildSessionSnapshot,
-} from "@/lib/build-session";
 import { ProductModeMenu } from "./ProductModeMenu";
 import { OneBottomSheet } from "./OneBottomSheet";
-import { OneAutomationInterviewDialog } from "./OneAutomationInterviewDialog";
-import { OneUseCaseChips, type OneUseCaseChipAction } from "./OneUseCaseChips";
+import { DescribeAutomation } from "@/components/automation/DescribeAutomation";
 import { OneAdaptiveResult, type OneAgentDraftSeed } from "./OneAdaptiveResult";
-import { OneActivation } from "./OneActivation";
 import { OneFeatureIntro } from "./OneFeatureIntro";
 import { OneMemorySheet } from "./OneMemorySheet";
 import { OneMemoryMap } from "./OneMemoryMap";
@@ -148,17 +138,17 @@ import { OneMemoryCandidateCard } from "./OneMemoryCandidateCard";
 import { OneProfileSheet } from "./OneProfileSheet";
 import { OneSuggestionCard } from "./OneSuggestionCard";
 import { OneGrowthCard } from "./OneGrowthCard";
-import { OneActivityArtifactRail } from "./OneActivityTimeline";
+import { OneActivityArtifactRail, taskBrowserUrl } from "./OneActivityTimeline";
 import { OneOrgChart, type OneOrgSearchItem } from "./OneOrgChart";
 import { OneAgentPortrait } from "./OneAgentPortrait";
 import { OneCreateAgentDialog, type OneCreateAgentSeed } from "./OneCreateAgentDialog";
 import { OneTaskforceDialog, OneTaskforceRail } from "./OneTaskforces";
 import { OneComputerHistory } from "./OneComputerHistory";
 import { OneSettingsRail, OneSettingsSheet, type OneSettingsKey } from "./OneSettings";
-import { OneTeamUpgradeIntro } from "./OneTeamUpgradeIntro";
 import { OneTurnWork, OneTurnWorkDividers } from "./OneTurnWork";
 import { OneTaskforceConversation } from "./OneTaskforceConversation";
 import { buildOneWorkPresentation } from "@/lib/one-turn-work";
+import { isDocumentLikeText } from "@/lib/one-doc-like";
 import { planOneThreadWork, projectThreadRuns, type OneThreadRunBlock } from "@/lib/one-thread-work";
 import { ToolApprovalInline } from "@/components/ToolApprovalInline";
 import {
@@ -201,8 +191,9 @@ const ONE_CONTEXT_RAIL_OPEN_STORAGE_KEY = "agentlas.one.context-rail-open.v1";
 /** The right rail is resizable (owner request 2026-08-16); the width persists like its open state. */
 const ONE_CONTEXT_RAIL_WIDTH_STORAGE_KEY = "agentlas.one.context-rail-width.v1";
 const ONE_CONTEXT_RAIL_WIDTH_DEFAULT = 420;
-const ONE_CONTEXT_RAIL_WIDTH_MIN = 300;
-const ONE_CONTEXT_RAIL_WIDTH_MAX = 720;
+const ONE_CONTEXT_RAIL_WIDTH_MIN = 340;
+const ONE_CONTEXT_RAIL_WIDTH_MAX = 1280;
+const ONE_CONTEXT_RAIL_RESULT_RATIO = 0.432;
 
 function oneOrgBrowserPreviewState(): OneOrgState {
   const now = new Date().toISOString();
@@ -240,9 +231,24 @@ function oneOrgBrowserPreviewState(): OneOrgState {
   };
 }
 
+function contextRailViewportMax(): number {
+  if (typeof window === "undefined") return ONE_CONTEXT_RAIL_WIDTH_MAX;
+  return window.innerWidth <= 1080
+    ? Math.max(ONE_CONTEXT_RAIL_WIDTH_MIN, window.innerWidth - 56)
+    : Math.max(ONE_CONTEXT_RAIL_WIDTH_MIN, window.innerWidth - 252 - 440);
+}
+
 function clampContextRailWidth(value: number): number {
   if (!Number.isFinite(value)) return ONE_CONTEXT_RAIL_WIDTH_DEFAULT;
-  return Math.min(ONE_CONTEXT_RAIL_WIDTH_MAX, Math.max(ONE_CONTEXT_RAIL_WIDTH_MIN, Math.round(value)));
+  return Math.min(ONE_CONTEXT_RAIL_WIDTH_MAX, contextRailViewportMax(), Math.max(ONE_CONTEXT_RAIL_WIDTH_MIN, Math.round(value)));
+}
+
+function preferredContextResultWidth(): number {
+  if (typeof window === "undefined") return 720;
+  const requested = window.innerWidth <= 1080
+    ? Math.round(window.innerWidth * 0.86)
+    : Math.round(window.innerWidth * ONE_CONTEXT_RAIL_RESULT_RATIO);
+  return clampContextRailWidth(requested);
 }
 
 function readStoredContextRailWidth(): number {
@@ -472,6 +478,11 @@ function uid(): string {
   return typeof crypto !== "undefined" && "randomUUID" in crypto
     ? crypto.randomUUID()
     : Math.random().toString(36).slice(2);
+}
+
+function oneGraphRequest(value: string): string | null {
+  const match = /^@graph(?:\s+|$)([\s\S]*)/i.exec(value.trim());
+  return match ? match[1].trim() : null;
 }
 
 function attachmentKind(file: File): "image" | "file" {
@@ -795,13 +806,6 @@ export function OneShell() {
    */
   const [alwaysApprovedChats, setAlwaysApprovedChats] = useState<readonly string[]>(alwaysApprovedChatIds);
   useEffect(() => subscribeAlwaysApproved(setAlwaysApprovedChats), []);
-  useEffect(() => {
-    try {
-      setTeamIntroVisible(window.localStorage.getItem("agentlas.one.team-intro.v1") !== "seen");
-    } catch {
-      setTeamIntroVisible(false);
-    }
-  }, []);
   const [updaterState, setUpdaterState] = useState<UpdaterState | null>(null);
   const [mobileStatus, setMobileStatus] = useState<MobileBridgeRuntimeStatus | null>(null);
   const [oneProfile, setOneProfile] = useState<OneProfile | null>(null);
@@ -821,7 +825,6 @@ export function OneShell() {
   const [computerHistory, setComputerHistory] = useState<ComputerHistoryState | null>(null);
   const [historyClearConfirmOpen, setHistoryClearConfirmOpen] = useState(false);
   const [historyClearBusy, setHistoryClearBusy] = useState(false);
-  const [teamIntroVisible, setTeamIntroVisible] = useState(false);
   const [oneMemory, setOneMemory] = useState<OneMemoryState | null>(null);
   const [oneMemoryMap, setOneMemoryMap] = useState<OneMemoryMapSnapshot | null>(null);
   const [homeMemoryMapOpen, setHomeMemoryMapOpen] = useState(false);
@@ -832,8 +835,6 @@ export function OneShell() {
   const [oneExperienceReuse, setOneExperienceReuse] = useState<OneExperienceReuseState | null>(null);
   const [oneImprovementProofs, setOneImprovementProofs] = useState<OneImprovementProofReadState | null>(null);
   const [oneIntroState, setOneIntroState] = useState<OneFeatureIntroState | null>(null);
-  const [oneHomeSignals, setOneHomeSignals] = useState<OneHomeSignalsV1 | null>(null);
-  const [automationSheetOpen, setAutomationSheetOpen] = useState(false);
   const [oneActivationState, setOneActivationState] = useState<OneActivationState | null>(null);
   const [briefingSnapshot, setBriefingSnapshot] = useState<OneBriefingSnapshot | null>(null);
   const [briefingActionBusy, setBriefingActionBusy] = useState(false);
@@ -983,14 +984,16 @@ export function OneShell() {
   const [pluginPickerOpen, setPluginPickerOpen] = useState(false);
   const [contextRailOpen, setContextRailOpenState] = useState(() => readStoredBoolean(ONE_CONTEXT_RAIL_OPEN_STORAGE_KEY, true));
   const [contextRailWidth, setContextRailWidthState] = useState<number>(readStoredContextRailWidth);
-  const setContextRailWidth = useCallback((next: number) => {
-    const clamped = clampContextRailWidth(next);
-    setContextRailWidthState(clamped);
-    try {
-      window.localStorage.setItem(ONE_CONTEXT_RAIL_WIDTH_STORAGE_KEY, String(clamped));
-    } catch {
-      // The rail stays resizable even when persistence is unavailable.
-    }
+  const setContextRailWidth = useCallback((next: number | ((current: number) => number)) => {
+    setContextRailWidthState((current) => {
+      const clamped = clampContextRailWidth(typeof next === "function" ? next(current) : next);
+      try {
+        window.localStorage.setItem(ONE_CONTEXT_RAIL_WIDTH_STORAGE_KEY, String(clamped));
+      } catch {
+        // The rail stays resizable even when persistence is unavailable.
+      }
+      return clamped;
+    });
   }, []);
   const [taskMenuOpen, setTaskMenuOpen] = useState(false);
   const setRailCollapsed = useCallback((collapsed: boolean) => {
@@ -1000,7 +1003,11 @@ export function OneShell() {
   const setContextRailOpen = useCallback((next: boolean | ((current: boolean) => boolean)) => {
     setContextRailOpenState((current) => {
       const value = typeof next === "function" ? next(current) : next;
-      window.localStorage.setItem(ONE_CONTEXT_RAIL_OPEN_STORAGE_KEY, String(value));
+      try {
+        window.localStorage.setItem(ONE_CONTEXT_RAIL_OPEN_STORAGE_KEY, String(value));
+      } catch {
+        // The output rail remains operable even when persistence is unavailable.
+      }
       return value;
     });
   }, []);
@@ -1173,6 +1180,16 @@ export function OneShell() {
       excludeRunId: workBusy ? activeActivityRunId : null,
     });
   }, [activeActivityRunId, activity, activityStateRunId, visibleMessages, runStartedAt, threadRuns, workBusy]);
+  const durableThreadBrowserUrl = useMemo(() => {
+    for (let index = threadRuns.length - 1; index >= 0; index -= 1) {
+      const url = taskBrowserUrl(threadRuns[index].state.items);
+      if (url) return url;
+    }
+    return undefined;
+  }, [threadRuns]);
+  useEffect(() => {
+    if (durableThreadBrowserUrl) setContextRailOpen(true);
+  }, [durableThreadBrowserUrl, setContextRailOpen]);
   const searchTriggerRef = useRef<HTMLButtonElement>(null);
   const searchSheetRef = useRef<HTMLElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
@@ -1421,11 +1438,10 @@ export function OneShell() {
       setOneIntroState(null);
       setOneActivationState(null);
       setBriefingSnapshot(null);
-      setOneHomeSignals(null);
       return;
     }
     try {
-      const [active, pending, update, mobile, recentChats, profile, org, taskforceRows, history, memory, memoryMap, suggestions, valueClosures, weeklyReflection, experienceReuse, improvementProofs, proactiveBriefing, intro, activation, homeSignals] = await Promise.all([
+      const [active, pending, update, mobile, recentChats, profile, org, taskforceRows, history, memory, memoryMap, suggestions, valueClosures, weeklyReflection, experienceReuse, improvementProofs, proactiveBriefing, intro, activation] = await Promise.all([
         api.invoke.activeChats().catch(() => []),
         api.confirm.listPending().catch(() => []),
         api.updater.getState().catch(() => null),
@@ -1445,7 +1461,6 @@ export function OneShell() {
         api.oneBriefing.get().catch(() => null),
         api.oneFeatureIntro.getState().catch(() => null),
         api.oneActivation.getState({ platform: "desktop", locale: appLocale }).catch(() => null),
-        api.oneHomeSignals.get().catch(() => null),
       ]);
       let resolvedIntro = intro;
       if (resolvedIntro && resolvedIntro.acknowledgedIntroVersion < resolvedIntro.currentIntroVersion) {
@@ -1493,7 +1508,6 @@ export function OneShell() {
       setOneImprovementProofs(keepPrevIfDeepEqual(improvementProofs));
       setOneIntroState(keepPrevIfDeepEqual(resolvedIntro));
       setOneActivationState(keepPrevIfDeepEqual(activation));
-      setOneHomeSignals(keepPrevIfDeepEqual(homeSignals));
       setBriefingSnapshot(keepPrevIfDeepEqual(safeBriefingSnapshot(proactiveBriefing)));
       setProjections(keepPrevIfDeepEqual(items));
       // One 홈은 One이 시작한 대화만 보여준다 — 전역 Work 대화는 Work에 남는다.
@@ -1522,18 +1536,13 @@ export function OneShell() {
           setReceipt(detail?.latestReceipt ?? null);
           router.replace(`/one?task=${encodeURIComponent(promotedTask.id)}`);
         } else if (chat && chat.originSurface !== "one") {
-          // One's home only ever renders One-surface conversations. A deep link
-          // to a Work chat — e.g. an automation run session, which is always
-          // stored with origin_surface 'work' — must open in the Work chat
-          // surface instead of leaking Work history into One. The recent-chat
-          // list above already filters by originSurface; this closes the
-          // asymmetric single-chat deep-link path that let "보기" surface a Work
-          // automation transcript inside One.
+          // One never ejects the person into Work. Reject stale/non-One deep
+          // links in place and return to One's own conversation home instead.
           selectedConversationIdRef.current = null;
           setSelected(null);
           setConversation(null);
           setReceipt(null);
-          router.replace(`/workspace/task?id=${encodeURIComponent(chat.id)}`);
+          router.replace("/one");
         } else {
           setSelected(null);
           setConversation(chat);
@@ -1676,11 +1685,6 @@ export function OneShell() {
       setHistoryClearBusy(false);
     }
   }, []);
-  const dismissTeamIntro = useCallback(() => {
-    setTeamIntroVisible(false);
-    try { window.localStorage.setItem("agentlas.one.team-intro.v1", "seen"); } catch { /* best effort */ }
-  }, []);
-
   useEffect(() => {
     void refreshAll();
     const onVisibility = () => {
@@ -2146,6 +2150,10 @@ export function OneShell() {
     return () => { cancelled = true; };
   }, [activeThreadChatId]);
   const runtimeArtifacts = activity.artifacts;
+  const latestRuntimeArtifact = runtimeArtifacts.at(-1) ?? null;
+  const terminalReceiptKey = receipt && receipt.status !== "running"
+    ? `${receipt.runId}:${receipt.status}`
+    : null;
   useEffect(() => {
     const api = ipc();
     if (!api) { setActiveThreadChat(conversation); return; }
@@ -2512,6 +2520,28 @@ export function OneShell() {
     const events = ipcEvents();
     const runLocale = normalizedLocale;
     if (!api || !events) throw new Error(tFor(runLocale, "one.shell.run.desktop_unavailable"));
+    // A Taskforce is the conversation's durable roster, not a one-turn
+    // composer decoration. Decision answers, clarification turns, and recovery
+    // continuations do not carry the composer's explicit target snapshot, so
+    // rehydrate the current eligible roster from the exact Taskforce chat.
+    // An explicitly supplied empty array still means "One only for this turn".
+    const effectiveTaskForceTargets: OrchestrationTarget[] = options?.taskForceTargets !== undefined
+      ? options.taskForceTargets
+      : (() => {
+          const taskforce = taskforces.find((item) => item.chatId === chatId);
+          if (!taskforce) return [];
+          const memberByAgentId = new Map((oneOrgState?.members ?? []).map((member) => [member.installedAgentId, member]));
+          return taskforce.memberAgentIds
+            .filter((agentId) => {
+              const member = memberByAgentId.get(agentId);
+              return member && !member.archivedAt && member.statusKind !== "locked" && member.statusKind !== "failed";
+            })
+            .map((agentId) => ({
+              source: "local" as const,
+              entityKind: "agent" as const,
+              agentId,
+            }));
+        })();
     const runId = options?.runId ?? uid();
     runIdRef.current = runId;
     activityRunIdRef.current = runId;
@@ -2607,7 +2637,7 @@ export function OneShell() {
         ...(options?.teamRef ? { oneTeamPreflightRef: options.teamRef } : {}),
         ...(options?.attachments ? { oneAttachmentRef: options.attachments.ref } : {}),
         ...(options?.recurrence ? { oneRecurrenceSelection: options.recurrence } : {}),
-        ...(options?.taskForceTargets?.length ? { taskForceTargets: options.taskForceTargets } : {}),
+        ...(effectiveTaskForceTargets.length ? { taskForceTargets: effectiveTaskForceTargets } : {}),
         ...(attachedOneMemoryUseOnce ? {
           oneMemoryUseOnceRef: {
             contractVersion: attachedOneMemoryUseOnce.contractVersion,
@@ -2691,7 +2721,7 @@ export function OneShell() {
         ));
       }
     }
-  }, [armedOneMemoryUseOnce, normalizedLocale, onePermission, oneRuntimeSelection, refreshAll, scrollToLatest, subscribeRun]);
+  }, [armedOneMemoryUseOnce, normalizedLocale, oneOrgState?.members, onePermission, oneRuntimeSelection, refreshAll, scrollToLatest, subscribeRun, taskforces]);
 
   const autoStartTeamPreflight = useCallback(async (
     proposal: OneTeamPreflightProposal,
@@ -2881,6 +2911,20 @@ export function OneShell() {
     }));
     const explicitValue = text.trim();
     if (!explicitValue && attachmentSnapshot.length === 0) return;
+    const graphRequest = oneGraphRequest(explicitValue);
+    if (graphRequest !== null && !graphRequest) {
+      setComposer("@graph ");
+      return;
+    }
+    if (graphRequest !== null && attachmentSnapshot.length > 0) {
+      setAttachmentError(appLocale === "ko"
+        ? "@graph 명령은 먼저 텍스트로 시작해 주세요. 파일은 다음 대화에서 붙일 수 있습니다."
+        : "Start @graph with text first. You can attach files in the next message.");
+      return;
+    }
+    // A Graph interview is a local chat surface backed by the Work Graph
+    // engine. It must not become a steer for an unrelated running model turn.
+    if (graphRequest !== null && (teamPreflightBusy || busy)) return;
     if (teamPreflightBusy) {
       // The previous submit is still preparing its run. Queue this one behind
       // it (flushed in startRun once the runId exists); attachments cannot be
@@ -2904,6 +2948,41 @@ export function OneShell() {
     if (!api) {
       setError(null);
       requestOneOperationalRecovery("one-submit-connection", "Desktop bridge unavailable");
+      return;
+    }
+    if (graphRequest !== null) {
+      try {
+        let targetChat = selected?.chatId ? await api.chats.get(selected.chatId) : conversation;
+        if (!targetChat) {
+          targetChat = await api.chats.create({
+            title: `Graph · ${graphRequest.split(/\r?\n/)[0].slice(0, 62)}`,
+            taskMode: "conversation",
+            originSurface: "one",
+          });
+          homeTransitionPendingRef.current = false;
+          setConversation(targetChat);
+          selectedTaskIdRef.current = null;
+          selectedConversationIdRef.current = targetChat.id;
+          shownThreadChatIdRef.current = targetChat.id;
+          router.replace(`/one?chat=${encodeURIComponent(targetChat.id)}`);
+        }
+        const entry = await api.chats.appendOneUserMessage(targetChat.id, explicitValue);
+        setComposer("");
+        setTurnOverrides({});
+        setComposerMenu(null);
+        setMessages((current) => current.some((message) => message.id === entry.id)
+          ? current
+          : [...current, {
+              id: entry.id,
+              role: "user",
+              text: entry.text,
+              createdAt: entry.createdAt,
+            }]);
+        scrollToLatest();
+      } catch (cause) {
+        setComposer(explicitValue);
+        requestOneOperationalRecovery("one-graph-chat", cause);
+      }
       return;
     }
     if (busy) {
@@ -3622,7 +3701,7 @@ export function OneShell() {
     void refreshAll({ includeOrg: false });
   }, [refreshAll, router]);
 
-  const createTaskforce = useCallback(async (input: { title: string; memberAgentIds: string[] }) => {
+  const createTaskforce = useCallback(async (input: { title: string; description: string; memberAgentIds: string[] }) => {
     const api = ipc();
     if (!api?.oneTaskforces) throw new Error("Desktop bridge unavailable");
     setTaskforceBusy(true);
@@ -3639,7 +3718,7 @@ export function OneShell() {
     }
   }, [refreshAll, router]);
 
-  const updateTaskforce = useCallback(async (input: { id: string; title: string; memberAgentIds: string[]; expectedRevision: number }) => {
+  const updateTaskforce = useCallback(async (input: { id: string; title: string; description: string; memberAgentIds: string[]; expectedRevision: number }) => {
     const api = ipc();
     if (!api?.oneTaskforces) throw new Error("Desktop bridge unavailable");
     setTaskforceBusy(true);
@@ -3891,16 +3970,11 @@ export function OneShell() {
     : connectedMobile
       ? tFor(appLocale, "one.shell.conn.mobile_connected")
       : tFor(appLocale, "one.shell.conn.desktop_ready");
-  const activationForeground = Boolean(
-    oneActivationState
-    && oneActivationState.eligibility === "eligible_first_use"
-    && (oneActivationState.status === "active"
-      || (oneActivationState.status === "completed" && oneActivationState.mobileConnection.status === "offered")),
-  );
-  const activationBlocksIntro = activationForeground || Boolean(
-    oneActivationState?.eligibility === "eligible_first_use"
-    && oneIntroState?.currentIntroVersion === 1,
-  );
+  // One opens as a conversation, not an onboarding/upgrade card. Activation
+  // state remains durable in Main for continuity, but it never owns the home
+  // surface or suppresses One's greeting.
+  const activationForeground = false;
+  const activationBlocksIntro = false;
   const showWeeklyReflection = shouldPresentOneWeeklyReflection({
     onHome: !selected && !conversation,
     hasOpenReflection: oneWeeklyReflection?.reflection?.status === "open",
@@ -3909,15 +3983,6 @@ export function OneShell() {
     briefingKind: briefing.kind,
     hasProactiveBriefing: Boolean(briefing.proactive),
   });
-  const activationBlocked = Boolean(
-    busy
-    || error
-    || actionableConfirmations.length > 0
-    || activeChatIds.length > 0
-    || selected?.status.value === "decision_required"
-    || selected?.status.value === "failed"
-    || selected?.status.value === "working",
-  );
   const oneIntroPending = Boolean(
     oneIntroState
     && oneIntroState.acknowledgedIntroVersion < oneIntroState.currentIntroVersion,
@@ -3943,23 +4008,24 @@ export function OneShell() {
   // available explicitly from "About One" via replayToken, but it must never
   // interrupt a fresh launch or cover the map automatically.
   const introEligible = false;
-  const canOpenSelectedInWork = Boolean(selected?.chat?.projectId);
-  const openWork = useCallback(async () => {
-    const api = ipc();
-    // Ask Main which conversation this Task really lives in. The href below is
-    // assembled from a projection that can lag behind the store, so the verified
-    // target wins whenever Main can produce one.
-    if (api && selected) {
-      if (!canOpenSelectedInWork) return;
-      const target = await resolveOneTaskWorkTarget(api, selected.taskId);
-      if (target) {
-        router.push(`/workspace/task?id=${encodeURIComponent(target.chatId)}&task=${encodeURIComponent(target.taskId)}`);
-        return;
-      }
-      return;
-    }
-    router.push("/dashboard");
-  }, [canOpenSelectedInWork, router, selected]);
+  const presentRichOutputRail = useCallback(() => {
+    setContextRailOpen(true);
+    setContextRailWidth((current) => Math.max(current, preferredContextResultWidth()));
+  }, [setContextRailOpen, setContextRailWidth]);
+  const focusOneOutput = useCallback(() => {
+    presentRichOutputRail();
+    window.requestAnimationFrame(() => {
+      resultTopRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }, [presentRichOutputRail]);
+  const presentBrowserOutput = useCallback((url: string) => {
+    void url;
+    presentRichOutputRail();
+  }, [presentRichOutputRail]);
+  useEffect(() => {
+    if (!surface && !latestRuntimeArtifact && !terminalReceiptKey) return;
+    presentRichOutputRail();
+  }, [latestRuntimeArtifact?.binding.artifactRef, presentRichOutputRail, surface?.manifestId, terminalReceiptKey]);
   const openCreateAgentDialog = useCallback((seed?: OneAgentDraftSeed) => {
     if (seed) {
       createAgentSeedTokenRef.current += 1;
@@ -3977,34 +4043,35 @@ export function OneShell() {
   const handleOneSemanticAction = useCallback((action: OneSurfaceSemanticAction) => {
     if (!action.enabled || busy) return;
     if (action.intent === "open_work") {
-      void openWork();
+      focusOneOutput();
       return;
     }
     if (action.intent === "open_asset") {
       const kind = action.targetRef?.split(":", 1)[0];
       if (kind === "agent") router.push("/library/agents");
       else if (kind === "team") router.push("/library/agents");
-      else if (kind === "automation") router.push("/automation");
-      else if (kind === "project") void openWork();
-      else if (kind === "site") router.push("/site");
-      else void openWork();
+      else if (kind === "automation") {
+        const request = action.instruction || action.description || action.label;
+        setComposer(`@graph ${request}`);
+        window.requestAnimationFrame(() => composerInputRef.current?.focus());
+      } else focusOneOutput();
       return;
     }
     if (action.intent === "run_automation" || action.intent === "open_automation") {
       // targetRef carries the registered automation id (optionally namespaced
-      // "automation:<id>"). Run reuses the automations preload API the list
-      // screen uses; both intents land on the live flow canvas.
+      // "automation:<id>"). Work Graph stays the background engine; One keeps
+      // the person in the conversation and renders the state here.
       const rawRef = action.targetRef ?? "";
       const automationId = rawRef.startsWith("automation:") ? rawRef.slice("automation:".length) : rawRef;
-      if (!automationId) {
-        router.push("/automation");
-        return;
-      }
-      if (action.intent === "run_automation") {
+      if (action.intent === "run_automation" && automationId) {
         const api = ipc();
         void api?.automations.runNow(automationId).catch(() => undefined);
+        focusOneOutput();
+      } else {
+        const request = action.instruction || action.description || action.label;
+        setComposer(`@graph ${request}`);
+        window.requestAnimationFrame(() => composerInputRef.current?.focus());
       }
-      router.push(`/automation/flow?id=${encodeURIComponent(automationId)}`);
       return;
     }
     if (action.intent === "open_build") {
@@ -4022,7 +4089,10 @@ export function OneShell() {
       return;
     }
     if (!["try_result", "refine_result", "reuse_result", "prepare_share"].includes(action.intent)) {
-      void openWork();
+      if (action.instruction) {
+        setComposer(action.instruction);
+        window.requestAnimationFrame(() => composerInputRef.current?.focus());
+      } else focusOneOutput();
       return;
     }
     const chatId = selected?.chatId ?? conversation?.id;
@@ -4035,7 +4105,7 @@ export function OneShell() {
       selected ? "task" : "conversation",
       { displayUserMessage: false },
     );
-  }, [appLocale, busy, conversation?.id, openCreateAgentDialog, openWork, router, selected, startRun]);
+  }, [appLocale, busy, conversation?.id, focusOneOutput, openCreateAgentDialog, router, selected, startRun]);
   const acceptSelectedResult = useCallback(async () => {
     const api = ipc();
     if (
@@ -4055,90 +4125,6 @@ export function OneShell() {
     window.dispatchEvent(new CustomEvent("agentlas:tasks-changed"));
     await refreshAll();
   }, [receipt, refreshAll, selected]);
-  const openActivationWork = useCallback(async () => {
-    const api = ipc();
-    let current = oneActivationState;
-    if (api?.oneActivation && current?.status === "active") {
-      try {
-        current = await api.oneActivation.resolveWork({
-          expectedStoreVersion: current.version,
-          confirmedByUser: true,
-        });
-      } catch (cause) {
-        requestOneOperationalRecovery("one-activation-work", cause);
-        const latest = await api.oneActivation.getState({ platform: "desktop", locale: appLocale }).catch(() => null);
-        if (latest?.status === "active" && latest.workNavigation.status === "pending") {
-          current = await api.oneActivation.resolveWork({
-            expectedStoreVersion: latest.version,
-            confirmedByUser: true,
-          }).catch((retryCause) => {
-            requestOneOperationalRecovery("one-activation-work", retryCause);
-            return latest;
-          });
-        } else if (latest) {
-          current = latest;
-        }
-      }
-      if (current) setOneActivationState(current);
-    }
-    await openWork();
-  }, [appLocale, oneActivationState, openWork]);
-  const skipActivation = useCallback(async () => {
-    const api = ipc();
-    let current = oneActivationState;
-    if (!current || current.status !== "active") return;
-    if (!api?.oneActivation) {
-      requestOneOperationalRecovery("one-activation-skip", new Error("Desktop bridge unavailable"));
-      return;
-    }
-    try {
-      current = await api.oneActivation.skip({
-        expectedStoreVersion: current.version,
-        confirmedByUser: true,
-      });
-    } catch (cause) {
-      requestOneOperationalRecovery("one-activation-skip", cause);
-      try {
-        const latest = await api.oneActivation.getState({ platform: "desktop", locale: appLocale });
-        current = latest.status === "active"
-          ? await api.oneActivation.skip({ expectedStoreVersion: latest.version, confirmedByUser: true })
-          : latest;
-      } catch (retryCause) {
-        requestOneOperationalRecovery("one-activation-skip", retryCause);
-        return;
-      }
-    }
-    setOneActivationState(current);
-  }, [appLocale, oneActivationState]);
-  const resolveActivationMobile = useCallback(async (resolution: OneActivationMobileResolution) => {
-    const api = ipc();
-    let current = oneActivationState;
-    if (!current || current.mobileConnection.status !== "offered") return;
-    if (!api?.oneActivation) {
-      requestOneOperationalRecovery("one-activation-mobile", new Error("Desktop bridge unavailable"));
-      return;
-    }
-    try {
-      current = await api.oneActivation.resolveMobile({
-        expectedStoreVersion: current.version,
-        resolution,
-        confirmedByUser: true,
-      });
-    } catch (cause) {
-      requestOneOperationalRecovery("one-activation-mobile", cause);
-      try {
-        const latest = await api.oneActivation.getState({ platform: "desktop", locale: appLocale });
-        current = latest.mobileConnection.status === "offered"
-          ? await api.oneActivation.resolveMobile({ expectedStoreVersion: latest.version, resolution, confirmedByUser: true })
-          : latest;
-      } catch (retryCause) {
-        requestOneOperationalRecovery("one-activation-mobile", retryCause);
-        return;
-      }
-    }
-    setOneActivationState(current);
-    if (resolution === "opened_settings") router.push("/settings");
-  }, [appLocale, oneActivationState, router]);
   const selectedCanContinueInPlace = Boolean(
     selected?.chatId && ["partial", "completed", "failed"].includes(selected.canonicalStatus ?? ""),
   );
@@ -4288,7 +4274,8 @@ export function OneShell() {
       return;
     }
     if (asset.assetType === "automation") {
-      router.push("/automation");
+      setComposer(`@graph ${appLocale === "ko" ? "이 자동화를 검토하고 필요한 변경을 제안해줘" : "Review this automation and propose any needed changes"}: ${asset.assetRef}`);
+      window.requestAnimationFrame(() => composerInputRef.current?.focus());
       return;
     }
     if (asset.assetType === "team") {
@@ -4299,59 +4286,8 @@ export function OneShell() {
       router.push("/library/agents");
       return;
     }
-    void openWork();
-  }, [openWork, router]);
-  // ── E1 use-case 칩 ────────────────────────────────────────────────
-  // 같은 렌더러 창에서 진행 중이던 빌드(인터뷰 대기·승인 대기·실행 중·오류)는
-  // "이어하기" 로테이션 칩의 로컬 신호가 된다. Main 신호(oneHomeSignals)와 함께
-  // OneUseCaseChips가 결정적으로 슬롯을 고른다.
-  const buildSessionSnapshot = useSyncExternalStore(
-    buildSessionSubscribe,
-    getBuildSessionSnapshot,
-    getBuildSessionSnapshot,
-  );
-  const hasUnfinishedBuild = ["running", "interview", "mcp-review", "runtime-approval", "error"]
-    .includes(buildSessionSnapshot.phase);
-  // 칩은 새 대화가 시작되기 전(홈)에서만 살고, 첫 입력과 동시에 사라진다.
-  const useCaseChipsVisible = composer.trim().length === 0 && !busy && !teamPreflightBusy;
-  const activateUseCaseChip = useCallback((action: OneUseCaseChipAction) => {
-    if (action.id === "automation" || action.id === "try_automation") {
-      // E3: 딥링크 폴백이 아니라 One 안에서 직접 생성한다.
-      setAutomationSheetOpen(true);
-      return;
-    }
-    if (action.id === "approve_graph" && action.targetId) {
-      // 승인 카드는 캔버스에 있다 — 상세 화면으로 보내면 누를 것을 못 찾는다.
-      router.push(`/automation/flow?id=${encodeURIComponent(action.targetId)}`);
-      return;
-    }
-    if (action.id === "fix_automation" && action.targetId) {
-      router.push(`/automation/detail?id=${encodeURIComponent(action.targetId)}`);
-      return;
-    }
-    if (action.id === "library" || action.id === "try_library") {
-      router.push("/library/agents");
-      return;
-    }
-    if (action.id === "experience" || action.id === "try_experience") {
-      router.push("/library/agents?tab=ontology");
-      return;
-    }
-    // Agent creation belongs to One Team. Even a legacy unfinished Build
-    // signal is resumed as an internal draft, preserving its request while
-    // leaving any generated/uploaded character in the One draft untouched.
-    openCreateAgentDialog(action.id === "resume_build" && buildSessionSnapshot.request
-      ? {
-          name: appLocale === "ko" ? "이어 만드는 에이전트" : "Continued agent",
-          description: buildSessionSnapshot.request,
-        }
-      : undefined);
-  }, [appLocale, buildSessionSnapshot.request, openCreateAgentDialog, router]);
-  const closeAutomationSheet = useCallback(() => setAutomationSheetOpen(false), []);
-  const openCreatedAutomation = useCallback((automationId: string) => {
-    setAutomationSheetOpen(false);
-    router.push(`/automation/flow?id=${encodeURIComponent(automationId)}`);
-  }, [router]);
+    focusOneOutput();
+  }, [appLocale, focusOneOutput, router]);
   /*
    * 브리핑이 찾아낸 것을 One 이 **실제로 살펴보게** 한다.
    *
@@ -4424,13 +4360,13 @@ export function OneShell() {
   }, [pendingBriefingAction, refreshAll, appLocale]);
 
   const openPreparedFinding = useCallback((candidate: OneProactiveBriefing) => {
-    if (candidate.preparedAction.kind === "open_project") {
-      router.push(`/project/detail?id=${encodeURIComponent(candidate.preparedAction.targetId)}`);
-      return;
-    }
     if (candidate.preparedAction.kind === "open_task") return;
-    router.push(`/automation/detail?id=${encodeURIComponent(candidate.preparedAction.targetId)}`);
-  }, [router]);
+    const target = candidate.preparedAction.targetId;
+    setComposer(candidate.preparedAction.kind === "open_project"
+      ? (appLocale === "ko" ? `이 프로젝트를 One 안에서 검토해줘: ${target}` : `Review this project here in One: ${target}`)
+      : `@graph ${appLocale === "ko" ? "이 자동화를 One 안에서 검토해줘" : "Review this automation here in One"}: ${target}`);
+    window.requestAnimationFrame(() => composerInputRef.current?.focus());
+  }, [appLocale]);
   const openProactiveTask = useCallback(async (candidate: OneProactiveBriefing) => {
     const api = ipc();
     if (candidate.source.kind !== "canonical_task" || candidate.preparedAction.kind !== "open_task") return;
@@ -4520,6 +4456,7 @@ export function OneShell() {
         data-task-active={selected || conversation ? "true" : "false"}
         data-home={!selected && !conversation ? "true" : "false"}
         data-rail-mode={railMode}
+        style={{ "--one-rail-width": `${contextRailWidth}px` } as CSSProperties}
       >
         {railOpen && <button type="button" className={styles.railScrim} aria-label={tFor(appLocale, "one.shell.rail.close_history_aria")} onClick={() => setRailOpen(false)} />}
         <aside
@@ -4540,7 +4477,7 @@ export function OneShell() {
                 setRailOpen(false);
                 window.requestAnimationFrame(() => railRevealButtonRef.current?.focus());
               }}
-            >‹</button>
+            ><IconSidebar size={16} /></button>
           </div>
           {railMode === "organisation" ? <>
             <OneTaskforceRail
@@ -4607,7 +4544,6 @@ export function OneShell() {
               {projections.map((item) => <TaskListButton key={item.taskId} item={item} active={item.taskId === selectedTaskId} locale={appLocale} onOpen={openTask} />)}
             </div>
             {selected && <nav className={`${styles.railUtilities} ${styles.railTaskActions}`} aria-label={tFor(appLocale, "one.shell.rail.manage_task_aria")}>
-              {canOpenSelectedInWork && <button type="button" onClick={() => void openWork()}>{tFor(appLocale, "one.shell.rail.open_in_work")}<span aria-hidden="true"><IconRoute size={12} /></span></button>}
               <button type="button" disabled={archiveMutationTaskId === selected.taskId || Boolean(selected.chatId && activeChatIds.includes(selected.chatId))} onClick={() => void mutateTaskArchive(selected.taskId, selected.canonicalStatus === "archived" ? "restore" : "archive")}>{selected.canonicalStatus === "archived" ? tFor(appLocale, "one.shell.rail.restore_from_archive") : tFor(appLocale, "one.shell.rail.archive_this_work")}</button>
             </nav>}
             <div className={styles.railBottomMenu}>
@@ -4624,7 +4560,6 @@ export function OneShell() {
             onOpenProfile={() => { setMemoryOpen(false); setProfileOpen(true); }}
             onOpenMemory={() => { setProfileOpen(false); setMemoryOpen(true); }}
             onToggleLocale={() => setPref(appLocale === "ko" ? "en" : "ko")}
-            onOpenWork={() => void openWork()}
           />}
         </aside>
 
@@ -4632,7 +4567,6 @@ export function OneShell() {
           className={styles.workspace}
           data-runtime-artifacts={runtimeArtifacts.length > 0 ? "true" : "false"}
           data-context-rail={(selected || conversation) && contextRailOpen ? "true" : "false"}
-          style={{ "--one-rail-width": `${contextRailWidth}px` } as CSSProperties}
         >
           <div className={`${styles.windowBar} titlebar-drag`}>
             {selected || conversation ? (
@@ -4640,18 +4574,22 @@ export function OneShell() {
                 <button
                   ref={railRevealButtonRef}
                   type="button"
+                  className={styles.taskSidebarRevealButton}
                   aria-label={railOpen
                     ? (appLocale === "ko" ? "사이드바 닫기" : "Close sidebar")
                     : tFor(appLocale, "one.shell.workspace.open_sidebar_aria")}
                   aria-expanded={railOpen}
                   onClick={() => {
                     if (railOpen) {
-                      setRailCollapsed(true);
                       setRailOpen(false);
                       return;
                     }
+                    if (window.matchMedia("(max-width: 760px)").matches) {
+                      setRailOpen(true);
+                      return;
+                    }
                     setRailCollapsed(false);
-                    setRailOpen(true);
+                    setRailOpen(false);
                   }}
                 ><IconSidebar size={16} /></button>
                 <span className={styles.taskToolbarDivider} aria-hidden="true" />
@@ -4667,12 +4605,12 @@ export function OneShell() {
                     status={busy ? "working" : visibleSelectedConfirmation ? "waiting" : activeOneMember?.statusKind ?? "quiet"}
                     label={activeOneMember?.displayName ?? "One"}
                     tone={activeOneMember?.icon ?? "purple"}
-                    size="small"
+                    size="medium"
                   />}
                   <span>
                     <strong>{activeTaskforce?.title ?? activeOneMember?.displayName ?? "One"}</strong>
                     <small>{activeTaskforce
-                      ? (appLocale === "ko" ? `Taskforce · One 포함 ${activeTaskforce.memberAgentIds.length + 1}명` : `Taskforce · ${activeTaskforce.memberAgentIds.length + 1} members incl. One`)
+                      ? (activeTaskforce.description || (appLocale === "ko" ? `Taskforce · One 포함 ${activeTaskforce.memberAgentIds.length + 1}명` : `Taskforce · ${activeTaskforce.memberAgentIds.length + 1} members incl. One`))
                       : activeOneMember
                       ? (appLocale === "ko" ? "상주 동료 · 전용 터미널" : "Standing teammate · Dedicated terminal")
                       : (appLocale === "ko" ? "CEO 오케스트레이터" : "CEO orchestrator")}</small>
@@ -4687,6 +4625,23 @@ export function OneShell() {
                   }}
                   aria-label={appLocale === "ko" ? "태스크포스 멤버 관리" : "Manage Taskforce members"}
                 ><IconUsers size={15} /><span>{activeTaskforce.memberAgentIds.length + 1}</span></button>}
+                <button
+                  type="button"
+                  className={styles.taskToolbarOutputToggle}
+                  data-one-output-toggle="true"
+                  data-active={contextRailOpen ? "true" : "false"}
+                  aria-label={contextRailOpen
+                    ? (appLocale === "ko" ? "결과 패널 닫기" : "Close result panel")
+                    : (appLocale === "ko" ? "결과 패널 열기" : "Open result panel")}
+                  aria-expanded={contextRailOpen}
+                  onClick={() => {
+                    if (contextRailOpen) {
+                      setContextRailOpen(false);
+                      return;
+                    }
+                    presentRichOutputRail();
+                  }}
+                ><IconPanelRight size={16} /></button>
                 <div className={styles.taskToolbarMenu} data-one-task-menu="true">
                   <button
                     type="button"
@@ -4697,11 +4652,6 @@ export function OneShell() {
                   ><IconMoreHorizontal size={16} /></button>
                   {taskMenuOpen && (
                     <div className={styles.taskToolbarMenuPopover} role="menu">
-                      {selected && canOpenSelectedInWork && (
-                        <button type="button" role="menuitem" onClick={() => { setTaskMenuOpen(false); void openWork(); }}>
-                          {tFor(appLocale, "one.shell.rail.open_in_work")}
-                        </button>
-                      )}
                       {selected && (
                         <button
                           type="button"
@@ -4723,19 +4673,6 @@ export function OneShell() {
                     </div>
                   )}
                 </div>
-                <button
-                  type="button"
-                  className={styles.taskToolbarPanelToggle}
-                  data-active={contextRailOpen ? "true" : "false"}
-                  aria-label={contextRailOpen
-                    ? (appLocale === "ko" ? "출력 패널 접기" : "Collapse output panel")
-                    : (appLocale === "ko" ? "출력 패널 열기" : "Open output panel")}
-                  title={contextRailOpen
-                    ? (appLocale === "ko" ? "출력 패널 접기" : "Collapse output panel")
-                    : (appLocale === "ko" ? "출력 패널 열기" : "Open output panel")}
-                  aria-pressed={contextRailOpen}
-                  onClick={() => setContextRailOpen((value) => !value)}
-                ><IconPanelRight size={16} /></button>
               </div>
             ) : (
               <button
@@ -4759,14 +4696,6 @@ export function OneShell() {
             )}
           </div>
           <div ref={scrollRef} className={styles.scroll}>
-            {!selected && !conversation && <OneActivation
-              state={oneActivationState}
-              locale={appLocale}
-              blocked={activationBlocked}
-              onSkip={skipActivation}
-              onOpenWork={openActivationWork}
-              onResolveMobile={resolveActivationMobile}
-            />}
             {!selected && !conversation ? (
               <div className={styles.homeContent}>
                 <header className={styles.homeChatHeader}>
@@ -4782,9 +4711,7 @@ export function OneShell() {
                 </header>
                 <div className={styles.homeConversation}>
                   <time className={styles.homeDate}>{new Date().toLocaleDateString(appLocale === "ko" ? "ko-KR" : "en-US", { month: "short", day: "numeric" })}</time>
-                  <OneTeamUpgradeIntro visible={teamIntroVisible} locale={appLocale} onDismiss={dismissTeamIntro} />
-                  {!teamIntroVisible && !activationForeground && (
-                    <section className={styles.homeAssistantMessage} aria-labelledby="one-home-message-title">
+                  <section className={styles.homeAssistantMessage} aria-labelledby="one-home-message-title">
                       <span className={styles.homeMessageAuthor}>One</span>
                       {briefing.kind === "quiet" && !briefing.proactive ? <>
                         <strong id="one-home-message-title">{appLocale === "ko" ? "무엇을 맡길까요?" : "What should I take care of?"}</strong>
@@ -4817,13 +4744,7 @@ export function OneShell() {
                           </div>
                         </div>
                       )}
-                    </section>
-                  )}
-                  {!teamIntroVisible && useCaseChipsVisible && (
-                    <div className={styles.homePrompts}>
-                      <OneUseCaseChips locale={appLocale} hasUnfinishedBuild={hasUnfinishedBuild} signals={oneHomeSignals} compact onActivate={activateUseCaseChip} />
-                    </div>
-                  )}
+                  </section>
                   {homeMemoryMapOpen && (
                     <section className={styles.homeMemoryMapPanel} aria-label={appLocale === "ko" ? "One 기억 지도" : "One memory map"}>
                       <OneMemoryMap snapshot={oneMemoryMap ?? EMPTY_ONE_MEMORY_MAP} locale={appLocale} />
@@ -4885,11 +4806,12 @@ export function OneShell() {
                     const hasAttachments = (message.images?.length ?? 0) > 0 || (message.files?.length ?? 0) > 0;
                     if (!visibleText && !hasAttachments && !liveBefore && blocksAfter.length === 0) return null;
                     const systemLabel = message.role === "system" ? oneSystemPromptLabel(message) : null;
+                    const graphRequest = message.role === "user" ? oneGraphRequest(message.text) : null;
                     return (
                       <Fragment key={message.id}>
                         {liveBefore && !preflightPrompt && <>
-                          {liveWorkBlock}
                           {activeTaskforce && <OneTaskforceConversation state={renderedActivity} org={oneOrgState} locale={appLocale} />}
+                          {liveWorkBlock}
                         </>}
                         {(visibleText || hasAttachments) && (systemLabel
                           ? (
@@ -4907,14 +4829,14 @@ export function OneShell() {
                           >
                             {activeTaskforce && message.role !== "system" && (
                               <div className={styles.taskforceMessageMeta}>
-                                {message.role === "assistant" && <OneAgentPortrait status={busy && message.streaming ? "working" : "quiet"} label="One" tone="purple" size="small" />}
+                                {message.role === "assistant" && <OneAgentPortrait status={busy && message.streaming ? "working" : "quiet"} label="One" tone="purple" size="medium" />}
                                 <span>
                                   <strong>{message.role === "user" ? (appLocale === "ko" ? "나" : "You") : "One"}</strong>
                                   {message.createdAt && <time dateTime={message.createdAt}>{new Date(message.createdAt).toLocaleTimeString(appLocale === "ko" ? "ko-KR" : "en-US", { hour: "2-digit", minute: "2-digit" })}</time>}
                                 </span>
                               </div>
                             )}
-                            <div className={styles.messageBody}>
+                            <div className={styles.messageBody} data-doc={message.role === "assistant" && !message.streaming && isDocumentLikeText(message.text) ? "true" : undefined}>
                               {message.images && message.images.length > 0 && (
                                 <div className={styles.messageImages}>
                                   {message.images.map((src, i) => (
@@ -4934,6 +4856,18 @@ export function OneShell() {
                             </div>
                           </article>
                           ))}
+                        {graphRequest && activeThreadChatId && (
+                          <DescribeAutomation
+                            key={`graph:${message.id}`}
+                            locale={appLocale}
+                            initialRequest={graphRequest}
+                            autoStart
+                            presentation="chat"
+                            persistenceKey={`agentlas.one.graph-interview.v1:${activeThreadChatId}:${message.id}`}
+                            openAfterCreate={false}
+                            onCreated={() => undefined}
+                          />
+                        )}
                         {blocksAfter.map((block) => (
                           <Fragment key={`work:${block.runId}`}>
                             {!activeTaskforce && <OneTurnWork
@@ -4967,12 +4901,10 @@ export function OneShell() {
                           <div className={styles.messageBody}><Markdown text={activeRunPrompt.text} messageId={`one-live-prompt:${activeRunPrompt.runId}`} /></div>
                         </article>
                       )}
-                      {liveWorkBlock}
                       {activeTaskforce && <OneTaskforceConversation state={renderedActivity} org={oneOrgState} locale={appLocale} />}
+                      {liveWorkBlock}
                     </>
                   )}
-                  {/* 도구 승인은 이 대화 안에서, 묻는 순간에(오너 결정 2026-08-15) */}
-                  <ToolApprovalInline chatId={activeThreadChatId} />
                 </section>
                 {awaitingWorkforceConsent && !teamPreflightBusy && !busy && (
                   <section className={styles.teamPreflightConsent} role="group" aria-live="polite">
@@ -5004,8 +4936,6 @@ export function OneShell() {
                       receipt={receipt}
                       locale={appLocale}
                       omitNarrative
-                      onOpenWork={() => void openWork()}
-                      canOpenWork={canOpenSelectedInWork}
                       onSemanticAction={handleOneSemanticAction}
                       onOpenAgentDraft={openCreateAgentDialog}
                       onRetryUnfinished={retryUnfinished}
@@ -5074,6 +5004,23 @@ export function OneShell() {
                 {tFor(appLocale, "one.shell.composer.drop_files")}
               </div>
             )}
+            {/* Keep live permissions close to the action they unblock. The
+                durable request stays in the approval queue/diagnostics; One
+                shows only compact choices immediately above the composer. */}
+            {activeThreadChatId && visibleSelectedConfirmation && (
+              <DecisionInline
+                confirmation={visibleSelectedConfirmation}
+                taskId={selected?.taskId ?? null}
+                locale={appLocale}
+                disabled={busy || selectedReadOnly}
+                onAnswer={answerConfirmation}
+                onAlwaysApprove={(confirmation) => markChatAlwaysApproved(confirmation.chatId)}
+                onClarify={clarifyConfirmation}
+                onSnooze={snoozeConfirmation}
+                onDismiss={() => setDismissedDecisionId(visibleSelectedConfirmation.sourceMessageId)}
+              />
+            )}
+            <ToolApprovalInline chatId={activeThreadChatId} compact />
             {armedOneMemoryUseOnce && (
               <div className={styles.oneMemoryUseOnceChip} role="status">
                 <span>{tFor(appLocale, "one.shell.composer.memory_once")}</span>
@@ -5561,8 +5508,33 @@ export function OneShell() {
           width={contextRailWidth}
           onResize={setContextRailWidth}
           minWidth={ONE_CONTEXT_RAIL_WIDTH_MIN}
-          maxWidth={ONE_CONTEXT_RAIL_WIDTH_MAX}
+          maxWidth={contextRailViewportMax()}
           defaultWidth={ONE_CONTEXT_RAIL_WIDTH_DEFAULT}
+          result={selected && (surface || (receipt && ["completed", "failed", "cancelled", "interrupted"].includes(receipt.status))) ? (
+            <OneAdaptiveResult
+              manifest={surface}
+              projection={selected}
+              receipt={receipt}
+              locale={appLocale}
+              onSemanticAction={handleOneSemanticAction}
+              onOpenAgentDraft={openCreateAgentDialog}
+              onRetryUnfinished={retryUnfinished}
+              onAcceptResult={acceptSelectedResult}
+              autoRecovery={autoRecovery}
+              valueClosure={selectedValueClosure}
+              experienceReuse={selectedExperienceReuse}
+              onManageExperience={() => { setProfileOpen(false); setMemoryOpen(true); }}
+              valueClosureState={oneValueClosures}
+              onValueClosureStateChange={handleValueClosuresChange}
+              improvementProof={selectedImprovementProof}
+              onManageImprovementAsset={manageImprovementAsset}
+            />
+          ) : null}
+          resultKey={surface
+            ? `surface:${surface.manifestId}`
+            : receipt && selected
+              ? `receipt:${selected.taskId}:${receipt.runId}:${receipt.status}`
+              : null}
           computerHistory={computerHistory}
           onHistoryConsent={enableComputerHistory}
           onHistoryClear={() => setHistoryClearConfirmOpen(true)}
@@ -5585,20 +5557,9 @@ export function OneShell() {
               .catch((cause) => requestOneOperationalRecovery("computer-history-draft", cause));
               }}
           browserScopeKey={activeThreadChatId ?? selected?.taskId ?? conversation?.id}
+          browserHistoryUrl={durableThreadBrowserUrl}
+          onBrowserObserved={presentBrowserOutput}
         />
-        {activeThreadChatId && visibleSelectedConfirmation && (
-          <DecisionBottomSheet
-            confirmation={visibleSelectedConfirmation}
-            taskId={selected?.taskId ?? null}
-            locale={appLocale}
-            disabled={busy || selectedReadOnly}
-            onAnswer={answerConfirmation}
-            onAlwaysApprove={(confirmation) => markChatAlwaysApproved(confirmation.chatId)}
-            onClarify={clarifyConfirmation}
-            onSnooze={snoozeConfirmation}
-            onDismiss={() => setDismissedDecisionId(visibleSelectedConfirmation.sourceMessageId)}
-          />
-        )}
       </div>
 
       {/* /one lives in the no-shell route group, so AppShell's global browser
@@ -5699,12 +5660,6 @@ export function OneShell() {
         onValueClosureStateChange={handleValueClosuresChange}
         onManageImprovementAsset={manageImprovementAsset}
       />
-      <OneAutomationInterviewDialog
-        open={automationSheetOpen}
-        locale={appLocale}
-        onClose={closeAutomationSheet}
-        onOpenAutomation={openCreatedAutomation}
-      />
       <OneTaskforceDialog
         open={taskforceDialogOpen}
         taskforce={taskforceEditing}
@@ -5742,12 +5697,12 @@ export function OneShell() {
           router.replace(`/one?chat=${encodeURIComponent(result.chatId)}`);
           await refreshAll();
         }}
-        onAddExisting={(source) => {
+        onAddExisting={() => {
           setCreateAgentOpen(false);
           setCreateAgentSeed(null);
           setAgentPickerRequest((current) => ({
             token: (current?.token ?? 0) + 1,
-            source,
+            source: "my",
           }));
         }}
       />
@@ -5860,7 +5815,7 @@ function decisionFieldValue(field: OneDecisionField, locale: "ko" | "en"): strin
     : tFor(locale, "one.shell.decision.not_stated");
 }
 
-function DecisionBottomSheet({ confirmation, taskId, locale, disabled, onAnswer, onAlwaysApprove, onClarify, onSnooze, onDismiss }: {
+function DecisionInline({ confirmation, taskId, locale, disabled, onAnswer, onAlwaysApprove, onClarify, onSnooze, onDismiss }: {
   confirmation: PendingConfirmation;
   taskId: string | null;
   locale: "ko" | "en";
@@ -5872,37 +5827,41 @@ function DecisionBottomSheet({ confirmation, taskId, locale, disabled, onAnswer,
   onDismiss: () => void;
 }) {
   return (
-    <OneBottomSheet
-      open
-      onClose={onDismiss}
-      closeLabel={tFor(locale, "one.shell.decision.close")}
-      ariaLabelledBy="one-decision-sheet-title"
-      size="wide"
-      title={locale === "ko" ? "결정이 필요해요" : "A decision is needed"}
-      titleId="one-decision-sheet-title"
-      description={locale === "ko" ? "One이 계속 진행하기 전에 선택을 기다리고 있습니다." : "One is waiting for your choice before it continues."}
+    <div
+      className={styles.decisionInline}
+      role="group"
+      aria-label={locale === "ko" ? "One 승인 요청" : "One approval request"}
+      data-testid="one-decision-inline"
     >
-      <div className={styles.decisionSheet}>
-        <DecisionCard
-          confirmation={confirmation}
-          taskId={taskId}
-          locale={locale}
-          disabled={disabled}
-          onAnswer={onAnswer}
-          onAlwaysApprove={onAlwaysApprove}
-          onClarify={onClarify}
-          onSnooze={onSnooze}
-        />
-      </div>
-    </OneBottomSheet>
+      <DecisionCard
+        confirmation={confirmation}
+        taskId={taskId}
+        locale={locale}
+        disabled={disabled}
+        compact
+        onAnswer={onAnswer}
+        onAlwaysApprove={onAlwaysApprove}
+        onClarify={onClarify}
+        onSnooze={onSnooze}
+      />
+      <button
+        type="button"
+        className={styles.decisionInlineClose}
+        onClick={onDismiss}
+        aria-label={tFor(locale, "one.shell.decision.close")}
+      >
+        <IconClose size={12} />
+      </button>
+    </div>
   );
 }
 
-function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onAlwaysApprove, onClarify, onSnooze }: {
+function DecisionCard({ confirmation, taskId, locale, disabled, compact = false, onAnswer, onAlwaysApprove, onClarify, onSnooze }: {
   confirmation: PendingConfirmation;
   taskId: string | null;
   locale: "ko" | "en";
   disabled: boolean;
+  compact?: boolean;
   onAnswer: (confirmation: PendingConfirmation, label: string, shouldStart?: boolean) => void;
   onAlwaysApprove: (confirmation: PendingConfirmation) => void;
   onClarify: (confirmation: PendingConfirmation) => void;
@@ -5970,6 +5929,103 @@ function DecisionCard({ confirmation, taskId, locale, disabled, onAnswer, onAlwa
     field.status === "stated" && Boolean(field.value)
   ));
   const lightweightChoice = riskRank === 0 && !highRiskNotice && !confirmation.multiSelect;
+
+  if (compact) {
+    const compactTitle = confirmation.header?.trim()
+      || (riskRank === 0
+        ? (locale === "ko" ? "One이 선택을 기다리고 있어요" : "One is waiting for your choice")
+        : (locale === "ko" ? "계속 진행할까요?" : "Continue with this action?"));
+    const compactSummary = decision.action.value
+      || decision.target.value
+      || confirmation.question;
+    return (
+      <section
+        className={styles.decisionCompactCard}
+        aria-labelledby={`${confirmation.sourceMessageId}-decision-title`}
+        data-risk={decision.risk.level}
+      >
+        <span className={styles.decisionCompactCopy}>
+          <strong id={`${confirmation.sourceMessageId}-decision-title`}>{compactTitle}</strong>
+          <small title={compactSummary}>{compactSummary}</small>
+        </span>
+        {selectableOptions.length > 1 && (
+          <span className={styles.decisionCompactChoices} role="group" aria-label={tFor(locale, "one.shell.decision.multi_select")}>
+            {selectableOptions.map((option) => {
+              const selected = confirmation.multiSelect
+                ? multiSelection.includes(option.index)
+                : chosenIndex === option.index;
+              return (
+                <button
+                  key={`${option.index}:${option.label}`}
+                  type="button"
+                  aria-pressed={selected}
+                  disabled={disabled}
+                  title={option.description ?? undefined}
+                  onClick={() => {
+                    if (confirmation.multiSelect) {
+                      setMultiSelection((current) => selected
+                        ? current.filter((index) => index !== option.index)
+                        : [...current, option.index]);
+                    } else {
+                      setChosenIndex(option.index);
+                    }
+                  }}
+                >
+                  {option.label}
+                </button>
+              );
+            })}
+          </span>
+        )}
+        <span className={styles.decisionCompactActions}>
+          {lightweightChoice && directOptions.length > 1 ? directOptions.map((option) => (
+            <button
+              key={`${option.index}:${option.label}`}
+              type="button"
+              disabled={disabled}
+              title={option.description ?? undefined}
+              onClick={() => onAnswer(confirmation, option.label)}
+            >
+              {option.label}
+            </button>
+          )) : (
+            <>
+              <button
+                type="button"
+                className={styles.decisionCompactReject}
+                disabled={disabled}
+                onClick={() => onAnswer(confirmation, rejectReply, false)}
+              >
+                {rejectLabel}
+              </button>
+              <button
+                type="button"
+                disabled={disabled || approvalReply === null}
+                title={tFor(locale, "one.shell.decision.always_approve_hint")}
+                onClick={() => {
+                  if (approvalReply === null) return;
+                  onAlwaysApprove(confirmation);
+                  onAnswer(confirmation, approvalReply);
+                }}
+              >
+                {tFor(locale, "one.shell.decision.always_approve")}
+              </button>
+              <button
+                type="button"
+                className={styles.decisionCompactPrimary}
+                disabled={disabled || approvalReply === null}
+                onClick={() => approvalReply !== null && onAnswer(confirmation, approvalReply)}
+              >
+                {riskRank >= 2
+                  ? tFor(locale, "one.shell.decision.approve")
+                  : (locale === "ko" ? "승인" : "Approve")}
+              </button>
+            </>
+          )}
+        </span>
+      </section>
+    );
+  }
 
   if (lightweightChoice) {
     return (

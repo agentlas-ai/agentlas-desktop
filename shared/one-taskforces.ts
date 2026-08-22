@@ -12,6 +12,7 @@ export interface OneTaskforce {
   id: string;
   chatId: string;
   title: string;
+  description: string;
   memberAgentIds: string[];
   createdAt: string;
   updatedAt: string;
@@ -20,12 +21,16 @@ export interface OneTaskforce {
 
 export interface CreateOneTaskforceInput {
   title: string;
+  /** Optional for compatibility with pre-1.0.31 clients. */
+  description?: string;
   memberAgentIds: string[];
 }
 
 export interface UpdateOneTaskforceInput {
   id: string;
   title: string;
+  /** Optional for compatibility with pre-1.0.31 clients. */
+  description?: string;
   memberAgentIds: string[];
   expectedRevision?: number;
 }

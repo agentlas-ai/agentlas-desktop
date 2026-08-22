@@ -34,6 +34,7 @@ import { agentResidencySnapshot } from "../runtime/agent-residency";
 import { readableActiveHubMemoryNestRoots } from "../agents/hub-memory-nest";
 import { couldHaveChangedTheOutsideWorld, isHostPreflightTool } from "../../shared/tool-activity";
 import { redactSecrets } from "../../shared/secret-patterns";
+import { setAgentRuntimeOverride } from "../store/agent-runtime-overrides";
 
 type Row = {
   id: string;
@@ -276,6 +277,18 @@ export function createOneTeamAgent(input: CreateOneTeamAgentInput): CreateOneTea
           lease_expires_at, added_at, updated_at, status_kind, status_line, credit_state, revision
         ) VALUES (?, ?, ?, ?, ?, ?, 'local', NULL, ?, ?, 'new', ?, 'unknown', 1)
       `).run(memberId, slug, id, name, icon, sortOrder, now, now, DEFAULT_STATUS_LINE);
+      if (input.runtimeSelection) {
+        setAgentRuntimeOverride({
+          scope: "agent",
+          targetId: id,
+          label: name,
+          selection: {
+            ...input.runtimeSelection,
+            role: "worker",
+            inherit: false,
+          },
+        });
+      }
       chatId = createChat({ agentId: id, title: name, originSurface: "one", taskMode: "conversation" }).id;
     })();
     committed = true;

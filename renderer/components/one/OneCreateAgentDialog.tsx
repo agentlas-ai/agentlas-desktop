@@ -3,7 +3,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   IconCheck,
-  IconChevronDown,
   IconFileUp,
   IconImage,
   IconPlus,
@@ -14,11 +13,11 @@ import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { ipc } from "@/lib/ipc";
 import { ONE_CHARACTER_OPTIONS, type OneCharacterId } from "@/lib/one-characters";
 import type { CreateOneTeamAgentResult } from "@shared/one-org";
+import type { RuntimeSelection, RuntimeStatus } from "@shared/types";
 import { OneBottomSheet } from "./OneBottomSheet";
 import styles from "./OneCreateAgentDialog.module.css";
 
 type AvatarMode = "original" | "sketch" | "generated" | "upload";
-type ExistingSource = "my" | "cloud" | "hub";
 type DraftStatus = "idle" | "saving" | "saved" | "error";
 
 export type OneCreateAgentSeed = {
@@ -38,6 +37,14 @@ type StoredDraft = {
   generatedSrc: string | null;
   uploadedSrc: string | null;
   uploadedName: string;
+  runtimeSelection: RuntimeSelection | null;
+};
+
+type AgentModelOption = {
+  key: string;
+  label: string;
+  detail: string;
+  selection: RuntimeSelection;
 };
 
 const DRAFT_KEY = "agentlas.one.new-agent-draft.v2";
@@ -55,7 +62,33 @@ const EMPTY_DRAFT: StoredDraft = {
   generatedSrc: null,
   uploadedSrc: null,
   uploadedName: "",
+  runtimeSelection: null,
 };
+
+function storedRuntimeSelection(value: unknown): RuntimeSelection | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as Partial<RuntimeSelection>;
+  if (typeof row.kind !== "string") return null;
+  return {
+    kind: row.kind as RuntimeSelection["kind"],
+    ...(typeof row.backend === "string" ? { backend: row.backend } : {}),
+    ...(typeof row.source === "string" ? { source: row.source } : {}),
+    ...(typeof row.model === "string" && row.model ? { model: row.model } : {}),
+    ...(typeof row.effort === "string" && row.effort ? { effort: row.effort } : {}),
+    ...(typeof row.longContext === "boolean" ? { longContext: row.longContext } : {}),
+    role: "worker",
+    inherit: false,
+  };
+}
+
+function runtimeSelectionKey(selection: RuntimeSelection): string {
+  return JSON.stringify({
+    kind: selection.kind,
+    backend: selection.backend ?? null,
+    source: selection.source ?? null,
+    model: selection.model ?? null,
+  });
+}
 
 function readDraft(): StoredDraft {
   try {
@@ -78,6 +111,7 @@ function readDraft(): StoredDraft {
       generatedSrc: typeof parsed.generatedSrc === "string" && parsed.generatedSrc.startsWith("data:image/") ? parsed.generatedSrc : null,
       uploadedSrc: typeof parsed.uploadedSrc === "string" && parsed.uploadedSrc.startsWith("data:image/") ? parsed.uploadedSrc : null,
       uploadedName: typeof parsed.uploadedName === "string" ? parsed.uploadedName.slice(0, 180) : "",
+      runtimeSelection: storedRuntimeSelection(parsed.runtimeSelection),
     };
   } catch {
     return EMPTY_DRAFT;
@@ -157,7 +191,7 @@ export function OneCreateAgentDialog({
   seed?: OneCreateAgentSeed | null;
   onClose: () => void;
   onCreated: (result: CreateOneTeamAgentResult) => void | Promise<void>;
-  onAddExisting: (source: ExistingSource) => void;
+  onAddExisting: () => void;
 }) {
   const uploadRef = useRef<HTMLInputElement>(null);
   const generationRequestRef = useRef(0);
@@ -173,11 +207,13 @@ export function OneCreateAgentDialog({
   const [generatedSrc, setGeneratedSrc] = useState<string | null>(EMPTY_DRAFT.generatedSrc);
   const [uploadedSrc, setUploadedSrc] = useState<string | null>(EMPTY_DRAFT.uploadedSrc);
   const [uploadedName, setUploadedName] = useState(EMPTY_DRAFT.uploadedName);
+  const [runtimeSelection, setRuntimeSelection] = useState<RuntimeSelection | null>(EMPTY_DRAFT.runtimeSelection);
+  const [modelOptions, setModelOptions] = useState<AgentModelOption[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [generationStartedAt, setGenerationStartedAt] = useState<number | null>(null);
   const [uploading, setUploading] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [existingOpen, setExistingOpen] = useState(false);
   const [draftStatus, setDraftStatus] = useState<DraftStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const ko = locale === "ko";
@@ -192,7 +228,8 @@ export function OneCreateAgentDialog({
     generatedSrc,
     uploadedSrc,
     uploadedName,
-  }), [characterId, description, generatePrompt, generatedSrc, mode, name, title, uploadedName, uploadedSrc]);
+    runtimeSelection,
+  }), [characterId, description, generatePrompt, generatedSrc, mode, name, runtimeSelection, title, uploadedName, uploadedSrc]);
 
   useEffect(() => {
     if (draftHydratedRef.current) return;
@@ -206,6 +243,7 @@ export function OneCreateAgentDialog({
     setGeneratedSrc(restored.generatedSrc);
     setUploadedSrc(restored.uploadedSrc);
     setUploadedName(restored.uploadedName);
+    setRuntimeSelection(restored.runtimeSelection);
     draftHydratedRef.current = true;
     setDraftStatus(restored.name || restored.description || restored.generatedSrc || restored.uploadedSrc ? "saved" : "idle");
   }, []);
@@ -233,6 +271,50 @@ export function OneCreateAgentDialog({
   }, [open]);
 
   useEffect(() => {
+    if (!open) return;
+    const api = ipc();
+    if (!api?.runtime) return;
+    let cancelled = false;
+    setModelsLoading(true);
+    void api.runtime.detect().then(async (runtimes) => {
+      const rows = await Promise.all(runtimes.map(async (runtime: RuntimeStatus) => {
+        const models = await api.runtime.listModels({
+          kind: runtime.kind,
+          backend: runtime.backend,
+          availableModels: runtime.availableModels,
+        }).catch(() => []);
+        const provider = runtime.label || runtime.backend || runtime.kind;
+        const selections = models.length > 0
+          ? models.map((model) => ({ model: model.id, label: model.label, tag: model.tag }))
+          : [{ model: runtime.model ?? undefined, label: runtime.model || (ko ? "기본 모델" : "Default model"), tag: undefined }];
+        return selections.map((model) => {
+          const selection: RuntimeSelection = {
+            kind: runtime.kind,
+            backend: runtime.backend,
+            source: runtime.source,
+            ...(model.model ? { model: model.model } : {}),
+            role: "worker",
+            inherit: false,
+          };
+          const key = runtimeSelectionKey(selection);
+          return {
+            key,
+            label: model.label,
+            detail: [model.tag, provider].filter(Boolean).join(" · "),
+            selection,
+          } satisfies AgentModelOption;
+        });
+      }));
+      if (!cancelled) setModelOptions(rows.flat());
+    }).catch(() => {
+      if (!cancelled) setModelOptions([]);
+    }).finally(() => {
+      if (!cancelled) setModelsLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [ko, open]);
+
+  useEffect(() => {
     if (!open || !seed || !draftHydratedRef.current || appliedSeedRef.current === seed.token) return;
     appliedSeedRef.current = seed.token;
     // A One-authored build draft replaces only textual definition fields. The
@@ -241,7 +323,6 @@ export function OneCreateAgentDialog({
     if (typeof seed.name === "string") setName(seed.name.slice(0, 80));
     if (typeof seed.title === "string") setTitle(seed.title.slice(0, 100));
     if (typeof seed.description === "string") setDescription(seed.description.slice(0, 1_200));
-    setExistingOpen(false);
     setError(null);
   }, [open, seed]);
 
@@ -338,9 +419,9 @@ export function OneCreateAgentDialog({
     setGeneratedSrc(EMPTY_DRAFT.generatedSrc);
     setUploadedSrc(EMPTY_DRAFT.uploadedSrc);
     setUploadedName(EMPTY_DRAFT.uploadedName);
+    setRuntimeSelection(EMPTY_DRAFT.runtimeSelection);
     setGenerating(false);
     setGenerationStartedAt(null);
-    setExistingOpen(false);
     setDraftStatus("idle");
     try { window.localStorage.removeItem(DRAFT_KEY); } catch { /* in-memory reset still succeeds */ }
   };
@@ -363,6 +444,7 @@ export function OneCreateAgentDialog({
         avatar: selectedStyle
           ? { kind: "preset", characterId: selectedCharacter.id }
           : { kind: "image", dataUrl: previewSrc! },
+        ...(runtimeSelection ? { runtimeSelection } : {}),
       });
       resetAfterCreation();
       await onCreated(result);
@@ -373,10 +455,9 @@ export function OneCreateAgentDialog({
     }
   };
 
-  const addExisting = (source: ExistingSource) => {
+  const addExisting = () => {
     persistDraftNow();
-    setExistingOpen(false);
-    onAddExisting(source);
+    onAddExisting();
   };
 
   const tabs: Array<{ id: AvatarMode; label: string; icon: ReactNode }> = [
@@ -452,17 +533,31 @@ export function OneCreateAgentDialog({
         <label>Title<input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={100} placeholder="e.g. Inbox Triage" /></label>
         <label>Description<textarea value={description} onChange={(event) => setDescription(event.target.value)} maxLength={1_200} placeholder={ko ? "이 에이전트에게 말투와 성격, 영혼을 부여하세요." : "Give this agent a voice, personality, and soul."} /></label>
 
-        <div className={styles.existingPicker} data-open={existingOpen ? "true" : "false"}>
-          <button type="button" className={styles.existingTrigger} aria-expanded={existingOpen} onClick={() => setExistingOpen((value) => !value)}>
+        <label className={styles.modelPicker}>
+          <span>{ko ? "LLM 모델" : "LLM model"}</span>
+          <select
+            value={runtimeSelection ? runtimeSelectionKey(runtimeSelection) : ""}
+            disabled={modelsLoading}
+            onChange={(event) => {
+              const option = modelOptions.find((item) => item.key === event.target.value);
+              setRuntimeSelection(option?.selection ?? null);
+            }}
+          >
+            <option value="">{modelsLoading
+              ? (ko ? "연결된 모델을 불러오는 중…" : "Loading connected models…")
+              : (ko ? "자동 · Worker 런타임 우선" : "Automatic · worker runtime first")}</option>
+            {modelOptions.map((option) => <option key={option.key} value={option.key}>{option.label}{option.detail ? ` · ${option.detail}` : ""}</option>)}
+          </select>
+          <small>{ko
+            ? "선택한 모델이 안 되면 Worker 런타임, 그다음 연결된 정상 런타임을 사용합니다."
+            : "If this model is unavailable, One uses the worker runtime, then another connected working runtime."}</small>
+        </label>
+
+        <div className={styles.existingPicker}>
+          <button type="button" className={styles.existingTrigger} onClick={addExisting}>
             <span className={styles.existingIcon} aria-hidden="true"><IconPlus size={15} /></span>
-            <span><strong>{ko ? "기존 에이전트 추가" : "Add an existing agent"}</strong><small>{ko ? "Local · Cloud · 북마크한 Hub에서 선택" : "Choose from Local, Cloud, or bookmarked Hub agents"}</small></span>
-            <IconChevronDown size={15} />
+            <span><strong>{ko ? "기존 에이전트 추가" : "Add an existing agent"}</strong><small>{ko ? "에이전트 선택 창 열기" : "Open the agent picker"}</small></span>
           </button>
-          {existingOpen && <div className={styles.existingMenu} role="menu">
-            <button type="button" role="menuitem" onClick={() => addExisting("my")}><strong>Local</strong><span>{ko ? "이 컴퓨터에 설치된 에이전트" : "Agents installed on this computer"}</span></button>
-            <button type="button" role="menuitem" onClick={() => addExisting("cloud")}><strong>Cloud</strong><span>{ko ? "캐시된 목록부터 바로 표시" : "Opens immediately from the cached list"}</span></button>
-            <button type="button" role="menuitem" onClick={() => addExisting("hub")}><strong>Hub</strong><span>{ko ? "북마크한 에이전트만 표시" : "Shows bookmarked agents only"}</span></button>
-          </div>}
         </div>
 
         {draftStatus !== "idle" && <p className={draftStatus === "error" ? styles.draftError : styles.draftStatus} role="status">

@@ -1,8 +1,15 @@
 import http from "node:http";
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { browserCdpPort } from "../mcp-tools/browser-cdp-launcher";
 import { getBrowserStatus } from "./connect";
-import type { BrowserLiveFrame, BrowserLiveViewport } from "../../shared/types";
+import type {
+  BrowserLiveFrame,
+  BrowserLiveInput,
+  BrowserLiveSessionResult,
+  BrowserLiveStreamFrame,
+  BrowserLiveViewport,
+} from "../../shared/types";
 
 interface CdpTarget {
   id?: unknown;
@@ -11,6 +18,33 @@ interface CdpTarget {
   url?: unknown;
   webSocketDebuggerUrl?: unknown;
 }
+
+interface VerifiedCdpTarget {
+  id: string;
+  title: string;
+  url: string;
+  socketUrl: string;
+}
+
+type BrowserLiveFrameSink = (frame: BrowserLiveStreamFrame) => void;
+
+interface LiveSessionRecord {
+  ownerId: number;
+  stream: CdpLiveStream;
+}
+
+const liveSessions = new Map<string, LiveSessionRecord>();
+// Agent MCP processes are intentionally ephemeral and close the pages they
+// created when a worker finishes. The output rail therefore owns one durable
+// CDP target per observed task URL instead of borrowing the worker's tab.
+const railTargetIdsByUrl = new Map<string, string>();
+const railTargetFlights = new Map<string, Promise<VerifiedCdpTarget | null>>();
+// 24fps is the lowest common cinematic cadence and stays visibly smoother than
+// the old 15fps rail while CDP acknowledgements still provide backpressure.
+const LIVE_FRAME_INTERVAL_MS = 1_000 / 24;
+const CDP_CALL_TIMEOUT_MS = 5_000;
+const WEB_VIEWPORT = { width: 1_280, height: 800 } as const;
+const PHONE_VIEWPORT = { width: 390, height: 844 } as const;
 
 function unavailable(error: BrowserLiveFrame["error"], viewport: BrowserLiveViewport = "desktop"): BrowserLiveFrame {
   return {
@@ -86,12 +120,7 @@ function fetchTargets(port: number): Promise<CdpTarget[]> {
   });
 }
 
-function verifiedTarget(target: CdpTarget, port: number): {
-  id: string;
-  title: string;
-  url: string;
-  socketUrl: string;
-} | null {
+function verifiedTarget(target: CdpTarget, port: number): VerifiedCdpTarget | null {
   if (
     target.type !== "page" ||
     typeof target.id !== "string" ||
@@ -107,6 +136,440 @@ function verifiedTarget(target: CdpTarget, port: number): {
     return null;
   }
   return { id: target.id, title: target.title, url: target.url, socketUrl: target.webSocketDebuggerUrl };
+}
+
+function createRailTarget(port: number, normalizedUrl: string): Promise<VerifiedCdpTarget | null> {
+  return new Promise((resolve) => {
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        method: "PUT",
+        path: `/json/new?${encodeURIComponent(normalizedUrl)}`,
+        timeout: 2_000,
+      },
+      (res) => {
+        if (res.statusCode !== 200) {
+          res.resume();
+          resolve(null);
+          return;
+        }
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk: string) => {
+          if (body.length < 1024 * 1024) body += chunk;
+        });
+        res.on("end", () => {
+          try {
+            const target = verifiedTarget(JSON.parse(body) as CdpTarget, port);
+            // Chrome may report about:blank for a few milliseconds while the
+            // requested navigation starts. The socket identity is already
+            // authoritative; frameNavigated will replace this URL in-stream.
+            resolve(target ? { ...target, url: normalizedUrl } : null);
+          } catch {
+            resolve(null);
+          }
+        });
+      },
+    );
+    req.once("error", () => resolve(null));
+    req.once("timeout", () => {
+      req.destroy();
+      resolve(null);
+    });
+    req.end();
+  });
+}
+
+async function ensureRailTarget(port: number, normalizedUrl: string): Promise<VerifiedCdpTarget | null> {
+  const active = railTargetFlights.get(normalizedUrl);
+  if (active) return active;
+  const flight = (async () => {
+    const targets = await fetchTargets(port);
+    const pages = targets.map((target) => verifiedTarget(target, port)).filter((target) => target !== null);
+    const ownedId = railTargetIdsByUrl.get(normalizedUrl);
+    const owned = ownedId ? pages.find((page) => page.id === ownedId) : undefined;
+    if (owned) return owned;
+    if (ownedId) railTargetIdsByUrl.delete(normalizedUrl);
+
+    // Always create a rail-owned target. Reusing the matching worker tab looks
+    // correct during execution but turns into an empty sidebar the instant the
+    // MCP worker exits and closes its context.
+    const created = await createRailTarget(port, normalizedUrl);
+    if (created) {
+      railTargetIdsByUrl.set(normalizedUrl, created.id);
+      return created;
+    }
+    // Older Chrome builds can reject /json/new. Falling back to an existing
+    // exact target keeps live rendering available while preserving strict URL
+    // attribution; it simply cannot promise post-worker persistence.
+    return pages.find((page) => matchUrl(page.url) === normalizedUrl) ?? null;
+  })();
+  railTargetFlights.set(normalizedUrl, flight);
+  return flight.finally(() => {
+    if (railTargetFlights.get(normalizedUrl) === flight) railTargetFlights.delete(normalizedUrl);
+  });
+}
+
+function finiteBetween(value: unknown, min: number, max: number): number {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return min;
+  return Math.min(max, Math.max(min, number));
+}
+
+/**
+ * One persistent CDP connection per visible live rail. CDP's screencast API
+ * supplies frame acknowledgements/backpressure, so a static page sends almost
+ * no traffic while animation, scrolling, and video can update smoothly.
+ */
+class CdpLiveStream {
+  private socket: WebSocket | null = null;
+  private requestSequence = 0;
+  private frameSequence = 0;
+  private lastFrameAt = 0;
+  private width = 1;
+  private height = 1;
+  private disposed = false;
+  private closing = false;
+  private closeNotified = false;
+  private readonly pending = new Map<number, {
+    resolve: (value: unknown) => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
+
+  constructor(
+    readonly sessionId: string,
+    readonly target: VerifiedCdpTarget,
+    readonly viewport: BrowserLiveViewport,
+    private readonly sink: BrowserLiveFrameSink,
+    private readonly onClosed: () => void,
+  ) {}
+
+  async start(): Promise<BrowserLiveFrame> {
+    const socket = new WebSocket(this.target.socketUrl);
+    this.socket = socket;
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("stream-open-timeout")), CDP_CALL_TIMEOUT_MS);
+      const fail = () => {
+        clearTimeout(timer);
+        reject(new Error("stream-open-failed"));
+      };
+      socket.addEventListener("open", () => {
+        clearTimeout(timer);
+        resolve();
+      }, { once: true });
+      socket.addEventListener("error", fail, { once: true });
+    });
+    socket.addEventListener("message", (event) => this.handleMessage(event));
+    socket.addEventListener("error", () => this.handleSocketClose());
+    socket.addEventListener("close", () => this.handleSocketClose());
+
+    await this.call("Page.enable");
+    await this.call("Runtime.enable");
+    const phone = this.viewport === "phone";
+    const viewport = phone ? PHONE_VIEWPORT : WEB_VIEWPORT;
+    // The rail is a viewer, not the page's layout viewport. Web must keep a
+    // real desktop canvas and scale it down inside a narrow rail; otherwise a
+    // 500px rail silently turns the "Web" tab into another mobile breakpoint.
+    await this.call("Emulation.setDeviceMetricsOverride", {
+      width: viewport.width,
+      height: viewport.height,
+      deviceScaleFactor: 1,
+      mobile: phone,
+      screenWidth: viewport.width,
+      screenHeight: viewport.height,
+    });
+    await this.call("Emulation.setTouchEmulationEnabled", phone
+      ? { enabled: true, maxTouchPoints: 5 }
+      : { enabled: false });
+
+    const metrics = await this.call("Page.getLayoutMetrics") as {
+      cssVisualViewport?: { clientWidth?: number; clientHeight?: number };
+      cssLayoutViewport?: { clientWidth?: number; clientHeight?: number };
+    };
+    const measuredViewport = metrics.cssVisualViewport ?? metrics.cssLayoutViewport;
+    this.width = Math.max(1, Math.round(Number(measuredViewport?.clientWidth) || viewport.width));
+    this.height = Math.max(1, Math.round(Number(measuredViewport?.clientHeight) || viewport.height));
+
+    await this.call("Page.startScreencast", {
+      format: "jpeg",
+      quality: 72,
+      maxWidth: viewport.width,
+      maxHeight: viewport.height,
+      everyNthFrame: 1,
+    });
+    // A still page does not always emit immediately. Seed the stream from the
+    // exact same CDP target so the start result itself contains a real frame.
+    const screenshot = await this.call("Page.captureScreenshot", {
+      format: "jpeg",
+      quality: 72,
+      fromSurface: true,
+      captureBeyondViewport: false,
+    }) as { data?: string };
+    if (!screenshot.data) throw new Error("empty-stream-frame");
+    const frame = this.frame(screenshot.data);
+    this.sink(frame);
+    return frame;
+  }
+
+  private async waitForHistoryEntry(index: number, entryId: number): Promise<void> {
+    const deadline = Date.now() + 2_500;
+    while (Date.now() < deadline) {
+      const history = await this.call("Page.getNavigationHistory") as {
+        currentIndex?: unknown;
+        entries?: Array<{ id?: unknown }>;
+      };
+      if (
+        Number(history.currentIndex) === index
+        && Number(history.entries?.[index]?.id) === entryId
+      ) return;
+      await new Promise<void>((resolve) => setTimeout(resolve, 40));
+    }
+    throw new Error("navigation-history-did-not-settle");
+  }
+
+  private async captureNavigationFrame(expectedUrl?: string): Promise<void> {
+    const deadline = Date.now() + 4_000;
+    const expected = matchUrl(expectedUrl);
+    while (Date.now() < deadline) {
+      try {
+        const evaluated = await this.call("Runtime.evaluate", {
+          expression: "({href:location.href,title:document.title,readyState:document.readyState})",
+          returnByValue: true,
+        }) as { result?: { value?: { href?: unknown; title?: unknown; readyState?: unknown } } };
+        const value = evaluated.result?.value;
+        const current = typeof value?.href === "string" ? matchUrl(value.href) : null;
+        const ready = value?.readyState === "interactive" || value?.readyState === "complete";
+        if (current && ready && (!expected || current === expected)) {
+          this.target.url = current;
+          if (typeof value?.title === "string") this.target.title = value.title;
+          const screenshot = await this.call("Page.captureScreenshot", {
+            format: "jpeg",
+            quality: 72,
+            fromSurface: true,
+            captureBeyondViewport: false,
+          }) as { data?: string };
+          if (screenshot.data) {
+            // History traversal can restore a static page from the back-forward
+            // cache without emitting another screencast frame. Seed one exact
+            // frame so the in-app viewport and address bar never stay stale.
+            this.sink(this.frame(screenshot.data));
+            return;
+          }
+        }
+      } catch {
+        // The execution context is briefly unavailable while navigation swaps
+        // documents. Retry within the bounded deadline.
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    }
+    throw new Error("navigation-frame-did-not-settle");
+  }
+
+  async dispatch(input: BrowserLiveInput): Promise<void> {
+    if (input.kind === "navigation") {
+      if (input.action === "navigate") {
+        const target = matchUrl(input.url);
+        if (!target) throw new Error("invalid-navigation-target");
+        await this.call("Page.navigate", { url: target });
+        await this.captureNavigationFrame(target);
+        return;
+      }
+      if (input.action === "reload") {
+        await this.call("Page.reload", { ignoreCache: false });
+        await this.captureNavigationFrame(this.target.url);
+        return;
+      }
+      const history = await this.call("Page.getNavigationHistory") as {
+        currentIndex?: unknown;
+        entries?: Array<{ id?: unknown; url?: unknown }>;
+      };
+      const currentIndex = Number(history.currentIndex);
+      const targetIndex = input.action === "back" ? currentIndex - 1 : currentIndex + 1;
+      const entryId = Number(history.entries?.[targetIndex]?.id);
+      if (Number.isFinite(entryId)) {
+        await this.call("Page.navigateToHistoryEntry", { entryId });
+        // CDP acknowledges before the history cursor always moves. Waiting for
+        // that cursor prevents a quick Back → Forward sequence from resolving
+        // Forward against the stale index and becoming a silent no-op.
+        await this.waitForHistoryEntry(targetIndex, entryId);
+        const expectedUrl = typeof history.entries?.[targetIndex]?.url === "string"
+          ? history.entries[targetIndex].url as string
+          : undefined;
+        await this.captureNavigationFrame(expectedUrl);
+      }
+      return;
+    }
+    if (input.kind === "pointer") {
+      const type = input.phase === "down" ? "mousePressed" : input.phase === "up" ? "mouseReleased" : "mouseMoved";
+      await this.call("Input.dispatchMouseEvent", {
+        type,
+        x: finiteBetween(input.x, 0, 1) * this.width,
+        y: finiteBetween(input.y, 0, 1) * this.height,
+        button: input.phase === "move" ? "none" : input.button ?? "left",
+        clickCount: Math.round(finiteBetween(input.clickCount ?? 1, 1, 3)),
+      });
+      return;
+    }
+    if (input.kind === "wheel") {
+      await this.call("Input.dispatchMouseEvent", {
+        type: "mouseWheel",
+        x: finiteBetween(input.x, 0, 1) * this.width,
+        y: finiteBetween(input.y, 0, 1) * this.height,
+        deltaX: finiteBetween(input.deltaX, -2_000, 2_000),
+        deltaY: finiteBetween(input.deltaY, -2_000, 2_000),
+      });
+      return;
+    }
+    if (input.kind === "text") {
+      const text = input.text.slice(0, 4_096);
+      if (text) await this.call("Input.insertText", { text });
+      return;
+    }
+    const key = input.key.slice(0, 64);
+    const code = input.code?.slice(0, 64);
+    const printable = input.phase === "down" && key.length === 1 ? key : undefined;
+    await this.call("Input.dispatchKeyEvent", {
+      type: input.phase === "down" ? "keyDown" : "keyUp",
+      key,
+      code,
+      text: printable,
+      unmodifiedText: printable,
+      modifiers: Math.round(finiteBetween(input.modifiers ?? 0, 0, 15)),
+    });
+  }
+
+  async close(): Promise<void> {
+    if (this.disposed || this.closing) return;
+    this.closing = true;
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      await this.call("Page.stopScreencast").catch(() => undefined);
+      await this.call("Emulation.clearDeviceMetricsOverride").catch(() => undefined);
+      await this.call("Emulation.setTouchEmulationEnabled", { enabled: false }).catch(() => undefined);
+    }
+    this.disposed = true;
+    this.rejectPending("stream-closed");
+    this.socket?.close();
+    this.notifyClosed();
+  }
+
+  private call(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+    if (this.disposed || !this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error("stream-not-open"));
+    }
+    const id = ++this.requestSequence;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error("cdp-call-timeout"));
+      }, CDP_CALL_TIMEOUT_MS);
+      this.pending.set(id, { resolve, reject, timer });
+      try {
+        this.socket!.send(JSON.stringify({ id, method, params }));
+      } catch {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(new Error("cdp-send-failed"));
+      }
+    });
+  }
+
+  private handleMessage(event: MessageEvent): void {
+    let message: {
+      id?: number;
+      result?: unknown;
+      error?: unknown;
+      method?: string;
+      params?: Record<string, unknown>;
+    };
+    try {
+      message = JSON.parse(String(event.data));
+    } catch {
+      return;
+    }
+    if (message.id) {
+      const pending = this.pending.get(message.id);
+      if (!pending) return;
+      clearTimeout(pending.timer);
+      this.pending.delete(message.id);
+      if (message.error) pending.reject(new Error("cdp-error"));
+      else pending.resolve(message.result);
+      return;
+    }
+    if (message.method === "Page.frameNavigated" && message.params) {
+      const frame = message.params.frame;
+      if (frame && typeof frame === "object") {
+        const row = frame as { parentId?: unknown; url?: unknown };
+        if (!row.parentId && typeof row.url === "string") this.target.url = row.url;
+      }
+      return;
+    }
+    if (message.method === "Page.loadEventFired") {
+      void this.call("Runtime.evaluate", { expression: "document.title", returnByValue: true })
+        .then((result) => {
+          const value = (result as { result?: { value?: unknown } })?.result?.value;
+          if (typeof value === "string") this.target.title = value;
+        })
+        .catch(() => undefined);
+      return;
+    }
+    if (message.method !== "Page.screencastFrame" || !message.params || this.closing) return;
+    const data = typeof message.params.data === "string" ? message.params.data : "";
+    const cdpSessionId = Number(message.params.sessionId);
+    if (Number.isFinite(cdpSessionId)) {
+      void this.call("Page.screencastFrameAck", { sessionId: cdpSessionId }).catch(() => undefined);
+    }
+    if (!data) return;
+    const now = Date.now();
+    if (now - this.lastFrameAt < LIVE_FRAME_INTERVAL_MS) return;
+    this.lastFrameAt = now;
+    const metadata = message.params.metadata;
+    if (metadata && typeof metadata === "object") {
+      const row = metadata as { deviceWidth?: unknown; deviceHeight?: unknown };
+      this.width = Math.max(1, Math.round(Number(row.deviceWidth) || this.width));
+      this.height = Math.max(1, Math.round(Number(row.deviceHeight) || this.height));
+    }
+    this.sink(this.frame(data));
+  }
+
+  private frame(data: string): BrowserLiveStreamFrame {
+    return {
+      available: true,
+      dataUrl: `data:image/jpeg;base64,${data}`,
+      targetId: this.target.id,
+      title: this.target.title.slice(0, 200),
+      url: displayUrl(this.target.url),
+      width: this.width,
+      height: this.height,
+      viewport: this.viewport,
+      capturedAt: new Date().toISOString(),
+      error: null,
+      sessionId: this.sessionId,
+      sequence: ++this.frameSequence,
+    };
+  }
+
+  private handleSocketClose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.rejectPending("stream-disconnected");
+    this.notifyClosed();
+  }
+
+  private rejectPending(reason: string): void {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error(reason));
+    }
+    this.pending.clear();
+  }
+
+  private notifyClosed(): void {
+    if (this.closeNotified) return;
+    this.closeNotified = true;
+    this.onClosed();
+  }
 }
 
 function captureTarget(socketUrl: string, viewportMode: BrowserLiveViewport): Promise<{ data: string; width: number; height: number }> {
@@ -273,6 +736,96 @@ export async function captureBrowserLiveFrame(
     };
   } catch {
     return unavailable("capture-failed", viewportMode);
+  }
+}
+
+function isBrowserLiveInput(value: unknown): value is BrowserLiveInput {
+  if (!value || typeof value !== "object") return false;
+  const input = value as Record<string, unknown>;
+  if (typeof input.sessionId !== "string" || input.sessionId.length > 128) return false;
+  if (input.kind === "pointer") {
+    return ["move", "down", "up"].includes(String(input.phase))
+      && Number.isFinite(input.x)
+      && Number.isFinite(input.y)
+      && (input.button === undefined || ["left", "middle", "right"].includes(String(input.button)));
+  }
+  if (input.kind === "wheel") {
+    return Number.isFinite(input.x)
+      && Number.isFinite(input.y)
+      && Number.isFinite(input.deltaX)
+      && Number.isFinite(input.deltaY);
+  }
+  if (input.kind === "key") {
+    return ["down", "up"].includes(String(input.phase))
+      && typeof input.key === "string"
+      && input.key.length <= 64
+      && (input.code === undefined || (typeof input.code === "string" && input.code.length <= 64));
+  }
+  if (input.kind === "navigation") {
+    if (["back", "forward", "reload"].includes(String(input.action))) return true;
+    return input.action === "navigate"
+      && typeof input.url === "string"
+      && input.url.length <= 2_048
+      && matchUrl(input.url) !== null;
+  }
+  return input.kind === "text" && typeof input.text === "string" && input.text.length <= 4_096;
+}
+
+export async function startBrowserLiveSession(
+  ownerId: number,
+  preferredUrl: string,
+  viewportMode: BrowserLiveViewport,
+  sink: BrowserLiveFrameSink,
+): Promise<BrowserLiveSessionResult> {
+  await stopBrowserLiveSessionsForOwner(ownerId);
+  const port = browserCdpPort();
+  const preferred = matchUrl(preferredUrl);
+  if (!preferred) return { sessionId: null, interactive: false, frame: unavailable("no-page", viewportMode) };
+  const target = await ensureRailTarget(port, preferred);
+  if (!target) return { sessionId: null, interactive: false, frame: unavailable("no-page", viewportMode) };
+
+  const sessionId = randomUUID();
+  let stream!: CdpLiveStream;
+  stream = new CdpLiveStream(sessionId, target, viewportMode, sink, () => {
+    const current = liveSessions.get(sessionId);
+    if (current?.stream === stream) liveSessions.delete(sessionId);
+  });
+  liveSessions.set(sessionId, { ownerId, stream });
+  try {
+    const frame = await stream.start();
+    return { sessionId, interactive: true, frame };
+  } catch {
+    liveSessions.delete(sessionId);
+    await stream.close().catch(() => undefined);
+    return { sessionId: null, interactive: false, frame: unavailable("capture-failed", viewportMode) };
+  }
+}
+
+export async function stopBrowserLiveSession(ownerId: number, sessionId: string): Promise<{ ok: boolean }> {
+  const record = liveSessions.get(sessionId);
+  if (!record || record.ownerId !== ownerId) return { ok: false };
+  liveSessions.delete(sessionId);
+  await record.stream.close().catch(() => undefined);
+  return { ok: true };
+}
+
+export async function stopBrowserLiveSessionsForOwner(ownerId: number): Promise<void> {
+  const matches = [...liveSessions.entries()].filter(([, record]) => record.ownerId === ownerId);
+  await Promise.all(matches.map(async ([sessionId, record]) => {
+    liveSessions.delete(sessionId);
+    await record.stream.close().catch(() => undefined);
+  }));
+}
+
+export async function dispatchBrowserLiveInput(ownerId: number, value: unknown): Promise<{ ok: boolean }> {
+  if (!isBrowserLiveInput(value)) return { ok: false };
+  const record = liveSessions.get(value.sessionId);
+  if (!record || record.ownerId !== ownerId) return { ok: false };
+  try {
+    await record.stream.dispatch(value);
+    return { ok: true };
+  } catch {
+    return { ok: false };
   }
 }
 

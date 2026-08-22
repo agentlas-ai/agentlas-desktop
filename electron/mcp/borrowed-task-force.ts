@@ -6,6 +6,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type {
   Chat,
   ChatHistoryEntry,
+  CommittedQuestionAnswer,
   AgentlasSurfaceManifest,
   AgentRuntimeOverride,
   InstalledAgent,
@@ -28,6 +29,7 @@ import {
   getOrCreateFirmSession,
   listChatMessages as readStoredChatMessages,
 } from "../store/chats";
+import { listCommittedQuestionAnswers } from "../confirm";
 import { getFirm } from "../store/firms";
 import { getResolvedOrg } from "../store/org-spec";
 import {
@@ -65,7 +67,7 @@ import {
   type WorkloadAllocation,
   type WorkloadResolution,
 } from "../runtime/workload-routing";
-import { pickActive, pickRunner } from "../runtime/selection";
+import { pickActive, pickRunner, selectRuntimeForTargets } from "../runtime/selection";
 import { getAgentById } from "./registry";
 import { runFirmInvocation } from "./firm-orchestrator";
 import { buildAgentRuntimeOntologyContext } from "../ontology/runtime-context";
@@ -123,6 +125,11 @@ const HANDOFF_TOOL_MARKUP_RE =
   /<(?:antml:)?invoke\s+name=|<(?:antml:)?parameter\s+name=|<\/(?:antml:)?(?:invoke|parameter)>|<(?:antml:)?function_calls>/i;
 const BORROWED_SECRET_FILE_GUARD =
   "Do not read, request, quote, or summarize secret-like files or credentials (.env*, signing/, keychains, private keys, tokens, cookies, API keys, billing/payment data). If a task appears to require them, report that the host must review them locally instead.";
+const TASK_FORCE_ASK_PROTOCOL = `When the team has reached a real user-approval gate, end the answer with exactly one closed choice block and then stop:
+<<agentlas-ask>>
+{"question":"<one short question ending with ?>","header":"<short label>","multiSelect":false,"options":[{"label":"<recommended approval choice>","description":"<what continues>"},{"label":"<request changes or wait>","description":"<what remains paused>"}]}
+<</agentlas-ask>>
+Use this only when the next phase is intentionally blocked on the person's decision. Keep the visible answer before it natural; never print or explain the wire format.`;
 
 export type WorkerHandoffRole = "worker" | "orchestrator";
 export type WorkerHandoffViolation = "tool_markup" | "empty_deliverable";
@@ -314,6 +321,17 @@ export class BorrowedAgentUnavailableError extends Error {
 
 export interface BorrowedInputPacket {
   agent: string;
+  /** Stable conversational step id for local One Team scheduling. */
+  stepId?: string;
+  /** Earlier local Taskforce steps that must finish before this one starts. */
+  dependsOn?: string[];
+  /** Optional visible One response after this teammate reports back. */
+  oneReply?: string;
+  /**
+   * Local One Team stage boundary. A true packet is never scheduled until the
+   * immediately preceding Decision has a committed owner answer.
+   */
+  requiresApproval?: boolean;
   inputType: string;
   inputKind: string;
   brief: string;
@@ -392,6 +410,8 @@ export interface BorrowedTaskForceParams {
   mcpConfigPath?: string;
   mcpAllowedTools?: string[];
   mcpCodexConfigArgs?: string[];
+  /** Ignore provider-global MCP/plugin config and admit only Main's exact per-run grant. */
+  isolatedMcpConfig?: true;
   /** Main-minted opaque MCP aliases for a one-run Agent App grant. */
   agentAppMcpRuntimeEnv?: NodeJS.ProcessEnv;
   /** Marks the main-owned one-run grant unavailable after a runtime MCP fatal. */
@@ -412,6 +432,25 @@ export interface BorrowedTaskForceParams {
   requireAllWorkers?: boolean;
   /** Frozen opaque Agentlas owner partition; main-only and never sent to a model. */
   borrowedCareerOwnerScopeKey?: string;
+  /**
+   * Main-owned bridge from runner-observed local paths to renderer-safe One
+   * artifact bindings. The task-force runtime never forwards raw paths.
+   */
+  bindOneRuntimeToolArtifacts?: (
+    toolId: string,
+    paths: readonly string[],
+  ) => NonNullable<McpInvocationEvent["oneArtifacts"]>;
+}
+
+function taskForceOneArtifacts(
+  p: BorrowedTaskForceParams,
+  toolId: string | undefined,
+  isError: boolean | undefined,
+  artifactPaths: readonly string[] | undefined,
+): NonNullable<McpInvocationEvent["oneArtifacts"]> | undefined {
+  if (isError || !toolId || !artifactPaths?.length || !p.bindOneRuntimeToolArtifacts) return undefined;
+  const bound = p.bindOneRuntimeToolArtifacts(toolId, artifactPaths);
+  return bound.length > 0 ? bound : undefined;
 }
 
 export interface WorkforceLeaderRunnerEvidence {
@@ -559,14 +598,14 @@ function taskForceRecoveryRuntime(
   failed: RuntimeStatus,
   failure: RunnerFailure,
 ): RuntimeStatus | null {
-  // Exact prepared Workforce, benchmarks, Agent Apps, and explicit per-agent
-  // pins are fail-closed contracts. Runtime recovery is only an ordinary local
-  // One Team convenience and never substitutes a frozen remote execution.
+  // Exact prepared Workforce, benchmarks, and Agent Apps are fail-closed
+  // contracts. Ordinary One Team model choices are preferences with an
+  // explicit product fallback chain (selected model -> worker -> connected),
+  // so a typed provider refusal must be allowed to continue once elsewhere.
   if (
     p.workforceSelectionReceipt ||
     p.benchmarkMode ||
-    p.req.agentAppMode ||
-    p.runtimeOverride
+    p.req.agentAppMode
   ) {
     return null;
   }
@@ -765,8 +804,8 @@ function taskForcePermission(p: BorrowedTaskForceParams): RunnerRequest["permiss
 
 /**
  * Child turns do not inherit the parent's authority.  A task-force packet is
- * the explicit grant: only an implementation packet may receive the bounded
- * read-write worker mode, and even that is capped by the host mode.  `full`
+ * the explicit grant: implementation and authored-file writing packets may
+ * receive the bounded read-write worker mode, and even that is capped by the host mode. `full`
  * is deliberately never propagated to a child; shell/external authority is
  * an owner/One decision, not a side effect of delegation.
  */
@@ -775,15 +814,22 @@ export function taskForceChildPermission(
   inputType: BorrowedInputPacket["inputType"],
   role: "worker" | "orchestrator",
   toolRequired = false,
+  preApprovalStage = false,
 ): RunnerRequest["permission"] {
   const host = p.req.appsGenerateMode ? "read" : p.req.permissions;
   if (host === "read") return "read";
+  // A PRD-first gate is an execution boundary, not just prose in the packet.
+  // While implementation is deferred, every child is forced read-only even
+  // when the planner marked its review as tool-bearing. This prevents a
+  // feasibility/design reviewer from gaining workspace-write authority before
+  // the person's committed approval releases the implementation stage.
+  if (preApprovalStage) return "read";
   // A planner-declared tool packet needs the bounded workspace-write sandbox
   // even when its semantic inputType is review/browser/validation. Codex
   // classifies MCP calls as approval-bearing operations; leaving these packets
   // in read mode silently queued an approval against an internal child chat
   // and timed out. This grant is still capped below full and by the host mode.
-  if (role === "worker" && (inputType === "implementation" || toolRequired)) return "write";
+  if (role === "worker" && (inputType === "implementation" || inputType === "writing" || toolRequired)) return "write";
   return "read";
 }
 
@@ -1104,6 +1150,7 @@ function taskForceRunnerBase(
   | "mcpConfigPath"
   | "mcpAllowedTools"
   | "mcpCodexConfigArgs"
+  | "isolatedMcpConfig"
   | "env"
   | "untrustedNoTools"
   | "untrustedAllowedMcpTools"
@@ -1118,11 +1165,16 @@ function taskForceRunnerBase(
   return {
     permission,
     approvalChatId: p.chat.id,
+    // Keep Codex in `on-request`: `never` means "decline anything that would
+    // ask", not "approve without another prompt". The automatic reviewer plus
+    // Agentlas' write-boundary arbiter accepts in-scope browser/tool calls while
+    // the typed workspace-write sandbox remains rooted to this exact cwd.
     approvalsReviewer: autoReviewApprovals && permission !== "read" ? "auto_review" : "user",
     restrictedReadBoundary: p.restrictedReadBoundary,
     mcpConfigPath: agentAppAllowedTools ? p.mcpConfigPath : toolsAllowed ? p.mcpConfigPath : undefined,
     mcpAllowedTools: agentAppAllowedTools ?? (toolsAllowed ? p.mcpAllowedTools : undefined),
     mcpCodexConfigArgs: toolsAllowed ? p.mcpCodexConfigArgs : undefined,
+    isolatedMcpConfig: p.isolatedMcpConfig,
     env: p.req.agentAppMode
       ? buildAgentAppRunnerEnv(p.runnerEnv ?? process.env, p.agentAppMcpRuntimeEnv)
       : toolsAllowed
@@ -1175,6 +1227,7 @@ function taskForceOrchestratorBoundary(
   | "mcpConfigPath"
   | "mcpAllowedTools"
   | "mcpCodexConfigArgs"
+  | "isolatedMcpConfig"
   | "env"
   | "untrustedNoTools"
   | "untrustedAllowedMcpTools"
@@ -1191,6 +1244,7 @@ function taskForceOrchestratorBoundary(
     mcpConfigPath: undefined,
     mcpAllowedTools: undefined,
     mcpCodexConfigArgs: undefined,
+    isolatedMcpConfig: p.isolatedMcpConfig,
     env: undefined,
     untrustedNoTools,
     untrustedAllowedMcpTools: undefined,
@@ -1340,6 +1394,43 @@ function boundedTaskForceText(text: string, limit: number): string {
  * the worker transcript. */
 export function boundedTaskForceMessage(text: string): string {
   return boundedTaskForceText(text, 900);
+}
+
+/**
+ * Host facts and execution-boundary blocks are useful inside the model call,
+ * but they are never words One said to a teammate. Keep them out of the
+ * human-facing room before truncation so a long control prefix cannot crowd
+ * the actual assignment out of the preview.
+ */
+export function stripTaskForceControlEnvelopes(text: string): string {
+  return String(text ?? "")
+    .replace(/\[\s*Host-confirmed facts for this run\s*\][\s\S]*?\[\s*\/\s*Host-confirmed facts for this run\s*\]/gi, "")
+    .replace(/\[\s*이번 실행의 호스트 확인 사실\s*\][\s\S]*?\[\s*\/\s*이번 실행의 호스트 확인 사실\s*\]/giu, "")
+    .replace(/\[\s*Agentlas One execution boundary\s*\][\s\S]*?\[\s*\/\s*Agentlas One execution boundary\s*\]/gi, "")
+    .replace(/\[\s*Agentlas One 실행 경계\s*\][\s\S]*?\[\s*\/\s*Agentlas One 실행 경계\s*\]/giu, "")
+    .replace(/\[\s*(?:Host-confirmed facts for this run|이번 실행의 호스트 확인 사실|Agentlas On(?:e)?)[\s\S]*?\[\s*middle omitted\s*\]\s*(?:…|\.\.\.)?\s*/giu, "")
+    .replace(/^\s*(?:Skills used|사용 스킬)\s*:[^.!?\n]*(?:[.!?]\s+|(?:\r?\n)+)/iu, "")
+    .replace(/^\s*(?:Reason|이유)\s*:[^.!?\n]*(?:[.!?]\s+|(?:\r?\n)+)/iu, "")
+    .replace(/^\s*(?:I['’]m using|Using)\b.*?\.\s+(?=(?:\*\*)?\[Hope\]|(?:\*\*)?Finding\b|Initial\b|The\b|#)/iu, "")
+    .replace(/\*{0,2}\[Hope\]\*{0,2}\s*/giu, "")
+    .replace(/\*{0,2}Finding\s*\/\s*result\s*:?\*{0,2}\s*/giu, "")
+    .replace(/\s*#{0,6}\s*STATUS\s+(?:COMPLETED|PARTIAL|FAILED)\b[\s\S]*$/iu, "")
+    .trim();
+}
+
+const TASK_FORCE_UNVERIFIED_ONE_REPLY_CLAIM_RE = /\b(?:I|we)\s+(?:have\s+|already\s+)?(?:saved|created|completed|finished|uploaded|published|verified|generated|updated|fixed|built)\b|(?:저장|생성|완료|업로드|게시|검증|수정|빌드)(?:했|됐|해뒀|되었습니다)/iu;
+
+/** Planner-authored oneReply text is coordination, not an execution receipt.
+ * Drop unsupported past-tense completion claims while preserving a following
+ * safe coordination sentence such as "Let's wait for approval." */
+export function taskForceCoordinatorReply(text: string): string {
+  const cleaned = stripTaskForceControlEnvelopes(text);
+  const sentences = cleaned.match(/[^.!?]+(?:[.!?]+|$)/gu) ?? [];
+  return sentences
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => sentence && !TASK_FORCE_UNVERIFIED_ONE_REPLY_CLAIM_RE.test(sentence))
+    .join(" ")
+    .trim();
 }
 
 /** Peer reviewers need more evidence than the compact UI preview, while still
@@ -1655,6 +1746,20 @@ export function parseBorrowedInputPackets(text: string): BorrowedInputPacket[] {
         if (!agent || !brief) return null;
         return {
           agent,
+          ...(cleanString(obj.stepId) || cleanString(obj.step_id)
+            ? { stepId: cleanString(obj.stepId) || cleanString(obj.step_id) }
+            : {}),
+          ...(asArray(obj.dependsOn ?? obj.depends_on).length > 0
+            ? {
+                dependsOn: asArray(obj.dependsOn ?? obj.depends_on)
+                  .map((v) => cleanString(v))
+                  .filter(Boolean),
+              }
+            : {}),
+          ...(cleanString(obj.oneReply) || cleanString(obj.one_reply)
+            ? { oneReply: cleanString(obj.oneReply) || cleanString(obj.one_reply) }
+            : {}),
+          requiresApproval: obj.requiresApproval === true || obj.requires_approval === true,
           inputType: cleanString(obj.inputType) || cleanString(obj.input_type) || "task-brief",
           inputKind: cleanString(obj.inputKind) || cleanString(obj.input_kind) || "text",
           brief,
@@ -2017,11 +2122,18 @@ function parseStrictTeamManagerPlan(text: string, expectedWorkerIds: string[]): 
 }
 
 export function buildFallbackPackets(specs: BorrowedAgentSpec[], userPrompt: string): BorrowedInputPacket[] {
-  return specs.map((spec) => ({
+  const cleanRequest = stripTaskForceControlEnvelopes(userPrompt);
+  return specs.map((spec, index) => ({
     agent: spec.slug,
+    stepId: `${spec.slug}-${index + 1}`,
+    dependsOn: [],
+    // A planner-less local packet cannot prove that it is still a planning
+    // step. Fail safe at the room's approval boundary instead of allowing a
+    // generic fallback to mutate the workspace before review.
+    requiresApproval: true,
     inputType: "specialist-task",
     inputKind: "text-request",
-    brief: userPrompt,
+    brief: `As ${spec.name}, handle the part of this request that fits your role: ${cleanRequest}`,
     context: [`Borrowed Hub agent: ${spec.name} (${spec.slug})`],
     expectedOutput: "Focused specialist analysis with evidence, assumptions, risks, and a concise recommendation.",
     constraints: ["Do not write the final synthesis.", "Stay inside the assigned specialist lane."],
@@ -2035,29 +2147,157 @@ export function normalizePacketsForRoster(
   packets: BorrowedInputPacket[],
   specs: BorrowedAgentSpec[],
   userPrompt: string,
-): { packets: BorrowedInputPacket[]; parseSuccess: boolean; fallbackUsed: boolean } {
+): { packets: BorrowedInputPacket[]; parseSuccess: boolean; fallbackUsed: boolean; validationErrors: string[] } {
   const bySlug = new Map(specs.map((spec) => [spec.slug, spec]));
-  const used = new Set<string>();
+  const usedAgents = new Set<string>();
+  const usedStepIds = new Set<string>();
+  const countsByAgent = new Map<string, number>();
   const normalized: BorrowedInputPacket[] = [];
   let invalidPacket = false;
+  const validationErrors: string[] = [];
   for (const packet of packets) {
-    if (!bySlug.has(packet.agent) || used.has(packet.agent)) {
+    if (!bySlug.has(packet.agent)) {
       invalidPacket = true;
+      validationErrors.push(`unknown agent: ${packet.agent}`);
       continue;
     }
-    used.add(packet.agent);
-    normalized.push(packet);
+    const ordinal = (countsByAgent.get(packet.agent) ?? 0) + 1;
+    countsByAgent.set(packet.agent, ordinal);
+    const stepId = cleanString(packet.stepId) || `${packet.agent}-${ordinal}`;
+    if (usedStepIds.has(stepId)) {
+      invalidPacket = true;
+      validationErrors.push(`duplicate stepId: ${stepId}`);
+      continue;
+    }
+    usedStepIds.add(stepId);
+    usedAgents.add(packet.agent);
+    normalized.push({
+      ...packet,
+      stepId,
+      dependsOn: [...new Set((packet.dependsOn ?? []).map(cleanString).filter(Boolean))],
+      ...(packet.oneReply?.trim() ? { oneReply: stripTaskForceControlEnvelopes(packet.oneReply) } : {}),
+      brief: stripTaskForceControlEnvelopes(packet.brief),
+      context: packet.context.map(stripTaskForceControlEnvelopes).filter(Boolean),
+      expectedOutput: stripTaskForceControlEnvelopes(packet.expectedOutput),
+      constraints: packet.constraints.map(stripTaskForceControlEnvelopes).filter(Boolean),
+      doneWhen: packet.doneWhen.map(stripTaskForceControlEnvelopes).filter(Boolean),
+    });
   }
-  const missing = specs.filter((spec) => !used.has(spec.slug));
+  const missing = specs.filter((spec) => !usedAgents.has(spec.slug));
   for (const fallback of buildFallbackPackets(missing, userPrompt)) {
-    normalized.push(fallback);
+    let stepId = fallback.stepId ?? `${fallback.agent}-1`;
+    let suffix = 1;
+    while (usedStepIds.has(stepId)) stepId = `${fallback.agent}-fallback-${suffix++}`;
+    usedStepIds.add(stepId);
+    normalized.push({ ...fallback, stepId });
   }
+
+  const knownSteps = new Set(normalized.map((packet) => packet.stepId!));
+  for (const packet of normalized) {
+    const requested = packet.dependsOn ?? [];
+    const accepted = requested.filter((dependency) => dependency !== packet.stepId && knownSteps.has(dependency));
+    if (accepted.length !== requested.length) {
+      invalidPacket = true;
+      validationErrors.push(`invalid dependency for ${packet.stepId}`);
+    }
+    packet.dependsOn = [...new Set(accepted)];
+  }
+
+  // A local plan must be executable even when the planner returned a cycle.
+  // Mark it invalid for one same-model repair and clear only the cyclic tail so
+  // the fallback path cannot deadlock the room forever.
+  const completed = new Set<string>();
+  let progressed = true;
+  while (progressed) {
+    progressed = false;
+    for (const packet of normalized) {
+      if (completed.has(packet.stepId!)) continue;
+      if ((packet.dependsOn ?? []).every((dependency) => completed.has(dependency))) {
+        completed.add(packet.stepId!);
+        progressed = true;
+      }
+    }
+  }
+  if (completed.size !== normalized.length) {
+    invalidPacket = true;
+    validationErrors.push("dependency cycle");
+    for (const packet of normalized) {
+      if (!completed.has(packet.stepId!)) packet.dependsOn = [];
+    }
+  }
+
   const fallbackUsed = missing.length > 0 || packets.length === 0;
+  if (missing.length > 0) validationErrors.push(`missing agents: ${missing.map((spec) => spec.slug).join(", ")}`);
+  if (packets.length === 0) validationErrors.push("no packets");
   return {
     packets: normalized,
     parseSuccess: packets.length > 0 && !invalidPacket && !fallbackUsed,
     fallbackUsed,
+    validationErrors,
   };
+}
+
+const TASK_FORCE_PRE_APPROVAL_INPUT_TYPES = new Set([
+  "planning",
+  "research",
+  "review",
+  "analysis",
+  "writing",
+]);
+
+export interface TaskForceApprovalPartition {
+  ready: BorrowedInputPacket[];
+  deferred: BorrowedInputPacket[];
+  gateActive: boolean;
+  reason: "planner-declared" | "staged-product-work" | null;
+}
+
+/**
+ * A local One Team room has a real two-turn execution boundary: planning and
+ * peer review may run before approval, while implementation is not admitted to
+ * the scheduler at all. Strict federated Workforce keeps its own authored
+ * execution contract and is deliberately excluded from this product-stage gate.
+ */
+export function partitionTaskForcePacketsForApproval(
+  packets: BorrowedInputPacket[],
+  options: { approvalContinuation: boolean; strictWorkforce: boolean },
+): TaskForceApprovalPartition {
+  if (options.strictWorkforce || options.approvalContinuation) {
+    return { ready: packets, deferred: [], gateActive: false, reason: null };
+  }
+  const plannerDeclared = packets.some((packet) => packet.requiresApproval === true);
+  const hasImplementation = packets.some((packet) => packet.inputType === "implementation");
+  const hasPreApprovalWork = packets.some((packet) => TASK_FORCE_PRE_APPROVAL_INPUT_TYPES.has(packet.inputType));
+  const stagedProductWork = hasImplementation && hasPreApprovalWork;
+  if (!plannerDeclared && !stagedProductWork) {
+    return { ready: packets, deferred: [], gateActive: false, reason: null };
+  }
+  const deferred = packets.filter((packet) => (
+    packet.requiresApproval === true || packet.inputType === "implementation"
+  ));
+  if (deferred.length === 0) {
+    return { ready: packets, deferred: [], gateActive: false, reason: null };
+  }
+  const deferredSet = new Set(deferred);
+  return {
+    ready: packets.filter((packet) => !deferredSet.has(packet)),
+    deferred,
+    gateActive: true,
+    reason: plannerDeclared ? "planner-declared" : "staged-product-work",
+  };
+}
+
+export function taskForceHistoryEndsAtCommittedApproval(
+  history: ChatHistoryEntry[],
+  committedAnswers: CommittedQuestionAnswer[],
+): boolean {
+  const last = history.at(-1);
+  if (!last || last.role !== "assistant" || !last.text.includes("<<agentlas-ask>>")) return false;
+  return committedAnswers.some((answer) => answer.sourceMessageId === last.id);
+}
+
+function taskForceTurnHasCommittedApproval(chatId: string, history: ChatHistoryEntry[]): boolean {
+  return taskForceHistoryEndsAtCommittedApproval(history, listCommittedQuestionAnswers(chatId));
 }
 
 interface WorkforceResponsibility {
@@ -2301,7 +2541,7 @@ function buildPlannerSystemPrompt(
   const responseGuide = locale === "ko" ? "Visible status may be Korean, but the JSON keys must stay English." : "Use English for visible status and JSON keys.";
   const outputContract = requireExactRoster
     ? `End with the same JSON shape and exact frozen roster slugs as this parser-valid contract example, replacing only the semantic packet fields and allocation estimates with your exact decisions:\n${plannerExactShape(runtimes, specs)}`
-    : `End with exactly this block:\n${PACKET_HEADING}\n\`\`\`json\n{"packets":[{"agent":"<slug>","inputType":"<research|implementation|review|writing|analysis|planning|other>","inputKind":"<text|codebase|files|image|data|browser|mixed>","brief":"<focused subtask>","context":["<facts/files/constraints to pass>"],"expectedOutput":"<deliverable>","constraints":["<limits>"],"doneWhen":["<checkable completion condition>"],"allocation":${workloadAllocationPromptExample("delegate")}}],"synthesis":${workloadAllocationPromptExample("synthesize")}}\n\`\`\``;
+    : `End with exactly this block:\n${PACKET_HEADING}\n\`\`\`json\n{"packets":[{"stepId":"<stable-step-id>","dependsOn":["<earlier-step-id>"],"agent":"<slug>","oneReply":"<optional short visible reply One sends after this result>","requiresApproval":false,"inputType":"<research|implementation|review|writing|analysis|planning|other>","inputKind":"<text|codebase|files|image|data|browser|mixed>","brief":"<short visible instruction One says to this teammate>","context":["<facts/files/constraints to pass>"],"expectedOutput":"<deliverable>","constraints":["<limits>"],"doneWhen":["<checkable completion condition>"],"allocation":${workloadAllocationPromptExample("delegate")}}],"synthesis":${workloadAllocationPromptExample("synthesize")}}\n\`\`\``;
   return [
     orchestratorEffectivePrompt ?? buildEffectiveAgentSystemPrompt(orchestrator.id, orchestrator.systemPrompt),
     "",
@@ -2314,10 +2554,31 @@ function buildPlannerSystemPrompt(
     "First decide what each task-force agent should receive: the input type, input kind, focused brief, required context, expected output, constraints, and done-when conditions.",
     requireExactRoster
       ? "The Workforce roster is frozen: emit exactly one packet for every listed agent. Do not omit, add, duplicate, replace, or rename an agent."
-      : "Use only the task-force agents that are actually useful. If all are useful, include all.",
+      : "This is a standing One Team room: every selected Taskforce member must receive at least one conversational step. The same agent may appear in multiple later steps when revision or follow-up is required.",
     requireExactRoster
       ? "The response object must contain exactly packets and synthesis. Every packet must include agent, inputType, inputKind, brief, context, expectedOutput, constraints, doneWhen, allocation, and capabilityBindings."
-      : "The response object must contain packets and synthesis. Every packet must include agent, inputType, inputKind, brief, context, expectedOutput, constraints, and allocation; add doneWhen when the packet's completion is checkable.",
+      : "The response object must contain packets and synthesis. Every packet must include stepId, dependsOn, agent, oneReply, requiresApproval, inputType, inputKind, brief, context, expectedOutput, constraints, and allocation; add doneWhen when completion is checkable.",
+    requireExactRoster
+      ? ""
+      : "Taskforce chat is the product surface. Each brief is shown as One's actual message in the room, so make it concise, natural, role-specific, and free of system prompts, host facts, execution boundaries, IDs, receipts, or control-plane prose.",
+    requireExactRoster
+      ? ""
+      : "Use dependsOn to express real conversational order. A reviewer of a proposal depends on its authoring step; a revision depends on the review; implementation depends on the approved plan. Independent steps may share an empty dependsOn array.",
+    requireExactRoster
+      ? ""
+      : "requiresApproval is a boolean host execution boundary, not prose. Mark every implementation/build/write-code/browser-verification step true when the person asked to review or approve a PRD/plan first. Pre-approval PRD drafting, product/technical review, design questions, and PRD revision are false.",
+    requireExactRoster
+      ? ""
+      : "For product-building requests, give every standing teammate a useful pre-approval conversational step before any gated implementation step: the planner authors the PRD, the builder reviews feasibility, the designer asks or reviews visual direction, and the planner revises. Never hide implementation work inside a false planning/review packet.",
+    requireExactRoster
+      ? ""
+      : "oneReply is One's short visible response immediately after that worker speaks. Use it when One must coordinate the room (for example, tell a designer to wait for plan approval); otherwise use an empty string.",
+    requireExactRoster
+      ? ""
+      : "oneReply may coordinate only the next step. It must never claim that a file was saved, work completed, a tool ran, or a fact was verified; those claims require measured execution evidence and belong in the worker result or synthesis.",
+    requireExactRoster
+      ? ""
+      : "When a worker must create or update a Markdown/document artifact, use inputType writing and set allocation.requirements.toolRequired to true so the host can grant bounded workspace write access. Planning-only drafts that do not create files stay planning/read-only.",
     "Keep briefs specific: a researcher should get evidence questions; a builder should get implementation constraints; a reviewer should get acceptance criteria; a writer should get audience/style/output format.",
     requireExactRoster
       ? "doneWhen is that packet's acceptance checklist: 1..16 conditions, each independently checkable as true or false from the worker's returned artifact alone (name concrete fields, counts, files, or observable facts — never vibes like 'high quality'). State the goal and required results in doneWhen, but do not over-specify the worker's method or search order."
@@ -2486,6 +2747,7 @@ function buildSynthesisSystemPrompt(
     BORROWED_SECRET_FILE_GUARD,
     "Resolve conflicts explicitly. Mention failed or weak specialist results only if they affect confidence.",
     "Do not expose hidden chain-of-thought. Summarize observable coordination, evidence, tradeoffs, and next steps.",
+    TASK_FORCE_ASK_PROTOCOL,
     "A task-force synthesis has no single specialist owner. Never emit agent_repo memory from synthesis; use project scope for folder-specific learning or session otherwise.",
     // Pin the visible answer to the run locale. A borrowed agent may be authored
     // in another language; its definition default must never override the language
@@ -2496,11 +2758,41 @@ function buildSynthesisSystemPrompt(
   ].join("\n");
 }
 
+function taskForceApprovalGateSystemPrompt(
+  locale: RuntimeLocale,
+  deferredCount: number,
+): string {
+  const question = locale === "ko"
+    ? "검토·수정된 PRD를 승인하고 구현을 시작할까요?"
+    : "Approve the reviewed PRD and start implementation?";
+  const header = locale === "ko" ? "PRD 승인" : "PRD approval";
+  const options = locale === "ko"
+    ? [
+        { label: "PRD 승인 후 구현", description: "보류된 구현 단계를 다음 턴에서 시작합니다." },
+        { label: "수정 요청", description: "구현은 계속 멈춘 채 PRD를 더 다듬습니다." },
+      ]
+    : [
+        { label: "Approve PRD and build", description: "Start the deferred implementation steps in the next turn." },
+        { label: "Request changes", description: "Keep implementation paused and revise the PRD." },
+      ];
+  return [
+    "## Host-enforced PRD approval stage",
+    `The host deferred ${deferredCount} implementation step(s); none of them ran and you must not claim that they ran.`,
+    "Synthesize only the completed PRD, peer review, revision, bound planning artifacts, assumptions, and risks.",
+    "Do not implement, run a build/dev server, open implementation browser evidence, or request image-generation permission in this turn. Image permission is a separate gate after PRD approval.",
+    "End with exactly the following closed Decision block, after the natural visible answer, and then stop:",
+    "<<agentlas-ask>>",
+    JSON.stringify({ question, header, multiSelect: false, options }),
+    "<</agentlas-ask>>",
+  ].join("\n");
+}
+
 function buildSynthesisPrompt(input: {
   originalRequest: string;
   planText: string;
   packets: BorrowedInputPacket[];
   results: BorrowedAgentResult[];
+  artifacts: NonNullable<McpInvocationEvent["oneArtifacts"]>;
 }): string {
   return [
     "Original user request:",
@@ -2522,8 +2814,52 @@ function buildSynthesisPrompt(input: {
       result.text,
     ].filter(Boolean).join("\n")).join("\n\n"),
     "",
+    "Host-verified One Outputs evidence:",
+    JSON.stringify({
+      count: input.artifacts.length,
+      artifacts: input.artifacts.map((artifact) => ({
+        label: artifact.label,
+        type: artifact.type,
+        sizeBytes: artifact.sizeBytes,
+      })),
+    }, null, 2),
+    input.artifacts.length > 0
+      ? "You may say that only the files listed above are available in Outputs. Use their exact labels."
+      : "No file is bound to Outputs for this run. Never say that a file, document, PRD, or artifact was saved, created, attached, shown, or is available in Outputs/the output panel.",
+    "Model prose is not artifact evidence; the host-verified list above is authoritative.",
+    "",
     "Write the final user-facing answer now.",
   ].join("\n");
+}
+
+export function stripUnsupportedArtifactClaims(
+  value: string,
+  artifacts: NonNullable<McpInvocationEvent["oneArtifacts"]>,
+  locale: RuntimeLocale,
+): string {
+  if (artifacts.length > 0) return value;
+  const positiveVerb = /\b(?:saved|created|generated|written|updated|attached|shown|published|available)\b|(?:저장|생성|작성|업데이트|첨부|표시|게시|제공)(?:했|됐|되었|되어|되어\s*있|함|완료)|(?:준비|확인)할\s*수\s*있/iu;
+  const artifactNoun = /\b(?:artifact|file|document|prd|outputs?|output\s+panel)\b|(?:산출물|파일|문서|기획안|PRD|출력|Outputs?)/iu;
+  const negation = /\b(?:not|no|never|cannot|can't|couldn't|wasn't|isn't|unavailable|missing|failed)\b|(?:아직|못|없|실패|미완료|되지\s*않)/iu;
+  let removed = false;
+  const cleaned = value
+    .split("\n")
+    .map((line) => line
+      .split(/(?<=[.!?。！？])\s+/u)
+      .filter((sentence) => {
+        const unsupported = artifactNoun.test(sentence) && positiveVerb.test(sentence) && !negation.test(sentence);
+        if (unsupported) removed = true;
+        return !unsupported;
+      })
+      .join(" "))
+    .filter((line) => line.trim().length > 0)
+    .join("\n")
+    .trim();
+  if (!removed) return value;
+  const evidenceNote = locale === "ko"
+    ? "이번 실행에서 Outputs에 연결된 파일은 아직 없습니다."
+    : "No file is available in Outputs for this run yet.";
+  return [cleaned, evidenceNote].filter(Boolean).join("\n\n");
 }
 
 function linkAbort(parent?: AbortSignal) {
@@ -2609,6 +2945,7 @@ async function runBorrowedAgentTurn(
   workforceGrant?: WorkforcePairRuntimeGrant,
   peerResults: BorrowedAgentResult[] = [],
   recoveryRuntime?: RuntimeStatus,
+  preApprovalStage = false,
 ): Promise<BorrowedAgentResult> {
   const id = agentNodeId(spec.slug);
   const installedAgent =
@@ -2637,6 +2974,7 @@ async function runBorrowedAgentTurn(
     packet.inputType,
     "worker",
     packet.allocation.requirements.toolRequired,
+    preApprovalStage,
   );
   const runnerBase = taskForceRunnerBase(
     p,
@@ -2644,10 +2982,12 @@ async function runBorrowedAgentTurn(
     packet.allocation.requirements.toolRequired,
   );
   const candidateRuntimes = taskForceCandidateRuntimes(p);
-  const workerDefault = pickActive(candidateRuntimes, "worker") ?? p.active;
-  const workerDefaultRunner = sameRuntime(workerDefault, p.active)
-    ? p.picked
-    : pickRunner(workerDefault) ?? p.picked;
+  const agentRuntimeChoice = installedAgent && !p.workforceSelectionReceipt && !p.req.agentAppMode
+    ? selectRuntimeForTargets(candidateRuntimes, [{ scope: "agent", targetId: installedAgent.id }], "worker")
+    : null;
+  const workerDefault = agentRuntimeChoice?.active ?? pickActive(candidateRuntimes, "worker") ?? p.active;
+  const workerDefaultRunner = agentRuntimeChoice?.picked
+    ?? (sameRuntime(workerDefault, p.active) ? p.picked : pickRunner(workerDefault) ?? p.picked);
   const orchestratorRuntimes = [...(p.runtimes ?? [p.active])];
   if (!orchestratorRuntimes.some((runtime) => sameRuntime(runtime, p.active))) {
     orchestratorRuntimes.unshift(p.active);
@@ -2678,13 +3018,22 @@ async function runBorrowedAgentTurn(
         runtimes: candidateRuntimes,
         fallbackRuntime: workerDefault,
         phase: "delegate",
-        manualOverride: p.runtimeOverride,
+        manualOverride: agentRuntimeChoice?.override ?? p.runtimeOverride,
+        explicitPinned: Boolean(agentRuntimeChoice?.unavailableOverride),
         requirementsVerified: p.workforceSelectionReceipt ? true : undefined,
       });
   if (p.workforceSelectionReceipt) {
     assertStrictPlannerResolution(packet.allocation, workloadResolution, `planner allocation for ${packet.agent}`);
   }
   const active = workloadResolution.runtime;
+  if (agentRuntimeChoice?.fallbackStage) {
+    p.sink(tag({
+      kind: "tool-use",
+      status: p.locale === "ko"
+        ? `${spec.name}에 지정한 모델을 지금 사용할 수 없어 ${agentRuntimeChoice.fallbackStage === "worker" ? "One의 워커 모델" : "연결된 다른 모델"}로 이어갑니다.`
+        : `${spec.name}'s selected model is unavailable, so One is continuing with ${agentRuntimeChoice.fallbackStage === "worker" ? "its worker model" : "another connected model"}.`,
+    }));
+  }
   if (p.workforceSelectionReceipt && (
     !workforceGrant ||
     workforceGrant.slotId !== spec.routeLabel?.slice("workforce:".length) ||
@@ -2706,7 +3055,11 @@ async function runBorrowedAgentTurn(
       ].join("\n")
     : "";
   const authoritativePacketPrompt = [
-    packetToPrompt(packet, oneAttachmentExecutionPrompt(p.req), workforceResponsibility),
+    packetToPrompt(
+      packet,
+      stripTaskForceControlEnvelopes(oneAttachmentExecutionPrompt(p.req)),
+      workforceResponsibility,
+    ),
     peerResultContext,
   ].filter(Boolean).join("\n\n");
   const workforceImages = workforceImagesForResponsibility(p, workforceResponsibility);
@@ -2933,10 +3286,14 @@ async function runBorrowedAgentTurn(
           {
             onStatus: (status) => p.sink(teamEvent("manager", spec.name, { kind: "tool-use", status: redactSensitiveText(status) })),
             onPartial: () => {},
-            onTool: (name, args, result, toolId, isError) => p.sink(teamEvent("manager", spec.name, {
-              kind: "tool-use",
-              tool: { name, args: redactEventValue(args), result: redactEventValue(result), id: toolId, isError },
-            })),
+            onTool: (name, args, result, toolId, isError, artifactPaths) => {
+              const oneArtifacts = taskForceOneArtifacts(p, toolId, isError, artifactPaths);
+              p.sink(teamEvent("manager", spec.name, {
+                kind: "tool-use",
+                tool: { name, args: redactEventValue(args), result: redactEventValue(result), id: toolId, isError },
+                ...(oneArtifacts ? { oneArtifacts } : {}),
+              }));
+            },
           },
         ));
         managerPlan = {
@@ -3038,6 +3395,7 @@ async function runBorrowedAgentTurn(
                 // Same packet, different handoff role: the repair/escalation
                 // turn is read-only and never inherits a worker's write grant.
                 permission: role === "worker" ? workerPermission : "read",
+                approvalsReviewer: role === "worker" ? runnerBase.approvalsReviewer : "user",
                 ...packageBoundary,
                 cwd: taskForceStageCwd(p, "nested-worker", packageBoundary.mcpAllowedTools ?? []),
                 chatId: observedWorkerInvocationId,
@@ -3046,10 +3404,14 @@ async function runBorrowedAgentTurn(
               {
                 onStatus: (status) => p.sink(teamEvent(worker.id, worker.id, { kind: "tool-use", status: redactSensitiveText(status) })),
                 onPartial: () => {},
-                onTool: (name, args, toolResult, toolId, isError) => p.sink(teamEvent(worker.id, worker.id, {
-                  kind: "tool-use",
-                  tool: { name, args: redactEventValue(args), result: redactEventValue(toolResult), id: toolId, isError },
-                })),
+                onTool: (name, args, toolResult, toolId, isError, artifactPaths) => {
+                  const oneArtifacts = taskForceOneArtifacts(p, toolId, isError, artifactPaths);
+                  p.sink(teamEvent(worker.id, worker.id, {
+                    kind: "tool-use",
+                    tool: { name, args: redactEventValue(args), result: redactEventValue(toolResult), id: toolId, isError },
+                    ...(oneArtifacts ? { oneArtifacts } : {}),
+                  }));
+                },
               },
             ));
             observedWorkerResult = attemptResult;
@@ -3208,10 +3570,14 @@ async function runBorrowedAgentTurn(
         {
           onStatus: (status) => p.sink(teamEvent("manager", spec.name, { kind: "tool-use", status: redactSensitiveText(status) })),
           onPartial: () => {},
-          onTool: (name, args, result, toolId, isError) => p.sink(teamEvent("manager", spec.name, {
-            kind: "tool-use",
-            tool: { name, args: redactEventValue(args), result: redactEventValue(result), id: toolId, isError },
-          })),
+          onTool: (name, args, result, toolId, isError, artifactPaths) => {
+            const oneArtifacts = taskForceOneArtifacts(p, toolId, isError, artifactPaths);
+            p.sink(teamEvent("manager", spec.name, {
+              kind: "tool-use",
+              tool: { name, args: redactEventValue(args), result: redactEventValue(result), id: toolId, isError },
+              ...(oneArtifacts ? { oneArtifacts } : {}),
+            }));
+          },
         },
       ));
       const teamText = await curateOwnedTaskForceResult({
@@ -3360,9 +3726,7 @@ async function runBorrowedAgentTurn(
           // The package's declared ceiling narrows the host grant (never widens it). Spread after
           // runnerBase so this wins for this borrowed agent's own turn.
           permission: role === "worker" ? workerPermission : "read",
-          approvalsReviewer: role === "worker" && packet.allocation.requirements.toolRequired
-            ? "auto_review"
-            : "user",
+          approvalsReviewer: role === "worker" ? runnerBase.approvalsReviewer : "user",
           ...packageBoundary,
           // A standing One teammate is an owner-installed local worker, not a
           // packet-only remote Workforce unit. Run its implementation turn in
@@ -3377,15 +3741,18 @@ async function runBorrowedAgentTurn(
         {
           onStatus: (status) => p.sink(tag({ kind: "tool-use", status: redactSensitiveText(status) })),
           onPartial: () => {},
-          onTool: (name, args, result, toolId, isError) =>
+          onTool: (name, args, result, toolId, isError, artifactPaths) => {
+            const oneArtifacts = taskForceOneArtifacts(p, toolId, isError, artifactPaths);
             p.sink(tag({
               kind: "tool-use",
               tool: { name, args: redactEventValue(args), result: redactEventValue(result), id: toolId, isError },
-            })),
+              ...(oneArtifacts ? { oneArtifacts } : {}),
+            }));
+          },
         },
       ));
       observedDirectResult = attemptResult;
-      return attemptResult;
+      return requireTaskForceRunnerSuccess(attemptResult, observedDirectRuntime);
     });
     const result = outcome.result;
     const workerText = await curateOwnedTaskForceResult({
@@ -3701,16 +4068,19 @@ async function runPlanner(
         phase: "plan",
       }),
       onPartial: () => {},
-      onTool: (name, args, toolResult, id, isError) =>
+      onTool: (name, args, toolResult, id, isError, artifactPaths) => {
+        const oneArtifacts = taskForceOneArtifacts(p, id, isError, artifactPaths);
         p.sink({
           kind: "tool-use",
           tool: { name, args: redactEventValue(args), result: redactEventValue(toolResult), id, isError },
+          ...(oneArtifacts ? { oneArtifacts } : {}),
           agentId: orchestratorId,
           agentName: orchestratorName,
           role: "orchestrator",
           tier: 1,
           phase: "plan",
-        }),
+        });
+      },
     },
   );
 
@@ -3921,9 +4291,44 @@ async function runPlanner(
       agentId: p.orchestratorAgent.id,
     }, "read");
     const parsedPlan = parseBorrowedWorkloadPlan(plannerText);
-    const normalized = normalizePacketsForRoster(parsedPlan.packets, specs, oneAttachmentExecutionPrompt(p.req));
-    packets = normalized.packets;
+    let normalized = normalizePacketsForRoster(parsedPlan.packets, specs, oneAttachmentExecutionPrompt(p.req));
     synthesisAllocation = parsedPlan.synthesisAllocation ?? defaultWorkloadAllocation("synthesize");
+
+    // One bounded same-model correction is cheaper and substantially safer
+    // than silently handing the full user/control prompt to every omitted
+    // teammate. This is local Taskforce planning only; strict Workforce keeps
+    // its separate schema-repair contract above.
+    if (!normalized.parseSuccess && specs.length > 1 && !p.signal?.aborted) {
+      plannerInvocationId = `${plannerInvocationBaseId}:room-plan-repair:${randomUUID()}`;
+      const validationError = normalized.validationErrors.join("; ") || "the plan did not cover the selected room";
+      const repairSystemPrompt = [
+        baseSystemPrompt,
+        "",
+        "## Local Taskforce room-plan repair",
+        `The prior plan was rejected: ${validationError}.`,
+        `Return a fresh plan that includes every selected slug at least once: ${specs.map((spec) => spec.slug).join(", ")}.`,
+        "Do not repeat host/control envelopes in any visible brief. Keep explicit sequencing in stepId/dependsOn and use oneReply for One's coordination messages.",
+      ].join("\n");
+      const repairedResult = await observeTaskForceModelCall(p, {
+        nodeId: orchestratorId,
+        phase: "planner",
+        attempt: 2,
+        agentId: p.orchestratorAgent.id,
+        runtime: p.active,
+      }, () => invokePlanner(plannerInvocationId, repairSystemPrompt, validationError));
+      const repairedText = restrictedTaskForceText(p, repairedResult.text, {
+        nodeId: orchestratorId,
+        phase: "planner",
+        attempt: 2,
+        agentId: p.orchestratorAgent.id,
+      }, "read");
+      const repairedPlan = parseBorrowedWorkloadPlan(repairedText);
+      normalized = normalizePacketsForRoster(repairedPlan.packets, specs, oneAttachmentExecutionPrompt(p.req));
+      plannerText = repairedText;
+      synthesisAllocation = repairedPlan.synthesisAllocation ?? synthesisAllocation;
+      result = repairedResult;
+    }
+    packets = normalized.packets;
     parseSuccess = normalized.parseSuccess;
     fallbackUsed = normalized.fallbackUsed;
   }
@@ -3973,46 +4378,11 @@ async function runPlanner(
     agentName: orchestratorName,
     role: "orchestrator",
     tier: 1,
-    phase: "delegate",
-    delegateTo: packets.map((packet) => agentNodeId(packet.agent)),
+    phase: p.workforceSelectionReceipt ? "delegate" : "plan",
+    ...(p.workforceSelectionReceipt
+      ? { delegateTo: packets.map((packet) => agentNodeId(packet.agent)) }
+      : {}),
   });
-  // A Taskforce is a visible group conversation, not an opaque fan-out. Emit
-  // the same typed handoff envelope already used by installed Firms so the
-  // user can open each teammate channel and read the real Korean/English brief.
-  for (const packet of packets) {
-    const targetId = agentNodeId(packet.agent);
-    const text = boundedTaskForceMessage(packet.brief || packet.expectedOutput);
-    if (!text) continue;
-    p.sink({
-      kind: "tool-use",
-      status: p.locale === "ko"
-        ? `${orchestratorName} → ${packet.agent} 메시지 전송`
-        : `${orchestratorName} → ${packet.agent} message sent`,
-      agentId: orchestratorId,
-      runtimeAgentId: p.orchestratorAgent.id,
-      agentName: orchestratorName,
-      role: "orchestrator",
-      tier: 1,
-      phase: "delegate",
-      delegateTo: [targetId],
-      agentMessage: {
-        messageId: randomUUID(),
-        direction: "orchestrator-to-worker",
-        fromAgentId: orchestratorId,
-        toAgentId: targetId,
-        text,
-        handoffDepth: 1,
-        handoffRoundtrip: 1,
-        handoffPermission: taskForceChildPermission(
-          p,
-          packet.inputType,
-          "worker",
-          packet.allocation.requirements.toolRequired,
-        ),
-        permissionInherited: false,
-      },
-    });
-  }
   return {
     text: plannerText,
     packets,
@@ -4034,6 +4404,18 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     throw new Error("workforce_runtime_isolation_unverified:codex-collaboration-authority");
   }
   p = await prepareTaskForceMemoryBoundary(p);
+  const observedOneArtifacts = new Map<string, NonNullable<McpInvocationEvent["oneArtifacts"]>[number]>();
+  const upstreamArtifactBinder = p.bindOneRuntimeToolArtifacts;
+  if (upstreamArtifactBinder) {
+    p = {
+      ...p,
+      bindOneRuntimeToolArtifacts: (toolId, paths) => {
+        const bound = upstreamArtifactBinder(toolId, paths);
+        for (const artifact of bound) observedOneArtifacts.set(artifact.artifactRef, artifact);
+        return bound;
+      },
+    };
+  }
   const emitFinal = p.emitFinal !== false;
   const overrideSpecs = uniqSpecs(p.taskForceSpecs);
   if (p.req.agentAppMode) {
@@ -4083,6 +4465,40 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         p.req.borrowVersions,
       );
   const plan = await runPlanner(p, specs, history);
+  const approvalContinuation = taskForceTurnHasCommittedApproval(p.chat.id, history);
+  const approvalPartition = partitionTaskForcePacketsForApproval(plan.packets, {
+    approvalContinuation,
+    strictWorkforce: Boolean(p.workforceSelectionReceipt),
+  });
+  const executionPackets = approvalPartition.ready;
+  if (approvalPartition.gateActive) {
+    tryRecordRunEvent({
+      runId: p.req.runId ?? `task-force:${p.chat.id}`,
+      kind: "taskforce_approval_gate",
+      chatId: p.chat.id,
+      nodeId: `${p.chat.id}:borrow-orchestrator`,
+      agentId: p.orchestratorAgent.id,
+      payload: {
+        schemaVersion: "agentlas.taskforce-approval-gate.v1",
+        state: "waiting_for_prd_approval",
+        reason: approvalPartition.reason,
+        readyStepIds: executionPackets.map((packet) => packet.stepId),
+        deferredStepIds: approvalPartition.deferred.map((packet) => packet.stepId),
+      },
+    });
+    p.sink({
+      kind: "tool-use",
+      status: p.locale === "ko"
+        ? `PRD 승인 전 구현 ${approvalPartition.deferred.length}단계를 보류했습니다.`
+        : `Deferred ${approvalPartition.deferred.length} implementation step(s) until PRD approval.`,
+      agentId: `${p.chat.id}:borrow-orchestrator`,
+      runtimeAgentId: p.orchestratorAgent.id,
+      agentName: p.orchestratorAgent.nameEn || p.orchestratorAgent.name || "Agentlas Orchestrator",
+      role: "orchestrator",
+      tier: 1,
+      phase: "plan",
+    });
+  }
   if (plan.capabilityBinding) {
     // Private local sibling artifact. It is intentionally not included in any
     // Hub MCP argument or public receipt; the receipt exposes only its digest
@@ -4100,10 +4516,51 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
   const specBySlug = new Map(specs.map((spec) => [spec.slug, spec]));
   const orchestratorId = `${p.chat.id}:borrow-orchestrator`;
   const orchestratorName = p.orchestratorAgent.nameEn || p.orchestratorAgent.name || "Agentlas Orchestrator";
-  const emitWorkerResultMessage = (result: BorrowedAgentResult) => {
+  const emitDelegationMessage = (packet: BorrowedInputPacket): string | null => {
+    const targetId = agentNodeId(packet.agent);
+    const text = boundedTaskForceMessage(stripTaskForceControlEnvelopes(packet.brief || packet.expectedOutput));
+    if (!text) return null;
+    const messageId = randomUUID();
+    p.sink({
+      kind: "tool-use",
+      status: p.locale === "ko"
+        ? `${orchestratorName} → ${packet.agent} 메시지 전송`
+        : `${orchestratorName} → ${packet.agent} message sent`,
+      agentId: orchestratorId,
+      runtimeAgentId: p.orchestratorAgent.id,
+      agentName: orchestratorName,
+      role: "orchestrator",
+      tier: 1,
+      phase: "delegate",
+      delegateTo: [targetId],
+      agentMessage: {
+        messageId,
+        direction: "orchestrator-to-worker",
+        fromAgentId: orchestratorId,
+        toAgentId: targetId,
+        text,
+        handoffDepth: 1,
+        handoffRoundtrip: 1,
+        handoffPermission: taskForceChildPermission(
+          p,
+          packet.inputType,
+          "worker",
+          packet.allocation.requirements.toolRequired,
+          approvalPartition.gateActive,
+        ),
+        permissionInherited: false,
+      },
+    });
+    return messageId;
+  };
+  const emitWorkerResultMessage = (
+    result: BorrowedAgentResult,
+    replyToMessageId?: string,
+  ): string | null => {
     const fromAgentId = agentNodeId(result.spec.slug);
-    const text = boundedTaskForceMessage(result.text);
-    if (!text) return;
+    const text = boundedTaskForceMessage(stripTaskForceControlEnvelopes(result.text));
+    if (!text) return null;
+    const messageId = randomUUID();
     p.sink({
       kind: "tool-use",
       done: true,
@@ -4117,10 +4574,11 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       tier: 2,
       phase: "delegate",
       agentMessage: {
-        messageId: randomUUID(),
+        messageId,
         direction: "worker-to-orchestrator",
         fromAgentId,
         toAgentId: orchestratorId,
+        ...(replyToMessageId ? { replyToMessageId } : {}),
         text,
         handoffDepth: 2,
         handoffRoundtrip: 2,
@@ -4128,31 +4586,34 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         permissionInherited: false,
       },
     });
+    return messageId;
   };
-  const emitPeerRelayMessage = (packet: BorrowedInputPacket, peerResults: BorrowedAgentResult[]) => {
+  const emitOneReplyMessage = (
+    packet: BorrowedInputPacket,
+    replyToMessageId: string | null,
+  ): string | null => {
     const targetId = agentNodeId(packet.agent);
-    const text = boundedTaskForceMessage([
-      "Completed peer updates:",
-      ...peerResults.map((result) => `${result.spec.name}: ${result.text}`),
-    ].join("\n"));
-    if (!text) return;
+    const text = boundedTaskForceMessage(taskForceCoordinatorReply(packet.oneReply ?? ""));
+    if (!text) return null;
+    const messageId = randomUUID();
     p.sink({
       kind: "tool-use",
+      done: true,
       status: p.locale === "ko"
-        ? `${orchestratorName} → ${packet.agent} 동료 결과 전달`
-        : `${orchestratorName} → ${packet.agent} peer results relayed`,
+        ? `${orchestratorName} → ${packet.agent} 답장`
+        : `${orchestratorName} → ${packet.agent} replied`,
       agentId: orchestratorId,
       runtimeAgentId: p.orchestratorAgent.id,
       agentName: orchestratorName,
       role: "orchestrator",
       tier: 1,
       phase: "delegate",
-      delegateTo: [targetId],
       agentMessage: {
-        messageId: randomUUID(),
+        messageId,
         direction: "orchestrator-to-worker",
         fromAgentId: orchestratorId,
         toAgentId: targetId,
+        ...(replyToMessageId ? { replyToMessageId } : {}),
         text,
         handoffDepth: 1,
         handoffRoundtrip: 3,
@@ -4161,10 +4622,12 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
           packet.inputType,
           "worker",
           packet.allocation.requirements.toolRequired,
+          approvalPartition.gateActive,
         ),
         permissionInherited: false,
       },
     });
+    return messageId;
   };
   const runPacket = async (
     packet: (typeof plan.packets)[number],
@@ -4178,7 +4641,15 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     const grant = slotId && spec.agentReleaseId
       ? plan.capabilityBinding?.grantsByPair.get(workforcePairKey(slotId, spec.agentReleaseId))
       : undefined;
-    return runBorrowedAgentTurn(p, spec, packet, grant, peerResults, recoveryRuntime);
+    return runBorrowedAgentTurn(
+      p,
+      spec,
+      packet,
+      grant,
+      peerResults,
+      recoveryRuntime,
+      approvalPartition.gateActive,
+    );
   };
   const runPacketWithRetry = async (
     packet: (typeof plan.packets)[number],
@@ -4213,49 +4684,46 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     return runPacket(packet, peerResults);
   };
 
-  const results: BorrowedAgentResult[] = new Array(plan.packets.length);
-  const localStandingRoster = !p.workforceSelectionReceipt
-    && !p.req.agentAppMode
-    && specs.every((spec) => spec.source === "installed");
-  const dependentIndexes = plan.packets
-    .map((packet, index) => packet.inputType === "review" || packet.inputKind === "browser" ? index : -1)
-    .filter((index) => index >= 0);
-  const stagePeerReview = localStandingRoster
-    && dependentIndexes.length > 0
-    && plan.packets.some((packet) => packet.inputType === "implementation");
+  const results: BorrowedAgentResult[] = new Array(executionPackets.length);
+  const stepIds = executionPackets.map((packet, index) => packet.stepId?.trim() || `packet-${index + 1}`);
+  const knownStepIds = new Set(stepIds);
+  const resultByStepId = new Map<string, BorrowedAgentResult>();
+  const resultMessageByStepId = new Map<string, string>();
+  const pending = new Set(executionPackets.map((_, index) => index));
 
-  if (stagePeerReview) {
-    const dependentSet = new Set(dependentIndexes);
-    const foundationIndexes = plan.packets.map((_, index) => index).filter((index) => !dependentSet.has(index));
-    const foundationResults = await parallelCap(
-      foundationIndexes,
-      getAgentConcurrency(),
-      (index) => runPacketWithRetry(plan.packets[index]),
-    );
-    foundationIndexes.forEach((packetIndex, resultIndex) => {
-      results[packetIndex] = foundationResults[resultIndex];
-      emitWorkerResultMessage(foundationResults[resultIndex]);
-    });
-    for (const index of dependentIndexes) emitPeerRelayMessage(plan.packets[index], foundationResults);
-    const reviewResults = await parallelCap(
-      dependentIndexes,
-      getAgentConcurrency(),
-      (index) => runPacketWithRetry(plan.packets[index], foundationResults),
-    );
-    dependentIndexes.forEach((packetIndex, resultIndex) => {
-      results[packetIndex] = reviewResults[resultIndex];
-      emitWorkerResultMessage(reviewResults[resultIndex]);
-    });
-  } else {
-    const parallelResults = await parallelCap(
-      plan.packets,
-      getAgentConcurrency(),
-      (packet) => runPacketWithRetry(packet),
-    );
-    parallelResults.forEach((result, index) => {
+  // Execute the local conversational graph in dependency-ready waves. Each
+  // callback emits its result before the rest of the wave finishes, so a fast
+  // teammate speaks in the room immediately instead of waiting behind the
+  // slowest sibling. Strict Workforce packets have no local dependency fields
+  // and therefore retain their existing parallel execution behavior.
+  while (pending.size > 0) {
+    const ready = [...pending].filter((index) => (
+      (executionPackets[index].dependsOn ?? [])
+        .filter((dependency) => knownStepIds.has(dependency))
+        .every((dependency) => resultByStepId.has(dependency))
+    ));
+    // normalizePacketsForRoster removes local cycles. This final guard keeps a
+    // malformed strict/legacy packet from hanging the run forever.
+    if (ready.length === 0) ready.push([...pending][0]);
+
+    await parallelCap(ready, getAgentConcurrency(), async (index) => {
+      const packet = executionPackets[index];
+      const dependencies = (packet.dependsOn ?? []).filter((dependency) => resultByStepId.has(dependency));
+      const peerResults = dependencies
+        .map((dependency) => resultByStepId.get(dependency))
+        .filter((result): result is BorrowedAgentResult => Boolean(result));
+      emitDelegationMessage(packet);
+      const result = await runPacketWithRetry(packet, peerResults);
       results[index] = result;
-      emitWorkerResultMessage(result);
+      resultByStepId.set(stepIds[index], result);
+      const replyToMessageId = dependencies
+        .map((dependency) => resultMessageByStepId.get(dependency))
+        .find((messageId): messageId is string => Boolean(messageId));
+      const resultMessageId = emitWorkerResultMessage(result, replyToMessageId);
+      if (resultMessageId) resultMessageByStepId.set(stepIds[index], resultMessageId);
+      emitOneReplyMessage(packet, resultMessageId);
     });
+    for (const index of ready) pending.delete(index);
   }
   const synthesisCandidateRuntimes = taskForceCandidateRuntimes(p);
   const synthesisResolution = resolveWorkloadAllocationAcrossRuntimes({
@@ -4335,6 +4803,9 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
           p.locale,
           taskForcePermission(p),
         ),
+        approvalPartition.gateActive
+          ? taskForceApprovalGateSystemPrompt(p.locale, approvalPartition.deferred.length)
+          : "",
         !p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "",
         synthesisMemory,
         synthesisOntology?.prompt,
@@ -4344,8 +4815,9 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       userPrompt: buildSynthesisPrompt({
         originalRequest: oneAttachmentExecutionPrompt(p.req),
         planText: plan.text,
-        packets: plan.packets,
+        packets: executionPackets,
         results,
+        artifacts: [...observedOneArtifacts.values()],
       }),
       images: synthesisImages,
       backendLabel: synthesisPicked.label,
@@ -4378,22 +4850,32 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
           p.sink({ kind: "partial", text: redactSensitiveText(text) });
         }
       },
-      onTool: (name, args, result, id, isError) =>
+      onTool: (name, args, result, id, isError, artifactPaths) => {
+        const oneArtifacts = taskForceOneArtifacts(p, id, isError, artifactPaths);
         p.sink({
           kind: "tool-use",
           tool: { name, args: redactEventValue(args), result: redactEventValue(result), id, isError },
+          ...(oneArtifacts ? { oneArtifacts } : {}),
           agentId: orchestratorId,
           agentName: orchestratorName,
           role: "orchestrator",
           tier: 1,
           phase: "synthesize",
-        }),
+        });
+      },
     },
   ));
   const continuation = stripStormbreakerContinueMarker(redactSensitiveText(final.text));
   let displayText = p.req.agentAppMode
     ? cleanAgentAppControlBlocks(continuation.text)
     : continuation.text;
+  if (!p.req.agentAppMode) {
+    displayText = stripUnsupportedArtifactClaims(
+      displayText,
+      [...observedOneArtifacts.values()],
+      p.locale,
+    );
+  }
   if (!p.req.agentAppMode && continuation.shouldContinue) {
     const boundaryNote = p.locale === "ko"
       ? "안전 경계: 다중 Hub 작업은 로컬 단일 에이전트 자동화로 대체하지 않습니다. 계속하려면 같은 조합으로 다시 실행해 모든 Hub bundle을 재검증해야 합니다."

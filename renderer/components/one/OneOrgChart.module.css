@@ -235,6 +235,14 @@
   background: transparent;
   color: #696e72;
   cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.oneRow:hover .oneEditButton,
+.oneRow:focus-within .oneEditButton {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .oneEditButton:hover,
@@ -277,13 +285,14 @@
   padding: 2px;
   border-radius: 6px;
   background: transparent;
-  opacity: .62;
-  pointer-events: auto;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .row:hover .rowActions,
 .row:focus-within .rowActions {
   opacity: 1;
+  pointer-events: auto;
 }
 
 .row:hover .source,
@@ -326,7 +335,7 @@
 .slotBudget button { color: #696e72; font-size: 9px; }
 
 @media (max-width: 760px) {
-  .rowActions { opacity: .62; }
+  .rowActions { opacity: 0; }
   .row:hover .rowActions,
   .row:focus-within .rowActions { opacity: 1; }
   .source { display: inline; }

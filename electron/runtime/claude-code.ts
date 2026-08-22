@@ -371,11 +371,19 @@ function systemFingerprint(req: RunnerRequest): string {
  * → result(is_error:true, api_error_status:429). 종료코드는 가변 — 이벤트가 진실.
  */
 export function claudeFailureFromEvent(
-  ev: { type?: string; is_error?: boolean; result?: unknown; terminal_reason?: string;
+  ev: { type?: string; error?: unknown; is_error?: boolean; result?: unknown; terminal_reason?: string;
         api_error_status?: number; rate_limit_info?: { status?: string; resetsAt?: number } },
   finalText: string,
   prior: RunnerFailure | null,
 ): RunnerFailure | null {
+  if (ev.error === "authentication_failed") {
+    return {
+      kind: "auth",
+      message: "authentication_failed",
+      runtime: "claude",
+      source: "marker",
+    };
+  }
   if (ev.type === "rate_limit_event" && ev.rate_limit_info?.status === "rejected") {
     return {
       kind: "quota", message: "Claude rate limit rejected", runtime: "claude", source: "marker",
@@ -1082,6 +1090,7 @@ const runClaudeTurn = async (
         sessionId = ev.session_id;
       }
       if (ev.error === "authentication_failed") {
+        runnerFailure = claudeFailureFromEvent(ev, finalText, runnerFailure);
         structuredRuntimeError = new Error(
           runReq.locale === "ko"
             ? "Claude Code 로그인이 만료됐습니다. 설정에서 Claude를 다시 연결한 뒤 재시도해주세요."
@@ -1391,6 +1400,30 @@ const runClaudeTurn = async (
               ),
         });
       } else {
+        // Provider markers are a completed typed outcome even when the CLI
+        // exits non-zero. Returning RunnerResult.failure lets orchestrators
+        // move to a different live provider without scraping a localized
+        // error sentence or retrying the same signed-out account.
+        if (runnerFailure) {
+          resolve({
+            text: (combined() || finalText || runnerFailure.message).trim(),
+            failure: runnerFailure,
+            tokens,
+            observedUsage,
+            workforcePermissionEnforcement: hasExactWorkforceMcpGrant
+              ? workforceNativeToolEnforcement(
+                  runReq,
+                  KIND,
+                  ["builtins", "slash_commands", "chrome", "session_persistence"],
+                )
+              : workforceZeroToolsEnforcement(
+                  runReq,
+                  KIND,
+                  ["builtins", "mcp", "slash_commands", "chrome", "session_persistence"],
+                ),
+          });
+          return;
+        }
         if (structuredRuntimeError) {
           rejectRuntime(structuredRuntimeError);
           return;

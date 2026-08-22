@@ -1,9 +1,9 @@
 // Agent OS workbench panel.
 // Renders traditional code artifacts and safe Agentlas Surface manifests in one
-// right-side workspace. Surface manifests are declarative; this component never
-// executes model-generated HTML/JS.
+// in-app right-side workspace. Surface manifests remain declarative; registered
+// live apps run in a sandboxed native web surface with no Desktop IPC.
 "use client";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { buildSurfaceDelegationPlan } from "@shared/surface-delegation";
 import type { AgentlasSurfaceCredentialRequest, AgentlasSurfacePaymentRequest } from "@shared/surface-delegation";
@@ -37,12 +37,17 @@ import {
   IconWand,
 } from "./Icon";
 import { useT } from "@/lib/i18n";
+import { NativeLiveWebView } from "./NativeLiveWebView";
+import { OneLiveMap } from "./one/OneLiveMap";
+import type { OneSurfaceMapBlock } from "@shared/one-surface";
 
 export interface WorkbenchSurface {
   id: string;
   manifest: AgentlasSurfaceManifest;
   state?: JsonObject;
   jobSummary?: SurfaceJobCostSummary;
+  /** Durable generated-app record backing a real live preview, when one exists. */
+  liveAppId?: string;
 }
 
 export type SurfaceActionHandler = (
@@ -96,6 +101,10 @@ export function WorkbenchPanel({
           .agentlas-creative-grid {
             grid-template-columns: 1fr !important;
           }
+          .agentlas-live-app-grid > * {
+            grid-column: auto !important;
+            grid-row: auto !important;
+          }
           .agentlas-workbench-hero {
             flex-direction: column !important;
           }
@@ -142,7 +151,7 @@ export function WorkbenchPanel({
       </header>
       <ExportBar artifact={artifact} surface={surface} />
       {surface ? (
-        <SurfaceWorkbench surface={surface} onAction={onSurfaceAction} onStatePatch={onSurfaceStatePatch} />
+        <SurfaceWorkbench surface={surface} onAction={onSurfaceAction} onStatePatch={onSurfaceStatePatch} wide={embedded} />
       ) : artifact ? (
         <CodeWorkbench artifact={artifact} />
       ) : null}
@@ -290,10 +299,12 @@ export function SurfaceWorkbench({
   surface,
   onAction,
   onStatePatch,
+  wide = false,
 }: {
   surface: WorkbenchSurface;
   onAction?: SurfaceActionHandler;
   onStatePatch?: SurfaceStatePatchHandler;
+  wide?: boolean;
 }) {
   const manifest = surface.manifest;
   const widgetTypes = new Set(manifest.widgets.map((w) => w.type));
@@ -308,7 +319,86 @@ export function SurfaceWorkbench({
   if (manifest.layout === "creative-studio" || widgetTypes.has("storyboard") || widgetTypes.has("asset-board")) {
     return <CreativeStudioSurface surface={surface} onAction={onAction} onStatePatch={onStatePatch} />;
   }
-  return <GenericSurface surface={surface} onAction={onAction} />;
+  return <GenericSurface surface={surface} onAction={onAction} wide={wide} />;
+}
+
+function RunningAppPreview({
+  appId,
+  declaredUrl,
+  title,
+}: {
+  appId?: string;
+  declaredUrl?: string;
+  title: string;
+}) {
+  const [attempt, setAttempt] = useState(0);
+  const [state, setState] = useState<{
+    pending: boolean;
+    url: string | null;
+    runtime: string | null;
+    error: string | null;
+  }>({
+    pending: Boolean(appId),
+    url: appId ? null : declaredUrl?.trim() || null,
+    runtime: appId ? null : "declared web",
+    error: null,
+  });
+
+  useEffect(() => {
+    let disposed = false;
+    const direct = declaredUrl?.trim() || null;
+    if (!appId) {
+      setState({
+        pending: false,
+        url: direct,
+        runtime: direct ? "declared web" : null,
+        error: direct ? null : "No live URL is attached to this app.",
+      });
+      return;
+    }
+    setState({ pending: true, url: null, runtime: null, error: null });
+    void window.agentlas.appFactory.startLivePreview({ appId }).then((result) => {
+      if (disposed) return;
+      if (result.ok && result.url) {
+        setState({ pending: false, url: result.url, runtime: result.runtime, error: null });
+      } else if (direct) {
+        setState({ pending: false, url: direct, runtime: "declared web", error: null });
+      } else {
+        setState({
+          pending: false,
+          url: null,
+          runtime: result.runtime,
+          error: result.reason || "The app runtime is not reachable.",
+        });
+      }
+    }).catch((error) => {
+      if (disposed) return;
+      if (direct) setState({ pending: false, url: direct, runtime: "declared web", error: null });
+      else setState({
+        pending: false,
+        url: null,
+        runtime: null,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+    return () => { disposed = true; };
+  }, [appId, declaredUrl, attempt]);
+
+  if (state.url) {
+    return <NativeLiveWebView url={state.url} title={title} runtimeLabel={state.runtime ?? undefined} />;
+  }
+  return (
+    <section style={appRuntimeUnavailable} role={state.error ? "alert" : "status"}>
+      <span style={appRuntimeStatusDot} />
+      <div>
+        <strong>{state.pending ? "Starting the real app runtime…" : "Live app unavailable"}</strong>
+        <p>{state.pending ? "Allocating a private loopback URL and attaching the in-app web surface." : state.error}</p>
+      </div>
+      {!state.pending ? (
+        <button type="button" style={exportButton} onClick={() => setAttempt((value) => value + 1)}>Retry</button>
+      ) : null}
+    </section>
+  );
 }
 
 function AppFactorySurface({
@@ -352,11 +442,15 @@ function AppFactorySurface({
   const appName = sanitizePublicAppCopy(app?.name || manifest.title, manifest.title);
   const tagline = sanitizePublicAppCopy(app?.tagline || app?.valueProp, "Agent-made app blueprint");
   const business = app?.business ?? objectValue(dataByName(manifest, "business"));
+  const hasLiveRuntime = Boolean(surface.liveAppId || app?.deployment?.previewUrl);
 
   return (
     <div style={surfaceBody}>
-      <div className="agentlas-creative-grid" style={appFactoryGrid}>
-        <section style={leftRail}>
+      <div
+        className={`agentlas-creative-grid${hasLiveRuntime ? " agentlas-live-app-grid" : ""}`}
+        style={hasLiveRuntime ? liveAppFactoryGrid : appFactoryGrid}
+      >
+        <section style={hasLiveRuntime ? liveAppLeftRail : leftRail}>
           <SectionTitle icon={<IconTarget size={14} />} label="Product Thesis" />
           <div style={appThesis}>
             <strong>{appName}</strong>
@@ -385,7 +479,7 @@ function AppFactorySurface({
           </div>
         </section>
 
-        <main style={centerRail}>
+        <main style={hasLiveRuntime ? liveAppCenterRail : centerRail}>
           <div className="agentlas-workbench-hero" style={appHeroBand}>
             <div>
               <div style={eyebrowDark}>Agent-made App</div>
@@ -399,7 +493,14 @@ function AppFactorySurface({
             </div>
           </div>
 
-          <section style={appPreviewShell}>
+          {hasLiveRuntime ? (
+            <RunningAppPreview
+              appId={surface.liveAppId}
+              declaredUrl={app?.deployment?.previewUrl}
+              title={appName}
+            />
+          ) : (
+          <section style={appPreviewShell} aria-label={`${appName} blueprint, not running`}>
             <div style={appPreviewTopbar}>
               <span style={appLogoMark}>{appName.slice(0, 1).toUpperCase()}</span>
               <strong>{appName}</strong>
@@ -413,7 +514,7 @@ function AppFactorySurface({
             <div className="agentlas-app-preview-body" style={appPreviewBody}>
               <div style={appPreviewMain}>
                 <div style={appPreviewHeadline}>
-                  <span>Live workflow</span>
+                  <span>Blueprint · not running</span>
                   <strong>{sanitizePublicAppCopy(routes[0]?.purpose, "No primary route declared.")}</strong>
                 </div>
                 <div className="agentlas-app-metric-grid" style={metricGrid}>
@@ -456,6 +557,7 @@ function AppFactorySurface({
               </div>
             </div>
           </section>
+          )}
 
           <section className="agentlas-app-lower-grid" style={appLowerGrid}>
             <div style={genericColumn}>
@@ -504,7 +606,7 @@ function AppFactorySurface({
           </section>
         </main>
 
-        <section style={rightRail}>
+        <section style={hasLiveRuntime ? liveAppRightRail : rightRail}>
           <SectionTitle icon={<IconStore size={14} />} label="Ship Console" />
           <div style={actionStack}>
             {(manifest.actions ?? []).slice(0, 6).map((action) => (
@@ -690,13 +792,17 @@ function CreativeStudioSurface({
 function GenericSurface({
   surface,
   onAction,
+  wide = false,
 }: {
   surface: WorkbenchSurface;
   onAction?: SurfaceActionHandler;
+  wide?: boolean;
 }) {
+  const { locale } = useT();
   const manifest = surface.manifest;
   const first = Object.entries(manifest.data)[0];
   const rows = rowsOf(first?.[1]);
+  const mapBlock = surfaceMapBlock(manifest);
   return (
     <div style={surfaceBody}>
       <section style={genericHero}>
@@ -708,6 +814,12 @@ function GenericSurface({
           <span style={darkPill}>{manifest.widgets.length} widgets</span>
         </div>
       </section>
+      {mapBlock && (
+        <section style={genericMapSection} data-surface-renderer="live-map">
+          <SectionTitle icon={<IconRoute size={14} />} label={mapBlock.title} />
+          <OneLiveMap block={mapBlock} locale={locale} compact={!wide} />
+        </section>
+      )}
       <section className="agentlas-generic-content" style={genericContent}>
         <div style={genericColumn}>
           <SectionTitle icon={<IconLayers size={14} />} label="Widgets" />
@@ -1508,6 +1620,43 @@ function rowsOf(data?: AgentlasSurfaceDataSet): JsonObject[] {
   return [];
 }
 
+export function surfaceMapBlock(manifest: AgentlasSurfaceManifest): OneSurfaceMapBlock | null {
+  const widget = manifest.widgets.find((candidate) => String(candidate.type).toLowerCase() === "map");
+  if (!widget) return null;
+  const dataset = (widget.data ? dataByName(manifest, widget.data) : undefined) ?? firstData(manifest, "routes");
+  const locations = rowsOf(dataset).flatMap((row, index) => {
+    const latitude = numericField(row, "latitude", "lat");
+    const longitude = numericField(row, "longitude", "lng", "lon");
+    if (latitude == null || longitude == null || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) return [];
+    const declaredSequence = numericField(row, "sequence", "order");
+    return [{
+      locationRef: stringField(row, "locationRef") || stringField(row, "id") || `location-${index + 1}`,
+      label: stringField(row, "label") || stringField(row, "name") || `Location ${index + 1}`,
+      latitude,
+      longitude,
+      sequence: declaredSequence != null && Number.isSafeInteger(declaredSequence) && declaredSequence > 0
+        ? declaredSequence
+        : index + 1,
+    }];
+  });
+  if (locations.length === 0) return null;
+  return {
+    blockId: "work-live-map",
+    type: "Map",
+    title: widget.title || dataset?.summary || manifest.title,
+    locations,
+  };
+}
+
+function numericField(row: JsonObject, ...keys: string[]): number | null {
+  for (const key of keys) {
+    const raw = row[key];
+    const value = typeof raw === "number" ? raw : typeof raw === "string" && raw.trim() ? Number(raw) : Number.NaN;
+    if (Number.isFinite(value)) return value;
+  }
+  return null;
+}
+
 function rowsWithSurfaceState(surface: WorkbenchSurface, dataName: string, rows: JsonObject[]): JsonObject[] {
   const overlayRows = objectAt(surface.state, ["data", dataName, "rows"]);
   if (!Array.isArray(overlayRows)) return rows;
@@ -1820,6 +1969,14 @@ const appFactoryGrid: CSSProperties = {
   background: "var(--paper-edge)",
 };
 
+// A running app is the primary output, so it owns the full first row instead
+// of being squeezed into the old three-column blueprint rail. Product and
+// shipping metadata remain available underneath the live canvas.
+const liveAppFactoryGrid: CSSProperties = {
+  ...appFactoryGrid,
+  gridTemplateColumns: "minmax(240px, 1fr) minmax(240px, 1fr)",
+};
+
 const leftRail: CSSProperties = {
   background: "var(--paper)",
   padding: 14,
@@ -1837,6 +1994,24 @@ const rightRail: CSSProperties = {
   background: "var(--paper)",
   padding: 14,
   overflow: "auto",
+};
+
+const liveAppCenterRail: CSSProperties = {
+  ...centerRail,
+  gridColumn: "1 / -1",
+  gridRow: 1,
+};
+
+const liveAppLeftRail: CSSProperties = {
+  ...leftRail,
+  gridColumn: 1,
+  gridRow: 2,
+};
+
+const liveAppRightRail: CSSProperties = {
+  ...rightRail,
+  gridColumn: 2,
+  gridRow: 2,
 };
 
 const appThesis: CSSProperties = {
@@ -1942,6 +2117,15 @@ const genericHero: CSSProperties = {
   color: "white",
 };
 
+const genericMapSection: CSSProperties = {
+  minWidth: 0,
+  margin: "0 14px 14px",
+  padding: 12,
+  border: "1px solid var(--paper-edge)",
+  borderRadius: 12,
+  background: "var(--paper)",
+};
+
 const eyebrowDark: CSSProperties = {
   fontSize: 10,
   fontWeight: 800,
@@ -1985,6 +2169,29 @@ const appPreviewShell: CSSProperties = {
   background: "var(--paper)",
   border: "1px solid var(--paper-edge)",
   overflow: "hidden",
+};
+
+const appRuntimeUnavailable: CSSProperties = {
+  marginTop: 12,
+  minHeight: 150,
+  padding: 20,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  gap: 12,
+  borderRadius: 10,
+  border: "1px solid var(--paper-edge)",
+  background: "var(--paper-2)",
+  color: "var(--muted-deep)",
+};
+
+const appRuntimeStatusDot: CSSProperties = {
+  width: 9,
+  height: 9,
+  flex: "0 0 auto",
+  borderRadius: 999,
+  background: "#f59e0b",
+  boxShadow: "0 0 0 4px rgba(245,158,11,.12)",
 };
 
 const appPreviewTopbar: CSSProperties = {

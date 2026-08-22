@@ -111,17 +111,19 @@ export function OneTaskforceDialog({
   locale: "ko" | "en";
   busy: boolean;
   onClose: () => void;
-  onCreate: (input: { title: string; memberAgentIds: string[] }) => Promise<void>;
-  onUpdate: (input: { id: string; title: string; memberAgentIds: string[]; expectedRevision: number }) => Promise<void>;
+  onCreate: (input: { title: string; description: string; memberAgentIds: string[] }) => Promise<void>;
+  onUpdate: (input: { id: string; title: string; description: string; memberAgentIds: string[]; expectedRevision: number }) => Promise<void>;
   onRemove: (input: { id: string; expectedRevision: number }) => Promise<void>;
 }) {
   const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
   useEffect(() => {
     if (!open) return;
     setTitle(taskforce?.title ?? "");
+    setDescription(taskforce?.description ?? "");
     setSelected(taskforce?.memberAgentIds ?? []);
     setError(null);
     setConfirmRemove(false);
@@ -169,8 +171,8 @@ export function OneTaskforceDialog({
     if (!nextTitle || busy) return;
     setError(null);
     try {
-      if (taskforce) await onUpdate({ id: taskforce.id, title: nextTitle, memberAgentIds: selected, expectedRevision: taskforce.revision });
-      else await onCreate({ title: nextTitle, memberAgentIds: selected });
+      if (taskforce) await onUpdate({ id: taskforce.id, title: nextTitle, description: description.trim(), memberAgentIds: selected, expectedRevision: taskforce.revision });
+      else await onCreate({ title: nextTitle, description: description.trim(), memberAgentIds: selected });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -191,6 +193,7 @@ export function OneTaskforceDialog({
   >
     <div className={styles.dialogBody} aria-busy={busy ? "true" : "false"}>
       <label className={styles.titleField}>{locale === "ko" ? "이름" : "Name"}<input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={80} placeholder={locale === "ko" ? "예: Launch Team" : "e.g. Launch Team"} /></label>
+      <label className={styles.descriptionField}>{locale === "ko" ? "설명" : "Description"}<textarea value={description} onChange={(event) => setDescription(event.target.value)} maxLength={600} rows={3} placeholder={locale === "ko" ? "이 팀의 역할, 목적, 협업 방식을 설명하세요." : "Describe this team's purpose, responsibilities, and way of working."} /></label>
       {busy && <div className={styles.busyState} role="status" aria-live="polite"><span aria-hidden="true" /><strong>{taskforce ? (locale === "ko" ? "태스크포스를 업데이트하는 중" : "Updating Taskforce") : (locale === "ko" ? "태스크포스를 만드는 중" : "Creating Taskforce")}</strong><small>{locale === "ko" ? "멤버와 독립 그룹 채팅을 함께 동기화합니다." : "Syncing members with the independent group chat."}</small><LoadingEstimate locale={locale} operationKey="one-taskforce-save" expectedSeconds={[2, 20]} /></div>}
       <section className={styles.memberList} aria-label={locale === "ko" ? "태스크포스 멤버" : "Taskforce members"}>
         <div className={styles.memberRow} data-fixed="true">

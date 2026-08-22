@@ -207,7 +207,8 @@ const OPERATIONAL_KEYS = [
   "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "NPM_CONFIG_PREFIX",
   "NPM_CONFIG_CACHE", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
   "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "NO_COLOR",
-  "AGENTLAS_BROWSER_APPROVAL_FILE", "AGENTLAS_COMPUTER_USE_CONTROL_FILE"
+  "AGENTLAS_BROWSER_APPROVAL_FILE", "AGENTLAS_CDP_HEADLESS",
+  "AGENTLAS_COMPUTER_USE_CONTROL_FILE"
 ];
 const PROXY_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
 let mapping;
@@ -497,7 +498,14 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         : argsWithBrowserProfile(key, (s.args ?? []).map(expandHome), opts);
       let builtInEnv: Record<string, string> =
         s.catalogId === "agentlas-browser"
-          ? { [BROWSER_APPROVAL_FILE_ENV]: browserApprovalInfoPath() }
+          ? {
+              [BROWSER_APPROVAL_FILE_ENV]: browserApprovalInfoPath(),
+              // Agent runs render their shared CDP page inside One's Browser
+              // rail. Keep the automation host non-windowed; the explicit
+              // Browser login action still uses browserOpenLogin's headful
+              // dedicated-profile window when a person needs to authenticate.
+              AGENTLAS_CDP_HEADLESS: "1",
+            }
           : s.catalogId === "cua-driver"
             ? { [COMPUTER_USE_CONTROL_FILE_ENV]: computerUseControlInfoPath() }
             : {};

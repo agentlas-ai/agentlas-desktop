@@ -7,46 +7,59 @@
 
 .entry {
   display: grid;
-  grid-template-columns: 36px minmax(0, 1fr);
-  align-items: start;
-  gap: 10px;
-  min-width: 0;
-}
-
-.content {
-  min-width: 0;
-  max-width: min(760px, 92%);
-}
-
-.content > header {
-  display: flex;
-  align-items: baseline;
+  grid-template-rows: auto auto;
   gap: 7px;
-  min-height: 20px;
+  min-width: 0;
+}
+
+/* 화자 헤더 — 캐릭터·이름·전달상태·시각이 한 줄, 본문은 그 아래. */
+.entryHeader {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 24px;
   color: #7d8285;
   font-size: 11px;
 }
-
-.content > header strong {
+.entryHeader strong {
   color: #2c3033;
   font-size: 12.5px;
   font-weight: 700;
 }
-
-.content > header time {
+.entryHeader time {
   margin-left: auto;
   color: #a0a5a8;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
+.entry[data-threaded="true"] {
+  position: relative;
+  margin-left: 32px;
+}
+
+.entry[data-threaded="true"]::before {
+  position: absolute;
+  top: -12px;
+  bottom: 18px;
+  left: -18px;
+  width: 14px;
+  border-bottom: 1px solid #d9dddc;
+  border-left: 1px solid #d9dddc;
+  border-radius: 0 0 0 10px;
+  content: "";
+}
+
+
 .delivery { color: #8b9194; }
 .delivery[data-status="failed"] { color: #a34d44; }
 .delivery[data-status="cancelled"] { color: #8a6a35; }
 
 .bubble {
-  margin-top: 3px;
-  padding: 10px 12px;
+  /* 캐릭터/헤더와 본문이 붙지 않게 — 오너 지시 2026-08-23 */
+  max-width: min(760px, 96%);
+  margin: 2px 0 0 2px;
+  padding: 11px 13px;
   border: 1px solid #e4e7e6;
   border-radius: 3px 14px 14px 14px;
   background: #f7f8f7;
@@ -54,6 +67,29 @@
   font-size: 13px;
   line-height: 1.6;
   overflow-wrap: anywhere;
+}
+
+.replyContext {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+  margin: 2px 0 5px;
+  color: #7b8184;
+  font-size: 10.5px;
+}
+
+.replyContext strong {
+  flex: 0 0 auto;
+  color: #51585b;
+  font-weight: 700;
+}
+
+.replyContext span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .entry[data-direction="worker-to-orchestrator"] .bubble {
@@ -68,6 +104,48 @@
   color: #5c6e42;
   font-weight: 700;
 }
+
+/* 문서형 발화 — 계획서·PRD·보고서는 말풍선이 아니라 렌더된 문서 카드로(서브스택 느낌). */
+.bubble[data-doc="true"] {
+  max-width: min(820px, 100%);
+  padding: 26px 30px 28px;
+  border: 1px solid #e8eae8;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 10px 28px rgba(28, 43, 34, .05);
+  font-size: 13.5px;
+  line-height: 1.72;
+}
+.bubble[data-doc="true"] .markdown :global(h1),
+.bubble[data-doc="true"] .markdown :global(h2) { margin: 18px 0 8px !important; font-size: 17px; line-height: 1.3; }
+.bubble[data-doc="true"] .markdown :global(h3),
+.bubble[data-doc="true"] .markdown :global(h4) { margin: 15px 0 6px !important; font-size: 14px; }
+.bubble[data-doc="true"] .markdown :global(h1:first-child),
+.bubble[data-doc="true"] .markdown :global(h2:first-child),
+.bubble[data-doc="true"] .markdown :global(h3:first-child) { margin-top: 0 !important; }
+.bubble[data-doc="true"] .markdown :global(p) { margin: 0 0 9px !important; }
+.bubble[data-doc="true"] .markdown :global(ul),
+.bubble[data-doc="true"] .markdown :global(ol) { margin: 8px 0 !important; padding-left: 21px !important; }
+.bubble[data-doc="true"] .mention { display: block; margin: 0 0 10px; }
+
+/* SNS 식 접힌 답글 — "+N replies" 필. */
+.thread { display: grid; gap: 10px; min-width: 0; }
+.replies {
+  justify-self: start;
+  min-height: 30px;
+  margin: -2px 0 0 50px;
+  padding: 4px 12px;
+  border: 1px solid #dfe4e0;
+  border-radius: 999px;
+  background: #fff;
+  color: #5e6f47;
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.replies:hover { background: #f4f6f3; }
+.replies:focus-visible { outline: 2px solid rgba(96, 122, 54, .28); outline-offset: 2px; }
 
 .markdown { min-width: 0; }
 .markdown > :global(div) { min-width: 0; }
@@ -96,9 +174,12 @@
 
 @media (max-width: 680px) {
   .conversation { gap: 14px; }
-  .entry { grid-template-columns: 32px minmax(0, 1fr); gap: 8px; }
-  .content { max-width: 96%; }
-  .bubble { padding: 9px 10px; font-size: 12.5px; }
-  .content > header { flex-wrap: wrap; gap: 4px 6px; }
-  .content > header time { margin-left: 0; }
+  .entry { gap: 6px; }
+  .bubble { max-width: 100%; padding: 9px 10px; font-size: 12.5px; }
+  .bubble[data-doc="true"] { padding: 18px 16px 20px; }
+  .entryHeader { flex-wrap: wrap; gap: 4px 7px; }
+  .entryHeader time { margin-left: 0; }
+  .replies { margin-left: 40px; }
+  .entry[data-threaded="true"] { margin-left: 18px; }
+  .replyContext span { display: none; }
 }

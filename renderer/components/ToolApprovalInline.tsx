@@ -29,6 +29,47 @@ export function ToolApprovalCard({ request, compact = false }: { request: ToolAp
   const { locale } = useT();
   const ko = locale === "ko";
   const runtimeName = RUNTIME_LABEL[request.runtime] ?? request.runtime;
+  const imageTool = /(?:image|dall|flux|midjourney|imagen)/i.test(request.tool);
+  if (compact) {
+    return (
+      <div className="tac tac-compact" role="group" aria-label={ko ? "도구 실행 승인" : "Tool call approval"} data-testid="tool-approval-card" data-approval-id={request.id}>
+        <span className="tac-compact-copy">
+          <strong>{imageTool ? (ko ? "이미지 생성을 허용할까요?" : "Allow image generation?") : (ko ? `${request.tool} 사용을 허용할까요?` : `Allow ${request.tool}?`)}</strong>
+          <small>{runtimeName}</small>
+        </span>
+        <span className="tac-compact-actions">
+          <button type="button" className="deny" onClick={() => decideToolApproval(request.id, "deny")}>{ko ? "거부" : "Deny"}</button>
+          <button type="button" onClick={() => decideToolApproval(request.id, "allow_session")}>{ko ? "이 작업 동안" : "For this task"}</button>
+          <button type="button" className="primary" onClick={() => decideToolApproval(request.id, "allow_once")}>{ko ? "이번만 허용" : "Allow once"}</button>
+        </span>
+        <style jsx>{`
+          .tac-compact {
+            width: min(920px, 100%); min-height: 42px; display: flex; align-items: center; gap: 12px;
+            margin: 0 auto 7px; padding: 5px 6px 5px 12px; border: 1px solid #d8ddda;
+            border-radius: 13px; background: rgba(255,255,255,.98); box-shadow: 0 8px 24px rgba(25,31,36,.06);
+            color: #353a3d; pointer-events: auto;
+          }
+          .tac-compact-copy { min-width: 0; display: flex; flex: 1 1 auto; align-items: baseline; gap: 7px; }
+          .tac-compact-copy strong { overflow: hidden; font-size: 11px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+          .tac-compact-copy small { color: #8a9093; font-size: 9px; white-space: nowrap; }
+          .tac-compact-actions { display: flex; flex: 0 0 auto; gap: 5px; }
+          .tac-compact-actions button {
+            min-height: 32px; padding: 0 10px; border: 1px solid #d9ddde; border-radius: 9px;
+            background: #fff; color: #4d5356; font: inherit; font-size: 10px; font-weight: 680; cursor: pointer;
+          }
+          .tac-compact-actions button:hover, .tac-compact-actions button:focus-visible { background: #f2f3f3; outline: 2px solid rgba(42,47,50,.15); }
+          .tac-compact-actions .deny { color: #9a4e45; }
+          .tac-compact-actions .primary { border-color: #24282b; background: #24282b; color: #fff; }
+          .tac-compact-actions .primary:hover, .tac-compact-actions .primary:focus-visible { background: #393e41; }
+          @media (max-width: 720px) {
+            .tac-compact { align-items: stretch; flex-direction: column; padding: 9px; }
+            .tac-compact-actions { width: 100%; }
+            .tac-compact-actions button { flex: 1 1 0; }
+          }
+        `}</style>
+      </div>
+    );
+  }
   return (
     <div className="tac" role="group" aria-label={ko ? "도구 실행 승인" : "Tool call approval"} data-testid="tool-approval-card" data-approval-id={request.id}>
       <div className="tac-head">
@@ -83,7 +124,7 @@ export function ToolApprovalCard({ request, compact = false }: { request: ToolAp
  * 대화 화면이 자기 chatId 로 마운트한다. 이 대화의 live 요청을 도착 순서대로 인라인 렌더하고,
  * 마운트되어 있는 동안 전역 배지는 이 대화 요청을 세지 않는다.
  */
-export function ToolApprovalInline({ chatId }: { chatId: string | null | undefined }) {
+export function ToolApprovalInline({ chatId, compact = false }: { chatId: string | null | undefined; compact?: boolean }) {
   const { queue } = useToolApprovals();
   useEffect(() => markChatVisible(chatId), [chatId]);
   if (!chatId) return null;
@@ -91,7 +132,7 @@ export function ToolApprovalInline({ chatId }: { chatId: string | null | undefin
   if (mine.length === 0) return null;
   return (
     <div data-testid="tool-approval-inline">
-      {mine.map((request) => <ToolApprovalCard key={request.id} request={request} />)}
+      {mine.map((request) => <ToolApprovalCard key={request.id} request={request} compact={compact} />)}
     </div>
   );
 }

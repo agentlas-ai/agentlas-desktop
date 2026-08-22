@@ -12,6 +12,7 @@ import { StringDecoder } from "node:string_decoder";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult , RunnerFailure } from "./runner";
 import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, wrapSystemPrompt } from "./runner";
 import { detectRuntimeRefusal } from "./runtime-refusal";
+import { abortReasonError } from "./abort-reason";
 import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
 import {
   CLI_HISTORY_CONTEXT_TOKENS,
@@ -192,6 +193,10 @@ function systemFingerprint(req: RunnerRequest): string {
     .update(req.model ?? "")
     .update("\0")
     .update(req.effort ?? "")
+    .update("\0")
+    .update(req.isolatedMcpConfig ? "isolated-mcp" : "provider-defaults")
+    .update("\0")
+    .update(JSON.stringify(req.mcpCodexConfigArgs ?? []))
     .digest("hex");
 }
 
@@ -472,6 +477,8 @@ function runCodexProcess(
         type?: string;
         text?: string;
         name?: string;
+        server?: string;
+        tool?: string;
         command?: string;
         input?: unknown;
         args?: unknown;
@@ -571,7 +578,18 @@ function runCodexProcess(
       } else if ((ev.type === "item.started" || ev.type === "item.completed") && isToolItem(ev.item?.type)) {
         closeThinking();
         const item = ev.item!;
+        // `codex exec --json` serializes MCP calls as snake_case
+        // `mcp_tool_call` items. Their executable identity lives in
+        // `server` + `tool`; `item.type` is only the envelope name. Keeping
+        // the envelope here made every browser action look like the same
+        // generic tool, so One could not attribute a navigation to the
+        // current Taskforce or present its page in the Browser rail.
+        const exactMcpName =
+          item.type === "mcp_tool_call" && item.tool
+            ? item.server ? `${item.server}.${item.tool}` : item.tool
+            : undefined;
         const name =
+          exactMcpName ??
           item.name ??
           (item.command ? "bash" : undefined) ??
           item.type ??
@@ -736,7 +754,10 @@ function runCodexProcess(
  * 우리에게 물어본다. full 은 예전 `--dangerously-bypass-approvals-and-sandbox` 와 같게
  * `never` 다 — 사용자가 이미 경계를 내려놓은 모드다.
  */
-export function codexThreadPolicy(permission: RunnerRequest["permission"]): {
+export function codexThreadPolicy(
+  permission: RunnerRequest["permission"],
+  cwd = agentRunCwd(),
+): {
   sandbox: string;
   approvalPolicy: string;
   sandboxPolicy: Record<string, unknown>;
@@ -745,10 +766,19 @@ export function codexThreadPolicy(permission: RunnerRequest["permission"]): {
     return { sandbox: "danger-full-access", approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } };
   }
   if (permission === "write") {
+    const writableRoot = path.resolve(cwd);
     return {
       sandbox: "workspace-write",
       approvalPolicy: "on-request",
-      sandboxPolicy: { type: "workspaceWrite", networkAccess: true },
+      sandboxPolicy: {
+        type: "workspaceWrite",
+        writableRoots: [writableRoot],
+        networkAccess: true,
+        // Taskforce staging folders can legitimately live below TMPDIR on
+        // macOS. The exact cwd is still the only added writable root.
+        excludeTmpdirEnvVar: false,
+        excludeSlashTmp: false,
+      },
     };
   }
   return { sandbox: "read-only", approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } };
@@ -849,7 +879,7 @@ async function runCodexResidentTurn(input: {
   const { bin, req, events, chatId, fingerprint, resumeThreadId, gapContext, mcpArgs, appliedEffort } = input;
   const cwd = req.cwd ?? agentRunCwd();
   const env = req.env ?? process.env;
-  const policy = codexThreadPolicy(req.permission);
+  const policy = codexThreadPolicy(req.permission, cwd);
   const approvalsReviewer = req.approvalsReviewer ?? "user";
   /*
    * 스폰 형상 — `-c` 는 app-server 하위 명령의 옵션이다(실측 `codex app-server --help`).
@@ -1136,7 +1166,7 @@ async function runCodexResidentTurn(input: {
           session.threadId = resumeThreadId;
           resumed = true;
         } catch (err) {
-          if (req.signal?.aborted) throw new Error(tStatus(req.locale, "aborted"));
+          if (req.signal?.aborted) throw abortReasonError(req);
           events.onStatus(`[runtime-session] resume_failed kind=${KIND}`);
           if (req.unattended) {
             // 무인 실행은 조용히 새 대화를 만들지 않는다(exec 경로와 같은 규칙).
@@ -1202,7 +1232,7 @@ async function runCodexResidentTurn(input: {
         } : {}),
       });
       broken = true;
-      throw new Error(tStatus(req.locale, "aborted"));
+      throw abortReasonError(req);
     }
     if (reason === "closed") {
       // 전송이 죽었다 — 우리가 물려준 세션의 문제다. 조용히 버리고 1회성으로 한 번 더.
@@ -1228,7 +1258,7 @@ async function runCodexResidentTurn(input: {
     }
     if (interrupted) {
       broken = true;
-      throw new Error(tStatus(req.locale, "aborted"));
+      throw abortReasonError(req);
     }
 
     session.completedTurns += 1;
@@ -1367,6 +1397,12 @@ export const runCodex: Runner = async (
     runReq.mcpCodexConfigArgs && runReq.mcpCodexConfigArgs.length > 0
       ? runReq.mcpCodexConfigArgs
       : [];
+  // Exact Agentlas Browser turns must not inherit provider-global MCP/plugin
+  // configuration (for example a user-level Playwright server that opens its
+  // own Chrome profile). Codex supports this on the one-shot exec surface; its
+  // app-server has no equivalent flag, so isolated turns intentionally bypass
+  // residency and use the exact Main-authored `-c mcp_servers.*` overrides.
+  const isolatedConfigArgs = runReq.isolatedMcpConfig ? ["--ignore-user-config"] : [];
   // 모델/effort를 CLI에 명시 전달 — 예전엔 세션 지문에만 쓰고 인자로는 안 넘겨서, 앱이
   // 뭘 선택했든 기기의 ~/.codex/config.toml(또는 codex 업데이트가 바꾼 내장 기본값)이
   // 이겼다(2026-07-08: 다른 기기에서 지정한 적 없는 Spark 모델로 조용히 실행된 사고).
@@ -1441,6 +1477,7 @@ export const runCodex: Runner = async (
     codexAppServerSupported() &&
     !residencyDisabledFor(KIND, runReq.env ?? process.env) &&
     !runReq.untrustedNoTools &&
+    !runReq.isolatedMcpConfig &&
     runReq.chatId &&
     fingerprint
   ) {
@@ -1495,6 +1532,7 @@ export const runCodex: Runner = async (
     const args = [
       "exec",
       "resume",
+      ...isolatedConfigArgs,
       "--json",
       "--skip-git-repo-check",
       ...resumePerm,
@@ -1527,7 +1565,7 @@ export const runCodex: Runner = async (
       if (runReq.chatId && fingerprint && r.threadId) {
         saveRuntimeSession(runReq.chatId, KIND, r.threadId, fingerprint, codexUsageCounters(r));
       }
-      throw new Error(tStatus(runReq.locale, "aborted"));
+      throw abortReasonError(runReq);
     }
     if (r.code === 0) {
       if (runReq.chatId && fingerprint && r.threadId) {
@@ -1566,6 +1604,7 @@ export const runCodex: Runner = async (
   // CREATE: 시스템 프롬프트 + 히스토리 + user를 stdin으로 보내 새 세션을 시드한다.
   const createArgs = [
     "exec",
+    ...isolatedConfigArgs,
     "--json",
     "--skip-git-repo-check",
     ...permArgs,
@@ -1579,7 +1618,7 @@ export const runCodex: Runner = async (
     if (runReq.chatId && fingerprint && created.threadId) {
       saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint, codexUsageCounters(created));
     }
-    throw new Error(tStatus(runReq.locale, "aborted"));
+    throw abortReasonError(runReq);
   }
   if (created.code === 0) {
     if (runReq.chatId && fingerprint && created.threadId) {

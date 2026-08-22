@@ -303,3 +303,9 @@ scripts/demo/
 /qa-*.mjs
 /renderer/qa-*.mjs
 /run-queue.sh
+
+# Generated from the pinned maplibre-gl package before renderer dev/build.
+/renderer/public/vendor/maplibre-gl/
+
+# Generated from the pinned File Viewer dependency graph before renderer dev/build.
+/renderer/public/file-viewer/

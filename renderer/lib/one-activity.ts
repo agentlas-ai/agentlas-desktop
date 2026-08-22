@@ -16,6 +16,7 @@ export interface OneActivityHandoffMessage {
   direction: AgentMessageDirection;
   fromAgentId: string;
   toAgentId: string;
+  replyToMessageId?: string;
   text: string;
   observedAt: string;
 }
@@ -279,6 +280,9 @@ function mergeHandoffs(
             direction: message.direction,
             fromAgentId: sourceId,
             toAgentId: targetId,
+            ...(message.replyToMessageId?.trim()
+              ? { replyToMessageId: message.replyToMessageId.trim() }
+              : {}),
             text: message.text.trim(),
             observedAt,
           } satisfies OneActivityHandoffMessage
@@ -289,9 +293,11 @@ function mergeHandoffs(
     }
     const nextStatus: OneHandoffStatus = event.tool?.isError
       ? "failed"
-      : event.done === true
-        ? "completed"
-        : existing?.status ?? "running";
+      : isDelegate
+        ? "running"
+        : event.done === true
+          ? "completed"
+          : existing?.status ?? "running";
     const nextHandoff: OneActivityHandoff = {
       id,
       fromAgentId: existing?.fromAgentId ?? sourceId,
@@ -353,7 +359,14 @@ function mergeVerifiedSurfaceArtifacts(
       binding,
       ...(event.agentName?.trim() ? { agentName: event.agentName.trim() } : {}),
     };
-    const index = next.findIndex((candidate) => candidate.id === nextArtifact.id);
+    const normalizedLabel = nextArtifact.label.trim().toLocaleLowerCase();
+    let index = next.findIndex((candidate) => candidate.id === nextArtifact.id);
+    if (index < 0) index = next.findIndex((candidate) => (
+      candidate.kind === nextArtifact.kind
+      && candidate.binding.taskId === binding.taskId
+      && candidate.binding.chatId === binding.chatId
+      && candidate.label.trim().toLocaleLowerCase() === normalizedLabel
+    ));
     if (index >= 0) next[index] = { ...next[index], ...nextArtifact };
     else next.push(nextArtifact);
   }
@@ -709,10 +722,11 @@ function ledgerAgentMessage(payload: Record<string, unknown>): NonNullable<McpIn
   const direction = ledgerString(payload, "agentMessageDirection");
   const fromAgentId = ledgerString(payload, "agentMessageFrom");
   const toAgentId = ledgerString(payload, "agentMessageTo");
+  const replyToMessageId = ledgerString(payload, "agentMessageReplyTo");
   const text = ledgerString(payload, "agentMessageText");
   if (!messageId || !fromAgentId || !toAgentId || !text) return undefined;
   if (direction !== "orchestrator-to-worker" && direction !== "worker-to-orchestrator") return undefined;
-  return { messageId, direction, fromAgentId, toAgentId, text };
+  return { messageId, direction, fromAgentId, toAgentId, ...(replyToMessageId ? { replyToMessageId } : {}), text };
 }
 
 function ledgerHttpsUrls(payload: Record<string, unknown>, key: string): string[] | undefined {

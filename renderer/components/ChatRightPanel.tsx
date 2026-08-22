@@ -23,6 +23,9 @@ import { ipc } from "@/lib/ipc";
 import { receiptAutoExpanded } from "@/lib/run-receipt-state";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import { projectPoolMemberKey } from "@shared/project-agent-pool";
+import { LiveOutputViewer, type LiveOutputKind } from "./LiveOutputViewer";
+import { CodeIdeViewer, isCodeArtifactName } from "./CodeIdeViewer";
+import { NativeLiveWebView } from "./NativeLiveWebView";
 
 export type ChatRightPanelTab = "agent" | "file" | "panel" | "memory";
 type PanelViewerSource = "workbench" | "file";
@@ -93,6 +96,7 @@ export function ChatRightPanel({
   const ko = locale === "ko";
   const [filePreview, setFilePreview] = useState<WorkspaceFilePreview | null>(null);
   const [viewerSource, setViewerSource] = useState<PanelViewerSource>("workbench");
+  const [resizing, setResizing] = useState(false);
   const hasPanelContent = Boolean(artifact || surface || filePreview);
   const showFilePreview = viewerSource === "file" && filePreview;
   const showWorkbench = viewerSource === "workbench" && (artifact || surface);
@@ -131,12 +135,16 @@ export function ChatRightPanel({
     event.preventDefault();
     const startX = event.clientX;
     const startWidth = width ?? 392;
-    const maxWidth = Math.max(340, Math.min(window.innerWidth - 420, Math.floor(window.innerWidth * 0.64)));
+    const maxWidth = window.innerWidth <= 760
+      ? Math.max(320, window.innerWidth - 40)
+      : Math.max(320, Math.min(1280, window.innerWidth - 520));
+    setResizing(true);
     const onMove = (moveEvent: PointerEvent) => {
       const next = Math.round(startWidth + startX - moveEvent.clientX);
       onResizeWidth(Math.min(maxWidth, Math.max(300, next)));
     };
     const onUp = () => {
+      setResizing(false);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
     };
@@ -148,24 +156,32 @@ export function ChatRightPanel({
     if (!onResizeWidth || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
     const current = width ?? 392;
-    const maxWidth = Math.max(340, Math.min(window.innerWidth - 420, Math.floor(window.innerWidth * 0.64)));
+    const maxWidth = window.innerWidth <= 760
+      ? Math.max(320, window.innerWidth - 40)
+      : Math.max(320, Math.min(1280, window.innerWidth - 520));
     const next = event.key === "Home"
-      ? 300
+      ? 320
       : event.key === "End"
         ? maxWidth
         : current + (event.key === "ArrowLeft" ? 16 : -16);
-    onResizeWidth(Math.min(maxWidth, Math.max(300, next)));
+    onResizeWidth(Math.min(maxWidth, Math.max(320, next)));
   }
 
   return (
-    <aside className="chat-right-panel titlebar-nodrag" data-active-tab={activeTab} style={{ ...shellStyle, width: width ?? shellStyle.width, maxWidth: "none" }}>
+    <aside
+      className="chat-right-panel titlebar-nodrag"
+      data-active-tab={activeTab}
+      data-rich-output={activeTab === "panel" && hasPanelContent ? "true" : "false"}
+      data-resizing={resizing ? "true" : "false"}
+      style={{ ...shellStyle, width: width ?? shellStyle.width, maxWidth: "none", transition: resizing ? "none" : shellStyle.transition }}
+    >
       {onResizeWidth && (
         <div
           role="separator"
           tabIndex={0}
           aria-orientation="vertical"
-          aria-valuemin={300}
-          aria-valuemax={960}
+          aria-valuemin={320}
+          aria-valuemax={1280}
           aria-valuenow={width ?? 392}
           aria-label={ko ? "우측 패널 너비" : "Right panel width"}
           title={ko ? "패널 너비 조절" : "Resize panel"}
@@ -752,49 +768,30 @@ function FileTab({
 function FileViewer({ file }: { file: WorkspaceFilePreview }) {
   const { locale } = useT();
   const ko = locale === "ko";
-  const [openError, setOpenError] = useState<string | null>(null);
   const typeLabel = viewerKindLabel(file.viewerKind, ko);
-  const openExternal = async () => {
-    setOpenError(null);
-    const message = await openWorkspaceFileExternal(file, ko);
-    if (message) setOpenError(message);
-  };
-  const revealInFolder = async () => {
-    setOpenError(null);
-    const message = await revealWorkspaceFile(file, ko);
-    if (message) setOpenError(message);
-  };
   return (
     <section style={fileViewerStyle}>
       <header style={fileViewerHeaderStyle}>
         <span style={fileViewerIconStyle}>{iconForViewerKind(file.viewerKind)}</span>
         <div style={{ flex: 1, minWidth: 0 }}>
           <strong style={fileViewerTitleStyle} title={file.path}>{file.name}</strong>
-          <span style={fileViewerMetaStyle}>{typeLabel} · {formatBytes(file.size)}</span>
+          <span style={fileViewerMetaStyle}>{typeLabel} · {formatBytes(file.size)}{file.live ? <b style={{ marginLeft: 6, color: "#23724d", fontSize: 9, letterSpacing: ".04em" }}>● LIVE</b> : null}</span>
         </div>
-        <button type="button" onClick={openExternal} style={fileViewerOpenButtonStyle}>
-          {ko ? "외부 열기" : "Open"}
-        </button>
-        {canRevealWorkspaceFile(file) && (
-          <button type="button" onClick={revealInFolder} style={fileViewerOpenButtonStyle}>
-            {ko ? "Finder에서 보기" : "Show"}
-          </button>
-        )}
       </header>
-      {openError && <div role="alert" style={fileNoticeStyle}>{openError}</div>}
+      {file.available === false && <div role="status" style={fileNoticeStyle}>{ko ? "파일 교체를 감지했습니다. 새 버전을 기다리는 중…" : "File replacement detected. Waiting for the new version…"}</div>}
       <div style={fileViewerBodyStyle}>
         {file.viewerKind === "browser" ? (
           <BrowserViewer file={file} />
-        ) : file.viewerKind === "image" ? (
-          <div style={mediaStageStyle}>
-            <img src={file.fileUrl} alt={file.name} style={imagePreviewStyle} />
-          </div>
-        ) : file.viewerKind === "video" ? (
-          <div style={mediaStageStyle}>
-            <video src={file.fileUrl} controls preload="metadata" style={videoPreviewStyle} />
-          </div>
-        ) : file.viewerKind === "pdf" ? (
-          <iframe src={file.fileUrl} title={file.name} style={iframePreviewStyle} />
+        ) : isLiveOutputKind(file.viewerKind) ? (
+          <LiveOutputViewer
+            source={file.fileUrl}
+            name={file.name}
+            kind={file.viewerKind}
+            mimeType={file.mimeType}
+            size={file.size}
+            locale={ko ? "ko" : "en"}
+            fill
+          />
         ) : isTextualViewerKind(file.viewerKind) && !file.content ? (
           /* ★내용이 없으면 **백지 대신 이유를 말한다.** 헤더만 뜨고 본문이 비어 있는
              화면은 "미리보기가 고장났다"로 읽힌다 — 실제로 그렇게 보고됐다. */
@@ -803,13 +800,12 @@ function FileViewer({ file }: { file: WorkspaceFilePreview }) {
             <strong>{ko ? "이 파일의 내용을 읽지 못했습니다" : "Could not read this file"}</strong>
             <p>
               {ko
-                ? "파일이 옮겨졌거나 이 대화의 작업 폴더 밖에 있을 수 있습니다. 기본 앱으로 열어 확인하세요."
-                : "It may have moved, or it sits outside this chat's working folder. Open it in its default app."}
+                ? "파일이 옮겨졌거나 이 대화의 작업 폴더 밖에 있을 수 있습니다. 채팅에서 다시 생성하거나 경로를 확인하세요."
+                : "It may have moved, or it sits outside this chat's working folder. Recreate it in chat or check the path."}
             </p>
-            <button type="button" onClick={openExternal} style={fileViewerPrimaryButtonStyle}>
-              {ko ? "파일 열기" : "Open file"}
-            </button>
           </div>
+        ) : (file.viewerKind === "json" || file.viewerKind === "text") && isCodeArtifactName(file.name) ? (
+          <CodeIdeViewer name={file.name} locale={ko ? "ko" : "en"} initialContent={file.viewerKind === "json" ? prettyJson(file.content || "") : file.content || ""} fill />
         ) : file.viewerKind === "markdown" ? (
           <MarkdownFileViewer file={file} />
         ) : file.viewerKind === "json" || file.viewerKind === "text" ? (
@@ -824,13 +820,8 @@ function FileViewer({ file }: { file: WorkspaceFilePreview }) {
             <IconFileUp size={28} style={{ color: "var(--muted)" }} />
             <strong>{ko ? "인앱 미리보기가 제한된 파일입니다" : "In-app preview is limited"}</strong>
             <p>
-              {file.viewerKind === "document"
-                ? (ko ? "문서 파일은 기본 앱으로 열어 확인하세요." : "Open this document in its default app.")
-                : (ko ? "이 파일 형식은 기본 앱으로 여는 것이 안전합니다." : "Open this file type in its default app.")}
+              {ko ? "이 형식은 현재 인앱 렌더러에서 지원하지 않습니다." : "This format is not supported by the in-app renderer yet."}
             </p>
-            <button type="button" onClick={openExternal} style={fileViewerPrimaryButtonStyle}>
-              {ko ? "파일 열기" : "Open file"}
-            </button>
           </div>
         )}
       </div>
@@ -841,6 +832,12 @@ function FileViewer({ file }: { file: WorkspaceFilePreview }) {
 /** 본문을 텍스트로 그리는 뷰어들 — 이들만 `content` 하이드레이션에 의존한다. */
 function isTextualViewerKind(kind: WorkspaceFilePreview["viewerKind"]): boolean {
   return kind === "markdown" || kind === "json" || kind === "text";
+}
+
+type WorkspaceLiveOutputKind = Extract<LiveOutputKind, WorkspaceFilePreview["viewerKind"]>;
+
+function isLiveOutputKind(kind: WorkspaceFilePreview["viewerKind"]): kind is WorkspaceLiveOutputKind {
+  return ["image", "video", "audio", "pdf", "document", "spreadsheet", "presentation", "archive"].includes(kind);
 }
 
 function externalOpenTargets(file: WorkspaceFilePreview): string[] {
@@ -857,41 +854,6 @@ function externalOpenTargets(file: WorkspaceFilePreview): string[] {
     if (value && !out.includes(value)) out.push(value);
   }
   return out;
-}
-
-async function openWorkspaceFileExternal(file: WorkspaceFilePreview, ko: boolean): Promise<string | null> {
-  const targets = externalOpenTargets(file);
-  const bridge = ipc();
-  if (bridge?.fs?.openPath) {
-    for (const target of targets) {
-      if (/^(data:|blob:)/i.test(target)) continue;
-      const result = await bridge.fs.openPath(target).catch(() => ({ ok: false, message: "" }));
-      if (result.ok) return null;
-    }
-    return ko ? "이 파일을 외부 앱에서 열지 못했습니다. 파일 위치와 기본 앱 설정을 확인해 주세요." : "This file could not be opened externally. Check its location and default app.";
-  }
-  window.open(file.browserUrl || file.fileUrl, "_blank", "noopener,noreferrer");
-  return null;
-}
-
-async function revealWorkspaceFile(file: WorkspaceFilePreview, ko: boolean): Promise<string | null> {
-  const bridge = ipc();
-  if (!bridge?.fs?.showItemInFolder) {
-    return ko ? "Finder에서 보기 기능을 사용할 수 없습니다." : "Show in folder is not available.";
-  }
-  for (const target of externalOpenTargets(file)) {
-    if (/^(https?:|data:|blob:)/i.test(target)) continue;
-    const result = await bridge.fs.showItemInFolder(target).catch(() => ({ ok: false, message: "" }));
-    if (result.ok) return null;
-  }
-  return ko ? "Finder에서 이 파일을 표시하지 못했습니다. 파일이 이동되거나 삭제되지 않았는지 확인해 주세요." : "This file could not be shown in Finder. Check whether it was moved or deleted.";
-}
-
-function canRevealWorkspaceFile(file: WorkspaceFilePreview): boolean {
-  return externalOpenTargets(file).some((target) => {
-    if (/^agentlas:\/\/localfile\//i.test(target) || target.startsWith("file://")) return true;
-    return target.startsWith("/") || /^[A-Za-z]:[\\/]/.test(target);
-  });
 }
 
 function previewMeta(file: WorkspaceFilePreview, ko: boolean): string {
@@ -946,14 +908,6 @@ function FileContextMenu({
         boxShadow: "0 14px 34px rgba(15, 23, 42, 0.18)",
       }}
     >
-      <button type="button" role="menuitem" style={contextMenuItemStyle} onClick={() => run(() => void openWorkspaceFileExternal(file, ko))}>
-        {ko ? "외부 앱으로 열기" : "Open externally"}
-      </button>
-      {canRevealWorkspaceFile(file) && (
-        <button type="button" role="menuitem" style={contextMenuItemStyle} onClick={() => run(() => void revealWorkspaceFile(file, ko))}>
-          {ko ? "Finder에서 보기" : "Show in folder"}
-        </button>
-      )}
       <button
         type="button"
         role="menuitem"
@@ -982,26 +936,21 @@ function MarkdownFileViewer({ file }: { file: WorkspaceFilePreview }) {
 function BrowserViewer({ file }: { file: WorkspaceFilePreview }) {
   const source = file.browserUrl || file.fileUrl;
   const isHtml = isHtmlFile(file.name);
+  if (!isHtml || !file.content) {
+    return <NativeLiveWebView url={source} title={file.name} runtimeLabel={file.live ? "watched" : "web"} />;
+  }
   return (
     <>
       <div style={browserAddressStyle} title={source}>
         {source}
       </div>
-      {isHtml && file.content ? (
-        <iframe
-          srcDoc={file.content}
-          title={file.name}
-          sandbox="allow-forms allow-modals allow-popups"
-          style={iframePreviewStyle}
-        />
-      ) : (
-        <iframe
-          src={source}
-          title={file.name}
-          sandbox="allow-forms allow-modals allow-popups allow-same-origin"
-          style={iframePreviewStyle}
-        />
-      )}
+      <iframe
+        srcDoc={file.content}
+        title={file.name}
+        sandbox="allow-scripts allow-forms allow-modals allow-popups allow-downloads"
+        allow="autoplay; clipboard-read; clipboard-write; fullscreen; picture-in-picture"
+        style={iframePreviewStyle}
+      />
     </>
   );
 }
@@ -1015,6 +964,7 @@ function EmptyViewer() {
     { label: ko ? "문서" : "Docs", icon: <IconFileUp size={14} /> },
     { label: ko ? "이미지" : "Image", icon: <IconImage size={14} /> },
     { label: ko ? "영상" : "Video", icon: <IconFilm size={14} /> },
+    { label: ko ? "음성" : "Audio", icon: <IconFilm size={14} /> },
     { label: ko ? "브라우저" : "Browser", icon: <IconPanelRight size={14} /> },
   ];
   return (
@@ -1041,15 +991,19 @@ function viewerKindLabel(kind: WorkspaceFilePreview["viewerKind"], ko: boolean):
   if (kind === "browser") return ko ? "브라우저" : "Browser";
   if (kind === "image") return ko ? "이미지" : "Image";
   if (kind === "video") return ko ? "영상" : "Video";
+  if (kind === "audio") return ko ? "음성" : "Audio";
   if (kind === "pdf") return "PDF";
+  if (kind === "spreadsheet") return ko ? "스프레드시트" : "Spreadsheet";
+  if (kind === "presentation") return ko ? "프레젠테이션" : "Presentation";
+  if (kind === "archive") return ko ? "압축 파일" : "Archive";
   if (kind === "document") return ko ? "문서" : "Document";
   return ko ? "파일" : "File";
 }
 
 function iconForViewerKind(kind: WorkspaceFilePreview["viewerKind"]) {
   if (kind === "image") return <IconImage size={14} />;
-  if (kind === "video") return <IconFilm size={14} />;
-  if (kind === "pdf" || kind === "document") return <IconFileUp size={14} />;
+  if (kind === "video" || kind === "audio") return <IconFilm size={14} />;
+  if (kind === "pdf" || kind === "document" || kind === "spreadsheet" || kind === "presentation" || kind === "archive") return <IconFileUp size={14} />;
   if (kind === "browser") return <IconPanelRight size={14} />;
   return <IconLayers size={14} />;
 }
@@ -1101,7 +1055,7 @@ function TabButton({
 const shellStyle: CSSProperties = {
   position: "relative",
   width: 392,
-  minWidth: 300,
+  minWidth: 320,
   maxWidth: "none",
   flexShrink: 1,
   height: "100%",
@@ -1111,6 +1065,7 @@ const shellStyle: CSSProperties = {
   flexDirection: "column",
   minHeight: 0,
   overflow: "hidden",
+  transition: "width 180ms ease",
 };
 
 const resizeHandleStyle: CSSProperties = {

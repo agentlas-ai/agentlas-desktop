@@ -72,7 +72,6 @@ import type {
 import type { OneRecurrenceSelectionV1 } from "./one-recurrence";
 import type {
   OneArtifactBindingRequestV1,
-  OneArtifactOpenResultV1,
   OneArtifactPreviewCapabilityV1,
   OneArtifactPreviewRevokeV1,
 } from "./one-artifacts";
@@ -259,7 +258,6 @@ export type {
 } from "./one-recurrence";
 export type {
   OneArtifactBindingRequestV1,
-  OneArtifactOpenResultV1,
   OneArtifactPreviewCapabilityV1,
   OneArtifactPreviewRevokeV1,
 } from "./one-artifacts";
@@ -2177,6 +2175,59 @@ export interface BrowserLiveFrame {
   capturedAt: string;
   error: "browser-offline" | "no-page" | "capture-failed" | null;
 }
+/** A frame pushed by the task-scoped CDP screencast. */
+export interface BrowserLiveStreamFrame extends BrowserLiveFrame {
+  sessionId: string;
+  sequence: number;
+}
+export interface BrowserLiveSessionResult {
+  sessionId: string | null;
+  interactive: boolean;
+  frame: BrowserLiveFrame;
+}
+export type BrowserLiveInput =
+  | {
+      sessionId: string;
+      kind: "pointer";
+      phase: "move" | "down" | "up";
+      /** Normalized coordinates inside the streamed viewport. */
+      x: number;
+      y: number;
+      button?: "left" | "middle" | "right";
+      clickCount?: number;
+    }
+  | {
+      sessionId: string;
+      kind: "wheel";
+      x: number;
+      y: number;
+      deltaX: number;
+      deltaY: number;
+    }
+  | {
+      sessionId: string;
+      kind: "key";
+      phase: "down" | "up";
+      key: string;
+      code?: string;
+      modifiers?: number;
+    }
+  | {
+      sessionId: string;
+      kind: "text";
+      text: string;
+    }
+  | {
+      sessionId: string;
+      kind: "navigation";
+      action: "back" | "forward" | "reload";
+    }
+  | {
+      sessionId: string;
+      kind: "navigation";
+      action: "navigate";
+      url: string;
+    };
 export interface ComputerUsePreviewSource {
   id: string;
   name: string;
@@ -3475,6 +3526,37 @@ export interface AppFactoryPreviewResult {
   createdAt: string;
 }
 
+/**
+ * A generated app preview that is actually reachable now. Local generated apps
+ * are served by a main-owned loopback server; cloud/external apps retain their
+ * declared HTTPS URL. A scaffold path by itself is never reported as live.
+ */
+export interface AppFactoryLivePreviewResult {
+  ok: boolean;
+  appId: string;
+  url?: string;
+  runtime: "managed-loopback" | "external-web" | "unavailable";
+  revision?: number;
+  reason?: string;
+}
+
+export interface WorkLiveViewBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export type WorkLiveViewState = "opening" | "loading" | "ready" | "error" | "closed";
+
+export interface WorkLiveViewStatus {
+  viewId: string;
+  state: WorkLiveViewState;
+  url?: string;
+  title?: string;
+  error?: string;
+}
+
 export interface AppFactoryAppToolPublishResult {
   rootPath: string;
   toolName: string;
@@ -4197,6 +4279,12 @@ export interface AgentMessageEvent {
   direction: AgentMessageDirection;
   fromAgentId: string;
   toAgentId: string;
+  /**
+   * Optional typed parent in the same Taskforce transcript. This lets the
+   * renderer show a Buzz-style comment without guessing relationships from
+   * prose or exposing execution identifiers in the room.
+   */
+  replyToMessageId?: string;
   /** Bounded, user-visible brief/result excerpt. The full worker result stays internal. */
   text: string;
   /** Host-enforced typed-handoff facts. Depth is 1..3; a pair may round-trip at most 4 times. */
@@ -4417,6 +4505,16 @@ export type FsReadScope =
   | { kind: "capability"; token: string }
   | { kind: "chat-workspace"; chatId: string }
   | { kind: "chat-assets"; chatId: string };
+
+export interface FsFileWatchSnapshot {
+  watchId: string;
+  path: string;
+  exists: boolean;
+  size: number | null;
+  mtimeMs: number | null;
+  revision: number;
+  error: "unavailable" | null;
+}
 
 /** Opaque authority issued only after a native picker or trusted drop event. */
 export interface FsPathGrant {
@@ -6183,6 +6281,9 @@ export interface AgentlasIpc {
     pickDirectory: () => Promise<FsPathGrant | null>;
     listDirectory: (absPath: string, scope: FsReadScope, showHidden?: boolean) => Promise<DirListing>;
     readTextFile: (absPath: string, scope: FsReadScope) => Promise<TextFilePreview>;
+    watchFile: (absPath: string, scope: FsReadScope) => Promise<FsFileWatchSnapshot>;
+    unwatchFile: (watchId: string) => Promise<{ ok: boolean }>;
+    onFileChanged: (handler: (snapshot: FsFileWatchSnapshot) => void) => () => void;
     /** 로컬 파일/폴더 또는 http(s) URL을 OS 기본 앱/브라우저로 연다. */
     openPath: (target: string) => Promise<{ ok: boolean; message?: string }>;
     /** 로컬 파일/폴더를 Finder/Explorer에서 표시한다. */
@@ -6739,6 +6840,11 @@ export interface AgentlasIpc {
     listLogs: (limit?: number) => Promise<BrowserActionLog[]>;
     /** Capture the current task's already-open page when supplied; never navigates. */
     captureLiveFrame: (preferredUrl?: string, viewport?: BrowserLiveViewport) => Promise<BrowserLiveFrame>;
+    /** Start a persistent, task-scoped CDP screencast. It never selects an unrelated tab. */
+    startLiveView: (preferredUrl: string, viewport?: BrowserLiveViewport) => Promise<BrowserLiveSessionResult>;
+    stopLiveView: (sessionId: string) => Promise<{ ok: boolean }>;
+    dispatchLiveInput: (input: BrowserLiveInput) => Promise<{ ok: boolean }>;
+    onLiveFrame: (handler: (frame: BrowserLiveStreamFrame) => void) => () => void;
     focusLiveTarget: (targetId?: string) => Promise<{ ok: boolean }>;
   };
   computerUse: {
@@ -6813,6 +6919,8 @@ export interface AgentlasIpc {
       /** 'one'이면 One 홈 전용 대화 — Work 사이드바에 나타나지 않는다. */
       originSurface?: "one" | "work";
     }) => Promise<Chat>;
+    /** Persist a local conversation-first command such as `@graph` without starting an LLM turn. */
+    appendOneUserMessage: (id: string, text: string) => Promise<ChatHistoryEntry>;
     /** Open the durable direct conversation owned by one standing One teammate. */
     openOneMember: (input: { agentId: string; title: string }) => Promise<Chat>;
     rename: (id: string, title: string) => Promise<Chat>;
@@ -6888,7 +6996,6 @@ export interface AgentlasIpc {
   oneArtifacts: {
     issuePreview: (input: OneArtifactBindingRequestV1) => Promise<OneArtifactPreviewCapabilityV1 | null>;
     revokePreview: (input: OneArtifactPreviewRevokeV1) => Promise<{ revoked: boolean }>;
-    open: (input: OneArtifactBindingRequestV1) => Promise<OneArtifactOpenResultV1>;
   };
   /** Persistent One identity and user-approved operating principles. */
   oneProfile: {
@@ -7283,6 +7390,10 @@ export interface AgentlasIpc {
     approveProviderPayment: (input: AppFactoryProviderPaymentApproveRequest) => Promise<AppFactoryProviderPaymentApproveResult>;
     runSmoke: (input: AppFactoryRootRequest) => Promise<AppFactorySmokeResult>;
     preparePreview: (input: AppFactoryRootRequest) => Promise<AppFactoryPreviewResult>;
+    /** Start or reuse a real, main-owned live preview for a registered app. */
+    startLivePreview: (input: { appId: string }) => Promise<AppFactoryLivePreviewResult>;
+    /** Stop the managed loopback preview. External URLs are unaffected. */
+    stopLivePreview: (input: { appId: string }) => Promise<{ ok: true; stopped: boolean }>;
     openLaunchTarget: (input: AppFactoryRootRequest) => Promise<AppFactoryLaunchTargetResult>;
     publishAsTool: (input: AppFactoryRootRequest) => Promise<AppFactoryAppToolPublishResult>;
     archive: (input: AppFactoryRootRequest) => Promise<AppFactoryOperationRecord>;
@@ -7291,6 +7402,31 @@ export interface AgentlasIpc {
     getApp: (id: string) => Promise<AppFactoryAppRecord | null>;
     getAppBySurface: (chatId: string, surfaceId: string) => Promise<AppFactoryAppRecord | null>;
     listOperations: (appId: string) => Promise<AppFactoryOperationRecord[]>;
+  };
+  /**
+   * Sandboxed native web surface used by Work. Unlike an iframe this remains
+   * compatible with apps that correctly deny framing, while exposing no
+   * preload, Node API, or Desktop IPC to the loaded page.
+   */
+  workLiveView: {
+    open: (input: {
+      viewId: string;
+      url: string;
+      bounds: WorkLiveViewBounds;
+      visible?: boolean;
+      mode?: "app" | "browser";
+    }) => Promise<{ ok: boolean; viewId: string; url?: string; reason?: string }>;
+    setBounds: (input: {
+      viewId: string;
+      bounds: WorkLiveViewBounds;
+      visible?: boolean;
+    }) => Promise<{ ok: boolean }>;
+    reload: (viewId: string) => Promise<{ ok: boolean }>;
+    navigate: (input: { viewId: string; url: string }) => Promise<{ ok: boolean; url?: string; reason?: string }>;
+    goBack: (viewId: string) => Promise<{ ok: boolean }>;
+    goForward: (viewId: string) => Promise<{ ok: boolean }>;
+    close: (viewId: string) => Promise<{ ok: true }>;
+    onStatus: (handler: (status: WorkLiveViewStatus) => void) => () => void;
   };
   /** Local meta-agent factory that materializes domain teams for Agentlas OS. */
   metaAgent: {

@@ -15,9 +15,11 @@ import type { AutomationToolMode } from "./types";
 // to match exactly.
 const EXACT_AGENTLAS_BROWSER_PATTERNS = [
   /\bAgentlas\s+Browser\b/i,
+  /\b(?:built[- ]in|in[- ]app|Taskforce)\s+Browser\b/i,
   /\b(?:CDP|remote[- ]debugging)\b/i,
   /(?:127\.0\.0\.1|localhost):9222/i,
   /로그인된\s*(?:에이전틀라스\s*)?브라우저/i,
+  /(?:내장|인앱|태스크포스)\s*브라우저/i,
 ];
 
 function hasAny(text: string, patterns: RegExp[]): boolean {

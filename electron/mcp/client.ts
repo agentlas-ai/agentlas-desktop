@@ -2061,12 +2061,15 @@ ${effectiveUserPrompt}`;
   }
 
   if (runtimeChoice.unavailableOverride) {
+    const fallbackLabel = runtimeChoice.fallbackStage === "worker"
+      ? (locale === "ko" ? "Worker 런타임" : "the worker runtime")
+      : (locale === "ko" ? "연결된 정상 런타임" : "another connected working runtime");
     sink({
       kind: "tool-use",
       status:
         locale === "ko"
-          ? `지정된 런타임(${runtimeChoice.unavailableOverride.selection.kind})을 찾지 못해 전역 활성 런타임으로 실행합니다.`
-          : `The assigned runtime (${runtimeChoice.unavailableOverride.selection.kind}) is unavailable, so Agentlas is using the global active runtime.`,
+          ? `선택한 모델을 지금 사용할 수 없어 ${fallbackLabel}으로 이어갑니다.`
+          : `The selected model is unavailable right now, so Agentlas is continuing with ${fallbackLabel}.`,
     });
   }
   if (req.agentAppMode && "fallbackFromKind" in runtimeChoice && runtimeChoice.fallbackFromKind) {
@@ -2532,6 +2535,38 @@ ${effectiveUserPrompt}`;
   // asking a conversational turn must not manufacture one. The chat id is the
   // durable fallback goal key until an authoritative promotion occurs.
   const canonicalTask = findCanonicalTaskForChat(chat.id);
+  const bindInvocationOneArtifacts = (
+    toolId: string,
+    paths: readonly string[],
+  ): NonNullable<McpInvocationEvent["oneArtifacts"]> => {
+    const runId = req.runId;
+    if (req.oneMode !== true || !canonicalTask || !runId || !toolId || paths.length === 0) return [];
+    return bindOneRuntimeToolArtifacts({
+      taskId: canonicalTask.id,
+      taskVersion: canonicalTask.version,
+      chatId: chat.id,
+      runId,
+      toolId,
+      paths,
+    }).map((artifact) => ({
+      taskId: canonicalTask.id,
+      taskVersion: canonicalTask.version,
+      chatId: chat.id,
+      runId,
+      manifestId: artifact.manifestId,
+      artifactRef: artifact.artifactRef,
+      label: artifact.label,
+      type: artifact.type,
+      sizeBytes: artifact.sizeBytes,
+    }));
+  };
+  const runBoundTaskForceInvocation = (
+    params: Parameters<typeof runBorrowedTaskForceInvocation>[0],
+  ) => runBorrowedTaskForceInvocation({
+    ...params,
+    ...(isolatedMcpConfig ? { isolatedMcpConfig: true as const } : {}),
+    bindOneRuntimeToolArtifacts: bindInvocationOneArtifacts,
+  });
   const workforceProjectDir = workingFolder ?? process.cwd();
   // 프로젝트가 있으면 편성은 프로젝트에 붙는다 — 새 대화를 열어도 팀을 물려받는다.
   const durableWorkforceGoalId = resolveDesktopWorkforceGoalId({
@@ -2679,7 +2714,7 @@ ${effectiveUserPrompt}`;
         ? "이 프로젝트에서 렌트허용된 Hub 에이전트가 없어 자동 편성을 실행하지 않았습니다. 프로젝트 화면에서 [렌트허용]을 켜거나 에이전트를 직접 지목해 주세요."
         : "No Hub agent in this project is allowed for rent, so the automatic staffing was not run. Enable [Allow rent] on the project screen or name an agent explicitly.");
     }
-    const execution = await runBorrowedTaskForceInvocation({
+    const execution = await runBoundTaskForceInvocation({
       req: { ...req, borrowAgents: undefined, taskForceTargets: undefined },
       chat,
       orchestratorAgent: agent,
@@ -2911,7 +2946,7 @@ ${effectiveUserPrompt}`;
           ? "이 프로젝트에서 렌트허용된 Hub 에이전트가 없어 자동 편성을 실행하지 않았습니다. 프로젝트 화면에서 [렌트허용]을 켜거나 에이전트를 직접 지목해 주세요."
           : "No Hub agent in this project is allowed for rent, so the automatic staffing was not run. Enable [Allow rent] on the project screen or name an agent explicitly.");
       }
-      const execution = await runBorrowedTaskForceInvocation({
+      const execution = await runBoundTaskForceInvocation({
         req: { ...req, userPrompt: explicitWorkforceGoal, borrowAgents: undefined, taskForceTargets: undefined },
         chat,
         orchestratorAgent: agent,
@@ -2991,7 +3026,7 @@ ${effectiveUserPrompt}`;
           ? { localEffectivePrompts: oneParticipantEffectivePrompts }
           : {}),
       });
-      await runBorrowedTaskForceInvocation({
+      await runBoundTaskForceInvocation({
         req: { ...req, userPrompt: effectiveUserPrompt },
         chat,
         orchestratorAgent: agent,
@@ -3077,7 +3112,7 @@ ${effectiveUserPrompt}`;
             ? `프로젝트 지정 ${rosterSpecs.length}명으로 편성합니다 (난이도 ${describeTurnEscalation(turnEscalation)}).`
             : `Staffing with ${rosterSpecs.length} project-designated member(s) (escalation ${describeTurnEscalation(turnEscalation)}).`,
         });
-        await runBorrowedTaskForceInvocation({
+        await runBoundTaskForceInvocation({
           req: { ...req, userPrompt: effectiveUserPrompt, borrowAgents: undefined, taskForceTargets: undefined },
           chat,
           orchestratorAgent: agent,
@@ -3130,7 +3165,7 @@ ${effectiveUserPrompt}`;
     : null;
   if (directBorrowedTeam && chat.kind !== "division") {
     try {
-      await runBorrowedTaskForceInvocation({
+      await runBoundTaskForceInvocation({
         req: { ...req, userPrompt: effectiveUserPrompt, borrowAgents: undefined },
         chat,
         orchestratorAgent: agent,
@@ -3163,7 +3198,7 @@ ${effectiveUserPrompt}`;
   }
   if (borrowedAgentSlugs.length > 1 && chat.kind !== "division") {
     try {
-      await runBorrowedTaskForceInvocation({
+      await runBoundTaskForceInvocation({
         req: { ...req, borrowAgents: borrowedAgentSlugs },
         chat,
         orchestratorAgent: agent,
@@ -3936,26 +3971,8 @@ ${effectiveUserPrompt}`;
           // the separate exact-result-folder filesystem seal below.
           if (oneTeamExecutionPolicy && name.trim()) observedOneToolEvidence = true;
         }
-        const runId = req.runId;
-        const oneArtifacts = req.oneMode === true && canonicalTask && !isError && id && runId && artifactPaths?.length
-          ? bindOneRuntimeToolArtifacts({
-              taskId: canonicalTask.id,
-              taskVersion: canonicalTask.version,
-              chatId: chat.id,
-              runId,
-              toolId: id,
-              paths: artifactPaths,
-            }).map((artifact) => ({
-              taskId: canonicalTask.id,
-              taskVersion: canonicalTask.version,
-              chatId: chat.id,
-              runId,
-              manifestId: artifact.manifestId,
-              artifactRef: artifact.artifactRef,
-              label: artifact.label,
-              type: artifact.type,
-              sizeBytes: artifact.sizeBytes,
-            }))
+        const oneArtifacts = !isError && id && artifactPaths?.length
+          ? bindInvocationOneArtifacts(id, artifactPaths)
           : undefined;
         sink({
           kind: "tool-use",

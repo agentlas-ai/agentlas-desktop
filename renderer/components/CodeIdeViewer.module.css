@@ -1,0 +1,75 @@
+.shell {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid #27303a;
+  border-radius: 14px;
+  background: #0d1117;
+  color: #c9d1d9;
+}
+
+.shell[data-fill="true"] { height: 100%; border: 0; border-radius: 0; }
+.shell[data-compact="true"] { border-radius: 9px; }
+
+.toolbar {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 12px;
+  border-bottom: 1px solid #27303a;
+  background: #111923;
+  font-size: 11px;
+}
+
+.traffic { display: inline-flex; gap: 4px; }
+.traffic i { width: 7px; height: 7px; border-radius: 50%; background: #46515e; }
+.traffic i:first-child { background: #f7768e; }
+.traffic i:nth-child(2) { background: #e0af68; }
+.traffic i:nth-child(3) { background: #9ece6a; }
+.filename { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #e6edf3; font-weight: 650; }
+.language { color: #7aa2f7; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; }
+.readonly { margin-left: auto; color: #8b949e; font-size: 9px; letter-spacing: .06em; text-transform: uppercase; }
+.copy { min-height: 28px; padding: 0 8px; border: 1px solid #33404d; border-radius: 7px; background: transparent; color: #c9d1d9; font: inherit; font-size: 10px; cursor: pointer; }
+.copy:hover, .copy:focus-visible { border-color: #7aa2f7; color: #fff; outline: none; }
+
+.body { min-height: 0; display: flex; flex: 1 1 auto; overflow: auto; }
+.gutter {
+  flex: 0 0 auto;
+  min-width: 42px;
+  padding: 14px 10px 18px 12px;
+  border-right: 1px solid #1f2730;
+  color: #4b5563;
+  font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  text-align: right;
+  user-select: none;
+  white-space: pre;
+}
+
+.code {
+  min-width: max-content;
+  margin: 0;
+  padding: 14px 18px 18px 14px;
+  color: #c9d1d9;
+  font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  white-space: pre;
+  tab-size: 2;
+}
+
+.loading, .error {
+  min-height: 150px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  padding: 20px;
+  color: #8b949e;
+  text-align: center;
+  font-size: 12px;
+}
+.error { color: #f2a8a8; }
+.error button { min-height: 30px; padding: 0 10px; border: 1px solid #714b54; border-radius: 7px; background: transparent; color: inherit; cursor: pointer; }
+
+@media (prefers-reduced-motion: reduce) { .loading span { animation: none; } }

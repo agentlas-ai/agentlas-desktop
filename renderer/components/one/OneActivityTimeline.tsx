@@ -1,20 +1,28 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
+  IconArrowLeft,
   IconCheck,
   IconChevronDown,
+  IconChevronRight,
   IconClose,
   IconCode,
   IconFileUp,
+  IconMoreHorizontal,
+  IconNetwork,
   IconPanelRight,
   IconPlus,
+  IconRefresh,
   IconShield,
   IconSparkles,
 } from "@/components/Icon";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
+import { LiveOutputViewer, type LiveOutputKind } from "@/components/LiveOutputViewer";
+import { CodeIdeViewer, isCodeArtifactName } from "@/components/CodeIdeViewer";
 import { ipc } from "@/lib/ipc";
-import type { BrowserLiveFrame } from "@/lib/types";
+import { isOneArtifactOpenRequest, ONE_ARTIFACT_OPEN_EVENT, requestOneArtifactOpen, type OneArtifactOpenRequest } from "@/lib/one-artifact-open";
+import type { BrowserLiveFrame, BrowserLiveInput } from "@/lib/types";
 import type { OneArtifactPreviewCapabilityV1 } from "@shared/one-artifacts";
 import type { ComputerHistoryEntry, ComputerHistoryState } from "@shared/computer-history";
 import type {
@@ -33,7 +41,10 @@ import styles from "./OneActivityTimeline.module.css";
 const ONE_OUTPUT_SECTIONS_STORAGE_KEY = "agentlas.one.output-sections.v1";
 const ONE_OUTPUT_HISTORY_HEIGHT_STORAGE_KEY = "agentlas.one.output-history-height.v1";
 type OutputSectionKey = "files" | "agents" | "processes" | "computer" | "sources";
-type OutputRailView = "activity" | "terminal" | "browser";
+type OutputRailView = "result" | "activity" | "terminal" | "browser";
+type BrowserLiveInputBody = BrowserLiveInput extends infer Input
+  ? Input extends { sessionId: string } ? Omit<Input, "sessionId"> : never
+  : never;
 
 function readCollapsedOutputSections(): Set<OutputSectionKey> {
   if (typeof window === "undefined") return new Set();
@@ -405,13 +416,20 @@ export function OneActivityTimeline({
   );
 }
 
-async function openArtifact(item: OneActivityArtifact): Promise<void> {
-  const bridge = ipc();
-  if (!bridge?.oneArtifacts?.open) return;
-  await bridge.oneArtifacts.open(item.binding).catch(() => ({ opened: false }));
+function openArtifact(item: OneActivityArtifact): void {
+  requestOneArtifactOpen({ binding: item.binding, label: item.label });
 }
 
-function ArtifactPreviewCard({ item, locale }: { item: OneActivityArtifact; locale: "ko" | "en" }) {
+function liveKindForCapability(capability: OneArtifactPreviewCapabilityV1): LiveOutputKind {
+  if (capability.kind === "document") {
+    if (capability.mimeType === "application/pdf") return "pdf";
+    if (/presentation|powerpoint/i.test(capability.mimeType)) return "presentation";
+    return "document";
+  }
+  return capability.kind;
+}
+
+function ArtifactPreviewCard({ item, locale, wide = false }: { item: OneActivityArtifact; locale: "ko" | "en"; wide?: boolean }) {
   const [preview, setPreview] = useState<OneArtifactPreviewCapabilityV1 | null>(null);
   const [settled, setSettled] = useState(false);
   useEffect(() => {
@@ -442,13 +460,11 @@ function ArtifactPreviewCard({ item, locale }: { item: OneActivityArtifact; loca
   }, [item.binding, item.id]);
 
   return <article className={styles.artifactPreviewCard} data-preview-kind={preview?.kind ?? "file"}>
-    {preview?.kind === "image" && <button type="button" className={styles.artifactVisual} onClick={() => void openArtifact(item)} aria-label={locale === "ko" ? `${item.label} 열기` : `Open ${item.label}`}>
-      {/* Main issues an opaque, expiring capability URL. Raw paths never enter this renderer. */}
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img src={preview.capabilityUrl} alt={item.label} />
-    </button>}
-    {preview?.kind === "video" && <div className={styles.artifactVisual}><video src={preview.capabilityUrl} controls preload="metadata" aria-label={item.label} /></div>}
-    {preview?.kind === "audio" && <div className={`${styles.artifactVisual} ${styles.artifactAudio}`}><audio src={preview.capabilityUrl} controls preload="metadata" aria-label={item.label} /></div>}
+    {preview && <div className={`${styles.artifactVisual} ${preview.kind === "audio" ? styles.artifactAudio : ""}`}>
+      {preview.kind === "data" && isCodeArtifactName(item.label)
+        ? <CodeIdeViewer source={preview.capabilityUrl} name={item.label} locale={locale} compact={!wide} />
+        : <LiveOutputViewer source={preview.capabilityUrl} name={item.label} kind={liveKindForCapability(preview)} mimeType={preview.mimeType} size={preview.sizeBytes} locale={locale} compact={!wide} />}
+    </div>}
     {!preview && <div className={styles.artifactFileFallback} data-loading={!settled ? "true" : "false"}><IconFileUp size={18} /></div>}
     <div className={styles.artifactPreviewCopy}>
       <span><strong>{item.label}</strong><small>{preview
@@ -459,9 +475,86 @@ function ArtifactPreviewCard({ item, locale }: { item: OneActivityArtifact; loca
   </article>;
 }
 
-function taskBrowserUrl(items: OneActivityItem[]): string | undefined {
+function ArtifactOpenViewer({ target, locale, wide }: { target: OneArtifactOpenRequest; locale: "ko" | "en"; wide: boolean }) {
+  const [capability, setCapability] = useState<OneArtifactPreviewCapabilityV1 | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState(false);
+  const binding = target.binding;
+  const issue = useCallback(() => {
+    const bridge = ipc();
+    if (!bridge?.oneArtifacts?.issuePreview) {
+      setCapability(null);
+      setLoading(false);
+      setFailed(true);
+      return;
+    }
+    setLoading(true);
+    setFailed(false);
+    void bridge.oneArtifacts.issuePreview(binding)
+      .then((next) => {
+        setCapability(next);
+        setLoading(false);
+        setFailed(!next);
+      })
+      .catch(() => {
+        setCapability(null);
+        setLoading(false);
+        setFailed(true);
+      });
+  }, [binding]);
+  useEffect(() => {
+    let issued: OneArtifactPreviewCapabilityV1 | null = null;
+    const bridge = ipc();
+    if (bridge?.oneArtifacts?.issuePreview) {
+      setLoading(true);
+      setFailed(false);
+      void bridge.oneArtifacts.issuePreview(binding)
+        .then((next) => {
+          issued = next;
+          setCapability(next);
+          setLoading(false);
+          setFailed(!next);
+        })
+        .catch(() => {
+          setCapability(null);
+          setLoading(false);
+          setFailed(true);
+        });
+    } else {
+      setCapability(null);
+      setLoading(false);
+      setFailed(true);
+    }
+    return () => {
+      // The capability is intentionally short-lived and Main revalidates every
+      // read. There is no path or OS-open escape from this viewer.
+      if (issued) void bridge?.oneArtifacts?.revokePreview({ ...binding, capabilityUrl: issued.capabilityUrl }).catch(() => ({ revoked: false }));
+    };
+  // Binding fields, not object identity, define the exact capability scope.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [binding.taskId, binding.taskVersion, binding.chatId, binding.runId, binding.manifestId, binding.artifactRef]);
+
+  if (loading) return <div className={styles.artifactFileFallback} data-loading="true" role="status">{locale === "ko" ? "파일을 여는 중…" : "Opening artifact…"}</div>;
+  if (failed || !capability) return <div className={styles.artifactFileFallback} role="alert"><span>{locale === "ko" ? "아티팩트를 인앱에서 열지 못했습니다." : "This artifact could not be opened in the app."}</span><button type="button" onClick={issue}>{locale === "ko" ? "다시 시도" : "Retry"}</button></div>;
+  return capability.kind === "data" && isCodeArtifactName(target.label)
+    ? <CodeIdeViewer source={capability.capabilityUrl} name={target.label} locale={locale} fill={wide} />
+    : <LiveOutputViewer source={capability.capabilityUrl} name={target.label} kind={liveKindForCapability(capability)} mimeType={capability.mimeType} size={capability.sizeBytes} locale={locale} fill />;
+}
+
+export function taskBrowserUrl(items: OneActivityItem[]): string | undefined {
   for (const item of [...items].reverse()) {
-    if (item.kind !== "tool" || !/browser.*navigate/iu.test(item.tool?.name ?? "") || !item.tool?.args) continue;
+    if (item.kind !== "tool" || !item.tool?.args || item.tool.isError) continue;
+    const toolName = item.tool.name ?? "";
+    const isExactNavigation = /browser.*navigate/iu.test(toolName);
+    // Runs written before exact MCP attribution was repaired contain only the
+    // Codex envelope name. Recover those durable Taskforce events narrowly:
+    // the completed result must itself prove a browser navigation. An
+    // arbitrary MCP call that happens to accept a URL must never claim the
+    // Browser rail.
+    const isLegacyProvenNavigation = toolName === "mcp_tool_call"
+      && typeof item.tool.result === "string"
+      && /(?:\bpage\.goto\b|\bpage url\s*:|\bnavigat(?:e|ed|ing)\b[^\n]{0,160}https?:\/\/)/iu.test(item.tool.result);
+    if (!isExactNavigation && !isLegacyProvenNavigation) continue;
     try {
       const value = JSON.parse(item.tool.args) as { url?: unknown };
       if (typeof value.url !== "string") continue;
@@ -474,76 +567,335 @@ function taskBrowserUrl(items: OneActivityItem[]): string | undefined {
   return undefined;
 }
 
+type BrowserShellTab = {
+  id: string;
+  title: string;
+  url: string | null;
+};
+
+function normalizedBrowserAddress(value: string): string | null {
+  const candidate = /^https?:\/\//iu.test(value.trim()) ? value.trim() : `https://${value.trim()}`;
+  try {
+    const parsed = new URL(candidate);
+    if (!/^https?:$/u.test(parsed.protocol) || parsed.username || parsed.password) return null;
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
 function OneBrowserLiveView({ active, locale, preferredUrl }: { active: boolean; locale: "ko" | "en"; preferredUrl?: string }) {
   const [frame, setFrame] = useState<BrowserLiveFrame | null>(null);
   const [loading, setLoading] = useState(false);
+  const [interactive, setInteractive] = useState(false);
   const [viewport, setViewport] = useState<"desktop" | "phone">("desktop");
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [tabs, setTabs] = useState<BrowserShellTab[]>(() => [{
+    id: "task-output",
+    title: locale === "ko" ? "이 사이트에 연결" : "Connected site",
+    url: preferredUrl ?? null,
+  }]);
+  const [activeTabId, setActiveTabId] = useState("task-output");
+  const [address, setAddress] = useState(preferredUrl ?? "");
+  const tabSequenceRef = useRef(0);
+  const sessionRef = useRef<string | null>(null);
+  const stopFlightRef = useRef<Promise<unknown>>(Promise.resolve());
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const composingRef = useRef(false);
+  const pointerFrameRef = useRef<number | null>(null);
+  const queuedPointerRef = useRef<{ x: number; y: number } | null>(null);
+  const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
+  const effectiveUrl = activeTab?.url ?? undefined;
+
   useEffect(() => {
-    if (!active) return;
+    if (!preferredUrl) return;
+    setTabs((current) => current.map((tab) => tab.id === "task-output"
+      ? { ...tab, url: preferredUrl }
+      : tab));
+    setActiveTabId("task-output");
+    setAddress(preferredUrl);
+  }, [preferredUrl]);
+
+  useEffect(() => {
+    setAddress(activeTab?.url ?? "");
+    setMenuOpen(false);
+  }, [activeTab?.id, activeTab?.url]);
+
+  useEffect(() => {
+    if (!active) {
+      setFrame(null);
+      setInteractive(false);
+      return;
+    }
     const bridge = ipc();
-    if (!bridge?.browser?.captureLiveFrame) return;
+    if (!bridge?.browser?.startLiveView || !bridge.browser.onLiveFrame) return;
     // A changed task URL invalidates the prior frame immediately. Keeping it
     // while an exact-target capture fails is how a completed Soulin run leaked
     // into a later Latchwork task's Browser rail.
     setFrame(null);
+    setInteractive(false);
     // Browser output belongs to a Taskforce/thread. With no URL observed for
     // that scope, showing whichever CDP tab happens to be open would leak an
     // unrelated job into this room.
-    if (!preferredUrl) {
+    if (!effectiveUrl) {
       setLoading(false);
       return;
     }
     let disposed = false;
-    let inFlight = false;
-    const capture = async () => {
-      if (disposed || inFlight || document.visibilityState !== "visible") return;
-      inFlight = true;
-      setLoading(true);
+    let ownedSession: string | null = null;
+    let retryTimer: number | null = null;
+    let retryAttempt = 0;
+    setLoading(true);
+    const unsubscribe = bridge.browser.onLiveFrame((next) => {
+      if (!disposed && next.sessionId === sessionRef.current && next.viewport === viewport) {
+        setFrame(next);
+        setLoading(false);
+        if (next.url) {
+          setAddress(next.url);
+          setTabs((current) => {
+            const target = current.find((tab) => tab.id === activeTabId);
+            const nextTitle = next.title || target?.title || (locale === "ko" ? "이 사이트에 연결" : "Connected site");
+            if (!target || (target.url === next.url && target.title === nextTitle)) return current;
+            return current.map((tab) => tab.id === activeTabId
+              ? { ...tab, url: next.url, title: nextTitle }
+              : tab);
+          });
+        }
+      }
+    });
+    const scheduleRetry = () => {
+      if (disposed || retryTimer != null) return;
+      const delay = Math.min(2_500, 600 + retryAttempt * 400);
+      retryAttempt += 1;
+      retryTimer = window.setTimeout(() => {
+        retryTimer = null;
+        void start();
+      }, delay);
+    };
+    const start = async () => {
       try {
-        const next = await bridge.browser.captureLiveFrame(preferredUrl, viewport);
-        if (!disposed) setFrame((current) => next.available || !current ? next : current);
+        // Page.stopScreencast is target-global. A tab/viewport switch used to
+        // start the replacement session while cleanup of the previous session
+        // was still in flight; the late stop then killed the fresh stream.
+        // Serialize that handoff without blocking React cleanup.
+        await stopFlightRef.current.catch(() => undefined);
+        if (disposed) return;
+        const result = await bridge.browser.startLiveView(effectiveUrl, viewport);
+        if (disposed) {
+          if (result.sessionId) void bridge.browser.stopLiveView(result.sessionId);
+          return;
+        }
+        ownedSession = result.sessionId;
+        sessionRef.current = result.sessionId;
+        setFrame(result.frame);
+        setInteractive(result.interactive);
+        if (result.sessionId && result.frame.available) {
+          retryAttempt = 0;
+          setLoading(false);
+          return;
+        }
+        // The tool event can arrive a fraction before the headless CDP host is
+        // ready, and the URL can be identical to a previous run. Neither case
+        // changes React dependencies, so a one-shot attempt strands the rail
+        // empty forever. Retry only the exact attributed URL until its durable
+        // rail target exists.
+        setLoading(true);
+        scheduleRetry();
       } catch {
-        // Keep the last confirmed frame visible through a transient capture failure.
-      } finally {
-        inFlight = false;
-        if (!disposed) setLoading(false);
+        if (!disposed) {
+          setFrame(null);
+          setInteractive(false);
+          setLoading(true);
+          scheduleRetry();
+        }
       }
     };
-    void capture();
-    const timer = window.setInterval(() => void capture(), 1_500);
-    const onVisibility = () => { if (document.visibilityState === "visible") void capture(); };
-    document.addEventListener("visibilitychange", onVisibility);
+    void start();
     return () => {
       disposed = true;
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", onVisibility);
+      if (retryTimer != null) window.clearTimeout(retryTimer);
+      unsubscribe();
+      if (ownedSession) {
+        stopFlightRef.current = bridge.browser.stopLiveView(ownedSession).catch(() => undefined);
+      }
+      if (sessionRef.current === ownedSession) sessionRef.current = null;
     };
-  // The live capture owns its own last-frame state; refreshing that frame is
-  // deliberately gated only by tab visibility, not by each frame object.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, preferredUrl, viewport]);
+  }, [active, activeTabId, effectiveUrl, locale, viewport]);
+
+  useEffect(() => () => {
+    if (pointerFrameRef.current != null) window.cancelAnimationFrame(pointerFrameRef.current);
+  }, []);
+
+  const pointInFrame = (element: HTMLElement, clientX: number, clientY: number) => {
+    const rect = element.getBoundingClientRect();
+    return {
+      x: Math.min(1, Math.max(0, (clientX - rect.left) / Math.max(1, rect.width))),
+      y: Math.min(1, Math.max(0, (clientY - rect.top) / Math.max(1, rect.height))),
+    };
+  };
+  const dispatch = (input: BrowserLiveInputBody) => {
+    const sessionId = sessionRef.current;
+    const bridge = ipc();
+    if (!sessionId || !bridge?.browser?.dispatchLiveInput) return;
+    void bridge.browser.dispatchLiveInput({ ...input, sessionId } as BrowserLiveInput);
+  };
+  const modifierMask = (event: { altKey: boolean; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }) =>
+    (event.altKey ? 1 : 0) | (event.ctrlKey ? 2 : 0) | (event.metaKey ? 4 : 0) | (event.shiftKey ? 8 : 0);
 
   const currentFrame = frame?.viewport === viewport ? frame : null;
   const available = Boolean(currentFrame?.available && currentFrame.dataUrl);
-  return <section className={styles.browserLive} data-available={available ? "true" : "false"} data-viewport={viewport}>
-    <div className={styles.browserChrome}>
-      <span aria-hidden="true"><i /><i /><i /></span>
-      <strong>{currentFrame?.title || (locale === "ko" ? "내장 브라우저" : "Built-in browser")}</strong>
-      <div className={styles.browserActions}>
-        <span className={styles.browserViewportToggle} role="tablist" aria-label={locale === "ko" ? "브라우저 화면 크기" : "Browser viewport"}>
-          <button type="button" role="tab" aria-selected={viewport === "desktop"} onClick={() => setViewport("desktop")}>{locale === "ko" ? "웹" : "Web"}</button>
-          <button type="button" role="tab" aria-selected={viewport === "phone"} onClick={() => setViewport("phone")}>{locale === "ko" ? "폰" : "Phone"}</button>
-        </span>
-        {currentFrame?.targetId && <button type="button" onClick={() => void ipc()?.browser.focusLiveTarget(currentFrame.targetId ?? undefined)}>{locale === "ko" ? "열기" : "Open"}</button>}
+  const addTab = () => {
+    const id = `browser-tab-${++tabSequenceRef.current}`;
+    setTabs((current) => [...current, {
+      id,
+      title: locale === "ko" ? "새 탭" : "New tab",
+      url: null,
+    }]);
+    setActiveTabId(id);
+    setFrame(null);
+    setInteractive(false);
+  };
+  const closeTab = (id: string) => {
+    const index = tabs.findIndex((tab) => tab.id === id);
+    if (index < 0) return;
+    if (tabs.length === 1) {
+      const blank = { ...tabs[0], title: locale === "ko" ? "새 탭" : "New tab", url: null };
+      setTabs([blank]);
+      setActiveTabId(blank.id);
+      return;
+    }
+    const next = tabs.filter((tab) => tab.id !== id);
+    // Keep related tab + selection updates in the same event batch. Calling a
+    // state setter from inside another state updater left React free to replay
+    // the updater and strand activeTabId on the deleted tab, so its live CDP
+    // session never reconnected after closing a new tab.
+    setTabs(next);
+    if (activeTabId === id) setActiveTabId(next[Math.min(index, next.length - 1)].id);
+  };
+  const navigateFromAddress = () => {
+    const url = normalizedBrowserAddress(address);
+    if (!url || !activeTab) return;
+    const sessionId = sessionRef.current;
+    const bridge = ipc();
+    if (sessionId && bridge?.browser?.dispatchLiveInput) {
+      setAddress(url);
+      void bridge.browser.dispatchLiveInput({ sessionId, kind: "navigation", action: "navigate", url });
+      return;
+    }
+    setTabs((current) => current.map((tab) => tab.id === activeTab.id
+      ? { ...tab, url, title: new URL(url).hostname }
+      : tab));
+    setAddress(url);
+    setFrame(null);
+    setInteractive(false);
+  };
+
+  return <section className={styles.browserLive} data-available={available ? "true" : "false"} data-viewport={viewport} data-interactive={interactive ? "true" : "false"}>
+    <div className={styles.browserTabBar}>
+      <div className={styles.browserTabs} role="tablist" aria-label={locale === "ko" ? "브라우저 탭" : "Browser tabs"}>
+        {tabs.map((tab) => <div
+          key={tab.id}
+          className={styles.browserTab}
+          data-selected={tab.id === activeTabId ? "true" : undefined}
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab.id === activeTabId}
+            className={styles.browserTabSelect}
+            onClick={() => setActiveTabId(tab.id)}
+          ><IconNetwork size={12} /><span>{tab.title}</span></button>
+          <button
+            type="button"
+            className={styles.browserTabClose}
+            aria-label={locale === "ko" ? `${tab.title} 탭 닫기` : `Close ${tab.title} tab`}
+            onClick={() => closeTab(tab.id)}
+          ><IconClose size={10} /></button>
+        </div>)}
+      </div>
+      <button type="button" className={styles.browserNewTab} onClick={addTab} aria-label={locale === "ko" ? "새 탭" : "New tab"}><IconPlus size={14} /></button>
+      {interactive && <span className={styles.browserLiveBadge}><i />LIVE</span>}
+    </div>
+    <div className={styles.browserNavigationBar}>
+      <button type="button" onClick={() => dispatch({ kind: "navigation", action: "back" })} disabled={!interactive} aria-label={locale === "ko" ? "뒤로" : "Back"}><IconArrowLeft size={14} /></button>
+      <button type="button" onClick={() => dispatch({ kind: "navigation", action: "forward" })} disabled={!interactive} aria-label={locale === "ko" ? "앞으로" : "Forward"}><IconChevronRight size={14} /></button>
+      <button type="button" onClick={() => dispatch({ kind: "navigation", action: "reload" })} disabled={!interactive} aria-label={locale === "ko" ? "새로고침" : "Reload"}><IconRefresh size={13} /></button>
+      <form className={styles.browserAddressForm} onSubmit={(event) => { event.preventDefault(); navigateFromAddress(); }}>
+        <IconNetwork size={12} />
+        <input
+          value={address}
+          onChange={(event) => setAddress(event.target.value)}
+          aria-label={locale === "ko" ? "주소" : "Address"}
+          placeholder={locale === "ko" ? "검색하거나 주소 입력" : "Search or enter address"}
+          spellCheck={false}
+        />
+      </form>
+      <div className={styles.browserMenuAnchor}>
+        <button type="button" aria-label={locale === "ko" ? "브라우저 메뉴" : "Browser menu"} aria-expanded={menuOpen} onClick={() => setMenuOpen((value) => !value)}><IconMoreHorizontal size={15} /></button>
+        {menuOpen && <div className={styles.browserMenu} role="menu">
+          <button type="button" role="menuitem" onClick={() => { setViewport("desktop"); setMenuOpen(false); }} data-selected={viewport === "desktop" ? "true" : undefined}>{locale === "ko" ? "웹 화면" : "Web viewport"}<small>1280×800</small></button>
+          <button type="button" role="menuitem" onClick={() => { setViewport("phone"); setMenuOpen(false); }} data-selected={viewport === "phone" ? "true" : undefined}>{locale === "ko" ? "휴대폰 화면" : "Phone viewport"}<small>390×844</small></button>
+          <span />
+          <button type="button" role="menuitem" disabled={!effectiveUrl} onClick={() => { if (effectiveUrl) void navigator.clipboard.writeText(effectiveUrl); setMenuOpen(false); }}>{locale === "ko" ? "주소 복사" : "Copy address"}</button>
+          <button type="button" role="menuitem" onClick={() => { closeTab(activeTabId); setMenuOpen(false); }}>{locale === "ko" ? "탭 닫기" : "Close tab"}</button>
+        </div>}
       </div>
     </div>
     {available
       // eslint-disable-next-line @next/next/no-img-element
       ? <div className={styles.browserViewport} data-mode={viewport}>
-          <img src={currentFrame!.dataUrl!} alt={currentFrame?.title || (locale === "ko" ? "내장 브라우저 라이브 화면" : "Live built-in browser view")} />
+          <div
+            className={styles.browserStreamInput}
+            role="application"
+            aria-label={locale === "ko" ? "실시간 브라우저. 클릭, 스크롤, 키보드 입력 가능" : "Live browser. Click, scroll, and type here"}
+            onPointerDown={(event) => {
+              event.currentTarget.setPointerCapture(event.pointerId);
+              inputRef.current?.focus({ preventScroll: true });
+              const point = pointInFrame(event.currentTarget, event.clientX, event.clientY);
+              dispatch({ kind: "pointer", phase: "down", ...point, button: event.button === 1 ? "middle" : event.button === 2 ? "right" : "left", clickCount: event.detail || 1 });
+            }}
+            onPointerUp={(event) => {
+              const point = pointInFrame(event.currentTarget, event.clientX, event.clientY);
+              dispatch({ kind: "pointer", phase: "up", ...point, button: event.button === 1 ? "middle" : event.button === 2 ? "right" : "left", clickCount: event.detail || 1 });
+            }}
+            onPointerMove={(event) => {
+              queuedPointerRef.current = pointInFrame(event.currentTarget, event.clientX, event.clientY);
+              if (pointerFrameRef.current != null) return;
+              pointerFrameRef.current = window.requestAnimationFrame(() => {
+                pointerFrameRef.current = null;
+                const point = queuedPointerRef.current;
+                if (point) dispatch({ kind: "pointer", phase: "move", ...point });
+              });
+            }}
+            onWheel={(event) => {
+              event.preventDefault();
+              const point = pointInFrame(event.currentTarget, event.clientX, event.clientY);
+              dispatch({ kind: "wheel", ...point, deltaX: event.deltaX, deltaY: event.deltaY });
+            }}
+            onContextMenu={(event) => event.preventDefault()}
+            onKeyDown={(event) => {
+              if (composingRef.current || event.nativeEvent.isComposing) return;
+              event.preventDefault();
+              const modifiers = modifierMask(event);
+              dispatch({ kind: "key", phase: "down", key: event.key, code: event.code, modifiers });
+              dispatch({ kind: "key", phase: "up", key: event.key, code: event.code, modifiers });
+            }}
+            onCompositionStart={() => { composingRef.current = true; }}
+            onCompositionEnd={(event) => {
+              composingRef.current = false;
+              if (event.data) dispatch({ kind: "text", text: event.data });
+            }}
+            onPaste={(event) => {
+              event.preventDefault();
+              const text = event.clipboardData.getData("text/plain");
+              if (text) dispatch({ kind: "text", text });
+            }}
+          >
+            <img src={currentFrame!.dataUrl!} draggable={false} alt={currentFrame?.title || (locale === "ko" ? "인앱 브라우저 라이브 화면" : "Live in-app browser view")} />
+            <textarea ref={inputRef} className={styles.browserInputCapture} aria-label={locale === "ko" ? "브라우저 키보드 입력" : "Browser keyboard input"} value="" onChange={() => undefined} />
+          </div>
         </div>
-      : <div className={styles.browserEmpty}><IconPanelRight size={22} /><strong>{loading ? (locale === "ko" ? "브라우저 화면 불러오는 중…" : "Loading browser view…") : (locale === "ko" ? "열린 브라우저 페이지가 없습니다" : "No browser page is open")}</strong><small>{locale === "ko" ? "에이전트가 브라우저를 사용하면 이곳에 실제 화면이 표시됩니다." : "The real page appears here when an agent uses the built-in browser."}</small>{loading && <LoadingEstimate locale={locale} operationKey="one-browser-live-frame" expectedSeconds={[1, 10]} />}</div>}
-    {currentFrame?.url && <small className={styles.browserUrl}><span>{currentFrame.url}</span>{currentFrame.width && currentFrame.height ? <strong>{currentFrame.width}×{currentFrame.height}</strong> : null}</small>}
+      : <div className={styles.browserEmpty}><IconPanelRight size={22} /><strong>{loading ? (locale === "ko" ? "브라우저 화면 불러오는 중…" : "Loading browser view…") : effectiveUrl ? (locale === "ko" ? "이 사이트에 연결할 수 없습니다" : "This site can't be reached") : (locale === "ko" ? "새 탭" : "New tab")}</strong><small>{loading ? (locale === "ko" ? "실제 페이지를 인앱 브라우저에 연결하고 있습니다." : "Connecting the real page to the in-app browser.") : effectiveUrl ? (locale === "ko" ? "연결 상태를 확인한 뒤 새로고침해 주세요." : "Check the connection, then reload this page.") : (locale === "ko" ? "주소창에 사이트 주소를 입력하세요." : "Enter a site in the address bar.")}</small>{loading && <LoadingEstimate locale={locale} operationKey="one-browser-live-frame" expectedSeconds={[1, 10]} />}</div>}
   </section>;
 }
 
@@ -597,6 +949,10 @@ export function OneActivityArtifactRail({
   onHistoryAsk,
   onHistoryReviewRecommendation,
   browserScopeKey,
+  browserHistoryUrl,
+  onBrowserObserved,
+  result,
+  resultKey,
 }: {
   items: OneActivityArtifact[];
   activity?: OneActivityState;
@@ -618,16 +974,31 @@ export function OneActivityArtifactRail({
   onHistoryReviewRecommendation?: (entry: ComputerHistoryEntry) => void;
   /** Stable Taskforce/thread identity used to retain only its own browser URL across turns. */
   browserScopeKey?: string;
+  /** Latest proven Browser navigation from this thread's durable run history. */
+  browserHistoryUrl?: string;
+  /** Present the scoped Browser rail when this thread observes a real navigation. */
+  onBrowserObserved?: (url: string) => void;
+  /** The structured/live result retained in both chat and this in-app rail. */
+  result?: ReactNode;
+  /** Stable identity used to present a newly arrived result automatically. */
+  resultKey?: string | null;
 }) {
   const [collapsedSections, setCollapsedSections] = useState<Set<OutputSectionKey>>(readCollapsedOutputSections);
   const [railView, setRailView] = useState<OutputRailView>("activity");
-  const resizeRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
+  const resizeRef = useRef<{ pointerId: number; startX: number; startWidth: number; rawWidth: number } | null>(null);
   const historyResizeRef = useRef<{ pointerId: number; startY: number; startHeight: number } | null>(null);
+  const browserComfortWidthAppliedRef = useRef(false);
   const [resizing, setResizing] = useState(false);
+  const [collapseReady, setCollapseReady] = useState(false);
   const [historyResizing, setHistoryResizing] = useState(false);
   const [historyHeight, setHistoryHeight] = useState(readOutputHistoryHeight);
   const [browserUrlsByScope, setBrowserUrlsByScope] = useState<Record<string, string>>({});
+  const [openedArtifact, setOpenedArtifact] = useState<OneArtifactOpenRequest | null>(null);
+  const presentedBrowserTargetRef = useRef<string | null>(null);
+  const presentedResultKeyRef = useRef<string | null>(null);
+  const presentedArtifactIdRef = useRef<string | null>(null);
   const clampWidth = (value: number) => Math.min(maxWidth, Math.max(minWidth, Math.round(value)));
+  const collapseThreshold = Math.max(120, Math.min(220, minWidth - 48));
   const clampHistoryHeight = (value: number) => Math.min(480, Math.max(150, Math.round(value)));
   const commitHistoryHeight = (value: number) => {
     const next = clampHistoryHeight(value);
@@ -659,7 +1030,122 @@ export function OneActivityArtifactRail({
       : { ...current, [browserScopeKey]: currentBrowserUrl });
   }, [browserScopeKey, currentBrowserUrl]);
   const preferredBrowserUrl = currentBrowserUrl
+    ?? browserHistoryUrl
     ?? (browserScopeKey ? browserUrlsByScope[browserScopeKey] : undefined);
+  const latestArtifactId = items.at(-1)?.id ?? null;
+  useEffect(() => {
+    const handleOpen = (event: Event) => {
+      const detail = (event as CustomEvent<unknown>).detail;
+      if (!isOneArtifactOpenRequest(detail)) return;
+      setOpenedArtifact(detail);
+      setRailView("result");
+    };
+    window.addEventListener(ONE_ARTIFACT_OPEN_EVENT, handleOpen);
+    return () => window.removeEventListener(ONE_ARTIFACT_OPEN_EVENT, handleOpen);
+  }, []);
+  useEffect(() => {
+    if (result || !latestArtifactId || presentedArtifactIdRef.current === latestArtifactId) return;
+    presentedArtifactIdRef.current = latestArtifactId;
+    // 자동 표시는 Browser 를 빼앗지 않는다 — 브라우저 작업 자체가 산출물이고, 새 아티팩트가
+    // 도착할 때마다 Activity 로 튕기면 사람이 보던 화면이 사라진다(P0: 재열람 시 Browser 유지).
+    setRailView((current) => (current === "browser" ? current : "activity"));
+  }, [latestArtifactId, result]);
+  useEffect(() => {
+    if (!preferredBrowserUrl) return;
+    const targetKey = `${browserScopeKey ?? "unscoped"}\u0000${preferredBrowserUrl}`;
+    if (presentedBrowserTargetRef.current === targetKey) return;
+    presentedBrowserTargetRef.current = targetKey;
+    // Browser work is itself the output. A person should not have to discover
+    // a hidden tab after the agent opens a page, and the external Chrome window
+    // is never the One presentation surface.
+    setRailView("browser");
+    onBrowserObserved?.(preferredBrowserUrl);
+  }, [browserScopeKey, onBrowserObserved, preferredBrowserUrl]);
+  useEffect(() => {
+    if (!result || !resultKey || presentedResultKeyRef.current === resultKey) return;
+    presentedResultKeyRef.current = resultKey;
+    // 결과 자동 표시도 같은 규칙 — 확인된 Browser 표면 위로는 올라오지 않는다. Result 탭은 남는다.
+    setRailView((current) => (current === "browser" ? current : "result"));
+  }, [result, resultKey]);
+  useEffect(() => {
+    if (railView !== "browser" || browserComfortWidthAppliedRef.current || !onResize) return;
+    browserComfortWidthAppliedRef.current = true;
+    const currentWidth = width ?? defaultWidth;
+    // A real browser needs room for tabs, navigation and the address bar. The
+    // former 420px activity-rail width compressed those controls into an
+    // unreadable preview; open Browser at the same comfortable width as the
+    // in-app browser reference while keeping the user's resize control.
+    const preferredWidth = typeof window === "undefined"
+      ? 640
+      : window.innerWidth <= 1080
+        ? Math.round(window.innerWidth * 0.86)
+        : Math.round(window.innerWidth * 0.432);
+    if (currentWidth < preferredWidth) onResize(Math.min(maxWidth, preferredWidth));
+  }, [defaultWidth, maxWidth, onResize, railView, width]);
+  useEffect(() => {
+    if (!onResize) return;
+    const move = (event: PointerEvent) => {
+      const drag = resizeRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      // Window-level tracking keeps the drag alive when the pointer leaves the
+      // narrow panel edge or Electron drops element pointer capture.
+      const rawWidth = drag.startWidth + (drag.startX - event.clientX);
+      drag.rawWidth = rawWidth;
+      const ready = rawWidth <= collapseThreshold;
+      setCollapseReady((current) => current === ready ? current : ready);
+      // Once the grip reaches the minimum, keep tracking the pointer beyond the
+      // panel. Releasing near the window edge collapses instead of leaving an
+      // awkward sliver that cannot be resized reliably.
+      onResize(ready ? minWidth : Math.min(maxWidth, Math.max(minWidth, Math.round(rawWidth))));
+      event.preventDefault();
+    };
+    const finish = (event: PointerEvent) => {
+      const drag = resizeRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      const shouldCollapse = event.type === "pointerup" && drag.rawWidth <= collapseThreshold;
+      resizeRef.current = null;
+      setResizing(false);
+      setCollapseReady(false);
+      if (shouldCollapse) {
+        // Collapsing is a visibility action, not a request to permanently
+        // reopen at the minimum. Preserve the last comfortable width (or the
+        // product default when the drag began from a narrow rail).
+        onResize(Math.max(defaultWidth, Math.min(maxWidth, Math.round(drag.startWidth))));
+        onClose?.();
+      }
+    };
+    window.addEventListener("pointermove", move, { passive: false });
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+    return () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+    };
+  }, [collapseThreshold, defaultWidth, maxWidth, minWidth, onClose, onResize]);
+  useEffect(() => {
+    if (!resizing) return;
+    const root = document.documentElement;
+    const body = document.body;
+    const prior = root.getAttribute("data-one-output-resizing");
+    const priorRootCursor = root.style.cursor;
+    const priorRootUserSelect = root.style.userSelect;
+    const priorBodyCursor = body.style.cursor;
+    const priorBodyUserSelect = body.style.userSelect;
+    root.setAttribute("data-one-output-resizing", "true");
+    root.style.cursor = "col-resize";
+    root.style.userSelect = "none";
+    body.style.cursor = "col-resize";
+    body.style.userSelect = "none";
+    return () => {
+      if (prior == null) root.removeAttribute("data-one-output-resizing");
+      else root.setAttribute("data-one-output-resizing", prior);
+      root.style.cursor = priorRootCursor;
+      root.style.userSelect = priorRootUserSelect;
+      body.style.cursor = priorBodyCursor;
+      body.style.userSelect = priorBodyUserSelect;
+    };
+  }, [resizing]);
   const sources = useMemo(() => {
     const current = activity?.sources ?? [];
     if (!preferredBrowserUrl || current.some((source) => source.url === preferredBrowserUrl)) return current;
@@ -696,50 +1182,37 @@ export function OneActivityArtifactRail({
       className={styles.artifactRail}
       aria-label={locale === "ko" ? "작업 산출물" : "Work outputs"}
       data-one-runtime-artifacts="true"
+      data-rail-view={railView}
       data-resizing={resizing ? "true" : "false"}
+      data-collapse-ready={collapseReady ? "true" : "false"}
       style={width ? { width } : undefined}
     >
       {onResize && (
         // Drag the left edge to resize (owner request 2026-08-16). Keyboard:
-        // ←/→ move 16px, Home/End jump to the bounds, double-click resets.
-        <div
+        // ←/→ move 16px, Home widens, End collapses, double-click resets.
+        <button
+          type="button"
           className={styles.artifactResizeHandle}
-          role="separator"
-          aria-orientation="vertical"
           aria-label={locale === "ko" ? "출력 패널 너비 조절" : "Resize output panel"}
-          aria-valuemin={minWidth}
-          aria-valuemax={maxWidth}
-          aria-valuenow={width ?? defaultWidth}
-          tabIndex={0}
+          title={locale === "ko" ? "드래그하거나 화살표 키로 너비 조절" : "Drag or use arrow keys to resize"}
           data-one-rail-resize="true"
           onPointerDown={(event) => {
             if (event.button !== 0) return;
-            resizeRef.current = { pointerId: event.pointerId, startX: event.clientX, startWidth: width ?? defaultWidth };
-            event.currentTarget.setPointerCapture(event.pointerId);
+            event.currentTarget.focus({ preventScroll: true });
+            const startWidth = width ?? defaultWidth;
+            resizeRef.current = { pointerId: event.pointerId, startX: event.clientX, startWidth, rawWidth: startWidth };
             setResizing(true);
+            setCollapseReady(false);
             event.preventDefault();
           }}
-          onPointerMove={(event) => {
-            const drag = resizeRef.current;
-            if (!drag || drag.pointerId !== event.pointerId) return;
-            // The rail sits on the right: dragging left widens it.
-            onResize(clampWidth(drag.startWidth + (drag.startX - event.clientX)));
-          }}
-          onPointerUp={(event) => {
-            if (resizeRef.current?.pointerId !== event.pointerId) return;
-            resizeRef.current = null;
-            setResizing(false);
-          }}
-          onPointerCancel={() => {
-            resizeRef.current = null;
-            setResizing(false);
-          }}
+          onClick={(event) => event.currentTarget.focus({ preventScroll: true })}
           onDoubleClick={() => onResize(defaultWidth)}
           onKeyDown={(event) => {
             const current = width ?? defaultWidth;
             if (event.key === "ArrowLeft") onResize(clampWidth(current + 16));
             else if (event.key === "ArrowRight") onResize(clampWidth(current - 16));
             else if (event.key === "Home") onResize(maxWidth);
+            else if (event.key === "End" && onClose) onClose();
             else if (event.key === "End") onResize(minWidth);
             else return;
             event.preventDefault();
@@ -754,7 +1227,7 @@ export function OneActivityArtifactRail({
         </div>
       </header>
       <nav className={styles.artifactTabs} aria-label={locale === "ko" ? "출력 보기" : "Output views"} role="tablist">
-        {(["activity", "terminal", "browser"] as const).map((view) => (
+        {([...(result || openedArtifact ? ["result" as const] : []), "activity" as const, "terminal" as const, "browser" as const]).map((view) => (
           <button
             key={view}
             type="button"
@@ -763,16 +1236,25 @@ export function OneActivityArtifactRail({
             data-active={railView === view ? "true" : "false"}
             onClick={() => setRailView(view)}
           >
-            {view === "activity" ? (locale === "ko" ? "Activity" : "Activity") : view === "terminal" ? (locale === "ko" ? "Terminal" : "Terminal") : (locale === "ko" ? "Browser" : "Browser")}
+            {view === "result" ? (locale === "ko" ? "결과" : "Result") : view === "activity" ? "Activity" : view === "terminal" ? "Terminal" : "Browser"}
           </button>
         ))}
       </nav>
       <div className={styles.artifactContentStack}>
       <div className={styles.artifactList}>
+        {railView === "result" && (openedArtifact || result) && <div className={styles.resultView}>
+          {openedArtifact && <>
+            <button type="button" className={styles.artifactBackButton} onClick={() => setOpenedArtifact(null)}>
+              <IconArrowLeft size={13} /> {locale === "ko" ? "결과로 돌아가기" : "Back to result"}
+            </button>
+            <ArtifactOpenViewer target={openedArtifact} locale={locale} wide={(width ?? defaultWidth) >= 560} />
+          </>}
+          {!openedArtifact && result}
+        </div>}
         {railView === "activity" && <>
           <OutputDisclosure section="files" label={locale === "ko" ? "결과물" : "Artifacts"} count={items.length} expanded={sectionExpanded("files")} onToggle={toggleSection}>
             {items.length === 0 && <p className={styles.artifactEmpty}>{locale === "ko" ? "만든 파일 또는 사이트가 여기에 표시됩니다" : "Files or sites you create appear here"}</p>}
-            {items.map((item) => <ArtifactPreviewCard key={item.id} item={item} locale={locale} />)}
+            {items.map((item) => <ArtifactPreviewCard key={item.id} item={item} locale={locale} wide={(width ?? defaultWidth) >= 560} />)}
           </OutputDisclosure>
           <OutputDisclosure section="agents" label={locale === "ko" ? "하위 에이전트" : "Subagents"} count={agents.length} expanded={sectionExpanded("agents")} onToggle={toggleSection}>
             {agents.length === 0
@@ -803,7 +1285,7 @@ export function OneActivityArtifactRail({
           </OutputDisclosure>
         </>}
       </div>
-      <div
+      {(railView === "activity" || railView === "terminal") && <><div
         className={styles.artifactHistoryResizeHandle}
         role="separator"
         aria-orientation="horizontal"
@@ -856,6 +1338,7 @@ export function OneActivityArtifactRail({
           onReviewRecommendation={onHistoryReviewRecommendation}
         />
       </div>
+      </>}
       </div>
     </aside>
   );

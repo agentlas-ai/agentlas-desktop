@@ -200,18 +200,26 @@
   position: absolute;
   top: 0;
   bottom: 0;
-  left: -6px;
-  width: 12px;
+  /* Keep the complete hit target inside the rounded rail. The previous half-
+     outside handle was clipped by the rail's overflow and left only a few
+     unreliable pixels for the pointer. */
+  left: 0;
+  width: 24px;
+  padding: 0;
+  border: 0;
   cursor: col-resize;
-  border-radius: 6px;
+  border-radius: 28px 0 0 28px;
+  background: transparent;
   touch-action: none;
-  z-index: 2;
+  user-select: none;
+  -webkit-app-region: no-drag;
+  z-index: 60;
 }
 .artifactResizeHandle::after {
   content: "";
   position: absolute;
   top: 50%;
-  left: 5px;
+  left: 3px;
   width: 3px;
   height: 44px;
   transform: translateY(-50%);
@@ -223,8 +231,13 @@
 .artifactResizeHandle:hover::after,
 .artifactResizeHandle:focus-visible::after,
 .artifactRail[data-resizing="true"] .artifactResizeHandle::after { opacity: 1; }
-.artifactResizeHandle:focus-visible { outline: 2px solid rgba(96, 122, 54, 0.35); outline-offset: -2px; }
+.artifactResizeHandle:focus-visible { outline: none; }
+.artifactResizeHandle:focus-visible::after { box-shadow: 0 0 0 3px rgba(96, 122, 54, 0.22); }
 .artifactRail[data-resizing="true"] { user-select: none; }
+.artifactRail[data-collapse-ready="true"] {
+  border-left-color: #63696c;
+  box-shadow: inset 3px 0 0 #63696c;
+}
 
 .artifactRail > header {
   min-height: 64px;
@@ -254,7 +267,7 @@
 
 .artifactTabs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(74px, 1fr));
   gap: 4px;
   padding: 8px 16px 0;
   border-bottom: 1px solid #f0f1f2;
@@ -281,6 +294,36 @@
   padding: 10px 20px 20px;
   overflow-y: auto;
 }
+
+.artifactRail[data-rail-view="result"] .artifactList,
+.artifactRail[data-rail-view="browser"] .artifactList {
+  padding: 0;
+}
+
+.resultView {
+  min-width: 0;
+  min-height: 100%;
+  padding: 18px 22px 28px;
+  background: #fff;
+}
+
+.resultView > :first-child { margin-top: 0; }
+.artifactBackButton {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 12px;
+  padding: 0 9px;
+  border: 1px solid #dfe3e1;
+  border-radius: 8px;
+  background: #fff;
+  color: #68706b;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.artifactBackButton:hover, .artifactBackButton:focus-visible { border-color: #b9c2bc; color: #3f4943; outline: none; }
 
 .artifactContentStack {
   min-height: 0;
@@ -430,29 +473,219 @@ button.artifactVisual { cursor: pointer; }
 .artifactPreviewCopy button { min-height: 32px; padding: 0 10px; border: 1px solid #d9dddb; border-radius: 8px; background: #fff; color: #505753; font: inherit; font-size: 10px; font-weight: 650; cursor: pointer; }
 .artifactPreviewCopy button:hover, .artifactPreviewCopy button:focus-visible { border-color: #b7bdba; background: #f3f4f3; outline: none; }
 
-.browserLive { display: grid; overflow: hidden; margin: 0 0 10px; border: 1px solid #e0e3e2; border-radius: 13px; background: #fff; }
-.browserChrome { min-height: 42px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 0 7px 0 11px; border-bottom: 1px solid #e6e8e7; background: #f6f7f6; }
-.browserChrome > span { display: inline-flex; gap: 4px; }
-.browserChrome i { width: 7px; height: 7px; border-radius: 50%; background: #9aa09d; }
-.browserChrome i:nth-child(2) { background: #707773; }
-.browserChrome i:nth-child(3) { background: #414744; }
-.browserChrome strong { overflow: hidden; color: #565d59; font-size: 10px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
-.browserActions { display: inline-flex; align-items: center; gap: 5px; }
-.browserChrome button { min-height: 28px; padding: 0 8px; border: 1px solid #d7dbd9; border-radius: 7px; background: #fff; color: #4d5450; font: inherit; font-size: 9px; font-weight: 650; cursor: pointer; }
-.browserChrome button:hover, .browserChrome button:focus-visible { border-color: #b5bbb8; background: #f0f1f0; outline: none; }
-.browserViewportToggle { display: inline-grid; grid-template-columns: repeat(2, auto); padding: 2px; border: 1px solid #d9dcda; border-radius: 8px; background: #eceeed; }
-.browserViewportToggle button { min-height: 22px; padding: 0 6px; border: 0; border-radius: 5px; background: transparent; color: #707672; }
-.browserViewportToggle button[aria-selected="true"] { background: #3f4542; color: #fff; }
-.browserViewport { min-height: 190px; display: grid; place-items: start center; overflow: auto; background: #eceeed; }
-.browserViewport img { width: 100%; max-height: 360px; display: block; object-fit: contain; }
+.browserLive {
+  display: grid;
+  overflow: hidden;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(20, 24, 28, .025);
+}
+.browserTabBar {
+  min-width: 0;
+  min-height: 46px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px 5px;
+  border-bottom: 1px solid #eceeef;
+  background: #fafafa;
+}
+.browserContextLabel {
+  min-width: 90px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #6f7478;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.browserTabs {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.browserTabs::-webkit-scrollbar { display: none; }
+.browserTab {
+  min-width: 112px;
+  max-width: 210px;
+  min-height: 34px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  padding: 0 5px 0 0;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: #6f7478;
+}
+.browserTab[data-selected="true"] {
+  border-color: #e7e9eb;
+  background: #fff;
+  color: #34383b;
+  box-shadow: 0 1px 2px rgba(22, 27, 31, .04);
+}
+.browserTabSelect {
+  min-width: 0;
+  min-height: 32px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  padding: 0 5px 0 10px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+.browserTabSelect > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.browserTabSelect:focus-visible { outline: none; }
+.browserTabClose {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #92979a;
+  cursor: pointer;
+}
+.browserTabClose:hover, .browserTabClose:focus-visible { background: #eff1f2; color: #4f5559; outline: none; }
+.browserNewTab,
+.browserNavigationBar > button,
+.browserMenuAnchor > button {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #707579;
+  cursor: pointer;
+}
+.browserNewTab:hover,
+.browserNewTab:focus-visible,
+.browserNavigationBar > button:hover,
+.browserNavigationBar > button:focus-visible,
+.browserMenuAnchor > button:hover,
+.browserMenuAnchor > button:focus-visible { background: #f1f2f3; color: #34383b; outline: none; }
+.browserNavigationBar > button:disabled { color: #c8cbcd; cursor: default; }
+.browserNavigationBar > button:disabled:hover { background: transparent; }
+.browserLiveBadge {
+  min-height: 21px;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  padding: 0 7px;
+  border: 1px solid #c9ded2;
+  border-radius: 999px;
+  background: #f3f8f5;
+  color: #397052;
+  font-size: 8px;
+  font-weight: 760;
+  letter-spacing: .04em;
+}
+.browserLiveBadge i { width: 5px; height: 5px; border-radius: 50%; background: #2b9a5b; box-shadow: 0 0 0 3px rgba(43, 154, 91, .09); }
+.browserNavigationBar {
+  min-width: 0;
+  min-height: 44px;
+  display: grid;
+  grid-template-columns: 30px 30px 30px minmax(0, 1fr) 30px;
+  align-items: center;
+  gap: 3px;
+  padding: 6px 9px;
+  border-bottom: 1px solid #e8eaec;
+  background: #fff;
+}
+.browserAddressForm {
+  min-width: 0;
+  min-height: 32px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: #f5f6f7;
+  color: #73787c;
+}
+.browserAddressForm:focus-within { border-color: #d8dcdf; background: #fff; box-shadow: 0 0 0 2px rgba(50, 55, 59, .06); }
+.browserAddressForm input {
+  min-width: 0;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #34383b;
+  font: inherit;
+  font-size: 10px;
+  text-align: center;
+}
+.browserAddressForm input::placeholder { color: #a1a5a8; }
+.browserMenuAnchor { position: relative; display: grid; place-items: center; }
+.browserMenuAnchor > button svg { transform: rotate(90deg); }
+.browserMenu {
+  position: absolute;
+  z-index: 8;
+  top: 35px;
+  right: 0;
+  width: 190px;
+  display: grid;
+  gap: 2px;
+  padding: 6px;
+  border: 1px solid #e0e3e5;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 12px 32px rgba(20, 25, 29, .14);
+}
+.browserMenu > span { height: 1px; margin: 3px 4px; background: #eceeef; }
+.browserMenu button {
+  min-height: 34px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #494e52;
+  font: inherit;
+  font-size: 10px;
+  text-align: left;
+  cursor: pointer;
+}
+.browserMenu button:hover, .browserMenu button:focus-visible, .browserMenu button[data-selected="true"] { background: #f1f2f3; outline: none; }
+.browserMenu button[data-selected="true"] { color: #202427; font-weight: 700; }
+.browserMenu button:disabled { color: #b2b6b9; cursor: default; }
+.browserMenu small { color: #92979a; font-size: 8px; font-weight: 500; }
+.browserViewport { min-height: 360px; display: grid; place-items: start center; overflow: auto; background: #eef0f1; }
+.browserStreamInput { width: 100%; max-height: none; position: relative; overflow: hidden; cursor: default; touch-action: none; outline: none; user-select: none; }
+.browserStreamInput:focus-within { box-shadow: inset 0 0 0 2px rgba(42, 105, 75, .45); }
+.browserStreamInput img { width: 100%; max-height: none; display: block; object-fit: contain; pointer-events: none; }
+.browserInputCapture { position: absolute; width: 1px; height: 1px; left: 50%; bottom: 0; padding: 0; border: 0; opacity: 0; resize: none; pointer-events: none; }
 .browserViewport[data-mode="phone"] { padding: 14px; background: #e7e9e8; }
-.browserViewport[data-mode="phone"] img { width: min(220px, 74%); max-height: none; aspect-ratio: 390 / 844; border: 6px solid #303532; border-radius: 24px; background: #fff; object-fit: cover; object-position: top; box-shadow: 0 6px 18px rgba(33, 38, 35, .16); }
-.browserEmpty { min-height: 190px; display: grid; place-items: center; align-content: center; gap: 7px; padding: 24px; color: #8b918e; text-align: center; }
-.browserEmpty strong { color: #555c58; font-size: 11px; }
-.browserEmpty small { max-width: 260px; color: #8b918e; font-size: 9px; line-height: 1.5; }
-.browserUrl { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; overflow: hidden; padding: 8px 10px; border-top: 1px solid #e6e8e7; color: #858b88; font-size: 9px; white-space: nowrap; }
-.browserUrl span { overflow: hidden; text-overflow: ellipsis; }
-.browserUrl strong { color: #686f6b; font-size: 8px; font-weight: 650; }
+.browserViewport[data-mode="phone"] .browserStreamInput { width: min(220px, 74%); max-height: none; border: 6px solid #303532; border-radius: 24px; background: #fff; box-shadow: 0 6px 18px rgba(33, 38, 35, .16); }
+.browserViewport[data-mode="phone"] .browserStreamInput img { width: 100%; max-height: none; aspect-ratio: 390 / 844; object-fit: cover; object-position: top; }
+.browserEmpty { min-height: 360px; display: grid; place-items: center; align-content: center; gap: 8px; padding: 28px; color: #8b918e; text-align: center; }
+.browserEmpty strong { color: #41464a; font-size: 13px; }
+.browserEmpty small { max-width: 290px; color: #888e92; font-size: 10px; line-height: 1.55; }
 
 @keyframes artifactPreviewPulse { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
 
@@ -497,10 +730,6 @@ button.artifactVisual { cursor: pointer; }
 @keyframes activityBlink {
   0%, 100% { opacity: .35; }
   50% { opacity: 1; }
-}
-
-@media (max-width: 1180px) {
-  .artifactRail { display: none; }
 }
 
 @media (max-width: 700px) {

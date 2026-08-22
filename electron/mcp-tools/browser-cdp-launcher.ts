@@ -870,7 +870,7 @@ function reconcileOwnerWithRetry(attempts = 4, delayMs = 90) {
  * 그래서 파일이 자기 계약 번호를 들고 다닌다. 두 writer 모두 **자기보다 높거나 같은 번호가
  * 이미 설치돼 있으면 덮어쓰지 않는다.** 낮은 번호나 남이 만든 파일만 갱신한다.
  */
-export const BROWSER_CDP_LAUNCHER_CONTRACT = 2;
+export const BROWSER_CDP_LAUNCHER_CONTRACT = 3;
 
 /** 설치된 런처 파일에서 계약 번호를 읽는다. 표식이 없으면 null(= 계약 이전 파일). */
 export function readLauncherContractVersion(source: string): number | null {
@@ -895,7 +895,11 @@ import http from 'node:http';
 const PORT = Number(process.env.AGENTLAS_CDP_PORT || 9222);
 const CDP_PROFILE = process.env.AGENTLAS_CDP_PROFILE || path.join(os.homedir(), '.agentlas', 'chrome-cdp-profile');
 const OWNER_FILE = path.join(CDP_PROFILE, '.agentlas-cdp-owner.json');
-const HEADLESS = String(process.env.AGENTLAS_CDP_HEADLESS || '').toLowerCase() === '1';
+// Agent-run browsing is presented in One's Browser rail, so the automation
+// host is non-windowed by default even if a caller omits the env hint. The
+// explicit Browser login action uses browserOpenLogin() and never this launch
+// path, preserving the one intentional headful window for human sign-in.
+const HEADLESS = String(process.env.AGENTLAS_CDP_HEADLESS || '1').toLowerCase() !== '0';
 const SKILLS_DIR = process.env.AGENTLAS_BROWSER_SKILLS_DIR || path.join(os.homedir(), '.agentlas', 'browser-skills');
 const APPROVAL_FILE = process.env.${BROWSER_APPROVAL_FILE_ENV} || '';
 const PLAYWRIGHT_MCP_CLI = ${JSON.stringify(playwrightMcpCliPath())};

@@ -393,6 +393,7 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     agentMessageDirection: ev.agentMessage?.direction,
     agentMessageFrom: ev.agentMessage?.fromAgentId,
     agentMessageTo: ev.agentMessage?.toAgentId,
+    agentMessageReplyTo: ev.agentMessage?.replyToMessageId,
     agentMessageText: ev.agentMessage?.text,
     handoffDepth: ev.agentMessage?.handoffDepth,
     handoffRoundtrip: ev.agentMessage?.handoffRoundtrip,

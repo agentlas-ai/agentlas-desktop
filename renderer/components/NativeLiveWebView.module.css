@@ -1,0 +1,182 @@
+.shell {
+  margin-top: 12px;
+  overflow: hidden;
+  border: 1px solid var(--paper-edge);
+  border-radius: 10px;
+  background: #10110f;
+  box-shadow: 0 14px 38px rgb(12 14 12 / 12%);
+}
+
+.shell[data-bare="true"] {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.shell[data-bare="true"] .stage {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.toolbar {
+  min-height: 42px;
+  padding: 0 10px 0 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: #f8fafc;
+  background: #171916;
+  border-bottom: 1px solid rgb(255 255 255 / 10%);
+}
+
+.identity,
+.actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.identity strong {
+  max-width: 210px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.statusDot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: #fbbf24;
+  box-shadow: 0 0 0 3px rgb(251 191 36 / 13%);
+}
+
+.statusDot.ready {
+  background: #34d399;
+  box-shadow: 0 0 0 3px rgb(52 211 153 / 15%), 0 0 12px rgb(52 211 153 / 28%);
+}
+
+.statusDot.error,
+.statusDot.closed {
+  background: #fb7185;
+  box-shadow: 0 0 0 3px rgb(251 113 133 / 14%);
+}
+
+.statusLabel,
+.runtimeLabel {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  color: #a7f3d0;
+}
+
+.runtimeLabel {
+  color: #94a3b8;
+  letter-spacing: 0;
+  font-weight: 600;
+}
+
+.actions button,
+.message button {
+  border: 1px solid rgb(255 255 255 / 13%);
+  border-radius: 6px;
+  color: #e5e7eb;
+  background: rgb(255 255 255 / 6%);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.actions button {
+  padding: 5px 7px;
+}
+
+.actions button:hover,
+.actions button:focus-visible,
+.message button:hover,
+.message button:focus-visible {
+  border-color: rgb(167 243 208 / 60%);
+  background: rgb(167 243 208 / 10%);
+  outline: none;
+}
+
+.address {
+  height: 26px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #94a3b8;
+  background: #111310;
+  border-bottom: 1px solid rgb(255 255 255 / 8%);
+  font: 10px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.stage {
+  position: relative;
+  height: clamp(320px, 52vh, 560px);
+  min-height: 320px;
+  isolation: isolate;
+  background:
+    radial-gradient(circle at 35% 25%, rgb(52 211 153 / 8%), transparent 34%),
+    #0e100e;
+}
+
+.message {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  text-align: center;
+  color: #cbd5e1;
+  font-size: 12px;
+}
+
+.message strong {
+  color: #f8fafc;
+  font-size: 13px;
+}
+
+.message button {
+  margin-top: 4px;
+  padding: 7px 10px;
+}
+
+.spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid rgb(255 255 255 / 15%);
+  border-top-color: #6ee7b7;
+  border-radius: 999px;
+  animation: live-view-spin .75s linear infinite;
+}
+
+@keyframes live-view-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 700px) {
+  .runtimeLabel,
+  .actions button:last-child { display: none; }
+  .stage { height: 360px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation-duration: 1.8s; }
+}

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
+import { LiveOutputViewer } from "@/components/LiveOutputViewer";
 import type { Automation, InstalledMcpServer } from "@/lib/types";
 import type {
   InvocationRunReceipt,
@@ -49,6 +50,8 @@ import { stripAgentIdentityBadges } from "@shared/agent-control-blocks";
 import { ipc } from "@/lib/ipc";
 import { tFor } from "@/lib/i18n";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
+import { requestOneArtifactOpen } from "@/lib/one-artifact-open";
+import { OneLiveMap } from "./OneLiveMap";
 import styles from "./OneAdaptiveResult.module.css";
 
 export type OneAgentDraftSeed = {
@@ -119,8 +122,6 @@ export function OneAdaptiveResult({
   projection,
   receipt,
   locale,
-  onOpenWork,
-  canOpenWork = false,
   onRetryUnfinished,
   onAcceptResult,
   onSemanticAction,
@@ -132,8 +133,6 @@ export function OneAdaptiveResult({
   projection: OneTaskProjection;
   receipt: InvocationRunReceipt | null;
   locale: "ko" | "en";
-  onOpenWork: () => void;
-  canOpenWork?: boolean;
   /**
    * The thread already shows the model's answer as Markdown (Codex parity).
    * Skip the Surface's flattened Narrative blocks and the title/summary header
@@ -192,7 +191,7 @@ export function OneAdaptiveResult({
   const semanticActions = showNative && surface
     ? [surface.primaryAction, ...surface.secondaryActions].filter(
         (action): action is OneSurfaceSemanticAction => Boolean(
-          action?.enabled && (action.intent !== "open_work" || canOpenWork),
+          action?.enabled && action.intent !== "open_work",
         ),
       )
     : [];
@@ -231,7 +230,7 @@ export function OneAdaptiveResult({
                 block={block}
                 locale={locale}
                 artifactContext={artifactContext}
-                onOpenWork={onOpenWork}
+                onSemanticAction={onSemanticAction}
                 onOpenAgentDraft={onOpenAgentDraft}
               />
             )) : (
@@ -409,13 +408,13 @@ function NativeBlock({
   block,
   locale,
   artifactContext,
-  onOpenWork,
+  onSemanticAction,
   onOpenAgentDraft,
 }: {
   block: OneSurfaceBlock;
   locale: "ko" | "en";
   artifactContext: OneArtifactBindingRequestV1 | null;
-  onOpenWork: () => void;
+  onSemanticAction?: (action: OneSurfaceSemanticAction) => void;
   onOpenAgentDraft?: (seed: OneAgentDraftSeed) => void;
 }) {
   const title = friendlyBlockTitle(block, locale);
@@ -434,10 +433,10 @@ function NativeBlock({
       {block.type === "Timeline" && <TimelineBlock block={block} locale={locale} />}
       {block.type === "Map" && <MapBlock block={block} locale={locale} />}
       {block.type === "Gallery" && (
-        <GalleryBlock block={block} locale={locale} artifactContext={artifactContext} onOpenWork={onOpenWork} />
+        <GalleryBlock block={block} locale={locale} artifactContext={artifactContext} />
       )}
       {block.type === "Media" && (
-        <MediaBlock block={block} locale={locale} artifactContext={artifactContext} onOpenWork={onOpenWork} />
+        <MediaBlock block={block} locale={locale} artifactContext={artifactContext} />
       )}
       {block.type === "Document" && <DocumentBlock block={block} locale={locale} artifactContext={artifactContext} />}
       {block.type === "ArtifactList" && <ArtifactListBlock block={block} locale={locale} artifactContext={artifactContext} />}
@@ -446,7 +445,7 @@ function NativeBlock({
       {block.type === "Status" && <StatusBlock block={block} locale={locale} />}
       {block.type === "Budget" && <BudgetBlock block={block} locale={locale} />}
       {block.type === "Checklist" && <ChecklistBlock block={block} locale={locale} />}
-      {block.type === "Automation" && <AutomationBlock block={block} locale={locale} />}
+      {block.type === "Automation" && <AutomationBlock block={block} locale={locale} onSemanticAction={onSemanticAction} />}
       {block.type === "AgentBuild" && <AgentBuildBlock block={block} locale={locale} onOpenDraft={onOpenAgentDraft} />}
       {block.type === "McpSetup" && <McpSetupBlock block={block} locale={locale} />}
     </section>
@@ -636,27 +635,7 @@ function ComparisonBlock({ block, locale }: { block: OneSurfaceComparisonBlock; 
 }
 
 function MapBlock({ block, locale }: { block: OneSurfaceMapBlock; locale: "ko" | "en" }) {
-  const ordered = [...block.locations].sort((left, right) => (left.sequence ?? Number.MAX_SAFE_INTEGER) - (right.sequence ?? Number.MAX_SAFE_INTEGER));
-  const minLat = Math.min(...ordered.map((item) => item.latitude));
-  const maxLat = Math.max(...ordered.map((item) => item.latitude));
-  const minLng = Math.min(...ordered.map((item) => item.longitude));
-  const maxLng = Math.max(...ordered.map((item) => item.longitude));
-  const points = ordered.map((item) => {
-    const x = 8 + ((item.longitude - minLng) / Math.max(maxLng - minLng, 0.000001)) * 84;
-    const y = 92 - ((item.latitude - minLat) / Math.max(maxLat - minLat, 0.000001)) * 84;
-    return { ...item, x, y };
-  });
-  return (
-    <div className={styles.mapLayout}>
-      <svg className={styles.mapPlot} role="img" aria-label={tFor(locale, "one.res.map.aria", { title: block.title })} viewBox="0 0 100 100" preserveAspectRatio="none">
-        <polyline points={points.map((item) => `${item.x},${item.y}`).join(" ")} fill="none" stroke="currentColor" strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
-        {points.map((item, index) => <g key={item.locationRef}><circle cx={item.x} cy={item.y} r="3.2" /><text x={item.x} y={item.y + 1.2} textAnchor="middle">{item.sequence ?? index + 1}</text></g>)}
-      </svg>
-      <ol className={styles.locationList}>{ordered.map((item, index) => <li key={item.locationRef}>
-        <b>{item.sequence ?? index + 1}</b><span>{displayValue(item.label)}</span><small>{item.latitude.toFixed(4)}, {item.longitude.toFixed(4)}</small>
-      </li>)}</ol>
-    </div>
-  );
+  return <OneLiveMap block={block} locale={locale} />;
 }
 
 type ArtifactPreviewState =
@@ -667,6 +646,7 @@ type ArtifactPreviewState =
 function useArtifactPreview(
   context: OneArtifactBindingRequestV1 | null,
   artifactRef: string,
+  label = artifactRef,
 ): { state: ArtifactPreviewState; retry: () => void; open: () => Promise<boolean> } {
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<ArtifactPreviewState>({ status: context ? "loading" : "unavailable", capability: null });
@@ -709,18 +689,10 @@ function useArtifactPreview(
   ]);
   const retry = useCallback(() => setAttempt((value) => value + 1), []);
   const open = useCallback(async () => {
-    const api = ipc();
     if (!context) return false;
-    if (!api?.oneArtifacts) {
-      requestOneOperationalRecovery("one-artifact-open", new Error("Desktop bridge unavailable"));
-      return false;
-    }
-    const result = await api.oneArtifacts.open({ ...context, artifactRef }).catch(() => ({ opened: false }));
-    if (!result.opened) {
-      requestOneOperationalRecovery("one-artifact-open", new Error("Artifact could not be opened"));
-    }
-    return result.opened;
-  }, [artifactRef, context]);
+    requestOneArtifactOpen({ binding: { ...context, artifactRef }, label });
+    return true;
+  }, [artifactRef, context, label]);
   return { state, retry, open };
 }
 
@@ -728,12 +700,10 @@ function GalleryBlock({
   block,
   locale,
   artifactContext,
-  onOpenWork,
 }: {
   block: OneSurfaceGalleryBlock;
   locale: "ko" | "en";
   artifactContext: OneArtifactBindingRequestV1 | null;
-  onOpenWork: () => void;
 }) {
   return (
     <div className={styles.galleryGrid} role="list" aria-label={block.title}>
@@ -743,7 +713,6 @@ function GalleryBlock({
           item={item}
           locale={locale}
           artifactContext={artifactContext}
-          onOpenWork={onOpenWork}
         />
       ))}
     </div>
@@ -754,14 +723,12 @@ function GalleryItem({
   item,
   locale,
   artifactContext,
-  onOpenWork,
 }: {
   item: OneSurfaceGalleryBlock["items"][number];
   locale: "ko" | "en";
   artifactContext: OneArtifactBindingRequestV1 | null;
-  onOpenWork: () => void;
 }) {
-  const preview = useArtifactPreview(artifactContext, item.artifactRef);
+  const preview = useArtifactPreview(artifactContext, item.artifactRef, item.label);
   const [mediaFailed, setMediaFailed] = useState(false);
   const unavailable = preview.state.status === "unavailable" || mediaFailed;
   return (
@@ -791,7 +758,6 @@ function GalleryItem({
         <div><strong>{displayValue(item.label)}</strong><span>{provenanceLabel(item.provenance, locale)}</span></div>
         <button type="button" aria-label={`${tFor(locale, "one.res.open_file")}: ${displayValue(item.label)}`} onClick={() => void preview.open()}>{tFor(locale, "one.res.open_file")}</button>
       </div>
-      {unavailable && <button type="button" className={styles.workFallbackButton} onClick={onOpenWork}>{tFor(locale, "one.res.view_in_work")}</button>}
     </article>
   );
 }
@@ -800,44 +766,24 @@ function MediaBlock({
   block,
   locale,
   artifactContext,
-  onOpenWork,
 }: {
   block: OneSurfaceMediaBlock;
   locale: "ko" | "en";
   artifactContext: OneArtifactBindingRequestV1 | null;
-  onOpenWork: () => void;
 }) {
-  const preview = useArtifactPreview(artifactContext, block.primaryArtifactRef);
-  const [mediaFailed, setMediaFailed] = useState(false);
-  const unavailable = preview.state.status === "unavailable" || mediaFailed;
+  const preview = useArtifactPreview(artifactContext, block.primaryArtifactRef, block.caption ?? block.title);
+  const unavailable = preview.state.status === "unavailable";
   const capabilityUrl = preview.state.status === "ready" ? preview.state.capability.capabilityUrl : null;
   return (
     <div className={styles.mediaLayout}>
       <div className={styles.primaryMedia} aria-busy={preview.state.status === "loading"}>
         {preview.state.status === "loading" && <div className={styles.mediaSkeleton} role="status" aria-label={tFor(locale, "one.res.media.loading")}><LoadingEstimate locale={locale} operationKey="one-artifact-media-preview" expectedSeconds={[1, 20]} /></div>}
-        {capabilityUrl && !mediaFailed && block.mediaType === "video" && (
-          <video aria-label={displayValue(block.caption ?? block.title)} controls playsInline preload="metadata" src={capabilityUrl} onError={() => setMediaFailed(true)}>
-            {tFor(locale, "one.res.media.video_unplayable")}
-          </video>
-        )}
-        {capabilityUrl && !mediaFailed && block.mediaType === "audio" && (
-          <div className={styles.audioFrame}>
-            <span>{tFor(locale, "one.res.media.audio_result")}</span>
-            <audio aria-label={displayValue(block.caption ?? block.title)} controls preload="metadata" src={capabilityUrl} onError={() => setMediaFailed(true)}>
-              {tFor(locale, "one.res.media.audio_unplayable")}
-            </audio>
-          </div>
-        )}
-        {capabilityUrl && !mediaFailed && block.mediaType === "image" && (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={capabilityUrl} alt={displayValue(block.caption ?? block.title)} referrerPolicy="no-referrer" onError={() => setMediaFailed(true)} />
-        )}
+        {capabilityUrl && <LiveOutputViewer source={capabilityUrl} name={displayValue(block.caption ?? block.title)} kind={block.mediaType} mimeType={preview.state.status === "ready" ? preview.state.capability.mimeType : undefined} size={preview.state.status === "ready" ? preview.state.capability.sizeBytes : undefined} locale={locale} />}
         {unavailable && (
           <div className={styles.mediaUnavailable} role="status">
             <span>{tFor(locale, "one.res.media.source_preserved")}</span>
             <div>
-              <button type="button" onClick={() => { setMediaFailed(false); preview.retry(); }}>{tFor(locale, "one.res.retry")}</button>
-              <button type="button" onClick={onOpenWork}>{tFor(locale, "one.res.view_in_work")}</button>
+              <button type="button" onClick={preview.retry}>{tFor(locale, "one.res.retry")}</button>
             </div>
           </div>
         )}
@@ -867,17 +813,9 @@ function MediaOutput({
   artifactContext: OneArtifactBindingRequestV1 | null;
 }) {
   const open = useCallback(async () => {
-    const api = ipc();
     if (!artifactContext) return;
-    if (!api?.oneArtifacts) {
-      requestOneOperationalRecovery("one-artifact-open", new Error("Desktop bridge unavailable"));
-      return;
-    }
-    const result = await api.oneArtifacts.open({ ...artifactContext, artifactRef: output.artifactRef }).catch(() => ({ opened: false }));
-    if (!result.opened) {
-      requestOneOperationalRecovery("one-artifact-open", new Error("Artifact could not be opened"));
-    }
-  }, [artifactContext, output.artifactRef]);
+    requestOneArtifactOpen({ binding: { ...artifactContext, artifactRef: output.artifactRef }, label: output.label });
+  }, [artifactContext, output.artifactRef, output.label]);
   return (
     <article className={styles.mediaOutput} role="listitem">
       <div><strong>{displayValue(output.label)}</strong><span>{artifactTypeLabel(output.type, locale)} · {verificationLabel(output.verificationStatus, locale)}{output.sizeBytes != null ? ` · ${formatBytes(output.sizeBytes)}` : ""}</span></div>
@@ -895,25 +833,25 @@ function DocumentBlock({
   locale: "ko" | "en";
   artifactContext: OneArtifactBindingRequestV1 | null;
 }) {
-  const open = useCallback(async () => {
-    const api = ipc();
-    if (!artifactContext) return;
-    if (!api?.oneArtifacts) {
-      requestOneOperationalRecovery("one-artifact-open", new Error("Desktop bridge unavailable"));
-      return;
-    }
-    const result = await api.oneArtifacts.open({ ...artifactContext, artifactRef: block.artifactRef }).catch(() => ({ opened: false }));
-    if (!result.opened) {
-      requestOneOperationalRecovery("one-artifact-open", new Error("Artifact could not be opened"));
-    }
-  }, [artifactContext, block.artifactRef]);
+  const preview = useArtifactPreview(artifactContext, block.artifactRef);
+  const capability = preview.state.status === "ready" ? preview.state.capability : null;
+  const viewerKind = capability?.mimeType === "application/pdf"
+    ? "pdf"
+    : capability?.mimeType.includes("presentation") || capability?.mimeType.includes("powerpoint")
+      ? "presentation"
+      : capability?.kind === "spreadsheet"
+        ? "spreadsheet"
+        : "document";
   return <article className={styles.documentPreview} data-artifact-ref={block.artifactRef}>
     <div>
       <strong>{tFor(locale, "one.res.doc.preview")}</strong>
       <span>{block.pageCount != null ? tFor(locale, "one.res.doc.pages", { count: block.pageCount }) : tFor(locale, "one.res.doc.content_checked")}</span>
-      <button type="button" onClick={() => void open()}>{tFor(locale, "one.res.open_file")}</button>
+      <button type="button" onClick={() => void preview.open()}>{tFor(locale, "one.res.open_file")}</button>
     </div>
-    <p>{displayValue(block.excerpt)}</p>
+    {preview.state.status === "loading" && <div className={styles.mediaSkeleton} role="status"><LoadingEstimate locale={locale} operationKey="one-artifact-document-preview" expectedSeconds={[1, 20]} /></div>}
+    {capability
+      ? <LiveOutputViewer source={capability.capabilityUrl} name={displayValue(block.title)} kind={viewerKind} mimeType={capability.mimeType} size={capability.sizeBytes} locale={locale} />
+      : preview.state.status === "unavailable" && <div className={styles.documentFallback}><p>{displayValue(block.excerpt)}</p><button type="button" onClick={preview.retry}>{tFor(locale, "one.res.retry")}</button></div>}
   </article>;
 }
 
@@ -981,17 +919,9 @@ function ArtifactFileCard({
   artifactContext: OneArtifactBindingRequestV1 | null;
 }) {
   const open = useCallback(async () => {
-    const api = ipc();
     if (!artifactContext) return;
-    if (!api?.oneArtifacts) {
-      requestOneOperationalRecovery("one-artifact-open", new Error("Desktop bridge unavailable"));
-      return;
-    }
-    const result = await api.oneArtifacts.open({ ...artifactContext, artifactRef: item.artifactRef }).catch(() => ({ opened: false }));
-    if (!result.opened) {
-      requestOneOperationalRecovery("one-artifact-open", new Error("Artifact could not be opened"));
-    }
-  }, [artifactContext, item.artifactRef]);
+    requestOneArtifactOpen({ binding: { ...artifactContext, artifactRef: item.artifactRef }, label: item.label });
+  }, [artifactContext, item.artifactRef, item.label]);
   return (
     <article className={styles.artifactCard} data-artifact-ref={item.artifactRef} data-verification-status={item.verificationStatus}>
       <div>
@@ -1038,17 +968,38 @@ function automationLastRunLabel(status: NonNullable<OneSurfaceAutomationBlock["l
 }
 
 /**
- * The exact "지금 실행" behavior of renderer/app/(shell)/automation/page.tsx:122
- * — fire runNow without awaiting completion, surface the refusal reason if the
- * start is rejected, and open the live flow canvas to watch the run.
+ * One owns the conversational automation surface. The Work Graph engine still
+ * executes the registered graph, but neither running nor editing it may eject
+ * the person to Work. A parent One conversation can handle the semantic action
+ * directly; registration receipts without a parent handler still run in place
+ * and explain how to continue with `@graph` in the current chat.
  */
-function useAutomationActions(locale: "ko" | "en") {
-  const router = useRouter();
+function useAutomationActions(
+  locale: "ko" | "en",
+  automationName: string,
+  onSemanticAction?: (action: OneSurfaceSemanticAction) => void,
+) {
   const [message, setMessage] = useState("");
   const runNow = useCallback((automationId: string) => {
+    if (onSemanticAction) {
+      setMessage(locale === "en"
+        ? "Starting the run here. Progress stays in this conversation."
+        : "이 대화에서 실행을 시작합니다. 진행 상황도 여기에서 이어집니다.");
+      onSemanticAction({
+        actionId: `one-run-${automationId}`,
+        intent: "run_automation",
+        label: locale === "en" ? "Run now" : "지금 실행",
+        description: locale === "en" ? "Run in the background and keep One open." : "백그라운드에서 실행하고 One 대화를 유지합니다.",
+        targetRef: `automation:${automationId}`,
+        enabled: true,
+      });
+      return;
+    }
     const api = ipc();
     if (!api) return;
-    setMessage(locale === "en" ? "Starting the run. Opening the live flow..." : "실행을 시작하고 라이브 플로우를 엽니다...");
+    setMessage(locale === "en"
+      ? "Starting the run here. Progress stays in One."
+      : "여기에서 실행을 시작합니다. 진행 상황은 One에 남습니다.");
     api.automations.runNow(automationId).catch((error: unknown) => {
       // 거절에는 언제나 사유가 실려 온다 — 버리지 않는다(자동화 목록 화면과 같은 규칙).
       const reason = error instanceof Error
@@ -1056,12 +1007,27 @@ function useAutomationActions(locale: "ko" | "en") {
         : "";
       setMessage(reason || (locale === "en" ? "Test run did not start." : "테스트 실행을 시작하지 못했습니다."));
     });
-    router.push(`/automation/flow?id=${encodeURIComponent(automationId)}`);
-  }, [locale, router]);
-  const openCanvas = useCallback((automationId: string) => {
-    router.push(`/automation/flow?id=${encodeURIComponent(automationId)}`);
-  }, [router]);
-  return { message, runNow, openCanvas };
+  }, [locale, onSemanticAction]);
+  const editInChat = useCallback((automationId: string) => {
+    if (!onSemanticAction) {
+      setMessage(locale === "en"
+        ? `Type @graph to edit ${automationName || "this automation"} in this conversation.`
+        : `이 대화에서 @graph로 ${automationName || "이 자동화"}을 수정해 주세요.`);
+      return;
+    }
+    onSemanticAction({
+      actionId: `one-edit-${automationId}`,
+      intent: "open_automation",
+      label: locale === "en" ? "Edit with @graph" : "@graph로 수정",
+      description: locale === "en" ? "Continue editing in this One conversation." : "이 One 대화에서 계속 수정합니다.",
+      instruction: locale === "en"
+        ? `Review and edit the ${automationName || "selected"} automation.`
+        : `${automationName || "선택한"} 자동화를 검토하고 수정해줘.`,
+      targetRef: `automation:${automationId}`,
+      enabled: true,
+    });
+  }, [automationName, locale, onSemanticAction]);
+  return { message, runNow, editInChat };
 }
 
 function AutomationCardFrame({
@@ -1074,7 +1040,7 @@ function AutomationCardFrame({
   automationId,
   actionMessage,
   onRunNow,
-  onOpenCanvas,
+  onEditInChat,
 }: {
   locale: "ko" | "en";
   statusState: "completed" | "working" | "failed";
@@ -1085,7 +1051,7 @@ function AutomationCardFrame({
   automationId: string | null;
   actionMessage: string;
   onRunNow: (automationId: string) => void;
-  onOpenCanvas: (automationId: string) => void;
+  onEditInChat: (automationId: string) => void;
 }) {
   const ko = locale === "ko";
   return (
@@ -1118,9 +1084,9 @@ function AutomationCardFrame({
           type="button"
           className={styles.action}
           disabled={!automationId}
-          onClick={() => automationId && onOpenCanvas(automationId)}
+          onClick={() => automationId && onEditInChat(automationId)}
         >
-          <span>{ko ? "캔버스 열기" : "Open canvas"}</span>
+          <span>{ko ? "@graph로 수정" : "Edit with @graph"}</span>
         </button>
       </div>
       {actionMessage && <p role="status">{displayValue(actionMessage)}</p>}
@@ -1128,9 +1094,17 @@ function AutomationCardFrame({
   );
 }
 
-function AutomationBlock({ block, locale }: { block: OneSurfaceAutomationBlock; locale: "ko" | "en" }) {
+function AutomationBlock({
+  block,
+  locale,
+  onSemanticAction,
+}: {
+  block: OneSurfaceAutomationBlock;
+  locale: "ko" | "en";
+  onSemanticAction?: (action: OneSurfaceSemanticAction) => void;
+}) {
   const ko = locale === "ko";
-  const { message, runNow, openCanvas } = useAutomationActions(locale);
+  const { message, runNow, editInChat } = useAutomationActions(locale, block.title, onSemanticAction);
   const lastRunLine = block.lastRun
     ? [
         ko ? "최근 실행" : "Last run",
@@ -1150,7 +1124,7 @@ function AutomationBlock({ block, locale }: { block: OneSurfaceAutomationBlock; 
       automationId={block.automationId}
       actionMessage={message}
       onRunNow={runNow}
-      onOpenCanvas={openCanvas}
+      onEditInChat={editInChat}
     />
   );
 }
@@ -1175,7 +1149,7 @@ export function OneAutomationRegistrationCard({
   locale: "ko" | "en";
 }) {
   const ko = locale === "ko";
-  const { message, runNow, openCanvas } = useAutomationActions(locale);
+  const { message, runNow, editInChat } = useAutomationActions(locale, name);
   const [record, setRecord] = useState<Automation | null>(null);
   useEffect(() => {
     const api = ipc();
@@ -1219,7 +1193,7 @@ export function OneAutomationRegistrationCard({
               automationId={record?.id ?? null}
               actionMessage={message}
               onRunNow={runNow}
-              onOpenCanvas={openCanvas}
+              onEditInChat={editInChat}
             />
           </section>
         </div>

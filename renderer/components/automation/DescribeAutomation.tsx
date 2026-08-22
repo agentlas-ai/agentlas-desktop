@@ -7,7 +7,7 @@
 // 만든 것은 **꺼진 채로** 저장된다. 자동화는 사람이 없는 동안 도는 것이라,
 // "만들어 뒀습니다"로 끝내면 안 된다.
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
@@ -22,44 +22,95 @@ interface Ready {
   triggerType: "schedule" | "manual";
 }
 
+interface InterviewState {
+  request: string;
+  answers: unknown[];
+  asked: string[];
+  round: number;
+}
+
+interface RecoveryState {
+  plan: GraphBuildRecoveryPlan;
+  blocked: {
+    nodeId: string; label: string; cause: string;
+    availableVars: string[]; upstreamSample: string | null;
+    varsSnapshot: Record<string, unknown>;
+  };
+}
+
+interface PersistedInterview {
+  request: string;
+  state: InterviewState | null;
+  questions: Question[];
+  drafts: Record<string, string>;
+  ready: Ready | null;
+  problem: { reason: string; nextAction: string } | null;
+  recovery: RecoveryState | null;
+  graphOverride: WorkflowGraph | null;
+  saved: boolean;
+  savedId: string | null;
+  revision: string;
+}
+
+function readPersistedInterview(key?: string): PersistedInterview | null {
+  if (!key || typeof window === "undefined") return null;
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(key) ?? "null") as PersistedInterview | null;
+    return parsed && typeof parsed.request === "string" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 const MAX_ROUNDS = 6;
 
-export function DescribeAutomation({ locale, onCreated, openAfterCreate = true, onOpenAutomation }: {
+export function DescribeAutomation({
+  locale,
+  onCreated,
+  openAfterCreate = true,
+  onOpenAutomation,
+  initialRequest = "",
+  autoStart = false,
+  presentation = "standalone",
+  persistenceKey,
+}: {
   locale: "ko" | "en";
   onCreated: (automationId: string) => void;
   /** One keeps the completed draft in its interview instead of ejecting to the canvas. */
   openAfterCreate?: boolean;
   onOpenAutomation?: (automationId: string) => void;
+  /** Chat-authored `@graph ...` command, already visible as the user bubble. */
+  initialRequest?: string;
+  autoStart?: boolean;
+  presentation?: "standalone" | "chat";
+  /** Main chat identity keeps an unfinished interview intact across reloads. */
+  persistenceKey?: string;
 }) {
   const ko = locale === "ko";
   const router = useRouter();
-  const [request, setRequest] = useState("");
-  const [state, setState] = useState<{ request: string; answers: unknown[]; asked: string[]; round: number } | null>(null);
-  const [questions, setQuestions] = useState<Question[]>([]);
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [ready, setReady] = useState<Ready | null>(null);
+  const persistedRef = useRef<PersistedInterview | null>(readPersistedInterview(persistenceKey));
+  const autoStartedRef = useRef(false);
+  const persisted = persistedRef.current;
+  const [request, setRequest] = useState(persisted?.request ?? initialRequest);
+  const [state, setState] = useState<InterviewState | null>(persisted?.state ?? null);
+  const [questions, setQuestions] = useState<Question[]>(persisted?.questions ?? []);
+  const [drafts, setDrafts] = useState<Record<string, string>>(persisted?.drafts ?? {});
+  const [ready, setReady] = useState<Ready | null>(persisted?.ready ?? null);
   const [busy, setBusy] = useState(false);
-  const [problem, setProblem] = useState<{ reason: string; nextAction: string } | null>(null);
+  const [problem, setProblem] = useState<{ reason: string; nextAction: string } | null>(persisted?.problem ?? null);
   /**
    * 짓다 막혔을 때 **이어갈 길**. 문장 한 줄로 끝내지 않는다 — 오너 2026-08-20:
    * "50% 정도 완성하다 실패를 했을 때도 이어갈 수 있어야지, 대안을 제시한다거나."
    */
-  const [recovery, setRecovery] = useState<{
-    plan: GraphBuildRecoveryPlan;
-    blocked: {
-      nodeId: string; label: string; cause: string;
-      availableVars: string[]; upstreamSample: string | null;
-      varsSnapshot: Record<string, unknown>;
-    };
-  } | null>(null);
+  const [recovery, setRecovery] = useState<RecoveryState | null>(persisted?.recovery ?? null);
   const [applying, setApplying] = useState<string | null>(null);
-  const [graphOverride, setGraphOverride] = useState<WorkflowGraph | null>(null);
+  const [graphOverride, setGraphOverride] = useState<WorkflowGraph | null>(persisted?.graphOverride ?? null);
   // ★저장 후 상태 — 실측: 저장이 조용히 끝나고 화면 전환이 늦자 사람이 버튼을 8번 눌러
   //   같은 그래프 사본이 8개 쌓였다. 저장했으면 "저장했고 이동 중"이라고 말해야 한다.
-  const [saved, setSaved] = useState(false);
-  const [savedId, setSavedId] = useState<string | null>(null);
+  const [saved, setSaved] = useState(persisted?.saved ?? false);
+  const [savedId, setSavedId] = useState<string | null>(persisted?.savedId ?? null);
   // 확인 화면에서 "고칠 점"을 말하면 인터뷰로 되돌아간다 — 취소가 전부 버리면 안 된다.
-  const [revision, setRevision] = useState("");
+  const [revision, setRevision] = useState(persisted?.revision ?? "");
   /**
    * ★만들어지는 동안 **정해진 단계가 도착하는 대로** 보여준다.
    *
@@ -68,6 +119,24 @@ export function DescribeAutomation({ locale, onCreated, openAfterCreate = true, 
    * 런타임은 이미 조각을 주고 있었고 판정기가 버리던 것을 열었다.
    */
   const [liveSteps, setLiveSteps] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (!persistenceKey) return;
+    const snapshot: PersistedInterview = {
+      request,
+      state,
+      questions,
+      drafts,
+      ready,
+      problem,
+      recovery,
+      graphOverride,
+      saved,
+      savedId,
+      revision,
+    };
+    try { window.localStorage.setItem(persistenceKey, JSON.stringify(snapshot)); } catch { /* live state remains usable */ }
+  }, [drafts, graphOverride, persistenceKey, problem, questions, ready, recovery, request, revision, saved, savedId, state]);
 
   useEffect(() => {
     const events = ipcEvents();
@@ -111,6 +180,18 @@ export function DescribeAutomation({ locale, onCreated, openAfterCreate = true, 
       setBusy(false);
     }
   }
+
+  useEffect(() => {
+    if (!autoStart || autoStartedRef.current || state || ready || saved) return;
+    const value = (initialRequest || request).trim();
+    if (!value) return;
+    autoStartedRef.current = true;
+    setRequest(value);
+    void turn({ request: value, answers: [], asked: [], round: 0 });
+    // `turn` intentionally owns the request lifecycle for this mount. Re-running
+    // because a function identity changed would duplicate the Graph interview.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoStart, initialRequest]);
 
   function start() {
     if (!request.trim()) return;
@@ -283,8 +364,18 @@ export function DescribeAutomation({ locale, onCreated, openAfterCreate = true, 
   }
 
   function reset() {
-    setRequest(""); setState(null); setQuestions([]); setDrafts({}); setReady(null); setProblem(null);
-    setSaved(false); setSavedId(null); setRevision("");
+    const restartRequest = presentation === "chat" ? initialRequest.trim() : "";
+    setRequest(restartRequest); setState(null); setQuestions([]); setDrafts({}); setReady(null); setProblem(null);
+    setRecovery(null); setGraphOverride(null); setSaved(false); setSavedId(null); setRevision("");
+    if (persistenceKey) {
+      try { window.localStorage.removeItem(persistenceKey); } catch { /* state reset still succeeds */ }
+    }
+    if (presentation === "chat" && restartRequest) {
+      autoStartedRef.current = true;
+      void turn({ request: restartRequest, answers: [], asked: [], round: 0 });
+    } else {
+      autoStartedRef.current = false;
+    }
   }
 
   const mutations = (ready?.graph.nodes ?? []).filter((n) => n.config?.effect === "mutation");
@@ -292,15 +383,27 @@ export function DescribeAutomation({ locale, onCreated, openAfterCreate = true, 
   return (
     <section
       data-testid="describe-automation"
+      data-presentation={presentation}
       style={{
         border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)",
-        background: "var(--paper)", padding: 16, display: "grid", gap: 12, marginBottom: 20,
+        background: "var(--paper)", padding: 16, display: "grid", gap: 12,
+        marginBottom: presentation === "chat" ? 8 : 20,
+        ...(presentation === "chat" ? { maxWidth: 720 } : {}),
       }}
     >
       <div style={{ fontSize: 14, fontWeight: 700, color: "var(--ink)" }}>
-        {ko ? "자동으로 돌릴 일을 적어 주세요." : "Tell me what to run for you."}
+        {presentation === "chat"
+          ? (ko ? "One이 이 대화에서 자동화를 설계합니다" : "One is designing this automation in chat")
+          : (ko ? "자동으로 돌릴 일을 적어 주세요." : "Tell me what to run for you.")}
       </div>
-      <div style={{ display: "flex", gap: 8 }}>
+      {presentation === "chat" ? (
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+          <div style={{ color: "var(--muted-deep)", fontSize: 12, lineHeight: 1.55 }}>{request}</div>
+          {(state || ready || saved) && <button data-testid="describe-reset" onClick={reset} style={{ ...btn(false), flex: "0 0 auto", padding: "6px 10px", fontSize: 11 }}>
+            {ko ? "다시 시작" : "Start over"}
+          </button>}
+        </div>
+      ) : <div style={{ display: "flex", gap: 8 }}>
         <input
           data-testid="describe-input"
           value={request}
@@ -325,7 +428,7 @@ export function DescribeAutomation({ locale, onCreated, openAfterCreate = true, 
             {busy ? <SpinnerLabel text={ko ? "정리하는 중…" : "Working…"} light /> : (ko ? "초안 잡기" : "Draft it")}
           </button>
         )}
-      </div>
+      </div>}
 
       {busy && liveSteps.length > 0 ? (
         <ol data-testid="describe-live-steps" style={{ margin: 0, paddingLeft: 18, display: "grid", gap: 3 }}>
@@ -468,7 +571,7 @@ export function DescribeAutomation({ locale, onCreated, openAfterCreate = true, 
                   ? (ko ? "저장했습니다 — 캔버스로 이동하는 중…" : "Saved — opening the canvas…")
                   : (ko ? "자동화 초안을 저장했습니다. 아직 꺼진 상태입니다." : "Automation draft saved. It remains switched off.")}
               </span>
-              {!openAfterCreate && savedId && <button
+              {!openAfterCreate && presentation !== "chat" && savedId && <button
                 type="button"
                 style={btn(false)}
                 onClick={() => onOpenAutomation ? onOpenAutomation(savedId) : router.push(`/automation/flow?id=${savedId}`)}

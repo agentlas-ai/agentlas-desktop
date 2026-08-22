@@ -51,7 +51,6 @@ type RailProps = {
   onOpenProfile: () => void;
   onOpenMemory: () => void;
   onToggleLocale: () => void;
-  onOpenWork: () => void;
 };
 
 type SheetProps = {
@@ -99,7 +98,7 @@ function RailRow({ icon, title, detail, badge, onClick }: { icon: ReactNode; tit
   </button>;
 }
 
-export function OneSettingsRail({ locale, profileName, pendingMemoryCount, onBack, onOpen, onOpenProfile, onOpenMemory, onToggleLocale, onOpenWork }: RailProps) {
+export function OneSettingsRail({ locale, profileName, pendingMemoryCount, onBack, onOpen, onOpenProfile, onOpenMemory, onToggleLocale }: RailProps) {
   const ko = locale === "ko";
   return <section className={styles.railRoot} aria-label={ko ? "One 설정" : "One settings"}>
     <header className={styles.railHeader}>
@@ -126,7 +125,6 @@ export function OneSettingsRail({ locale, profileName, pendingMemoryCount, onBac
       </div>
       <div className={styles.railGroup}><span>{ko ? "앱" : "App"}</span>
         <RailRow icon={<IconSettings size={15} />} title={ko ? "언어" : "Language"} detail={ko ? "English로 전환" : "한국어로 전환"} onClick={onToggleLocale} />
-        <RailRow icon={<IconArrowLeft size={15} />} title={ko ? "Work 열기" : "Open Work"} onClick={onOpenWork} />
       </div>
     </div>
   </section>;

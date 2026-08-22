@@ -46,13 +46,18 @@ export interface WorkspaceFilePreview {
   path: string;
   name: string;
   size: number;
-  viewerKind: "markdown" | "json" | "text" | "browser" | "image" | "video" | "pdf" | "document" | "binary";
+  viewerKind: "markdown" | "json" | "text" | "browser" | "image" | "video" | "audio" | "pdf" | "document" | "spreadsheet" | "presentation" | "archive" | "binary";
   fileUrl: string;
+  mimeType?: string;
   browserUrl?: string;
   openTargets?: string[];
   content?: string;
   truncated?: boolean;
   reason?: TextFilePreview["reason"];
+  /** Main-observed file revision while this preview is open. */
+  revision?: number;
+  live?: boolean;
+  available?: boolean;
 }
 
 export function WorkspacePanel({ chatId, onClose, persistence, embedded = false, onOpenFilePreview, projectFolder = null }: Props) {
@@ -750,8 +755,12 @@ function viewerKindForFile(name: string, preview: TextFilePreview): WorkspaceFil
   if ([".html", ".htm", ".url", ".webloc"].includes(ext)) return "browser";
   if ([".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".svg"].includes(ext)) return "image";
   if ([".mp4", ".webm", ".mov", ".m4v", ".ogv"].includes(ext)) return "video";
+  if ([".mp3", ".mpeg", ".m4a", ".wav", ".ogg", ".oga", ".opus", ".flac", ".aac", ".weba", ".mid", ".midi"].includes(ext)) return "audio";
   if (ext === ".pdf") return "pdf";
-  if ([".doc", ".docx", ".rtf", ".pages", ".ppt", ".pptx", ".xls", ".xlsx"].includes(ext)) return "document";
+  if ([".ppt", ".pptx", ".pptm", ".pot", ".potx", ".ppsx", ".odp", ".key"].includes(ext)) return "presentation";
+  if ([".xls", ".xlsx", ".xlsm", ".xlsb", ".xlt", ".xltx", ".csv", ".tsv", ".ods", ".numbers"].includes(ext)) return "spreadsheet";
+  if (ext === ".zip") return "archive";
+  if ([".doc", ".docx", ".docm", ".dot", ".dotx", ".rtf", ".odt", ".pages", ".hwp", ".hwpx"].includes(ext)) return "document";
   if (!preview.reason) return "text";
   return "binary";
 }
@@ -763,7 +772,7 @@ function extensionOf(name: string): string {
 }
 
 function fileUrlForPath(absPath: string, viewerKind?: WorkspaceFilePreview["viewerKind"]): string {
-  if (viewerKind === "image" || viewerKind === "video" || viewerKind === "pdf") {
+  if (["image", "video", "audio", "pdf", "document", "spreadsheet", "presentation", "archive"].includes(viewerKind ?? "")) {
     // pdf 도 같은 경로로 서빙한다 — `file://` 은 webSecurity 에 막혀 빈 iframe 이 된다.
     return `agentlas://localfile/?p=${encodeURIComponent(absPath)}`;
   }

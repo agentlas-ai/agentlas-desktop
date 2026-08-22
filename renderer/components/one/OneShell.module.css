@@ -87,6 +87,10 @@
   transition: grid-template-columns 180ms ease;
 }
 
+:global(html[data-one-output-resizing="true"]) .body {
+  transition: none;
+}
+
 .body[data-rail-collapsed="true"] {
   grid-template-columns: 0 minmax(0, 1fr) 0;
 }
@@ -100,17 +104,23 @@
 }
 
 .body[data-task-active="true"][data-context-rail="true"] {
-  grid-template-columns: 252px minmax(0, 1fr) minmax(300px, 360px);
+  grid-template-columns: 252px minmax(0, 1fr) var(--one-rail-width, 420px);
 }
 
 .body[data-task-active="true"][data-rail-collapsed="true"][data-context-rail="true"] {
-  grid-template-columns: 0 minmax(0, 1fr) minmax(300px, 360px);
+  grid-template-columns: 0 minmax(0, 1fr) var(--one-rail-width, 420px);
 }
 
 .body[data-task-active="true"] .rail {
   transform: translateX(0);
   opacity: 1;
   pointer-events: auto;
+}
+
+.body[data-task-active="true"][data-rail-collapsed="true"] .rail {
+  transform: translateX(-100%);
+  opacity: 0;
+  pointer-events: none;
 }
 
 .body > [data-one-runtime-artifacts="true"] {
@@ -481,17 +491,28 @@
 .body[data-task-active="true"] .windowBar {
   height: 64px;
   border-bottom: 1px solid #e8e9ea;
-  background: rgba(255, 255, 255, .96);
+  /* Messages scroll underneath this fixed bar. It must be fully opaque or
+     reply text appears ghosted through the Taskforce header. */
+  background: #fff;
 }
 
 .taskToolbar {
   position: relative;
   height: 64px;
-  display: flex;
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: 12px;
-  padding: 0 20px 0 96px;
+  padding: 0 20px;
   color: #4e5357;
+  user-select: none;
+}
+
+/* With the left rail closed this control lives in the macOS title bar. Keep
+   it clear of the traffic-light controls instead of pinning it underneath
+   them at the window edge. */
+.body[data-task-active="true"][data-rail-collapsed="true"] .taskToolbar {
+  padding-left: 76px;
 }
 
 .body[data-task-active="true"][data-rail-open="true"] .taskToolbar {
@@ -527,14 +548,24 @@
 .taskToolbarDivider {
   width: 1px;
   height: 22px;
+  display: none;
   background: #e4e6e7;
 }
 
+.taskSidebarRevealButton { display: none !important; }
+.body[data-rail-collapsed="true"] .taskSidebarRevealButton { display: grid !important; }
+.body[data-rail-collapsed="true"] .taskToolbarDivider { display: block; }
+.body[data-rail-open="true"] .taskSidebarRevealButton,
+.body[data-rail-open="true"] .sidebarRevealButton { display: none !important; }
+
 .taskToolbarIdentity {
+  grid-column: 3;
+  width: 100%;
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 12px;
+  overflow: hidden;
 }
 
 .taskToolbarIdentity > span:last-child {
@@ -563,18 +594,32 @@
 
 .taskforceToolbarPortraits {
   position: relative;
-  min-width: 56px;
-  height: 32px;
-  display: flex !important;
-  align-items: center;
+  width: 94px;
+  min-width: 94px;
+  flex: 0 0 94px;
+  height: 40px;
+  display: block !important;
+  isolation: isolate;
+  overflow: hidden;
+  pointer-events: none;
+  user-select: none;
 }
 
-.taskforceToolbarPortraits > span { margin-left: -11px; border-color: #fff; box-shadow: 0 0 0 2px #fff; }
-.taskforceToolbarPortraits > span:first-child { margin-left: 0; z-index: 3; }
-.taskforceToolbarPortraits > span:nth-child(2) { z-index: 2; }
-.taskforceToolbarPortraits > span:nth-child(3) { z-index: 1; }
+.taskforceToolbarPortraits > span {
+  position: absolute;
+  width: 30px;
+  height: 30px;
+  margin: 0;
+  box-shadow: none;
+}
+.taskforceToolbarPortraits > span:first-child { top: 4px; left: 0; z-index: 1; }
+.taskforceToolbarPortraits > span:nth-child(2) { top: 7px; left: 34px; z-index: 3; }
+.taskforceToolbarPortraits > span:nth-child(3) { top: 4px; left: 68px; z-index: 2; }
+.taskforceToolbarPortraits > span > span { display: none; }
+.taskforceToolbarPortraits img { pointer-events: none; user-select: none; -webkit-user-drag: none; }
 
 .taskToolbar > .taskforceMembersButton {
+  grid-column: 4;
   width: auto;
   min-width: 44px;
   display: inline-flex;
@@ -588,10 +633,14 @@
   font-weight: 650;
 }
 
+.taskToolbar > .taskToolbarOutputToggle {
+  grid-column: 5;
+}
+
 .taskToolbar > .taskforceMembersButton:hover,
 .taskToolbar > .taskforceMembersButton:focus-visible { border-color: #bdc2c0; background: #f3f4f3; }
 
-.taskToolbarMenu { position: relative; flex: 0 0 auto; }
+.taskToolbarMenu { position: relative; grid-column: 6; }
 
 .taskToolbarMenuPopover {
   position: absolute;
@@ -623,8 +672,6 @@
 .taskToolbarMenuPopover > button:hover,
 .taskToolbarMenuPopover > button:focus-visible { background: #f2f3f3; outline: none; }
 .taskToolbarMenuPopover > button:disabled { color: #b4b8ba; cursor: default; }
-
-.taskToolbarPanelToggle { margin-left: auto; }
 
 .sidebarRevealButton {
   position: absolute;
@@ -1191,6 +1238,138 @@
   background: #fffdf9;
 }
 
+.decisionInline {
+  position: relative;
+  width: min(920px, 100%);
+  margin: 0 auto 7px;
+  border: 1px solid #d8ddda;
+  border-radius: 13px;
+  color: #353a3d;
+  background: rgba(255, 255, 255, .98);
+  box-shadow: 0 8px 24px rgba(25, 31, 36, .06);
+  pointer-events: auto;
+}
+
+.decisionInlineClose {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  color: #7a8082;
+  background: transparent;
+  cursor: pointer;
+}
+
+.decisionInlineClose:hover,
+.decisionInlineClose:focus-visible {
+  color: #24282b;
+  background: #f1f2f2;
+  outline: 2px solid rgba(42, 47, 50, .14);
+}
+
+.decisionCompactCard {
+  min-height: 46px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 40px 6px 12px;
+}
+
+.decisionCompactCopy {
+  min-width: 0;
+  display: grid;
+  flex: 1 1 220px;
+  gap: 2px;
+}
+
+.decisionCompactCopy strong {
+  overflow: hidden;
+  color: #303538;
+  font-size: 11px;
+  font-weight: 720;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.decisionCompactCopy small {
+  overflow: hidden;
+  color: #858b8e;
+  font-size: 9px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.decisionCompactChoices,
+.decisionCompactActions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 5px;
+}
+
+.decisionCompactChoices {
+  max-width: 42%;
+  overflow-x: auto;
+}
+
+.decisionCompactChoices button,
+.decisionCompactActions button {
+  min-height: 32px;
+  flex: 0 0 auto;
+  padding: 0 10px;
+  border: 1px solid #d9ddde;
+  border-radius: 9px;
+  color: #4d5356;
+  background: #fff;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 680;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.decisionCompactChoices button[aria-pressed="true"] {
+  border-color: #4a5053;
+  color: #24282b;
+  background: #eceeee;
+}
+
+.decisionCompactChoices button:hover,
+.decisionCompactChoices button:focus-visible,
+.decisionCompactActions button:hover,
+.decisionCompactActions button:focus-visible {
+  border-color: #aeb4b6;
+  background: #f2f3f3;
+  outline: 2px solid rgba(42, 47, 50, .12);
+}
+
+.decisionCompactActions .decisionCompactReject { color: #8e4942; }
+
+.decisionCompactActions .decisionCompactPrimary {
+  border-color: #24282b;
+  color: #fff;
+  background: #24282b;
+}
+
+.decisionCompactActions .decisionCompactPrimary:hover,
+.decisionCompactActions .decisionCompactPrimary:focus-visible {
+  border-color: #393e41;
+  color: #fff;
+  background: #393e41;
+}
+
+.decisionCompactChoices button:disabled,
+.decisionCompactActions button:disabled {
+  cursor: default;
+  opacity: .46;
+}
+
 .decisionSheet {
   display: grid;
   gap: 8px;
@@ -1362,6 +1541,10 @@
 @media (max-width: 700px) {
   .decisionHeading { align-items: stretch; flex-direction: column; }
   .decisionOptions > button, .decisionSecondaryActions > button { width: 100%; }
+  .decisionCompactCard { align-items: stretch; flex-direction: column; padding: 9px 40px 9px 9px; }
+  .decisionCompactChoices { max-width: 100%; }
+  .decisionCompactActions { width: 100%; }
+  .decisionCompactActions button { flex: 1 1 0; }
 }
 
 .emptyThread {
@@ -2297,6 +2480,8 @@
     left: 64px;
     display: grid;
   }
+  .taskSidebarRevealButton { display: grid !important; }
+  .taskToolbarDivider { display: block; }
   .homeContent, .threadContent { width: calc(100% - 28px); padding-top: 38px; padding-bottom: 208px; }
   .newUser h1 { font-size: clamp(24px, 7.4vw, 30px); }
   .briefing h1 { font-size: 34px; }
@@ -2426,11 +2611,11 @@
 }
 
 .body[data-task-active="true"][data-context-rail="true"] {
-  grid-template-columns: 252px minmax(0, 1fr) minmax(300px, 360px);
+  grid-template-columns: 252px minmax(0, 1fr) var(--one-rail-width, 420px);
 }
 
 .body[data-task-active="true"][data-rail-collapsed="true"][data-context-rail="true"] {
-  grid-template-columns: 0 minmax(0, 1fr) minmax(300px, 360px);
+  grid-template-columns: 0 minmax(0, 1fr) var(--one-rail-width, 420px);
 }
 
 .rail {
@@ -2785,13 +2970,31 @@
 
 @media (max-width: 1080px) {
   .body,
-  .body[data-task-active="true"] {
+  .body[data-task-active="true"],
+  .body[data-task-active="true"][data-context-rail="true"] {
     grid-template-columns: 224px minmax(0, 1fr) 0;
   }
 
   .body[data-rail-collapsed="true"],
-  .body[data-task-active="true"][data-rail-collapsed="true"] {
+  .body[data-task-active="true"][data-rail-collapsed="true"],
+  .body[data-task-active="true"][data-rail-collapsed="true"][data-context-rail="true"] {
     grid-template-columns: 0 minmax(0, 1fr) 0;
+  }
+
+  /* A narrower window must not reserve an invisible third column. Keep the
+     conversation at full width and present Outputs as a real, resizable
+     overlay below the title bar. */
+  .body > [data-one-runtime-artifacts="true"] {
+    position: absolute;
+    z-index: 58;
+    top: 64px;
+    right: 0;
+    bottom: 0;
+    grid-column: auto;
+    width: min(var(--one-rail-width, 420px), calc(100% - 56px)) !important;
+    height: auto;
+    border-left: 1px solid #e4e6e7;
+    box-shadow: -16px 0 36px rgba(24, 29, 32, .09);
   }
 
   .homeHistoryRail { display: none; }
@@ -2815,3 +3018,22 @@
   .body[data-task-active="true"] .messageBody { max-width: 94%; }
   .composer { min-height: 94px; }
 }
+
+/* 문서형 답변 — 계획서·PRD·보고서는 대화 흐름 안에서 렌더된 문서 카드로 보인다(오너 지시 2026-08-23). */
+.messageBody[data-doc="true"] {
+  max-width: min(820px, 100%);
+  margin-top: 6px;
+  padding: 26px 30px 28px;
+  border: 1px solid #e8eae8;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 10px 28px rgba(28, 43, 34, .05);
+  line-height: 1.72;
+}
+.messageBody[data-doc="true"] :global(h1),
+.messageBody[data-doc="true"] :global(h2) { margin: 18px 0 8px; font-size: 17px; line-height: 1.3; }
+.messageBody[data-doc="true"] :global(h3),
+.messageBody[data-doc="true"] :global(h4) { margin: 15px 0 6px; font-size: 14px; }
+.messageBody[data-doc="true"] :global(h1:first-child),
+.messageBody[data-doc="true"] :global(h2:first-child),
+.messageBody[data-doc="true"] :global(h3:first-child) { margin-top: 0; }

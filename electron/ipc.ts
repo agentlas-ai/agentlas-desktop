@@ -263,6 +263,7 @@ import {
 } from "./updater";
 import { listDirectory, pickDirectory, readTextFilePreview } from "./fs/workspace";
 import { grantDroppedPath, grantPastedAttachment, grantPastedImage, grantPath, pathFromGrant, resolveFsReadPath } from "./fs/access";
+import { unwatchFsPreviewFile, unwatchFsPreviewFilesForOwner, watchFsPreviewFile } from "./fs/file-watch";
 import { connectGithubProject } from "./project-sources/github";
 import {
   getAuthSession,
@@ -429,7 +430,6 @@ import {
 } from "./one/attachments";
 import {
   issueOneArtifactPreviewCapability,
-  resolveOneArtifactOpenPath,
   revokeOneArtifactPreview,
 } from "./one/artifact-preview";
 import {
@@ -637,7 +637,14 @@ import {
   refreshBrowserCredentialsIfDue,
   revokeBrowserCredentialConsent,
 } from "./browser/credential-sync";
-import { captureBrowserLiveFrame, focusBrowserLiveTarget } from "./browser/live-view";
+import {
+  captureBrowserLiveFrame,
+  dispatchBrowserLiveInput,
+  focusBrowserLiveTarget,
+  startBrowserLiveSession,
+  stopBrowserLiveSession,
+  stopBrowserLiveSessionsForOwner,
+} from "./browser/live-view";
 import { captureComputerUsePreview } from "./computer-use/preview";
 import {
   archiveAppPackage,
@@ -658,6 +665,20 @@ import {
   syncProviderBrowserResults,
 } from "./app-factory/operations";
 import { scaffoldServiceApp } from "./app-factory/scaffold";
+import {
+  startAppFactoryLivePreview,
+  stopAppFactoryLivePreview,
+} from "./app-factory/live-preview";
+import {
+  closeWorkLiveView,
+  closeWorkLiveViewsForOwner,
+  goBackWorkLiveView,
+  goForwardWorkLiveView,
+  navigateWorkLiveView,
+  openWorkLiveView,
+  reloadWorkLiveView,
+  setWorkLiveViewBounds,
+} from "./work-live-view";
 import { archiveSurfaceAssetPack, materializeSurfaceAssetPack, restoreSurfaceAssetPack } from "./surface-assets/materialize";
 import { archiveToolPackage, installToolMcp, restoreToolPackage } from "./tool-factory/operations";
 import { runToolFactorySmoke, scaffoldAgentTool } from "./tool-factory/scaffold";
@@ -1375,6 +1396,10 @@ async function seedProjectMapInBackground(folderPath: string, projectName?: stri
     console.error("[architecture] project map seed failed:", err);
   }
 }
+
+const browserLiveCleanupOwners = new Set<number>();
+const fsWatchCleanupOwners = new Set<number>();
+const workLiveCleanupOwners = new Set<number>();
 
 export function registerIpcHandlers(): void {
   let oneProjectionHostRef: string | null = null;
@@ -2278,6 +2303,24 @@ export function registerIpcHandlers(): void {
     listDirectory(absPath, scope, showHidden ?? false),
   );
   ipcMain.handle("fs:readTextFile", (_e, absPath: string, scope: FsReadScope) => readTextFilePreview(absPath, scope));
+  ipcMain.handle("fs:watchFile", (event, absPath: string, scope: FsReadScope) => {
+    assertTrustedSitePublishIpcSender(event);
+    const ownerId = event.sender.id;
+    if (!fsWatchCleanupOwners.has(ownerId)) {
+      fsWatchCleanupOwners.add(ownerId);
+      event.sender.once("destroyed", () => {
+        fsWatchCleanupOwners.delete(ownerId);
+        unwatchFsPreviewFilesForOwner(ownerId);
+      });
+    }
+    return watchFsPreviewFile(ownerId, String(absPath || ""), scope, (snapshot) => {
+      if (!event.sender.isDestroyed()) event.sender.send("fs:fileChanged", snapshot);
+    });
+  });
+  ipcMain.handle("fs:unwatchFile", (event, watchId?: string) => {
+    assertTrustedSitePublishIpcSender(event);
+    return unwatchFsPreviewFile(event.sender.id, typeof watchId === "string" ? watchId.slice(0, 128) : "");
+  });
   // This channel is intentionally absent from window.agentlas. Only the isolated
   // preload bridge can pair webUtils.getPathForFile(File) with this grant call.
   ipcMain.handle("fs:grantDroppedPath", (_e, droppedPath: string) => grantDroppedPath(droppedPath));
@@ -3589,6 +3632,29 @@ export function registerIpcHandlers(): void {
       viewport === "phone" ? "phone" : "desktop",
     );
   });
+  ipcMain.handle("browser:startLiveView", async (event, preferredUrl?: string, viewport?: "desktop" | "phone") => {
+    assertTrustedSitePublishIpcSender(event);
+    const ownerId = event.sender.id;
+    if (!browserLiveCleanupOwners.has(ownerId)) {
+      browserLiveCleanupOwners.add(ownerId);
+      event.sender.once("destroyed", () => {
+        browserLiveCleanupOwners.delete(ownerId);
+        void stopBrowserLiveSessionsForOwner(ownerId);
+      });
+    }
+    const scopedUrl = typeof preferredUrl === "string" ? preferredUrl.slice(0, 2_048) : "";
+    return startBrowserLiveSession(ownerId, scopedUrl, viewport === "phone" ? "phone" : "desktop", (frame) => {
+      if (!event.sender.isDestroyed()) event.sender.send("browser:liveFrame", frame);
+    });
+  });
+  ipcMain.handle("browser:stopLiveView", (event, sessionId?: string) => {
+    assertTrustedSitePublishIpcSender(event);
+    return stopBrowserLiveSession(event.sender.id, typeof sessionId === "string" ? sessionId.slice(0, 128) : "");
+  });
+  ipcMain.handle("browser:dispatchLiveInput", (event, input: unknown) => {
+    assertTrustedSitePublishIpcSender(event);
+    return dispatchBrowserLiveInput(event.sender.id, input);
+  });
   ipcMain.handle("browser:focusLiveTarget", (event, targetId?: string) => {
     assertTrustedSitePublishIpcSender(event);
     return focusBrowserLiveTarget(typeof targetId === "string" ? targetId.slice(0, 256) : undefined);
@@ -3768,6 +3834,15 @@ export function registerIpcHandlers(): void {
     (_e, input: { agentId: string; title: string }) =>
       getOrCreateOneMemberChat(input.agentId, input.title),
   );
+  ipcMain.handle("chats:appendOneUserMessage", (_e, id: string, rawText: string) => {
+    const chat = getChat(id);
+    if (!chat || chat.originSurface !== "one") throw new Error("One conversation not found.");
+    const text = typeof rawText === "string" ? rawText.trim() : "";
+    if (!text || text.length > 12_000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text)) {
+      throw new Error("One conversation message is invalid.");
+    }
+    return appendChatMessage(id, "user", text);
+  });
   ipcMain.handle("chats:rename", (_e, id: string, title: string) => renameChat(id, title));
   ipcMain.handle("chats:remove", (_e, id: string) => {
     // Renderer의 busy 표시는 투영일 뿐이다. 삭제 권위인 Main이 terminal event가 끝날
@@ -4089,12 +4164,6 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("oneArtifacts:revokePreview", (_e, input: OneArtifactPreviewRevokeV1) => ({
     revoked: revokeOneArtifactPreview(input),
   }));
-  ipcMain.handle("oneArtifacts:open", async (_e, input: OneArtifactBindingRequestV1) => {
-    const artifactPath = resolveOneArtifactOpenPath(input);
-    if (!artifactPath) return { opened: false };
-    const error = await shell.openPath(artifactPath);
-    return { opened: error === "" };
-  });
   ipcMain.handle("oneProfile:get", () => getOneProfile());
   ipcMain.handle("oneProfile:update", (_e, input: OneProfileUpdateInput) => updateOneProfile(input));
   ipcMain.handle("oneProfile:addPrinciple", (_e, input: OneOperatingPrincipleCreateInput) =>
@@ -5502,6 +5571,70 @@ export function registerIpcHandlers(): void {
     const result = await preparePreviewDeploy(input);
     recordAppFactoryOperation(result.rootPath, "deploy-preview", true, result, "preview-ready");
     return result;
+  });
+  ipcMain.handle("appFactory:startLivePreview", async (event, input: { appId: string }) => {
+    assertTrustedSitePublishIpcSender(event);
+    return startAppFactoryLivePreview(input?.appId);
+  });
+  ipcMain.handle("appFactory:stopLivePreview", async (event, input: { appId: string }) => {
+    assertTrustedSitePublishIpcSender(event);
+    return stopAppFactoryLivePreview(input?.appId);
+  });
+
+  // Native Work live view. Every operation is bound to the requesting renderer;
+  // a different window cannot resize, reload, or close its surface by guessing an id.
+  ipcMain.handle("workLiveView:open", async (event, input: {
+    viewId: string;
+    url: string;
+    bounds: import("../shared/types").WorkLiveViewBounds;
+    visible?: boolean;
+    mode?: "app" | "browser";
+  }) => {
+    const win = assertTrustedSitePublishIpcSender(event);
+    const ownerId = event.sender.id;
+    if (!workLiveCleanupOwners.has(ownerId)) {
+      workLiveCleanupOwners.add(ownerId);
+      event.sender.once("destroyed", () => {
+        closeWorkLiveViewsForOwner(ownerId);
+        workLiveCleanupOwners.delete(ownerId);
+      });
+    }
+    return openWorkLiveView({
+      ownerId,
+      window: win,
+      ...input,
+      send: (status) => {
+        if (!event.sender.isDestroyed()) event.sender.send("workLiveView:status", status);
+      },
+    });
+  });
+  ipcMain.handle("workLiveView:setBounds", (event, input: {
+    viewId: string;
+    bounds: import("../shared/types").WorkLiveViewBounds;
+    visible?: boolean;
+  }) => {
+    assertTrustedSitePublishIpcSender(event);
+    return setWorkLiveViewBounds(event.sender.id, input);
+  });
+  ipcMain.handle("workLiveView:reload", (event, viewId: string) => {
+    assertTrustedSitePublishIpcSender(event);
+    return reloadWorkLiveView(event.sender.id, viewId);
+  });
+  ipcMain.handle("workLiveView:navigate", (event, input: { viewId: string; url: string }) => {
+    assertTrustedSitePublishIpcSender(event);
+    return navigateWorkLiveView(event.sender.id, input);
+  });
+  ipcMain.handle("workLiveView:goBack", (event, viewId: string) => {
+    assertTrustedSitePublishIpcSender(event);
+    return goBackWorkLiveView(event.sender.id, viewId);
+  });
+  ipcMain.handle("workLiveView:goForward", (event, viewId: string) => {
+    assertTrustedSitePublishIpcSender(event);
+    return goForwardWorkLiveView(event.sender.id, viewId);
+  });
+  ipcMain.handle("workLiveView:close", (event, viewId: string) => {
+    assertTrustedSitePublishIpcSender(event);
+    return closeWorkLiveView(event.sender.id, viewId);
   });
   ipcMain.handle("appFactory:openLaunchTarget", async (_e, input: AppFactoryRootRequest) => {
     const rootPath = isCloudAppRoot(input.rootPath) ? input.rootPath : path.resolve(input.rootPath);

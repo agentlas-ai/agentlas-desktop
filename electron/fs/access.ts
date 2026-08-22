@@ -44,11 +44,19 @@ const GENERATED_ROOT_NAMES = [
 const LOCAL_MEDIA_EXTS = new Set([
   ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".avif", ".bmp",
   ".mp4", ".webm", ".mov", ".m4v", ".ogv",
+  ".mp3", ".mpeg", ".m4a", ".wav", ".ogg", ".oga", ".opus", ".flac", ".aac", ".weba", ".mid", ".midi",
   /* ★PDF — 렌더러는 `agentlas://app` origin 이고 `webSecurity: true` 라서 `file://`
      iframe 은 무조건 차단된다. 이 목록에 없으면 PDF 뷰어는 **구조적으로** 아무것도
      못 띄운다(칩으로 광고만 하고 있었다). 서빙 경로는 이미지·영상과 동일한
      main-authoritative root + realpath 검사를 그대로 통과한다. */
   ".pdf",
+  // Office/iWork/Hangul are only exposed as bytes to the in-app document
+  // renderer. Macro-capable containers are parsed for preview; nothing inside
+  // them is executed by the renderer.
+  ".doc", ".docx", ".docm", ".dot", ".dotx", ".rtf", ".odt", ".pages", ".hwp", ".hwpx",
+  ".ppt", ".pptx", ".pptm", ".pot", ".potx", ".ppsx", ".odp", ".key",
+  ".xls", ".xlsx", ".xlsm", ".xlsb", ".xlt", ".xltx", ".csv", ".tsv", ".ods", ".numbers",
+  ".zip",
 ]);
 
 /** 붙여넣기에는 원본 경로가 없을 수 있다. Main이 허용 형식·확장자·상한을 결정한다. */

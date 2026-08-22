@@ -13,6 +13,7 @@ type Row = {
   id: string;
   chat_id: string;
   title: string;
+  description: string;
   member_agent_ids_json: string;
   created_at: string;
   updated_at: string;
@@ -35,6 +36,16 @@ function normalizeTitle(value: unknown): string {
     throw new Error("Taskforce title is invalid.");
   }
   return title;
+}
+
+function normalizeDescription(value: unknown): string {
+  if (value == null) return "";
+  if (typeof value !== "string") throw new Error("Taskforce description must be text.");
+  const description = value.normalize("NFC").replace(/\r\n?/g, "\n").trim();
+  if (Array.from(description).length > 600 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(description)) {
+    throw new Error("Taskforce description is invalid.");
+  }
+  return description;
 }
 
 function normalizeMemberIds(value: unknown, options: { allowUnavailable: boolean }): string[] {
@@ -81,6 +92,7 @@ function toTaskforce(row: Row): OneTaskforce {
     id: row.id,
     chatId: row.chat_id,
     title: row.title,
+    description: row.description ?? "",
     memberAgentIds: readMemberIds(row.member_agent_ids_json),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -116,6 +128,7 @@ export function listOneTaskforces(): OneTaskforce[] {
 
 export function createOneTaskforce(input: CreateOneTaskforceInput): OneTaskforce {
   const title = normalizeTitle(input?.title);
+  const description = normalizeDescription(input?.description);
   const memberAgentIds = normalizeMemberIds(input?.memberAgentIds, { allowUnavailable: false });
   const id = randomUUID();
   const now = new Date().toISOString();
@@ -123,9 +136,9 @@ export function createOneTaskforce(input: CreateOneTaskforceInput): OneTaskforce
     const chat = createChat({ title, originSurface: "one", taskMode: "conversation" });
     getDb().prepare(
       `INSERT INTO one_taskforces
-       (id, chat_id, title, member_agent_ids_json, created_at, updated_at, revision)
-       VALUES (?, ?, ?, ?, ?, ?, 1)`,
-    ).run(id, chat.id, title, JSON.stringify(memberAgentIds), now, now);
+       (id, chat_id, title, description, member_agent_ids_json, created_at, updated_at, revision)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1)`,
+    ).run(id, chat.id, title, description, JSON.stringify(memberAgentIds), now, now);
   })();
   emitTaskforceChanged(id);
   return toTaskforce(rowFor(id));
@@ -136,6 +149,7 @@ export function updateOneTaskforce(input: UpdateOneTaskforceInput): OneTaskforce
   const row = rowFor(id);
   assertExpectedRevision(row, input.expectedRevision);
   const title = normalizeTitle(input.title);
+  const description = normalizeDescription(input.description);
   // Existing members intentionally survive lease expiry, archival, or package
   // removal so the group transcript keeps an honest grey participant row.
   // Only newly-added identities must still be active staff.
@@ -147,9 +161,9 @@ export function updateOneTaskforce(input: UpdateOneTaskforceInput): OneTaskforce
   getDb().transaction(() => {
     getDb().prepare(
       `UPDATE one_taskforces
-       SET title = ?, member_agent_ids_json = ?, updated_at = ?, revision = revision + 1
+       SET title = ?, description = ?, member_agent_ids_json = ?, updated_at = ?, revision = revision + 1
        WHERE id = ?`,
-    ).run(title, JSON.stringify(memberAgentIds), now, id);
+    ).run(title, description, JSON.stringify(memberAgentIds), now, id);
     renameChat(row.chat_id, title);
   })();
   emitTaskforceChanged(id);

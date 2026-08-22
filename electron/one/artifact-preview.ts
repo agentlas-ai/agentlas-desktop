@@ -69,11 +69,29 @@ const ARTIFACT_BY_EXTENSION: Readonly<Record<string, ArtifactSpec>> = Object.fre
   ".flac": { kind: "audio", mimeType: "audio/flac", maxBytes: MAX_AUDIO_BYTES },
   ".aac": { kind: "audio", mimeType: "audio/aac", maxBytes: MAX_AUDIO_BYTES },
   ".pdf": { kind: "document", mimeType: "application/pdf", maxBytes: MAX_DOCUMENT_BYTES },
+  ".doc": { kind: "document", mimeType: "application/msword", maxBytes: MAX_DOCUMENT_BYTES },
   ".docx": { kind: "document", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", maxBytes: MAX_DOCUMENT_BYTES },
+  ".docm": { kind: "document", mimeType: "application/vnd.ms-word.document.macroenabled.12", maxBytes: MAX_DOCUMENT_BYTES },
+  ".rtf": { kind: "document", mimeType: "application/rtf", maxBytes: MAX_DOCUMENT_BYTES },
+  ".odt": { kind: "document", mimeType: "application/vnd.oasis.opendocument.text", maxBytes: MAX_DOCUMENT_BYTES },
+  ".pages": { kind: "document", mimeType: "application/vnd.apple.pages", maxBytes: MAX_DOCUMENT_BYTES },
+  ".hwp": { kind: "document", mimeType: "application/x-hwp", maxBytes: MAX_DOCUMENT_BYTES },
+  ".hwpx": { kind: "document", mimeType: "application/vnd.hancom.hwpx", maxBytes: MAX_DOCUMENT_BYTES },
+  ".ppt": { kind: "document", mimeType: "application/vnd.ms-powerpoint", maxBytes: MAX_DOCUMENT_BYTES },
+  ".pptx": { kind: "document", mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation", maxBytes: MAX_DOCUMENT_BYTES },
+  ".pptm": { kind: "document", mimeType: "application/vnd.ms-powerpoint.presentation.macroenabled.12", maxBytes: MAX_DOCUMENT_BYTES },
+  ".odp": { kind: "document", mimeType: "application/vnd.oasis.opendocument.presentation", maxBytes: MAX_DOCUMENT_BYTES },
+  ".key": { kind: "document", mimeType: "application/vnd.apple.keynote", maxBytes: MAX_DOCUMENT_BYTES },
   ".txt": { kind: "document", mimeType: "text/plain", maxBytes: MAX_DOCUMENT_BYTES },
   ".md": { kind: "document", mimeType: "text/markdown", maxBytes: MAX_DOCUMENT_BYTES },
+  ".xls": { kind: "spreadsheet", mimeType: "application/vnd.ms-excel", maxBytes: MAX_DATA_BYTES },
   ".xlsx": { kind: "spreadsheet", mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", maxBytes: MAX_DATA_BYTES },
+  ".xlsm": { kind: "spreadsheet", mimeType: "application/vnd.ms-excel.sheet.macroenabled.12", maxBytes: MAX_DATA_BYTES },
+  ".xlsb": { kind: "spreadsheet", mimeType: "application/vnd.ms-excel.sheet.binary.macroenabled.12", maxBytes: MAX_DATA_BYTES },
   ".csv": { kind: "spreadsheet", mimeType: "text/csv", maxBytes: MAX_DATA_BYTES },
+  ".tsv": { kind: "spreadsheet", mimeType: "text/tab-separated-values", maxBytes: MAX_DATA_BYTES },
+  ".ods": { kind: "spreadsheet", mimeType: "application/vnd.oasis.opendocument.spreadsheet", maxBytes: MAX_DATA_BYTES },
+  ".numbers": { kind: "spreadsheet", mimeType: "application/vnd.apple.numbers", maxBytes: MAX_DATA_BYTES },
   ".json": { kind: "data", mimeType: "application/json", maxBytes: MAX_DATA_BYTES },
   ".zip": { kind: "archive", mimeType: "application/zip", maxBytes: MAX_DATA_BYTES },
   ".js": { kind: "data", mimeType: "text/javascript", maxBytes: MAX_DATA_BYTES },
@@ -93,8 +111,18 @@ const ARTIFACT_BY_EXTENSION: Readonly<Record<string, ArtifactSpec>> = Object.fre
   ".bash": { kind: "data", mimeType: "text/x-shellscript", maxBytes: MAX_DATA_BYTES },
   ".zsh": { kind: "data", mimeType: "text/x-shellscript", maxBytes: MAX_DATA_BYTES },
   ".html": { kind: "data", mimeType: "text/html", maxBytes: MAX_DATA_BYTES },
+  ".htm": { kind: "data", mimeType: "text/html", maxBytes: MAX_DATA_BYTES },
   ".css": { kind: "data", mimeType: "text/css", maxBytes: MAX_DATA_BYTES },
   ".scss": { kind: "data", mimeType: "text/plain", maxBytes: MAX_DATA_BYTES },
+  ".vue": { kind: "data", mimeType: "text/plain", maxBytes: MAX_DATA_BYTES },
+  ".svelte": { kind: "data", mimeType: "text/plain", maxBytes: MAX_DATA_BYTES },
+  ".xml": { kind: "data", mimeType: "application/xml", maxBytes: MAX_DATA_BYTES },
+  ".graphql": { kind: "data", mimeType: "text/plain", maxBytes: MAX_DATA_BYTES },
+  ".gql": { kind: "data", mimeType: "text/plain", maxBytes: MAX_DATA_BYTES },
+  ".yaml": { kind: "data", mimeType: "text/plain", maxBytes: MAX_DATA_BYTES },
+  ".yml": { kind: "data", mimeType: "text/plain", maxBytes: MAX_DATA_BYTES },
+  ".toml": { kind: "data", mimeType: "text/plain", maxBytes: MAX_DATA_BYTES },
+  ".sql": { kind: "data", mimeType: "text/plain", maxBytes: MAX_DATA_BYTES },
 });
 
 interface BindingRow {
@@ -663,8 +691,18 @@ function exactLifecycleTransition(row: BindingRow, input: OneArtifactBindingRequ
 function exactBinding(input: unknown): BindingRow | null {
   if (!isOneArtifactBindingRequestV1(input)) return null;
   const task = getCanonicalTask(input.taskId);
-  if (!task || task.version !== input.taskVersion || task.originChatId !== input.chatId || task.status === "archived") return null;
   const runtimeBinding = input.manifestId === runtimeManifestId(input.runId) && input.artifactRef.startsWith("runtime:");
+  // Runtime tool artifacts are emitted while the run is active. The terminal
+  // Task transition may advance its version before the user reopens the file;
+  // the opaque row remains pinned to its creation version, so a later version
+  // of the same non-archived Task must not invalidate that exact run binding.
+  // Durable surface artifacts retain the stricter exact-version/lifecycle gate.
+  if (
+    !task
+    || task.originChatId !== input.chatId
+    || task.status === "archived"
+    || (runtimeBinding ? task.version < input.taskVersion : task.version !== input.taskVersion)
+  ) return null;
   if (!runtimeBinding) {
     const durable = getDurableOneSurfaceResult({ runId: input.runId, chatId: input.chatId, taskId: input.taskId });
     if (!durable || durable.manifest.manifestId !== input.manifestId || !manifestContainsArtifact(durable.manifest, input.artifactRef)) return null;
@@ -828,10 +866,6 @@ export function issueOneArtifactPreviewCapability(
   if (!Number.isFinite(nowMs)) return null;
   const verified = verifiedFile(input);
   if (!verified || !isOneArtifactBindingRequestV1(input)) return null;
-  if (!["image", "video", "audio"].includes(verified.row.kind)) {
-    fs.closeSync(verified.fd);
-    return null;
-  }
   fs.closeSync(verified.fd);
   pruneTokens(nowMs);
   let token = "";
@@ -841,7 +875,7 @@ export function issueOneArtifactPreviewCapability(
   return {
     capabilityUrl: `agentlas://one-artifact/${token}`,
     mimeType: verified.row.mime_type,
-    kind: verified.row.kind as "image" | "video" | "audio",
+    kind: verified.row.kind,
     sizeBytes: verified.row.size_bytes,
     expiresAt: new Date(expiresAtMs).toISOString(),
   };

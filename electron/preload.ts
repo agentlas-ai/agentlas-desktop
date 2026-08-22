@@ -125,6 +125,13 @@ const api: AgentlasIpc = {
     listDirectory: (absPath: string, scope: FsReadScope, showHidden?: boolean) =>
       ipcRenderer.invoke("fs:listDirectory", absPath, scope, showHidden ?? false),
     readTextFile: (absPath: string, scope: FsReadScope) => ipcRenderer.invoke("fs:readTextFile", absPath, scope),
+    watchFile: (absPath: string, scope: FsReadScope) => ipcRenderer.invoke("fs:watchFile", absPath, scope),
+    unwatchFile: (watchId: string) => ipcRenderer.invoke("fs:unwatchFile", watchId),
+    onFileChanged: (handler) => {
+      const wrapped = (_event: Electron.IpcRendererEvent, snapshot: Parameters<typeof handler>[0]) => handler(snapshot);
+      ipcRenderer.on("fs:fileChanged", wrapped);
+      return () => ipcRenderer.removeListener("fs:fileChanged", wrapped);
+    },
     openPath: (target: string) => ipcRenderer.invoke("fs:openPath", target),
     showItemInFolder: (target: string) => ipcRenderer.invoke("fs:showItemInFolder", target),
     saveTextFile: (suggestedName: string, content: string) =>
@@ -527,6 +534,15 @@ const api: AgentlasIpc = {
     listLogs: (limit?: number) => ipcRenderer.invoke("browser:listLogs", limit),
     captureLiveFrame: (preferredUrl?: string, viewport?: "desktop" | "phone") =>
       ipcRenderer.invoke("browser:captureLiveFrame", preferredUrl, viewport),
+    startLiveView: (preferredUrl: string, viewport?: "desktop" | "phone") =>
+      ipcRenderer.invoke("browser:startLiveView", preferredUrl, viewport),
+    stopLiveView: (sessionId: string) => ipcRenderer.invoke("browser:stopLiveView", sessionId),
+    dispatchLiveInput: (input) => ipcRenderer.invoke("browser:dispatchLiveInput", input),
+    onLiveFrame: (handler) => {
+      const wrapped = (_event: Electron.IpcRendererEvent, frame: Parameters<typeof handler>[0]) => handler(frame);
+      ipcRenderer.on("browser:liveFrame", wrapped);
+      return () => ipcRenderer.removeListener("browser:liveFrame", wrapped);
+    },
     focusLiveTarget: (targetId?: string) => ipcRenderer.invoke("browser:focusLiveTarget", targetId),
   },
   computerUse: {
@@ -567,6 +583,8 @@ const api: AgentlasIpc = {
     listByFirm: (firmId: string) => ipcRenderer.invoke("chats:listByFirm", firmId),
     get: (id: string) => ipcRenderer.invoke("chats:get", id),
     create: (input) => ipcRenderer.invoke("chats:create", input),
+    appendOneUserMessage: (id: string, text: string) =>
+      ipcRenderer.invoke("chats:appendOneUserMessage", id, text),
     openOneMember: (input) => ipcRenderer.invoke("chats:openOneMember", input),
     rename: (id: string, title: string) => ipcRenderer.invoke("chats:rename", id, title),
     archive: (id: string) => ipcRenderer.invoke("chats:archive", id),
@@ -615,7 +633,6 @@ const api: AgentlasIpc = {
   oneArtifacts: {
     issuePreview: (input) => ipcRenderer.invoke("oneArtifacts:issuePreview", input),
     revokePreview: (input) => ipcRenderer.invoke("oneArtifacts:revokePreview", input),
-    open: (input) => ipcRenderer.invoke("oneArtifacts:open", input),
   },
   oneProfile: {
     get: () => ipcRenderer.invoke("oneProfile:get"),
@@ -859,6 +876,8 @@ const api: AgentlasIpc = {
     approveProviderPayment: (input) => ipcRenderer.invoke("appFactory:approveProviderPayment", input),
     runSmoke: (input) => ipcRenderer.invoke("appFactory:runSmoke", input),
     preparePreview: (input) => ipcRenderer.invoke("appFactory:preparePreview", input),
+    startLivePreview: (input) => ipcRenderer.invoke("appFactory:startLivePreview", input),
+    stopLivePreview: (input) => ipcRenderer.invoke("appFactory:stopLivePreview", input),
     openLaunchTarget: (input) => ipcRenderer.invoke("appFactory:openLaunchTarget", input),
     publishAsTool: (input) => ipcRenderer.invoke("appFactory:publishAsTool", input),
     archive: (input) => ipcRenderer.invoke("appFactory:archive", input),
@@ -868,6 +887,20 @@ const api: AgentlasIpc = {
     getAppBySurface: (chatId, surfaceId) =>
       ipcRenderer.invoke("appFactory:getAppBySurface", chatId, surfaceId),
     listOperations: (appId) => ipcRenderer.invoke("appFactory:listOperations", appId),
+  },
+  workLiveView: {
+    open: (input) => ipcRenderer.invoke("workLiveView:open", input),
+    setBounds: (input) => ipcRenderer.invoke("workLiveView:setBounds", input),
+    reload: (viewId) => ipcRenderer.invoke("workLiveView:reload", viewId),
+    navigate: (input) => ipcRenderer.invoke("workLiveView:navigate", input),
+    goBack: (viewId) => ipcRenderer.invoke("workLiveView:goBack", viewId),
+    goForward: (viewId) => ipcRenderer.invoke("workLiveView:goForward", viewId),
+    close: (viewId) => ipcRenderer.invoke("workLiveView:close", viewId),
+    onStatus: (handler) => {
+      const wrapped = (_event: Electron.IpcRendererEvent, status: Parameters<typeof handler>[0]) => handler(status);
+      ipcRenderer.on("workLiveView:status", wrapped);
+      return () => ipcRenderer.removeListener("workLiveView:status", wrapped);
+    },
   },
   metaAgent: {
     createCommerceTeam: (input) => ipcRenderer.invoke("metaAgent:createCommerceTeam", input),

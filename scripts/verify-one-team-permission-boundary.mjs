@@ -14,14 +14,17 @@ const codex = readFileSync(resolve(root, "electron/runtime/codex.ts"), "utf8");
 // The grant is explicit and bounded: a full parent can only mint a write
 // implementation worker, while planner/synthesis/repair remain read-only.
 assert.match(taskForce, /export function taskForceChildPermission/);
-assert.match(taskForce, /role === "worker" && \(inputType === "implementation" \|\| toolRequired\)/);
+assert.match(taskForce, /role === "worker" && \(inputType === "implementation" \|\| inputType === "writing" \|\| toolRequired\)/);
 assert.match(taskForce, /packet\.allocation\.requirements\.toolRequired/);
 assert.match(taskForce, /approvalChatId: p\.chat\.id/, "child live approvals must route to the visible Taskforce chat, not an internal runtime session");
-assert.match(taskForce, /packet\.allocation\.requirements\.toolRequired[\s\S]{0,180}auto_review/, "an explicit tool packet must have a reviewer even though its internal worker has no approval UI");
+assert.match(taskForce, /approvalsReviewer: autoReviewApprovals && permission !== "read" \? "auto_review" : "user"/, "tool workers must keep Codex on-request and use its bounded automatic reviewer");
+assert.match(taskForce, /isolatedMcpConfig: p\.isolatedMcpConfig/, "exact Browser isolation must reach Taskforce planner, workers, and synthesis");
+assert.doesNotMatch(taskForce, /codexApprovalPolicy/, "Taskforce must not set approval_policy=never because that declines approval-bearing MCP calls");
 assert.match(taskForce, /const managerRunnerBase = taskForceRunnerBase\(p, "read"\)/);
 assert.match(taskForce, /permission: role === "worker" \? workerPermission : "read"/);
 assert.match(taskForce, /permissions: workerPermission/);
 assert.match(codex, /approvalPolicy: policy\.approvalPolicy,[\s\S]{0,120}approvalsReviewer,[\s\S]{0,180}sandboxPolicy: policy\.sandboxPolicy/, "resident turns must reassert both approval policy and reviewer");
+assert.match(codex, /writableRoots: \[writableRoot\][\s\S]{0,360}excludeTmpdirEnvVar: false[\s\S]{0,80}excludeSlashTmp: false/, "workspace-write turns must carry a complete cwd-rooted typed policy");
 assert.match(firm, /export function firmNodePermission/);
 assert.match(firm, /turn\.phase === "delegate" \? "write" : "read"/);
 assert.match(firm, /permission: .*nodePermission/);
@@ -47,6 +50,8 @@ assert.match(client, /oneTeamExecutionPolicy === "solo_locked"/);
 // navigate to the standalone Build route, and the draft seed must reach both
 // semantic result cards and the create dialog without replacing avatar state.
 assert.doesNotMatch(oneShell, /router\.push\(["'`]\/build/);
+assert.doesNotMatch(oneShell, /router\.(?:push|replace)\([`"']\/(?:workspace\/task|dashboard)/, "One must never navigate the person into Work");
+assert.doesNotMatch(oneShell, /open_in_work|onOpenWork|canOpenWork/, "One controls must not expose a Work escape hatch");
 assert.match(oneShell, /onOpenAgentDraft=\{openCreateAgentDialog\}/);
 assert.match(oneShell, /seed=\{createAgentSeed\}/);
 

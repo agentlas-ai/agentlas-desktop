@@ -32,6 +32,7 @@ import { acpOrLegacyRunner, acpSessionKind, createAcpRunner } from "./acp";
 import { resolveAcpAgentSpec } from "./acp-agents";
 import { acquireLocalInferenceSlot } from "./local-inference-run-slots";
 import type { Runner } from "./runner";
+import { peekProviderUsedPercent } from "../usage";
 
 /**
  * CLI 러너를 전역 실행 슬롯으로 래핑 — 챗·firm·swarm·워크플로우·자동화가 각자 캡으로
@@ -157,6 +158,9 @@ export interface RuntimeChoice {
   picked: { runner: Runner; label: string } | null;
   override: AgentRuntimeOverride | null;
   unavailableOverride: AgentRuntimeOverride | null;
+  /** Internal fallback path for a selected agent model. Kept out of chat copy. */
+  fallbackStage?: "worker" | "connected";
+  fallbackReason?: "runtime-unavailable" | "model-unavailable" | "quota-exceeded";
 }
 
 export interface AgentAppRuntimeChoice extends RuntimeChoice {
@@ -325,7 +329,42 @@ function runtimeMatchesOverride(runtime: RuntimeStatus, override: AgentRuntimeOv
   const selection = override.selection;
   if (runtime.kind !== selection.kind) return false;
   if (selection.backend && runtime.backend !== selection.backend) return false;
+  if (selection.source && runtime.source !== selection.source) return false;
   return true;
+}
+
+const QUOTA_FALLBACK_PERCENT = 90;
+const LOCAL_AUTHORITATIVE_MODEL_KINDS = new Set<RuntimeStatus["kind"]>(["ollama", "lmstudio", "mlx"]);
+
+function runtimeSelectionUnavailableReason(
+  runtime: RuntimeStatus | undefined,
+  selection: Pick<import("../../shared/types").RuntimeSelection, "kind" | "model">,
+): RuntimeChoice["fallbackReason"] | null {
+  if (!runtime || !pickRunner(runtime)) return "runtime-unavailable";
+  const model = selection.model?.trim();
+  const modelListIsAuthoritative = runtime.kind === "byok"
+    || LOCAL_AUTHORITATIVE_MODEL_KINDS.has(runtime.kind)
+    || runtime.modelDiscovery?.status === "ok";
+  if (
+    model
+    && modelListIsAuthoritative
+    && (runtime.availableModels?.length ?? 0) > 0
+    && !runtime.availableModels!.includes(model)
+  ) return "model-unavailable";
+  const used = peekProviderUsedPercent(selection.kind);
+  if (used !== null && used >= QUOTA_FALLBACK_PERCENT) return "quota-exceeded";
+  return null;
+}
+
+function runtimeStatusSelection(runtime: RuntimeStatus): import("../../shared/types").RuntimeSelection {
+  return {
+    kind: runtime.kind,
+    backend: runtime.backend,
+    source: runtime.source,
+    model: runtime.model ?? undefined,
+    effort: runtime.effort ?? undefined,
+    longContext: runtime.longContextEnabled,
+  };
 }
 
 export function selectExactRuntime(
@@ -385,10 +424,55 @@ export function selectRuntimeForTargets(
   const override = findAgentRuntimeOverride(targets);
   if (override) {
     const matched = runtimes.find((runtime) => runtimeMatchesOverride(runtime, override));
-    if (matched) {
+    const unavailableReason = runtimeSelectionUnavailableReason(matched, override.selection);
+    if (matched && !unavailableReason) {
       const active = applyRuntimeOverride(matched, override);
       return { active, picked: pickRunner(active), override, unavailableOverride: null };
     }
+
+    // Explicit One Team contract: selected model -> orchestrator's worker role
+    // -> any other connected working runtime. This is narrower than changing
+    // the global role pool and applies only when an agent-scoped preference is
+    // known unavailable or over its measured usage threshold.
+    const worker = pickActive(runtimes, "worker");
+    const workerReason = worker
+      ? runtimeSelectionUnavailableReason(worker, runtimeStatusSelection(worker))
+      : "runtime-unavailable";
+    if (worker && !workerReason && (
+      !matched
+      || worker.kind !== matched.kind
+      || worker.backend !== matched.backend
+      || worker.model !== override.selection.model
+    )) {
+      return {
+        active: worker,
+        picked: pickRunner(worker),
+        override: null,
+        unavailableOverride: override,
+        fallbackStage: "worker",
+        fallbackReason: unavailableReason ?? "runtime-unavailable",
+      };
+    }
+
+    for (const candidate of runtimes) {
+      const active = { ...candidate, active: true };
+      if (runtimeSelectionUnavailableReason(active, runtimeStatusSelection(active))) continue;
+      if (
+        matched
+        && active.kind === matched.kind
+        && active.backend === matched.backend
+        && active.model === override.selection.model
+      ) continue;
+      return {
+        active,
+        picked: pickRunner(active),
+        override: null,
+        unavailableOverride: override,
+        fallbackStage: "connected",
+        fallbackReason: unavailableReason ?? "runtime-unavailable",
+      };
+    }
+    return null;
   }
 
   const active = pickActive(runtimes, role);
