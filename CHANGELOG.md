@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.0.31 — 2026-08-23
+
+Bundled runtime: Agentlas OS v1.2.16 (6d0d7e7eafaa96ebbed92e1a2223b01f13eed245).
+Source readiness does not prove a public installer or update feed; the
+Releases page stays the authority.
+
+- One Team is a conversation now, all the way through. One coordinates the
+  taskforce room as its standing CEO, teammates speak as themselves, and a
+  plan or PRD arrives as a rendered document instead of a chat bubble.
+  Replies fold behind an SNS-style "+N replies" pill, the speaker's character
+  sits above what it said, and characters are drawn large enough to recognise.
+- Browser work is itself the output. The built-in Browser opens inside the
+  Work outputs rail when the team actually navigates, keeps its tab even as
+  new artifacts stream in, and comes back — same page, same address — when
+  the room is reopened. The automatic presentation no longer loses to the
+  activity feed; the full PRD-to-build Luna journey passes with the imagegen
+  consent asked separately, and the recording comes from that run.
+- Documents, code, media and maps render natively in One: office files, an
+  in-app code viewer, live video and audio, and a map layer, with a file
+  watcher keeping live previews honest about what is on disk.
+
 ## 1.0.30 — 2026-08-21
 
 Bundled runtime: Agentlas OS v1.2.16 (6d0d7e7eafaa96ebbed92e1a2223b01f13eed245).

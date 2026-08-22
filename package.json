@@ -15,7 +15,7 @@
     "minimumSourceAppVersion": "0.7.0",
     "minimumRuntimeVersion": "1.0.4",
     "minimumSchemaVersion": 35,
-    "targetSchemaVersion": 99,
+    "targetSchemaVersion": 100,
     "bundledRuntimeVersion": "1.2.16"
   },
   "agentlasBundledRuntimeSource": {
@@ -399,6 +399,7 @@
     "test:right-panel-artifacts": "npm run build:electron && node scripts/right-panel-artifacts-contract.mjs",
     "test:live-output-runtime": "npm run build:electron && electron scripts/test-live-output-runtime.cjs",
     "test:live-renderers": "node scripts/verify-live-renderers.cjs",
+    "test:design-output-tokens": "node scripts/test-design-output-tokens.cjs",
     "qa:live-renderers": "npm run build:electron && npm run build:renderer && electron scripts/qa-live-renderers-electron.cjs",
     "test:store-isolation": "node scripts/store-isolation-contract.mjs",
     "test:model-discovery-contract": "node scripts/test-model-discovery-contract.cjs",
