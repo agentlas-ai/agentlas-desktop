@@ -592,6 +592,19 @@ function modelLabel(active: RuntimeStatus): string {
   );
 }
 
+function taskForceControlEffort(active: RuntimeStatus): string | undefined {
+  const modelEfforts = active.model
+    ? active.allocationModelProfiles?.[active.model]?.efforts
+    : undefined;
+  const advertised = modelEfforts?.length
+    ? modelEfforts
+    : active.efforts?.map((entry) => entry.id) ?? [];
+  for (const candidate of ["low", "minimal", "none", "medium"]) {
+    if (advertised.includes(candidate)) return candidate;
+  }
+  return active.effort ?? undefined;
+}
+
 function providerLabel(active: RuntimeStatus): string {
   return active.backend || active.kind || "unknown";
 }
@@ -1037,6 +1050,68 @@ function taskForceRunnerBase(
   };
 }
 
+/** Planning and synthesis are control-plane turns. They already receive the
+ * bounded request, roster, packets, and worker results, so they never receive
+ * an MCP grant or workspace cwd. Third-party surfaces additionally require the
+ * measured zero-authority boundary; only the owner's frozen local roster may
+ * use a read-only runtime that cannot prove zero built-ins. */
+export function taskForceControlPlaneNeedsZeroAuthority(input: {
+  agentAppMode?: boolean;
+  workforceSelectionReceipt?: WorkforceSelectionReceipt;
+  specs: BorrowedAgentSpec[];
+}): boolean {
+  // Site Agent Apps and Core-prepared Workforce bundles cross an untrusted
+  // package boundary. Public/owner-Cloud directives do too. Those control
+  // turns must keep the release-verified zero-authority contract and fail
+  // closed on runtimes (currently Codex) that cannot enforce it.
+  if (input.agentAppMode || input.workforceSelectionReceipt) return true;
+
+  // A saved One Taskforce made only from this owner's installed agents/teams
+  // is a different trust class: its effective prompts were frozen by Main at
+  // invocation start and the control plane never receives a third-party
+  // package directive. Treating this owner-local conversation as an Agent App
+  // made Codex reject the planner before any teammate could run. It remains
+  // read-only, has no MCP grant, and receives no workspace cwd, but it does not
+  // claim the stronger zero-builtins boundary that Codex cannot prove.
+  return input.specs.length === 0 || input.specs.some((spec) => (
+    (spec.source !== "installed" && spec.source !== "firm" && spec.source !== "firm-node") ||
+    !spec.installedAgentId
+  ));
+}
+
+function taskForceOrchestratorBoundary(
+  p: BorrowedTaskForceParams,
+  specs: BorrowedAgentSpec[],
+): Pick<
+  RunnerRequest,
+  | "permission"
+  | "restrictedReadBoundary"
+  | "mcpConfigPath"
+  | "mcpAllowedTools"
+  | "mcpCodexConfigArgs"
+  | "env"
+  | "untrustedNoTools"
+  | "untrustedAllowedMcpTools"
+  | "onAgentAppMcpRuntimeUnavailable"
+> {
+  const untrustedNoTools = taskForceControlPlaneNeedsZeroAuthority({
+    agentAppMode: p.req.agentAppMode,
+    workforceSelectionReceipt: p.workforceSelectionReceipt,
+    specs,
+  });
+  return {
+    permission: "read",
+    restrictedReadBoundary: p.restrictedReadBoundary,
+    mcpConfigPath: undefined,
+    mcpAllowedTools: undefined,
+    mcpCodexConfigArgs: undefined,
+    env: undefined,
+    untrustedNoTools,
+    untrustedAllowedMcpTools: undefined,
+    onAgentAppMcpRuntimeUnavailable: undefined,
+  };
+}
+
 /*
  * Stage execution contract — the one place that decides where a task-force model
  * call runs and what it is allowed to touch.
@@ -1139,6 +1214,66 @@ export function redactSensitiveText(text: string): string {
       /\b(api[_-]?key|token|secret|password|passwd|pwd|cookie|session|authorization)\b\s*[:=]\s*['"]?[^\s'"]{8,}/gi,
       "[redacted-secret]",
     );
+}
+
+function taskForceHandoffFacts(compact: string): string {
+  const facts: string[] = [];
+  const add = (value: string) => {
+    const normalized = value.replace(/[),.;:`'"\]]+$/u, "");
+    if (normalized && !facts.includes(normalized)) facts.push(normalized);
+  };
+  for (const match of compact.matchAll(/https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d{2,5})?(?:\/[^\s<>{}\[\]]*)?/giu)) {
+    add(match[0]);
+  }
+  for (const match of compact.matchAll(/\b(?:port|포트)\s*[:=]?\s*(\d{2,5})\b/giu)) {
+    add(`port ${match[1]}`);
+  }
+  for (const match of compact.matchAll(/\b(?:STATUS|상태)\s*[:=]?\s*(COMPLETED|PARTIAL|FAILED|완료|부분 완료|실패)\b/giu)) {
+    add(`STATUS ${match[1]}`);
+  }
+  return facts.slice(0, 8).join(" · ");
+}
+
+/** Preserve the start and end of a long worker result, then pin machine-useful
+ * handoff facts (especially localhost URLs and status) that may otherwise sit
+ * in the omitted middle. Prefix-only truncation caused reviewers to probe a
+ * guessed stale port even though the implementation worker had reported the
+ * exact live endpoint later in its answer. */
+function boundedTaskForceText(text: string, limit: number): string {
+  const compact = redactSensitiveText(text).replace(/\s+/g, " ").trim();
+  if (!compact || compact.length <= limit) return compact;
+  const facts = taskForceHandoffFacts(compact);
+  const factLine = facts ? ` HANDOFF FACTS: ${facts}` : "";
+  const bodyBudget = Math.max(240, limit - factLine.length - 28);
+  const headBudget = Math.max(120, Math.floor(bodyBudget * 0.4));
+  const tailBudget = Math.max(120, bodyBudget - headBudget);
+  return `${compact.slice(0, headBudget).trimEnd()} …[middle omitted]… ${compact.slice(-tailBudget).trimStart()}${factLine}`;
+}
+
+/** The durable handoff rail is a conversation preview, not a second copy of
+ * the worker transcript. */
+export function boundedTaskForceMessage(text: string): string {
+  return boundedTaskForceText(text, 900);
+}
+
+/** Peer reviewers need more evidence than the compact UI preview, while still
+ * avoiding replay of a tool-heavy worker transcript into every reviewer. */
+export function boundedTaskForcePeerContext(text: string): string {
+  return boundedTaskForceText(text, 2_400);
+}
+
+/** A follow-up Taskforce turn must not replay an entire long-lived chat into
+ * both the planner and the synthesizer. The current request is passed
+ * separately; this window carries only the latest conversational decisions. */
+function boundedTaskForceHistory(history: ChatHistoryEntry[]): ChatHistoryEntry[] {
+  return history.slice(-4).map((entry) => {
+    const compact = redactSensitiveText(entry.text).replace(/\s+/g, " ").trim();
+    return {
+      ...entry,
+      text: compact.length > 2_000 ? `${compact.slice(0, 1_999)}…` : compact,
+      imageDataUrls: undefined,
+    };
+  });
 }
 
 function cleanAgentAppControlBlocks(text: string): string {
@@ -1941,7 +2076,7 @@ function packetToPrompt(
     "Return a compact specialist result. Include: finding/result, evidence or reasoning basis, assumptions, risks, and what the orchestrator should do with it.",
     // 산출물과 한계·상태를 분리해 반환해야 검토 가능성이 생긴다(위임 계약 7요소 중
     // 상태·증거). COMPLETED는 워커의 '주장'일 뿐이고 수락 판정은 오케스트레이터 몫.
-    "End with two labeled sections: LIMITATIONS (what you could not verify or complete — write 'none' only if truly none) and STATUS (COMPLETED, PARTIAL, or FAILED; for PARTIAL/FAILED name each unmet done-when condition). Claiming COMPLETED does not finish the task force — the orchestrator accepts or rejects your claim.",
+    "End with three labeled sections: LIMITATIONS (what you could not verify or complete — write 'none' only if truly none), STATUS (COMPLETED, PARTIAL, or FAILED; for PARTIAL/FAILED name each unmet done-when condition), and HANDOFF FACTS (at most 8 short lines: primary_url, artifact_paths relative to the working folder, process/command identity, verification, remaining work; omit fields that do not apply). Never bury a live endpoint or artifact location only in earlier prose. Claiming COMPLETED does not finish the task force — the orchestrator accepts or rejects your claim.",
   ].filter(Boolean).join("\n");
 }
 
@@ -2104,6 +2239,7 @@ function buildPlannerSystemPrompt(
     "",
     "For every packet, judge complexity, risk, context size, and required precision. Assign provider-neutral capacity independently; do not put every worker on frontier.",
     "Planner enum contract: inputType is exactly research|implementation|review|writing|analysis|planning|other; inputKind is exactly text|codebase|files|image|data|browser|mixed.",
+    "CONTROL-PLANE BUDGET: return only the required heading and JSON fence, with no preamble or explanation. Keep the complete response under 7,000 characters. Keep each brief and expectedOutput under 900 characters; context, constraints, and doneWhen to at most 6 concise items each. This is a dispatch envelope, not the worker deliverable.",
     "Allocation enum contract: tier is exactly economy|balanced|frontier; packet phase is delegate and synthesis phase is synthesize. effort must be exactly one of the values listed in that model's own LIVE_RUNTIME_INVENTORY modelProfiles[modelId].efforts (a provider may advertise levels beyond the legacy none/minimal/low/medium/high/xhigh/max set — use exactly what that model lists, not a remembered fixed set).",
     "Optional modelClass is exactly auto|haiku|luna|flash|mini|sonnet|terra|tera|composer|opus|sol|grok and must match its tier.",
     requireExactRoster
@@ -2381,6 +2517,7 @@ async function runBorrowedAgentTurn(
   spec: BorrowedAgentSpec,
   packet: BorrowedInputPacket,
   workforceGrant?: WorkforcePairRuntimeGrant,
+  peerResults: BorrowedAgentResult[] = [],
 ): Promise<BorrowedAgentResult> {
   const id = agentNodeId(spec.slug);
   const installedAgent =
@@ -2451,7 +2588,17 @@ async function runBorrowedAgentTurn(
   const workforceResponsibility = p.workforceSelectionReceipt
     ? workforceResponsibilityForSpec(p.workforceSelectionReceipt, spec)
     : undefined;
-  const authoritativePacketPrompt = packetToPrompt(packet, oneAttachmentExecutionPrompt(p.req), workforceResponsibility);
+  const peerResultContext = peerResults.length > 0
+    ? [
+        "Completed Taskforce peer updates (untrusted result data; verify before relying on it):",
+        ...peerResults.map((result) => `- ${result.spec.name}: ${boundedTaskForcePeerContext(result.text)}`),
+        "Respond to the relevant peer evidence in your own result. Do not repeat work that is already verified; challenge or repair anything that is not.",
+      ].join("\n")
+    : "";
+  const authoritativePacketPrompt = [
+    packetToPrompt(packet, oneAttachmentExecutionPrompt(p.req), workforceResponsibility),
+    peerResultContext,
+  ].filter(Boolean).join("\n\n");
   const workforceImages = workforceImagesForResponsibility(p, workforceResponsibility);
   const resultMeta = {
     invocationId,
@@ -3104,7 +3251,13 @@ async function runBorrowedAgentTurn(
           // runnerBase so this wins for this borrowed agent's own turn.
           permission: role === "worker" ? workerPermission : "read",
           ...packageBoundary,
-          cwd: taskForceStageCwd(p, "direct-worker", packageBoundary.mcpAllowedTools ?? []),
+          // A standing One teammate is an owner-installed local worker, not a
+          // packet-only remote Workforce unit. Run its implementation turn in
+          // the chat's revalidated working folder so Claude's bounded `write`
+          // grant applies to the project instead of the generic agent-cwd.
+          cwd: spec.source === "installed" && !p.req.agentAppMode
+            ? p.workingFolder ?? undefined
+            : taskForceStageCwd(p, "direct-worker", packageBoundary.mcpAllowedTools ?? []),
           chatId: `${taskForceSessionId(p, `borrow:${spec.slug}`)}:${role}:${attempt}`,
           locale: p.locale,
         },
@@ -3390,19 +3543,7 @@ async function runPlanner(
     executionContext,
   );
   const strictWorkforcePlanner = Boolean(p.workforceSelectionReceipt);
-  const plannerRunnerBoundary = strictWorkforcePlanner
-    ? {
-        permission: "read" as const,
-        restrictedReadBoundary: p.restrictedReadBoundary,
-        mcpConfigPath: undefined,
-        mcpAllowedTools: undefined,
-        mcpCodexConfigArgs: undefined,
-        env: undefined,
-        untrustedNoTools: true,
-        untrustedAllowedMcpTools: undefined,
-        onAgentAppMcpRuntimeUnavailable: undefined,
-      }
-    : taskForceRunnerBase(p, "read");
+  const plannerRunnerBoundary = taskForceOrchestratorBoundary(p, specs);
   const invokePlanner = async (
     invocationId: string,
     systemPrompt: string,
@@ -3410,7 +3551,7 @@ async function runPlanner(
   ): Promise<RunnerResult> => p.picked.runner(
     {
       systemPrompt,
-      history,
+      history: boundedTaskForceHistory(history),
       userPrompt: validationError
         ? `${baseUserPrompt}\n\nSchema repair validation error (sanitized): ${validationError}`
         : baseUserPrompt,
@@ -3418,10 +3559,14 @@ async function runPlanner(
       backendLabel: p.picked.label,
       model: p.active.model ?? undefined,
       longContext: p.active.longContextEnabled ?? false,
-      effort: p.active.effort ?? undefined,
+      // Packet routing is a compact schema task. Inheriting the owner's max
+      // reasoning setting made the control plane spend more tokens than the
+      // workers it was dispatching. Keep the selected model, but use its low
+      // reasoning tier for this bounded, locally validated envelope.
+      effort: taskForceControlEffort(p.active),
       signal: p.signal,
       ...plannerRunnerBoundary,
-      cwd: strictWorkforcePlanner ? taskForceStageCwd(p, "planner") : p.req.agentAppMode ? undefined : p.workingFolder ?? undefined,
+      cwd: taskForceStageCwd(p, "planner"),
       chatId: invocationId,
       locale: p.locale,
     },
@@ -3711,6 +3856,38 @@ async function runPlanner(
     phase: "delegate",
     delegateTo: packets.map((packet) => agentNodeId(packet.agent)),
   });
+  // A Taskforce is a visible group conversation, not an opaque fan-out. Emit
+  // the same typed handoff envelope already used by installed Firms so the
+  // user can open each teammate channel and read the real Korean/English brief.
+  for (const packet of packets) {
+    const targetId = agentNodeId(packet.agent);
+    const text = boundedTaskForceMessage(packet.brief || packet.expectedOutput);
+    if (!text) continue;
+    p.sink({
+      kind: "tool-use",
+      status: p.locale === "ko"
+        ? `${orchestratorName} → ${packet.agent} 메시지 전송`
+        : `${orchestratorName} → ${packet.agent} message sent`,
+      agentId: orchestratorId,
+      runtimeAgentId: p.orchestratorAgent.id,
+      agentName: orchestratorName,
+      role: "orchestrator",
+      tier: 1,
+      phase: "delegate",
+      delegateTo: [targetId],
+      agentMessage: {
+        messageId: randomUUID(),
+        direction: "orchestrator-to-worker",
+        fromAgentId: orchestratorId,
+        toAgentId: targetId,
+        text,
+        handoffDepth: 1,
+        handoffRoundtrip: 1,
+        handoffPermission: taskForceChildPermission(p, packet.inputType, "worker"),
+        permissionInherited: false,
+      },
+    });
+  }
   return {
     text: plannerText,
     packets,
@@ -3796,7 +3973,73 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
   }
   try {
   const specBySlug = new Map(specs.map((spec) => [spec.slug, spec]));
-  const runPacket = async (packet: (typeof plan.packets)[number]) => {
+  const orchestratorId = `${p.chat.id}:borrow-orchestrator`;
+  const orchestratorName = p.orchestratorAgent.nameEn || p.orchestratorAgent.name || "Agentlas Orchestrator";
+  const emitWorkerResultMessage = (result: BorrowedAgentResult) => {
+    const fromAgentId = agentNodeId(result.spec.slug);
+    const text = boundedTaskForceMessage(result.text);
+    if (!text) return;
+    p.sink({
+      kind: "tool-use",
+      done: true,
+      status: p.locale === "ko"
+        ? `${result.spec.name} → ${orchestratorName} 결과 전달`
+        : `${result.spec.name} → ${orchestratorName} result sent`,
+      agentId: fromAgentId,
+      ...(result.spec.installedAgentId ? { runtimeAgentId: result.spec.installedAgentId } : {}),
+      agentName: result.spec.name,
+      role: result.spec.slug,
+      tier: 2,
+      phase: "delegate",
+      agentMessage: {
+        messageId: randomUUID(),
+        direction: "worker-to-orchestrator",
+        fromAgentId,
+        toAgentId: orchestratorId,
+        text,
+        handoffDepth: 2,
+        handoffRoundtrip: 2,
+        handoffPermission: "read",
+        permissionInherited: false,
+      },
+    });
+  };
+  const emitPeerRelayMessage = (packet: BorrowedInputPacket, peerResults: BorrowedAgentResult[]) => {
+    const targetId = agentNodeId(packet.agent);
+    const text = boundedTaskForceMessage([
+      "Completed peer updates:",
+      ...peerResults.map((result) => `${result.spec.name}: ${result.text}`),
+    ].join("\n"));
+    if (!text) return;
+    p.sink({
+      kind: "tool-use",
+      status: p.locale === "ko"
+        ? `${orchestratorName} → ${packet.agent} 동료 결과 전달`
+        : `${orchestratorName} → ${packet.agent} peer results relayed`,
+      agentId: orchestratorId,
+      runtimeAgentId: p.orchestratorAgent.id,
+      agentName: orchestratorName,
+      role: "orchestrator",
+      tier: 1,
+      phase: "delegate",
+      delegateTo: [targetId],
+      agentMessage: {
+        messageId: randomUUID(),
+        direction: "orchestrator-to-worker",
+        fromAgentId: orchestratorId,
+        toAgentId: targetId,
+        text,
+        handoffDepth: 1,
+        handoffRoundtrip: 3,
+        handoffPermission: taskForceChildPermission(p, packet.inputType, "worker"),
+        permissionInherited: false,
+      },
+    });
+  };
+  const runPacket = async (
+    packet: (typeof plan.packets)[number],
+    peerResults: BorrowedAgentResult[] = [],
+  ) => {
     const spec = specBySlug.get(packet.agent) ?? specs[0];
     const slotId = spec.routeLabel?.startsWith("workforce:")
       ? spec.routeLabel.slice("workforce:".length)
@@ -3804,26 +4047,67 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     const grant = slotId && spec.agentReleaseId
       ? plan.capabilityBinding?.grantsByPair.get(workforcePairKey(slotId, spec.agentReleaseId))
       : undefined;
-    return runBorrowedAgentTurn(p, spec, packet, grant);
+    return runBorrowedAgentTurn(p, spec, packet, grant, peerResults);
   };
-  const results = await parallelCap(plan.packets, getAgentConcurrency(), runPacket);
-  // 완주 규범: 워커 한 명의 일시 실패가 태스크포스 전체를 "다시 시도해 달라" 종결로
-  // 만들지 않는다. 실패한 워커만 같은 입력으로 1회 자동 재실행해 스스로 복구한다.
-  for (let index = 0; index < plan.packets.length; index += 1) {
-    if (results[index]?.ok !== false || p.signal?.aborted) continue;
-    const failedSlug = results[index].spec.slug;
+  const runPacketWithRetry = async (
+    packet: (typeof plan.packets)[number],
+    peerResults: BorrowedAgentResult[] = [],
+  ) => {
+    const first = await runPacket(packet, peerResults);
+    if (first.ok || p.signal?.aborted) return first;
     p.sink({
       kind: "tool-use",
       status: p.locale === "ko"
-        ? `한 단계가 막혀 다시 진행하는 중… (${failedSlug})`
-        : `Retrying a blocked step… (${failedSlug})`,
+        ? `한 단계가 막혀 다시 진행하는 중… (${first.spec.slug})`
+        : `Retrying a blocked step… (${first.spec.slug})`,
     });
-    const retried = await runPacket(plan.packets[index]);
-    if (retried.ok) results[index] = retried;
-  }
+    return runPacket(packet, peerResults);
+  };
 
-  const orchestratorId = `${p.chat.id}:borrow-orchestrator`;
-  const orchestratorName = p.orchestratorAgent.nameEn || p.orchestratorAgent.name || "Agentlas Orchestrator";
+  const results: BorrowedAgentResult[] = new Array(plan.packets.length);
+  const localStandingRoster = !p.workforceSelectionReceipt
+    && !p.req.agentAppMode
+    && specs.every((spec) => spec.source === "installed");
+  const dependentIndexes = plan.packets
+    .map((packet, index) => packet.inputType === "review" || packet.inputKind === "browser" ? index : -1)
+    .filter((index) => index >= 0);
+  const stagePeerReview = localStandingRoster
+    && dependentIndexes.length > 0
+    && plan.packets.some((packet) => packet.inputType === "implementation");
+
+  if (stagePeerReview) {
+    const dependentSet = new Set(dependentIndexes);
+    const foundationIndexes = plan.packets.map((_, index) => index).filter((index) => !dependentSet.has(index));
+    const foundationResults = await parallelCap(
+      foundationIndexes,
+      getAgentConcurrency(),
+      (index) => runPacketWithRetry(plan.packets[index]),
+    );
+    foundationIndexes.forEach((packetIndex, resultIndex) => {
+      results[packetIndex] = foundationResults[resultIndex];
+      emitWorkerResultMessage(foundationResults[resultIndex]);
+    });
+    for (const index of dependentIndexes) emitPeerRelayMessage(plan.packets[index], foundationResults);
+    const reviewResults = await parallelCap(
+      dependentIndexes,
+      getAgentConcurrency(),
+      (index) => runPacketWithRetry(plan.packets[index], foundationResults),
+    );
+    dependentIndexes.forEach((packetIndex, resultIndex) => {
+      results[packetIndex] = reviewResults[resultIndex];
+      emitWorkerResultMessage(reviewResults[resultIndex]);
+    });
+  } else {
+    const parallelResults = await parallelCap(
+      plan.packets,
+      getAgentConcurrency(),
+      (packet) => runPacketWithRetry(packet),
+    );
+    parallelResults.forEach((result, index) => {
+      results[index] = result;
+      emitWorkerResultMessage(result);
+    });
+  }
   const synthesisCandidateRuntimes = taskForceCandidateRuntimes(p);
   const synthesisResolution = resolveWorkloadAllocationAcrossRuntimes({
     allocation: plan.synthesisAllocation,
@@ -3880,19 +4164,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
 
   if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
   const synthesisInvocationId = taskForceSessionId(p, "borrow-synthesis");
-  const synthesisRunnerBoundary = p.workforceSelectionReceipt
-    ? {
-        permission: "read" as const,
-        restrictedReadBoundary: p.restrictedReadBoundary,
-        mcpConfigPath: undefined,
-        mcpAllowedTools: undefined,
-        mcpCodexConfigArgs: undefined,
-        env: undefined,
-        untrustedNoTools: true,
-        untrustedAllowedMcpTools: undefined,
-        onAgentAppMcpRuntimeUnavailable: undefined,
-      }
-    : taskForceRunnerBase(p, "read");
+  const synthesisRunnerBoundary = taskForceOrchestratorBoundary(p, specs);
   const synthesisImages = p.req.agentAppMode
     ? undefined
     : p.workforceSelectionReceipt
@@ -3919,7 +4191,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         synthesisOntology?.prompt,
         synthesisMemoryEmitter,
       ].filter(Boolean).join("\n\n"),
-      history,
+      history: boundedTaskForceHistory(history),
       userPrompt: buildSynthesisPrompt({
         originalRequest: oneAttachmentExecutionPrompt(p.req),
         planText: plan.text,
@@ -3934,7 +4206,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       forceSurface: p.req.oneMode === true && emitFinal && !p.req.agentAppMode,
       signal: p.signal,
       ...synthesisRunnerBoundary,
-      cwd: p.workforceSelectionReceipt ? taskForceStageCwd(p, "synthesis") : p.req.agentAppMode ? undefined : p.workingFolder ?? undefined,
+      cwd: taskForceStageCwd(p, "synthesis"),
       chatId: synthesisInvocationId,
       locale: p.locale,
     },

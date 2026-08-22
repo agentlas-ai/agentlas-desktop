@@ -12,6 +12,7 @@ import { buildAgentRoster, isRosterVisibleAgent, visibleRosterAgents } from "@/l
 import { onAgentRosterChange } from "@/lib/agent-roster-events";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
+import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { AgentMemorySaveQueue, parseMemoryMarkdown, type ParsedMemory } from "@/lib/agent-memory";
 import { cliModelTagLabel } from "@shared/models";
 import {
@@ -2398,8 +2399,9 @@ function PublishedAgentsRoster({
 
   if (loading) {
     return (
-      <div style={{ padding: collapsed ? "10px 0" : 14, fontSize: 12, color: "var(--muted-deep)", textAlign: collapsed ? "center" : "left" }}>
-        {ko ? "불러오는 중..." : "Loading..."}
+      <div style={{ padding: collapsed ? "10px 0" : 14, fontSize: 12, color: "var(--muted-deep)", textAlign: collapsed ? "center" : "left", display: "grid", gap: 5 }}>
+        <span>{ko ? "불러오는 중..." : "Loading..."}</span>
+        {!collapsed && <LoadingEstimate locale={ko ? "ko" : "en"} operationKey="desktop-agent-library" expectedSeconds={[1, 25]} />}
       </div>
     );
   }

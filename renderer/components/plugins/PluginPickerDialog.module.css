@@ -159,7 +159,7 @@
 }
 
 .check {
-  color: var(--accent, #3b6cf6);
+  color: #303532;
   font-size: 12px;
 }
 
@@ -176,8 +176,43 @@
 }
 
 .search:focus {
-  outline: 2px solid var(--accent, #3b6cf6);
+  outline: 2px solid #5d635f;
   outline-offset: -1px;
+}
+
+.typeTabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 3px;
+  margin: 0 24px 8px;
+  padding: 3px;
+  border-radius: 10px;
+  background: #f0f1f0;
+}
+
+.typeTab {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #747a76;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.typeTab:hover,
+.typeTab:focus-visible {
+  color: #303532;
+  outline: none;
+}
+
+.typeTab[data-active="true"] {
+  background: #fff;
+  color: #303532;
+  box-shadow: 0 1px 2px rgba(15, 18, 16, 0.08);
 }
 
 /* body */
@@ -238,12 +273,12 @@
 }
 
 .card:hover {
-  border-color: var(--accent, #3b6cf6);
+  border-color: #9ca19e;
 }
 
 .card[data-selected] {
-  border-color: var(--accent, #3b6cf6);
-  background: color-mix(in srgb, var(--accent, #3b6cf6) 8%, transparent);
+  border-color: #5d635f;
+  background: #f2f3f2;
 }
 
 /* 이미 붙어 있는 도구는 고를 수는 있어도(다시 눌러 확인) 새것처럼 보이면 안 된다. */
@@ -303,7 +338,7 @@
 }
 
 .card[data-selected] .cardAction {
-  color: var(--accent, #3b6cf6);
+  color: #303532;
 }
 
 .more {
@@ -320,8 +355,8 @@
 }
 
 .more:hover {
-  border-color: var(--accent, #3b6cf6);
-  color: var(--accent, #3b6cf6);
+  border-color: #777d79;
+  color: #303532;
 }
 
 /* key step */
@@ -357,7 +392,7 @@
 }
 
 .keyInput:focus {
-  outline: 2px solid var(--accent, #3b6cf6);
+  outline: 2px solid #5d635f;
   outline-offset: -1px;
 }
 
@@ -411,12 +446,12 @@
 
 .primary {
   border: 1px solid transparent;
-  background: var(--accent, #3b6cf6);
+  background: #303532;
   color: #fff;
 }
 
 .primary:hover:not(:disabled) {
-  filter: brightness(1.06);
+  background: #202421;
 }
 
 .ghost:disabled,

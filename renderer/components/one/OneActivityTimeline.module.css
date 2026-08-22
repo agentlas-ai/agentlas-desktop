@@ -63,6 +63,13 @@
 
 .header[aria-expanded="true"] .chevron { transform: rotate(180deg); }
 
+.activityEta {
+  display: flex;
+  min-height: 22px;
+  align-items: flex-start;
+  padding: 0 0 6px 18px;
+}
+
 .pulse {
   width: 7px;
   height: 7px;
@@ -266,6 +273,7 @@
 .artifactTabs button:focus-visible { outline: 2px solid #cbd9c1; outline-offset: -2px; }
 
 .artifactList {
+  flex: 1 1 auto;
   min-height: 0;
   display: grid;
   align-content: start;
@@ -273,6 +281,40 @@
   padding: 10px 20px 20px;
   overflow-y: auto;
 }
+
+.artifactContentStack {
+  min-height: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.artifactHistoryResizeHandle {
+  position: relative;
+  flex: 0 0 10px;
+  cursor: row-resize;
+  border-top: 1px solid #eceeef;
+  background: #fff;
+  touch-action: none;
+}
+.artifactHistoryResizeHandle::after {
+  position: absolute;
+  top: 3px;
+  left: 50%;
+  width: 42px;
+  height: 3px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: #d5d8db;
+  opacity: .55;
+  content: "";
+}
+.artifactHistoryResizeHandle:hover::after,
+.artifactHistoryResizeHandle:focus-visible::after,
+.artifactHistoryResizeHandle[data-resizing="true"]::after { opacity: 1; }
+.artifactHistoryResizeHandle:focus-visible { outline: 2px solid rgba(96, 122, 54, .35); outline-offset: -2px; }
+.artifactHistoryPane { min-height: 0; flex: 0 0 auto; overflow: hidden; background: #fff; }
 
 .artifactEmpty {
   min-height: 38px;
@@ -352,6 +394,67 @@ a.artifactRuntimeRow:focus-visible {
 .artifactSubrail > div { display: grid; gap: 2px; padding: 8px 2px; }
 .artifactSubrail strong { color: #596065; font-size: 12px; }
 .artifactSubrail span { color: #8a9195; font-size: 11px; }
+
+.artifactPreviewCard {
+  min-width: 0;
+  display: grid;
+  overflow: hidden;
+  border: 1px solid #e1e4e3;
+  border-radius: 13px;
+  background: #fff;
+}
+
+.artifactVisual {
+  min-width: 0;
+  min-height: 118px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  border-bottom: 1px solid #e8eae9;
+  background: #f4f5f4;
+}
+
+button.artifactVisual { cursor: pointer; }
+.artifactVisual img, .artifactVisual video { width: 100%; max-height: 230px; display: block; object-fit: contain; background: #f4f5f4; }
+.artifactAudio { min-height: 72px; padding: 0 12px; }
+.artifactAudio audio { width: 100%; }
+.artifactFileFallback { min-height: 58px; display: grid; place-items: center; border-bottom: 1px solid #e8eae9; background: #f4f5f4; color: #747b77; }
+.artifactFileFallback[data-loading="true"] { color: #a0a5a2; animation: artifactPreviewPulse 1.1s ease-in-out infinite; }
+.artifactPreviewCopy { min-width: 0; min-height: 56px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 8px 10px 8px 12px; }
+.artifactPreviewCopy > span { min-width: 0; display: grid; gap: 3px; }
+.artifactPreviewCopy strong, .artifactPreviewCopy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.artifactPreviewCopy strong { color: #353b38; font-size: 11px; }
+.artifactPreviewCopy small { color: #8b918e; font-size: 9px; }
+.artifactPreviewCopy button { min-height: 32px; padding: 0 10px; border: 1px solid #d9dddb; border-radius: 8px; background: #fff; color: #505753; font: inherit; font-size: 10px; font-weight: 650; cursor: pointer; }
+.artifactPreviewCopy button:hover, .artifactPreviewCopy button:focus-visible { border-color: #b7bdba; background: #f3f4f3; outline: none; }
+
+.browserLive { display: grid; overflow: hidden; margin: 0 0 10px; border: 1px solid #e0e3e2; border-radius: 13px; background: #fff; }
+.browserChrome { min-height: 42px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 0 7px 0 11px; border-bottom: 1px solid #e6e8e7; background: #f6f7f6; }
+.browserChrome > span { display: inline-flex; gap: 4px; }
+.browserChrome i { width: 7px; height: 7px; border-radius: 50%; background: #9aa09d; }
+.browserChrome i:nth-child(2) { background: #707773; }
+.browserChrome i:nth-child(3) { background: #414744; }
+.browserChrome strong { overflow: hidden; color: #565d59; font-size: 10px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.browserActions { display: inline-flex; align-items: center; gap: 5px; }
+.browserChrome button { min-height: 28px; padding: 0 8px; border: 1px solid #d7dbd9; border-radius: 7px; background: #fff; color: #4d5450; font: inherit; font-size: 9px; font-weight: 650; cursor: pointer; }
+.browserChrome button:hover, .browserChrome button:focus-visible { border-color: #b5bbb8; background: #f0f1f0; outline: none; }
+.browserViewportToggle { display: inline-grid; grid-template-columns: repeat(2, auto); padding: 2px; border: 1px solid #d9dcda; border-radius: 8px; background: #eceeed; }
+.browserViewportToggle button { min-height: 22px; padding: 0 6px; border: 0; border-radius: 5px; background: transparent; color: #707672; }
+.browserViewportToggle button[aria-selected="true"] { background: #3f4542; color: #fff; }
+.browserViewport { min-height: 190px; display: grid; place-items: start center; overflow: auto; background: #eceeed; }
+.browserViewport img { width: 100%; max-height: 360px; display: block; object-fit: contain; }
+.browserViewport[data-mode="phone"] { padding: 14px; background: #e7e9e8; }
+.browserViewport[data-mode="phone"] img { width: min(220px, 74%); max-height: none; aspect-ratio: 390 / 844; border: 6px solid #303532; border-radius: 24px; background: #fff; object-fit: cover; object-position: top; box-shadow: 0 6px 18px rgba(33, 38, 35, .16); }
+.browserEmpty { min-height: 190px; display: grid; place-items: center; align-content: center; gap: 7px; padding: 24px; color: #8b918e; text-align: center; }
+.browserEmpty strong { color: #555c58; font-size: 11px; }
+.browserEmpty small { max-width: 260px; color: #8b918e; font-size: 9px; line-height: 1.5; }
+.browserUrl { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; overflow: hidden; padding: 8px 10px; border-top: 1px solid #e6e8e7; color: #858b88; font-size: 9px; white-space: nowrap; }
+.browserUrl span { overflow: hidden; text-overflow: ellipsis; }
+.browserUrl strong { color: #686f6b; font-size: 8px; font-weight: 650; }
+
+@keyframes artifactPreviewPulse { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
 
 .artifact {
   min-width: 0;

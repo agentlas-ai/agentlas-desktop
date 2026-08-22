@@ -1,8 +1,9 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { HubAgentBookmark, InstalledAgent, InstalledMcpServer, MarketplaceListing, McpServerStatus, McpToolCatalogEntry } from "@shared/types";
 import type { OneOrgCollaborationStyle, OneOrgMember, OneOrgState } from "@shared/one-org";
 import { OneAgentPortrait } from "./OneAgentPortrait";
 import { OneBottomSheet } from "./OneBottomSheet";
+import { LoadingEstimate } from "@/components/LoadingEstimate";
 import styles from "./OneOrgChart.module.css";
 import {
   IconApps,
@@ -63,13 +64,23 @@ function leaseLabel(member: OneOrgMember, locale: string): string | null {
     : `Expires ${date.toLocaleDateString("en-US", { month: "numeric", day: "numeric" })}`;
 }
 
+function AgentInventoryLoading({ locale }: { locale: string }) {
+  return <div className={styles.inventoryLoading} role="status" aria-live="polite">
+    <span className={styles.inventorySpinner} aria-hidden="true" />
+    <span><strong>{locale === "ko" ? "에이전트 목록 불러오는 중" : "Loading agents"}</strong><small>{locale === "ko" ? "저장된 목록을 먼저 확인하고 최신 상태를 동기화합니다." : "Showing cached inventory first, then syncing the latest state."}</small><LoadingEstimate locale={locale === "ko" ? "ko" : "en"} operationKey="one-agent-inventory" expectedSeconds={[1, 20]} /></span>
+  </div>;
+}
+
 export function OneOrgChart({
   state,
   installedAgents,
   cloudListings,
   hubBookmarks,
+  inventoryLoading = false,
   locale,
   onAdd,
+  onCreateAgent,
+  addRequest,
   onMaterializeSource,
   onRename,
   onUpdate,
@@ -80,6 +91,7 @@ export function OneOrgChart({
   onReorder,
   onFailure,
   onOpenMember,
+  onEditOne,
   activeMemberId,
   activeTaskForceIds,
   onBrowseTools,
@@ -100,8 +112,11 @@ export function OneOrgChart({
   installedAgents: InstalledAgent[];
   cloudListings: MarketplaceListing[];
   hubBookmarks: HubAgentBookmark[];
+  inventoryLoading?: boolean;
   locale: string;
   onAdd: (installedAgentId: string, displayName?: string, leaseExpiresAt?: string | null) => Promise<void>;
+  onCreateAgent?: () => void;
+  addRequest?: { token: number; source: "my" | "cloud" | "hub" };
   onMaterializeSource: (source: "cloud" | "hub", listing: MarketplaceListing) => Promise<InstalledAgent>;
   onRename: (member: OneOrgMember, displayName: string) => Promise<void>;
   onUpdate?: (member: OneOrgMember, displayName: string, collaborationStyle: OneOrgCollaborationStyle) => Promise<void>;
@@ -112,6 +127,7 @@ export function OneOrgChart({
   onReorder: (orderedIds: string[], expectedRevision: number) => Promise<void>;
   onFailure?: (member: OneOrgMember) => void;
   onOpenMember?: (member: OneOrgMember) => void;
+  onEditOne?: () => void;
   activeMemberId?: string | null;
   activeTaskForceIds?: string[];
   onBrowseTools?: (member: OneOrgMember) => void;
@@ -149,6 +165,17 @@ export function OneOrgChart({
   const [toolsBusy, setToolsBusy] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  useEffect(() => {
+    if (!addRequest?.token) return;
+    setAddTab(addRequest.source);
+    setSelectedAgent("");
+    setName("");
+    setLeaseDays(addRequest.source === "hub" ? "7" : "0");
+    setAddSearch("");
+    setAddError(null);
+    setRoleFilter(null);
+    setAddOpen(true);
+  }, [addRequest]);
   const ghostRoles = locale === "ko" ? ["개발", "마케팅", "리서치"] : ["Engineering", "Marketing", "Research"];
   const active = state?.members.filter((member) => !member.archivedAt) || [];
   const archived = state?.members.filter((member) => Boolean(member.archivedAt)) || [];
@@ -335,6 +362,12 @@ export function OneOrgChart({
         <OneAgentPortrait status="quiet" label="Agentlas One" size="medium" tone="purple" />
         <div className={styles.rowCopy}><strong>One</strong><span>{locale === "ko" ? "CEO 오케스트레이터 · 항상 켜짐" : "CEO orchestrator · Always on"}</span></div>
         <span className={styles.badge}>CEO</span>
+        {onEditOne && <button
+          type="button"
+          className={styles.oneEditButton}
+          aria-label={locale === "ko" ? "One 말투와 성격 편집" : "Edit One voice and personality"}
+          onClick={onEditOne}
+        ><IconEdit size={14} /></button>}
       </div>
       {insufficientCredits.length > 0 && <div className={styles.creditWarning} role="status"><span><IconShield size={13} />{locale === "ko" ? `크레딧 부족으로 ${insufficientCredits.length}명 멈춤` : `${insufficientCredits.length} staff paused for insufficient credits`}</span>{onBrowseCredits && <button type="button" onClick={onBrowseCredits}>{locale === "ko" ? "충전" : "Add credits"}</button>}</div>}
       <div className={styles.sectionLabel}>{locale === "ko" ? "상주 스태프" : "Standing Staff"}</div>
@@ -382,15 +415,11 @@ export function OneOrgChart({
           </div>
         ))}
       </div>
-      <button
-        type="button"
-        className={styles.addRow}
-        onClick={() => setAddOpen(true)}
-        disabled={!state || state.slots.available <= 0}
-        aria-label={state?.slots.available ? (locale === "ko" ? "에이전트 추가" : "Add agent") : (locale === "ko" ? "슬롯이 가득 참" : "No staff slots available")}
-      >
-        <span className={styles.addAvatar} aria-hidden="true"><IconPlus size={16} /></span>
-      </button>
+      <div className={styles.agentActions}>
+        {onCreateAgent && <button type="button" className={styles.createAgentButton} onClick={onCreateAgent} disabled={!state || state.slots.available <= 0} aria-label={state?.slots.available ? (locale === "ko" ? "새 에이전트 만들기 또는 기존 에이전트 추가" : "Create or add an agent") : (locale === "ko" ? "슬롯이 가득 참" : "No staff slots available")}>
+          <IconPlus size={15} />
+        </button>}
+      </div>
       <div className={styles.sectionLabel}>{locale === "ko" ? "현재 태스크포스" : "Active Task Force"}</div>
       {taskForce.length > 0 ? <div className={styles.taskForceRows}>{taskForce.map((agent) => <div className={styles.taskForceRow} key={agent!.id}><OneAgentPortrait status="working" label={agent!.name} tone={agent!.tone} size="small" /><span>{agent!.localDisplayName || agent!.name}</span><small>{locale === "ko" ? "이번 작업" : "This task"}</small></div>)}</div> : <div className={styles.taskForceHint}>{locale === "ko" ? "대화에서 소환한 일회성 에이전트는 여기 슬롯을 차지하지 않고 현재 Work에만 연결됩니다." : "Temporary agents summoned in chat do not occupy a standing slot and stay attached only to the current Work task."}</div>}
       <footer className={styles.footer}>
@@ -479,10 +508,11 @@ export function OneOrgChart({
           <p className={styles.sourceNote}>{addTab === "my" ? addCopy.localNote : addTab === "cloud" ? addCopy.cloudNote : addCopy.hubNote}</p>
 
           {addTab === "my" ? (
-            candidates.length > 0 ? <div className={styles.candidateGrid} role="list" aria-label={addCopy.installed}>{candidates.map((agent) => <button type="button" role="listitem" key={agent.id} data-active={selectedAgent === agent.id ? "true" : "false"} onClick={() => { setSelectedAgent(agent.id); setName(""); setAddError(null); }}><OneAgentPortrait status="quiet" label={agent.localDisplayName || agent.name} tone={agent.tone} size="small" /><span><strong>{agent.localDisplayName || (ko ? agent.name : agent.nameEn) || agent.name}</strong><small>{agent.kind === "team" ? addCopy.team : addCopy.single} · {ko ? "로컬" : "Local"}</small><em>{(ko ? agent.tagline : agent.taglineEn) || agent.tagline || agent.taglineEn}</em></span>{selectedAgent === agent.id && <IconCheck size={15} />}</button>)}</div>
+            inventoryLoading && candidates.length === 0 ? <AgentInventoryLoading locale={locale} />
+              : candidates.length > 0 ? <div className={styles.candidateGrid} role="list" aria-label={addCopy.installed}>{candidates.map((agent) => <button type="button" role="listitem" key={agent.id} data-active={selectedAgent === agent.id ? "true" : "false"} onClick={() => { setSelectedAgent(agent.id); setName(""); setAddError(null); }}><span><strong>{agent.localDisplayName || (ko ? agent.name : agent.nameEn) || agent.name}</strong><small>{agent.kind === "team" ? addCopy.team : addCopy.single} · {ko ? "로컬" : "Local"}</small><em>{(ko ? agent.tagline : agent.taglineEn) || agent.tagline || agent.taglineEn}</em></span>{selectedAgent === agent.id && <IconCheck size={15} />}</button>)}</div>
               : <div className={styles.sheetEmpty}>{roleFilter ? addCopy.noMatch : (ko ? "사용 가능한 로컬 에이전트가 없습니다." : "No local agents are available.")}{roleFilter && <button type="button" className={styles.inlineLink} onClick={() => setRoleFilter(null)}>{addCopy.showAll}</button>}</div>
-          ) : remoteCandidates.length > 0 ? (
-            <div className={styles.candidateGrid} role="list" aria-label={addTab === "cloud" ? "Cloud" : "Hub"}>{remoteCandidates.map((listing) => <button type="button" role="listitem" key={`${addTab}:${listing.entityKind || "agent"}:${listing.slug}`} data-active={selectedAgent === listing.slug ? "true" : "false"} onClick={() => { setSelectedAgent(listing.slug); setName(""); setLeaseDays(addTab === "hub" ? "7" : "0"); setAddError(null); }}><OneAgentPortrait status="quiet" label={(ko ? listing.name : listing.nameEn) || listing.name || listing.slug} size="small" /><span><strong>{(ko ? listing.name : listing.nameEn) || listing.name || listing.slug}</strong><small>{listing.entityKind === "team" || (listing.agentCount ?? 0) > 1 ? addCopy.team : addCopy.single} · {addTab === "cloud" ? "Cloud" : "Hub"}</small><em>{(ko ? listing.tagline : listing.taglineEn) || listing.tagline || listing.taglineEn}</em></span>{selectedAgent === listing.slug && <IconCheck size={15} />}</button>)}</div>
+          ) : inventoryLoading && remoteCandidates.length === 0 ? <AgentInventoryLoading locale={locale} /> : remoteCandidates.length > 0 ? (
+            <div className={styles.candidateGrid} role="list" aria-label={addTab === "cloud" ? "Cloud" : "Hub"}>{remoteCandidates.map((listing) => <button type="button" role="listitem" key={`${addTab}:${listing.entityKind || "agent"}:${listing.slug}`} data-active={selectedAgent === listing.slug ? "true" : "false"} onClick={() => { setSelectedAgent(listing.slug); setName(""); setLeaseDays(addTab === "hub" ? "7" : "0"); setAddError(null); }}><span><strong>{(ko ? listing.name : listing.nameEn) || listing.name || listing.slug}</strong><small>{listing.entityKind === "team" || (listing.agentCount ?? 0) > 1 ? addCopy.team : addCopy.single} · {addTab === "cloud" ? "Cloud" : "Hub"}</small><em>{(ko ? listing.tagline : listing.taglineEn) || listing.tagline || listing.taglineEn}</em></span>{selectedAgent === listing.slug && <IconCheck size={15} />}</button>)}</div>
           ) : <div className={styles.sheetEmpty}><span>{addTab === "cloud" ? addCopy.cloudEmpty : addCopy.hubEmpty}</span>{onBrowseSource && <button type="button" onClick={() => onBrowseSource(addTab)}>{addTab === "cloud" ? addCopy.cloudBrowse : addCopy.hubBrowse}</button>}</div>}
 
           {(selectedCandidate || selectedListing) && <section className={styles.selectedAgentPanel}>
@@ -492,6 +522,7 @@ export function OneOrgChart({
             <p className={styles.note}>{addCopy.nameNote}</p>
           </section>}
           {addError && <p className={styles.addError} role="alert">{addError}</p>}
+          {busy && <div className={styles.addBusy} role="status" aria-live="polite"><span className={styles.inventorySpinner} aria-hidden="true" /><span>{ko ? "에이전트를 조직에 연결하고 전용 채팅을 준비하고 있습니다." : "Connecting the agent to the organisation and preparing its dedicated chat."}<LoadingEstimate locale={ko ? "ko" : "en"} operationKey="one-agent-org-add" expectedSeconds={[2, 30]} /></span></div>}
           <div className={styles.sheetActions}><button type="button" disabled={busy} onClick={() => { setSelectedAgent(""); setName(""); setLeaseDays("0"); setAddSearch(""); setAddError(null); setRoleFilter(null); setAddOpen(false); }}>{addCopy.cancel}</button><button type="button" className={styles.primaryAction} disabled={!selectedAgent || busy} onClick={() => void submitAdd()}>{busy ? (ko ? "추가 중…" : "Adding…") : addCopy.add}</button></div>
         </div>
       </OneBottomSheet>

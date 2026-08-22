@@ -2,7 +2,7 @@ import http from "node:http";
 import { execFile } from "node:child_process";
 import { browserCdpPort } from "../mcp-tools/browser-cdp-launcher";
 import { getBrowserStatus } from "./connect";
-import type { BrowserLiveFrame } from "../../shared/types";
+import type { BrowserLiveFrame, BrowserLiveViewport } from "../../shared/types";
 
 interface CdpTarget {
   id?: unknown;
@@ -12,7 +12,7 @@ interface CdpTarget {
   webSocketDebuggerUrl?: unknown;
 }
 
-function unavailable(error: BrowserLiveFrame["error"]): BrowserLiveFrame {
+function unavailable(error: BrowserLiveFrame["error"], viewport: BrowserLiveViewport = "desktop"): BrowserLiveFrame {
   return {
     available: false,
     dataUrl: null,
@@ -21,6 +21,7 @@ function unavailable(error: BrowserLiveFrame["error"]): BrowserLiveFrame {
     url: null,
     width: null,
     height: null,
+    viewport,
     capturedAt: new Date().toISOString(),
     error,
   };
@@ -33,6 +34,18 @@ function displayUrl(raw: string): string | null {
     parsed.username = "";
     parsed.password = "";
     parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+function matchUrl(raw: string | undefined): string | null {
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw);
+    if (!/^https?:$/u.test(parsed.protocol) || parsed.username || parsed.password) return null;
     parsed.hash = "";
     return parsed.toString();
   } catch {
@@ -96,7 +109,7 @@ function verifiedTarget(target: CdpTarget, port: number): {
   return { id: target.id, title: target.title, url: target.url, socketUrl: target.webSocketDebuggerUrl };
 }
 
-function captureTarget(socketUrl: string): Promise<{ data: string; width: number; height: number }> {
+function captureTarget(socketUrl: string, viewportMode: BrowserLiveViewport): Promise<{ data: string; width: number; height: number }> {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(socketUrl);
     let sequence = 0;
@@ -104,7 +117,7 @@ function captureTarget(socketUrl: string): Promise<{ data: string; width: number
     const timeout = setTimeout(() => {
       socket.close();
       reject(new Error("capture-timeout"));
-    }, 3_500);
+    }, 5_000);
 
     const finishError = (reason: string) => {
       clearTimeout(timeout);
@@ -136,16 +149,46 @@ function captureTarget(socketUrl: string): Promise<{ data: string; width: number
     socket.addEventListener("error", () => finishError("cdp-socket-error"), { once: true });
     socket.addEventListener("open", () => {
       void (async () => {
-        const metrics = await call("Page.getLayoutMetrics") as {
+        const phone = viewportMode === "phone";
+        let metrics: {
           cssVisualViewport?: { clientWidth?: number; clientHeight?: number };
           cssLayoutViewport?: { clientWidth?: number; clientHeight?: number };
         };
-        const screenshot = await call("Page.captureScreenshot", {
-          format: "jpeg",
-          quality: 72,
-          fromSurface: true,
-          captureBeyondViewport: false,
-        }) as { data?: string };
+        let screenshot: { data?: string };
+        try {
+          if (phone) {
+            await call("Emulation.setDeviceMetricsOverride", {
+              width: 390,
+              height: 844,
+              deviceScaleFactor: 1,
+              mobile: true,
+              screenWidth: 390,
+              screenHeight: 844,
+            });
+            await call("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 5 });
+          } else {
+            // A prior interrupted phone capture must never strand the shared
+            // browser tab at mobile dimensions. Desktop capture self-heals it.
+            await call("Emulation.clearDeviceMetricsOverride").catch(() => undefined);
+            await call("Emulation.setTouchEmulationEnabled", { enabled: false }).catch(() => undefined);
+            await call("Page.getLayoutMetrics").catch(() => undefined);
+          }
+          metrics = await call("Page.getLayoutMetrics") as typeof metrics;
+          screenshot = await call("Page.captureScreenshot", {
+            format: "jpeg",
+            quality: 72,
+            fromSurface: true,
+            captureBeyondViewport: false,
+          }) as typeof screenshot;
+        } finally {
+          if (phone) {
+            // The live browser remains a normal desktop tab. Phone mode is a
+            // momentary, real responsive capture rather than a lasting mutation.
+            await call("Emulation.clearDeviceMetricsOverride").catch(() => undefined);
+            await call("Emulation.setTouchEmulationEnabled", { enabled: false }).catch(() => undefined);
+            await call("Page.getLayoutMetrics").catch(() => undefined);
+          }
+        }
         if (!screenshot.data) throw new Error("empty-screenshot");
         const viewport = metrics.cssVisualViewport ?? metrics.cssLayoutViewport;
         const width = Math.max(1, Math.round(Number(viewport?.clientWidth) || 1));
@@ -198,15 +241,23 @@ function activateBrowserApplication(): Promise<void> {
   });
 }
 
-export async function captureBrowserLiveFrame(): Promise<BrowserLiveFrame> {
+export async function captureBrowserLiveFrame(
+  preferredUrl?: string,
+  viewportMode: BrowserLiveViewport = "desktop",
+): Promise<BrowserLiveFrame> {
   const port = browserCdpPort();
   const targets = await fetchTargets(port);
-  if (targets.length === 0) return unavailable("browser-offline");
+  if (targets.length === 0) return unavailable("browser-offline", viewportMode);
   const pages = targets.map((target) => verifiedTarget(target, port)).filter((target) => target !== null);
-  const target = pages.find((page) => page.url !== "about:blank") ?? pages[0];
-  if (!target) return unavailable("no-page");
+  const preferred = matchUrl(preferredUrl);
+  const target = preferred
+    ? pages.find((page) => matchUrl(page.url) === preferred)
+    : pages.find((page) => page.url !== "about:blank") ?? pages[0];
+  // A task-scoped request must fail empty instead of silently showing an
+  // unrelated tab left over from another task.
+  if (!target) return unavailable("no-page", viewportMode);
   try {
-    const screenshot = await captureTarget(target.socketUrl);
+    const screenshot = await captureTarget(target.socketUrl, viewportMode);
     return {
       available: true,
       dataUrl: `data:image/jpeg;base64,${screenshot.data}`,
@@ -215,11 +266,12 @@ export async function captureBrowserLiveFrame(): Promise<BrowserLiveFrame> {
       url: displayUrl(target.url),
       width: screenshot.width,
       height: screenshot.height,
+      viewport: viewportMode,
       capturedAt: new Date().toISOString(),
       error: null,
     };
   } catch {
-    return unavailable("capture-failed");
+    return unavailable("capture-failed", viewportMode);
   }
 }
 

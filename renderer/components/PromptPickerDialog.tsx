@@ -11,6 +11,7 @@ import { useT } from "@/lib/i18n";
 import type { HubPromptSummary, HubPromptViewer } from "@shared/types";
 import { UpgradeCta } from "./UpgradeCta";
 import { IconClose, IconLock, IconSearch, IconSparkles } from "./Icon";
+import { LoadingEstimate } from "./LoadingEstimate";
 
 /** 다국어 필드에서 현재 언어 텍스트를 뽑는다(영어 사용자에게 한국어 누수 방지). */
 function pickText(ko: boolean, koText?: string, enText?: string): string {
@@ -466,8 +467,9 @@ export function PromptPickerDialog({
 
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "grid", gap: 6, alignContent: "start" }}>
           {loading ? (
-            <div style={{ padding: "10px 8px", color: "var(--muted-deep)", fontSize: 12.5 }}>
-              {ko ? "프롬프트 불러오는 중..." : "Loading prompts..."}
+            <div style={{ padding: "10px 8px", color: "var(--muted-deep)", fontSize: 12.5, display: "grid", gap: 5 }}>
+              <span>{ko ? "프롬프트 불러오는 중..." : "Loading prompts..."}</span>
+              <LoadingEstimate locale={ko ? "ko" : "en"} operationKey="desktop-prompt-picker" expectedSeconds={[1, 15]} />
             </div>
           ) : sorted.length === 0 ? (
             <div style={{ padding: "10px 8px", color: "var(--muted-deep)", fontSize: 12.5, lineHeight: 1.5 }}>

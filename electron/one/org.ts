@@ -5,6 +5,8 @@ import type { InstalledAgent } from "../../shared/types";
 import type {
   AddOneOrgMemberInput,
   ArchiveOneOrgMemberInput,
+  CreateOneTeamAgentInput,
+  CreateOneTeamAgentResult,
   OneOrgCompletionSummary,
   OneOrgMember,
   OneOrgSource,
@@ -21,6 +23,13 @@ import { getAgentConcurrencyInfo } from "../store/concurrency";
 import { getDb } from "../store/db";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import { listInstalledAgentsReadOnly } from "../mcp/registry";
+import { materializeAgentFiles } from "../agents/files";
+import { createChat } from "../store/chats";
+import {
+  decodeOneTeamAvatarDataUrl,
+  removeOneTeamAvatarDirectory,
+  writeOneTeamAvatar,
+} from "./avatar";
 import { agentResidencySnapshot } from "../runtime/agent-residency";
 import { readableActiveHubMemoryNestRoots } from "../agents/hub-memory-nest";
 import { couldHaveChangedTheOutsideWorld, isHostPreflightTool } from "../../shared/tool-activity";
@@ -55,6 +64,10 @@ const DEFAULT_STATUS_LINE = "아직 맡은 일 없음";
 const MAX_STATUS_LINE = 40;
 const SOURCE_VALUES = new Set<OneOrgSource>(["local", "cloud", "hub"]);
 const COLLABORATION_STYLES = new Set(["default", "concise", "warm", "direct"] as const);
+const ONE_CHARACTER_IDS = new Set([
+  "blue-wave", "green-cloud", "purple-beacon", "amber-pod", "orange-sprout", "red-triangle",
+  "blue-wave-2d", "green-cloud-2d", "purple-beacon-2d", "amber-pod-2d", "orange-sprout-2d", "red-triangle-2d",
+]);
 
 type StatusLine = { kind: OneOrgStatusKind; ko: string; en: string };
 
@@ -173,6 +186,116 @@ function assertText(value: unknown, label: string, max = 160): string {
     throw new Error(`${label} is invalid.`);
   }
   return normalized;
+}
+
+function optionalText(value: unknown, label: string, max: number): string {
+  if (value === undefined || value === null || value === "") return "";
+  if (typeof value !== "string") throw new Error(`${label} must be text.`);
+  const normalized = value.normalize("NFC").replace(/\r\n?/g, "\n").trim();
+  if (normalized.length > max || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(normalized)) {
+    throw new Error(`${label} is invalid.`);
+  }
+  return normalized;
+}
+
+function oneTeamAgentSlug(name: string, id: string): string {
+  const base = name.normalize("NFKD").toLocaleLowerCase()
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 72) || "one-teammate";
+  let candidate = `${base}-${id.slice(0, 8)}`;
+  let suffix = 2;
+  while (getDb().prepare("SELECT 1 FROM installed_agents WHERE slug = ? LIMIT 1").get(candidate)) {
+    candidate = `${base.slice(0, 68)}-${id.slice(0, 6)}-${suffix}`;
+    suffix += 1;
+  }
+  return candidate;
+}
+
+function oneTeamAgentPrompt(name: string, title: string, personality: string): string {
+  return [
+    `You are ${name}, a persistent named teammate inside Agentlas One Team.`,
+    title ? `Your role is: ${title}.` : "Your role is a flexible specialist directed by the owner and One, the CEO orchestrator.",
+    personality ? `Your voice, personality, and working soul are: ${personality}` : "Be thoughtful, concrete, candid, and collaborative.",
+    "",
+    "Operating contract:",
+    "- Keep this direct chat, working memory, and identity independent from One and every other teammate.",
+    "- One is the CEO orchestrator. Coordinate through explicit messages and Taskforces, while preserving permission and handoff boundaries.",
+    "- Do not claim another agent's work, memory, credentials, or private files as your own.",
+    "- Ask one concise question when the goal is materially ambiguous; otherwise act and report concrete outcomes.",
+    "- Use only tools and access actually granted by the host. Never invent completed actions or receipts.",
+  ].join("\n");
+}
+
+/** Create, seat, and open a user-owned local teammate without leaving One. */
+export function createOneTeamAgent(input: CreateOneTeamAgentInput): CreateOneTeamAgentResult {
+  ensureSlot();
+  if (!input || typeof input !== "object") throw new Error("Agent input is required.");
+  const name = assertText(input.name, "name", 80);
+  const title = optionalText(input.title, "title", 100);
+  const personality = optionalText(input.description, "description", 1_200);
+  if (!input.avatar || typeof input.avatar !== "object") throw new Error("A character is required.");
+
+  const id = randomUUID();
+  const slug = oneTeamAgentSlug(name, id);
+  const now = new Date().toISOString();
+  let icon = "character:blue-wave-2d";
+  let avatar: ReturnType<typeof decodeOneTeamAvatarDataUrl> | null = null;
+  if (input.avatar.kind === "preset") {
+    const characterId = assertText(input.avatar.characterId, "characterId", 80);
+    if (!ONE_CHARACTER_IDS.has(characterId)) throw new Error("Unknown One Team character.");
+    icon = `character:${characterId}`;
+  } else if (input.avatar.kind === "image") {
+    avatar = decodeOneTeamAvatarDataUrl(input.avatar.dataUrl);
+    icon = `one-avatar:${id}`;
+  } else {
+    throw new Error("Unsupported One Team character source.");
+  }
+
+  const db = getDb();
+  const memberId = randomUUID();
+  const sortOrder = activeRows().reduce((max, row) => Math.max(max, row.sort_order), -1) + 1;
+  let chatId = "";
+  let committed = false;
+  try {
+    db.transaction(() => {
+      db.prepare(`
+        INSERT INTO installed_agents
+          (id, slug, name, name_en, tagline, tagline_en, system_prompt, mcp_servers_json,
+           env_requirements_json, preferred_backend, trust_grade, installed_at, tone, builtin,
+           role, visibility, entity_kind)
+        VALUES (?, ?, ?, ?, ?, ?, ?, '[]', '[]', NULL, 'B', ?, ?, 0, NULL, 'visible', 'agent')
+      `).run(
+        id, slug, name, name, title || "One Team teammate", title || "One Team teammate",
+        oneTeamAgentPrompt(name, title, personality), now, icon,
+      );
+      db.prepare(`
+        INSERT INTO one_org_members (
+          id, agent_slug, installed_agent_id, display_name, icon, sort_order, source,
+          lease_expires_at, added_at, updated_at, status_kind, status_line, credit_state, revision
+        ) VALUES (?, ?, ?, ?, ?, ?, 'local', NULL, ?, ?, 'new', ?, 'unknown', 1)
+      `).run(memberId, slug, id, name, icon, sortOrder, now, now, DEFAULT_STATUS_LINE);
+      chatId = createChat({ agentId: id, title: name, originSurface: "one", taskMode: "conversation" }).id;
+    })();
+    committed = true;
+    materializeAgentFiles(id);
+    if (avatar) writeOneTeamAvatar({ agentId: id, slug, ...avatar });
+  } catch (error) {
+    if (committed) {
+      db.transaction(() => {
+        db.prepare("DELETE FROM chats WHERE agent_id = ? AND origin_surface = 'one'").run(id);
+        db.prepare("DELETE FROM one_org_members WHERE installed_agent_id = ?").run(id);
+        db.prepare("DELETE FROM installed_agents WHERE id = ?").run(id);
+      })();
+    }
+    removeOneTeamAvatarDirectory(slug);
+    throw error;
+  }
+
+  emitDesktopStoreChange({ entity: "agent", id });
+  emitOrgChanged();
+  return { state: getOneOrgState(), installedAgentId: id, chatId };
 }
 
 function assertExpectedRevision(row: Row, expectedRevision?: number): void {

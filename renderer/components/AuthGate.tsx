@@ -9,6 +9,7 @@ import { ipc } from "@/lib/ipc";
 import type { AuthSession } from "@/lib/types";
 import { Landing } from "./Landing";
 import { useT } from "@/lib/i18n";
+import { LoadingEstimate } from "./LoadingEstimate";
 
 // DEV 전용 QA 라우트 — 브라우저(Playwright) 렌더 회귀 검증용으로 게이트를 우회한다.
 // 프로덕션 빌드에선 절대 우회하지 않는다. /one 역시 production에서는 계속 인증을 요구한다.
@@ -17,7 +18,7 @@ const DEV_QA_ROUTES = ["/one", "/surface-preview", "/qa-qsheet"];
 export function AuthGate({ children }: { children: React.ReactNode }) {
   // null = 아직 조회 전 (세션 확인 중 — 흰 화면 깜빡임 방지용 다크 스플래시)
   const [session, setSession] = useState<AuthSession | null>(null);
-  const { t } = useT();
+  const { t, locale } = useT();
   const pathname = usePathname();
 
   useEffect(() => {
@@ -77,6 +78,9 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
           <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 8 }}>{t("auth.checking.title")}</div>
           <div style={{ fontSize: 13, color: "rgba(238,245,242,0.72)", lineHeight: 1.5 }}>
             {t("auth.checking.body")}
+          </div>
+          <div style={{ marginTop: 10 }}>
+            <LoadingEstimate locale={locale} operationKey="desktop-auth-session" expectedSeconds={[1, 10]} inverse />
           </div>
         </div>
       </div>

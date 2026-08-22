@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { LoadingEstimate } from "@/components/LoadingEstimate";
 import type { Automation, InstalledMcpServer } from "@/lib/types";
 import type {
   InvocationRunReceipt,
@@ -46,10 +47,15 @@ import {
 import { redactSecrets } from "@shared/secret-patterns";
 import { stripAgentIdentityBadges } from "@shared/agent-control-blocks";
 import { ipc } from "@/lib/ipc";
-import { setRequest as setBuildRequest } from "@/lib/build-session";
 import { tFor } from "@/lib/i18n";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import styles from "./OneAdaptiveResult.module.css";
+
+export type OneAgentDraftSeed = {
+  name: string;
+  title?: string;
+  description?: string;
+};
 
 const DESKTOP_NATIVE_BLOCK_TYPES = new Set<OneSurfaceBlockType>([
   "Narrative",
@@ -118,6 +124,7 @@ export function OneAdaptiveResult({
   onRetryUnfinished,
   onAcceptResult,
   onSemanticAction,
+  onOpenAgentDraft,
   autoRecovery,
   omitNarrative = false,
 }: {
@@ -135,6 +142,8 @@ export function OneAdaptiveResult({
    */
   omitNarrative?: boolean;
   onSemanticAction?: (action: OneSurfaceSemanticAction) => void;
+  /** Keep agent definition review inside One instead of navigating to Build. */
+  onOpenAgentDraft?: (seed: OneAgentDraftSeed) => void;
   valueClosure?: OneValueClosureRecord | null;
   experienceReuse?: OneExperienceReuseRecord | null;
   onManageExperience?: () => void;
@@ -223,6 +232,7 @@ export function OneAdaptiveResult({
                 locale={locale}
                 artifactContext={artifactContext}
                 onOpenWork={onOpenWork}
+                onOpenAgentDraft={onOpenAgentDraft}
               />
             )) : (
               <FallbackResult
@@ -400,11 +410,13 @@ function NativeBlock({
   locale,
   artifactContext,
   onOpenWork,
+  onOpenAgentDraft,
 }: {
   block: OneSurfaceBlock;
   locale: "ko" | "en";
   artifactContext: OneArtifactBindingRequestV1 | null;
   onOpenWork: () => void;
+  onOpenAgentDraft?: (seed: OneAgentDraftSeed) => void;
 }) {
   const title = friendlyBlockTitle(block, locale);
   return (
@@ -435,7 +447,7 @@ function NativeBlock({
       {block.type === "Budget" && <BudgetBlock block={block} locale={locale} />}
       {block.type === "Checklist" && <ChecklistBlock block={block} locale={locale} />}
       {block.type === "Automation" && <AutomationBlock block={block} locale={locale} />}
-      {block.type === "AgentBuild" && <AgentBuildBlock block={block} locale={locale} />}
+      {block.type === "AgentBuild" && <AgentBuildBlock block={block} locale={locale} onOpenDraft={onOpenAgentDraft} />}
       {block.type === "McpSetup" && <McpSetupBlock block={block} locale={locale} />}
     </section>
   );
@@ -755,7 +767,7 @@ function GalleryItem({
   return (
     <article className={styles.galleryItem} role="listitem" aria-busy={preview.state.status === "loading"}>
       <div className={styles.galleryFrame}>
-        {preview.state.status === "loading" && <div className={styles.mediaSkeleton} role="status" aria-label={tFor(locale, "one.res.gallery.loading_image")} />}
+        {preview.state.status === "loading" && <div className={styles.mediaSkeleton} role="status" aria-label={tFor(locale, "one.res.gallery.loading_image")}><LoadingEstimate locale={locale} operationKey="one-artifact-image-preview" expectedSeconds={[1, 15]} /></div>}
         {preview.state.status === "ready" && !mediaFailed && (
           // The source is a short-lived Main capability, never a file path or remote model URL.
           // eslint-disable-next-line @next/next/no-img-element
@@ -802,7 +814,7 @@ function MediaBlock({
   return (
     <div className={styles.mediaLayout}>
       <div className={styles.primaryMedia} aria-busy={preview.state.status === "loading"}>
-        {preview.state.status === "loading" && <div className={styles.mediaSkeleton} role="status" aria-label={tFor(locale, "one.res.media.loading")} />}
+        {preview.state.status === "loading" && <div className={styles.mediaSkeleton} role="status" aria-label={tFor(locale, "one.res.media.loading")}><LoadingEstimate locale={locale} operationKey="one-artifact-media-preview" expectedSeconds={[1, 20]} /></div>}
         {capabilityUrl && !mediaFailed && block.mediaType === "video" && (
           <video aria-label={displayValue(block.caption ?? block.title)} controls playsInline preload="metadata" src={capabilityUrl} onError={() => setMediaFailed(true)}>
             {tFor(locale, "one.res.media.video_unplayable")}
@@ -1223,9 +1235,16 @@ function agentBuildStageLabel(status: OneSurfaceAgentBuildBlock["stages"][number
   return locale === "ko" ? "대기" : "Waiting";
 }
 
-function AgentBuildBlock({ block, locale }: { block: OneSurfaceAgentBuildBlock; locale: "ko" | "en" }) {
+function AgentBuildBlock({
+  block,
+  locale,
+  onOpenDraft,
+}: {
+  block: OneSurfaceAgentBuildBlock;
+  locale: "ko" | "en";
+  onOpenDraft?: (seed: OneAgentDraftSeed) => void;
+}) {
   const ko = locale === "ko";
-  const router = useRouter();
   return (
     <div className={styles.statusBlock} data-one-agent-build-card="true">
       <p>
@@ -1252,14 +1271,14 @@ function AgentBuildBlock({ block, locale }: { block: OneSurfaceAgentBuildBlock; 
         <button
           type="button"
           className={styles.actionPrimary}
-          onClick={() => {
-            // 방금 One 과 합의한 사양을 Build 요청 칸에 실어 보낸다 — 빈 화면을 열면
-            // 사용자가 같은 내용을 손으로 다시 쓰게 된다.
-            if (block.request) setBuildRequest(block.request);
-            router.push("/build");
-          }}
+          disabled={!onOpenDraft}
+          onClick={() => onOpenDraft?.({
+            name: block.agentName,
+            title: block.title !== block.agentName ? block.title : undefined,
+            description: block.request,
+          })}
         >
-          <span>{ko ? "빌드 열기" : "Open build"}</span>
+          <span>{ko ? "One Team에서 완성" : "Finish in One Team"}</span>
         </button>
       </div>
     </div>

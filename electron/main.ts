@@ -87,6 +87,7 @@ import { startComputerUseControlServer, stopComputerUseControlServer } from "./c
 import { authorizeLocalMediaPath } from "./fs/access";
 import { readChatMessageAttachment } from "./store/chat-message-attachments";
 import { serveOneArtifactProtocolRequest } from "./one/artifact-preview";
+import { resolveOneTeamAvatarProtocolPath } from "./one/avatar";
 import { servePluginIconRequest } from "./mcp-tools/plugin-brand";
 import { reconcileOneHubDerivativeDraftStorage } from "./one/hub-derivative";
 import { recoverDesktopStartup, type StartupRecoveryPresentation } from "./one/startup-recovery";
@@ -540,6 +541,11 @@ function registerRendererProtocol(): void {
       if (url.hostname === "one-artifact") {
         return serveOneArtifactProtocolRequest(request.url, request.headers.get("range"));
       }
+      if (url.hostname === "one-avatar") {
+        const avatarPath = resolveOneTeamAvatarProtocolPath(request.url);
+        if (!avatarPath) return new Response("not found", { status: 404 });
+        return net.fetch(pathToFileURL(avatarPath).toString());
+      }
       // 허브 플러그인 로고 — 원격에서 한 번 받아 디스크에 두고 그 뒤로는 로컬에서 답한다.
       // 카드가 매번 외부로 나가지 않고, 한 번 본 로고는 오프라인에서도 뜬다.
       if (url.hostname === "plugin-icon") {
@@ -586,7 +592,12 @@ async function loadMainRendererIntoWindow(): Promise<void> {
   const startUrl = process.env.ELECTRON_START_URL;
   if (isDev && startUrl) {
     await mainWindow.loadURL(startUrl);
-    mainWindow.webContents.openDevTools({ mode: "detach" });
+    // Keep normal local QA launches to one visible Agentlas window. Detached
+    // DevTools are opt-in so restarting the renderer does not accumulate extra
+    // Electron windows beside the product under test.
+    if (process.env.AGENTLAS_OPEN_DEVTOOLS === "1") {
+      mainWindow.webContents.openDevTools({ mode: "detach" });
+    }
   } else {
     await mainWindow.loadURL("agentlas://app/index.html");
   }

@@ -6,6 +6,7 @@ import { ipc } from "@/lib/ipc";
 import { pickLocalized, useT } from "@/lib/i18n";
 import type { FirmListing, MarketplaceListing } from "@/lib/types";
 import { IconCheck, IconClose, IconSparkles, IconBuilding, IconFolder } from "@/components/Icon";
+import { LoadingEstimate } from "@/components/LoadingEstimate";
 
 const BUILD_URL = "https://agentlas.cloud/build";
 
@@ -229,8 +230,9 @@ export function ImportAgentsModal({
           )}
 
           {loading ? (
-            <div style={{ padding: 24, textAlign: "center", color: "var(--muted-deep)", fontSize: 13 }}>
-              {t("import.loading")}
+            <div style={{ padding: 24, textAlign: "center", color: "var(--muted-deep)", fontSize: 13, display: "grid", gap: 6, justifyItems: "center" }}>
+              <span>{t("import.loading")}</span>
+              <LoadingEstimate locale={locale} operationKey="desktop-agent-import-catalog" expectedSeconds={[2, 20]} />
             </div>
           ) : signedIn === false ? (
             <div style={{ padding: "20px 8px", textAlign: "center" }}>

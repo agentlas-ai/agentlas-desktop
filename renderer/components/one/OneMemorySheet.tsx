@@ -26,6 +26,7 @@ import { OneValueClosureCard } from "./OneValueClosureCard";
 import { OneExperienceReuseCard } from "./OneExperienceReuseCard";
 import { OneImprovementProofCard } from "./OneImprovementProofCard";
 import { OneBottomSheet } from "./OneBottomSheet";
+import { LoadingEstimate } from "@/components/LoadingEstimate";
 import type { OneDurableMemoryEntryUi } from "@shared/types";
 import styles from "./OneMemorySheet.module.css";
 
@@ -378,7 +379,7 @@ export function OneMemorySheet({
       description={tFor(locale, "one.mem.header.body")}
     >
         {!state ? (
-          <div className={styles.loading} role="status">{tFor(locale, "one.mem.loading")}</div>
+          <div className={styles.loading} role="status"><span>{tFor(locale, "one.mem.loading")}</span><LoadingEstimate locale={locale} operationKey="one-memory-load" expectedSeconds={[1, 15]} /></div>
         ) : (
           <div className={styles.content}>
             {(message || error) && <p className={error ? styles.error : styles.message} role={error ? "alert" : "status"}>{error ?? message}</p>}

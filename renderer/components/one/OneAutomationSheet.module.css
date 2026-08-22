@@ -76,6 +76,31 @@
   line-height: 1.55;
 }
 
+.busyState {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  margin: 4px 0 12px;
+  padding: 10px 11px;
+  border: 1px solid #dedfdd;
+  border-radius: 10px;
+  background: #f4f4f3;
+  color: #3f4542;
+}
+
+.busyState > span {
+  width: 18px;
+  height: 18px;
+  border: 2px solid #d5d8d6;
+  border-top-color: #343936;
+  border-radius: 50%;
+  animation: oneAutomationSpin .75s linear infinite;
+}
+
+.busyState > div { display: grid; gap: 2px; }
+.busyState strong { font-size: 11px; }
+
 .actions {
   display: flex;
   gap: 10px;
@@ -142,4 +167,10 @@
     flex-direction: column;
     gap: 0;
   }
+}
+
+@keyframes oneAutomationSpin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .busyState > span { animation-duration: 1.8s; }
 }

@@ -10,6 +10,7 @@ import type {
   Project,
 } from "@shared/types";
 import { OneBottomSheet } from "./OneBottomSheet";
+import { LoadingEstimate } from "@/components/LoadingEstimate";
 import styles from "./OneProjectSessionSheet.module.css";
 
 type Props = {
@@ -281,6 +282,7 @@ export function OneProjectSessionSheet({
               />
             </div>
             <div className={styles.sessionList} aria-busy={loading ? "true" : "false"}>
+              {loading && <div className={styles.empty} role="status" style={{ display: "grid", gap: 5 }}><span>{locale === "ko" ? "이 폴더의 세션을 불러오는 중…" : "Loading sessions from this folder…"}</span><LoadingEstimate locale={locale} operationKey="one-project-sessions" expectedSeconds={[2, 30]} /></div>}
               {!loading && sessions.length === 0 && <p className={styles.empty}>{copy.noSessions}</p>}
               {sessions.map((session) => (
                 <article key={session.sourceKey} className={styles.sessionCard}>

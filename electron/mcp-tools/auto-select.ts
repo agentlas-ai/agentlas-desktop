@@ -9,7 +9,7 @@ import { installFromCatalog, listInstalledServers } from "./registry";
 import { testServerConnection } from "./client";
 import { readEnvVar } from "../secrets/vault";
 import { getSource as getMarketSource } from "../marketplace";
-import { COMPUTER_USE_JUDGMENT_GUIDANCE, COMPUTER_USE_JUDGMENT_KIND, COMPUTER_USE_JUDGMENT_QUESTION, resolveAutomationToolMode } from "../../shared/automation-tool-policy";
+import { resolveAutomationToolMode } from "../../shared/automation-tool-policy";
 import { buildToolAccessNotice } from "../../shared/tool-access-notice";
 import { listPendingHubPluginApprovals } from "./hub-plugin-bridge";
 import { judgedComputerUse } from "../system-agents/judged-tool-mode";
@@ -77,7 +77,12 @@ export interface AutoSelectMcpDependencies {
     missingEnv: string[];
   }>;
   /** The only thing allowed to pick an optional tool. Injectable so tests can pin a verdict. */
-  resolveNeeds: (input: { task: string; candidates: McpNeedCandidate[] }) => Promise<ResolvedMcpNeeds>;
+  resolveNeeds: (input: {
+    task: string;
+    candidates: McpNeedCandidate[];
+    signal?: AbortSignal;
+    timeoutMs?: number;
+  }) => Promise<ResolvedMcpNeeds>;
 }
 
 /** Build a deterministic fixed-assignment result for an agent whose One Team
@@ -90,6 +95,8 @@ async function fixedAssignmentContext(input: {
   workingFolder?: string | null;
   toolMode?: AutomationToolMode;
   hubMode?: AutomationHubMode;
+  /** Abort the optional tool-need judgment when the parent invocation stops. */
+  signal?: AbortSignal;
   fixedServerIds: string[];
   installedServers: InstalledMcpServer[];
 }): Promise<AutoSelectedMcpContext> {
@@ -337,6 +344,8 @@ export async function autoSelectMcpTools(input: {
   workingFolder?: string | null;
   toolMode?: AutomationToolMode;
   hubMode?: AutomationHubMode;
+  /** Abort the optional tool-need judgment when the parent invocation stops. */
+  signal?: AbortSignal;
   /** 같은 채팅의 후속 턴을 알아보기 위한 대화 식별자. 없으면 재사용하지 않는다. */
   conversationId?: string | null;
   /** 자격 증명 입력 직후의 재선택 — 메모를 무시하고 처음부터 다시 고른다. */
@@ -352,11 +361,12 @@ export async function autoSelectMcpTools(input: {
   const taskText = [input.agentName, input.userPrompt, input.workingFolder ?? "", input.systemPrompt]
     .filter(Boolean)
     .join("\n");
-  // Does this automation actually have to drive a human-facing web UI? The resident judge is
-  // the only answer — there is no keyword pre-filter, so a task written in ANY language gets
-  // judged, not silently skipped. The verdict is cached, so the synchronous store writes that
-  // resolve the same automation later read it too (see peekJudgment / judgedComputerUse).
-  // Skipped only when the user already chose the mode by hand — nothing left to decide.
+  // Does this automation actually have to drive a human-facing web UI? The same
+  // resident tool-needs judgment below decides that by selecting the Browser or
+  // Computer Use candidate. A separate prejudge used to ask the model the same
+  // question first; a cold One Team turn therefore paid for two model calls
+  // before any worker started. Cached historical judgment is still accepted as
+  // a warm hint, but this function issues exactly one fresh judgment.
   // 설치 목록 읽기는 로컬 DB 조회다 — 판정보다 앞에 두어야 메모 지문을 만들 수 있다.
   let initialInstalledServers: InstalledMcpServer[] = [];
   try {
@@ -394,25 +404,7 @@ export async function autoSelectMcpTools(input: {
     if (hit) selectionMemo.delete(memoKey);
   }
 
-  const toolModeText = [input.agentName ?? "", input.userPrompt ?? "", input.workingFolder ?? ""].join("\n");
-  if (input.toolMode !== "browser" && input.toolMode !== "computer-use" && toolModeText.trim()) {
-    try {
-      const { prejudge } = await import("../system-agents/judgment");
-      await prejudge<"yes" | "no">({
-        kind: COMPUTER_USE_JUDGMENT_KIND,
-        question: COMPUTER_USE_JUDGMENT_QUESTION,
-        labels: ["yes", "no"] as const,
-        input: toolModeText,
-        guidance: COMPUTER_USE_JUDGMENT_GUIDANCE,
-        // Conservative default is "no": an unreachable model must not force the brittle
-        // screen-driving path. peekJudgment only reads llm-sourced verdicts anyway.
-        fallback: "no",
-      });
-    } catch {
-      // Judgment is best-effort; an unjudged run stays on the neutral "auto" path.
-    }
-  }
-  const effectiveToolMode = resolveAutomationToolMode({
+  let effectiveToolMode = resolveAutomationToolMode({
     toolMode: input.toolMode,
     name: input.agentName,
     promptTemplate: input.userPrompt,
@@ -430,7 +422,7 @@ export async function autoSelectMcpTools(input: {
   // missing native driver must not strand a task that the authenticated
   // Agentlas Browser can safely complete. Explicit Computer Use selections
   // remain strict and never receive this browser fallback.
-  const allowAutomaticBrowserFallback = input.toolMode == null && effectiveToolMode === "computer-use";
+  const automaticHostDecision = input.toolMode == null || input.toolMode === "auto";
 
   // ── ① 프로젝트 우선 (project-first narrowing) ────────────────────────────
   // 프로젝트를 여는 이유는 그 안에 이미 갖춰 둔 것을 먼저 쓰라는 뜻이다. 그런데 이 선택기는
@@ -486,9 +478,6 @@ export async function autoSelectMcpTools(input: {
         : "Agentlas policy selected Computer Use for human web/social automation",
     );
   }
-  if (allowAutomaticBrowserFallback) {
-    pinnedReasons.set("agentlas-browser", "authenticated browser fallback for policy-selected Computer Use");
-  }
   // Everything pinned so far is a host binding or the routing resolver — these outrank both
   // the judge's picks and the installed-convenience pins added next.
   const hostBindingPins = new Set(pinnedReasons.keys());
@@ -498,6 +487,21 @@ export async function autoSelectMcpTools(input: {
   // need a credential, so this can never produce a key prompt on its own.
   for (const server of initialInstalledServers) {
     if (!server.catalogId || !server.enabled) continue;
+    // `local-only` is an execution boundary, not merely a catalog filter. The
+    // Network resolver starts the federated Workforce runtime and was being
+    // re-attached as an installed convenience pin even after Hub routing had
+    // been explicitly disabled. Besides violating the boundary, its cold
+    // connection probe dominated ordinary One Team startup. One may opt into
+    // Network on a later host-owned turn; local standing workers must not.
+    if (server.catalogId === "hephaestus-network" && !hubAllowed) continue;
+    // In automatic mode these are mutually exclusive host bindings, not
+    // convenience tools. Leave them in the one resident judgment's candidate
+    // menu instead of silently pinning both before the decision exists.
+    if (
+      automaticHostDecision
+      && effectiveToolMode === "auto"
+      && (server.catalogId === "agentlas-browser" || server.catalogId === "cua-driver" || server.catalogId === "playwright")
+    ) continue;
     if (pinnedReasons.has(server.catalogId) || blockedByHostBinding(server.catalogId)) continue;
     pinnedReasons.set(server.catalogId, "already installed and enabled by the user");
   }
@@ -539,8 +543,27 @@ export async function autoSelectMcpTools(input: {
   const needs = await deps.resolveNeeds({
     task: taskText,
     candidates: [...hubCandidates, ...localCandidates, ...customCandidates],
+    signal: input.signal,
+    timeoutMs: 15_000,
   });
   const neededIds = new Set(needs.needed);
+  if (automaticHostDecision) {
+    const choseBrowser = neededIds.has("agentlas-browser");
+    const choseComputerUse = neededIds.has("cua-driver");
+    if (choseBrowser) effectiveToolMode = "browser";
+    else if (choseComputerUse) effectiveToolMode = "computer-use";
+  }
+  if (effectiveToolMode === "browser") {
+    pinnedReasons.set("agentlas-browser", "Browser plugin (real-login CDP) selected for this run");
+    hostBindingPins.add("agentlas-browser");
+  } else if (effectiveToolMode === "computer-use") {
+    pinnedReasons.set("cua-driver", "Computer Use selected for this run");
+    hostBindingPins.add("cua-driver");
+    if (input.toolMode == null) {
+      pinnedReasons.set("agentlas-browser", "authenticated browser fallback for policy-selected Computer Use");
+      hostBindingPins.add("agentlas-browser");
+    }
+  }
   const cappedHub = Math.max(0, hubInventory.listings.length - hubOffered.length);
   const needsNote = [
     needs.decided

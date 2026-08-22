@@ -1,0 +1,384 @@
+.dialog { width: min(960px, 100%); }
+.body { padding-top: 20px; }
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(350px, .94fr) minmax(360px, 1.06fr);
+  gap: 30px;
+}
+
+.avatarPanel,
+.fields {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 14px;
+}
+
+.heroPreview {
+  min-height: 220px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid #e1e3e2;
+  border-radius: 14px;
+  background: #f7f7f7;
+  color: #8b9190;
+}
+
+.heroPreview img {
+  width: 204px;
+  height: 204px;
+  object-fit: contain;
+}
+
+.heroPreview[data-empty="true"] { border-style: dashed; }
+
+.generationState {
+  width: min(300px, 88%);
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  color: #444947;
+  text-align: center;
+}
+
+.generationState strong { font-size: 13px; }
+.generationState small { color: #777d7a; font-size: 10px; line-height: 1.5; }
+
+.spinner {
+  width: 18px;
+  height: 18px;
+  display: inline-block;
+  border: 2px solid #d5d8d6;
+  border-top-color: #343936;
+  border-radius: 50%;
+  animation: oneCharacterSpin .75s linear infinite;
+}
+
+.tabs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid #e2e4e3;
+  border-radius: 11px;
+  background: #f2f3f3;
+}
+
+.tabs button {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #747a77;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.tabs button[data-active="true"] {
+  background: #fff;
+  color: #252a28;
+  box-shadow: 0 1px 3px rgba(30, 35, 32, .08);
+  font-weight: 680;
+}
+
+.tabs button:focus-visible,
+.characterGrid button:focus-visible,
+.actions button:focus-visible,
+.secondaryButton:focus-visible,
+.existingTrigger:focus-visible,
+.existingMenu button:focus-visible {
+  outline: 2px solid #555c58;
+  outline-offset: 2px;
+}
+
+.characterLibrary { display: grid; }
+
+.characterGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.characterGrid button {
+  position: relative;
+  min-height: 112px;
+  display: grid;
+  place-items: center;
+  gap: 2px;
+  padding: 8px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: transparent;
+  color: #626865;
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.characterGrid button:hover { border-color: #b8bdbb; }
+
+.characterGrid button[data-active="true"] {
+  border-color: #444a47;
+  box-shadow: inset 0 0 0 1px #444a47;
+  color: #252a28;
+  font-weight: 680;
+}
+
+.characterGrid img {
+  width: 82px;
+  height: 82px;
+  object-fit: contain;
+}
+
+.characterGrid i {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #303532;
+  color: #fff;
+  font-style: normal;
+}
+
+.generator,
+.uploader {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid #e1e4e2;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.generator label,
+.fields label {
+  display: grid;
+  gap: 7px;
+  color: #353a37;
+  font-size: 11px;
+  font-weight: 680;
+}
+
+.generator textarea,
+.fields input,
+.fields textarea {
+  width: 100%;
+  border: 1px solid #d9dddb;
+  border-radius: 10px;
+  background: #fff;
+  color: #222725;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  outline: none;
+}
+
+.generator textarea {
+  min-height: 82px;
+  padding: 10px 12px;
+  resize: vertical;
+}
+
+.fields input { height: 44px; padding: 0 12px; }
+.fields textarea { min-height: 116px; padding: 11px 12px; resize: vertical; }
+
+.generator textarea:focus,
+.fields input:focus,
+.fields textarea:focus {
+  border-color: #59615d;
+  box-shadow: 0 0 0 3px rgba(55, 63, 58, .1);
+}
+
+.uploader input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.uploader small {
+  overflow: hidden;
+  color: #7d8380;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.secondaryButton {
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid #d7dbd9;
+  border-radius: 9px;
+  background: #fff;
+  color: #3d4440;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 680;
+  cursor: pointer;
+}
+
+.secondaryButton:hover:not(:disabled) { border-color: #aeb4b1; background: #f1f2f2; }
+.secondaryButton:disabled { cursor: not-allowed; opacity: .45; }
+
+.existingPicker {
+  overflow: hidden;
+  border: 1px solid #dfe2e1;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.existingTrigger {
+  width: 100%;
+  min-height: 58px;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 0;
+  background: #fff;
+  color: #343936;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.existingTrigger:hover { background: #f5f6f5; }
+
+.existingIcon {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #d7dbd9;
+  border-radius: 8px;
+  background: #fff;
+  color: #4f5652;
+}
+
+.existingTrigger > span:nth-child(2) { display: grid; min-width: 0; gap: 2px; }
+.existingTrigger strong { font-size: 11px; font-weight: 680; }
+.existingTrigger small { overflow: hidden; color: #7d8380; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.existingTrigger > svg { color: #777d7a; transition: transform 140ms ease; }
+.existingPicker[data-open="true"] .existingTrigger > svg { transform: rotate(180deg); }
+
+.existingMenu {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  padding: 8px;
+  border-top: 1px solid #e2e4e3;
+  background: #f5f6f5;
+}
+
+.existingMenu button {
+  min-width: 0;
+  min-height: 62px;
+  display: grid;
+  align-content: center;
+  gap: 3px;
+  padding: 8px 9px;
+  border: 1px solid #dfe2e1;
+  border-radius: 9px;
+  background: #fff;
+  color: #343936;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.existingMenu button:hover { border-color: #9fa6a2; background: #f9f9f9; }
+.existingMenu strong { font-size: 10px; font-weight: 720; }
+.existingMenu span { color: #777d7a; font-size: 8px; line-height: 1.35; }
+
+.draftStatus,
+.draftError {
+  margin: -4px 1px 0;
+  color: #777d7a;
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.draftError { color: #93483f; }
+
+.error {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid #d9aaa3;
+  border-radius: 9px;
+  background: #fff;
+  color: #8c4037;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.creatingState {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 11px 12px;
+  border: 1px solid #dcdedc;
+  border-radius: 10px;
+  background: #f3f3f2;
+  color: #343936;
+}
+
+.creatingState > span:last-child { display: grid; gap: 2px; }
+.creatingState strong { font-size: 11px; }
+.creatingState small { color: #777d7a; font-size: 9px; line-height: 1.45; }
+
+.actions {
+  display: grid;
+  grid-template-columns: auto minmax(170px, auto);
+  justify-content: end;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.actions button {
+  min-height: 42px;
+  padding: 0 16px;
+  border: 1px solid #d7dbd9;
+  border-radius: 9px;
+  background: #fff;
+  color: #484e4b;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 680;
+  cursor: pointer;
+}
+
+.actions button:hover:not(:disabled) { background: #f1f2f2; }
+.actions .primaryButton { border-color: #303532; background: #303532; color: #fff; }
+.actions .primaryButton:hover:not(:disabled) { background: #202421; }
+.actions button:disabled { cursor: not-allowed; opacity: .45; }
+
+@media (max-width: 760px) {
+  .layout { grid-template-columns: 1fr; }
+  .heroPreview { min-height: 180px; }
+  .heroPreview img { width: 164px; height: 164px; }
+  .tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .existingMenu { grid-template-columns: 1fr; }
+}
+
+@keyframes oneCharacterSpin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation-duration: 1.8s; }
+  .existingTrigger > svg { transition: none; }
+}

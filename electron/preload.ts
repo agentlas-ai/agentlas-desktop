@@ -328,6 +328,7 @@ const api: AgentlasIpc = {
   },
   oneOrg: {
     get: () => ipcRenderer.invoke("oneOrg:get"),
+    createAgent: (input) => ipcRenderer.invoke("oneOrg:createAgent", input),
     add: (input) => ipcRenderer.invoke("oneOrg:add", input),
     rename: (input) => ipcRenderer.invoke("oneOrg:rename", input),
     update: (input) => ipcRenderer.invoke("oneOrg:update", input),
@@ -337,6 +338,12 @@ const api: AgentlasIpc = {
     markRead: (input) => ipcRenderer.invoke("oneOrg:markRead", input),
     reorder: (input) => ipcRenderer.invoke("oneOrg:reorder", input),
     setTools: (input) => ipcRenderer.invoke("oneOrg:setTools", input),
+  },
+  oneTaskforces: {
+    list: () => ipcRenderer.invoke("oneTaskforces:list"),
+    create: (input) => ipcRenderer.invoke("oneTaskforces:create", input),
+    update: (input) => ipcRenderer.invoke("oneTaskforces:update", input),
+    remove: (input) => ipcRenderer.invoke("oneTaskforces:remove", input),
   },
   computerHistory: {
     get: () => ipcRenderer.invoke("computerHistory:get"),
@@ -518,7 +525,8 @@ const api: AgentlasIpc = {
     resolveApproval: (requestId: string, decision) =>
       ipcRenderer.invoke("browser:resolveApproval", requestId, decision),
     listLogs: (limit?: number) => ipcRenderer.invoke("browser:listLogs", limit),
-    captureLiveFrame: () => ipcRenderer.invoke("browser:captureLiveFrame"),
+    captureLiveFrame: (preferredUrl?: string, viewport?: "desktop" | "phone") =>
+      ipcRenderer.invoke("browser:captureLiveFrame", preferredUrl, viewport),
     focusLiveTarget: (targetId?: string) => ipcRenderer.invoke("browser:focusLiveTarget", targetId),
   },
   computerUse: {

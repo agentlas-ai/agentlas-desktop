@@ -53,6 +53,17 @@ import {
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 import { isAuthenticSystemTimeMcpLaunch } from "../mcp-tools/system-time-server";
 
+/** Claude exposes file mutations as a typed tool_use input followed by a
+ * tool_result. Admit only exact paths from known mutation tools; Main still
+ * opens and seals every candidate before it can reach One Outputs. */
+export function claudeArtifactPathsFromToolUse(name: string, input: unknown): string[] {
+  if (!/^(?:Write|Edit|MultiEdit|NotebookEdit)$/iu.test(name) || !input || typeof input !== "object") return [];
+  const record = input as Record<string, unknown>;
+  const candidates = [record.file_path, record.path];
+  const paths = candidates.filter((value): value is string => typeof value === "string" && path.isAbsolute(value));
+  return [...new Set(paths)];
+}
+
 /**
  * 중지 사유를 그대로 전한다. 중지는 사람이 누른 것 외에도 무활동 워치독·단계 시간 초과·
  * 예산 소진으로 일어난다. 예전엔 전부 "사용자가 정지 버튼으로"라고 단정해,
@@ -912,6 +923,7 @@ const runClaudeTurn = async (
     };
 
     const toolNameById = new Map<string, string>();
+    const toolInputById = new Map<string, unknown>();
     /*
      * ★무엇이 막혔는지는 거부 문구가 아니라 **그 호출**이 안다.
      *
@@ -1177,6 +1189,7 @@ const runClaudeTurn = async (
             }
             if (block.id) {
               toolNameById.set(block.id, block.name);
+              toolInputById.set(block.id, block.input);
               toolCallById.set(block.id, { name: block.name, detail: detailOfToolInput(block.input) });
             }
             // 도구 이벤트 전에 본문을 강제 플러시 — 렌더러 인터리브 앵커가 최신 좌표를 본다.
@@ -1193,7 +1206,11 @@ const runClaudeTurn = async (
             const toolName = toolId ? toolNameById.get(toolId) ?? "tool_result" : "tool_result";
             const result = truncateUi(stringifyToolPayload(block.content));
             if (block.is_error === true) announceApprovalBlock(result, toolId);
-            events.onTool?.(toolName, undefined, result, toolId, block.is_error === true);
+            const artifactPaths = toolId && block.is_error !== true
+              ? claudeArtifactPathsFromToolUse(toolName, toolInputById.get(toolId))
+              : [];
+            events.onTool?.(toolName, undefined, result, toolId, block.is_error === true, artifactPaths);
+            if (toolId) toolInputById.delete(toolId);
           }
         }
       } else if (ev.type === "user" && ev.message?.content) {
@@ -1203,7 +1220,11 @@ const runClaudeTurn = async (
           const toolName = toolId ? toolNameById.get(toolId) ?? "tool_result" : "tool_result";
           const result = truncateUi(stringifyToolPayload(block.content));
           if (block.is_error === true) announceApprovalBlock(result, toolId);
-          events.onTool?.(toolName, undefined, result, toolId, block.is_error === true);
+          const artifactPaths = toolId && block.is_error !== true
+            ? claudeArtifactPathsFromToolUse(toolName, toolInputById.get(toolId))
+            : [];
+          events.onTool?.(toolName, undefined, result, toolId, block.is_error === true, artifactPaths);
+          if (toolId) toolInputById.delete(toolId);
         }
       } else if (ev.type === "rate_limit_event") {
         // ★한도 거절은 표식이다 — 예전에는 케이스가 없어 조용히 버려졌다(분류는 순수 함수 한 곳).

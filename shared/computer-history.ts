@@ -1,9 +1,11 @@
 /** Path-free Computer History DTOs shared by Electron and the One renderer. */
 
 export type ComputerHistorySource = "10min" | "6h";
+export type ComputerHistoryRecommendationKind = "agent" | "plugin" | "graph";
 
 export interface ComputerHistoryRecommendation {
   id: string;
+  kind: ComputerHistoryRecommendationKind;
   title: string;
   body: string;
   evidence: Array<{ entryId: string; label: string; occurredAt: string; source: ComputerHistorySource }>;
@@ -13,6 +15,7 @@ export interface ComputerHistoryRecommendation {
 /** Created only after an explicit review click. History list DTOs stay path-free. */
 export interface ComputerHistoryDraftPrompt {
   recommendationId: string;
+  recommendationKind: ComputerHistoryRecommendationKind;
   prompt: string;
   evidenceCount: number;
 }

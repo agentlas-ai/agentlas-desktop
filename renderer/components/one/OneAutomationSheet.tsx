@@ -16,6 +16,7 @@ import {
 import { ipc } from "@/lib/ipc";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import { tFor } from "@/lib/i18n";
+import { LoadingEstimate } from "@/components/LoadingEstimate";
 import type { Automation, AutomationCreateInput } from "@/lib/types";
 import { OneBottomSheet } from "./OneBottomSheet";
 import styles from "./OneAutomationSheet.module.css";
@@ -222,6 +223,13 @@ export function OneAutomationSheet({ open, locale, onClose, onOpenAutomation }: 
               />
             </label>
             {error && <p className={styles.error} role="alert">{error}</p>}
+            {busy && <div className={styles.busyState} role="status" aria-live="polite">
+              <span aria-hidden="true" />
+              <div>
+                <strong>{tFor(locale, "one.autosheet.creating")}</strong>
+                <LoadingEstimate locale={locale} operationKey="one-automation-create" expectedSeconds={[1, 20]} />
+              </div>
+            </div>}
             <div className={styles.actions}>
               <button type="submit" className={styles.primary} disabled={busy}>
                 {busy

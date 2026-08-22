@@ -93,6 +93,29 @@ export interface AddOneOrgMemberInput {
   leaseExpiresAt?: string | null;
 }
 
+export type OneTeamAgentAvatarInput =
+  | { kind: "preset"; characterId: string }
+  | { kind: "image"; dataUrl: string };
+
+/**
+ * A lightweight, user-owned teammate created directly inside One Team.
+ * This is intentionally distinct from Agent Build: it creates a runnable local
+ * identity, seats it in the organisation, and opens its durable direct chat in
+ * one atomic user flow.
+ */
+export interface CreateOneTeamAgentInput {
+  name: string;
+  title?: string;
+  description?: string;
+  avatar: OneTeamAgentAvatarInput;
+}
+
+export interface CreateOneTeamAgentResult {
+  state: OneOrgState;
+  installedAgentId: string;
+  chatId: string;
+}
+
 export interface RenameOneOrgMemberInput {
   id: string;
   displayName: string;

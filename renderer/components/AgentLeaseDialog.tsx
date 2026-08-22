@@ -17,6 +17,7 @@ import type { CSSProperties } from "react";
 import { ipc } from "@/lib/ipc";
 import { openPricing } from "@/components/UpgradeCta";
 import type { AgentLeaseQuote } from "@shared/types";
+import { LoadingEstimate } from "@/components/LoadingEstimate";
 
 const DAY_PRESETS = [1, 3, 7, 14, 30] as const;
 
@@ -134,8 +135,9 @@ export function AgentLeaseDialog({
         </header>
 
         {quoteLoading ? (
-          <div role="status" style={{ padding: "18px 0", textAlign: "center", color: "var(--muted-deep)", fontSize: 12.5 }}>
-            {ko ? "대여 조건을 확인하는 중…" : "Checking lease terms…"}
+          <div role="status" style={{ padding: "18px 0", textAlign: "center", color: "var(--muted-deep)", fontSize: 12.5, display: "grid", gap: 6, justifyItems: "center" }}>
+            <span>{ko ? "대여 조건을 확인하는 중…" : "Checking lease terms…"}</span>
+            <LoadingEstimate locale={ko ? "ko" : "en"} operationKey="desktop-agent-lease-quote" expectedSeconds={[2, 15]} />
           </div>
         ) : notOffered ? (
           <>

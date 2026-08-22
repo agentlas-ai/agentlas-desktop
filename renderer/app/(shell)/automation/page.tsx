@@ -9,6 +9,7 @@ import { humanSchedule } from "@shared/graph-blueprint";
 import type { Automation, InstalledAgent, InstalledFirm } from "@/lib/types";
 import { IconBolt, IconBuilding, IconPlus, IconTrash } from "@/components/Icon";
 import { DescribeAutomation } from "@/components/automation/DescribeAutomation";
+import { LoadingEstimate } from "@/components/LoadingEstimate";
 
 export default function AutomationListPage() {
   const { t, locale } = useT();
@@ -265,9 +266,12 @@ export default function AutomationListPage() {
               background: "var(--paper)",
               color: "var(--muted-deep)",
               fontSize: 13,
+              display: "grid",
+              gap: 6,
             }}
           >
-            {locale === "en" ? "Loading automations…" : "자동화를 불러오는 중입니다…"}
+            <span>{locale === "en" ? "Loading automations…" : "자동화를 불러오는 중입니다…"}</span>
+            <LoadingEstimate locale={locale} operationKey="desktop-automation-list" expectedSeconds={[1, 20]} />
           </div>
         ) : items.length === 0 ? (
           <div

@@ -15,6 +15,7 @@ import {
 } from "react";
 import { flushSync } from "react-dom";
 import { Markdown, StreamingMarkdown } from "@/components/Markdown";
+import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { BrowserActionApprovalSheet } from "@/components/BrowserActionApprovalSheet";
 import { McpKeyRequestSheet } from "@/components/McpKeyRequestSheet";
 import {
@@ -33,6 +34,7 @@ import {
   IconSidebar,
   IconShield,
   IconSparkles,
+  IconUsers,
 } from "@/components/Icon";
 import { grantForDroppedFile, grantForPastedAttachment, grantForPastedImage, ipc, ipcEvents } from "@/lib/ipc";
 import { tFor, useT } from "@/lib/i18n";
@@ -81,6 +83,7 @@ import type {
   UpdaterState,
 } from "@/lib/types";
 import type { OneOrgCollaborationStyle, OneOrgMember, OneOrgState } from "@shared/one-org";
+import type { OneTaskforce } from "@shared/one-taskforces";
 import type { ComputerHistoryState } from "@shared/computer-history";
 import {
   type OneFeatureIntroBlockingStateCategory,
@@ -131,13 +134,12 @@ import {
 import {
   subscribe as buildSessionSubscribe,
   getSnapshot as getBuildSessionSnapshot,
-  startFreshBuild,
 } from "@/lib/build-session";
 import { ProductModeMenu } from "./ProductModeMenu";
 import { OneBottomSheet } from "./OneBottomSheet";
 import { OneAutomationSheet } from "./OneAutomationSheet";
 import { OneUseCaseChips, type OneUseCaseChipAction } from "./OneUseCaseChips";
-import { OneAdaptiveResult } from "./OneAdaptiveResult";
+import { OneAdaptiveResult, type OneAgentDraftSeed } from "./OneAdaptiveResult";
 import { OneActivation } from "./OneActivation";
 import { OneFeatureIntro } from "./OneFeatureIntro";
 import { OneMemorySheet } from "./OneMemorySheet";
@@ -149,6 +151,8 @@ import { OneGrowthCard } from "./OneGrowthCard";
 import { OneActivityArtifactRail } from "./OneActivityTimeline";
 import { OneOrgChart, type OneOrgSearchItem } from "./OneOrgChart";
 import { OneAgentPortrait } from "./OneAgentPortrait";
+import { OneCreateAgentDialog, type OneCreateAgentSeed } from "./OneCreateAgentDialog";
+import { OneTaskforceDialog, OneTaskforceRail } from "./OneTaskforces";
 import { OneComputerHistory } from "./OneComputerHistory";
 import { OneSettingsRail, OneSettingsSheet, type OneSettingsKey } from "./OneSettings";
 import { OneTeamUpgradeIntro } from "./OneTeamUpgradeIntro";
@@ -165,6 +169,7 @@ import {
 } from "./OneComposerControls";
 import { OneVoiceInputHelp } from "./OneVoiceInputHelp";
 import { OneWeeklyReflectionCard } from "./OneWeeklyReflectionCard";
+import { PluginPickerDialog } from "@/components/plugins/PluginPickerDialog";
 import {
   beginOneActivityState,
   initialOneActivityState,
@@ -800,6 +805,17 @@ export function OneShell() {
   const [mobileStatus, setMobileStatus] = useState<MobileBridgeRuntimeStatus | null>(null);
   const [oneProfile, setOneProfile] = useState<OneProfile | null>(null);
   const [oneOrgState, setOneOrgState] = useState<OneOrgState | null>(null);
+  const [taskforces, setTaskforces] = useState<OneTaskforce[]>([]);
+  const [taskforceDialogOpen, setTaskforceDialogOpen] = useState(false);
+  const [taskforceEditingId, setTaskforceEditingId] = useState<string | null>(null);
+  const [taskforceBusy, setTaskforceBusy] = useState(false);
+  const [createAgentOpen, setCreateAgentOpen] = useState(false);
+  const [createAgentSeed, setCreateAgentSeed] = useState<OneCreateAgentSeed | null>(null);
+  const createAgentSeedTokenRef = useRef(0);
+  const [agentPickerRequest, setAgentPickerRequest] = useState<{
+    token: number;
+    source: "my" | "cloud" | "hub";
+  }>();
   const [failureFocus, setFailureFocus] = useState<FailureEventUi | null>(null);
   const [failureReceiptOpen, setFailureReceiptOpen] = useState(false);
   const [computerHistory, setComputerHistory] = useState<ComputerHistoryState | null>(null);
@@ -917,6 +933,7 @@ export function OneShell() {
     setStagedSteerState(next);
   }
   const [availableAgents, setAvailableAgents] = useState<InstalledAgent[]>([]);
+  const [inventoryLoading, setInventoryLoading] = useState(true);
   const [cloudListings, setCloudListings] = useState<MarketplaceListing[]>(() => readViewData<MarketplaceListing[]>("dashboard.cloud-listings")?.value ?? []);
   const [hubBookmarks, setHubBookmarks] = useState<HubAgentBookmark[]>(() => readViewData<HubAgentBookmark[]>("dashboard.hub-bookmarks")?.value ?? []);
   const [installedPlugins, setInstalledPlugins] = useState<InstalledMcpServer[]>([]);
@@ -963,6 +980,7 @@ export function OneShell() {
   const [railCollapsed, setRailCollapsedState] = useState(() => readStoredBoolean(ONE_LEFT_RAIL_COLLAPSED_STORAGE_KEY, false));
   const [railMode, setRailMode] = useState<"organisation" | "settings">("organisation");
   const [settingsSheet, setSettingsSheet] = useState<OneSettingsKey | null>(null);
+  const [pluginPickerOpen, setPluginPickerOpen] = useState(false);
   const [contextRailOpen, setContextRailOpenState] = useState(() => readStoredBoolean(ONE_CONTEXT_RAIL_OPEN_STORAGE_KEY, true));
   const [contextRailWidth, setContextRailWidthState] = useState<number>(readStoredContextRailWidth);
   const setContextRailWidth = useCallback((next: number) => {
@@ -1014,7 +1032,10 @@ export function OneShell() {
   const normalizedLocale = appLocale;
   useEffect(() => {
     const api = ipc();
-    if (!api) return;
+    if (!api) {
+      setInventoryLoading(false);
+      return;
+    }
     let cancelled = false;
     void Promise.all([
       api.team.list().catch(() => []),
@@ -1031,6 +1052,8 @@ export function OneShell() {
       setPluginStatuses(statuses);
       setCloudListings(cloud);
       setHubBookmarks(bookmarks);
+    }).finally(() => {
+      if (!cancelled) setInventoryLoading(false);
     });
     const reconcileBookmarks = () => {
       void loadViewData("dashboard.hub-bookmarks", () => api.marketplace.bookmarks(), { maxAgeMs: 0, force: true })
@@ -1387,6 +1410,7 @@ export function OneShell() {
       setLoaded(true);
       setProjections([]);
       setConversations([]);
+      setTaskforces([]);
       setActiveChatIds([]);
       setConfirmations([]);
       setOneProfile(null);
@@ -1407,7 +1431,7 @@ export function OneShell() {
       return;
     }
     try {
-      const [active, pending, update, mobile, recentChats, profile, org, history, memory, memoryMap, suggestions, valueClosures, weeklyReflection, experienceReuse, improvementProofs, proactiveBriefing, intro, activation, homeSignals] = await Promise.all([
+      const [active, pending, update, mobile, recentChats, profile, org, taskforceRows, history, memory, memoryMap, suggestions, valueClosures, weeklyReflection, experienceReuse, improvementProofs, proactiveBriefing, intro, activation, homeSignals] = await Promise.all([
         api.invoke.activeChats().catch(() => []),
         api.confirm.listPending().catch(() => []),
         api.updater.getState().catch(() => null),
@@ -1415,6 +1439,7 @@ export function OneShell() {
         api.chats.listRecent(40).catch(() => []),
         api.oneProfile.get(),
         includeOrg ? api.oneOrg.get().catch(() => null) : Promise.resolve(null),
+        api.oneTaskforces.list().catch(() => []),
         api.computerHistory.get().catch(() => null),
         api.oneMemory.getState().catch(() => null),
         typeof api.oneMemory.getMap === "function" ? api.oneMemory.getMap().catch(() => null) : Promise.resolve(null),
@@ -1461,6 +1486,7 @@ export function OneShell() {
       setMobileStatus(keepPrevIfDeepEqual(mobile));
       setOneProfile(keepPrevIfDeepEqual(profile));
       if (org) setOneOrgState(keepPrevIfDeepEqual(org));
+      setTaskforces(keepPrevIfDeepEqual(taskforceRows));
       setComputerHistory(keepPrevIfDeepEqual(history));
       setOneMemory(keepPrevIfDeepEqual(memory));
       if (memoryMap) {
@@ -1477,7 +1503,8 @@ export function OneShell() {
       setBriefingSnapshot(keepPrevIfDeepEqual(safeBriefingSnapshot(proactiveBriefing)));
       setProjections(keepPrevIfDeepEqual(items));
       // One 홈은 One이 시작한 대화만 보여준다 — 전역 Work 대화는 Work에 남는다.
-      setConversations(keepPrevIfDeepEqual(recentChats.filter((chat) => !chat.taskId && chat.originSurface === "one")));
+      const taskforceChatIds = new Set(taskforceRows.map((taskforce) => taskforce.chatId));
+      setConversations(keepPrevIfDeepEqual(recentChats.filter((chat) => !chat.taskId && chat.originSurface === "one" && !taskforceChatIds.has(chat.id))));
       const wanted = selectedTaskIdRef.current;
       if (wanted) {
         const detail = items.find((item) => item.taskId === wanted)
@@ -1627,7 +1654,7 @@ export function OneShell() {
     if (!target) return;
     if (target.configurationValid === false && nextEnabled) {
       setSettingsSheet(null);
-      router.push("/library/mcps");
+      setPluginPickerOpen(true);
       return;
     }
     setInstalledPlugins((current) => current.map((plugin) => plugin.id === pluginId ? { ...plugin, enabled: nextEnabled } : plugin));
@@ -1640,7 +1667,7 @@ export function OneShell() {
     } catch {
       setInstalledPlugins((current) => current.map((plugin) => plugin.id === pluginId ? { ...plugin, enabled: target.enabled } : plugin));
     }
-  }, [installedPlugins, pluginStatuses, router]);
+  }, [installedPlugins, pluginStatuses]);
   const clearComputerHistoryView = useCallback(async () => {
     const api = ipc();
     if (!api) return;
@@ -1683,12 +1710,21 @@ export function OneShell() {
     const events = ipcEvents();
     if (!events?.onStoreChanged) return;
     return events.onStoreChanged((change) => {
-      if (change.entity !== "one-org") return;
       const api = ipc();
       if (!api) return;
-      void api.oneOrg.get().then((next) => setOneOrgState(keepPrevIfDeepEqual(next))).catch(() => undefined);
+      if (change.entity === "one-org") {
+        void Promise.all([
+          api.oneOrg.get(),
+          api.team.list().catch(() => null),
+        ]).then(([next, agents]) => {
+          setOneOrgState(keepPrevIfDeepEqual(next));
+          if (agents) setAvailableAgents(keepPrevIfDeepEqual(agents));
+        }).catch(() => undefined);
+      } else if (change.entity === "one-taskforce") {
+        void refreshAll({ includeOrg: false });
+      }
     });
-  }, []);
+  }, [refreshAll]);
 
   const reconcileConversationTask = useCallback(async (chatId: string) => {
     const api = ipc();
@@ -2069,6 +2105,32 @@ export function OneShell() {
 
   const activeThreadChatId = selected?.chatId ?? conversation?.id ?? null;
   const activeThreadPromptFallback = selected?.display.title ?? conversation?.title ?? "";
+  const activeTaskforce = useMemo(
+    () => taskforces.find((taskforce) => taskforce.chatId === activeThreadChatId) ?? null,
+    [activeThreadChatId, taskforces],
+  );
+  const taskforceEditing = useMemo(
+    () => taskforceEditingId ? taskforces.find((taskforce) => taskforce.id === taskforceEditingId) ?? null : null,
+    [taskforceEditingId, taskforces],
+  );
+  const activeTaskforceAgentIds = useMemo(() => {
+    if (!activeTaskforce) return [];
+    const members = oneOrgState?.members ?? [];
+    const byId = new Map(members.map((member) => [member.installedAgentId, member]));
+    return activeTaskforce.memberAgentIds.filter((agentId) => {
+      const member = byId.get(agentId);
+      return member && !member.archivedAt && member.statusKind !== "locked" && member.statusKind !== "failed";
+    });
+  }, [activeTaskforce, oneOrgState?.members]);
+  const seededTaskforceChatRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (seededTaskforceChatRef.current !== activeThreadChatId) {
+      seededTaskforceChatRef.current = activeThreadChatId;
+      setTurnAgentIds(activeTaskforceAgentIds);
+      return;
+    }
+    if (activeTaskforce) setTurnAgentIds(activeTaskforceAgentIds);
+  }, [activeTaskforce, activeTaskforceAgentIds, activeThreadChatId]);
   const activeOneMember = useMemo(() => {
     if (!activeThreadChat || activeThreadChat.originSurface !== "one") return null;
     return oneOrgState?.members.find((member) => member.installedAgentId === activeThreadChat.agentId) ?? null;
@@ -3017,7 +3079,7 @@ export function OneShell() {
     };
     setComposer("");
     setTurnOverrides({});
-    setTurnAgentIds([]);
+    setTurnAgentIds(activeTaskforceAgentIds);
     setAgentPickerOpen(false);
     setComposerMenu(null);
     clearAttachmentDrafts();
@@ -3106,7 +3168,7 @@ export function OneShell() {
       requestOneOperationalRecovery("one-submit", cause);
       setError(null);
     }
-  }, [autoStartTeamPreflight, busy, clearAttachmentDrafts, conversation, appLocale, normalizedLocale, onePermission, oneRuntimeSelection, resolveActivationConcern, router, scrollToLatest, selected, startRun, teamPreflight, teamPreflightBusy, turnAgentIds, turnOverrides, workspaceGrant]);
+  }, [activeTaskforceAgentIds, autoStartTeamPreflight, busy, clearAttachmentDrafts, conversation, appLocale, normalizedLocale, onePermission, oneRuntimeSelection, resolveActivationConcern, router, scrollToLatest, selected, startRun, teamPreflight, teamPreflightBusy, turnAgentIds, turnOverrides, workspaceGrant]);
 
   const stopRun = useCallback(() => {
     // Stop is terminal for the visible work item: Main drops the directions
@@ -3507,13 +3569,17 @@ export function OneShell() {
         setSearchOpen(false);
         selectedTaskIdRef.current = null;
         selectedConversationIdRef.current = chat.id;
+        setSelected(null);
+        setConversation(chat);
+        setReceipt(null);
         // Same-route push navigation in a static export can promote Next's
         // `one.txt` RSC sidecar to the main document. Replace follows the same
         // proven path used when a newly started run receives its chat binding.
         router.replace(`/one?chat=${encodeURIComponent(chat.id)}`);
+        void refreshAll({ includeOrg: false });
       })
       .catch((cause) => requestOneOperationalRecovery("one-member-channel", cause));
-  }, [router]);
+  }, [refreshAll, router]);
 
   const retryFocusedFailure = useCallback(() => {
     const focus = failureFocus;
@@ -3541,8 +3607,74 @@ export function OneShell() {
   const openConversation = useCallback((chatId: string) => {
     setRailOpen(false);
     setSearchOpen(false);
+    selectedTaskIdRef.current = null;
+    selectedConversationIdRef.current = chatId;
     router.replace(`/one?chat=${encodeURIComponent(chatId)}`);
-  }, [router]);
+    void refreshAll({ includeOrg: false });
+  }, [refreshAll, router]);
+
+  const openTaskforce = useCallback((taskforce: OneTaskforce) => {
+    setRailOpen(false);
+    setSearchOpen(false);
+    selectedTaskIdRef.current = null;
+    selectedConversationIdRef.current = taskforce.chatId;
+    router.replace(`/one?chat=${encodeURIComponent(taskforce.chatId)}`);
+    void refreshAll({ includeOrg: false });
+  }, [refreshAll, router]);
+
+  const createTaskforce = useCallback(async (input: { title: string; memberAgentIds: string[] }) => {
+    const api = ipc();
+    if (!api?.oneTaskforces) throw new Error("Desktop bridge unavailable");
+    setTaskforceBusy(true);
+    try {
+      const created = await api.oneTaskforces.create(input);
+      setTaskforceDialogOpen(false);
+      setTaskforceEditingId(null);
+      selectedTaskIdRef.current = null;
+      selectedConversationIdRef.current = created.chatId;
+      router.replace(`/one?chat=${encodeURIComponent(created.chatId)}`);
+      await refreshAll({ includeOrg: false });
+    } finally {
+      setTaskforceBusy(false);
+    }
+  }, [refreshAll, router]);
+
+  const updateTaskforce = useCallback(async (input: { id: string; title: string; memberAgentIds: string[]; expectedRevision: number }) => {
+    const api = ipc();
+    if (!api?.oneTaskforces) throw new Error("Desktop bridge unavailable");
+    setTaskforceBusy(true);
+    try {
+      await api.oneTaskforces.update(input);
+      await refreshAll({ includeOrg: false });
+      setTaskforceDialogOpen(false);
+      setTaskforceEditingId(null);
+    } finally {
+      setTaskforceBusy(false);
+    }
+  }, [refreshAll]);
+
+  const removeTaskforce = useCallback(async (input: { id: string; expectedRevision: number }) => {
+    const api = ipc();
+    if (!api?.oneTaskforces) throw new Error("Desktop bridge unavailable");
+    const target = taskforces.find((taskforce) => taskforce.id === input.id);
+    setTaskforceBusy(true);
+    try {
+      await api.oneTaskforces.remove(input);
+      setTaskforceDialogOpen(false);
+      setTaskforceEditingId(null);
+      if (target?.chatId === activeThreadChatId) {
+        selectedConversationIdRef.current = null;
+        setConversation(null);
+        setMessages([]);
+        setSurface(null);
+        setReceipt(null);
+        router.replace("/one");
+      }
+      await refreshAll({ includeOrg: false });
+    } finally {
+      setTaskforceBusy(false);
+    }
+  }, [activeThreadChatId, refreshAll, router, taskforces]);
 
   const removeConversation = useCallback(async (chatId: string) => {
     const api = ipc();
@@ -3828,6 +3960,20 @@ export function OneShell() {
     }
     router.push("/dashboard");
   }, [canOpenSelectedInWork, router, selected]);
+  const openCreateAgentDialog = useCallback((seed?: OneAgentDraftSeed) => {
+    if (seed) {
+      createAgentSeedTokenRef.current += 1;
+      setCreateAgentSeed({
+        token: createAgentSeedTokenRef.current,
+        name: seed.name,
+        title: seed.title,
+        description: seed.description,
+      });
+    } else {
+      setCreateAgentSeed(null);
+    }
+    setCreateAgentOpen(true);
+  }, []);
   const handleOneSemanticAction = useCallback((action: OneSurfaceSemanticAction) => {
     if (!action.enabled || busy) return;
     if (action.intent === "open_work") {
@@ -3862,7 +4008,11 @@ export function OneShell() {
       return;
     }
     if (action.intent === "open_build") {
-      router.push("/build");
+      openCreateAgentDialog({
+        name: action.label || (appLocale === "ko" ? "새 에이전트" : "New agent"),
+        title: action.description,
+        description: action.instruction,
+      });
       return;
     }
     if (action.intent === "toggle_mcp_server") {
@@ -3885,7 +4035,7 @@ export function OneShell() {
       selected ? "task" : "conversation",
       { displayUserMessage: false },
     );
-  }, [busy, conversation?.id, openWork, router, selected, startRun]);
+  }, [appLocale, busy, conversation?.id, openCreateAgentDialog, openWork, router, selected, startRun]);
   const acceptSelectedResult = useCallback(async () => {
     const api = ipc();
     if (
@@ -4187,11 +4337,16 @@ export function OneShell() {
       router.push("/library/agents?tab=ontology");
       return;
     }
-    // 이어하기만 현재 세션을 보존한다. "에이전트 만들기"와 "다시 사용해보기"는
-    // 이전 요청·첨부·출력 폴더를 새 에이전트에 섞지 않는 진짜 새 빌드다.
-    if (action.id !== "resume_build") startFreshBuild();
-    router.push("/build");
-  }, [router]);
+    // Agent creation belongs to One Team. Even a legacy unfinished Build
+    // signal is resumed as an internal draft, preserving its request while
+    // leaving any generated/uploaded character in the One draft untouched.
+    openCreateAgentDialog(action.id === "resume_build" && buildSessionSnapshot.request
+      ? {
+          name: appLocale === "ko" ? "이어 만드는 에이전트" : "Continued agent",
+          description: buildSessionSnapshot.request,
+        }
+      : undefined);
+  }, [appLocale, buildSessionSnapshot.request, openCreateAgentDialog, router]);
   const closeAutomationSheet = useCallback(() => setAutomationSheetOpen(false), []);
   const openCreatedAutomation = useCallback((automationId: string) => {
     setAutomationSheetOpen(false);
@@ -4348,7 +4503,11 @@ export function OneShell() {
   }, [introBlockingCategory, oneIntroPending, oneIntroState]);
 
   if (!loaded) {
-    return <div className={styles.shell}><div className={styles.loading} role="status">{tFor(appLocale, "one.shell.loading")}</div></div>;
+    return <div className={styles.shell}><div className={styles.loadingShell} role="status" aria-live="polite">
+      <aside className={styles.loadingRail}><span className={styles.loadingBrand} /><span /><span /><span /><span /></aside>
+      <main className={styles.loadingWorkspace}><span className={styles.loadingSpinner} aria-hidden="true" /><strong>{tFor(appLocale, "one.shell.loading")}</strong><small>{appLocale === "ko" ? "조직, 대화, 태스크포스와 기록을 안전하게 불러오고 있습니다." : "Loading your organisation, chats, Taskforces, and history."}</small><LoadingEstimate locale={appLocale} operationKey="one-shell-startup" expectedSeconds={[2, 30]} /><div><i /><i /><i /></div></main>
+      <aside className={styles.loadingContext}><span /><span /><span /><span /></aside>
+    </div></div>;
   }
 
   return (
@@ -4384,13 +4543,27 @@ export function OneShell() {
             >‹</button>
           </div>
           {railMode === "organisation" ? <>
+            <OneTaskforceRail
+              taskforces={taskforces}
+              org={oneOrgState}
+              activeChatId={activeThreadChatId}
+              locale={appLocale}
+              onOpen={openTaskforce}
+              onCreate={() => {
+                setTaskforceEditingId(null);
+                setTaskforceDialogOpen(true);
+              }}
+            />
             <OneOrgChart
               state={oneOrgState ?? (!ipc() ? oneOrgBrowserPreviewState() : null)}
               installedAgents={availableAgents}
               cloudListings={cloudListings}
               hubBookmarks={hubBookmarks}
+              inventoryLoading={inventoryLoading}
               locale={appLocale}
+              addRequest={agentPickerRequest}
               onAdd={addOneOrg}
+              onCreateAgent={() => openCreateAgentDialog()}
               onMaterializeSource={materializeOneOrgSource}
               onRename={renameOneOrg}
               onUpdate={updateOneOrg}
@@ -4401,6 +4574,7 @@ export function OneShell() {
               onReorder={reorderOneOrg}
               onFailure={openOneFailure}
               onOpenMember={openOneMember}
+              onEditOne={() => { setMemoryOpen(false); setProfileOpen(true); }}
               activeMemberId={activeOneMember?.installedAgentId ?? null}
               activeTaskForceIds={turnAgentIds}
               installedPlugins={installedPlugins}
@@ -4481,19 +4655,37 @@ export function OneShell() {
                 ><IconSidebar size={16} /></button>
                 <span className={styles.taskToolbarDivider} aria-hidden="true" />
                 <div className={styles.taskToolbarIdentity}>
-                  <OneAgentPortrait
+                  {activeTaskforce ? <span className={styles.taskforceToolbarPortraits} aria-hidden="true">
+                    <OneAgentPortrait status={busy ? "working" : "quiet"} label="One" tone="purple" size="small" />
+                    {activeTaskforce.memberAgentIds.slice(0, 2).map((agentId) => {
+                      const member = oneOrgState?.members.find((item) => item.installedAgentId === agentId);
+                      const unavailable = !member || Boolean(member.archivedAt) || member.statusKind === "locked" || member.statusKind === "failed";
+                      return <OneAgentPortrait key={agentId} status={unavailable ? "locked" : member.statusKind} label={member?.displayName ?? "Unavailable"} tone={member?.icon ?? "blue"} size="small" />;
+                    })}
+                  </span> : <OneAgentPortrait
                     status={busy ? "working" : visibleSelectedConfirmation ? "waiting" : activeOneMember?.statusKind ?? "quiet"}
                     label={activeOneMember?.displayName ?? "One"}
                     tone={activeOneMember?.icon ?? "purple"}
                     size="small"
-                  />
+                  />}
                   <span>
-                    <strong>{activeOneMember?.displayName ?? "One"}</strong>
-                    <small>{activeOneMember
+                    <strong>{activeTaskforce?.title ?? activeOneMember?.displayName ?? "One"}</strong>
+                    <small>{activeTaskforce
+                      ? (appLocale === "ko" ? `Taskforce · One 포함 ${activeTaskforce.memberAgentIds.length + 1}명` : `Taskforce · ${activeTaskforce.memberAgentIds.length + 1} members incl. One`)
+                      : activeOneMember
                       ? (appLocale === "ko" ? "상주 동료 · 전용 터미널" : "Standing teammate · Dedicated terminal")
                       : (appLocale === "ko" ? "CEO 오케스트레이터" : "CEO orchestrator")}</small>
                   </span>
                 </div>
+                {activeTaskforce && <button
+                  type="button"
+                  className={styles.taskforceMembersButton}
+                  onClick={() => {
+                    setTaskforceEditingId(activeTaskforce.id);
+                    setTaskforceDialogOpen(true);
+                  }}
+                  aria-label={appLocale === "ko" ? "태스크포스 멤버 관리" : "Manage Taskforce members"}
+                ><IconUsers size={15} /><span>{activeTaskforce.memberAgentIds.length + 1}</span></button>}
                 <div className={styles.taskToolbarMenu} data-one-task-menu="true">
                   <button
                     type="button"
@@ -4566,14 +4758,14 @@ export function OneShell() {
             )}
           </div>
           <div ref={scrollRef} className={styles.scroll}>
-            <OneActivation
+            {!selected && !conversation && <OneActivation
               state={oneActivationState}
               locale={appLocale}
               blocked={activationBlocked}
               onSkip={skipActivation}
               onOpenWork={openActivationWork}
               onResolveMobile={resolveActivationMobile}
-            />
+            />}
             {!selected && !conversation ? (
               <div className={styles.homeContent}>
                 <header className={styles.homeChatHeader}>
@@ -4802,6 +4994,7 @@ export function OneShell() {
                       onOpenWork={() => void openWork()}
                       canOpenWork={canOpenSelectedInWork}
                       onSemanticAction={handleOneSemanticAction}
+                      onOpenAgentDraft={openCreateAgentDialog}
                       onRetryUnfinished={retryUnfinished}
                       onAcceptResult={acceptSelectedResult}
                       autoRecovery={autoRecovery}
@@ -4957,7 +5150,7 @@ export function OneShell() {
                 }}
                 onOpenPlugins={() => {
                   setComposerMenu(null);
-                  router.push("/library/mcps");
+                  setSettingsSheet("plugins");
                 }}
                 onTogglePlugin={(pluginId) => {
                   const target = installedPlugins.find((plugin) => plugin.id === pluginId);
@@ -4966,7 +5159,7 @@ export function OneShell() {
                   // 스위치를 흉내 내는 대신 키를 넣을 수 있는 화면으로 보낸다.
                   if (target.configurationValid === false) {
                     setComposerMenu(null);
-                    router.push("/library/mcps");
+                    setPluginPickerOpen(true);
                     return;
                   }
                   const api = ipc();
@@ -5132,14 +5325,22 @@ export function OneShell() {
                   event.preventDefault();
                   void addAttachmentFiles(files);
                 }}
-                placeholder={oneActivationState?.status === "active" && oneActivationState.concern.status === "pending"
+                placeholder={activeTaskforce
+                  ? (appLocale === "ko" ? `${activeTaskforce.title}에 메시지` : `Message ${activeTaskforce.title}`)
+                  : activeOneMember
+                    ? (appLocale === "ko" ? `${activeOneMember.displayName}에게 메시지` : `Message ${activeOneMember.displayName}`)
+                    : oneActivationState?.status === "active" && oneActivationState.concern.status === "pending"
                   ? tFor(appLocale, "one.shell.composer.placeholder_activation")
                   : selected
                   ? tFor(appLocale, "one.shell.composer.placeholder_selected")
                   : conversation
                     ? tFor(appLocale, "one.shell.composer.placeholder_conversation")
                     : tFor(appLocale, "one.shell.composer.placeholder_default")}
-                aria-label={tFor(appLocale, "one.shell.composer.request_aria")}
+                aria-label={activeTaskforce
+                  ? (appLocale === "ko" ? `${activeTaskforce.title}에 요청` : `Request for ${activeTaskforce.title}`)
+                  : activeOneMember
+                    ? (appLocale === "ko" ? `${activeOneMember.displayName}에게 요청` : `Request for ${activeOneMember.displayName}`)
+                    : tFor(appLocale, "one.shell.composer.request_aria")}
                 disabled={composerInteractionBlocked}
               />
               <div className={styles.composerBar}>
@@ -5288,11 +5489,11 @@ export function OneShell() {
                     onMutateArchive={mutateTaskArchive}
                   />
                 ))}
-                {query.trim() && searchLoading && searchHits.length === 0 && <div className={styles.searchState} role="status">{tFor(appLocale, "one.shell.search.searching")}</div>}
+                {query.trim() && searchLoading && searchHits.length === 0 && <div className={styles.searchState} role="status" style={{ display: "grid", gap: 4 }}><span>{tFor(appLocale, "one.shell.search.searching")}</span><LoadingEstimate locale={appLocale} operationKey="one-search" expectedSeconds={[1, 15]} /></div>}
                 {query.trim() && !searchLoading && !searchFailed && searchHits.length === 0 && <div className={styles.searchState}>{tFor(appLocale, "one.shell.search.no_match")}</div>}
                 {query.trim() && searchNextCursor && !searchFailed && (
                   <button type="button" className={styles.searchMore} disabled={searchLoadingMore} onClick={loadMoreSearchResults}>
-                    {searchLoadingMore ? tFor(appLocale, "one.shell.search.finding_more") : tFor(appLocale, "one.shell.search.show_older")}
+                    {searchLoadingMore ? <span style={{ display: "inline-grid", gap: 2 }}>{tFor(appLocale, "one.shell.search.finding_more")}<LoadingEstimate locale={appLocale} operationKey="one-search-more" expectedSeconds={[1, 15]} compact /></span> : tFor(appLocale, "one.shell.search.show_older")}
                   </button>
                 )}
               </div>
@@ -5349,6 +5550,27 @@ export function OneShell() {
           minWidth={ONE_CONTEXT_RAIL_WIDTH_MIN}
           maxWidth={ONE_CONTEXT_RAIL_WIDTH_MAX}
           defaultWidth={ONE_CONTEXT_RAIL_WIDTH_DEFAULT}
+          computerHistory={computerHistory}
+          onHistoryConsent={enableComputerHistory}
+          onHistoryClear={() => setHistoryClearConfirmOpen(true)}
+          onHistoryAsk={() => {
+            startNewConversation();
+            setComposer(appLocale === "ko"
+              ? "최근 컴퓨터 기록을 바탕으로 반복 작업과 에이전트 빌드 후보를 설명해줘."
+              : "Use my recent computer history to explain repeated work and agent-build candidates.");
+          }}
+          onHistoryReviewRecommendation={(entry) => {
+            startNewConversation();
+            const api = ipc();
+            const recommendationId = entry.recommendation?.id;
+            if (!api || !recommendationId) {
+              requestOneOperationalRecovery("computer-history-draft", new Error("Computer History evidence unavailable"));
+              return;
+            }
+            void api.computerHistory.prepareDraft(recommendationId, appLocale)
+              .then((draft) => setComposer(draft.prompt))
+              .catch((cause) => requestOneOperationalRecovery("computer-history-draft", cause));
+          }}
         />
         {activeThreadChatId && visibleSelectedConfirmation && (
           <DecisionBottomSheet
@@ -5386,9 +5608,27 @@ export function OneShell() {
         onSelectPermission={setOnePermission}
         onSelectModel={(runtime, model) => applyOneRuntimeSelection({ model }, runtime)}
         onHistoryConsent={enableComputerHistory}
-        onOpenMcpLibrary={() => { setSettingsSheet(null); router.push("/library/mcps"); }}
+        onOpenMcpLibrary={() => { setSettingsSheet(null); setPluginPickerOpen(true); }}
         onToolTabChange={setSettingsSheet}
       />
+
+      {pluginPickerOpen && <PluginPickerDialog
+        ko={appLocale === "ko"}
+        onClose={() => setPluginPickerOpen(false)}
+        onCompleted={() => {
+          const api = ipc();
+          if (!api) return;
+          void Promise.all([
+            api.mcpTools.listInstalled(),
+            api.mcpTools.listCatalog(),
+            api.mcpTools.status().catch(() => []),
+          ]).then(([plugins, catalog, statuses]) => {
+            setInstalledPlugins(plugins);
+            setPluginCatalog(catalog);
+            setPluginStatuses(statuses);
+          });
+        }}
+      />}
 
       <OneBottomSheet
         open={historyClearConfirmOpen}
@@ -5450,6 +5690,52 @@ export function OneShell() {
         locale={appLocale}
         onClose={closeAutomationSheet}
         onOpenAutomation={openCreatedAutomation}
+      />
+      <OneTaskforceDialog
+        open={taskforceDialogOpen}
+        taskforce={taskforceEditing}
+        org={oneOrgState}
+        locale={appLocale}
+        busy={taskforceBusy}
+        onClose={() => {
+          setTaskforceDialogOpen(false);
+          setTaskforceEditingId(null);
+        }}
+        onCreate={createTaskforce}
+        onUpdate={updateTaskforce}
+        onRemove={removeTaskforce}
+      />
+      <OneCreateAgentDialog
+        open={createAgentOpen}
+        locale={appLocale}
+        seed={createAgentSeed}
+        onClose={() => {
+          setCreateAgentOpen(false);
+          setCreateAgentSeed(null);
+        }}
+        onCreated={async (result) => {
+          setCreateAgentOpen(false);
+          setCreateAgentSeed(null);
+          setOneOrgState(result.state);
+          const api = ipc();
+          if (api) {
+            setAvailableAgents(await api.team.list().catch(() => availableAgents));
+          }
+          selectedTaskIdRef.current = null;
+          selectedConversationIdRef.current = result.chatId;
+          setRailOpen(false);
+          setSearchOpen(false);
+          router.replace(`/one?chat=${encodeURIComponent(result.chatId)}`);
+          await refreshAll();
+        }}
+        onAddExisting={(source) => {
+          setCreateAgentOpen(false);
+          setCreateAgentSeed(null);
+          setAgentPickerRequest((current) => ({
+            token: (current?.token ?? 0) + 1,
+            source,
+          }));
+        }}
       />
       <OneFeatureIntro
         eligible={introEligible}

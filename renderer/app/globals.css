@@ -2941,12 +2941,12 @@ button[data-dashboard-chevron="open"] {
 
 .dashboard-usage-bar {
   display: grid;
-  /* 마지막 칸(리셋 시각)에 88px 상한이 박혀 있어 카드를 넓혀도 `resets in 2d 6h`가
-     2px 모자라 잘렸다(실측 2026-08-18: 필요 90px vs 허용 88px). 상한을 풀고 내용
-     폭을 따르게 한다 — 값이 짧으면 자리도 줄어드니 좁은 카드가 손해 보지 않는다. */
-  grid-template-columns: minmax(56px, 84px) minmax(60px, 1fr) 38px max-content;
+  /* 리셋 문자열을 max-content로 고정하면 좁은 카드에서 마지막 track이 카드 밖으로
+     밀린다. 마지막 track은 줄어들 수 있게 두고, span의 ellipsis가 긴 문자열을
+     안전하게 줄인다. */
+  grid-template-columns: minmax(48px, 56px) minmax(40px, 1fr) 32px minmax(0, max-content);
   align-items: center;
-  gap: 8px;
+  gap: 4px;
 }
 
 .dashboard-usage-bar > span {
@@ -3895,7 +3895,7 @@ button[data-toggle-state="off"] {
   }
 
   .dashboard-usage-bar {
-    grid-template-columns: 72px minmax(70px, 1fr) 38px;
+    grid-template-columns: minmax(0, 72px) minmax(0, 1fr) 32px;
   }
 
   .dashboard-usage-bar > span:last-child {

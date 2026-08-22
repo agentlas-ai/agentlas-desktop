@@ -23,6 +23,7 @@ import { pickLocalized, useT } from "@/lib/i18n";
 import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { AgentLeaseDialog } from "@/components/AgentLeaseDialog";
+import { LoadingEstimate } from "@/components/LoadingEstimate";
 import {
   buildProjectRosterSections,
   isUserFacingProjectPoolMember,
@@ -502,7 +503,7 @@ function ProjectPage() {
         </header>
         <section style={{ maxWidth: 720, margin: "24px auto", padding: "0 24px" }}>
           {loading
-            ? <div style={pageNotice}>{locale === "en" ? "Loading project…" : "프로젝트를 불러오는 중입니다…"}</div>
+            ? <div style={{ ...pageNotice, display: "grid", gap: 6 }}><span>{locale === "en" ? "Loading project…" : "프로젝트를 불러오는 중입니다…"}</span><LoadingEstimate locale={locale} operationKey="desktop-project-detail" expectedSeconds={[1, 25]} /></div>
             : <div style={pageNotice} role="alert">{locale === "en" ? "The project could not be loaded. Return to the dashboard and try again." : "프로젝트를 불러오지 못했습니다. 대시보드로 돌아가 다시 시도하세요."}</div>}
         </section>
       </div>

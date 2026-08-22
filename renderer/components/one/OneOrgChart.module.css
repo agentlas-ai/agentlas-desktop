@@ -26,9 +26,13 @@
 .creditBadge { flex: none; color: #a06b15; font-size: 8px; font-weight: 700; white-space: nowrap; }
 .sectionLabel { margin: 2px 4px -2px; color: #9da39f; font-size: 9px; font-weight: 760; letter-spacing: .1em; text-transform: uppercase; }
 .rows { display: grid; gap: 6px; }
-.addRow { display: grid; width: 38px; height: 38px; place-items: center; margin: 0 auto 2px; padding: 0; border: 1px dashed #c5d3cc; border-radius: 11px; background: #fafcfb; color: #6f9b89; cursor: pointer; }
-.addRow:hover, .addRow:focus-visible { border-color: #8fc4ad; background: #f1faf5; outline: 2px solid transparent; }
-.addRow:disabled { border-color: #e1e5e2; background: #f6f7f6; color: #b0b6b2; cursor: not-allowed; }
+.agentActions { display: flex; justify-content: center; margin: 2px 7px 5px; }
+.addRow, .createAgentButton { min-width: 0; min-height: 34px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 0 8px; border: 1px solid #d9dddb; border-radius: 9px; background: #fff; color: #59605d; font: inherit; font-size: 9px; font-weight: 650; cursor: pointer; }
+.addRow:hover, .addRow:focus-visible, .createAgentButton:hover, .createAgentButton:focus-visible { border-color: #b8bebb; background: #f3f4f3; color: #303532; outline: none; }
+.addRow:focus-visible, .createAgentButton:focus-visible { box-shadow: 0 0 0 2px rgba(48, 53, 50, .14); }
+.addRow:disabled { border-color: #e1e4e2; background: #f6f7f6; color: #b0b6b2; cursor: not-allowed; }
+.createAgentButton { width: 36px; min-width: 36px; padding: 0; }
+.createAgentButton:disabled { border-color: #e1e4e2; background: #f6f7f6; color: #b0b6b2; cursor: not-allowed; }
 .addAvatar { display: grid; place-items: center; line-height: 1; }
 .empty, .taskForceHint { padding: 9px 7px; color: #9ca29f; font-size: 10px; line-height: 1.45; }
 .ghosts { display: grid; gap: 6px; padding: 0 6px 8px; }
@@ -39,7 +43,7 @@
 .ghost small { color: #a2aaa5; font-size: 8px; }
 .taskForceHint { padding: 4px 7px 8px; }
 .taskForceRows { display: grid; gap: 5px; padding: 0 0 5px; }
-.taskForceRow { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; align-items: center; gap: 7px; min-height: 36px; padding: 4px 7px; border: 1px solid #e8ece9; border-radius: 10px; background: #fcfdfc; }
+.taskForceRow { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; align-items: center; gap: 7px; min-height: 42px; padding: 4px 7px; border: 1px solid #e8ece9; border-radius: 10px; background: #fcfdfc; }
 .taskForceRow span { overflow: hidden; color: #59655e; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .taskForceRow small { color: #9aa29d; font-size: 8px; }
 .rowActions { display: flex; gap: 3px; opacity: 1; }
@@ -177,7 +181,7 @@
   background: #efeff0;
   outline: none;
 }
-.row[data-active="true"]::before { position: absolute; top: 11px; bottom: 11px; left: -4px; width: 3px; border-radius: 999px; background: #7564ad; content: ""; }
+.row[data-active="true"]::before { position: absolute; top: 11px; bottom: 11px; left: -4px; width: 3px; border-radius: 999px; background: #353a37; content: ""; }
 
 .row[data-status="failed"] {
   border-color: transparent;
@@ -214,8 +218,31 @@
 }
 
 .badge {
-  color: #7e68ba;
+  color: #555b5f;
   font-weight: 740;
+}
+
+.oneEditButton {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  place-items: center;
+  margin-left: -5px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #696e72;
+  cursor: pointer;
+}
+
+.oneEditButton:hover,
+.oneEditButton:focus-visible {
+  background: #fff;
+  color: #34383b;
+  outline: none;
+  box-shadow: 0 0 0 1px #dedfe1;
 }
 
 .sectionLabel,
@@ -241,28 +268,6 @@
 .taskForceRow:hover { background: #efeff0; }
 .taskForceRow span { color: #555a5e; font-size: 11px; }
 .taskForceRow small { color: #999ea2; font-size: 8px; }
-
-.addRow {
-  width: 40px;
-  height: 40px;
-  margin: 7px auto 10px;
-  border: 0;
-  border-radius: 11px;
-  background: transparent;
-  color: #777c80;
-}
-
-.addRow:hover,
-.addRow:focus-visible {
-  background: #eeeeef;
-}
-
-.addRow:disabled {
-  background: transparent;
-  color: #b7b9bc;
-}
-
-.addAvatar { font-size: 19px; }
 
 .rowActions {
   position: absolute;
@@ -340,7 +345,7 @@
   color: #50555a;
 }
 
-.modelPolicy > svg { color: #7564ad; }
+.modelPolicy > svg { color: #545a57; }
 .modelPolicy > div { display: grid; gap: 3px; min-width: 0; }
 .modelPolicy strong { color: #32363a; font-size: 11px; }
 .modelPolicy span { color: #767b80; font-size: 9px; line-height: 1.45; }
@@ -416,7 +421,7 @@
 .addSearch > button:hover { background: var(--one-sheet-card-muted); }
 .sourceNote { margin: -4px 0 0; color: var(--one-sheet-muted); font-size: 11px; line-height: 1.5; }
 .candidateGrid { min-height: 0; flex: 1; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-content: start; gap: 8px; overflow-y: auto; padding-right: 2px; }
-.candidateGrid > button { min-height: 78px; display: grid; grid-template-columns: 36px minmax(0, 1fr) 18px; align-items: center; gap: 10px; padding: 11px 12px; border: 1px solid var(--one-sheet-control-border); border-radius: var(--one-sheet-card-radius); background: var(--one-sheet-control-surface); color: var(--one-sheet-ink); font: inherit; text-align: left; cursor: pointer; }
+.candidateGrid > button { min-height: 70px; display: grid; grid-template-columns: minmax(0, 1fr) 18px; align-items: center; gap: 10px; padding: 11px 12px; border: 1px solid var(--one-sheet-control-border); border-radius: var(--one-sheet-card-radius); background: var(--one-sheet-control-surface); color: var(--one-sheet-ink); font: inherit; text-align: left; cursor: pointer; }
 .candidateGrid > button:hover,
 .candidateGrid > button:focus-visible { border-color: #c8cbd0; outline: 0; }
 .candidateGrid > button[data-active="true"] { border-color: var(--one-sheet-accent); background: color-mix(in srgb, var(--one-sheet-accent) 6%, #fff); box-shadow: var(--one-sheet-focus); color: var(--one-sheet-accent); }
@@ -429,6 +434,12 @@
 .candidateGrid em { color: #686e72; font-size: 10px; font-style: normal; }
 .sheetEmpty { min-height: 88px; flex: 1; display: grid; place-items: center; gap: 8px; margin: 0; padding: 18px; border: 1px solid var(--one-sheet-line); border-radius: var(--one-sheet-card-radius); background: var(--one-sheet-card-muted); color: var(--one-sheet-muted); font-size: 11px; line-height: 1.5; text-align: center; }
 .sheetEmpty > button { min-height: 34px; padding: 0 12px; border: 1px solid var(--one-sheet-control-border); border-radius: var(--one-sheet-control-radius); background: var(--one-sheet-control-surface); color: var(--one-sheet-ink); font: inherit; font-size: 11px; font-weight: 650; cursor: pointer; }
+.inventoryLoading { min-height: 112px; flex: 1; display: flex; align-items: center; justify-content: center; gap: 12px; padding: 20px; border: 1px solid var(--one-sheet-line); border-radius: var(--one-sheet-card-radius); background: var(--one-sheet-card-muted); color: var(--one-sheet-ink); }
+.inventoryLoading > span:last-child { display: grid; gap: 4px; }
+.inventoryLoading strong { font-size: 12px; }
+.inventoryLoading small { color: var(--one-sheet-muted); font-size: 10px; line-height: 1.45; }
+.inventorySpinner { width: 18px; height: 18px; flex: 0 0 auto; border: 2px solid #d5d8d6; border-top-color: #343936; border-radius: 50%; animation: oneInventorySpin .75s linear infinite; }
+.addBusy { display: flex; align-items: center; gap: 9px; padding: 10px 12px; border: 1px solid #dedfdd; border-radius: 10px; background: #f4f4f3; color: #565c59; font-size: 10px; line-height: 1.45; }
 .selectedAgentPanel { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; padding: 16px; border: 1px solid var(--one-sheet-line); border-radius: var(--one-sheet-card-radius); background: #fafafa; }
 .selectedAgentPanel .modelPolicy,
 .selectedAgentPanel .note { grid-column: 1 / -1; }
@@ -460,3 +471,6 @@
   .selectedAgentPanel .modelPolicy,
   .selectedAgentPanel .note { grid-column: 1; }
 }
+
+@keyframes oneInventorySpin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .inventorySpinner { animation-duration: 1.8s; } }

@@ -45,6 +45,7 @@ function previewHistoryState(): ComputerHistoryState {
         source: "6h",
         recommendation: {
           id: "preview:reference-agent",
+          kind: "agent",
           title: "Reference-image web recreation agent",
           body: "Turn the repeated process for attaching reference screenshots, matching desktop/mobile layouts, and running visual QA into a reusable agent draft.",
           evidence: [{ entryId: "preview:soulin-build", label: "6h memory summary with cited events.jsonl", occurredAt: at(16, 25), source: "6h" }],
@@ -83,8 +84,13 @@ function AppMark({ app }: { app: string }) {
 function RecommendationBlock({ entry, locale, onReview }: { entry: ComputerHistoryEntry; locale: string; onReview?: (entry: ComputerHistoryEntry) => void }) {
   const recommendation = entry.recommendation;
   if (!recommendation) return null;
+  const label = recommendation.kind === "plugin"
+    ? (locale === "ko" ? "추천 플러그인 초안" : "Suggested plugin draft")
+    : recommendation.kind === "graph"
+      ? (locale === "ko" ? "추천 그래프 초안" : "Suggested graph draft")
+      : (locale === "ko" ? "추천 에이전트 초안" : "Suggested agent draft");
   return <section className={styles.recommendation} aria-label={locale === "ko" ? "추천 초안" : "Draft recommendation"}>
-    <small>{locale === "ko" ? "추천 에이전트 빌드" : "Suggested agent build"}</small>
+    <small>{label}</small>
     <span>{recommendation.body}</span>
     <button type="button" onClick={() => onReview?.(entry)}>{recommendation.title} · {locale === "ko" ? "초안 검토" : "Review draft"}</button>
   </section>;
@@ -98,6 +104,7 @@ export function OneComputerHistory({
   onAsk,
   onReviewRecommendation,
   previewWhenUnavailable = false,
+  compact = false,
 }: {
   state: ComputerHistoryState | null;
   locale: string;
@@ -107,6 +114,8 @@ export function OneComputerHistory({
   onReviewRecommendation?: (entry: ComputerHistoryEntry) => void;
   /** Browser-only visual fixture; the Desktop bridge always supplies real state. */
   previewWhenUnavailable?: boolean;
+  /** Embedded lower-right pane inside a task output rail. */
+  compact?: boolean;
 }) {
   const viewState = useMemo(() => state ?? (previewWhenUnavailable ? previewHistoryState() : null), [previewWhenUnavailable, state]);
   const groups = useMemo(() => {
@@ -142,7 +151,7 @@ export function OneComputerHistory({
     empty: "No history yet. Observed work will appear here.",
   };
   return (
-    <section className={styles.root} aria-label="Computer History">
+    <section className={styles.root} aria-label="Computer History" data-compact={compact ? "true" : "false"}>
       <header className={styles.header}>
         <div><h2>{copy.title} <span title={copy.localOnly} aria-label={copy.localOnly}><IconShield size={10} /></span></h2><p>{copy.subtitle}</p></div>
         <div className={styles.headerActions}>

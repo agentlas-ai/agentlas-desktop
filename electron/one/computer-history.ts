@@ -6,6 +6,7 @@ import type {
   ComputerHistoryEntry,
   ComputerHistoryDraftPrompt,
   ComputerHistoryRecommendation,
+  ComputerHistoryRecommendationKind,
   ComputerHistorySource,
   ComputerHistoryState,
 } from "../../shared/computer-history";
@@ -179,7 +180,19 @@ function frontmatter(raw: string): { body: string; values: Record<string, string
   return { body: raw.slice(end + 4), values };
 }
 
-function explicitSuggestion(raw: string): { name: string; description: string } | null {
+function declaredRecommendationKind(value: string): ComputerHistoryRecommendationKind | null {
+  const normalized = value.trim().toLocaleLowerCase();
+  // Skysight's legacy `skill` suggestion becomes an Agentlas agent draft. A
+  // procedural skill has variable inputs and judgment; it is not silently
+  // relabelled as an integration plugin. New producers can declare plugin or
+  // graph explicitly, preserving the evidence-based product distinction.
+  if (normalized === "agent" || normalized === "skill") return "agent";
+  if (["plugin", "tool", "mcp"].includes(normalized)) return "plugin";
+  if (["graph", "automation", "routine"].includes(normalized)) return "graph";
+  return null;
+}
+
+function explicitSuggestion(raw: string): { kind: ComputerHistoryRecommendationKind; name: string; description: string } | null {
   if (!raw.startsWith("---")) return null;
   const end = raw.indexOf("\n---", 3);
   if (end < 0) return null;
@@ -194,7 +207,8 @@ function explicitSuggestion(raw: string): { name: string; description: string } 
   }
   const name = safeText(values.name || "", 100);
   const description = safeText(values.description || "", MAX_BODY_CHARS);
-  return name && description ? { name, description } : null;
+  const kind = declaredRecommendationKind(values.type || "");
+  return kind && name && description ? { kind, name, description } : null;
 }
 
 function parseEntry(file: string, source: ComputerHistorySource): ComputerHistoryEntry | null {
@@ -225,6 +239,7 @@ function parseEntry(file: string, source: ComputerHistorySource): ComputerHistor
     source,
     recommendation: suggestion ? {
       id: createHash("sha256").update(`${file}:${suggestion.name}:${suggestion.description}`).digest("hex").slice(0, 24),
+      kind: suggestion.kind,
       title: suggestion.name,
       body: suggestion.description,
       evidence: [{ entryId: id, label: title, occurredAt, source }],
@@ -274,8 +289,9 @@ function buildRecommendation(entries: ComputerHistoryEntry[]): ComputerHistoryRe
   const evidence = candidate.slice(0, 3).map((entry) => ({ entryId: entry.id, label: entry.title, occurredAt: entry.occurredAt, source: entry.source }));
   return {
     id: createHash("sha256").update(evidence.map((item) => item.label + item.occurredAt).join("|")).digest("hex").slice(0, 24),
+    kind: "agent",
     title: candidate[0].title,
-    body: "반복된 컴퓨터 기록을 근거로 에이전트·그래프 초안을 제안합니다. 자동으로 켜지지 않습니다.",
+    body: "반복된 컴퓨터 기록을 근거로 에이전트 초안을 제안합니다. 자동으로 만들거나 켜지지 않습니다.",
     evidence,
     status: "draft",
   };
@@ -323,22 +339,32 @@ export function prepareComputerHistoryDraftPrompt(
     const events = eventPaths.length > 0 ? eventPaths.join(", ") : "(no cited events.jsonl)";
     return `${index + 1}. ${item.label}\n   6h summary: ${summaryPath}\n   cited events.jsonl: ${events}`;
   }).join("\n");
+  const kindLabel = recommendation.kind === "plugin"
+    ? (locale === "ko" ? "플러그인" : "plugin")
+    : recommendation.kind === "graph"
+      ? (locale === "ko" ? "그래프" : "graph")
+      : (locale === "ko" ? "에이전트" : "agent");
+  const safetyLine = recommendation.kind === "plugin"
+    ? (locale === "ko" ? "자동으로 설치하거나 연결하지 말고, 필요한 Tool 목록과 권한 범위를 포함한 편집 가능한 초안만 보여줘." : "Do not install or connect anything automatically. Show an editable draft with the required Tools and authority boundary.")
+    : recommendation.kind === "graph"
+      ? (locale === "ko" ? "자동으로 그래프를 켜지 말고, 트리거와 실제 노드가 포함된 편집 가능한 초안만 보여줘." : "Do not enable the graph automatically. Show an editable draft with its trigger and real nodes.")
+      : (locale === "ko" ? "자동으로 에이전트를 빌드하거나 조직에 추가하지 말고, 역할·말투·권한 범위가 포함된 편집 가능한 초안만 보여줘." : "Do not build or add the agent automatically. Show an editable draft with its role, voice, and authority boundary.");
   const prompt = locale === "ko"
     ? [
-        `Computer History 아래 설명을 바탕으로 새 "${recommendation.title}" 초안을 만들어줘.`,
+        `Computer History 아래 설명을 바탕으로 새 ${kindLabel} "${recommendation.title}" 초안을 만들어줘.`,
         "기록된 워크플로와 내가 한 액션을 이해할 수 있도록 다음 6시간 요약 파일과 그 안에 인용된 events.jsonl을 참고해줘:",
         evidenceLines,
         `원래 제안: "${recommendation.body}"`,
-        "자동으로 빌드하거나 설치하지 말고, 먼저 근거와 범위를 정리한 편집 가능한 초안만 보여줘.",
+        safetyLine,
       ].join("\n")
     : [
-        `Computer History: prepare a new "${recommendation.title}" draft from the description below.`,
+        `Computer History: prepare a new ${kindLabel} "${recommendation.title}" draft from the description below.`,
         "Use these six-hour summaries and their cited events.jsonl files to understand the recorded workflow and my actions:",
         evidenceLines,
         `Original proposal: "${recommendation.body}"`,
-        "Do not build or install anything automatically. Show an editable draft with its evidence and scope first.",
+        safetyLine,
       ].join("\n");
-  return { recommendationId, prompt, evidenceCount: references.length };
+  return { recommendationId, recommendationKind: recommendation.kind, prompt, evidenceCount: references.length };
 }
 
 export function getComputerHistoryConsent(): "off" | "on" { return consent(); }
@@ -375,6 +401,7 @@ export function recordComputerHistorySummary(input: {
   body: string;
   apps?: string[];
   occurredAt?: string;
+  suggestion?: { kind: ComputerHistoryRecommendationKind; name: string; description: string };
 }): boolean {
   if (consent() !== "on") return false;
   const source = input.source || "10min";
@@ -388,6 +415,12 @@ export function recordComputerHistorySummary(input: {
     `title: ${safeText(input.title, 120)}`,
     `occurredAt: ${occurredAt}`,
     `apps: ${(input.apps || []).map((app) => safeText(app, 32)).join(", ")}`,
+    ...(input.suggestion ? [
+      "suggestion:",
+      `  type: ${input.suggestion.kind}`,
+      `  name: ${safeText(input.suggestion.name, 100)}`,
+      `  description: ${safeText(input.suggestion.description, MAX_BODY_CHARS)}`,
+    ] : []),
     "---",
     "",
     safeText(input.body, MAX_BODY_CHARS),

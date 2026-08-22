@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { detectRuntimes } from "../runtime/detect";
+import { ONE_AGENT_ID } from "../runtime/agent-residency";
 // Stormbreaker Loop — 목표 분해/연속 실행/검증 가능한 오류 repair를 감독(비차단·실패-무해).
 import { superviseStormbreaker, type StormbreakerHandle } from "../hephaestus/stormbreaker-supervisor";
 import { isStormbreakerAutoEnabled } from "../hephaestus/supervisor";
@@ -324,6 +325,17 @@ function mainOneTeamRuntimeBinding(req: McpInvocationRequest): OneTeamRuntimeBin
 
 function mainOneParticipantExecutionSnapshot(req: McpInvocationRequest): unknown {
   return (req as MainBoundOneInvocationRequest).oneParticipantExecutionSnapshot;
+}
+
+/**
+ * One is the only controller allowed to start owner Cloud, Build, or federated
+ * Network routes. `hep-network --stormbreaker` is a legacy spelling of the
+ * local Storm command and intentionally remains available to every teammate.
+ */
+export function oneControllerOnlyHephaestusCommand(prompt: string): "build" | "cloud" | "network" | null {
+  if (/^\s*\/?hep-network\s+--stormbreaker\b/i.test(prompt)) return null;
+  const match = prompt.match(/^\s*\/?hep-(build|cloud|network)\b/i);
+  return match ? match[1].toLowerCase() as "build" | "cloud" | "network" : null;
 }
 
 type EventSink = (ev: McpInvocationEvent) => void;
@@ -1537,6 +1549,21 @@ export async function runMcpInvocation(
     sink({ kind: "error", error: { code: "no-agent", message: tStatus(locale, "errAgentNotFound") } });
     return earlyResult();
   }
+  const oneControllerOnlyCommand = req.oneMode
+    ? oneControllerOnlyHephaestusCommand(req.userPrompt)
+    : null;
+  if (oneControllerOnlyCommand && agent.id !== ONE_AGENT_ID) {
+    sink({
+      kind: "error",
+      error: {
+        code: "one-controller-command-required",
+        message: locale === "ko"
+          ? `hep-${oneControllerOnlyCommand}는 One만 실행할 수 있습니다. 이 동료에게는 로컬 Tool·MCP와 hep-storm을 사용할 수 있습니다.`
+          : `Only One can run hep-${oneControllerOnlyCommand}. This teammate can use local Tools, MCP, and hep-storm.`,
+      },
+    });
+    return earlyResult();
+  }
   const oneParticipantEffectivePrompts = oneTeamExecutionPolicy
     ? validatedOneParticipantEffectivePromptMap(mainOneParticipantExecutionSnapshot(req))
     : null;
@@ -2106,7 +2133,8 @@ ${effectiveUserPrompt}`;
   const explicitStormbreakerGoal = explicitStormbreakerRequest
     ? req.userPrompt.replace(stormbreakerPrefix, "").trim() || req.userPrompt
     : req.userPrompt;
-  const stormbreakerEngaged = !oneTeamExecutionPolicy && !req.agentAppMode && !restrictedReadBoundary && (
+  const oneTeamAllowsStorm = !oneTeamExecutionPolicy || oneTeamExecutionPolicy === "solo_locked";
+  const stormbreakerEngaged = oneTeamAllowsStorm && !req.agentAppMode && !restrictedReadBoundary && (
     chat.kind === "division" ||
     chat.continuousMode === true ||
     explicitStormbreakerRequest ||
@@ -2127,7 +2155,7 @@ ${effectiveUserPrompt}`;
     ? (getProject(invocationProjectId)?.agentPool ?? [])
     : [];
   const stormbreakerSwarm =
-    !oneTeamExecutionPolicy &&
+    oneTeamAllowsStorm &&
     !req.agentAppMode &&
     !restrictedReadBoundary &&
     chat.kind !== "division" &&
@@ -2227,8 +2255,12 @@ ${effectiveUserPrompt}`;
   // gets the same tools an ordinary chat turn would. Confirmed external
   // staffing keeps the exclusion, because there the roster's own host LLM owns
   // the capability decision.
-  const oneSoloTurn = oneTeamExecutionPolicy === "solo_locked";
-  const workforceOwnsCapabilityChoice = Boolean(oneTeamExecutionPolicy) && !oneSoloTurn;
+  // An existing One Team roster is made from owner-installed teammates. It
+  // still needs the normal local capability auto-selection so every selected
+  // worker receives the same approved Filesystem/System Time/etc. MCP config
+  // as the visible One turn. Only a server-prepared external Workforce owns
+  // capability binding through its validated WorkOrder receipt.
+  const workforceOwnsCapabilityChoice = oneTeamExecutionPolicy === "confirmed_external_workforce";
   /*
    * ★읽기 실행도 MCP 를 받는다 — 오너 결정 2026-08-18.
    *
@@ -2266,6 +2298,7 @@ ${effectiveUserPrompt}`;
         workingFolder,
         toolMode: req.toolMode,
         hubMode: req.hubMode,
+        signal,
         // 같은 채팅의 후속 턴이면 지난 선택과 접속 확인을 재사용한다(auto-select 메모).
         conversationId: req.chatId,
         ...(oneMemberToolPolicy ? oneMemberToolPolicy : {}),
@@ -3164,7 +3197,7 @@ ${effectiveUserPrompt}`;
   // Explicit single borrow also bypasses swarm: its verified Hub user preamble
   // must reach the selected primary runtime unchanged instead of being discarded.
   if (
-    !oneTeamExecutionPolicy &&
+    oneTeamAllowsStorm &&
     !req.agentAppMode &&
     (chat.swarmMode || stormbreakerSwarm) &&
     borrowedAgentSlugs.length === 0 &&

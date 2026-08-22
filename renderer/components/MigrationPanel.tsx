@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
+import { LoadingEstimate } from "./LoadingEstimate";
 import type {
   MigrationResult,
   MigrationSourceKind,
@@ -80,7 +81,10 @@ export function MigrationPanel() {
       </p>
 
       {loading ? (
-        <div style={{ fontSize: 13, color: "var(--muted-deep)" }}>{t("migration.scanning")}</div>
+        <div style={{ display: "grid", gap: 5, fontSize: 13, color: "var(--muted-deep)" }}>
+          <span>{t("migration.scanning")}</span>
+          <LoadingEstimate locale={locale} operationKey="desktop-migration-scan" expectedSeconds={[2, 20]} />
+        </div>
       ) : scanError ? (
         <ErrorNote title={t("migration.scan_failed")} detail={scanError} onRetry={() => void scan()} retryLabel={t("migration.retry")} />
       ) : available.length === 0 ? (

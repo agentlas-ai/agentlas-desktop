@@ -243,7 +243,7 @@ export default function LibraryMcpsPage() {
             borderRadius: 999,
             fontSize: 12.5,
             fontWeight: 600,
-            background: "var(--accent)",
+            background: "#303532",
             color: "#fff",
             border: "1px solid transparent",
             display: "inline-flex",
@@ -251,7 +251,7 @@ export default function LibraryMcpsPage() {
             gap: 5,
           }}
         >
-          {locale === "en" ? "Add MCP & plugins" : "MCP · 플러그인 추가"}
+          {locale === "en" ? "Add tools" : "도구 추가"}
         </button>
       </div>
 

@@ -18,6 +18,7 @@
 //    (미입력 서버는 MCP 화면에 "키 필요"로 남아 스스로를 설명한다).
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { IconFilter } from "@/components/Icon";
 import { PluginLogo, usePluginBrandMap } from "@/components/PluginLogo";
 import type { MarketplaceListing, PluginKind } from "@/lib/types";
 import {
@@ -33,6 +34,7 @@ import {
   type PluginPickerResult,
 } from "./PluginPickerCore";
 import styles from "./PluginPickerDialog.module.css";
+import { LoadingEstimate } from "@/components/LoadingEstimate";
 
 export type { PluginPickerResult } from "./PluginPickerCore";
 export { setupKindFor, serviceDomainOf, domainMatches, type PluginSetupKind } from "./PluginPickerCore";
@@ -220,7 +222,7 @@ export function PluginPickerDialog({
           <h2 id="plugin-picker-title" className={styles.title}>
             {variant === "onboarding"
               ? ko ? "어떤 도구를 자주 쓰세요?" : "What do you use every day?"
-              : ko ? "MCP · 플러그인 추가" : "Add MCP & plugins"}
+              : ko ? "도구 추가" : "Add tools"}
           </h2>
           <button type="button" className={styles.close} onClick={onClose} aria-label={ko ? "닫기" : "Close"}>
             ×
@@ -244,32 +246,10 @@ export function PluginPickerDialog({
               aria-expanded={filterOpen}
               aria-label={ko ? "필터" : "Filter"}
             >
-              <FilterIcon />
+              <IconFilter size={16} />
             </button>
             {filterOpen && (
               <div className={styles.filterMenu} role="menu">
-                {showTypeFilter && (
-                  <>
-                    <div className={styles.filterGroupLabel}>{ko ? "종류" : "Type"}</div>
-                    {([
-                      ["all", ko ? "전체" : "All types"],
-                      ["mcp", ko ? "MCP (계정 연결)" : "MCP (account-backed)"],
-                      ["skill", ko ? "플러그인 (스킬)" : "Plugins (skills)"],
-                    ] as Array<[TypeFilter, string]>).map(([value, label]) => (
-                      <button
-                        key={value}
-                        type="button"
-                        role="menuitemradio"
-                        aria-checked={typeFilter === value}
-                        className={styles.filterItem}
-                        onClick={() => setTypeFilter(value)}
-                      >
-                        <span>{label}</span>
-                        {typeFilter === value && <span className={styles.check}>✓</span>}
-                      </button>
-                    ))}
-                  </>
-                )}
                 <div className={styles.filterGroupLabel}>{ko ? "설치 상태" : "Status"}</div>
                 {([
                   ["all", ko ? "전체" : "All"],
@@ -295,13 +275,35 @@ export function PluginPickerDialog({
             className={styles.search}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder={ko ? "도구 검색…" : "Search plugins…"}
-            aria-label={ko ? "도구 검색" : "Search plugins"}
+            placeholder={ko ? "도구 검색…" : "Search tools…"}
+            aria-label={ko ? "도구 검색" : "Search tools"}
           />
         </div>
 
+        {showTypeFilter && (
+          <div className={styles.typeTabs} role="tablist" aria-label={ko ? "도구 종류" : "Tool type"}>
+            {([
+              ["all", ko ? "전체" : "All"],
+              ["skill", ko ? "플러그인" : "Plugins"],
+              ["mcp", "MCP"],
+            ] as Array<[TypeFilter, string]>).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                role="tab"
+                aria-selected={typeFilter === value}
+                className={styles.typeTab}
+                data-active={typeFilter === value ? "true" : "false"}
+                onClick={() => setTypeFilter(value)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
+
         <div className={styles.body}>
-          {!loaded && <p className={styles.hint}>{ko ? "목록을 불러오는 중…" : "Loading…"}</p>}
+          {!loaded && <div className={styles.hint} style={{ display: "grid", gap: 5 }}><span>{ko ? "목록을 불러오는 중…" : "Loading…"}</span><LoadingEstimate locale={ko ? "ko" : "en"} operationKey="desktop-plugin-catalog" expectedSeconds={[2, 20]} /></div>}
           {loaded && loadError && (
             <p className={styles.error}>
               {ko ? "목록을 불러오지 못했습니다: " : "Could not load the catalog: "}
@@ -312,7 +314,7 @@ export function PluginPickerDialog({
             <p className={styles.hint}>
               {query.trim()
                 ? ko ? `"${query.trim()}"과 맞는 도구가 없습니다.` : `Nothing matches "${query.trim()}".`
-                : ko ? "표시할 도구가 없습니다." : "No plugins to show."}
+                : ko ? "표시할 도구가 없습니다." : "No tools to show."}
             </p>
           )}
 
@@ -413,12 +415,4 @@ function SetupHint({
   const hint = setupHintFor({ listing, ko, hasLogin });
   if (!hint) return null;
   return <span className={styles.cardHint} data-tone={hint.tone}>{hint.text}</span>;
-}
-
-function FilterIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <path d="M2 4h12M4 8h8M6 12h4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-    </svg>
-  );
 }

@@ -75,6 +75,7 @@ export async function resolveMcpNeeds(input: {
   task: string;
   candidates: McpNeedCandidate[];
   signal?: AbortSignal;
+  timeoutMs?: number;
   /** Injectable judge (tests). Defaults to the resident judgment service. */
   judgeSubsetFn?: typeof judgeSubset;
 }): Promise<ResolvedMcpNeeds> {
@@ -100,6 +101,7 @@ export async function resolveMcpNeeds(input: {
     guidance: MCP_NEED_JUDGMENT_GUIDANCE,
     maxInputChars: MAX_INPUT_CHARS,
     signal: input.signal,
+    ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
   });
 
   if (verdict.source !== "llm") {

@@ -2,6 +2,7 @@
 
 import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
 import { IconChevronDown } from "@/components/Icon";
+import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { extractAutomationRegistrations, type OneActivityState } from "@/lib/one-activity";
 import { OneAutomationRegistrationCard } from "./OneAdaptiveResult";
 import { OneHandoffCard } from "./OneHandoffCard";
@@ -392,20 +393,31 @@ export function OneTurnWork({
       aria-busy={active}
     >
       {active ? (
-        <div className={styles.live} role="status" aria-live="polite">
-          <span className={styles.liveMark} aria-hidden="true" />
-          <span className={`${styles.liveText} ${styles.shimmer}`}>{headline}</span>
-          {hasRows && (
-            <button
-              type="button"
-              className={styles.liveToggle}
-              onClick={() => setExpanded((current) => !current)}
-              aria-expanded={expanded}
-              aria-label={ko ? "과정 접기/펼치기" : "Toggle steps"}
-            >
-              <IconChevronDown size={12} />
-            </button>
-          )}
+        <div className={styles.liveBlock}>
+          <div className={styles.live} role="status" aria-live="polite">
+            <span className={styles.liveMark} aria-hidden="true" />
+            <span className={`${styles.liveText} ${styles.shimmer}`}>{headline}</span>
+            {hasRows && (
+              <button
+                type="button"
+                className={styles.liveToggle}
+                onClick={() => setExpanded((current) => !current)}
+                aria-expanded={expanded}
+                aria-label={ko ? "과정 접기/펼치기" : "Toggle steps"}
+              >
+                <IconChevronDown size={12} />
+              </button>
+            )}
+          </div>
+          <div className={styles.liveEstimate}>
+            <LoadingEstimate
+              compact
+              locale={locale}
+              operationKey={preparing ? "one-turn-preparing" : "one-turn-running"}
+              startedAt={startedAt ?? undefined}
+              expectedSeconds={preparing ? [2, 45] : [30, 900]}
+            />
+          </div>
         </div>
       ) : (
         <button

@@ -26,12 +26,20 @@
 }
 
 /* ── live header (running) ────────────────────────────────────────────── */
+.liveBlock { display: grid; gap: 2px; }
 .live {
   min-height: 26px;
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 2px 0;
+}
+
+.liveEstimate {
+  min-height: 18px;
+  padding-left: 14px;
+  color: var(--work-faint);
+  font-size: 10px;
 }
 
 .liveMark {

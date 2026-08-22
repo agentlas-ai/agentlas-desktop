@@ -80,6 +80,7 @@ import {
 import {
   addOneOrgMember,
   archiveOneOrgMember,
+  createOneTeamAgent,
   getOneOrgState,
   markOneOrgMemberRead,
   reorderOneOrgMembers,
@@ -89,6 +90,12 @@ import {
   setOneOrgMemberTools,
   updateOneOrgMember,
 } from "./one/org";
+import {
+  createOneTaskforce,
+  listOneTaskforces,
+  removeOneTaskforce,
+  updateOneTaskforce,
+} from "./one/taskforces";
 import {
   clearComputerHistory,
   getComputerHistoryState,
@@ -2887,6 +2894,7 @@ export function registerIpcHandlers(): void {
 
   // ── One Team (durable identity bindings; Work still owns execution) ──
   ipcMain.handle("oneOrg:get", () => getOneOrgState());
+  ipcMain.handle("oneOrg:createAgent", (_e, input) => createOneTeamAgent(input));
   ipcMain.handle("oneOrg:add", (_e, input) => addOneOrgMember(input));
   ipcMain.handle("oneOrg:rename", (_e, input) => renameOneOrgMember(input));
   ipcMain.handle("oneOrg:update", (_e, input) => updateOneOrgMember(input));
@@ -2896,6 +2904,18 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("oneOrg:markRead", (_e, input) => markOneOrgMemberRead(input));
   ipcMain.handle("oneOrg:reorder", (_e, input) => reorderOneOrgMembers(input));
   ipcMain.handle("oneOrg:setTools", (_e, input) => setOneOrgMemberTools(input));
+
+  // ── One Taskforces (durable group chats; One is always implicit) ──
+  ipcMain.handle("oneTaskforces:list", () => listOneTaskforces());
+  ipcMain.handle("oneTaskforces:create", (_e, input) => createOneTaskforce(input));
+  ipcMain.handle("oneTaskforces:update", (_e, input) => updateOneTaskforce(input));
+  ipcMain.handle("oneTaskforces:remove", (_e, input) => {
+    const taskforce = listOneTaskforces().find((item) => item.id === input?.id);
+    if (taskforce && invocationService.activeChatIds().includes(taskforce.chatId)) {
+      throw new Error("Stop the active Taskforce run before deleting it.");
+    }
+    removeOneTaskforce(input);
+  });
 
   // ── Computer History (explicit local opt-in; no raw history leaves disk) ──
   ipcMain.handle("computerHistory:get", () => getComputerHistoryState());
@@ -3562,9 +3582,12 @@ export function registerIpcHandlers(): void {
     }
   });
   ipcMain.handle("browser:listLogs", (_e, limit?: number) => browserListLogs(limit));
-  ipcMain.handle("browser:captureLiveFrame", (event) => {
+  ipcMain.handle("browser:captureLiveFrame", (event, preferredUrl?: string, viewport?: "desktop" | "phone") => {
     assertTrustedSitePublishIpcSender(event);
-    return captureBrowserLiveFrame();
+    return captureBrowserLiveFrame(
+      typeof preferredUrl === "string" ? preferredUrl.slice(0, 2_048) : undefined,
+      viewport === "phone" ? "phone" : "desktop",
+    );
   });
   ipcMain.handle("browser:focusLiveTarget", (event, targetId?: string) => {
     assertTrustedSitePublishIpcSender(event);

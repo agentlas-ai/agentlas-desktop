@@ -237,6 +237,33 @@
   background: #fafafa;
 }
 
+/* Task output rail: the same real History/recommendation feed occupies only
+   the resizable lower pane, so it must not inherit the full-page evidence-rail
+   spacing. */
+.root[data-compact="true"] {
+  height: 100%;
+  min-height: 0;
+  padding: 12px 14px 18px;
+  overflow: auto;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+.root[data-compact="true"] .header { gap: 8px; padding-bottom: 9px; }
+.root[data-compact="true"] .header h2 { font-size: 13px; }
+.root[data-compact="true"] .header p { font-size: 8px; }
+.root[data-compact="true"] .headerActions { width: 100%; grid-template-columns: max-content minmax(0, 1fr); }
+.root[data-compact="true"] .headerActions button { min-height: 27px; font-size: 8px; }
+.root[data-compact="true"] .timeline { gap: 10px; margin-top: 8px; padding: 10px 8px 2px; }
+.root[data-compact="true"] .day > summary { margin: 0 0 9px 51px; }
+.root[data-compact="true"] .entry { grid-template-columns: 44px 12px minmax(0, 1fr); }
+.root[data-compact="true"] .entry::before { left: 50px; }
+.root[data-compact="true"] .card { padding-left: 6px; padding-bottom: 12px; }
+.root[data-compact="true"] .card > strong { font-size: 10px; }
+.root[data-compact="true"] .card > p { font-size: 9px; -webkit-line-clamp: 2; }
+.root[data-compact="true"] .apps .appMark { width: 18px; height: 18px; }
+.root[data-compact="true"] .recommendation { padding: 8px 9px; }
+
 /* Final reference pass: the right rail follows the supplied Codex history
    capture — one continuous time column, dotted spine, neutral markers, and an
    inline recommendation block. */

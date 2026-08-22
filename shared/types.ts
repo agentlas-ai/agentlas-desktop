@@ -99,6 +99,8 @@ import type { OneMemoryMapSnapshot } from "./one-memory-map";
 import type {
   AddOneOrgMemberInput,
   ArchiveOneOrgMemberInput,
+  CreateOneTeamAgentInput,
+  CreateOneTeamAgentResult,
   OneOrgCompletionSummary,
   MarkOneOrgMemberReadInput,
   OneOrgState,
@@ -108,6 +110,12 @@ import type {
   SetOneOrgMemberToolsInput,
   UpdateOneOrgMemberInput,
 } from "./one-org";
+import type {
+  CreateOneTaskforceInput,
+  OneTaskforce,
+  RemoveOneTaskforceInput,
+  UpdateOneTaskforceInput,
+} from "./one-taskforces";
 import type { ComputerHistoryDraftPrompt, ComputerHistoryState } from "./computer-history";
 import type {
   AcceptOneSuggestionForReviewInput,
@@ -171,6 +179,8 @@ import type {
 export type {
   AddOneOrgMemberInput,
   ArchiveOneOrgMemberInput,
+  CreateOneTeamAgentInput,
+  CreateOneTeamAgentResult,
   OneOrgMember,
   OneOrgCompletionSummary,
   MarkOneOrgMemberReadInput,
@@ -183,6 +193,12 @@ export type {
   RenameOneOrgMemberInput,
   UpdateOneOrgMemberInput,
 } from "./one-org";
+export type {
+  CreateOneTaskforceInput,
+  OneTaskforce,
+  RemoveOneTaskforceInput,
+  UpdateOneTaskforceInput,
+} from "./one-taskforces";
 export type {
   ComputerHistoryDraftPrompt,
   ComputerHistoryEntry,
@@ -2146,6 +2162,7 @@ export interface BrowserActionLog {
   result: string | null;
   approval: string | null;
 }
+export type BrowserLiveViewport = "desktop" | "phone";
 export interface BrowserLiveFrame {
   available: boolean;
   dataUrl: string | null;
@@ -2155,6 +2172,8 @@ export interface BrowserLiveFrame {
   url: string | null;
   width: number | null;
   height: number | null;
+  /** The real CDP viewport used for this capture. */
+  viewport: BrowserLiveViewport;
   capturedAt: string;
   error: "browser-offline" | "no-page" | "capture-failed" | null;
 }
@@ -6453,6 +6472,7 @@ export interface AgentlasIpc {
   /** Durable One Team bindings; execution remains in canonical Work/Automation. */
   oneOrg: {
     get: () => Promise<OneOrgState>;
+    createAgent: (input: CreateOneTeamAgentInput) => Promise<CreateOneTeamAgentResult>;
     add: (input: AddOneOrgMemberInput) => Promise<OneOrgState>;
     rename: (input: RenameOneOrgMemberInput) => Promise<OneOrgState>;
     update: (input: UpdateOneOrgMemberInput) => Promise<OneOrgState>;
@@ -6462,6 +6482,13 @@ export interface AgentlasIpc {
     markRead: (input: MarkOneOrgMemberReadInput) => Promise<OneOrgState>;
     reorder: (input: ReorderOneOrgMembersInput) => Promise<OneOrgState>;
     setTools: (input: SetOneOrgMemberToolsInput) => Promise<OneOrgState>;
+  };
+  /** Durable group conversations. One is implicit and always present. */
+  oneTaskforces: {
+    list: () => Promise<OneTaskforce[]>;
+    create: (input: CreateOneTaskforceInput) => Promise<OneTaskforce>;
+    update: (input: UpdateOneTaskforceInput) => Promise<OneTaskforce>;
+    remove: (input: RemoveOneTaskforceInput) => Promise<void>;
   };
   /** Opt-in local Computer History summaries and read-only recommendations. */
   computerHistory: {
@@ -6710,7 +6737,8 @@ export interface AgentlasIpc {
     revokePermission: (site: string, actionType: string) => Promise<{ ok: true }>;
     resolveApproval: (requestId: string, decision: BrowserApprovalDecision) => Promise<{ ok: boolean }>;
     listLogs: (limit?: number) => Promise<BrowserActionLog[]>;
-    captureLiveFrame: () => Promise<BrowserLiveFrame>;
+    /** Capture the current task's already-open page when supplied; never navigates. */
+    captureLiveFrame: (preferredUrl?: string, viewport?: BrowserLiveViewport) => Promise<BrowserLiveFrame>;
     focusLiveTarget: (targetId?: string) => Promise<{ ok: boolean }>;
   };
   computerUse: {

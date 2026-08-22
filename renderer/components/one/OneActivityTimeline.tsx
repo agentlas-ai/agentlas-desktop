@@ -7,14 +7,16 @@ import {
   IconClose,
   IconCode,
   IconFileUp,
-  IconFolder,
-  IconImage,
   IconPanelRight,
   IconPlus,
   IconShield,
   IconSparkles,
 } from "@/components/Icon";
+import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { ipc } from "@/lib/ipc";
+import type { BrowserLiveFrame } from "@/lib/types";
+import type { OneArtifactPreviewCapabilityV1 } from "@shared/one-artifacts";
+import type { ComputerHistoryEntry, ComputerHistoryState } from "@shared/computer-history";
 import type {
   OneActivityCode,
   OneActivityArtifact,
@@ -25,9 +27,11 @@ import type {
 import { buildToolCallDisplay, normalizeToolCall } from "@shared/tool-call-detail";
 import { isCommandTool, isComputerUseTool } from "@shared/tool-taxonomy";
 import type { OnePermissionMode } from "./OneComposerControls";
+import { OneComputerHistory } from "./OneComputerHistory";
 import styles from "./OneActivityTimeline.module.css";
 
 const ONE_OUTPUT_SECTIONS_STORAGE_KEY = "agentlas.one.output-sections.v1";
+const ONE_OUTPUT_HISTORY_HEIGHT_STORAGE_KEY = "agentlas.one.output-history-height.v1";
 type OutputSectionKey = "files" | "agents" | "processes" | "computer" | "sources";
 type OutputRailView = "activity" | "terminal" | "browser";
 
@@ -41,6 +45,12 @@ function readCollapsedOutputSections(): Set<OutputSectionKey> {
   } catch {
     return new Set();
   }
+}
+
+function readOutputHistoryHeight(): number {
+  if (typeof window === "undefined") return 250;
+  const value = Number(window.localStorage.getItem(ONE_OUTPUT_HISTORY_HEIGHT_STORAGE_KEY));
+  return Number.isFinite(value) ? Math.min(480, Math.max(150, Math.round(value))) : 250;
 }
 
 function elapsedLabel(ms: number): string {
@@ -383,6 +393,7 @@ export function OneActivityTimeline({
         <span className={styles.count}>{!preparing && visible.length > 0 ? (locale === "ko" ? `${visible.length}개 이벤트` : `${visible.length} events`) : ""}</span>
         <span className={styles.chevron} aria-hidden="true"><IconChevronDown size={13} /></span>
       </button>
+      {active && <div className={styles.activityEta}><LoadingEstimate locale={locale} operationKey={preparing ? "one-run-prepare" : "one-run-execution"} startedAt={startedAt} expectedSeconds={preparing ? [2, 45] : [30, 600]} /></div>}
       {expanded && visible.length > 0 && (
         <div className={styles.rows}>
           {visible.map((item) => (
@@ -398,6 +409,135 @@ async function openArtifact(item: OneActivityArtifact): Promise<void> {
   const bridge = ipc();
   if (!bridge?.oneArtifacts?.open) return;
   await bridge.oneArtifacts.open(item.binding).catch(() => ({ opened: false }));
+}
+
+function ArtifactPreviewCard({ item, locale }: { item: OneActivityArtifact; locale: "ko" | "en" }) {
+  const [preview, setPreview] = useState<OneArtifactPreviewCapabilityV1 | null>(null);
+  const [settled, setSettled] = useState(false);
+  useEffect(() => {
+    const bridge = ipc();
+    if (!bridge?.oneArtifacts?.issuePreview) {
+      setSettled(true);
+      return;
+    }
+    let disposed = false;
+    let issued: OneArtifactPreviewCapabilityV1 | null = null;
+    setPreview(null);
+    setSettled(false);
+    void bridge.oneArtifacts.issuePreview(item.binding)
+      .then((capability) => {
+        if (disposed) {
+          if (capability) void bridge.oneArtifacts.revokePreview({ ...item.binding, capabilityUrl: capability.capabilityUrl }).catch(() => ({ revoked: false }));
+          return;
+        }
+        issued = capability;
+        setPreview(capability);
+        setSettled(true);
+      })
+      .catch(() => setSettled(true));
+    return () => {
+      disposed = true;
+      if (issued) void bridge.oneArtifacts.revokePreview({ ...item.binding, capabilityUrl: issued.capabilityUrl }).catch(() => ({ revoked: false }));
+    };
+  }, [item.binding, item.id]);
+
+  return <article className={styles.artifactPreviewCard} data-preview-kind={preview?.kind ?? "file"}>
+    {preview?.kind === "image" && <button type="button" className={styles.artifactVisual} onClick={() => void openArtifact(item)} aria-label={locale === "ko" ? `${item.label} 열기` : `Open ${item.label}`}>
+      {/* Main issues an opaque, expiring capability URL. Raw paths never enter this renderer. */}
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src={preview.capabilityUrl} alt={item.label} />
+    </button>}
+    {preview?.kind === "video" && <div className={styles.artifactVisual}><video src={preview.capabilityUrl} controls preload="metadata" aria-label={item.label} /></div>}
+    {preview?.kind === "audio" && <div className={`${styles.artifactVisual} ${styles.artifactAudio}`}><audio src={preview.capabilityUrl} controls preload="metadata" aria-label={item.label} /></div>}
+    {!preview && <div className={styles.artifactFileFallback} data-loading={!settled ? "true" : "false"}><IconFileUp size={18} /></div>}
+    <div className={styles.artifactPreviewCopy}>
+      <span><strong>{item.label}</strong><small>{preview
+        ? `${preview.mimeType} · ${Math.max(1, Math.round(preview.sizeBytes / 1024))} KB`
+        : settled ? (locale === "ko" ? "파일" : "File") : (locale === "ko" ? "미리보기 준비 중…" : "Preparing preview…")}</small></span>
+      <button type="button" onClick={() => void openArtifact(item)}>{locale === "ko" ? "열기" : "Open"}</button>
+    </div>
+  </article>;
+}
+
+function taskBrowserUrl(items: OneActivityItem[]): string | undefined {
+  for (const item of [...items].reverse()) {
+    if (item.kind !== "tool" || !/browser.*navigate/iu.test(item.tool?.name ?? "") || !item.tool?.args) continue;
+    try {
+      const value = JSON.parse(item.tool.args) as { url?: unknown };
+      if (typeof value.url !== "string") continue;
+      const parsed = new URL(value.url);
+      if (/^https?:$/u.test(parsed.protocol) && !parsed.username && !parsed.password) return parsed.toString();
+    } catch {
+      // Tool arguments are untrusted runtime text. Invalid JSON/URLs are not a browser source.
+    }
+  }
+  return undefined;
+}
+
+function OneBrowserLiveView({ active, locale, preferredUrl }: { active: boolean; locale: "ko" | "en"; preferredUrl?: string }) {
+  const [frame, setFrame] = useState<BrowserLiveFrame | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [viewport, setViewport] = useState<"desktop" | "phone">("desktop");
+  useEffect(() => {
+    if (!active) return;
+    const bridge = ipc();
+    if (!bridge?.browser?.captureLiveFrame) return;
+    // A changed task URL invalidates the prior frame immediately. Keeping it
+    // while an exact-target capture fails is how a completed Soulin run leaked
+    // into a later Latchwork task's Browser rail.
+    setFrame(null);
+    let disposed = false;
+    let inFlight = false;
+    const capture = async () => {
+      if (disposed || inFlight || document.visibilityState !== "visible") return;
+      inFlight = true;
+      setLoading(true);
+      try {
+        const next = await bridge.browser.captureLiveFrame(preferredUrl, viewport);
+        if (!disposed) setFrame((current) => next.available || !current ? next : current);
+      } catch {
+        // Keep the last confirmed frame visible through a transient capture failure.
+      } finally {
+        inFlight = false;
+        if (!disposed) setLoading(false);
+      }
+    };
+    void capture();
+    const timer = window.setInterval(() => void capture(), 1_500);
+    const onVisibility = () => { if (document.visibilityState === "visible") void capture(); };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  // The live capture owns its own last-frame state; refreshing that frame is
+  // deliberately gated only by tab visibility, not by each frame object.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, preferredUrl, viewport]);
+
+  const currentFrame = frame?.viewport === viewport ? frame : null;
+  const available = Boolean(currentFrame?.available && currentFrame.dataUrl);
+  return <section className={styles.browserLive} data-available={available ? "true" : "false"} data-viewport={viewport}>
+    <div className={styles.browserChrome}>
+      <span aria-hidden="true"><i /><i /><i /></span>
+      <strong>{currentFrame?.title || (locale === "ko" ? "내장 브라우저" : "Built-in browser")}</strong>
+      <div className={styles.browserActions}>
+        <span className={styles.browserViewportToggle} role="tablist" aria-label={locale === "ko" ? "브라우저 화면 크기" : "Browser viewport"}>
+          <button type="button" role="tab" aria-selected={viewport === "desktop"} onClick={() => setViewport("desktop")}>{locale === "ko" ? "웹" : "Web"}</button>
+          <button type="button" role="tab" aria-selected={viewport === "phone"} onClick={() => setViewport("phone")}>{locale === "ko" ? "폰" : "Phone"}</button>
+        </span>
+        {currentFrame?.targetId && <button type="button" onClick={() => void ipc()?.browser.focusLiveTarget(currentFrame.targetId ?? undefined)}>{locale === "ko" ? "열기" : "Open"}</button>}
+      </div>
+    </div>
+    {available
+      // eslint-disable-next-line @next/next/no-img-element
+      ? <div className={styles.browserViewport} data-mode={viewport}>
+          <img src={currentFrame!.dataUrl!} alt={currentFrame?.title || (locale === "ko" ? "내장 브라우저 라이브 화면" : "Live built-in browser view")} />
+        </div>
+      : <div className={styles.browserEmpty}><IconPanelRight size={22} /><strong>{loading ? (locale === "ko" ? "브라우저 화면 불러오는 중…" : "Loading browser view…") : (locale === "ko" ? "열린 브라우저 페이지가 없습니다" : "No browser page is open")}</strong><small>{locale === "ko" ? "에이전트가 브라우저를 사용하면 이곳에 실제 화면이 표시됩니다." : "The real page appears here when an agent uses the built-in browser."}</small>{loading && <LoadingEstimate locale={locale} operationKey="one-browser-live-frame" expectedSeconds={[1, 10]} />}</div>}
+    {currentFrame?.url && <small className={styles.browserUrl}><span>{currentFrame.url}</span>{currentFrame.width && currentFrame.height ? <strong>{currentFrame.width}×{currentFrame.height}</strong> : null}</small>}
+  </section>;
 }
 
 function OutputDisclosure({
@@ -444,6 +584,11 @@ export function OneActivityArtifactRail({
   minWidth = 300,
   maxWidth = 720,
   defaultWidth = 420,
+  computerHistory,
+  onHistoryConsent,
+  onHistoryClear,
+  onHistoryAsk,
+  onHistoryReviewRecommendation,
 }: {
   items: OneActivityArtifact[];
   activity?: OneActivityState;
@@ -458,12 +603,26 @@ export function OneActivityArtifactRail({
   minWidth?: number;
   maxWidth?: number;
   defaultWidth?: number;
+  computerHistory?: ComputerHistoryState | null;
+  onHistoryConsent?: (enabled: boolean) => Promise<void>;
+  onHistoryClear?: () => void;
+  onHistoryAsk?: () => void;
+  onHistoryReviewRecommendation?: (entry: ComputerHistoryEntry) => void;
 }) {
   const [collapsedSections, setCollapsedSections] = useState<Set<OutputSectionKey>>(readCollapsedOutputSections);
   const [railView, setRailView] = useState<OutputRailView>("activity");
   const resizeRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
+  const historyResizeRef = useRef<{ pointerId: number; startY: number; startHeight: number } | null>(null);
   const [resizing, setResizing] = useState(false);
+  const [historyResizing, setHistoryResizing] = useState(false);
+  const [historyHeight, setHistoryHeight] = useState(readOutputHistoryHeight);
   const clampWidth = (value: number) => Math.min(maxWidth, Math.max(minWidth, Math.round(value)));
+  const clampHistoryHeight = (value: number) => Math.min(480, Math.max(150, Math.round(value)));
+  const commitHistoryHeight = (value: number) => {
+    const next = clampHistoryHeight(value);
+    setHistoryHeight(next);
+    try { window.localStorage.setItem(ONE_OUTPUT_HISTORY_HEIGHT_STORAGE_KEY, String(next)); } catch { /* persistence is best effort */ }
+  };
   const agents = useMemo(() => {
     const candidates = activity?.items.filter((item) => item.kind === "agent" || (item.kind === "tool" && item.agentName)) ?? [];
     const unique = new Map<string, OneActivityItem>();
@@ -481,7 +640,23 @@ export function OneActivityArtifactRail({
    */
   const processes = activity?.items.filter((item) => item.kind === "tool" && isCommandTool(item.tool?.name)) ?? [];
   const computerUse = activity?.items.filter((item) => item.kind === "tool" && isComputerUseTool(item.tool?.name)) ?? [];
-  const sources = activity?.sources ?? [];
+  const preferredBrowserUrl = useMemo(() => taskBrowserUrl(activity?.items ?? []), [activity?.items]);
+  const sources = useMemo(() => {
+    const current = activity?.sources ?? [];
+    if (!preferredBrowserUrl || current.some((source) => source.url === preferredBrowserUrl)) return current;
+    return [...current, {
+      id: `source:${preferredBrowserUrl}`,
+      url: preferredBrowserUrl,
+      label: (() => {
+        try {
+          const parsed = new URL(preferredBrowserUrl);
+          return `${parsed.host}${parsed.pathname === "/" ? "" : parsed.pathname}`;
+        } catch { return preferredBrowserUrl; }
+      })(),
+      toolName: "browser_navigate",
+      status: "completed" as const,
+    }];
+  }, [activity?.sources, preferredBrowserUrl]);
   const toggleSection = (section: OutputSectionKey) => {
     setCollapsedSections((current) => {
       const next = new Set(current);
@@ -573,19 +748,12 @@ export function OneActivityArtifactRail({
           </button>
         ))}
       </nav>
+      <div className={styles.artifactContentStack}>
       <div className={styles.artifactList}>
         {railView === "activity" && <>
           <OutputDisclosure section="files" label={locale === "ko" ? "결과물" : "Artifacts"} count={items.length} expanded={sectionExpanded("files")} onToggle={toggleSection}>
             {items.length === 0 && <p className={styles.artifactEmpty}>{locale === "ko" ? "만든 파일 또는 사이트가 여기에 표시됩니다" : "Files or sites you create appear here"}</p>}
-            {items.map((item) => (
-              <button key={item.id} type="button" className={styles.artifact} onClick={() => void openArtifact(item)} title={item.label}>
-                <span className={styles.artifactFileIcon}><IconFileUp size={16} /></span>
-                <span>
-                  <strong>{item.label}</strong>
-                  <small>{item.kind === "image" ? <><IconImage size={11} /> {locale === "ko" ? "이미지" : "Image"}</> : <><IconFolder size={11} /> {locale === "ko" ? "파일" : "File"}</>}</small>
-                </span>
-              </button>
-            ))}
+            {items.map((item) => <ArtifactPreviewCard key={item.id} item={item} locale={locale} />)}
           </OutputDisclosure>
           <OutputDisclosure section="agents" label={locale === "ko" ? "하위 에이전트" : "Subagents"} count={agents.length} expanded={sectionExpanded("agents")} onToggle={toggleSection}>
             {agents.length === 0
@@ -607,15 +775,68 @@ export function OneActivityArtifactRail({
               : computerUse.slice(-3).map((item) => <div key={item.id} className={styles.artifactRuntimeRow}><IconPanelRight size={13} /><span>{item.tool?.name || (locale === "ko" ? "컴퓨터 작업" : "Computer task")}</span><small>{item.status === "completed" ? <IconCheck size={12} /> : null}</small></div>)}
           </OutputDisclosure>
         </>}
-        {railView === "browser" && <OutputDisclosure section="sources" label={locale === "ko" ? "출처·브라우저" : "Sources & browser"} count={sources.length} expanded={sectionExpanded("sources")} onToggle={toggleSection}>
-          {sources.length === 0
-            ? <p className={styles.artifactEmpty}>{locale === "ko" ? "브라우저 출처 없음" : "No browser sources"}</p>
-            : sources.slice(-5).map((source) => <SourceRow key={source.id} source={source} />)}
-        </OutputDisclosure>}
-        <div className={styles.artifactSubrail} aria-label={locale === "ko" ? "기록과 추천" : "History and recommendations"}>
-          <div><strong>{locale === "ko" ? "History" : "History"}</strong><span>{locale === "ko" ? "Computer History에서 관리" : "Managed in Computer History"}</span></div>
-          <div><strong>{locale === "ko" ? "Recommendations" : "Recommendations"}</strong><span>{locale === "ko" ? "초안은 승인 후 실행" : "Drafts require approval"}</span></div>
-        </div>
+        {railView === "browser" && <>
+          <OneBrowserLiveView active={railView === "browser"} locale={locale} preferredUrl={preferredBrowserUrl} />
+          <OutputDisclosure section="sources" label={locale === "ko" ? "출처" : "Sources"} count={sources.length} expanded={sectionExpanded("sources")} onToggle={toggleSection}>
+            {sources.length === 0
+              ? <p className={styles.artifactEmpty}>{locale === "ko" ? "브라우저 출처 없음" : "No browser sources"}</p>
+              : sources.slice(-5).map((source) => <SourceRow key={source.id} source={source} />)}
+          </OutputDisclosure>
+        </>}
+      </div>
+      <div
+        className={styles.artifactHistoryResizeHandle}
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label={locale === "ko" ? "기록 패널 높이 조절" : "Resize history panel"}
+        aria-valuemin={150}
+        aria-valuemax={480}
+        aria-valuenow={historyHeight}
+        tabIndex={0}
+        data-resizing={historyResizing ? "true" : "false"}
+        onPointerDown={(event) => {
+          if (event.button !== 0) return;
+          historyResizeRef.current = { pointerId: event.pointerId, startY: event.clientY, startHeight: historyHeight };
+          event.currentTarget.setPointerCapture(event.pointerId);
+          setHistoryResizing(true);
+          event.preventDefault();
+        }}
+        onPointerMove={(event) => {
+          const drag = historyResizeRef.current;
+          if (!drag || drag.pointerId !== event.pointerId) return;
+          setHistoryHeight(clampHistoryHeight(drag.startHeight + (drag.startY - event.clientY)));
+        }}
+        onPointerUp={(event) => {
+          if (historyResizeRef.current?.pointerId !== event.pointerId) return;
+          historyResizeRef.current = null;
+          setHistoryResizing(false);
+          commitHistoryHeight(historyHeight);
+        }}
+        onPointerCancel={() => {
+          historyResizeRef.current = null;
+          setHistoryResizing(false);
+        }}
+        onDoubleClick={() => commitHistoryHeight(250)}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowUp") commitHistoryHeight(historyHeight + 16);
+          else if (event.key === "ArrowDown") commitHistoryHeight(historyHeight - 16);
+          else if (event.key === "Home") commitHistoryHeight(480);
+          else if (event.key === "End") commitHistoryHeight(150);
+          else return;
+          event.preventDefault();
+        }}
+      />
+      <div className={styles.artifactHistoryPane} style={{ height: historyHeight }} aria-label={locale === "ko" ? "기록과 추천" : "History and recommendations"}>
+        <OneComputerHistory
+          compact
+          state={computerHistory ?? null}
+          locale={locale}
+          onConsent={onHistoryConsent ?? (async () => {})}
+          onClear={onHistoryClear ?? (() => {})}
+          onAsk={onHistoryAsk ?? (() => {})}
+          onReviewRecommendation={onHistoryReviewRecommendation}
+        />
+      </div>
       </div>
     </aside>
   );

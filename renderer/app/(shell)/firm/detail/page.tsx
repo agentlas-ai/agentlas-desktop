@@ -12,6 +12,7 @@ import { classifyAgent } from "@/lib/ownership";
 import type { Chat, InstalledAgent, InstalledFirm, ResolvedOrg, ResolvedNode, WorkspaceNode } from "@/lib/types";
 import type { AgentEvolutionProposalUi, AgentLearningSummary, AgentMemoryEntryUi, ExperienceOntologyGraphSnapshot, ExperienceOntologySummary } from "@shared/types";
 import { AgentAvatar } from "@/components/AgentAvatar";
+import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { ExperienceProfileCard } from "@/components/ExperienceProfileCard";
 import {
   AgentLearningMetricGrid,
@@ -520,10 +521,11 @@ function FirmDetailPage() {
     return (
       <div style={{ flex: 1, overflowY: "auto", background: "var(--paper-2)" }}>
         <section style={{ maxWidth: 720, margin: "24px auto", padding: "0 24px" }}>
-          <div style={firmNotice}>
-            {loading
+          <div style={{ ...firmNotice, display: "grid", gap: 6 }}>
+            <span>{loading
               ? locale === "ko" ? "회사 정보를 불러오는 중입니다…" : "Loading firm details…"
-              : loadMessage || (locale === "ko" ? "회사 정보를 열 수 없습니다." : "Firm details could not be opened.")}
+              : loadMessage || (locale === "ko" ? "회사 정보를 열 수 없습니다." : "Firm details could not be opened.")}</span>
+            {loading && <LoadingEstimate locale={locale} operationKey="desktop-firm-detail" expectedSeconds={[1, 25]} />}
           </div>
         </section>
       </div>

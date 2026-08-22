@@ -21,6 +21,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { pickLocalized } from "@/lib/i18n";
 import { visibleAgents } from "@/lib/agent-visibility";
+import { LoadingEstimate } from "@/components/LoadingEstimate";
 import type {
   GraphAgentBinding,
   GraphBinding,
@@ -106,8 +107,9 @@ export function ConnectionsDialog({ automationId, locale, onClose }: {
         </header>
 
         {loading ? (
-          <div style={{ fontSize: 13, color: "var(--muted-deep)" }}>
-            {ko ? "확인하는 중…" : "Checking…"}
+          <div style={{ fontSize: 13, color: "var(--muted-deep)", display: "grid", gap: 5 }}>
+            <span>{ko ? "확인하는 중…" : "Checking…"}</span>
+            <LoadingEstimate locale={ko ? "ko" : "en"} operationKey="desktop-automation-connections" expectedSeconds={[2, 15]} />
           </div>
         ) : failed ? (
           <div style={{ display: "grid", gap: 4 }}>

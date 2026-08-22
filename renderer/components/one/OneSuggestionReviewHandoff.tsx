@@ -14,6 +14,7 @@ import type {
 } from "@/lib/types";
 import { isOneSuggestionReviewSeed } from "@shared/one-review-seed";
 import { isOneHubDerivativeDraft } from "@shared/one-hub-derivative";
+import { LoadingEstimate } from "@/components/LoadingEstimate";
 import styles from "./OneSuggestionReviewHandoff.module.css";
 
 type ReviewFallbackKey =
@@ -253,7 +254,8 @@ export function OneSuggestionReviewHandoffBanner({
   }
   if (!handoff) {
     return <section className={styles.loading} role="status" data-one-review-state="loading">
-      {tFor(locale, "one.rev.loading")}
+      <span>{tFor(locale, "one.rev.loading")}</span>
+      <LoadingEstimate locale={locale} operationKey="one-suggestion-review" expectedSeconds={[1, 15]} />
     </section>;
   }
 

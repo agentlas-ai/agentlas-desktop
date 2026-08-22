@@ -120,6 +120,13 @@ function safePayload(input: Record<string, unknown> | undefined): Record<string,
       out[key] = truncate(value, 1_200);
       continue;
     }
+    // Typed Taskforce handoffs are already redacted and bounded by Main. Keep
+    // their endpoint/status capsule intact so a later timeline replay does not
+    // turn an exact peer result back into a misleading prefix-only preview.
+    if (key === "agentMessageText" && typeof value === "string") {
+      out[key] = truncate(value, 2_400);
+      continue;
+    }
     if (typeof value === "string") {
       out[key] = truncate(value, 800);
     } else if (typeof value === "number" || typeof value === "boolean") {
@@ -330,6 +337,11 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     activityCode: ev.activity?.code,
     phase: ev.phase,
     delegateTo: ev.delegateTo,
+    // The row's agent_id remains the durable installed/runtime identity for
+    // accounting. Preserve the orchestration node separately so replay can
+    // reconnect a named worker to the same visible handoff edge.
+    agentNodeId: ev.agentId,
+    runtimeAgentId: ev.runtimeAgentId,
     role: ev.role,
     modelRole: ev.modelRole,
     agentName: ev.agentName,

@@ -15,6 +15,7 @@ import type {
   OneProfile,
 } from "@/lib/types";
 import { OneBottomSheet } from "./OneBottomSheet";
+import { LoadingEstimate } from "@/components/LoadingEstimate";
 import styles from "./OneProfileSheet.module.css";
 
 const PROFILE_SUBTITLE_FALLBACK: Record<Locale, string> = {
@@ -240,7 +241,7 @@ export function OneProfileSheet({
       description={profileSubtitle(locale)}
     >
         {!profile ? (
-          <div className={styles.loading} role="status">{tFor(locale, "one.prof.loading")}</div>
+          <div className={styles.loading} role="status"><span>{tFor(locale, "one.prof.loading")}</span><LoadingEstimate locale={locale} operationKey="one-profile-load" expectedSeconds={[1, 15]} /></div>
         ) : (
           <div className={styles.content}>
             {(message || error) && (

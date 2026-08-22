@@ -329,9 +329,9 @@ export interface OneSurfaceAgentBuildBlock {
   agentName: string;
   agentSlug?: string;
   /**
-   * 사람이 읽는 빌드 사양. One 의 [빌드 열기] 가 이 문장을 Build 화면의 요청 칸에
-   * 실어 보낸다 — 이게 없으면 카드를 눌러도 빈 화면이 열려 사용자가 방금 One 과
-   * 합의한 사양을 손으로 다시 쓰게 된다.
+   * 사람이 읽는 빌드 사양. One 의 결과 카드가 이 문장을 One Team 내부 생성
+   * 모달의 설명 칸에 실어 보낸다. 선택·생성·업로드한 캐릭터 초안은 유지되므로
+   * 사용자가 같은 사양을 다시 쓰거나 이미지 작업을 잃지 않는다.
    */
   request?: string;
   stages: Array<{

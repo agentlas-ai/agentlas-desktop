@@ -4748,10 +4748,22 @@ export function initStore(options: StoreInitOptions = {}): void {
       summary_json TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS one_taskforces (
+      id TEXT PRIMARY KEY,
+      chat_id TEXT NOT NULL UNIQUE,
+      title TEXT NOT NULL,
+      member_agent_ids_json TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      revision INTEGER NOT NULL DEFAULT 1,
+      FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE
+    );
     CREATE INDEX IF NOT EXISTS idx_one_org_members_order
       ON one_org_members(archived_at, sort_order, added_at);
     CREATE INDEX IF NOT EXISTS idx_one_org_members_agent
       ON one_org_members(installed_agent_id);
+    CREATE INDEX IF NOT EXISTS idx_one_taskforces_updated
+      ON one_taskforces(updated_at DESC);
   `);
   // v99 was already shipped before the pending-kind/cache columns existed.
   // Keep the schema version stable while making the append-only table upgrade

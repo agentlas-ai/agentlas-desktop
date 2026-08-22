@@ -8,6 +8,7 @@ import { pickLocalized, useT } from "@/lib/i18n";
 import type { Automation, InstalledAgent, InstalledFirm } from "@/lib/types";
 import { IconBolt, IconBuilding, IconTrash } from "@/components/Icon";
 import { RunHistoryPanel } from "@/components/automation/RunHistoryPanel";
+import { LoadingEstimate } from "@/components/LoadingEstimate";
 
 export default function AutomationDetailWrapper() {
   return (
@@ -107,10 +108,11 @@ function AutomationDetailPage() {
     return (
       <div style={{ flex: 1, overflowY: "auto", background: "var(--paper-2)" }}>
         <section style={{ maxWidth: 640, margin: "24px auto", padding: "0 24px" }}>
-          <div style={noticeBox}>
-            {loading
+          <div style={{ ...noticeBox, display: "grid", gap: 6 }}>
+            <span>{loading
               ? locale === "en" ? "Loading automation…" : "자동화를 불러오는 중입니다…"
-              : error || (locale === "en" ? "Automation could not be opened." : "자동화를 열 수 없습니다.")}
+              : error || (locale === "en" ? "Automation could not be opened." : "자동화를 열 수 없습니다.")}</span>
+            {loading && <LoadingEstimate locale={locale} operationKey="desktop-automation-detail" expectedSeconds={[1, 20]} />}
           </div>
         </section>
       </div>

@@ -236,8 +236,8 @@ function mergeHandoffs(
   observedAt: string,
 ): OneActivityHandoff[] {
   const sourceId = nonEmptyAgentId(event.agentMessage?.fromAgentId)
-    ?? nonEmptyAgentId(event.runtimeAgentId)
-    ?? nonEmptyAgentId(event.agentId);
+    ?? nonEmptyAgentId(event.agentId)
+    ?? nonEmptyAgentId(event.runtimeAgentId);
   if (!sourceId) return current;
   const targets = new Set<string>();
   for (const target of event.delegateTo ?? []) {
@@ -245,11 +245,24 @@ function mergeHandoffs(
     if (id && id !== sourceId) targets.add(id);
   }
   const message = event.agentMessage;
-  const observedAgentId = nonEmptyAgentId(event.runtimeAgentId) ?? nonEmptyAgentId(event.agentId);
+  // `agentId` is the orchestration node used by delegateTo; runtimeAgentId is
+  // the installed memory/accounting owner. Topology must prefer the former.
+  const observedAgentId = nonEmptyAgentId(event.agentId) ?? nonEmptyAgentId(event.runtimeAgentId);
   const observedAgentName = event.agentName?.trim() || undefined;
   const messageTarget = nonEmptyAgentId(message?.toAgentId);
   if (messageTarget && messageTarget !== sourceId) targets.add(messageTarget);
-  if (targets.size === 0) return current;
+  if (targets.size === 0) {
+    if (!observedAgentId || !observedAgentName) return current;
+    return current.map((candidate) => ({
+      ...candidate,
+      ...(candidate.fromAgentId === observedAgentId && !candidate.fromAgentName
+        ? { fromAgentName: observedAgentName }
+        : {}),
+      ...(candidate.toAgentId === observedAgentId && !candidate.toAgentName
+        ? { toAgentName: observedAgentName }
+        : {}),
+    }));
+  }
 
   let next = current;
   for (const targetId of targets) {
@@ -302,9 +315,15 @@ function mergeHandoffs(
   // Worker activity often arrives after the outgoing delegation envelope. Use
   // its typed identity/name to label the target without parsing status copy.
   if (observedAgentId && observedAgentName) {
-    next = next.map((candidate) => candidate.toAgentId === observedAgentId
-      ? { ...candidate, toAgentName: candidate.toAgentName ?? observedAgentName }
-      : candidate);
+    next = next.map((candidate) => ({
+      ...candidate,
+      ...(candidate.fromAgentId === observedAgentId
+        ? { fromAgentName: candidate.fromAgentName ?? observedAgentName }
+        : {}),
+      ...(candidate.toAgentId === observedAgentId
+        ? { toAgentName: candidate.toAgentName ?? observedAgentName }
+        : {}),
+    }));
   }
   return next;
 }
@@ -373,7 +392,11 @@ export function reduceOneActivity(
   // (`firm-orchestrator` emits them on tool-use), so project them before the
   // ordinary activity branches. This keeps the existing runtime contract and
   // gives the chat a read-only handoff projection.
-  if (event.delegateTo?.length || event.agentMessage) {
+  if (
+    event.delegateTo?.length
+    || event.agentMessage
+    || (event.agentName?.trim() && (event.agentId || event.runtimeAgentId))
+  ) {
     handoffs = mergeHandoffs(handoffs, event, observedAt);
   }
 
@@ -853,13 +876,17 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
       if (delegateTo || agentMessage) {
         const agentName = ledgerString(payload, "agentName");
         const role = ledgerString(payload, "role");
+        const topologyAgentId = ledgerString(payload, "agentNodeId") || row.agentId;
         const rawPhase = ledgerString(payload, "phase");
         const phase = rawPhase === "plan" || rawPhase === "delegate" || rawPhase === "synthesize"
           ? rawPhase
           : undefined;
         apply({
           kind: "tool-use",
-          ...(row.agentId ? { agentId: row.agentId } : {}),
+          ...(topologyAgentId ? { agentId: topologyAgentId } : {}),
+          ...(ledgerString(payload, "runtimeAgentId")
+            ? { runtimeAgentId: ledgerString(payload, "runtimeAgentId") }
+            : {}),
           ...(agentName ? { agentName } : {}),
           ...(role ? { role } : {}),
           ...(phase ? { phase } : {}),

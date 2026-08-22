@@ -30,6 +30,7 @@ import type { Automation, WorkflowGraph, WorkflowNode, WorkflowNodeRunState } fr
 import { layoutGraph, needsLayout } from "@shared/graph-layout";
 import { validateWorkflow, type WorkflowIssue } from "@/lib/workflow-validate";
 import { workflowNodeTypes, type NodeStrings, type WorkflowNodeData } from "@/components/automation/nodes";
+import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { NODE_ACCENT } from "@/components/automation/nodes/nodeShared";
 import { NodePalette, type PaletteNodeSeed } from "@/components/automation/NodePalette";
 import { NodeConfigPanel } from "@/components/automation/NodeConfigPanel";
@@ -1154,10 +1155,11 @@ function AutomationFlowPage() {
     return (
       <div style={{ flex: 1, overflowY: "auto", background: "var(--paper-2)" }}>
         <section style={{ maxWidth: 640, margin: "24px auto", padding: "0 24px" }}>
-          <div style={noticeBox}>
-            {loading
+          <div style={{ ...noticeBox, display: "grid", gap: 6 }}>
+            <span>{loading
               ? locale === "en" ? "Loading automation…" : "자동화를 불러오는 중입니다…"
-              : error || (locale === "en" ? "Automation could not be opened." : "자동화를 열 수 없습니다.")}
+              : error || (locale === "en" ? "Automation could not be opened." : "자동화를 열 수 없습니다.")}</span>
+            {loading && <LoadingEstimate locale={locale} operationKey="desktop-automation-flow" expectedSeconds={[1, 25]} />}
           </div>
         </section>
       </div>

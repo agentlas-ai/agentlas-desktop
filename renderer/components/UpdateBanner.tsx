@@ -13,9 +13,10 @@ import { IconChevronDown, IconClose, IconRefresh, IconSparkles } from "@/compone
 import { ipc, updaterEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import type { UpdaterState } from "@/lib/types";
+import { LoadingEstimate } from "./LoadingEstimate";
 
 export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
-  const { t } = useT();
+  const { t, locale } = useT();
   const [state, setState] = useState<UpdaterState>({ status: "idle" });
   /** 사용자가 "나중에" 누른 버전. 그 버전에 대해서는 더 이상 안 띄움 */
   const [dismissedVersion, setDismissedVersion] = useState<string | null>(null);
@@ -234,9 +235,10 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
         <>
           <Spinner />
           <span className="sidenav-update-copy">
-            {state.status === "available"
+            <span>{state.status === "available"
               ? t("update.found", { version: state.version ?? "?" })
-              : t("update.downloading", { pct: state.progress ?? 0 })}
+              : t("update.downloading", { pct: state.progress ?? 0 })}</span>
+            {!collapsed && <LoadingEstimate locale={locale} operationKey="desktop-update-download" expectedSeconds={[60, 600]} progress={state.progress} compact />}
           </span>
         </>
       )}

@@ -3,6 +3,7 @@
 // 라우트 변경 시 resetKey(보통 pathname)가 바뀌면 자동으로 복구된다.
 "use client";
 import { Component, type ReactNode } from "react";
+import { LoadingEstimate } from "./LoadingEstimate";
 
 // 클래스 컴포넌트라 useT() 훅을 쓸 수 없어, i18n과 동일한 override 키를 직접 읽는다.
 // (lib/i18n.tsx: STORAGE_KEY "agentlas.locale", SSR 기본값 en)
@@ -79,6 +80,7 @@ export class ErrorBoundary extends Component<Props, State> {
             ? "현재 작업은 그대로 보존됩니다. 잠시 후 이 화면에서 이어집니다."
             : "Your current work is preserved. This view will resume shortly."}
         </p>
+        <LoadingEstimate locale={ko ? "ko" : "en"} operationKey="desktop-view-recovery" expectedSeconds={[2, 3]} />
       </div>
     );
   }
