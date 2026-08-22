@@ -9,14 +9,19 @@ const types = readFileSync(resolve(root, "shared/types.ts"), "utf8");
 const ledger = readFileSync(resolve(root, "electron/store/run-events.ts"), "utf8");
 const oneShell = readFileSync(resolve(root, "renderer/components/one/OneShell.tsx"), "utf8");
 const client = readFileSync(resolve(root, "electron/mcp/client.ts"), "utf8");
+const codex = readFileSync(resolve(root, "electron/runtime/codex.ts"), "utf8");
 
 // The grant is explicit and bounded: a full parent can only mint a write
 // implementation worker, while planner/synthesis/repair remain read-only.
 assert.match(taskForce, /export function taskForceChildPermission/);
-assert.match(taskForce, /role === "worker" && inputType === "implementation"/);
+assert.match(taskForce, /role === "worker" && \(inputType === "implementation" \|\| toolRequired\)/);
+assert.match(taskForce, /packet\.allocation\.requirements\.toolRequired/);
+assert.match(taskForce, /approvalChatId: p\.chat\.id/, "child live approvals must route to the visible Taskforce chat, not an internal runtime session");
+assert.match(taskForce, /packet\.allocation\.requirements\.toolRequired[\s\S]{0,180}auto_review/, "an explicit tool packet must have a reviewer even though its internal worker has no approval UI");
 assert.match(taskForce, /const managerRunnerBase = taskForceRunnerBase\(p, "read"\)/);
 assert.match(taskForce, /permission: role === "worker" \? workerPermission : "read"/);
 assert.match(taskForce, /permissions: workerPermission/);
+assert.match(codex, /approvalPolicy: policy\.approvalPolicy,[\s\S]{0,120}approvalsReviewer,[\s\S]{0,180}sandboxPolicy: policy\.sandboxPolicy/, "resident turns must reassert both approval policy and reviewer");
 assert.match(firm, /export function firmNodePermission/);
 assert.match(firm, /turn\.phase === "delegate" \? "write" : "read"/);
 assert.match(firm, /permission: .*nodePermission/);

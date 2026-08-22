@@ -656,7 +656,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       runtime: spec.id,
       sessionKey: `${spec.id}:${req.sessionFingerprintSeed ?? req.cwd ?? "default"}`,
       cwd,
-      chatId: req.chatId,
+      chatId: req.approvalChatId ?? req.chatId,
       agentId: req.agentId,
       unattended: req.unattended === true,
     });

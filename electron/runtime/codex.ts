@@ -850,6 +850,7 @@ async function runCodexResidentTurn(input: {
   const cwd = req.cwd ?? agentRunCwd();
   const env = req.env ?? process.env;
   const policy = codexThreadPolicy(req.permission);
+  const approvalsReviewer = req.approvalsReviewer ?? "user";
   /*
    * 스폰 형상 — `-c` 는 app-server 하위 명령의 옵션이다(실측 `codex app-server --help`).
    * reasoning summary 를 켜는 것은 exec 경로와 같은 이유다(끄면 요약 아이템이 비어 온다).
@@ -857,7 +858,7 @@ async function runCodexResidentTurn(input: {
   const args = [...CODEX_APP_SERVER_ARGS, "-c", "model_reasoning_summary=auto", ...mcpArgs];
   const pool = codexSessionPool();
   const poolKey = codexPoolKey({
-    chatId,
+    chatId: req.approvalChatId ?? chatId,
     fingerprint,
     cwd,
     bin,
@@ -1120,6 +1121,7 @@ async function runCodexResidentTurn(input: {
       const startParams: Record<string, unknown> = {
         cwd,
         approvalPolicy: policy.approvalPolicy,
+        approvalsReviewer,
         sandbox: policy.sandbox,
         ...(req.model ? { model: req.model } : {}),
       };
@@ -1169,6 +1171,12 @@ async function runCodexResidentTurn(input: {
       threadId: session.threadId,
       input: [{ type: "text", text: promptText }],
       cwd,
+      // Reassert sticky policy on every turn. A resident thread can survive a
+      // permission/reviewer change, and inheriting its previous values would
+      // either over-grant the next role or strand an internal tool worker on a
+      // user approval surface it cannot render.
+      approvalPolicy: policy.approvalPolicy,
+      approvalsReviewer,
       sandboxPolicy: policy.sandboxPolicy,
       ...(req.model ? { model: req.model } : {}),
       ...(appliedEffort ? { effort: appliedEffort } : {}),
@@ -1365,6 +1373,10 @@ export const runCodex: Runner = async (
   // 앱이 모델을 갖고 있으면 그 모델이 반드시 이긴다. 없으면 기기 설정을 따른다(BYOM 존중).
   // `--model`/`-c`는 `exec`와 `exec resume` 둘 다 지원 확인됨(0.133+).
   const modelArgs: string[] = [];
+  // `codex exec` has no interactive approval loop. Keep ordinary calls on the
+  // user reviewer and opt only Main-authored internal tool workers into the
+  // bounded auto reviewer; this mirrors app-server's typed turn override.
+  modelArgs.push("-c", `approvals_reviewer="${runReq.approvalsReviewer ?? "user"}"`);
   // reasoning summary 아이템을 켠다 — 실측(codex 0.147): 이 설정 없이는 `--json`에
   // reasoning 아이템이 0건이라 화면이 "생각 중" 외에 아무것도 말할 수 없었다. 켜면
   // 모델이 낸 헤드라인("**Preparing file count command execution**")이 아이템으로 온다.

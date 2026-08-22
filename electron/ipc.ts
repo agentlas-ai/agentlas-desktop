@@ -4656,8 +4656,14 @@ export function registerIpcHandlers(): void {
     if (!current || typeof current !== "object" || typeof current.request !== "string") {
       return { ok: false, code: "INTERVIEW_STATE_INVALID", reason: "만들 내용을 읽지 못했습니다.", nextAction: "무엇을 자동으로 하고 싶은지 한 문장으로 말씀해 주세요." };
     }
-    const { callConnectedModelDetailed } = require("./system-agents/judgment") as typeof import("./system-agents/judgment");
+    const {
+      callConnectedModelDetailed,
+      awaitConnectedModelRunnerWithAbortGrace,
+    } = require("./system-agents/judgment") as typeof import("./system-agents/judgment");
     const { MAX_SELF_CORRECTIONS } = require("./workflow/graph-interview") as typeof import("./workflow/graph-interview");
+    // 한 번의 사람 답변은 스스로 고치는 재시도까지 모두 합쳐 2분 안에 끝난다.
+    // 각 재시도마다 2분을 새로 주면 화면의 남은 시간과 실제 대기가 서로 다른 약속이 된다.
+    const interviewDeadline = Date.now() + 120_000;
 
     /**
      * 한 턴 안에서 **스스로 고칠 기회**를 정해진 횟수만큼 준다.
@@ -4692,7 +4698,7 @@ export function registerIpcHandlers(): void {
         const detailedTurn = await callConnectedModelDetailed({
           systemPrompt: "You return only compact JSON. No prose.",
           input: buildInterviewPrompt(attempt, currentUiLocale()),
-          timeoutMs: 120_000,
+          timeoutMs: Math.max(1, interviewDeadline - Date.now()),
           // 그래프를 **짓는** 호출이다 — 조회 도구와 이미 동의된 MCP 가 함께 간다.
           // (판정 호출부는 이 깃발을 켜지 않으므로 무도구 잠금이 그대로 유지된다.)
           authoring: true,
@@ -4804,7 +4810,13 @@ export function registerIpcHandlers(): void {
         // 특화도 Hub도 못 찾은 슬롯의 기본 러너 = 상주 오케스트레이터. 이게 없으면
         // AGENT 노드가 no-runner로 멈춰 "만들었는데 안 도는" 그래프가 된다(실측).
         const orchestrator = installedAgents.find((a) => a.id === "builtin-agentlas-orchestrator");
-        staffing = await staffGraph(built.graph, {
+        const staffingController = new AbortController();
+        const staffingBudgetMs = Math.max(1, Math.min(8_000, interviewDeadline - Date.now()));
+        const staffingTimer = setTimeout(() => {
+          staffingController.abort(new Error("Graph staffing timed out"));
+        }, staffingBudgetMs);
+        try {
+          staffing = await awaitConnectedModelRunnerWithAbortGrace(staffGraph(built.graph, {
           installed: installedAgents.map((a) => ({
             id: a.id, name: a.name, ...(a.tagline ? { tagline: a.tagline } : {}),
           })),
@@ -4812,7 +4824,10 @@ export function registerIpcHandlers(): void {
           ...(orchestrator
             ? { defaultRunnerRef: orchestrator.id, defaultRunnerLabel: orchestrator.name }
             : {}),
-        });
+          }), staffingController.signal);
+        } finally {
+          clearTimeout(staffingTimer);
+        }
         staffedGraph = applyStaffing(built.graph, staffing);
       } catch {
         // 편성 실패는 그래프 실패가 아니다 — 기본 에이전트로 도는 그래프가 나온다.

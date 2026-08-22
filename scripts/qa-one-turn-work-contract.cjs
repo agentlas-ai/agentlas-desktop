@@ -273,8 +273,9 @@ check("rows without timestamps fall back to the last prompt row; the live run is
 const shell = read("renderer/components/one/OneShell.tsx");
 const turnWorkView = read("renderer/components/one/OneTurnWork.tsx");
 check("OneShell draws one block per turn and never hides the Markdown answer", () => {
-  assert.match(shell, /\{blocksAfter\.map\(\(block\) => \(\s*<OneTurnWork/, "settled turns must render their own block");
-  assert.match(shell, /\{liveBefore && !preflightPrompt && liveWorkBlock\}/, "the live block sits before the streaming answer");
+  assert.match(shell, /\{blocksAfter\.map\(\(block\) => \([\s\S]{0,180}!activeTaskforce && <OneTurnWork/, "settled direct turns must render their own work block");
+  assert.match(shell, /\{blocksAfter\.map\(\(block\) => \([\s\S]{0,1200}activeTaskforce && <OneTaskforceConversation/, "settled Taskforce turns must render teammate messages instead of machine receipts");
+  assert.match(shell, /\{liveBefore && !preflightPrompt && <>[\s\S]{0,100}\{liveWorkBlock\}/, "the live block sits before the streaming answer");
   assert.match(shell, /api\.runLedger\.chatTimeline\(chatId/, "past turns are projected from the ledger");
   assert.match(shell, /const visibleText = visibleOneMessageText\(message\);/, "the answer renders as written");
   assert.doesNotMatch(shell, /dedicatedResultMessageId|narrativeResultMessage/, "no result card may replace the answer");

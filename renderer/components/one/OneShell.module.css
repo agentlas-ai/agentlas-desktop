@@ -1077,6 +1077,54 @@
   color: #272a2d;
 }
 
+.taskforceMessageMeta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 36px;
+  margin-bottom: 3px;
+}
+
+.taskforceMessageMeta > span {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  color: #9a9fa2;
+  font-size: 11px;
+}
+
+.taskforceMessageMeta strong {
+  color: #2c3033;
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.taskforceMessageMeta time {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.message[data-taskforce="true"][data-role="assistant"] .messageBody {
+  max-width: min(760px, calc(92% - 46px));
+  margin-left: 46px;
+  padding: 10px 12px;
+  border: 1px solid #e4e7e6;
+  border-radius: 3px 14px 14px 14px;
+  background: #f4f5f4;
+  font-size: 13px;
+  line-height: 1.62;
+}
+
+.message[data-taskforce="true"][data-role="user"] {
+  display: grid;
+  justify-items: end;
+}
+
+.message[data-taskforce="true"][data-role="user"] .taskforceMessageMeta {
+  min-height: 20px;
+  margin-bottom: 3px;
+}
+
 .message[data-role="system"] .messageBody {
   padding: 12px 14px;
   border-left: 3px solid #bd5c50;
@@ -2356,7 +2404,6 @@
 .failureCardActions { display: flex; flex-wrap: wrap; gap: 7px; }
 .failureCardActions button { border: 1px solid rgba(177, 59, 42, 0.28); border-radius: 8px; background: #fff; padding: 6px 10px; color: #6e2d24; cursor: pointer; }
 .failureCardActions button:disabled { opacity: .45; cursor: not-allowed; }
-.failureReceipt { margin: 10px 0 0; padding: 9px; overflow: auto; border-radius: 8px; background: rgba(75, 33, 27, 0.06); font: 11px/1.45 var(--font-mono, ui-monospace); }
 
 /* --------------------------------------------------------------------------
  * One inbox shell — the desktop reference is a fixed organisation / chat /

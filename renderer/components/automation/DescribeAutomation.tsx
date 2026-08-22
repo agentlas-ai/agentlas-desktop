@@ -10,6 +10,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ipc, ipcEvents } from "@/lib/ipc";
+import { LoadingEstimate } from "@/components/LoadingEstimate";
 import type { GraphBuildRecoveryPlan, WorkflowGraph } from "@/lib/types";
 import { humanSchedule } from "@shared/graph-blueprint";
 
@@ -23,9 +24,12 @@ interface Ready {
 
 const MAX_ROUNDS = 6;
 
-export function DescribeAutomation({ locale, onCreated }: {
+export function DescribeAutomation({ locale, onCreated, openAfterCreate = true, onOpenAutomation }: {
   locale: "ko" | "en";
-  onCreated: () => void;
+  onCreated: (automationId: string) => void;
+  /** One keeps the completed draft in its interview instead of ejecting to the canvas. */
+  openAfterCreate?: boolean;
+  onOpenAutomation?: (automationId: string) => void;
 }) {
   const ko = locale === "ko";
   const router = useRouter();
@@ -53,6 +57,7 @@ export function DescribeAutomation({ locale, onCreated }: {
   // ★저장 후 상태 — 실측: 저장이 조용히 끝나고 화면 전환이 늦자 사람이 버튼을 8번 눌러
   //   같은 그래프 사본이 8개 쌓였다. 저장했으면 "저장했고 이동 중"이라고 말해야 한다.
   const [saved, setSaved] = useState(false);
+  const [savedId, setSavedId] = useState<string | null>(null);
   // 확인 화면에서 "고칠 점"을 말하면 인터뷰로 되돌아간다 — 취소가 전부 버리면 안 된다.
   const [revision, setRevision] = useState("");
   /**
@@ -199,8 +204,9 @@ export function DescribeAutomation({ locale, onCreated }: {
       //   저장 직후 reset()으로 카드를 지우면 — 특히 이동이 느릴 때 — 사람 눈에는
       //   "아무 일도 안 일어남"으로 보이고, 버튼을 다시 누른다(실측: 사본 8개).
       setSaved(true);
-      onCreated();
-      router.push(`/automation/flow?id=${res.id}`);
+      setSavedId(res.id);
+      onCreated(res.id);
+      if (openAfterCreate) router.push(`/automation/flow?id=${res.id}`);
     } catch {
       // 조용한 실패 금지 — 예외가 나가면 버튼만 풀리고 아무 말이 없다.
       setProblem({
@@ -278,7 +284,7 @@ export function DescribeAutomation({ locale, onCreated }: {
 
   function reset() {
     setRequest(""); setState(null); setQuestions([]); setDrafts({}); setReady(null); setProblem(null);
-    setSaved(false); setRevision("");
+    setSaved(false); setSavedId(null); setRevision("");
   }
 
   const mutations = (ready?.graph.nodes ?? []).filter((n) => n.config?.effect === "mutation");
@@ -328,6 +334,12 @@ export function DescribeAutomation({ locale, onCreated }: {
           ))}
         </ol>
       ) : null}
+      {busy ? <LoadingEstimate
+        locale={locale}
+        operationKey={ready ? "one-graph-preflight-save" : "one-graph-interview"}
+        expectedSeconds={ready ? [2, 45] : [10, 120]}
+        hardMaxSeconds={ready ? 46 : 121}
+      /> : null}
 
       {questions.length > 0 ? (
         <div data-testid="describe-questions" style={{ display: "grid", gap: 12 }}>
@@ -445,13 +457,22 @@ export function DescribeAutomation({ locale, onCreated }: {
           </div>
           {saved ? (
             <div data-testid="describe-saved" style={{
-              display: "flex", alignItems: "center", gap: 8,
+              display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
               padding: "10px 12px", borderRadius: "var(--radius-sm)",
               background: "var(--paper-2)", border: "1px solid var(--paper-edge)",
               fontSize: 13, fontWeight: 600, color: "var(--ink)",
             }}>
-              <span className="describe-spinner" aria-hidden />
-              {ko ? "저장했습니다 — 캔버스로 이동하는 중…" : "Saved — opening the canvas…"}
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                {openAfterCreate && <span className="describe-spinner" aria-hidden />}
+                {openAfterCreate
+                  ? (ko ? "저장했습니다 — 캔버스로 이동하는 중…" : "Saved — opening the canvas…")
+                  : (ko ? "자동화 초안을 저장했습니다. 아직 꺼진 상태입니다." : "Automation draft saved. It remains switched off.")}
+              </span>
+              {!openAfterCreate && savedId && <button
+                type="button"
+                style={btn(false)}
+                onClick={() => onOpenAutomation ? onOpenAutomation(savedId) : router.push(`/automation/flow?id=${savedId}`)}
+              >{ko ? "정밀 편집" : "Precise editor"}</button>}
             </div>
           ) : (
             <>

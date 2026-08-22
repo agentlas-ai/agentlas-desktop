@@ -93,6 +93,7 @@ export const LoadingEstimate = memo(function LoadingEstimate({
   operationKey,
   startedAt,
   expectedSeconds,
+  hardMaxSeconds,
   progress,
   compact = false,
   inverse = false,
@@ -106,6 +107,8 @@ export const LoadingEstimate = memo(function LoadingEstimate({
   startedAt?: number | null;
   /** Honest cold-start range used until three local completions have been observed. */
   expectedSeconds?: ExpectedSeconds;
+  /** Lifecycle ceiling enforced by the operation itself; learned history may not exceed it. */
+  hardMaxSeconds?: number;
   /** 0..1 or 0..100. When present, remaining time is derived from actual progress. */
   progress?: number | null;
   compact?: boolean;
@@ -137,13 +140,19 @@ export const LoadingEstimate = memo(function LoadingEstimate({
   const elapsed = Math.max(0, (now - anchor) / 1_000);
   const normalizedProgress = normalizeProgress(progress);
   const observedRange = useMemo(() => learnedRange(samples), [samples]);
+  const lifecycleRemaining = typeof hardMaxSeconds === "number" && Number.isFinite(hardMaxSeconds)
+    ? Math.max(0, hardMaxSeconds - elapsed)
+    : null;
 
   let remainingLabel: string;
   let basis: "progress" | "history" | "range" | "unknown" = "unknown";
   if (normalizedProgress !== null && normalizedProgress >= 0.04 && elapsed >= 4) {
-    const remaining = normalizedProgress >= 0.995
+    const projectedRemaining = normalizedProgress >= 0.995
       ? 0
       : clamp((elapsed / normalizedProgress) * (1 - normalizedProgress), 0, 60 * 60);
+    const remaining = lifecycleRemaining === null
+      ? projectedRemaining
+      : Math.min(projectedRemaining, lifecycleRemaining);
     remainingLabel = remaining <= 8
       ? (locale === "ko" ? "곧 완료" : "Finishing soon")
       : (locale === "ko"
@@ -151,7 +160,13 @@ export const LoadingEstimate = memo(function LoadingEstimate({
           : `About ${formatDuration(remaining, locale)} left`);
     basis = "progress";
   } else {
-    const range = observedRange ?? expectedSeconds ?? null;
+    const learnedOrExpected = observedRange ?? expectedSeconds ?? null;
+    const range = learnedOrExpected && typeof hardMaxSeconds === "number" && Number.isFinite(hardMaxSeconds)
+      ? [
+          Math.min(learnedOrExpected[0], Math.max(1, hardMaxSeconds)),
+          Math.min(learnedOrExpected[1], Math.max(1, hardMaxSeconds)),
+        ] as ExpectedSeconds
+      : learnedOrExpected;
     if (!range) {
       remainingLabel = locale === "ko" ? "남은 시간 계산 중" : "Calculating time left";
     } else if (elapsed > range[1]) {

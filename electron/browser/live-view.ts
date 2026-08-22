@@ -250,9 +250,10 @@ export async function captureBrowserLiveFrame(
   if (targets.length === 0) return unavailable("browser-offline", viewportMode);
   const pages = targets.map((target) => verifiedTarget(target, port)).filter((target) => target !== null);
   const preferred = matchUrl(preferredUrl);
-  const target = preferred
-    ? pages.find((page) => matchUrl(page.url) === preferred)
-    : pages.find((page) => page.url !== "about:blank") ?? pages[0];
+  // Capture is always scoped by the calling Taskforce/thread. An unscoped
+  // request must never turn into "show the most recently open browser tab".
+  if (!preferred) return unavailable("no-page", viewportMode);
+  const target = pages.find((page) => matchUrl(page.url) === preferred);
   // A task-scoped request must fail empty instead of silently showing an
   // unrelated tab left over from another task.
   if (!target) return unavailable("no-page", viewportMode);

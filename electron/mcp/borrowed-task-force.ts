@@ -15,6 +15,7 @@ import type {
 } from "../../shared/types";
 import type {
   Runner,
+  RunnerFailure,
   RunnerRequest,
   RunnerResult,
   WorkforcePermissionEnforcementReceipt,
@@ -161,6 +162,33 @@ export class WorkerHandoffContractError extends Error {
       escalationCount: 1,
     };
   }
+}
+
+/**
+ * A provider refusal is not a malformed worker handoff. Keeping it typed stops
+ * the output-repair policy from spending a second call on the same signed-out
+ * or quota-blocked runtime, and lets the ordinary One Team path choose one
+ * different live runtime without parsing provider prose.
+ */
+export class TaskForceRuntimeFailureError extends Error {
+  readonly code = "task_force_runtime_failure";
+  readonly failure: RunnerFailure;
+  readonly runtime: RuntimeStatus;
+
+  constructor(failure: RunnerFailure, runtime: RuntimeStatus) {
+    super(`${failure.runtime} runtime ${failure.kind}: ${failure.message}`);
+    this.name = "TaskForceRuntimeFailureError";
+    this.failure = { ...failure };
+    this.runtime = { ...runtime };
+  }
+}
+
+export function requireTaskForceRunnerSuccess<T extends { failure?: RunnerFailure }>(
+  result: T,
+  runtime: RuntimeStatus,
+): T {
+  if (result.failure) throw new TaskForceRuntimeFailureError(result.failure, runtime);
+  return result;
 }
 
 export function workerHandoffContractViolation(text: unknown): WorkerHandoffViolation | null {
@@ -504,6 +532,50 @@ function taskForceCandidateRuntimes(p: BorrowedTaskForceParams): RuntimeStatus[]
   return candidates.length > 0 ? candidates : [p.active];
 }
 
+function taskForceRuntimeInventoryId(
+  runtimes: RuntimeStatus[],
+  target: RuntimeStatus,
+): string | null {
+  const index = runtimes.findIndex((runtime) => sameRuntime(runtime, target));
+  return index >= 0 ? `runtime-${index + 1}` : null;
+}
+
+function sameRuntimeFailureDomain(
+  candidate: RuntimeStatus,
+  failed: RuntimeStatus,
+  failure: RunnerFailure,
+): boolean {
+  // Authentication and quota refusals normally cover the provider/account,
+  // not one executable path. Exit/timeout failures stay scoped to the exact
+  // runtime so another installation or backend remains eligible.
+  if (failure.kind === "auth" || failure.kind === "quota") {
+    return candidate.kind === failed.kind && candidate.backend === failed.backend;
+  }
+  return sameRuntime(candidate, failed);
+}
+
+function taskForceRecoveryRuntime(
+  p: BorrowedTaskForceParams,
+  failed: RuntimeStatus,
+  failure: RunnerFailure,
+): RuntimeStatus | null {
+  // Exact prepared Workforce, benchmarks, Agent Apps, and explicit per-agent
+  // pins are fail-closed contracts. Runtime recovery is only an ordinary local
+  // One Team convenience and never substitutes a frozen remote execution.
+  if (
+    p.workforceSelectionReceipt ||
+    p.benchmarkMode ||
+    p.req.agentAppMode ||
+    p.runtimeOverride
+  ) {
+    return null;
+  }
+  const candidates = taskForceCandidateRuntimes(p).filter((runtime) => (
+    !sameRuntimeFailureDomain(runtime, failed, failure) && Boolean(pickRunner(runtime))
+  ));
+  return pickActive(candidates, "worker") ?? candidates[0] ?? null;
+}
+
 function cleanString(value: unknown): string {
   if (typeof value === "string") return value.trim();
   if (typeof value === "number") return String(value);
@@ -702,10 +774,16 @@ export function taskForceChildPermission(
   p: Pick<BorrowedTaskForceParams, "req">,
   inputType: BorrowedInputPacket["inputType"],
   role: "worker" | "orchestrator",
+  toolRequired = false,
 ): RunnerRequest["permission"] {
   const host = p.req.appsGenerateMode ? "read" : p.req.permissions;
   if (host === "read") return "read";
-  if (role === "worker" && inputType === "implementation") return "write";
+  // A planner-declared tool packet needs the bounded workspace-write sandbox
+  // even when its semantic inputType is review/browser/validation. Codex
+  // classifies MCP calls as approval-bearing operations; leaving these packets
+  // in read mode silently queued an approval against an internal child chat
+  // and timed out. This grant is still capped below full and by the host mode.
+  if (role === "worker" && (inputType === "implementation" || toolRequired)) return "write";
   return "read";
 }
 
@@ -802,7 +880,10 @@ async function observeTaskForceModelCall<T>(
     payload: { ...receiptBase, status: "started" },
   });
   try {
-    const result = await call();
+    const result = requireTaskForceRunnerSuccess(
+      await call() as T & { failure?: RunnerFailure },
+      input.runtime,
+    ) as T;
     const outputTokens = Number((result as { tokens?: unknown })?.tokens);
     if (Number.isInteger(outputTokens) && outputTokens > 0) {
       const modelRole = input.phase === "worker" ? "worker" : "orchestrator";
@@ -1013,9 +1094,12 @@ function taskForcePermissionLabel(permission: RunnerRequest["permission"]): stri
 function taskForceRunnerBase(
   p: BorrowedTaskForceParams,
   childPermission: RunnerRequest["permission"] = taskForcePermission(p),
+  autoReviewApprovals = false,
 ): Pick<
   RunnerRequest,
   | "permission"
+  | "approvalChatId"
+  | "approvalsReviewer"
   | "restrictedReadBoundary"
   | "mcpConfigPath"
   | "mcpAllowedTools"
@@ -1033,6 +1117,8 @@ function taskForceRunnerBase(
   const toolsAllowed = !p.req.agentAppMode && taskForceAllowsTools(p);
   return {
     permission,
+    approvalChatId: p.chat.id,
+    approvalsReviewer: autoReviewApprovals && permission !== "read" ? "auto_review" : "user",
     restrictedReadBoundary: p.restrictedReadBoundary,
     mcpConfigPath: agentAppAllowedTools ? p.mcpConfigPath : toolsAllowed ? p.mcpConfigPath : undefined,
     mcpAllowedTools: agentAppAllowedTools ?? (toolsAllowed ? p.mcpAllowedTools : undefined),
@@ -2074,6 +2160,7 @@ function packetToPrompt(
       : "",
     "",
     "Return a compact specialist result. Include: finding/result, evidence or reasoning basis, assumptions, risks, and what the orchestrator should do with it.",
+    "Write the human-facing finding as teammate chat: never mention receipts, Task IDs, Run IDs, or other internal execution identifiers. Those remain in the machine ledger and HANDOFF FACTS only.",
     // 산출물과 한계·상태를 분리해 반환해야 검토 가능성이 생긴다(위임 계약 7요소 중
     // 상태·증거). COMPLETED는 워커의 '주장'일 뿐이고 수락 판정은 오케스트레이터 몫.
     "End with three labeled sections: LIMITATIONS (what you could not verify or complete — write 'none' only if truly none), STATUS (COMPLETED, PARTIAL, or FAILED; for PARTIAL/FAILED name each unmet done-when condition), and HANDOFF FACTS (at most 8 short lines: primary_url, artifact_paths relative to the working folder, process/command identity, verification, remaining work; omit fields that do not apply). Never bury a live endpoint or artifact location only in earlier prose. Claiming COMPLETED does not finish the task force — the orchestrator accepts or rejects your claim.",
@@ -2480,6 +2567,9 @@ interface BorrowedAgentResult {
   handoffId: string;
   model: string;
   provider: string;
+  /** Internal-only typed provider failure used for one bounded recovery. */
+  runtimeFailure?: RunnerFailure;
+  failedRuntime?: RuntimeStatus;
   workforceResponsibility?: WorkforceResponsibility;
   invocationEvidence?: WorkforceInvocationEvidence;
   nestedExecutionEvidence?: WorkforceNestedExecutionEvidence;
@@ -2518,6 +2608,7 @@ async function runBorrowedAgentTurn(
   packet: BorrowedInputPacket,
   workforceGrant?: WorkforcePairRuntimeGrant,
   peerResults: BorrowedAgentResult[] = [],
+  recoveryRuntime?: RuntimeStatus,
 ): Promise<BorrowedAgentResult> {
   const id = agentNodeId(spec.slug);
   const installedAgent =
@@ -2541,8 +2632,17 @@ async function runBorrowedAgentTurn(
     tier: 2,
     phase: "delegate",
   });
-  const workerPermission = taskForceChildPermission(p, packet.inputType, "worker");
-  const runnerBase = taskForceRunnerBase(p, workerPermission);
+  const workerPermission = taskForceChildPermission(
+    p,
+    packet.inputType,
+    "worker",
+    packet.allocation.requirements.toolRequired,
+  );
+  const runnerBase = taskForceRunnerBase(
+    p,
+    workerPermission,
+    packet.allocation.requirements.toolRequired,
+  );
   const candidateRuntimes = taskForceCandidateRuntimes(p);
   const workerDefault = pickActive(candidateRuntimes, "worker") ?? p.active;
   const workerDefaultRunner = sameRuntime(workerDefault, p.active)
@@ -2563,14 +2663,24 @@ async function runBorrowedAgentTurn(
     phase: "synthesize",
     manualOverride: p.runtimeOverride,
   });
-  const workloadResolution = resolveWorkloadAllocationAcrossRuntimes({
-    allocation: packet.allocation,
-    runtimes: candidateRuntimes,
-    fallbackRuntime: workerDefault,
-    phase: "delegate",
-    manualOverride: p.runtimeOverride,
-    requirementsVerified: p.workforceSelectionReceipt ? true : undefined,
-  });
+  const workloadResolution: WorkloadResolution = recoveryRuntime
+    ? {
+        allocation: packet.allocation,
+        requirementsVerified: packet.allocation.requirementsVerified === true,
+        runtime: { ...recoveryRuntime },
+        resolvedRuntimeId: taskForceRuntimeInventoryId(candidateRuntimes, recoveryRuntime),
+        resolvedTier: null,
+        source: "safe-fallback",
+        resolutionCodes: ["allocated-runtime-failed-fell-back-to-live-runtime"],
+      }
+    : resolveWorkloadAllocationAcrossRuntimes({
+        allocation: packet.allocation,
+        runtimes: candidateRuntimes,
+        fallbackRuntime: workerDefault,
+        phase: "delegate",
+        manualOverride: p.runtimeOverride,
+        requirementsVerified: p.workforceSelectionReceipt ? true : undefined,
+      });
   if (p.workforceSelectionReceipt) {
     assertStrictPlannerResolution(packet.allocation, workloadResolution, `planner allocation for ${packet.agent}`);
   }
@@ -3250,6 +3360,9 @@ async function runBorrowedAgentTurn(
           // The package's declared ceiling narrows the host grant (never widens it). Spread after
           // runnerBase so this wins for this borrowed agent's own turn.
           permission: role === "worker" ? workerPermission : "read",
+          approvalsReviewer: role === "worker" && packet.allocation.requirements.toolRequired
+            ? "auto_review"
+            : "user",
           ...packageBoundary,
           // A standing One teammate is an owner-installed local worker, not a
           // packet-only remote Workforce unit. Run its implementation turn in
@@ -3365,6 +3478,7 @@ async function runBorrowedAgentTurn(
     };
   } catch (err) {
     if (p.signal?.aborted) throw err;
+    const typedRuntimeFailure = err instanceof TaskForceRuntimeFailureError ? err : null;
     if (p.req.agentAppMode) {
       p.sink(tag({
         kind: "tool-use",
@@ -3397,6 +3511,12 @@ async function runBorrowedAgentTurn(
       packet,
       text: redactSensitiveText(`[${spec.slug} ${timedOut ? "timeout" : "error"}] ${message}`),
       ok: false,
+      ...(typedRuntimeFailure
+        ? {
+            runtimeFailure: { ...typedRuntimeFailure.failure },
+            failedRuntime: { ...typedRuntimeFailure.runtime },
+          }
+        : {}),
       invocationEvidence: {
         invocationId: observedDirectInvocationId,
         runtimeId: observedDirectResolution.resolvedRuntimeId
@@ -3883,7 +4003,12 @@ async function runPlanner(
         text,
         handoffDepth: 1,
         handoffRoundtrip: 1,
-        handoffPermission: taskForceChildPermission(p, packet.inputType, "worker"),
+        handoffPermission: taskForceChildPermission(
+          p,
+          packet.inputType,
+          "worker",
+          packet.allocation.requirements.toolRequired,
+        ),
         permissionInherited: false,
       },
     });
@@ -4031,7 +4156,12 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         text,
         handoffDepth: 1,
         handoffRoundtrip: 3,
-        handoffPermission: taskForceChildPermission(p, packet.inputType, "worker"),
+        handoffPermission: taskForceChildPermission(
+          p,
+          packet.inputType,
+          "worker",
+          packet.allocation.requirements.toolRequired,
+        ),
         permissionInherited: false,
       },
     });
@@ -4039,6 +4169,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
   const runPacket = async (
     packet: (typeof plan.packets)[number],
     peerResults: BorrowedAgentResult[] = [],
+    recoveryRuntime?: RuntimeStatus,
   ) => {
     const spec = specBySlug.get(packet.agent) ?? specs[0];
     const slotId = spec.routeLabel?.startsWith("workforce:")
@@ -4047,7 +4178,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     const grant = slotId && spec.agentReleaseId
       ? plan.capabilityBinding?.grantsByPair.get(workforcePairKey(slotId, spec.agentReleaseId))
       : undefined;
-    return runBorrowedAgentTurn(p, spec, packet, grant, peerResults);
+    return runBorrowedAgentTurn(p, spec, packet, grant, peerResults, recoveryRuntime);
   };
   const runPacketWithRetry = async (
     packet: (typeof plan.packets)[number],
@@ -4055,6 +4186,24 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
   ) => {
     const first = await runPacket(packet, peerResults);
     if (first.ok || p.signal?.aborted) return first;
+    if (first.runtimeFailure && first.failedRuntime) {
+      const recoveryRuntime = taskForceRecoveryRuntime(
+        p,
+        first.failedRuntime,
+        first.runtimeFailure,
+      );
+      // A typed provider refusal is never an output-format problem. If this is
+      // a frozen/pinned surface or no different live runtime exists, fail now
+      // instead of charging the same dead provider for an identical retry.
+      if (!recoveryRuntime) return first;
+      p.sink({
+        kind: "tool-use",
+        status: p.locale === "ko"
+          ? `배정된 실행 환경을 사용할 수 없어 다른 사용 가능한 모델로 한 번 이어갑니다. (${first.spec.name})`
+          : `The assigned runtime is unavailable; continuing once on another live model. (${first.spec.name})`,
+      });
+      return runPacket(packet, peerResults, recoveryRuntime);
+    }
     p.sink({
       kind: "tool-use",
       status: p.locale === "ko"

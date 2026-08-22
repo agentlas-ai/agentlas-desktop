@@ -91,6 +91,7 @@ export function OneOrgChart({
   onReorder,
   onFailure,
   onOpenMember,
+  onOpenOne,
   onEditOne,
   activeMemberId,
   activeTaskForceIds,
@@ -127,6 +128,7 @@ export function OneOrgChart({
   onReorder: (orderedIds: string[], expectedRevision: number) => Promise<void>;
   onFailure?: (member: OneOrgMember) => void;
   onOpenMember?: (member: OneOrgMember) => void;
+  onOpenOne?: () => void;
   onEditOne?: () => void;
   activeMemberId?: string | null;
   activeTaskForceIds?: string[];
@@ -358,7 +360,17 @@ export function OneOrgChart({
           <div className={styles.searchSection}><strong>{searchCopy.history}</strong>{matchingHistory.length === 0 ? <span className={styles.searchEmpty}>{searchCopy.noHistory}</span> : matchingHistory.map((item) => <button type="button" key={item.id} onClick={() => { onOpenHistory?.(item); setSearchOpen(false); }}>{<span><b>{item.title}</b><small>{item.detail}</small></span>}</button>)}</div>
         </div>}
       </div>}
-      <div className={styles.oneRow}>
+      <div
+        className={styles.oneRow}
+        role={onOpenOne ? "button" : undefined}
+        tabIndex={onOpenOne ? 0 : undefined}
+        onClick={onOpenOne}
+        onKeyDown={(event) => {
+          if (!onOpenOne || (event.key !== "Enter" && event.key !== " ")) return;
+          event.preventDefault();
+          onOpenOne();
+        }}
+      >
         <OneAgentPortrait status="quiet" label="Agentlas One" size="medium" tone="purple" />
         <div className={styles.rowCopy}><strong>One</strong><span>{locale === "ko" ? "CEO 오케스트레이터 · 항상 켜짐" : "CEO orchestrator · Always on"}</span></div>
         <span className={styles.badge}>CEO</span>
@@ -366,7 +378,7 @@ export function OneOrgChart({
           type="button"
           className={styles.oneEditButton}
           aria-label={locale === "ko" ? "One 말투와 성격 편집" : "Edit One voice and personality"}
-          onClick={onEditOne}
+          onClick={(event) => { event.stopPropagation(); onEditOne(); }}
         ><IconEdit size={14} /></button>}
       </div>
       {insufficientCredits.length > 0 && <div className={styles.creditWarning} role="status"><span><IconShield size={13} />{locale === "ko" ? `크레딧 부족으로 ${insufficientCredits.length}명 멈춤` : `${insufficientCredits.length} staff paused for insufficient credits`}</span>{onBrowseCredits && <button type="button" onClick={onBrowseCredits}>{locale === "ko" ? "충전" : "Add credits"}</button>}</div>}

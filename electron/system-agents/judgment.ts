@@ -99,8 +99,52 @@ export interface RequiredJudgeSpec<V extends string> {
 // peekJudgment/prejudge for anything synchronous — so the budget is sized for a
 // cold CLI plus one skipped candidate rather than for a warm API round trip.
 const DEFAULT_TIMEOUT_MS = 45_000;
+const RUNNER_ABORT_GRACE_MS = 500;
 const MAX_INPUT_CHARS = 8_000;
 const CACHE_MAX = 500;
+
+function connectedModelAbortReason(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error) return signal.reason;
+  if (typeof signal.reason === "string" && signal.reason.trim()) return new Error(signal.reason);
+  return new Error("Connected model request was cancelled");
+}
+
+/**
+ * A runtime receives the AbortSignal first, but the UI must not depend on every CLI adapter
+ * settling correctly after cancellation. Keep a short cleanup grace, then detach from a broken
+ * runner so Graph interviews and resident judgments always leave their loading state.
+ *
+ * Promise.race keeps observing a late rejection from the runner, so detaching cannot create an
+ * unhandled rejection. The runner still receives the original signal and retains its normal
+ * child-process cleanup path.
+ */
+export function awaitConnectedModelRunnerWithAbortGrace<T>(
+  runner: PromiseLike<T>,
+  signal: AbortSignal,
+  settleGraceMs = RUNNER_ABORT_GRACE_MS,
+): Promise<T> {
+  const observedRunner = Promise.resolve(runner);
+  let removeAbortListener = () => {};
+  let settleTimer: ReturnType<typeof setTimeout> | null = null;
+  const abortBoundary = new Promise<never>((_resolve, reject) => {
+    const onAbort = () => {
+      const graceMs = Number.isFinite(settleGraceMs)
+        ? Math.max(0, Math.floor(settleGraceMs))
+        : RUNNER_ABORT_GRACE_MS;
+      settleTimer = setTimeout(() => reject(connectedModelAbortReason(signal)), graceMs);
+    };
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+    removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+  });
+  return Promise.race([observedRunner, abortBoundary]).finally(() => {
+    removeAbortListener();
+    if (settleTimer) clearTimeout(settleTimer);
+  });
+}
 
 /** LRU-ish cache: identical (kind,input) never re-calls the model within a session. */
 const cache = new Map<string, Verdict<string>>();
@@ -363,15 +407,21 @@ async function callJudgmentModelDetailed(opts: {
   ];
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-  const onAbort = () => controller.abort();
-  opts.signal?.addEventListener("abort", onAbort, { once: true });
+  const timeoutMs = Math.max(1, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const timeout = setTimeout(() => {
+    controller.abort(new Error(`Connected model timed out after ${Math.round(timeoutMs / 1000)}s`));
+  }, timeoutMs);
+  const onAbort = () => controller.abort(
+    opts.signal?.reason ?? new Error("Connected model request was cancelled"),
+  );
+  if (opts.signal?.aborted) onAbort();
+  else opts.signal?.addEventListener("abort", onAbort, { once: true });
   try {
     for (const runtime of ordered) {
       const picked = pickRunner(runtime);
       if (!picked) continue;
       try {
-        const result = await picked.runner(
+        const result = await awaitConnectedModelRunnerWithAbortGrace(picked.runner(
           {
             systemPrompt: opts.systemPrompt,
             history: [],
@@ -397,7 +447,7 @@ async function callJudgmentModelDetailed(opts: {
             onStatus: () => {},
             onTool: () => {},
           },
-        );
+        ), controller.signal);
         if (result.failure) {
           /*
            * ★거절은 답이 아니다 — 다음 후보로 간다. 예전에는 첫 resolve가 무조건
@@ -441,7 +491,7 @@ async function callJudgmentModelDetailed(opts: {
       const recovery = selection ? pickRecoveryRunner(selection) : null;
       if (selection && recovery && !controller.signal.aborted) {
         try {
-          const result = await recovery.runner(
+          const result = await awaitConnectedModelRunnerWithAbortGrace(recovery.runner(
             {
               systemPrompt: opts.systemPrompt,
               history: [],
@@ -459,7 +509,7 @@ async function callJudgmentModelDetailed(opts: {
               locale: opts.locale ?? "en",
             },
             { onPartial: () => {}, onStatus: () => {}, onTool: () => {} },
-          );
+          ), controller.signal);
           if (result.failure) {
             lastFailure = result.failure;
           } else {

@@ -486,6 +486,13 @@ function OneBrowserLiveView({ active, locale, preferredUrl }: { active: boolean;
     // while an exact-target capture fails is how a completed Soulin run leaked
     // into a later Latchwork task's Browser rail.
     setFrame(null);
+    // Browser output belongs to a Taskforce/thread. With no URL observed for
+    // that scope, showing whichever CDP tab happens to be open would leak an
+    // unrelated job into this room.
+    if (!preferredUrl) {
+      setLoading(false);
+      return;
+    }
     let disposed = false;
     let inFlight = false;
     const capture = async () => {
@@ -589,6 +596,7 @@ export function OneActivityArtifactRail({
   onHistoryClear,
   onHistoryAsk,
   onHistoryReviewRecommendation,
+  browserScopeKey,
 }: {
   items: OneActivityArtifact[];
   activity?: OneActivityState;
@@ -608,6 +616,8 @@ export function OneActivityArtifactRail({
   onHistoryClear?: () => void;
   onHistoryAsk?: () => void;
   onHistoryReviewRecommendation?: (entry: ComputerHistoryEntry) => void;
+  /** Stable Taskforce/thread identity used to retain only its own browser URL across turns. */
+  browserScopeKey?: string;
 }) {
   const [collapsedSections, setCollapsedSections] = useState<Set<OutputSectionKey>>(readCollapsedOutputSections);
   const [railView, setRailView] = useState<OutputRailView>("activity");
@@ -616,6 +626,7 @@ export function OneActivityArtifactRail({
   const [resizing, setResizing] = useState(false);
   const [historyResizing, setHistoryResizing] = useState(false);
   const [historyHeight, setHistoryHeight] = useState(readOutputHistoryHeight);
+  const [browserUrlsByScope, setBrowserUrlsByScope] = useState<Record<string, string>>({});
   const clampWidth = (value: number) => Math.min(maxWidth, Math.max(minWidth, Math.round(value)));
   const clampHistoryHeight = (value: number) => Math.min(480, Math.max(150, Math.round(value)));
   const commitHistoryHeight = (value: number) => {
@@ -640,7 +651,15 @@ export function OneActivityArtifactRail({
    */
   const processes = activity?.items.filter((item) => item.kind === "tool" && isCommandTool(item.tool?.name)) ?? [];
   const computerUse = activity?.items.filter((item) => item.kind === "tool" && isComputerUseTool(item.tool?.name)) ?? [];
-  const preferredBrowserUrl = useMemo(() => taskBrowserUrl(activity?.items ?? []), [activity?.items]);
+  const currentBrowserUrl = useMemo(() => taskBrowserUrl(activity?.items ?? []), [activity?.items]);
+  useEffect(() => {
+    if (!browserScopeKey || !currentBrowserUrl) return;
+    setBrowserUrlsByScope((current) => current[browserScopeKey] === currentBrowserUrl
+      ? current
+      : { ...current, [browserScopeKey]: currentBrowserUrl });
+  }, [browserScopeKey, currentBrowserUrl]);
+  const preferredBrowserUrl = currentBrowserUrl
+    ?? (browserScopeKey ? browserUrlsByScope[browserScopeKey] : undefined);
   const sources = useMemo(() => {
     const current = activity?.sources ?? [];
     if (!preferredBrowserUrl || current.some((source) => source.url === preferredBrowserUrl)) return current;

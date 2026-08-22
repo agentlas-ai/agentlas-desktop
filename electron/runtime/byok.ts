@@ -232,7 +232,7 @@ async function runAnthropicMessages(
     sessionKey: `byok:${req.sessionFingerprintSeed ?? req.cwd ?? "default"}`,
     permission: req.permission,
     ...(req.cwd ? { cwd: req.cwd } : {}),
-    ...(req.chatId ? { chatId: req.chatId } : {}),
+    ...(req.approvalChatId ?? req.chatId ? { chatId: req.approvalChatId ?? req.chatId } : {}),
     unattended: req.unattended === true,
     ...(req.signal ? { signal: req.signal } : {}),
   };

@@ -139,6 +139,19 @@ export interface RunnerRequest {
    */
   chatId?: string;
   /**
+   * Live tool-approval cards belong to the visible parent conversation, which
+   * may differ from an internal child session's `chatId`. Main alone authors
+   * this routing hint; it changes no session, sandbox, or capability scope.
+   */
+  approvalChatId?: string;
+  /**
+   * Main-only Codex approval reviewer. Internal Taskforce workers have no
+   * renderer of their own, so an explicitly tool-required packet may route
+   * approval prompts through Codex's bounded automatic reviewer. Ordinary
+   * interactive turns stay user-reviewed.
+   */
+  approvalsReviewer?: "user" | "auto_review";
+  /**
    * 실행 중인 에이전트 — 도구 승인 요청(RuntimeToolPermissionAsk)에 실려
    * 에이전트 스코프 능력 규칙(capability_grants)의 대상이 된다.
    */

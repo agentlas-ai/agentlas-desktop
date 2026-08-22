@@ -492,7 +492,7 @@ export async function runLocalOpenAiChat(
     sessionKey: `${runtimeKind}:${req.sessionFingerprintSeed ?? req.cwd ?? "default"}`,
     permission: req.permission,
     ...(req.cwd ? { cwd: req.cwd } : {}),
-    ...(req.chatId ? { chatId: req.chatId } : {}),
+    ...(req.approvalChatId ?? req.chatId ? { chatId: req.approvalChatId ?? req.chatId } : {}),
     ...(req.agentId ? { agentId: req.agentId } : {}),
     unattended: req.unattended === true,
     ...(req.signal ? { signal: req.signal } : {}),

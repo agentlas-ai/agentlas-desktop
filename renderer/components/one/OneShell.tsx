@@ -137,7 +137,7 @@ import {
 } from "@/lib/build-session";
 import { ProductModeMenu } from "./ProductModeMenu";
 import { OneBottomSheet } from "./OneBottomSheet";
-import { OneAutomationSheet } from "./OneAutomationSheet";
+import { OneAutomationInterviewDialog } from "./OneAutomationInterviewDialog";
 import { OneUseCaseChips, type OneUseCaseChipAction } from "./OneUseCaseChips";
 import { OneAdaptiveResult, type OneAgentDraftSeed } from "./OneAdaptiveResult";
 import { OneActivation } from "./OneActivation";
@@ -157,6 +157,7 @@ import { OneComputerHistory } from "./OneComputerHistory";
 import { OneSettingsRail, OneSettingsSheet, type OneSettingsKey } from "./OneSettings";
 import { OneTeamUpgradeIntro } from "./OneTeamUpgradeIntro";
 import { OneTurnWork, OneTurnWorkDividers } from "./OneTurnWork";
+import { OneTaskforceConversation } from "./OneTaskforceConversation";
 import { buildOneWorkPresentation } from "@/lib/one-turn-work";
 import { planOneThreadWork, projectThreadRuns, type OneThreadRunBlock } from "@/lib/one-thread-work";
 import { ToolApprovalInline } from "@/components/ToolApprovalInline";
@@ -817,7 +818,6 @@ export function OneShell() {
     source: "my" | "cloud" | "hub";
   }>();
   const [failureFocus, setFailureFocus] = useState<FailureEventUi | null>(null);
-  const [failureReceiptOpen, setFailureReceiptOpen] = useState(false);
   const [computerHistory, setComputerHistory] = useState<ComputerHistoryState | null>(null);
   const [historyClearConfirmOpen, setHistoryClearConfirmOpen] = useState(false);
   const [historyClearBusy, setHistoryClearBusy] = useState(false);
@@ -1146,12 +1146,6 @@ export function OneShell() {
         startedAt={renderedActivityStartedAt}
         locale={appLocale}
         workspacePath={workspacePath}
-        taskId={selected?.taskId ?? conversation?.taskId ?? null}
-        runId={activeActivityRunId}
-        onInterruptHandoff={() => {
-          cancelActiveRun("one-handoff-interrupt");
-          window.setTimeout(() => composerInputRef.current?.focus(), 0);
-        }}
       />
     )
     : null;
@@ -3512,7 +3506,6 @@ export function OneShell() {
     setSelected(null);
     setConversation(null);
     setFailureFocus(null);
-    setFailureReceiptOpen(false);
     setMessages([]);
     // 화면을 비웠으니 그 화면이 누구 것이었는지도 함께 지운다.
     shownThreadChatIdRef.current = null;
@@ -3544,7 +3537,6 @@ export function OneShell() {
     const api = ipc();
     const failure = await api?.runLedger.failures({ agentId: member.installedAgentId, limit: 1 }).then((items) => items[0] ?? null).catch(() => null);
     setFailureFocus(failure ?? null);
-    setFailureReceiptOpen(false);
     if (failure?.chatId) {
       setRailOpen(false);
       setSearchOpen(false);
@@ -3554,7 +3546,7 @@ export function OneShell() {
     startNewConversation();
     setComposer(appLocale === "ko"
       ? `${member.displayName}의 실패를 원장과 함께 확인하고, 필요한 담당·도구를 바꿔 다시 완주해줘. 실패 표식: ${member.statusLine}`
-      : `Review ${member.displayName}'s failure with its receipt, then change the owner or tool and retry to completion. Failure marker: ${member.statusLine}`);
+      : `Review ${member.displayName}'s failure record, then change the owner or tool and retry to completion. Failure marker: ${member.statusLine}`);
   }, [appLocale, router, startNewConversation]);
 
   const openOneMember = useCallback((member: OneOrgMember) => {
@@ -3585,18 +3577,26 @@ export function OneShell() {
     const focus = failureFocus;
     if (!focus?.chatId || busy) return;
     const prompt = appLocale === "ko"
-      ? "직전 실패를 같은 대화에서 다시 시도해줘. 이미 바깥에 반영됐을 가능성이 있으면 중복 실행하지 말고 영수증을 먼저 확인해줘."
-      : "Retry the previous failure in this conversation. If the outside effect may already have happened, inspect the receipt before repeating it.";
+      ? "직전 실패를 같은 대화에서 다시 시도해줘. 이미 바깥에 반영됐을 가능성이 있으면 중복 실행하지 말고 실행 기록을 먼저 확인해줘."
+      : "Retry the previous failure in this conversation. If the outside effect may already have happened, inspect the execution record before repeating it.";
     void startRun(focus.chatId, null, null, prompt, "conversation", { displayUserMessage: true }).catch((cause) => requestOneOperationalRecovery("one-failure-retry", cause));
   }, [appLocale, busy, failureFocus, startRun]);
 
   const sendFocusedFailureToOne = useCallback(() => {
-    if (!failureFocus) return;
+    if (!failureFocus || busy) return;
+    const chatId = failureFocus.chatId ?? conversation?.id;
+    if (!chatId) {
+      setComposer(appLocale === "ko" ? "이 실패 원인을 찾아 고치고 다시 시도해줘." : "Find the cause of this failure, fix it, and retry.");
+      return;
+    }
     const prompt = appLocale === "ko"
       ? `실패 원장을 읽고 원인을 해결한 뒤 재시도해줘. runId=${failureFocus.runId ?? "없음"}, 오류=${failureFocus.errorCode ?? "실행 오류"}`
       : `Read the failure receipt, fix the cause, and retry. runId=${failureFocus.runId ?? "none"}, error=${failureFocus.errorCode ?? "runtime failure"}`;
-    setComposer(prompt);
-  }, [appLocale, failureFocus]);
+    void startRun(chatId, null, null, prompt, "conversation", {
+      displayUserMessage: false,
+      promptOrigin: "system",
+    }).catch((cause) => requestOneOperationalRecovery("one-failure-review", cause));
+  }, [appLocale, busy, conversation?.id, failureFocus, startRun]);
 
   const openTask = useCallback((taskId: string) => {
     setRailOpen(false);
@@ -4153,11 +4153,11 @@ export function OneShell() {
     && ["proposed", "blocked", "team_reserved", "workforce_reserved", "solo_reserved", "deferred"].includes(teamPreflight.status),
   );
   // A just-created home run briefly enters preflight before its chat binding
-  // arrives. Preflight and an attached live run are both interactive: the user
-  // may change the next turn's model/effort/permission and may queue a steering
-  // message without stopping the current work. Only settled read-only history
-  // (or a decision that must be resolved first) locks the composer.
-  const composerInteractionBlocked = (!busy && !teamPreflightBusy && selectedReadOnly) || teamDecisionPending;
+  // arrives. Keep next-turn settings interactive throughout that phase and an
+  // attached live run. Only message submission waits for an unresolved staffing
+  // decision; settled read-only history locks both surfaces.
+  const composerSettingsBlocked = !busy && !teamPreflightBusy && selectedReadOnly;
+  const composerInteractionBlocked = composerSettingsBlocked || teamDecisionPending;
   // Attachments cannot be steered into an existing or still-preparing run in
   // v1. Keep that single boundary explicit instead of dimming every control.
   const composerAttachmentBlocked = busy || teamPreflightBusy || selectedReadOnly || teamDecisionPending;
@@ -4350,7 +4350,7 @@ export function OneShell() {
   const closeAutomationSheet = useCallback(() => setAutomationSheetOpen(false), []);
   const openCreatedAutomation = useCallback((automationId: string) => {
     setAutomationSheetOpen(false);
-    router.push(`/automation/detail?id=${encodeURIComponent(automationId)}`);
+    router.push(`/automation/flow?id=${encodeURIComponent(automationId)}`);
   }, [router]);
   /*
    * 브리핑이 찾아낸 것을 One 이 **실제로 살펴보게** 한다.
@@ -4574,6 +4574,7 @@ export function OneShell() {
               onReorder={reorderOneOrg}
               onFailure={openOneFailure}
               onOpenMember={openOneMember}
+              onOpenOne={startNewConversation}
               onEditOne={() => { setMemoryOpen(false); setProfileOpen(true); }}
               activeMemberId={activeOneMember?.installedAgentId ?? null}
               activeTaskForceIds={turnAgentIds}
@@ -4848,23 +4849,21 @@ export function OneShell() {
                       <p>{failureFocus.errorMessage}</p>
                       <div className={styles.failureCardActions}>
                         <button type="button" disabled={!failureFocus.chatId || busy} onClick={retryFocusedFailure}>{appLocale === "ko" ? "다시 시도" : "Retry"}</button>
-                        <button type="button" onClick={() => setFailureReceiptOpen((value) => !value)}>{appLocale === "ko" ? "영수증" : "Receipt"}</button>
-                        <button type="button" className={styles.primaryButton} onClick={sendFocusedFailureToOne}>{appLocale === "ko" ? "One에게" : "Ask One"}</button>
+                        <button type="button" className={styles.primaryButton} disabled={busy} onClick={sendFocusedFailureToOne}>{appLocale === "ko" ? "One에게 맡기기" : "Ask One"}</button>
                       </div>
-                      {failureReceiptOpen && <pre className={styles.failureReceipt}>{JSON.stringify({ runId: failureFocus.runId, chatId: failureFocus.chatId, agentId: failureFocus.agentId, at: failureFocus.ts }, null, 2)}</pre>}
                     </section>
                   )}
                   {threadWorkPlan.leading.map((block) => (
-                    <OneTurnWork
-                      key={`work:${block.runId}`}
-                      state={block.state}
-                      busy={false}
-                      startedAt={Date.parse(block.startedAt)}
-                      locale={appLocale}
-                      workspacePath={workspacePath}
-                      taskId={conversation?.taskId ?? selected?.taskId ?? null}
-                      runId={block.runId}
-                    />
+                    <Fragment key={`work:${block.runId}`}>
+                      {!activeTaskforce && <OneTurnWork
+                        state={block.state}
+                        busy={false}
+                        startedAt={Date.parse(block.startedAt)}
+                        locale={appLocale}
+                        workspacePath={workspacePath}
+                      />}
+                      {activeTaskforce && <OneTaskforceConversation state={block.state} org={oneOrgState} locale={appLocale} />}
+                    </Fragment>
                   ))}
                   {visibleMessages.map((message) => {
                     // Narrative output remains the primary final response.
@@ -4888,7 +4887,10 @@ export function OneShell() {
                     const systemLabel = message.role === "system" ? oneSystemPromptLabel(message) : null;
                     return (
                       <Fragment key={message.id}>
-                        {liveBefore && !preflightPrompt && liveWorkBlock}
+                        {liveBefore && !preflightPrompt && <>
+                          {liveWorkBlock}
+                          {activeTaskforce && <OneTaskforceConversation state={renderedActivity} org={oneOrgState} locale={appLocale} />}
+                        </>}
                         {(visibleText || hasAttachments) && (systemLabel
                           ? (
                             // A prompt One sent on the person's behalf ("One
@@ -4901,7 +4903,17 @@ export function OneShell() {
                             className={styles.message}
                             data-role={message.role}
                             data-kind={isResultContinuationMessage(message) ? "continuity" : undefined}
+                            data-taskforce={activeTaskforce ? "true" : undefined}
                           >
+                            {activeTaskforce && message.role !== "system" && (
+                              <div className={styles.taskforceMessageMeta}>
+                                {message.role === "assistant" && <OneAgentPortrait status={busy && message.streaming ? "working" : "quiet"} label="One" tone="purple" size="small" />}
+                                <span>
+                                  <strong>{message.role === "user" ? (appLocale === "ko" ? "나" : "You") : "One"}</strong>
+                                  {message.createdAt && <time dateTime={message.createdAt}>{new Date(message.createdAt).toLocaleTimeString(appLocale === "ko" ? "ko-KR" : "en-US", { hour: "2-digit", minute: "2-digit" })}</time>}
+                                </span>
+                              </div>
+                            )}
                             <div className={styles.messageBody}>
                               {message.images && message.images.length > 0 && (
                                 <div className={styles.messageImages}>
@@ -4923,16 +4935,16 @@ export function OneShell() {
                           </article>
                           ))}
                         {blocksAfter.map((block) => (
-                          <OneTurnWork
-                            key={`work:${block.runId}`}
-                            state={block.state}
-                            busy={false}
-                            startedAt={Date.parse(block.startedAt)}
-                            locale={appLocale}
-                            workspacePath={workspacePath}
-                            taskId={conversation?.taskId ?? selected?.taskId ?? null}
-                            runId={block.runId}
-                          />
+                          <Fragment key={`work:${block.runId}`}>
+                            {!activeTaskforce && <OneTurnWork
+                              state={block.state}
+                              busy={false}
+                              startedAt={Date.parse(block.startedAt)}
+                              locale={appLocale}
+                              workspacePath={workspacePath}
+                            />}
+                            {activeTaskforce && <OneTaskforceConversation state={block.state} org={oneOrgState} locale={appLocale} />}
+                          </Fragment>
                         ))}
                       </Fragment>
                     );
@@ -4956,6 +4968,7 @@ export function OneShell() {
                         </article>
                       )}
                       {liveWorkBlock}
+                      {activeTaskforce && <OneTaskforceConversation state={renderedActivity} org={oneOrgState} locale={appLocale} />}
                     </>
                   )}
                   {/* 도구 승인은 이 대화 안에서, 묻는 순간에(오너 결정 2026-08-15) */}
@@ -5363,7 +5376,7 @@ export function OneShell() {
                       type="button"
                       className={styles.composerChip}
                       data-one-composer-trigger="model"
-                      disabled={composerInteractionBlocked}
+                      disabled={composerSettingsBlocked}
                       aria-expanded={composerMenu === "model"}
                       aria-haspopup="dialog"
                       aria-controls={composerMenu === "model" ? "one-composer-popover" : undefined}
@@ -5382,7 +5395,7 @@ export function OneShell() {
                       type="button"
                       className={styles.composerChip}
                       data-one-composer-trigger="effort"
-                      disabled={composerInteractionBlocked}
+                      disabled={composerSettingsBlocked}
                       aria-expanded={composerMenu === "effort"}
                       aria-haspopup="dialog"
                       aria-controls={composerMenu === "effort" ? "one-composer-popover" : undefined}
@@ -5401,7 +5414,7 @@ export function OneShell() {
                     className={styles.composerChip}
                     data-one-composer-trigger="permission"
                     data-one-permission={onePermission}
-                    disabled={composerInteractionBlocked}
+                    disabled={composerSettingsBlocked}
                     aria-expanded={composerMenu === "permission"}
                     aria-haspopup="dialog"
                     aria-controls={composerMenu === "permission" ? "one-composer-popover" : undefined}
@@ -5418,7 +5431,7 @@ export function OneShell() {
                     type="button"
                     className={styles.composerQuickMode}
                     data-active={turnOverrides.fastMode ? "true" : "false"}
-                    disabled={composerInteractionBlocked}
+                    disabled={composerSettingsBlocked}
                     onClick={() => setTurnOverrides((current) => {
                       const next = { ...current };
                       if (next.fastMode) delete next.fastMode;
@@ -5434,7 +5447,7 @@ export function OneShell() {
                   <OneVoiceInputHelp
                     locale={appLocale}
                     composerRef={composerInputRef}
-                    disabled={composerInteractionBlocked}
+                    disabled={composerSettingsBlocked}
                   />
                   {(busy || composer.trim() || attachmentDrafts.length > 0) && (
                     <button
@@ -5570,7 +5583,8 @@ export function OneShell() {
             void api.computerHistory.prepareDraft(recommendationId, appLocale)
               .then((draft) => setComposer(draft.prompt))
               .catch((cause) => requestOneOperationalRecovery("computer-history-draft", cause));
-          }}
+              }}
+          browserScopeKey={activeThreadChatId ?? selected?.taskId ?? conversation?.id}
         />
         {activeThreadChatId && visibleSelectedConfirmation && (
           <DecisionBottomSheet
@@ -5685,7 +5699,7 @@ export function OneShell() {
         onValueClosureStateChange={handleValueClosuresChange}
         onManageImprovementAsset={manageImprovementAsset}
       />
-      <OneAutomationSheet
+      <OneAutomationInterviewDialog
         open={automationSheetOpen}
         locale={appLocale}
         onClose={closeAutomationSheet}
