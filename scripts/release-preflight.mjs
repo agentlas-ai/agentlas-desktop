@@ -423,4 +423,11 @@ try {
   fail(`release source contract failed for v${pkg.version}: ${error instanceof Error ? error.message : String(error)}`);
 }
 
+// 패키징 완전성 — 1.0.32 는 app.asar 에 dist/plugins 가 없어 launch 즉시 죽었다.
+// 여기서는 설정만 본다(빌드 전이라 산출물이 없다). 산출물 검사는 package-mac.sh 가
+// electron-builder 직후에 같은 스크립트의 --app 모드로 수행한다.
+if (!run(process.execPath, [join(root, "scripts", "verify-packaging-completeness.mjs")], { cwd: root })) {
+  fail("packaging completeness failed: a packaging config does not carry everything the app requires at launch");
+}
+
 console.log(`[release-preflight] PASS — v${pkg.version} satisfies the release contract`);

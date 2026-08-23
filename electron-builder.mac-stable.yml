@@ -46,6 +46,12 @@ files:
   # dist/shared/** holds runtime values (shared/models.ts). MUST be packaged or the app crashes.
   - dist/shared/**/*
   - dist/renderer/**/*
+  # dist/plugins/** holds the built-in plugin packages (manifest + SKILL.md + references).
+  # electron/plugins/builtin.ts value-imports these manifests, so leaving them out ships an
+  # app that throws "Cannot find module ../../plugins/agentlas-browser/plugin.json" at launch.
+  # 1.0.32 shipped without this line because this config deliberately duplicates the base
+  # config instead of extending it, and the rule was only added to the base.
+  - dist/plugins/**/*
   - package.json
   - "!**/*.map"
 
@@ -53,6 +59,10 @@ asar: true
 asarUnpack:
   - "**/node_modules/better-sqlite3/**/*"
   - "**/node_modules/keytar/**/*"
+  # node-pty loads its native addon and spawn-helper at runtime. electron-builder currently
+  # auto-unpacks it as a detected native module, but the base config states this explicitly
+  # and this duplicate must not depend on that autodetection staying true.
+  - "**/node_modules/node-pty/**/*"
 
 electronFuses:
   resetAdHocDarwinSignature: true

@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.33 — 2026-08-23
+
+Bundled runtime: Agentlas OS v1.2.16 (6d0d7e7eafaa96ebbed92e1a2223b01f13eed245).
+Source readiness does not prove a public installer or update feed; the
+Releases page stays the authority.
+
+- Fixes the 1.0.32 launch crash ("Cannot find module ../../plugins/agentlas-browser/plugin.json").
+  The signed macOS package was built from a config that had not picked up the
+  built-in plugin manifests, so the app threw in the main process before any
+  window opened. The package now carries them again, and the build refuses to
+  produce an installer whose app.asar is missing anything the app requires at
+  launch — checked on the packaged .app itself, not only on the config.
+
 ## 1.0.32 — 2026-08-23
 
 Bundled runtime: Agentlas OS v1.2.16 (6d0d7e7eafaa96ebbed92e1a2223b01f13eed245).

@@ -416,6 +416,25 @@ build_mac_arch() {
     "${builder_args[@]}" \
     --publish never \
     --config.directories.output="$local_release"
+
+  # 1.0.32 는 app.asar 에 dist/plugins 가 통째로 빠진 채 나가 launch 즉시 죽었다.
+  # 설정 검사만으로는 설정이 하나 더 생기면 뚫리므로, 만들어진 .app 자체를 잰다.
+  # 아키텍처별 출력 디렉터리는 electron-builder 규칙(arm64 는 mac-arm64, x64 는 mac)을 따른다.
+  local packed_app
+  if [[ "$arch" == "arm64" ]]; then
+    packed_app="$local_release/mac-arm64/Agentlas.app"
+  else
+    packed_app="$local_release/mac/Agentlas.app"
+  fi
+  if [[ ! -d "$packed_app" ]]; then
+    # 출력 배치가 바뀌었을 수 있다 — 조용히 넘기지 말고 찾아본다.
+    packed_app="$(find "$local_release" -maxdepth 2 -name 'Agentlas.app' -type d | head -1)"
+  fi
+  if [[ -z "$packed_app" || ! -d "$packed_app" ]]; then
+    echo "packaging completeness: ${arch} 산출 .app 을 찾지 못했다 — 검사를 건너뛸 수 없다" >&2
+    exit 1
+  fi
+  node scripts/verify-packaging-completeness.mjs --app "$packed_app"
 }
 
 while true; do

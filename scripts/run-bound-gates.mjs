@@ -74,8 +74,16 @@ const dropped = gates.slice(MAX_GATES);
 
 let failed = 0;
 const skipped = [];
+// 인자가 있어야 자기검사로 도는 게이트는 파일 머리에 `// gate-args: --self-test` 를 적는다.
+// (verify-mac-install-boundary.mjs 는 인자 없이 부르면 사용법 오류로 죽어 "실패"로 오보됐다.)
+function gateArgs(gate) {
+  const head = fs.readFileSync(path.join(root, gate), "utf8").slice(0, 2048);
+  const m = head.match(/^\/\/\s*gate-args:\s*(.+)$/m);
+  return m ? m[1].trim().split(/\s+/) : [];
+}
+
 for (const gate of selected) {
-  const result = spawnSync(process.execPath, [gate], { cwd: root, encoding: "utf8" });
+  const result = spawnSync(process.execPath, [gate, ...gateArgs(gate)], { cwd: root, encoding: "utf8" });
   if (result.status === 0) {
     console.log(`ok   ${gate}`);
     continue;
