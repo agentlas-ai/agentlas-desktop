@@ -137,9 +137,24 @@ assert.match(oneShellStyles, /\.taskToolbar\s*\{[\s\S]*?grid-template-columns:\s
 // 1.0.31: 결과 레일 토글은 툴바에 남는다 — 닫힌 레일을 다시 여는 유일한 손잡이다.
 assert.match(oneShell, /결과 패널 열기[\s\S]{0,400}?presentRichOutputRail\(\)/);
 assert.match(oneShellStyles, /data-rail-collapsed="true"\]\s+\.taskToolbar\s*\{[\s\S]*?padding-left:\s*76px/);
-assert.match(oneShellStyles, /\.taskforceToolbarPortraits\s*\{[\s\S]*?width:\s*94px/);
-assert.match(oneShellStyles, /\.taskforceToolbarPortraits\s*>\s*span:nth-child\(2\)[^}]*left:\s*34px/);
-assert.match(oneShellStyles, /\.taskforceToolbarPortraits\s*>\s*span:nth-child\(3\)[^}]*left:\s*68px/);
+// 게이트 §7.4 — 여기는 **정확한 픽셀값**을 못박고 있었다. 그러면 정상적인 디자인 조정이
+// 게이트를 깨고(오늘 한 번 그랬다), 통과시키려고 디자인을 되돌리게 된다.
+// 계약은 "겹쳐 쌓인 초상 세 개가 서로 다른 자리에 있고, 뒤로 갈수록 오른쪽이다"이다.
+// 값이 아니라 **순서와 관계**로 검사한다.
+{
+  const portraitOffset = (nth) => {
+    const rule = new RegExp(`\\.taskforceToolbarPortraits\\s*>\\s*span:nth-child\\(${nth}\\)[^}]*left:\\s*(\\d+)px`).exec(oneShellStyles);
+    assert.ok(rule, `stacked toolbar portrait ${nth} must be positioned explicitly`);
+    return Number(rule[1]);
+  };
+  const second = portraitOffset(2);
+  const third = portraitOffset(3);
+  assert.ok(second > 0, "the second portrait must be offset from the first");
+  assert.ok(third > second, "portraits must fan out in order, not collide");
+  const widthRule = /\.taskforceToolbarPortraits\s*\{[\s\S]*?width:\s*(\d+)px/.exec(oneShellStyles);
+  assert.ok(widthRule, "the stacked portrait strip must reserve a width");
+  assert.ok(Number(widthRule[1]) > third, "the strip must be wide enough to hold the last portrait");
+}
 assert.match(oneShellStyles, /data-rail-open="true"\]\s+\.(?:taskSidebarRevealButton|sidebarRevealButton)/);
 assert.match(oneShellStyles, /@media \(max-width: 1080px\)[\s\S]*?data-context-rail="true"\][\s\S]*?grid-template-columns:\s*224px minmax\(0, 1fr\) 0/);
 assert.match(oneShellStyles, /width:\s*min\(var\(--one-rail-width, 420px\), calc\(100% - 56px\)\) !important/);
