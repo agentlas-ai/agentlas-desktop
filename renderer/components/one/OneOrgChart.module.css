@@ -79,7 +79,7 @@
 .dialogHeader h3 { margin: 0; font-size: 15px; }
 .dialogHeader button { border: 0; background: none; color: #87908b; font-size: 20px; cursor: pointer; }
 .slotNote { margin: -8px 0 0; color: #6d7972; font-size: 10px; }
-.tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; padding: 3px; border-radius: 9px; background: #f2f5f3; }
+.tabs { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 5px; padding: 3px; border-radius: 9px; background: #f2f5f3; }
 .tabs button { min-height: 28px; border: 0; border-radius: 7px; background: transparent; color: #8a928e; font-size: 10px; cursor: pointer; }
 .tabs button[data-active="true"] { background: #fff; color: #1d7d63; box-shadow: 0 1px 4px rgba(20, 40, 30, .08); }
 .field { display: grid; gap: 5px; color: #67706b; font-size: 10px; }
