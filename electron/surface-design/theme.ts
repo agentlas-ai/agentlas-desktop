@@ -5,6 +5,7 @@
 //
 // 스캐폴드는 정적 HTML(빌드 스텝 없음)이라 vanilla CSS로 제공한다. React 앱을 만들 땐
 // 에이전트가 shadcn MCP를, 디자인 리서치엔 lazyweb MCP를 쓰도록 안내(surface 디자인 디렉티브).
+import { DESIGN_OUTPUT_TOKEN_CONTRACT, DESIGN_OUTPUT_TOKEN_SOURCE } from "../../shared/design-output-tokens";
 
 export interface DesignTokens {
   /** 브랜드 강조색(HEX). lazyweb 추출/사용자 브랜드가 있으면 주입. */
@@ -72,6 +73,23 @@ export function buildDesignCss(tokens: DesignTokens = {}): string {
   --sh3:0 8px 28px rgba(20,18,12,.10),0 2px 6px rgba(20,18,12,.06);
   --ring:0 0 0 3px var(--accent-soft);
   --font-sans:${sans}; --font-mono:${DEFAULT_MONO};
+  /* Shared with the trusted One/Work output renderers.  Keeping the aliases
+     here means a generated static report and an in-app report consume the same
+     built-in @design token contract. */
+  --design-token-source:"${DESIGN_OUTPUT_TOKEN_SOURCE}";
+  --design-token-contract:"${DESIGN_OUTPUT_TOKEN_CONTRACT}";
+  --design-bg:var(--bg); --design-panel:var(--panel); --design-panel-muted:var(--panel-2);
+  --design-ink:var(--ink); --design-ink-2:var(--ink-2); --design-muted:var(--muted); --design-faint:var(--faint);
+  --design-line:var(--line); --design-line-2:var(--line-2);
+  --design-accent:var(--accent); --design-accent-ink:var(--accent-ink); --design-contrast-ink:#fff; --design-accent-soft:var(--accent-soft);
+  --design-ok:var(--ok); --design-ok-soft:var(--ok-soft); --design-warn:var(--warn); --design-warn-soft:var(--warn-soft);
+  --design-danger:var(--risk); --design-danger-soft:var(--risk-soft);
+  --design-font-sans:var(--font-sans); --design-font-mono:var(--font-mono);
+  --design-space-1:var(--s1); --design-space-2:var(--s2); --design-space-3:var(--s3); --design-space-4:var(--s4);
+  --design-space-5:var(--s5); --design-space-6:var(--s6);
+  --design-radius-sm:var(--r1); --design-radius-md:var(--r2); --design-radius-lg:var(--r3); --design-radius-full:var(--r-full);
+  --design-shadow-1:var(--sh1); --design-shadow-2:var(--sh2);
+  --design-motion-fast:140ms; --design-motion-smooth:220ms cubic-bezier(.2,.75,.25,1);
 }
 * { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; }

@@ -208,7 +208,29 @@ async function main() {
     const viewport = await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
     const workPanelBox = await workPanel.boundingBox();
     assert.ok(workPanelBox, "Work right panel must be visible in the app window");
-    assert.ok(workPanelBox.width / viewport.width >= 0.40, `Work rich result panel must open wide: ${workPanelBox.width}/${viewport.width}`);
+    const workDesignTokens = await page.locator("aside.agentlas-workbench-panel").first().evaluate((node) => {
+      const root = getComputedStyle(document.documentElement);
+      return {
+        source: node.getAttribute("data-design-token-source"),
+        contract: node.getAttribute("data-design-token-contract"),
+        surface: node.getAttribute("data-design-surface"),
+        bg: root.getPropertyValue("--design-bg").trim(),
+        accent: root.getPropertyValue("--design-accent").trim(),
+      };
+    });
+    assert.equal(workDesignTokens.source, "builtin:design@0.1.0", "Work output must declare the built-in design token source");
+    assert.equal(workDesignTokens.contract, "output-surface.v1", "Work output must use the output token contract");
+    assert.ok(workDesignTokens.bg && workDesignTokens.accent, "Work output must resolve semantic design tokens");
+    const workPresentation = await workPanel.evaluate((node) => ({
+      kind: node.getAttribute("data-output-kind"),
+      wide: node.getAttribute("data-output-wide"),
+      autoWidth: node.getAttribute("data-output-auto-width"),
+    }));
+    const expectedAutoWidth = Math.round(viewport.width * 0.432);
+    assert.equal(workPresentation.kind, "map", "Work map result must be classified as a map output");
+    assert.equal(workPresentation.wide, "true", "Work map result must mark the output as wide");
+    assert.equal(workPresentation.autoWidth, "true", "Work map result must trigger automatic panel width");
+    assert.ok(Math.abs(workPanelBox.width - expectedAutoWidth) <= 2, `Work rich result panel must open at the reference width: ${workPanelBox.width} vs ${expectedAutoWidth}`);
     assert.equal(await page.locator("[data-tour-id=workspace.chat]").getByText("오른쪽 패널", { exact: false }).count().catch(() => 0), 0);
     assert.ok(await page.getByText("여행 지도 결과", { exact: true }).count() >= 1, "result must remain in the Work conversation/panel");
     const mapCanvasCount = await page.locator("[data-map-state=ready] canvas").count();
@@ -250,6 +272,14 @@ async function main() {
     await page.goto(`${baseUrl}/workspace/task?id=${encodeURIComponent(workChat.id)}&surface=${encodeURIComponent(liveSurface.id)}`, { waitUntil: "domcontentloaded" });
     await waitFor(page, () => document.querySelector(".chat-right-panel[data-active-tab=panel]") !== null);
     await waitFor(page, () => document.querySelector('[aria-label="실시간 웹 결과 live app"]') !== null, 30_000);
+    const liveDesignTokens = await page.locator("aside.agentlas-workbench-panel").first().evaluate((node) => ({
+      source: node.getAttribute("data-design-token-source"),
+      contract: node.getAttribute("data-design-token-contract"),
+      surface: node.getAttribute("data-design-surface"),
+    }));
+    assert.equal(liveDesignTokens.source, "builtin:design@0.1.0", "live web host chrome must declare the built-in design token source");
+    assert.equal(liveDesignTokens.contract, "output-surface.v1", "live web host chrome must use the output token contract");
+    assert.equal(liveDesignTokens.surface, "web", "live web host chrome must use the web token surface");
     const liveBetaNotice = page.locator('[role="dialog"][aria-label*="Hub Network"], [role="dialog"][aria-label*="허브 네트워크"]');
     if (await liveBetaNotice.count()) {
       await liveBetaNotice.getByRole("button").first().click().catch(() => undefined);
@@ -280,7 +310,9 @@ async function main() {
     const output = {
       ok: true,
       sameBrowserWindow: true,
-      work: { panelWidth: workPanelAfterResize.width, viewportWidth: viewport.width, ratio: workPanelAfterResize.width / viewport.width, mapCanvasCount },
+      work: { initialPanelWidth: workPanelBox.width, panelWidth: workPanelAfterResize.width, viewportWidth: viewport.width, ratio: workPanelAfterResize.width / viewport.width, mapCanvasCount },
+      designTokens: workDesignTokens,
+      liveDesignTokens,
       liveWeb: { childUrl: nativeWeb.child.url, interaction: webInteraction },
       screenshots: ["work-right-panel-map.png", "work-right-panel-live-web.png"],
       rendererErrors: errors,

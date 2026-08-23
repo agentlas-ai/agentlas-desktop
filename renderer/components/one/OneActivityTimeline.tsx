@@ -20,7 +20,15 @@ import {
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { LiveOutputViewer, type LiveOutputKind } from "@/components/LiveOutputViewer";
 import { CodeIdeViewer, isCodeArtifactName } from "@/components/CodeIdeViewer";
+import { LiveDeviceMockup } from "@/components/LiveDeviceMockup";
 import { ipc } from "@/lib/ipc";
+import {
+  isWideOutputKind,
+  outputPresentationKindForName,
+  preferredOutputRailWidth,
+  type OutputPresentationKind,
+} from "@/lib/output-presentation";
+import { designOutputSurfaceProps, designSurfaceKindForOutput } from "@/lib/design-output-tokens";
 import { isOneArtifactOpenRequest, ONE_ARTIFACT_OPEN_EVENT, requestOneArtifactOpen, type OneArtifactOpenRequest } from "@/lib/one-artifact-open";
 import type { BrowserLiveFrame, BrowserLiveInput } from "@/lib/types";
 import type { OneArtifactPreviewCapabilityV1 } from "@shared/one-artifacts";
@@ -41,7 +49,7 @@ import styles from "./OneActivityTimeline.module.css";
 const ONE_OUTPUT_SECTIONS_STORAGE_KEY = "agentlas.one.output-sections.v1";
 const ONE_OUTPUT_HISTORY_HEIGHT_STORAGE_KEY = "agentlas.one.output-history-height.v1";
 type OutputSectionKey = "files" | "agents" | "processes" | "computer" | "sources";
-type OutputRailView = "result" | "activity" | "terminal" | "browser";
+type OutputRailView = "result" | "activity" | "terminal" | "browser" | "app";
 type BrowserLiveInputBody = BrowserLiveInput extends infer Input
   ? Input extends { sessionId: string } ? Omit<Input, "sessionId"> : never
   : never;
@@ -385,7 +393,7 @@ export function OneActivityTimeline({
 
   return (
     <section
-      className={styles.activity}
+      {...designOutputSurfaceProps("report", styles.activity)}
       data-one-activity="true"
       data-state={preparing ? "preparing" : busy ? "running" : "settled"}
       data-permission={state.selectedPermissionMode ?? permission}
@@ -565,6 +573,18 @@ export function taskBrowserUrl(items: OneActivityItem[]): string | undefined {
     }
   }
   return undefined;
+}
+
+/**
+ * A generated web app is a first-class One output, not an artifact link.
+ * Work and One share the same main-owned loopback preview runtime; this
+ * descriptor only carries the verified app identity and URL to the rail.
+ */
+export interface OneLiveAppPreview {
+  appId: string;
+  title: string;
+  url: string;
+  runtime?: string;
 }
 
 type BrowserShellTab = {
@@ -953,6 +973,8 @@ export function OneActivityArtifactRail({
   onBrowserObserved,
   result,
   resultKey,
+  resultKind = "standard",
+  appPreview,
 }: {
   items: OneActivityArtifact[];
   activity?: OneActivityState;
@@ -982,12 +1004,15 @@ export function OneActivityArtifactRail({
   result?: ReactNode;
   /** Stable identity used to present a newly arrived result automatically. */
   resultKey?: string | null;
+  /** Result kind drives the same comfortable in-app width for map/media/docs/code. */
+  resultKind?: OutputPresentationKind;
+  /** A generated web app that is already reachable on its verified preview URL. */
+  appPreview?: OneLiveAppPreview | null;
 }) {
   const [collapsedSections, setCollapsedSections] = useState<Set<OutputSectionKey>>(readCollapsedOutputSections);
   const [railView, setRailView] = useState<OutputRailView>("activity");
   const resizeRef = useRef<{ pointerId: number; startX: number; startWidth: number; rawWidth: number } | null>(null);
   const historyResizeRef = useRef<{ pointerId: number; startY: number; startHeight: number } | null>(null);
-  const browserComfortWidthAppliedRef = useRef(false);
   const [resizing, setResizing] = useState(false);
   const [collapseReady, setCollapseReady] = useState(false);
   const [historyResizing, setHistoryResizing] = useState(false);
@@ -995,6 +1020,7 @@ export function OneActivityArtifactRail({
   const [browserUrlsByScope, setBrowserUrlsByScope] = useState<Record<string, string>>({});
   const [openedArtifact, setOpenedArtifact] = useState<OneArtifactOpenRequest | null>(null);
   const presentedBrowserTargetRef = useRef<string | null>(null);
+  const presentedAppTargetRef = useRef<string | null>(null);
   const presentedResultKeyRef = useRef<string | null>(null);
   const presentedArtifactIdRef = useRef<string | null>(null);
   const clampWidth = (value: number) => Math.min(maxWidth, Math.max(minWidth, Math.round(value)));
@@ -1033,6 +1059,32 @@ export function OneActivityArtifactRail({
     ?? browserHistoryUrl
     ?? (browserScopeKey ? browserUrlsByScope[browserScopeKey] : undefined);
   const latestArtifactId = items.at(-1)?.id ?? null;
+  const openedArtifactKind = openedArtifact ? outputPresentationKindForName(openedArtifact.label) : "standard";
+  const latestArtifactKind = outputPresentationKindForName(items.at(-1)?.label);
+  const activeOutputKind: OutputPresentationKind = appPreview
+    ? "web"
+    : openedArtifactKind !== "standard"
+      ? openedArtifactKind
+      : resultKind !== "standard"
+        ? resultKind
+        : preferredBrowserUrl
+          ? "web"
+          : openedArtifact
+            ? "document"
+            : latestArtifactKind;
+  const outputIdentity = openedArtifact
+    ? `artifact:${openedArtifact.binding.runId}:${openedArtifact.binding.artifactRef}`
+    : appPreview
+      ? `app:${appPreview.appId}:${appPreview.url}`
+    : preferredBrowserUrl
+      ? `browser:${preferredBrowserUrl}`
+      : resultKey
+        ? `result:${resultKey}`
+        : `kind:${activeOutputKind}`;
+  const appViewId = useMemo(
+    () => appPreview ? `one_app_${appPreview.appId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 60)}` : undefined,
+    [appPreview?.appId],
+  );
   useEffect(() => {
     const handleOpen = (event: Event) => {
       const detail = (event as CustomEvent<unknown>).detail;
@@ -1043,6 +1095,24 @@ export function OneActivityArtifactRail({
     window.addEventListener(ONE_ARTIFACT_OPEN_EVENT, handleOpen);
     return () => window.removeEventListener(ONE_ARTIFACT_OPEN_EVENT, handleOpen);
   }, []);
+  useEffect(() => {
+    const handleInAppLink = (event: Event) => {
+      const detail = (event as CustomEvent<unknown>).detail;
+      if (!detail || typeof detail !== "object") return;
+      const candidate = detail as { href?: unknown; fileUrl?: unknown };
+      const url = typeof candidate.href === "string" && /^https?:\/\//iu.test(candidate.href)
+        ? candidate.href
+        : typeof candidate.fileUrl === "string" && /^https?:\/\//iu.test(candidate.fileUrl)
+          ? candidate.fileUrl
+          : null;
+      if (!url) return;
+      const scope = browserScopeKey ?? "unscoped";
+      setBrowserUrlsByScope((current) => current[scope] === url ? current : { ...current, [scope]: url });
+      setRailView("browser");
+    };
+    window.addEventListener("agentlas:in-app-linked-file", handleInAppLink);
+    return () => window.removeEventListener("agentlas:in-app-linked-file", handleInAppLink);
+  }, [browserScopeKey]);
   useEffect(() => {
     if (result || !latestArtifactId || presentedArtifactIdRef.current === latestArtifactId) return;
     presentedArtifactIdRef.current = latestArtifactId;
@@ -1058,30 +1128,40 @@ export function OneActivityArtifactRail({
     // Browser work is itself the output. A person should not have to discover
     // a hidden tab after the agent opens a page, and the external Chrome window
     // is never the One presentation surface.
-    setRailView("browser");
+    setRailView((current) => current === "app" ? current : "browser");
     onBrowserObserved?.(preferredBrowserUrl);
   }, [browserScopeKey, onBrowserObserved, preferredBrowserUrl]);
+  useEffect(() => {
+    if (!appPreview?.url) {
+      presentedAppTargetRef.current = null;
+      if (railView === "app") setRailView("activity");
+      return;
+    }
+    const targetKey = `${appPreview.appId}\u0000${appPreview.url}`;
+    if (presentedAppTargetRef.current === targetKey) return;
+    presentedAppTargetRef.current = targetKey;
+    // The app itself is the primary output. Open it once when the verified
+    // preview becomes reachable, but do not fight a user's later tab choice.
+    setRailView("app");
+  }, [appPreview?.appId, appPreview?.url, railView]);
   useEffect(() => {
     if (!result || !resultKey || presentedResultKeyRef.current === resultKey) return;
     presentedResultKeyRef.current = resultKey;
     // 결과 자동 표시도 같은 규칙 — 확인된 Browser 표면 위로는 올라오지 않는다. Result 탭은 남는다.
-    setRailView((current) => (current === "browser" ? current : "result"));
+    setRailView((current) => (current === "browser" || current === "app" ? current : "result"));
   }, [result, resultKey]);
   useEffect(() => {
-    if (railView !== "browser" || browserComfortWidthAppliedRef.current || !onResize) return;
-    browserComfortWidthAppliedRef.current = true;
-    const currentWidth = width ?? defaultWidth;
-    // A real browser needs room for tabs, navigation and the address bar. The
-    // former 420px activity-rail width compressed those controls into an
-    // unreadable preview; open Browser at the same comfortable width as the
-    // in-app browser reference while keeping the user's resize control.
+    if (!onResize || !visible || !isWideOutputKind(activeOutputKind)) return;
+    // Only a new rendered output can trigger the automatic expansion. Width is
+    // intentionally not a dependency: after the user drags the rail narrower,
+    // the next pointer move must not fight their explicit resize choice.
     const preferredWidth = typeof window === "undefined"
-      ? 640
-      : window.innerWidth <= 1080
-        ? Math.round(window.innerWidth * 0.86)
-        : Math.round(window.innerWidth * 0.432);
-    if (currentWidth < preferredWidth) onResize(Math.min(maxWidth, preferredWidth));
-  }, [defaultWidth, maxWidth, onResize, railView, width]);
+      ? Math.min(maxWidth, Math.max(minWidth, 640))
+      : preferredOutputRailWidth(window.innerWidth, minWidth, maxWidth);
+    const currentWidth = width ?? defaultWidth;
+    if (currentWidth < preferredWidth) onResize(preferredWidth);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeOutputKind, defaultWidth, maxWidth, minWidth, onResize, outputIdentity, resultKey, visible]);
   useEffect(() => {
     if (!onResize) return;
     const move = (event: PointerEvent) => {
@@ -1179,10 +1259,13 @@ export function OneActivityArtifactRail({
   if (!visible) return null;
   return (
     <aside
-      className={styles.artifactRail}
+      {...designOutputSurfaceProps(designSurfaceKindForOutput(activeOutputKind), styles.artifactRail)}
       aria-label={locale === "ko" ? "작업 산출물" : "Work outputs"}
       data-one-runtime-artifacts="true"
       data-rail-view={railView}
+      data-output-kind={activeOutputKind}
+      data-output-wide={isWideOutputKind(activeOutputKind) ? "true" : "false"}
+      data-output-auto-width={isWideOutputKind(activeOutputKind) ? "true" : "false"}
       data-resizing={resizing ? "true" : "false"}
       data-collapse-ready={collapseReady ? "true" : "false"}
       style={width ? { width } : undefined}
@@ -1219,26 +1302,39 @@ export function OneActivityArtifactRail({
           }}
         />
       )}
-      <header>
-        <strong>{locale === "ko" ? "출력" : "Outputs"}</strong>
+      <nav className={styles.artifactTabs} aria-label={locale === "ko" ? "출력 보기" : "Output views"} role="tablist">
+        <div className={styles.artifactTabList}>
+          {([
+            ...(result || openedArtifact ? ["result" as const] : []),
+            "activity" as const,
+            "terminal" as const,
+            ...(appPreview ? ["app" as const] : []),
+            "browser" as const,
+          ]).map((view) => (
+            <button
+              key={view}
+              type="button"
+              role="tab"
+              aria-selected={railView === view}
+              data-active={railView === view ? "true" : "false"}
+              onClick={() => setRailView(view)}
+            >
+              {view === "result"
+                ? (locale === "ko" ? "결과" : "Result")
+                : view === "activity"
+                  ? "Activity"
+                  : view === "terminal"
+                    ? "Terminal"
+                    : view === "app"
+                      ? (locale === "ko" ? "앱" : "App")
+                      : "Browser"}
+            </button>
+          ))}
+        </div>
         <div className={styles.artifactHeaderActions}>
           <button type="button" onClick={onAdd} aria-label={locale === "ko" ? "파일 추가" : "Add file"}><IconPlus size={15} /></button>
           {onClose && <button type="button" onClick={onClose} aria-label={locale === "ko" ? "출력 패널 접기" : "Collapse output panel"}><IconClose size={15} /></button>}
         </div>
-      </header>
-      <nav className={styles.artifactTabs} aria-label={locale === "ko" ? "출력 보기" : "Output views"} role="tablist">
-        {([...(result || openedArtifact ? ["result" as const] : []), "activity" as const, "terminal" as const, "browser" as const]).map((view) => (
-          <button
-            key={view}
-            type="button"
-            role="tab"
-            aria-selected={railView === view}
-            data-active={railView === view ? "true" : "false"}
-            onClick={() => setRailView(view)}
-          >
-            {view === "result" ? (locale === "ko" ? "결과" : "Result") : view === "activity" ? "Activity" : view === "terminal" ? "Terminal" : "Browser"}
-          </button>
-        ))}
       </nav>
       <div className={styles.artifactContentStack}>
       <div className={styles.artifactList}>
@@ -1247,7 +1343,7 @@ export function OneActivityArtifactRail({
             <button type="button" className={styles.artifactBackButton} onClick={() => setOpenedArtifact(null)}>
               <IconArrowLeft size={13} /> {locale === "ko" ? "결과로 돌아가기" : "Back to result"}
             </button>
-            <ArtifactOpenViewer target={openedArtifact} locale={locale} wide={(width ?? defaultWidth) >= 560} />
+            <ArtifactOpenViewer target={openedArtifact} locale={locale} wide={isWideOutputKind(activeOutputKind) || (width ?? defaultWidth) >= 560} />
           </>}
           {!openedArtifact && result}
         </div>}
@@ -1284,6 +1380,18 @@ export function OneActivityArtifactRail({
               : sources.slice(-5).map((source) => <SourceRow key={source.id} source={source} />)}
           </OutputDisclosure>
         </>}
+        {railView === "app" && appPreview && appViewId && (
+          <div {...designOutputSurfaceProps("web", styles.appPreviewView)} data-one-live-app="true" data-app-id={appPreview.appId}>
+            <LiveDeviceMockup
+              url={appPreview.url}
+              title={appPreview.title}
+              runtimeLabel={appPreview.runtime ?? "managed preview"}
+              locale={locale}
+              viewId={appViewId}
+              onClose={onClose}
+            />
+          </div>
+        )}
       </div>
       {(railView === "activity" || railView === "terminal") && <><div
         className={styles.artifactHistoryResizeHandle}

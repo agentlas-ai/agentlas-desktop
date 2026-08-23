@@ -9,9 +9,9 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { MermaidBlock } from "./MermaidBlock";
 import { MathSpan } from "./MathSpan";
-import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { splitStreamingSegments, type SegmentCache } from "@shared/streaming-segments";
+import { designOutputSurfaceProps } from "@/lib/design-output-tokens";
 
 export interface CodeArtifact {
   /** 채팅 내 안정적 id — 메시지id + 블록 인덱스 조합 */
@@ -65,7 +65,10 @@ export function Markdown({
   );
   const blocks = useMemo(() => parseBlocks(text, messageId), [text, messageId]);
   return (
-    <div style={{ fontSize: 14, lineHeight: 1.65, fontFamily: "var(--font-body)", overflowWrap: "anywhere" }}>
+    <div
+      {...designOutputSurfaceProps("report")}
+      style={{ fontSize: 14, lineHeight: 1.65, fontFamily: "var(--design-font-sans)", overflowWrap: "anywhere" }}
+    >
       {blocks.map((b, i) => renderBlock(b, i, onOpenArtifact, t, onOpenMedia, onOpenLinkedFile, resolvedMediaBasePaths))}
     </div>
   );
@@ -1005,24 +1008,21 @@ function renderInlineLink(
   const href = cleanLinkHref(rawHref);
   const localTargets = localPathsFromFileRef(href, mediaBasePaths);
   const isLocalFile = localTargets.length > 0 || looksLikeLocalFileRef(href);
-  const handleClick = async (event: ReactMouseEvent<HTMLAnchorElement>) => {
-    if (!isLocalFile) return;
+  const isHttpLink = /^https?:\/\//iu.test(href);
+  const handleClick = (event: ReactMouseEvent<HTMLAnchorElement>) => {
+    if (!isLocalFile && !isHttpLink) return;
     event.preventDefault();
     event.stopPropagation();
     if (onOpenLinkedFile) {
       onOpenLinkedFile(linkedFileArtifactFromRef(href, label, mediaBasePaths));
       return;
     }
-    const bridge = ipc();
-    if (bridge?.fs?.openPath) {
-      const targets = uniqueStrings([...localTargets, href]);
-      for (const target of targets) {
-        const result = await bridge.fs.openPath(target).catch(() => ({ ok: false }));
-        if (result.ok) return;
-      }
-    }
-    const fallback = localTargets[0] ? fileUrlForLocalPath(localTargets[0]) : href;
-    window.open(fallback, "_blank", "noopener,noreferrer");
+    // A renderer without an owner callback must still stay in-app. The
+    // mounted One/Work output owner can adopt this event; there is no Finder,
+    // Quick Look, Chrome, or sibling BrowserWindow fallback.
+    window.dispatchEvent(new CustomEvent("agentlas:in-app-linked-file", {
+      detail: linkedFileArtifactFromRef(href, label, mediaBasePaths),
+    }));
   };
   return (
     <a
@@ -1031,7 +1031,7 @@ function renderInlineLink(
       target="_blank"
       rel="noreferrer"
       onClick={handleClick}
-      style={{ color: "var(--accent)", textDecoration: "underline", cursor: isLocalFile ? "pointer" : undefined }}
+      style={{ color: "var(--accent)", textDecoration: "underline", cursor: (isLocalFile || isHttpLink) ? "pointer" : undefined }}
       title={isLocalFile && localTargets[0] ? localTargets[0] : href}
     >
       {label}

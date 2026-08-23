@@ -24,3 +24,29 @@
 @keyframes map-spin { to { transform: rotate(360deg); } }
 @media (max-width: 760px) { .layout { grid-template-columns: 1fr; } .stage, .map { min-height: 280px; } .locations { max-height: 190px; } }
 @media (prefers-reduced-motion: reduce) { .overlay > span { animation-duration: 1.6s; } .locations button { transition: none; } }
+
+/* @design output-surface.v1 — map controls use host tokens; the MapLibre
+   canvas remains the live map renderer and is never replaced by SVG. */
+.layout {
+  --map-bg: var(--design-panel-muted);
+  --map-panel: var(--design-panel);
+  --map-ink: var(--design-ink);
+  --map-muted: var(--design-muted);
+  --map-line: var(--design-line);
+  --map-accent: var(--design-ok);
+}
+.layout[data-fill="true"],
+.stage { background: var(--map-bg); }
+.stage,
+.locations button { border-color: var(--map-line); }
+.locations button { background: var(--map-panel); color: var(--map-ink); }
+.locations button:hover,
+.locations button:focus-visible { border-color: var(--map-accent); background: color-mix(in srgb, var(--map-accent) 8%, var(--map-panel)); }
+.locations strong,
+.locations b,
+.liveBadge { color: var(--map-accent); }
+.locations small,
+.overlay,
+.overlay small { color: var(--map-muted); }
+.overlay { background: color-mix(in srgb, var(--map-bg) 92%, transparent); }
+.overlay button { border-color: var(--map-accent); background: var(--map-accent); color: var(--design-accent-ink); }

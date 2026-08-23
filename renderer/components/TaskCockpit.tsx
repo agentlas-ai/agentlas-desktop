@@ -237,9 +237,49 @@ function workspacePreviewFromLocalServer(url: string): WorkspaceFilePreview {
   };
 }
 
+/** External links from a rendered surface stay in the same app rail too. */
+function workspacePreviewFromBrowserUrl(url: string): WorkspaceFilePreview | null {
+  try {
+    const parsed = new URL(url);
+    if (!/^https?:$/i.test(parsed.protocol) || parsed.username || parsed.password) return null;
+    return {
+      path: url,
+      name: parsed.hostname + (parsed.pathname === "/" ? "" : parsed.pathname),
+      size: 0,
+      viewerKind: "browser",
+      fileUrl: url,
+      browserUrl: url,
+      openTargets: [url],
+      content: "",
+      truncated: false,
+      reason: "binary",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function workspacePreviewFromLocalFile(path: string): WorkspaceFilePreview {
+  const name = path.replace(/\\/g, "/").split("/").filter(Boolean).at(-1) || "index.html";
+  const fileUrl = fileUrlForToolPath(path);
+  return {
+    path,
+    name,
+    size: 0,
+    viewerKind: "browser",
+    fileUrl,
+    browserUrl: fileUrl,
+    openTargets: [path, fileUrl],
+    content: "",
+    truncated: false,
+    reason: "binary",
+  };
+}
+
 function workspacePreviewFromLinkedFile(file: LinkedFileArtifact): WorkspaceFilePreview {
   const path = file.path || file.paths?.[0] || file.href;
-  const viewerKind = viewerKindFromName(file.name || path);
+  const isRemoteUrl = /^https?:\/\//i.test(path);
+  const viewerKind = isRemoteUrl ? "browser" : viewerKindFromName(file.name || path);
   return {
     path,
     name: file.name || basename(path),
@@ -258,7 +298,11 @@ function viewerKindFromName(name: string): WorkspaceFilePreview["viewerKind"] {
   const ext = extensionOf(name);
   if ([".md", ".mdx"].includes(ext)) return "markdown";
   if ([".json", ".jsonl"].includes(ext)) return "json";
-  if ([".html", ".htm", ".url", ".webloc"].includes(ext)) return "browser";
+  // A static HTML artifact is source code when it comes from the chat/file
+  // list. Generated/live web surfaces use workspacePreviewFromLocalFile or a
+  // local-server URL and remain explicit Browser viewers.
+  if ([".html", ".htm"].includes(ext)) return "text";
+  if ([".url", ".webloc"].includes(ext)) return "browser";
   if ([".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".svg"].includes(ext)) return "image";
   if ([".mp4", ".webm", ".mov", ".m4v", ".ogv"].includes(ext)) return "video";
   if ([".mp3", ".mpeg", ".m4a", ".wav", ".ogg", ".oga", ".opus", ".flac", ".aac", ".weba", ".mid", ".midi"].includes(ext)) return "audio";
@@ -2944,7 +2988,8 @@ function ChatPage() {
       const api = ipc();
       const manifest = activeSurface.manifest;
       if (action.type === "external-link" && action.url) {
-        window.open(action.url, "_blank", "noopener,noreferrer");
+        const preview = workspacePreviewFromBrowserUrl(action.url);
+        if (preview) void openWorkspaceFilePreview(preview);
         return;
       }
       if (action.type === "copy") {
@@ -3075,8 +3120,10 @@ function ChatPage() {
                 result.summary,
               ].join("\n"),
             );
-            window.open(result.fileUrl, "_blank", "noopener,noreferrer");
-            setWorkspaceOpenPersisted(true);
+            // The generated index is a real HTML output. Keep it in the same
+            // BrowserWindow and hydrate it through the existing browser viewer
+            // instead of handing it to Finder/Chrome.
+            void openWorkspaceFilePreview(workspacePreviewFromLocalFile(result.indexPath));
             setFolderReload((n) => n + 1);
             return;
           }

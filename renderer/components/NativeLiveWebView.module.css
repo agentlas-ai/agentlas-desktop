@@ -133,6 +133,18 @@
     #0e100e;
 }
 
+/* @design output-surface.v1 — only the host toolbar/status chrome is themed;
+   the live external document inside the native webview is left untouched. */
+.shell { border-color: var(--design-line); }
+.toolbar { color: var(--design-contrast-ink, #fff); background: color-mix(in srgb, var(--design-ink) 92%, var(--design-accent) 8%); }
+.address { color: var(--design-muted); background: color-mix(in srgb, var(--design-ink) 96%, var(--design-bg)); }
+.actions button,
+.message button { border-color: color-mix(in srgb, var(--design-contrast-ink, #fff) 16%, transparent); color: var(--design-contrast-ink, #fff); }
+.actions button:hover,
+.actions button:focus-visible,
+.message button:hover,
+.message button:focus-visible { border-color: var(--design-accent); background: var(--design-accent-soft); }
+
 .message {
   position: absolute;
   inset: 0;

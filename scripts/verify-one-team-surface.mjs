@@ -160,7 +160,14 @@ assert.match(oneShell, /onBrowserObserved=\{presentBrowserOutput\}/);
 assert.match(activity, /setFrame\(null\)[\s\S]*?if \(!effectiveUrl\)/);
 assert.match(oneShell, /browserScopeKey=\{activeThreadChatId \?\? selected\?\.taskId \?\? conversation\?\.id\}/);
 assert.match(activity, /data-mode=\{viewport\}/);
-assert.match(activity, /\[\.\.\.\(result\s*\|\|\s*openedArtifact \? \["result" as const\] : \[\]\), "activity" as const, "terminal" as const, "browser" as const\]/);
+assert.match(activity, /result\s*\|\|\s*openedArtifact \? \["result" as const\] : \[\]/,
+  "the output rail must retain the Result view when a result or opened artifact exists");
+assert.match(activity, /"activity" as const,[\s\S]{0,80}"terminal" as const/,
+  "the output rail must retain Activity and Terminal views");
+assert.match(activity, /appPreview \? \["app" as const\] : \[\]/,
+  "the output rail must expose a generated-app view only when a live app exists");
+assert.match(activity, /"browser" as const/,
+  "the output rail must retain the in-app Browser view");
 assert.match(activity, /data-one-rail-resize="true"/);
 assert.match(activity, /window\.addEventListener\("pointermove", move/);
 assert.match(activity, /drag\.rawWidth <= collapseThreshold/);

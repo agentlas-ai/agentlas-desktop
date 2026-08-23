@@ -456,6 +456,86 @@
   --neu-inset: inset 0 1px 3px rgba(0, 0, 0, 0.6), inset 0 -1px 2px rgba(255, 255, 255, 0.03);
 }
 
+/* ── Built-in @design output contract ─────────────────────────────────────
+   The Design plugin's surface builder and the trusted One/Work renderers use
+   the same semantic names.  These are aliases to the app theme, so changing
+   light/dark or the brand accent updates reports, maps, code, and media chrome
+   without touching the live page being previewed. */
+:root {
+  --design-token-source: "builtin:design@0.1.0";
+  --design-token-contract: "output-surface.v1";
+  --design-bg: var(--paper);
+  --design-panel: var(--paper);
+  --design-panel-muted: var(--paper-2);
+  --design-ink: var(--ink);
+  --design-ink-2: var(--ink-soft);
+  --design-muted: var(--muted-deep);
+  --design-faint: var(--muted);
+  --design-line: var(--paper-edge);
+  --design-line-2: color-mix(in srgb, var(--paper-edge) 76%, var(--ink) 24%);
+  --design-accent: var(--accent);
+  --design-accent-ink: var(--paper);
+  --design-contrast-ink: #ffffff;
+  --design-accent-soft: var(--accent-soft);
+  --design-ok: var(--green-deep);
+  --design-ok-soft: color-mix(in srgb, var(--green-deep) 14%, transparent);
+  --design-warn: var(--amber-deep);
+  --design-warn-soft: color-mix(in srgb, var(--amber-deep) 14%, transparent);
+  --design-danger: var(--red-deep);
+  --design-danger-soft: color-mix(in srgb, var(--red-deep) 14%, transparent);
+  --design-font-sans: var(--font-body);
+  --design-font-mono: var(--font-mono);
+  --design-space-1: 4px;
+  --design-space-2: 8px;
+  --design-space-3: 12px;
+  --design-space-4: 16px;
+  --design-space-5: 24px;
+  --design-space-6: 32px;
+  --design-radius-sm: var(--radius-sm);
+  --design-radius-md: var(--radius-md);
+  --design-radius-lg: var(--radius-lg);
+  --design-radius-full: 999px;
+  --design-shadow-1: var(--shadow-1);
+  --design-shadow-2: var(--shadow-2);
+  --design-motion-fast: 140ms;
+  --design-motion-smooth: 220ms cubic-bezier(.2, .75, .25, 1);
+}
+
+/* Only trusted in-app output surfaces opt into this layer.  A live external
+   web page remains its own document and never gets the host's CSS injected. */
+.design-output-surface {
+  color: var(--design-ink);
+  font-family: var(--design-font-sans);
+  isolation: isolate;
+}
+.design-output-surface :where(code, kbd, pre) {
+  font-family: var(--design-font-mono);
+}
+.design-output-surface :where(button, input, select, textarea) {
+  font-family: inherit;
+}
+.design-output-surface[data-design-surface="report"] {
+  --output-surface-bg: var(--design-bg);
+  --output-surface-panel: var(--design-panel);
+  --output-surface-muted: var(--design-panel-muted);
+  --output-surface-ink: var(--design-ink);
+  --output-surface-muted-ink: var(--design-muted);
+  --output-surface-line: var(--design-line);
+  --output-surface-accent: var(--design-accent);
+}
+.design-output-surface[data-design-surface="map"] {
+  --output-surface-bg: var(--design-panel-muted);
+  --output-surface-panel: var(--design-panel);
+  --output-surface-line: var(--design-line);
+  --output-surface-accent: var(--design-ok);
+}
+.design-output-surface[data-design-surface="code"] {
+  --output-surface-bg: var(--design-panel-muted);
+  --output-surface-panel: var(--design-panel);
+  --output-surface-line: var(--design-line);
+  --output-surface-accent: var(--design-accent);
+}
+
 * {
   box-sizing: border-box;
 }

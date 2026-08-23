@@ -13,7 +13,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import { flushSync } from "react-dom";
-import { Markdown, StreamingMarkdown } from "@/components/Markdown";
+import { Markdown, StreamingMarkdown, type LinkedFileArtifact } from "@/components/Markdown";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { BrowserActionApprovalSheet } from "@/components/BrowserActionApprovalSheet";
 import { McpKeyRequestSheet } from "@/components/McpKeyRequestSheet";
@@ -139,7 +139,7 @@ import { OneMemoryCandidateCard } from "./OneMemoryCandidateCard";
 import { OneProfileSheet } from "./OneProfileSheet";
 import { OneSuggestionCard } from "./OneSuggestionCard";
 import { OneGrowthCard } from "./OneGrowthCard";
-import { OneActivityArtifactRail, taskBrowserUrl } from "./OneActivityTimeline";
+import { OneActivityArtifactRail, taskBrowserUrl, type OneLiveAppPreview } from "./OneActivityTimeline";
 import { OneOrgChart, type OneOrgSearchItem } from "./OneOrgChart";
 import { OneAgentPortrait } from "./OneAgentPortrait";
 import { OneCreateAgentDialog, type OneCreateAgentSeed } from "./OneCreateAgentDialog";
@@ -150,6 +150,12 @@ import { OneTurnWork, OneTurnWorkDividers } from "./OneTurnWork";
 import { OneTaskforceConversation } from "./OneTaskforceConversation";
 import { buildOneWorkPresentation } from "@/lib/one-turn-work";
 import { isDocumentLikeText } from "@/lib/one-doc-like";
+import { requestOneArtifactOpen } from "@/lib/one-artifact-open";
+import {
+  outputPresentationKindForManifest,
+  outputPresentationKindForName,
+  type OutputPresentationKind,
+} from "@/lib/output-presentation";
 import { planOneThreadWork, projectThreadRuns, type OneThreadRunBlock } from "@/lib/one-thread-work";
 import { ToolApprovalInline } from "@/components/ToolApprovalInline";
 import {
@@ -844,6 +850,10 @@ export function OneShell() {
   const [pendingTeamPrompt, setPendingTeamPrompt] = useState<PendingTeamPrompt | null>(null);
   const [messages, setMessages] = useState<UiMessage[]>([]);
   const [surface, setSurface] = useState<OneSurfaceManifestV1 | null>(null);
+  // One and Work share the same main-owned generated-app preview. One keeps
+  // only the verified descriptor here; the native WebContentsView belongs to
+  // the Outputs rail so chat remains the primary conversation surface.
+  const [oneLiveAppPreview, setOneLiveAppPreview] = useState<OneLiveAppPreview | null>(null);
   const [receipt, setReceipt] = useState<InvocationRunReceipt | null>(null);
   const [busy, setBusy] = useState(false);
   const [activity, setActivity] = useState<OneActivityState>(() => initialOneActivityState());
@@ -2152,6 +2162,93 @@ export function OneShell() {
   }, [activeThreadChatId]);
   const runtimeArtifacts = activity.artifacts;
   const latestRuntimeArtifact = runtimeArtifacts.at(-1) ?? null;
+  useEffect(() => {
+    const bridge = typeof window === "undefined" ? null : window.agentlas;
+    const chatId = activeThreadChatId;
+    const surfaceId = surface?.manifestId;
+    if (!bridge?.appFactory || !chatId || !surfaceId) {
+      setOneLiveAppPreview(null);
+      return;
+    }
+
+    let disposed = false;
+    let refreshing = false;
+    const refresh = async () => {
+      if (disposed || refreshing) return;
+      refreshing = true;
+      try {
+        // Read the raw Main bridge instead of ipc()'s 15-second cache. A newly
+        // scaffolded app must appear in the One rail while the user is still
+        // watching the same conversation.
+        const apps = await bridge.appFactory.listApps(chatId);
+        const app = apps.find((candidate) => (
+          candidate.surfaceId === surfaceId && candidate.status !== "archived"
+        ));
+        if (!app) {
+          if (!disposed) setOneLiveAppPreview(null);
+          return;
+        }
+        const preview = await bridge.appFactory.startLivePreview({ appId: app.id });
+        if (disposed) return;
+        if (!preview.ok || !preview.url) {
+          // Keep a currently reachable view during a transient registry or
+          // filesystem read failure; clear only when the app identity changed.
+          setOneLiveAppPreview((current) => current?.appId === app.id ? current : null);
+          return;
+        }
+        const previewUrl = preview.url;
+        setOneLiveAppPreview((current) => (
+          current?.appId === app.id
+            && current.url === previewUrl
+            && current.title === app.appName
+            && current.runtime === preview.runtime
+            ? current
+            : {
+              appId: app.id,
+              title: app.appName,
+              url: previewUrl,
+              runtime: preview.runtime,
+            }
+        ));
+      } catch {
+        // A polling tick is advisory. NativeLiveWebView owns the visible
+        // failure state, so a temporary registry read must not blank the rail.
+      } finally {
+        refreshing = false;
+      }
+    };
+
+    void refresh();
+    const timer = window.setInterval(refresh, busy ? 1_200 : 3_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [activeThreadChatId, busy, surface?.manifestId]);
+  const openOneLinkedFile = useCallback((file: LinkedFileArtifact) => {
+    const normalized = (file.path || file.paths?.[0] || file.href || file.name).replace(/\\/g, "/").toLowerCase();
+    const matched = runtimeArtifacts.find((artifact) => {
+      const label = artifact.label.replace(/\\/g, "/").toLowerCase();
+      return label === file.name.toLowerCase()
+        || normalized.endsWith(`/${label}`)
+        || normalized === label;
+    });
+    if (matched) {
+      requestOneArtifactOpen({ binding: matched.binding, label: matched.label });
+      return;
+    }
+    // Keep an unbound link in the renderer. A future owner can adopt it into
+    // the same Outputs rail; no OS-level open fallback is permitted.
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("agentlas:in-app-linked-file", { detail: file }));
+    }
+  }, [runtimeArtifacts]);
+  const oneOutputKind: OutputPresentationKind = useMemo(() => {
+    if (oneLiveAppPreview) return "web";
+    const surfaceKind = outputPresentationKindForManifest(surface);
+    if (surfaceKind !== "standard") return surfaceKind;
+    return outputPresentationKindForName(latestRuntimeArtifact?.label);
+  }, [latestRuntimeArtifact?.label, oneLiveAppPreview, surface]);
   const terminalReceiptKey = receipt && receipt.status !== "running"
     ? `${receipt.runId}:${receipt.status}`
     : null;
@@ -4457,6 +4554,7 @@ export function OneShell() {
         data-rail-collapsed={railCollapsed ? "true" : "false"}
         data-rail-open={railOpen ? "true" : "false"}
         data-context-rail={(selected || conversation) && contextRailOpen ? "true" : "false"}
+        data-context-rail-kind={oneOutputKind}
         data-task-active={selected || conversation ? "true" : "false"}
         data-home={!selected && !conversation ? "true" : "false"}
         data-rail-mode={railMode}
@@ -4571,6 +4669,7 @@ export function OneShell() {
           className={styles.workspace}
           data-runtime-artifacts={runtimeArtifacts.length > 0 ? "true" : "false"}
           data-context-rail={(selected || conversation) && contextRailOpen ? "true" : "false"}
+          data-context-rail-kind={oneOutputKind}
         >
           <div className={`${styles.windowBar} titlebar-drag`}>
             {selected || conversation ? (
@@ -4856,7 +4955,9 @@ export function OneShell() {
                                   ))}
                                 </div>
                               )}
-                              {visibleText && (message.streaming ? <StreamingMarkdown text={visibleText} messageId={message.id} /> : <Markdown text={visibleText} messageId={message.id} />)}
+                              {visibleText && (message.streaming
+                                ? <StreamingMarkdown text={visibleText} messageId={message.id} onOpenLinkedFile={openOneLinkedFile} />
+                                : <Markdown text={visibleText} messageId={message.id} onOpenLinkedFile={openOneLinkedFile} />)}
                             </div>
                           </article>
                           ))}
@@ -4902,7 +5003,7 @@ export function OneShell() {
                     <>
                       {busy && activeRunPrompt && !livePromptMounted && (
                         <article className={styles.message} data-role="user">
-                          <div className={styles.messageBody}><Markdown text={activeRunPrompt.text} messageId={`one-live-prompt:${activeRunPrompt.runId}`} /></div>
+                          <div className={styles.messageBody}><Markdown text={activeRunPrompt.text} messageId={`one-live-prompt:${activeRunPrompt.runId}`} onOpenLinkedFile={openOneLinkedFile} /></div>
                         </article>
                       )}
                       {activeTaskforce && <OneTaskforceConversation state={renderedActivity} org={oneOrgState} locale={appLocale} />}
@@ -5520,6 +5621,7 @@ export function OneShell() {
               projection={selected}
               receipt={receipt}
               locale={appLocale}
+              inOutputRail
               onSemanticAction={handleOneSemanticAction}
               onOpenAgentDraft={openCreateAgentDialog}
               onRetryUnfinished={retryUnfinished}
@@ -5539,6 +5641,8 @@ export function OneShell() {
             : receipt && selected
               ? `receipt:${selected.taskId}:${receipt.runId}:${receipt.status}`
               : null}
+          resultKind={oneOutputKind}
+          appPreview={oneLiveAppPreview}
           computerHistory={computerHistory}
           onHistoryConsent={enableComputerHistory}
           onHistoryClear={() => setHistoryClearConfirmOpen(true)}

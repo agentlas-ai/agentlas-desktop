@@ -1,10 +1,10 @@
 .activity {
-  --activity-ink: #303436;
-  --activity-muted: #737a7f;
-  --activity-faint: #9aa0a4;
-  --activity-line: #e9ecea;
-  --activity-fill: #f7f8f7;
-  --activity-accent: #6f8e55;
+  --activity-ink: var(--design-ink);
+  --activity-muted: var(--design-muted);
+  --activity-faint: var(--design-faint);
+  --activity-line: var(--design-line);
+  --activity-fill: var(--design-panel-muted);
+  --activity-accent: var(--design-accent);
   width: min(720px, 100%);
   margin: 8px 0 26px;
   border-top: 1px solid var(--activity-line);
@@ -239,18 +239,28 @@
   box-shadow: inset 3px 0 0 #63696c;
 }
 
-.artifactRail > header {
-  min-height: 64px;
+.artifactTabs {
+  min-height: 48px;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 22px;
+  align-items: stretch;
+  gap: 8px;
+  padding: 8px 12px 0;
   border-bottom: 1px solid #f0f1f2;
 }
-
-.artifactRail > header strong { color: #5f656a; font-size: 15px; }
-.artifactHeaderActions { display: inline-flex; align-items: center; gap: 2px; }
-.artifactRail > header button {
+.artifactTabList {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+}
+.artifactHeaderActions {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 2px;
+}
+.artifactHeaderActions button {
   width: 38px;
   height: 38px;
   display: grid;
@@ -262,17 +272,12 @@
   color: #a0a5a8;
   cursor: pointer;
 }
-.artifactRail > header button:hover,
-.artifactRail > header button:focus-visible { background: #f2f3f3; color: #555c60; outline: none; }
+.artifactHeaderActions button:hover,
+.artifactHeaderActions button:focus-visible { background: #f2f3f3; color: #555c60; outline: none; }
 
-.artifactTabs {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(74px, 1fr));
-  gap: 4px;
-  padding: 8px 16px 0;
-  border-bottom: 1px solid #f0f1f2;
-}
 .artifactTabs button {
+  flex: 1 1 0;
+  min-width: 0;
   min-height: 36px;
   border: 0;
   border-bottom: 2px solid transparent;
@@ -296,8 +301,25 @@
 }
 
 .artifactRail[data-rail-view="result"] .artifactList,
-.artifactRail[data-rail-view="browser"] .artifactList {
+.artifactRail[data-rail-view="browser"] .artifactList,
+.artifactRail[data-rail-view="app"] .artifactList {
   padding: 0;
+}
+
+.appPreviewView {
+  min-width: 0;
+  min-height: 100%;
+  height: 100%;
+  overflow: auto;
+  background: var(--design-bg, #fff);
+}
+
+.appPreviewView > section {
+  margin: 0;
+  min-height: 100%;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
 }
 
 .resultView {

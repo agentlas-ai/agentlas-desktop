@@ -27,3 +27,19 @@
 @keyframes output-spin { to { transform: rotate(360deg); } }
 @keyframes output-wave { 0%,100% { transform: scaleY(.55); opacity: .5; } 50% { transform: scaleY(1); opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .audioPulse i { animation: none; } .mediaStatus > span, .loading > span { animation-duration: 1.6s; } }
+
+/* @design output-surface.v1 — media/document chrome follows the same trusted
+   surface tokens while the media element itself keeps native playback. */
+.mediaStage,
+.documentEngine,
+.loading { border-color: var(--design-line); }
+.mediaStage[data-fill="true"] { background: var(--design-bg); }
+.audioStage { background: color-mix(in srgb, var(--design-ok) 8%, var(--design-panel)); }
+.audioPulse { color: var(--design-ok); }
+.documentEngine,
+.loading { background: var(--design-panel-muted); }
+.mediaStatus { background: color-mix(in srgb, var(--design-ink) 74%, transparent); color: var(--design-contrast-ink); }
+.mediaStatus[data-state="error"],
+.documentError { background: color-mix(in srgb, var(--design-danger) 12%, var(--design-bg)); color: var(--design-danger); }
+.documentError small { color: var(--design-muted); }
+.loading > span { border-color: var(--design-line-2); border-top-color: var(--design-accent); }

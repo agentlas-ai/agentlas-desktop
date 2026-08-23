@@ -1,0 +1,239 @@
+.shell {
+  --device-shell-bg: var(--design-bg, #fff);
+  --device-shell-line: var(--design-line, #e7e8e5);
+  --device-shell-muted: var(--design-muted, #858a86);
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--device-shell-bg);
+  color: var(--design-ink, #20221f);
+}
+
+.windowBar {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 12px 0 16px;
+  border-bottom: 1px solid var(--device-shell-line);
+  background: color-mix(in srgb, var(--device-shell-bg) 94%, var(--design-panel-muted, #f4f5f1));
+}
+
+.windowTitle,
+.windowActions {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.windowTitle { gap: 8px; }
+.windowTitle strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.windowDot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #3da45a;
+  box-shadow: 0 0 0 3px rgb(61 164 90 / 13%);
+}
+
+.liveBadge {
+  padding: 3px 6px;
+  border: 1px solid color-mix(in srgb, var(--design-accent, #6b6e52) 35%, transparent);
+  border-radius: 999px;
+  color: var(--design-accent, #6b6e52);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .08em;
+}
+
+.windowActions { gap: 2px; }
+.windowButton,
+.deviceControls button {
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--device-shell-muted);
+  cursor: pointer;
+}
+
+.windowButton {
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+}
+
+.windowButton:hover,
+.windowButton:focus-visible,
+.deviceControls button:hover,
+.deviceControls button:focus-visible {
+  outline: none;
+  background: var(--design-accent-soft, #eef0e8);
+  color: var(--design-ink, #20221f);
+}
+
+.deviceArea {
+  min-height: 0;
+  flex: 1 1 auto;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  padding: 20px 16px 18px;
+  background:
+    radial-gradient(circle at 50% 42%, color-mix(in srgb, var(--design-accent, #6b6e52) 9%, transparent), transparent 48%),
+    var(--device-shell-bg);
+}
+
+.deviceFrame {
+  position: relative;
+  width: min(340px, 100%);
+  aspect-ratio: 393 / 852;
+  flex: 0 0 auto;
+  padding: 8px;
+  border: 1px solid #777b7d;
+  border-radius: 48px;
+  background: linear-gradient(145deg, #fafafa 0%, #a9adb0 16%, #f7f7f6 42%, #868b8f 100%);
+  box-shadow:
+    0 26px 54px rgb(24 28 26 / 18%),
+    inset 0 0 0 2px rgb(255 255 255 / 75%),
+    inset 0 0 0 4px rgb(42 45 45 / 25%);
+}
+
+.deviceFrame::after {
+  position: absolute;
+  inset: 4px;
+  border: 1px solid rgb(255 255 255 / 70%);
+  border-radius: 44px;
+  pointer-events: none;
+  content: "";
+}
+
+.bezel {
+  width: 100%;
+  height: 100%;
+  padding: 8px;
+  border: 2px solid #070808;
+  border-radius: 40px;
+  background: #050505;
+  box-shadow: inset 0 0 0 2px #2b2d2d, inset 0 0 0 4px #000;
+}
+
+.deviceScreen {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border-radius: 31px;
+  background: #fff;
+}
+
+.dynamicIsland {
+  position: absolute;
+  top: 9px;
+  left: 50%;
+  z-index: 2;
+  width: 82px;
+  height: 22px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: #050505;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 25%);
+  pointer-events: none;
+}
+
+.screenViewport {
+  width: 100%;
+  height: 100%;
+  padding-top: 16px;
+}
+
+.screenViewport > section {
+  min-height: 100%;
+}
+
+.sideButton {
+  position: absolute;
+  right: -4px;
+  width: 4px;
+  border-radius: 0 3px 3px 0;
+  background: linear-gradient(#777b7c, #303335);
+  box-shadow: 1px 0 1px rgb(0 0 0 / 15%);
+}
+
+.sideButtonTop { top: 25%; height: 7%; }
+.sideButtonMiddle { top: 35%; height: 13%; }
+
+.poweredOff {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 10px;
+  padding: 24px;
+  color: #747975;
+  text-align: center;
+  background: #f7f7f6;
+}
+
+.poweredOff strong { font-size: 12px; }
+.poweredOff button {
+  min-height: 32px;
+  padding: 0 13px;
+  border: 0;
+  border-radius: 999px;
+  color: #fff;
+  background: #111;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.deviceControls {
+  min-height: 48px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 14px 10px;
+  border-top: 1px solid var(--device-shell-line);
+  background: var(--device-shell-bg);
+}
+
+.deviceControls::before {
+  position: absolute;
+  content: "";
+}
+
+.deviceControls button {
+  width: 31px;
+  height: 31px;
+  border-radius: 50%;
+}
+
+.deviceControls .passiveControl { color: #b5bab5; }
+
+.shell[data-expanded="true"] .deviceFrame { width: min(390px, 100%); }
+
+@media (max-width: 700px) {
+  .deviceArea { padding-inline: 10px; }
+  .deviceFrame { width: min(270px, 100%); }
+  .shell[data-expanded="true"] .deviceFrame { width: min(310px, 100%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .windowButton,
+  .deviceControls button { transition: none; }
+}

@@ -7,7 +7,6 @@ import {
   IconShield,
   IconSparkles,
 } from "@/components/Icon";
-import { ipc } from "@/lib/ipc";
 import type { OneRuntimeFeedbackItem } from "@/lib/one-runtime-feedback";
 import styles from "./OneShell.module.css";
 
@@ -54,15 +53,16 @@ export function OneRuntimeFeedbackList({
   );
 }
 
-async function openArtifact(item: OneRuntimeFeedbackItem) {
+function openArtifact(item: OneRuntimeFeedbackItem) {
   const target = item.path || item.previewUrl;
   if (!target) return;
-  const bridge = ipc();
-  if (bridge?.fs?.openPath) {
-    const result = await bridge.fs.openPath(target).catch(() => ({ ok: false, message: "" }));
-    if (result.ok) return;
-  }
-  window.open(item.previewUrl || target, "_blank", "noopener,noreferrer");
+  // This legacy rail is kept for old snapshots only. It must never escape to
+  // Finder/Chrome; the active One Outputs rail owns the in-app capability
+  // viewer. A namespaced event lets a mounted owner adopt the item without
+  // creating a second native window.
+  window.dispatchEvent(new CustomEvent("agentlas:one-open-legacy-artifact", {
+    detail: { ...item, target },
+  }));
 }
 
 export function OneRuntimeArtifactRail({

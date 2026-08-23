@@ -51,6 +51,7 @@ import { ipc } from "@/lib/ipc";
 import { tFor } from "@/lib/i18n";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import { requestOneArtifactOpen } from "@/lib/one-artifact-open";
+import { designOutputSurfaceProps } from "@/lib/design-output-tokens";
 import { OneLiveMap } from "./OneLiveMap";
 import styles from "./OneAdaptiveResult.module.css";
 
@@ -128,6 +129,7 @@ export function OneAdaptiveResult({
   onOpenAgentDraft,
   autoRecovery,
   omitNarrative = false,
+  inOutputRail = false,
 }: {
   manifest: OneSurfaceManifestV1 | null;
   projection: OneTaskProjection;
@@ -154,6 +156,8 @@ export function OneAdaptiveResult({
   onRetryUnfinished?: () => void;
   /** Main verifies the exact Task version and completed run receipt. */
   onAcceptResult?: () => Promise<void>;
+  /** Render rich media/document surfaces as a full-height in-app result. */
+  inOutputRail?: boolean;
   /**
    * One's own recovery state. While One is still routing around the obstacle
    * there is no failure to report yet, so the closure card must not claim one.
@@ -209,7 +213,10 @@ export function OneAdaptiveResult({
   ), [projection.canonicalVersion, projection.chatId, projection.taskId, receipt?.runId, surface]);
 
   return (
-    <section className={styles.root} aria-label={tFor(locale, "one.res.aria.work_result")}>
+    <section
+      {...designOutputSurfaceProps("report", styles.root)}
+      aria-label={tFor(locale, "one.res.aria.work_result")}
+    >
       {hasDedicatedResult && (
         <article className={styles.result} data-surface-contract={surface?.contractVersion ?? "invalid"} data-narrative={omitNarrative ? "omitted" : "inline"}>
           {!omitNarrative && (
@@ -232,6 +239,7 @@ export function OneAdaptiveResult({
                 artifactContext={artifactContext}
                 onSemanticAction={onSemanticAction}
                 onOpenAgentDraft={onOpenAgentDraft}
+                inOutputRail={inOutputRail}
               />
             )) : (
               <FallbackResult
@@ -410,12 +418,14 @@ function NativeBlock({
   artifactContext,
   onSemanticAction,
   onOpenAgentDraft,
+  inOutputRail,
 }: {
   block: OneSurfaceBlock;
   locale: "ko" | "en";
   artifactContext: OneArtifactBindingRequestV1 | null;
   onSemanticAction?: (action: OneSurfaceSemanticAction) => void;
   onOpenAgentDraft?: (seed: OneAgentDraftSeed) => void;
+  inOutputRail?: boolean;
 }) {
   const title = friendlyBlockTitle(block, locale);
   return (
@@ -433,12 +443,12 @@ function NativeBlock({
       {block.type === "Timeline" && <TimelineBlock block={block} locale={locale} />}
       {block.type === "Map" && <MapBlock block={block} locale={locale} />}
       {block.type === "Gallery" && (
-        <GalleryBlock block={block} locale={locale} artifactContext={artifactContext} />
+        <GalleryBlock block={block} locale={locale} artifactContext={artifactContext} inOutputRail={inOutputRail} />
       )}
       {block.type === "Media" && (
-        <MediaBlock block={block} locale={locale} artifactContext={artifactContext} />
+        <MediaBlock block={block} locale={locale} artifactContext={artifactContext} inOutputRail={inOutputRail} />
       )}
-      {block.type === "Document" && <DocumentBlock block={block} locale={locale} artifactContext={artifactContext} />}
+      {block.type === "Document" && <DocumentBlock block={block} locale={locale} artifactContext={artifactContext} inOutputRail={inOutputRail} />}
       {block.type === "ArtifactList" && <ArtifactListBlock block={block} locale={locale} artifactContext={artifactContext} />}
       {block.type === "SourceList" && <SourceListBlock block={block} locale={locale} />}
       {block.type === "Decision" && <DecisionBlock block={block} locale={locale} />}
@@ -700,19 +710,22 @@ function GalleryBlock({
   block,
   locale,
   artifactContext,
+  inOutputRail = false,
 }: {
   block: OneSurfaceGalleryBlock;
   locale: "ko" | "en";
   artifactContext: OneArtifactBindingRequestV1 | null;
+  inOutputRail?: boolean;
 }) {
   return (
-    <div className={styles.galleryGrid} role="list" aria-label={block.title}>
+    <div className={styles.galleryGrid} data-output-rail={inOutputRail ? "true" : "false"} role="list" aria-label={block.title}>
       {block.items.map((item) => (
         <GalleryItem
           key={item.artifactRef}
           item={item}
           locale={locale}
           artifactContext={artifactContext}
+          inOutputRail={inOutputRail}
         />
       ))}
     </div>
@@ -723,16 +736,18 @@ function GalleryItem({
   item,
   locale,
   artifactContext,
+  inOutputRail = false,
 }: {
   item: OneSurfaceGalleryBlock["items"][number];
   locale: "ko" | "en";
   artifactContext: OneArtifactBindingRequestV1 | null;
+  inOutputRail?: boolean;
 }) {
   const preview = useArtifactPreview(artifactContext, item.artifactRef, item.label);
   const [mediaFailed, setMediaFailed] = useState(false);
   const unavailable = preview.state.status === "unavailable" || mediaFailed;
   return (
-    <article className={styles.galleryItem} role="listitem" aria-busy={preview.state.status === "loading"}>
+    <article className={styles.galleryItem} data-output-rail={inOutputRail ? "true" : "false"} role="listitem" aria-busy={preview.state.status === "loading"}>
       <div className={styles.galleryFrame}>
         {preview.state.status === "loading" && <div className={styles.mediaSkeleton} role="status" aria-label={tFor(locale, "one.res.gallery.loading_image")}><LoadingEstimate locale={locale} operationKey="one-artifact-image-preview" expectedSeconds={[1, 15]} /></div>}
         {preview.state.status === "ready" && !mediaFailed && (
@@ -766,10 +781,12 @@ function MediaBlock({
   block,
   locale,
   artifactContext,
+  inOutputRail = false,
 }: {
   block: OneSurfaceMediaBlock;
   locale: "ko" | "en";
   artifactContext: OneArtifactBindingRequestV1 | null;
+  inOutputRail?: boolean;
 }) {
   const preview = useArtifactPreview(artifactContext, block.primaryArtifactRef, block.caption ?? block.title);
   const unavailable = preview.state.status === "unavailable";
@@ -778,7 +795,7 @@ function MediaBlock({
     <div className={styles.mediaLayout}>
       <div className={styles.primaryMedia} aria-busy={preview.state.status === "loading"}>
         {preview.state.status === "loading" && <div className={styles.mediaSkeleton} role="status" aria-label={tFor(locale, "one.res.media.loading")}><LoadingEstimate locale={locale} operationKey="one-artifact-media-preview" expectedSeconds={[1, 20]} /></div>}
-        {capabilityUrl && <LiveOutputViewer source={capabilityUrl} name={displayValue(block.caption ?? block.title)} kind={block.mediaType} mimeType={preview.state.status === "ready" ? preview.state.capability.mimeType : undefined} size={preview.state.status === "ready" ? preview.state.capability.sizeBytes : undefined} locale={locale} />}
+        {capabilityUrl && <LiveOutputViewer source={capabilityUrl} name={displayValue(block.caption ?? block.title)} kind={block.mediaType} mimeType={preview.state.status === "ready" ? preview.state.capability.mimeType : undefined} size={preview.state.status === "ready" ? preview.state.capability.sizeBytes : undefined} locale={locale} fill={inOutputRail} />}
         {unavailable && (
           <div className={styles.mediaUnavailable} role="status">
             <span>{tFor(locale, "one.res.media.source_preserved")}</span>
@@ -828,10 +845,12 @@ function DocumentBlock({
   block,
   locale,
   artifactContext,
+  inOutputRail = false,
 }: {
   block: OneSurfaceDocumentBlock;
   locale: "ko" | "en";
   artifactContext: OneArtifactBindingRequestV1 | null;
+  inOutputRail?: boolean;
 }) {
   const preview = useArtifactPreview(artifactContext, block.artifactRef);
   const capability = preview.state.status === "ready" ? preview.state.capability : null;
@@ -850,7 +869,7 @@ function DocumentBlock({
     </div>
     {preview.state.status === "loading" && <div className={styles.mediaSkeleton} role="status"><LoadingEstimate locale={locale} operationKey="one-artifact-document-preview" expectedSeconds={[1, 20]} /></div>}
     {capability
-      ? <LiveOutputViewer source={capability.capabilityUrl} name={displayValue(block.title)} kind={viewerKind} mimeType={capability.mimeType} size={capability.sizeBytes} locale={locale} />
+      ? <LiveOutputViewer source={capability.capabilityUrl} name={displayValue(block.title)} kind={viewerKind} mimeType={capability.mimeType} size={capability.sizeBytes} locale={locale} fill={inOutputRail} />
       : preview.state.status === "unavailable" && <div className={styles.documentFallback}><p>{displayValue(block.excerpt)}</p><button type="button" onClick={preview.retry}>{tFor(locale, "one.res.retry")}</button></div>}
   </article>;
 }

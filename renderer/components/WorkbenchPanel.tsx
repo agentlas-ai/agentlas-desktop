@@ -37,9 +37,10 @@ import {
   IconWand,
 } from "./Icon";
 import { useT } from "@/lib/i18n";
-import { NativeLiveWebView } from "./NativeLiveWebView";
+import { LiveDeviceMockup } from "./LiveDeviceMockup";
 import { OneLiveMap } from "./one/OneLiveMap";
 import type { OneSurfaceMapBlock } from "@shared/one-surface";
+import { designOutputSurfaceProps, designSurfaceKindForOutput } from "@/lib/design-output-tokens";
 
 export interface WorkbenchSurface {
   id: string;
@@ -59,6 +60,17 @@ export type SurfaceStatePatchHandler = (
   surface: WorkbenchSurface,
   patch: Omit<SurfaceStatePatchRequest, "surfaceId">,
 ) => void;
+
+/** A live app owns the result canvas; blueprint chrome belongs only to the
+ * non-running fallback. Keep this predicate shared by the outer shell and the
+ * app surface so a preview URL cannot accidentally render both layers. */
+function isLiveAppSurface(surface: WorkbenchSurface | null): boolean {
+  const previewUrl = surface?.manifest.app?.deployment?.previewUrl;
+  return Boolean(
+    surface?.liveAppId ||
+    (typeof previewUrl === "string" && previewUrl.trim()),
+  );
+}
 
 export function WorkbenchPanel({
   artifact,
@@ -85,9 +97,17 @@ export function WorkbenchPanel({
     : artifact
       ? t("chatstream.lines", { count: artifact.code.split("\n").length })
       : "";
+  const outputKind = surface
+    ? designSurfaceKindForOutput(surface.manifest.layout)
+    : "code";
+  const liveAppSurface = isLiveAppSurface(surface);
 
   return (
-    <aside className="agentlas-workbench-panel" style={embedded ? embeddedShell : shell}>
+    <aside
+      {...designOutputSurfaceProps(outputKind, "agentlas-workbench-panel")}
+      data-live-app-surface={liveAppSurface ? "true" : "false"}
+      style={liveAppSurface ? (embedded ? liveEmbeddedShell : liveShell) : (embedded ? embeddedShell : shell)}
+    >
       <style>{`
         @keyframes workbench-in {
           from { transform: translateX(20px); opacity: 0; }
@@ -100,10 +120,6 @@ export function WorkbenchPanel({
           }
           .agentlas-creative-grid {
             grid-template-columns: 1fr !important;
-          }
-          .agentlas-live-app-grid > * {
-            grid-column: auto !important;
-            grid-row: auto !important;
           }
           .agentlas-workbench-hero {
             flex-direction: column !important;
@@ -122,34 +138,38 @@ export function WorkbenchPanel({
           }
         }
       `}</style>
-      <header style={header}>
-        <div style={mark}>
-          {isSurface ? <IconSparkles size={15} /> : <IconLayers size={15} />}
-        </div>
-        <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={eyebrow}>{isSurface ? "Agent OS Workbench" : "Code Artifact"}</div>
-          <div style={titleStyle} title={title}>
-            {title}
-          </div>
-        </div>
-        {subtitle && <span style={chip}>{subtitle}</span>}
-        <button
-          onClick={() =>
-            void navigator.clipboard.writeText(
-              surface ? JSON.stringify(surface.manifest, null, 2) : artifact?.code ?? "",
-            )
-          }
-          style={ghostButton}
-        >
-          {t("chatstream.copy")}
-        </button>
-        {onClose && (
-          <button onClick={onClose} aria-label={t("chatstream.close_panel")} title={t("chatstream.close")} style={iconButton}>
-            <IconClose size={15} />
-          </button>
-        )}
-      </header>
-      <ExportBar artifact={artifact} surface={surface} />
+      {!liveAppSurface && (
+        <>
+          <header style={header}>
+            <div style={mark}>
+              {isSurface ? <IconSparkles size={15} /> : <IconLayers size={15} />}
+            </div>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={eyebrow}>{isSurface ? "Agent OS Workbench" : "Code Artifact"}</div>
+              <div style={titleStyle} title={title}>
+                {title}
+              </div>
+            </div>
+            {subtitle && <span style={chip}>{subtitle}</span>}
+            <button
+              onClick={() =>
+                void navigator.clipboard.writeText(
+                  surface ? JSON.stringify(surface.manifest, null, 2) : artifact?.code ?? "",
+                )
+              }
+              style={ghostButton}
+            >
+              {t("chatstream.copy")}
+            </button>
+            {onClose && (
+              <button onClick={onClose} aria-label={t("chatstream.close_panel")} title={t("chatstream.close")} style={iconButton}>
+                <IconClose size={15} />
+              </button>
+            )}
+          </header>
+          <ExportBar artifact={artifact} surface={surface} />
+        </>
+      )}
       {surface ? (
         <SurfaceWorkbench surface={surface} onAction={onSurfaceAction} onStatePatch={onSurfaceStatePatch} wide={embedded} />
       ) : artifact ? (
@@ -306,6 +326,10 @@ export function SurfaceWorkbench({
   onStatePatch?: SurfaceStatePatchHandler;
   wide?: boolean;
 }) {
+  if (isLiveAppSurface(surface)) {
+    return <LiveAppSurface surface={surface} />;
+  }
+
   const manifest = surface.manifest;
   const widgetTypes = new Set(manifest.widgets.map((w) => w.type));
   if (
@@ -322,6 +346,27 @@ export function SurfaceWorkbench({
   return <GenericSurface surface={surface} onAction={onAction} wide={wide} />;
 }
 
+/** The live URL is the result. Keep it as the only child of the result rail so
+ * the old blueprint/Export chrome cannot compete with the running page. */
+function LiveAppSurface({ surface }: { surface: WorkbenchSurface }) {
+  const app = surface.manifest.app;
+  const title = sanitizePublicAppCopy(app?.name || surface.manifest.title, surface.manifest.title);
+  return (
+    <div
+      {...designOutputSurfaceProps("web", "agentlas-live-app-canvas")}
+      data-live-app-canvas="true"
+      aria-label={`${title} live app`}
+      style={liveAppCanvas}
+    >
+      <RunningAppPreview
+        appId={surface.liveAppId}
+        declaredUrl={app?.deployment?.previewUrl}
+        title={title}
+      />
+    </div>
+  );
+}
+
 function RunningAppPreview({
   appId,
   declaredUrl,
@@ -331,6 +376,7 @@ function RunningAppPreview({
   declaredUrl?: string;
   title: string;
 }) {
+  const { locale } = useT();
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<{
     pending: boolean;
@@ -385,7 +431,18 @@ function RunningAppPreview({
   }, [appId, declaredUrl, attempt]);
 
   if (state.url) {
-    return <NativeLiveWebView url={state.url} title={title} runtimeLabel={state.runtime ?? undefined} />;
+    const viewId = appId
+      ? `work_app_${appId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 60)}`
+      : undefined;
+    return (
+      <LiveDeviceMockup
+        url={state.url}
+        title={title}
+        runtimeLabel={state.runtime ?? undefined}
+        locale={locale}
+        viewId={viewId}
+      />
+    );
   }
   return (
     <section style={appRuntimeUnavailable} role={state.error ? "alert" : "status"}>
@@ -442,15 +499,11 @@ function AppFactorySurface({
   const appName = sanitizePublicAppCopy(app?.name || manifest.title, manifest.title);
   const tagline = sanitizePublicAppCopy(app?.tagline || app?.valueProp, "Agent-made app blueprint");
   const business = app?.business ?? objectValue(dataByName(manifest, "business"));
-  const hasLiveRuntime = Boolean(surface.liveAppId || app?.deployment?.previewUrl);
 
   return (
     <div style={surfaceBody}>
-      <div
-        className={`agentlas-creative-grid${hasLiveRuntime ? " agentlas-live-app-grid" : ""}`}
-        style={hasLiveRuntime ? liveAppFactoryGrid : appFactoryGrid}
-      >
-        <section style={hasLiveRuntime ? liveAppLeftRail : leftRail}>
+      <div className="agentlas-creative-grid" style={appFactoryGrid}>
+        <section style={leftRail}>
           <SectionTitle icon={<IconTarget size={14} />} label="Product Thesis" />
           <div style={appThesis}>
             <strong>{appName}</strong>
@@ -479,7 +532,7 @@ function AppFactorySurface({
           </div>
         </section>
 
-        <main style={hasLiveRuntime ? liveAppCenterRail : centerRail}>
+        <main style={centerRail}>
           <div className="agentlas-workbench-hero" style={appHeroBand}>
             <div>
               <div style={eyebrowDark}>Agent-made App</div>
@@ -493,13 +546,6 @@ function AppFactorySurface({
             </div>
           </div>
 
-          {hasLiveRuntime ? (
-            <RunningAppPreview
-              appId={surface.liveAppId}
-              declaredUrl={app?.deployment?.previewUrl}
-              title={appName}
-            />
-          ) : (
           <section style={appPreviewShell} aria-label={`${appName} blueprint, not running`}>
             <div style={appPreviewTopbar}>
               <span style={appLogoMark}>{appName.slice(0, 1).toUpperCase()}</span>
@@ -557,7 +603,6 @@ function AppFactorySurface({
               </div>
             </div>
           </section>
-          )}
 
           <section className="agentlas-app-lower-grid" style={appLowerGrid}>
             <div style={genericColumn}>
@@ -606,7 +651,7 @@ function AppFactorySurface({
           </section>
         </main>
 
-        <section style={hasLiveRuntime ? liveAppRightRail : rightRail}>
+        <section style={rightRail}>
           <SectionTitle icon={<IconStore size={14} />} label="Ship Console" />
           <div style={actionStack}>
             {(manifest.actions ?? []).slice(0, 6).map((action) => (
@@ -1805,6 +1850,19 @@ const embeddedShell: CSSProperties = {
   animation: "none",
 };
 
+const liveShell: CSSProperties = {
+  ...shell,
+  minWidth: 0,
+  background: "var(--design-bg, var(--paper))",
+};
+
+const liveEmbeddedShell: CSSProperties = {
+  ...embeddedShell,
+  minHeight: 0,
+  padding: 0,
+  background: "var(--design-bg, var(--paper))",
+};
+
 const header: CSSProperties = {
   padding: "10px 14px",
   display: "flex",
@@ -1953,6 +2011,16 @@ const surfaceBody: CSSProperties = {
   background: "var(--paper-2)",
 };
 
+const liveAppCanvas: CSSProperties = {
+  width: "100%",
+  height: "100%",
+  minHeight: 0,
+  display: "flex",
+  flexDirection: "column",
+  overflow: "hidden",
+  background: "var(--design-bg, var(--paper))",
+};
+
 const creativeGrid: CSSProperties = {
   minHeight: "100%",
   display: "grid",
@@ -1967,14 +2035,6 @@ const appFactoryGrid: CSSProperties = {
   gridTemplateColumns: "220px minmax(320px, 1fr) 240px",
   gap: 1,
   background: "var(--paper-edge)",
-};
-
-// A running app is the primary output, so it owns the full first row instead
-// of being squeezed into the old three-column blueprint rail. Product and
-// shipping metadata remain available underneath the live canvas.
-const liveAppFactoryGrid: CSSProperties = {
-  ...appFactoryGrid,
-  gridTemplateColumns: "minmax(240px, 1fr) minmax(240px, 1fr)",
 };
 
 const leftRail: CSSProperties = {
@@ -1994,24 +2054,6 @@ const rightRail: CSSProperties = {
   background: "var(--paper)",
   padding: 14,
   overflow: "auto",
-};
-
-const liveAppCenterRail: CSSProperties = {
-  ...centerRail,
-  gridColumn: "1 / -1",
-  gridRow: 1,
-};
-
-const liveAppLeftRail: CSSProperties = {
-  ...leftRail,
-  gridColumn: 1,
-  gridRow: 2,
-};
-
-const liveAppRightRail: CSSProperties = {
-  ...rightRail,
-  gridColumn: 2,
-  gridRow: 2,
 };
 
 const appThesis: CSSProperties = {

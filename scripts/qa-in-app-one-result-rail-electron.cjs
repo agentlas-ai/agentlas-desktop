@@ -95,6 +95,18 @@ async function waitFor(page, predicate, timeout = 30_000) {
 }
 
 async function findLiveRendererPage(desktop, baseUrl, timeout = 60_000) {
+  // Prefer Playwright's first stable page just like the Work rail proof. The
+  // startup placeholder can be replaced in-place, so this fast path avoids
+  // missing the Main bridge while repeatedly scanning transient handles.
+  try {
+    const first = await desktop.firstWindow({ timeout });
+    await first.waitForURL((url) => url.origin === new URL(baseUrl).origin && url.pathname === "/one", { timeout });
+    await first.waitForFunction(() => Boolean(window.agentlas), null, { timeout });
+    return first;
+  } catch {
+    // Fall through to the rescan below when the placeholder page was closed or
+    // the renderer restarted during startup.
+  }
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     for (const candidate of desktop.windows()) {
@@ -223,7 +235,30 @@ async function main() {
     const viewport = await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
     const railBox = await rail.boundingBox();
     assert.ok(railBox, "One output rail must be visible in the app window");
-    assert.ok(railBox.width / viewport.width >= 0.40, `One rich output rail must open wide: ${railBox.width}/${viewport.width}`);
+    const designTokens = await rail.evaluate((node) => {
+      const root = getComputedStyle(document.documentElement);
+      return {
+        source: node.getAttribute("data-design-token-source"),
+        contract: node.getAttribute("data-design-token-contract"),
+        surface: node.getAttribute("data-design-surface"),
+        bg: root.getPropertyValue("--design-bg").trim(),
+        accent: root.getPropertyValue("--design-accent").trim(),
+      };
+    });
+    assert.equal(designTokens.source, "builtin:design@0.1.0", "One output rail must declare the built-in design token source");
+    assert.equal(designTokens.contract, "output-surface.v1", "One output rail must use the output token contract");
+    assert.equal(designTokens.surface, "map", "One map rail must expose the map token surface");
+    assert.ok(designTokens.bg && designTokens.accent, "One output rail must resolve semantic design tokens");
+    const railPresentation = await rail.evaluate((node) => ({
+      kind: node.getAttribute("data-output-kind"),
+      wide: node.getAttribute("data-output-wide"),
+      autoWidth: node.getAttribute("data-output-auto-width"),
+    }));
+    const expectedAutoWidth = Math.round(viewport.width * 0.432);
+    assert.equal(railPresentation.kind, "map", "One map result must be classified as a map output");
+    assert.equal(railPresentation.wide, "true", "One map result must mark the output as wide");
+    assert.equal(railPresentation.autoWidth, "true", "One map result must trigger automatic rail width");
+    assert.ok(Math.abs(railBox.width - expectedAutoWidth) <= 2, `One rich output rail must open at the reference width: ${railBox.width} vs ${expectedAutoWidth}`);
     assert.ok(await page.getByText("실시간 이동 지도", { exact: true }).count() >= 1, "One result title must remain in the output rail");
     assert.ok(await page.getByText("실시간 지도 결과로 정리했습니다", { exact: false }).count() >= 1, "One transcript must retain the result message");
     assert.ok(await page.locator('[data-map-state="ready"] canvas').count() > 0, "One map must be a real MapLibre canvas");
@@ -299,7 +334,8 @@ async function main() {
     const output = {
       ok: true,
       sameBrowserWindow: true,
-      one: { panelWidth: railAfterResize.width, viewportWidth: viewport.width, ratio: railAfterResize.width / viewport.width, mapCanvasCount: await page.locator('[data-map-state="ready"] canvas').count() },
+      one: { initialPanelWidth: railBox.width, panelWidth: railAfterResize.width, viewportWidth: viewport.width, ratio: railAfterResize.width / viewport.width, mapCanvasCount: await page.locator('[data-map-state="ready"] canvas').count() },
+      designTokens,
       screenshots: ["one-right-panel-map.png", "one-right-panel-code-ide.png"],
       codeIde: true,
       rendererErrors: errors,

@@ -209,7 +209,10 @@ async function main() {
     await page.goto(`${baseUrl}/surface-preview?${query.toString()}`, { waitUntil: "commit" });
     await page.getByText("LIVE", { exact: true }).waitFor({ timeout: 20_000 });
     const firstView = await waitForNativeView(desktop, (row) => row.url.startsWith("http://127.0.0.1:") && !row.loading);
-    assert.ok(firstView.bounds.width > 300 && firstView.bounds.height > 300, `native app bounds are not usable: ${JSON.stringify(firstView.bounds)}`);
+    // Generated apps are presented inside the live phone mockup. The native
+    // WebContentsView is therefore the inner screen (about 262px wide at the
+    // default rail size), not the entire simulator frame.
+    assert.ok(firstView.bounds.width > 220 && firstView.bounds.height > 300, `native app viewport bounds are not usable: ${JSON.stringify(firstView.bounds)}`);
 
     const isolation = await desktop.evaluate(async ({ BrowserWindow }) => {
       const view = BrowserWindow.getAllWindows()[0].contentView.children.find((candidate) => candidate.webContents?.getURL().startsWith("http://127.0.0.1:"));

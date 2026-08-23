@@ -269,6 +269,11 @@
   gap: 12px;
 }
 
+/* The Outputs rail is the large in-app canvas shown beside the conversation.
+   Keep a gallery item readable at the supplied desktop width instead of
+   squeezing several thumbnails into a narrow card. */
+.galleryGrid[data-output-rail="true"] { grid-template-columns: minmax(0, 1fr); }
+
 .galleryItem {
   min-width: 0;
   overflow: hidden;
@@ -373,6 +378,13 @@
   min-height: 230px;
   border: 1px solid #e3e6e4;
   border-radius: 14px;
+}
+.block[data-block-kind="Media"] .primaryMedia,
+.block[data-block-kind="Document"] .documentPreview {
+  min-width: 0;
+}
+.block[data-block-kind="Media"] [data-fill="true"] {
+  min-height: 320px;
 }
 .primaryMedia > div { width: 100%; }
 
@@ -895,3 +907,64 @@
 @media (prefers-reduced-motion: reduce) {
   .mediaSkeleton { animation: none; }
 }
+
+/* @design output-surface.v1 — the report is a trusted host surface, so its
+   semantic chrome follows the same token aliases as generated reports. */
+.root {
+  --result-bg: var(--design-bg);
+  --result-panel: var(--design-panel);
+  --result-panel-muted: var(--design-panel-muted);
+  --result-ink: var(--design-ink);
+  --result-muted: var(--design-muted);
+  --result-line: var(--design-line);
+  --result-accent: var(--design-accent);
+  --result-accent-soft: var(--design-accent-soft);
+  --result-radius: var(--design-radius-md);
+  --result-shadow: var(--design-shadow-1);
+}
+.root .result { background: var(--result-bg); color: var(--result-ink); }
+.root .header { border-color: var(--result-line); }
+.root .header h3,
+.root .block h4,
+.root .metric strong,
+.root .card strong,
+.root .artifactCard strong,
+.root .documentPreview strong { color: var(--result-ink); }
+.root .summary,
+.root .workflowSteps p,
+.root .metric span,
+.root .card span,
+.root .artifactCard span,
+.root .documentPreview span,
+.root .documentPreview p { color: var(--result-muted); }
+.root .block + .block,
+.root .table th,
+.root .table td,
+.root .workflowSteps li,
+.root .sourceList li,
+.root .budgetLines > div { border-color: var(--result-line); }
+.root .tableWrap,
+.root .metric,
+.root .card,
+.root .artifactCard,
+.root .comparisonCard,
+.root .documentPreview,
+.root .sourceDisclosure { border-color: var(--result-line); border-radius: var(--result-radius); background: var(--result-panel); box-shadow: var(--result-shadow); }
+.root .table th,
+.root .workflowSteps code,
+.root .statusPill,
+.root .mediaUnavailable,
+.root .documentFallback { background: var(--result-panel-muted); }
+.root .table th,
+.root .comparisonColumns span,
+.root .statusBlock > p,
+.root .budgetTotal span,
+.root .budgetLines span { color: var(--result-muted); }
+.root .workflowSteps li > b,
+.root .statusPill[data-task-state="completed"],
+.root .budgetTrack span { background: var(--result-accent-soft); color: var(--result-accent); }
+.root .artifactCard button,
+.root .documentPreview button,
+.root .action { border-color: var(--result-line); background: var(--result-panel); color: var(--result-ink); }
+.root .actionPrimary { border-color: var(--result-accent); background: var(--result-accent); color: var(--design-accent-ink); }
+.root :where(button, summary):focus-visible { outline-color: var(--result-accent); }

@@ -26,6 +26,13 @@ import { projectPoolMemberKey } from "@shared/project-agent-pool";
 import { LiveOutputViewer, type LiveOutputKind } from "./LiveOutputViewer";
 import { CodeIdeViewer, isCodeArtifactName } from "./CodeIdeViewer";
 import { NativeLiveWebView } from "./NativeLiveWebView";
+import {
+  isWideOutputKind,
+  outputPresentationKindForViewerKind,
+  outputPresentationKindForWorkbenchManifest,
+  preferredOutputRailWidth,
+  type OutputPresentationKind,
+} from "@/lib/output-presentation";
 
 export type ChatRightPanelTab = "agent" | "file" | "panel" | "memory";
 type PanelViewerSource = "workbench" | "file";
@@ -100,21 +107,18 @@ export function ChatRightPanel({
   const hasPanelContent = Boolean(artifact || surface || filePreview);
   const showFilePreview = viewerSource === "file" && filePreview;
   const showWorkbench = viewerSource === "workbench" && (artifact || surface);
-  const activeLabel = activeTab === "file"
-    ? (ko ? "파일" : "Files")
-    : activeTab === "agent"
-      ? (ko ? "에이전트" : "Agents")
-      : activeTab === "memory"
-        ? (ko ? "기억" : "Memory")
-        : (ko ? "미리보기" : "Preview");
-  const activeIcon = activeTab === "file"
-    ? <IconFolder size={14} />
-    : activeTab === "agent"
-      ? <IconNetwork size={14} />
-      : activeTab === "memory"
-        ? <IconSparkles size={14} />
-        : <IconPanelRight size={14} />;
-
+  const outputKind: OutputPresentationKind = showFilePreview
+    ? outputPresentationKindForViewerKind(showFilePreview.viewerKind)
+    : artifact
+      ? "code"
+      : outputPresentationKindForWorkbenchManifest(surface?.manifest as unknown as Record<string, unknown> | null);
+  const outputIdentity = showFilePreview
+    ? `file:${showFilePreview.viewerKind}:${showFilePreview.path || showFilePreview.fileUrl}`
+    : artifact
+      ? `code:${artifact.id}`
+      : surface
+        ? `surface:${surface.id}`
+        : "empty";
   useEffect(() => {
     setFilePreview(null);
     setViewerSource("workbench");
@@ -129,6 +133,19 @@ export function ChatRightPanel({
     setFilePreview(externalFilePreview);
     setViewerSource("file");
   }, [externalFilePreview?.path, externalFilePreview?.fileUrl]);
+
+  useEffect(() => {
+    if (!onResizeWidth || activeTab !== "panel" || !isWideOutputKind(outputKind)) return;
+    // The right rail widens once for a new rich result. The width dependency is
+    // intentionally omitted so a person can drag the same result narrower
+    // without React immediately fighting the explicit resize.
+    const currentWidth = width ?? 392;
+    const preferred = typeof window === "undefined"
+      ? 640
+      : preferredOutputRailWidth(window.innerWidth, 320, 1280);
+    if (currentWidth < preferred) onResizeWidth(preferred);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, onResizeWidth, outputIdentity, outputKind]);
 
   function beginResize(event: ReactPointerEvent<HTMLDivElement>) {
     if (!onResizeWidth) return;
@@ -172,6 +189,9 @@ export function ChatRightPanel({
       className="chat-right-panel titlebar-nodrag"
       data-active-tab={activeTab}
       data-rich-output={activeTab === "panel" && hasPanelContent ? "true" : "false"}
+      data-output-kind={outputKind}
+      data-output-wide={isWideOutputKind(outputKind) ? "true" : "false"}
+      data-output-auto-width={activeTab === "panel" && isWideOutputKind(outputKind) ? "true" : "false"}
       data-resizing={resizing ? "true" : "false"}
       style={{ ...shellStyle, width: width ?? shellStyle.width, maxWidth: "none", transition: resizing ? "none" : shellStyle.transition }}
     >
@@ -202,12 +222,6 @@ export function ChatRightPanel({
           <IconClose size={14} />
         </button>
       </header>
-
-      <div style={panelContextStyle}>
-        <span style={headerMarkStyle}>{activeIcon}</span>
-        <strong style={titleStyle}>{activeLabel}</strong>
-        <span style={contextTitleStyle} title={chatTitle}>{chatTitle}</span>
-      </div>
 
       <div style={bodyStyle} data-right-panel-body={activeTab}>
         {activeTab === "file" && (
@@ -576,14 +590,14 @@ function RunReceiptCard({ chatId, busy }: { chatId: string | null; busy: boolean
 
   if (!receipt) return null;
   const status = receiptStatus(receipt.status, ko);
-  const openResultFolder = async () => {
+  const copyResultFolder = async () => {
     if (!receipt.resultFolder) return;
     setOpenError(null);
-    const result = await ipc()?.fs.openPath(receipt.resultFolder).catch(() => ({
-      ok: false,
-      message: "",
-    }));
-    if (result && !result.ok) setOpenError(result.message || (ko ? "결과 폴더를 열 수 없습니다." : "Could not open the result folder."));
+    try {
+      await navigator.clipboard.writeText(receipt.resultFolder);
+    } catch {
+      setOpenError(ko ? "결과 경로를 복사하지 못했습니다." : "Could not copy the result path.");
+    }
   };
 
   return (
@@ -606,9 +620,9 @@ function RunReceiptCard({ chatId, busy }: { chatId: string | null; busy: boolean
             <strong>{receipt.eventCount}</strong>
           </div>
           {receipt.resultFolder && (
-            <button type="button" onClick={() => void openResultFolder()} title={receipt.resultFolder} style={receiptFolderButtonStyle}>
+            <button type="button" onClick={() => void copyResultFolder()} title={receipt.resultFolder} style={receiptFolderButtonStyle}>
               <IconFolder size={12} />
-              <span>{ko ? "결과 폴더 열기" : "Open result folder"}</span>
+              <span>{ko ? "결과 경로 복사" : "Copy result path"}</span>
             </button>
           )}
           {openError && (
@@ -780,7 +794,9 @@ function FileViewer({ file }: { file: WorkspaceFilePreview }) {
       </header>
       {file.available === false && <div role="status" style={fileNoticeStyle}>{ko ? "파일 교체를 감지했습니다. 새 버전을 기다리는 중…" : "File replacement detected. Waiting for the new version…"}</div>}
       <div style={fileViewerBodyStyle}>
-        {file.viewerKind === "browser" ? (
+        {isCodeFilePreview(file) ? (
+          <CodeIdeViewer name={file.name} locale={ko ? "ko" : "en"} initialContent={file.viewerKind === "json" ? prettyJson(file.content || "") : file.content || ""} fill />
+        ) : file.viewerKind === "browser" ? (
           <BrowserViewer file={file} />
         ) : isLiveOutputKind(file.viewerKind) ? (
           <LiveOutputViewer
@@ -804,8 +820,6 @@ function FileViewer({ file }: { file: WorkspaceFilePreview }) {
                 : "It may have moved, or it sits outside this chat's working folder. Recreate it in chat or check the path."}
             </p>
           </div>
-        ) : (file.viewerKind === "json" || file.viewerKind === "text") && isCodeArtifactName(file.name) ? (
-          <CodeIdeViewer name={file.name} locale={ko ? "ko" : "en"} initialContent={file.viewerKind === "json" ? prettyJson(file.content || "") : file.content || ""} fill />
         ) : file.viewerKind === "markdown" ? (
           <MarkdownFileViewer file={file} />
         ) : file.viewerKind === "json" || file.viewerKind === "text" ? (
@@ -832,6 +846,20 @@ function FileViewer({ file }: { file: WorkspaceFilePreview }) {
 /** 본문을 텍스트로 그리는 뷰어들 — 이들만 `content` 하이드레이션에 의존한다. */
 function isTextualViewerKind(kind: WorkspaceFilePreview["viewerKind"]): boolean {
   return kind === "markdown" || kind === "json" || kind === "text";
+}
+
+/** Source-like files use the IDE even when the same extension can also be a
+ * runnable web surface. A browser result is still selected explicitly by a
+ * live URL or by a preview without hydrated source bytes. */
+function isCodeFilePreview(file: WorkspaceFilePreview): boolean {
+  if (!isCodeArtifactName(file.name)) return false;
+  if (file.viewerKind === "json" || file.viewerKind === "text") return true;
+  // A hydrated local HTML file is still a runnable web result when its
+  // source came through the explicit file:// preview path. Static source
+  // references are classified as text above and remain IDE previews.
+  return file.viewerKind === "browser"
+    && Boolean(file.content)
+    && !/^file:|^agentlas:/iu.test(file.fileUrl);
 }
 
 type WorkspaceLiveOutputKind = Extract<LiveOutputKind, WorkspaceFilePreview["viewerKind"]>;
@@ -1088,48 +1116,6 @@ const headerStyle: CSSProperties = {
   padding: "6px 8px",
   borderBottom: "var(--hairline)",
   background: "var(--paper)",
-};
-
-const headerMarkStyle: CSSProperties = {
-  width: 22,
-  height: 22,
-  borderRadius: 6,
-  display: "inline-flex",
-  alignItems: "center",
-  justifyContent: "center",
-  color: "var(--ink-soft)",
-  background: "transparent",
-  flexShrink: 0,
-};
-
-const titleStyle: CSSProperties = {
-  display: "block",
-  color: "var(--ink)",
-  fontSize: 11.5,
-  fontWeight: 700,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-};
-
-const panelContextStyle: CSSProperties = {
-  minHeight: 45,
-  display: "flex",
-  alignItems: "center",
-  gap: 6,
-  padding: "0 10px",
-  borderBottom: "1px solid var(--paper-edge)",
-  background: "var(--paper)",
-};
-
-const contextTitleStyle: CSSProperties = {
-  minWidth: 0,
-  marginLeft: "auto",
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-  color: "var(--muted-deep)",
-  fontSize: 10.5,
 };
 
 const iconButtonStyle: CSSProperties = {

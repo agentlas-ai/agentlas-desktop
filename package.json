@@ -454,7 +454,11 @@
     "test:one-judgment": "node scripts/verify-one-judgment-one-place.mjs",
     "test:no-guessed-folders": "node scripts/verify-no-guessed-folders.mjs",
     "test:build-recovery": "npm run build:electron && node scripts/verify-build-recovery.mjs",
-    "verify:gate-freshness": "node scripts/verify-gate-freshness.mjs"
+    "verify:gate-freshness": "node scripts/verify-gate-freshness.mjs",
+    "gate:freshness": "node scripts/verify-gate-freshness.mjs",
+    "gate:freshness:check": "node scripts/verify-gate-freshness.mjs --baseline",
+    "gate:freshness:baseline": "node scripts/verify-gate-freshness.mjs --update-baseline",
+    "gate:one-team-surface": "node scripts/verify-one-team-surface.mjs"
   },
   "dependencies": {
     "@file-viewer/preset-lite": "^2.3.0",
