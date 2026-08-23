@@ -460,7 +460,8 @@
     "gate:freshness:baseline": "node scripts/verify-gate-freshness.mjs --update-baseline",
     "gate:one-team-surface": "node scripts/verify-one-team-surface.mjs",
     "test:one-org-truthfulness": "node scripts/verify-one-org-truthfulness.mjs",
-    "test:one-cost-leak-boundaries": "node scripts/verify-one-cost-and-leak-boundaries.mjs"
+    "test:one-cost-leak-boundaries": "node scripts/verify-one-cost-and-leak-boundaries.mjs",
+    "gate:bound": "node scripts/run-bound-gates.mjs --staged"
   },
   "dependencies": {
     "@file-viewer/preset-lite": "^2.3.0",

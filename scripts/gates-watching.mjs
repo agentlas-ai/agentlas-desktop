@@ -39,15 +39,24 @@ function toRelative(value) {
   return path.relative(root, absolute);
 }
 
+// 이 파일은 도구이자 모듈이다. 다른 스크립트가 `gatesWatching` 만 쓰려고 import 했을 때
+// CLI 출력이 섞이면 안 된다 — 직접 실행됐을 때만 CLI 로 행동한다.
+const invokedDirectly = process.argv[1]
+  && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 const hookMode = process.argv.includes("--hook");
 
-if (!hookMode) {
+if (invokedDirectly && !hookMode) {
   const relative = toRelative(process.argv[2]) || process.argv[2] || "";
   const hits = gatesWatching(relative);
   if (!hits.length) console.log(`gates-watching: ${relative || "(no path)"} — 물고 있는 게이트 없음`);
   else console.log(`gates-watching: ${relative} — ${hits.length}개\n${hits.map((h) => `  ${h}`).join("\n")}`);
   process.exit(0);
 }
+
+// 훅 모드도 직접 실행일 때만. import 한 쪽의 stdin 을 읽어 버리면 안 된다.
+if (!invokedDirectly) {
+  // 모듈로 불렸다 — CLI 동작은 아무것도 하지 않는다.
+} else {
 
 // 훅 모드: 실패해도 편집을 막지 않는다. 알림이 임무다.
 let payload = {};
@@ -79,3 +88,5 @@ process.stdout.write(`${JSON.stringify({
     additionalContext: context,
   },
 })}\n`);
+
+}
