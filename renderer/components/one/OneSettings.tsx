@@ -38,10 +38,28 @@ import type {
 import type { ComputerHistoryState } from "@shared/computer-history";
 import type { OneBriefingCadence, OneBriefingPreferences } from "@shared/one-briefing";
 import type { OneComposerModelOption, OnePermissionMode } from "./OneComposerControls";
-import { OneBottomSheet } from "./OneBottomSheet";
+import { OneBottomSheet, type OneBottomSheetSize } from "./OneBottomSheet";
 import styles from "./OneSettings.module.css";
 
 export type OneSettingsKey = "mcp" | "plugins" | "permission" | "models" | "multimodal" | "concurrency" | "history" | "briefing";
+
+/**
+ * 시트 폭은 내용이 정한다.
+ *
+ * 예전에는 항목과 무관하게 전부 `wide`(1120px)로 열려서, 스위치 두 개짜리 설정도 도구 목록과
+ * 같은 폭을 차지했다 — 라벨과 컨트롤이 화면 양 끝으로 벌어져 읽기 어려웠다(2026-08-23 지적).
+ * 여러 열로 늘어놓을 것이 있는 화면만 넓게 연다.
+ */
+const SHEET_WIDTH: Record<OneSettingsKey, OneBottomSheetSize> = {
+  mcp: "wide",
+  plugins: "wide",
+  models: "wide",
+  multimodal: "wide",
+  permission: "compact",
+  concurrency: "compact",
+  history: "compact",
+  briefing: "compact",
+};
 
 type RailProps = {
   locale: string;
@@ -341,8 +359,8 @@ function BriefingSettings({ locale }: { locale: string }) {
   ];
   return <div className={styles.settingList}>
     {error && <div className={styles.emptyState}>{error}</div>}
-    <div className={styles.toolRow}>
-      <span className={styles.railCopy}>
+    <div className={styles.settingRow}>
+      <span className={styles.settingCopy}>
         <strong>{ko ? "알려 주는 빈도" : "How often One tells you"}</strong>
         <small>{ko ? "One 이 먼저 말을 거는 정도입니다." : "How often One starts the conversation."}</small>
       </span>
@@ -355,8 +373,8 @@ function BriefingSettings({ locale }: { locale: string }) {
         {cadences.map((item) => <option key={item.id} value={item.id}>{ko ? item.ko : item.en}</option>)}
       </select>
     </div>
-    <div className={styles.toolRow}>
-      <span className={styles.railCopy}>
+    <div className={styles.settingRow}>
+      <span className={styles.settingCopy}>
         <strong>{ko ? "데스크탑 알림" : "Desktop notifications"}</strong>
         <small>{ko ? "앱이 가려져 있을 때 OS 알림으로 알려 줍니다. 내용은 담지 않습니다." : "A generic OS alert when the app is hidden. It never carries details."}</small>
       </span>
@@ -371,8 +389,8 @@ function BriefingSettings({ locale }: { locale: string }) {
         })}
       />
     </div>
-    <div className={styles.toolRow}>
-      <span className={styles.railCopy}>
+    <div className={styles.settingRow}>
+      <span className={styles.settingCopy}>
         <strong>{ko ? "방해 금지" : "Quiet hours"}</strong>
         <small>{ko ? `${preferences.quietHours.startHour}시 ~ ${preferences.quietHours.endHour}시에는 알리지 않습니다.` : `No alerts between ${preferences.quietHours.startHour}:00 and ${preferences.quietHours.endHour}:00.`}</small>
       </span>
@@ -397,7 +415,7 @@ export function OneSettingsSheet({ open, locale, installedPlugins, pluginCatalog
   const description = toolsOpen
     ? (ko ? "플러그인은 카탈로그 도구이고 MCP는 직접 등록한 서버입니다. 서로 다른 목록으로 관리합니다." : "Plugins are catalog tools; MCP contains servers you registered yourself. They stay in separate lists.")
     : (ko ? meta.descriptionKo : meta.descriptionEn);
-  return <OneBottomSheet open={open !== null} onClose={onClose} closeLabel={ko ? "설정 닫기" : "Close settings"} size="wide" eyebrow={ko ? "One 설정" : "One settings"} title={title} description={description} titleId="one-settings-sheet-title" ariaLabelledBy="one-settings-sheet-title">
+  return <OneBottomSheet open={open !== null} onClose={onClose} closeLabel={ko ? "설정 닫기" : "Close settings"} size={SHEET_WIDTH[open ?? "permission"]} eyebrow={ko ? "One 설정" : "One settings"} title={title} description={description} titleId="one-settings-sheet-title" ariaLabelledBy="one-settings-sheet-title">
     <div className={styles.sheetBody} data-setting={open || undefined}>
       {toolsOpen && <div className={styles.toolTabs} role="tablist" aria-label={ko ? "도구 종류" : "Tool type"}>
         <button type="button" role="tab" aria-selected={open === "plugins"} data-active={open === "plugins" ? "true" : "false"} onClick={() => onToolTabChange("plugins")}>{ko ? "플러그인" : "Plugins"}</button>

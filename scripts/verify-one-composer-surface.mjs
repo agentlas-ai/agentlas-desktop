@@ -48,4 +48,20 @@ for (const block of blocks) {
   assert.match(block, /--ink-soft:\s*#[0-9a-fA-F]{3,8}/, "a dark user bubble must redefine --ink-soft too");
 }
 
-console.log("one composer surface PASS: the composer stack narrows together, and a dark user bubble flips its ink variables");
+// ── C. 설정 시트: 아이콘 없는 행은 3열 격자에 넣지 않는다 ──────────────────
+// .toolRow 는 `36px minmax(0,1fr) auto` 다. 아이콘을 안 넣는 행이 그것을 쓰면 제목이 36px 칸에
+// 갇혀 "알려…/데스…/방해…" 로 잘린다(브리핑 시트에서 실제로 그랬다 — 2026-08-23).
+const settingsCss = readFileSync(path.join(root, "renderer/components/one/OneSettings.module.css"), "utf8");
+const settingsTsx = readFileSync(path.join(root, "renderer/components/one/OneSettings.tsx"), "utf8");
+assert.match(settingsCss, /\.settingRow \{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\) auto/, "an icon-less setting row needs a two-column rule");
+assert.match(settingsCss, /\.settingCopy strong \{[^}]*font-size: 13px/, "sheet body text must not reuse the 11px sidebar size");
+// 시트 안에서 사이드바용 railCopy 를 다시 쓰면 글씨가 8~11px 로 작아진다.
+const sheetBody = settingsTsx.slice(settingsTsx.indexOf("function BriefingSettings"));
+assert.doesNotMatch(sheetBody, /styles\.railCopy/, "the settings sheet must not reuse the sidebar copy style");
+
+// ── D. 시트 폭은 내용이 정한다 ─────────────────────────────────────────────
+// 전부 wide(1120px)로 열면 스위치 두 개짜리 설정도 도구 목록과 같은 폭을 차지한다.
+assert.match(settingsTsx, /const SHEET_WIDTH: Record<OneSettingsKey, OneBottomSheetSize>/, "each settings pane must choose its own width");
+assert.doesNotMatch(settingsTsx, /size="wide"/, "the settings sheet must not hard-code one width for every pane");
+
+console.log("one surface PASS: composer stack aligned, dark bubble ink flipped, icon-less rows two-column, sheet width follows content");

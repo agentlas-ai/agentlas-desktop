@@ -23,6 +23,27 @@
 .toolTabs button:focus-visible { outline: 0; box-shadow: var(--one-sheet-focus); }
 .emptyState { padding: 28px 16px; border: 1px solid var(--one-sheet-line); border-radius: var(--one-sheet-card-radius); background: var(--one-sheet-card-muted); color: var(--one-sheet-muted); font-size: 12px; line-height: 1.5; text-align: center; }
 .settingList { display: grid; gap: 8px; }
+/* 아이콘이 없는 설정 행 — 라벨과 컨트롤 두 칸.
+   .toolRow 는 `36px minmax(0,1fr) auto` 3열이라 아이콘을 넣지 않는 행이 그것을 쓰면
+   제목이 36px 칸에 갇혀 "알려…/데스…/방해…" 로 잘리고, 컨트롤이 1fr 을 먹어 늘어난다
+   (브리핑 알림 시트에서 실제로 그랬다 — 2026-08-23). 그런 행은 이 클래스를 쓴다. */
+.settingRow {
+  min-height: 62px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  padding: 9px 12px;
+  border: 1px solid #e6ece8;
+  border-radius: 10px;
+  background: #fff;
+}
+.settingRow + .settingRow { margin-top: 7px; }
+/* 시트 본문 크기 — 사이드바용 .railCopy(11px/8px)를 시트에서 재사용하면 글씨가 너무 작다. */
+.settingCopy { min-width: 0; display: grid; gap: 4px; }
+.settingCopy strong { color: var(--one-sheet-ink); font-size: 13px; }
+.settingCopy small { color: var(--one-sheet-muted); font-size: 10px; line-height: 1.45; }
+
 .toolRow { min-height: 62px; display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; align-items: center; gap: 11px; padding: 9px 12px; border: 1px solid var(--one-sheet-control-border); border-radius: var(--one-sheet-card-radius); background: var(--one-sheet-control-surface); }
 .toolMark { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 9px; background: #f0f1f1; color: #51575b; font-size: 12px; font-weight: 780; }
 .toolRow > div { min-width: 0; display: grid; gap: 4px; }
