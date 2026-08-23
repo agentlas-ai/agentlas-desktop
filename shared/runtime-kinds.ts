@@ -20,6 +20,8 @@ export const RUNTIME_KINDS = [
   "lmstudio",
   "mlx",
   "acp",
+  // Agentlas 서빙 — CLI 도 API 키도 없는 사람의 실행 경로. 모델은 우리 서버가 고른다.
+  "agentlas",
 ] as const satisfies readonly RuntimeKind[];
 
 // Exhaustiveness in both directions: every RuntimeKind must be listed above.

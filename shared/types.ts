@@ -660,7 +660,7 @@ export type {
  * through the generic ACP runner without a new RuntimeKind per vendor. Which
  * agent a status row is: `RuntimeStatus.acpAgentId`; display name: `label`.
  */
-export type RuntimeKind = "claude-code" | "codex" | "antigravity" | "kimi" | "grok" | "cursor" | "byok" | "ollama" | "lmstudio" | "mlx" | "acp";
+export type RuntimeKind = "claude-code" | "codex" | "antigravity" | "kimi" | "grok" | "cursor" | "byok" | "ollama" | "lmstudio" | "mlx" | "acp" | "agentlas";
 // 역할 목록·성격의 정본은 shared/runtime-roles.ts 하나다(손으로 쓴 배열 금지).
 import type { RuntimeRole } from "./runtime-roles";
 export type { RuntimeRole };
@@ -704,7 +704,9 @@ export type RuntimeBackend =
   | "minimax"
   | "xai"
   | "openrouter"
-  | "cursor";
+  | "cursor"
+  // Agentlas 서빙 — 우리 서버가 모델을 고른다. 사용자가 고르는 것은 세기뿐이다.
+  | "agentlas";
 
 export interface RuntimeSelection {
   kind: RuntimeKind;
@@ -1780,7 +1782,9 @@ export interface ExternalCliSessionImportInput {
 }
 
 /**
- * "one" 은 개인 에이전트 One 하나를 가리키는 싱글턴 타겟이다(target_id = "one").
+ * "one" 은 개인 에이전트 One 하나를 가리키는 싱글턴 **타겟**이다(target_id = "one").
+ * 타겟이 하나인 것과 **연결이 하나**인 것은 다르다 — One 은 여러 방(=여러 봇)에 붙을 수
+ * 있고, 방마다 대화가 따로 생긴다. 그 둘을 한 인덱스로 묶었던 것이 v94 의 실수였다(v101 에서 분리).
  * agent/firm 은 One 통합 이전에 만들어진 레거시 연결 — 계속 돌지만 새로 만들지 않는다.
  */
 export type TelegramConnectTargetKind = "agent" | "firm" | "one";
@@ -1853,6 +1857,11 @@ export interface TelegramConnectAutoInput {
   targetId: string;
   /** 사용자가 지정한 봇 표시 이름(텔레그램에 보이는 이름). 비우면 "Agentlas <타겟명>" 자동. */
   botName?: string;
+  /**
+   * true면 기존 연결을 재확인하지 않고 **새 봇/새 방**을 하나 더 만든다.
+   * One은 방마다 하나이므로 봇을 더 붙이면 그만큼 대화(세션)가 늘어난다.
+   */
+  newConnection?: boolean;
 }
 
 export interface TelegramConnectActionResult {
@@ -6780,8 +6789,12 @@ export interface AgentlasIpc {
   };
   telegram: {
     listBindings: () => Promise<TelegramConnectBinding[]>;
-    /** One 싱글턴 연결. 이미 있으면 그 바인딩을 그대로 돌려준다(멱등). */
-    connectOne: (input?: { botName?: string }) => Promise<TelegramConnectActionResult>;
+    /**
+     * One 연결. 기본은 멱등이다 — 이미 방까지 붙은 연결이 있으면 그 바인딩을 돌려준다.
+     * `newConnection: true` 면 봇을 하나 더 만든다. One 은 **방마다 하나**라서(v101)
+     * 봇이 늘면 텔레그램에서 나란히 열 수 있는 대화가 그만큼 늘어난다.
+     */
+    connectOne: (input?: { botName?: string; newConnection?: boolean }) => Promise<TelegramConnectActionResult>;
     /** agent/firm 레거시 연결 일괄 제거. deleteBots 는 옵트인. */
     removeLegacy: (input: { deleteBots: boolean }) => Promise<TelegramLegacyCleanupResult>;
     autoConnect: (input: TelegramConnectAutoInput) => Promise<TelegramConnectActionResult>;
@@ -6981,6 +6994,8 @@ export interface AgentlasIpc {
   oneProfile: {
     get: () => Promise<OneProfile>;
     update: (input: OneProfileUpdateInput) => Promise<OneProfile>;
+    /** One 자신의 초상(생성·업로드 이미지)을 저장하고 프로필이 그것을 가리키게 한다. */
+    setAvatarImage: (input: { dataUrl: string; expectedVersion: number }) => Promise<OneProfile>;
     addPrinciple: (input: OneOperatingPrincipleCreateInput) => Promise<OneProfile>;
     updatePrinciple: (input: OneOperatingPrincipleUpdateInput) => Promise<OneProfile>;
     setPrincipleEnabled: (input: OneOperatingPrincipleEnabledInput) => Promise<OneProfile>;

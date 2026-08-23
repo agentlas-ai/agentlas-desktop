@@ -116,6 +116,9 @@ export const RUNTIME_MCP_SUPPORT: Record<RuntimeKind, RuntimeMcpSupport | null> 
   // never reads mcpConfigPath) and have no tool loop of their own. When they
   // grow one, this row — not a new hand-written list — is what changes.
   byok: null,
+  // 서빙 실행은 Agentlas 서버의 대화 창구를 지난다. 도구 왕복은 호스트(데스크탑)가
+  // 자기 도구 고리에서 돌리므로, 런타임에 MCP 설정을 건네는 칸 자체가 없다.
+  agentlas: null,
 };
 
 /** Can this runtime kind receive MCP servers at all? */

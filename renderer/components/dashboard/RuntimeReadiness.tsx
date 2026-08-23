@@ -82,6 +82,7 @@ function activeRuntimeLabel(runtimes: RuntimeStatus[], ko: boolean): string {
     ollama: "Ollama",
     lmstudio: "LM Studio",
     mlx: "MLX",
+    agentlas: "Agentlas",
   };
   const model = active.model?.trim();
   const version = active.version && active.version !== "unknown" ? active.version : "";

@@ -35,7 +35,7 @@ import { agentResidencySnapshot } from "../runtime/agent-residency";
 import { readableActiveHubMemoryNestRoots } from "../agents/hub-memory-nest";
 import { couldHaveChangedTheOutsideWorld, isHostPreflightTool } from "../../shared/tool-activity";
 import { redactSecrets } from "../../shared/secret-patterns";
-import { setAgentRuntimeOverride } from "../store/agent-runtime-overrides";
+import { getAgentRuntimeOverride, removeAgentRuntimeOverride, setAgentRuntimeOverride } from "../store/agent-runtime-overrides";
 
 type Row = {
   id: string;
@@ -237,6 +237,56 @@ function oneTeamAgentPrompt(name: string, title: string, personality: string): s
   ].join("\n");
 }
 
+/**
+ * 우리가 쓴 팀원 정의를 역으로 읽어 역할·성격을 되찾는다.
+ *
+ * ── 왜 역파싱인가 ──
+ * 만들 때 받은 역할·성격은 `oneTeamAgentPrompt` 가 한 덩어리 정의로 합쳐 저장한다.
+ * 편집 창을 지금 값으로 채우려면 그 두 조각을 다시 꺼내야 한다. 저장 칸을 새로 만드는
+ * 방법도 있지만, 그건 스키마를 올리는 일이고 이미 깔려 있는 설치본 전부가 그 사다리를
+ * 지나야 한다 — 화면 하나 통일하자고 치를 값이 아니다.
+ *
+ * 형식이 우리 손에 있어서 역파싱이 성립한다. 남이 만든 패키지 정의는 이 형식이 아니므로
+ * `null` 이 나오고, 그 팀원은 정의를 바꿀 수 없는 것으로 취급된다 — 남의 프롬프트를
+ * 우리 형식으로 덮어쓰는 사고를 구조적으로 막는다.
+ */
+function parseOneTeamAgentPrompt(prompt: string, name: string): { title: string; personality: string } | null {
+  const lines = (prompt || "").split("\n");
+  if (lines[0] !== `You are ${name}, a persistent named teammate inside Agentlas One Team.`) return null;
+  const roleLine = lines[1] ?? "";
+  const roleMatch = /^Your role is: (.*)\.$/.exec(roleLine);
+  const title = roleMatch ? roleMatch[1] : "";
+  const contractAt = lines.indexOf("Operating contract:");
+  if (contractAt < 3) return null;
+  // 성격은 그 표식 줄부터 계약 앞의 빈 줄 직전까지다(여러 줄일 수 있다).
+  const soulLines = lines.slice(2, contractAt - 1);
+  const first = soulLines[0] ?? "";
+  const soulMatch = /^Your voice, personality, and working soul are: ([\s\S]*)$/.exec(first);
+  if (!soulMatch) return { title, personality: "" };
+  const personality = [soulMatch[1], ...soulLines.slice(1)].join("\n").trim();
+  return { title, personality };
+}
+
+/** 편집 창을 채울 값 — 지금 정의에서 읽은 역할·성격과 "고쳐도 되는가". */
+function editableIdentityOf(
+  installedAgentId: string,
+  displayName: string,
+): { title: string; description: string; identityEditable: boolean } {
+  void displayName;
+  const agent = listInstalledAgentsReadOnly().find((item) => item.id === installedAgentId);
+  if (!agent) return { title: "", description: "", identityEditable: false };
+  const parsed = parseOneTeamAgentPrompt(agent.systemPrompt, agent.name);
+  if (!parsed) {
+    // 남의 패키지 — 한 줄 설명은 보여 주되 고칠 수는 없다.
+    return { title: agent.tagline || "", description: "", identityEditable: false };
+  }
+  return {
+    title: parsed.title || (agent.tagline === "One Team teammate" ? "" : agent.tagline || ""),
+    description: parsed.personality,
+    identityEditable: true,
+  };
+}
+
 /** Create, seat, and open a user-owned local teammate without leaving One. */
 /**
  * 캐릭터/사진 입력 하나를 저장 가능한 icon 값으로 바꾼다.
@@ -436,6 +486,8 @@ function toMember(row: Row, now = Date.now()): OneOrgMember {
     completionSummary,
     autoSelectTools: row.auto_select_tools !== 0,
     collaborationStyle: COLLABORATION_STYLES.has(row.collaboration_style) ? row.collaboration_style : "default",
+    ...editableIdentityOf(row.installed_agent_id, row.display_name ?? ""),
+    runtimeSelection: getAgentRuntimeOverride("agent", row.installed_agent_id)?.selection ?? null,
     revision: row.revision,
   };
 }
@@ -589,6 +641,49 @@ export function updateOneOrgMember(input: UpdateOneOrgMemberInput): OneOrgState 
   const now = new Date().toISOString();
   // 편집에서도 만들 때와 같은 캐릭터 선택을 받는다(오너 지적 2026-08-23).
   const chosen = input.avatar ? resolveOneTeamAvatar(input.avatar, row.installed_agent_id) : null;
+
+  /*
+   * 역할·성격은 **우리가 쓴 정의**일 때만 다시 쓴다.
+   *
+   * 판정은 여기서 한다 — 화면이 "고칠 수 있다"고 보내 온 값을 믿지 않는다. 밖에서 설치한
+   * 에이전트의 정의를 우리 형식으로 덮어쓰면 그 패키지는 원래 하던 일을 잃는다.
+   */
+  const current = listInstalledAgentsReadOnly().find((agent) => agent.id === row.installed_agent_id);
+  const parsed = current ? parseOneTeamAgentPrompt(current.systemPrompt, current.name) : null;
+  const wantsIdentityEdit = input.title !== undefined || input.description !== undefined;
+  if (wantsIdentityEdit && parsed && current) {
+    const nextTitle = input.title === undefined ? parsed.title : optionalText(input.title, "title", 100);
+    const nextPersonality = input.description === undefined
+      ? parsed.personality
+      : optionalText(input.description, "description", 1_200);
+    getDb().prepare(`
+      UPDATE installed_agents
+      SET tagline = ?, tagline_en = ?, system_prompt = ?
+      WHERE id = ?
+    `).run(
+      nextTitle || "One Team teammate",
+      nextTitle || "One Team teammate",
+      oneTeamAgentPrompt(current.name, nextTitle, nextPersonality),
+      row.installed_agent_id,
+    );
+  }
+
+  /*
+   * 모델 고정. `null` 은 "고정을 푼다"이고, 값이 없으면(undefined) 지금 설정을 그대로 둔다.
+   * 이 둘을 같게 다루면 창을 열었다 닫기만 해도 고정이 사라진다.
+   */
+  if (input.runtimeSelection !== undefined) {
+    if (input.runtimeSelection === null) {
+      removeAgentRuntimeOverride("agent", row.installed_agent_id);
+    } else {
+      setAgentRuntimeOverride({
+        scope: "agent",
+        targetId: row.installed_agent_id,
+        label: displayName,
+        selection: { ...input.runtimeSelection, role: "worker", inherit: false },
+      });
+    }
+  }
   if (chosen) {
     getDb().prepare(`
       UPDATE one_org_members

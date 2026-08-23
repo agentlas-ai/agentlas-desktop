@@ -62,6 +62,24 @@ export interface OneOrgMember {
   autoSelectTools: boolean;
   /** User-owned briefing style applied when this standing member is selected. */
   collaborationStyle: OneOrgCollaborationStyle;
+  /**
+   * 지금 이 팀원의 한 줄 역할과 성격. **편집 창을 채우기 위한 값**이다.
+   *
+   * 만들기와 편집이 같은 창을 쓰려면(오너 지시 2026-08-23) 편집이 열릴 때 지금 값이
+   * 이미 적혀 있어야 한다. 그 값을 조직도가 들고 있지 않으면 창은 빈칸으로 열리고,
+   * 사용자는 "수정"이 아니라 "처음부터 다시 쓰기"를 하게 된다.
+   */
+  title: string;
+  description: string;
+  /**
+   * 역할·성격까지 이 창에서 고쳐도 되는가.
+   *
+   * One Team 안에서 만든 팀원은 우리가 쓴 정의라 통째로 다시 쓸 수 있다. 밖에서 설치한
+   * 에이전트는 남의 패키지이므로 이름·캐릭터·협업 방식까지만 바꾸고 정의는 건드리지 않는다.
+   */
+  identityEditable: boolean;
+  /** 이 팀원에게 고정된 모델(에이전트 단위 선택). 고정이 없으면 null — 자동 배정이다. */
+  runtimeSelection: import("./types").RuntimeSelection | null;
   revision: number;
 }
 
@@ -141,6 +159,17 @@ export interface UpdateOneOrgMemberInput {
   collaborationStyle: OneOrgCollaborationStyle;
   /** 편집에서 캐릭터·사진을 바꾼다. 생략하면 지금 것을 그대로 둔다. */
   avatar?: OneTeamAgentAvatarInput;
+  /**
+   * 역할 한 줄과 성격. One Team 안에서 만든 팀원에만 적용된다 — 밖에서 설치한 패키지의
+   * 정의는 이 창으로 바뀌지 않는다(호스트가 다시 판정한다. 클라이언트 말을 믿지 않는다).
+   */
+  title?: string;
+  description?: string;
+  /**
+   * 이 팀원에게 고정할 모델. `null` 이면 고정을 풀고 자동 배정으로 되돌린다.
+   * 생략하면 지금 설정을 그대로 둔다.
+   */
+  runtimeSelection?: import("./types").RuntimeSelection | null;
   expectedRevision?: number;
 }
 

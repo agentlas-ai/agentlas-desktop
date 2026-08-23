@@ -60,6 +60,7 @@ const BACKEND_LABEL_KO: Record<RuntimeBackend, string> = {
   xai: "xAI (Grok API)",
   openrouter: "OpenRouter",
   cursor: "Cursor",
+  agentlas: "Agentlas (포함된 모델)",
 };
 
 const BACKEND_LABEL_EN: Record<RuntimeBackend, string> = {
@@ -78,6 +79,7 @@ const BACKEND_LABEL_EN: Record<RuntimeBackend, string> = {
   xai: "xAI (Grok API)",
   openrouter: "OpenRouter",
   cursor: "Cursor",
+  agentlas: "Agentlas (included models)",
 };
 
 function backendLabel(b: RuntimeBackend, locale: string): string {

@@ -17,6 +17,7 @@ import {
   runUpstageByok,
   runXaiByok,
 } from "./byok";
+import { agentlasServingRunnerLabel, runAgentlasServing } from "./agentlas-serving";
 import { runClaudeCode } from "./claude-code";
 import { runCodex } from "./codex";
 import { runAntigravity } from "./antigravity";
@@ -151,6 +152,7 @@ const RUNNER_LABEL: Record<string, string> = {
   "byok:minimax": "MiniMax",
   "byok:xai": "xAI",
   "byok:openrouter": "OpenRouter",
+  agentlas: "Agentlas",
 };
 
 export interface RuntimeChoice {
@@ -234,6 +236,11 @@ export function pickRunner(active: RuntimeStatus): { runner: Runner; label: stri
     return { runner: runLMStudioSlotted, label: `LM Studio${active.model ? ` · ${active.model}` : ""}` };
   if (active.kind === "mlx")
     return { runner: runMLXSlotted, label: `MLX${active.model ? ` · ${active.model}` : ""}` };
+  if (active.kind === "agentlas") {
+    // 서버가 실행을 들고 있으므로 로컬 실행 슬롯을 잡지 않는다 — 이 기계의 CPU 를 쓰지 않는
+    // 원격 호출이라, BYOK 와 같은 취급이 맞다.
+    return { runner: runAgentlasServing, label: agentlasServingRunnerLabel(active.model) };
+  }
   if (active.kind === "byok") {
     if (active.backend === "anthropic")
       return { runner: runAnthropicByok, label: RUNNER_LABEL["byok:anthropic"] };
@@ -286,6 +293,7 @@ export function pickRecoveryRunner(selection: Pick<RuntimeStatus, "kind"> & { so
     if (!spec) return null;
     return { runner: bindRuntimeSource(createAcpRunner(spec), selection.source), label: spec.label };
   }
+  if (selection.kind === "agentlas") return { runner: runAgentlasServing, label: "Agentlas" };
   if (selection.kind === "ollama") return { runner: runOllama, label: "Ollama" };
   if (selection.kind === "lmstudio") return { runner: runLMStudio, label: "LM Studio" };
   if (selection.kind === "mlx") return { runner: runMLX, label: "MLX" };

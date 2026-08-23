@@ -30,6 +30,15 @@ export interface OneProfile {
   profileContext: string;
   preferredLocale: OneProfileLocale;
   timeZone: string | null;
+  /**
+   * One 의 얼굴. 프리셋 캐릭터면 `character:<id>`, 직접 넣은 그림이면 `one-avatar:self`.
+   * 없으면 지금까지의 기본 얼굴을 쓴다.
+   *
+   * 만들기·편집이 한 창을 쓰게 되면서(오너 지시 2026-08-23) One 도 팀원처럼 캐릭터를
+   * 고를 수 있어야 했다. 프로필은 meta 한 줄에 담긴 JSON 이라 칸을 늘리는 데 스키마
+   * 사다리가 필요 없다 — 다만 예전 저장본에는 이 칸이 없으므로 항상 선택 항목이다.
+   */
+  avatarIcon?: string;
   operatingPrinciples: OneOperatingPrinciple[];
   createdAt: string;
   updatedAt: string;
@@ -37,7 +46,7 @@ export interface OneProfile {
 
 export interface OneProfileUpdateInput {
   expectedVersion: number;
-  patch: Partial<Pick<OneProfile, "displayName" | "role" | "profileContext" | "preferredLocale" | "timeZone">>;
+  patch: Partial<Pick<OneProfile, "displayName" | "role" | "profileContext" | "preferredLocale" | "timeZone" | "avatarIcon">>;
 }
 
 export interface OneOperatingPrincipleCreateInput {
@@ -161,6 +170,7 @@ export function isOneProfile(value: unknown): value is OneProfile {
     "profileContext",
     "preferredLocale",
     "timeZone",
+    "avatarIcon",
     "operatingPrinciples",
     "createdAt",
     "updatedAt",
@@ -174,6 +184,8 @@ export function isOneProfile(value: unknown): value is OneProfile {
     !isBoundedString(value.profileContext, 0, 4_000) ||
     typeof value.preferredLocale !== "string" || !PROFILE_LOCALES.has(value.preferredLocale as OneProfileLocale) ||
     !(value.timeZone === null || isBoundedString(value.timeZone, 1, 128)) ||
+    // 예전 저장본에는 이 칸이 아예 없다. 없는 것과 잘못된 것은 다르다.
+    !(value.avatarIcon === undefined || isBoundedString(value.avatarIcon, 1, 160)) ||
     !Array.isArray(value.operatingPrinciples) || value.operatingPrinciples.length > 128 ||
     !value.operatingPrinciples.every(isPrinciple) ||
     !isIsoTimestamp(value.createdAt) ||

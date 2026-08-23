@@ -23,6 +23,7 @@ const RUNTIME_LABEL: Record<string, string> = {
   kimi: "Kimi",
   acp: "ACP",
   ollama: "Ollama",
+  agentlas: "Agentlas",
 };
 
 export function ToolApprovalCard({ request, compact = false }: { request: ToolApprovalRequestEvent; compact?: boolean }) {

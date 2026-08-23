@@ -358,3 +358,63 @@
 @media (prefers-reduced-motion: reduce) {
   .spinner { animation-duration: 1.8s; }
 }
+
+/* ── 편집에서만 쓰는 칸 ───────────────────────────────────────────────
+   조직원 설정 창을 이 창으로 합치면서 함께 옮겨 온 것들이다. 생김새는 원래 창의
+   것을 그대로 따라 사람이 배운 모양이 바뀌지 않게 한다. */
+.lockedIdentity {
+  margin: 0;
+  padding: 11px 12px;
+  border: 1px solid #e3e6e5;
+  border-radius: 9px;
+  background: #f7f8f8;
+  color: #666d69;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.styleField { display: grid; gap: 8px; }
+.styleField > span { color: #484e4b; font-size: 11px; font-weight: 700; }
+.styleField > small { color: #777d7a; font-size: 10px; line-height: 1.45; }
+
+.styleOptions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.styleOptions button {
+  display: flex;
+  min-height: 60px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 11px;
+  border: 1px solid #d7dbd9;
+  border-radius: 9px;
+  background: #fff;
+  color: #303532;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.styleOptions button[data-active="true"] { border-color: #303532; background: #f4f5f5; }
+.styleOptions button > span:first-child { display: grid; gap: 3px; }
+.styleOptions strong { font-size: 12px; }
+.styleOptions small { color: #777d7a; font-size: 10px; line-height: 1.4; }
+
+.editorExtras { display: flex; flex-wrap: wrap; gap: 8px; }
+.editorExtras button {
+  min-height: 38px;
+  padding: 0 13px;
+  border: 1px solid #d7dbd9;
+  border-radius: 9px;
+  background: #fff;
+  color: #484e4b;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 680;
+  cursor: pointer;
+}
+.editorExtras button:hover:not(:disabled) { background: #f1f2f2; }
+.editorExtras button:disabled { cursor: not-allowed; opacity: .45; }
+.editorExtras .archiveExtra { color: #b4413c; }
+
+@media (max-width: 760px) {
+  .styleOptions { grid-template-columns: 1fr; }
+}

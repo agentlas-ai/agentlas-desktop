@@ -18,6 +18,10 @@ import { probeOllama } from "./ollama";
 import { probeLMStudio } from "./lmstudio";
 import { probeMLX } from "./mlx";
 import { hasApiKey } from "../secrets/vault";
+import {
+  AGENTLAS_SERVING_DEFAULT_MODEL,
+  AGENTLAS_SERVING_MODELS,
+} from "../../shared/agentlas-serving";
 import { getDb } from "../store/db";
 import {
   listResolvedModelRoles,
@@ -275,6 +279,23 @@ export async function detectRuntimes(force = false): Promise<RuntimeStatus[]> {
     return cloneRuntimeStatuses(list);
   } finally {
     detectInFlight = null;
+  }
+}
+
+/**
+ * Agentlas 서빙을 지금 쓸 수 있는가 = 로그인되어 있는가.
+ *
+ * 세션 확인은 동기 함수 하나지만, auth 모듈은 창·메뉴까지 끌어오므로 여기서 지연 로드한다.
+ * 그리고 이 판정이 실패해도 감지 전체를 죽이지 않는다 — 한 줄의 실패가 다른 런타임을
+ * 가리는 일은 이 파일의 원칙에 어긋난다.
+ */
+function hasAgentlasServingAccess(): boolean {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const auth = require("../auth") as { getSessionCookieHeader?: () => string | null };
+    return Boolean(auth.getSessionCookieHeader?.());
+  } catch {
+    return false;
   }
 }
 
@@ -625,6 +646,45 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
       console.warn(`[detect] acp agent ${spec.id} skipped: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+  /*
+   * Agentlas 서빙 — CLI 도 API 키도 없는 사람의 실행 경로.
+   *
+   * 다른 런타임은 "이 기계에 실물이 있는가"를 재지만, 이건 잴 실물이 없다. 자격은
+   * **로그인**이고, 그것이 이 줄의 프로브다. 로그인하지 않았으면 목록에 넣지 않는다 —
+   * 고를 수는 있는데 누르면 실패하는 항목은 고장으로 읽힌다.
+   */
+  if (hasAgentlasServingAccess()) {
+    const servingModels = AGENTLAS_SERVING_MODELS.map((model) => model.id);
+    const selectedServingModel = cliModelOf("agentlas", active, servingModels, "agentlas")
+      ?? AGENTLAS_SERVING_DEFAULT_MODEL;
+    list.push({
+      kind: "agentlas",
+      backend: "agentlas",
+      source: "agentlas:serving",
+      version: null,
+      active: false,
+      label: "Agentlas",
+      model: selectedServingModel,
+      availableModels: servingModels,
+      // 목록은 우리가 정한 세 개가 전부다 — 프로브로 알아낼 것이 없다(정직한 부재가 아니라
+      // 원래 목록이 고정이다).
+      modelDiscovery: discoveryOf("agentlas", unsupportedDiscovery("no-list-concept:serving-tiers")),
+      ...allocationAdvertisement({
+        live: servingModels,
+        selected: selectedServingModel,
+        catalogFallback: false,
+      }),
+      allocationModelProfiles: Object.fromEntries(AGENTLAS_SERVING_MODELS.map((model) => [
+        model.id,
+        {
+          costTier: model.tier === "hard" ? "frontier" : model.tier === "normal" ? "balanced" : "economy",
+          supportsTools: false,
+          supportsMultimodal: false,
+        },
+      ])),
+    });
+  }
+
   if (anthropicByok) {
     const selectedModel = byokModelOf("anthropic", active);
     list.push({

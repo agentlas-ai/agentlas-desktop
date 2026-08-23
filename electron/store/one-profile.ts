@@ -20,7 +20,7 @@ import { getDb } from "./db";
 import { tryRecordOneDomainEvent } from "../one/domain-events";
 
 const META_KEY = "agentlas.one.profile.v1";
-const PROFILE_PATCH_KEYS = ["displayName", "role", "profileContext", "preferredLocale", "timeZone"] as const;
+const PROFILE_PATCH_KEYS = ["displayName", "role", "profileContext", "preferredLocale", "timeZone", "avatarIcon"] as const;
 const PROFILE_LOCALES = new Set<OneProfileLocale>(["system", "ko", "en"]);
 const PRINCIPLE_SCOPES = new Set<OneOperatingPrincipleScope>([
   "personal",
@@ -215,6 +215,16 @@ export function updateOneProfile(input: OneProfileUpdateInput): OneProfile {
       }
       next.preferredLocale = input.patch.preferredLocale;
     }
+    if ("avatarIcon" in input.patch) {
+      // 캐릭터 id 하나만 받는다. 임의 문자열을 그대로 저장하면 화면이 그리지 못하는 값이
+      // 남고, 그때는 "고장"이 아니라 "얼굴이 사라짐"으로 보인다.
+      const icon = cleanText(input.patch.avatarIcon, "avatarIcon", 1, 160);
+      // 프리셋 캐릭터이거나, One 자신의 초상 자리 하나. 그 밖의 문자열은 화면이 그리지 못한다.
+      if (!/^character:[a-z0-9][a-z0-9-]{0,60}$/.test(icon) && icon !== "one-avatar:self") {
+        throw new TypeError("Invalid avatarIcon");
+      }
+      next.avatarIcon = icon;
+    }
     if ("timeZone" in input.patch) {
       if (input.patch.timeZone === null) {
         next.timeZone = null;
@@ -236,7 +246,8 @@ export function updateOneProfile(input: OneProfileUpdateInput): OneProfile {
       next.role === current.role &&
       next.profileContext === current.profileContext &&
       next.preferredLocale === current.preferredLocale &&
-      next.timeZone === current.timeZone
+      next.timeZone === current.timeZone &&
+      next.avatarIcon === current.avatarIcon
     ) return current;
     return { ...next, version: timestamp.version, updatedAt: timestamp.iso };
   });

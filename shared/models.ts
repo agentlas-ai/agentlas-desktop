@@ -7,6 +7,7 @@
 //  - "agentlas" : BYOK 직접 API / Ollama — 대화 히스토리를 Agentlas가 직접 들고 있으므로
 //                 모델 선택·1M 컨텍스트·히스토리 압축을 Agentlas가 구현/적용한다.
 import type { RuntimeKind } from "./types";
+import { AGENTLAS_SERVING_MODELS } from "./agentlas-serving";
 
 export type ByokBackend =
   | "anthropic"
@@ -209,6 +210,8 @@ export const CONTEXT_MANAGED_BY: Record<RuntimeKind, "runtime" | "agentlas"> = {
   lmstudio: "agentlas",
   mlx: "agentlas",
   acp: "runtime",
+  // 서빙 실행은 세션도 압축도 우리가 들고 있다 — CLI 처럼 위임할 상대가 없다.
+  agentlas: "agentlas",
 };
 
 // ── CLI 런타임 모델 선택 ──────────────────────────────────
@@ -219,7 +222,7 @@ export const CONTEXT_MANAGED_BY: Record<RuntimeKind, "runtime" | "agentlas"> = {
 // 헤드리스(-p) 한계: Claude Code의 인터랙티브 메뉴에 있는 "빠른 모드"와 `model[1m]`(1M) 변형은
 // CLI 플래그가 없어 옮길 수 없다. 대신 claude는 `--effort`(작업량)를 지원한다.
 /** 보조 표기 키. 라벨은 하드코딩하지 말고 cliModelTagLabel()로 로케일 변환. */
-export type CliModelTag = "legacy" | "preview";
+export type CliModelTag = "legacy" | "preview" | "credits";
 
 export interface CliModelOption {
   /** CLI 모델 플래그에 전달하는 값. claude는 opus/sonnet/haiku 별칭 또는 풀ID(claude-opus-4-7 등) */
@@ -235,6 +238,8 @@ export interface CliModelOption {
 const CLI_MODEL_TAG_LABELS: Record<CliModelTag, { ko: string; en: string }> = {
   legacy: { ko: "레거시", en: "Legacy" },
   preview: { ko: "프리뷰", en: "Preview" },
+  // 고르기 **전에** 비용을 말한다. 쓰고 나서 알게 되면 그것은 통보지 선택이 아니다.
+  credits: { ko: "크레딧 사용", en: "Uses credits" },
 };
 
 /** CLI 모델의 보조 표기(tag)를 로케일 라벨로. tag 없으면 빈 문자열. */
@@ -265,6 +270,17 @@ export const CLI_MODELS: Partial<Record<RuntimeKind, CliModelOption[]>> = {
   kimi: [],
   grok: [],
   cursor: [{ id: "auto", label: "Cursor Auto" }],
+  /*
+   * Agentlas 서빙 — 세기 세 개가 목록의 전부다. 발견으로 늘어나지 않는다.
+   * 라벨을 여기 두는 이유: 목록이 없으면 화면이 id 를 그대로 그려 "agentlas-normal" 이
+   * 사용자에게 보인다.
+   */
+  agentlas: AGENTLAS_SERVING_MODELS.map((model) => ({
+    id: model.id,
+    label: model.label,
+    tag: "credits" as const,
+    workforceTier: model.tier === "hard" ? "frontier" : model.tier === "normal" ? "balanced" : "economy",
+  })),
 };
 
 const DISCOVERED_CLI_MODELS = new Map<string, CliModelOption[]>();

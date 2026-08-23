@@ -269,7 +269,7 @@ export function OneComposerControls({
             ))}
             {activeMenu === "model" && (
               <>
-                {runtime && runtime.kind !== "byok" && (
+                {runtime && runtime.kind !== "byok" && runtime.kind !== "agentlas" && (
                   <ComposerRow icon={<IconSparkles size={15} />} title={locale === "ko" ? "구독 기본" : "Subscription default"} checked={!runtime.model} onClick={() => onSelectModel(runtime, "")} />
                 )}
                 {filteredModels.map((item) => (

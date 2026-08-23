@@ -142,7 +142,7 @@ import { OneGrowthCard } from "./OneGrowthCard";
 import { OneActivityArtifactRail, taskBrowserUrl, type OneLiveAppPreview } from "./OneActivityTimeline";
 import { OneOrgChart, type OneOrgSearchItem } from "./OneOrgChart";
 import { OneAgentPortrait } from "./OneAgentPortrait";
-import { OneCreateAgentDialog, type OneCreateAgentSeed, type OneEditMemberTarget } from "./OneCreateAgentDialog";
+import { OneCreateAgentDialog, type OneCreateAgentSeed, type OneEditMemberTarget, type OneEditSelfTarget } from "./OneCreateAgentDialog";
 import { OneTaskforceDialog, OneTaskforceRail } from "./OneTaskforces";
 import { OneComputerHistory } from "./OneComputerHistory";
 import { OneSettingsRail, OneSettingsSheet, type OneSettingsKey } from "./OneSettings";
@@ -232,6 +232,10 @@ function oneOrgBrowserPreviewState(): OneOrgState {
       completionSummary: { produced: [], pending: [] },
       autoSelectTools: true,
       collaborationStyle: "default",
+      title: "Chief of Staff",
+      description: "",
+      identityEditable: false,
+      runtimeSelection: null,
       revision: 1,
     }],
     slots: { used: 2, capacity: 4, available: 2, includesOne: true, recommended: 4, hardMax: 8, cores: 10, totalMemGB: 32, userSet: false },
@@ -824,6 +828,13 @@ export function OneShell() {
   const [createAgentOpen, setCreateAgentOpen] = useState(false);
   const [createAgentSeed, setCreateAgentSeed] = useState<OneCreateAgentSeed | null>(null);
   const [editMemberTarget, setEditMemberTarget] = useState<OneEditMemberTarget | null>(null);
+  /*
+   * 통합 편집 창이 조직도에 열어 달라고 요청하는 부속 화면(도구 설정·담당 교체).
+   * 창을 하나로 합치면서 이 두 화면의 진입점이 사라졌기 때문에, 요청을 여기로 올려 보낸다.
+   */
+  const [orgSheetRequest, setOrgSheetRequest] = useState<{ token: number; kind: "tools" | "replace"; memberId: string } | null>(null);
+  /** One 자신을 고치는 창. 팀원 편집과 같은 창을 쓴다(오너 지시 2026-08-23). */
+  const [editOneTarget, setEditOneTarget] = useState<OneEditSelfTarget | null>(null);
   const createAgentSeedTokenRef = useRef(0);
   const [agentPickerRequest, setAgentPickerRequest] = useState<{
     token: number;
@@ -4295,6 +4306,11 @@ export function OneShell() {
   // v1. Keep that single boundary explicit instead of dimming every control.
   const composerAttachmentBlocked = busy || teamPreflightBusy || selectedReadOnly || teamDecisionPending;
   const oneDisplayName = oneProfile?.displayName.trim() || "One";
+  /*
+   * One 의 얼굴. 프로필에서 고른 캐릭터가 있으면 그것이고, 없으면 지금까지의 기본이다.
+   * 고를 수 있게 만들어 놓고 화면이 옛 얼굴을 계속 그리면 그 기능은 없는 것과 같다.
+   */
+  const oneAvatarTone = oneProfile?.avatarIcon?.trim() || "purple";
   const removeAttachmentDraft = useCallback((id: string) => {
     const current = attachmentDraftsRef.current;
     const removed = current.find((item) => item.id === id);
@@ -4614,6 +4630,10 @@ export function OneShell() {
           aria-hidden={railCollapsed && !railOpen ? "true" : undefined}
           inert={railCollapsed && !railOpen ? true : undefined}
         >
+          {/* macOS 신호등 옆 48px는 창을 잡는 손잡이다. 이 스트립이 없으면 One
+              화면에서는 창을 옮길 곳이 한 군데도 없다(다른 화면은 SideNav가 같은
+              역할을 한다). */}
+          <div className={`${styles.railDrag} titlebar-drag`} aria-hidden="true" />
           <div className={`${styles.railProduct} titlebar-nodrag`}>
             <ProductModeMenu current="one" darkText locale={appLocale} />
             <button
@@ -4629,6 +4649,7 @@ export function OneShell() {
           </div>
           {railMode === "organisation" ? <>
             <OneTaskforceRail
+              oneAvatarIcon={oneAvatarTone}
               taskforces={taskforces}
               org={oneOrgState}
               activeChatId={activeThreadChatId}
@@ -4640,6 +4661,7 @@ export function OneShell() {
               }}
             />
             <OneOrgChart
+              oneAvatarIcon={oneAvatarTone}
               state={oneOrgState ?? (!ipc() ? oneOrgBrowserPreviewState() : null)}
               installedAgents={availableAgents}
               cloudListings={cloudListings}
@@ -4660,7 +4682,18 @@ export function OneShell() {
               onFailure={openOneFailure}
               onOpenMember={openOneMember}
               onOpenOne={startNewConversation}
-              onEditOne={() => { setMemoryOpen(false); setProfileOpen(true); }}
+              onEditOne={() => {
+                // One 도 팀원과 같은 창에서 고친다. "지킬 것" 목록만 기존 프로필 창에 남는다.
+                setMemoryOpen(false);
+                setEditOneTarget({
+                  displayName: oneProfile?.displayName ?? "One",
+                  role: oneProfile?.role ?? "Agentlas One",
+                  profileContext: oneProfile?.profileContext ?? "",
+                  avatarIcon: oneProfile?.avatarIcon ?? "",
+                  expectedVersion: oneProfile?.version ?? 0,
+                });
+                setCreateAgentOpen(true);
+              }}
               onEditIdentity={(member) => {
                 // 이름·캐릭터는 '에이전트 만들기'와 같은 창에서 고친다(오너 지적 2026-08-23).
                 setEditMemberTarget({
@@ -4668,10 +4701,15 @@ export function OneShell() {
                   displayName: member.displayName,
                   icon: member.icon,
                   collaborationStyle: member.collaborationStyle ?? "default",
+                  title: member.title ?? "",
+                  description: member.description ?? "",
+                  identityEditable: Boolean(member.identityEditable),
+                  runtimeSelection: member.runtimeSelection ?? null,
                   revision: member.revision,
                 });
                 setCreateAgentOpen(true);
               }}
+              sheetRequest={orgSheetRequest ?? undefined}
               activeMemberId={activeOneMember?.installedAgentId ?? null}
               activeTaskForceIds={turnAgentIds}
               installedPlugins={installedPlugins}
@@ -4755,7 +4793,7 @@ export function OneShell() {
                 <span className={styles.taskToolbarDivider} aria-hidden="true" />
                 <div className={styles.taskToolbarIdentity}>
                   {activeTaskforce ? <span className={styles.taskforceToolbarPortraits} aria-hidden="true">
-                    <OneAgentPortrait status={busy ? "working" : "quiet"} label="One" tone="purple" size="small" />
+                    <OneAgentPortrait status={busy ? "working" : "quiet"} label="One" tone={oneAvatarTone} size="small" />
                     {activeTaskforce.memberAgentIds.slice(0, 2).map((agentId) => {
                       const member = oneOrgState?.members.find((item) => item.installedAgentId === agentId);
                       const unavailable = !member || Boolean(member.archivedAt) || member.statusKind === "locked" || member.statusKind === "failed";
@@ -4989,7 +5027,7 @@ export function OneShell() {
                           >
                             {activeTaskforce && message.role !== "system" && (
                               <div className={styles.taskforceMessageMeta}>
-                                {message.role === "assistant" && <OneAgentPortrait status={busy && message.streaming ? "working" : "quiet"} label="One" tone="purple" size="medium" />}
+                                {message.role === "assistant" && <OneAgentPortrait status={busy && message.streaming ? "working" : "quiet"} label="One" tone={oneAvatarTone} size="medium" />}
                                 <span>
                                   <strong>{message.role === "user" ? (appLocale === "ko" ? "나" : "You") : "One"}</strong>
                                   {message.createdAt && <time dateTime={message.createdAt}>{new Date(message.createdAt).toLocaleTimeString(appLocale === "ko" ? "ko-KR" : "en-US", { hour: "2-digit", minute: "2-digit" })}</time>}
@@ -5850,6 +5888,7 @@ export function OneShell() {
         onManageImprovementAsset={manageImprovementAsset}
       />
       <OneTaskforceDialog
+        oneAvatarIcon={oneAvatarTone}
         open={taskforceDialogOpen}
         taskforce={taskforceEditing}
         org={oneOrgState}
@@ -5868,13 +5907,31 @@ export function OneShell() {
         locale={appLocale}
         seed={createAgentSeed}
         edit={editMemberTarget}
+        editOne={editOneTarget}
         onClose={() => {
           setCreateAgentOpen(false);
           setCreateAgentSeed(null);
           setEditMemberTarget(null);
+          setEditOneTarget(null);
+        }}
+        onOpenPrinciples={() => { setEditOneTarget(null); setProfileOpen(true); }}
+        onSavedOne={async () => {
+          setEditOneTarget(null);
+          await refreshAll();
         }}
         onUpdated={async () => {
           setEditMemberTarget(null);
+          await refreshAll();
+        }}
+        onOpenTools={(memberId) => {
+          setOrgSheetRequest((current) => ({ token: (current?.token ?? 0) + 1, kind: "tools", memberId }));
+        }}
+        onReplaceMember={(memberId) => {
+          setOrgSheetRequest((current) => ({ token: (current?.token ?? 0) + 1, kind: "replace", memberId }));
+        }}
+        onArchiveMember={async (memberId) => {
+          const member = oneOrgState?.members.find((row) => row.id === memberId);
+          if (member) await archiveOneOrg(member);
           await refreshAll();
         }}
         onCreated={async (result) => {

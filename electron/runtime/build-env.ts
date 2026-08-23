@@ -88,6 +88,8 @@ const BUILD_RUNTIME_ENV_KEYS: Record<RuntimeKind, readonly string[]> = {
   // BYOK runners read their one selected key directly from the Main vault and
   // do not need any host environment credential.
   byok: [],
+  // 서빙은 로그인 세션으로 인증한다 — 넘길 벤더 키가 없다.
+  agentlas: [],
 };
 
 const MCP_SECRET_ALIAS_RE = /^AGENTLAS_MCP_SECRET_[A-F0-9]{32}$/;

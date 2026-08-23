@@ -411,6 +411,7 @@ import {
   getCanonicalTaskForChat,
   listCanonicalTasks,
 } from "./store/tasks";
+import { ONE_SELF_AVATAR_ICON, decodeOneTeamAvatarDataUrl, writeOneSelfAvatar } from "./one/avatar";
 import { mutateOneTaskArchive, searchOneHistory } from "./one/search";
 import { importExternalCliSession, listExternalCliSessions } from "./external-cli-sessions";
 import {
@@ -3391,7 +3392,7 @@ export function registerIpcHandlers(): void {
 
   // ── Telegram Connect (Bot API polling + Agentlas invocation bridge) ─────
   ipcMain.handle("telegram:listBindings", () => listTelegramBindings());
-  ipcMain.handle("telegram:connectOne", (_e, input?: { botName?: string }) => connectTelegramToOne(input ?? {}));
+  ipcMain.handle("telegram:connectOne", (_e, input?: { botName?: string; newConnection?: boolean }) => connectTelegramToOne(input ?? {}));
   ipcMain.handle("telegram:removeLegacy", (_e, input: { deleteBots?: boolean }) =>
     removeLegacyTelegramConnections({ deleteBots: input?.deleteBots === true }));
   ipcMain.handle("telegram:autoConnect", (_e, input) => autoConnectTelegram(input));
@@ -4165,6 +4166,20 @@ export function registerIpcHandlers(): void {
   }));
   ipcMain.handle("oneProfile:get", () => getOneProfile());
   ipcMain.handle("oneProfile:update", (_e, input: OneProfileUpdateInput) => updateOneProfile(input));
+  /*
+   * One 자신의 초상(생성·업로드 이미지). 팀원과 같은 창에서 같은 방식으로 고르므로,
+   * 저장하는 길도 있어야 한다 — 없으면 그 창에서 One 만 두 탭이 사라진다.
+   * 이미지는 먼저 디스크에 쓰고, 그다음 프로필이 그 자리를 가리키게 한다. 순서를 뒤집으면
+   * 저장이 실패했을 때 프로필만 없는 그림을 가리킨다.
+   */
+  ipcMain.handle("oneProfile:setAvatarImage", (_e, input: { dataUrl: string; expectedVersion: number }) => {
+    const decoded = decodeOneTeamAvatarDataUrl(String(input?.dataUrl ?? ""));
+    writeOneSelfAvatar(decoded);
+    return updateOneProfile({
+      expectedVersion: Number(input?.expectedVersion),
+      patch: { avatarIcon: ONE_SELF_AVATAR_ICON },
+    });
+  });
   ipcMain.handle("oneProfile:addPrinciple", (_e, input: OneOperatingPrincipleCreateInput) =>
     addOneOperatingPrinciple(input));
   ipcMain.handle("oneProfile:updatePrinciple", (_e, input: OneOperatingPrincipleUpdateInput) =>

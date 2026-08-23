@@ -24,6 +24,7 @@ export const RUNTIME_BACKENDS = [
   "xai",
   "openrouter",
   "cursor",
+  "agentlas",
 ] as const satisfies readonly RuntimeBackend[];
 
 // Exhaustiveness in both directions: every RuntimeBackend must be listed above.

@@ -47,10 +47,27 @@ type AgentModelOption = {
   selection: RuntimeSelection;
 };
 
+/** One 자신의 초상이 사는 주소. 창이 지금 얼굴을 보여줄 때 쓴다. */
+const ONE_SELF_AVATAR_SRC = "agentlas://one-avatar/self";
+
 const DRAFT_KEY = "agentlas.one.new-agent-draft.v2";
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
 const MODES = new Set<AvatarMode>(["original", "sketch", "generated", "upload"]);
 const CHARACTER_IDS = new Set<string>(ONE_CHARACTER_OPTIONS.map((item) => item.id));
+
+/** 협업 말투 — 문구는 조직원 설정 창에 있던 것을 그대로 옮겼다(사람이 배운 말이 바뀌지 않게). */
+const COLLABORATION_STYLE_OPTIONS: Array<{
+  id: OneOrgCollaborationStyle;
+  ko: string;
+  koDetail: string;
+  en: string;
+  enDetail: string;
+}> = [
+  { id: "default", ko: "에이전트 기본", koDetail: "원본 역할과 말투를 그대로 사용", en: "Agent default", enDetail: "Keeps the source role and voice" },
+  { id: "concise", ko: "간결하게", koDetail: "결론과 다음 행동을 먼저", en: "Concise", enDetail: "Decision and next action first" },
+  { id: "warm", ko: "따뜻하게", koDetail: "협업적이되 위험은 숨기지 않음", en: "Warm", enDetail: "Collaborative, still explicit about risk" },
+  { id: "direct", ko: "직설적으로", koDetail: "막힘과 선택지를 구체적으로", en: "Direct", enDetail: "Concrete about blockers and choices" },
+];
 
 const EMPTY_DRAFT: StoredDraft = {
   mode: "original",
@@ -188,7 +205,32 @@ export interface OneEditMemberTarget {
   /** 지금 아이콘 — `character:<id>` 면 그 캐릭터를 미리 선택해 준다. */
   icon: string;
   collaborationStyle: OneOrgCollaborationStyle;
+  /** 지금 역할 한 줄과 성격 — 창을 열자마자 적혀 있어야 "수정"이 된다. */
+  title: string;
+  description: string;
+  /** 역할·성격까지 고칠 수 있는가(호스트 판정). 밖에서 설치한 패키지는 못 고친다. */
+  identityEditable: boolean;
+  /** 지금 고정된 모델. 없으면 자동 배정. */
+  runtimeSelection: RuntimeSelection | null;
   revision: number;
+}
+
+/**
+ * One 자신을 이 창에서 고친다.
+ *
+ * 팀원을 만드는 창, 팀원을 고치는 창, One 을 고치는 창이 서로 달랐다(오너 지적 2026-08-23).
+ * 세 가지가 하는 일은 같다 — 이름·얼굴·역할·성격·모델을 정하는 것이다. 그래서 창도 하나다.
+ *
+ * One 은 설치된 에이전트가 아니라 팀원처럼 쓸 초상 폴더가 없었다. 그래서 One 전용 자리를
+ * 따로 만들었다 — 같은 창인데 One 에서만 두 탭이 사라지는 것은 통일이 아니라 구멍이다.
+ */
+export interface OneEditSelfTarget {
+  displayName: string;
+  role: string;
+  profileContext: string;
+  /** 지금 캐릭터 — `character:<id>`. 없으면 기본 얼굴. */
+  avatarIcon: string;
+  expectedVersion: number;
 }
 
 export function OneCreateAgentDialog({
@@ -196,19 +238,34 @@ export function OneCreateAgentDialog({
   locale,
   seed,
   edit,
+  editOne,
   onClose,
   onCreated,
   onUpdated,
   onAddExisting,
+  onOpenTools,
+  onReplaceMember,
+  onArchiveMember,
+  onOpenPrinciples,
+  onSavedOne,
 }: {
   open: boolean;
   locale: "ko" | "en";
   seed?: OneCreateAgentSeed | null;
   edit?: OneEditMemberTarget | null;
+  /** One 자신을 고치는 모드. `edit` 과 동시에 켜지지 않는다. */
+  editOne?: OneEditSelfTarget | null;
   onClose: () => void;
   onCreated: (result: CreateOneTeamAgentResult) => void | Promise<void>;
   onUpdated?: () => void | Promise<void>;
   onAddExisting: () => void;
+  /** 편집에서만 쓰는 부가 동작. 없으면 그 버튼을 그리지 않는다. */
+  onOpenTools?: (memberId: string) => void;
+  onReplaceMember?: (memberId: string) => void;
+  onArchiveMember?: (memberId: string) => void | Promise<void>;
+  /** One 모드에서만 — "One이 꼭 지킬 것" 목록 창을 연다. */
+  onOpenPrinciples?: () => void;
+  onSavedOne?: () => void | Promise<void>;
 }) {
   const uploadRef = useRef<HTMLInputElement>(null);
   const generationRequestRef = useRef(0);
@@ -225,6 +282,8 @@ export function OneCreateAgentDialog({
   const [uploadedSrc, setUploadedSrc] = useState<string | null>(EMPTY_DRAFT.uploadedSrc);
   const [uploadedName, setUploadedName] = useState(EMPTY_DRAFT.uploadedName);
   const [runtimeSelection, setRuntimeSelection] = useState<RuntimeSelection | null>(EMPTY_DRAFT.runtimeSelection);
+  // 협업 말투는 편집에서만 쓴다. 만들 때는 원본 역할을 그대로 쓰는 것이 기본이라 묻지 않는다.
+  const [collaborationStyle, setCollaborationStyle] = useState<OneOrgCollaborationStyle>("default");
   const [modelOptions, setModelOptions] = useState<AgentModelOption[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -267,6 +326,13 @@ export function OneCreateAgentDialog({
 
   useEffect(() => {
     if (!draftHydratedRef.current) return;
+    /*
+     * 임시저장은 **새로 만들 때만** 한다.
+     *
+     * 편집도 같은 칸을 쓰게 되면서, 남의 이름과 성격이 "새 에이전트 초안"으로 저장될 수
+     * 있게 됐다. 그러면 다음에 새로 만들기를 열었을 때 방금 고친 팀원의 내용이 적혀 있다.
+     */
+    if (edit || editOne) return;
     if (skipNextDraftWriteRef.current) {
       skipNextDraftWriteRef.current = false;
       return;
@@ -281,7 +347,7 @@ export function OneCreateAgentDialog({
       }
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [draft]);
+  }, [draft, edit, editOne]);
 
   useEffect(() => {
     if (open) setError(null);
@@ -357,6 +423,7 @@ export function OneCreateAgentDialog({
   const avatarReady = Boolean(selectedStyle || previewSrc);
 
   const persistDraftNow = () => {
+    if (edit || editOne) return;
     try {
       window.localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
       setDraftStatus("saved");
@@ -455,6 +522,12 @@ export function OneCreateAgentDialog({
     editKeyRef.current = key;
     skipNextDraftWriteRef.current = true;
     setName(edit.displayName);
+    // ★ 여기가 "수정"을 수정으로 만드는 자리다. 지금 값이 적혀 있지 않으면 사람은
+    //   고치는 것이 아니라 처음부터 다시 쓰게 된다(오너 지적 2026-08-23).
+    setTitle(edit.title);
+    setDescription(edit.description);
+    setRuntimeSelection(edit.runtimeSelection);
+    setCollaborationStyle(edit.collaborationStyle);
     const preset = edit.icon.startsWith("character:") ? edit.icon.slice("character:".length) : null;
     if (preset && CHARACTER_IDS.has(preset)) {
       setCharacterId(preset as OneCharacterId);
@@ -464,6 +537,87 @@ export function OneCreateAgentDialog({
       setGeneratedSrc(null);
     }
   }, [open, edit]);
+
+  // One 도 같은 방식으로 채워 둔다 — 창이 열리면 지금 One 의 모습이 이미 적혀 있다.
+  const editOneKeyRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!open || !editOne) {
+      if (!open) editOneKeyRef.current = null;
+      return;
+    }
+    if (editOneKeyRef.current === editOne.expectedVersion) return;
+    editOneKeyRef.current = editOne.expectedVersion;
+    skipNextDraftWriteRef.current = true;
+    setName(editOne.displayName);
+    setTitle(editOne.role);
+    setDescription(editOne.profileContext);
+    const preset = editOne.avatarIcon.startsWith("character:")
+      ? editOne.avatarIcon.slice("character:".length)
+      : "";
+    if (preset && CHARACTER_IDS.has(preset)) {
+      setCharacterId(preset as OneCharacterId);
+      const character = ONE_CHARACTER_OPTIONS.find((option) => option.id === preset);
+      setAvatarMode(character?.style === "sketch" ? "sketch" : "original");
+      setUploadedSrc(null);
+      setGeneratedSrc(null);
+      return;
+    }
+    if (editOne.avatarIcon === "one-avatar:self") {
+      // 이미 직접 넣은 그림이 있다. 창을 열자마자 그 그림이 보여야 "지금 상태"가 맞는다.
+      setAvatarMode("upload");
+      setUploadedSrc(ONE_SELF_AVATAR_SRC);
+      setUploadedName("");
+      setGeneratedSrc(null);
+      return;
+    }
+    setUploadedSrc(null);
+    setGeneratedSrc(null);
+  }, [open, editOne]);
+
+  const updateOne = async () => {
+    if (!editOne) return;
+    const cleanName = name.replace(/\s+/g, " ").trim();
+    if (!cleanName || !avatarReady || creating) return;
+    const api = ipc();
+    if (!api?.oneProfile?.update) {
+      setError(ko ? "One 프로필 저장 기능을 불러오지 못했습니다. 앱을 다시 열어 주세요." : "One profile storage is unavailable. Reopen the app and try again.");
+      return;
+    }
+    setCreating(true);
+    setError(null);
+    try {
+      /*
+       * 새로 넣은 그림이면 먼저 그림을 저장하고, 그 결과로 올라간 판 번호로 나머지를 저장한다.
+       * 순서를 뒤집으면 글은 저장됐는데 얼굴만 예전 것으로 남는다.
+       */
+      let version = editOne.expectedVersion;
+      const newImage = !selectedStyle && previewSrc && previewSrc !== ONE_SELF_AVATAR_SRC;
+      if (newImage) {
+        if (!api.oneProfile.setAvatarImage) {
+          setError(ko ? "이 버전에서는 One 초상 저장을 지원하지 않습니다." : "Saving a One portrait is unavailable in this version.");
+          setCreating(false);
+          return;
+        }
+        const saved = await api.oneProfile.setAvatarImage({ dataUrl: previewSrc, expectedVersion: version });
+        version = saved.version;
+      }
+      await api.oneProfile.update({
+        expectedVersion: version,
+        patch: {
+          displayName: cleanName,
+          role: title.trim() || "Agentlas One",
+          profileContext: description.trim(),
+          avatarIcon: selectedStyle ? `character:${selectedCharacter.id}` : "one-avatar:self",
+        },
+      });
+      await onSavedOne?.();
+      onClose();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setCreating(false);
+    }
+  };
 
   const updateMember = async () => {
     if (!edit) return;
@@ -480,10 +634,15 @@ export function OneCreateAgentDialog({
       await api.oneOrg.update({
         id: edit.memberId,
         displayName: cleanName,
-        collaborationStyle: edit.collaborationStyle,
+        collaborationStyle,
         avatar: selectedStyle
           ? { kind: "preset", characterId: selectedCharacter.id }
           : { kind: "image", dataUrl: previewSrc! },
+        // 역할·성격은 고칠 수 있는 팀원일 때만 보낸다. 보내더라도 실제 허용 여부는
+        // 호스트가 다시 판정한다 — 화면의 말을 믿고 남의 패키지를 덮어쓰면 안 된다.
+        ...(edit.identityEditable ? { title: title.trim(), description: description.trim() } : {}),
+        // null 은 "고정 해제". undefined 와 구분되지 않으면 창을 열었다 닫기만 해도 고정이 풀린다.
+        runtimeSelection,
         expectedRevision: edit.revision,
       });
       await onUpdated?.();
@@ -543,19 +702,27 @@ export function OneCreateAgentDialog({
       persistDraftNow();
       onClose();
     }}
-    closeLabel={edit ? (ko ? "팀원 편집 닫기" : "Close edit teammate") : (ko ? "새 에이전트 닫기" : "Close new agent")}
+    closeLabel={editOne
+      ? (ko ? "One 편집 닫기" : "Close edit One")
+      : edit ? (ko ? "팀원 편집 닫기" : "Close edit teammate") : (ko ? "새 에이전트 닫기" : "Close new agent")}
     closeDisabled={creating}
     closeOnBackdrop={!creating}
     closeOnEscape={!creating}
     size="wide"
     panelClassName={styles.dialog}
     bodyClassName={styles.body}
-    eyebrow="One Team"
-    title={edit ? (ko ? "팀원 편집" : "Edit Teammate") : "New Agent"}
+    eyebrow={editOne ? "One" : "One Team"}
+    title={editOne ? (ko ? "One 편집" : "Edit One") : edit ? (ko ? "팀원 편집" : "Edit Teammate") : "New Agent"}
     titleId="one-create-agent-title"
     ariaLabelledBy="one-create-agent-title"
-    description={edit
-      ? (ko ? "이름과 캐릭터를 바꿉니다. 만들 때와 같은 방식으로 고르면 됩니다." : "Change the name and character. You pick them the same way you did when creating.")
+    description={editOne
+      ? (ko
+        ? "팀원을 만들 때와 같은 창입니다. 여기에 적고 저장한 내용만 다음 대화에도 사용합니다."
+        : "The same window you use to create a teammate. Only what you save here is used in future conversations.")
+      : edit
+      ? (ko
+        ? "만들 때와 같은 창입니다. 지금 값이 적혀 있고, 고쳐서 저장하면 그게 수정입니다."
+        : "The same window you used to create it. Everything is filled in with what it is now — change and save.")
       : (ko
         ? "독립 채팅과 기억을 가진 팀원을 One Team 안에서 바로 만듭니다. 창을 닫아도 작성 내용과 생성된 캐릭터는 임시저장됩니다."
         : "Create a teammate with its own chat and memory directly inside One Team. Your form and generated character stay saved if you close this window.")}
@@ -601,10 +768,38 @@ export function OneCreateAgentDialog({
 
       <section className={styles.fields}>
         <label>Name<input value={name} onChange={(event) => setName(event.target.value)} maxLength={80} placeholder="inbox-triage" autoFocus /></label>
-        {!edit && <label>Title<input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={100} placeholder="e.g. Inbox Triage" /></label>}
-        {!edit && <label>Description<textarea value={description} onChange={(event) => setDescription(event.target.value)} maxLength={1_200} placeholder={ko ? "이 에이전트에게 말투와 성격, 영혼을 부여하세요." : "Give this agent a voice, personality, and soul."} /></label>}
+        {/* 만들 때와 고칠 때가 같은 칸을 쓴다. 편집이면 지금 값이 이미 적혀 있고, 그것이 곧 수정이다. */}
+        {(!edit || edit.identityEditable) && <label>{editOne ? (ko ? "역할" : "Role") : "Title"}<input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={editOne ? 120 : 100} placeholder={editOne ? "Agentlas One" : "e.g. Inbox Triage"} /></label>}
+        {(!edit || edit.identityEditable) && <label>{editOne ? (ko ? "말투·성격과 내 선호" : "Voice, personality, and preferences") : "Description"}<textarea value={description} onChange={(event) => setDescription(event.target.value)} maxLength={editOne ? 4_000 : 1_200} placeholder={ko ? (editOne ? "예: 항상 턴 끝에 진척도를 표로 보여 주고, 내가 결정할 것이 있으면 먼저 말해 줘." : "이 에이전트에게 말투와 성격, 영혼을 부여하세요.") : (editOne ? "e.g. End every turn with a progress table and tell me what needs my decision." : "Give this agent a voice, personality, and soul.")} /></label>}
+        {edit && !edit.identityEditable && <p className={styles.lockedIdentity}>
+          {ko
+            ? "이 팀원은 밖에서 설치한 에이전트라 역할과 성격은 원본 패키지가 정합니다. 이름·캐릭터·협업 방식·모델은 여기서 바꿉니다."
+            : "This teammate comes from an installed package, so its role and personality stay as published. Name, character, collaboration style, and model are yours to change here."}
+        </p>}
 
-        <label className={styles.modelPicker}>
+        {edit && <div className={styles.styleField}>
+          <span>{ko ? "협업 말투" : "Collaboration style"}</span>
+          <div className={styles.styleOptions} role="radiogroup" aria-label={ko ? "협업 말투" : "Collaboration style"}>
+            {COLLABORATION_STYLE_OPTIONS.map((option) => <button
+              key={option.id}
+              type="button"
+              role="radio"
+              aria-checked={collaborationStyle === option.id}
+              data-active={collaborationStyle === option.id ? "true" : "false"}
+              onClick={() => setCollaborationStyle(option.id)}
+            >
+              <span><strong>{ko ? option.ko : option.en}</strong><small>{ko ? option.koDetail : option.enDetail}</small></span>
+              {collaborationStyle === option.id && <span aria-hidden="true"><IconCheck size={13} /></span>}
+            </button>)}
+          </div>
+          <small>{ko ? "One이 이 팀원에게 일을 넘길 때 적용됩니다." : "Applied when One hands work to this teammate."}</small>
+        </div>}
+
+        {/*
+          One 의 모델은 대화 작성기에서 고른다(그 자리에서 바로 바꾸는 것이 One 의 방식이다).
+          여기에 또 두면 두 곳이 서로 다른 값을 보여 주게 된다.
+        */}
+        {!editOne && <label className={styles.modelPicker}>
           <span>{ko ? "LLM 모델" : "LLM model"}</span>
           <select
             value={runtimeSelection ? runtimeSelectionKey(runtimeSelection) : ""}
@@ -622,7 +817,7 @@ export function OneCreateAgentDialog({
           <small>{ko
             ? "선택한 모델이 안 되면 Worker 런타임, 그다음 연결된 정상 런타임을 사용합니다."
             : "If this model is unavailable, One uses the worker runtime, then another connected working runtime."}</small>
-        </label>
+        </label>}
 
         <div className={styles.existingPicker}>
           {!edit && <button type="button" className={styles.existingTrigger} onClick={addExisting}>
@@ -631,7 +826,20 @@ export function OneCreateAgentDialog({
           </button>}
         </div>
 
-        {draftStatus !== "idle" && <p className={draftStatus === "error" ? styles.draftError : styles.draftStatus} role="status">
+        {/*
+          조직원 설정 창이 따로 갖고 있던 것들이다. 창을 하나로 합치는 이상 여기 없으면
+          그 기능들이 도달 불가가 된다 — 화면을 합치면서 기능을 잃는 것이 가장 나쁘다.
+        */}
+        {editOne && onOpenPrinciples && <div className={styles.editorExtras}>
+          <button type="button" onClick={() => { onOpenPrinciples(); onClose(); }}>{ko ? "One이 꼭 지킬 것 관리" : "Manage what One must follow"}</button>
+        </div>}
+        {edit && (onOpenTools || onReplaceMember || onArchiveMember) && <div className={styles.editorExtras}>
+          {onOpenTools && <button type="button" onClick={() => { onOpenTools(edit.memberId); onClose(); }}>{ko ? "도구 설정 열기" : "Open tool settings"}</button>}
+          {onReplaceMember && <button type="button" onClick={() => { onReplaceMember(edit.memberId); onClose(); }}>{ko ? "담당 교체" : "Replace staff member"}</button>}
+          {onArchiveMember && <button type="button" className={styles.archiveExtra} disabled={creating} onClick={() => { void Promise.resolve(onArchiveMember(edit.memberId)).then(() => onClose()); }}>{ko ? "보관하기" : "Archive"}</button>}
+        </div>}
+
+        {!edit && !editOne && draftStatus !== "idle" && <p className={draftStatus === "error" ? styles.draftError : styles.draftStatus} role="status">
           {draftStatus === "saving"
             ? (ko ? "임시저장 중…" : "Saving draft…")
             : draftStatus === "error"
@@ -642,9 +850,9 @@ export function OneCreateAgentDialog({
         {creating && <div className={styles.creatingState} role="status" aria-live="polite"><span className={styles.spinner} aria-hidden="true" /><span><strong>{ko ? "One Team에 팀원을 만들고 있어요" : "Creating your One Team teammate"}</strong><small>{ko ? "로컬 정체성, 조직도 자리, 독립 채팅을 함께 저장합니다." : "Saving its local identity, organisation seat, and independent chat."}</small><LoadingEstimate locale={locale} operationKey="one-agent-create" expectedSeconds={[1, 12]} /></span></div>}
         <div className={styles.actions}>
           <button type="button" disabled={creating} onClick={() => { persistDraftNow(); onClose(); }}>{ko ? "취소" : "Cancel"}</button>
-          <button type="button" className={styles.primaryButton} disabled={!name.trim() || !avatarReady || creating} onClick={() => void (edit ? updateMember() : createAgent())}>{creating
-            ? (edit ? (ko ? "저장 중…" : "Saving…") : (ko ? "만드는 중…" : "Creating…"))
-            : (edit ? (ko ? "저장" : "Save") : (ko ? "만들고 채팅 열기" : "Create & open chat"))}</button>
+          <button type="button" className={styles.primaryButton} disabled={!name.trim() || !avatarReady || creating} onClick={() => void (editOne ? updateOne() : edit ? updateMember() : createAgent())}>{creating
+            ? (editOne || edit ? (ko ? "저장 중…" : "Saving…") : (ko ? "만드는 중…" : "Creating…"))
+            : (editOne || edit ? (ko ? "저장" : "Save") : (ko ? "만들고 채팅 열기" : "Create & open chat"))}</button>
         </div>
       </section>
     </div>

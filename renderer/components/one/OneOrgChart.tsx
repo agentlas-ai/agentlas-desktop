@@ -95,6 +95,8 @@ export function OneOrgChart({
   onOpenOne,
   onEditOne,
   onEditIdentity,
+  sheetRequest,
+  oneAvatarIcon,
   activeMemberId,
   activeTaskForceIds,
   onBrowseTools,
@@ -134,6 +136,15 @@ export function OneOrgChart({
   onEditOne?: () => void;
   /** 이름·캐릭터는 '에이전트 만들기'와 같은 창에서 고친다(오너 지적 2026-08-23). */
   onEditIdentity?: (member: OneOrgMember) => void;
+  /**
+   * 통합 편집 창이 요청한 부속 화면(도구 설정·담당 교체).
+   *
+   * 창을 하나로 합치면서 이 두 화면의 진입점이 사라졌다. 기능을 잃지 않으려면 통합 창이
+   * 여기에 열어 달라고 말할 수 있어야 한다. `token` 은 같은 대상을 다시 눌러도 열리게 한다.
+   */
+  sheetRequest?: { token: number; kind: "tools" | "replace"; memberId: string };
+  /** One 이 프로필에서 고른 캐릭터. 없으면 지금까지의 기본 얼굴. */
+  oneAvatarIcon?: string;
   activeMemberId?: string | null;
   activeTaskForceIds?: string[];
   onBrowseTools?: (member: OneOrgMember) => void;
@@ -184,6 +195,25 @@ export function OneOrgChart({
     setRoleFilter(null);
     setAddOpen(true);
   }, [addRequest]);
+
+  /*
+   * 통합 편집 창이 "도구 설정" 또는 "담당 교체"를 열어 달라고 하면 여기서 연다.
+   * 대상이 지금 조직에 없으면 아무것도 하지 않는다 — 빈 시트를 띄우는 것보다 낫다.
+   */
+  useEffect(() => {
+    if (!sheetRequest?.token) return;
+    const member = state?.members.find((row) => row.id === sheetRequest.memberId);
+    if (!member) return;
+    if (sheetRequest.kind === "tools") {
+      setToolsMember(member);
+      return;
+    }
+    setEditorMember(member);
+    setEditName(member.displayName);
+    setEditStyle(member.collaborationStyle ?? "default");
+    setReplaceId("");
+    setHandover(false);
+  }, [sheetRequest, state?.members]);
   const ghostRoles = locale === "ko" ? ["개발", "마케팅", "리서치"] : ["Engineering", "Marketing", "Research"];
   const active = state?.members.filter((member) => !member.archivedAt) || [];
   const archived = state?.members.filter((member) => Boolean(member.archivedAt)) || [];
@@ -380,7 +410,7 @@ export function OneOrgChart({
           onOpenOne();
         }}
       >
-        <OneAgentPortrait status="quiet" label="Agentlas One" size="medium" tone="purple" />
+        <OneAgentPortrait status="quiet" label="Agentlas One" size="medium" tone={oneAvatarIcon?.trim() || "purple"} />
         <div className={styles.rowCopy}><strong>One</strong><span>{locale === "ko" ? "CEO 오케스트레이터 · 항상 켜짐" : "CEO orchestrator · Always on"}</span></div>
         <span className={styles.badge}>CEO</span>
         {onEditOne && <button
@@ -425,6 +455,13 @@ export function OneOrgChart({
                 aria-label={locale === "ko" ? `${member.displayName} 편집` : `Edit ${member.displayName}`}
                 onClick={(event) => {
                   event.stopPropagation();
+                  /*
+                   * 편집은 **만들 때와 같은 창**으로 바로 연다(오너 지시 2026-08-23).
+                   * 예전에는 여기서 조직원 설정 시트를 먼저 띄우고, 그 안의 버튼을 한 번 더
+                   * 눌러야 만들기 창이 나왔다 — 같은 일을 두 화면으로 배우게 만드는 구조였다.
+                   * 통합 창이 없는 화면(구형 임베드)에서만 예전 시트로 되돌아간다.
+                   */
+                  if (onEditIdentity) { onEditIdentity(member); return; }
                   setEditorMember(member);
                   setEditName(member.displayName);
                   setEditStyle(member.collaborationStyle ?? "default");

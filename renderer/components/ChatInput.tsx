@@ -51,6 +51,7 @@ const CLI_LABEL: Record<string, string> = {
   codex: "Codex",
   antigravity: "Antigravity",
   grok: "Grok",
+  agentlas: "Agentlas",
 };
 
 /** 로컬 OpenAI 호환 런타임 표시명(서버가 모델을 노출). */
@@ -2828,7 +2829,11 @@ function ModelMenu({
 }) {
   const efforts = runtime.efforts ?? [];
   // CLI(claude-code/codex/antigravity)는 "구독 기본" 선택 가능. BYOK/로컬(ollama/lmstudio/mlx)은 항상 구체 모델.
-  const allowDefaultModel = runtime.kind !== "byok" && !LOCAL_RUNTIME_LABEL[runtime.kind];
+  // Agentlas 서빙도 마찬가지다 — 고를 것이 세기뿐이라 "구독 기본"이라 부를 것이 없고,
+  // 그렇게 부르면 사용자는 자기 구독 CLI 가 도는 줄로 읽는다.
+  const allowDefaultModel = runtime.kind !== "byok"
+    && runtime.kind !== "agentlas"
+    && !LOCAL_RUNTIME_LABEL[runtime.kind];
   const managedByRuntime = CONTEXT_MANAGED_BY[runtime.kind] === "runtime";
   const check = <span style={{ color: "var(--accent)", fontWeight: 700 }}>•</span>;
   const modelIcon = <IconSparkles size={13} style={{ color: "var(--accent)" }} />;

@@ -229,6 +229,15 @@ export const RUNTIME_CAPABILITIES: Record<RuntimeKind, RuntimeCapabilityDescript
     distinctiveContextFiles: [],
     hook: null,
   },
+  agentlas: {
+    systemPrompt: { delivery: "native-role", evidence: "electron/runtime/agentlas-serving.ts sends the system prompt as its own field" },
+    resume: { kind: "none", evidence: "each turn carries its history; the server holds no session (structural)" },
+    image: { kind: "none", evidence: "the serving endpoint takes text turns only" },
+    commandSurfaces: [],
+    transcript: null,
+    distinctiveContextFiles: [],
+    hook: null, // 도구 관문은 호스트의 도구 고리에 있다.
+  },
 };
 
 /** 명령 표면이 있는 런타임만 (스캐너 소비용). */
@@ -269,6 +278,8 @@ export const RUNTIME_SCHEMA_OUTPUT: Record<RuntimeKind, SchemaOutputDelivery | n
   ollama: { via: "response-format" },
   lmstudio: { via: "response-format" },
   mlx: { via: "response-format" },
+  // 서빙은 우리 서버가 본문을 만든다. 지금 창구는 대화 텍스트만 주고받는다.
+  agentlas: null,
 };
 
 /**

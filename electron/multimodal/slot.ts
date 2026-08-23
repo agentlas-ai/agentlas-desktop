@@ -31,6 +31,8 @@ const IMAGE_ENGINE_BY_RUNTIME: Record<RuntimeKind, ImageModel | null> = {
   lmstudio: null,
   mlx: null,
   acp: null,
+  // 서빙 실행은 글자만 다룬다. 그림은 다른 창구(멀티모달)가 맡는다.
+  agentlas: null,
 };
 
 export interface MultimodalImageSlot {

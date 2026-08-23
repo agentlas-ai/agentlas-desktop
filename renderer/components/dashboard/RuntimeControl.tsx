@@ -67,6 +67,7 @@ const RUNTIME_LABEL: Record<string, string> = {
   ollama: "Ollama",
   lmstudio: "LM Studio",
   mlx: "MLX",
+  agentlas: "Agentlas",
 };
 
 const BACKEND_LABEL: Record<string, string> = {
@@ -85,10 +86,16 @@ const BACKEND_LABEL: Record<string, string> = {
   xai: "xAI",
   openrouter: "OpenRouter",
   cursor: "Cursor",
+  agentlas: "Agentlas",
 };
 
-/** Local OpenAI-compatible runtimes expose models but have no subscription default. */
-const LOCAL_MODEL_KINDS = new Set(["ollama", "lmstudio", "mlx"]);
+/**
+ * 모델을 반드시 골라야 하는 런타임 — "구독 기본"이라는 선택지가 없다.
+ *
+ * 로컬 OpenAI 호환 런타임은 구독이라는 것이 없고, Agentlas 서빙은 고를 것이 세기뿐이라
+ * 기본이라 부를 것이 없다. 그런데도 "구독 기본"을 띄우면 사용자는 자기 구독으로 도는 줄 안다.
+ */
+const LOCAL_MODEL_KINDS = new Set(["ollama", "lmstudio", "mlx", "agentlas"]);
 
 function runtimeKey(runtime: Pick<RuntimeStatus, "kind" | "backend" | "source">): string {
   return `${runtime.kind}\u0000${runtime.backend}\u0000${runtime.source}`;

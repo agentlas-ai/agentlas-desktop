@@ -106,6 +106,8 @@ function engineLabel(r: RuntimeStatus, ko: boolean): string {
       return "Codex (GPT)";
     case "antigravity":
       return "Antigravity";
+    case "agentlas":
+      return "Agentlas";
     case "ollama":
       return ko ? "Ollama · 로컬" : "Ollama · local";
     default:

@@ -26,11 +26,11 @@ function memberFor(org: OneOrgState | null, agentId: string): OneOrgMember | und
   return org?.members.find((member) => member.installedAgentId === agentId);
 }
 
-function TaskforcePortraits({ taskforce, org }: { taskforce: OneTaskforce; org: OneOrgState | null }) {
+function TaskforcePortraits({ taskforce, org, oneAvatarIcon }: { taskforce: OneTaskforce; org: OneOrgState | null; oneAvatarIcon?: string }) {
   const visible = taskforce.memberAgentIds.slice(0, 2);
   const overflow = Math.max(0, taskforce.memberAgentIds.length - visible.length);
   return <span className={styles.portraitStack} aria-hidden="true">
-    <OneAgentPortrait status="quiet" label="One" tone="purple" size="small" />
+    <OneAgentPortrait status="quiet" label="One" tone={oneAvatarIcon?.trim() || "purple"} size="small" />
     {visible.map((agentId) => {
       const member = memberFor(org, agentId);
       return <OneAgentPortrait
@@ -52,6 +52,7 @@ export function OneTaskforceRail({
   locale,
   onOpen,
   onCreate,
+  oneAvatarIcon,
 }: {
   taskforces: OneTaskforce[];
   org: OneOrgState | null;
@@ -59,6 +60,8 @@ export function OneTaskforceRail({
   locale: "ko" | "en";
   onOpen: (taskforce: OneTaskforce) => void;
   onCreate: () => void;
+  /** One 이 고른 캐릭터 — 화면마다 다른 얼굴을 보여 주지 않기 위해 함께 내려온다. */
+  oneAvatarIcon?: string;
 }) {
   return <section className={styles.rail} aria-label="Taskforces">
     <header className={styles.railHeader}>
@@ -81,7 +84,7 @@ export function OneTaskforceRail({
           data-active={activeChatId === taskforce.chatId ? "true" : "false"}
           onClick={() => onOpen(taskforce)}
         >
-          <TaskforcePortraits taskforce={taskforce} org={org} />
+          <TaskforcePortraits taskforce={taskforce} org={org} oneAvatarIcon={oneAvatarIcon} />
           <span className={styles.taskforceCopy}>
             <strong>{taskforce.title}</strong>
             <small>{locale === "ko"
@@ -104,6 +107,7 @@ export function OneTaskforceDialog({
   onCreate,
   onUpdate,
   onRemove,
+  oneAvatarIcon,
 }: {
   open: boolean;
   taskforce: OneTaskforce | null;
@@ -114,6 +118,7 @@ export function OneTaskforceDialog({
   onCreate: (input: { title: string; description: string; memberAgentIds: string[] }) => Promise<void>;
   onUpdate: (input: { id: string; title: string; description: string; memberAgentIds: string[]; expectedRevision: number }) => Promise<void>;
   onRemove: (input: { id: string; expectedRevision: number }) => Promise<void>;
+  oneAvatarIcon?: string;
 }) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -157,6 +162,10 @@ export function OneTaskforceDialog({
         completionSummary: { produced: [], pending: [] },
         autoSelectTools: false,
         collaborationStyle: "default" as const,
+        title: "",
+        description: "",
+        identityEditable: false,
+        runtimeSelection: null,
         revision: 1,
       })),
     ];
@@ -197,7 +206,7 @@ export function OneTaskforceDialog({
       {busy && <div className={styles.busyState} role="status" aria-live="polite"><span aria-hidden="true" /><strong>{taskforce ? (locale === "ko" ? "태스크포스를 업데이트하는 중" : "Updating Taskforce") : (locale === "ko" ? "태스크포스를 만드는 중" : "Creating Taskforce")}</strong><small>{locale === "ko" ? "멤버와 독립 그룹 채팅을 함께 동기화합니다." : "Syncing members with the independent group chat."}</small><LoadingEstimate locale={locale} operationKey="one-taskforce-save" expectedSeconds={[2, 20]} /></div>}
       <section className={styles.memberList} aria-label={locale === "ko" ? "태스크포스 멤버" : "Taskforce members"}>
         <div className={styles.memberRow} data-fixed="true">
-          <OneAgentPortrait status="quiet" label="One" tone="purple" />
+          <OneAgentPortrait status="quiet" label="One" tone={oneAvatarIcon?.trim() || "purple"} />
           <span><strong>One</strong><small>{locale === "ko" ? "CEO 오케스트레이터 · 항상 참여" : "CEO orchestrator · Always present"}</small></span>
           <span className={styles.fixedBadge}><IconCheck size={12} />{locale === "ko" ? "고정" : "Pinned"}</span>
         </div>
