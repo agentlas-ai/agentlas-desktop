@@ -4434,7 +4434,18 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   // 초기 부팅: 사용자 override 또는 OS locale
   useEffect(() => {
     void (async () => {
-      let stored: LocalePref = "en";
+      /*
+       * ★ 저장된 선택이 없으면 **보는 사람의 언어를 따른다** (2026-08-24 수리).
+       *
+       * 여기 기본값이 "en" 이었다. 그런데 바로 아래에서 `stored` 가 "ko" 또는 "en" 이면
+       * 곧바로 빠져나가므로, **저장된 선택이 없는 사람에게는 아래의 시스템 언어 조회가
+       * 한 번도 실행되지 않았다.** 결과: 한국어 사용자가 처음 들어오면 화면이 전부 영어이고,
+       * 설정에서 직접 고르기 전에는 그대로다. 나머지 사이트는 한국어인데 주력 제품만 영어였다.
+       *
+       * 이 파일 머리에 적힌 규칙이 원래 "저장값 → 시스템 언어 → 영어" 였다. 코드가 그
+       * 규칙과 어긋나 있었고, 여기서 규칙대로 되돌린다.
+       */
+      let stored: LocalePref = "system";
       try {
         const raw = window.localStorage.getItem(STORAGE_KEY);
         if (raw === "ko" || raw === "en") stored = raw;
