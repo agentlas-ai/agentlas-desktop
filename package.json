@@ -15,7 +15,7 @@
     "minimumSourceAppVersion": "0.7.0",
     "minimumRuntimeVersion": "1.0.4",
     "minimumSchemaVersion": 35,
-    "targetSchemaVersion": 100,
+    "targetSchemaVersion": 102,
     "bundledRuntimeVersion": "1.2.16"
   },
   "agentlasBundledRuntimeSource": {
@@ -467,7 +467,8 @@
     "verify:install-beacon": "node scripts/verify-install-beacon.mjs",
     "verify:one-org-identity": "node scripts/verify-one-org-identity-editing.mjs",
     "verify:one-composer-surface": "node scripts/verify-one-composer-surface.mjs",
-    "verify:pinned-lookup": "node scripts/verify-pinned-lookup-shape.mjs"
+    "verify:pinned-lookup": "node scripts/verify-pinned-lookup-shape.mjs",
+    "verify:seat-migration": "npm run build:electron && node scripts/verify-seat-migration.cjs"
   },
   "dependencies": {
     "@file-viewer/preset-lite": "^2.3.0",

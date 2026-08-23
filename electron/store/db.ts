@@ -18,7 +18,7 @@ import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-p
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 100;
+const SCHEMA_VERSION = 102;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -700,6 +700,32 @@ function insertRecoveryAgent(
     `INSERT INTO installed_agents (${insertColumns.map(quoteSqlIdentifier).join(", ")})
      VALUES (${insertColumns.map(() => "?").join(", ")})`,
   ).run(...insertColumns.map((column) => values[column]));
+}
+
+/**
+ * 되돌릴 수 없는 마이그레이션 직전에 DB 파일을 복사해 둔다.
+ *
+ * ★ 왜 (v102 좌석 전환): chats 를 재작성하는 단계는 실패해도 되돌릴 수 없다. SQLite 는
+ * 컬럼 제약을 제자리에서 못 바꾸므로 테이블을 새로 만들고 옮기고 지운다. 트랜잭션이
+ * 감당 못 하는 실패(디스크 가득, 프로세스 강제 종료, 파일 손상)에서는 이 사본이 유일한
+ * 복구 경로다.
+ *
+ * WAL 을 먼저 합쳐서 복사한다 — 합치지 않으면 사본이 최근 쓰기를 빠뜨린 상태가 된다.
+ * 복사에 실패해도 마이그레이션을 막지는 않는다. 다만 그 사실을 오류에 실어 보낸다
+ * ("백업을 만들지 못했다") — 조용히 넘어가면 복구할 게 없다는 걸 사고 나서 안다.
+ */
+function backupDatabaseFile(db: Database.Database, tag: string): string | null {
+  try {
+    const source = db.name;
+    if (!source || source === ":memory:") return null;
+    try { db.pragma("wal_checkpoint(TRUNCATE)"); } catch {}
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const target = `${source}.${tag}-${stamp}.bak`;
+    fs.copyFileSync(source, target);
+    return target;
+  } catch {
+    return null;
+  }
 }
 
 function repairOrphanChatsV50(db: Database.Database): void {
@@ -4859,6 +4885,224 @@ export function initStore(options: StoreInitOptions = {}): void {
       CREATE INDEX IF NOT EXISTS idx_plugin_builder_sessions_slug_phase
         ON plugin_builder_sessions(slug, phase);
     `);
+  }
+
+  // v101: One 텔레그램 연결의 싱글턴을 **방 단위**로 옮긴다.
+  //
+  // v94는 "One이 둘"을 막으려고 target_kind 하나에만 유니크를 걸었는데, 그 인덱스는
+  // 두 가지 다른 것을 한꺼번에 금지했다 — (1) One이라는 대상이 둘인 것, (2) One이
+  // 여러 방(=여러 봇)에 있는 것. 막아야 할 것은 (1)뿐이다. (2)까지 막혀 있었기 때문에
+  // 봇을 하나 더 붙이는 길이 아예 없었고, 텔레그램에서 오는 일은 전부 대화 하나에
+  // 쌓였다("세션이 하나밖에 안 나오는 구조").
+  //
+  // 대상 단일성은 targetId(TELEGRAM_ONE_TARGET_ID) 상수가 이미 보장한다. 여기서는
+  // 방 하나에 One 포트가 둘이 되는 것만 막는다 — 같은 방에서 두 봇이 같은 메시지에
+  // 각자 답하는 것이 진짜 막아야 할 상태다. 아직 방을 못 잡은 행(telegram_chat_id
+  // NULL)은 여러 개 있어도 된다: 그게 "봇은 만들었고 방 연결을 기다리는 중"이다.
+  if (userVersion < 101 && tableExists(_db, "telegram_bindings")) {
+    _db.exec(`
+      DROP INDEX IF EXISTS idx_telegram_bindings_one_singleton;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_telegram_bindings_one_room
+        ON telegram_bindings(telegram_chat_id)
+        WHERE target_kind = 'one' AND telegram_chat_id IS NOT NULL;
+    `);
+  }
+
+  // v102: 좌석·세션 모델 (오너 결정 2026-08-23).
+  //
+  // ★ 무엇이 문제였나
+  // `chats.agent_id` 가 `installed_agents(id) ON DELETE CASCADE` 였다. 즉 **봇을 지우면
+  // 그 봇과 나눈 대화가 통째로 사라졌다.** 사람 입장에서 봇은 갈아탈 수 있는 담당자인데,
+  // 담당자를 바꾸면 지난 대화가 없어지는 셈이다.
+  //
+  // ★ 무엇으로 바꾸나
+  //   좌석(seat)   = 사람이 보는 고정 자리. 절대 자동 삭제되지 않는다.
+  //   세션         = 그 좌석에서 오간 대화 한 판. 좌석 1 : 세션 N.
+  //   점유자        = 그 좌석에 지금 앉아 있는 봇. 갈아탈 수 있고 비어 있을 수도 있다.
+  // 봇 삭제 = **좌석을 비우는 일**이지 좌석·세션을 없애는 일이 아니다.
+  //
+  // ★ 되돌릴 수 없는 단계다
+  // chats 를 재작성한다(SQLite 는 컬럼 제약을 제자리에서 못 바꾼다). 그래서 시작 전에
+  // DB 파일을 복사해 둔다. 실패하면 그 파일이 유일한 복구 경로다.
+  if (userVersion < 102) {
+    const seatBackup = backupDatabaseFile(_db, "v102-seats");
+    // 지금 이미 깨져 있는 참조를 먼저 적어 둔다. 그래야 "내가 만든 위반"만 가려낼 수 있다.
+    const existingViolations = new Set(
+      (_db.pragma("foreign_key_check") as Array<{
+        table: string;
+        rowid: number | null;
+        parent: string;
+        fkid: number;
+      }>).map((row) => `${row.table}:${row.rowid ?? "null"}:${row.parent}:${row.fkid}`),
+    );
+
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS one_seats (
+        id          TEXT PRIMARY KEY,
+        kind        TEXT NOT NULL CHECK(kind IN ('solo','group')),
+        title       TEXT NOT NULL DEFAULT '',
+        project_id  TEXT REFERENCES projects(id) ON DELETE SET NULL,
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL,
+        archived_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_one_seats_updated ON one_seats(updated_at DESC);
+
+      -- agent_id 에 FK 를 걸지 않는다. 봇이 삭제돼도 "그때 누가 앉아 있었나" 는 남아야 한다.
+      -- 지워진 봇은 표시명 스냅샷으로 보여준다(display_name).
+      CREATE TABLE IF NOT EXISTS one_seat_occupants (
+        seat_id      TEXT NOT NULL REFERENCES one_seats(id) ON DELETE CASCADE,
+        slot         INTEGER NOT NULL DEFAULT 0,
+        agent_id     TEXT,
+        display_name TEXT NOT NULL DEFAULT '',
+        since        TEXT NOT NULL,
+        until        TEXT,
+        PRIMARY KEY (seat_id, slot, since)
+      );
+      -- ★ UNIQUE 여야 한다. 그냥 INDEX 면 "한 슬롯에 현재 점유자 하나" 를 아무것도 막지
+      -- 않는다. 부분 인덱스라 과거 이력은 얼마든지 쌓이고 현재 점유만 하나로 강제된다.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_seat_occupants_current
+        ON one_seat_occupants(seat_id, slot) WHERE until IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_seat_occupants_agent
+        ON one_seat_occupants(agent_id) WHERE agent_id IS NOT NULL;
+    `);
+
+    _db.pragma("foreign_keys = OFF");
+    try {
+      const migrateSeats = _db.transaction(() => {
+        // ① chats 재작성 — seat_id 추가, agent_id 를 NULL 허용 + SET NULL 로 강등.
+        //
+        // ★ 열 이름을 손으로 나열하지 않는다 (2026-08-23 실측으로 잡은 사고).
+        // chats 는 사다리를 지나며 열이 12개 더 붙었다(kind, parent_chat_id, working_folder,
+        // hired_agents, runtime_selection_json …). 처음에 기본 6개만 적어 옮겼다가 시험에서
+        // "no such column: kind" 로 드러났다 — 실제 사용자 DB 였다면 **하위 세션 사슬과
+        // 작업 폴더가 통째로 사라졌다.** 그리고 다음에 열이 하나 더 붙으면 같은 일이 또 난다.
+        //
+        // 그래서 **실행 시점에 실제 열을 읽어** 그대로 옮긴다. 우리가 의미를 바꾸는 두
+        // 열(agent_id 제약, seat_id 신설)만 손으로 다루고 나머지는 있는 그대로 따라간다.
+        const chatColumns = (_db!.pragma("table_info(chats)") as Array<{ name: string; type: string; notnull: number; dflt_value: string | null; pk: number }>);
+        const carried = chatColumns.filter((column) => column.name !== "agent_id" && column.name !== "seat_id");
+        const columnSql = carried.map((column) => {
+          // 옮겨오는 열은 정의를 그대로 유지한다 — 기본값·NOT NULL 을 잃으면 나중 코드가 깨진다.
+          const notNull = column.notnull ? " NOT NULL" : "";
+          const dflt = column.dflt_value === null ? "" : ` DEFAULT ${column.dflt_value}`;
+          const pk = column.pk ? " PRIMARY KEY" : "";
+          return `${column.name} ${column.type || "TEXT"}${pk}${notNull}${dflt}`;
+        }).join(",\n            ");
+        const carriedNames = carried.map((column) => column.name).join(", ");
+        _db!.exec(`
+          DROP TABLE IF EXISTS chats_v102;
+          CREATE TABLE chats_v102 (
+            ${columnSql},
+            seat_id TEXT,
+            agent_id TEXT,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE SET NULL,
+            FOREIGN KEY(seat_id) REFERENCES one_seats(id) ON DELETE CASCADE,
+            FOREIGN KEY(agent_id) REFERENCES installed_agents(id) ON DELETE SET NULL
+          );
+          INSERT INTO chats_v102 (${carriedNames}, seat_id, agent_id)
+            SELECT ${carriedNames}, NULL, agent_id FROM chats;
+        `);
+        // 옮긴 행 수가 다르면 여기서 멈춘다 — 데이터가 줄어든 채로 교체하면 되돌릴 수 없다.
+        const beforeCount = (_db!.prepare("SELECT COUNT(*) AS n FROM chats").get() as { n: number }).n;
+        const afterCount = (_db!.prepare("SELECT COUNT(*) AS n FROM chats_v102").get() as { n: number }).n;
+        if (beforeCount !== afterCount) {
+          throw new Error(`v102 seat migration lost rows: chats ${beforeCount} -> ${afterCount}`);
+        }
+
+        // ② 봇 하나당 solo 좌석 하나. 표시 이름은 지금 이름을 스냅샷으로 남긴다 —
+        //    나중에 봇이 지워져도 "누구 자리였는지" 를 말할 수 있어야 한다.
+        _db!.exec(`
+          INSERT INTO one_seats (id, kind, title, project_id, created_at, updated_at)
+          SELECT
+            'seat_' || c.agent_id,
+            'solo',
+            '',
+            (SELECT c2.project_id FROM chats c2
+              WHERE c2.agent_id = c.agent_id AND c2.project_id IS NOT NULL
+              ORDER BY c2.created_at ASC LIMIT 1),
+            MIN(c.created_at),
+            MAX(c.updated_at)
+          FROM chats c
+          WHERE c.agent_id IS NOT NULL
+          GROUP BY c.agent_id;
+
+          INSERT INTO one_seat_occupants (seat_id, slot, agent_id, display_name, since, until)
+          SELECT
+            'seat_' || c.agent_id,
+            0,
+            c.agent_id,
+            COALESCE((SELECT a.name FROM installed_agents a WHERE a.id = c.agent_id), ''),
+            MIN(c.created_at),
+            NULL
+          FROM chats c
+          WHERE c.agent_id IS NOT NULL
+          GROUP BY c.agent_id;
+
+          UPDATE chats_v102
+             SET seat_id = 'seat_' || agent_id
+           WHERE agent_id IS NOT NULL;
+        `);
+
+        // ③ 하위 실행 세션(division)은 좌석을 새로 만들지 않고 뿌리의 좌석을 물려받는다.
+        //    사슬이 깊을 수 있어 더 이상 바뀌지 않을 때까지 올려 붙인다. 뿌리를 못 찾는
+        //    고아는 좌석 없이 둔다 — 지금도 목록에 안 나온다.
+        const inheritSeat = _db!.prepare(`
+          UPDATE chats_v102
+             SET seat_id = (
+               SELECT p.seat_id FROM chats_v102 p
+                WHERE p.id = (SELECT c.parent_chat_id FROM chats c WHERE c.id = chats_v102.id)
+             )
+           WHERE seat_id IS NULL
+             AND (SELECT c.parent_chat_id FROM chats c WHERE c.id = chats_v102.id) IS NOT NULL
+        `);
+        for (let pass = 0; pass < 32; pass += 1) {
+          if (inheritSeat.run().changes === 0) break;
+        }
+
+        // ④ 교체. 인덱스는 재작성 뒤에 다시 만든다(테이블과 함께 사라진다).
+        // 인덱스도 이름을 나열하지 않는다. 테이블을 지우면 그 인덱스가 함께 사라지므로,
+        // **지우기 전에** 실제 정의를 읽어 두었다가 그대로 되살린다. 사다리 뒤쪽에서 추가된
+        // 인덱스를 빠뜨리면 조회가 조용히 느려진다 — 화면은 정상이라 아무도 모른다.
+        const chatIndexes = (_db!.prepare(
+          `SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='chats' AND sql IS NOT NULL`,
+        ).all() as Array<{ sql: string }>).map((row) => row.sql);
+        _db!.exec(`
+          DROP TABLE chats;
+          ALTER TABLE chats_v102 RENAME TO chats;
+        `);
+        for (const indexSql of chatIndexes) {
+          _db!.exec(`${indexSql.replace(/^CREATE (UNIQUE )?INDEX /i, (m) => `${m}IF NOT EXISTS `)};`);
+        }
+        _db!.exec(`CREATE INDEX IF NOT EXISTS idx_chats_seat_updated ON chats(seat_id, updated_at DESC);`);
+
+        // ⑤ 내가 만든 위반만 가려낸다. 특히 telegram_bindings.chat_session_id 가 chats(id)
+        //    를 참조하므로 이 교체에서 끊기면 안 된다.
+        const newViolations = (_db!.pragma("foreign_key_check") as Array<{
+          table: string;
+          rowid: number | null;
+          parent: string;
+          fkid: number;
+        }>).filter(
+          (row) => !existingViolations.has(`${row.table}:${row.rowid ?? "null"}:${row.parent}:${row.fkid}`),
+        );
+        if (newViolations.length > 0) {
+          throw new Error(
+            `v102 seat migration introduced ${newViolations.length} integrity violation(s): `
+            + newViolations.slice(0, 5).map((row) => `${row.table}->${row.parent}`).join(", "),
+          );
+        }
+      });
+      migrateSeats();
+    } catch (error) {
+      // 백업 경로를 오류에 실어 보낸다. 이 단계는 되돌릴 수 없으므로 그 파일이 유일한 길이다.
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}`
+        + (seatBackup ? ` — 이 단계 직전 백업: ${seatBackup}` : " — 백업을 만들지 못했다"),
+      );
+    } finally {
+      _db.pragma("foreign_keys = ON");
+    }
   }
 
   if (userVersion < SCHEMA_VERSION) _db.pragma(`user_version = ${SCHEMA_VERSION}`);
