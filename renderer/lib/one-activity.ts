@@ -3,7 +3,7 @@ import type { OneArtifactBindingRequestV1 } from "@shared/one-artifacts";
 
 export type OneActivityStatus = "running" | "cancelling" | "completed" | "failed" | "cancelled" | "info";
 export type OneActivityKind = "run" | "reasoning" | "tool" | "agent" | "notice" | "result" | "terminal";
-export type OneActivityCode = "runtime_wait" | "recovery_retry" | "session_resume";
+export type OneActivityCode = "runtime_wait" | "queue_wait" | "recovery_retry" | "session_resume";
 
 export type OneHandoffStatus = "running" | "completed" | "failed" | "cancelled";
 
@@ -417,10 +417,18 @@ export function reduceOneActivity(
     effectivePermission = event.lifecycle.permission ?? effectivePermission;
     selectedPermissionMode = event.lifecycle.selectedPermissionMode ?? selectedPermissionMode;
     if (typeof event.lifecycle.cwd === "string" && event.lifecycle.cwd.trim()) cwd = event.lifecycle.cwd.trim();
+    // ★ 차례를 기다리는 것은 도는 것이 아니다 (2026-08-23).
+    //   큐에 들어간 실행도 같은 lifecycle:start 로 오는데, 그 사실(status)을 여기서
+    //   안 보고 무조건 "도는 중"으로 적었다. 그래서 아무도 안 집은 실행이 화면에서는
+    //   이미 일하는 것으로 보였고, 사용자는 아무 일도 안 일어나는 진행 표시를 보다가
+    //   다시 보낸다 — 그 재전송이 큐를 더 밀어 올린다.
+    //   상태는 그대로 running 으로 둔다(끝맺음·취소 판정이 전부 이 값에 걸려 있다).
+    //   달라지는 것은 **사람에게 뭐라고 말하는가** 하나다.
     items = upsertItem(items, {
       id: "run:lifecycle",
       kind: "run",
       status: "running",
+      ...(event.status === "queued" ? { activityCode: "queue_wait" as const } : {}),
       observedAt,
     });
   } else if (event.kind === "lifecycle" && event.lifecycle?.phase === "cancel_requested") {
@@ -787,7 +795,7 @@ function ledgerPermissionMode(value: unknown): "auto" | "read" | "write" | "full
 }
 
 function ledgerActivityCode(value: unknown): NonNullable<McpInvocationEvent["activity"]>["code"] | undefined {
-  return value === "runtime_wait" || value === "recovery_retry" || value === "session_resume"
+  return value === "runtime_wait" || value === "queue_wait" || value === "recovery_retry" || value === "session_resume"
     ? value
     : undefined;
 }

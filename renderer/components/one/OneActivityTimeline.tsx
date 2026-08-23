@@ -109,6 +109,7 @@ function agentStateLabel(item: OneActivityItem, locale: "ko" | "en"): string {
 
 function activityCodeLabel(code: OneActivityCode | undefined, locale: "ko" | "en"): string {
   if (code === "runtime_wait") return locale === "ko" ? "실행 결과를 기다리는 중…" : "Waiting for runtime output…";
+  if (code === "queue_wait") return locale === "ko" ? "차례를 기다리는 중…" : "Waiting in queue…";
   if (code === "recovery_retry") return locale === "ko" ? "중단된 단계를 다시 시도하는 중…" : "Retrying a blocked step…";
   if (code === "session_resume") return locale === "ko" ? "이전 실행을 이어가는 중…" : "Resuming the previous run…";
   return "";
@@ -239,7 +240,9 @@ function ActivityRow({
   const primary = activityToolPrimary(item, tool, locale)
     || (item.kind === "run"
       ? item.status === "running"
-        ? (locale === "ko" ? "작업 중" : "Working")
+        ? item.activityCode === "queue_wait"
+          ? (locale === "ko" ? "차례를 기다리는 중" : "Waiting in queue")
+          : (locale === "ko" ? "작업 중" : "Working")
         : item.status === "cancelling"
           ? (locale === "ko" ? "중지하는 중" : "Stopping")
         : item.status === "cancelled"

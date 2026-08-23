@@ -461,6 +461,7 @@ export function buildOneWorkPresentation(
 
 function activityCodeCopy(code: OneActivityItem["activityCode"], locale: "ko" | "en"): string {
   if (code === "runtime_wait") return locale === "ko" ? "실행 결과를 기다리는 중" : "Waiting for runtime output";
+  if (code === "queue_wait") return locale === "ko" ? "차례를 기다리는 중" : "Waiting in queue";
   if (code === "recovery_retry") return locale === "ko" ? "중단된 단계를 다시 시도하는 중" : "Retrying a blocked step";
   if (code === "session_resume") return locale === "ko" ? "이전 실행을 이어가는 중" : "Resuming the previous run";
   return "";
@@ -541,6 +542,11 @@ function liveHeadline(cells: OneWorkCell[], state: OneActivityState, locale: "ko
   }
   if (state.items.some((item) => item.id === "answer:stream" && item.status === "running")) {
     return ko ? "답변 작성 중" : "Writing";
+  }
+  // 아직 아무것도 안 일어난 실행이 큐에서 차례를 기다리는 중이라면 그렇게 말한다.
+  // "작업 중"은 이 경우 사실이 아니고, 사실이 아닌 진행 표시가 재전송을 부른다.
+  if (state.items.some((item) => item.kind === "run" && item.status === "running" && item.activityCode === "queue_wait")) {
+    return ko ? "차례를 기다리는 중" : "Waiting in queue";
   }
   return ko ? "작업 중" : "Working";
 }

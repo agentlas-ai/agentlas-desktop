@@ -4329,7 +4329,7 @@ export interface McpInvocationEvent {
   status?: string;
   /** Machine-readable transient progress. Status copy is presentation only. */
   activity?: {
-    code: "runtime_wait" | "recovery_retry" | "session_resume";
+    code: "runtime_wait" | "queue_wait" | "recovery_retry" | "session_resume";
   };
   text?: string;
   /** partial 델타 스트리밍(무-agentId 메인 스트림 한정) — text(누적 전문) 대신 직전 partial
