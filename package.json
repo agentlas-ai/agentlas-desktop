@@ -258,6 +258,7 @@
     "verify:browser-rail": "npm run build:electron && node scripts/verify-browser-rail.mjs",
     "verify:keychain-boundary": "node scripts/verify-keychain-boundary.mjs",
     "test:telegram-command-surface": "npm run build:electron && node scripts/telegram-command-surface-contract.cjs",
+    "test:telegram-one-rooms": "npm run build:electron && node scripts/test-telegram-one-rooms.cjs",
     "test:telegram-one-binding": "npm run build:electron && electron scripts/telegram-one-binding-contract.cjs",
     "test:telegram-one-dialog-ui": "npm run build:renderer && node scripts/telegram-one-dialog-ui-contract.mjs",
     "test:startup-founder-new-idea": "npm run build && node scripts/test-startup-founder-new-idea.cjs",
