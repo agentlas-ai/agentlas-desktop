@@ -98,6 +98,35 @@ for (const gate of selected) {
     console.log(`skip ${gate} — needs the Electron host; run it with \`npx electron ${gate}\``);
     continue;
   }
+  /*
+   * TypeScript 모듈을 직접 읽는 게이트는 node 만으로는 못 돈다. 그 실패는 계약이 깨진
+   * 것이 아니라 **호스트가 안 맞는 것**이다(2026-08-24 실측: 통과하는 게이트가 node 에서
+   * `Cannot find module '../plugins/builtin'` 으로 죽어 남의 커밋을 막았다. 같은 게이트를
+   * TS 로더로 돌리니 전 항목 통과).
+   *
+   * 로더가 있으면 그것으로 한 번 더 돌려 **실제로 확인한다**. 없으면 통과로 세지 않고
+   * 무엇을 확인하지 못했는지 남긴다 — 위 Electron 갈래와 같은 규칙이다. 로더를 이 저장소의
+   * 필수 의존성으로 만들지 않는 이유는, 없는 환경에서 또 다른 거짓 실패가 나기 때문이다.
+   */
+  if (/Cannot find module .*(?:\.\.?\/|@\/)/.test(output) || /Unknown file extension "\.tsx?"/.test(output)) {
+    const viaLoader = spawnSync("npx", ["--no-install", "tsx", gate, ...gateArgs(gate)], {
+      cwd: root,
+      encoding: "utf8",
+    });
+    if (viaLoader.status === 0) {
+      console.log(`ok   ${gate} (TS 로더)`);
+      continue;
+    }
+    if (viaLoader.error || viaLoader.status === null) {
+      skipped.push(gate);
+      console.log(`skip ${gate} — TypeScript 로더가 필요합니다; \`npx tsx ${gate}\` 로 돌리세요`);
+      continue;
+    }
+    failed += 1;
+    console.error(`FAIL ${gate}`);
+    console.error(`${viaLoader.stdout || ""}${viaLoader.stderr || ""}`.trim().split("\n").slice(-6).join("\n"));
+    continue;
+  }
   failed += 1;
   console.error(`FAIL ${gate}`);
   console.error(output.trim().split("\n").slice(-6).join("\n"));

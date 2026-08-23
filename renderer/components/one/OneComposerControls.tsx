@@ -27,6 +27,11 @@ export type OneComposerModelOption = {
   label: string;
   tag?: string;
   runtime: RuntimeStatus;
+  /**
+   * 벤더 로고 주소. 없으면 기본 아이콘을 그린다 — 모르는 벤더에 아무 로고나 붙이지 않는다.
+   * 값을 만드는 곳은 목록을 만드는 쪽이다(오너 지시 2026-08-24: "모델 명과 모델 로고").
+   */
+  logo?: string | null;
 };
 
 export type OneComposerAgentOption = {
@@ -273,7 +278,10 @@ export function OneComposerControls({
                   <ComposerRow icon={<IconSparkles size={15} />} title={locale === "ko" ? "구독 기본" : "Subscription default"} checked={!runtime.model} onClick={() => onSelectModel(runtime, "")} />
                 )}
                 {filteredModels.map((item) => (
-                  <ComposerRow key={`${item.runtime.kind}:${item.runtime.backend}:${item.id}`} icon={<IconSparkles size={15} />} title={item.label} subtitle={item.tag} checked={runtime?.kind === item.runtime.kind && runtime?.backend === item.runtime.backend && runtime?.model === item.id} onClick={() => onSelectModel(item.runtime, item.id)} />
+                  <ComposerRow key={`${item.runtime.kind}:${item.runtime.backend}:${item.id}`} icon={item.logo
+                    ? /* eslint-disable-next-line @next/next/no-img-element */
+                      <img src={item.logo} alt="" className={styles.modelLogo} />
+                    : <IconSparkles size={15} />} title={item.label} subtitle={item.tag} checked={runtime?.kind === item.runtime.kind && runtime?.backend === item.runtime.backend && runtime?.model === item.id} onClick={() => onSelectModel(item.runtime, item.id)} />
                 ))}
               </>
             )}

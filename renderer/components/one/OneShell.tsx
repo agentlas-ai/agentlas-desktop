@@ -142,6 +142,7 @@ import { OneGrowthCard } from "./OneGrowthCard";
 import { OneActivityArtifactRail, taskBrowserUrl, type OneLiveAppPreview } from "./OneActivityTimeline";
 import { OneOrgChart, type OneOrgSearchItem } from "./OneOrgChart";
 import { OneAgentPortrait } from "./OneAgentPortrait";
+import { llmLogoSrc } from "@/lib/llm-logo";
 import { OneCreateAgentDialog, type OneCreateAgentSeed, type OneEditMemberTarget, type OneEditSelfTarget } from "./OneCreateAgentDialog";
 import { OneTaskforceDialog, OneTaskforceRail } from "./OneTaskforces";
 import { OneComputerHistory } from "./OneComputerHistory";
@@ -2331,7 +2332,13 @@ export function OneShell() {
             : runtime.kind === "grok" ? "Grok"
               : runtime.kind === "kimi" ? "Kimi"
                 : runtime.label ?? (runtime.backend || runtime.kind);
-      return models.map((model) => ({ ...model, runtime, tag: model.tag ?? provider }));
+      return models.map((model) => ({
+        ...model,
+        runtime,
+        tag: model.tag ?? provider,
+        // 벤더 로고. 모르는 벤더면 null 이고 화면이 기본 아이콘을 그린다.
+        logo: llmLogoSrc({ model: model.id, backend: runtime.backend, kind: runtime.kind }),
+      }));
     })).then((groups) => {
       if (!cancelled) setOneModelOptions(groups.flat());
     }).catch(() => {
