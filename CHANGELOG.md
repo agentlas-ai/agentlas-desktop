@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.0.32 — 2026-08-23
+
+Bundled runtime: Agentlas OS v1.2.16 (6d0d7e7eafaa96ebbed92e1a2223b01f13eed245).
+Source readiness does not prove a public installer or update feed; the
+Releases page stays the authority.
+
+- Public Hub agents can finally join your One Team. Call-only listings — the
+  ones whose creators keep their instructions private — now take a seat in the
+  organisation like anyone else, and every run they participate in is executed
+  through the Hub borrow path, never as an empty local prompt. That covers the
+  taskforce room, the team preflight (which now offers the external workforce
+  door for them), and their own 1:1 chat.
+- The marketplace manifest omitting the callable flag no longer blocks the
+  seat: the install flow re-checks the search listing before concluding a
+  package is broken.
+
 ## 1.0.31 — 2026-08-23
 
 Bundled runtime: Agentlas OS v1.2.16 (6d0d7e7eafaa96ebbed92e1a2223b01f13eed245).
