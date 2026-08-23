@@ -464,7 +464,8 @@
     "gate:bound": "node scripts/run-bound-gates.mjs --staged",
     "verify:packaging-completeness": "node scripts/verify-packaging-completeness.mjs",
     "verify:install-beacon": "node scripts/verify-install-beacon.mjs",
-    "verify:one-org-identity": "node scripts/verify-one-org-identity-editing.mjs"
+    "verify:one-org-identity": "node scripts/verify-one-org-identity-editing.mjs",
+    "verify:one-composer-surface": "node scripts/verify-one-composer-surface.mjs"
   },
   "dependencies": {
     "@file-viewer/preset-lite": "^2.3.0",

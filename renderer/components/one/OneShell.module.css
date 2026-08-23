@@ -2926,6 +2926,12 @@
   border-radius: 15px 15px 4px 15px;
   background: #171719;
   color: #fff;
+  /* 본문 렌더러는 문단·목록에 인라인으로 var(--ink) 를 박는다. 인라인은 클래스를 이기므로
+     위의 color:#fff 만으로는 검은 말풍선 안에서 글자가 검게 남는다(오너 지적 2026-08-23).
+     변수 자체를 이 말풍선 안에서 뒤집어 모든 자손이 함께 밝아지게 한다. */
+  --ink: #f7f8fa;
+  --ink-soft: #c9ccd4;
+  --hairline: 1px solid rgba(255, 255, 255, .16);
 }
 
 .messageBody > :global(div) {
@@ -2944,6 +2950,9 @@
 .body[data-task-active="true"] .composer,
 .body[data-task-active="true"] .steeringQueue,
 .body[data-task-active="true"] .oneTurnAgentChips,
+/* 컴포저 위에 쌓이는 줄은 전부 같은 폭이어야 왼쪽 모서리가 한 줄로 선다. */
+.body[data-task-active="true"] .attachmentTray,
+.body[data-task-active="true"] .attachmentError,
 .composer {
   width: min(720px, 100%);
 }
