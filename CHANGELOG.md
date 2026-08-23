@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.34 — 2026-08-23
+
+Bundled runtime: Agentlas OS v1.2.16 (6d0d7e7eafaa96ebbed92e1a2223b01f13eed245).
+Source readiness does not prove a public installer or update feed; the
+Releases page stays the authority.
+
+- Cloud agent publishing: a publish that is still live is no longer reported as
+  a failed receipt ("uploaded but failed"), and files the server withholds from
+  a package are now named in the result instead of vanishing silently. These
+  landed just after the 1.0.33 build was cut, so 1.0.34 carries them.
+
 ## 1.0.33 — 2026-08-23
 
 Bundled runtime: Agentlas OS v1.2.16 (6d0d7e7eafaa96ebbed92e1a2223b01f13eed245).
