@@ -67,4 +67,15 @@ assert.match(briefing, /if \(JSON\.stringify\(state\) === before\) return state;
 const org = read("electron/one/org.ts");
 assert.match(org, /db\.transaction\(\(\) => \{\s*\n\s*sortOrder = activeRows\(\)/, "sort order must be computed inside the transaction");
 
+// ⑧ 팀 제안은 막다른 길을 만들지 않는다(PRD §4.14).
+const shell = read("renderer/components/one/OneShell.tsx");
+assert.match(shell, /teamPreflightExpired/, "expiry must be judged in the view, not only when the store is read");
+assert.match(shell, /teamPreflight\.status === "cancelled"[\s\S]{0,400}팀 제안이 만료됐습니다/, "every terminal proposal state needs a card and a next action");
+assert.match(shell, /위 제안에 먼저 답해 주세요|The earlier team proposal expired/, "a plain message typed while a proposal is open must not be silently dropped");
+
+// ⑨ 산출물 바인딩 표는 마이그레이션 사다리 안에서 만들어지고 보존 규칙이 있다(PRD §5.25).
+const db = read("electron/store/db.ts");
+assert.match(db, /CREATE TABLE IF NOT EXISTS one_artifact_bindings/, "the binding table must be created by the migration ladder so the schema gate can see it");
+assert.match(db, /DELETE FROM one_artifact_bindings[\s\S]{0,200}-90 days/, "the binding table must have a retention rule");
+
 console.log("one cost/leak boundaries PASS: retry caps, resume-not-rerun, durable recovery ledger, live reservations, expiry exit, preview lock, bounded ledgers");

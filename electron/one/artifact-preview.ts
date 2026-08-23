@@ -174,6 +174,11 @@ export interface OneVerifiedBoundArtifactSet {
 
 const tokens = new Map<string, TokenRecord>();
 
+/**
+ * PRD §5.25 — 이 표는 이제 마이그레이션 사다리(electron/store/db.ts)가 만든다. 여기서는
+ * **호환성만 확인**한다. 예전처럼 여기서 만들면 스키마 게이트가 그 존재를 못 본다.
+ * (CREATE 문은 사다리와 같은 모양을 유지한다 — 사다리를 지나지 않은 오래된 개발 DB 대비.)
+ */
 function ensureBindingTable(): void {
   const db = getDb();
   db.exec(`

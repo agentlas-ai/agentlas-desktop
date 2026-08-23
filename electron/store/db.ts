@@ -4795,6 +4795,48 @@ export function initStore(options: StoreInitOptions = {}): void {
   addColumnIfMissing(_db, "one_org_members", "handover_note", "handover_note TEXT");
   addColumnIfMissing(_db, "one_taskforces", "description", "description TEXT NOT NULL DEFAULT ''");
 
+  // PRD §5.25 — 산출물 바인딩 표가 마이그레이션 사다리 **밖에서**(첫 사용 시 지연 생성)
+  // 만들어져 스키마 게이트가 그 존재를 보지 못했다. 사다리 안으로 옮긴다. 버전 가드 밖에
+  // 두는 것은 의도적이다: 이미 100 을 지난 설치본도 이 경로를 지나야 표를 얻는다(멱등).
+  _db.exec(`
+    CREATE TABLE IF NOT EXISTS one_artifact_bindings (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      task_version INTEGER NOT NULL,
+      bound_task_version INTEGER NOT NULL,
+      chat_id TEXT NOT NULL,
+      run_id TEXT NOT NULL,
+      manifest_id TEXT NOT NULL,
+      artifact_ref TEXT NOT NULL,
+      source_path TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      size_bytes INTEGER NOT NULL,
+      file_dev TEXT NOT NULL,
+      file_ino TEXT NOT NULL,
+      file_mtime_ns TEXT NOT NULL,
+      file_ctime_ns TEXT NOT NULL,
+      sha256 TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(task_id, chat_id, run_id, manifest_id, artifact_ref)
+    );
+    CREATE INDEX IF NOT EXISTS idx_one_artifact_binding_exact
+      ON one_artifact_bindings(task_id, chat_id, run_id, manifest_id, artifact_ref);
+    CREATE INDEX IF NOT EXISTS idx_one_artifact_binding_chat
+      ON one_artifact_bindings(chat_id, created_at);
+  `);
+  // 지우는 코드가 없어 영원히 쌓였다. 사라진 대화의 바인딩과 아주 오래된 행은 거둔다
+  // (바인딩은 미리보기 발급용 색인이지 사용자 기록이 아니다).
+  try {
+    _db.exec(`
+      DELETE FROM one_artifact_bindings
+       WHERE chat_id NOT IN (SELECT id FROM chats)
+          OR created_at < datetime('now', '-90 days');
+    `);
+  } catch {
+    // 정리는 베스트에포트다 — 기동을 막지 않는다.
+  }
+
   // v100 — durable in-app plugin builder drafts.  The seed is retained so an
   // agent-offer can be enforced once per conversation even after a restart or
   // an abandoned draft.

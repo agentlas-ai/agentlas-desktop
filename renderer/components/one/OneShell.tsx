@@ -846,6 +846,9 @@ export function OneShell() {
   const [briefingSnapshot, setBriefingSnapshot] = useState<OneBriefingSnapshot | null>(null);
   const [briefingActionBusy, setBriefingActionBusy] = useState(false);
   const [teamPreflight, setTeamPreflight] = useState<OneTeamPreflightProposal | null>(null);
+  // PRD §4.14 — 제안 만료는 시각으로 결정되므로, 화면도 시간이 지나는 것을 알아야 한다.
+  // 제안이 떠 있는 동안에만 도는 가벼운 틱이다(없으면 만료된 카드가 계속 눌린다).
+  const [nowTick, setNowTick] = useState(() => Date.now());
   const [teamPreflightBusy, setTeamPreflightBusy] = useState(false);
   const [pendingTeamPrompt, setPendingTeamPrompt] = useState<PendingTeamPrompt | null>(null);
   const [messages, setMessages] = useState<UiMessage[]>([]);
@@ -2972,6 +2975,13 @@ export function OneShell() {
     void autoStartTeamPreflight(teamPreflight, pendingTeamPrompt, true);
   }, [autoStartTeamPreflight, awaitingWorkforceConsent, busy, pendingTeamPrompt, teamPreflight]);
 
+  useEffect(() => {
+    if (!teamPreflight) return;
+    setNowTick(Date.now());
+    const timer = window.setInterval(() => setNowTick(Date.now()), 10_000);
+    return () => window.clearInterval(timer);
+  }, [teamPreflight]);
+
   const resolveActivationConcern = useCallback(async (chatId: string) => {
     const api = ipc();
     let current = oneActivationState;
@@ -3129,7 +3139,24 @@ export function OneShell() {
       requestOneOperationalRecovery("one-submit-continuation", "Current task cannot continue with its present verified state");
       return;
     }
-    if (teamPreflight && ["proposed", "blocked", "team_reserved", "workforce_reserved", "solo_reserved", "deferred"].includes(teamPreflight.status)) return;
+    // PRD §4.14 — 제안 카드가 떠 있는 동안 사용자가 평상어로 답하면 **조용히 버려졌다.**
+    // 버리지 않는다: 만료된 제안이면 그 사실을 말하고 이번 입력을 그대로 진행시키고,
+    // 아직 살아 있는 제안이면 왜 지금 못 받는지 한 줄로 답한다.
+    if (teamPreflight && ["proposed", "blocked", "team_reserved", "workforce_reserved", "solo_reserved", "deferred"].includes(teamPreflight.status)) {
+      const expiresAt = Date.parse(teamPreflight.expiresAt ?? "");
+      const expired = Number.isFinite(expiresAt) && expiresAt <= Date.now();
+      if (!expired) {
+        setError(appLocale === "ko"
+          ? "위 제안에 먼저 답해 주세요. 진행하거나 취소하면 이 메시지를 이어서 보낼 수 있어요."
+          : "Answer the proposal above first. Once you continue or cancel it, this message will go through.");
+        return;
+      }
+      // 만료된 카드는 더 이상 관문이 아니다. 화면에서 내리고 사용자의 문장을 살린다.
+      setTeamPreflight(null);
+      setError(appLocale === "ko"
+        ? "이전 팀 제안은 시간이 지나 만료됐습니다. 방금 보낸 내용으로 계속합니다."
+        : "The earlier team proposal expired. Continuing with what you just sent.");
+    }
     const prepareOrRun = async (
       chatId: string,
       taskId: string | null,
@@ -4239,8 +4266,16 @@ export function OneShell() {
     && !selectedCanSteerActiveRun
     && (!selected.chatId || (!selected.truth.mayStartExecution && !selectedCanContinueInPlace)),
   );
+  // PRD §4.14 — 만료 판정이 **읽을 때만** 일어나서, 화면의 카드는 만료 뒤에도 눌렸다.
+  // 화면도 시각으로 판단한다(제안 수명은 30분이다).
+  const teamPreflightExpired = Boolean(
+    teamPreflight
+    && Number.isFinite(Date.parse(teamPreflight.expiresAt ?? ""))
+    && Date.parse(teamPreflight.expiresAt) <= nowTick,
+  );
   const teamDecisionPending = Boolean(
     teamPreflight
+    && !teamPreflightExpired
     && ["proposed", "blocked", "team_reserved", "workforce_reserved", "solo_reserved", "deferred"].includes(teamPreflight.status),
   );
   // A just-created home run briefly enters preflight before its chat binding
@@ -5033,6 +5068,30 @@ export function OneShell() {
                   <p className={styles.teamPreflightRecovery} role="status">
                     {tFor(appLocale, "one.shell.thread.recovery")}
                   </p>
+                )}
+                {/*
+                  PRD §4.14 — 만료·취소에는 카드도 버튼도 없어서 대화가 그냥 멈췄다.
+                  모든 종결 상태에 문구와 다음 행동을 준다. 만료는 실패가 아니므로
+                  "다시 보내면 이어집니다"가 실제로 할 수 있는 행동이다.
+                */}
+                {teamPreflight && (teamPreflightExpired || ["expired", "cancelled"].includes(teamPreflight.status)) && !busy && !teamPreflightBusy && (
+                  <section className={styles.teamPreflightConsent} role="status" aria-live="polite">
+                    <strong>
+                      {teamPreflight.status === "cancelled"
+                        ? (appLocale === "ko" ? "팀 제안을 취소했습니다" : "The team proposal was cancelled")
+                        : (appLocale === "ko" ? "팀 제안이 만료됐습니다" : "The team proposal expired")}
+                    </strong>
+                    <p>
+                      {appLocale === "ko"
+                        ? "하려던 일을 다시 보내 주세요. 같은 요청으로 바로 이어서 진행합니다."
+                        : "Send what you wanted again and One will continue from there."}
+                    </p>
+                    <div className={styles.teamPreflightConsentActions}>
+                      <button type="button" onClick={() => setTeamPreflight(null)}>
+                        {appLocale === "ko" ? "확인" : "Got it"}
+                      </button>
+                    </div>
+                  </section>
                 )}
                 {selected && latestCommittedAnswer && (
                   <ResolvedDecisionReceipt receipt={latestCommittedAnswer} locale={appLocale} />
