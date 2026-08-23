@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.0.36 — 2026-08-23
+
+Bundled runtime: Agentlas OS v1.2.16 (6d0d7e7eafaa96ebbed92e1a2223b01f13eed245).
+Source readiness does not prove a public installer or update feed; the
+Releases page stays the authority.
+
+- The briefing notification settings are readable again. Their labels were being
+  squeezed into an icon-sized column and clipped to "How of…", and the sheet
+  reused the sidebar's small type.
+- A settings panel now opens at a width that suits it. Every panel used to open
+  at the widest size, so a pane with two switches spread its label and control to
+  opposite edges of the screen.
+- Cloud agent packages can now be up to 30 MB (6 MB per file, 45 MB per request),
+  raised from 10 MB. Package files no longer live inside a database document, so
+  the limit that came from that is gone.
+
 ## 1.0.35 — 2026-08-23
 
 Bundled runtime: Agentlas OS v1.2.16 (6d0d7e7eafaa96ebbed92e1a2223b01f13eed245).
