@@ -1,0 +1,39 @@
+/* 복구가 상한까지 실패했을 때만 뜨는 한 줄. 화면을 가리지 않고, 스스로 닫을 수 있다. */
+.recoveryNotice {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(560px, calc(100vw - 32px));
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+  background: var(--surface-raised, rgba(28, 28, 30, 0.96));
+  color: var(--text, #f5f5f7);
+  font-size: 13px;
+  line-height: 1.45;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
+}
+
+.recoveryNotice button {
+  flex: 0 0 auto;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  opacity: 0.72;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.recoveryNotice button:hover { opacity: 1; }
+
+@media (prefers-reduced-motion: reduce) {
+  .recoveryNotice { transition: none; }
+}

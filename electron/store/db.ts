@@ -156,6 +156,22 @@ function schemaColumns(db: Database.Database, table: string): SchemaColumn[] {
   return db.prepare(`PRAGMA table_info(${quoteSqlIdentifier(table)})`).all() as SchemaColumn[];
 }
 
+/**
+ * PRD §5.26 — 예전에는 다섯 개의 `ALTER TABLE … ADD COLUMN` 이 **매 기동마다 다시 돌고**
+ * 모든 실패를 삼켰다(정상 경로에서도 예외가 나고, 진짜 문제도 같은 자리에서 조용히 사라졌다).
+ * 칸이 있는지 먼저 보고, 없을 때만 더한다. 그리고 "이미 있다" 외의 실패는 삼키지 않는다.
+ */
+function addColumnIfMissing(db: Database.Database, table: string, column: string, ddl: string): void {
+  if (!tableExists(db, table)) return;
+  if (schemaColumns(db, table).some((entry) => entry.name === column)) return;
+  try {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+  } catch (error) {
+    // 경합으로 다른 프로세스가 먼저 더했을 수 있다. 그 외의 실패는 올린다.
+    if (!/duplicate column name/i.test(String((error as Error).message))) throw error;
+  }
+}
+
 function tableExists(db: Database.Database, table: string): boolean {
   return Boolean(
     db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1").get(table),
@@ -4731,7 +4747,9 @@ export function initStore(options: StoreInitOptions = {}): void {
       updated_at TEXT NOT NULL,
       archived_at TEXT,
       status_kind TEXT NOT NULL DEFAULT 'new',
-      status_line TEXT NOT NULL DEFAULT '아직 맡은 일 없음',
+      -- PRD §4.33 — 스키마에 사람이 읽는 문구(그것도 한 언어)를 박지 않는다.
+      -- 빈 값이면 투영이 로케일 표에서 "아직 맡은 일 없음 / No work assigned yet"을 만든다.
+      status_line TEXT NOT NULL DEFAULT '',
       last_activity_at TEXT,
       pending_count INTEGER NOT NULL DEFAULT 0,
       pending_kind TEXT NOT NULL DEFAULT 'approval' CHECK(pending_kind IN ('approval','review','input')),
@@ -4769,11 +4787,13 @@ export function initStore(options: StoreInitOptions = {}): void {
   // v99 was already shipped before the pending-kind/cache columns existed.
   // Keep the schema version stable while making the append-only table upgrade
   // safe for existing stores (SQLite has no IF NOT EXISTS for ADD COLUMN).
-  try { _db.exec("ALTER TABLE one_org_members ADD COLUMN pending_kind TEXT NOT NULL DEFAULT 'approval'"); } catch { /* already present */ }
-  try { _db.exec("ALTER TABLE one_org_members ADD COLUMN auto_select_tools INTEGER NOT NULL DEFAULT 1 CHECK(auto_select_tools IN (0,1))"); } catch { /* already present */ }
-  try { _db.exec("ALTER TABLE one_org_members ADD COLUMN collaboration_style TEXT NOT NULL DEFAULT 'default' CHECK(collaboration_style IN ('default','concise','warm','direct'))"); } catch { /* already present */ }
-  try { _db.exec("ALTER TABLE one_org_members ADD COLUMN handover_note TEXT"); } catch { /* already present */ }
-  try { _db.exec("ALTER TABLE one_taskforces ADD COLUMN description TEXT NOT NULL DEFAULT ''"); } catch { /* already present */ }
+  // pending_kind 의 CHECK 는 ALTER 로 붙일 수 없다(SQLite 제약). 새 설치와 업그레이드 설치의
+  // 제약이 갈리므로, 값의 정당성은 쓰기 경로(setOneOrgMemberStatus)가 함께 지킨다.
+  addColumnIfMissing(_db, "one_org_members", "pending_kind", "pending_kind TEXT NOT NULL DEFAULT 'approval'");
+  addColumnIfMissing(_db, "one_org_members", "auto_select_tools", "auto_select_tools INTEGER NOT NULL DEFAULT 1 CHECK(auto_select_tools IN (0,1))");
+  addColumnIfMissing(_db, "one_org_members", "collaboration_style", "collaboration_style TEXT NOT NULL DEFAULT 'default' CHECK(collaboration_style IN ('default','concise','warm','direct'))");
+  addColumnIfMissing(_db, "one_org_members", "handover_note", "handover_note TEXT");
+  addColumnIfMissing(_db, "one_taskforces", "description", "description TEXT NOT NULL DEFAULT ''");
 
   // v100 — durable in-app plugin builder drafts.  The seed is retained so an
   // agent-offer can be enforced once per conversation even after a restart or

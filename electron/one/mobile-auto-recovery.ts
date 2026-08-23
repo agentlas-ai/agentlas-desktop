@@ -4,6 +4,7 @@ import { captureMobileOneInvocationBinding } from "../invocation/workspace-bindi
 import type { InvocationService, InvocationSettledEnvelope } from "../invocation/service";
 import { judgeOneAutoRecovery } from "./auto-recovery";
 import { verifyOneRecoveryOutcome } from "./recovery-verification";
+import { getMeta, setMeta } from "../store/meta";
 
 interface MobileRecoveryState {
   originalRunId: string;
@@ -16,6 +17,45 @@ interface MobileRecoveryState {
 
 const states = new Map<string, MobileRecoveryState>();
 let restartScanStarted = false;
+
+/**
+ * PRD §4.32 — 복구 이력이 메모리에만 있었다. 그래서 데스크탑을 다시 켤 때마다 최근 대화
+ * 500개를 훑어 실패한 모바일 One 대화마다 **유료 복구를 처음부터 다시** 시작했고, 계속
+ * 실패하는 건은 재시작마다 다시 나갔다. 시도 이력을 지속 저장해 상한을 프로세스 밖에서도 공유한다.
+ */
+const RECOVERY_LEDGER_KEY = "one.mobile-auto-recovery.attempts.v1";
+/** 이력이 무한히 커지지 않게 최근 것만 남긴다. */
+const RECOVERY_LEDGER_MAX = 200;
+/** 한 실행에 대해 이 횟수를 넘겨 복구하지 않는다(판정기의 회차와 같은 축을 공유한다). */
+const RECOVERY_ATTEMPT_HARD_MAX = 3;
+
+type RecoveryLedger = Record<string, { attempts: number; at: string }>;
+
+function readRecoveryLedger(): RecoveryLedger {
+  try {
+    const parsed = JSON.parse(getMeta(RECOVERY_LEDGER_KEY) || "{}") as RecoveryLedger;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function recordRecoveryAttempt(originalRunId: string, attempts: number): void {
+  try {
+    const ledger = readRecoveryLedger();
+    ledger[originalRunId] = { attempts, at: new Date().toISOString() };
+    const entries = Object.entries(ledger)
+      .sort((a, b) => b[1].at.localeCompare(a[1].at))
+      .slice(0, RECOVERY_LEDGER_MAX);
+    setMeta(RECOVERY_LEDGER_KEY, JSON.stringify(Object.fromEntries(entries)));
+  } catch {
+    // 원장을 못 쓰면 이번 프로세스의 상한만 유효하다 — 조용히 무한 재시도로 돌아가지는 않는다.
+  }
+}
+
+function persistedAttempts(originalRunId: string): number {
+  return Math.max(0, Math.floor(readRecoveryLedger()[originalRunId]?.attempts ?? 0));
+}
 
 function recoveryPrompt(input: {
   goal: string;
@@ -75,10 +115,14 @@ async function handleSettled(
       return;
     }
     if (envelope.receipt.status !== "failed" && envelope.receipt.status !== "interrupted") return;
+    // PRD §4.32 — 이 실행에 이미 쓴 복구 횟수는 프로세스가 아니라 원장이 안다.
+    // 상한을 넘었으면 재시작해도 다시 시작하지 않는다(같은 실패에 유료 실행을 반복하지 않는다).
+    const spent = persistedAttempts(envelope.runId);
+    if (spent >= RECOVERY_ATTEMPT_HARD_MAX) return;
     state = {
       originalRunId: envelope.runId,
       goal: envelope.goal,
-      attemptsSpent: 0,
+      attemptsSpent: spent,
       previousFingerprint: null,
       recoveryRunIds: new Set(),
       processingRunIds: new Set(),
@@ -124,6 +168,11 @@ async function handleSettled(
     // inspects what actually happened and can ask for new authority if needed.
     if (envelope.receipt.executionPermission !== "read") {
       activeState.attemptsSpent += 1;
+      if (activeState.attemptsSpent > RECOVERY_ATTEMPT_HARD_MAX) {
+        states.delete(envelope.chatId);
+        return;
+      }
+      recordRecoveryAttempt(activeState.originalRunId, activeState.attemptsSpent);
       startRecovery(service, envelope, activeState, "");
       return;
     }
@@ -141,6 +190,11 @@ async function handleSettled(
       return;
     }
     activeState.attemptsSpent = judgement.decision.attempt;
+    if (activeState.attemptsSpent > RECOVERY_ATTEMPT_HARD_MAX) {
+      states.delete(envelope.chatId);
+      return;
+    }
+    recordRecoveryAttempt(activeState.originalRunId, activeState.attemptsSpent);
     startRecovery(service, envelope, activeState, judgement.diagnosis);
   } finally {
     activeState.processingRunIds.delete(envelope.runId);

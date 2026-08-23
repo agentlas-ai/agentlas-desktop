@@ -607,8 +607,11 @@ export function createOneValueClosure(input: CreateOneValueClosureInput): OneVal
     const next: OneValueClosureState = {
       ...current.state,
       version: tick.version,
-      evidence: [...current.state.evidence, ...evidence],
-      closures: [...current.state.closures, record],
+      // PRD §5.23 — 상한이 없어 한 덩이 문자열이 무한히 커졌다. 덧붙일 때마다 **전체 문자열
+      // 비교**로 저장하고(위 CAS), 5초 폴링이 그 전체를 화면으로 실어 날랐다.
+      // 옆 모듈(experience-reuse)은 이미 상한을 둔다 — 같은 규칙을 쓴다.
+      evidence: [...current.state.evidence, ...evidence].slice(-4_096),
+      closures: [...current.state.closures, record].slice(-2_048),
       updatedAt: tick.iso,
     };
     if (!isOneValueClosureState(next)) throw new Error("Value Closure mutation violated the closed storage contract");

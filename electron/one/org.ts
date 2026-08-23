@@ -61,7 +61,9 @@ type Row = {
   revision: number;
 };
 
-const DEFAULT_STATUS_LINE = "아직 맡은 일 없음";
+// 스키마 기본값에서 문구를 뺐으므로(PRD §4.33) 삽입 시 쓰는 초기값도 코드가 소유한다.
+// 화면에 보이는 문구는 항상 STATUS_TEMPLATES 를 지나 두 언어로 만들어진다.
+const DEFAULT_STATUS_LINE = "";
 const MAX_STATUS_LINE = 40;
 const SOURCE_VALUES = new Set<OneOrgSource>(["local", "cloud", "hub"]);
 const COLLABORATION_STYLES = new Set(["default", "concise", "warm", "direct"] as const);
@@ -88,6 +90,11 @@ const STATUS_TEMPLATES = {
 
 function emitOrgChanged(): void {
   emitDesktopStoreChange({ entity: "one-org" });
+}
+
+/** 업그레이드 설치본에는 DB CHECK 가 없으므로 쓰기 경로가 값을 좁힌다(PRD §5.26). */
+function normalizePendingKind(value: unknown): "approval" | "review" | "input" {
+  return value === "review" || value === "input" ? value : "approval";
 }
 
 function boundedLine(value: string | null | undefined, fallback = DEFAULT_STATUS_LINE): string {
@@ -256,11 +263,14 @@ export function createOneTeamAgent(input: CreateOneTeamAgentInput): CreateOneTea
 
   const db = getDb();
   const memberId = randomUUID();
-  const sortOrder = activeRows().reduce((max, row) => Math.max(max, row.sort_order), -1) + 1;
+  // PRD §5.30 — 정렬 번호를 트랜잭션 **밖에서** 계산하면 동시에 만든 두 팀원이 같은 번호를
+  // 갖는다. 트랜잭션 안에서 읽어 계산한다.
+  let sortOrder = 0;
   let chatId = "";
   let committed = false;
   try {
     db.transaction(() => {
+      sortOrder = activeRows().reduce((max, row) => Math.max(max, row.sort_order), -1) + 1;
       db.prepare(`
         INSERT INTO installed_agents
           (id, slug, name, name_en, tagline, tagline_en, system_prompt, mcp_servers_json,
@@ -638,7 +648,11 @@ export function replaceOneOrgMember(input: ReplaceOneOrgMemberInput): OneOrgStat
       agent.slug, agent.id, row.display_name, sourceFor(agent), nextLease, now, DEFAULT_STATUS_LINE,
       nextLease ? "ok" : "unknown", note, id,
     );
-    getDb().prepare("DELETE FROM one_org_completion_cache WHERE installed_agent_id = ?").run(agent.id);
+    // PRD §5.27 — 들어오는 쪽만 지우고 **나가는 쪽**을 두면, 교체된 팀원의 옛 완료 요약이
+    // 캐시에 남아 그 에이전트를 다시 앉힐 때 새 상태처럼 보인다. 둘 다 지운다.
+    const clearCache = getDb().prepare("DELETE FROM one_org_completion_cache WHERE installed_agent_id = ?");
+    clearCache.run(agent.id);
+    if (row.installed_agent_id !== agent.id) clearCache.run(row.installed_agent_id);
   });
   transaction();
   emitOrgChanged();
@@ -651,6 +665,9 @@ export function archiveOneOrgMember(input: ArchiveOneOrgMemberInput): OneOrgStat
   if (!row) throw new Error("One Team member not found.");
   assertExpectedRevision(row, input.expectedRevision);
   const now = new Date().toISOString();
+  // PRD §5.27 — 완료 요약 캐시가 팀원보다 오래 살았다. 보관하면 그 팀원의 캐시도 함께
+  // 내려야, 나중에 복원했을 때 옛 실행의 요약이 새 상태처럼 보이지 않는다.
+  getDb().prepare("DELETE FROM one_org_completion_cache WHERE installed_agent_id = ?").run(row.installed_agent_id);
   getDb().prepare("UPDATE one_org_members SET archived_at = ?, updated_at = ?, revision = revision + 1 WHERE id = ?").run(now, now, id);
   emitOrgChanged();
   return getOneOrgState();
@@ -742,7 +759,8 @@ export function setOneOrgMemberStatus(input: {
   `).run(
     input.statusKind, boundedLine(input.statusLine, row.status_line),
     Math.max(0, Math.floor(input.pendingCount ?? row.pending_count)),
-    input.pendingKind ?? row.pending_kind ?? "approval",
+    // 업그레이드된 설치본에는 이 칸의 CHECK 가 없다(ALTER 로 붙일 수 없음). 정당성은 여기서 지킨다.
+    normalizePendingKind(input.pendingKind ?? row.pending_kind),
     Math.max(0, Math.floor(input.unreadCount ?? row.unread_count)),
     input.creditState ?? row.credit_state,
     input.lastActivityAt === undefined ? row.last_activity_at : input.lastActivityAt,

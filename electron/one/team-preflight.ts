@@ -679,12 +679,31 @@ function recoverReservations(deps: OneTeamPreflightDependencies): void {
       );
       if (!promptUnavailable && !abandonedReservation) return record;
       changed = true;
-      if (record.reservation) {
-        // Probe the durable start ledger before clearing the process-local
-        // capability. Both outcomes remain recovery-only; neither auto-retries.
-        void (deps.hasRunReceipt ?? hasInvocationRunReceipt)(record.reservation.runId);
-      }
+      // PRD §4.30 — 여기서 지속 원장을 확인해 놓고 **결과를 버리고 있었다.** 그래서 실제로
+      // 시작해 이미 비용을 쓴 실행까지 "복구 필요"로 표시됐고, 사용자가 복구를 누르면 같은
+      // 일을 유료로 한 번 더 했다. 시작된 실행은 복구가 아니라 **이어보기**다.
+      const startedRunId = record.reservation?.runId ?? null;
+      const alreadyStarted = Boolean(
+        startedRunId && (deps.hasRunReceipt ?? hasInvocationRunReceipt)(startedRunId),
+      );
       PROCESS_PROMPTS.delete(record.proposal.proposalId);
+      if (alreadyStarted && record.reservation) {
+        const startedStatus = record.reservation.mode === "team"
+          ? "team_started"
+          : record.reservation.mode === "workforce" ? "workforce_started" : "solo_started";
+        return {
+          ...record,
+          proposal: mutateProposal(record.proposal, startedStatus, now, {
+            reservedRun: null,
+            startedRun: {
+              mode: record.reservation.mode,
+              runId: record.reservation.runId,
+              startedAt: record.proposal.startedRun?.startedAt ?? record.reservation.reservedAt,
+            },
+          }),
+          reservation: null,
+        };
+      }
       return {
         ...record,
         proposal: mutateProposal(record.proposal, "recovery_required", now, {
@@ -905,7 +924,27 @@ export async function prepareOneTeamPreflight(
     );
     if (duplicate) return duplicate.proposal;
     state.version += 1;
-    state.proposals = [...state.proposals, record].slice(-MAX_PROPOSALS);
+    // PRD §4.31 — 예전에는 들어온 순서로만 잘라내서, **예약이 잡혀 실행 중인 제안**도
+    // 새 제안에 밀려 사라질 수 있었다. 그러면 그 예약은 청구도 해제도 못 한다.
+    // 종결된 것부터 버리고, 살아 있는 예약은 절대 밀어내지 않는다.
+    const appended = [...state.proposals, record];
+    if (appended.length > MAX_PROPOSALS) {
+      const live = (item: InternalOneTeamPreflight): boolean =>
+        Boolean(item.reservation)
+        || ["team_reserved", "workforce_reserved", "solo_reserved", "team_started", "workforce_started", "solo_started"].includes(item.proposal.status);
+      const settled = appended.filter((item) => !live(item));
+      const alive = appended.filter(live);
+      const dropCount = appended.length - MAX_PROPOSALS;
+      // 종결된 것부터, 오래된 순으로 버린다. 그래도 넘치면(살아 있는 예약만 남은 경우)
+      // 더 버리지 않는다 — 축출로 청구를 잃는 것보다 상한을 넘기는 편이 낫다.
+      const keptSettled = settled.slice(Math.min(dropCount, settled.length));
+      for (const dropped of settled.slice(0, Math.min(dropCount, settled.length))) {
+        PROCESS_PROMPTS.delete(dropped.proposal.proposalId);
+      }
+      state.proposals = appended.filter((item) => alive.includes(item) || keptSettled.includes(item));
+    } else {
+      state.proposals = appended;
+    }
     persistStore(state, raw, db);
     return proposal;
   });

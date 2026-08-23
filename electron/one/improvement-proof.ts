@@ -658,7 +658,9 @@ function mergeEvidence(
     byReceipt.set(candidate.receiptRef, candidate);
     appended.push(candidate);
   }
-  return [...current.evidence, ...appended];
+  // PRD §5.23 — 상한이 없어 이 배열이 무한히 커졌고, 그 전체가 매 저장의 CAS 비교 대상이자
+  // 5초 폴링의 운반 대상이었다. 옆 모듈(experience-reuse)과 같은 상한을 쓴다.
+  return [...current.evidence, ...appended].slice(-4_096);
 }
 
 function baselineTasksFor(comparisons: OneImprovementComparisonRecord[]) {
@@ -828,7 +830,7 @@ export function createOneImprovementProof(
       ...current.state,
       version: tick.version,
       evidence: mergeEvidence(current.state, evidence),
-      proofs: [...current.state.proofs, record],
+      proofs: [...current.state.proofs, record].slice(-2_048),
       updatedAt: tick.iso,
     };
     if (!isOneImprovementProofState(next)) throw new Error("Improvement Proof mutation violated the closed storage contract");

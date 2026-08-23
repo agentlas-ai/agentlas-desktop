@@ -459,7 +459,8 @@
     "gate:freshness:check": "node scripts/verify-gate-freshness.mjs --baseline",
     "gate:freshness:baseline": "node scripts/verify-gate-freshness.mjs --update-baseline",
     "gate:one-team-surface": "node scripts/verify-one-team-surface.mjs",
-    "test:one-org-truthfulness": "node scripts/verify-one-org-truthfulness.mjs"
+    "test:one-org-truthfulness": "node scripts/verify-one-org-truthfulness.mjs",
+    "test:one-cost-leak-boundaries": "node scripts/verify-one-cost-and-leak-boundaries.mjs"
   },
   "dependencies": {
     "@file-viewer/preset-lite": "^2.3.0",

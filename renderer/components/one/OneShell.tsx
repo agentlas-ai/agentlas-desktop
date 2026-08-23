@@ -1458,7 +1458,11 @@ export function OneShell() {
         api.updater.getState().catch(() => null),
         api.mobileBridge.status().catch(() => null),
         api.chats.listRecent(40).catch(() => []),
-        api.oneProfile.get(),
+        // PRD §4.27 — 홈 새로고침 19개 중 이것 하나만 안전망이 없었다. 프로필 조회가 한 번
+        // 실패하면 Promise.all 전체가 거절돼 **모든 화면 갱신이 통째로 건너뛰어졌고**,
+        // 바깥 catch 는 복구를 부르며 오류를 지워서 화면이 5초마다 빈 채로 남았다.
+        // 프로필이 없으면 이전 값을 유지한다(없음을 성공으로 위장하지 않는다 — 아래에서 그대로 둔다).
+        api.oneProfile.get().catch(() => null),
         includeOrg ? api.oneOrg.get().catch(() => null) : Promise.resolve(null),
         api.oneTaskforces.list().catch(() => []),
         api.computerHistory.get().catch(() => null),
@@ -1504,7 +1508,7 @@ export function OneShell() {
       setConfirmations(keepPrevIfDeepEqual(pending));
       setUpdaterState(keepPrevIfDeepEqual(update));
       setMobileStatus(keepPrevIfDeepEqual(mobile));
-      setOneProfile(keepPrevIfDeepEqual(profile));
+      if (profile) setOneProfile(keepPrevIfDeepEqual(profile));
       if (org) setOneOrgState(keepPrevIfDeepEqual(org));
       setTaskforces(keepPrevIfDeepEqual(taskforceRows));
       setComputerHistory(keepPrevIfDeepEqual(history));

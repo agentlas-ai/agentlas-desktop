@@ -615,16 +615,35 @@ function saveState(state: BriefingStateV1): void {
   }
 }
 
+/**
+ * PRD §5.24 — 잠금 파일에 나이 검사가 없었다. 강제 종료 한 번으로 잠금이 남으면 이후 모든
+ * 변경이 **영구히** 실패한다(내는 오류에는 푸는 길이 있어야 한다). 오래된 잠금은 거둔다.
+ */
+const BRIEFING_LOCK_STALE_MS = 60_000;
+
 function mutateStateCas(now: Date, mutate: (state: BriefingStateV1) => void): BriefingStateV1 {
   const target = statePath();
   fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
   const lock = `${target}.lock`;
   let handle: number | null = null;
   try {
-    handle = fs.openSync(lock, "wx", 0o600);
+    try {
+      handle = fs.openSync(lock, "wx", 0o600);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const heldFor = Date.now() - (fs.statSync(lock).mtimeMs || 0);
+      if (heldFor < BRIEFING_LOCK_STALE_MS) throw error;
+      // 이 나이의 잠금은 살아 있는 소유자가 없다. 거두고 다시 잡는다.
+      fs.rmSync(lock, { force: true });
+      handle = fs.openSync(lock, "wx", 0o600);
+    }
     const state = loadState(now);
     const expectedRevision = state.revision;
+    const before = JSON.stringify(state);
     mutate(state);
+    // PRD §5.24 — 바뀐 게 없어도 매번 다시 쓰고 판번호를 올렸다. 그 판번호는 다른 화면의
+    // CAS 를 헛되이 깨뜨린다. 무변경이면 쓰지 않는다.
+    if (JSON.stringify(state) === before) return state;
     const current = loadState(now);
     if (current.revision !== expectedRevision) throw new Error("One Briefing state changed during update");
     state.revision = expectedRevision + 1;

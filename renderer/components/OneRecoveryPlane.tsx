@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ONE_OPERATIONAL_RECOVERY_EVENT,
   type OneOperationalRecoveryDetail,
   withOneOperationalRecoveryDispatchSuppressed,
 } from "@/lib/one-operational-recovery";
 import { useT } from "@/lib/i18n";
+import styles from "./OneRecoveryPlane.module.css";
 
 function recoveryPrompt(detail: OneOperationalRecoveryDetail): string {
   return [
@@ -27,6 +28,14 @@ type QueuedRecovery = {
 
 const RECOVERY_RETRY_BASE_MS = 1_000;
 const RECOVERY_RETRY_MAX_MS = 60_000;
+/**
+ * PRD §4.6 — 재시도에 상한이 없어서, 계속 실패하는 항목 하나가 1분마다 **영원히** 유료
+ * 모델 실행을 다시 시작했다. 게다가 큐는 선두가 끝나야 뒤가 도는 구조라 그 하나가 나머지
+ * 복구를 통째로 막았다. 시도 상한을 두고, 상한에 닿으면 선두를 비켜 준 뒤 사용자에게 말한다.
+ */
+const RECOVERY_MAX_ATTEMPTS = 3;
+/** PRD §5.28 — 큐에 길이 상한이 없었다. 오래된 것부터 버린다(가장 최근 실패가 더 유용하다). */
+const RECOVERY_QUEUE_MAX = 12;
 
 function recoveryRetryDelay(attempts: number): number {
   return Math.min(
@@ -43,6 +52,7 @@ function recoveryRetryDelay(attempts: number): number {
  */
 export function OneRecoveryPlane() {
   const { locale } = useT();
+  const [notice, setNotice] = useState<{ scope: string } | null>(null);
   const activeRef = useRef(false);
   const queueRef = useRef<QueuedRecovery[]>([]);
   const queuedFingerprintsRef = useRef<Set<string>>(new Set());
@@ -101,8 +111,13 @@ export function OneRecoveryPlane() {
             return;
           }
 
-          const recent = await api.chats.listRecent(100);
-          let one = recent.find((chat) => chat.originSurface === "one" && chat.kind !== "division") ?? null;
+          // PRD §4.6 — 복구는 실패가 일어난 방에서 이어진다. 그 방을 모를 때만 최근 One 대화로 간다.
+          let one = queued.detail.chatId
+            ? await api.chats.get(queued.detail.chatId).catch(() => null)
+            : null;
+          if (one && (one.originSurface !== "one" || one.kind === "division")) one = null;
+          const recent = one ? [] : await api.chats.listRecent(100);
+          one = one ?? recent.find((chat) => chat.originSurface === "one" && chat.kind !== "division") ?? null;
           if (!one) {
             one = await api.chats.create({
               title: "One",
@@ -143,6 +158,15 @@ export function OneRecoveryPlane() {
         queueRef.current.shift();
         queuedFingerprintsRef.current.delete(queued.fingerprint);
         recentRef.current.set(queued.fingerprint, Date.now());
+        setNotice(null);
+        scheduleDrain(0);
+      } else if (queued.attempts >= RECOVERY_MAX_ATTEMPTS) {
+        // 상한에 닿았다. 이 항목은 큐에서 내려 **뒤에 밀린 복구가 돌게 하고**, 조용히 사라지는
+        // 대신 사용자에게 한 줄로 남긴다. 냉각 기록을 남겨 같은 실패가 즉시 되돌아오지 않게 한다.
+        queueRef.current.shift();
+        queuedFingerprintsRef.current.delete(queued.fingerprint);
+        recentRef.current.set(queued.fingerprint, Date.now());
+        setNotice({ scope: queued.detail.scope });
         scheduleDrain(0);
       } else {
         scheduleDrain(queued.started ? 1_000 : recoveryRetryDelay(queued.attempts));
@@ -166,6 +190,10 @@ export function OneRecoveryPlane() {
       for (const [key, seenAt] of recentRef.current) {
         if (now - seenAt > 10 * 60_000) recentRef.current.delete(key);
       }
+      while (queueRef.current.length >= RECOVERY_QUEUE_MAX) {
+        const dropped = queueRef.current.shift();
+        if (dropped) queuedFingerprintsRef.current.delete(dropped.fingerprint);
+      }
       queuedFingerprintsRef.current.add(fingerprint);
       queueRef.current.push({
         detail: normalized,
@@ -177,6 +205,9 @@ export function OneRecoveryPlane() {
       scheduleDrain(0);
     };
     window.addEventListener(ONE_OPERATIONAL_RECOVERY_EVENT, recover);
+    // PRD §5.28 — 언어를 바꾸면 이 효과가 다시 만들어진다. 예전에는 새 효과가 이벤트를
+    // 받을 때까지 아무것도 안 해서, 대기 중이던 복구가 그대로 멈춰 있었다.
+    if (queueRef.current.length > 0) scheduleDrain(0);
     return () => {
       disposed = true;
       if (retryTimerRef.current !== null) window.clearTimeout(retryTimerRef.current);
@@ -185,7 +216,19 @@ export function OneRecoveryPlane() {
     };
   }, [locale]);
 
-  // Recovery stays silent until One authors a useful result or a
-  // capability-bound question. Code does not expose a failure or canned state.
-  return null;
+  // 복구가 성공하는 동안은 조용하다 — One 이 스스로 결과를 쓴다. 그러나 상한까지 실패하면
+  // 조용함은 거짓말이 된다(PRD §4.6). 내부 코드·경로는 노출하지 않고 사실만 한 줄로 남긴다.
+  if (!notice) return null;
+  return (
+    <div role="status" className={styles.recoveryNotice}>
+      <span>
+        {locale === "ko"
+          ? "일부 작업을 자동으로 되돌리지 못했습니다. 다시 시도해 주세요."
+          : "One could not finish an automatic repair. Please try that action again."}
+      </span>
+      <button type="button" onClick={() => setNotice(null)}>
+        {locale === "ko" ? "닫기" : "Dismiss"}
+      </button>
+    </div>
+  );
 }

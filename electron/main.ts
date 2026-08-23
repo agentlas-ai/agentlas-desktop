@@ -93,7 +93,7 @@ import { servePluginIconRequest } from "./mcp-tools/plugin-brand";
 import { reconcileOneHubDerivativeDraftStorage } from "./one/hub-derivative";
 import { recoverDesktopStartup, type StartupRecoveryPresentation } from "./one/startup-recovery";
 import { initFileLogging, mainLogFilePath } from "./logging";
-import { setCurrentUiLocale } from "./ui-locale";
+import { currentUiLocale, setCurrentUiLocale } from "./ui-locale";
 import { prepareMacRuntimeResourcesForExecution } from "./runtime/mac-resource-seal";
 import {
   issueMobileBridgePairing,
@@ -351,9 +351,13 @@ function checkOneBriefingDesktopNotification(): void {
     if (!candidate) return;
     // Privacy boundary: OS surfaces never receive a project, Task, customer,
     // automation title, or evidence. Details remain inside authenticated One.
+    // PRD §4.33 — OS 알림만 영어 하드코딩이라 한국어 사용자는 화면 안 문구는 한국어로,
+    // 알림만 영어로 봤다. 로케일 표를 지나게 한다.
     const notification = new Notification({
       title: "Agentlas One",
-      body: "One found something that may need your attention. Open Agentlas to review it.",
+      body: currentUiLocale() === "ko"
+        ? "확인이 필요한 일이 있어요. Agentlas 를 열어 살펴보세요."
+        : "One found something that may need your attention. Open Agentlas to review it.",
       silent: true,
     });
     notification.on("click", () => { void openOneFromNotification(); });
@@ -389,11 +393,12 @@ function startOneTeamNotificationBridge(): void {
     if (oneTeamNotificationKeys.has(key)) return;
     oneTeamNotificationKeys.add(key);
     if (oneTeamNotificationKeys.size > 512) oneTeamNotificationKeys.delete(oneTeamNotificationKeys.values().next().value as string);
+    const notificationLocale = currentUiLocale();
     const body = reason === "approval"
-      ? "One needs your input to continue."
+      ? (notificationLocale === "ko" ? "이어가려면 확인이 필요해요." : "One needs your input to continue.")
       : reason === "failure"
-        ? "One had a failed run to review."
-        : "One finished a long-running task."
+        ? (notificationLocale === "ko" ? "확인이 필요한 실패한 작업이 있어요." : "One had a failed run to review.")
+        : (notificationLocale === "ko" ? "오래 걸린 작업을 끝냈어요." : "One finished a long-running task.")
     const notification = new Notification({ title: "Agentlas One", body, silent: true });
     notification.on("click", () => { void openOneFromNotification(); });
     notification.show();

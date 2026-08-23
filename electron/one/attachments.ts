@@ -271,6 +271,9 @@ function createSafeRunDirectory(resultFolder: string, runId: string): string {
   return runDir;
 }
 
+/** 만료된 팀 귀속 첨부 기록을 붙잡아 두는 시간(그 뒤에는 목록에서도 지운다). */
+const EXPIRED_RECORD_RETENTION_MS = 10 * 60_000;
+
 function cleanupExpired(): void {
   const now = Date.now();
   for (const [setId, record] of records) {
@@ -278,8 +281,12 @@ function cleanupExpired(): void {
     if (Date.parse(record.expiresAt) > now) continue;
     safeRemove(record.pendingDir);
     safeRemove(record.runDir);
-    if (record.teamProposalId) record.status = "failed";
-    else records.delete(setId);
+    if (record.teamProposalId) {
+      record.status = "failed";
+      // 만료 기록은 "다시 첨부하세요"를 말하기 위한 것이므로 잠시만 남긴다. 프로세스가
+      // 살아 있는 동안 영원히 쌓이면 그 제안은 계속 만료 상태로 읽힌다.
+      if (now - Date.parse(record.expiresAt) > EXPIRED_RECORD_RETENTION_MS) records.delete(setId);
+    } else records.delete(setId);
   }
   // Capabilities are deliberately process-local. After a restart no pending
   // directory can still be authorized, so remove it at the first attachment
@@ -567,10 +574,31 @@ export function getOneAttachmentsForTeam(proposalId: string): PreparedOneAttachm
   return record ? preparedProjection(record) : null;
 }
 
+/**
+ * PRD §4.26 — 이 판정이 **상태를 안 보고** 제안 id 만 봤다. 만료된 첨부는 `failed` 로 표시된
+ * 채 목록에 남으므로, 30분이 지나면 화면은 첨부 없이 보내고 실행은 "정확히 준비된 첨부가
+ * 필요하다"며 거절했다 — 그 제안에 대해 **영구히**. 요구 판정도 만료를 만료로 본다.
+ * 요구가 남아 있는 것은 아직 쓸 수 있는 첨부(prepared/claiming/claimed)뿐이다.
+ */
 export function teamProposalRequiresOneAttachments(proposalId: string): boolean {
   cleanupExpired();
   return [...records.values()].some((candidate) => (
     candidate.teamProposalId === proposalId
+    && candidate.status !== "failed"
+    && (candidate.status === "claimed" || Date.parse(candidate.expiresAt) > Date.now())
+  ));
+}
+
+/**
+ * 만료돼 더 못 쓰는 팀 귀속 첨부가 있었는가 — 화면이 "다시 첨부하세요"라고 말할 근거다.
+ * 사실을 감추지 않되, 실행을 영구히 막지도 않는다.
+ */
+export function teamProposalHasExpiredOneAttachments(proposalId: string): boolean {
+  cleanupExpired();
+  return [...records.values()].some((candidate) => (
+    candidate.teamProposalId === proposalId
+    && candidate.status !== "claimed"
+    && (candidate.status === "failed" || Date.parse(candidate.expiresAt) <= Date.now())
   ));
 }
 

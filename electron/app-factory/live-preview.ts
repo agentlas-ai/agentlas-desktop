@@ -323,7 +323,25 @@ async function handleRequest(preview: ActivePreview, request: IncomingMessage, r
   await serveFile(request, response, filePath);
 }
 
+/**
+ * PRD §4.28 — 시작은 비동기라, 존재 검사와 등록 사이에 **같은 앱에 대한 두 번째 시작**이
+ * 끼어들 수 있었다(실행 시작/종료마다 렌더러 효과가 다시 걸린다). 그러면 나중 것이 지도를
+ * 덮어쓰고, 먼저 만든 서버·15초 타이머·파일 감시는 닫히지 않은 채 참조를 잃는다.
+ * 진행 중 시작을 앱마다 하나로 묶는다.
+ */
+const startingPreviews = new Map<string, Promise<AppFactoryLivePreviewResult>>();
+
 async function startManagedPreview(record: AppFactoryAppRecord): Promise<AppFactoryLivePreviewResult> {
+  const inFlight = startingPreviews.get(record.id);
+  if (inFlight) return inFlight;
+  const started = startManagedPreviewOnce(record).finally(() => {
+    startingPreviews.delete(record.id);
+  });
+  startingPreviews.set(record.id, started);
+  return started;
+}
+
+async function startManagedPreviewOnce(record: AppFactoryAppRecord): Promise<AppFactoryLivePreviewResult> {
   const existing = activePreviews.get(record.id);
   if (existing) {
     return {
@@ -374,6 +392,14 @@ async function startManagedPreview(record: AppFactoryAppRecord): Promise<AppFact
       try { client.write(": heartbeat\n\n"); } catch { preview.clients.delete(client); }
     }
   }, 15_000);
+  // 준비하는 사이에 앱이 보관됐을 수 있다. 그 경우 방금 연 서버를 그대로 닫는다 —
+  // 폐기된 앱의 서버가 남는 것이 §4.28 의 다른 절반이다.
+  const current = getAgentApp(record.id);
+  if (!current || current.status === "archived") {
+    clearInterval(preview.heartbeat);
+    server.close();
+    return { ok: false, appId: record.id, runtime: "unavailable", reason: "The app was archived while its preview was starting." };
+  }
   preview.watcher = watchFiles(preview);
   activePreviews.set(record.id, preview);
   server.once("close", () => {
