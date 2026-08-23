@@ -272,12 +272,20 @@ function ConcurrencySettings({ locale, active }: { locale: string; active: boole
   </div>;
 }
 
+/**
+ * 기록이 어디에 남는지는 제품마다 다르다. 문구를 화면 안에 박아 두면 이식본이 사실과 다른
+ * 개인정보 약속을 하게 된다(웹은 서버에 저장한다). 한 함수로 모아 두고 이식 시 여기만 바꾼다.
+ */
+function historyPrivacyHeadline(locale: string): string {
+  return locale === "ko" ? "원본은 이 Mac 밖으로 나가지 않습니다" : "Source activity stays on this Mac";
+}
+
 function HistorySettings({ locale, state, onConsent }: { locale: string; state: ComputerHistoryState | null; onConsent: (enabled: boolean) => Promise<void> }) {
   const [busy, setBusy] = useState(false);
   const enabled = state?.consent === "on" || (!ipc() && state === null);
   const update = async (next: boolean) => { setBusy(true); try { await onConsent(next); } finally { setBusy(false); } };
   return <div className={styles.historySettings}>
-    <div className={styles.historyHero}><IconLock size={18} /><div><strong>{locale === "ko" ? "원본은 이 Mac 밖으로 나가지 않습니다" : "Source activity stays on this Mac"}</strong><span>{locale === "ko" ? "10분 사실과 6시간 요약만 저장하고 원본 관찰 이벤트는 7일 후 자동 삭제합니다." : "Only 10-minute facts and six-hour summaries are kept; source observation events are removed after seven days."}</span></div></div>
+    <div className={styles.historyHero}><IconLock size={18} /><div><strong>{historyPrivacyHeadline(locale)}</strong><span>{locale === "ko" ? "10분 사실과 6시간 요약만 저장하고 원본 관찰 이벤트는 7일 후 자동 삭제합니다." : "Only 10-minute facts and six-hour summaries are kept; source observation events are removed after seven days."}</span></div></div>
     <div className={styles.toggleRow}><div><strong>{locale === "ko" ? "컴퓨터 기록" : "Computer history"}</strong><small>{enabled ? (locale === "ko" ? "기록과 추천이 켜져 있습니다." : "History and recommendations are on.") : (locale === "ko" ? "명시적으로 켜기 전에는 수집하지 않습니다." : "Nothing is collected until you explicitly enable it.")}</small></div><button type="button" className={styles.switch} data-on={enabled ? "true" : "false"} disabled={busy} aria-label={locale === "ko" ? `컴퓨터 기록 ${enabled ? "끄기" : "켜기"}` : `Turn computer history ${enabled ? "off" : "on"}`} onClick={() => void update(!enabled)}><span /></button></div>
     <p className={styles.inlineNote}>{locale === "ko" ? "에이전트 빌드 추천은 초안만 만듭니다. 검토 버튼을 누르기 전에는 빌드나 설치를 시작하지 않습니다." : "Agent-build recommendations create drafts only. Build and installation never start until you choose Review."}</p>
   </div>;
