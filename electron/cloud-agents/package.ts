@@ -370,6 +370,14 @@ interface RemediationOutcome {
  */
 function collectReferencedFileNames(root: string): Set<string> {
   const names = new Set<string>();
+  // Matching the name pattern against a whole file is quadratic on the lines
+  // real packages contain. On a run of identical characters — minified JS, a
+  // base64 data URI, a one-line JSON — the greedy class matches to the end at
+  // every start position and then backtracks looking for a dot that never
+  // comes. Measured here: 256 KB on one line took 58s, and the per-file ceiling
+  // is now 2 MB. Tokenize first: a run with no dot is skipped whole, and the
+  // name pattern only ever runs on a bounded candidate. Same names out.
+  const tokenRe = /[A-Za-z0-9._-]+/g;
   const nameRe = /[A-Za-z0-9._-]+\.[A-Za-z0-9]{1,8}/g;
   const pending = [root];
   let read = 0;
@@ -398,7 +406,13 @@ function collectReferencedFileNames(root: string): Set<string> {
         continue;
       }
       read += 1;
-      for (const match of text.match(nameRe) ?? []) names.add(match.toLowerCase());
+      for (const token of text.match(tokenRe) ?? []) {
+        if (!token.includes(".")) continue;
+        // A name is short. A dotted token this long is data, and only its tail
+        // could carry one.
+        const candidate = token.length > 512 ? token.slice(-512) : token;
+        for (const match of candidate.match(nameRe) ?? []) names.add(match.toLowerCase());
+      }
     }
   }
   return names;
