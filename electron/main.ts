@@ -7,6 +7,7 @@
 // - nodeIntegration: false
 // - sandbox: true (renderer는 sandboxed)
 // - 모든 Node API는 preload → ipc 경로로만 노출
+import { startInstallBeacon } from "./install-beacon";
 import {
   app,
   autoUpdater as electronAutoUpdater,
@@ -1206,6 +1207,8 @@ app.whenReady().then(async () => {
   if (!mainWindow || mainWindow.isDestroyed()) await createWindow();
   else await loadMainRendererIntoWindow();
   traceStartup("window-loaded");
+  // 누가 어떤 버전을 쓰는지 서버가 알게 한다(1.0.31·32 크래시 때 영향 범위를 셀 수 없었다).
+  startInstallBeacon(installIdentity.channel);
   // 창이 뜨고 초기 렌더러 IPC가 가라앉은 뒤에 레거시 정합을 돌린다.
   setTimeout(runDeferredLegacyLearningReconciliation, 3_000);
   startOneBriefingScheduler();

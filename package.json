@@ -462,7 +462,8 @@
     "test:one-org-truthfulness": "node scripts/verify-one-org-truthfulness.mjs",
     "test:one-cost-leak-boundaries": "node scripts/verify-one-cost-and-leak-boundaries.mjs",
     "gate:bound": "node scripts/run-bound-gates.mjs --staged",
-    "verify:packaging-completeness": "node scripts/verify-packaging-completeness.mjs"
+    "verify:packaging-completeness": "node scripts/verify-packaging-completeness.mjs",
+    "verify:install-beacon": "node scripts/verify-install-beacon.mjs"
   },
   "dependencies": {
     "@file-viewer/preset-lite": "^2.3.0",

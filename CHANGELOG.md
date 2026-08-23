@@ -10,6 +10,11 @@ Releases page stays the authority.
   a failed receipt ("uploaded but failed"), and files the server withholds from
   a package are now named in the result instead of vanishing silently. These
   landed just after the 1.0.33 build was cut, so 1.0.34 carries them.
+- The app now tells the Agentlas server which version is running (version, OS,
+  CPU architecture, release channel, and a per-install random id — nothing
+  else), once after the window opens and then every six hours. This is what
+  lets us say how many installs a broken release actually reached; during the
+  1.0.31/1.0.32 incident the only evidence was GitHub download counters.
 
 ## 1.0.33 — 2026-08-23
 
