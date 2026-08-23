@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.35 — 2026-08-23
+
+Bundled runtime: Agentlas OS v1.2.16 (6d0d7e7eafaa96ebbed92e1a2223b01f13eed245).
+Source readiness does not prove a public installer or update feed; the
+Releases page stays the authority.
+
+- You can now choose a character when you seat an agent in One Team, and change
+  a teammate's name and picture later from the same window you used to create
+  one. Previously the picture was decided for you and there was no way to change
+  it afterwards.
+- Team packages no longer scatter their internal roles (orchestrator, memory
+  curator, and so on) through the "add agent" list as if each were a hireable
+  person. A team joins as a team.
+- The same imported agent no longer piles up as dozens of identical rows. Copies
+  whose source folder is gone are now recognised as the same agent and merged.
+- Your own messages are readable again: the dark chat bubble no longer renders
+  dark text inside it.
+- An attached file now lines up with the message box instead of sticking out to
+  its left.
+
 ## 1.0.34 — 2026-08-23
 
 Bundled runtime: Agentlas OS v1.2.16 (6d0d7e7eafaa96ebbed92e1a2223b01f13eed245).
