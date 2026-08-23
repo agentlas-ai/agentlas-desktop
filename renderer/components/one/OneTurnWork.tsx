@@ -426,17 +426,25 @@ export function OneTurnWork({
           <span className={styles.headerChevron} aria-hidden="true"><IconChevronDown size={12} /></span>
         </button>
       )}
-      {expanded && (hasRows || presentation.terminalMessage) && (
+      {expanded && hasRows && (
         <div className={styles.rows}>
           {visibleCells.map((cell) => <WorkRow key={cell.id} cell={cell} locale={locale} />)}
-          {presentation.terminalMessage && !presentation.cells.some((cell) => cell.kind === "notice" && cell.message === presentation.terminalMessage) && (
-            <div className={styles.row} data-kind="notice" data-status="failed">
-              <span className={styles.rowHead}>
-                <span className={styles.rowMark} data-status="failed" aria-hidden="true" />
-                <span className={styles.rowText}><span className={styles.notice} data-level="error">{presentation.terminalMessage}</span></span>
-              </span>
-            </div>
-          )}
+        </div>
+      )}
+      {/* ★ 실패 사유는 접힘과 무관하게 보인다 (2026-08-23).
+          이 블록은 실행이 끝나는 순간 스스로 접힌다(위 useEffect). 그래서 사유가
+          펼침 안에만 있던 동안에는, 사유를 적어 두고도 **적는 순간 감췄다.**
+          사용자에게 남는 것은 "실패" 배지 하나뿐이고 왜인지는 눌러야 나왔다.
+          낸 오류에는 푸는 길이 있어야 한다 — 사유는 길의 첫 칸이다.
+          행 목록은 그대로 접어 둔다. 감춰서 문제였던 것은 사유 한 줄이다. */}
+      {presentation.terminalMessage && !presentation.cells.some((cell) => cell.kind === "notice" && cell.message === presentation.terminalMessage) && (
+        <div className={styles.rows}>
+          <div className={styles.row} data-kind="notice" data-status="failed">
+            <span className={styles.rowHead}>
+              <span className={styles.rowMark} data-status="failed" aria-hidden="true" />
+              <span className={styles.rowText}><span className={styles.notice} data-level="error">{presentation.terminalMessage}</span></span>
+            </span>
+          </div>
         </div>
       )}
     </section>
