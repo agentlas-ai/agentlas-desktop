@@ -11,8 +11,11 @@ import type {
   CloudAgentRevisionIdentity,
 } from "../../shared/types";
 
-const MAX_TOTAL_BYTES = 3 * 1024 * 1024;
-const MAX_FILE_BYTES = 512 * 1024;
+// Kept in step with electron/cloud-agents/package.ts, the engine, the Terminal
+// and the server. A restore limit below the publish limit would make a package
+// this product accepted impossible to install back.
+const MAX_TOTAL_BYTES = 10 * 1024 * 1024;
+const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_FILES = 400;
 const MARKER_FILE = ".agentlas-cloud-package.json";
 const MAX_MARKER_BYTES = 256 * 1024;

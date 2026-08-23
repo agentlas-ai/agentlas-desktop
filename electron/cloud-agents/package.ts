@@ -38,9 +38,21 @@ import type {
 } from "../../shared/types";
 import { userDataPath } from "../runtime-paths";
 
-const MAX_TOTAL_BYTES = 3 * 1024 * 1024;
-const MAX_UNCOMPRESSED_TOTAL_BYTES = 4 * (3 * 1024 * 1024);
-const MAX_FILE_BYTES = 512 * 1024;
+// THE REAL WALL IS THE DOCUMENT, NOT THE NETWORK.
+//
+//   The server stores a package's bytes inside one manifest record
+//   (ScanManifest.cloudPackage.files[].contentBase64), and that record is a
+//   single MongoDB document, capped at 16 MiB by BSON. Content is stored
+//   base64, so the document carries 4/3 of these transport bytes: 10 MiB is
+//   about 13.3 MiB of base64 plus the manifest's own fields, leaving roughly
+//   2 MiB of headroom. Raising it further means moving the bytes out of the
+//   document first — and the owner's decision (2026-08-23) is that they stay
+//   in the record, because an agent parked in object storage cannot be routed
+//   to. Same four numbers in the engine (agentlas_cloud/upload.py), restore.ts,
+//   the Terminal (engine/hub/install.cjs) and the server; server deploys first.
+const MAX_TOTAL_BYTES = 10 * 1024 * 1024;
+const MAX_UNCOMPRESSED_TOTAL_BYTES = 4 * MAX_TOTAL_BYTES;
+const MAX_FILE_BYTES = 2 * 1024 * 1024;
 // ★ THE CEILING MEASURES WHAT IS STORED, NOT WHAT WAS AUTHORED.
 //
 //   Packages travel as base64 with no compression, which inflates text by a
