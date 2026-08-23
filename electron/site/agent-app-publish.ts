@@ -1457,9 +1457,35 @@ async function defaultRequestDeploymentProbe(input: {
   body?: string;
 }): Promise<SiteDeploymentProbeResult> {
   const target = new URL(input.url);
-  const pinnedLookup: LookupFunction = (_hostname, _options, callback) => {
-    callback(null, input.address, input.family);
-  };
+  /**
+   * 주소를 고정하는 lookup.
+   *
+   * ★ 형식을 틀리면 이 요청은 **언제나** 실패한다(2026-08-23 실측, 웹에서 같은 결함을 먼저
+   * 잡았다). Node 는 소켓 연결 시 이 함수를 `{ hints, all: true }` 로 부르고, `all` 이
+   * 켜져 있으면 콜백은 `(err, [{ address, family }])` **배열**을 받아야 한다. 언제나 단일
+   * 형식으로 답하면 Node 가 주소를 undefined 로 읽어 ERR_INVALID_IP_ADDRESS 로 죽는다.
+   *
+   * 웹에서는 이것 때문에 원격 MCP 호출이 100% 실패하고 있었다. 여기서는 사이트 배포 확인이
+   * 언제나 실패한다 — 배포는 됐는데 "확인 실패"로 보이는 자리다.
+   *
+   * 두 형식을 모두 답한다. 타입 검사도 단위 테스트도 이것을 못 본다 — 형식이 맞는지는
+   * Node 만 안다.
+   */
+  const pinnedLookup: LookupFunction = ((hostname: string, options: unknown, callback: unknown) => {
+    const wantsAll = Boolean(options && typeof options === "object" && (options as { all?: boolean }).all);
+    if (wantsAll) {
+      (callback as (err: NodeJS.ErrnoException | null, addresses: Array<{ address: string; family: number }>) => void)(
+        null,
+        [{ address: input.address, family: input.family }],
+      );
+      return;
+    }
+    (callback as (err: NodeJS.ErrnoException | null, address: string, family: number) => void)(
+      null,
+      input.address,
+      input.family,
+    );
+  }) as never;
   return new Promise((resolve, reject) => {
     let settled = false;
     let request: ReturnType<typeof httpsRequest> | null = null;
