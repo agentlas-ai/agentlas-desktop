@@ -87,9 +87,19 @@ export function OneTaskforceRail({
           <TaskforcePortraits taskforce={taskforce} org={org} oneAvatarIcon={oneAvatarIcon} />
           <span className={styles.taskforceCopy}>
             <strong>{taskforce.title}</strong>
-            <small>{locale === "ko"
-              ? `One 포함 ${taskforce.memberAgentIds.length + 1}명${unavailable ? ` · ${unavailable}명 확인 필요` : ""}`
-              : `${taskforce.memberAgentIds.length + 1} members incl. One${unavailable ? ` · ${unavailable} need review` : ""}`}</small>
+            {/*
+              영어에서는 하나일 때 단수로 쓴다. "1 members" 는 첫 화면에 그대로 보이는
+              문법 오류였다(2026-08-23 실제 화면에서 발견). 한국어는 수에 따라 안 바뀐다.
+            */}
+            <small>{(() => {
+              const people = taskforce.memberAgentIds.length + 1;
+              if (locale === "ko") {
+                return `One 포함 ${people}명${unavailable ? ` · ${unavailable}명 확인 필요` : ""}`;
+              }
+              const who = `${people} ${people === 1 ? "member" : "members"} incl. One`;
+              const review = unavailable ? ` · ${unavailable} ${unavailable === 1 ? "needs" : "need"} review` : "";
+              return `${who}${review}`;
+            })()}</small>
           </span>
         </button>;
       })}
