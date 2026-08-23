@@ -2,6 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { gunzipSync } from "node:zlib";
+import {
+  PACKAGE_MAX_TOTAL_BYTES,
+  PACKAGE_MAX_FILE_BYTES,
+  PACKAGE_MAX_FILES,
+} from "../../shared/upload-scan-catalog.generated";
 import type {
   CloudAgentCloudScope,
   CloudAgentPackageDownload,
@@ -11,12 +16,11 @@ import type {
   CloudAgentRevisionIdentity,
 } from "../../shared/types";
 
-// Kept in step with electron/cloud-agents/package.ts, the engine, the Terminal
-// and the server. A restore limit below the publish limit would make a package
-// this product accepted impossible to install back.
-const MAX_TOTAL_BYTES = 10 * 1024 * 1024;
-const MAX_FILE_BYTES = 2 * 1024 * 1024;
-const MAX_FILES = 400;
+// 상한은 정본 하나에서 생성된다 — 복원 한도가 발행 한도보다 낮으면 방금 받아준
+// 패키지를 다시 설치할 수 없게 된다.
+const MAX_TOTAL_BYTES = PACKAGE_MAX_TOTAL_BYTES;
+const MAX_FILE_BYTES = PACKAGE_MAX_FILE_BYTES;
+const MAX_FILES = PACKAGE_MAX_FILES;
 const MARKER_FILE = ".agentlas-cloud-package.json";
 const MAX_MARKER_BYTES = 256 * 1024;
 

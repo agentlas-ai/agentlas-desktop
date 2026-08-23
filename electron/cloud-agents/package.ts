@@ -37,35 +37,21 @@ import type {
   CloudAgentVisibility,
 } from "../../shared/types";
 import { userDataPath } from "../runtime-paths";
+import {
+  PACKAGE_MAX_TOTAL_BYTES,
+  PACKAGE_MAX_FILE_BYTES,
+  PACKAGE_MAX_UNCOMPRESSED_TOTAL_BYTES,
+  PACKAGE_MAX_UNCOMPRESSED_FILE_BYTES,
+  PACKAGE_MAX_FILES,
+} from "../../shared/upload-scan-catalog.generated";
 
-// THE REAL WALL IS THE DOCUMENT, NOT THE NETWORK.
-//
-//   The server stores a package's bytes inside one manifest record
-//   (ScanManifest.cloudPackage.files[].contentBase64), and that record is a
-//   single MongoDB document, capped at 16 MiB by BSON. Content is stored
-//   base64, so the document carries 4/3 of these transport bytes: 10 MiB is
-//   about 13.3 MiB of base64 plus the manifest's own fields, leaving roughly
-//   2 MiB of headroom. Raising it further means moving the bytes out of the
-//   document first — and the owner's decision (2026-08-23) is that they stay
-//   in the record, because an agent parked in object storage cannot be routed
-//   to. Same four numbers in the engine (agentlas_cloud/upload.py), restore.ts,
-//   the Terminal (engine/hub/install.cjs) and the server; server deploys first.
-const MAX_TOTAL_BYTES = 10 * 1024 * 1024;
-const MAX_UNCOMPRESSED_TOTAL_BYTES = 4 * MAX_TOTAL_BYTES;
-const MAX_FILE_BYTES = 2 * 1024 * 1024;
-// ★ THE CEILING MEASURES WHAT IS STORED, NOT WHAT WAS AUTHORED.
-//
-//   Packages travel as base64 with no compression, which inflates text by a
-//   third on the way to a 3 MB ceiling. Measured on the published teams, a
-//   text-heavy package compresses 1.5x-3.6x — so the ceiling was costing
-//   authors most of their room, and the trim pass was deleting knowledge files
-//   to save space that compression gives back for free.
-//
-//   Limits now apply to the COMPRESSED bytes. Original size keeps a bound of
-//   its own so a small archive cannot declare an enormous original. The server
-//   (api/cloud-agents/v1/register) enforces the identical pair.
-const MAX_UNCOMPRESSED_FILE_BYTES = 4 * MAX_FILE_BYTES;
-const MAX_FILES = 400;
+// 상한은 정본 하나(upload-scan-catalog.json)에서 생성돼 내려온다. 여기서 다시
+// 적으면 서버·엔진·터미널과 어긋나고, 어긋난 쪽은 파일 이름도 없는 코드로 거절한다.
+const MAX_TOTAL_BYTES = PACKAGE_MAX_TOTAL_BYTES;
+const MAX_UNCOMPRESSED_TOTAL_BYTES = PACKAGE_MAX_UNCOMPRESSED_TOTAL_BYTES;
+const MAX_FILE_BYTES = PACKAGE_MAX_FILE_BYTES;
+const MAX_UNCOMPRESSED_FILE_BYTES = PACKAGE_MAX_UNCOMPRESSED_FILE_BYTES;
+const MAX_FILES = PACKAGE_MAX_FILES;
 const MANIFEST_VERSION = "0.1" as const;
 const PACKAGE_HASH_VERSION = "path-sha256-executable-v2" as const;
 const ROUTING_CARD_PATH = ".agentlas/routing-card.json";
