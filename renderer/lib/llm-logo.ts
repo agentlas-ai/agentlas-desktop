@@ -27,6 +27,11 @@ const LOGO_FILES: Record<string, string> = {
   x: "x.svg",
   zai: "zai.png",
   zhipu: "zhipu.png",
+  mistral: "mistral.svg",
+  qwen: "qwen.svg",
+  meta: "meta.svg",
+  nvidia: "nvidia.svg",
+  minimax: "minimax.svg",
 };
 
 /** 먼저 맞는 것이 이긴다 — 좁은 표식을 위에 둔다. */
@@ -42,6 +47,11 @@ const VENDOR_RULES: Array<{ match: RegExp; logo: keyof typeof LOGO_FILES }> = [
   { match: /\bollama\b/i, logo: "ollama" },
   { match: /\bcursor\b/i, logo: "cursor" },
   { match: /\bcopilot\b/i, logo: "githubcopilot" },
+  { match: /\bmistral\b/i, logo: "mistral" },
+  { match: /\bqwen\b/i, logo: "qwen" },
+  { match: /\b(llama|meta)\b/i, logo: "meta" },
+  { match: /\b(nvidia|nemotron)\b/i, logo: "nvidia" },
+  { match: /\bminimax\b/i, logo: "minimax" },
 ];
 
 /**
