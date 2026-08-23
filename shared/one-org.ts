@@ -91,6 +91,12 @@ export interface AddOneOrgMemberInput {
   installedAgentId: string;
   displayName?: string;
   leaseExpiresAt?: string | null;
+  /**
+   * 좌석에 앉힐 때 고른 캐릭터/사진. 없으면 패키지가 들고 온 tone 을 그대로 쓴다.
+   * (2026-08-23 오너 지적: 만들기 화면에는 캐릭터 선택이 있는데 좌석 배치에는 없어서
+   *  붙이기만 하면 아이콘이 제멋대로 나왔다 — 두 입구가 같은 선택을 받아야 한다.)
+   */
+  avatar?: OneTeamAgentAvatarInput;
 }
 
 export type OneTeamAgentAvatarInput =
@@ -133,6 +139,8 @@ export interface UpdateOneOrgMemberInput {
   id: string;
   displayName: string;
   collaborationStyle: OneOrgCollaborationStyle;
+  /** 편집에서 캐릭터·사진을 바꾼다. 생략하면 지금 것을 그대로 둔다. */
+  avatar?: OneTeamAgentAvatarInput;
   expectedRevision?: number;
 }
 

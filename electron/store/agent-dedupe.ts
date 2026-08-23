@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type Database from "better-sqlite3";
@@ -92,7 +93,25 @@ function localIdentityKey(row: AgentRow, route: AgentRoute | null): string | nul
   const kind = row.entity_kind ?? route?.kind ?? "agent";
   if (!route) return null;
   if (route.definitionHash) return `${kind}\u0000hash:${route.definitionHash}`;
+  // 원본 폴더가 사라진 행은 경로로 묶을 수 없다. 임시 폴더에서 반복 설치된 사본이 그렇다 —
+  // 실측 2026-08-23: 같은 에이전트 43개가 각각 다른 pytest 임시 경로를 들고 남아 목록을 뒤덮었다.
+  // 죽은 경로에 한해 내용(종류·이름·시스템 프롬프트 전문)으로 묶는다. 살아 있는 import 는
+  // 절대 이 갈래로 오지 않으므로, 서로 다른 두 로컬 패키지가 합쳐질 위험은 생기지 않는다.
+  if (!routeIsLive(route)) {
+    const prompt = (row.system_prompt ?? "").trim();
+    if (prompt.length >= MIN_CONTENT_IDENTITY_PROMPT) {
+      return `${kind}\u0000dead-content:${row.name}\u0000${sha256(prompt)}`;
+    }
+    return null;
+  }
   return `${kind}\u0000path:${routePathIdentity(route)}`;
+}
+
+/** 부트스트랩 문구 하나로 서로 다른 패키지가 합쳐지지 않도록 최소 길이를 둔다. */
+const MIN_CONTENT_IDENTITY_PROMPT = 200;
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 type FirmRow = {

@@ -18,6 +18,7 @@ import type {
   RenameOneOrgMemberInput,
   SetOneOrgMemberToolsInput,
   UpdateOneOrgMemberInput,
+  OneTeamAgentAvatarInput,
 } from "../../shared/one-org";
 import { getAgentConcurrencyInfo } from "../store/concurrency";
 import { getDb } from "../store/db";
@@ -237,6 +238,26 @@ function oneTeamAgentPrompt(name: string, title: string, personality: string): s
 }
 
 /** Create, seat, and open a user-owned local teammate without leaving One. */
+/**
+ * 캐릭터/사진 입력 하나를 저장 가능한 icon 값으로 바꾼다.
+ * 만들기·좌석 배치·편집 세 입구가 같은 규칙을 쓰게 하는 유일한 자리다 —
+ * 한 곳에만 두면 나머지 두 곳에서 아이콘이 제멋대로 정해진다(2026-08-23 오너 지적).
+ */
+function resolveOneTeamAvatar(
+  avatar: OneTeamAgentAvatarInput,
+  agentId: string,
+): { icon: string; image: ReturnType<typeof decodeOneTeamAvatarDataUrl> | null } {
+  if (avatar.kind === "preset") {
+    const characterId = assertText(avatar.characterId, "characterId", 80);
+    if (!ONE_CHARACTER_IDS.has(characterId)) throw new Error("Unknown One Team character.");
+    return { icon: `character:${characterId}`, image: null };
+  }
+  if (avatar.kind === "image") {
+    return { icon: `one-avatar:${agentId}`, image: decodeOneTeamAvatarDataUrl(avatar.dataUrl) };
+  }
+  throw new Error("Unsupported One Team character source.");
+}
+
 export function createOneTeamAgent(input: CreateOneTeamAgentInput): CreateOneTeamAgentResult {
   ensureSlot();
   if (!input || typeof input !== "object") throw new Error("Agent input is required.");
@@ -248,18 +269,9 @@ export function createOneTeamAgent(input: CreateOneTeamAgentInput): CreateOneTea
   const id = randomUUID();
   const slug = oneTeamAgentSlug(name, id);
   const now = new Date().toISOString();
-  let icon = "character:blue-wave-2d";
-  let avatar: ReturnType<typeof decodeOneTeamAvatarDataUrl> | null = null;
-  if (input.avatar.kind === "preset") {
-    const characterId = assertText(input.avatar.characterId, "characterId", 80);
-    if (!ONE_CHARACTER_IDS.has(characterId)) throw new Error("Unknown One Team character.");
-    icon = `character:${characterId}`;
-  } else if (input.avatar.kind === "image") {
-    avatar = decodeOneTeamAvatarDataUrl(input.avatar.dataUrl);
-    icon = `one-avatar:${id}`;
-  } else {
-    throw new Error("Unsupported One Team character source.");
-  }
+  const resolved = resolveOneTeamAvatar(input.avatar, id);
+  const icon = resolved.icon;
+  const avatar = resolved.image;
 
   const db = getDb();
   const memberId = randomUUID();
@@ -531,6 +543,9 @@ export function addOneOrgMember(input: AddOneOrgMemberInput): OneOrgState {
     throw new Error("leaseExpiresAt must be an ISO timestamp or null.");
   }
   const id = randomUUID();
+  // 고른 캐릭터가 있으면 그것을, 없으면 패키지가 들고 온 tone 을 쓴다.
+  const chosen = input.avatar ? resolveOneTeamAvatar(input.avatar, agent.id) : null;
+  const icon = chosen?.icon ?? agent.tone ?? "one-puppy";
   const sortOrder = activeRows().reduce((max, row) => Math.max(max, row.sort_order), -1) + 1;
   getDb().prepare(`
     INSERT INTO one_org_members (
@@ -538,9 +553,11 @@ export function addOneOrgMember(input: AddOneOrgMemberInput): OneOrgState {
       lease_expires_at, added_at, updated_at, status_kind, status_line, credit_state, revision
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, 1)
   `).run(
-    id, agent.slug, agent.id, displayName, agent.tone || "one-puppy", sortOrder, sourceFor(agent),
+    id, agent.slug, agent.id, displayName, icon, sortOrder, sourceFor(agent),
     leaseExpiresAt, now, now, DEFAULT_STATUS_LINE, leaseExpiresAt ? "ok" : "unknown",
   );
+  // 올린 사진은 파일로 착지시킨다. 좌석 행만 바꾸면 아이콘 주소가 가리키는 실물이 없다.
+  if (chosen?.image) writeOneTeamAvatar({ agentId: agent.id, slug: agent.slug, ...chosen.image });
   // A newly seated identity starts with an honest empty status; an old cache
   // from an archived tenure must not appear as work completed in this role.
   getDb().prepare("DELETE FROM one_org_completion_cache WHERE installed_agent_id = ?").run(agent.id);
@@ -570,11 +587,24 @@ export function updateOneOrgMember(input: UpdateOneOrgMemberInput): OneOrgState 
   if (!row) throw new Error("One Team member not found.");
   assertExpectedRevision(row, input.expectedRevision);
   const now = new Date().toISOString();
-  getDb().prepare(`
-    UPDATE one_org_members
-    SET display_name = ?, collaboration_style = ?, updated_at = ?, revision = revision + 1
-    WHERE id = ?
-  `).run(displayName, input.collaborationStyle, now, id);
+  // 편집에서도 만들 때와 같은 캐릭터 선택을 받는다(오너 지적 2026-08-23).
+  const chosen = input.avatar ? resolveOneTeamAvatar(input.avatar, row.installed_agent_id) : null;
+  if (chosen) {
+    getDb().prepare(`
+      UPDATE one_org_members
+      SET display_name = ?, collaboration_style = ?, icon = ?, updated_at = ?, revision = revision + 1
+      WHERE id = ?
+    `).run(displayName, input.collaborationStyle, chosen.icon, now, id);
+    // 설치된 패키지의 tone 도 함께 맞춘다 — 조직도 밖(채팅 목록 등)이 같은 얼굴을 보여야 한다.
+    getDb().prepare("UPDATE installed_agents SET tone = ? WHERE id = ?").run(chosen.icon, row.installed_agent_id);
+    if (chosen.image) writeOneTeamAvatar({ agentId: row.installed_agent_id, slug: row.agent_slug, ...chosen.image });
+  } else {
+    getDb().prepare(`
+      UPDATE one_org_members
+      SET display_name = ?, collaboration_style = ?, updated_at = ?, revision = revision + 1
+      WHERE id = ?
+    `).run(displayName, input.collaborationStyle, now, id);
+  }
   emitOrgChanged();
   return getOneOrgState();
 }

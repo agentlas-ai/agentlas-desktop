@@ -12,7 +12,7 @@ import {
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { ipc } from "@/lib/ipc";
 import { ONE_CHARACTER_OPTIONS, type OneCharacterId } from "@/lib/one-characters";
-import type { CreateOneTeamAgentResult } from "@shared/one-org";
+import type { CreateOneTeamAgentResult, OneOrgCollaborationStyle } from "@shared/one-org";
 import type { RuntimeSelection, RuntimeStatus } from "@shared/types";
 import { OneBottomSheet } from "./OneBottomSheet";
 import styles from "./OneCreateAgentDialog.module.css";
@@ -178,19 +178,36 @@ function modeStyle(mode: AvatarMode): "original" | "sketch" | null {
   return null;
 }
 
+/**
+ * 이미 앉아 있는 팀원을 이 창에서 그대로 편집한다. 만들 때와 고르는 방식이 달라지면
+ * 사람은 두 화면을 따로 배워야 하고, 캐릭터를 바꿀 길이 사라진다(오너 지적 2026-08-23).
+ */
+export interface OneEditMemberTarget {
+  memberId: string;
+  displayName: string;
+  /** 지금 아이콘 — `character:<id>` 면 그 캐릭터를 미리 선택해 준다. */
+  icon: string;
+  collaborationStyle: OneOrgCollaborationStyle;
+  revision: number;
+}
+
 export function OneCreateAgentDialog({
   open,
   locale,
   seed,
+  edit,
   onClose,
   onCreated,
+  onUpdated,
   onAddExisting,
 }: {
   open: boolean;
   locale: "ko" | "en";
   seed?: OneCreateAgentSeed | null;
+  edit?: OneEditMemberTarget | null;
   onClose: () => void;
   onCreated: (result: CreateOneTeamAgentResult) => void | Promise<void>;
+  onUpdated?: () => void | Promise<void>;
   onAddExisting: () => void;
 }) {
   const uploadRef = useRef<HTMLInputElement>(null);
@@ -426,6 +443,58 @@ export function OneCreateAgentDialog({
     try { window.localStorage.removeItem(DRAFT_KEY); } catch { /* in-memory reset still succeeds */ }
   };
 
+  // 편집으로 열리면 지금 이름과 캐릭터를 그대로 채워 둔다 — 창을 열자마자 "지금 상태"가 보여야 한다.
+  const editKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!open || !edit) {
+      if (!open) editKeyRef.current = null;
+      return;
+    }
+    const key = `${edit.memberId}:${edit.revision}`;
+    if (editKeyRef.current === key) return;
+    editKeyRef.current = key;
+    skipNextDraftWriteRef.current = true;
+    setName(edit.displayName);
+    const preset = edit.icon.startsWith("character:") ? edit.icon.slice("character:".length) : null;
+    if (preset && CHARACTER_IDS.has(preset)) {
+      setCharacterId(preset as OneCharacterId);
+      const character = ONE_CHARACTER_OPTIONS.find((option) => option.id === preset);
+      setAvatarMode(character?.style === "sketch" ? "sketch" : "original");
+      setUploadedSrc(null);
+      setGeneratedSrc(null);
+    }
+  }, [open, edit]);
+
+  const updateMember = async () => {
+    if (!edit) return;
+    const cleanName = name.replace(/\s+/g, " ").trim();
+    if (!cleanName || !avatarReady || creating) return;
+    const api = ipc();
+    if (!api?.oneOrg?.update) {
+      setError(ko ? "One Team 저장 기능을 불러오지 못했습니다. 앱을 다시 열어 주세요." : "One Team storage is unavailable. Reopen the app and try again.");
+      return;
+    }
+    setCreating(true);
+    setError(null);
+    try {
+      await api.oneOrg.update({
+        id: edit.memberId,
+        displayName: cleanName,
+        collaborationStyle: edit.collaborationStyle,
+        avatar: selectedStyle
+          ? { kind: "preset", characterId: selectedCharacter.id }
+          : { kind: "image", dataUrl: previewSrc! },
+        expectedRevision: edit.revision,
+      });
+      await onUpdated?.();
+      onClose();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setCreating(false);
+    }
+  };
+
   const createAgent = async () => {
     const cleanName = name.replace(/\s+/g, " ").trim();
     if (!cleanName || !avatarReady || creating) return;
@@ -474,7 +543,7 @@ export function OneCreateAgentDialog({
       persistDraftNow();
       onClose();
     }}
-    closeLabel={ko ? "새 에이전트 닫기" : "Close new agent"}
+    closeLabel={edit ? (ko ? "팀원 편집 닫기" : "Close edit teammate") : (ko ? "새 에이전트 닫기" : "Close new agent")}
     closeDisabled={creating}
     closeOnBackdrop={!creating}
     closeOnEscape={!creating}
@@ -482,12 +551,14 @@ export function OneCreateAgentDialog({
     panelClassName={styles.dialog}
     bodyClassName={styles.body}
     eyebrow="One Team"
-    title={"New Agent"}
+    title={edit ? (ko ? "팀원 편집" : "Edit Teammate") : "New Agent"}
     titleId="one-create-agent-title"
     ariaLabelledBy="one-create-agent-title"
-    description={ko
-      ? "독립 채팅과 기억을 가진 팀원을 One Team 안에서 바로 만듭니다. 창을 닫아도 작성 내용과 생성된 캐릭터는 임시저장됩니다."
-      : "Create a teammate with its own chat and memory directly inside One Team. Your form and generated character stay saved if you close this window."}
+    description={edit
+      ? (ko ? "이름과 캐릭터를 바꿉니다. 만들 때와 같은 방식으로 고르면 됩니다." : "Change the name and character. You pick them the same way you did when creating.")
+      : (ko
+        ? "독립 채팅과 기억을 가진 팀원을 One Team 안에서 바로 만듭니다. 창을 닫아도 작성 내용과 생성된 캐릭터는 임시저장됩니다."
+        : "Create a teammate with its own chat and memory directly inside One Team. Your form and generated character stay saved if you close this window.")}
   >
     <div className={styles.layout}>
       <section className={styles.avatarPanel}>
@@ -530,8 +601,8 @@ export function OneCreateAgentDialog({
 
       <section className={styles.fields}>
         <label>Name<input value={name} onChange={(event) => setName(event.target.value)} maxLength={80} placeholder="inbox-triage" autoFocus /></label>
-        <label>Title<input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={100} placeholder="e.g. Inbox Triage" /></label>
-        <label>Description<textarea value={description} onChange={(event) => setDescription(event.target.value)} maxLength={1_200} placeholder={ko ? "이 에이전트에게 말투와 성격, 영혼을 부여하세요." : "Give this agent a voice, personality, and soul."} /></label>
+        {!edit && <label>Title<input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={100} placeholder="e.g. Inbox Triage" /></label>}
+        {!edit && <label>Description<textarea value={description} onChange={(event) => setDescription(event.target.value)} maxLength={1_200} placeholder={ko ? "이 에이전트에게 말투와 성격, 영혼을 부여하세요." : "Give this agent a voice, personality, and soul."} /></label>}
 
         <label className={styles.modelPicker}>
           <span>{ko ? "LLM 모델" : "LLM model"}</span>
@@ -554,10 +625,10 @@ export function OneCreateAgentDialog({
         </label>
 
         <div className={styles.existingPicker}>
-          <button type="button" className={styles.existingTrigger} onClick={addExisting}>
+          {!edit && <button type="button" className={styles.existingTrigger} onClick={addExisting}>
             <span className={styles.existingIcon} aria-hidden="true"><IconPlus size={15} /></span>
             <span><strong>{ko ? "기존 에이전트 추가" : "Add an existing agent"}</strong><small>{ko ? "에이전트 선택 창 열기" : "Open the agent picker"}</small></span>
-          </button>
+          </button>}
         </div>
 
         {draftStatus !== "idle" && <p className={draftStatus === "error" ? styles.draftError : styles.draftStatus} role="status">
@@ -571,7 +642,9 @@ export function OneCreateAgentDialog({
         {creating && <div className={styles.creatingState} role="status" aria-live="polite"><span className={styles.spinner} aria-hidden="true" /><span><strong>{ko ? "One Team에 팀원을 만들고 있어요" : "Creating your One Team teammate"}</strong><small>{ko ? "로컬 정체성, 조직도 자리, 독립 채팅을 함께 저장합니다." : "Saving its local identity, organisation seat, and independent chat."}</small><LoadingEstimate locale={locale} operationKey="one-agent-create" expectedSeconds={[1, 12]} /></span></div>}
         <div className={styles.actions}>
           <button type="button" disabled={creating} onClick={() => { persistDraftNow(); onClose(); }}>{ko ? "취소" : "Cancel"}</button>
-          <button type="button" className={styles.primaryButton} disabled={!name.trim() || !avatarReady || creating} onClick={() => void createAgent()}>{creating ? (ko ? "만드는 중…" : "Creating…") : (ko ? "만들고 채팅 열기" : "Create & open chat")}</button>
+          <button type="button" className={styles.primaryButton} disabled={!name.trim() || !avatarReady || creating} onClick={() => void (edit ? updateMember() : createAgent())}>{creating
+            ? (edit ? (ko ? "저장 중…" : "Saving…") : (ko ? "만드는 중…" : "Creating…"))
+            : (edit ? (ko ? "저장" : "Save") : (ko ? "만들고 채팅 열기" : "Create & open chat"))}</button>
         </div>
       </section>
     </div>

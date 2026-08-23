@@ -483,3 +483,9 @@
 
 @keyframes oneInventorySpin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .inventorySpinner { animation-duration: 1.8s; } }
+
+/* 좌석 배치 시트의 캐릭터 고르기 — 만들기 화면과 같은 목록을 같은 크기로 보여준다. */
+.characterRow { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 0; }
+.characterRow button { width: 44px; height: 44px; padding: 2px; border: 1px solid #e3eae5; border-radius: 10px; background: #fbfdfb; cursor: pointer; }
+.characterRow button[data-active="true"] { border-color: #1d7e67; box-shadow: 0 0 0 2px rgba(29, 126, 103, .18); }
+.characterRow img { width: 100%; height: 100%; object-fit: contain; }

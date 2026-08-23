@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { HubAgentBookmark, InstalledAgent, InstalledMcpServer, MarketplaceListing, McpServerStatus, McpToolCatalogEntry } from "@shared/types";
 import type { OneOrgCollaborationStyle, OneOrgMember, OneOrgState } from "@shared/one-org";
+import { ONE_CHARACTER_OPTIONS } from "@/lib/one-characters";
 import { OneAgentPortrait } from "./OneAgentPortrait";
 import { OneBottomSheet } from "./OneBottomSheet";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
@@ -93,6 +94,7 @@ export function OneOrgChart({
   onOpenMember,
   onOpenOne,
   onEditOne,
+  onEditIdentity,
   activeMemberId,
   activeTaskForceIds,
   onBrowseTools,
@@ -115,7 +117,7 @@ export function OneOrgChart({
   hubBookmarks: HubAgentBookmark[];
   inventoryLoading?: boolean;
   locale: string;
-  onAdd: (installedAgentId: string, displayName?: string, leaseExpiresAt?: string | null) => Promise<void>;
+  onAdd: (installedAgentId: string, displayName?: string, leaseExpiresAt?: string | null, characterId?: string) => Promise<void>;
   onCreateAgent?: () => void;
   addRequest?: { token: number; source: "my" | "cloud" | "hub" };
   onMaterializeSource: (source: "cloud" | "hub", listing: MarketplaceListing) => Promise<InstalledAgent>;
@@ -130,6 +132,8 @@ export function OneOrgChart({
   onOpenMember?: (member: OneOrgMember) => void;
   onOpenOne?: () => void;
   onEditOne?: () => void;
+  /** 이름·캐릭터는 '에이전트 만들기'와 같은 창에서 고친다(오너 지적 2026-08-23). */
+  onEditIdentity?: (member: OneOrgMember) => void;
   activeMemberId?: string | null;
   activeTaskForceIds?: string[];
   onBrowseTools?: (member: OneOrgMember) => void;
@@ -157,6 +161,8 @@ export function OneOrgChart({
   const [addError, setAddError] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [editorMember, setEditorMember] = useState<OneOrgMember | null>(null);
+  // 앉힐 때 고르는 캐릭터. 만들기 화면과 같은 목록에서 고른다(오너 지적 2026-08-23).
+  const [addCharacterId, setAddCharacterId] = useState<string>(ONE_CHARACTER_OPTIONS[0]?.id ?? "");
   const [editStyle, setEditStyle] = useState<OneOrgCollaborationStyle>("default");
   const [replaceId, setReplaceId] = useState("");
   const [handover, setHandover] = useState(false);
@@ -191,11 +197,14 @@ export function OneOrgChart({
     "마케팅": ["마케팅", "marketing", "growth", "sales", "content"],
     "리서치": ["리서치", "research", "analysis", "analyst", "조사"],
   };
-  const replacementCandidates = installedAgents.filter((agent) => !usedIds.has(agent.id));
+  const replacementCandidates = installedAgents.filter((agent) => !usedIds.has(agent.id) && !agent.parentTeamId);
   const addSearchValue = addSearch.trim().toLocaleLowerCase();
   const candidates = installedAgents.filter((agent) => {
     if (usedIds.has(agent.id)) return false;
     if (agent.assetSource === "agent-cloud" || agent.assetSource === "hub") return false;
+    // 팀 패키지의 내부 역할(Orchestrator·Memory Curator 등)은 앉힐 수 있는 사람이 아니다.
+    // 팀은 팀으로 앉힌다 — 실측 2026-08-23: 팀 4개가 구성원 25명으로 풀려 목록을 뒤덮었다.
+    if (agent.parentTeamId) return false;
     if (!roleFilter) return true;
     const haystack = `${agent.name} ${agent.nameEn} ${agent.tagline} ${agent.taglineEn} ${agent.slug}`.toLocaleLowerCase();
     return (roleTerms[roleFilter] || []).some((term) => haystack.includes(term));
@@ -321,8 +330,8 @@ export function OneOrgChart({
       const leaseExpiresAt = addTab === "hub" && Number.isFinite(days) && days > 0
         ? new Date(Date.now() + days * 24 * 60 * 60 * 1_000).toISOString()
         : null;
-      await onAdd(installed.id, name.trim() || undefined, leaseExpiresAt);
-      setSelectedAgent(""); setName(""); setLeaseDays("0"); setAddSearch(""); setRoleFilter(null); setAddOpen(false);
+      await onAdd(installed.id, name.trim() || undefined, leaseExpiresAt, addCharacterId);
+      setSelectedAgent(""); setName(""); setLeaseDays("0"); setAddSearch(""); setRoleFilter(null); setAddOpen(false); setAddCharacterId(ONE_CHARACTER_OPTIONS[0]?.id ?? "");
     } catch (cause) {
       setAddError(cause instanceof Error ? cause.message : String(cause));
     } finally { setBusy(false); }
@@ -460,7 +469,13 @@ export function OneOrgChart({
         {editorMember && <div className={styles.memberEditor}>
           <section className={styles.editorSection}>
             <div className={styles.editorHeading}><strong>{editorCopy.basic}</strong><span>{memberKind(editorMember, installedAgents, locale)} · {sourceLabel(editorMember.source, locale)}</span></div>
-            <label className={styles.editorField}>{editorCopy.orgName}<input value={editName} onChange={(event) => setEditName(event.target.value)} maxLength={80} /></label>
+            {onEditIdentity
+              ? <button
+                  type="button"
+                  className={styles.secondaryAction}
+                  onClick={() => { const target = editorMember; setEditorMember(null); if (target) onEditIdentity(target); }}
+                >{locale === "ko" ? `이름·캐릭터 바꾸기 — ${editName || editorMember.displayName}` : `Change name & character — ${editName || editorMember.displayName}`}</button>
+              : <label className={styles.editorField}>{editorCopy.orgName}<input value={editName} onChange={(event) => setEditName(event.target.value)} maxLength={80} /></label>}
             <div className={styles.editorReadOnly}><span>{editorCopy.original}</span><strong>{editorInstalled?.localDisplayName || editorInstalled?.name || editorMember.agentSlug}</strong><small>{(ko ? editorInstalled?.tagline : editorInstalled?.taglineEn) || editorInstalled?.tagline || editorInstalled?.taglineEn || editorCopy.originalFallback}</small></div>
           </section>
 
@@ -529,6 +544,20 @@ export function OneOrgChart({
 
           {(selectedCandidate || selectedListing) && <section className={styles.selectedAgentPanel}>
             <label className={styles.editorField}>{addCopy.displayName}<input value={name} onChange={(event) => setName(event.target.value)} placeholder={addCopy.displayPlaceholder} /></label>
+            <div className={styles.editorField}>
+              <span>{locale === "ko" ? "캐릭터" : "Character"}</span>
+              <div className={styles.characterRow} role="listbox" aria-label={locale === "ko" ? "캐릭터 고르기" : "Choose a character"}>
+                {ONE_CHARACTER_OPTIONS.map((character) => <button
+                  key={character.id}
+                  type="button"
+                  role="option"
+                  aria-selected={addCharacterId === character.id}
+                  data-active={addCharacterId === character.id ? "true" : "false"}
+                  title={character.label}
+                  onClick={() => setAddCharacterId(character.id)}
+                >{/* eslint-disable-next-line @next/next/no-img-element */}<img src={character.src} alt={character.label} /></button>)}
+              </div>
+            </div>
             {addTab === "hub" && <label className={styles.editorField}>{addCopy.lease}<select value={leaseDays} onChange={(event) => setLeaseDays(event.target.value)}><option value="7">7 {ko ? "일" : "days"}</option><option value="30">30 {ko ? "일" : "days"}</option></select></label>}
             <div className={styles.modelPolicy}><IconSparkles size={15} /><div><strong>{addCopy.modelAuto}</strong><span>{selectedCandidate?.preferredBackend ? addCopy.modelPreferred(selectedCandidate.preferredBackend) : addCopy.modelDefault}</span></div></div>
             <p className={styles.note}>{addCopy.nameNote}</p>

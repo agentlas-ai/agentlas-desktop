@@ -142,7 +142,7 @@ import { OneGrowthCard } from "./OneGrowthCard";
 import { OneActivityArtifactRail, taskBrowserUrl, type OneLiveAppPreview } from "./OneActivityTimeline";
 import { OneOrgChart, type OneOrgSearchItem } from "./OneOrgChart";
 import { OneAgentPortrait } from "./OneAgentPortrait";
-import { OneCreateAgentDialog, type OneCreateAgentSeed } from "./OneCreateAgentDialog";
+import { OneCreateAgentDialog, type OneCreateAgentSeed, type OneEditMemberTarget } from "./OneCreateAgentDialog";
 import { OneTaskforceDialog, OneTaskforceRail } from "./OneTaskforces";
 import { OneComputerHistory } from "./OneComputerHistory";
 import { OneSettingsRail, OneSettingsSheet, type OneSettingsKey } from "./OneSettings";
@@ -823,6 +823,7 @@ export function OneShell() {
   const [taskforceBusy, setTaskforceBusy] = useState(false);
   const [createAgentOpen, setCreateAgentOpen] = useState(false);
   const [createAgentSeed, setCreateAgentSeed] = useState<OneCreateAgentSeed | null>(null);
+  const [editMemberTarget, setEditMemberTarget] = useState<OneEditMemberTarget | null>(null);
   const createAgentSeedTokenRef = useRef(0);
   const [agentPickerRequest, setAgentPickerRequest] = useState<{
     token: number;
@@ -1587,10 +1588,16 @@ export function OneShell() {
       requestOneOperationalRecovery("one-org", cause);
     }
   }, []);
-  const addOneOrg = useCallback((installedAgentId: string, displayName?: string, leaseExpiresAt?: string | null) => mutateOneOrg(() => {
+  const addOneOrg = useCallback((installedAgentId: string, displayName?: string, leaseExpiresAt?: string | null, characterId?: string) => mutateOneOrg(() => {
     const api = ipc();
     if (!api) return Promise.reject(new Error("Desktop bridge unavailable"));
-    return api.oneOrg.add({ installedAgentId, ...(displayName ? { displayName } : {}), ...(leaseExpiresAt !== undefined ? { leaseExpiresAt } : {}) });
+    return api.oneOrg.add({
+      installedAgentId,
+      ...(displayName ? { displayName } : {}),
+      ...(leaseExpiresAt !== undefined ? { leaseExpiresAt } : {}),
+      // 고른 캐릭터가 없으면 패키지가 들고 온 얼굴을 그대로 쓴다.
+      ...(characterId ? { avatar: { kind: "preset" as const, characterId } } : {}),
+    });
   }), [mutateOneOrg]);
   const materializeOneOrgSource = useCallback(async (source: "cloud" | "hub", listing: MarketplaceListing) => {
     const api = ipc();
@@ -4654,6 +4661,17 @@ export function OneShell() {
               onOpenMember={openOneMember}
               onOpenOne={startNewConversation}
               onEditOne={() => { setMemoryOpen(false); setProfileOpen(true); }}
+              onEditIdentity={(member) => {
+                // 이름·캐릭터는 '에이전트 만들기'와 같은 창에서 고친다(오너 지적 2026-08-23).
+                setEditMemberTarget({
+                  memberId: member.id,
+                  displayName: member.displayName,
+                  icon: member.icon,
+                  collaborationStyle: member.collaborationStyle ?? "default",
+                  revision: member.revision,
+                });
+                setCreateAgentOpen(true);
+              }}
               activeMemberId={activeOneMember?.installedAgentId ?? null}
               activeTaskForceIds={turnAgentIds}
               installedPlugins={installedPlugins}
@@ -5849,9 +5867,15 @@ export function OneShell() {
         open={createAgentOpen}
         locale={appLocale}
         seed={createAgentSeed}
+        edit={editMemberTarget}
         onClose={() => {
           setCreateAgentOpen(false);
           setCreateAgentSeed(null);
+          setEditMemberTarget(null);
+        }}
+        onUpdated={async () => {
+          setEditMemberTarget(null);
+          await refreshAll();
         }}
         onCreated={async (result) => {
           setCreateAgentOpen(false);
