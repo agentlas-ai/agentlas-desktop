@@ -2632,7 +2632,7 @@ export function validateCloudRegistrationReceipt(
     !json.cloudId.trim() ||
     json.slug !== manifest.slug ||
     json.scope !== expectedScope ||
-    json.packageHash !== manifest.packageHash ||
+    !registrationSawOurPackage(json, manifest) ||
     json.packageHashVersion !== manifest.packageHashVersion ||
     !/^rev_[a-f0-9]{32}$/.test(revision) ||
     responseEtag !== expectedEtag ||
@@ -2641,11 +2641,15 @@ export function validateCloudRegistrationReceipt(
   ) {
     throw new Error("Agentlas Cloud register returned an invalid or mismatched registration receipt.");
   }
+  const withheld = serverWithheldPaths(json);
   return {
     cloudId: json.cloudId,
     slug: json.slug,
     scope: expectedScope,
-    packageHash: manifest.packageHash,
+    // What the server actually stored. When it withholds a file of its own,
+    // that is a different package than the one sent, and the local record must
+    // say so or a later comparison reads as tampering.
+    packageHash: typeof json.packageHash === "string" && json.packageHash ? json.packageHash : manifest.packageHash,
     packageHashVersion: manifest.packageHashVersion,
     revision,
     etag: expectedEtag,
@@ -2653,7 +2657,45 @@ export function validateCloudRegistrationReceipt(
     ...(typeof json.marketplaceUrl === "string" ? { marketplaceUrl: json.marketplaceUrl } : {}),
     registeredAt: json.registeredAt,
     dryRun: false,
+    ...(withheld.length
+      ? {
+          autoRecovered: [
+            `Published without ${withheld.length} file(s) the server's own scan withheld: ${withheld.join(", ")}.`,
+          ],
+        }
+      : {}),
   };
+}
+
+/**
+ * THE SERVER MAY STORE LESS THAN IT RECEIVED, AND THAT IS NOT A FAILED PROOF.
+ *
+ * Registration verifies the submitted hash, then withholds any file its own
+ * scan judged credential-like and stores the remainder under a NEW hash, with
+ * `uploadReceipt.omissions` naming every dropped path. Comparing only against
+ * the stored hash turns that documented repair into "invalid or mismatched
+ * registration receipt" AFTER the listing is live — the agent searchable and
+ * callable on the Hub while its publisher is told the upload failed.
+ *
+ * Attestation is for proving the server saw exactly this package, and
+ * `submittedPackageHash` is that proof, so either hash matching ours satisfies
+ * it. A response carrying neither still fails closed.
+ */
+function registrationSawOurPackage(json: Record<string, unknown>, manifest: CloudAgentPackageManifest): boolean {
+  const ours = String(manifest.packageHash || "").toLowerCase();
+  if (String(json.packageHash ?? "").toLowerCase() === ours) return true;
+  const receipt = isRecord(json.uploadReceipt) ? json.uploadReceipt : null;
+  if (!receipt) return false;
+  return String(receipt.submittedPackageHash ?? "").toLowerCase() === ours;
+}
+
+/** Paths the server left out of the stored package, for the user to see. */
+function serverWithheldPaths(json: Record<string, unknown>): string[] {
+  const receipt = isRecord(json.uploadReceipt) ? json.uploadReceipt : null;
+  const omissions = receipt && Array.isArray(receipt.omissions) ? receipt.omissions : [];
+  return omissions
+    .map((entry) => (isRecord(entry) && typeof entry.path === "string" ? entry.path : ""))
+    .filter((value): value is string => value.length > 0);
 }
 
 function scopeForVisibility(visibility: CloudAgentVisibility): CloudAgentCloudScope {
