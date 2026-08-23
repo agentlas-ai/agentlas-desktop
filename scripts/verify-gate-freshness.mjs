@@ -23,6 +23,15 @@ const gateFiles = fs.readdirSync(path.join(root, "scripts"))
  * 것을 막는다. 게이트 스크립트 자체는 상당수가 로컬 전용(gitignore)이라 항상 디스크에서 읽는다.
  */
 const BASE_REF = process.env.AGENTLAS_GATE_BASE || "";
+let trackedSet = null;
+function isTracked(relative) {
+  if (!trackedSet) {
+    try {
+      trackedSet = new Set(execFileSync("git", ["ls-files"], { cwd: root, encoding: "utf8", maxBuffer: 256 * 1024 * 1024 }).split("\n"));
+    } catch { trackedSet = new Set(); }
+  }
+  return trackedSet.has(relative);
+}
 function readSource(relative) {
   if (BASE_REF) {
     // INDEX = 스테이지된 내용(`git show :path`). 공유 체크아웃에서 남의 미스테이지 편집이
@@ -31,7 +40,13 @@ function readSource(relative) {
     try {
       return execFileSync("git", ["show", spec], { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
     } catch {
-      return ""; // 그 커밋에 없던 파일. 빈 본문이면 앵커는 죽은 것으로 계산된다(정확).
+      // git 이 못 주는 이유는 둘이다. (1) 그 커밋/인덱스에 없던 파일 → 빈 본문이 정확하다.
+      // (2) 애초에 이 저장소가 추적하지 않는 파일(형제 저장소의 모바일 앱, 로컬 전용 파일)
+      //     → 빈 본문으로 세면 살아 있는 앵커가 전부 죽었다고 보고된다(실측: 모바일 계약 5건).
+      if (!isTracked(relative) && fs.existsSync(path.resolve(root, relative))) {
+        return fs.readFileSync(path.resolve(root, relative), "utf8");
+      }
+      return "";
     }
   }
   return fs.readFileSync(path.resolve(root, relative), "utf8");
@@ -42,6 +57,25 @@ function readSource(relative) {
  * 존재하지 않는다 — 없으면 디스크로 되돌아간다. 추적되는 게이트는 소스와 같은 기준으로 읽어야
  * "게이트는 새 것, 소스는 옛 것" 같은 섞인 판정을 내지 않는다.
  */
+/*
+ * "이 경로가 있는가"도 소스와 같은 기준으로 물어야 한다. 관문이 인덱스를 볼 때 디스크를 보면,
+ * 옆 세션이 아직 커밋하지 않은 삭제가 내 커밋의 "새 낡음"으로 잡힌다(실측: 다른 세션이 One
+ * 화면 몇 개를 지우는 중이었고, 그 미커밋 삭제가 게이트 4개를 낡음으로 만들었다).
+ */
+function sourceExists(relative) {
+  if (BASE_REF) {
+    const spec = BASE_REF === "INDEX" ? `:${relative}` : `${BASE_REF}:${relative}`;
+    try {
+      execFileSync("git", ["cat-file", "-e", spec], { cwd: root, stdio: ["ignore", "ignore", "ignore"] });
+      return true;
+    } catch {
+      // 추적하지 않는 파일(형제 저장소·로컬 전용)은 디스크가 유일한 사실이다.
+      return !isTracked(relative) && fs.existsSync(path.resolve(root, relative));
+    }
+  }
+  return fs.existsSync(path.resolve(root, relative));
+}
+
 function readGate(relative) {
   if (BASE_REF) {
     const spec = BASE_REF === "INDEX" ? `:${relative}` : `${BASE_REF}:${relative}`;
@@ -118,12 +152,25 @@ for (const gate of gateFiles) {
   const text = readGate(name);
   const missing = new Set();
   for (const m of text.matchAll(PATH_RE)) {
-    if (fs.existsSync(path.join(root, m[2]))) continue;
+    if (sourceExists(m[2])) continue;
     // "이 파일은 삭제된 채로 있어야 한다"를 지키는 게이트가 있다. 그런 존재 검사에 쓰인 경로는
     // 죽은 경로가 아니라 그 게이트의 요점이다(실측: test-automation-setup-request).
     const before = text.slice(Math.max(0, m.index - 140), m.index);
     // 존재 검사(삭제 유지 계약)와 게이트가 **직접 만드는** 픽스처 경로는 죽은 경로가 아니다.
     if (/existsSync\s*\(|writeFileSync\s*\(|mkdirSync\s*\(|cpSync\s*\(|\bpath:\s*$/.test(before)) continue;
+    // 같은 계약을 **목록으로** 쓰는 흔한 모양도 있다:
+    //   for (const retired of ["a.tsx", "b.tsx"]) assert.ok(!existsSync(join(root, retired)))
+    // 이때 경로 리터럴 앞에는 existsSync 가 없고 뒤에 온다. 뒤도 보지 않으면 "지워진 채로
+    // 있어야 한다"는 계약을 매번 죽은 경로로 오탐한다(2026-08-23 실측: 9건이 전부 이 모양).
+    const after = text.slice(m.index, Math.min(text.length, m.index + 600));
+    // 목록이 길면 140자 창에는 `of [` 가 안 들어온다(항목 4번째부터 오탐이 되살아난다).
+    // 목록 머리를 찾기 위한 창은 넉넉히 잡는다.
+    const beforeWide = text.slice(Math.max(0, m.index - 900), m.index);
+    const listHead = beforeWide.lastIndexOf("of [");
+    const inAbsenceLoop = listHead >= 0
+      && !beforeWide.slice(listHead).includes("]")
+      && /!\s*(?:fs\.)?existsSync\s*\(/.test(after);
+    if (inAbsenceLoop) continue;
     missing.add(m[2]);
   }
   if (missing.size) {

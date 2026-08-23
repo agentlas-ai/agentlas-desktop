@@ -465,9 +465,18 @@ function ensureAvailableAgent(id: string): InstalledAgent {
 
 function ensureSlot(): void {
   const info = getAgentConcurrencyInfo();
-  const used = activeRows().length + 1;
-  if (used >= Math.max(1, info.current)) {
-    throw new Error("One Team slots are full. Increase concurrency or archive a member first.");
+  const limit = Math.max(1, info.current);
+  // 한 칸 어긋나 있었다: `활성 + 1 >= 동시성` 은 동시성 1인 머신에서 **인원 0명일 때 이미 참**이라
+  // 저사양 사용자는 One Team 에 한 명도 앉힐 수 없었다(코어 3개 이하·메모리 6GB 이하면 동시성 1).
+  // 앉힐 수 있는 최대 인원은 동시성과 같다.
+  const active = activeRows().length;
+  if (active >= limit) {
+    // 거절 문구는 실제로 할 수 있는 행동만 말한다 — 팀원이 0명인 사람에게 "보관하세요"는 길이 아니다.
+    throw new Error(
+      active === 0
+        ? `One Team slots are full at the current concurrency (${limit}). Increase concurrency in Settings to add a member.`
+        : `One Team slots are full (${active}/${limit}). Increase concurrency or archive a member first.`,
+    );
   }
 }
 
@@ -722,9 +731,13 @@ export function setOneOrgMemberStatus(input: {
   const row = getDb().prepare("SELECT * FROM one_org_members WHERE installed_agent_id = ? AND archived_at IS NULL LIMIT 1").get(id) as Row | undefined;
   if (!row) return getOneOrgState();
   const now = new Date().toISOString();
+  // PRD §5.29 — 판번호(revision)는 **사용자의 편집**을 위한 CAS 값이다. 실행 정산이 만드는
+  // 상태 갱신(작업 중/완료/실패)까지 판번호를 올리면, 화면이 열려 있는 동안 실행이 한 번만
+  // 돌아도 사용자의 이름 변경·순서 변경이 "다른 화면에서 바뀌었다"로 헛되이 거절된다.
+  // 상태는 값만 갱신하고 판번호는 건드리지 않는다.
   getDb().prepare(`
     UPDATE one_org_members SET status_kind = ?, status_line = ?, pending_count = ?, pending_kind = ?,
-      unread_count = ?, credit_state = ?, last_activity_at = ?, updated_at = ?, revision = revision + 1
+      unread_count = ?, credit_state = ?, last_activity_at = ?, updated_at = ?
     WHERE id = ?
   `).run(
     input.statusKind, boundedLine(input.statusLine, row.status_line),

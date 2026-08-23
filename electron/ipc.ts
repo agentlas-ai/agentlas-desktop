@@ -489,7 +489,6 @@ import {
   snoozeOneSuggestion,
 } from "./one/suggestions";
 import { getOneSuggestionReviewSeed } from "./one/review-seed";
-import { getOneHomeSignals } from "./one/home-signals";
 import { getOneHubDerivativeDraft } from "./one/hub-derivative";
 import {
   getLatestOneValueClosure,
@@ -4278,7 +4277,6 @@ export function registerIpcHandlers(): void {
     getLatestOneValueClosure(taskId));
   ipcMain.handle("oneValueClosure:setReflection", (_e, input: SetOneValueClosureReflectionInput) =>
     setOneValueClosureReflection(input));
-  ipcMain.handle("oneHomeSignals:get", () => getOneHomeSignals());
   ipcMain.handle("oneWeeklyReflection:get", () => {
     // Async pre-pass: warm completion-claim judgments for the stored closure
     // statements the synchronous reflection builder peeks (miss = regex fallback).

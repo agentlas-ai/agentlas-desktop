@@ -1904,16 +1904,30 @@ export class InvocationService {
     if (!change.chatId || !change.agentId) return;
     for (const [runId, record] of this.activeRuns.entries()) {
       if (record.chatId !== change.chatId) continue;
+      const locale = pickLocale(record.request);
       if (record.oneMode) {
+        // PRD §3.5 — `closed` 는 프로세스 실패만 뜻하지 않는다. 유휴 회수(reaped)·풀 축출(evicted)·
+        // 앱 종료(shutdown)·턴 종료(turn-complete)도 같은 상태로 온다. 사유를 보지 않고 전부
+        // 실패로 적었기 때문에, 일을 끝낸 팀원이 조직도에 "실행 실패"로 남아 있었다.
+        // 문구도 한국어 하드코딩이라 영어 사용자는 아무 말도 못 봤다.
+        const closedIsFailure = change.state === "closed"
+          && !["reaped", "evicted", "shutdown", "turn-complete"].includes(change.reason);
+        const statusKind = change.state === "running"
+          ? "working"
+          : closedIsFailure ? "failed" : "quiet";
+        const statusLine = change.state === "running"
+          ? (locale === "ko" ? "지금 작업 중" : "Working now")
+          : closedIsFailure
+            ? (locale === "ko" ? "실패 · 확인 필요" : "Failed · review needed")
+            : (locale === "ko" ? "최근 작업 완료" : "Recently completed");
         setOneOrgMemberStatus({
           installedAgentId: change.agentId,
-          statusKind: change.state === "running" ? "working" : change.state === "closed" ? "failed" : "quiet",
-          statusLine: change.state === "running" ? "지금 작업 중" : change.state === "closed" ? "실행 실패 — 프로세스 종료" : "최근 작업 완료",
+          statusKind,
+          statusLine,
           ...(change.state === "running" ? { unreadCount: 0 } : {}),
           lastActivityAt: new Date().toISOString(),
         });
       }
-      const locale = pickLocale(record.request);
       const status = change.state === "running"
         ? locale === "ko" ? "CLI 프로세스 실행 중" : "CLI process running"
         : change.state === "idle"
@@ -1986,14 +2000,22 @@ export class InvocationService {
       const failed = receipt.status === "failed" || receipt.status === "cancelled" || receipt.status === "interrupted";
       const creditBlocked = receipt.errorCode === "insufficient_credits" || /insufficient[_ -]?credits/i.test(receipt.errorMessage || "");
       cacheOneOrgCompletionSummary({ installedAgentId: record.actualAgentId, runId });
+      // PRD §3.5 — 사람이 읽는 문구는 로케일 표에서 가져온다. 내부 오류 코드는 사용자 문장에
+      // 붙이지 않는다(코드는 영수증에 이미 있고, 화면에서는 뜻을 못 준다).
+      const settleLocale = pickLocale(record.request);
+      const statusLine = failed
+        ? creditBlocked
+          ? (settleLocale === "ko" ? "크레딧 부족" : "Out of credits")
+          : (settleLocale === "ko" ? "실패 · 확인 필요" : "Failed · review needed")
+        : (settleLocale === "ko" ? "최근 작업 완료" : "Recently completed");
       setOneOrgMemberStatus({
         installedAgentId: record.actualAgentId,
         statusKind: failed ? "failed" : record.pendingQuestion ? "waiting" : "quiet",
-        statusLine: failed
-          ? creditBlocked ? "크레딧 부족" : `실패 · ${receipt.errorCode || "실행 오류"}`
-          : "최근 작업 완료",
+        statusLine,
         unreadCount: failed ? 0 : 1,
-        ...(creditBlocked ? { creditState: "insufficient" as const } : {}),
+        // PRD §4.29 — 부족만 적고 성공 때 아무것도 안 보내면, 조직도가 옛 값을 그대로 유지해
+        // 충전 후에도 "크레딧 부족"이 영영 남았다. 성공 정산은 상태를 정상으로 되돌린다.
+        creditState: creditBlocked ? ("insufficient" as const) : ("ok" as const),
         ...(record.pendingQuestion ? { pendingCount: 1, pendingKind: "input" as const } : { pendingCount: 0 }),
         lastActivityAt: receipt.finishedAt || receipt.updatedAt,
       });

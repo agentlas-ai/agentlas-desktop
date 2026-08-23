@@ -1,6 +1,0 @@
-.root { max-width: min(540px, 84%); display: flex; align-items: flex-start; justify-self: start; gap: 9px; margin: 0; padding: 11px 13px; border: 0; border-radius: 15px 15px 15px 4px; background: #f1f1f2; }
-.eyebrow { color: #7e68ba; font-size: 9px; font-weight: 760; letter-spacing: .08em; }
-.root p { max-width: 470px; margin: 3px 0 8px; color: #505458; font-size: 12px; line-height: 1.5; }
-.root button { min-height: 28px; padding: 0 9px; border: 1px solid #d5d5d7; border-radius: 7px; background: #fff; color: #4a4e52; font-size: 9px; cursor: pointer; }
-.cursor { display: inline-block; width: 4px; height: 12px; margin-left: 2px; vertical-align: -2px; background: #8c79bd; animation: blink 1s steps(2) infinite; }
-@keyframes blink { 50% { opacity: 0; } }
