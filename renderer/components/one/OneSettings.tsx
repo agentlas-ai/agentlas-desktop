@@ -36,11 +36,12 @@ import type {
   RuntimeStatus,
 } from "@shared/types";
 import type { ComputerHistoryState } from "@shared/computer-history";
+import type { OneBriefingCadence, OneBriefingPreferences } from "@shared/one-briefing";
 import type { OneComposerModelOption, OnePermissionMode } from "./OneComposerControls";
 import { OneBottomSheet } from "./OneBottomSheet";
 import styles from "./OneSettings.module.css";
 
-export type OneSettingsKey = "mcp" | "plugins" | "permission" | "models" | "multimodal" | "concurrency" | "history";
+export type OneSettingsKey = "mcp" | "plugins" | "permission" | "models" | "multimodal" | "concurrency" | "history" | "briefing";
 
 type RailProps = {
   locale: string;
@@ -74,6 +75,7 @@ type SheetProps = {
 
 const SETTINGS_META: Record<OneSettingsKey, { titleKo: string; titleEn: string; descriptionKo: string; descriptionEn: string }> = {
   mcp: { titleKo: "MCP 서버", titleEn: "MCP servers", descriptionKo: "직접 등록한 MCP 서버의 연결과 실행 상태를 관리합니다.", descriptionEn: "Manage connections and runtime state for custom MCP servers." },
+  briefing: { titleKo: "브리핑 알림", titleEn: "Briefing notifications", descriptionKo: "One이 먼저 알려 주는 빈도와 방식, 방해 금지 시간을 정합니다.", descriptionEn: "Choose how often One reaches out, where it shows up, and when to stay quiet." },
   plugins: { titleKo: "플러그인", titleEn: "Plugins", descriptionKo: "카탈로그에서 설치한 도구를 켜거나 끕니다.", descriptionEn: "Enable or disable tools installed from the catalog." },
   permission: { titleKo: "실행 권한", titleEn: "Execution permission", descriptionKo: "One이 대화와 작업에서 사용할 기본 권한을 정합니다.", descriptionEn: "Choose One's default authority for conversations and work." },
   models: { titleKo: "모델", titleEn: "Models", descriptionKo: "CEO 오케스트레이터인 One의 기본 모델을 정합니다.", descriptionEn: "Choose the default model for One, the CEO orchestrator." },
@@ -119,6 +121,9 @@ export function OneSettingsRail({ locale, profileName, pendingMemoryCount, onBac
         <RailRow icon={<IconSparkles size={15} />} title={ko ? "모델" : "Models"} detail={ko ? "One CEO 기본 모델" : "One CEO default"} onClick={() => onOpen("models")} />
         <RailRow icon={<IconImage size={15} />} title={ko ? "멀티모달" : "Multimodal"} onClick={() => onOpen("multimodal")} />
         <RailRow icon={<IconApps size={15} />} title={ko ? "동시 실행" : "Concurrency"} onClick={() => onOpen("concurrency")} />
+      </div>
+      <div className={styles.railGroup}><span>{ko ? "알림" : "Notifications"}</span>
+        <RailRow icon={<IconSparkles size={15} />} title={ko ? "브리핑" : "Briefing"} detail={ko ? "주기·데스크탑 알림·방해 금지" : "Cadence, desktop alerts, quiet hours"} onClick={() => onOpen("briefing")} />
       </div>
       <div className={styles.railGroup}><span>{ko ? "개인정보" : "Privacy"}</span>
         <RailRow icon={<IconLock size={15} />} title="Computer History" onClick={() => onOpen("history")} />
@@ -278,6 +283,102 @@ function HistorySettings({ locale, state, onConsent }: { locale: string; state: 
   </div>;
 }
 
+/**
+ * PRD §6(데스크탑) — 브리핑 알림 기능은 Main·IPC·preload 까지 전부 배선돼 있는데 **화면에서
+ * 부르는 곳이 없었다.** 그래서 15분마다 도는 예약기는 알림을 낼 수 없었고(기본 채널이 앱 안
+ * 알림뿐), 주기·방해 금지도 기본값에 고정돼 있었다. 마지막 칸을 잇는다.
+ */
+function BriefingSettings({ locale }: { locale: string }) {
+  const ko = locale === "ko";
+  const [preferences, setPreferences] = useState<OneBriefingPreferences | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const api = ipc();
+    if (!api) return;
+    void api.oneBriefing.get()
+      .then((snapshot) => { if (!cancelled) setPreferences(snapshot?.preferences ?? null); })
+      .catch(() => { if (!cancelled) setError(ko ? "설정을 불러오지 못했습니다." : "Could not load these settings."); });
+    return () => { cancelled = true; };
+  }, [ko]);
+
+  const save = async (patch: { cadence?: OneBriefingCadence; channels?: OneBriefingPreferences["channels"]; quietHours?: OneBriefingPreferences["quietHours"] }) => {
+    const api = ipc();
+    if (!api || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      setPreferences(await api.oneBriefing.setPreferences(patch));
+    } catch {
+      // 실패를 삼키지 않는다 — 저장 안 된 것을 저장된 것처럼 보이게 두지 않는다.
+      setError(ko ? "저장하지 못했습니다. 다시 시도해 주세요." : "Could not save. Please try again.");
+      const api2 = ipc();
+      if (api2) setPreferences(await api2.oneBriefing.get().then((snapshot) => snapshot?.preferences ?? null).catch(() => null));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!preferences) {
+    return <div className={styles.emptyState}>{error ?? (ko ? "불러오는 중…" : "Loading…")}</div>;
+  }
+  const desktopOn = preferences.channels.includes("desktop_notification");
+  const cadences: Array<{ id: OneBriefingCadence; ko: string; en: string }> = [
+    { id: "important_only", ko: "중요한 것만", en: "Important only" },
+    { id: "daily", ko: "매일", en: "Daily" },
+    { id: "weekdays", ko: "평일", en: "Weekdays" },
+    { id: "weekly", ko: "주 1회", en: "Weekly" },
+  ];
+  return <div className={styles.settingList}>
+    {error && <div className={styles.emptyState}>{error}</div>}
+    <div className={styles.toolRow}>
+      <span className={styles.railCopy}>
+        <strong>{ko ? "알려 주는 빈도" : "How often One tells you"}</strong>
+        <small>{ko ? "One 이 먼저 말을 거는 정도입니다." : "How often One starts the conversation."}</small>
+      </span>
+      <select
+        value={preferences.cadence}
+        disabled={busy}
+        aria-label={ko ? "브리핑 빈도" : "Briefing cadence"}
+        onChange={(event) => void save({ cadence: event.target.value as OneBriefingCadence })}
+      >
+        {cadences.map((item) => <option key={item.id} value={item.id}>{ko ? item.ko : item.en}</option>)}
+      </select>
+    </div>
+    <div className={styles.toolRow}>
+      <span className={styles.railCopy}>
+        <strong>{ko ? "데스크탑 알림" : "Desktop notifications"}</strong>
+        <small>{ko ? "앱이 가려져 있을 때 OS 알림으로 알려 줍니다. 내용은 담지 않습니다." : "A generic OS alert when the app is hidden. It never carries details."}</small>
+      </span>
+      <input
+        type="checkbox"
+        checked={desktopOn}
+        disabled={busy}
+        aria-label={ko ? "데스크탑 알림 사용" : "Use desktop notifications"}
+        onChange={(event) => void save({
+          // 앱 안 알림은 항상 켜져 있다(계약상 최소 채널).
+          channels: event.target.checked ? ["in_app", "desktop_notification"] : ["in_app"],
+        })}
+      />
+    </div>
+    <div className={styles.toolRow}>
+      <span className={styles.railCopy}>
+        <strong>{ko ? "방해 금지" : "Quiet hours"}</strong>
+        <small>{ko ? `${preferences.quietHours.startHour}시 ~ ${preferences.quietHours.endHour}시에는 알리지 않습니다.` : `No alerts between ${preferences.quietHours.startHour}:00 and ${preferences.quietHours.endHour}:00.`}</small>
+      </span>
+      <input
+        type="checkbox"
+        checked={preferences.quietHours.enabled}
+        disabled={busy}
+        aria-label={ko ? "방해 금지 사용" : "Use quiet hours"}
+        onChange={(event) => void save({ quietHours: { ...preferences.quietHours, enabled: event.target.checked } })}
+      />
+    </div>
+  </div>;
+}
+
 export function OneSettingsSheet({ open, locale, installedPlugins, pluginCatalog, pluginStatuses, permission, runtime, models, history, onClose, onTogglePlugin, onSelectPermission, onSelectModel, onHistoryConsent, onOpenMcpLibrary, onToolTabChange }: SheetProps) {
   const ko = locale === "ko";
   const meta = open ? SETTINGS_META[open] : SETTINGS_META.mcp;
@@ -301,6 +402,7 @@ export function OneSettingsSheet({ open, locale, installedPlugins, pluginCatalog
       {open === "multimodal" && <MultimodalSettingsPanel locale={locale} active={open === "multimodal"} />}
       {open === "concurrency" && <ConcurrencySettings locale={locale} active={open === "concurrency"} />}
       {open === "history" && <HistorySettings locale={locale} state={history} onConsent={onHistoryConsent} />}
+      {open === "briefing" && <BriefingSettings locale={locale} />}
     </div>
   </OneBottomSheet>;
 }
