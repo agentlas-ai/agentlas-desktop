@@ -50,6 +50,15 @@ const ONE_OUTPUT_HISTORY_HEIGHT_STORAGE_KEY = "agentlas.one.output-history-heigh
 type OutputSectionKey = "files" | "agents" | "processes" | "computer" | "sources";
 type OutputRailView = "result" | "activity" | "terminal" | "browser" | "app";
 
+/** 탭마다 제 아이콘 — 글자만 있으면 어느 탭인지 눈으로 못 고른다. */
+function RailTabIcon({ view }: { view: OutputRailView }) {
+  if (view === "browser") return <IconNetwork size={12} />;
+  if (view === "terminal") return <IconCode size={12} />;
+  if (view === "app") return <IconPanelRight size={12} />;
+  if (view === "result") return <IconCheck size={12} />;
+  return <IconSparkles size={12} />;
+}
+
 function railTabLabel(view: OutputRailView, locale: "ko" | "en"): string {
   if (view === "result") return locale === "ko" ? "결과" : "Result";
   if (view === "app") return locale === "ko" ? "앱" : "App";
@@ -1351,6 +1360,7 @@ export function OneActivityArtifactRail({
                 aria-selected={railView === view}
                 onClick={() => selectRailView(view)}
               >
+                <RailTabIcon view={view} />
                 {railTabLabel(view, locale)}
               </button>
               <button
@@ -1363,8 +1373,6 @@ export function OneActivityArtifactRail({
               </button>
             </span>
           ))}
-        </div>
-        <div className={styles.artifactHeaderActions}>
           <span className={styles.artifactAddWrap}>
             <button
               type="button"
@@ -1394,6 +1402,8 @@ export function OneActivityArtifactRail({
               </div>
             )}
           </span>
+        </div>
+        <div className={styles.artifactHeaderActions}>
           {onClose && <button type="button" onClick={onClose} aria-label={locale === "ko" ? "출력 패널 접기" : "Collapse output panel"}><IconClose size={15} /></button>}
         </div>
       </nav>

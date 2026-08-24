@@ -68,8 +68,11 @@
 .mobileTable { display: none; }
 
 .table {
-  width: 100%;
-  min-width: 480px;
+  /* width:100% 를 고정으로 두면 열 수가 늘어날수록 한 열이 한 글자 폭까지
+     줄어 "부/동/산" 처럼 세로로 쪼개졌다(실측: 결과 패널을 연 상태의 7열 표).
+     내용만큼 넓히고, 좁으면 감싼 칸이 가로로 민다. */
+  width: max-content;
+  min-width: 100%;
   border-collapse: collapse;
   color: #292d30;
   font-size: 12px;
@@ -77,6 +80,8 @@
 
 .table th,
 .table td {
+  /* 한 열이 읽을 수 없을 만큼 좁아지지 않게 하는 하한. */
+  min-width: 96px;
   padding: 10px 12px;
   border-bottom: 1px solid #eceeef;
   text-align: left;

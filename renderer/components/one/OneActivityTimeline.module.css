@@ -292,6 +292,9 @@
  */
 .artifactTabs button[role="tab"] {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   min-width: 0;
   height: 28px;
   padding: 0 4px 0 8px;
@@ -829,7 +832,23 @@ button.artifactVisual { cursor: pointer; }
 
 .artifactTabClose:hover { background: #e4e6e7; color: #1d2023; }
 
-.artifactAddWrap { position: relative; display: inline-flex; }
+.artifactAddWrap { position: relative; display: inline-flex; flex: 0 0 auto; }
+
+/* + 는 탭 바로 뒤에 붙는다 — 오른쪽 끝에 두면 어느 줄에 속하는지 모른다. */
+.artifactAddWrap > button {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #8a9195;
+  cursor: pointer;
+}
+
+.artifactAddWrap > button:hover { background: #f1f2f3; color: #1d2023; }
 
 .artifactAddMenu {
   position: absolute;

@@ -612,8 +612,11 @@ function TableBlock({
     >
       <table
         style={{
-          width: "100%",
-          minWidth: "max-content",
+          // width:100% 가 minWidth:max-content 를 이겨서, 칸이 좁아지면 셀
+          // 글자가 한 글자씩 세로로 쪼개졌다(실측: 결과 패널을 연 폭에서
+          // "부/동/산" 처럼 끊김). 내용만큼 넓히고, 좁으면 가로로 민다.
+          width: "max-content",
+          minWidth: "100%",
           borderCollapse: "collapse",
           fontSize: 13,
           lineHeight: 1.45,
@@ -626,6 +629,7 @@ function TableBlock({
                 key={j}
                 style={{
                   padding: "8px 12px",
+                  minWidth: 88,
                   textAlign: alignToCss(block.align[j] ?? "default") ?? "left",
                   fontWeight: 700,
                   fontSize: 12,
@@ -653,6 +657,7 @@ function TableBlock({
                   key={ci}
                   style={{
                     padding: "8px 12px",
+                    minWidth: 88,
                     textAlign: alignToCss(block.align[ci] ?? "default") ?? "left",
                     borderTop: "1px solid var(--paper-edge)",
                     color: "var(--ink)",
