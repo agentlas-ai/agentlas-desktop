@@ -74,7 +74,7 @@
 .archivedRow { display: flex; justify-content: space-between; padding-top: 7px; }
 .archivedRow button { border: 0; background: none; color: #278c70; font-size: 9px; cursor: pointer; }
 .overlay { position: fixed; z-index: 80; inset: 0; display: grid; place-items: center; background: rgba(27, 33, 30, .25); backdrop-filter: blur(4px); }
-.dialog { width: min(390px, calc(100vw - 32px)); display: grid; gap: 14px; padding: 18px; border: 1px solid #e2e7e4; border-radius: 16px; background: #fff; box-shadow: 0 18px 70px rgba(21, 32, 26, .18); }
+.dialog { width: var(--popup-3-width); display: grid; gap: 14px; padding: 18px; border: 1px solid #e2e7e4; border-radius: 16px; background: #fff; box-shadow: 0 18px 70px rgba(21, 32, 26, .18); }
 .dialogHeader { display: flex; align-items: center; justify-content: space-between; }
 .dialogHeader h3 { margin: 0; font-size: 15px; }
 .dialogHeader button { border: 0; background: none; color: #87908b; font-size: 20px; cursor: pointer; }

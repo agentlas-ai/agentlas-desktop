@@ -18,7 +18,7 @@
 .keyPanel {
   display: flex;
   flex-direction: column;
-  width: min(880px, 100%);
+  width: var(--popup-1-width);
   max-height: min(760px, 100%);
   border-radius: 18px;
   border: 1px solid var(--glass-border, rgba(0, 0, 0, 0.12));
@@ -28,7 +28,7 @@
 }
 
 .keyPanel {
-  width: min(520px, 100%);
+  width: var(--popup-3-width);
 }
 
 .header {
@@ -467,7 +467,7 @@
 .inlineStage {
   display: flex;
   flex-direction: column;
-  width: min(560px, 100%);
+  width: var(--popup-3-width);
   margin: 8px auto 0;
   overflow: hidden;
   border: 1px solid #e3e3de;

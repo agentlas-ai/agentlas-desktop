@@ -10,7 +10,7 @@
 }
 
 .dialog {
-  width: min(880px, calc(100vw - 32px));
+  width: var(--popup-1-width);
   max-height: min(720px, calc(100vh - 32px));
   overflow: auto;
   border: 1px solid rgba(15, 23, 42, 0.1);

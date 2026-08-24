@@ -251,7 +251,7 @@
 .surfaceTag { width: 31px; height: 31px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 8px; background: #edf6f2; color: var(--teal); font-size: 10px; font-weight: 750; }
 
 .dialogBackdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 22px; background: rgb(5 18 15 / 0.48); backdrop-filter: blur(5px); }
-.dialog { width: min(690px, 100%); max-height: min(740px, calc(100vh - 44px)); overflow: hidden; display: flex; flex-direction: column; border: 1px solid #dfe8e4; border-radius: 20px; background: #fff; box-shadow: 0 28px 85px rgb(4 25 19 / 0.25); }
+.dialog { width: var(--popup-2-width); max-height: min(740px, calc(100vh - 44px)); overflow: hidden; display: flex; flex-direction: column; border: 1px solid #dfe8e4; border-radius: 20px; background: #fff; box-shadow: 0 28px 85px rgb(4 25 19 / 0.25); }
 .dialogHeader { display: flex; align-items: flex-start; justify-content: space-between; gap: 22px; padding: 25px 26px 18px; }
 .dialogHeader > div { display: grid; gap: 5px; }
 .dialogEyebrow { color: var(--teal); font-size: 9px; font-weight: 760; letter-spacing: 0.16em; }

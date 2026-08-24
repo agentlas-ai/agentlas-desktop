@@ -17,7 +17,7 @@
   position: relative;
   display: flex;
   flex-direction: column;
-  width: min(460px, 92vw);
+  width: var(--popup-3-width);
   max-height: min(720px, calc(100vh - 48px));
   /* 카드 자체는 스크롤하지 않는다 — .scroll 만 스크롤해서 닫기 버튼과 주 CTA 가
      내용 길이와 무관하게 항상 화면에 남는다. */

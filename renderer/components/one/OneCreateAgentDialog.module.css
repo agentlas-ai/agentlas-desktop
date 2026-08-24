@@ -1,4 +1,4 @@
-.dialog { width: min(960px, 100%); }
+.dialog { width: var(--popup-1-width); }
 .body { padding-top: 20px; }
 
 .layout {
