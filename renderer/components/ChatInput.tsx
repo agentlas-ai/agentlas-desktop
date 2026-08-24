@@ -736,8 +736,15 @@ function ChatInputComponent({
      */
     const appRoute = parseAppSlashRoute(text);
     if (appRoute) {
-      onSend(buildAppRoutePrompt(appRoute, locale === "en" ? "en" : "ko"), currentSendOptions());
       finishComposerAfterSend();
+      if (appRoute.request) {
+        // 할 말이 붙어 있으면 그 앱에 시키는 요청이다.
+        onSend(buildAppRoutePrompt(appRoute, locale === "en" ? "en" : "ko"), currentSendOptions());
+      } else {
+        // 명령만 쳤으면 그 앱을 연다. 이 길이 없어서 창업 스튜디오 화면(511줄)은
+        // 도달하는 문이 아예 없었다(감사 2026-08-25).
+        router.push(appRoute.app.route);
+      }
       return;
     }
     const pluginMention = /(^|\s)@plugin-make\b/i.exec(text);
