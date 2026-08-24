@@ -2033,6 +2033,32 @@ export function OneShell() {
       return () => { cancelled = true; };
     }
 
+    /*
+     * 진단용 한 줄 — 동작은 바꾸지 않는다.
+     *
+     * 이 자리는 "사용자가 다른 대화로 옮겼다"고 보고 **도는 실행의 실시간 구독을 끊는**
+     * 곳이다. 웹 이식본에서 전송 직후 이 teardown 이 돌아, 방금 건 구독이 열리기도 전에
+     * 닫히는 것이 관측됐다(2026-08-24). 판정이 왜 "옮겼다"로 나왔는지는 두 값을 나란히
+     * 봐야 알 수 있는데, 그 순간을 사람이 재현해 잡기 어렵다.
+     *
+     * `window.__ipcTrace` 가 정의돼 있을 때만 적는다 — 없으면 아무 일도 하지 않으므로
+     * 제품 동작·성능에 영향이 없다. 원인이 확정되면 지운다.
+     */
+    try {
+      const trace = (globalThis as { __ipcTrace?: unknown[] }).__ipcTrace;
+      if (Array.isArray(trace)) {
+        trace.push({
+          at: "one-shell/teardown",
+          activeThreadChatId,
+          runChatId: runChatIdRef.current,
+          runId: runIdRef.current,
+          promotionHandoff,
+          activeThreadUnknown,
+        });
+      }
+    } catch {
+      // 진단이 제품을 멈추게 하지 않는다.
+    }
     unsubscribeRunRef.current?.();
     unsubscribeRunRef.current = null;
     runIdRef.current = null;
