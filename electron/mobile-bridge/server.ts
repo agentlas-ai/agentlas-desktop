@@ -1300,6 +1300,27 @@ export class AgentlasMobileBridgeServer {
   }
 
   /** DESKTOP_MOBILE_BRIDGE: revocation takes effect on live sockets immediately. */
+  /**
+   * 지금 붙어 있는 전화를 전부 끊는다 — **자격은 지우지 않는다.**
+   *
+   * ★ 왜 필요한가 (2026-08-24 실측): 전화는 **연결을 맺을 때 한 번만** 인증한다. 그래서
+   *   로그아웃해도 이미 붙어 있는 연결은 그대로 살아 계속 명령을 보낼 수 있었다. 계정 교체
+   *   경로는 기기를 폐기하며 끊었지만, 로그아웃은 폐기 대상이 비어 있어(로그아웃엔 활성
+   *   워크스페이스가 없다) 아무것도 끊지 않았다.
+   *
+   * 자격을 지우지 않는 이유는 따로 있다 — 예전에 로그아웃/부팅에서 지우다가 실제 기계에서
+   * 짝지은 39대가 전부 끊겼다. 다시 로그인하면 그대로 살아나야 한다. 그래서 "끊되 지우지
+   * 않는다" 가 옳은 자리다: 다시 붙으려면 로그인해야 하고(서명 게이트), 로그인하면 복구된다.
+   */
+  disconnectAllDevices(): number {
+    const deviceIds = new Set<string>();
+    for (const state of this.clients) {
+      if (state.context.deviceId) deviceIds.add(state.context.deviceId);
+    }
+    for (const deviceId of deviceIds) this.disconnectDevice(deviceId);
+    return deviceIds.size;
+  }
+
   disconnectDevice(deviceId: string): void {
     for (const state of this.clients) {
       if (state.context.deviceId !== deviceId) continue;

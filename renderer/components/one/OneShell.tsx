@@ -785,6 +785,33 @@ function writeBriefingDismissal(signature: string): number {
   return expiresAt;
 }
 
+/**
+ * 마지막으로 열어 본 One 대화. 앱을 껐다 켜거나 다른 화면에 다녀와도 그 대화로 돌아온다.
+ * "새 대화"를 누르면 지워져 홈에서 시작한다 — 사용자가 명시적으로 바꾼 것이기 때문이다.
+ *
+ * ★ 왜 필요한가 (오너 신고 2026-08-24): One 은 열 때마다 항상 홈(빈 대화)에서 시작했고,
+ *   돌아갈 대화를 고르는 길도 없어서 "켤 때마다 기존 대화가 날아간다" 로 보였다.
+ */
+const LAST_ONE_CONVERSATION_KEY = "agentlas.one.lastConversationId";
+
+function rememberLastOneConversation(chatId: string | null): void {
+  try {
+    if (chatId) window.localStorage.setItem(LAST_ONE_CONVERSATION_KEY, chatId);
+    else window.localStorage.removeItem(LAST_ONE_CONVERSATION_KEY);
+  } catch {
+    /* 저장소를 못 쓰는 환경에서는 기억하지 않을 뿐, 화면은 그대로 돈다. */
+  }
+}
+
+function readLastOneConversation(): string | null {
+  try {
+    const value = window.localStorage.getItem(LAST_ONE_CONVERSATION_KEY);
+    return value && value.trim() ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 export function OneShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -1279,6 +1306,9 @@ export function OneShell() {
     }
     selectedTaskIdRef.current = selectedTaskId;
     selectedConversationIdRef.current = selectedConversationId;
+    // 어떤 길로 들어왔든(목록 클릭·주소 복원·앱 재시작) 지금 보고 있는 대화를 기억한다.
+    // 목록 클릭에만 걸어 두면 주소로 들어온 경우를 놓쳐 다음 실행에서 홈으로 떨어진다.
+    if (selectedConversationId) rememberLastOneConversation(selectedConversationId);
   }, [selectedConversationId, selectedTaskId]);
 
   useEffect(() => {
@@ -1567,8 +1597,19 @@ export function OneShell() {
       // 목록은 이미 One 것만 온다(위 listRecentOne). 여기서는 Task/태스크포스로 따로
       // 그려지는 것만 뺀다 — origin 검사는 남겨 둔다. 계약이 깨지면 조용히 넘어가는 대신
       // 여기서 걸러지는 편이 낫다.
+      /*
+       * ★ 2026-08-24 (오너 신고: "One 킬 때마다 기존 대화 날아감"): 팀 대화를 이 목록에서
+       *   빼 두었는데, 팀 목록을 그리는 화면은 **끝내 만들어지지 않았다**(taskforces 상태를
+       *   렌더하는 곳이 저장소에 하나도 없다). 그래서 팀과 나눈 대화는 어디에도 나타나지
+       *   않아 돌아갈 길이 없었다 — 지워진 것이 아니라 닿을 수 없었던 것이다.
+       *   목록에 함께 싣는다. 어느 것이 팀인지는 아래에서 표시한다.
+       */
       const taskforceChatIds = new Set(taskforceRows.map((taskforce) => taskforce.chatId));
-      setConversations(keepPrevIfDeepEqual(recentChats.filter((chat) => !chat.taskId && chat.originSurface === "one" && !taskforceChatIds.has(chat.id))));
+      setConversations(keepPrevIfDeepEqual(
+        recentChats
+          .filter((chat) => !chat.taskId && chat.originSurface === "one")
+          .map((chat) => (taskforceChatIds.has(chat.id) ? { ...chat, isTaskforce: true } : chat)),
+      ));
       const wanted = selectedTaskIdRef.current;
       if (wanted) {
         const detail = items.find((item) => item.taskId === wanted)
@@ -3864,6 +3905,7 @@ export function OneShell() {
     homeTransitionPendingRef.current = true;
     selectedTaskIdRef.current = null;
     selectedConversationIdRef.current = null;
+    rememberLastOneConversation(null);
     setSelected(null);
     setConversation(null);
     setFailureFocus(null);
@@ -3970,10 +4012,39 @@ export function OneShell() {
     setSearchOpen(false);
     selectedTaskIdRef.current = null;
     selectedConversationIdRef.current = chatId;
+    rememberLastOneConversation(chatId);
     router.replace(`/one?chat=${encodeURIComponent(chatId)}`);
     void refreshAll({ includeOrg: false });
   }, [refreshAll, router]);
 
+
+  /*
+   * 마지막으로 보던 대화로 돌아간다 — 앱을 껐다 켜도, 다른 화면에 다녀와도.
+   * 주소에 대화가 이미 지정돼 있거나, 방금 "새 대화"를 누른 참이면 건드리지 않는다.
+   * 기억된 대화가 목록에 없으면(지워졌으면) 기억을 버리고 홈에 머문다.
+   */
+  const oneConversationRestoredRef = useRef(false);
+  useEffect(() => {
+    if (oneConversationRestoredRef.current) return;
+    if (selectedConversationId || selectedTaskId) { oneConversationRestoredRef.current = true; return; }
+    if (homeTransitionPendingRef.current) return;
+    const remembered = readLastOneConversation();
+    if (!remembered) { oneConversationRestoredRef.current = true; return; }
+    oneConversationRestoredRef.current = true;
+    // 목록이 채워지기를 기다리지 않는다 — 목록은 늦게 오거나 비어 있을 수 있고, 그러면
+    // 사용자는 홈에 떨어진 채 남는다("켤 때마다 대화가 날아간다"). 기억한 대화를 바로 열고,
+    // 그 대화가 이미 사라졌다면 아래에서 기억을 버린다.
+    void (async () => {
+      try {
+        const api = ipc();
+        const chat = api ? await api.chats.get(remembered).catch(() => null) : null;
+        if (!chat || chat.archivedAt) { rememberLastOneConversation(null); return; }
+        openConversation(remembered);
+      } catch {
+        rememberLastOneConversation(null);
+      }
+    })();
+  }, [selectedConversationId, selectedTaskId, openConversation]);
   const openTaskforce = useCallback((taskforce: OneTaskforce) => {
     setRailOpen(false);
     setSearchOpen(false);

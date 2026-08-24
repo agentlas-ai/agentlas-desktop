@@ -474,6 +474,24 @@ export function reconcileMobileBridgeDevicesForAccount(
   }
   // A challenge minted for the previous account can never be completed.
   state.pairing.dispose();
+  /*
+   * 로그아웃(활성 워크스페이스 없음)이면 **지금 붙어 있는 전화를 끊는다.**
+   *
+   * ★ 2026-08-24 실측: 전화는 연결을 맺을 때 한 번만 인증한다. 그리고 아래 폐기 목록은
+   *   로그아웃일 때 언제나 비어 있다(폐기 판정에 활성 워크스페이스가 필요하다). 그래서
+   *   로그아웃해도 이미 붙어 있는 연결은 그대로 살아 계속 명령을 보낼 수 있었다 —
+   *   "로그아웃하면 서빙이 멈춘다" 는 새로 연결하는 경우에만 참이었다.
+   *
+   *   자격은 그대로 둔다. 지우면 다시 로그인해도 되살아나지 않는다(예전에 그렇게 짝지은
+   *   39대를 전부 끊은 적이 있다). 끊기만 하면 다시 붙으려면 로그인해야 하고, 로그인하면
+   *   페어링이 그대로 복구된다.
+   */
+  if (!activeWorkspaceId) {
+    const dropped = state.server.disconnectAllDevices();
+    if (dropped > 0) {
+      console.warn(`[mobile-bridge] disconnected ${dropped} phone(s): this Desktop is signed out (credentials kept)`);
+    }
+  }
   if (!userDataPath) return { revoked: 0 };
   const revoked = revokeMobileBridgeDevicesForOtherAccounts(userDataPath, activeWorkspaceId);
   for (const deviceId of revoked) state.server.disconnectDevice(deviceId);

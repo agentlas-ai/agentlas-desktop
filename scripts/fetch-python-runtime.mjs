@@ -191,6 +191,71 @@ rmSync(tmp, { recursive: true, force: true });
 
 const bin = process.platform === "win32" ? path.join(outDir, "python.exe") : path.join(outDir, "bin", "python3");
 if (!existsSync(bin)) fail(`설치 후 python 바이너리를 찾지 못함: ${bin}`);
+
+/*
+ * 엔진이 쓰는 파이썬 패키지를 번들 안에 넣는다.
+ *
+ * ★ 왜 (2026-08-24 실측): 동봉 엔진은 `jsonschema` 와 `referencing` 을 import 한다. 번들에
+ *   없으면 그 기능은 사용자의 `~/.local` 에 있는 것을 집어 쓰다가 아키텍처가 다르면 죽고,
+ *   `~/.local` 을 무시하도록 막아 두면 이번엔 모듈이 없어서 죽는다 — 어느 쪽이든 실패다.
+ *   그래서 우리가 배포하는 인터프리터가 스스로 갖고 있어야 한다.
+ *
+ * ★ 왜 여기(지문 계산 앞): 트리 지문은 이 아래에서 계산되고 afterPack 이 그 값과 대조한다.
+ *   설치를 지문 뒤에 하거나 손으로 하면 지문이 어긋나 **맥 빌드가 통째로 멈춘다**(실제로
+ *   손으로 깔린 148개 파일이 그렇게 빌드를 막고 있었다).
+ *
+ * 버전은 전부 고정한다 — 재현되지 않으면 지문도 재현되지 않는다.
+ */
+const BUNDLED_PYTHON_PACKAGES = [
+  "jsonschema==4.26.0",
+  "jsonschema-specifications==2025.9.1",
+  "referencing==0.37.0",
+  "rpds-py==2026.6.3",
+  "attrs==26.1.0",
+  "typing-extensions==4.16.0",
+];
+
+/** 대상 플랫폼의 휠 태그. 크로스 아키텍처 빌드에서 네이티브 휠(rpds-py)을 바르게 고르게 한다. */
+function pipPlatformTags(tripleValue) {
+  if (tripleValue.includes("apple-darwin")) {
+    return tripleValue.startsWith("aarch64")
+      ? ["macosx_11_0_arm64", "macosx_12_0_arm64", "macosx_14_0_arm64"]
+      : ["macosx_10_9_x86_64", "macosx_10_12_x86_64", "macosx_11_0_x86_64"];
+  }
+  if (tripleValue.includes("windows")) return tripleValue.startsWith("aarch64") ? ["win_arm64"] : ["win_amd64"];
+  return tripleValue.startsWith("aarch64")
+    ? ["manylinux_2_17_aarch64", "manylinux2014_aarch64"]
+    : ["manylinux_2_17_x86_64", "manylinux2014_x86_64"];
+}
+
+const sitePackages = process.platform === "win32"
+  ? path.join(outDir, "Lib", "site-packages")
+  : path.join(outDir, "lib", `python${pyver.split(".").slice(0, 2).join(".")}`, "site-packages");
+if (!existsSync(sitePackages)) fail(`site-packages 를 찾지 못함: ${sitePackages}`);
+console.log(`[fetch-python] bundling ${BUNDLED_PYTHON_PACKAGES.length} engine package(s)…`);
+{
+  const pipArgs = [
+    "-m", "pip", "install", "--quiet", "--no-input", "--disable-pip-version-check",
+    "--no-compile", "--target", sitePackages, "--upgrade",
+  ];
+  // 이 기계에서 그대로 돌 수 있는 파이썬이면 직접 풀게 두고, 아니면 대상 플랫폼 휠만 받는다.
+  if (targetArch !== process.arch || process.platform !== (triple.includes("apple-darwin") ? "darwin" : triple.includes("windows") ? "win32" : "linux")) {
+    pipArgs.push("--only-binary=:all:", "--python-version", pyver.split(".").slice(0, 2).join("."));
+    for (const tag of pipPlatformTags(triple)) pipArgs.push("--platform", tag);
+  }
+  execFileSync(bin, [...pipArgs, ...BUNDLED_PYTHON_PACKAGES], {
+    stdio: "inherit",
+    env: { ...process.env, PYTHONNOUSERSITE: "1", PYTHONDONTWRITEBYTECODE: "1", PIP_DISABLE_PIP_VERSION_CHECK: "1" },
+  });
+}
+// 넣었다고 믿지 않고 실제로 불러 본다 — 없으면 그 기능은 사용자 손에서 죽는다.
+for (const moduleName of ["jsonschema", "referencing"]) {
+  execFileSync(bin, ["-c", `import ${moduleName}`], {
+    env: { ...process.env, PYTHONNOUSERSITE: "1", PYTHONDONTWRITEBYTECODE: "1" },
+  });
+}
+console.log("[fetch-python] engine packages import cleanly from the bundled interpreter.");
+
 const executableRelativePath = path.relative(outDir, bin).split(path.sep).join("/");
 const executableSha256 = await sha256File(bin);
 const runtimeTreeDigest = await runtimeTreeSha256(outDir);

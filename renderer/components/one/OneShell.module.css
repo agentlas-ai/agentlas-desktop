@@ -2969,6 +2969,18 @@
   --ink: #f7f8fa;
   --ink-soft: #c9ccd4;
   --hairline: 1px solid rgba(255, 255, 255, .16);
+  /* ★ 2026-08-24 실측: 본문은 `--ink` 가 아니라 **`--design-ink`** 로 칠해진다
+     (.design-output-surface { color: var(--design-ink) }). 그 토큰은 최상위에서
+     `--design-ink: var(--ink)` 로 **한 번 계산되어 굳기 때문에**, 여기서 `--ink` 만
+     뒤집으면 본문은 여전히 최상위의 검은 값(#001519)을 쓴다 — 검은 말풍선에 검은 글자다.
+     그래서 이 말풍선 안에서 쓰이는 design 계열을 함께 뒤집는다. */
+  --design-ink: #f7f8fa;
+  --design-ink-2: #c9ccd4;
+  --design-muted: #c9ccd4;
+  --design-faint: #9aa0aa;
+  --design-line: rgba(255, 255, 255, .18);
+  --design-line-2: rgba(255, 255, 255, .24);
+  --output-surface-ink: #f7f8fa;
 }
 
 .messageBody > :global(div) {

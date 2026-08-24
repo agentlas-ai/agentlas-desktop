@@ -4990,18 +4990,35 @@ export function initStore(options: StoreInitOptions = {}): void {
           return `${column.name} ${column.type || "TEXT"}${pk}${notNull}${dflt}`;
         }).join(",\n            ");
         const carriedNames = carried.map((column) => column.name).join(", ");
+        /*
+         * ★ 외래키도 "실제 있는 열" 로만 건다 (2026-08-24 실측으로 잡은 사고).
+         *   열 목록은 실행 시점에 읽으면서 **외래키 절과 INSERT 는 이름을 손으로 박아** 뒀다.
+         *   아주 오래된 스키마에서 올라오는 DB 의 chats 에는 `project_id` 도 `agent_id` 도
+         *   아직 없어서, 그 사람들의 업데이트가 `unknown column "project_id" in foreign key
+         *   definition` 으로 **여기서 통째로 멈췄다.** 오래 안 쓰다 켠 사람만 맞는 종류다.
+         */
+        // ★ 원본 chats 의 열 목록으로 확인한다. `carried` 는 우리가 의미를 바꾸는 두 열
+        //   (agent_id·seat_id)을 **빼 둔** 목록이라, 거기서 agent_id 를 찾으면 언제나 없다 —
+        //   그러면 좌석 만들기가 통째로 건너뛰어진다(내가 처음에 그렇게 썼다).
+        const carriedHas = (name: string): boolean => chatColumns.some((column) => column.name === name);
+        const foreignKeys = [
+          ...(carriedHas("project_id") ? ["FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE SET NULL"] : []),
+          "FOREIGN KEY(seat_id) REFERENCES one_seats(id) ON DELETE CASCADE",
+          "FOREIGN KEY(agent_id) REFERENCES installed_agents(id) ON DELETE SET NULL",
+        ].join(",\n            ");
+        // 옛 chats 에 agent_id 가 없으면 옮겨올 값도 없다 — NULL 로 시작하고, 그 뒤 사다리가
+        // 채운다. (agent_id 는 이 단계에서 NULL 허용으로 강등되므로 안전하다.)
+        const carriedAgentId = carriedHas("agent_id") ? "agent_id" : "NULL";
         _db!.exec(`
           DROP TABLE IF EXISTS chats_v102;
           CREATE TABLE chats_v102 (
             ${columnSql},
             seat_id TEXT,
             agent_id TEXT,
-            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE SET NULL,
-            FOREIGN KEY(seat_id) REFERENCES one_seats(id) ON DELETE CASCADE,
-            FOREIGN KEY(agent_id) REFERENCES installed_agents(id) ON DELETE SET NULL
+            ${foreignKeys}
           );
           INSERT INTO chats_v102 (${carriedNames}, seat_id, agent_id)
-            SELECT ${carriedNames}, NULL, agent_id FROM chats;
+            SELECT ${carriedNames}, NULL, ${carriedAgentId} FROM chats;
         `);
         // 옮긴 행 수가 다르면 여기서 멈춘다 — 데이터가 줄어든 채로 교체하면 되돌릴 수 없다.
         const beforeCount = (_db!.prepare("SELECT COUNT(*) AS n FROM chats").get() as { n: number }).n;
@@ -5012,15 +5029,24 @@ export function initStore(options: StoreInitOptions = {}): void {
 
         // ② 봇 하나당 solo 좌석 하나. 표시 이름은 지금 이름을 스냅샷으로 남긴다 —
         //    나중에 봇이 지워져도 "누구 자리였는지" 를 말할 수 있어야 한다.
+        /*
+         * 좌석은 "그 대화가 어느 봇의 것이었나" 에서 만들어진다. 아주 오래된 스키마의 chats
+         * 에는 `agent_id` 자체가 없어 만들 원천이 없다 — 그때는 이 시딩을 통째로 건너뛴다.
+         * (건너뛰어도 chats_v102.agent_id 는 전부 NULL 이므로 아래 UPDATE 도 할 일이 없다.)
+         */
+        if (carriedHas("agent_id")) {
+        const seatProjectExpr = carriedHas("project_id")
+          ? `(SELECT c2.project_id FROM chats c2
+              WHERE c2.agent_id = c.agent_id AND c2.project_id IS NOT NULL
+              ORDER BY c2.created_at ASC LIMIT 1)`
+          : "NULL";
         _db!.exec(`
           INSERT INTO one_seats (id, kind, title, project_id, created_at, updated_at)
           SELECT
             'seat_' || c.agent_id,
             'solo',
             '',
-            (SELECT c2.project_id FROM chats c2
-              WHERE c2.agent_id = c.agent_id AND c2.project_id IS NOT NULL
-              ORDER BY c2.created_at ASC LIMIT 1),
+            ${seatProjectExpr},
             MIN(c.created_at),
             MAX(c.updated_at)
           FROM chats c
@@ -5043,21 +5069,26 @@ export function initStore(options: StoreInitOptions = {}): void {
              SET seat_id = 'seat_' || agent_id
            WHERE agent_id IS NOT NULL;
         `);
+        }
 
         // ③ 하위 실행 세션(division)은 좌석을 새로 만들지 않고 뿌리의 좌석을 물려받는다.
         //    사슬이 깊을 수 있어 더 이상 바뀌지 않을 때까지 올려 붙인다. 뿌리를 못 찾는
         //    고아는 좌석 없이 둔다 — 지금도 목록에 안 나온다.
-        const inheritSeat = _db!.prepare(`
-          UPDATE chats_v102
-             SET seat_id = (
-               SELECT p.seat_id FROM chats_v102 p
-                WHERE p.id = (SELECT c.parent_chat_id FROM chats c WHERE c.id = chats_v102.id)
-             )
-           WHERE seat_id IS NULL
-             AND (SELECT c.parent_chat_id FROM chats c WHERE c.id = chats_v102.id) IS NOT NULL
-        `);
-        for (let pass = 0; pass < 32; pass += 1) {
-          if (inheritSeat.run().changes === 0) break;
+        // 하위 세션 사슬은 `parent_chat_id` 로만 알 수 있다. 그 열이 없던 시절의 DB 에는
+        // 사슬 자체가 없으므로 물려줄 것도 없다 — 있을 때만 돈다.
+        if (carriedHas("parent_chat_id")) {
+          const inheritSeat = _db!.prepare(`
+            UPDATE chats_v102
+               SET seat_id = (
+                 SELECT p.seat_id FROM chats_v102 p
+                  WHERE p.id = (SELECT c.parent_chat_id FROM chats c WHERE c.id = chats_v102.id)
+               )
+             WHERE seat_id IS NULL
+               AND (SELECT c.parent_chat_id FROM chats c WHERE c.id = chats_v102.id) IS NOT NULL
+          `);
+          for (let pass = 0; pass < 32; pass += 1) {
+            if (inheritSeat.run().changes === 0) break;
+          }
         }
 
         // ④ 교체. 인덱스는 재작성 뒤에 다시 만든다(테이블과 함께 사라진다).
