@@ -97,7 +97,7 @@ const SETTINGS_META: Record<OneSettingsKey, { titleKo: string; titleEn: string; 
   plugins: { titleKo: "플러그인", titleEn: "Plugins", descriptionKo: "카탈로그에서 설치한 도구를 켜거나 끕니다.", descriptionEn: "Enable or disable tools installed from the catalog." },
   permission: { titleKo: "실행 권한", titleEn: "Execution permission", descriptionKo: "One이 대화와 작업에서 사용할 기본 권한을 정합니다.", descriptionEn: "Choose One's default authority for conversations and work." },
   models: { titleKo: "모델", titleEn: "Models", descriptionKo: "CEO 오케스트레이터인 One의 기본 모델을 정합니다.", descriptionEn: "Choose the default model for One, the CEO orchestrator." },
-  multimodal: { titleKo: "멀티모달", titleEn: "Multimodal", descriptionKo: "이미지·영상·음성 작업에 사용할 엔진과 키를 연결합니다.", descriptionEn: "Connect engines and keys for image, video, and audio work." },
+  multimodal: { titleKo: "멀티모달", titleEn: "Multimodal", descriptionKo: "이미지·영상 작업에 사용할 엔진과 키를 연결합니다.", descriptionEn: "Connect engines and keys for image and video work." },
   concurrency: { titleKo: "동시 실행", titleEn: "Concurrency", descriptionKo: "One과 터미널 에이전트가 동시에 사용할 수 있는 슬롯 수입니다.", descriptionEn: "Set how many slots One and terminal agents may use at once." },
   history: { titleKo: "Computer History", titleEn: "Computer History", descriptionKo: "로컬 작업 요약과 에이전트 빌드 추천의 기록 범위를 관리합니다.", descriptionEn: "Manage local work summaries and agent-build recommendations." },
 };
@@ -242,7 +242,12 @@ function MultimodalSettingsPanel({ locale, active }: { locale: string; active: b
     catch { setNotice(locale === "ko" ? "키를 저장하지 못했습니다." : "Could not save the key."); }
     finally { setBusy(false); }
   };
-  const modalities: Array<{ id: MultimodalModality; ko: string; en: string }> = [{ id: "image", ko: "이미지", en: "Image" }, { id: "video", ko: "영상", en: "Video" }, { id: "audio", ko: "음성", en: "Audio" }];
+  // 음성(audio) 모달리티는 뺀다 — 프로바이더(openai-audio·elevenlabs-audio)는 정의돼 있지만
+  // 그것을 소비해 오디오를 **생성하는 엔진이 아무 데도 없다**(electron/multimodal 에 image·video 만,
+  // startAudio ipc/preload 없음; 웹도 media 라우트에 audio 없음). 피커를 보이면 사용자가 키까지
+  // 저장하는데 아무 것도 안 만드는 죽은 어포던스가 된다(감사 2026-08-25, 웹·데스크탑 공통).
+  // 엔진이 생기면 여기에 { id: "audio", ... } 한 줄만 되살리면 된다.
+  const modalities: Array<{ id: MultimodalModality; ko: string; en: string }> = [{ id: "image", ko: "이미지", en: "Image" }, { id: "video", ko: "영상", en: "Video" }];
   return <div className={styles.multimodal}>{notice && <p className={styles.notice} role="status">{notice}</p>}{modalities.map((modality) => {
     const selected = selectedFor(modality.id);
     const items = providers.filter((provider) => provider.modality === modality.id);
