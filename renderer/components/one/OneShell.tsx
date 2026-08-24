@@ -794,6 +794,61 @@ function writeBriefingDismissal(signature: string): number {
  */
 const LAST_ONE_CONVERSATION_KEY = "agentlas.one.lastConversationId";
 
+type OneRailMode = "organisation" | "sessions" | "settings";
+
+/** 마지막으로 본 레일 탭. 조직도와 세션 목록 사이를 오갈 때 매번 되돌아가지 않게 한다. */
+const LAST_ONE_RAIL_MODE_KEY = "agentlas.one.railMode";
+
+function readLastRailMode(): OneRailMode {
+  try {
+    const value = window.localStorage.getItem(LAST_ONE_RAIL_MODE_KEY);
+    return value === "sessions" ? "sessions" : "organisation";
+  } catch {
+    return "organisation";
+  }
+}
+
+function rememberRailMode(mode: OneRailMode): void {
+  // 설정은 잠시 들르는 곳이지 머무는 탭이 아니다 — 기억하지 않는다.
+  if (mode === "settings") return;
+  try { window.localStorage.setItem(LAST_ONE_RAIL_MODE_KEY, mode); } catch { /* 저장소를 못 써도 화면은 돈다 */ }
+}
+
+/** 대화가 앉아 있는 자리 이름. 사람은 대화를 내용으로 기억하므로 제목 아래 작게 붙는다. */
+function seatLabelForChat(
+  chat: Chat,
+  taskforces: OneTaskforce[],
+  org: OneOrgState | null,
+  locale: "ko" | "en",
+): string {
+  const taskforce = taskforces.find((item) => item.chatId === chat.id);
+  if (taskforce) return taskforce.title.trim() || (locale === "ko" ? "팀" : "Team");
+  const member = org?.members.find((item) => item.installedAgentId === chat.agentId && !item.archivedAt);
+  if (member) return (locale === "ko" ? member.displayName : member.nameEn || member.displayName).trim();
+  return locale === "ko" ? "One · CEO" : "One · CEO";
+}
+
+/** 오늘 / 어제 / 지난 7일 / 그 이전. 날짜를 하나씩 쓰면 목록이 두 배가 된다. */
+function sessionBucket(iso: string, locale: "ko" | "en"): { key: string; label: string } {
+  const then = new Date(iso);
+  if (Number.isNaN(then.getTime())) return { key: "older", label: locale === "ko" ? "그 이전" : "Older" };
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+  const days = Math.floor((startOfToday.getTime() - new Date(then).setHours(0, 0, 0, 0)) / 86_400_000);
+  if (days <= 0) return { key: "today", label: locale === "ko" ? "오늘" : "Today" };
+  if (days === 1) return { key: "yesterday", label: locale === "ko" ? "어제" : "Yesterday" };
+  if (days <= 7) return { key: "week", label: locale === "ko" ? "지난 7일" : "Previous 7 days" };
+  if (days <= 30) return { key: "month", label: locale === "ko" ? "지난 30일" : "Previous 30 days" };
+  return { key: "older", label: locale === "ko" ? "그 이전" : "Older" };
+}
+
+/** 30일 넘게 손대지 않은 대화. 사용자가 직접 정리하게 만들지 않고 접어서 제안한다. */
+function isDormantSession(iso: string): boolean {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return false;
+  return Date.now() - then > 30 * 86_400_000;
+}
+
 function rememberLastOneConversation(chatId: string | null): void {
   try {
     if (chatId) window.localStorage.setItem(LAST_ONE_CONVERSATION_KEY, chatId);
@@ -1033,7 +1088,11 @@ export function OneShell() {
   const [archiveMutationTaskId, setArchiveMutationTaskId] = useState<string | null>(null);
   const [railOpen, setRailOpen] = useState(false);
   const [railCollapsed, setRailCollapsedState] = useState(() => readStoredBoolean(ONE_LEFT_RAIL_COLLAPSED_STORAGE_KEY, false));
-  const [railMode, setRailMode] = useState<"organisation" | "settings">("organisation");
+  const [railMode, setRailModeState] = useState<OneRailMode>(() => readLastRailMode());
+  const setRailMode = useCallback((mode: OneRailMode) => {
+    rememberRailMode(mode);
+    setRailModeState(mode);
+  }, []);
   const [settingsSheet, setSettingsSheet] = useState<OneSettingsKey | null>(null);
   const [pluginPickerOpen, setPluginPickerOpen] = useState(false);
   const [contextRailOpen, setContextRailOpenState] = useState(() => readStoredBoolean(ONE_CONTEXT_RAIL_OPEN_STORAGE_KEY, true));
@@ -2276,6 +2335,28 @@ export function OneShell() {
   }, [projections, selectedTaskId]);
 
   const activeThreadChatId = selected?.chatId ?? conversation?.id ?? null;
+  /*
+   * 세션 목록 — 시간으로 묶고, 각 줄에 어느 자리의 대화인지 붙인다. 날짜를 하나씩 쓰면
+   * 목록이 두 배가 되고, 자리를 안 쓰면 같은 제목이 여러 줄일 때 구분이 안 된다.
+   * 30일 넘게 손대지 않은 것은 따로 접어 둔다 — 사용자가 직접 정리하게 만들지 않는다.
+   */
+  const sessionGroups = useMemo(() => {
+    const fresh: Chat[] = [];
+    const dormant: Chat[] = [];
+    for (const chat of conversations) (isDormantSession(chat.updatedAt) ? dormant : fresh).push(chat);
+    const order = ["today", "yesterday", "week", "month", "older"];
+    const buckets = new Map<string, { key: string; label: string; items: Chat[] }>();
+    for (const chat of fresh) {
+      const bucket = sessionBucket(chat.updatedAt, appLocale);
+      const existing = buckets.get(bucket.key);
+      if (existing) existing.items.push(chat);
+      else buckets.set(bucket.key, { ...bucket, items: [chat] });
+    }
+    return {
+      groups: order.map((key) => buckets.get(key)).filter((group): group is { key: string; label: string; items: Chat[] } => Boolean(group)),
+      dormant,
+    };
+  }, [conversations, appLocale]);
   const activeThreadPromptFallback = selected?.display.title ?? conversation?.title ?? "";
   const activeTaskforce = useMemo(
     () => taskforces.find((taskforce) => taskforce.chatId === activeThreadChatId) ?? null,
@@ -4850,7 +4931,14 @@ export function OneShell() {
               }}
             ><IconSidebar size={16} /></button>
           </div>
-          {railMode === "organisation" ? <>
+          {railMode !== "settings" ? <>
+            {/* 대화 목록은 하루에 수십 번 오가는 곳이라 화면 뒤로 숨기지 않는다. 레일이
+                조직도로 차 있으므로 탭으로 나누되, 나가지 않고 한 화면 안에 남긴다. */}
+            <div className={styles.railTabs} role="tablist" aria-label={appLocale === "ko" ? "레일 보기" : "Rail view"}>
+              <button type="button" role="tab" aria-selected={railMode === "organisation"} data-active={railMode === "organisation" ? "true" : "false"} onClick={() => setRailMode("organisation")}>{appLocale === "ko" ? "조직" : "Team"}</button>
+              <button type="button" role="tab" aria-selected={railMode === "sessions"} data-active={railMode === "sessions" ? "true" : "false"} onClick={() => setRailMode("sessions")}>{appLocale === "ko" ? "세션" : "Sessions"}</button>
+            </div>
+            {railMode === "organisation" ? <>
             <OneTaskforceRail
               oneAvatarIcon={oneAvatarTone}
               taskforces={taskforces}
@@ -4934,15 +5022,60 @@ export function OneShell() {
                   : `Analyze this computer-history item for repeated work: ${item.title}`);
               }}
             />
+            </> : <>
             <div className={styles.railPrimaryActions}>
               <button type="button" className={styles.railPrimaryButton} onClick={startNewConversation}><span aria-hidden="true"><IconPlus size={13} /></span>{tFor(appLocale, "one.shell.rail.new_conversation")}</button>
               <button ref={searchTriggerRef} type="button" className={styles.railPrimaryButton} onClick={() => setSearchOpen(true)}><span aria-hidden="true"><IconSearch size={13} /></span>{tFor(appLocale, "one.shell.rail.search_all")}</button>
             </div>
-            <div className={styles.railTop}><strong>{tFor(appLocale, "one.shell.rail.recent")}</strong></div>
-            <div className={styles.railList}>
-              {conversations.map((item) => <ConversationListButton key={item.id} item={item} active={item.id === selectedConversationId} locale={appLocale} onOpen={openConversation} onRemove={removeConversation} />)}
-              {projections.map((item) => <TaskListButton key={item.taskId} item={item} active={item.taskId === selectedTaskId} locale={appLocale} onOpen={openTask} />)}
-            </div>
+            {sessionGroups.groups.length === 0 && sessionGroups.dormant.length === 0 && projections.length === 0 && (
+              <div className={styles.railEmpty}>{appLocale === "ko" ? "아직 대화가 없어요. 위에서 새 대화를 시작하세요." : "No conversations yet. Start one above."}</div>
+            )}
+            {sessionGroups.groups.map((group) => (
+              <Fragment key={group.key}>
+                <div className={styles.railTop}><strong>{group.label}</strong></div>
+                <div className={styles.railList}>
+                  {group.items.map((item) => (
+                    <ConversationListButton
+                      key={item.id}
+                      item={item}
+                      active={item.id === selectedConversationId}
+                      locale={appLocale}
+                      onOpen={openConversation}
+                      onRemove={removeConversation}
+                      seatLabel={seatLabelForChat(item, taskforces, oneOrgState, appLocale)}
+                      running={activeChatIds.includes(item.id)}
+                    />
+                  ))}
+                </div>
+              </Fragment>
+            ))}
+            {sessionGroups.dormant.length > 0 && (
+              <details className={styles.railDormant}>
+                <summary>{appLocale === "ko" ? `30일 넘게 안 쓴 대화 ${sessionGroups.dormant.length}개` : `${sessionGroups.dormant.length} untouched for over 30 days`}</summary>
+                <div className={styles.railList}>
+                  {sessionGroups.dormant.map((item) => (
+                    <ConversationListButton
+                      key={item.id}
+                      item={item}
+                      active={item.id === selectedConversationId}
+                      locale={appLocale}
+                      onOpen={openConversation}
+                      onRemove={removeConversation}
+                      seatLabel={seatLabelForChat(item, taskforces, oneOrgState, appLocale)}
+                    />
+                  ))}
+                </div>
+              </details>
+            )}
+            {projections.length > 0 && (
+              <>
+                <div className={styles.railTop}><strong>{tFor(appLocale, "one.shell.rail.recent")}</strong></div>
+                <div className={styles.railList}>
+                  {projections.map((item) => <TaskListButton key={item.taskId} item={item} active={item.taskId === selectedTaskId} locale={appLocale} onOpen={openTask} />)}
+                </div>
+              </>
+            )}
+            </>}
             {selected && <nav className={`${styles.railUtilities} ${styles.railTaskActions}`} aria-label={tFor(appLocale, "one.shell.rail.manage_task_aria")}>
               <button type="button" disabled={archiveMutationTaskId === selected.taskId || Boolean(selected.chatId && activeChatIds.includes(selected.chatId))} onClick={() => void mutateTaskArchive(selected.taskId, selected.canonicalStatus === "archived" ? "restore" : "archive")}>{selected.canonicalStatus === "archived" ? tFor(appLocale, "one.shell.rail.restore_from_archive") : tFor(appLocale, "one.shell.rail.archive_this_work")}</button>
             </nav>}
@@ -6186,12 +6319,17 @@ function TaskListButton({ item, active, locale, onOpen }: { item: OneTaskProject
   );
 }
 
-function ConversationListButton({ item, active, locale, onOpen, onRemove }: { item: Chat; active: boolean; locale: "ko" | "en"; onOpen: (chatId: string) => void; onRemove: (chatId: string) => Promise<void> }) {
+function ConversationListButton({ item, active, locale, onOpen, onRemove, seatLabel, running }: { item: Chat; active: boolean; locale: "ko" | "en"; onOpen: (chatId: string) => void; onRemove: (chatId: string) => Promise<void>; seatLabel?: string; running?: boolean }) {
   return (
     <div className={styles.conversationRow}>
+      {/* 읽는 순서 = 눈이 움직이는 순서: 제목 → 자리 → 시각. 사람은 대화를 내용으로
+          기억하지 자리로 기억하지 않으므로 제목이 첫째다. */}
       <button type="button" className={styles.taskButton} data-active={active ? "true" : "false"} onClick={() => onOpen(item.id)} aria-current={active ? "page" : undefined}>
         <strong>{briefingSourceName(item.title, locale)}</strong>
-        <small>{tFor(locale, "one.shell.convlist.conversation")} · {formatTimestamp(item.updatedAt, locale)}</small>
+        <small>
+          {running && <span className={styles.sessionRunningDot} aria-hidden="true" />}
+          {seatLabel ? `${seatLabel} · ` : ""}{formatTimestamp(item.updatedAt, locale)}
+        </small>
       </button>
       <button type="button" className={styles.conversationDelete} onClick={(event) => { event.stopPropagation(); void onRemove(item.id); }} aria-label={locale === "ko" ? "대화 삭제" : "Delete conversation"}><IconClose size={12} /></button>
     </div>

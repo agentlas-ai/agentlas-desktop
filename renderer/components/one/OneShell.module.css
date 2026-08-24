@@ -3095,3 +3095,69 @@
 .messageBody[data-doc="true"] :global(h1:first-child),
 .messageBody[data-doc="true"] :global(h2:first-child),
 .messageBody[data-doc="true"] :global(h3:first-child) { margin-top: 0; }
+
+/* ── 레일 탭: 조직 | 세션 ──────────────────────────────────────────────────
+   대화 목록은 하루에 수십 번 오가는 곳이라 화면 뒤로 숨기지 않는다. 레일이 조직도로
+   차 있으므로 탭으로 나누되, 별도 화면으로 나가지 않아 "지금 누구와 하는 중인지"를
+   잃지 않는다(2026-08-24 UX 연구 결론). */
+.railTabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
+  margin: 0 10px 8px;
+  padding: 2px;
+  border-radius: 9px;
+  background: #f1f2f3;
+}
+
+.railTabs button {
+  padding: 6px 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #6b7075;
+  font-size: 12px;
+  font-weight: 640;
+  cursor: pointer;
+}
+
+.railTabs button[data-active="true"] {
+  background: #fff;
+  color: #1d2023;
+  box-shadow: 0 1px 2px rgba(25, 31, 36, .08);
+}
+
+/* 도는 중인 대화 표시 — 제목 아래 한 점. 상태를 문장으로 쓰면 줄이 길어진다. */
+.sessionRunningDot {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: #4f7df3;
+  vertical-align: middle;
+}
+
+.railEmpty {
+  margin: 6px 12px;
+  color: #8a9096;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* 30일 넘게 손대지 않은 대화 — 접어서 제안한다. 사용자가 직접 정리하게 만들지 않는다. */
+.railDormant {
+  margin: 8px 10px 0;
+}
+
+.railDormant > summary {
+  padding: 5px 2px;
+  color: #8a9096;
+  font-size: 11.5px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.railDormant > summary::-webkit-details-marker { display: none; }
+.railDormant > summary::before { content: "› "; }
+.railDormant[open] > summary::before { content: "⌄ "; }
