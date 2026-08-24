@@ -47,7 +47,8 @@ export interface OneTeamPreflightRole {
     displayName: string;
     slug: string;
     source: "installed" | "firm-node";
-    entityKind: "agent";
+    /** 팀 패키지를 부르면 팀으로 기록한다 — 에이전트로 적으면 실행기가 팀 그래프를 잃는다. */
+    entityKind: "agent" | "team";
     availability: "installed_present";
     releaseState: "exact_package_hash" | "installed_release_unversioned";
     releaseRef: string | null;
@@ -288,7 +289,8 @@ export function isOneTeamPreflightRole(value: unknown): value is OneTeamPrefligh
     "releaseState", "releaseRef",
   ])) return false;
   if (!safeId(candidate.candidateRef) || !safeText(candidate.displayName, 120) || !safeText(candidate.slug, 160)) return false;
-  if (!["installed", "firm-node"].includes(String(candidate.source)) || candidate.entityKind !== "agent") return false;
+  if (!["installed", "firm-node"].includes(String(candidate.source))) return false;
+  if (candidate.entityKind !== "agent" && candidate.entityKind !== "team") return false;
   if (candidate.availability !== "installed_present") return false;
   if (!["exact_package_hash", "installed_release_unversioned"].includes(String(candidate.releaseState))) return false;
   if (candidate.releaseRef !== null && (typeof candidate.releaseRef !== "string" || !PACKAGE_HASH_RE.test(candidate.releaseRef))) return false;

@@ -4693,10 +4693,16 @@ export function OneShell() {
       resultTopRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     });
   }, [presentRichOutputRail]);
+  /*
+   * 브라우저 작업이 관측됐다는 이유로 오른쪽 패널을 저 혼자 열던 자리
+   * (제거, 오너 지시 2026-08-24 "우측사이드바 디폴트로 접히고"). 감사 2026-08-25
+   * 에서 이 경로가 살아 있어 "브라우저 작업이 생기면 여전히 저 혼자 열고 그
+   * 상태가 저장돼 다음 대화까지 따라간다" 가 실측됐다. 브라우저 탭은 패널
+   * 안에서 만들어지므로, 사람이 패널을 열면 거기 있다.
+   */
   const presentBrowserOutput = useCallback((url: string) => {
     void url;
-    presentRichOutputRail();
-  }, [presentRichOutputRail]);
+  }, []);
   /*
    * 산출물이나 터미널 기록이 하나라도 있으면 오른쪽 패널을 저 혼자 열던 자리
    * (제거, 오너 지시 2026-08-24 "우측사이드바 디폴트로 접히고"). 열림 상태가

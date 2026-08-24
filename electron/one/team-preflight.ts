@@ -358,7 +358,8 @@ function roleFromCandidate(
       displayName: agent.localDisplayName || agent.nameEn || agent.name || agent.slug,
       slug: agent.slug,
       source: candidate.source,
-      entityKind: "agent",
+      // 팀 패키지는 팀으로 적는다. 에이전트로 적으면 기록과 실행이 어긋난다.
+      entityKind: agent.kind === "team" ? "team" : "agent",
       availability: "installed_present",
       releaseState: candidate.packageHash ? "exact_package_hash" : "installed_release_unversioned",
       releaseRef: candidate.packageHash,

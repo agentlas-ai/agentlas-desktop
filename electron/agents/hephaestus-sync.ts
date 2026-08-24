@@ -76,7 +76,15 @@ export function isEphemeralPackagePath(resolved: string): boolean {
   const lower = resolved.toLowerCase();
   if (/[/\\]pytest-of-[^/\\]+[/\\]/.test(lower)) return true;
   if (/[/\\]pytest-\d+[/\\]/.test(lower)) return true;
-  for (const base of [os.tmpdir(), "/tmp", "/private/tmp", "/private/var/folders"]) {
+  // macOS 에서 /var 는 /private/var 의 심링크다. path.resolve 는 심링크를 풀지
+  // 않으므로 두 형태를 모두 적어야 한다 — 감사에서 /var/folders 와 /var/tmp 가
+  // 그대로 통과하는 것이 실측됐다(2026-08-25).
+  for (const base of [
+    os.tmpdir(),
+    "/tmp", "/private/tmp",
+    "/var/tmp", "/private/var/tmp",
+    "/var/folders", "/private/var/folders",
+  ]) {
     try {
       const root = path.resolve(base).toLowerCase();
       if (lower === root || lower.startsWith(root.endsWith(path.sep) ? root : root + path.sep)) return true;
