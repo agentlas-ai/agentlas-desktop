@@ -152,6 +152,12 @@ export function SideNav({
       { label: t("nav.agent_hub"), href: "/marketplace", icon: IconUsers },
       { label: t("nav.automations"), href: "/automation", icon: IconBolt },
       { label: t("nav.site"), href: "/site", icon: IconApps },
+      /*
+       * 프롬프트 스토어는 화면도 번역 문구도 다 있는데 들어가는 문이 없었다
+       * (감사 2026-08-25: 렌더러 전체에서 /prompts 로 가는 링크 0건). 화면을
+       * 만들어 두고 아무도 못 가는 것은 없는 것과 같다.
+       */
+      { label: t("nav.prompts"), href: "/prompts", icon: IconFileUp },
     ],
     [t],
   );

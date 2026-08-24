@@ -20,7 +20,7 @@ import type {
 import { useRouter } from "next/navigation";
 import { CONTEXT_MANAGED_BY } from "@shared/models";
 import type { OrchestrationTarget, Recommendation, RecExecChoice, RecRouterAgent } from "@shared/types";
-import type { AgentlasAppDefinition } from "@/lib/apps";
+import { buildAppRoutePrompt, parseAppSlashRoute, type AgentlasAppDefinition } from "@/lib/apps";
 import { callableHubBookmarks } from "@/lib/hub-bookmark-events";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import { ipc, grantForDroppedFile } from "@/lib/ipc";
@@ -726,6 +726,20 @@ function ChatInputComponent({
   function submit() {
     if (submitDisabled) return;
     const text = withAttachmentContext(input.trim());
+    /*
+     * 앱 슬래시 명령(/site, /document-studio, /startup …).
+     *
+     * 명령 목록과 파서는 처음부터 다 있었는데 부르는 곳이 없어서, 치면 그냥
+     * 평범한 문장으로 모델에 갔다(감사 2026-08-25: parseAppSlashRoute 호출부
+     * 0건, ChatInput 이 넘겨받은 apps 를 한 번도 읽지 않음). 명령을 치면 그 앱을
+     * 여는 요청으로 바꿔 보낸다.
+     */
+    const appRoute = parseAppSlashRoute(text);
+    if (appRoute) {
+      onSend(buildAppRoutePrompt(appRoute, locale === "en" ? "en" : "ko"), currentSendOptions());
+      finishComposerAfterSend();
+      return;
+    }
     const pluginMention = /(^|\s)@plugin-make\b/i.exec(text);
     if (pluginMention) {
       const request = text.replace(pluginMention[0], " ").trim();
