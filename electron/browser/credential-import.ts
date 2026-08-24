@@ -558,11 +558,27 @@ export async function importBrowserCredentials(
     const placeholders = shared.map(() => "?").join(", ");
     // merge: 이미 있는 (host_key, name, path) 는 건드리지 않는다.
     const insert = dest.prepare(`INSERT OR IGNORE INTO cookies (${quoted}) VALUES (${placeholders})`);
-    const existsStmt = dest.prepare(
-      "SELECT 1 AS found FROM cookies WHERE host_key = ? AND name = ? AND path = ? LIMIT 1",
+    /*
+     * ★ 왜 "있으면 건드리지 않는다" 를 버렸나 (오너 신고 2026-08-24, 실측으로 확인):
+     *   같은 (host_key, name, path) 를 그냥 건너뛰면, 전용 프로필에 한 번이라도 그 쿠키가
+     *   들어간 뒤로는 **낡은 값이 영원히 남는다.** 실제로 돌려 보니 사이트 3개를 고르고
+     *   `cookiesAdded: 0` 인데 `ok: true` 였다 — 목록에는 "연결됨" 으로 올라가고 로그인은
+     *   되지 않는, 정확히 신고된 상태다. 로그인 쿠키는 회전한다. 원본이 더 새것이면
+     *   갱신해야 옮긴 것이 된다.
+     */
+    const existingStmt = dest.prepare(
+      "SELECT expires_utc AS expiresUtc, last_update_utc AS updatedUtc FROM cookies WHERE host_key = ? AND name = ? AND path = ? LIMIT 1",
     );
+    const deleteStmt = dest.prepare("DELETE FROM cookies WHERE host_key = ? AND name = ? AND path = ?");
+    const freshnessOf = (record: Record<string, unknown>): number => {
+      // Chrome 은 두 칸 다 마이크로초 정수다. 있는 것 중 큰 값을 신선도로 본다.
+      const expires = Number(record.expires_utc ?? record.expiresUtc ?? 0);
+      const updated = Number(record.last_update_utc ?? record.updatedUtc ?? 0);
+      return Math.max(Number.isFinite(expires) ? expires : 0, Number.isFinite(updated) ? updated : 0);
+    };
 
     let added = 0;
+    let refreshed = 0;
     const linkedSites: string[] = [];
     const selectRows = src.prepare(
       `SELECT ${quoted} FROM cookies WHERE host_key = ? OR host_key = ? OR host_key LIKE ?`,
@@ -571,12 +587,20 @@ export async function importBrowserCredentials(
     const runAll = dest.transaction((jobs: Array<{ domain: string; rows: Record<string, unknown>[] }>) => {
       for (const job of jobs) {
         for (const row of job.rows) {
-          const already = existsStmt.get(
-            String(row.host_key ?? ""),
-            String(row.name ?? ""),
-            String(row.path ?? "/"),
-          ) as { found?: number } | undefined;
-          if (already?.found) continue;
+          const hostKey = String(row.host_key ?? "");
+          const name = String(row.name ?? "");
+          const cookiePath = String(row.path ?? "/");
+          const already = existingStmt.get(hostKey, name, cookiePath) as
+            { expiresUtc?: number; updatedUtc?: number } | undefined;
+          if (already) {
+            // 신선도를 비교할 칸이 아예 없는 저장소 형식이면 예전처럼 건드리지 않는다.
+            if (!destColumns.has("expires_utc") && !destColumns.has("last_update_utc")) continue;
+            if (freshnessOf(row) <= freshnessOf(already as Record<string, unknown>)) continue;
+            deleteStmt.run(hostKey, name, cookiePath);
+            insert.run(shared.map((c) => (row as Record<string, unknown>)[c] ?? null));
+            refreshed += 1;
+            continue;
+          }
           insert.run(shared.map((c) => (row as Record<string, unknown>)[c] ?? null));
           added += 1;
         }
@@ -607,7 +631,25 @@ export async function importBrowserCredentials(
       linkedSites.push(site);
     }
 
-    return { ok: true, cookiesAdded: added, linkedSites, skipped };
+    /*
+     * ★ 아무것도 옮기지 않았으면 옮겼다고 말하지 않는다 (오너 신고 2026-08-24).
+     *   예전에는 `cookiesAdded: 0` 이어도 `ok: true` 를 돌려줬다. 화면은 "가져왔다" 로
+     *   읽고 사이트를 목록에 올리는데 로그인은 되지 않는다 — 사용자는 무엇이 잘못됐는지
+     *   알 길이 없다. 옮긴 것이 없으면 그 사실과 다음에 할 일을 말한다.
+     */
+    const moved = added + refreshed;
+    if (moved === 0) {
+      return {
+        ok: false,
+        cookiesAdded: 0,
+        linkedSites,
+        skipped,
+        error: linkedSites.length > 0
+          ? "사이트는 목록에 올렸지만 새로 옮길 로그인 정보가 없었습니다. 그 브라우저에서 다시 로그인한 뒤 가져오거나, 연동 창에서 한 번 로그인해 주세요."
+          : "옮길 로그인 정보를 찾지 못했습니다. 그 브라우저에서 해당 사이트에 로그인되어 있는지 확인해 주세요.",
+      };
+    }
+    return { ok: true, cookiesAdded: moved, linkedSites, skipped };
   } catch (error) {
     return {
       ok: false,
