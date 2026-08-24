@@ -372,6 +372,25 @@ function roleFromCandidate(
   };
 }
 
+/**
+ * 사람이 이름을 대서 부른 팀원의 자격.
+ *
+ * 자동 후보 목록(eligibleRosterSpecialists)은 팀을 뺀다 — 아무도 지목하지
+ * 않았는데 팀 하나를 통째로 부르면 범위와 비용이 사람 모르게 커진다.
+ * 그러나 사람이 단톡방에 앉히거나 이번 턴에 지목한 팀은 다르다. 그것을 같은
+ * 규칙으로 걸렀기 때문에, 3명짜리 방에서 팀원이 한 번도 불리지 않고 One 만
+ * 답했다(오너 지적 2026-08-24 "팀은 당연히 부르는 거고").
+ *
+ * 소스가 사라진 패키지는 여전히 부를 수 없다 — 실행할 파일이 없다.
+ */
+function eligibleExplicitMember(installed: InstalledAgent, coordinatorId: string): boolean {
+  return installed.id !== coordinatorId
+    && !installed.sourceMissingSince
+    && !isCallOnlyHubAgent(installed)
+    && installed.visibility !== "background"
+    && installed.visibility !== "private";
+}
+
 function eligibleRosterSpecialists(all: InstalledAgent[], coordinatorId: string): InstalledAgent[] {
   return all.filter((installed) =>
     installed.id !== coordinatorId
@@ -438,7 +457,7 @@ function exactInstalledRoster(
   for (const agentId of requestedAgentIds) {
     const matches = all().filter((agent) => agent.id === agentId);
     const installed = matches.length === 1 ? matches[0] : null;
-    if (!installed || installed.kind === "team" || seen.has(installed.id) || !eligibleRosterSpecialists([installed], coordinator.id).length) {
+    if (!installed || seen.has(installed.id) || !eligibleExplicitMember(installed, coordinator.id)) {
       unresolvedExternal = true;
       continue;
     }
@@ -446,7 +465,12 @@ function exactInstalledRoster(
     const snapshot = candidateSnapshot(installed, "installed");
     candidates.push(snapshot);
     roles.push(roleFromCandidate(installed, snapshot, chat, false, permission, "explicit-turn-agent"));
-    targets.push({ source: "local", entityKind: "agent", agentId: installed.id });
+    // 팀을 에이전트로 실으면 실행기가 팀 그래프를 잃는다. 로컬 팀의 대상
+    // 식별자는 firmId 이고, 이 저장소는 설치 행의 id 를 그대로 쓴다
+    // (electron/hephaestus/recommendation.ts localTarget 과 같은 규칙).
+    targets.push(installed.kind === "team"
+      ? { source: "local", entityKind: "team", firmId: installed.id }
+      : { source: "local", entityKind: "agent", agentId: installed.id });
   }
   if (
     allowDeterministicLocalSelection

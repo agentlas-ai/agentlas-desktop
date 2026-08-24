@@ -14,6 +14,7 @@ import {
 } from "react";
 import { flushSync } from "react-dom";
 import { Markdown, StreamingMarkdown, type LinkedFileArtifact } from "@/components/Markdown";
+import { AskCard, type AskCardOption } from "@/components/AskCard";
 import { OneSplitPane } from "@/components/one/OneSplitPane";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { BrowserActionApprovalSheet } from "@/components/BrowserActionApprovalSheet";
@@ -3362,8 +3363,39 @@ export function OneShell() {
   const answerWorkforceConsent = useCallback(async (accepted: boolean) => {
     const api = ipc();
     const proposal = teamPreflight;
-    const prompt = pendingTeamPrompt;
-    if (!proposal || !prompt || runIdRef.current) return;
+    /*
+     * 예전에는 세 조건 중 하나만 없어도 조용히 돌아갔다. 카드는 서버가 들고
+     * 있는 제안 상태로 뜨는데 누를 근거(pendingTeamPrompt)는 이 화면의 메모리에만
+     * 있어서, 새로고침하거나 다른 대화를 다녀오면 "아무리 눌러도 무반응" 이
+     * 됐다(오너 지적 2026-08-24). 낼 수 있는 카드에는 누를 길이 있어야 한다.
+     */
+    if (!proposal) return;
+    if (runIdRef.current) {
+      setError(appLocale === "ko"
+        ? "지금 실행 중이라 팀을 바꿀 수 없어요. 끝난 뒤에 다시 눌러 주세요."
+        : "A run is in progress, so the team cannot change yet. Try again when it finishes.");
+      return;
+    }
+    // 이 제안을 만든 말은 이 대화의 마지막 내 말이다. 화면 메모리가 비었어도
+    // 거기서 되찾는다. 어긋나면 Main 이 promptDigest 로 거절하므로 조용히
+    // 엉뚱한 말이 실행되지는 않는다.
+    const recoveredText = pendingTeamPrompt?.text
+      ?? [...visibleMessages].reverse().find((item) => item.role === "user" && (item.text ?? "").trim())?.text
+      ?? null;
+    if (!recoveredText) {
+      setError(appLocale === "ko"
+        ? "어떤 말에 대한 제안인지 찾지 못했어요. 하려던 말을 다시 보내 주세요."
+        : "The message behind this proposal could not be found. Send it again.");
+      return;
+    }
+    const prompt: PendingTeamPrompt = pendingTeamPrompt ?? {
+      proposalId: proposal.proposalId,
+      text: recoveredText,
+      attachments: null,
+      recurrence: null,
+      overrides: {},
+      taskForceTargets: [],
+    };
     if (!api) {
       requestOneOperationalRecovery("one-team-preflight-consent", new Error("Desktop bridge unavailable"));
       return;
@@ -6855,92 +6887,98 @@ function DecisionCard({ confirmation, taskId, locale, disabled, compact = false,
     const compactSummary = decision.action.value
       || decision.target.value
       || confirmation.question;
+    /*
+     * 오너 지시 2026-08-24: 묻는 자리는 앱 어디서나 한 모양이다.
+     * 예전에는 제목·요약·선택지·승인·항상승인·거절이 한 줄에 가로로 늘어서서
+     * 무엇을 고르는지 읽을 수 없었다("승인 칩도 누가 저딴식으로 만드냐").
+     * 규격은 docs/DESIGN-ASK-CARD.md, 모양은 AskCard 하나가 정한다.
+     */
+    /*
+     * 고르는 질문과 승인은 같은 주제가 아니다(오너 지적 2026-08-24
+     * "넌 동작방식이랑 승인이 같은 주제냐?"). 한 카드에 "패널을 어떻게
+     * 나눌까" 세 갈래와 "항상 승인 / 거절" 을 함께 담으면, 무엇을 답하는
+     * 자리인지 알 수 없다. 고를 것이 있으면 고르는 것만 묻고, 승인·거절은
+     * 고를 것이 없을 때의 답이다.
+     */
+    const pickOptions: AskCardOption[] = lightweightChoice && directOptions.length > 1
+      ? directOptions.map((option) => ({
+        id: `direct:${option.index}`,
+        title: option.label,
+        note: option.description ?? undefined,
+        disabled,
+      }))
+      : selectableOptions.length > 1
+        ? selectableOptions.map((option) => ({
+          id: `pick:${option.index}`,
+          title: option.label,
+          note: option.description ?? undefined,
+          disabled,
+          active: confirmation.multiSelect
+            ? multiSelection.includes(option.index)
+            : chosenIndex === option.index,
+        }))
+        : [];
+
+    const askOptions: AskCardOption[] = pickOptions.length > 0
+      ? pickOptions
+      : [
+        {
+          id: "approve",
+          title: riskRank >= 2 ? tFor(locale, "one.shell.decision.approve") : (locale === "ko" ? "승인" : "Approve"),
+          note: approvalDescription ?? compactSummary,
+          disabled: disabled || approvalReply === null,
+          active: true,
+        },
+        {
+          id: "always",
+          title: tFor(locale, "one.shell.decision.always_approve"),
+          note: tFor(locale, "one.shell.decision.always_approve_hint"),
+          disabled: disabled || approvalReply === null,
+        },
+        { id: "reject", title: rejectLabel, disabled },
+      ];
+
+    const chooseAsk = (id: string) => {
+      if (id === "reject") { onAnswer(confirmation, rejectReply, false); return; }
+      if (id === "always") {
+        if (approvalReply === null) return;
+        onAlwaysApprove(confirmation);
+        onAnswer(confirmation, approvalReply);
+        return;
+      }
+      if (id === "approve") {
+        if (approvalReply !== null) onAnswer(confirmation, approvalReply);
+        return;
+      }
+      if (id.startsWith("direct:")) {
+        const index = Number(id.slice("direct:".length));
+        const option = directOptions.find((item) => item.index === index);
+        if (option) onAnswer(confirmation, option.label);
+        return;
+      }
+      if (id.startsWith("pick:")) {
+        const index = Number(id.slice("pick:".length));
+        if (confirmation.multiSelect) {
+          setMultiSelection((current) => current.includes(index)
+            ? current.filter((value) => value !== index)
+            : [...current, index]);
+          return;
+        }
+        // 하나만 고르는 질문은 고르는 순간이 답이다 — 그 다음에 다시
+        // "승인" 을 누르게 하면 같은 답을 두 번 시키는 것이다.
+        const option = selectableOptions.find((item) => item.index === index);
+        if (option) onAnswer(confirmation, option.label);
+      }
+    };
+
     return (
-      <section
-        className={styles.decisionCompactCard}
-        aria-labelledby={`${confirmation.sourceMessageId}-decision-title`}
-        data-risk={decision.risk.level}
-      >
-        <span className={styles.decisionCompactCopy}>
-          <strong id={`${confirmation.sourceMessageId}-decision-title`}>{compactTitle}</strong>
-          <small title={compactSummary}>{compactSummary}</small>
-        </span>
-        {selectableOptions.length > 1 && (
-          <span className={styles.decisionCompactChoices} role="group" aria-label={tFor(locale, "one.shell.decision.multi_select")}>
-            {selectableOptions.map((option) => {
-              const selected = confirmation.multiSelect
-                ? multiSelection.includes(option.index)
-                : chosenIndex === option.index;
-              return (
-                <button
-                  key={`${option.index}:${option.label}`}
-                  type="button"
-                  aria-pressed={selected}
-                  disabled={disabled}
-                  title={option.description ?? undefined}
-                  onClick={() => {
-                    if (confirmation.multiSelect) {
-                      setMultiSelection((current) => selected
-                        ? current.filter((index) => index !== option.index)
-                        : [...current, option.index]);
-                    } else {
-                      setChosenIndex(option.index);
-                    }
-                  }}
-                >
-                  {option.label}
-                </button>
-              );
-            })}
-          </span>
-        )}
-        <span className={styles.decisionCompactActions}>
-          {lightweightChoice && directOptions.length > 1 ? directOptions.map((option) => (
-            <button
-              key={`${option.index}:${option.label}`}
-              type="button"
-              disabled={disabled}
-              title={option.description ?? undefined}
-              onClick={() => onAnswer(confirmation, option.label)}
-            >
-              {option.label}
-            </button>
-          )) : (
-            <>
-              <button
-                type="button"
-                className={styles.decisionCompactReject}
-                disabled={disabled}
-                onClick={() => onAnswer(confirmation, rejectReply, false)}
-              >
-                {rejectLabel}
-              </button>
-              <button
-                type="button"
-                disabled={disabled || approvalReply === null}
-                title={tFor(locale, "one.shell.decision.always_approve_hint")}
-                onClick={() => {
-                  if (approvalReply === null) return;
-                  onAlwaysApprove(confirmation);
-                  onAnswer(confirmation, approvalReply);
-                }}
-              >
-                {tFor(locale, "one.shell.decision.always_approve")}
-              </button>
-              <button
-                type="button"
-                className={styles.decisionCompactPrimary}
-                disabled={disabled || approvalReply === null}
-                onClick={() => approvalReply !== null && onAnswer(confirmation, approvalReply)}
-              >
-                {riskRank >= 2
-                  ? tFor(locale, "one.shell.decision.approve")
-                  : (locale === "ko" ? "승인" : "Approve")}
-              </button>
-            </>
-          )}
-        </span>
-      </section>
+      <AskCard
+        title={compactTitle || compactSummary}
+        locale={locale}
+        options={askOptions}
+        onChoose={chooseAsk}
+        data-testid="one-decision-ask-card"
+      />
     );
   }
 

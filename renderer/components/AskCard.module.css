@@ -1,0 +1,189 @@
+/* 규격: docs/DESIGN-ASK-CARD.md — 값은 globals.css 의 --ask-* 토큰이 정본이다.
+   토큰은 오너가 준 참조 화면을 픽셀로 재서 넣었다. 여기에 숫자를 직접 쓰지 않는다. */
+.card {
+  display: grid;
+  gap: 0;
+  padding: var(--ask-card-pad-top) var(--ask-card-pad-side) var(--ask-card-pad-bottom);
+  border: 1px solid var(--ask-card-line);
+  border-radius: var(--ask-card-radius);
+  background: var(--ask-card-bg);
+  box-shadow: var(--ask-card-shadow);
+}
+
+.head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  /* 제목은 카드 좌우 패딩(9px)보다 안쪽에서 시작한다 — 선택지 글자와 같은 줄. */
+  padding: 0 9px;
+  margin-bottom: var(--ask-title-gap);
+}
+
+.title {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font-size: var(--ask-title-size);
+  font-weight: var(--ask-title-weight);
+  color: var(--ask-title-ink);
+  line-height: 1;
+}
+
+.close {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  margin: -4px -4px 0 0;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ask-footer-ink);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.close:hover { background: var(--ask-option-hover); color: var(--ask-title-ink); }
+
+.options {
+  display: grid;
+  gap: var(--ask-option-gap);
+}
+
+.option {
+  display: flex;
+  align-items: center;
+  gap: var(--ask-index-gap);
+  width: 100%;
+  min-height: var(--ask-option-height);
+  padding: 0 var(--ask-option-pad-side);
+  border: 0;
+  border-radius: var(--ask-option-radius);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.option:hover { background: var(--ask-option-hover); }
+.option[data-active="true"] { background: var(--ask-option-active); }
+.option:disabled { opacity: .45; cursor: default; }
+
+.index {
+  flex: 0 0 auto;
+  width: var(--ask-index-size);
+  height: var(--ask-index-size);
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--ask-index-bg);
+  color: var(--ask-index-ink);
+  font-size: 11.5px;
+  font-weight: 640;
+  font-variant-numeric: tabular-nums;
+}
+
+.option[data-active="true"] .index { background: var(--ask-index-bg-active); }
+
+.optionText {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  gap: var(--ask-option-note-gap);
+}
+
+.optionTitleRow {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.optionTitle {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--ask-option-title-size);
+  font-weight: var(--ask-option-title-weight);
+  color: var(--ask-option-title-ink);
+  line-height: 1;
+}
+
+.badge {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--ask-badge-bg);
+  color: var(--ask-badge-ink);
+  font-size: var(--ask-badge-size);
+  font-weight: 620;
+  line-height: 1.2;
+}
+
+.optionNote {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--ask-option-note-size);
+  color: var(--ask-option-note-ink);
+  line-height: 1.2;
+}
+
+.arrow {
+  flex: 0 0 auto;
+  align-self: center;
+  color: var(--ask-footer-ink);
+  font-size: 13px;
+}
+
+/* 참조 화면에는 구분선이 없다(실측: 그 자리 픽셀이 전부 흰색). */
+.footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: var(--ask-option-height);
+  padding: 0 var(--ask-option-pad-side);
+}
+
+.footerMark {
+  flex: 0 0 auto;
+  width: var(--ask-index-size);
+  height: var(--ask-index-size);
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--ask-index-bg);
+  color: var(--ask-index-ink);
+  font-size: 11px;
+}
+
+.footerInput {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--ask-title-ink);
+  font: inherit;
+  font-size: var(--ask-footer-size);
+}
+
+.footerInput::placeholder { color: var(--ask-footer-ink); }
+
+.skip {
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--ask-skip-line);
+  border-radius: 8px;
+  background: var(--ask-card-bg);
+  color: var(--ask-skip-ink);
+  font-size: var(--ask-footer-size);
+  font-weight: 620;
+  cursor: pointer;
+}
+
+.skip:hover { background: var(--ask-option-hover); color: var(--ask-title-ink); }

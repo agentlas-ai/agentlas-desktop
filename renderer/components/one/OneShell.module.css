@@ -1281,6 +1281,18 @@
   pointer-events: auto;
 }
 
+/*
+ * 묻는 카드는 제 껍데기를 스스로 갖는다. 래퍼가 테두리·그림자·반경을 또
+ * 두르면 선이 두 겹이 되고, 그만큼 카드가 입력창보다 2px 좁아진다
+ * (실측: 래퍼 407 / 카드 405 / 입력창 407). 껍데기는 하나여야 한다.
+ */
+.decisionInline:has([data-ask-card="true"]) {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
 .decisionInlineClose {
   position: absolute;
   top: 5px;

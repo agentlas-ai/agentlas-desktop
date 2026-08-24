@@ -309,3 +309,4 @@ scripts/demo/
 
 # Generated from the pinned File Viewer dependency graph before renderer dev/build.
 /renderer/public/file-viewer/
+!docs/DESIGN-ASK-CARD.md
