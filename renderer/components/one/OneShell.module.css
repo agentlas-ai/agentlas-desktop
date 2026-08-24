@@ -1256,6 +1256,7 @@
   .workspace[data-context-rail="true"] .composerDock { right: 0; }
   .body[data-task-active="true"] .composer,
   .body[data-task-active="true"] .steeringQueue,
+  .body[data-task-active="true"] .decisionInline,
   .body[data-task-active="true"] .oneTurnAgentChips { width: min(1040px, 100%); }
 }
 
@@ -3033,6 +3034,10 @@
 /* 컴포저 위에 쌓이는 줄은 전부 같은 폭이어야 왼쪽 모서리가 한 줄로 선다. */
 .body[data-task-active="true"] .attachmentTray,
 .body[data-task-active="true"] .attachmentError,
+/* 묻는 카드도 그 줄 중 하나다. 이 목록에서 빠져 있어서 카드만 920px 로
+   넓게 떴다(실측: 창 1682 에서 카드 920 / 입력창 720). */
+.body[data-task-active="true"] .decisionInline,
+.decisionInline,
 .composer {
   width: min(720px, 100%);
 }
