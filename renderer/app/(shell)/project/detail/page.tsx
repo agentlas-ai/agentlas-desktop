@@ -1,7 +1,7 @@
 // 프로젝트 상세 — 프로젝트 문맥, 채팅, PM 메모리 기반 작업 타임라인.
 "use client";
 
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type PointerEvent as ReactPointerEvent } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import {
@@ -45,6 +45,120 @@ import type {
   ProjectTimelineEntry,
   ProjectTimelineSnapshot,
 } from "@/lib/types";
+import type { OntologyProjectStatus } from "@shared/types";
+
+/**
+ * 프로젝트 지식 — 상태 보기, 준비, 새로고침, 소스 추가, 인박스 열기.
+ *
+ * 이 다섯 창구는 처음부터 다 있었는데 화면에서 부르는 곳이 0이었다
+ * (감사 2026-08-25). 엔진은 실행 중에 이 지식을 이미 조회하고 있었으므로
+ * 죽은 코드가 아니라 손잡이가 없던 것이다. 서재의 "온톨로지 인박스" 는
+ * 채우는 코드가 저장소 어디에도 없어 영원히 비어 있었고, 그 화면이 쓰는
+ * 것은 에이전트 한 명의 경험이지 이 프로젝트 폴더의 지식이 아니다.
+ */
+function ProjectOntologyPanel({
+  projectId,
+  locale,
+  cardStyle,
+  eyebrowStyle,
+}: {
+  projectId: string;
+  locale: "ko" | "en";
+  cardStyle: CSSProperties;
+  eyebrowStyle: CSSProperties;
+}) {
+  const ko = locale === "ko";
+  const [status, setStatus] = useState<OntologyProjectStatus | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    const api = ipc();
+    if (!api?.ontology) return;
+    const next = await api.ontology.getProject(projectId).catch(() => null);
+    setStatus(next);
+  }, [projectId]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const run = async (label: string, fn: () => Promise<unknown>) => {
+    setBusy(label);
+    setNote(null);
+    try {
+      await fn();
+      await load();
+    } catch (error) {
+      // 실패는 사유를 그대로 보인다 — 조용히 아무 일도 없던 것처럼 두지 않는다.
+      setNote(String((error as Error)?.message ?? error).slice(0, 200));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const stateLabel = !status
+    ? (ko ? "확인 중" : "Checking")
+    : status.state === "ready" ? (ko ? "준비됨" : "Ready")
+    : status.state === "ingesting" ? (ko ? "읽는 중" : "Ingesting")
+    : status.state === "provisioned" ? (ko ? "자리만 잡음" : "Provisioned")
+    : status.state === "degraded" ? (ko ? "일부만 됨" : "Degraded")
+    : (ko ? "실패" : "Failed");
+
+  const counts = status?.counts;
+  const buttonStyle: CSSProperties = {
+    minHeight: 28,
+    padding: "0 10px",
+    border: "1px solid var(--paper-edge)",
+    borderRadius: 8,
+    background: "var(--paper)",
+    color: "var(--ink)",
+    fontSize: 11.5,
+    fontWeight: 620,
+    cursor: "pointer",
+  };
+
+  return (
+    <section style={{ ...cardStyle, marginBottom: 16 }}>
+      <div style={{ ...eyebrowStyle, marginBottom: 8 }}>{ko ? "프로젝트 지식" : "Project knowledge"}</div>
+      <strong style={{ display: "block", fontSize: 13, color: "var(--ink)" }}>{stateLabel}</strong>
+      {counts ? (
+        <span style={{ display: "block", marginTop: 4, fontSize: 11.5, color: "var(--muted-deep)" }}>
+          {ko
+            ? `등록한 소스 ${counts.registeredSources}개 · 인박스 ${counts.inboxEntries}개 · 읽은 조각 ${counts.databaseChunks}개`
+            : `${counts.registeredSources} sources · ${counts.inboxEntries} in inbox · ${counts.databaseChunks} chunks`}
+        </span>
+      ) : null}
+      {status && status.warnings.length > 0 ? (
+        <span style={{ display: "block", marginTop: 6, fontSize: 11.5, color: "var(--muted-deep)" }}>
+          {status.warnings[0]}
+        </span>
+      ) : null}
+      {note ? (
+        <span style={{ display: "block", marginTop: 6, fontSize: 11.5, color: "var(--danger, #9a4e45)" }} role="status">{note}</span>
+      ) : null}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>
+        {status?.state === "failed" || !status?.memoryDir ? (
+          <button type="button" style={buttonStyle} disabled={Boolean(busy)}
+            onClick={() => void run("provision", () => ipc()!.ontology.provision(projectId))}>
+            {busy === "provision" ? (ko ? "준비 중" : "Preparing") : (ko ? "지식 자리 만들기" : "Set up")}
+          </button>
+        ) : null}
+        <button type="button" style={buttonStyle} disabled={Boolean(busy)}
+          onClick={() => void run("sync", () => ipc()!.ontology.sync(projectId))}>
+          {busy === "sync" ? (ko ? "읽는 중" : "Reading") : (ko ? "다시 읽기" : "Re-read")}
+        </button>
+        <button type="button" style={buttonStyle} disabled={Boolean(busy)}
+          onClick={() => void run("inbox", () => ipc()!.ontology.openInbox(projectId))}>
+          {ko ? "인박스 열기" : "Open inbox"}
+        </button>
+      </div>
+      <span style={{ display: "block", marginTop: 8, fontSize: 11, color: "var(--muted-deep)", lineHeight: 1.5 }}>
+        {ko
+          ? "인박스에 넣은 파일과 등록한 폴더만 읽습니다. 홈 폴더나 옆 프로젝트는 절대 훑지 않습니다."
+          : "Only the inbox and folders you register are read. Your home directory and sibling projects are never scanned."}
+      </span>
+    </section>
+  );
+}
 
 export default function ProjectPageWrapper() {
   return (
@@ -966,6 +1080,7 @@ function ProjectPage() {
                 {project.sourceType === "github" ? project.sourceRef : (project.folderPath || project.sourceRef)?.split(/[\\/]/).filter(Boolean).at(-1)}
               </span> : null}
             </section>
+            <ProjectOntologyPanel projectId={project.id} locale={locale} cardStyle={cardStyle} eyebrowStyle={eyebrowStyle} />
             <ProjectTimelinePanel timeline={timeline} locale={locale} recoveryPending={recoveryPending} />
           </div>
         </aside>
