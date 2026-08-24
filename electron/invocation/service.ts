@@ -308,9 +308,21 @@ function exactOneInvocationParticipants(
       || (preparedTeam.mode === "team" && preparedTeam.taskForceTargets.length < 1)
     ) return null;
     for (const target of preparedTeam.taskForceTargets) {
+      if (target.source !== "local") return null;
+      /*
+       * 팀은 이 명단에 오르지 않는다.
+       *
+       * 이 명단은 "이 실행에 참여하는 설치본 하나하나의 버전을 못 박는" 것이고,
+       * 팀은 그 자체가 설치본이 아니라 구성원을 가진 그래프다. 그런데 여기서
+       * 팀을 에이전트로만 받았기 때문에, 사람이 팀을 이름으로 지목해 확정하면
+       * 실행이 시작되기도 전에 던졌다 — 카드는 뜨고, 확정을 누르고, 아무 일도
+       * 일어나지 않는 채로 영어 내부 오류 한 줄만 남았다(감사 2026-08-25:
+       * 팀만 지목 / 에이전트+팀 지목 둘 다 THROW, 우회 없음).
+       * 팀은 taskForceTargets 로 실행기에 그대로 전달돼 팀 그래프로 돈다.
+       */
+      if (target.entityKind === "team") continue;
       if (
-        target.source !== "local"
-        || target.entityKind !== "agent"
+        target.entityKind !== "agent"
         || !ONE_TASK_KIND_PARTICIPANT_ID_RE.test(target.agentId)
         || seen.has(target.agentId)
       ) return null;
