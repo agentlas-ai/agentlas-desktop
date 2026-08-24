@@ -40,7 +40,7 @@ const loadFailures: string[] = [];
 /**
  * ★ Why these are loaded tolerantly instead of value-imported.
  *
- * They used to be `import x from "../../plugins/.../plugin.json"` at module scope. That
+ * They used to be value-imported from their package paths at module scope. That
  * made a packaging mistake fatal: 1.0.31 and 1.0.32 shipped an app.asar with no
  * dist/plugins at all, so the main process threw before any window existed. The app could
  * not start, which also meant it could not auto-update itself out of the broken build —

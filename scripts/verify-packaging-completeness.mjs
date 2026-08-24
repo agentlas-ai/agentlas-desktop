@@ -47,10 +47,15 @@ for (const file of walk(path.join(root, "electron"))) {
   const specs = [];
   for (const m of src.matchAll(IMPORT_RE)) specs.push(m[1] ?? m[2]);
   for (const m of src.matchAll(MANIFEST_LITERAL_RE)) {
-    specs.push(m[1]);
     const abs = path.resolve(path.dirname(file), m[1]);
     const rel = path.relative(root, abs);
-    if (!rel.startsWith("..")) manifestLiterals.add(rel.split(path.sep).join("/"));
+    // ★ 실제로 존재하는 파일만 담는다. 주석에 예시로 적힌 경로("…/plugins/.../plugin.json")
+    // 까지 진짜 매니페스트로 읽어, 1.0.37 맥 빌드를 "app.asar 에 그 파일이 없다"로
+    // 세웠다. 소스가 이름을 대는 파일이 배포본에 있어야 한다는 계약은 **존재하는
+    // 파일**에만 의미가 있다.
+    if (rel.startsWith("..") || !existsSync(abs)) continue;
+    specs.push(m[1]);
+    manifestLiterals.add(rel.split(path.sep).join("/"));
   }
   for (const spec of specs) {
     const abs = path.resolve(path.dirname(file), spec);
