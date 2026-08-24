@@ -320,9 +320,24 @@
 }
 
 .artifactRail[data-rail-view="result"] .artifactList,
+/*
+ * 라이브 화면(브라우저·앱)은 칸을 꽉 채워야 하므로 목록의 여백을 없앤다.
+ * 다만 그 아래 붙는 접이식 섹션("출처")까지 여백을 잃어 글자가 벽에
+ * 붙어 있었다 — 여백은 라이브 화면에서만 빼고 섹션은 그대로 둔다.
+ */
 .artifactRail[data-rail-view="browser"] .artifactList,
 .artifactRail[data-rail-view="app"] .artifactList {
   padding: 0;
+}
+
+.artifactRail[data-rail-view="browser"] .artifactList > .artifactSection,
+.artifactRail[data-rail-view="app"] .artifactList > .artifactSection {
+  padding: 0 20px;
+}
+
+.artifactRail[data-rail-view="browser"] .artifactList > .artifactSection:last-child,
+.artifactRail[data-rail-view="app"] .artifactList > .artifactSection:last-child {
+  padding-bottom: 16px;
 }
 
 .appPreviewView {
