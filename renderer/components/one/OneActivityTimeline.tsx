@@ -830,7 +830,12 @@ function OneBrowserLiveView({ active, locale, preferredUrl }: { active: boolean;
   };
 
   return <section className={styles.browserLive} data-available={available ? "true" : "false"} data-viewport={viewport} data-interactive={interactive ? "true" : "false"}>
-    <div className={styles.browserTabBar}>
+    {/*
+      * 탭이 하나뿐일 때는 이 줄이 바깥 패널의 "브라우저" 탭과 같은 말을 두 번
+      * 한다. 그동안 머리가 세 겹(패널 탭 + 브라우저 탭 + 주소줄)이었다.
+      * 탭이 둘 이상일 때만 줄을 세우고, 새 탭과 LIVE 표시는 주소줄로 옮겼다.
+      */}
+    {tabs.length > 1 && <div className={styles.browserTabBar}>
       <div className={styles.browserTabs} role="tablist" aria-label={locale === "ko" ? "브라우저 탭" : "Browser tabs"}>
         {tabs.map((tab) => <div
           key={tab.id}
@@ -854,7 +859,7 @@ function OneBrowserLiveView({ active, locale, preferredUrl }: { active: boolean;
       </div>
       <button type="button" className={styles.browserNewTab} onClick={addTab} aria-label={locale === "ko" ? "새 탭" : "New tab"}><IconPlus size={14} /></button>
       {interactive && <span className={styles.browserLiveBadge}><i />LIVE</span>}
-    </div>
+    </div>}
     <div className={styles.browserNavigationBar}>
       <button type="button" onClick={() => dispatch({ kind: "navigation", action: "back" })} disabled={!interactive} aria-label={locale === "ko" ? "뒤로" : "Back"}><IconArrowLeft size={14} /></button>
       <button type="button" onClick={() => dispatch({ kind: "navigation", action: "forward" })} disabled={!interactive} aria-label={locale === "ko" ? "앞으로" : "Forward"}><IconChevronRight size={14} /></button>
@@ -869,6 +874,8 @@ function OneBrowserLiveView({ active, locale, preferredUrl }: { active: boolean;
           spellCheck={false}
         />
       </form>
+      {tabs.length <= 1 && <button type="button" className={styles.browserNewTab} onClick={addTab} aria-label={locale === "ko" ? "새 탭" : "New tab"}><IconPlus size={14} /></button>}
+      {tabs.length <= 1 && interactive && <span className={styles.browserLiveBadge}><i />LIVE</span>}
       <div className={styles.browserMenuAnchor}>
         <button type="button" aria-label={locale === "ko" ? "브라우저 메뉴" : "Browser menu"} aria-expanded={menuOpen} onClick={() => setMenuOpen((value) => !value)}><IconMoreHorizontal size={15} /></button>
         {menuOpen && <div className={styles.browserMenu} role="menu">

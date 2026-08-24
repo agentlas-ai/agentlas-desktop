@@ -659,13 +659,24 @@ button.artifactVisual { cursor: pointer; }
 .browserNavigationBar {
   min-width: 0;
   min-height: 44px;
-  display: grid;
-  grid-template-columns: 30px 30px 30px minmax(0, 1fr) 30px;
+  /* 다섯 칸 고정 격자였다. 새 탭·LIVE 가 주소줄로 오면서 자식이 늘자
+     다음 줄로 감싸 줄 높이가 44 -> 78px 이 됐다. 개수에 안 매이게 한다. */
+  display: flex;
   align-items: center;
   gap: 3px;
   padding: 6px 9px;
   border-bottom: 1px solid #e8eaec;
   background: #fff;
+}
+
+.browserNavigationBar > button,
+.browserNavigationBar > span,
+.browserNavigationBar > div {
+  flex: 0 0 auto;
+}
+
+.browserNavigationBar > .browserAddressForm {
+  flex: 1 1 auto;
 }
 .browserAddressForm {
   min-width: 0;
