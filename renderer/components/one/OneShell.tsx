@@ -1825,6 +1825,30 @@ export function OneShell() {
     if (supersededByNewerRun()) return;
     await refreshAll();
     if (supersededByNewerRun()) return;
+    /*
+     * ★ 답 말풍선을 durable 기록에서 되살린다.
+     *
+     * 실행이 끝났다는 사실은 두 길로 온다: 라이브 이벤트(정상)와, 그것을 놓쳤을 때 도는
+     * activeChats 폴링 안전망(아래 useEffect). 그런데 이 settleRun 은 threadRuns 와
+     * Activity 만 복원하고 **대화 메시지는 다시 읽지 않았다.** 답은 messages 에 사는데
+     * 그것을 안 채우니, 라이브 이벤트를 놓친 실행은 서버가 답을 냈고 기록에도 남았는데
+     * 화면에는 내 말풍선만 남는다 — 새로고침해야 보인다.
+     *
+     * 웹 이식본에서 먼저 실측됐다(2026-08-24, 이벤트 스트림 미개설). 데스크탑은 IPC 라
+     * 놓칠 일이 드물지만 안전망이 존재한다는 것 자체가 "놓칠 수 있다"는 뜻이고, 나머지를
+     * 다 복원하면서 정작 답만 빼놓는 안전망은 반쪽이다. 새로고침이 하는 일을 그대로 한다.
+     *
+     * 지금 그 대화를 보고 있고 새 실행이 시작되지 않았을 때만. 서버 스냅샷이 비어 있으면
+     * 화면의 낙관 행을 지우지 않는다 — 없는 것을 사실로 만들지 않기 위해서다.
+     */
+    if (shownThreadChatIdRef.current === chatId && runChatIdRef.current === chatId && !runIdRef.current) {
+      const history = await api.invoke.history(chatId).catch(() => null);
+      if (!supersededByNewerRun() && history && shownThreadChatIdRef.current === chatId) {
+        const next = toUiMessages(history);
+        setMessages((current) => (next.length === 0 && current.length > 0 ? current : next));
+      }
+    }
+    if (supersededByNewerRun()) return;
     // A canonical Task projection can intentionally omit a receipt that has
     // not yet been bound into its immutable reference list. That must not
     // erase the Activity for the run that just settled: the chat-owned durable
