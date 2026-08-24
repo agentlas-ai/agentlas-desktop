@@ -61,8 +61,35 @@ function packageRefFromCard(card: Record<string, unknown>): string | null {
   return validPackageRef(String(source.ref ?? ""));
 }
 
+/**
+ * 임시 폴더에서 온 패키지는 제품 자산이 아니다.
+ *
+ * 중복 판정이 경로 기준이라, 테스트가 실행될 때마다 새로 만드는 임시 폴더
+ * (`.../pytest-of-<user>/pytest-<n>/...`)는 매번 "처음 보는 에이전트"가 됐다.
+ * 그렇게 같은 스튜디오가 43개까지 쌓여 한 번 정리했는데(2026-08-23), 유입을
+ * 막지 않아 59개로 다시 늘었다. 청소가 아니라 수도꼭지를 잠근다.
+ *
+ * 살아 있는 임시 폴더도 거부한다 — 다음 실행이면 사라질 경로를 라이브러리에
+ * 등록하면, 그 자리는 반드시 "소스 없음" 상태가 된다.
+ */
+export function isEphemeralPackagePath(resolved: string): boolean {
+  const lower = resolved.toLowerCase();
+  if (/[/\\]pytest-of-[^/\\]+[/\\]/.test(lower)) return true;
+  if (/[/\\]pytest-\d+[/\\]/.test(lower)) return true;
+  for (const base of [os.tmpdir(), "/tmp", "/private/tmp", "/private/var/folders"]) {
+    try {
+      const root = path.resolve(base).toLowerCase();
+      if (lower === root || lower.startsWith(root.endsWith(path.sep) ? root : root + path.sep)) return true;
+    } catch {
+      // 해석할 수 없는 기준 경로는 판단에 쓰지 않는다.
+    }
+  }
+  return false;
+}
+
 function validPackageRef(raw: string): string | null {
   if (!raw || !path.isAbsolute(raw)) return null;
+  if (isEphemeralPackagePath(path.resolve(raw))) return null;
   try {
     if (!fs.statSync(raw).isDirectory()) return null;
   } catch {
