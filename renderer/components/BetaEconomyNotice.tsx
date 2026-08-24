@@ -206,7 +206,7 @@ const backdrop: CSSProperties = {
 };
 
 const card: CSSProperties = {
-  width: "min(520px, calc(100vw - 40px))",
+  width: "var(--popup-3-width)",
   maxHeight: "calc(100vh - 40px)",
   overflowY: "auto",
   padding: "22px 22px 18px",

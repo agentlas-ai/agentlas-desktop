@@ -2604,6 +2604,7 @@ export function OneShell() {
 
     let disposed = false;
     let refreshing = false;
+    const startedPreviewAppIds = new Set<string>();
     const refresh = async () => {
       if (disposed || refreshing) return;
       refreshing = true;
@@ -2620,6 +2621,8 @@ export function OneShell() {
           return;
         }
         const preview = await bridge.appFactory.startLivePreview({ appId: app.id });
+        // 무엇을 켰는지 기억해 둔다 — 정리에서 그것만 끈다.
+        startedPreviewAppIds.add(app.id);
         if (disposed) return;
         if (!preview.ok || !preview.url) {
           // Keep a currently reachable view during a transient registry or
@@ -2654,6 +2657,15 @@ export function OneShell() {
     return () => {
       disposed = true;
       window.clearInterval(timer);
+      /*
+       * 켜는 곳이 두 군데인데 한쪽만 껐다(감사 2026-08-25). Work 화면은
+       * 고쳤지만 One 에서 켠 미리보기 서버는 대화를 떠나도 계속 떠 있었고,
+       * 앱 안에서 끌 방법이 없었다. 이 대화에서 켠 것만 끈다.
+       */
+      for (const appId of startedPreviewAppIds) {
+        void bridge.appFactory?.stopLivePreview?.({ appId }).catch(() => undefined);
+      }
+      startedPreviewAppIds.clear();
     };
   }, [activeThreadChatId, busy, surface?.manifestId]);
   const openOneLinkedFile = useCallback((file: LinkedFileArtifact) => {

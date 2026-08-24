@@ -884,7 +884,7 @@ const detailOverlay: CSSProperties = {
 };
 
 const detailDialog: CSSProperties = {
-  width: "min(640px, 100%)",
+  width: "var(--popup-2-width)",
   maxHeight: "min(760px, 90vh)",
   overflowY: "auto",
   borderRadius: 8,

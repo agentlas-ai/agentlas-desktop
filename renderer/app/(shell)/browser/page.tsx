@@ -794,7 +794,7 @@ function SiteEditor({
           z-index: 70;
         }
         .be {
-          width: min(440px, 92vw);
+          width: var(--popup-3-width);
           max-height: calc(100vh - 32px);
           overflow-y: auto;
           background: var(--rd-bg);

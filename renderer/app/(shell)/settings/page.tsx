@@ -1249,7 +1249,7 @@ function MobileBridgePanel() {
             <div
               onClick={(event) => event.stopPropagation()}
               style={{
-                width: "min(420px, 100%)", background: "var(--paper)", borderRadius: 18,
+                width: "var(--popup-3-width)", background: "var(--paper)", borderRadius: 18,
                 border: "1px solid var(--paper-edge)", boxShadow: "0 24px 60px -24px rgba(0,0,0,.5)",
                 padding: 22,
               }}

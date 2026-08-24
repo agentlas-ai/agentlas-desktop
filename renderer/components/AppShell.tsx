@@ -862,7 +862,7 @@ function BugReportModal({ open, onClose }: { open: boolean; onClose: () => void 
     >
       <div
         style={{
-          width: "min(460px, calc(100vw - 32px))",
+          width: "var(--popup-3-width)",
           maxHeight: "calc(100vh - 32px)",
           overflowY: "auto",
           background: "var(--paper)",
@@ -1119,7 +1119,7 @@ function FirstRunTour({
         top: 64,
         left: "50%",
         transform: "translateX(-50%)",
-        width: "min(460px, calc(100vw - 32px))",
+        width: "var(--popup-3-width)",
         zIndex: 200,
         border: "1px solid var(--paper-edge)",
         borderRadius: 10,

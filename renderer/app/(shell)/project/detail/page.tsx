@@ -584,7 +584,7 @@ function ProjectPage() {
             aria-modal="true"
             aria-labelledby="task-start-title"
             aria-describedby="task-start-description"
-            style={{ width: "min(520px, calc(100vw - 32px))", overflow: "hidden", border: "1px solid var(--paper-edge)", borderRadius: 16, background: "var(--paper)", boxShadow: "0 24px 80px rgba(20, 22, 18, .22)" }}
+            style={{ width: "var(--popup-3-width)", overflow: "hidden", border: "1px solid var(--paper-edge)", borderRadius: 16, background: "var(--paper)", boxShadow: "0 24px 80px rgba(20, 22, 18, .22)" }}
           >
             <header style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "20px 20px 16px" }}>
               <div style={{ flex: 1, minWidth: 0 }}>
@@ -644,7 +644,7 @@ function ProjectPage() {
             role="dialog"
             aria-modal="true"
             aria-labelledby="external-cli-session-title"
-            style={{ width: "min(760px, calc(100vw - 32px))", maxHeight: "min(720px, calc(100vh - 48px))", display: "flex", flexDirection: "column", overflow: "hidden", border: "1px solid var(--paper-edge)", borderRadius: 16, background: "var(--paper)", boxShadow: "0 24px 80px rgba(20, 22, 18, .22)" }}
+            style={{ width: "var(--popup-2-width)", maxHeight: "min(720px, calc(100vh - 48px))", display: "flex", flexDirection: "column", overflow: "hidden", border: "1px solid var(--paper-edge)", borderRadius: 16, background: "var(--paper)", boxShadow: "0 24px 80px rgba(20, 22, 18, .22)" }}
           >
             <header style={{ display: "flex", alignItems: "center", gap: 12, padding: "18px 20px", borderBottom: "1px solid var(--paper-edge)" }}>
               <div style={{ flex: 1, minWidth: 0 }}>

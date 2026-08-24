@@ -2848,7 +2848,7 @@ const secureCredentialOverlay: CSSProperties = {
 };
 
 const secureCredentialDialog: CSSProperties = {
-  width: "min(520px, 100%)",
+  width: "var(--popup-3-width)",
   borderRadius: 8,
   border: "1px solid var(--paper-edge)",
   background: "var(--paper)",
