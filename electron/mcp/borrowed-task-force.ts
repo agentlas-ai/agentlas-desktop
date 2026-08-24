@@ -2,6 +2,7 @@
 // Hub "borrow" is not an installed firm: the local orchestrator plans per-agent
 // input packets, runs each borrowed agent as an isolated BYOM local sub-run, then
 // synthesizes the results into the visible chat answer.
+import { AGENT_SURFACE_CLOSE, AGENT_SURFACE_OPEN } from "../../shared/agent-control-blocks";
 import { createHash, randomUUID } from "node:crypto";
 import type {
   Chat,
@@ -2135,11 +2136,15 @@ export function buildFallbackPackets(specs: BorrowedAgentSpec[], userPrompt: str
      * 않고 승인 카드만 뜬다(게이트 verify-one-improvement-proof-producer 의
      * planner-fallback 시나리오에서 워커 실행 0회로 잡힌다).
      *
-     * 이 패킷이 하는 일은 분석과 권고뿐이고, 지시문이 "최종 종합을 쓰지 말고
-     * 지정된 레인 안에 머물라" 고 못 박는다. 작업공간을 실제로 바꾸는 것은
-     * 도구 관문이 따로 막으므로, 여기서 한 번 더 막는 것은 이중이고 그
-     * 대가로 방이 멈춘다. 승인은 만들 때 한 번이라는 결정(2026-08-09)과도
-     * 어긋난다.
+     * 안전한 근거는 브리프에 적은 문장이 아니다 — 그건 모델에게 보내는 산문일
+     * 뿐 아무도 검사하지 않는다(감사 2026-08-25 정정). 실제 근거는 구조다:
+     * 이 패킷은 권한 도출에서 읽기로 확정된다. 쓰기를 주는 조건 어느 것에도
+     * 해당하지 않으며, 읽기 실행에서 바깥을 바꾸는 도구 호출은 중재자가 없어도
+     * 기본값이 거부한다. 그래서 여기서 한 번 더 막는 것은 이중이고, 그 대가로
+     * 방이 멈춘다. 승인은 만들 때 한 번이라는 결정(2026-08-09)과도 어긋난다.
+     *
+     * 이 패킷의 종류를 바꾸거나 도구 필요 표시를 켜려는 사람에게: 그러면 위
+     * 근거가 무너진다. 폴백은 읽기라는 것이 이 결정의 전제다.
      */
     requiresApproval: false,
     inputType: "specialist-task",
@@ -2843,17 +2848,48 @@ function buildSynthesisPrompt(input: {
   ].join("\n");
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export function stripUnsupportedArtifactClaims(
   value: string,
   artifacts: NonNullable<McpInvocationEvent["oneArtifacts"]>,
   locale: RuntimeLocale,
 ): string {
   if (artifacts.length > 0) return value;
+  /*
+   * 결과 카드 계약 블록은 산문이 아니다 — 건드리지 않는다.
+   *
+   * 이 함수는 "산출물/파일/문서" 와 "생성/저장" 이 한 문장에 있으면 그 문장을
+   * 지운다. 그런데 Surface 계약은 한 줄짜리 JSON 이라 그 줄 전체가 문장 하나로
+   * 취급돼 통째로 사라졌다. 결과 카드가 파서에 닿기도 전에 없어진 것이다.
+   *
+   * 사용자가 실제로 겪는다(감사 2026-08-25): 도구 결과에 산출물 경로를 실어
+   * 주는 런타임은 claude-code 와 codex 둘뿐이고, 나머지로 팀을 돌리면 산출물
+   * 이름이 든 팀 결과 카드가 매번 사라졌다. 파일은 만들어져 있고 크레딧도
+   * 나갔는데 "연결된 파일이 아직 없습니다" 만 남았다.
+   *
+   * 계약 블록을 떼어 두고 산문에만 적용한 뒤 제자리에 되돌린다.
+   */
+  const fences: string[] = [];
+  const FENCE_SLOT = "\u0000agentlas-surface-slot-";
+  const withoutFences = value.replace(
+    new RegExp(`${escapeRegExp(AGENT_SURFACE_OPEN)}[\\s\\S]*?${escapeRegExp(AGENT_SURFACE_CLOSE)}`, "g"),
+    (match) => {
+      fences.push(match);
+      return `${FENCE_SLOT}${fences.length - 1}\u0000`;
+    },
+  );
+  const restoreFences = (text: string): string => text.replace(
+    new RegExp(`${FENCE_SLOT}(\\d+)\u0000`, "g"),
+    (_all, index) => fences[Number(index)] ?? "",
+  );
   const positiveVerb = /\b(?:saved|created|generated|written|updated|attached|shown|published|available)\b|(?:저장|생성|작성|업데이트|첨부|표시|게시|제공)(?:했|됐|되었|되어|되어\s*있|함|완료)|(?:준비|확인)할\s*수\s*있/iu;
   const artifactNoun = /\b(?:artifact|file|document|prd|outputs?|output\s+panel)\b|(?:산출물|파일|문서|기획안|PRD|출력|Outputs?)/iu;
   const negation = /\b(?:not|no|never|cannot|can't|couldn't|wasn't|isn't|unavailable|missing|failed)\b|(?:아직|못|없|실패|미완료|되지\s*않)/iu;
   let removed = false;
-  const cleaned = value
+  const cleaned = withoutFences
     .split("\n")
     .map((line) => line
       .split(/(?<=[.!?。！？])\s+/u)
@@ -2870,7 +2906,7 @@ export function stripUnsupportedArtifactClaims(
   const evidenceNote = locale === "ko"
     ? "이번 실행에서 Outputs에 연결된 파일은 아직 없습니다."
     : "No file is available in Outputs for this run yet.";
-  return [cleaned, evidenceNote].filter(Boolean).join("\n\n");
+  return restoreFences([cleaned, evidenceNote].filter(Boolean).join("\n\n"));
 }
 
 function linkAbort(parent?: AbortSignal) {
