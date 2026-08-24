@@ -104,11 +104,11 @@
 }
 
 .body[data-task-active="true"][data-context-rail="true"] {
-  grid-template-columns: 252px minmax(0, 1fr) var(--one-rail-width, 420px);
+  grid-template-columns: 252px minmax(0, 1fr) var(--one-rail-width, 210px);
 }
 
 .body[data-task-active="true"][data-rail-collapsed="true"][data-context-rail="true"] {
-  grid-template-columns: 0 minmax(0, 1fr) var(--one-rail-width, 420px);
+  grid-template-columns: 0 minmax(0, 1fr) var(--one-rail-width, 210px);
 }
 
 .body[data-task-active="true"] .rail {
@@ -531,18 +531,28 @@
 }
 
 .taskToolbar > button,
+/* 점 세 개는 무엇을 여는지 알려주지 않는다 — 글자로 쓴다(오너 결정 2026-08-24). */
 .taskToolbarMenu > button {
-  width: 40px;
   height: 40px;
+  min-width: 58px;
   flex: 0 0 auto;
   display: grid;
   place-items: center;
-  padding: 0;
+  padding: 0 10px;
   border: 0;
   border-radius: 8px;
   background: transparent;
-  color: #777d81;
+  color: #5b6165;
+  font-size: 11.5px;
+  font-weight: 760;
+  letter-spacing: .06em;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, .9), 0 1px 2px rgba(24, 29, 32, .22);
   cursor: pointer;
+}
+
+.taskToolbarMenu > button:hover {
+  background: #f1f2f3;
+  color: #1d2023;
 }
 
 .taskToolbar > button:hover,
@@ -657,12 +667,18 @@
 
 .taskToolbarMenu { position: relative; grid-column: 6; }
 
+/* ── 팝업 크기 체계 (오너 결정 2026-08-24) ────────────────────────────────
+   팝업1 = 가장 큰 것, 팝업2 = 팝업1 가로의 70%, 팝업3 = 50%.
+   메뉴 말풍선은 이 체계 밖의 작은 것이며, 글자가 잘리지 않을 만큼만 넓힌다. */
 .taskToolbarMenuPopover {
   position: absolute;
   z-index: 70;
   top: calc(100% + 6px);
-  left: 0;
-  width: 190px;
+  right: 0;
+  left: auto;
+  width: max-content;
+  min-width: 200px;
+  max-width: 280px;
   display: grid;
   padding: 6px;
   border: 1px solid #e2e4e5;
@@ -2626,11 +2642,11 @@
 }
 
 .body[data-task-active="true"][data-context-rail="true"] {
-  grid-template-columns: 252px minmax(0, 1fr) var(--one-rail-width, 420px);
+  grid-template-columns: 252px minmax(0, 1fr) var(--one-rail-width, 210px);
 }
 
 .body[data-task-active="true"][data-rail-collapsed="true"][data-context-rail="true"] {
-  grid-template-columns: 0 minmax(0, 1fr) var(--one-rail-width, 420px);
+  grid-template-columns: 0 minmax(0, 1fr) var(--one-rail-width, 210px);
 }
 
 .rail {
@@ -3052,7 +3068,7 @@
     right: 0;
     bottom: 0;
     grid-column: auto;
-    width: min(var(--one-rail-width, 420px), calc(100% - 56px)) !important;
+    width: min(var(--one-rail-width, 210px), calc(100% - 56px)) !important;
     height: auto;
     border-left: 1px solid #e4e6e7;
     box-shadow: -16px 0 36px rgba(24, 29, 32, .09);
@@ -3164,3 +3180,450 @@
 .railDormant > summary::-webkit-details-marker { display: none; }
 .railDormant > summary::before { content: "› "; }
 .railDormant[open] > summary::before { content: "⌄ "; }
+
+
+/* 팝업 크기 체계 — 다른 팝업이 이 변수를 쓰면 한 곳에서 비율이 지켜진다. */
+.body {
+  --one-popup-1-width: min(1040px, calc(100vw - 96px));
+  --one-popup-2-width: calc(var(--one-popup-1-width) * .7);
+  --one-popup-3-width: calc(var(--one-popup-1-width) * .5);
+}
+
+/* ── 분할 보기 ────────────────────────────────────────────────────────────
+   칸이 없을 때 `display: contents` 로 무대가 레이아웃에서 완전히 사라진다.
+   래퍼를 항상 flex 로 두면 칸이 하나뿐인 평소 화면까지 배치가 바뀐다. */
+.splitStage {
+  display: contents;
+}
+
+.splitStage[data-split="true"] {
+  position: relative;
+  /* 높이·폭을 스스로 정해야 한다. auto 로 두면 칸이 내용 길이만큼
+     (실측 32,242px) 늘어나 스크롤이 사라지고, 칸 넷이 오른쪽 산출물 레일
+     밑으로 밀려 들어가 겹친다(실측 x=975 칸 vs x=761 레일). */
+  height: 100%;
+  width: 100%;
+  min-height: 0;
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+  background: #e6e8ea;
+  /* 모서리를 끌면 이 두 값이 바뀐다. 위아래·좌우 비율을 한 점에서 잡는다. */
+  --split-col: 50%;
+  --split-row: 50%;
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr;
+}
+
+/* 둘이면 좌우로만 가른다. */
+.splitStage[data-panes="2"] {
+  grid-template-columns: var(--split-col) 1fr;
+  grid-template-rows: 1fr;
+}
+
+/* 셋이면 왼쪽 한 칸이 위아래를 다 쓰고, 오른쪽이 둘로 갈린다. */
+.splitStage[data-panes="3"] {
+  grid-template-columns: var(--split-col) 1fr;
+  grid-template-rows: var(--split-row) 1fr;
+}
+
+.splitStage[data-panes="3"] > *:first-child {
+  grid-row: span 2;
+}
+
+/* 넷이면 위 둘 아래 둘. */
+.splitStage[data-panes="4"] {
+  grid-template-columns: var(--split-col) 1fr;
+  grid-template-rows: var(--split-row) 1fr;
+}
+
+.splitStage[data-split="true"] > .scroll {
+  min-width: 0;
+  min-height: 0;
+  height: auto;
+}
+
+/* 모서리 손잡이 — 네 칸이 만나는 점. 끌면 가로·세로 비율이 함께 움직인다. */
+.splitCorner {
+  position: absolute;
+  z-index: 12;
+  width: 22px;
+  height: 22px;
+  margin: -11px 0 0 -11px;
+  border: 0;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 0 1px #d6d9dc, 0 2px 6px rgba(24, 29, 32, .16);
+  cursor: nwse-resize;
+  padding: 0;
+}
+
+.splitCorner[data-axis="x"] { cursor: col-resize; }
+
+.splitCorner::after {
+  content: "";
+  position: absolute;
+  inset: 8px;
+  border-radius: 50%;
+  background: #b9bec4;
+}
+
+.splitCorner:hover::after,
+.splitCorner:focus-visible::after { background: #1d2023; }
+
+.splitPane {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  overflow: hidden;
+}
+
+.splitPaneHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 8px 8px 12px;
+  border-bottom: 1px solid #eceef0;
+}
+
+.splitPaneTitle {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.splitPaneSeat {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: #8b9096;
+  letter-spacing: .01em;
+}
+
+.splitPaneName {
+  max-width: 100%;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #1d2023;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.splitPaneClose {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #8b9096;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.splitPaneClose:hover {
+  background: #f1f2f3;
+  color: #1d2023;
+}
+
+.splitPaneBody {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 14px 4px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.splitPaneNote {
+  margin: 0;
+  font-size: 12px;
+  color: #8b9096;
+}
+
+.splitPaneFocusUnused {
+  flex: 0 0 auto;
+  margin: 8px 12px 12px;
+  min-height: 32px;
+  border: 1px solid #e2e4e5;
+  border-radius: 9px;
+  background: #fafbfb;
+  color: #4a5054;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.splitPaneFocus:hover {
+  background: #f1f2f3;
+  color: #1d2023;
+}
+
+/* ── 팝업 2 — 에이전트 세션 (팝업1 가로의 70%) ─────────────────────────── */
+.sessionSheet {
+  position: absolute;
+  z-index: 80;
+  top: 64px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: var(--one-popup-2-width, min(728px, calc(100vw - 96px)));
+  max-height: min(560px, calc(100% - 120px));
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #e2e4e5;
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 24px 60px rgba(24, 29, 32, .18);
+  overflow: hidden;
+}
+
+.sessionSheetHeader {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 12px 12px 18px;
+  border-bottom: 1px solid #eceef0;
+}
+
+.sessionSheetHeader > strong {
+  flex: 0 0 auto;
+  font-size: 14px;
+  color: #1d2023;
+}
+
+.sessionSheetHint {
+  flex: 1 1 auto;
+  font-size: 11.5px;
+  color: #8b9096;
+}
+
+.sessionSheetList {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  gap: 2px;
+  padding: 8px;
+  overflow-y: auto;
+}
+
+.sessionSheetEmpty {
+  margin: 0;
+  padding: 18px;
+  font-size: 12.5px;
+  color: #8b9096;
+  text-align: center;
+}
+
+.sessionSheetRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  border-radius: 10px;
+}
+
+.sessionSheetRow:hover {
+  background: #f7f8f8;
+}
+
+.sessionSheetRow[data-active="true"] {
+  background: #f1f2f3;
+}
+
+.sessionSheetOpen {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.sessionSheetSeat {
+  flex: 0 0 auto;
+  max-width: 148px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 700;
+  color: #6f757a;
+}
+
+.sessionSheetName {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: #1d2023;
+}
+
+.sessionSheetSplit {
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid #e2e4e5;
+  border-radius: 8px;
+  background: #fff;
+  color: #4a5054;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.sessionSheetSplit[data-on="true"] {
+  border-color: #1d2023;
+  background: #1d2023;
+  color: #fff;
+}
+
+.sessionSheetSplit:disabled {
+  opacity: .4;
+  cursor: default;
+}
+
+/* 나간 팀원 — 알림도 경고도 아니고, 대화에 남는 회색 사실 한 줄. */
+.departureNotice {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 14px 0;
+  color: #9aa0aa;
+  font-size: 12px;
+  letter-spacing: .02em;
+  user-select: none;
+}
+
+.departureNotice > span:first-child,
+.departureNotice > span:last-child {
+  color: #c8ccd2;
+}
+
+/* 칸 안쪽: 대화 + 그 칸의 사이드바 */
+.splitPaneStage {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  gap: 1px;
+  background: #eceef0;
+}
+
+.splitPaneRail {
+  flex: 0 0 auto;
+  width: min(260px, 46%);
+  min-width: 0;
+  background: #fff;
+  overflow: hidden;
+}
+
+/* 산출물 패널은 화면 오른쪽에 떠 있도록 만들어졌다. 칸 안에서는 그 칸의
+   한 칸을 차지하는 평범한 요소여야 한다. */
+.splitPaneRail [data-one-runtime-artifacts="true"] {
+  position: static;
+  inset: auto;
+  width: 100% !important;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.splitPaneRailToggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid #e2e4e5;
+  border-radius: 7px;
+  background: #fff;
+  color: #5b6165;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.splitPaneRailToggle[data-on="true"] {
+  border-color: #1d2023;
+  background: #1d2023;
+  color: #fff;
+}
+
+.splitPaneRailCount {
+  font-variant-numeric: tabular-nums;
+  opacity: .75;
+}
+
+/* 칸마다 자기 입력창 — 대화 하나에 입력창 하나(오너 결정 2026-08-24). */
+.splitPaneComposer {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  margin: 8px;
+  padding: 6px 6px 6px 10px;
+  border: 1px solid #e2e4e5;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.splitPaneComposer > textarea {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-height: 96px;
+  padding: 6px 0;
+  border: 0;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: #1d2023;
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.splitPaneComposer > button {
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 9px;
+  background: #1d2023;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.splitPaneComposer > button:disabled {
+  background: #d6d9dc;
+  color: #8b9096;
+  cursor: default;
+}
+

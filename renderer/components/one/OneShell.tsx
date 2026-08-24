@@ -14,6 +14,7 @@ import {
 } from "react";
 import { flushSync } from "react-dom";
 import { Markdown, StreamingMarkdown, type LinkedFileArtifact } from "@/components/Markdown";
+import { OneSplitPane } from "@/components/one/OneSplitPane";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { BrowserActionApprovalSheet } from "@/components/BrowserActionApprovalSheet";
 import { McpKeyRequestSheet } from "@/components/McpKeyRequestSheet";
@@ -195,13 +196,33 @@ function keepPrevIfDeepEqual<T>(next: T): (prev: T | null | undefined) => T {
 const ONE_PERMISSION_STORAGE_KEY = "agentlas.one.permission-mode.v1";
 const ONE_RUNTIME_STORAGE_KEY = "agentlas.one.runtime-selection.v1";
 const ONE_LEFT_RAIL_COLLAPSED_STORAGE_KEY = "agentlas.one.left-rail-collapsed.v1";
-const ONE_CONTEXT_RAIL_OPEN_STORAGE_KEY = "agentlas.one.context-rail-open.v1";
+/*
+ * v2 (2026-08-24): 예전 키에는 "열림" 이 저장돼 있어서, 보여줄 산출물이 하나도
+ * 없는 대화에서도 오른쪽 패널이 탭만 띄운 채 화면 절반을 먹고 있었다.
+ * 이제 닫힌 채로 시작하고, 그 대화가 실제로 무언가를 만들면 한 번 열린다.
+ */
+const ONE_CONTEXT_RAIL_OPEN_STORAGE_KEY = "agentlas.one.context-rail-open.v2";
 /** The right rail is resizable (owner request 2026-08-16); the width persists like its open state. */
-const ONE_CONTEXT_RAIL_WIDTH_STORAGE_KEY = "agentlas.one.context-rail-width.v1";
-const ONE_CONTEXT_RAIL_WIDTH_DEFAULT = 420;
-const ONE_CONTEXT_RAIL_WIDTH_MIN = 340;
+/*
+ * v2 로 올린 이유(오너 결정 2026-08-24 "디폴트 값 지금의 반으로 줄여라"):
+ * 예전 키에는 화면 절반을 넘는 폭이 이미 저장돼 있어서, 기본값만 줄여도
+ * 실제로 뜨는 폭은 그대로였다(실측 648px = 상한까지 벌어진 값).
+ * 키를 올려 모두가 새 기본 폭에서 시작하고, 그 뒤 직접 끈 폭은 그대로 남는다.
+ */
+const ONE_CONTEXT_RAIL_WIDTH_STORAGE_KEY = "agentlas.one.context-rail-width.v2";
+/* 처음 열릴 때 오른쪽 패널이 화면을 너무 많이 먹었다 — 기본을 절반으로 줄인다
+   (오너 결정 2026-08-24). 사용자가 넓히면 그 값이 기억되므로 기본만 낮춘다. */
+/* 실제로 뜨던 폭(실측 648px)의 절반 — 오너 결정 2026-08-24. */
+const ONE_CONTEXT_RAIL_WIDTH_DEFAULT = 324;
+/*
+ * 하한은 기본값보다 커서는 안 된다. 340 이던 동안 기본값 210 은 clamp 에
+ * 걸려 한 번도 화면에 나온 적이 없다 — 저장된 값이 사람의 선택이려면
+ * 사람이 고를 수 있는 값이어야 한다.
+ */
+const ONE_CONTEXT_RAIL_WIDTH_MIN = 200;
 const ONE_CONTEXT_RAIL_WIDTH_MAX = 1280;
-const ONE_CONTEXT_RAIL_RESULT_RATIO = 0.432;
+/* 오너 지시 2026-08-24: "켜져도 지금의 반만". 0.432 -> 0.216. */
+const ONE_CONTEXT_RAIL_RESULT_RATIO = 0.216;
 
 function oneOrgBrowserPreviewState(): OneOrgState {
   const now = new Date().toISOString();
@@ -258,7 +279,7 @@ function clampContextRailWidth(value: number): number {
 function preferredContextResultWidth(): number {
   if (typeof window === "undefined") return 720;
   const requested = window.innerWidth <= 1080
-    ? Math.round(window.innerWidth * 0.86)
+    ? Math.round(window.innerWidth * 0.43)
     : Math.round(window.innerWidth * ONE_CONTEXT_RAIL_RESULT_RATIO);
   return clampContextRailWidth(requested);
 }
@@ -796,6 +817,15 @@ const LAST_ONE_CONVERSATION_KEY = "agentlas.one.lastConversationId";
 
 type OneRailMode = "organisation" | "sessions" | "settings";
 
+/** 세션 목록의 한 줄. 대화가 주인이고, 작업은 그 줄에 붙는 상태다. */
+interface OneSessionRow {
+  kind: "chat" | "task";
+  key: string;
+  chat: Chat | null;
+  task: OneTaskProjection | null;
+  sortAt: string;
+}
+
 /** 마지막으로 본 레일 탭. 조직도와 세션 목록 사이를 오갈 때 매번 되돌아가지 않게 한다. */
 const LAST_ONE_RAIL_MODE_KEY = "agentlas.one.railMode";
 
@@ -814,7 +844,21 @@ function rememberRailMode(mode: OneRailMode): void {
   try { window.localStorage.setItem(LAST_ONE_RAIL_MODE_KEY, mode); } catch { /* 저장소를 못 써도 화면은 돈다 */ }
 }
 
-/** 대화가 앉아 있는 자리 이름. 사람은 대화를 내용으로 기억하므로 제목 아래 작게 붙는다. */
+/*
+ * 대화 줄에 붙는 이름 — **누구와 한 대화인지**다 (오너 결정 2026-08-24).
+ * 상태 문구("결과 확인")가 아니라 이름을 쓴다: 단톡방이면 방 이름, 한 명이면 그 자리에
+ * 앉은 에이전트의 **표시 이름**(고유 식별자가 아니라 사용자가 바꿀 수 있는 이름),
+ * 그 밖에는 One.
+ *
+ * 자리가 비었거나 에이전트가 나갔어도 이름을 만든다 — 이름을 못 만든다고 세션을 못 열게
+ * 하면 안 된다. 보관된 자리도 이름은 남는다.
+ */
+/** 한 칸이 사라질 만큼 끌지는 못하게 한다. */
+function clampSplitRatio(value: number): number {
+  if (!Number.isFinite(value)) return 50;
+  return Math.min(80, Math.max(20, Math.round(value)));
+}
+
 function seatLabelForChat(
   chat: Chat,
   taskforces: OneTaskforce[],
@@ -822,10 +866,13 @@ function seatLabelForChat(
   locale: "ko" | "en",
 ): string {
   const taskforce = taskforces.find((item) => item.chatId === chat.id);
-  if (taskforce) return taskforce.title.trim() || (locale === "ko" ? "팀" : "Team");
-  const member = org?.members.find((item) => item.installedAgentId === chat.agentId && !item.archivedAt);
-  if (member) return (locale === "ko" ? member.displayName : member.nameEn || member.displayName).trim();
-  return locale === "ko" ? "One · CEO" : "One · CEO";
+  if (taskforce) return taskforce.title.trim() || (locale === "ko" ? "단톡방" : "Group");
+  const member = org?.members.find((item) => item.installedAgentId === chat.agentId);
+  if (member) {
+    const name = (locale === "ko" ? member.displayName : member.nameEn || member.displayName).trim();
+    if (name) return member.archivedAt ? `${name}${locale === "ko" ? " (나감)" : " (left)"}` : name;
+  }
+  return "One";
 }
 
 /** 오늘 / 어제 / 지난 7일 / 그 이전. 날짜를 하나씩 쓰면 목록이 두 배가 된다. */
@@ -1095,7 +1142,7 @@ export function OneShell() {
   }, []);
   const [settingsSheet, setSettingsSheet] = useState<OneSettingsKey | null>(null);
   const [pluginPickerOpen, setPluginPickerOpen] = useState(false);
-  const [contextRailOpen, setContextRailOpenState] = useState(() => readStoredBoolean(ONE_CONTEXT_RAIL_OPEN_STORAGE_KEY, true));
+  const [contextRailOpen, setContextRailOpenState] = useState(() => readStoredBoolean(ONE_CONTEXT_RAIL_OPEN_STORAGE_KEY, false));
   const [contextRailWidth, setContextRailWidthState] = useState<number>(readStoredContextRailWidth);
   const setContextRailWidth = useCallback((next: number | ((current: number) => number)) => {
     setContextRailWidthState((current) => {
@@ -1109,6 +1156,39 @@ export function OneShell() {
     });
   }, []);
   const [taskMenuOpen, setTaskMenuOpen] = useState(false);
+  const [sessionSheetOpen, setSessionSheetOpen] = useState(false);
+  /**
+   * 분할 보기 — 지금 보고 있는 대화 옆에 붙는 칸들. 화면 전체로는 최대 4칸이므로
+   * 옆칸은 3개까지다. 입력창은 언제나 왼쪽 첫 칸(지금 대화)에만 있다.
+   */
+  const [splitChatIds, setSplitChatIds] = useState<string[]>([]);
+  const [splitRatio, setSplitRatio] = useState({ col: 50, row: 50 });
+  const splitStageRef = useRef<HTMLDivElement | null>(null);
+  const beginSplitResize = useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
+    const stage = splitStageRef.current;
+    if (!stage) return;
+    event.preventDefault();
+    const pointerId = event.pointerId;
+    const move = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== pointerId) return;
+      const box = stage.getBoundingClientRect();
+      if (box.width <= 0 || box.height <= 0) return;
+      setSplitRatio({
+        col: clampSplitRatio(((moveEvent.clientX - box.left) / box.width) * 100),
+        row: clampSplitRatio(((moveEvent.clientY - box.top) / box.height) * 100),
+      });
+    };
+    const end = (endEvent: PointerEvent) => {
+      if (endEvent.pointerId !== pointerId) return;
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+    };
+    // 창 단위로 따라가야 손잡이(22px) 밖으로 포인터가 나가도 드래그가 산다.
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+  }, []);
   const setRailCollapsed = useCallback((collapsed: boolean) => {
     window.localStorage.setItem(ONE_LEFT_RAIL_COLLAPSED_STORAGE_KEY, String(collapsed));
     setRailCollapsedState(collapsed);
@@ -1300,9 +1380,11 @@ export function OneShell() {
     }
     return undefined;
   }, [threadRuns]);
-  useEffect(() => {
-    if (durableThreadBrowserUrl) setContextRailOpen(true);
-  }, [durableThreadBrowserUrl, setContextRailOpen]);
+  /*
+   * 브라우저를 쓴 적 있는 대화라는 이유로 오른쪽 패널을 저 혼자 열던 자리
+   * (제거, 오너 지시 2026-08-24 "우측사이드바 디폴트로 접히고"). 열림 상태가
+   * 저장까지 돼서, 한 번 열린 뒤로는 무엇을 지워도 다시 열린 채로 시작했다.
+   */
   const searchTriggerRef = useRef<HTMLButtonElement>(null);
   const searchSheetRef = useRef<HTMLElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
@@ -1664,9 +1746,16 @@ export function OneShell() {
        *   목록에 함께 싣는다. 어느 것이 팀인지는 아래에서 표시한다.
        */
       const taskforceChatIds = new Set(taskforceRows.map((taskforce) => taskforce.chatId));
+      /*
+       * ★ `!chat.taskId` 를 뺐다 (오너 결정 2026-08-24: "두 개 합치라").
+       *   작업이 붙은 대화는 이 목록에서 빠지고 아래 작업 목록으로만 떴다. 그래서 같은
+       *   일이 두 군데로 갈렸고, 작업 줄에는 이름 대신 "결과 확인" 같은 상태 문구가 붙었다.
+       *   목록은 하나이고 작업은 그 대화의 상태일 뿐이므로 전부 대화 줄로 세운다.
+       *   (이 줄을 되돌리면 대화 20개 중 19개가 목록에서 사라진다 — 실측.)
+       */
       setConversations(keepPrevIfDeepEqual(
         recentChats
-          .filter((chat) => !chat.taskId && chat.originSurface === "one")
+          .filter((chat) => chat.originSurface === "one")
           .map((chat) => (taskforceChatIds.has(chat.id) ? { ...chat, isTaskforce: true } : chat)),
       ));
       const wanted = selectedTaskIdRef.current;
@@ -2336,27 +2425,121 @@ export function OneShell() {
 
   const activeThreadChatId = selected?.chatId ?? conversation?.id ?? null;
   /*
-   * 세션 목록 — 시간으로 묶고, 각 줄에 어느 자리의 대화인지 붙인다. 날짜를 하나씩 쓰면
-   * 목록이 두 배가 되고, 자리를 안 쓰면 같은 제목이 여러 줄일 때 구분이 안 된다.
-   * 30일 넘게 손대지 않은 것은 따로 접어 둔다 — 사용자가 직접 정리하게 만들지 않는다.
+   * 세션 목록 — **하나의 목록**이다 (오너 결정 2026-08-24).
+   *
+   * 예전에는 시간으로 묶고 그 아래에 작업 목록을 따로 붙였다. 화면에서는 "지난 7일" 과
+   * "최근" 이 갈려 보였고, 같은 날 대화가 서로 다른 덩어리에 흩어졌다. 사람이 찾는 것은
+   * 날짜가 아니라 대화이므로, 최근 순으로 한 줄씩 세운다.
+   *
+   * 각 줄에 붙는 것은 상태 문구("결과 확인")가 아니라 **누구와 한 대화인지**다 — One,
+   * 단톡방 이름, 또는 그 에이전트의 표시 이름. 상태는 점 하나로 족하다.
+   *
+   * 30일 넘게 손대지 않은 것만 접어 둔다 — 사용자가 직접 정리하게 만들지 않는다.
    */
-  const sessionGroups = useMemo(() => {
-    const fresh: Chat[] = [];
-    const dormant: Chat[] = [];
-    for (const chat of conversations) (isDormantSession(chat.updatedAt) ? dormant : fresh).push(chat);
-    const order = ["today", "yesterday", "week", "month", "older"];
-    const buckets = new Map<string, { key: string; label: string; items: Chat[] }>();
-    for (const chat of fresh) {
-      const bucket = sessionBucket(chat.updatedAt, appLocale);
-      const existing = buckets.get(bucket.key);
-      if (existing) existing.items.push(chat);
-      else buckets.set(bucket.key, { ...bucket, items: [chat] });
+  /**
+   * 옆에 세워 둘 칸. 지금 보고 있는 대화는 왼쪽 첫 칸이므로 목록에서 뺀다 —
+   * 빼지 않으면 같은 대화가 두 칸에 떠서 어느 쪽이 진짜인지 알 수 없다.
+   * 사라진 대화 id 는 조용히 버린다(세션이 지워져도 화면이 깨지지 않아야 한다).
+   */
+  /**
+   * 나간 팀원 표시.
+   *
+   * 자리를 뜬 팀원의 대화가 그냥 열리기만 하면, 사용자는 답이 왜 One 말투로
+   * 바뀌었는지 알 길이 없다. 나간 사실을 대화 안에 회색 줄로 남긴다
+   * (오너 결정 2026-08-24). 나간 시각 뒤의 첫 메시지 앞에 놓아, 언제부터
+   * One 이 대신 받고 있는지가 시간 순서로 드러나게 한다.
+   */
+  const departureNotices = useMemo(() => {
+    const chatId = activeThreadChatId;
+    if (!chatId) return [] as Array<{ id: string; at: number; label: string }>;
+    const memberByAgent = new Map((oneOrgState?.members ?? []).map((member) => [member.installedAgentId, member]));
+    const taskforce = taskforces.find((item) => item.chatId === chatId);
+    const agentIds = taskforce
+      ? taskforce.memberAgentIds
+      : (activeThreadChat?.agentId ? [activeThreadChat.agentId] : []);
+    const notices: Array<{ id: string; at: number; label: string }> = [];
+    for (const agentId of agentIds) {
+      const member = memberByAgent.get(agentId);
+      /*
+       * 조직에 없는 id 를 "나갔다"로 읽으면 안 된다. 조직이 아직 안 실려 왔을
+       * 때도, 애초에 팀원 자리가 아닌 대화일 때도 같은 모양이라서 One 대화에
+       * "나간 팀원 나갔습니다" 가 떴다(실측 2026-08-24). 나간 시각이 실제로
+       * 적혀 있고 이름을 아는 경우에만 줄을 남긴다.
+       */
+      if (!member || !member.archivedAt) continue;
+      const name = (appLocale === "ko" ? member.displayName : member.nameEn || member.displayName).trim();
+      if (!name) continue;
+      const shown = name;
+      const at = new Date(member.archivedAt).getTime();
+      notices.push({
+        id: `left:${agentId}`,
+        at: Number.isNaN(at) ? 0 : at,
+        label: appLocale === "ko" ? `${shown} 나갔습니다` : `${shown} left`,
+      });
     }
+    return notices.sort((left, right) => left.at - right.at);
+  }, [activeThreadChatId, activeThreadChat, taskforces, oneOrgState, appLocale]);
+
+  /** 나간 줄을 어느 메시지 앞에 놓을지. 남는 것은 대화 끝에 붙인다. */
+  const departurePlan = useMemo(() => {
+    const beforeMessage = new Map<string, Array<{ id: string; label: string }>>();
+    const trailing: Array<{ id: string; label: string }> = [];
+    const pending = [...departureNotices];
+    for (const message of visibleMessages) {
+      if (pending.length === 0) break;
+      const at = message.createdAt ? new Date(message.createdAt).getTime() : Number.NaN;
+      if (Number.isNaN(at)) continue;
+      while (pending.length > 0 && pending[0].at > 0 && pending[0].at <= at) {
+        const notice = pending.shift()!;
+        const list = beforeMessage.get(message.id) ?? [];
+        list.push({ id: notice.id, label: notice.label });
+        beforeMessage.set(message.id, list);
+      }
+    }
+    for (const notice of pending) trailing.push({ id: notice.id, label: notice.label });
+    return { beforeMessage, trailing };
+  }, [departureNotices, visibleMessages]);
+
+  const splitPanes = useMemo(() => {
+    const byId = new Map(conversations.map((chat) => [chat.id, chat]));
+    const seen = new Set<string>();
+    const panes: Chat[] = [];
+    for (const id of splitChatIds) {
+      if (id === selectedConversationId || seen.has(id)) continue;
+      const chat = byId.get(id);
+      if (!chat) continue;
+      seen.add(id);
+      panes.push(chat);
+      if (panes.length >= 3) break;
+    }
+    return panes;
+  }, [conversations, splitChatIds, selectedConversationId]);
+
+  const sessionGroups = useMemo(() => {
+    const taskByChat = new Map(projections.filter((item) => item.chatId).map((item) => [item.chatId as string, item]));
+    const rows: OneSessionRow[] = conversations.map((chat) => ({
+      kind: "chat" as const,
+      key: chat.id,
+      chat,
+      task: taskByChat.get(chat.id) ?? null,
+      sortAt: chat.updatedAt,
+    }));
+    /*
+     * 작업은 **줄을 따로 세우지 않는다** (오너 결정 2026-08-24: "두 개 합치라").
+     * 예전에는 대화 줄과 작업 줄이 각각 서서, 같은 일이 두 번 보이고 한쪽에는 이름 대신
+     * "결과 확인" 같은 상태 문구가 붙었다. 작업은 그 대화의 상태일 뿐이므로 점으로만 쓴다.
+     * 대화가 아직 없는 작업만(드물다) 한 줄을 얻는다.
+     */
+    for (const item of projections) {
+      if (item.chatId) continue;
+      rows.push({ kind: "task" as const, key: `task:${item.taskId}`, task: item, chat: null, sortAt: item.status.asOf });
+    }
+    rows.sort((a, b) => String(b.sortAt).localeCompare(String(a.sortAt)));
     return {
-      groups: order.map((key) => buckets.get(key)).filter((group): group is { key: string; label: string; items: Chat[] } => Boolean(group)),
-      dormant,
+      rows: rows.filter((row) => !(row.chat && isDormantSession(row.chat.updatedAt))),
+      dormant: conversations.filter((chat) => isDormantSession(chat.updatedAt)),
     };
-  }, [conversations, appLocale]);
+  }, [conversations, projections]);
   const activeThreadPromptFallback = selected?.display.title ?? conversation?.title ?? "";
   const activeTaskforce = useMemo(
     () => taskforces.find((taskforce) => taskforce.chatId === activeThreadChatId) ?? null,
@@ -2405,6 +2588,7 @@ export function OneShell() {
     return () => { cancelled = true; };
   }, [activeThreadChatId]);
   const runtimeArtifacts = activity.artifacts;
+
   const latestRuntimeArtifact = runtimeArtifacts.at(-1) ?? null;
   useEffect(() => {
     const bridge = typeof window === "undefined" ? null : window.agentlas;
@@ -5027,28 +5211,26 @@ export function OneShell() {
               <button type="button" className={styles.railPrimaryButton} onClick={startNewConversation}><span aria-hidden="true"><IconPlus size={13} /></span>{tFor(appLocale, "one.shell.rail.new_conversation")}</button>
               <button ref={searchTriggerRef} type="button" className={styles.railPrimaryButton} onClick={() => setSearchOpen(true)}><span aria-hidden="true"><IconSearch size={13} /></span>{tFor(appLocale, "one.shell.rail.search_all")}</button>
             </div>
-            {sessionGroups.groups.length === 0 && sessionGroups.dormant.length === 0 && projections.length === 0 && (
+            {sessionGroups.rows.length === 0 && sessionGroups.dormant.length === 0 && (
               <div className={styles.railEmpty}>{appLocale === "ko" ? "아직 대화가 없어요. 위에서 새 대화를 시작하세요." : "No conversations yet. Start one above."}</div>
             )}
-            {sessionGroups.groups.map((group) => (
-              <Fragment key={group.key}>
-                <div className={styles.railTop}><strong>{group.label}</strong></div>
-                <div className={styles.railList}>
-                  {group.items.map((item) => (
-                    <ConversationListButton
-                      key={item.id}
-                      item={item}
-                      active={item.id === selectedConversationId}
-                      locale={appLocale}
-                      onOpen={openConversation}
-                      onRemove={removeConversation}
-                      seatLabel={seatLabelForChat(item, taskforces, oneOrgState, appLocale)}
-                      running={activeChatIds.includes(item.id)}
-                    />
-                  ))}
-                </div>
-              </Fragment>
-            ))}
+            {/* 하나의 목록, 최근 순. 날짜 덩어리로 나누지 않는다(오너 결정 2026-08-24). */}
+            <div className={styles.railList}>
+              {sessionGroups.rows.map((row) => (row.chat ? (
+                <ConversationListButton
+                  key={row.key}
+                  item={row.chat}
+                  active={row.chat.id === selectedConversationId || (row.task ? row.task.taskId === selectedTaskId : false)}
+                  locale={appLocale}
+                  onOpen={openConversation}
+                  onRemove={removeConversation}
+                  seatLabel={seatLabelForChat(row.chat, taskforces, oneOrgState, appLocale)}
+                  running={activeChatIds.includes(row.chat.id)}
+                />
+              ) : row.task ? (
+                <TaskListButton key={row.key} item={row.task} active={row.task.taskId === selectedTaskId} locale={appLocale} onOpen={openTask} />
+              ) : null))}
+            </div>
             {sessionGroups.dormant.length > 0 && (
               <details className={styles.railDormant}>
                 <summary>{appLocale === "ko" ? `30일 넘게 안 쓴 대화 ${sessionGroups.dormant.length}개` : `${sessionGroups.dormant.length} untouched for over 30 days`}</summary>
@@ -5066,14 +5248,6 @@ export function OneShell() {
                   ))}
                 </div>
               </details>
-            )}
-            {projections.length > 0 && (
-              <>
-                <div className={styles.railTop}><strong>{tFor(appLocale, "one.shell.rail.recent")}</strong></div>
-                <div className={styles.railList}>
-                  {projections.map((item) => <TaskListButton key={item.taskId} item={item} active={item.taskId === selectedTaskId} locale={appLocale} onOpen={openTask} />)}
-                </div>
-              </>
             )}
             </>}
             {selected && <nav className={`${styles.railUtilities} ${styles.railTaskActions}`} aria-label={tFor(appLocale, "one.shell.rail.manage_task_aria")}>
@@ -5142,12 +5316,13 @@ export function OneShell() {
                     size="medium"
                   />}
                   <span>
+                    {/* 이름만 쓴다. "상주 동료 · 전용 터미널" 같은 설명 부제는 아무것도
+                        알려주지 않으면서 이름 아래 자리를 차지했다(오너 결정 2026-08-24).
+                        단톡방만 사람 수를 쓴다 — 그건 실제로 바뀌는 정보다. */}
                     <strong>{activeTaskforce?.title ?? activeOneMember?.displayName ?? "One"}</strong>
-                    <small>{activeTaskforce
-                      ? (activeTaskforce.description || (appLocale === "ko" ? `Taskforce · One 포함 ${activeTaskforce.memberAgentIds.length + 1}명` : `Taskforce · ${activeTaskforce.memberAgentIds.length + 1} members incl. One`))
-                      : activeOneMember
-                      ? (appLocale === "ko" ? "상주 동료 · 전용 터미널" : "Standing teammate · Dedicated terminal")
-                      : (appLocale === "ko" ? "CEO 오케스트레이터" : "CEO orchestrator")}</small>
+                    {activeTaskforce && <small>{appLocale === "ko"
+                      ? `One 포함 ${activeTaskforce.memberAgentIds.length + 1}명`
+                      : `${activeTaskforce.memberAgentIds.length + 1} members incl. One`}</small>}
                   </span>
                 </div>
                 {activeTaskforce && <button
@@ -5183,7 +5358,7 @@ export function OneShell() {
                     aria-haspopup="menu"
                     aria-expanded={taskMenuOpen}
                     onClick={() => setTaskMenuOpen((value) => !value)}
-                  ><IconMoreHorizontal size={16} /></button>
+                  >MENU</button>
                   {taskMenuOpen && (
                     <div className={styles.taskToolbarMenuPopover} role="menu">
                       {selected && (
@@ -5203,6 +5378,9 @@ export function OneShell() {
                       )}
                       <button type="button" role="menuitem" onClick={() => { setTaskMenuOpen(false); startNewConversation(); }}>
                         {tFor(appLocale, "one.shell.rail.new_conversation")}
+                      </button>
+                      <button type="button" role="menuitem" onClick={() => { setTaskMenuOpen(false); setSessionSheetOpen(true); }}>
+                        {appLocale === "ko" ? "에이전트 세션" : "Agent sessions"}
                       </button>
                     </div>
                   )}
@@ -5229,6 +5407,13 @@ export function OneShell() {
               ><IconSidebar size={16} /></button>
             )}
           </div>
+          <div
+            ref={splitStageRef}
+            className={styles.splitStage}
+            data-split={splitPanes.length > 0 ? "true" : "false"}
+            data-panes={splitPanes.length > 0 ? String(splitPanes.length + 1) : undefined}
+            style={splitPanes.length > 0 ? { ["--split-col" as string]: `${splitRatio.col}%`, ["--split-row" as string]: `${splitRatio.row}%` } : undefined}
+          >
           <div ref={scrollRef} className={styles.scroll}>
             {!selected && !conversation ? (
               <div className={styles.homeContent}>
@@ -5343,6 +5528,13 @@ export function OneShell() {
                     const graphRequest = message.role === "user" ? oneGraphRequest(message.text) : null;
                     return (
                       <Fragment key={message.id}>
+                        {(departurePlan.beforeMessage.get(message.id) ?? []).map((notice) => (
+                          <p key={notice.id} className={styles.departureNotice} data-one-departure="true">
+                            <span aria-hidden="true">---------</span>
+                            <span>{notice.label}</span>
+                            <span aria-hidden="true">---------</span>
+                          </p>
+                        ))}
                         {liveBefore && !preflightPrompt && <>
                           {activeTaskforce && <OneTaskforceConversation state={renderedActivity} org={oneOrgState} locale={appLocale} />}
                           {liveWorkBlock}
@@ -5419,6 +5611,13 @@ export function OneShell() {
                       </Fragment>
                     );
                   })}
+                  {departurePlan.trailing.map((notice) => (
+                    <p key={notice.id} className={styles.departureNotice} data-one-departure="true">
+                      <span aria-hidden="true">---------</span>
+                      <span>{notice.label}</span>
+                      <span aria-hidden="true">---------</span>
+                    </p>
+                  ))}
                   {preflightPrompt && (
                     <OneTurnWork
                       state={initialOneActivityState()}
@@ -5530,6 +5729,50 @@ export function OneShell() {
                 )}
               </div>
             )}
+          </div>
+          {splitPanes.map((pane) => (
+            <OneSplitPane
+              key={pane.id}
+              chatId={pane.id}
+              title={pane.title || (appLocale === "ko" ? "새 대화" : "New conversation")}
+              seatLabel={seatLabelForChat(pane, taskforces, oneOrgState, appLocale)}
+              locale={appLocale}
+              running={activeChatIds.includes(pane.id)}
+              onFocus={() => {
+                // 옆칸을 누르면 그 칸이 입력창을 가져간다. 지금 보던 대화는
+                // 사라지지 않고 옆칸으로 자리를 바꾼다.
+                const previous = selectedConversationId;
+                setSplitChatIds((ids) => {
+                  const without = ids.filter((id) => id !== pane.id);
+                  if (previous && previous !== pane.id && !without.includes(previous)) without.unshift(previous);
+                  return without.slice(0, 3);
+                });
+                openConversation(pane.id);
+              }}
+              onClose={() => setSplitChatIds((ids) => ids.filter((id) => id !== pane.id))}
+              permissionMode={onePermission}
+              runtimeSelection={oneRuntimeSelection}
+              appLocale={appLocale}
+            />
+          ))}
+          {splitPanes.length > 0 && (
+            <button
+              type="button"
+              className={styles.splitCorner}
+              // 둘로 갈랐을 때는 위아래 경계가 없다 — 가로만 움직인다.
+              data-axis={splitPanes.length === 1 ? "x" : "xy"}
+              style={{ left: `${splitRatio.col}%`, top: splitPanes.length === 1 ? "50%" : `${splitRatio.row}%` }}
+              aria-label={appLocale === "ko" ? "칸 크기 조절" : "Resize panes"}
+              onPointerDown={beginSplitResize}
+              onKeyDown={(event) => {
+                const step = event.shiftKey ? 1 : 4;
+                if (event.key === "ArrowLeft") { event.preventDefault(); setSplitRatio((r) => ({ ...r, col: clampSplitRatio(r.col - step) })); }
+                if (event.key === "ArrowRight") { event.preventDefault(); setSplitRatio((r) => ({ ...r, col: clampSplitRatio(r.col + step) })); }
+                if (event.key === "ArrowUp") { event.preventDefault(); setSplitRatio((r) => ({ ...r, row: clampSplitRatio(r.row - step) })); }
+                if (event.key === "ArrowDown") { event.preventDefault(); setSplitRatio((r) => ({ ...r, row: clampSplitRatio(r.row + step) })); }
+              }}
+            />
+          )}
           </div>
 
           <div
@@ -5981,6 +6224,61 @@ export function OneShell() {
               <p className={styles.composerNote}>{tFor(appLocale, "one.shell.composer.view_only")}</p>
             )}
           </div>
+
+          {sessionSheetOpen && (
+            <section className={styles.sessionSheet} role="dialog" aria-modal="true" aria-label={appLocale === "ko" ? "에이전트 세션" : "Agent sessions"}>
+              <header className={styles.sessionSheetHeader}>
+                <strong>{appLocale === "ko" ? "에이전트 세션" : "Agent sessions"}</strong>
+                <span className={styles.sessionSheetHint}>
+                  {appLocale === "ko"
+                    ? `세션 분할 ${splitPanes.length + 1}/4`
+                    : `Split ${splitPanes.length + 1}/4`}
+                </span>
+                <button type="button" className={styles.iconButton} aria-label={appLocale === "ko" ? "닫기" : "Close"} onClick={() => setSessionSheetOpen(false)}><IconClose size={14} /></button>
+              </header>
+              <div className={styles.sessionSheetList}>
+                {sessionGroups.rows.length === 0 && (
+                  <p className={styles.sessionSheetEmpty}>{appLocale === "ko" ? "아직 세션이 없습니다." : "No sessions yet."}</p>
+                )}
+                {sessionGroups.rows.map((row) => {
+                  const chat = row.chat;
+                  if (!chat) return null;
+                  const isOpen = chat.id === selectedConversationId;
+                  const inSplit = splitPanes.some((pane) => pane.id === chat.id);
+                  const splitFull = splitPanes.length >= 3;
+                  return (
+                    <div key={row.key} className={styles.sessionSheetRow} data-active={isOpen ? "true" : "false"}>
+                      <button
+                        type="button"
+                        className={styles.sessionSheetOpen}
+                        onClick={() => { setSessionSheetOpen(false); openConversation(chat.id); }}
+                      >
+                        <span className={styles.sessionSheetSeat}>{seatLabelForChat(chat, taskforces, oneOrgState, appLocale)}</span>
+                        <span className={styles.sessionSheetName}>{chat.title || (appLocale === "ko" ? "새 대화" : "New conversation")}</span>
+                        {activeChatIds.includes(chat.id) && <span className={styles.sessionRunningDot} aria-hidden="true" />}
+                      </button>
+                      <button
+                        type="button"
+                        className={styles.sessionSheetSplit}
+                        data-on={inSplit ? "true" : "false"}
+                        disabled={isOpen || (!inSplit && splitFull)}
+                        title={isOpen
+                          ? (appLocale === "ko" ? "지금 보고 있는 대화입니다" : "This one is already open")
+                          : (!inSplit && splitFull ? (appLocale === "ko" ? "세션 분할은 4개까지입니다" : "Four at most") : undefined)}
+                        onClick={() => setSplitChatIds((ids) => (
+                          ids.includes(chat.id) ? ids.filter((id) => id !== chat.id) : [...ids, chat.id].slice(-3)
+                        ))}
+                      >
+                        {inSplit
+                          ? (appLocale === "ko" ? "분할 해제" : "Unsplit")
+                          : (appLocale === "ko" ? "세션 분할" : "Split")}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          )}
 
           {searchOpen && (
             <section ref={searchSheetRef} className={styles.searchSheet} role="dialog" aria-modal="true" aria-label={tFor(appLocale, "one.shell.search.dialog_aria")} onKeyDown={trapSearchFocus}>

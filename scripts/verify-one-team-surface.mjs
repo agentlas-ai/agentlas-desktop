@@ -157,7 +157,7 @@ assert.match(oneShellStyles, /data-rail-collapsed="true"\]\s+\.taskToolbar\s*\{[
 }
 assert.match(oneShellStyles, /data-rail-open="true"\]\s+\.(?:taskSidebarRevealButton|sidebarRevealButton)/);
 assert.match(oneShellStyles, /@media \(max-width: 1080px\)[\s\S]*?data-context-rail="true"\][\s\S]*?grid-template-columns:\s*224px minmax\(0, 1fr\) 0/);
-assert.match(oneShellStyles, /width:\s*min\(var\(--one-rail-width, 420px\), calc\(100% - 56px\)\) !important/);
+assert.match(oneShellStyles, /width:\s*min\(var\(--one-rail-width,\s*\d+px\), calc\(100% - 56px\)\) !important/);
 
 // Browser evidence can be inspected as both a normal web viewport and a real
 // responsive phone capture. Phone mode must always clear CDP emulation again.

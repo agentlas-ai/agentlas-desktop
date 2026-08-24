@@ -97,6 +97,8 @@ export function isWideOutputKind(kind: OutputPresentationKind): boolean {
 
 /** Width used by the supplied desktop reference: roughly 43% of the content window. */
 export function preferredOutputRailWidth(viewportWidth: number, minWidth: number, maxWidth: number): number {
-  const requested = viewportWidth <= 760 ? Math.round(viewportWidth * 0.86) : Math.round(viewportWidth * 0.432);
+  // 오너 결정 2026-08-24: 처음 떴을 때 화면 절반을 먹지 않는다. 넓은 창 기준
+  // 계수를 절반으로 내렸다(0.432 -> 0.216). 좁은 창은 원래대로 거의 전폭을 쓴다.
+  const requested = viewportWidth <= 760 ? Math.round(viewportWidth * 0.86) : Math.round(viewportWidth * 0.216);
   return Math.min(maxWidth, Math.max(minWidth, requested));
 }
