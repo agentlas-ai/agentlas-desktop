@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.0.38 — 2026-08-24
+
+Bundled runtime: Agentlas OS v1.2.16 (6d0d7e7eafaa96ebbed92e1a2223b01f13eed245).
+Source readiness does not prove a public installer or update feed; the
+Releases page stays the authority.
+
+- What you type to One was unreadable: dark text on the dark bubble. The bubble
+  flipped one colour token to a light value, but the message body is painted
+  through a different token that is resolved once at the top of the page, so it
+  kept the dark value. Measured on the shipped 1.0.37 itself: body text came out
+  as rgb(0,21,25) on a rgb(23,23,25) bubble; it is now rgb(247,248,250).
+- Conversations stopped disappearing when you reopen One. Team conversations
+  were left out of the recent list on the assumption that a separate team list
+  would show them, and that screen was never built — so those conversations had
+  no way back. One also always opened on an empty home. It now lists team
+  conversations too and returns to the conversation you were last in, across
+  quitting the app or visiting another screen. "New conversation" still starts
+  fresh, and a conversation that no longer exists is forgotten instead of
+  reopened.
+- Updating from a much older version no longer fails partway. The step that
+  moves chats onto seats named columns that did not exist yet in those older
+  databases, and stopped the whole update.
+- Signing out now disconnects phones that are already connected. A phone
+  authenticates once, when it connects, so signing out previously left an open
+  connection able to keep sending commands. Pairings are kept, so signing back
+  in restores them.
+
 ## 1.0.37 — 2026-08-24
 
 Bundled runtime: Agentlas OS v1.2.16 (6d0d7e7eafaa96ebbed92e1a2223b01f13eed245).
