@@ -11,7 +11,7 @@ import {
   OPENCRAB_MCP_URL_KEY,
   OPENCRAB_MCP_URL_SENTINEL,
 } from "../opencrab/constants";
-import { builtinPluginCatalogEntry } from "../plugins/builtin";
+import { builtinPluginCatalogEntriesIfPresent } from "../plugins/builtin";
 
 export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
   // ── 선택형 지식 그래프 ─────────────────────────────────────
@@ -279,9 +279,7 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
     mark: "HN",
     envRequirements: [],
   },
-  builtinPluginCatalogEntry("cua-driver"),
-  builtinPluginCatalogEntry("playwright"),
-  builtinPluginCatalogEntry("agentlas-browser"),
+  ...builtinPluginCatalogEntriesIfPresent(["cua-driver", "playwright", "agentlas-browser"]),
   {
     id: "brave-search",
     name: "Brave 검색",
@@ -355,7 +353,7 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
     mark: "sh",
     envRequirements: [],
   },
-  builtinPluginCatalogEntry("agentlas-time"),
+  ...builtinPluginCatalogEntriesIfPresent(["agentlas-time"]),
 ];
 
 export function getCatalogEntry(id: string): McpToolCatalogEntry | null {

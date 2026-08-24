@@ -141,6 +141,17 @@ export interface AutoUpdaterLike {
   quitAndInstall(isSilent?: boolean, isForceRunAfter?: boolean): void;
 }
 
+/**
+ * Reads the version the update feed offers *right now*, without touching
+ * electron-updater's own state. `null` means the feed could not be read.
+ *
+ * Why this exists: the version we downloaded was chosen when the check ran,
+ * which can be days before the user presses install. In August 2026 two
+ * releases had to be withdrawn hours after publication; anyone whose app had
+ * already downloaded one still installed it, because nothing looked again.
+ */
+export type OfferedVersionReader = () => Promise<string | null>;
+
 export interface ContinuitySnapshot {
   schemaVersion: 1 | 2;
   userDataPath: string;
@@ -246,6 +257,12 @@ export interface UpdaterControllerDependencies {
   transientRetryMaxDelayMs?: number;
   /** Test seam for fail-closed launchd inspection/bootout before stale macOS cleanup. */
   runLaunchctl?: (args: string[]) => number;
+  /**
+   * Re-reads what the feed offers, immediately before an install is handed off.
+   * Required: leaving it optional would let a wiring mistake silently restore
+   * the behavior this guard exists to remove.
+   */
+  offeredVersion: OfferedVersionReader;
 }
 
 interface InstallAccessResult {
@@ -397,7 +414,11 @@ function safeMessage(code: UpdaterErrorCode): string {
     case "compatibility-metadata-missing":
       return "This release does not declare the required Agentlas compatibility boundary. Automatic install was not attempted.";
     case "minimum-app-version":
-      return "This release needs an automatic bridge update before it can be applied. The current app and local data remain unchanged.";
+      // Never promise a bridge. Nothing in this repo picks an intermediate
+      // build, and this state is not retryable, so the old wording described a
+      // rescue that would never arrive. Reinstalling is the only way out, and
+      // it keeps userData.
+      return "This app is too old to update itself. Download the latest installer and replace it — your local Agentlas data is kept.";
     case "minimum-runtime-version":
       return "This release needs an automatic Agentlas runtime bridge before it can be applied. The current app and local data remain unchanged.";
     case "minimum-schema-version":
@@ -1839,9 +1860,56 @@ export class DesktopUpdaterController {
     return this.installPromise;
   }
 
+  /**
+   * Is the payload we are about to install still the one the feed offers?
+   *
+   * The target version was chosen when the check ran. Between that moment and
+   * the user pressing install, the release it names can be withdrawn — which is
+   * exactly what happened to 1.0.31/1.0.32: they were pulled hours after
+   * publication, but an app that had already downloaded one installed it
+   * anyway, and the resulting build could not start, so it could not update
+   * itself back out. Re-reading the feed here is one small request that turns a
+   * dead end into a re-download.
+   *
+   * Fail-closed: an unreadable feed is not permission to proceed. Replacing the
+   * app on days-old information is the risk this guard exists to remove, and
+   * refusing costs the user a retry, not their installation.
+   */
+  private async confirmStillOffered(version: string): Promise<boolean> {
+    let offered: string | null;
+    try {
+      offered = await this.deps.offeredVersion();
+    } catch (error) {
+      this.logger.warn("[updater] could not re-read the update feed before installing", error);
+      offered = null;
+    }
+    if (offered === version) return true;
+
+    if (offered === null) {
+      this.publish(this.errorState("check-failed"));
+      return false;
+    }
+
+    // The feed names a different version: the payload we hold was superseded or
+    // withdrawn. Drop it and let the normal flow fetch what is offered now.
+    this.logger.warn(
+      `[updater] the downloaded payload (${version}) is no longer what the feed offers (${offered}); discarding it`,
+    );
+    this.availableVersion = null;
+    this.availableReleaseNotes = undefined;
+    if (!this.cleanupOrBlock(version)) return false;
+    this.publish({ status: "checking" });
+    void this.check();
+    return false;
+  }
+
   private async installOnce(): Promise<UpdaterActionResult> {
     const version = this.state.version;
     if (!version) return { accepted: false, state: this.state };
+    // Before anything irreversible: is this still the version being offered?
+    if (!(await this.confirmStillOffered(version))) {
+      return { accepted: false, state: this.state };
+    }
     const access = evaluateInstallAccess({ platform: this.deps.platform, execPath: this.deps.execPath, uid: this.deps.uid });
     if (!(await this.verifyInstalledAppTrustOrBlock(version, access))) {
       return { accepted: false, state: this.state };

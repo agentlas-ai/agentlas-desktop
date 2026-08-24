@@ -1,20 +1,60 @@
 # Changelog
 
+## 1.0.37 — 2026-08-24
+
+Bundled runtime: Agentlas OS v1.2.16 (6d0d7e7eafaa96ebbed92e1a2223b01f13eed245).
+Source readiness does not prove a public installer or update feed; the
+Releases page stays the authority.
+
+- On a Mac without Node.js installed, connecting a CLI ended at "npm was not
+  found on this system" — a dead end with nothing the person could do about it.
+  The app now carries its own verified Node and npm on macOS as it already did
+  on Windows, and installed CLIs can find it when they run. Three of them start
+  with a line that looks up Node in your PATH, so installing without that was
+  not really installing.
+- Dark mode is turned off. Colours in this app are written directly into each
+  screen rather than through a theme, so dark mode left text the same colour as
+  the box behind it in many places. The theme picker in Settings is hidden too,
+  rather than left as a button that does nothing.
+- On Windows, "sign in again" did nothing when pressed. The code that opens a
+  terminal reported success the moment it asked, before knowing whether a window
+  actually appeared, and swallowed the failure. It now checks first, and shows
+  the reason and a command you can type yourself when it cannot.
+- Deleting a bot no longer deletes the conversations you had with it. Chats were
+  tied to the bot with a rule that removed them together.
+- Three Agentlas-served models are available to people without their own CLI,
+  and creating, seating, and editing a teammate now use the same window.
+- A finished run no longer hides why it failed when it collapses, a saved
+  picture shows up again, a run waiting its turn no longer claims to be working,
+  and the first screen no longer says "1 members".
+- Vendor logos appear in the model list, results no longer arrive as an empty
+  card, and the app follows your system language when you have not picked one.
+- One conversations stopped disappearing from the home screen. The screen asked
+  for the 40 most recent chats of any kind and then kept only the One ones, so a
+  busy Work day pushed One conversations out of the window entirely — they were
+  never deleted, just never fetched. Measured on one machine: 20 One
+  conversations existed and 10 reached the screen. Three screens asked this way;
+  all three now ask the database for One conversations directly. One of them
+  created a brand new conversation when it failed to find an existing one.
+- A background session started from One is now part of One. It inherited nothing,
+  and a chat with no surface silently counts as Work, so answering its approval
+  request took you to Work.
+- A question the bot never filled in is no longer shown. We teach bots to ask
+  using a blank form; one submitted the form as-is, and nothing rejected it, so
+  "Question text ending with ?" sat in the approval inbox for twelve days where
+  it could not be answered or dismissed. Real questions are untouched.
+- Merging two copies of the same bot no longer seats it twice in One Team.
+- The approval banner no longer sits under the window controls at the top of the
+  window; every other surface already reserved that strip.
+
 ## 1.0.36 — 2026-08-23
 
 Bundled runtime: Agentlas OS v1.2.16 (6d0d7e7eafaa96ebbed92e1a2223b01f13eed245).
 Source readiness does not prove a public installer or update feed; the
 Releases page stays the authority.
 
-- The briefing notification settings are readable again. Their labels were being
-  squeezed into an icon-sized column and clipped to "How of…", and the sheet
-  reused the sidebar's small type.
-- A settings panel now opens at a width that suits it. Every panel used to open
-  at the widest size, so a pane with two switches spread its label and control to
-  opposite edges of the screen.
-- Cloud agent packages can now be up to 30 MB (6 MB per file, 45 MB per request),
-  raised from 10 MB. Package files no longer live inside a database document, so
-  the limit that came from that is gone.
+- Briefing settings are readable again, panels are sized to their contents, and
+  the package size limit moved from 10 MB to 30 MB.
 
 ## 1.0.35 — 2026-08-23
 

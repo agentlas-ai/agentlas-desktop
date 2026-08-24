@@ -13,6 +13,7 @@ import { IconChevronDown, IconClose, IconRefresh, IconSparkles } from "@/compone
 import { ipc, updaterEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import type { UpdaterState } from "@/lib/types";
+import { updaterCanUseOfficialInstaller } from "@shared/types";
 import { LoadingEstimate } from "./LoadingEstimate";
 
 export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
@@ -59,11 +60,7 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
   const isDownloaded = state.status === "downloaded";
   const isInstalling = state.status === "installing";
   const isManual = state.status === "manual-required" || state.status === "incompatible";
-  const canUseOfficialInstaller = state.status === "manual-required" && (
-    state.code === "install-source-untrusted"
-    || state.code === "install-not-applied"
-    || state.code === "install-start-failed"
-  );
+  const canUseOfficialInstaller = updaterCanUseOfficialInstaller(state);
   // "available"도 즉시 노출 — 새 버전 발견 순간 알림(자동 다운로드 중).
   const isDownloading = state.status === "downloading" || state.status === "available";
   const isDismissed =
@@ -112,6 +109,8 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
         ? t("update.cleanup_failed")
         : state.code === "compatibility-metadata-missing"
           ? t("update.metadata_missing")
+          : state.code === "minimum-app-version"
+            ? t("update.too_old_to_auto_update")
           : state.code === "minimum-schema-version"
             ? t("update.schema_incompatible")
     : state.status === "incompatible"

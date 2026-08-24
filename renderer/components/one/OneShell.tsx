@@ -1317,6 +1317,24 @@ export function OneShell() {
     });
   }, []);
 
+  /**
+   * 흘러나오는 답을 따라 내려간다 — **맨 아래를 보고 있을 때만.**
+   *
+   * 사람이 위로 올려 읽는 중이면 아무것도 하지 않는다. 읽던 자리를 뺏으면
+   * 안 따라가는 것보다 나쁘다.
+   */
+  const followStreamToLatest = useCallback(() => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    const distanceFromBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+    if (distanceFromBottom > 160) return;
+    window.requestAnimationFrame(() => {
+      const live = scrollRef.current;
+      if (!live) return;
+      live.scrollTo({ top: live.scrollHeight, behavior: "auto" });
+    });
+  }, []);
+
   const scrollResultToTop = useCallback((behavior: ScrollBehavior = "smooth") => {
     window.requestAnimationFrame(() => {
       const scroller = scrollRef.current;
@@ -1473,7 +1491,12 @@ export function OneShell() {
         api.confirm.listPending().catch(() => []),
         api.updater.getState().catch(() => null),
         api.mobileBridge.status().catch(() => null),
-        api.chats.listRecent(40).catch(() => []),
+        // ★ One 것만 데이터베이스에서 골라 받는다.
+        // 예전에는 `listRecent(40)` 로 **전체** 최근 40개를 받아 아래에서 One 것만 걸렀다.
+        // Work 를 많이 쓰면 그 40칸이 Work 대화로 차서, 멀쩡히 살아 있는 One 대화가
+        // 화면에서 사라진다 — 지워진 것처럼 보이지만 행은 그대로다. 실측: One 대화 20개 중
+        // 10개만 그 창에 들어왔다. 거르는 일을 DB 에 시키면 창이 One 것만으로 채워진다.
+        api.chats.listRecentOne(40).catch(() => []),
         // PRD §4.27 — 홈 새로고침 19개 중 이것 하나만 안전망이 없었다. 프로필 조회가 한 번
         // 실패하면 Promise.all 전체가 거절돼 **모든 화면 갱신이 통째로 건너뛰어졌고**,
         // 바깥 catch 는 복구를 부르며 오류를 지워서 화면이 5초마다 빈 채로 남았다.
@@ -1541,7 +1564,9 @@ export function OneShell() {
       setOneActivationState(keepPrevIfDeepEqual(activation));
       setBriefingSnapshot(keepPrevIfDeepEqual(safeBriefingSnapshot(proactiveBriefing)));
       setProjections(keepPrevIfDeepEqual(items));
-      // One 홈은 One이 시작한 대화만 보여준다 — 전역 Work 대화는 Work에 남는다.
+      // 목록은 이미 One 것만 온다(위 listRecentOne). 여기서는 Task/태스크포스로 따로
+      // 그려지는 것만 뺀다 — origin 검사는 남겨 둔다. 계약이 깨지면 조용히 넘어가는 대신
+      // 여기서 걸러지는 편이 낫다.
       const taskforceChatIds = new Set(taskforceRows.map((taskforce) => taskforce.chatId));
       setConversations(keepPrevIfDeepEqual(recentChats.filter((chat) => !chat.taskId && chat.originSurface === "one" && !taskforceChatIds.has(chat.id))));
       const wanted = selectedTaskIdRef.current;
@@ -1861,6 +1886,16 @@ export function OneShell() {
       if (typeof event.delta === "string") streamTextRef.current += event.delta;
       else streamTextRef.current = event.text ?? streamTextRef.current;
       setMessages((current) => upsertLiveMessage(current, streamTextRef.current, true));
+      /*
+       * ★ 답이 흘러나오는 동안에도 화면이 따라 내려간다 (오너 지적 2026-08-24).
+       *
+       * 예전에는 **다 끝났을 때만** 내려갔다. 긴 답은 아래로 계속 자라는데 화면은 그대로라,
+       * 답이 오고 있는데도 사용자는 빈 화면을 본다 — "답이 안 온다"로 읽힌다.
+       *
+       * 단, **사람이 위로 올려 읽고 있으면 끌어내리지 않는다.** 읽던 자리를 뺏는 것이
+       * 안 따라가는 것보다 나쁘다. 맨 아래 근처에 있을 때만 따라간다.
+       */
+      followStreamToLatest();
       return;
     }
     if (event.kind === "surface") {
@@ -1920,7 +1955,7 @@ export function OneShell() {
       unsubscribeRunRef.current = null;
       void settleRun(chatId, taskId, settledRunId);
     }
-  }, [reconcileConversationTask, scrollToLatest, settleRun]);
+  }, [reconcileConversationTask, scrollToLatest, settleRun, followStreamToLatest]);
 
   const consumeRunEventRef = useRef(consumeRunEvent);
   useEffect(() => {
@@ -1946,10 +1981,21 @@ export function OneShell() {
       && Boolean(selectedTaskId)
       && activityChatIdRef.current != null;
     const sameActivityThread = promotionHandoff || activityChatIdRef.current === activeThreadChatId;
+    /*
+     * ★ 아직 어느 대화인지 모르는 순간에는 구독을 끊지 않는다 (2026-08-24).
+     *
+     * 이 효과는 화면 상태가 바뀔 때마다 다시 돈다. 대화가 작업으로 승격되는 짧은 순간에는
+     * 화면이 어느 대화를 보고 있는지 잠깐 비는데, 그때 아래에서 **도는 실행의 실시간
+     * 구독을 통째로 끊어** 버렸다. 구독이 끊기면 답이 만들어지고 크레딧까지 나가도
+     * 화면에는 아무것도 안 온다 — 프로덕션에서 그 증상이 반복해서 났다.
+     *
+     * "모른다"는 "다른 대화로 옮겼다"가 아니다. 정말로 다른 대화로 옮겼을 때만 끊는다.
+     */
+    const activeThreadUnknown = activeThreadChatId == null;
     const liveRunOwnsActiveThread = Boolean(
       runIdRef.current
       && runChatIdRef.current
-      && (runChatIdRef.current === activeThreadChatId || promotionHandoff),
+      && (runChatIdRef.current === activeThreadChatId || promotionHandoff || activeThreadUnknown),
     );
     if (!promotionHandoff) activityChatIdRef.current = activeThreadChatId;
 
@@ -2165,7 +2211,7 @@ export function OneShell() {
       return;
     }
     if (activeTaskforce) setTurnAgentIds(activeTaskforceAgentIds);
-  }, [activeTaskforce, activeTaskforceAgentIds, activeThreadChatId]);
+  }, [activeTaskforce, activeTaskforceAgentIds, activeThreadChatId, settleRun]);
   const activeOneMember = useMemo(() => {
     if (!activeThreadChat || activeThreadChat.originSurface !== "one") return null;
     return oneOrgState?.members.find((member) => member.installedAgentId === activeThreadChat.agentId) ?? null;
@@ -2399,6 +2445,35 @@ export function OneShell() {
     const unsubscribe = events.onActiveChats((chatIds) => {
       if (idleCheck) { clearTimeout(idleCheck); idleCheck = null; }
       if (!chatIds.includes(chatId)) {
+        /*
+         * ★ 실시간이 안 왔는데 서버는 끝났다고 한다 (2026-08-24 프로덕션 실측).
+         *
+         * 웹은 실행마다 새 실시간 연결을 연다. 그 연결이 안 열리면 답이 만들어지고
+         * 크레딧까지 나갔는데도 **화면에는 아무것도 안 온다** — 새로고침해야만 보였다.
+         * 데스크탑 앱은 항상 연결된 통로를 써서 이 일이 없다.
+         *
+         * 실시간을 고치는 것과 별개로, **답을 놓치는 길은 막아 둔다.** 서버가 그 대화에
+         * 도는 실행이 없다고 하면, 우리가 기다리던 실행은 이미 끝난 것이다. 그때 평소
+         * 완료 때와 같은 경로로 대화를 다시 받아 온다.
+         *
+         * 곧바로 하지 않고 잠깐 기다리는 이유: 진짜 완료 신호가 오는 중일 수 있다.
+         * 그 사이에 도착하면 이 자리는 아무것도 하지 않는다.
+         */
+        if (runIdRef.current) {
+          const missedRunId = runIdRef.current;
+          const missedTaskId = runTaskIdRef.current;
+          idleCheck = setTimeout(() => {
+            idleCheck = null;
+            if (runIdRef.current !== missedRunId || runChatIdRef.current !== chatId) return;
+            runIdRef.current = null;
+            setBusy(false);
+            unsubscribeRunRef.current?.();
+            unsubscribeRunRef.current = null;
+            void settleRun(chatId, missedTaskId, missedRunId);
+          }, 2_000);
+          return;
+        }
+
         // The chat went idle. Main starts a queued direction a microtask after
         // settlement, so a queue that is still shown once the chat has been
         // idle for a moment has no run behind it (stop cleared it, or the

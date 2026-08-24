@@ -41,7 +41,43 @@ const LOCKED_ASSETS = {
     npmCliSha256: "3ce7cba6f5128dd5f54c98b6a5036b0f850496878cc2e21044b675fe3c594e3e",
     runtimeTreeSha256: "893e18bdab084c0af59c27eb8573f2bd3d2917b76919336efe97f9440039fb97",
   },
+  /*
+   * macOS — 2026-08-24 추가.
+   *
+   * 그전까지 이 표에는 윈도우만 있었고, 그래서 **맥 사용자는 Node 가 없으면 CLI 를 설치조차
+   * 못 했다**(설치 경로가 시스템 npm 만 찾았다). 개발용 맥에는 Node 가 있어서 그 구멍이
+   * 보이지 않았다. "설치 버튼을 누르면 알아서 받아야 한다"는 것이 제품 요구다.
+   */
+  "darwin:arm64": {
+    name: `node-v${NODE_VERSION}-darwin-arm64.tar.gz`,
+    sha256: "e1a97e14c99c803e96c7339403282ea05a499c32f8d83defe9ef5ec66f979ed1",
+    nodeSha256: "ee6fb0e015284d83a91e8ec5213f43a157f8a392b58555301682892ba928c04a",
+    npmCliSha256: "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+    runtimeTreeSha256: "26d8a5de52cfe628bb3763366380991f417137967bcc211098552026f6dfe92b",
+  },
+  "darwin:x64": {
+    name: `node-v${NODE_VERSION}-darwin-x64.tar.gz`,
+    sha256: "dfd0dbd3e721503434df7b7205e719f61b3a3a31b2bcf9729b8b91fea240f080",
+    nodeSha256: "c5afe80c9fd47c0e1ba3a7221173d061dae04577acc67e21e945d16e34c696c8",
+    npmCliSha256: "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+    runtimeTreeSha256: "1e6949b832796ae46e994760086155fd3e7ee73ab7c03616c02748a5f17209c8",
+  },
 };
+
+/** 플랫폼별 실행 파일 위치. 윈도우는 루트에, 유닉스는 bin/ 과 lib/ 밑에 있다. */
+function layoutFor(platform) {
+  return platform === "win32"
+    ? { node: "node.exe", npmCli: "node_modules/npm/bin/npm-cli.js" }
+    : { node: "bin/node", npmCli: "lib/node_modules/npm/bin/npm-cli.js" };
+}
+
+/**
+ * 고정값을 아직 모를 때(`__PIN__`) 계산해서 출력만 하고 끝낸다.
+ *
+ * 새 플랫폼을 추가할 때 값을 손으로 지어낼 수는 없다. 한 번 받아서 계산한 값을 이 표에
+ * 붙여 넣으면, 그 뒤로는 매 빌드가 그 값과 대조한다.
+ */
+const PRINT_PINS = process.argv.includes("--print-pins");
 
 function fail(message) {
   console.error(`[fetch-node] ${message}`);
@@ -161,9 +197,13 @@ try {
       archive,
       extractRoot,
     ], { stdio: "inherit", windowsHide: true });
-  } else {
+  } else if (asset.name.endsWith(".zip")) {
     // Developer/CI cross-target verification on macOS or Linux.
     execFileSync("unzip", ["-q", archive, "-d", extractRoot], { stdio: "inherit" });
+  } else {
+    // 유닉스 배포본은 tar.gz 다. 심볼릭 링크(bin/npm → ../lib/...)가 그대로 보존돼야
+    // npm 이 동작하므로 아카이브를 있는 그대로 푼다.
+    execFileSync("tar", ["-xzf", archive, "-C", extractRoot], { stdio: "inherit" });
   }
 
   const topLevel = readdirSync(extractRoot).filter((entry) => entry !== "__MACOSX");
@@ -184,19 +224,29 @@ try {
     });
   }
 
-  const nodeRelativePath = "node.exe";
-  const npmCliRelativePath = "node_modules/npm/bin/npm-cli.js";
-  const nodePath = path.join(outDir, nodeRelativePath);
+  const layout = layoutFor(targetPlatform);
+  const nodeRelativePath = layout.node;
+  const npmCliRelativePath = layout.npmCli;
+  const nodePath = path.join(outDir, ...nodeRelativePath.split("/"));
   const npmCliPath = path.join(outDir, ...npmCliRelativePath.split("/"));
-  if (!existsSync(nodePath) || !existsSync(npmCliPath)) fail("Node archive does not contain node.exe and npm CLI");
+  if (!existsSync(nodePath) || !existsSync(npmCliPath)) {
+    fail(`Node archive does not contain ${nodeRelativePath} and ${npmCliRelativePath}`);
+  }
   const nodeSha256 = await sha256File(nodePath);
   const npmCliSha256 = await sha256File(npmCliPath);
-  if (nodeSha256 !== asset.nodeSha256 || npmCliSha256 !== asset.npmCliSha256) {
-    fail("extracted Node executable or npm CLI does not match the immutable file pins");
-  }
   const runtimeTreeDigest = await runtimeTreeSha256(outDir);
-  if (runtimeTreeDigest !== asset.runtimeTreeSha256) {
-    fail(`extracted Node runtime tree mismatch: expected=${asset.runtimeTreeSha256} observed=${runtimeTreeDigest}`);
+  if (PRINT_PINS) {
+    console.log(`[fetch-node] pins for ${targetPlatform}:${targetArch}`);
+    console.log(`    nodeSha256: "${nodeSha256}",`);
+    console.log(`    npmCliSha256: "${npmCliSha256}",`);
+    console.log(`    runtimeTreeSha256: "${runtimeTreeDigest}",`);
+  } else {
+    if (nodeSha256 !== asset.nodeSha256 || npmCliSha256 !== asset.npmCliSha256) {
+      fail("extracted Node executable or npm CLI does not match the immutable file pins");
+    }
+    if (runtimeTreeDigest !== asset.runtimeTreeSha256) {
+      fail(`extracted Node runtime tree mismatch: expected=${asset.runtimeTreeSha256} observed=${runtimeTreeDigest}`);
+    }
   }
   const manifest = {
     schemaVersion: "agentlas.node-runtime.v1",

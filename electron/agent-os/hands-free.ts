@@ -97,6 +97,10 @@ export async function runHandsFreeAgentOs(
       projectId: input.chat.projectId,
       title: `${team.firm.name} operations`,
       kind: "division",
+      // 하위 실행 세션은 자기를 부른 대화의 표면을 물려받는다. 넘기지 않으면
+      // createChat 이 조용히 "work" 로 떨어뜨려, One 에서 시작한 일인데 그 세션이
+      // 낸 승인 요청을 누르면 Work 로 끌려간다.
+      originSurface: input.chat.originSurface === "one" ? "one" : "work",
     });
     firmChatId = firmChat.id;
     operatorAgentId = team.agent.id;

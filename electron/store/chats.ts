@@ -156,6 +156,33 @@ export function listRecentChats(limit = 50): Chat[] {
   return rows.map(toChat);
 }
 
+/**
+ * One 표면이 시작한 대화만, One 자신의 창으로 읽는다.
+ *
+ * ★ 왜 따로 있나. One 화면은 `listRecentChats(40)` 로 **전체** 최근 40개를 받아 그중
+ * origin_surface === "one" 인 것만 걸러 그렸다. Work 를 활발히 쓰는 사람은 그 40칸이
+ * Work 대화로 다 차서, 멀쩡히 살아 있는 One 대화가 화면에서 사라진다 — 지워진 것처럼
+ * 보이지만 행은 그대로 있다. 이 기계에서 재보니 One 대화 20개 중 10개만 그 창에
+ * 들어왔다. Work 를 더 쓸수록 0 에 가까워진다.
+ *
+ * 거르는 일을 데이터베이스에 시키면 창이 One 것만으로 채워지므로, Work 사용량이
+ * One 의 기억을 밀어내지 못한다.
+ */
+export function listRecentOneChats(limit = 50): Chat[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT * FROM chats
+       WHERE archived_at IS NULL
+         AND kind = 'user'
+         AND used_at IS NOT NULL
+         AND origin_surface = 'one'
+       ORDER BY updated_at DESC
+       LIMIT ?`,
+    )
+    .all(limit) as ChatRow[];
+  return rows.map(toChat);
+}
+
 export function listArchivedChats(): Chat[] {
   const rows = getDb()
     .prepare(

@@ -6894,6 +6894,8 @@ export interface AgentlasIpc {
   chats: {
     /** 최신순 활성 채팅 (보관된 것 제외). 사이드바 "최근 채팅" 섹션에서 사용 */
     listRecent: (limit?: number) => Promise<Chat[]>;
+    /** One 홈 전용 — 전체 최근 목록을 잘라 쓰면 Work 대화가 One 대화를 밀어낸다. */
+    listRecentOne: (limit?: number) => Promise<Chat[]>;
     /** 보관된 채팅 — 보관함 페이지용 */
     listArchived: () => Promise<Chat[]>;
     listByProject: (projectId: string) => Promise<Chat[]>;
@@ -7668,4 +7670,75 @@ export interface OneDurableMemoryEntryUi {
   projectSlug: string | null;
   evidenceCount: number;
   createdAt: string;
+}
+
+/**
+ * Can this updater state be resolved by fetching the official installer?
+ *
+ * ★ One definition, used by both the main process (which decides whether the
+ * action is allowed) and the renderer (which decides whether to draw the
+ * button). They were hand-maintained copies of the same list; a button that
+ * appears but does nothing is a worse dead end than no button at all.
+ *
+ * - The three `install-*` codes mean native replacement could not start or
+ *   apply. A fresh installer replaces app bytes and keeps userData.
+ * - `minimum-app-version` means the installed app predates the oldest starting
+ *   point the release accepts. Nothing picks an intermediate build to bridge
+ *   from and the state is not retryable, so reinstalling is the only exit that
+ *   exists — leaving it out froze such an install permanently.
+ *
+ * Backup, schema, and metadata failures stay out: replacing the bundle cannot
+ * repair those boundaries.
+ */
+export function updaterCanUseOfficialInstaller(state: {
+  status?: string;
+  code?: UpdaterErrorCode;
+}): boolean {
+  if (state.status === "manual-required") {
+    return state.code === "install-source-untrusted"
+      || state.code === "install-not-applied"
+      || state.code === "install-start-failed";
+  }
+  if (state.status === "incompatible") return state.code === "minimum-app-version";
+  return false;
+}
+
+/**
+ * 봇이 "질문 서식"을 채우지 않고 그대로 베껴 낸 것인가?
+ *
+ * ★ 사고: 우리는 봇에게 질문 쓰는 법을 빈 서식으로 알려준다 —
+ * question 자리에 "Question text ending with ?", header 자리에 "Short label",
+ * 선택지에 "Option A"/"Option B". 그 안내문을 자기 질문으로 바꿔 채우라는 뜻인데,
+ * 봇이 안내문을 지우지 않고 그대로 제출하는 일이 실제로 일어났다. 걸러내는 곳이
+ * 없어서 그 안내문이 승인함까지 올라왔고, 답해도 이어갈 내용이 없으니 사라지지도
+ * 않아 12일 동안 남아 있었다.
+ *
+ * 오너 규칙: 답할 수 없는 것은 보여주지 않는다. 그래서 이 판정은 두 곳이 같이 쓴다 —
+ * 질문을 받는 쪽(다시 내게 한다)과 목록을 만드는 쪽(올리지 않는다). 손으로 유지되는
+ * 두 벌이면 한쪽만 고쳐져 다시 새어 나온다.
+ *
+ * 판정은 보수적이다: 사람이 실제로 저 문장을 쓸 일은 없지만, 그래도 한 조각만 같은
+ * 경우는 통과시키고 서식의 뼈대가 그대로 남아 있을 때만 막는다.
+ */
+export function isUnfilledQuestionTemplate(input: {
+  question?: string;
+  header?: string;
+  options?: ReadonlyArray<{ label?: string }>;
+}): boolean {
+  const norm = (value?: string) => (value ?? "").trim().toLowerCase();
+  const question = norm(input.question);
+  const header = norm(input.header);
+  const labels = (input.options ?? []).map((option) => norm(option?.label));
+
+  // 서식의 질문 자리를 그대로 낸 경우. 이 문장 자체가 "여기에 질문을 써라"는 안내문이라
+  // 사용자에게는 뜻이 없다.
+  if (question === "question text ending with ?") return true;
+
+  // 질문은 채웠는데 선택지를 안 채운 경우 — 고를 수 없으니 역시 답할 수 없다.
+  const placeholderLabels = labels.filter((label) => /^option [a-d]$/.test(label));
+  if (labels.length > 0 && placeholderLabels.length === labels.length) return true;
+
+  // 짧은 이름만 안 채운 것은 막지 않는다 — 질문과 선택지가 진짜면 답할 수 있다.
+  if (header === "short label" && question === "" ) return true;
+  return false;
 }

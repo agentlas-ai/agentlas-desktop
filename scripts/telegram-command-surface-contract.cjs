@@ -265,18 +265,26 @@ check("command and inline-button replies follow the Telegram client language", (
 
 // 15. 카드를 못 그리는 채널(텔레그램)에 "아래에서 확인하세요"를 보내면 가리킬 곳이 없고
 //     정작 결과(경로·내용)가 사라진다. 실사용에서 파일을 만들고도 안내만 갔다.
-check("cardless channels keep the model's result text", () => {
+//
+//     예전엔 이 계약을 `isCardlessTextSurface(executionContext)` 라는 **채널 분기**로 지켰다.
+//     2026-08-15 오너 결정으로 "모델이 쓴 본문이 답"이 모든 채널의 규칙이 되면서 그 분기는
+//     사라졌고, 이 게이트는 없어진 함수 이름을 찾다가 영구 실패하고 있었다(구현 문장을
+//     못박은 게이트의 전형). 지금 재는 것은 이름이 아니라 **우선순위**다:
+//     모델 본문이 먼저고, 완료 안내문은 본문이 비었을 때만 나온다.
+check("the model's own result text wins over a UI-pointing completion blurb", () => {
   const source = fs.readFileSync(path.join(root, "electron/mcp/client.ts"), "utf8");
   const branch = /} else if \(usedDeterministicOneSurface && deterministicOneSurface\) \{[\s\S]*?\n        } else if/.exec(source);
   assert.ok(branch, "the One completion-copy branch was not found");
   assert.match(
     branch[0],
-    /isCardlessTextSurface\(executionContext\)/,
-    "a cardless channel must keep the model's own result text instead of a UI-pointing completion blurb",
+    /displayText\s*=\s*modelText\s*\n?\s*\|\|\s*deterministicOneCompletionCopy/,
+    "model text must be the answer; the completion copy is only the empty-body fallback",
   );
-  const helper = /function isCardlessTextSurface[\s\S]*?\n}/.exec(source);
-  assert.ok(helper, "isCardlessTextSurface not found");
-  assert.match(helper[0], /"telegram"/, "telegram must be treated as a cardless channel");
+  assert.match(
+    branch[0],
+    /const modelText = surfaceParse\.cleanedText\.trim\(\);/,
+    "the model body must come from the parsed surface text",
+  );
 });
 
 console.log(`\ntelegram command surface: ${checks} checks passed`);

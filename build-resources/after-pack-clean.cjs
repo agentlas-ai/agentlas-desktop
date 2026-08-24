@@ -67,7 +67,28 @@ const NODE_RUNTIME_ASSETS = {
     npmCliSha256: "3ce7cba6f5128dd5f54c98b6a5036b0f850496878cc2e21044b675fe3c594e3e",
     runtimeTreeSha256: "893e18bdab084c0af59c27eb8573f2bd3d2917b76919336efe97f9440039fb97",
   },
+  "darwin:arm64": {
+    archiveName: "node-v24.18.0-darwin-arm64.tar.gz",
+    archiveSha256: "e1a97e14c99c803e96c7339403282ea05a499c32f8d83defe9ef5ec66f979ed1",
+    nodeSha256: "ee6fb0e015284d83a91e8ec5213f43a157f8a392b58555301682892ba928c04a",
+    npmCliSha256: "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+    runtimeTreeSha256: "26d8a5de52cfe628bb3763366380991f417137967bcc211098552026f6dfe92b",
+  },
+  "darwin:x64": {
+    archiveName: "node-v24.18.0-darwin-x64.tar.gz",
+    archiveSha256: "dfd0dbd3e721503434df7b7205e719f61b3a3a31b2bcf9729b8b91fea240f080",
+    nodeSha256: "c5afe80c9fd47c0e1ba3a7221173d061dae04577acc67e21e945d16e34c696c8",
+    npmCliSha256: "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+    runtimeTreeSha256: "1e6949b832796ae46e994760086155fd3e7ee73ab7c03616c02748a5f17209c8",
+  },
 };
+
+/** 플랫폼별 실행 파일 위치. 윈도우는 루트에, 맥은 bin/·lib/ 밑에 있다. */
+function nodeRuntimeLayout(platform) {
+  return platform === "win32"
+    ? { node: "node.exe", npmCli: "node_modules/npm/bin/npm-cli.js" }
+    : { node: "bin/node", npmCli: "lib/node_modules/npm/bin/npm-cli.js" };
+}
 
 function isPathInside(parent, candidate) {
   const relative = path.relative(parent, candidate);
@@ -407,7 +428,13 @@ async function verifyBundledPython(projectDir, resourcesDir, platform, builderAr
 }
 
 async function verifyBundledNode(projectDir, resourcesDir, platform, builderArch) {
-  if (platform !== "win32") return null;
+  /*
+   * ★ 2026-08-24 이전에는 이 줄이 `platform !== "win32"` 였다. 그래서 **맥 배포에서는
+   *   번들 Node 를 아무도 검사하지 않았다** — 빠져도, 깨져도 초록불이었다. Node 가 없는
+   *   맥 사용자에게 CLI 설치 버튼이 막다른 길이던 것과 같은 뿌리다.
+   */
+  if (platform !== "win32" && platform !== "darwin") return null;
+  const layout = nodeRuntimeLayout(platform);
   const sourceRoot = path.join(projectDir, "build-resources", "node-runtime");
   const packagedRoot = path.join(resourcesDir, "node-runtime");
   const manifestName = "agentlas-node-runtime.json";
@@ -437,21 +464,21 @@ async function verifyBundledNode(projectDir, resourcesDir, platform, builderArch
     : builderArch === 1 || String(builderArch).toLowerCase() === "x64"
       ? "x64"
       : null;
-  const locked = normalizedArch ? NODE_RUNTIME_ASSETS[`win32:${normalizedArch}`] : null;
+  const locked = normalizedArch ? NODE_RUNTIME_ASSETS[`${platform}:${normalizedArch}`] : null;
   if (
     manifest.schemaVersion !== "agentlas.node-runtime.v1" ||
     manifest.nodeVersion !== NODE_RUNTIME_VERSION ||
-    manifest.platform !== "win32" ||
+    manifest.platform !== platform ||
     manifest.arch !== normalizedArch || !locked ||
     manifest.archiveName !== locked.archiveName ||
     manifest.archiveSha256 !== locked.archiveSha256 ||
-    manifest.nodeRelativePath !== "node.exe" ||
+    manifest.nodeRelativePath !== layout.node ||
     manifest.nodeSha256 !== locked.nodeSha256 ||
-    manifest.npmCliRelativePath !== "node_modules/npm/bin/npm-cli.js" ||
+    manifest.npmCliRelativePath !== layout.npmCli ||
     manifest.npmCliSha256 !== locked.npmCliSha256 ||
     manifest.runtimeTreeSha256 !== locked.runtimeTreeSha256
   ) {
-    throw new Error("[afterPack] Node runtime does not match the pinned Windows asset");
+    throw new Error(`[afterPack] Node runtime does not match the pinned ${platform} asset`);
   }
 
   for (const [relative, expectedSha256, label] of [
@@ -726,6 +753,9 @@ async function prepareMacRuntimeResourcesForInstall(context, phase = "afterSign"
 }
 
 exports.prepareMacRuntimeResourcesForInstall = prepareMacRuntimeResourcesForInstall;
+// 만들어진 .app 을 따로 재는 게이트가 이 검사를 그대로 쓸 수 있어야 한다 — 검사를 베껴
+// 쓰면 그 사본이 낡아 조용히 눈이 먼다.
+exports.verifyBundledNode = verifyBundledNode;
 
 exports.default = async function afterPackClean(context) {
   if (process.platform === "darwin" && context.electronPlatformName === "darwin") {

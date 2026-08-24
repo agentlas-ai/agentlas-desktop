@@ -121,6 +121,10 @@ export function getOrCreateAutomationSession(input: {
         projectId: input.projectId ?? null,
         title: marker,
         kind: "division",
+        // 자동화는 Work 기능이므로 Work 세션이 맞다. 넘기지 않아도 같은 값이 되지만,
+        // createChat 은 빠뜨린 호출을 조용히 "work" 로 떨어뜨리므로 — 빠뜨린 것과
+        // 정한 것이 구분되지 않는다 — 정했다는 사실을 남긴다.
+        originSurface: "work",
       });
   if (!chat) throw new Error("automation_session_ledger_unavailable");
 

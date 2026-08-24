@@ -95,6 +95,23 @@ const SCENARIOS = [
     // 연결됨 상태에서 그룹 설정이 사라지면 그룹방에서 멘션 없는 메시지를 영영 못 받는다.
     expect: [/Group settings|그룹 설정/, /Disconnect|연결 끊기/, /type \/ to open|\/ 를 입력하면/],
   },
+  {
+    // v101: One 은 방마다 하나다. 연결이 둘이면 **둘 다** 보여야 한다 — 하나만 그리면
+    // 사용자는 두 번째 봇이 안 붙었다고 읽는다. "봇 하나 더 붙이기"도 항상 있어야
+    // 세션을 늘릴 길이 화면에 존재한다.
+    name: "connected-two-bots",
+    bindings: [
+      binding({
+        id: "one-1", targetKind: "one", targetId: "one", targetName: "Hope",
+        status: "test_passed", botUsername: "agentlas_hope_bot", telegramChatTitle: "Hope 와의 대화",
+      }),
+      binding({
+        id: "one-2", targetKind: "one", targetId: "one", targetName: "Hope",
+        status: "chat_paired", botUsername: "agentlas_grok_bot", telegramChatTitle: "그록봇 방",
+      }),
+    ],
+    expect: [/agentlas_hope_bot/, /agentlas_grok_bot/, /Add another bot|봇 하나 더 붙이기/],
+  },
   { name: "empty", bindings: [], expect: [/Automatic connect|자동 연결/] },
   {
     // 구 preload·목 브리지는 모르는 메서드에 null 을 돌려준다. 그걸 그대로 담으면

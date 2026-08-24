@@ -116,8 +116,11 @@ export function OneRecoveryPlane() {
             ? await api.chats.get(queued.detail.chatId).catch(() => null)
             : null;
           if (one && (one.originSurface !== "one" || one.kind === "division")) one = null;
-          const recent = one ? [] : await api.chats.listRecent(100);
-          one = one ?? recent.find((chat) => chat.originSurface === "one" && chat.kind !== "division") ?? null;
+          // One 것만 골라 받는다. 예전에는 전체 최근 100개를 받아 그중에서 찾았는데,
+          // Work 를 많이 쓰면 그 100칸이 Work 대화로 차서 **멀쩡한 One 대화가 있는데도**
+          // 못 찾고 아래에서 새 대화를 만들었다 — 복구할 때마다 One 대화가 하나씩 늘어난다.
+          const recent = one ? [] : await api.chats.listRecentOne(100);
+          one = one ?? recent.find((chat) => chat.kind !== "division") ?? null;
           if (!one) {
             one = await api.chats.create({
               title: "One",

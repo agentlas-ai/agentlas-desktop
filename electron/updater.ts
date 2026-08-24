@@ -3,9 +3,10 @@
 // The state machine lives in updater/controller.ts so permission, compatibility,
 // continuity, and retry behavior can be proven without launching or replacing a
 // real app. This adapter binds it to Electron's app/window/shell APIs.
-import { app, BrowserWindow, dialog, shell } from "electron";
+import { app, BrowserWindow, dialog, net, shell } from "electron";
 import fs from "node:fs";
 import path from "node:path";
+import { updaterCanUseOfficialInstaller } from "../shared/types";
 import type { UpdaterActionResult, UpdaterState } from "../shared/types";
 import { bootAuthFromKeychain, getAuthSession, type AuthRestoreResult } from "./auth";
 import { quiesceAutomationSchedulerForUpdate } from "./automation-scheduler";
@@ -49,6 +50,82 @@ function hasBundledUpdateConfig(): boolean {
   } catch {
     return false;
   }
+}
+
+/** How long the pre-install feed re-read may take before it is treated as unreadable. */
+const OFFERED_VERSION_TIMEOUT_MS = 10_000;
+
+/**
+ * The version the update feed offers right now, or null when it cannot be read.
+ *
+ * Deliberately the same source of truth electron-updater itself uses for a
+ * stable channel: GET https://github.com/<owner>/<repo>/releases/latest with a
+ * JSON Accept header, then `tag_name`. Reading a different surface (our website
+ * API, a mirror) would create a second answer that can disagree with the one
+ * the download actually came from.
+ */
+async function readOfferedVersion(): Promise<string | null> {
+  let owner = "";
+  let repo = "";
+  let provider = "";
+  try {
+    const config = fs.readFileSync(updateConfigPath(), "utf8");
+    owner = /^\s*owner:\s*(\S+)\s*$/m.exec(config)?.[1] ?? "";
+    repo = /^\s*repo:\s*(\S+)\s*$/m.exec(config)?.[1] ?? "";
+    provider = /^\s*provider:\s*(\S+)\s*$/m.exec(config)?.[1] ?? "";
+  } catch (error) {
+    console.warn("[updater] app-update.yml could not be read for the pre-install re-check", error);
+    return null;
+  }
+  // Only GitHub is wired here. Any other provider must read as "unknown", never
+  // as "confirmed" — a silent yes is what this guard exists to prevent.
+  if (provider !== "github" || !owner || !repo) return null;
+
+  return new Promise<string | null>((resolve) => {
+    let settled = false;
+    const finish = (value: string | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const request = net.request({
+      method: "GET",
+      url: `https://github.com/${owner}/${repo}/releases/latest`,
+      redirect: "follow",
+    });
+    // A limit that only warns is not a limit: abort the request itself.
+    const timer = setTimeout(() => {
+      try { request.abort(); } catch { /* already finished */ }
+      finish(null);
+    }, OFFERED_VERSION_TIMEOUT_MS);
+    timer.unref?.();
+    request.setHeader("Accept", "application/json");
+    request.on("response", (response) => {
+      if (response.statusCode !== 200) {
+        response.on("data", () => undefined);
+        response.on("end", () => finish(null));
+        return;
+      }
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer) => chunks.push(chunk));
+      response.on("end", () => {
+        try {
+          const tag = JSON.parse(Buffer.concat(chunks).toString("utf8"))?.tag_name;
+          finish(typeof tag === "string" && tag ? tag.replace(/^v/, "") : null);
+        } catch {
+          finish(null);
+        }
+      });
+      response.on("error", () => finish(null));
+    });
+    request.on("error", () => finish(null));
+    try {
+      request.end();
+    } catch {
+      finish(null);
+    }
+  });
 }
 
 function broadcast(state: UpdaterState): void {
@@ -308,6 +385,7 @@ export async function initAutoUpdater(options: AutoUpdaterInitOptions = {}): Pro
     homePath: app.getPath("home"),
     uid: typeof process.getuid === "function" ? process.getuid() : null,
     runtimeVersion: () => readBundledRuntimeVersion(process.resourcesPath, sourceRoot),
+    offeredVersion: readOfferedVersion,
     databaseSchemaVersion: () => readDatabaseSchemaVersion(dbPath),
     inspectInstalledAppTrust: (bundlePath) => inspectMacInstalledAppTrust({
       bundlePath,
@@ -407,15 +485,9 @@ export async function quitAndInstall(): Promise<UpdaterActionResult> {
 
 export async function openManualDownload(): Promise<UpdaterActionResult> {
   const state = controller?.getState() ?? fallbackState;
-  // The official installer is a safe escape hatch when native replacement
-  // itself could not start or apply. It replaces app bytes while preserving
-  // userData. Compatibility/backup/schema failures stay fail-closed because
-  // replacing the bundle cannot repair those boundaries.
-  const canUseOfficialInstaller = state.status === "manual-required" && (
-    state.code === "install-source-untrusted"
-    || state.code === "install-not-applied"
-    || state.code === "install-start-failed"
-  );
+  // 허용 여부는 shared/types.ts 의 updaterCanUseOfficialInstaller 한 곳에서 온다 —
+  // 화면과 여기가 손으로 유지되는 두 벌이면 반드시 갈린다.
+  const canUseOfficialInstaller = updaterCanUseOfficialInstaller(state);
   if (!canUseOfficialInstaller) {
     return { accepted: false, state };
   }

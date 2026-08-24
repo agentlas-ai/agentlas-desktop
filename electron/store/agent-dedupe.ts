@@ -303,8 +303,32 @@ function updateFirmReferences(db: Database.Database, duplicateId: string, canoni
   }
 }
 
+/**
+ * 좌석은 옮기기 전에 겹치는지 본다.
+ *
+ * ★ 왜. 아래 재지정은 `UPDATE OR IGNORE` 라, 표에 유일 제약이 있으면 겹치는 행을 조용히
+ * 건너뛴다. 그런데 One 조직 멤버 표에는 그 제약이 없다 — 같은 봇이 두 번 앉는 것은
+ * 코드가 막고 있고, 이 합치기 경로는 그 코드를 지나지 않는다. 그래서 겹치는 봇을 합칠 때
+ * 좌석까지 그대로 옮기면 **같은 봇이 두 자리에 앉은 상태**가 만들어진다.
+ *
+ * 살아남는 쪽이 이미 앉아 있으면 사라지는 쪽의 좌석 행을 지운다. 앉아 있지 않으면
+ * 아래 재지정이 그 자리를 그대로 물려받는다 — 자리는 사라지지 않는다.
+ */
+function mergeOneOrgSeats(db: Database.Database, duplicateId: string, canonicalId: string): void {
+  const hasTable = db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'one_org_members'")
+    .get();
+  if (!hasTable) return;
+  const canonicalSeated = db
+    .prepare("SELECT 1 FROM one_org_members WHERE installed_agent_id = ? LIMIT 1")
+    .get(canonicalId);
+  if (!canonicalSeated) return;
+  db.prepare("DELETE FROM one_org_members WHERE installed_agent_id = ?").run(duplicateId);
+}
+
 function mergeReferences(db: Database.Database, duplicateId: string, canonicalId: string): void {
   updateFirmReferences(db, duplicateId, canonicalId);
+  mergeOneOrgSeats(db, duplicateId, canonicalId);
   for (const reference of referencedTables(db)) {
     const table = quoteIdentifier(reference.table);
     const column = quoteIdentifier(reference.column);

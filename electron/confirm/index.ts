@@ -5,6 +5,7 @@
 //   사용자가 챗에서 답하면 후속 user 메시지가 쌓여 마지막이 더 이상 assistant가 아니게 되므로 자동 해소된다.
 // fence 포맷은 renderer/lib/ask-question.ts와 동일: <<agentlas-ask>>{json}<</agentlas-ask>>.
 import { createHash } from "node:crypto";
+import { isUnfilledQuestionTemplate } from "../../shared/types";
 import type { CommittedQuestionAnswer, PendingConfirmation } from "../../shared/types";
 import { getLastChatMessage, listRecentChats } from "../store/chats";
 import { getDb } from "../store/db";
@@ -101,6 +102,13 @@ function firstQuestion(
       })
       .slice(0, 8);
     if (options.length < 2) return null;
+    // 오너 규칙: 답할 수 없는 것은 보여주지 않는다. 봇이 질문 서식을 채우지 않고
+    // 그대로 낸 것은 사용자가 답할 수 있는 질문이 아니므로 대기 목록에 올리지 않는다.
+    if (isUnfilledQuestionTemplate({
+      question,
+      header: typeof parsed.header === "string" ? parsed.header : undefined,
+      options,
+    })) return null;
     return {
       question: question.slice(0, 4_000),
       header: typeof parsed.header === "string" ? parsed.header.trim().slice(0, 200) || undefined : undefined,

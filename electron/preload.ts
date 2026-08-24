@@ -577,6 +577,8 @@ const api: AgentlasIpc = {
   },
   chats: {
     listRecent: (limit?: number) => ipcRenderer.invoke("chats:listRecent", limit),
+    /** One 홈 전용 목록 — Work 대화가 One 대화를 밀어내지 않게 DB 에서 거른다. */
+    listRecentOne: (limit?: number) => ipcRenderer.invoke("chats:listRecentOne", limit),
     listArchived: () => ipcRenderer.invoke("chats:listArchived"),
     listByProject: (projectId: string) =>
       ipcRenderer.invoke("chats:listByProject", projectId),

@@ -313,8 +313,14 @@ function verifyReleaseSourceContract(runtimeRoot, manifestVersion) {
   if (!releaseWorkflow.includes("npm run fetch:python")) {
     throw new Error("cross-platform release does not fetch pinned standalone Python");
   }
-  if (!/runner\.os == 'Windows'[\s\S]{0,160}npm run fetch:node/.test(releaseWorkflow)) {
-    throw new Error("cross-platform release does not fetch the pinned Windows Node runtime");
+  // 번들 Node 는 모든 배포판이 받아야 한다. 예전에는 이 단계가 윈도우 전용이었고, 그래서
+  // 맥 배포판에는 앱이 들고 다닐 Node 가 실리지 않았다 — Node 가 없는 맥 사용자에게 CLI
+  // 설치 버튼이 막다른 길이던 원인이다(2026-08-24).
+  if (!releaseWorkflow.includes("npm run fetch:node")) {
+    throw new Error("cross-platform release does not fetch the pinned Node runtime");
+  }
+  if (/runner\.os == 'Windows'[\s\S]{0,120}npm run fetch:node/.test(releaseWorkflow)) {
+    throw new Error("pinned Node runtime fetch is Windows-only again — the mac build would ship without Node");
   }
   if (!signedWorkflow.includes("--public-allowlist") ||
       !signedWorkflow.includes("--verification-file=release/desktop-release-verification.json")) {
@@ -428,6 +434,68 @@ try {
 // electron-builder 직후에 같은 스크립트의 --app 모드로 수행한다.
 if (!run(process.execPath, [join(root, "scripts", "verify-packaging-completeness.mjs")], { cwd: root })) {
   fail("packaging completeness failed: a packaging config does not carry everything the app requires at launch");
+}
+
+// ── 최저 출발 버전은 함부로 올리지 않는다 ─────────────────────────────────────
+// 이 숫자보다 낮은 앱은 자동 업데이트를 거절당한다. 그런데 그 거절 화면을 그리는
+// 것은 "그 옛날 앱"의 코드라서, 우리가 새 릴리스에 아무리 좋은 안내와 버튼을 넣어도
+// 그 사람에게는 절대 닿지 않는다. 즉 이 숫자를 올리는 순간, 그 아래 사용자는 우리가
+// 화면으로 도울 수 없는 곳에 갇힌다(중간 다리를 골라주는 코드는 없다).
+//
+// 지금까지 한 번도 올린 적이 없어서 실제로 갇힌 사람은 없다. 올리려면 그 대가를
+// 알고 올려야 하므로, 조용히 올라가는 것만 막는다.
+{
+  const previous = capture("git", ["show", "HEAD:package.json"], { cwd: root });
+  if (previous !== null) {
+    let before = "";
+    try {
+      before = JSON.parse(previous)?.agentlasUpdateCompatibility?.minimumSourceAppVersion || "";
+    } catch {
+      before = "";
+    }
+    const after = pkg.agentlasUpdateCompatibility?.minimumSourceAppVersion || "";
+    const asParts = (v) => String(v).split(".").map((n) => Number.parseInt(n, 10) || 0);
+    const higher = (a, b) => {
+      const [x, y] = [asParts(a), asParts(b)];
+      for (let i = 0; i < 3; i += 1) if (x[i] !== y[i]) return x[i] > y[i];
+      return false;
+    };
+    if (before && after && higher(after, before) && !process.env.AGENTLAS_ALLOW_MINIMUM_SOURCE_RAISE) {
+      fail(
+        `minimumSourceAppVersion ${before} → ${after}: apps below ${after} can no longer update themselves, ` +
+        `and no release can reach them with an explanation. Set AGENTLAS_ALLOW_MINIMUM_SOURCE_RAISE=1 to accept that.`,
+      );
+    }
+  }
+}
+
+// 두 번째 겹: 위 검사를 지나쳐 매니페스트가 빠진 빌드가 나가더라도, 앱은 켜져서
+// 스스로 업데이트로 고칠 수 있어야 한다. 1.0.31/1.0.32 는 그러지 못해서 받은
+// 사람이 전원 손으로 지우고 다시 깔아야 했다.
+const degradeGate = join(root, "scripts", "verify-builtin-plugins-degrade.mjs");
+if (!existsSync(degradeGate)) {
+  fail("builtin-plugins degrade gate is missing — a release must not proceed without it");
+}
+if (!run(process.execPath, [degradeGate], { cwd: root })) {
+  fail("builtin-plugins degrade failed: a missing plugin manifest still kills the main process at launch");
+}
+
+// 세 번째 겹: 철회된 릴리스가 이미 내려받아져 있어도 설치되지 않아야 한다.
+const withdrawnGate = join(root, "scripts", "verify-updater-withdrawn-release-guard.mjs");
+if (!existsSync(withdrawnGate)) {
+  fail("updater withdrawn-release gate is missing — a release must not proceed without it");
+}
+if (!run(process.execPath, [withdrawnGate], { cwd: root })) {
+  fail("updater withdrawn-release guard failed: a payload the feed no longer offers can still be installed");
+}
+
+// 오너 규칙: 답할 수 없는 것은 보여주지 않는다.
+const unanswerableGate = join(root, "scripts", "verify-unanswerable-questions-hidden.mjs");
+if (!existsSync(unanswerableGate)) {
+  fail("unanswerable-questions gate is missing — a release must not proceed without it");
+}
+if (!run(process.execPath, [unanswerableGate], { cwd: root })) {
+  fail("unanswerable questions failed: a question the bot never filled in can still reach the user");
 }
 
 console.log(`[release-preflight] PASS — v${pkg.version} satisfies the release contract`);

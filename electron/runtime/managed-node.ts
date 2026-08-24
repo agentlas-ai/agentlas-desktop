@@ -28,7 +28,35 @@ const LOCKED_NODE_ASSETS: Record<string, LockedNodeAsset> = {
     npmCliSha256: "3ce7cba6f5128dd5f54c98b6a5036b0f850496878cc2e21044b675fe3c594e3e",
     runtimeTreeSha256: "893e18bdab084c0af59c27eb8573f2bd3d2917b76919336efe97f9440039fb97",
   },
+  /*
+   * macOS — 2026-08-24 추가.
+   *
+   * 그전까지 이 표에는 윈도우만 있었다. 그래서 **Node 가 없는 맥에서는 CLI 설치 버튼이
+   * "npm 을 찾을 수 없습니다"로 끝났다** — 사용자가 할 수 있는 일이 없는 막다른 길이다.
+   * 설치 버튼을 누르면 앱이 알아서 준비하는 것이 제품 요구다.
+   */
+  "darwin:arm64": {
+    archiveName: "node-v24.18.0-darwin-arm64.tar.gz",
+    archiveSha256: "e1a97e14c99c803e96c7339403282ea05a499c32f8d83defe9ef5ec66f979ed1",
+    nodeSha256: "ee6fb0e015284d83a91e8ec5213f43a157f8a392b58555301682892ba928c04a",
+    npmCliSha256: "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+    runtimeTreeSha256: "26d8a5de52cfe628bb3763366380991f417137967bcc211098552026f6dfe92b",
+  },
+  "darwin:x64": {
+    archiveName: "node-v24.18.0-darwin-x64.tar.gz",
+    archiveSha256: "dfd0dbd3e721503434df7b7205e719f61b3a3a31b2bcf9729b8b91fea240f080",
+    nodeSha256: "c5afe80c9fd47c0e1ba3a7221173d061dae04577acc67e21e945d16e34c696c8",
+    npmCliSha256: "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+    runtimeTreeSha256: "1e6949b832796ae46e994760086155fd3e7ee73ab7c03616c02748a5f17209c8",
+  },
 };
+
+/** 플랫폼별 실행 파일 위치. 윈도우는 루트에, 유닉스는 bin/·lib/ 밑에 있다. */
+function expectedLayout(platform: NodeJS.Platform): { node: string; npmCli: string } {
+  return platform === "win32"
+    ? { node: "node.exe", npmCli: "node_modules/npm/bin/npm-cli.js" }
+    : { node: "bin/node", npmCli: "lib/node_modules/npm/bin/npm-cli.js" };
+}
 
 interface ManagedNodeManifest {
   schemaVersion: "agentlas.node-runtime.v1";
@@ -180,9 +208,9 @@ export function validateManagedNodeRuntimeRoot(
     !locked ||
     manifest.archiveName !== locked.archiveName ||
     manifest.archiveSha256 !== locked.archiveSha256 ||
-    manifest.nodeRelativePath !== "node.exe" ||
+    manifest.nodeRelativePath !== expectedLayout(platform).node ||
     manifest.nodeSha256 !== locked.nodeSha256 ||
-    manifest.npmCliRelativePath !== "node_modules/npm/bin/npm-cli.js" ||
+    manifest.npmCliRelativePath !== expectedLayout(platform).npmCli ||
     manifest.npmCliSha256 !== locked.npmCliSha256 ||
     manifest.runtimeTreeSha256 !== locked.runtimeTreeSha256
   ) {

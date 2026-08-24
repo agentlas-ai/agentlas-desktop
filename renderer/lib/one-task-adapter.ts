@@ -367,7 +367,9 @@ export async function listOneTaskProjections(
     return details.filter((item): item is OneTaskProjection => Boolean(item));
   }
 
-  const chats = (await api.chats.listRecent(40)).filter((chat) => chat.originSurface === "one");
+  // One 것만 골라 받는다 — 전체 최근 40개를 잘라 쓰면 Work 대화가 One 을 밀어내
+  // 이미 만들어 둔 One 작업이 목록에서 사라진다.
+  const chats = await api.chats.listRecentOne(40);
   const linkedTasks = await Promise.all(chats.map((chat) => api.tasks.findForChat(chat.id).catch(() => null)));
   const taskPairs = chats.flatMap((chat, index) => {
     const task = linkedTasks[index];

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // One은 텔레그램의 단일 창구다. 이 게이트가 잠그는 것:
 //  1) target_kind 드리프트 0 — 타입 union ≡ v94 CHECK ≡ 실제 테이블
-//  2) One 바인딩 싱글턴 — 두 번째 행은 표현조차 불가능
+//  2) One 바인딩은 **방마다 하나** — 같은 방에 둘은 불가, 다른 방/대기 중은 여럿 가능(v101)
 //  3) One 바인딩은 절대 고아가 되지 않는다(설치 에이전트가 0개여도 prune 대상 아님)
 //  4) One 대화는 origin_surface='one' + agentlas-one 이고, /new 뒤에도 지정 프로젝트를 되건다
 //  5) v93 → v94 업그레이드가 레거시 행의 토큰 표식을 보존한다
@@ -105,23 +105,35 @@ async function main() {
     });
 
     const now = new Date().toISOString();
-    const insertOne = (id) =>
+    const insertOne = (id, chatId = null) =>
       db
         .prepare(
           `INSERT INTO telegram_bindings
-           (id, target_kind, target_id, status, enabled, last_update_id, created_at, updated_at,
+           (id, target_kind, target_id, telegram_chat_id, status, enabled, last_update_id, created_at, updated_at,
             automation_report_enabled, token_saved)
-           VALUES (?, 'one', 'one', 'chat_paired', 1, 0, ?, ?, 0, 0)`,
+           VALUES (?, 'one', 'one', ?, 'chat_paired', 1, 0, ?, ?, 0, 0)`,
         )
-        .run(id, now, now);
+        .run(id, chatId, now, now);
 
-    check("One binding is a singleton — the second row cannot exist", () => {
-      insertOne("one-binding-1");
-      assert.throws(() => insertOne("one-binding-2"), /UNIQUE/i, "a second One binding must be rejected");
+    // v101: 단일성은 **방** 단위다. 예전 전역 싱글턴은 "One 이 둘"과 "One 이 여러 방에"
+    // 두 가지를 함께 금지해, 봇을 하나 더 붙이는 길 자체가 없었다(대화가 영원히 하나).
+    check("One binding is one-per-room — same room rejected, other rooms allowed", () => {
+      insertOne("one-binding-1", "room-a");
+      assert.throws(() => insertOne("one-binding-dup", "room-a"), /UNIQUE/i, "같은 방에 One 포트 둘은 거절되어야 한다");
+      insertOne("one-binding-2", "room-b");
+      insertOne("one-binding-waiting", null);
+      insertOne("one-binding-waiting-2", null);
       assert.equal(
         db.prepare("SELECT COUNT(*) AS n FROM telegram_bindings WHERE target_kind = 'one'").get().n,
-        1,
+        4,
+        "다른 방과 방 대기 중인 봇은 공존해야 한다 — 그래야 텔레그램에서 세션이 여러 개 열린다",
       );
+      const indexes = db
+        .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='telegram_bindings'")
+        .all()
+        .map((r) => r.name);
+      assert.ok(!indexes.includes("idx_telegram_bindings_one_singleton"), "전역 싱글턴 인덱스는 사라져야 한다");
+      assert.ok(indexes.includes("idx_telegram_bindings_one_room"), "방 단위 유니크 인덱스가 있어야 한다");
     });
 
     check("a One binding is never orphaned or pruned, even with no installed agents", async () => {
@@ -133,11 +145,11 @@ async function main() {
     });
 
     const pruned = await connect.pruneOrphanedTelegramBindings();
-    check("pruneOrphans leaves the One binding alone", () => {
+    check("pruneOrphans leaves every One binding alone", () => {
       assert.equal(
         db.prepare("SELECT COUNT(*) AS n FROM telegram_bindings WHERE target_kind = 'one'").get().n,
-        1,
-        `pruneOrphans removed the One binding (removed=${pruned.removed})`,
+        4,
+        `pruneOrphans removed a One binding (removed=${pruned.removed})`,
       );
     });
 

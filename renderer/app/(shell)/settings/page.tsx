@@ -1,5 +1,6 @@
 // 설정 — BYOC 연결 관리. PRD 3.1 FRE 6단계 + 10번 리스크 "키 저장 위치 명시".
 "use client";
+import { updaterCanUseOfficialInstaller } from "@shared/types";
 import { useCallback, useEffect, useState, type CSSProperties , useMemo} from "react";
 import { ipc, ipcEvents, updaterEvents } from "@/lib/ipc";
 import { useT, type LocalePref } from "@/lib/i18n";
@@ -2170,6 +2171,7 @@ function UpdatePanel() {
     if (state.code === "continuity-backup-failed") return t("settings.update.safety_backup_failed");
     if (state.code === "legacy-cleanup-failed") return t("settings.update.cleanup_failed");
     if (state.code === "compatibility-metadata-missing") return t("settings.update.metadata_missing");
+    if (state.code === "minimum-app-version") return t("settings.update.too_old_to_auto_update");
     if (state.code === "minimum-schema-version") return t("settings.update.schema_incompatible");
     switch (state.status) {
       case "checking":
@@ -2247,11 +2249,7 @@ function UpdatePanel() {
           >
             {t("settings.update.install")}
           </button>
-        ) : state.status === "manual-required" && (
-          state.code === "install-source-untrusted"
-          || state.code === "install-not-applied"
-          || state.code === "install-start-failed"
-        ) ? (
+        ) : updaterCanUseOfficialInstaller(state) ? (
           <button
             onClick={() => void openOfficialInstaller()}
             style={{

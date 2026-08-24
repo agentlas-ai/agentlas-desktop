@@ -86,6 +86,18 @@ electronFuses:
 # OUTSIDE the asar so bin/hephaestus + the Python tree stay executable.
 # Heavy, non-runtime dirs (render output, tests, vendored caches, git) excluded.
 extraResources:
+  # 앱이 들고 다니는 Node+npm — 모든 플랫폼 공통.
+  #
+  # ★ 왜 여기(최상위)인가 (2026-08-24 실측):
+  #   플랫폼 블록(mac:/win:)에 두면 설정 상속·중첩에서 같은 FileSet 이 두 번 적용되어
+  #   `EEXIST … node-runtime/bin/npm` 으로 **빌드가 죽는다**(맥 Node 의 npm·npx·corepack 은
+  #   심링크다). 최상위에 한 번만 두면 겹치지 않고, mac 블록을 비우는 로컬 후보 설정에서도
+  #   살아남는다. filter 도 주지 않는다 — 주면 심링크를 파일로 한 번 더 복사하려 든다.
+  #
+  #   내용물은 빌드하는 플랫폼용으로 준비된다(맥 빌드=darwin, 윈도우 빌드=win).
+  #   시스템에 설치하지도, 시스템 PATH 에 올리지도 않는다 — 앱이 자기 자식에게만 쓴다.
+  - from: build-resources/node-runtime
+    to: node-runtime
   - from: dist/embedded-core
     to: Hephaestus
     filter:
@@ -216,8 +228,6 @@ mac:
       to: macos-release-signing-policy.json
     - from: build-resources/native/macos/agentlas-input-driver
       to: native/macos/agentlas-input-driver
-  # An official-ID bundle must never be emitted as an unsigned local artifact.
-  # The isolated local config explicitly overrides this within its own ID.
   forceCodeSigning: true
   # Electron 43 requires macOS 12 Monterey or newer. The update feed pairs this
   # product-version floor with Darwin 21 in update-compatibility.cjs.
@@ -252,14 +262,11 @@ dmg:
 # SmartScreen shows a one-time "More info → Run anyway"; the portable .exe runs
 # without installing. Add CSC_LINK / CSC_KEY_PASSWORD in CI later to ship signed.
 win:
-  # Private Node+npm bootstrap for official CLI packages. This is copied only
-  # into Windows builds and never installed system-wide or added to system PATH.
+  # The runtime itself is copied once by the top-level extraResources block.
+  # Windows needs one supplement: electron-builder refuses to traverse a FileSet
+  # whose root child is named node_modules, and the Windows Node distribution
+  # keeps npm there (macOS keeps it under lib/, which needs no supplement).
   extraResources:
-    - from: build-resources/node-runtime
-      to: node-runtime
-      filter:
-        - "**/*"
-        - "!.gitkeep"
     # electron-builder intentionally refuses to traverse a FileSet whose root
     # child is named node_modules. Copy the immutable official Node distribution's
     # module tree from that directory as its own FileSet so npm/Corepack survive.

@@ -67,6 +67,7 @@ export default function TelegramOneDialog() {
   const [botName, setBotName] = useState("");
   const [deleteBots, setDeleteBots] = useState(false);
   const [error, setError] = useState("");
+  const [addingAnother, setAddingAnother] = useState(false);
 
   const busy = dialog.busy;
   const open = dialog.open;
@@ -128,11 +129,16 @@ export default function TelegramOneDialog() {
       // 않으므로(셸이 항상 마운트) 여기서 지우지 않으면 다시 열 때 그대로 보인다.
       setBotToken("");
       setMode("auto");
+      // 다시 열었을 때 "봇 추가" 폼이 펼쳐진 채로 시작하면 이미 연결된 사람이
+      // 실수로 봇을 하나 더 만든다.
+      setAddingAnother(false);
     };
   }, [open]);
 
-  const oneBinding = useMemo(
-    () => bindings.find((binding) => binding.targetKind === "one") ?? null,
+  // One은 방마다 하나다 — 봇을 더 붙이면 연결이 늘고, 늘어난 만큼 텔레그램에서
+  // 나란히 굴릴 수 있는 대화가 생긴다. 그래서 "하나"가 아니라 목록으로 본다.
+  const oneBindings = useMemo(
+    () => bindings.filter((binding) => binding.targetKind === "one"),
     [bindings],
   );
   const legacyBindings = useMemo(
@@ -153,8 +159,12 @@ export default function TelegramOneDialog() {
             targetId: "one",
             botToken: botToken.trim(),
           })
-        : await api.telegram.connectOne(botName.trim() ? { botName: botName.trim() } : {});
+        : await api.telegram.connectOne({
+            ...(botName.trim() ? { botName: botName.trim() } : {}),
+            ...(addingAnother ? { newConnection: true } : {}),
+          });
       setBotToken("");
+      setAddingAnother(false);
       appendLog(result.message, "success");
       await refresh();
     } catch (err) {
@@ -164,7 +174,7 @@ export default function TelegramOneDialog() {
     } finally {
       setTelegramOneBusy(null);
     }
-  }, [appendLog, botName, botToken, busy, mode, refresh, t]);
+  }, [addingAnother, appendLog, botName, botToken, busy, mode, refresh, t]);
 
   const runCleanup = useCallback(async () => {
     const api = ipc();
@@ -200,7 +210,7 @@ export default function TelegramOneDialog() {
   }, [appendLog, busy, deleteBots, legacyBindings.length, refresh, t]);
 
   const runBindingAction = useCallback(
-    async (action: "open" | "test" | "settings" | "remove") => {
+    async (action: "open" | "test" | "settings" | "remove", oneBinding: TelegramConnectBinding) => {
       const api = ipc();
       if (!api || !oneBinding || busy) return;
       if (action === "remove" && !window.confirm(t("tgone.disconnect.confirm"))) return;
@@ -229,12 +239,14 @@ export default function TelegramOneDialog() {
         setTelegramOneBusy(null);
       }
     },
-    [appendLog, busy, oneBinding, refresh, t],
+    [appendLog, busy, refresh, t],
   );
 
   if (!open) return null;
 
-  const connected = Boolean(oneBinding);
+  const connected = oneBindings.length > 0;
+  // 연결이 하나도 없으면 곧바로 연결 폼, 있으면 "하나 더" 를 눌렀을 때만 폼을 편다.
+  const showConnectForm = !connected || addingAnother;
   const latestLog = dialog.logs[0]?.text ?? "";
   const canConnect = mode === "auto" || botToken.trim().length > 0;
 
@@ -294,42 +306,60 @@ export default function TelegramOneDialog() {
             {latestLog ? <span className={styles.progressLine}>{latestLog}</span> : null}
             <span className={styles.progressHint}>{t("tgone.connecting.keep_open")}</span>
           </div>
-        ) : connected && oneBinding ? (
-          <div className={styles.connected}>
-            <div className={styles.connectedHead}>
-              <span className={styles.pill}>{t(STATUS_KEY[oneBinding.status] as never)}</span>
-              {oneBinding.botUsername ? <span>@{oneBinding.botUsername}</span> : null}
-            </div>
-            <p className={styles.connectedChat}>
-              {oneBinding.telegramChatTitle || t("tgone.connected.chat_waiting")}
-            </p>
-            <p className={styles.hint}>{t("tgone.connected.commands_hint")}</p>
+        ) : null}
+
+        {busy !== "connect" && connected ? (
+          <>
+            {oneBindings.map((oneBinding) => (
+              <div key={oneBinding.id} className={styles.connected}>
+                <div className={styles.connectedHead}>
+                  <span className={styles.pill}>{t(STATUS_KEY[oneBinding.status] as never)}</span>
+                  {oneBinding.botUsername ? <span>@{oneBinding.botUsername}</span> : null}
+                </div>
+                <p className={styles.connectedChat}>
+                  {oneBinding.telegramChatTitle || t("tgone.connected.chat_waiting")}
+                </p>
+                <p className={styles.hint}>{t("tgone.connected.commands_hint")}</p>
+                <div className={styles.actions}>
+                  <button type="button" onClick={() => void runBindingAction("open", oneBinding)} disabled={Boolean(busy)}>
+                    {t("tgone.action.open_bot")}
+                  </button>
+                  <button type="button" onClick={() => void runBindingAction("test", oneBinding)} disabled={Boolean(busy)}>
+                    {t("tgone.action.test")}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void runBindingAction("settings", oneBinding)}
+                    disabled={Boolean(busy)}
+                    title={t("tgone.action.group_settings.hint")}
+                  >
+                    {t("tgone.action.group_settings")}
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.danger}
+                    onClick={() => void runBindingAction("remove", oneBinding)}
+                    disabled={Boolean(busy)}
+                  >
+                    {t("tgone.action.disconnect")}
+                  </button>
+                </div>
+              </div>
+            ))}
+            <p className={styles.hint}>{t("tgone.multi.hint")}</p>
             <div className={styles.actions}>
-              <button type="button" onClick={() => void runBindingAction("open")} disabled={Boolean(busy)}>
-                {t("tgone.action.open_bot")}
-              </button>
-              <button type="button" onClick={() => void runBindingAction("test")} disabled={Boolean(busy)}>
-                {t("tgone.action.test")}
-              </button>
               <button
                 type="button"
-                onClick={() => void runBindingAction("settings")}
-                disabled={Boolean(busy)}
-                title={t("tgone.action.group_settings.hint")}
-              >
-                {t("tgone.action.group_settings")}
-              </button>
-              <button
-                type="button"
-                className={styles.danger}
-                onClick={() => void runBindingAction("remove")}
+                onClick={() => setAddingAnother((value) => !value)}
                 disabled={Boolean(busy)}
               >
-                {t("tgone.action.disconnect")}
+                {addingAnother ? t("tgone.action.add_bot.cancel") : t("tgone.action.add_bot")}
               </button>
             </div>
-          </div>
-        ) : (
+          </>
+        ) : null}
+
+        {busy !== "connect" && showConnectForm ? (
           <div className={styles.options} role="radiogroup" aria-labelledby="tgone-title">
             {CONNECT_MODES.map((option, index) => (
               <button
@@ -404,7 +434,7 @@ export default function TelegramOneDialog() {
               </label>
             )}
           </div>
-        )}
+        ) : null}
 
         {legacyBindings.length > 0 ? (
           <div className={styles.legacy}>
@@ -443,16 +473,16 @@ export default function TelegramOneDialog() {
           ref={primaryRef}
           type="button"
           className={styles.primary}
-          disabled={Boolean(busy) || (!connected && !canConnect)}
+          disabled={Boolean(busy) || (showConnectForm && !canConnect)}
           onClick={() => {
-            if (connected) {
+            if (!showConnectForm) {
               closeTelegramOneDialog();
               return;
             }
             void runConnect();
           }}
         >
-          {connected
+          {!showConnectForm
             ? t("tgone.action.done")
             : busy === "connect"
               ? t("tgone.action.connecting")

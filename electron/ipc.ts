@@ -386,6 +386,7 @@ import {
   listChatsByFirm,
   listChatsByProject,
   listRecentChats,
+  listRecentOneChats,
   appendChatMessage,
   removeChat,
   renameChat,
@@ -3800,6 +3801,8 @@ export function registerIpcHandlers(): void {
 
   // ── chats ──────────────────────────────────────────────
   ipcMain.handle("chats:listRecent", (_e, limit?: number) => listRecentChats(limit));
+  // One 화면 전용 — 전체 최근 목록을 잘라 쓰면 Work 대화가 One 대화를 밀어낸다.
+  ipcMain.handle("chats:listRecentOne", (_e, limit?: number) => listRecentOneChats(limit));
   ipcMain.handle("chats:listArchived", () => listArchivedChats());
   ipcMain.handle("chats:archive", (_e, id: string) => archiveChat(id));
   ipcMain.handle("chats:unarchive", (_e, id: string) => unarchiveChat(id));

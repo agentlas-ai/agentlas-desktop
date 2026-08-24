@@ -92,8 +92,31 @@ function resolveBinary(name: string): string | null {
 }
 
 /** 보강된 PATH를 가진 env (GUI spawn용). */
+/**
+ * 앱이 들고 다니는 Node 의 실행 디렉터리. 없으면 null.
+ *
+ * ★ 왜 PATH 에 넣어야 하나 (2026-08-24 실측):
+ * 설치되는 CLI 중 codex·kimi·grok 은 `#!/usr/bin/env node` 로 시작하는 스크립트다. 즉
+ * **실행 시점에 PATH 에서 node 를 찾는다.** 앱이 그것을 설치해 줘도 사용자 컴퓨터에 Node 가
+ * 없으면 `env: node: No such file or directory` 로 죽는다(claude 만 자체 실행이라 살아난다).
+ * 설치만 해 주고 실행이 안 되면 설치해 준 것이 아니다.
+ */
+function managedNodeBinDir(): string | null {
+  const bundled = resolveManagedNodeRuntime();
+  if (!bundled.ok) return null;
+  return path.dirname(bundled.runtime.node);
+}
+
 function augmentedEnv(): NodeJS.ProcessEnv {
-  const merged = Array.from(new Set([managedBinDir(), ...(process.env.PATH || "").split(path.delimiter), ...EXTRA_BIN_DIRS]))
+  // 번들 Node 는 기존 PATH **뒤**, 보충 경로 **앞** — 실행 경로(exec.ts withCliPath)와
+  // 같은 순서다. 두 곳이 어긋나면 "검증은 통과했는데 실행은 죽는" 상태가 만들어진다.
+  const bundledNode = managedNodeBinDir();
+  const merged = Array.from(new Set([
+    managedBinDir(),
+    ...(process.env.PATH || "").split(path.delimiter),
+    ...(bundledNode ? [bundledNode] : []),
+    ...EXTRA_BIN_DIRS,
+  ]))
     .filter(Boolean)
     .join(path.delimiter);
   return { ...process.env, PATH: merged };
@@ -276,30 +299,34 @@ function writeManagedWindowsCliLauncher(
 }
 
 function resolveNpmRunner(): { ok: true; runner: NpmRunner } | { ok: false; reason: string } {
-  // The Windows package always carries this verified private runtime. Prefer it
-  // over a user/system npm so Connect is reproducible and never needs UAC.
-  if (process.platform === "win32") {
-    const bundled = resolveManagedNodeRuntime();
-    if (bundled.ok) {
-      return {
-        ok: true,
-        runner: {
-          command: bundled.runtime.node,
-          argvPrefix: [bundled.runtime.npmCli],
-          managedRuntime: bundled.runtime,
-        },
-      };
-    }
-    const external = resolveBinary("npm");
-    if (external) return { ok: true, runner: { command: external, argvPrefix: [] } };
+  /*
+   * 앱이 들고 다니는 검증된 Node 를 먼저 쓴다 — 사용자 컴퓨터에 Node 가 있든 없든.
+   *
+   * ★ 2026-08-24 이전에는 이 우선순위가 **윈도우에만** 있었다. 그래서 Node 가 없는 맥에서는
+   *   설치 버튼이 "npm 을 찾을 수 없습니다"로 끝났다 — 사용자가 할 수 있는 일이 없는
+   *   막다른 길이었다(개발용 맥에는 Node 가 있어 보이지 않던 구멍이다).
+   *   "설치 버튼을 누르면 알아서 받아야 한다"가 제품 요구다.
+   *
+   * 시스템 npm 폴백은 남긴다 — 어떤 이유로 번들이 빠진 빌드에서도 Node 가 있는 사람은
+   * 계속 쓸 수 있어야 한다.
+   */
+  const bundled = resolveManagedNodeRuntime();
+  if (bundled.ok) {
     return {
-      ok: false,
-      reason: `Agentlas managed Node runtime is unavailable (${bundled.reason}). Reinstall or update Agentlas Desktop.`,
+      ok: true,
+      runner: {
+        command: bundled.runtime.node,
+        argvPrefix: [bundled.runtime.npmCli],
+        managedRuntime: bundled.runtime,
+      },
     };
   }
   const external = resolveBinary("npm");
   if (external) return { ok: true, runner: { command: external, argvPrefix: [] } };
-  return { ok: false, reason: "npm was not found on this system" };
+  return {
+    ok: false,
+    reason: `Agentlas managed Node runtime is unavailable (${bundled.reason}). Reinstall or update Agentlas Desktop.`,
+  };
 }
 
 function managedBinary(name: string): string | null {

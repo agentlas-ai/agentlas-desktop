@@ -12,18 +12,85 @@
 // (mcp-config.ts:46, client.ts:349). Changing the stored string here would silently rewrite
 // every existing installation's row on the next `refreshInstalledCatalogServer`.
 //
-// The manifests are imported (not read from disk) so they are bundled by tsc into dist/ —
-// a runtime path lookup would work in the repo and fail in a packaged app.
 import type { McpToolCatalogEntry } from "../../shared/types";
 import { BROWSER_CDP_LAUNCHER_BASENAME } from "../mcp-tools/browser-cdp-launcher";
 import { computerUseMcpLaunchArgs } from "../computer-use/mcp-server";
 import { systemTimeMcpLaunchArgs } from "../mcp-tools/system-time-server";
-import browserPlugin from "../../plugins/agentlas-browser/plugin.json";
-import computerUsePlugin from "../../plugins/agentlas-computer-use/plugin.json";
-import timePlugin from "../../plugins/agentlas-time/plugin.json";
 
-/** Every built-in plugin package bundled with the app. */
-const BUILTIN_PLUGINS = [browserPlugin, computerUsePlugin, timePlugin] as const;
+interface PluginManifest {
+  slug: string;
+  provides?: { tools?: unknown[] };
+}
+
+/**
+ * ★ Every built-in plugin manifest, declared as data.
+ *
+ * `scripts/verify-packaging-completeness.mjs` reads this list to prove the packaged
+ * app.asar actually contains each file. Keep the paths as plain string literals — a
+ * computed path would leave that gate detecting nothing.
+ */
+export const BUILTIN_PLUGIN_MANIFEST_PATHS = [
+  "../../plugins/agentlas-browser/plugin.json",
+  "../../plugins/agentlas-computer-use/plugin.json",
+  "../../plugins/agentlas-time/plugin.json",
+] as const;
+
+const loadFailures: string[] = [];
+
+/**
+ * ★ Why these are loaded tolerantly instead of value-imported.
+ *
+ * They used to be `import x from "../../plugins/.../plugin.json"` at module scope. That
+ * made a packaging mistake fatal: 1.0.31 and 1.0.32 shipped an app.asar with no
+ * dist/plugins at all, so the main process threw before any window existed. The app could
+ * not start, which also meant it could not auto-update itself out of the broken build —
+ * every affected user had to find the app, delete it, and reinstall by hand.
+ *
+ * A missing manifest must cost the tools it declares and nothing else. The app still
+ * starts, still reaches the updater, and repairs itself on the next release.
+ * `builtinPluginLoadFailures()` is what makes the loss visible rather than silent.
+ *
+ * The packaging gate (verify-packaging-completeness.mjs, run by package-mac.sh against the
+ * built .app) remains the thing that stops such a build from shipping at all. This is the
+ * second layer, for the mistake that gets past it.
+ *
+ * The relative paths resolve the same way in the repo and in the packaged app: this module
+ * compiles to dist/electron/plugins/, and copy-builtin-plugins.cjs puts the packages in
+ * dist/plugins/. tsc's json emit is not what places them there, so dropping the value
+ * imports does not change what ships.
+ */
+function loadManifests(): PluginManifest[] {
+  const loaded: PluginManifest[] = [];
+  for (const manifestPath of BUILTIN_PLUGIN_MANIFEST_PATHS) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const manifest = require(manifestPath) as PluginManifest;
+      if (!manifest || typeof manifest.slug !== "string") {
+        throw new Error("manifest has no slug");
+      }
+      loaded.push(manifest);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      loadFailures.push(`${manifestPath}: ${reason}`);
+      console.error(
+        `[builtin-plugins] ${manifestPath} could not be loaded — the tools it declares are unavailable in this install. ` +
+          `This build is incomplete; updating to the next release restores them. (${reason})`,
+      );
+    }
+  }
+  return loaded;
+}
+
+/** Every built-in plugin package bundled with the app that this install could actually load. */
+const BUILTIN_PLUGINS: readonly PluginManifest[] = loadManifests();
+
+/**
+ * Manifests this install could not load, as `path: reason`. Empty on a complete build.
+ * Surfaced so an incomplete install can say so instead of looking merely feature-poor.
+ */
+export function builtinPluginLoadFailures(): string[] {
+  return [...loadFailures];
+}
 
 /**
  * The host-owned closed list of resolvers (PLUGIN-SPEC.md §2.3).
@@ -138,6 +205,24 @@ export function builtinPluginCatalogEntry(id: string): McpToolCatalogEntry {
     );
   }
   return entry;
+}
+
+/**
+ * Catalog rows for the given built-in tool ids, skipping any this install could not load.
+ *
+ * This is the accessor the catalog array uses. `builtinPluginCatalogEntry` still throws for
+ * a caller that demands one specific tool — but assembling the whole catalog must not be an
+ * all-or-nothing operation, because that is what turned one missing manifest into an app
+ * that could not start.
+ */
+export function builtinPluginCatalogEntriesIfPresent(ids: readonly string[]): McpToolCatalogEntry[] {
+  const rows: McpToolCatalogEntry[] = [];
+  for (const id of ids) {
+    const entry = index().get(id);
+    if (entry) rows.push(entry);
+    else console.error(`[builtin-plugins] built-in tool "${id}" is missing from this install and was left out of the catalog`);
+  }
+  return rows;
 }
 
 /** Every built-in plugin tool id, for diagnostics and parity checks. */

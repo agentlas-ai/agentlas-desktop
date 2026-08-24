@@ -412,6 +412,10 @@ build_mac_arch() {
   # architectures are built separately, so refresh the extraResource before
   # each electron-builder invocation instead of relying on host Python/Rosetta.
   PYBS_ARCH="$arch" npm run fetch:python
+  # 앱이 들고 다니는 Node+npm 도 같은 이유로 아키텍처별로 다시 마련한다. 이것이 없으면
+  # Node 가 없는 맥 사용자에게 CLI 설치 버튼이 막다른 길이 되고, afterPack 이 그 사실을
+  # 잡아 빌드를 세운다(2026-08-24 이전에는 검사조차 하지 않아 조용히 빠져 나갔다).
+  NODE_RUNTIME_ARCH="$arch" npm run fetch:node
   COPYFILE_DISABLE=1 electron-builder \
     "${builder_args[@]}" \
     --publish never \

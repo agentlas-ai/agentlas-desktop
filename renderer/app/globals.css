@@ -8718,11 +8718,19 @@ button[data-toggle-state="on"] {
 }
 
 .app-attention-nudge {
+  /*
+   * ★ 창 최상단 34px 는 비워 두어야 한다.
+   *
+   * macOS 는 titleBarStyle "hiddenInset" 이라 본문이 창 꼭대기까지 올라오고, 그 자리에
+   * 신호등 버튼이 떠 있다. 사이드바는 .sidenav-drag 로, 각 화면은 자기 헤더로 그 띠를
+   * 비워 둔다. 이 알림만 그 규칙 밖에 있었다 — 본문 맨 위에 끼어들면서 10px 만 띄워서,
+   * 신호등과 겹치고 위쪽이 잘려 보였다. 사이드바와 같은 34px 를 앞에 둔다.
+   */
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 11px;
-  margin: 10px 18px 0;
+  margin: calc(34px + 10px) 18px 0;
   padding: 10px 12px;
   border: 1px solid color-mix(in oklch, #d92d20 34%, var(--paper-edge));
   border-radius: 10px;

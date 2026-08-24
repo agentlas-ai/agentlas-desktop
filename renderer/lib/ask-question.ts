@@ -16,6 +16,7 @@
 // 본문에서 fence는 통째로 제거하고, 추출한 질문은 메시지 메타데이터로 옮긴다.
 // 질문이 여러 개 필요하면 fence를 여러 개 연속으로 emit할 수 있다.
 // 스트리밍 중 부분적으로 도착할 수 있어, 닫는 fence가 없으면 추출하지 않고 그대로 둔다.
+import { isUnfilledQuestionTemplate } from "@shared/types";
 import type { ChatQuestion } from "@/components/ChatStream";
 
 const OPEN_FENCE = "<<agentlas-ask>>";
@@ -82,6 +83,14 @@ function tryParse(body: string, id: string): ChatQuestion | null {
     options.push({ label, description });
   }
   if (options.length < 2) return null;
+  // 오너 규칙: 답할 수 없는 것은 보여주지 않는다. 봇이 질문 서식을 채우지 않고 그대로
+  // 낸 블록은 사용자가 고를 수 있는 질문이 아니다. 여기서 버리면 대화창에도 뜨지 않고,
+  // 승인함도 같은 판정을 쓰므로 목록에도 오르지 않는다.
+  if (isUnfilledQuestionTemplate({
+    question,
+    header: typeof o.header === "string" ? o.header : undefined,
+    options,
+  })) return null;
   return {
     // IDs are always message-scoped. Model-authored JSON can never claim a
     // reserved product-consent identity; main-owned supplemental questions use

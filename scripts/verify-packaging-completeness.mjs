@@ -33,13 +33,26 @@ function walk(dir, out = []) {
 // `import x from "…"` / `require("…")` 중 electron/ 밖으로 나가는 상대경로만 본다.
 // type-only import 는 런타임에 사라지므로 제외한다.
 const IMPORT_RE = /(?:^|\n)\s*import\s+(?!type\s)[^;]*?from\s+["'](\.{1,2}\/[^"']+)["']|require\(\s*["'](\.{1,2}\/[^"']+)["']\s*\)/g;
+// 플러그인 매니페스트는 값 import 가 아니라 선언된 경로 목록을 런타임에 require 한다
+// (electron/plugins/builtin.ts: BUILTIN_PLUGIN_MANIFEST_PATHS). 그렇게 바꾼 이유는
+// 매니페스트 하나가 빠졌을 때 앱이 즉사하지 않게 하기 위해서다 — 즉사하면 스스로
+// 업데이트해서 고칠 수도 없다. 대신 그 경로들은 이 게이트가 계속 봐야 하므로,
+// require 의 인자가 변수여도 잡히도록 문자열 리터럴로도 수집한다.
+const MANIFEST_LITERAL_RE = /["'](\.{1,2}\/[^"']*plugins\/[^"']+\.json)["']/g;
 const required = new Map(); // distTopDir -> 근거 (파일:import)
+const manifestLiterals = new Set(); // repo 상대경로 (예: plugins/agentlas-browser/plugin.json)
 
 for (const file of walk(path.join(root, "electron"))) {
   const src = readFileSync(file, "utf8");
-  for (const m of src.matchAll(IMPORT_RE)) {
-    const spec = m[1] ?? m[2];
-    if (!spec) continue;
+  const specs = [];
+  for (const m of src.matchAll(IMPORT_RE)) specs.push(m[1] ?? m[2]);
+  for (const m of src.matchAll(MANIFEST_LITERAL_RE)) {
+    specs.push(m[1]);
+    const abs = path.resolve(path.dirname(file), m[1]);
+    const rel = path.relative(root, abs);
+    if (!rel.startsWith("..")) manifestLiterals.add(rel.split(path.sep).join("/"));
+  }
+  for (const spec of specs) {
     const abs = path.resolve(path.dirname(file), spec);
     const rel = path.relative(root, abs);
     if (rel.startsWith("..")) continue;                 // 저장소 밖 — 해당 없음
@@ -53,7 +66,11 @@ for (const file of walk(path.join(root, "electron"))) {
 
 assert.ok(
   required.has("plugins"),
-  "이 게이트는 electron/ 이 plugins/ 를 값 import 하는 것을 전제로 한다 — 탐지가 0이면 정규식이 죽은 것이다",
+  "이 게이트는 electron/ 이 plugins/ 를 참조하는 것을 전제로 한다 — 탐지가 0이면 정규식이 죽은 것이다",
+);
+assert.ok(
+  manifestLiterals.size >= 3,
+  `내장 플러그인 매니페스트 경로를 ${manifestLiterals.size}개만 찾았다 — 선언 형식이 바뀌어 이 게이트가 눈이 먼 것이다`,
 );
 
 // ── 패키징 설정들을 읽는다 ────────────────────────────────────────────────────
@@ -135,11 +152,10 @@ if (appFlag !== -1) {
     const present = entries.some((e) => e.replace(/\\/g, "/").startsWith(`/dist/${top}/`));
     if (!present) shipped.push(`app.asar 에 dist/${top}/ 가 없다 — 근거: ${why}`);
   }
-  // builtin.ts 가 이름을 대는 매니페스트는 개별로도 확인한다(디렉터리만 있고 알맹이가 빠질 수 있다).
-  const builtinSrc = readFileSync(path.join(root, "electron", "plugins", "builtin.ts"), "utf8");
-  for (const m of builtinSrc.matchAll(/from\s+["']\.\.\/\.\.\/(plugins\/[^"']+\.json)["']/g)) {
-    const wanted = `/dist/${m[1]}`;
-    if (!entries.includes(wanted)) shipped.push(`app.asar 에 ${wanted} 가 없다 — builtin.ts 가 launch 시 이 파일을 require 한다`);
+  // 소스가 이름을 대는 매니페스트는 개별로도 확인한다(디렉터리만 있고 알맹이가 빠질 수 있다).
+  for (const rel of manifestLiterals) {
+    const wanted = `/dist/${rel}`;
+    if (!entries.includes(wanted)) shipped.push(`app.asar 에 ${wanted} 가 없다 — 앱이 이 매니페스트를 require 한다`);
   }
   if (shipped.length) {
     console.error("packaging completeness FAIL (산출물):");

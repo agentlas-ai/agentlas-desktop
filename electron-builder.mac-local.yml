@@ -32,8 +32,12 @@ extraResources:
 
 mac:
   # electron-builder extends the base mac config. Null clears only the
-  # platform-scoped official trust policy; global runtime extraResources stay
-  # intact. A local candidate cannot carry an official update identity hint.
+  # platform-scoped official trust policy; top-level extraResources (embedded
+  # engine, python runtime, **the bundled Node**) stay intact.
+  #
+  # ★ 2026-08-24: 여기에 리소스를 다시 나열하면 베이스 것과 겹쳐 같은 FileSet 이 두 번
+  #   복사되고 `EEXIST … node-runtime/bin/npm` 으로 빌드가 죽는다. 번들 Node 를 최상위로
+  #   옮긴 이유다 — 이 자리를 비워도 로컬 후보에 그대로 들어간다.
   extraResources: null
   identity: null
   notarize: false

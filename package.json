@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "1.0.36",
+  "version": "1.0.37",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Antigravity 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -464,6 +464,10 @@
     "test:one-cost-leak-boundaries": "node scripts/verify-one-cost-and-leak-boundaries.mjs",
     "gate:bound": "node scripts/run-bound-gates.mjs --staged",
     "verify:packaging-completeness": "node scripts/verify-packaging-completeness.mjs",
+    "verify:builtin-plugins-degrade": "node scripts/verify-builtin-plugins-degrade.mjs",
+    "verify:updater-withdrawn-release": "node scripts/verify-updater-withdrawn-release-guard.mjs",
+    "verify:unanswerable-questions": "node scripts/verify-unanswerable-questions-hidden.mjs",
+    "verify:updater-has-an-exit": "node scripts/verify-updater-has-an-exit.mjs",
     "verify:install-beacon": "node scripts/verify-install-beacon.mjs",
     "verify:one-org-identity": "node scripts/verify-one-org-identity-editing.mjs",
     "verify:one-composer-surface": "node scripts/verify-one-composer-surface.mjs",

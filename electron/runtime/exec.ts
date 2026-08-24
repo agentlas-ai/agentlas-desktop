@@ -14,6 +14,7 @@ import { userDataPath } from "../runtime-paths";
 import { onHostShutdown } from "../host-lifecycle";
 import { currentRunPriority, nicenessForPriority } from "./run-priority";
 import { AGENTLAS_SPAWN_MARKER_ENV, recordSpawnedRunChild } from "./spawn-registry";
+import { resolveManagedNodeRuntime } from "./managed-node";
 
 /**
  * 패키지된 GUI 앱(Finder/Dock 실행)은 로그인 셸의 PATH를 상속받지 못해 PATH가
@@ -48,6 +49,29 @@ function cliSearchDirs(): string[] {
   ];
 }
 
+/**
+ * 앱이 들고 다니는 Node 의 실행 디렉터리. 없으면 null.
+ *
+ * ★ 왜 실행 PATH 에 있어야 하나 (2026-08-24 실측):
+ * 설치되는 CLI 중 codex·kimi·grok 은 `#!/usr/bin/env node` 로 시작한다 — **실행 시점에
+ * PATH 에서 node 를 찾는다.** 위 cliSearchDirs() 는 그 사실을 알고 흔한 node 위치를
+ * 나열하지만, 그것은 **이미 Node 가 있는 사람만 구제한다.** Node 가 없는 사용자에게는
+ * 그 목록의 어느 칸에도 node 가 없어서, 앱이 CLI 를 설치해 줘도 첫 실행이
+ * `env: node: No such file or directory` 로 죽는다.
+ *
+ * 기존 PATH 보다 **뒤**, 보충 경로보다 **앞**에 둔다: 사용자가 이미 쓰는 node 가 있으면
+ * 그쪽을 존중하고(오폭 0), 없을 때만 앱이 들고 온 것으로 살린다.
+ */
+function bundledNodeBinDir(): string | null {
+  try {
+    const bundled = resolveManagedNodeRuntime();
+    if (!bundled.ok) return null;
+    return path.dirname(bundled.runtime.node);
+  } catch {
+    return null;
+  }
+}
+
 function managedCliDir(): string {
   return process.platform === "win32"
     ? path.join(os.homedir(), ".agentlas", "npm")
@@ -71,9 +95,11 @@ export function withCliPath(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     Object.keys(base).find((k) => k.toLowerCase() === "path") ?? "PATH";
   const existing = (base[pathKey] ?? "").split(sep).filter(Boolean);
   const managed = preferredManagedCliDir();
+  const bundledNode = bundledNodeBinDir();
   const merged = Array.from(new Set([
     ...(managed ? [managed] : []),
     ...existing.filter((entry) => entry !== managed),
+    ...(bundledNode ? [bundledNode] : []),
     ...cliSearchDirs(),
   ].filter(Boolean)));
   return { ...base, [pathKey]: merged.join(sep) };

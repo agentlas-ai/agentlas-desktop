@@ -212,6 +212,7 @@ const TELEGRAM_COPY = {
     "test.message": "Agentlas 연결 테스트입니다. 이 메시지에 답장하거나 봇을 불러 작업을 맡겨보세요.",
     "test.sent": "테스트 메시지를 보냈습니다.",
     "pair.connected": "Agentlas에 연결되었습니다. 이제 메시지로 실행할 수 있어요.",
+    "pair.room_taken": "이 방에는 이미 다른 Agentlas 봇이 연결되어 있어요. 한 방에는 봇 하나만 붙습니다 — 다른 방(또는 이 봇과의 1:1 대화)에서 다시 시작해 주세요.",
     "run.started": "시작했어요. 웹/파일 제작은 몇 분 걸릴 수 있습니다. 끝나면 이 방에 결과 경로와 여는 방법을 보냅니다.",
     "run.working": "받았어요. 지금 작업 중입니다 — 몇 분 걸릴 수 있어요. 끝나면 이 방에 결과를 보냅니다.",
     "run.timeout": "작업이 너무 오래 걸려 자동으로 멈췄습니다. 이 방에 \"계속 진행해\"라고 보내면 같은 세션에서 이어갈 수 있습니다.",
@@ -316,6 +317,7 @@ const TELEGRAM_COPY = {
     "test.message": "Agentlas connection test. Reply to this message or mention the bot to assign work.",
     "test.sent": "Test message sent.",
     "pair.connected": "Connected to Agentlas. You can now run it by messaging here.",
+    "pair.room_taken": "Another Agentlas bot is already connected in this chat. Only one bot can live in a chat — start again in a different chat (or in this bot's direct message).",
     "run.started": "Started. Website/file creation can take a few minutes. I will send the result path and how to open it here when it finishes.",
     "run.working": "Got it. Working on it now — this can take a few minutes. I will send the result here when it's done.",
     "run.timeout": "The run took too long and was stopped automatically. Send \"continue\" in this chat to resume the same session.",
@@ -699,12 +701,19 @@ async function verifyBotToken(token: string): Promise<TelegramUser> {
   return me;
 }
 
-/** 지금 살아 있는 One 바인딩(있으면). 싱글턴이므로 최대 1행이다. */
+/**
+ * 지금 살아 있는 One 바인딩들. One은 **방마다 하나**라서 여러 행일 수 있다
+ * (봇 하나 = 방 하나 = 대화 하나). 가장 최근에 손댄 것이 앞에 온다.
+ */
+export function listTelegramOneBindingRows(): TelegramBindingRow[] {
+  return getDb()
+    .prepare("SELECT * FROM telegram_bindings WHERE target_kind = 'one' ORDER BY updated_at DESC")
+    .all() as TelegramBindingRow[];
+}
+
+/** 가장 최근 One 바인딩(있으면). 여러 개일 수 있으므로 "대표 하나"라는 뜻이다. */
 export function getTelegramOneBindingRow(): TelegramBindingRow | null {
-  const row = getDb()
-    .prepare("SELECT * FROM telegram_bindings WHERE target_kind = 'one' LIMIT 1")
-    .get() as TelegramBindingRow | undefined;
-  return row ?? null;
+  return listTelegramOneBindingRows()[0] ?? null;
 }
 
 export function getTelegramOneBinding(): TelegramConnectBinding | null {
@@ -713,16 +722,20 @@ export function getTelegramOneBinding(): TelegramConnectBinding | null {
 }
 
 /**
- * 텔레그램 ↔ One 연결. 싱글턴이라 두 번 눌러도 같은 바인딩이 돌아온다(멱등).
- * 방 페어링까지 끝난 바인딩이 있으면 autoConnectTelegram 이 테스트 발송으로 확인만 한다.
+ * 텔레그램 ↔ One 연결.
+ *
+ * 기본은 멱등이다 — 이미 방까지 붙은 연결이 있으면 새로 만들지 않고 테스트 발송으로
+ * 확인만 한다. `newConnection: true`면 그 재사용을 건너뛰고 **봇을 하나 더** 만든다.
+ * One은 방마다 하나이므로, 봇이 늘면 그만큼 텔레그램에서 열 수 있는 대화가 늘어난다.
  */
 export async function connectTelegramToOne(
-  input: { botName?: string } = {},
+  input: { botName?: string; newConnection?: boolean } = {},
 ): Promise<TelegramConnectActionResult> {
   return autoConnectTelegram({
     targetKind: "one",
     targetId: TELEGRAM_ONE_TARGET_ID,
     ...(input.botName ? { botName: input.botName } : {}),
+    ...(input.newConnection ? { newConnection: true } : {}),
   });
 }
 
@@ -758,7 +771,11 @@ export async function removeLegacyTelegramConnections(
 
 export async function autoConnectTelegram(input: TelegramConnectAutoInput): Promise<TelegramConnectActionResult> {
   const target = resolveTarget(input.targetKind, input.targetId, true);
-  const existing = await findReusableTargetBinding(input.targetKind, input.targetId);
+  // "하나 더 붙이기"는 재사용의 반대말이다. 여기서 기존 행을 집으면 사용자는
+  // 새 봇을 만들었다고 생각하는데 화면은 옛 연결을 다시 보여준다.
+  const existing = input.newConnection
+    ? null
+    : await findReusableTargetBinding(input.targetKind, input.targetId);
   if (existing?.telegram_chat_id) {
     const result = await sendTelegramTest(existing.id);
     return {
@@ -1433,9 +1450,18 @@ async function handleTelegramUpdate(poller: Poller, update: TelegramUpdate): Pro
   if (!binding) {
     // 보안: 선착순 귀속 금지. `/start <bindingId>` 토큰이 일치하는 미페어링 바인딩만 귀속한다.
     // bindingId는 randomUUID(추측 불가)이고 앱의 텔레그램 세션만 이 토큰을 실어 보낸다.
-    binding =
+    const paired =
       tryPairBindingWithToken([...poller.bindingIds], message, text) ??
       tryPairFreshPrivateBinding([...poller.bindingIds], message);
+    if (paired === "room_taken") {
+      // 조용히 무시하면 사용자는 "봇이 죽었다"고 읽는다. 왜 안 붙었는지 말해 준다.
+      await telegramApi(poller.token, "sendMessage", {
+        chat_id: chatId,
+        text: tg("pair.room_taken"),
+      }).catch(() => undefined);
+      return;
+    }
+    binding = paired;
     if (binding) {
       // 페어링 확정 — 이 핸드셰이크 메시지는 실행하지 않고 확인만 보낸다.
       await telegramApi(poller.token, "sendMessage", {
@@ -1610,7 +1636,7 @@ function findBindingForChat(bindingIds: string[], chatId: string): TelegramBindi
 
 // 페어링 토큰(`/start <bindingId>`)이 일치하는 미페어링 바인딩만 귀속한다.
 // 선착순 귀속을 없애 봇을 발견한 제3자가 로컬 에이전트 실행을 탈취하는 것을 차단.
-function tryPairBindingWithToken(bindingIds: string[], message: TelegramMessage, text: string): TelegramBindingRow | null {
+function tryPairBindingWithToken(bindingIds: string[], message: TelegramMessage, text: string): TelegramPairOutcome {
   if (bindingIds.length === 0) return null;
   const token = text.match(/^\/start(?:@\w+)?\s+(\S+)/i)?.[1];
   if (!token || !bindingIds.includes(token)) return null; // 토큰 없음/미관리 바인딩 → 페어링 안 함
@@ -1621,7 +1647,7 @@ function tryPairBindingWithToken(bindingIds: string[], message: TelegramMessage,
   return pairBindingToMessage(row, message);
 }
 
-function tryPairFreshPrivateBinding(bindingIds: string[], message: TelegramMessage): TelegramBindingRow | null {
+function tryPairFreshPrivateBinding(bindingIds: string[], message: TelegramMessage): TelegramPairOutcome {
   if (bindingIds.length === 0 || message.chat.type !== "private") return null;
   const placeholders = bindingIds.map(() => "?").join(",");
   const rows = getDb()
@@ -1640,15 +1666,41 @@ function tryPairFreshPrivateBinding(bindingIds: string[], message: TelegramMessa
   return pairBindingToMessage(rows[0], message);
 }
 
-function pairBindingToMessage(row: TelegramBindingRow, message: TelegramMessage): TelegramBindingRow | null {
-  const title = chatTitle(message.chat);
-  getDb()
+/**
+ * 이 방에 이미 다른 One 포트가 붙어 있는가.
+ *
+ * One은 방마다 하나다(v101 부분 유니크 인덱스). 같은 방에 봇 둘을 붙이면 한 메시지에
+ * 둘이 각자 답한다 — 그래서 페어링 단계에서 미리 막는다. 다른 방이면 얼마든지 붙는다.
+ */
+function roomHasOtherOnePort(chatId: string, exceptBindingId: string): boolean {
+  const row = getDb()
     .prepare(
-      `UPDATE telegram_bindings
-       SET telegram_chat_id = ?, telegram_chat_title = ?, status = 'chat_paired', updated_at = ?
-       WHERE id = ?`,
+      `SELECT id FROM telegram_bindings
+       WHERE target_kind = 'one' AND telegram_chat_id = ? AND id != ? LIMIT 1`,
     )
-    .run(String(message.chat.id), title, nowIso(), row.id);
+    .get(chatId, exceptBindingId) as { id: string } | undefined;
+  return Boolean(row);
+}
+
+/** 방 페어링 결과. "room_taken"은 실패가 아니라 **말해 줘야 하는 상태**다. */
+type TelegramPairOutcome = TelegramBindingRow | "room_taken" | null;
+
+function pairBindingToMessage(row: TelegramBindingRow, message: TelegramMessage): TelegramPairOutcome {
+  const chatId = String(message.chat.id);
+  if (row.target_kind === "one" && roomHasOtherOnePort(chatId, row.id)) return "room_taken";
+  const title = chatTitle(message.chat);
+  try {
+    getDb()
+      .prepare(
+        `UPDATE telegram_bindings
+         SET telegram_chat_id = ?, telegram_chat_title = ?, status = 'chat_paired', updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(chatId, title, nowIso(), row.id);
+  } catch {
+    // 유니크 인덱스가 경합에서 이겼다 — 위 검사와 같은 뜻이다. 폴러를 죽이지 않는다.
+    return "room_taken";
+  }
   return getBindingRow(row.id);
 }
 
