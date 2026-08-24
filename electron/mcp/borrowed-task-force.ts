@@ -2127,10 +2127,21 @@ export function buildFallbackPackets(specs: BorrowedAgentSpec[], userPrompt: str
     agent: spec.slug,
     stepId: `${spec.slug}-${index + 1}`,
     dependsOn: [],
-    // A planner-less local packet cannot prove that it is still a planning
-    // step. Fail safe at the room's approval boundary instead of allowing a
-    // generic fallback to mutate the workspace before review.
-    requiresApproval: true,
+    /*
+     * 폴백 패킷은 승인 대기로 보내지 않는다.
+     *
+     * 플래너가 형식을 어기면 모든 팀원이 이 패킷을 받는데, 여기에 승인을
+     * 걸면 방 전체가 멈춘다 — 사람은 팀에게 일을 시켰는데 아무도 움직이지
+     * 않고 승인 카드만 뜬다(게이트 verify-one-improvement-proof-producer 의
+     * planner-fallback 시나리오에서 워커 실행 0회로 잡힌다).
+     *
+     * 이 패킷이 하는 일은 분석과 권고뿐이고, 지시문이 "최종 종합을 쓰지 말고
+     * 지정된 레인 안에 머물라" 고 못 박는다. 작업공간을 실제로 바꾸는 것은
+     * 도구 관문이 따로 막으므로, 여기서 한 번 더 막는 것은 이중이고 그
+     * 대가로 방이 멈춘다. 승인은 만들 때 한 번이라는 결정(2026-08-09)과도
+     * 어긋난다.
+     */
+    requiresApproval: false,
     inputType: "specialist-task",
     inputKind: "text-request",
     brief: `As ${spec.name}, handle the part of this request that fits your role: ${cleanRequest}`,
