@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
@@ -112,7 +112,16 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
   const [siteBusy, setSiteBusy] = useState(false);
   const [siteError, setSiteError] = useState<string | null>(null);
   const [siteNote, setSiteNote] = useState<string | null>(null);
-  const [siteScanStarted, setSiteScanStarted] = useState(false);
+  /*
+   * ★ 상태가 아니라 ref 다 (오너 신고 2026-08-24 수리): 예전에는 useState 였고 그 값이
+   *   아래 effect 의 deps 에 들어 있었다. `setSiteScanStarted(true)` 가 곧바로 effect 를
+   *   다시 돌려 **직전 실행의 정리 함수가 실행**되고, 그것이 `alive = false` 로 만들었다.
+   *   그래서 스캔이 제때 끝나 결과가 도착해도 `if (!alive) return` 에 걸려 통째로 버려졌고,
+   *   화면은 "브라우저를 살펴보는 중…" 에 영영 남았다. 한 번만 하고 싶다는 뜻은 렌더와
+   *   무관한 사실이므로 ref 가 맞는 자리다.
+   */
+  const siteScanStartedRef = useRef(false);
+  const [siteStalled, setSiteStalled] = useState(false);
 
   // ── 8단계: 자주 쓰는 도구 ───────────────────────────────────────────────────
   // 목록·설치·후속 단계는 팝업(PluginPickerDialog)과 같은 코어를 쓴다. 다른 것은
@@ -164,6 +173,7 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
     s6: "Agentlas는 모바일에서도 사용할 수 있어요.", s6sub: "App Store와 Play Store에서 Agentlas를 설치한 뒤, 환경설정에서 새 기기 연결을 눌러 QR 코드로 연결하세요.",
     s7: "이미 로그인해 둔 사이트를 가져올까요?", s7sub: "평소 쓰는 브라우저에 로그인돼 있는 곳이에요. 고른 곳만 Agentlas로 넘어옵니다. 비밀번호와 결제수단은 가져오지 않아요.",
     s7search: "사이트 이름이나 주소로 찾기", s7scanning: "브라우저를 살펴보는 중…", s7empty: "가져올 로그인을 찾지 못했어요.", s7none: "찾는 이름과 맞는 사이트가 없어요.",
+    s7stalled: "브라우저를 읽는 데 시간이 걸리고 있어요. 지금 건너뛰고 나중에 설정에서 해도 됩니다.", s7skip: "건너뛰기", s7skipped: "건너뛰었어요. 설정 → 커넥트에서 언제든 가져올 수 있어요.",
     s7linked: "이미 연결됨", s7importing: "가져오는 중…", s7profiles: "브라우저 프로필", s7more: "더 보기",
     s8: "매일 쓰는 서비스가 뭐예요?", s8sub: "고른 것은 모든 에이전트가 함께 씁니다. 나중에 환경설정에서 더 추가할 수 있어요.",
     s8search: "서비스 이름으로 찾기", s8loading: "목록을 불러오는 중…", s8empty: "표시할 서비스가 없어요.", s8none: "찾는 이름과 맞는 서비스가 없어요.",
@@ -180,6 +190,7 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
     s6: "Agentlas also works on mobile.", s6sub: "Install Agentlas from the App Store or Play Store, then choose Connect new device in Settings and scan the QR code.",
     s7: "Which sites are you already signed in to?", s7sub: "These are places your everyday browser is signed in to. Only the ones you pick come over. Passwords and payment methods stay behind.",
     s7search: "Find a site by name or address", s7scanning: "Looking through your browser…", s7empty: "No logins to bring over.", s7none: "No site matches that name.",
+    s7stalled: "Reading your browser is taking a while. You can skip this now and do it later in Settings.", s7skip: "Skip", s7skipped: "Skipped. You can bring sites over any time from Settings → Connect.",
     s7linked: "Already connected", s7importing: "Bringing them over…", s7profiles: "Browser profile", s7more: "Show more",
     s8: "What do you use every day?", s8sub: "Every agent shares what you pick. You can add more later in Settings.",
     s8search: "Find a service by name", s8loading: "Loading…", s8empty: "Nothing to show yet.", s8none: "No service matches that name.",
@@ -228,15 +239,24 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
   // 7단계에 처음 닿을 때만 브라우저를 훑는다. 설명을 보는 동안 미리 훑으면 아직
   // 물어보지도 않은 일을 하는 셈이고, 여기까지 오지 않는 사람에게는 그냥 낭비다.
   useEffect(() => {
-    if (!open || step !== 7 || siteScanStarted) return;
-    setSiteScanStarted(true);
+    if (!open || step !== 7 || siteScanStartedRef.current) return;
+    siteScanStartedRef.current = true;
     let alive = true;
     void (async () => {
       const api = ipc();
       if (!api) return;
       setSiteScanning(true);
+      setSiteStalled(false);
+      /*
+       * ★ 왜 시간 상한이 필요한가 (오너 신고 2026-08-24): 이 화면이 "브라우저를 살펴보는
+       *   중…"에서 영영 멈춰 있었다. 스캔 자체는 이 기계에서 56ms 만에 154개를 돌려준다 —
+       *   느린 것이 아니라 **응답이 오지 않는 것**이다. 본체가 다른 동기 작업으로 막히면
+       *   이 요청은 큐에 남고, 화면에는 빠져나올 길이 없다. 기다림에는 끝이 있어야 한다.
+       */
+      const stallTimer = window.setTimeout(() => { if (alive) setSiteStalled(true); }, 8_000);
       try {
         const res = await api.browser.scanCredentials(null);
+        window.clearTimeout(stallTimer);
         if (!alive) return;
         const profiles = res.profiles ?? [];
         setSiteProfiles(profiles);
@@ -250,19 +270,22 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
           ? "이 컴퓨터에서 Chrome 계열 브라우저 프로필을 찾지 못했어요. 다음으로 넘어가도 괜찮아요."
           : "No Chrome-family browser profile was found on this computer. It is fine to continue.");
       } catch (error) {
+        window.clearTimeout(stallTimer);
         if (!alive) return;
         setSiteScanning(false);
         setSiteError(error instanceof Error ? error.message : "scan failed");
       }
     })();
     return () => { alive = false; };
-  }, [open, step, siteScanStarted, ko]);
+  }, [open, step, ko]);
 
   const loadSites = useCallback(async (profileId: string) => {
     const api = ipc();
     if (!api) return;
     setSiteScanning(true);
+    setSiteStalled(false);
     setSiteError(null);
+    const stallTimer = window.setTimeout(() => setSiteStalled(true), 8_000);
     try {
       const res = await api.browser.scanCredentials(profileId);
       setSites(Array.isArray(res.domains) ? res.domains : []);
@@ -271,7 +294,9 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
     } catch (error) {
       setSiteError(error instanceof Error ? error.message : "scan failed");
     } finally {
+      window.clearTimeout(stallTimer);
       setSiteScanning(false);
+      setSiteStalled(false);
     }
   }, []);
 
@@ -493,7 +518,24 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
                 />
               </div>
 
-              {siteScanning && <p className={styles.stepNote}>{copy.s7scanning}</p>}
+              {siteScanning && !siteStalled && <p className={styles.stepNote}>{copy.s7scanning}</p>}
+              {siteScanning && siteStalled && (
+                <p className={styles.stepNote}>
+                  {copy.s7stalled}{" "}
+                  <button
+                    type="button"
+                    className={styles.linkButton}
+                    onClick={() => {
+                      // 기다림을 끊고 이 단계를 비워 둔다. 나중에 설정에서 다시 할 수 있다.
+                      setSiteScanning(false);
+                      setSiteStalled(false);
+                      setSiteNote(copy.s7skipped);
+                    }}
+                  >
+                    {copy.s7skip}
+                  </button>
+                </p>
+              )}
               {!siteScanning && visibleSites.length === 0 && (
                 <p className={styles.stepNote}>{siteQuery.trim() ? copy.s7none : copy.s7empty}</p>
               )}

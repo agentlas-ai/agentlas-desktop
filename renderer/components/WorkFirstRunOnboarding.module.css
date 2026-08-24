@@ -45,3 +45,14 @@
 .moreButton{display:block;margin:16px auto 0;padding:9px 18px;border:1px dashed #d6d7d1;border-radius:999px;background:transparent;color:#5b625e;font-size:13px;cursor:pointer}
 .moreButton:hover{border-color:#111;color:#111}
 @media(max-width:720px){.tileGrid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px}.searchInput{height:46px;font-size:15px}}
+
+/* 기다림에는 끝이 있어야 한다 — 오래 걸릴 때 그 자리에서 빠져나갈 수 있게 한다. */
+.linkButton {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #4f7df3;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
