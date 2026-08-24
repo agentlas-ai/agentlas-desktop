@@ -67,11 +67,13 @@
 토큰 블록(`--ask-*`)과 `AskCard.module.css` 를 그대로 복사하고 마크업을 위
 구조대로 맞춘다. 값을 새로 정하지 않는다 — 그러면 다시 갈라진다.
 
-## 아직 옮기지 않은 곳
+## 지금 이 카드를 쓰는 곳 (2026-08-24 기준 전부)
 
-- `renderer/components/ToolApprovalInline.tsx`
-- `renderer/components/ToolApprovalSheet.tsx`
-- `renderer/components/BrowserActionApprovalSheet.tsx`
-- `renderer/components/ChatQuestionSheet.tsx`
+- `renderer/components/one/OneShell.tsx` — One 결정/승인
+- `renderer/components/ToolApprovalInline.tsx` — 도구 실행 승인
+- `renderer/components/ToolApprovalSheet.tsx` — 위 카드를 그대로 재사용
+- `renderer/components/BrowserActionApprovalSheet.tsx` — 브라우저 행동 승인
+- `renderer/components/ChatQuestionSheet.tsx` — 실행 중 질문
+- `renderer/components/AskUserSheet.tsx` — 에이전트의 질문
 
-이 넷은 순서대로 `AskCard` 로 바꾼다. 바꿀 때마다 이 목록에서 지운다.
+새로 묻는 자리를 만들 때 이 목록에 추가한다. 다른 모양을 새로 만들지 않는다.

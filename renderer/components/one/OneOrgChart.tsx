@@ -208,6 +208,12 @@ export function OneOrgChart({
       setToolsMember(member);
       return;
     }
+    /*
+     * 이 진입점만 예전 조직원 설정 시트를 그대로 열고 있었다. 그래서 같은
+     * 사람을 고치는 창이 두 개로 보였다(오너 지적 2026-08-24: 사진 두 장).
+     * 통합 창이 있으면 언제나 그쪽이다.
+     */
+    if (onEditIdentity) { onEditIdentity(member); return; }
     setEditorMember(member);
     setEditName(member.displayName);
     setEditStyle(member.collaborationStyle ?? "default");
@@ -612,7 +618,8 @@ export function OneOrgChart({
         closeDisabled={toolsBusy}
         closeOnBackdrop={!toolsBusy}
         closeOnEscape={!toolsBusy}
-        size="full"
+        /* 내용이 목록 몇 줄뿐이라 팝업2. 예전 full 은 화면을 다 먹고 아래 70%가 비었다. */
+        size="compact"
         panelClassName={styles.toolsDialog}
         bodyClassName={styles.toolsDialogBody}
         eyebrow={toolsMember?.displayName}

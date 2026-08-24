@@ -10,6 +10,7 @@
  * 세 답: [이번만 허용] [이 작업에서 계속 허용] [거부]. 답은 한 번만 간다.
  */
 import { useEffect } from "react";
+import { AskCard, type AskCardOption } from "@/components/AskCard";
 import { useT } from "@/lib/i18n";
 import type { ToolApprovalRequestEvent } from "@/lib/types";
 import { decideToolApproval, markChatVisible, useToolApprovals } from "@/lib/tool-approvals";
@@ -31,100 +32,50 @@ export function ToolApprovalCard({ request, compact = false }: { request: ToolAp
   const ko = locale === "ko";
   const runtimeName = RUNTIME_LABEL[request.runtime] ?? request.runtime;
   const imageTool = /(?:image|dall|flux|midjourney|imagen)/i.test(request.tool);
-  if (compact) {
-    return (
-      <div className="tac tac-compact" role="group" aria-label={ko ? "도구 실행 승인" : "Tool call approval"} data-testid="tool-approval-card" data-approval-id={request.id}>
-        <span className="tac-compact-copy">
-          <strong>{imageTool ? (ko ? "이미지 생성을 허용할까요?" : "Allow image generation?") : (ko ? `${request.tool} 사용을 허용할까요?` : `Allow ${request.tool}?`)}</strong>
-          <small>{runtimeName}</small>
-        </span>
-        <span className="tac-compact-actions">
-          <button type="button" className="deny" onClick={() => decideToolApproval(request.id, "deny")}>{ko ? "거부" : "Deny"}</button>
-          <button type="button" onClick={() => decideToolApproval(request.id, "allow_session")}>{ko ? "이 작업 동안" : "For this task"}</button>
-          <button type="button" className="primary" onClick={() => decideToolApproval(request.id, "allow_once")}>{ko ? "이번만 허용" : "Allow once"}</button>
-        </span>
-        <style jsx>{`
-          .tac-compact {
-            width: min(920px, 100%); min-height: 42px; display: flex; align-items: center; gap: 12px;
-            margin: 0 auto 7px; padding: 5px 6px 5px 12px; border: 1px solid #d8ddda;
-            border-radius: 13px; background: rgba(255,255,255,.98); box-shadow: 0 8px 24px rgba(25,31,36,.06);
-            color: #353a3d; pointer-events: auto;
-          }
-          .tac-compact-copy { min-width: 0; display: flex; flex: 1 1 auto; align-items: baseline; gap: 7px; }
-          .tac-compact-copy strong { overflow: hidden; font-size: 11px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
-          .tac-compact-copy small { color: #8a9093; font-size: 9px; white-space: nowrap; }
-          .tac-compact-actions { display: flex; flex: 0 0 auto; gap: 5px; }
-          .tac-compact-actions button {
-            min-height: 32px; padding: 0 10px; border: 1px solid #d9ddde; border-radius: 9px;
-            background: #fff; color: #4d5356; font: inherit; font-size: 10px; font-weight: 680; cursor: pointer;
-          }
-          .tac-compact-actions button:hover, .tac-compact-actions button:focus-visible { background: #f2f3f3; outline: 2px solid rgba(42,47,50,.15); }
-          .tac-compact-actions .deny { color: #9a4e45; }
-          .tac-compact-actions .primary { border-color: #24282b; background: #24282b; color: #fff; }
-          .tac-compact-actions .primary:hover, .tac-compact-actions .primary:focus-visible { background: #393e41; }
-          @media (max-width: 720px) {
-            .tac-compact { align-items: stretch; flex-direction: column; padding: 9px; }
-            .tac-compact-actions { width: 100%; }
-            .tac-compact-actions button { flex: 1 1 0; }
-          }
-        `}</style>
-      </div>
-    );
-  }
+  /*
+   * 오너 지시 2026-08-24: 묻는 자리는 앱 어디서나 한 모양이다.
+   * 예전에는 도구 이름과 [거부][이 작업 동안][이번만 허용] 이 한 줄에 가로로
+   * 늘어서서, 무엇을 허락하는지 읽기 전에 버튼부터 보였다.
+   * 규격은 docs/DESIGN-ASK-CARD.md.
+   */
+  const askTitle = imageTool
+    ? (ko ? "이미지 생성을 허용할까요?" : "Allow image generation?")
+    : (ko ? `${request.tool} 사용을 허용할까요?` : `Allow ${request.tool}?`);
+  const askOptions: AskCardOption[] = [
+    {
+      id: "allow_once",
+      title: ko ? "이번만 허용" : "Allow once",
+      note: ko ? `${runtimeName} 가 지금 이 호출에만 씁니다.` : `${runtimeName} uses it for this call only.`,
+      active: true,
+    },
+    {
+      id: "allow_session",
+      title: ko ? "이 작업에서 계속 허용" : "Allow for this task",
+      note: ko ? "이 작업이 끝날 때까지 다시 묻지 않습니다." : "No more questions until this task ends.",
+    },
+    ...(compact ? [] : [{
+      id: "allow_always",
+      title: ko ? "항상 허용" : "Always allow",
+      note: ko ? "어떤 에이전트에서도 이 도구를 다시 묻지 않습니다." : "Never ask again for this tool, in any agent.",
+    }]),
+    {
+      id: "deny",
+      title: ko ? "거부" : "Deny",
+      note: ko ? "이 호출만 거부되고 나머지는 그대로 진행됩니다." : "Only this call is refused; the rest of the run continues.",
+    },
+  ];
+
   return (
-    <div className="tac" role="group" aria-label={ko ? "도구 실행 승인" : "Tool call approval"} data-testid="tool-approval-card" data-approval-id={request.id}>
-      <div className="tac-head">
-        <span className="tac-eyebrow">{runtimeName}</span>
-        <strong className="tac-title">{ko ? "이 도구 실행을 허용할까요?" : "Allow this tool call?"}</strong>
-      </div>
-      <div className="tac-row"><span className="tac-key">{ko ? "도구" : "Tool"}</span><span className="tac-val mono">{request.tool}</span></div>
-      {request.detail && <div className="tac-row"><span className="tac-key">{ko ? "대상" : "Target"}</span><span className="tac-val mono">{request.detail}</span></div>}
-      {!compact && request.cwd && <div className="tac-row"><span className="tac-key">{ko ? "작업 폴더" : "Folder"}</span><span className="tac-val mono">{request.cwd}</span></div>}
-      <p className="tac-note">
-        {ko
-          ? "허용하지 않으면 이 호출만 거부되고 나머지는 그대로 진행됩니다. \"항상 허용\"은 이 도구를 영구 허용해 어떤 에이전트에서도 다시 묻지 않습니다."
-          : "Denying rejects only this call; the rest of the run proceeds. \"Always allow\" permanently allows this tool for every agent — it will never ask again."}
-      </p>
-      <div className="tac-actions">
-        <button type="button" className="deny" onClick={() => decideToolApproval(request.id, "deny")}>{ko ? "거부" : "Deny"}</button>
-        <button type="button" onClick={() => decideToolApproval(request.id, "allow_always")}>{ko ? "항상 허용" : "Always allow"}</button>
-        <button type="button" onClick={() => decideToolApproval(request.id, "allow_session")}>{ko ? "이 작업에서 계속 허용" : "Allow for this task"}</button>
-        <button type="button" className="primary" onClick={() => decideToolApproval(request.id, "allow_once")}>{ko ? "이번만 허용" : "Allow once"}</button>
-      </div>
-      <style jsx>{`
-        .tac {
-          display: flex; flex-direction: column; gap: 8px;
-          margin: 8px 0; padding: 12px 14px;
-          border: 1px solid var(--one-sheet-primary, #2f6f4f);
-          border-radius: 12px;
-          background: var(--one-sheet-bg, rgba(47, 111, 79, 0.06));
-        }
-        .tac-head { display: flex; flex-direction: column; gap: 2px; }
-        .tac-eyebrow { font-size: 11px; letter-spacing: 0.02em; color: var(--one-sheet-muted, #7a7f76); }
-        .tac-title { font-size: 14px; }
-        .tac-row { display: flex; gap: 10px; align-items: baseline; }
-        .tac-key { flex: 0 0 auto; min-width: 62px; font-size: 12px; color: var(--one-sheet-muted, #7a7f76); }
-        .tac-val { font-size: 13px; overflow-wrap: anywhere; }
-        .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-        .tac-note { margin: 0; font-size: 12px; line-height: 1.5; color: var(--one-sheet-muted, #7a7f76); }
-        .tac-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
-        .tac-actions button {
-          min-height: 34px; padding: 0 12px;
-          border: 1px solid var(--one-sheet-control-border, rgba(0, 0, 0, 0.14));
-          border-radius: 10px; background: transparent; color: inherit; font-size: 13px; cursor: pointer;
-        }
-        .tac-actions button:focus-visible { outline: none; box-shadow: var(--one-sheet-focus, 0 0 0 3px rgba(90, 120, 255, 0.35)); }
-        .tac-actions .deny { color: var(--one-sheet-danger, #b4443a); }
-        .tac-actions .primary { border-color: var(--one-sheet-primary, #2f6f4f); background: var(--one-sheet-primary, #2f6f4f); color: #fff; }
-      `}</style>
-    </div>
+    <AskCard
+      title={askTitle}
+      locale={ko ? "ko" : "en"}
+      options={askOptions}
+      onChoose={(id) => decideToolApproval(request.id, id as Parameters<typeof decideToolApproval>[1])}
+      data-testid="tool-approval-card"
+    />
   );
 }
 
-/**
- * 대화 화면이 자기 chatId 로 마운트한다. 이 대화의 live 요청을 도착 순서대로 인라인 렌더하고,
- * 마운트되어 있는 동안 전역 배지는 이 대화 요청을 세지 않는다.
- */
 export function ToolApprovalInline({ chatId, compact = false }: { chatId: string | null | undefined; compact?: boolean }) {
   const { queue } = useToolApprovals();
   useEffect(() => markChatVisible(chatId), [chatId]);

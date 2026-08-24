@@ -10,6 +10,7 @@
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import { useT } from "@/lib/i18n";
+import { AskCard } from "@/components/AskCard";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import type { AskUserRequestEvent } from "@/lib/types";
 
@@ -65,59 +66,31 @@ export function AskUserSheet() {
 
   const secondsLeft = Math.max(0, Math.ceil((req.expiresAt - now) / 1_000));
 
+  /*
+   * 오너 지시 2026-08-24: 묻는 자리는 앱 어디서나 한 모양이다.
+   * 규격은 docs/DESIGN-ASK-CARD.md.
+   */
   return (
     <div className={`aus ${oneRoute ? "aus-one" : ""}`} role="dialog" aria-modal="false">
       <div className="aus-card">
-        <div className="aus-top">
-          <span className="aus-tag">{ko ? "에이전트의 질문" : "The agent is asking"}</span>
-          {req.askedBy && <span className="aus-by">{req.askedBy}</span>}
-        </div>
-        <div className="aus-question">{req.question}</div>
-        {req.options.length > 0 && (
-          <div className="aus-options">
-            {req.options.map((option) => (
-              <button
-                key={option.label}
-                type="button"
-                className="aus-option"
-                onClick={() => answer(option.label)}
-              >
-                <span className="aus-option-label">{option.label}</span>
-                {option.description && <span className="aus-option-desc">{option.description}</span>}
-              </button>
-            ))}
-          </div>
-        )}
-        {req.allowFreeText && (
-          <form
-            className="aus-free"
-            onSubmit={(event) => {
-              event.preventDefault();
-              if (freeText.trim()) answer(freeText);
-            }}
-          >
-            <input
-              className="aus-input"
-              value={freeText}
-              onChange={(event) => setFreeText(event.target.value)}
-              placeholder={ko ? "직접 답하기" : "Answer in your own words"}
-              aria-label={ko ? "직접 답하기" : "Answer in your own words"}
-            />
-            <button type="submit" className="aus-send" disabled={!freeText.trim()}>
-              {ko ? "보내기" : "Send"}
-            </button>
-          </form>
-        )}
-        <div className="aus-foot">
-          <span className="aus-note">
-            {ko
-              ? `${secondsLeft}초 안에 답해주세요 · 대기 ${queue.length}건`
-              : `${secondsLeft}s left · ${queue.length} waiting`}
-          </span>
-          <button type="button" className="aus-skip" onClick={() => answer(null)}>
-            {ko ? "답하지 않음" : "Skip"}
-          </button>
-        </div>
+        <AskCard
+          title={req.askedBy ? `${req.askedBy} · ${req.question}` : req.question}
+          locale={ko ? "ko" : "en"}
+          options={req.options.map((option, index) => ({
+            id: option.label,
+            title: option.label,
+            note: option.description ?? undefined,
+            active: index === 0,
+          }))}
+          onChoose={(id) => answer(id)}
+          footer={req.allowFreeText
+            ? {
+              placeholder: ko ? "직접 답하기" : "Answer in your own words",
+              skipLabel: ko ? `답하지 않음 · ${secondsLeft}초` : `Skip · ${secondsLeft}s`,
+              onSkip: (text) => answer(text ? text : null),
+            }
+            : undefined}
+        />
       </div>
       <style jsx>{`
         .aus {

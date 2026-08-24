@@ -113,7 +113,13 @@ assert.match(oneShell, /<DecisionInline[\s\S]*?<ToolApprovalInline chatId=\{acti
 assert.doesNotMatch(oneShell, /function DecisionBottomSheet/);
 assert.match(oneShell, /data-testid="one-decision-inline"/);
 assert.match(toolApproval, /Allow image generation\?/);
-assert.match(toolApproval, /tac-compact/);
+// 도구 승인이 대화 안의 한 줄로 뜬다는 것이 계약이지, 그 줄이 어떤 클래스
+// 이름을 쓰는지가 계약은 아니다. 오너 지시 2026-08-24 로 묻는 자리는 전부
+// 공용 AskCard 한 모양이 됐다(docs/DESIGN-ASK-CARD.md).
+assert.match(toolApproval, /<AskCard/,
+  "tool approval must ask through the shared ask card");
+assert.match(toolApproval, /data-testid="tool-approval-card"/,
+  "the tool approval surface must stay findable by its test id");
 assert.match(taskforceRuntime, /TASK_FORCE_ASK_PROTOCOL/);
 assert.match(taskforceRuntime, /When the team has reached a real user-approval gate/);
 assert.match(taskforceRuntime, /<\/agentlas-ask>>/);

@@ -8,6 +8,7 @@
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import { useT } from "@/lib/i18n";
+import { AskCard } from "@/components/AskCard";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import type { BrowserApprovalRequestEvent, BrowserApprovalDecision } from "@/lib/types";
 import { OneBottomSheet } from "@/components/one/OneBottomSheet";
@@ -125,47 +126,47 @@ export function BrowserActionApprovalSheet() {
       : "Page code can perform multiple actions at once. Review the target and code, then allow it once or deny it."
     : req.summary;
 
+  /*
+   * 오너 지시 2026-08-24: 묻는 자리는 앱 어디서나 한 모양이다.
+   * 규격은 docs/DESIGN-ASK-CARD.md.
+   */
+  const remainingSeconds = Math.max(0, Math.ceil((req.expiresAt - now) / 1_000));
+  const askTitle = `${actionName}${req.site ? ` · ${req.site}` : ""}`;
+  const summaryLine = isUnsafeCode ? (unsafeCodeDetail || req.summary) : req.summary;
+  const safetyNote = isPayment
+    ? (ko ? "결제는 안전을 위해 매번 확인합니다." : "Payments are confirmed every time for safety.")
+    : isUnsafeCode
+      ? (ko ? "임의 코드는 페이지에서 여러 동작을 한 번에 실행할 수 있어 매번 확인합니다."
+            : "Arbitrary code can perform multiple page actions and is confirmed every time.")
+      : null;
+
   const content = (
     <>
-      <div className={`baa ${onePresentation ? "baa-one" : ""}`}>
-        <div className="baa-top">
-          <span className={`baa-tag ${isPayment || isUnsafeCode ? "pay" : ""}`}>{actionName}</span>
-          {req.site && <span className="baa-site">{req.site}</span>}
-        </div>
-        <div className={`baa-summary ${isUnsafeCode ? "code" : ""}`}>
-          {isUnsafeCode ? unsafeCodeDetail || req.summary : req.summary}
-        </div>
-        <div className="baa-note">
-          {ko
-            ? `${Math.max(0, Math.ceil((req.expiresAt - now) / 1_000))}초 안에 선택 · 대기 ${queue.length}건`
-            : `Choose within ${Math.max(0, Math.ceil((req.expiresAt - now) / 1_000))}s · ${queue.length} pending`}
-        </div>
-        {isPayment && (
-          <div className="baa-note">
-            {ko ? "결제는 안전을 위해 매번 확인합니다." : "Payments are confirmed every time for safety."}
-          </div>
-        )}
-        {isUnsafeCode && (
-          <div className="baa-note">
-            {ko
-              ? "임의 코드는 페이지에서 여러 동작을 한 번에 실행할 수 있어 매번 확인합니다."
-              : "Arbitrary code can perform multiple page actions and is confirmed every time."}
-          </div>
-        )}
-        <div className="baa-actions">
-          <button className="deny" onClick={() => resolve("deny")}>
-            {ko ? "거부" : "Deny"}
-          </button>
-          <button className="once" onClick={() => resolve("once")}>
-            {ko ? "한 번만" : "Allow once"}
-          </button>
-          {req.allowAlways && (
-            <button className="always" onClick={() => resolve("always")}>
-              {ko ? "항상 승인" : "Always allow"}
-            </button>
-          )}
-        </div>
-      </div>
+      <AskCard
+        title={askTitle}
+        locale={ko ? "ko" : "en"}
+        options={[
+          {
+            id: "once",
+            title: ko ? "한 번만 허용" : "Allow once",
+            note: summaryLine,
+            active: true,
+          },
+          ...(req.allowAlways ? [{
+            id: "always",
+            title: ko ? "항상 승인" : "Always allow",
+            note: ko ? "이 사이트의 같은 동작은 다시 묻지 않습니다." : "The same action on this site will not ask again.",
+          }] : []),
+          {
+            id: "deny",
+            title: ko ? "거부" : "Deny",
+            note: safetyNote
+              ?? (ko ? `${remainingSeconds}초 안에 고르지 않으면 거부됩니다 · 대기 ${queue.length}건`
+                     : `Denied automatically in ${remainingSeconds}s · ${queue.length} pending`),
+          },
+        ]}
+        onChoose={(id) => resolve(id as "once" | "always" | "deny")}
+      />
       <style jsx>{`
         .baa-wrap {
           position: fixed;

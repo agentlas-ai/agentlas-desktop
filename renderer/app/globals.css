@@ -10644,3 +10644,16 @@ button[data-toggle-state="on"] {
   --ask-skip-ink: #4a5054;
   --ask-skip-line: #e2e4e5;
 }
+
+/* ── 팝업 크기 체계 — 오너 결정 2026-08-24 ────────────────────────────────
+ * 팝업1이 가장 큰 것, 팝업2는 그 가로의 70%, 팝업3은 50%.
+ * 내용이 적은 창이 화면을 다 먹지 않게 하는 유일한 기준이다
+ * (실측: 도구 창이 size="full" 로 화면 전체를 먹고 내용은 위 30%뿐이었다).
+ * 규격 문서: docs/DESIGN-POPUP-SIZES.md
+ */
+:root {
+  --popup-1-width: min(1040px, calc(100vw - 96px));
+  --popup-2-width: calc(min(1040px, calc(100vw - 96px)) * .7);
+  --popup-3-width: calc(min(1040px, calc(100vw - 96px)) * .5);
+  --popup-max-height: min(calc(100dvh - 48px), 880px);
+}

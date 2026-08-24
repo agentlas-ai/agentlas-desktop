@@ -9,6 +9,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChatQuestion } from "@/components/ChatStream";
 import { useT } from "@/lib/i18n";
+import { AskCard } from "@/components/AskCard";
 
 export interface QuestionSheetAnswer {
   questionId: string;
@@ -138,94 +139,45 @@ export function ChatQuestionSheet({
 
   const nextLabel = isLast ? (ko ? "제출" : "Submit") : ko ? "다음" : "Next";
 
+  /*
+   * 오너 지시 2026-08-24: 묻는 자리는 앱 어디서나 한 모양이다.
+   * 여러 질문이면 제목에 1/2 처럼 몇 번째인지 붙는다.
+   * 규격은 docs/DESIGN-ASK-CARD.md.
+   */
+  const stepPrefix = questions.length > 1 ? `${active + 1}/${questions.length} · ` : "";
   return (
-    <div className="chat-qsheet titlebar-nodrag" role="dialog" tabIndex={-1} onKeyDown={onKeyDown}>
-      <div className="chat-qsheet-head">
-        {questions.length > 1 && (
-          <span className="chat-qsheet-step">{active + 1}/{questions.length}</span>
-        )}
-        <strong className="chat-qsheet-question">{q.question}</strong>
-        <button
-          type="button"
-          className="chat-qsheet-iconbtn"
-          aria-label={collapsed ? (ko ? "펼치기" : "Expand") : ko ? "접기" : "Collapse"}
-          onClick={() => setCollapsed((v) => !v)}
-        >
-          {collapsed ? "▴" : "▾"}
-        </button>
-        <button type="button" className="chat-qsheet-iconbtn" aria-label={ko ? "닫기" : "Dismiss"} onClick={onDismiss}>
-          ✕
-        </button>
-      </div>
-
-      {!collapsed && (
-        <>
-          <div className="chat-qsheet-opts">
-            {q.options.map((opt, i) => {
-              const on = (selected[q.id] ?? []).includes(opt.label);
-              return (
-                <button
-                  key={opt.label}
-                  type="button"
-                  className="chat-qsheet-opt"
-                  data-selected={on ? "true" : "false"}
-                  role={q.multiSelect ? "checkbox" : "radio"}
-                  aria-checked={on}
-                  onClick={() => pick(opt.label)}
-                >
-                  <span className="chat-qsheet-opt-body">
-                    <strong>{opt.label}</strong>
-                    {opt.description && <span>{opt.description}</span>}
-                  </span>
-                  <kbd className="chat-qsheet-opt-key">{i + 1}</kbd>
-                </button>
-              );
-            })}
-            {/* 기타 — 자유입력 */}
-            <div
-              className="chat-qsheet-opt chat-qsheet-other"
-              data-selected={(notes[q.id] ?? "").trim() ? "true" : "false"}
-            >
-              <span className="chat-qsheet-opt-body">
-                <strong>{ko ? "기타" : "Other"}</strong>
-              </span>
-              <kbd className="chat-qsheet-opt-key">{q.options.length + 1}</kbd>
-            </div>
-            <input
-              ref={otherInputRef}
-              value={notes[q.id] ?? ""}
-              onChange={(e) => {
-                const nextValue = e.target.value;
-                setNotes((prev) => ({ ...prev, [q.id]: nextValue }));
-                if (!q.multiSelect && nextValue.trim()) {
-                  setSelected((prev) => ({ ...prev, [q.id]: [] }));
-                }
-              }}
-              placeholder={ko ? "여기에 답변을 입력하세요" : "Type your answer here"}
-              className="chat-qsheet-other-input"
-            />
-          </div>
-
-          <div className="chat-qsheet-foot">
-            {busy && (
-              <span className="chat-qsheet-hint">
-                {ko ? "실행이 정리되면 전송돼요 — 답은 지금 골라두세요." : "Sends when the run settles — pick answers now."}
-              </span>
-            )}
-            <button type="button" className="chat-qsheet-skip" onClick={skip}>
-              {ko ? "건너뛰기" : "Skip"}
-            </button>
-            <button
-              type="button"
-              className="chat-qsheet-next"
-              disabled={isLast ? busy || !hasAnyAnswer : !currentAnswered}
-              onClick={next}
-            >
-              {nextLabel} ↵
-            </button>
-          </div>
-        </>
-      )}
+    <div className="titlebar-nodrag" onKeyDown={onKeyDown}>
+      <AskCard
+        title={`${stepPrefix}${q.question}`}
+        locale={ko ? "ko" : "en"}
+        onClose={onDismiss}
+        options={q.options.map((opt) => ({
+          id: opt.label,
+          title: opt.label,
+          note: opt.description ?? undefined,
+          active: (selected[q.id] ?? []).includes(opt.label),
+        }))}
+        onChoose={(id) => {
+          pick(id);
+          // 하나만 고르는 질문은 고르는 순간이 답이다.
+          if (!q.multiSelect) next();
+        }}
+        footer={{
+          placeholder: ko ? "여기에 답변을 입력하세요" : "Type your answer here",
+          skipLabel: busy
+            ? (ko ? "실행이 정리되면 전송" : "Sends when settled")
+            : (ko ? "건너뛰기" : "Skip"),
+          onSkip: (freeText) => {
+            if (freeText) {
+              setNotes((prev) => ({ ...prev, [q.id]: freeText }));
+              if (!q.multiSelect) setSelected((prev) => ({ ...prev, [q.id]: [] }));
+              next();
+              return;
+            }
+            skip();
+          },
+        }}
+      />
     </div>
   );
 }

@@ -773,27 +773,15 @@ export function OneCreateAgentDialog({
         {(!edit || edit.identityEditable) && <label>{editOne ? (ko ? "말투·성격과 내 선호" : "Voice, personality, and preferences") : "Description"}<textarea value={description} onChange={(event) => setDescription(event.target.value)} maxLength={editOne ? 4_000 : 1_200} placeholder={ko ? (editOne ? "예: 항상 턴 끝에 진척도를 표로 보여 주고, 내가 결정할 것이 있으면 먼저 말해 줘." : "이 에이전트에게 말투와 성격, 영혼을 부여하세요.") : (editOne ? "e.g. End every turn with a progress table and tell me what needs my decision." : "Give this agent a voice, personality, and soul.")} /></label>}
         {edit && !edit.identityEditable && <p className={styles.lockedIdentity}>
           {ko
-            ? "이 팀원은 밖에서 설치한 에이전트라 역할과 성격은 원본 패키지가 정합니다. 이름·캐릭터·협업 방식·모델은 여기서 바꿉니다."
-            : "This teammate comes from an installed package, so its role and personality stay as published. Name, character, collaboration style, and model are yours to change here."}
+            ? "이 팀원은 밖에서 설치한 에이전트라 역할과 성격은 원본 패키지가 정합니다. 이름·캐릭터·모델은 여기서 바꿉니다."
+            : "This teammate comes from an installed package, so its role and personality stay as published. Name, character, and model are yours to change here."}
         </p>}
 
-        {edit && <div className={styles.styleField}>
-          <span>{ko ? "협업 말투" : "Collaboration style"}</span>
-          <div className={styles.styleOptions} role="radiogroup" aria-label={ko ? "협업 말투" : "Collaboration style"}>
-            {COLLABORATION_STYLE_OPTIONS.map((option) => <button
-              key={option.id}
-              type="button"
-              role="radio"
-              aria-checked={collaborationStyle === option.id}
-              data-active={collaborationStyle === option.id ? "true" : "false"}
-              onClick={() => setCollaborationStyle(option.id)}
-            >
-              <span><strong>{ko ? option.ko : option.en}</strong><small>{ko ? option.koDetail : option.enDetail}</small></span>
-              {collaborationStyle === option.id && <span aria-hidden="true"><IconCheck size={13} /></span>}
-            </button>)}
-          </div>
-          <small>{ko ? "One이 이 팀원에게 일을 넘길 때 적용됩니다." : "Applied when One hands work to this teammate."}</small>
-        </div>}
+        {/*
+          협업 말투 고르기는 뺐다(오너 지시 2026-08-24 "말투 같은거 선택 빼고").
+          저장 값(collaborationStyle)은 그대로 유지해 이미 고른 사람의 설정이
+          사라지지 않게 한다 — 화면에서만 사라진다.
+        */}
 
         {/*
           One 의 모델은 대화 작성기에서 고른다(그 자리에서 바로 바꾸는 것이 One 의 방식이다).

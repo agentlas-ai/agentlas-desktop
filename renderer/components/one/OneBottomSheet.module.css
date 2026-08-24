@@ -59,8 +59,8 @@
 .sheet {
   position: relative;
   z-index: 1;
-  width: min(880px, 100%);
-  max-height: min(calc(100dvh - 16px), 900px);
+  width: var(--popup-2-width);
+  max-height: var(--popup-max-height);
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -76,16 +76,21 @@
   animation: oneDialogEnter 180ms cubic-bezier(0.22, 0.8, 0.28, 1) both;
 }
 
+/*
+ * 팝업 크기 체계(오너 결정 2026-08-24). 이름은 그대로 두고 폭만 체계에 맞춘다:
+ * full/wide = 팝업1, (기본) = 팝업2, compact = 팝업3.
+ * 규격: docs/DESIGN-POPUP-SIZES.md
+ */
 .compact {
-  width: min(560px, 100%);
+  width: var(--popup-3-width);
 }
 
 .wide {
-  width: min(1120px, 100%);
+  width: var(--popup-1-width);
 }
 
 .full {
-  width: 100%;
+  width: var(--popup-1-width);
 }
 
 .header {
