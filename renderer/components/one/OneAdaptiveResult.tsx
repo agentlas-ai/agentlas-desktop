@@ -172,6 +172,8 @@ export function OneAdaptiveResult({
   const fallback = useMemo(() => readSafeFallback(manifest, projection.taskId), [manifest, projection.taskId]);
   const hasManifest = Boolean(manifest && typeof manifest === "object");
   const dedicatedBlocks = useMemo(
+    // ValueClosure·ImprovementProof 는 참조 한 줄만 들고 있고 진짜 카드는 기억 화면에
+    // 산다. 결과 카드에서 일부러 빼는 것이지 빠뜨린 게 아니다.
     () => (renderDecision?.blocks ?? []).filter((block) => (
       block.type !== "ValueClosure"
       && block.type !== "ImprovementProof"
@@ -179,10 +181,26 @@ export function OneAdaptiveResult({
     )),
     [omitNarrative, renderDecision],
   );
-  const hasDedicatedResult = Boolean(
+  const hasNativeResult = Boolean(
     surface && renderDecision?.native && oneSurfaceNeedsDedicatedResult(surface)
     && (!omitNarrative || dedicatedBlocks.length > 0),
   );
+  /*
+   * ★ 준비된 대체 카드가 닿지 못하던 자리 (2026-08-24 실측).
+   *
+   * 검사는 **전부 아니면 전무**다 — 스무 개 블록 중 하나만 규격에 어긋나도
+   * `native` 가 통째로 false 가 되고 블록 목록은 빈 배열이 된다. 그런데 대체 카드는
+   * `hasDedicatedResult` 안쪽에 있었고, 그 값이 `native` 를 요구했다. 즉 대체 카드가
+   * 필요한 유일한 상황에서 그 카드는 절대 그려질 수 없었다 — 사용자는 이유도 없는
+   * **빈 카드**를 본다. 실측: fixture 20종 중 Media 하나가 걸리자 20개 전부 사라졌다.
+   *
+   * 그래서 native 는 "어느 쪽을 그릴지" 고르는 데만 쓰고, 카드를 낼지 말지는
+   * 결과 블록이 있느냐로 정한다.
+   */
+  const hasFallbackResult = Boolean(
+    surface && !renderDecision?.native && oneSurfaceNeedsDedicatedResult(surface),
+  );
+  const hasDedicatedResult = hasNativeResult || hasFallbackResult;
   const canAcceptResult = Boolean(
     projection.canonicalStatus === "partial"
     && receipt?.status === "completed"

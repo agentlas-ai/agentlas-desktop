@@ -143,7 +143,17 @@ function isBlock(value: unknown): value is Record<string, unknown> & { blockId: 
         && isSafeId(value.primaryArtifactRef) && ["video", "audio", "image"].includes(String(value.mediaType))
         && (value.caption == null || typeof value.caption === "string")
         && (value.durationSeconds == null || (isFiniteNumber(value.durationSeconds) && Number(value.durationSeconds) >= 0))
-        && Array.isArray(value.outputs) && value.outputs.length <= 512 && value.outputs.every(isArtifact);
+        // ★ 대표 파일이 목록 안에 있어야 한다 (2026-08-24 실측).
+        //
+        // 예전에는 `outputs: []` 도 통과했다. 그런데 화면은 대표 파일을 목록에서 찾아
+        // 그리므로 그런 블록은 **아무것도 못 그린다** — 게다가 화면 검사는 전부 아니면
+        // 전무라, 이 블록 하나 때문에 같은 답에 실린 다른 블록 열아홉 개까지 통째로
+        // 사라졌다. 공용 fixture 자신이 이 상태였는데 게이트는 초록이었다.
+        && Array.isArray(value.outputs) && value.outputs.length >= 1 && value.outputs.length <= 512
+        && value.outputs.every(isArtifact)
+        && value.outputs.some((item) => isRecord(item)
+          && item.artifactRef === value.primaryArtifactRef
+          && item.type === value.mediaType);
     case "Document":
       return hasOnlyKeys(value, ["blockId", "type", "title", "artifactRef", "excerpt", "pageCount"])
         && isSafeId(value.artifactRef) && typeof value.excerpt === "string"
