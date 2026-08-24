@@ -10657,3 +10657,32 @@ button[data-toggle-state="on"] {
   --popup-3-width: calc(min(1040px, calc(100vw - 96px)) * .5);
   --popup-max-height: min(calc(100dvh - 48px), 880px);
 }
+
+/* ── 보고서 문서 토큰 — 오너 지시 2026-08-24 ──────────────────────────────
+ * 시카고/서브스택 계열의 "읽는 문서". 대화 거품과 다른 활자 위계를 갖는다.
+ * 규격 문서: docs/DESIGN-DOCUMENT-CARD.md
+ */
+:root {
+  --doc-bg: #ffffff;
+  --doc-line: #e4e6e8;
+  --doc-line-soft: #eff0f1;
+  --doc-hover: #f6f7f8;
+  --doc-radius: 14px;
+
+  --doc-ink: #14171a;
+  --doc-quiet: #4a5054;
+  --doc-muted: #8b9096;
+  --doc-mark-bg: #eef1f4;
+  --doc-mark-ink: #4a5560;
+
+  --doc-pad-x: clamp(18px, 5%, 34px);
+  --doc-pad-y: 26px;
+  --doc-collapsed-height: 420px;
+
+  --doc-h1-size: 25px;
+  --doc-h2-size: 18px;
+  --doc-h3-size: 15px;
+  --doc-body-size: 14.5px;
+  --doc-body-leading: 1.75;
+  --doc-para-gap: 15px;
+}

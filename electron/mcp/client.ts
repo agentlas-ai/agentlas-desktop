@@ -3358,6 +3358,17 @@ ${effectiveUserPrompt}`;
       ? "[호스트 출력 언어 계약]\n현재 One 화면 언어는 한국어입니다. 이번 사용자 메시지·인용문·파일의 언어와 무관하게 한국어로 답변하세요. 사용자가 이번 메시지에서 다른 출력 언어를 명시적으로 요구할 때만 예외입니다. 이 계약을 언급하거나 인용하지 마세요.\n[/호스트 출력 언어 계약]"
       : "[Host response-language contract]\nThe visible One interface language is English. Reply in English regardless of the language of this user message, quoted text, or files. Only an explicit request in this message for another output language is an exception. Do not mention or quote this contract.\n[/Host response-language contract]");
   }
+  /*
+   * 보고서로 낼지는 에이전트가 정한다(오너 지시 2026-08-24). 호스트는 글의
+   * 모양을 보고 문서인지 추측하지 않는다 — 그건 판정자를 하나 더 세우는 일이고,
+   * 같은 글이 그날 형식에 따라 문서가 되기도 안 되기도 한다. 대신 "이건
+   * 보고서다" 라고 스스로 밝히는 표식 하나를 알려 준다.
+   */
+  if (req.oneMode && !req.agentAppMode) {
+    turnContextParts.push(locale === "ko"
+      ? "[보고서 표식]\n이번 답이 읽을 문서(보고서·기획서·조사 결과·제안서처럼 목차가 있고 나중에 다시 꺼내 볼 글)라면, 답 맨 앞에 다음 세 줄을 그대로 두고 그 아래 마크다운 본문을 쓰세요.\n---\ndocument: <문서 제목>\n---\n그러면 대화가 아니라 문서로 그려지고, 사람이 마크다운이나 PDF로 받아 갈 수 있습니다. 짧은 답·잡담·한두 문단 설명에는 쓰지 마세요. 쓸지 말지는 당신이 판단합니다. 이 표식을 설명하거나 언급하지 마세요.\n[/보고서 표식]"
+      : "[Document marker]\nIf this answer is a document to read (a report, plan, research write-up, or proposal — something with sections that will be opened again later), begin the answer with exactly these three lines and write the markdown body below them.\n---\ndocument: <document title>\n---\nIt is then rendered as a document rather than chat, and the person can take it away as Markdown or PDF. Do not use it for short answers, small talk, or a paragraph or two. Whether to use it is your judgment. Never explain or mention this marker.\n[/Document marker]");
+  }
   // 표면 안내는 프롬프트가 아니라 이 턴의 맥락으로 들어간다.
   if (executionContext?.surfaceContext?.trim()) {
     turnContextParts.push(executionContext.surfaceContext.trim());

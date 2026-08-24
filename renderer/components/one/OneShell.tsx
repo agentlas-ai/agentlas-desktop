@@ -15,6 +15,8 @@ import {
 import { flushSync } from "react-dom";
 import { Markdown, StreamingMarkdown, type LinkedFileArtifact } from "@/components/Markdown";
 import { AskCard, type AskCardOption } from "@/components/AskCard";
+import { OneDocumentCard } from "@/components/one/OneDocumentCard";
+import { readOneDocumentMark } from "@/lib/one-document-mark";
 import { OneSplitPane } from "@/components/one/OneSplitPane";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { BrowserActionApprovalSheet } from "@/components/BrowserActionApprovalSheet";
@@ -5636,9 +5638,21 @@ export function OneShell() {
                                   ))}
                                 </div>
                               )}
+                              {/*
+                                * 에이전트가 앞머리에 보고서 표식을 남긴 글은 대화 거품이
+                                * 아니라 읽는 문서로 그린다(오너 지시 2026-08-24). 글의
+                                * 모양으로 추측하지 않는다 — 표식이 있을 때만이다.
+                                * 답이 자라는 중에는 평소대로 그린다: 표식만 있고 본문이
+                                * 아직 한 줄인 글을 문서 카드로 세우면 빈 액자가 된다.
+                                */}
                               {visibleText && (message.streaming
                                 ? <StreamingMarkdown text={visibleText} messageId={message.id} onOpenLinkedFile={openOneLinkedFile} />
-                                : <Markdown text={visibleText} messageId={message.id} onOpenLinkedFile={openOneLinkedFile} />)}
+                                : (() => {
+                                  const documentMark = readOneDocumentMark(visibleText);
+                                  return documentMark
+                                    ? <OneDocumentCard doc={documentMark} locale={appLocale} messageId={message.id} />
+                                    : <Markdown text={visibleText} messageId={message.id} onOpenLinkedFile={openOneLinkedFile} />;
+                                })())}
                             </div>
                           </article>
                           ))}

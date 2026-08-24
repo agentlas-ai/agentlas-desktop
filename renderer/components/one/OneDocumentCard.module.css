@@ -1,0 +1,224 @@
+/*
+ * 보고서 카드 — 시카고/서브스택 계열의 읽는 문서.
+ *
+ * 대화 거품이 아니라 **문서**다. 넉넉한 여백, 또렷한 제목 위계, 표와 각주가
+ * 본문과 같은 줄 위에 선다. 값은 --doc-* 토큰이 정본(globals.css).
+ */
+.card {
+  margin: 10px 0;
+  border: 1px solid var(--doc-line);
+  border-radius: var(--doc-radius);
+  background: var(--doc-bg);
+  overflow: hidden;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--doc-line-soft);
+}
+
+.mark {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--doc-mark-bg);
+  color: var(--doc-mark-ink);
+}
+
+.title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 640;
+  color: var(--doc-ink);
+}
+
+.headAction {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--doc-muted);
+  cursor: pointer;
+}
+
+.headAction:hover { background: var(--doc-hover); color: var(--doc-ink); }
+.headAction:disabled { opacity: .45; cursor: default; }
+
+.menuAnchor { position: relative; display: inline-flex; }
+
+.menu {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 178px;
+  display: grid;
+  gap: 1px;
+  padding: 6px;
+  border: 1px solid var(--doc-line);
+  border-radius: 12px;
+  background: var(--doc-bg);
+  box-shadow: 0 12px 30px rgba(24, 29, 32, .12);
+}
+
+.menu > button {
+  min-height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--doc-ink);
+  font-size: 12.5px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.menu > button:hover:not(:disabled) { background: var(--doc-hover); }
+.menu > button:disabled { color: var(--doc-muted); cursor: default; }
+
+.status {
+  padding: 0 14px 10px;
+  font-size: 12px;
+  color: var(--doc-muted);
+}
+
+/* ── 본문 ─────────────────────────────────────────────────────────────── */
+.bodyWrap {
+  position: relative;
+  padding: var(--doc-pad-y) var(--doc-pad-x);
+}
+
+.bodyWrap[data-clipped="true"] {
+  max-height: var(--doc-collapsed-height);
+  overflow: hidden;
+}
+
+.bodyWrap[data-clipped="true"]::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 96px;
+  background: linear-gradient(to bottom, rgba(255, 255, 255, 0), var(--doc-bg) 82%);
+  pointer-events: none;
+}
+
+.expand {
+  width: 100%;
+  min-height: 38px;
+  border: 0;
+  border-top: 1px solid var(--doc-line-soft);
+  background: transparent;
+  color: var(--doc-muted);
+  font-size: 12.5px;
+  font-weight: 620;
+  cursor: pointer;
+}
+
+.expand:hover { background: var(--doc-hover); color: var(--doc-ink); }
+
+/* 문서 활자 — 대화 거품과 다른 위계를 갖는다. */
+.body {
+  color: var(--doc-ink);
+  font-size: var(--doc-body-size);
+  line-height: var(--doc-body-leading);
+}
+
+.body :global(h1) {
+  margin: 0 0 18px;
+  font-size: var(--doc-h1-size);
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: -.01em;
+}
+
+.body :global(h2) {
+  margin: 28px 0 10px;
+  font-size: var(--doc-h2-size);
+  font-weight: 680;
+  line-height: 1.3;
+}
+
+.body :global(h3) {
+  margin: 22px 0 8px;
+  font-size: var(--doc-h3-size);
+  font-weight: 660;
+}
+
+.body :global(p) { margin: 0 0 var(--doc-para-gap); }
+
+.body :global(ul),
+.body :global(ol) { margin: 0 0 var(--doc-para-gap); padding-left: 22px; }
+
+.body :global(li) { margin: 0 0 6px; }
+
+.body :global(blockquote) {
+  margin: 0 0 var(--doc-para-gap);
+  padding: 2px 0 2px 16px;
+  border-left: 3px solid var(--doc-line);
+  color: var(--doc-quiet);
+}
+
+.body :global(hr) {
+  margin: 26px 0;
+  border: 0;
+  border-top: 1px solid var(--doc-line-soft);
+}
+
+.body :global(table) { font-size: calc(var(--doc-body-size) - 1.5px); }
+
+/* 각주 번호 — 본문 흐름을 끊지 않는 작은 위첨자. */
+.body :global(sup) {
+  font-size: 10px;
+  color: var(--doc-muted);
+}
+
+/* ── 전체 보기 (팝업1) ─────────────────────────────────────────────────── */
+.readerBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(22, 26, 29, .34);
+}
+
+.reader {
+  width: var(--popup-1-width);
+  max-height: var(--popup-max-height);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--doc-line);
+  border-radius: 16px;
+  background: var(--doc-bg);
+  box-shadow: 0 28px 80px rgba(20, 25, 20, .26);
+  overflow: hidden;
+}
+
+.readerBody {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 34px clamp(28px, 8%, 84px) 56px;
+}
+
+/* 읽는 화면에서는 한 줄 길이를 눈에 편한 폭으로 묶는다. */
+.readerBody > .body { max-width: 74ch; margin: 0 auto; }

@@ -311,3 +311,4 @@ scripts/demo/
 /renderer/public/file-viewer/
 !docs/DESIGN-ASK-CARD.md
 !docs/DESIGN-POPUP-SIZES.md
+!docs/DESIGN-DOCUMENT-CARD.md
