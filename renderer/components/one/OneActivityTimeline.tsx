@@ -49,6 +49,14 @@ const ONE_OUTPUT_SECTIONS_STORAGE_KEY = "agentlas.one.output-sections.v1";
 const ONE_OUTPUT_HISTORY_HEIGHT_STORAGE_KEY = "agentlas.one.output-history-height.v1";
 type OutputSectionKey = "files" | "agents" | "processes" | "computer" | "sources";
 type OutputRailView = "result" | "activity" | "terminal" | "browser" | "app";
+
+function railTabLabel(view: OutputRailView, locale: "ko" | "en"): string {
+  if (view === "result") return locale === "ko" ? "결과" : "Result";
+  if (view === "app") return locale === "ko" ? "앱" : "App";
+  if (view === "activity") return locale === "ko" ? "작업" : "Activity";
+  if (view === "terminal") return locale === "ko" ? "터미널" : "Terminal";
+  return locale === "ko" ? "브라우저" : "Browser";
+}
 type BrowserLiveInputBody = BrowserLiveInput extends infer Input
   ? Input extends { sessionId: string } ? Omit<Input, "sessionId"> : never
   : never;
@@ -1012,7 +1020,36 @@ export function OneActivityArtifactRail({
   appPreview?: OneLiveAppPreview | null;
 }) {
   const [collapsedSections, setCollapsedSections] = useState<Set<OutputSectionKey>>(readCollapsedOutputSections);
-  const [railView, setRailView] = useState<OutputRailView>("activity");
+  /*
+   * 탭은 고정 목록이 아니다(오너 지시 2026-08-24). 무언가 결과가 나오면 그
+   * 탭이 하나 생기고, 나머지는 + 로 사람이 직접 연다. 아무것도 안 한 대화에서
+   * "결과 / Activity / Terminal / Browser" 네 개가 늘 떠 있을 이유가 없다.
+   */
+  const [openTabs, setOpenTabs] = useState<OutputRailView[]>([]);
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const [railView, setRailView] = useState<OutputRailView | null>(null);
+  /*
+   * 브라우저와 앱은 좁은 칸에서 아무것도 못 읽는다(실측 324px 에서 페이지가
+   * 찌그러졌다). 그 탭을 실제로 보기 시작할 때만 읽을 수 있는 폭을 확보한다 —
+   * 결과가 생길 때마다 저 혼자 벌어지던 예전 동작과는 다르다.
+   */
+  const selectRailView = useCallback((view: OutputRailView) => {
+    setRailView(view);
+    if (view !== "browser" && view !== "app") return;
+    const readable = Math.min(maxWidth, 560);
+    onResize?.(Math.max(width ?? defaultWidth, readable));
+  }, [defaultWidth, maxWidth, onResize, width]);
+  const openRailTab = useCallback((view: OutputRailView) => {
+    setOpenTabs((tabs) => (tabs.includes(view) ? tabs : [...tabs, view]));
+    selectRailView(view);
+  }, [selectRailView]);
+  const closeRailTab = useCallback((view: OutputRailView) => {
+    setOpenTabs((tabs) => {
+      const next = tabs.filter((tab) => tab !== view);
+      setRailView((current) => (current === view ? next[next.length - 1] ?? null : current));
+      return next;
+    });
+  }, []);
   const resizeRef = useRef<{ pointerId: number; startX: number; startWidth: number; rawWidth: number } | null>(null);
   const historyResizeRef = useRef<{ pointerId: number; startY: number; startHeight: number } | null>(null);
   const [resizing, setResizing] = useState(false);
@@ -1130,13 +1167,16 @@ export function OneActivityArtifactRail({
     // Browser work is itself the output. A person should not have to discover
     // a hidden tab after the agent opens a page, and the external Chrome window
     // is never the One presentation surface.
+    // 브라우저 작업 자체가 결과다 — 탭이 없으면 이때 하나 생긴다.
+    setOpenTabs((tabs) => (tabs.includes("browser") ? tabs : [...tabs, "browser"]));
     setRailView((current) => current === "app" ? current : "browser");
     onBrowserObserved?.(preferredBrowserUrl);
   }, [browserScopeKey, onBrowserObserved, preferredBrowserUrl]);
   useEffect(() => {
     if (!appPreview?.url) {
       presentedAppTargetRef.current = null;
-      if (railView === "app") setRailView("activity");
+      setOpenTabs((tabs) => tabs.filter((tab) => tab !== "app"));
+      if (railView === "app") setRailView(null);
       return;
     }
     const targetKey = `${appPreview.appId}\u0000${appPreview.url}`;
@@ -1144,12 +1184,15 @@ export function OneActivityArtifactRail({
     presentedAppTargetRef.current = targetKey;
     // The app itself is the primary output. Open it once when the verified
     // preview becomes reachable, but do not fight a user's later tab choice.
+    setOpenTabs((tabs) => (tabs.includes("app") ? tabs : [...tabs, "app"]));
     setRailView("app");
   }, [appPreview?.appId, appPreview?.url, railView]);
   useEffect(() => {
     if (!result || !resultKey || presentedResultKeyRef.current === resultKey) return;
     presentedResultKeyRef.current = resultKey;
-    // 결과 자동 표시도 같은 규칙 — 확인된 Browser 표면 위로는 올라오지 않는다. Result 탭은 남는다.
+    // 결과가 나오면 그 탭이 하나 생긴다. 다만 확인된 Browser/App 표면 위로는
+    // 올라오지 않는다 — 탭만 만들고 보고 있던 것을 빼앗지 않는다.
+    setOpenTabs((tabs) => (tabs.includes("result") ? tabs : [...tabs, "result"]));
     setRailView((current) => (current === "browser" || current === "app" ? current : "result"));
   }, [result, resultKey]);
   /*
@@ -1300,38 +1343,75 @@ export function OneActivityArtifactRail({
       )}
       <nav className={styles.artifactTabs} aria-label={locale === "ko" ? "출력 보기" : "Output views"} role="tablist">
         <div className={styles.artifactTabList}>
-          {([
-            ...(result || openedArtifact ? ["result" as const] : []),
-            "activity" as const,
-            "terminal" as const,
-            ...(appPreview ? ["app" as const] : []),
-            "browser" as const,
-          ]).map((view) => (
-            <button
-              key={view}
-              type="button"
-              role="tab"
-              aria-selected={railView === view}
-              data-active={railView === view ? "true" : "false"}
-              onClick={() => setRailView(view)}
-            >
-              {view === "result"
-                ? (locale === "ko" ? "결과" : "Result")
-                : view === "activity"
-                  ? "Activity"
-                  : view === "terminal"
-                    ? "Terminal"
-                    : view === "app"
-                      ? (locale === "ko" ? "앱" : "App")
-                      : "Browser"}
-            </button>
+          {openTabs.map((view) => (
+            <span key={view} className={styles.artifactTab} data-active={railView === view ? "true" : "false"}>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={railView === view}
+                onClick={() => selectRailView(view)}
+              >
+                {railTabLabel(view, locale)}
+              </button>
+              <button
+                type="button"
+                className={styles.artifactTabClose}
+                aria-label={locale === "ko" ? `${railTabLabel(view, locale)} 닫기` : `Close ${railTabLabel(view, locale)}`}
+                onClick={() => closeRailTab(view)}
+              >
+                <IconClose size={11} />
+              </button>
+            </span>
           ))}
         </div>
         <div className={styles.artifactHeaderActions}>
-          <button type="button" onClick={onAdd} aria-label={locale === "ko" ? "파일 추가" : "Add file"}><IconPlus size={15} /></button>
+          <span className={styles.artifactAddWrap}>
+            <button
+              type="button"
+              aria-label={locale === "ko" ? "보기 추가" : "Add view"}
+              aria-haspopup="menu"
+              aria-expanded={addMenuOpen}
+              onClick={() => setAddMenuOpen((value) => !value)}
+            ><IconPlus size={15} /></button>
+            {addMenuOpen && (
+              <div className={styles.artifactAddMenu} role="menu">
+                {(["activity", "terminal", "browser"] as const).map((view) => (
+                  <button
+                    key={view}
+                    type="button"
+                    role="menuitem"
+                    disabled={openTabs.includes(view)}
+                    onClick={() => { setAddMenuOpen(false); openRailTab(view); }}
+                  >
+                    {railTabLabel(view, locale)}
+                  </button>
+                ))}
+                {onAdd && (
+                  <button type="button" role="menuitem" onClick={() => { setAddMenuOpen(false); onAdd(); }}>
+                    {locale === "ko" ? "파일 추가" : "Add file"}
+                  </button>
+                )}
+              </div>
+            )}
+          </span>
           {onClose && <button type="button" onClick={onClose} aria-label={locale === "ko" ? "출력 패널 접기" : "Collapse output panel"}><IconClose size={15} /></button>}
         </div>
       </nav>
+      {openTabs.length === 0 && (
+        <div className={styles.artifactEmptyStage}>
+          <p className={styles.artifactEmptyTitle}>{locale === "ko" ? "여기에 결과가 쌓입니다" : "Outputs appear here"}</p>
+          <p className={styles.artifactEmptyNote}>
+            {locale === "ko"
+              ? "무언가 만들어지면 그 탭이 저절로 생깁니다. 지금 바로 열 수도 있습니다."
+              : "A tab appears on its own when something is produced. You can also open one now."}
+          </p>
+          <div className={styles.artifactEmptyList}>
+            {(["activity", "terminal", "browser"] as const).map((view) => (
+              <button key={view} type="button" onClick={() => openRailTab(view)}>{railTabLabel(view, locale)}</button>
+            ))}
+          </div>
+        </div>
+      )}
       <div className={styles.artifactContentStack}>
       <div className={styles.artifactList}>
         {railView === "result" && (openedArtifact || result) && <div className={styles.resultView}>

@@ -175,14 +175,23 @@ assert.match(oneShell, /onBrowserObserved=\{presentBrowserOutput\}/);
 assert.match(activity, /setFrame\(null\)[\s\S]*?if \(!effectiveUrl\)/);
 assert.match(oneShell, /browserScopeKey=\{activeThreadChatId \?\? selected\?\.taskId \?\? conversation\?\.id\}/);
 assert.match(activity, /data-mode=\{viewport\}/);
-assert.match(activity, /result\s*\|\|\s*openedArtifact \? \["result" as const\] : \[\]/,
-  "the output rail must retain the Result view when a result or opened artifact exists");
-assert.match(activity, /"activity" as const,[\s\S]{0,80}"terminal" as const/,
-  "the output rail must retain Activity and Terminal views");
-assert.match(activity, /appPreview \? \["app" as const\] : \[\]/,
-  "the output rail must expose a generated-app view only when a live app exists");
-assert.match(activity, /"browser" as const/,
-  "the output rail must retain the in-app Browser view");
+/*
+ * 오너 지시 2026-08-24: 탭은 고정 목록이 아니다. 계약은 "다섯 보기가 모두
+ * 도달 가능하다" 이지, "다섯 개가 언제나 떠 있다" 가 아니다. 결과와 앱은
+ * 실제로 생길 때 탭이 되고, 나머지는 + 로 연다.
+ */
+assert.match(activity, /setOpenTabs\(\(tabs\) => \(tabs\.includes\("result"\) \? tabs : \[\.\.\.tabs, "result"\]\)\)/,
+  "a produced result must open its own tab");
+assert.match(activity, /setOpenTabs\(\(tabs\) => \(tabs\.includes\("app"\) \? tabs : \[\.\.\.tabs, "app"\]\)\)/,
+  "a live generated app must open its own tab");
+assert.match(activity, /setOpenTabs\(\(tabs\) => \(tabs\.includes\("browser"\) \? tabs : \[\.\.\.tabs, "browser"\]\)\)/,
+  "observed browser work must open its own tab");
+assert.match(activity, /\(\["activity", "terminal", "browser"\] as const\)/,
+  "Activity, Terminal and Browser must stay reachable from the add-view menu");
+for (const view of ["result", "activity", "terminal", "browser", "app"]) {
+  assert.match(activity, new RegExp(`railView === "${view}"`),
+    `the output rail must still render the ${view} view`);
+}
 assert.match(activity, /data-one-rail-resize="true"/);
 assert.match(activity, /window\.addEventListener\("pointermove", move/);
 assert.match(activity, /drag\.rawWidth <= collapseThreshold/);

@@ -4640,10 +4640,13 @@ export function OneShell() {
     void url;
     presentRichOutputRail();
   }, [presentRichOutputRail]);
-  useEffect(() => {
-    if (!surface && !latestRuntimeArtifact && !terminalReceiptKey) return;
-    presentRichOutputRail();
-  }, [latestRuntimeArtifact?.binding.artifactRef, presentRichOutputRail, surface?.manifestId, terminalReceiptKey]);
+  /*
+   * 산출물이나 터미널 기록이 하나라도 있으면 오른쪽 패널을 저 혼자 열던 자리
+   * (제거, 오너 지시 2026-08-24 "우측사이드바 디폴트로 접히고"). 열림 상태가
+   * 저장까지 돼서, 한 번 무언가를 만든 뒤로는 모든 대화가 패널을 편 채로
+   * 시작했다(실측: 지운 직후에도 다시 true 로 저장됨). 결과는 이제 대화 안의
+   * 결과 카드로 알리고, 패널은 사람이 열 때 열린다.
+   */
   const openCreateAgentDialog = useCallback((seed?: OneAgentDraftSeed) => {
     if (seed) {
       createAgentSeedTokenRef.current += 1;

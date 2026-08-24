@@ -240,7 +240,7 @@
 }
 
 .artifactTabs {
-  min-height: 48px;
+  min-height: 44px;
   display: flex;
   align-items: stretch;
   gap: 8px;
@@ -251,8 +251,19 @@
   min-width: 0;
   flex: 1 1 auto;
   display: flex;
-  align-items: stretch;
+  align-items: center;
   gap: 4px;
+  /* 좁아지면 탭 글자가 "결/과", "브라/우저" 로 쪼개져 읽을 수 없었다.
+     탭은 줄바꿈하지 않고, 모자라면 탭 줄이 가로로 밀린다. */
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.artifactTabList::-webkit-scrollbar { display: none; }
+
+.artifactTabList button {
+  white-space: nowrap;
+  flex: 0 0 auto;
 }
 .artifactHeaderActions {
   flex: 0 0 auto;
@@ -275,19 +286,24 @@
 .artifactHeaderActions button:hover,
 .artifactHeaderActions button:focus-visible { background: #f2f3f3; color: #555c60; outline: none; }
 
-.artifactTabs button {
-  flex: 1 1 0;
+/*
+ * 탭은 균등 분할이 아니라 제 글자 폭만큼만 차지한다. flex: 1 1 0 이던 동안
+ * 탭이 늘어날수록 서로를 눌러 "결/과", "브라/우저" 로 쪼개졌다(실측).
+ */
+.artifactTabs button[role="tab"] {
+  flex: 0 0 auto;
   min-width: 0;
-  min-height: 36px;
+  height: 28px;
+  padding: 0 4px 0 8px;
   border: 0;
-  border-bottom: 2px solid transparent;
   background: transparent;
   color: #8a9195;
   font: inherit;
-  font-size: 12px;
+  font-size: 12.5px;
+  white-space: nowrap;
   cursor: pointer;
 }
-.artifactTabs button[data-active="true"] { border-bottom-color: #6f8e55; color: #3f4943; font-weight: 700; }
+.artifactTab[data-active="true"] button[role="tab"] { color: #1d2023; font-weight: 650; }
 .artifactTabs button:focus-visible { outline: 2px solid #cbd9c1; outline-offset: -2px; }
 
 .artifactList {
@@ -777,3 +793,118 @@ button.artifactVisual { cursor: pointer; }
   white-space: nowrap;
   border: 0;
 }
+
+/* ── 탭: 고정 목록이 아니라 열린 것만 (오너 지시 2026-08-24) ───────────── */
+.artifactTab {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 2px 0 0;
+  border-radius: 8px;
+}
+
+.artifactTab[data-active="true"] {
+  background: #f1f2f3;
+  box-shadow: inset 0 0 0 1px #e4e6e7;
+}
+
+.artifactTabClose {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #9aa0aa;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.artifactTab:hover .artifactTabClose,
+.artifactTab[data-active="true"] .artifactTabClose { opacity: 1; }
+
+.artifactTabClose:hover { background: #e4e6e7; color: #1d2023; }
+
+.artifactAddWrap { position: relative; display: inline-flex; }
+
+.artifactAddMenu {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 156px;
+  display: grid;
+  gap: 1px;
+  padding: 6px;
+  border: 1px solid #e2e4e5;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 12px 30px rgba(24, 29, 32, .12);
+}
+
+.artifactAddMenu > button {
+  min-height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #1d2023;
+  font-size: 12.5px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.artifactAddMenu > button:hover:not(:disabled) { background: #f4f5f5; }
+.artifactAddMenu > button:disabled { color: #b9bec4; cursor: default; }
+
+/* 아무 탭도 없을 때 — 빈 채로 두지 않고 무엇을 열 수 있는지 보여준다. */
+.artifactEmptyStage {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 24px 20px;
+  text-align: center;
+}
+
+.artifactEmptyTitle {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 650;
+  color: #4a5054;
+}
+
+.artifactEmptyNote {
+  margin: 0 0 6px;
+  max-width: 30ch;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #8b9096;
+}
+
+.artifactEmptyList {
+  display: grid;
+  gap: 4px;
+  width: min(220px, 100%);
+}
+
+.artifactEmptyList > button {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid #e2e4e5;
+  border-radius: 9px;
+  background: #fff;
+  color: #4a5054;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.artifactEmptyList > button:hover { background: #f7f8f8; color: #1d2023; }
