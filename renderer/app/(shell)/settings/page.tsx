@@ -1471,6 +1471,12 @@ function MemoryDiagnosticsPanel() {
   const ko = locale !== "en";
   const [dreaming, setDreaming] = useState<{ enabled: boolean; lastRunAt: string | null; running: boolean } | null>(null);
   const [supervisor, setSupervisor] = useState<boolean | null>(null);
+  /*
+   * 유료 Hub 자동고용. 기본이 켜짐인데 앱 어디에도 끄는 스위치가 없었다
+   * (감사 2026-08-25: 값을 읽어 쓰기는 하는데 바꾸는 곳이 0). 돈이 나가는
+   * 자동 동작에는 끄는 길이 있어야 한다.
+   */
+  const [networkAuto, setNetworkAuto] = useState<boolean | null>(null);
   const [doctorOut, setDoctorOut] = useState<string | null>(null);
   const [doctorBusy, setDoctorBusy] = useState(false);
 
@@ -1479,6 +1485,7 @@ function MemoryDiagnosticsPanel() {
     if (!api) return;
     void api.memoryDreaming.status().then(setDreaming).catch(() => {});
     void api.hephaestus.getSupervisor().then((s) => setSupervisor(s.enabled)).catch(() => {});
+    void api.hephaestus.getEngineToggles().then((t) => setNetworkAuto(t?.networkAuto === true)).catch(() => {});
   }, []);
 
   const toggleDreaming = async () => {
@@ -1494,6 +1501,17 @@ function MemoryDiagnosticsPanel() {
     try {
       await api.hephaestus.setSupervisor(!supervisor);
       setSupervisor(!supervisor);
+    } catch {
+      // 엔진 미가용 — 상태 유지
+    }
+  };
+
+  const toggleNetworkAuto = async () => {
+    const api = ipc();
+    if (!api || networkAuto == null) return;
+    try {
+      await api.hephaestus.setEngineToggle({ id: "network", enabled: !networkAuto });
+      setNetworkAuto(!networkAuto);
     } catch {
       // 엔진 미가용 — 상태 유지
     }
@@ -1573,6 +1591,22 @@ function MemoryDiagnosticsPanel() {
         </div>
         <button onClick={() => void toggleSupervisor()} style={{ ...btnStyle, minWidth: 64 }} disabled={supervisor == null}>
           {supervisor == null ? "…" : supervisor ? "ON" : "OFF"}
+        </button>
+      </div>
+
+      <div style={rowStyle}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 600 }}>
+            {ko ? "밖에서 전문가 자동 고용" : "Hire outside specialists automatically"}
+          </div>
+          <div style={{ fontSize: 11.5, color: "var(--muted-deep)", marginTop: 2 }}>
+            {ko
+              ? "설치된 에이전트로 부족할 때 공개 Hub 에서 사람을 빌립니다 — 크레딧이 나갑니다."
+              : "Borrows people from the public Hub when installed agents fall short — this spends credits."}
+          </div>
+        </div>
+        <button onClick={() => void toggleNetworkAuto()} style={{ ...btnStyle, minWidth: 64 }} disabled={networkAuto == null}>
+          {networkAuto == null ? "…" : networkAuto ? "ON" : "OFF"}
         </button>
       </div>
 
