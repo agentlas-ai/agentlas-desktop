@@ -3646,7 +3646,23 @@ export function OneShell() {
           || classifyOneRequestIntent(value) === "task"
           ? "task"
           : "conversation";
-        const explicitTeamRequest = taskForceTargetSnapshot.length > 0 || overrideSnapshot.sessionRouting;
+        /*
+         * 단톡방은 그 자체가 "여럿이 있는 자리"다. 그런데 편성 조건에 방의
+         * 존재가 없어서, 칩을 일일이 붙이지 않으면 3명짜리 방에서도 One 혼자
+         * 답했다(오너 지적 2026-08-24 "one만 일하냐?"). 방에 살아 있는 팀원이
+         * 있으면 그 방의 말은 팀의 일이다.
+         */
+        const taskforceForChat = taskforces.find((item) => item.chatId === chatId) ?? null;
+        const taskforceMemberIds = taskforceForChat
+          ? taskforceForChat.memberAgentIds.filter((agentId) => {
+            const member = oneOrgState?.members.find((item) => item.installedAgentId === agentId);
+            return Boolean(member) && !member?.archivedAt
+              && member?.statusKind !== "locked" && member?.statusKind !== "failed";
+          })
+          : [];
+        const explicitTeamRequest = taskForceTargetSnapshot.length > 0
+          || overrideSnapshot.sessionRouting
+          || taskforceMemberIds.length > 0;
         // Ordinary conversation must never pass through adaptive-team
         // preparation. That subsystem materializes a canonical Task as soon as
         // it finds a team need; running it speculatively made greetings and
@@ -3676,7 +3692,14 @@ export function OneShell() {
           expectedTaskVersion: taskVersion,
           permission: onePermission === "read" ? "read" : "write",
           ...(oneRuntimeSelection ? { runtimeSelection: oneRuntimeSelection } : {}),
-          ...(taskForceTargetSnapshot.length > 0 ? { requestedAgentIds: taskForceTargetSnapshot.map((target) => target.source === "local" && target.entityKind === "agent" ? target.agentId : "").filter(Boolean) } : {}),
+          ...((() => {
+            // 이번 턴에 지정한 팀원이 우선이고, 없으면 방의 팀원이 기본이다.
+            const chipIds = taskForceTargetSnapshot
+              .map((target) => target.source === "local" && target.entityKind === "agent" ? target.agentId : "")
+              .filter(Boolean);
+            const requestedAgentIds = chipIds.length > 0 ? chipIds : taskforceMemberIds;
+            return requestedAgentIds.length > 0 ? { requestedAgentIds } : {};
+          })()),
           ...(overrideSnapshot.sessionRouting ? { dynamicTeamRequested: true } : {}),
         });
         if (prepared.kind === "not_required") {
