@@ -58,12 +58,29 @@ export interface OneTeamPreflightRole {
   rationaleRef: string;
 }
 
+/** 부를 수 없는 사유 — 문장이 아니라 닫힌 목록이다(화면이 골라 번역한다). */
+export type OneTeamMemberUnavailableReason =
+  | "not_installed"
+  | "source_missing"
+  | "call_only"
+  | "hidden"
+  | "ineligible";
+
+export const ONE_TEAM_MEMBER_UNAVAILABLE_REASONS: ReadonlySet<string> = new Set([
+  "not_installed", "source_missing", "call_only", "hidden", "ineligible",
+]);
+
 export interface OneTeamPreflightProposal {
   contractVersion: typeof ONE_TEAM_PREFLIGHT_CONTRACT_VERSION;
   proposalId: string;
   version: number;
   status: OneTeamPreflightStatus;
   goalSummary: string;
+  /**
+   * 사람이 부른 팀원 중 이번에 올 수 없는 사람과 그 사유. 조용히 빠지면
+   * "왜 One 만 답하지" 로만 보인다(오너 지적 2026-08-24).
+   */
+  unavailableMembers?: Array<{ agentId: string; displayName: string; reason: OneTeamMemberUnavailableReason }>;
   binding: {
     chatId: string;
     taskId: string;
@@ -188,6 +205,26 @@ function exactKeys(record: Record<string, unknown>, keys: readonly string[]): bo
   return Object.keys(record).length === expected.size && Object.keys(record).every((key) => expected.has(key));
 }
 
+/**
+ * 필수 키는 모두 있고, 나머지는 선택 목록 안에서만 허용한다.
+ *
+ * 계약에 필드를 필수로 더하면 이미 저장된 제안이 전부 "손상" 으로 판정돼
+ * 편성 자체가 막힌다(실측 2026-08-25: unavailableMembers 를 필수로 넣자
+ * "One team preflight store is corrupt" 로 prepare 가 죽었다). 새 필드는
+ * 만들 때는 항상 채우되, 읽을 때는 없어도 받는다.
+ */
+function keysWithin(
+  record: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[],
+): boolean {
+  const allowed = new Set([...required, ...optional]);
+  const present = new Set(Object.keys(record));
+  for (const key of required) if (!present.has(key)) return false;
+  for (const key of present) if (!allowed.has(key)) return false;
+  return true;
+}
+
 function objectValue(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -260,13 +297,21 @@ export function isOneTeamPreflightRole(value: unknown): value is OneTeamPrefligh
 
 export function isOneTeamPreflightProposal(value: unknown): value is OneTeamPreflightProposal {
   const proposal = objectValue(value);
-  if (!proposal || !exactKeys(proposal, [
+  if (!proposal || !keysWithin(proposal, [
     "contractVersion", "proposalId", "version", "status", "goalSummary", "binding",
     "complexityReasons", "roles", "cost", "selectionBoundary", "limitation", "canConfirmTeam",
     "canConfirmWorkforce", "reservedRun", "startedRun", "createdAt", "updatedAt", "expiresAt",
-  ])) return false;
+  ], ["unavailableMembers"])) return false;
   if (proposal.contractVersion !== ONE_TEAM_PREFLIGHT_CONTRACT_VERSION || !safeId(proposal.proposalId)) return false;
   if (!Number.isSafeInteger(proposal.version) || Number(proposal.version) < 1 || !STATUSES.has(proposal.status as OneTeamPreflightStatus)) return false;
+  const unavailableMembers = proposal.unavailableMembers ?? [];
+  if (!Array.isArray(unavailableMembers) || unavailableMembers.length > 16) return false;
+  for (const raw of unavailableMembers) {
+    const member = objectValue(raw);
+    if (!member || !exactKeys(member, ["agentId", "displayName", "reason"])) return false;
+    if (!safeId(member.agentId) || !safeText(member.displayName, 120)) return false;
+    if (!ONE_TEAM_MEMBER_UNAVAILABLE_REASONS.has(String(member.reason))) return false;
+  }
   if (!safeText(proposal.goalSummary, 240) || !safeIso(proposal.createdAt) || !safeIso(proposal.updatedAt) || !safeIso(proposal.expiresAt)) return false;
   if (Date.parse(proposal.expiresAt as string) <= Date.parse(proposal.createdAt as string)) return false;
   if (!stringEnumArray<OneTeamPreflightComplexityReason>(proposal.complexityReasons, COMPLEXITY_REASONS, 6)) return false;

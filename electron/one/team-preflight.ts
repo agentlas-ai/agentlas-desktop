@@ -444,6 +444,8 @@ function exactInstalledRoster(
   candidates: CandidateSnapshot[];
   targets: OrchestrationTarget[];
   unresolvedExternal: boolean;
+  /** 요청했지만 이번에 부를 수 없는 팀원과 그 사유. */
+  unresolvedMembers: Array<{ agentId: string; displayName: string; reason: string }>;
 } {
   const byId = deps.getAgentById ?? getAgentById;
   const all = deps.listInstalledAgents ?? listInstalledAgents;
@@ -453,11 +455,27 @@ function exactInstalledRoster(
   const roles: OneTeamPreflightRole[] = [roleFromCandidate(coordinator, candidates[0], chat, true, permission)];
   const targets: OrchestrationTarget[] = [];
   let unresolvedExternal = false;
+  const unresolved: Array<{ agentId: string; displayName: string; reason: string }> = [];
   const seen = new Set([coordinator.id]);
   for (const agentId of requestedAgentIds) {
     const matches = all().filter((agent) => agent.id === agentId);
     const installed = matches.length === 1 ? matches[0] : null;
     if (!installed || seen.has(installed.id) || !eligibleExplicitMember(installed, coordinator.id)) {
+      // 왜 못 왔는지는 사람에게도 보여야 한다 — 조용히 빠지면 "왜 One 만
+      // 답하지" 로만 보인다(오너 지적 2026-08-24).
+      unresolved.push({
+        agentId,
+        displayName: installed?.name ?? agentId,
+        reason: !installed
+          ? "not_installed"
+          : installed.sourceMissingSince
+            ? "source_missing"
+            : isCallOnlyHubAgent(installed)
+              ? "call_only"
+              : installed.visibility === "private" || installed.visibility === "background"
+                ? "hidden"
+                : "ineligible",
+      });
       unresolvedExternal = true;
       continue;
     }
@@ -498,7 +516,7 @@ function exactInstalledRoster(
       targets.push({ source: "local", entityKind: "agent", agentId: selected.agent.id });
     }
   }
-  return { roles, candidates, targets, unresolvedExternal };
+  return { roles, candidates, targets, unresolvedExternal, unresolvedMembers: unresolved };
 }
 
 function isCandidateSnapshot(value: unknown): value is CandidateSnapshot {
@@ -624,12 +642,25 @@ function parseStore(raw: string): { state: OneTeamPreflightStoreV1; migratedProp
     migratedProposalCount += 1;
     return { ...internal, proposal: migration.proposal };
   });
-  if (
-    !proposals.every(isInternalProposal)
-  ) throw new Error("One team preflight store is corrupt; it was not overwritten");
+  /*
+   * 읽을 수 없는 제안 하나가 편성 기능 전체를 죽이던 자리.
+   *
+   * 실측 2026-08-25: 제안 계약에 필드를 하나 더했더니 이미 저장돼 있던 제안이
+   * 검증에 걸렸고, 그 순간부터 prepare 도 getForChat 도 "store is corrupt" 로
+   * 죽었다. 팀을 부르는 길이 통째로 막히고 푸는 방법도 없다.
+   *
+   * 파일이 JSON 이 아니거나 저장소 모양 자체가 다르면 그건 손상이 맞다(위에서
+   * 이미 막았다). 그러나 제안 하나가 낡았다는 것은 그 제안을 버릴 이유이지
+   * 나머지를 버릴 이유가 아니다. 버린 사실은 조용히 넘기지 않는다.
+   */
+  const usable = proposals.filter(isInternalProposal);
+  const droppedProposalCount = proposals.length - usable.length;
+  if (droppedProposalCount > 0) {
+    console.warn(`[one-team-preflight] dropped ${droppedProposalCount} unreadable proposal(s); ${usable.length} kept`);
+  }
   return {
-    state: { ...item, proposals } as unknown as OneTeamPreflightStoreV1,
-    migratedProposalCount,
+    state: { ...item, proposals: usable } as unknown as OneTeamPreflightStoreV1,
+    migratedProposalCount: migratedProposalCount + droppedProposalCount,
   };
 }
 
@@ -874,7 +905,13 @@ export async function prepareOneTeamPreflight(
   if (requestedAgentIds.length === 0) await prejudgeRosterAutoRoute(chat, input.userPrompt, deps);
   const permission = input.permission ?? "write";
   const roster = exactInstalledRoster(chat, deps, input.userPrompt, true, requestedAgentIds, permission);
-  const canConfirmTeam = roster.roles.length >= 2 && !roster.unresolvedExternal;
+  /*
+   * 한 명이 못 오면 나머지도 버리던 자리(오너 지적 2026-08-24 "one만 일하냐?").
+   * 실측: 방 팀원 둘 중 하나는 원본 폴더가 사라져 부를 수 없었는데, 그 한 명
+   * 때문에 멀쩡한 팀원까지 편성이 막히고 One 혼자 답했다. 올 수 있는 사람이
+   * 있으면 그들로 간다. 못 온 사람은 사유와 함께 제안에 실어 보여 준다.
+   */
+  const canConfirmTeam = roster.roles.length >= 2;
   // When the installed roster cannot cover the work, external staffing is the
   // remaining route — not a dead end. Main already implements that run end to
   // end (`confirmed_external_workforce` + `hub-first`); this is the door that
@@ -894,6 +931,7 @@ export async function prepareOneTeamPreflight(
     version: 1,
     status: canConfirmTeam ? "proposed" : "blocked",
     goalSummary: goalSummary(reasons),
+    unavailableMembers: roster.unresolvedMembers as OneTeamPreflightProposal["unavailableMembers"],
     binding: {
       chatId: chat.id,
       taskId: waitingTask.id,
