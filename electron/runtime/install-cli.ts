@@ -582,7 +582,57 @@ export function updateCli(kind: ManageableCli, requestedSource?: string | null):
  *  · 앱이 설치한 CLI(~/.agentlas/npm/bin 등)는 사용자 셸 PATH에 없을 수 있다 →
  *    bare 이름 대신 절대경로로 실행한다.
  */
-export function openCliLogin(kind: ManageableCli, requestedSource?: string | null): CliActionResult {
+/**
+ * 터미널을 실제로 띄웠는지 확인하고 나서 성공을 말한다.
+ *
+ * ── 왜 필요한가 (2026-08-24 오너 신고: "재로그인 아무리 눌러도 무반응") ──
+ * 예전에는 `spawn` 을 부르고 곧바로 `ok: true` 를 돌려줬다. spawn 은 비동기라 **프로세스가
+ * 실제로 떴는지와 무관하게 즉시 반환**하고, 실패는 나중에 `error` 이벤트로 온다. 그런데 그
+ * 이벤트를 빈 함수로 삼키고 있었다.
+ *
+ * 그래서 창이 안 떠도 앱은 "열었다"고 답했다. 화면은 성공으로 알고 아무 안내도 띄우지 않고
+ * 로그인 완료만 기다린다 — 사용자 눈에는 **버튼이 죽은 것**이다. 윈도우에서 특히 잦다
+ * (PowerShell 정책·경로·관리형 런처 등 실패 요인이 더 많다).
+ *
+ * 짧게 기다리는 이유: 실행 실패(ENOENT·EACCES)는 즉시 온다. 그 뒤에도 죽을 수는 있지만
+ * 그건 터미널이 뜬 뒤의 일이라 사용자가 화면에서 본다.
+ */
+async function spawnTerminalVerified(
+  command: string,
+  args: string[],
+  options: Parameters<typeof spawn>[2],
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (result: { ok: true } | { ok: false; reason: string }) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(command, args, options);
+    } catch (error) {
+      done({ ok: false, reason: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    child.once("error", (error) => {
+      done({ ok: false, reason: error instanceof Error ? error.message : String(error) });
+    });
+    // 실행 자체가 안 된 경우 pid 가 없다.
+    if (!child.pid) {
+      done({ ok: false, reason: `${path.basename(command)} did not start` });
+      return;
+    }
+    const timer = setTimeout(() => {
+      child.unref();
+      done({ ok: true });
+    }, 700);
+    timer.unref?.();
+  });
+}
+
+export async function openCliLogin(kind: ManageableCli, requestedSource?: string | null): Promise<CliActionResult> {
   const plan = kind === "antigravity"
     ? { loginArgs: [] as string[], bin: "agy" }
     : CLI_PLAN[kind];
@@ -625,14 +675,15 @@ export function openCliLogin(kind: ManageableCli, requestedSource?: string | nul
   try {
     if (process.platform === "darwin") {
       // Terminal.app에서 실행 + 활성화. 경로는 위에서 단일인용으로 고정.
-      const child = spawn("osascript", [
+      const started = await spawnTerminalVerified("osascript", [
         "-e",
         `tell application "Terminal" to do script "${posixCmd.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`,
         "-e",
         `tell application "Terminal" to activate`,
       ], { detached: true, stdio: "ignore" });
-      child.once("error", () => {});
-      child.unref();
+      if (!started.ok) {
+        return { ok: false, message: started.reason, command: `${plan.bin} ${loginArgs.join(" ")}`.trim() };
+      }
     } else if (process.platform === "win32") {
       // PowerShell is built into supported Windows versions. Spawn it directly
       // (no shell:true/cmd string composition), keep the terminal visible, and
@@ -654,14 +705,15 @@ export function openCliLogin(kind: ManageableCli, requestedSource?: string | nul
         `Write-Host ${psQuote(guide)}`,
         `& ${psQuote(abs)} ${loginArgs.map(psQuote).join(" ")}`.trim(),
       ].join("; ");
-      const child = spawn(powershell, ["-NoLogo", "-NoProfile", "-NoExit", "-Command", psCommand], {
+      const started = await spawnTerminalVerified(powershell, ["-NoLogo", "-NoProfile", "-NoExit", "-Command", psCommand], {
         detached: true,
         env: prependPath(augmentedEnv(), managedBinDir()),
         stdio: "ignore",
         windowsHide: false,
       });
-      child.once("error", () => {});
-      child.unref();
+      if (!started.ok) {
+        return { ok: false, message: started.reason, command: `${plan.bin} ${loginArgs.join(" ")}`.trim() };
+      }
     } else {
       // Never report success for a terminal that is not present. Pass the
       // already-resolved CLI as argv so spaces cannot turn into a shell parse.
@@ -677,13 +729,14 @@ export function openCliLogin(kind: ManageableCli, requestedSource?: string | nul
           command: `${plan.bin} ${loginArgs.join(" ")}`.trim(),
         };
       }
-      const child = spawn(terminal.path, terminal.args, {
+      const started = await spawnTerminalVerified(terminal.path, terminal.args, {
         detached: true,
         env: augmentedEnv(),
         stdio: "ignore",
       });
-      child.once("error", () => {});
-      child.unref();
+      if (!started.ok) {
+        return { ok: false, message: started.reason, command: `${plan.bin} ${loginArgs.join(" ")}`.trim() };
+      }
     }
     return { ok: true, message: [abs, ...loginArgs].join(" ") };
   } catch (e) {

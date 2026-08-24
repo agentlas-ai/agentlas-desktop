@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState, type CSSProperties , useMemo} from "react";
 import { ipc, ipcEvents, updaterEvents } from "@/lib/ipc";
 import { useT, type LocalePref } from "@/lib/i18n";
-import { useTheme, type ThemePref } from "@/lib/theme";
+import { DARK_THEME_ENABLED, useTheme, type ThemePref } from "@/lib/theme";
 import type {
   MultimodalModality,
   AgentConcurrencyInfo,
@@ -452,10 +452,15 @@ export default function SettingsPage() {
         />
 
         {/* 화면 테마 (라이트/다크/시스템) */}
-        <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "24px 0 12px" }}>
+        {/*
+          다크가 꺼져 있으면 이 선택지 자체를 감춘다(오너 지시 2026-08-24).
+          남겨 두면 눌러도 아무 일이 안 일어나는 죽은 버튼이 된다 — 화면이 고장 난 것처럼 보이고,
+          그건 다크가 깨져 보이던 것과 같은 종류의 문제다.
+        */}
+        {DARK_THEME_ENABLED && <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "24px 0 12px" }}>
           {t("settings.appearance.title")}
-        </h2>
-        <div
+        </h2>}
+        {DARK_THEME_ENABLED && <div
           style={{
             padding: 6,
             borderRadius: "var(--radius-md)",
@@ -492,7 +497,7 @@ export default function SettingsPage() {
               </button>
             );
           })}
-        </div>
+        </div>}
 
         {/* 에이전트 동시성(스웜 크기) — 게임 그래픽 세팅처럼 내 컴 사양 기반 추천 + 슬라이더 */}
         {concurrency && (

@@ -26,7 +26,24 @@ function systemDark(): boolean {
   return window.matchMedia("(prefers-color-scheme: dark)").matches;
 }
 
+/**
+ * ★ 다크 테마는 지금 꺼져 있다 (오너 지시 2026-08-24).
+ *
+ * ── 왜 ──
+ * 화면 대부분이 토큰이 아니라 **색을 직접 박아** 쓰고 있다(실측 1,782곳 / 39개 파일).
+ * 그 색들은 밝은 화면 기준이라 어두운 화면에서 그대로 남고, **글자와 상자가 같은 색이 되어
+ * 읽을 수 없는 자리가 곳곳에 생긴다.** 오너 신고: "글자랑 박스가 같은 색이라 안 보이는 거
+ * 천지다. 이럴 거면 다크모드 자체를 없애라."
+ *
+ * ── 왜 지우지 않고 끄는가 ──
+ * 토큰 층과 어두운 팔레트는 멀쩡하다. 고쳐야 하는 것은 그 1,782곳이고, 그건 화면 전체를
+ * 훑는 일이라 문 연 직후에 할 일이 아니다. 여기 한 줄을 되돌리면 그대로 다시 켜진다 —
+ * **다만 그 1,782곳을 먼저 정리한 뒤에** 켜야 한다.
+ */
+export const DARK_THEME_ENABLED = false;
+
 function resolve(pref: ThemePref): ResolvedTheme {
+  if (!DARK_THEME_ENABLED) return "light";
   if (pref === "system") return systemDark() ? "dark" : "light";
   return pref;
 }
@@ -69,6 +86,9 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   // system 모드일 때만 OS 변경을 추적
   useEffect(() => {
+    // 다크가 꺼져 있으면 OS 가 어두워져도 따라가지 않는다. 이 줄이 없으면 앱이 켜져 있는
+    // 동안 OS 테마가 바뀌는 순간 다시 어두워진다 — 껐다고 말하고 안 꺼진 상태가 된다.
+    if (!DARK_THEME_ENABLED) return;
     if (pref !== "system" || typeof window === "undefined" || !window.matchMedia) return;
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     const onChange = () => {
