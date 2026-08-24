@@ -1160,6 +1160,8 @@ export function OneShell() {
   }, []);
   const [taskMenuOpen, setTaskMenuOpen] = useState(false);
   const [sessionSheetOpen, setSessionSheetOpen] = useState(false);
+  /** 이 대화에서 켠 생성 앱 미리보기 서버들. 대화를 떠날 때 끈다. */
+  const livePreviewAppIdsRef = useRef<Set<string>>(new Set());
   /**
    * 분할 보기 — 지금 보고 있는 대화 옆에 붙는 칸들. 화면 전체로는 최대 4칸이므로
    * 옆칸은 3개까지다. 입력창은 언제나 왼쪽 첫 칸(지금 대화)에만 있다.
@@ -2604,7 +2606,7 @@ export function OneShell() {
 
     let disposed = false;
     let refreshing = false;
-    const startedPreviewAppIds = new Set<string>();
+    const startedPreviewAppIds = livePreviewAppIdsRef.current;
     const refresh = async () => {
       if (disposed || refreshing) return;
       refreshing = true;
@@ -2657,17 +2659,28 @@ export function OneShell() {
     return () => {
       disposed = true;
       window.clearInterval(timer);
-      /*
-       * 켜는 곳이 두 군데인데 한쪽만 껐다(감사 2026-08-25). Work 화면은
-       * 고쳤지만 One 에서 켠 미리보기 서버는 대화를 떠나도 계속 떠 있었고,
-       * 앱 안에서 끌 방법이 없었다. 이 대화에서 켠 것만 끈다.
-       */
-      for (const appId of startedPreviewAppIds) {
-        void bridge.appFactory?.stopLivePreview?.({ appId }).catch(() => undefined);
-      }
-      startedPreviewAppIds.clear();
     };
   }, [activeThreadChatId, busy, surface?.manifestId]);
+  /*
+   * 미리보기 서버는 대화를 떠날 때 끈다.
+   *
+   * 처음에는 위 effect 의 정리에 붙였는데, 그 effect 가 busy 를 보고 있어서
+   * 턴이 시작·종료할 때마다 서버가 닫히고 다음 실행이 새 포트로 새 서버를
+   * 열었다 — 미리보기를 켜 둔 사람은 메시지마다 화면이 다시 떴다
+   * (감사 2026-08-25). 서버가 필요 없어지는 때는 대화를 떠날 때이지 busy 가
+   * 바뀔 때가 아니다.
+   */
+  useEffect(() => {
+    const startedIds = livePreviewAppIdsRef.current;
+    return () => {
+      const bridge = typeof window === "undefined" ? null : window.agentlas;
+      for (const appId of startedIds) {
+        void bridge?.appFactory?.stopLivePreview?.({ appId }).catch(() => undefined);
+      }
+      startedIds.clear();
+    };
+  }, [activeThreadChatId]);
+
   const openOneLinkedFile = useCallback((file: LinkedFileArtifact) => {
     const normalized = (file.path || file.paths?.[0] || file.href || file.name).replace(/\\/g, "/").toLowerCase();
     const matched = runtimeArtifacts.find((artifact) => {
