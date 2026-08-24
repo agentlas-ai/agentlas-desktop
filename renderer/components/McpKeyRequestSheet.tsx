@@ -172,7 +172,7 @@ export function McpKeyRequestSheet({
         }
         .mkr {
           pointer-events: auto;
-          width: min(520px, 96vw);
+          width: var(--popup-3-width);
           max-height: min(70vh, 560px);
           overflow-y: auto;
           background: var(--rd-bg, #14151a);

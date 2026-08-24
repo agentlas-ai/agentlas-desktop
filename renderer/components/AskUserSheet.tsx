@@ -99,7 +99,7 @@ export function AskUserSheet() {
           bottom: 22px;
           z-index: 95;
           transform: translateX(-50%);
-          width: min(520px, calc(100vw - 32px));
+          width: var(--popup-3-width);
         }
         .aus-card {
           padding: 14px 16px;

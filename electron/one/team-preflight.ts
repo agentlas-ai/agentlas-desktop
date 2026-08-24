@@ -547,12 +547,49 @@ function isRuntimeBinding(value: unknown): value is OneTeamRuntimeBinding {
     && sha256(binding) === digest;
 }
 
+/**
+ * 저장된 실행 대상이 읽을 수 있는 모양인가.
+ *
+ * 역할 쪽만 팀을 받게 고치고 이쪽을 두었더니, 팀을 지목하면 카드는 완벽하게
+ * 뜨는데(만든 직후 돌려주는 값이라 검사를 안 거친다) "팀으로 확정" 을 누르는
+ * 순간 저장소에서 이미 걸러진 뒤라 "제안이 없다" 며 죽었다. 앱을 껐다 켜면
+ * 카드 자체가 사라진다. 감사 2026-08-25 가 검증기를 직접 돌려 잡았다.
+ *
+ * 로컬 팀의 대상 식별자는 agentId 가 아니라 firmId 다.
+ */
 function isLocalAgentTarget(value: unknown): value is OrchestrationTarget {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const item = value as Record<string, unknown>;
-  return Object.keys(item).sort().join(",") === "agentId,entityKind,source"
-    && item.source === "local" && item.entityKind === "agent"
-    && typeof item.agentId === "string" && item.agentId.length > 0 && item.agentId.length <= 256;
+  if (item.source !== "local") return false;
+  const shape = Object.keys(item).sort().join(",");
+  if (shape === "agentId,entityKind,source") {
+    return item.entityKind === "agent"
+      && typeof item.agentId === "string" && item.agentId.length > 0 && item.agentId.length <= 256;
+  }
+  if (shape === "entityKind,firmId,source") {
+    return item.entityKind === "team"
+      && typeof item.firmId === "string" && item.firmId.length > 0 && item.firmId.length <= 256;
+  }
+  return false;
+}
+
+/** 버린 제안이 어디서 걸렸는지 한 줄로. 사람이 읽고 고칠 자리를 찾을 수 있게. */
+function describeUnreadableProposal(value: unknown): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "not-an-object";
+  const item = value as Record<string, unknown>;
+  const shape = Object.keys(item).sort().join(",");
+  if (shape !== "main,proposal,reservation") return `unexpected-shape:${shape}`;
+  if (!isOneTeamPreflightProposal(item.proposal)) return "proposal-contract";
+  const main = item.main as Record<string, unknown> | null;
+  if (!main || typeof main !== "object" || Array.isArray(main)) return "main-missing";
+  const targets = main.taskForceTargets;
+  if (Array.isArray(targets) && !targets.every(isLocalAgentTarget)) {
+    const kinds = targets
+      .map((target) => (target && typeof target === "object" ? String((target as Record<string, unknown>).entityKind ?? "?") : "?"))
+      .join("/");
+    return `target-contract:${kinds}`;
+  }
+  return "main-contract";
 }
 
 function isInternalProposal(value: unknown): value is InternalOneTeamPreflight {
@@ -654,10 +691,17 @@ function parseStore(raw: string): { state: OneTeamPreflightStoreV1; migratedProp
    * 이미 막았다). 그러나 제안 하나가 낡았다는 것은 그 제안을 버릴 이유이지
    * 나머지를 버릴 이유가 아니다. 버린 사실은 조용히 넘기지 않는다.
    */
-  const usable = proposals.filter(isInternalProposal);
-  const droppedProposalCount = proposals.length - usable.length;
+  const usable: unknown[] = [];
+  const dropped: string[] = [];
+  for (const record of proposals) {
+    if (isInternalProposal(record)) { usable.push(record); continue; }
+    // 왜 버렸는지까지 남긴다. 개수만 세던 동안, 팀 대상을 못 읽는 결함이
+    // 조용한 삭제 뒤에 숨어 있었다(감사 2026-08-25).
+    dropped.push(describeUnreadableProposal(record));
+  }
+  const droppedProposalCount = dropped.length;
   if (droppedProposalCount > 0) {
-    console.warn(`[one-team-preflight] dropped ${droppedProposalCount} unreadable proposal(s); ${usable.length} kept`);
+    console.warn(`[one-team-preflight] dropped ${droppedProposalCount} unreadable proposal(s); ${usable.length} kept — ${dropped.join(" | ")}`);
   }
   return {
     state: { ...item, proposals: usable } as unknown as OneTeamPreflightStoreV1,

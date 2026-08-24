@@ -89,7 +89,7 @@ export function ConnectionsDialog({ automationId, locale, onClose }: {
       <section
         className="titlebar-nodrag"
         style={{
-          width: "min(560px, 100%)", maxHeight: "82vh", overflowY: "auto",
+          width: "var(--popup-3-width)", maxHeight: "82vh", overflowY: "auto",
           background: "var(--paper)", border: "1px solid var(--paper-edge)",
           borderRadius: "var(--radius-md)", padding: 20, display: "grid", gap: 14,
           boxShadow: "0 24px 60px -24px rgb(0 0 0 / 45%)",

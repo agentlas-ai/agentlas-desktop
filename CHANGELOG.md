@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.0.39 — 2026-08-25
+
+Bundled runtime: Agentlas OS v1.2.16 (6d0d7e7eafaa96ebbed92e1a2223b01f13eed245).
+Source readiness does not prove a public installer or update feed; the
+Releases page stays the authority.
+
+- Sessions can now be opened side by side, up to four. Each pane is a whole
+  conversation: it has its own composer and its own outputs sidebar, and the
+  point where the panes meet drags to resize both directions at once.
+- Every place the app asks you to choose — tool approval, browser actions,
+  One's decisions, questions during a run, an agent's own question — now uses
+  one card with the same shape. Choices stack vertically with a one-line
+  explanation each, instead of a row of buttons whose names had to carry the
+  whole meaning.
+- The outputs panel no longer opens itself. It used to open whenever a run
+  produced anything and then remember that, so every later conversation started
+  with half the window taken by an empty panel. Opened width is now half what it
+  was, and its tabs appear one per real output instead of four fixed ones.
+- A report an agent writes is rendered as a document, not a chat bubble, and can
+  be taken away as Markdown or PDF. Whether something is a report is the agent's
+  own call, not a guess made from how the text is shaped.
+- Group chats call their members again. A room with three people would answer
+  with One alone, because the roster only looked at per-turn mentions and never
+  at the room itself, because a team package was always skipped, and because one
+  member who could not come discarded the whole roster. All three are fixed, and
+  a member who cannot come is now named with the reason.
+- One unreadable stored proposal used to kill team staffing outright, with no
+  way out. Unreadable entries are now dropped one by one and the rest survive.
+- Packages imported from a temporary folder are refused. Repeated test runs had
+  filled the library with 60 copies of the same studio, each from a folder that
+  no longer exists.
+- Two screens that existed but could not be reached — the prompt store and the
+  startup studio — now have a way in, and the app's slash commands work.
+
 ## 1.0.38 — 2026-08-24
 
 Bundled runtime: Agentlas OS v1.2.16 (6d0d7e7eafaa96ebbed92e1a2223b01f13eed245).

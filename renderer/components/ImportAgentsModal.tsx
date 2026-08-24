@@ -173,7 +173,7 @@ export function ImportAgentsModal({
         className="glass-lift"
         onClick={(e) => e.stopPropagation()}
         style={{
-          width: "min(560px, 92vw)",
+          width: "var(--popup-3-width)",
           maxHeight: "82vh",
           display: "flex",
           flexDirection: "column",

@@ -123,7 +123,7 @@ export function AgentLeaseDialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby="agent-lease-title"
-        style={{ width: "min(440px, calc(100vw - 32px))", border: "1px solid var(--paper-edge)", borderRadius: 16, background: "var(--paper)", boxShadow: "0 24px 80px rgba(20, 22, 18, .22)", padding: 20, display: "flex", flexDirection: "column", gap: 14 }}
+        style={{ width: "var(--popup-3-width)", border: "1px solid var(--paper-edge)", borderRadius: 16, background: "var(--paper)", boxShadow: "0 24px 80px rgba(20, 22, 18, .22)", padding: 20, display: "flex", flexDirection: "column", gap: 14 }}
       >
         <header>
           <h2 id="agent-lease-title" style={{ margin: 0, fontSize: 17, fontFamily: "var(--font-head)" }}>

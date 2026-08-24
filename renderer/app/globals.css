@@ -44,7 +44,7 @@
 
 .feature-update-dialog {
   position: relative;
-  width: min(540px, 92vw);
+  width: var(--popup-3-width);
   max-height: calc(100vh - 48px);
   overflow: auto;
   border: 1px solid color-mix(in srgb, var(--paper-edge) 88%, #b7955b 12%);

@@ -82,7 +82,7 @@ export function PromptInputsConfirmDialog({
     >
       <div
         style={{
-          width: "min(440px, 100%)",
+          width: "var(--popup-3-width)",
           border: "1px solid var(--paper-edge)",
           borderRadius: 12,
           background: "var(--paper)",
@@ -367,7 +367,7 @@ export function PromptPickerDialog({
     >
       <div
         style={{
-          width: "min(540px, 100%)",
+          width: "var(--popup-3-width)",
           maxHeight: "min(620px, 90vh)",
           border: "1px solid var(--paper-edge)",
           borderRadius: 12,

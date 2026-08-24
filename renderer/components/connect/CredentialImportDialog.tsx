@@ -248,7 +248,7 @@ export function CredentialImportDialog({
           padding: 24px;
         }
         .cid-panel {
-          width: min(620px, 100%);
+          width: var(--popup-2-width);
           max-height: 82vh;
           display: flex;
           flex-direction: column;

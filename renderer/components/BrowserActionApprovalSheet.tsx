@@ -83,7 +83,7 @@ export function BrowserActionApprovalSheet() {
             bottom: 22px;
             z-index: 90;
             transform: translateX(-50%);
-            max-width: min(440px, calc(100vw - 32px));
+            max-width: var(--popup-3-width);
             padding: 10px 14px;
             border-radius: 10px;
             background: var(--rd-bg, #14151a);
@@ -181,7 +181,7 @@ export function BrowserActionApprovalSheet() {
         }
         .baa {
           pointer-events: auto;
-          width: min(460px, 96vw);
+          width: var(--popup-3-width);
           background: var(--rd-bg, #14151a);
           color: var(--rd-ink, #f3f4f8);
           border: 1px solid var(--rd-hair, rgba(255, 255, 255, 0.12));
