@@ -144,6 +144,48 @@ function relayEndpoint(): string {
   return url.toString();
 }
 
+/**
+ * 서버에 "중계는 어디로 붙나"를 묻는다.
+ *
+ * ★ 왜 (2026-08-25)
+ *   중계를 웹에서 떼어 별도 서비스로 옮겼다. 그런데 주소를 데스크탑이 **자기 안에서**
+ *   정하고 있어서, 옮기려면 매번 데스크탑을 새로 배포해야 했다. 환경변수는 실사용자
+ *   기계에서 아무도 켜지 않으므로 사실상 옮길 방법이 없었다.
+ *   이제 서버가 알려준다 — 앞으로 주소 이전은 서버 설정 한 줄이고 재배포가 없다.
+ *
+ * ★ 실패는 전부 "예전 주소로 간다"로 끝나야 한다
+ *   서버가 죽었든, 느리든, 이상한 값을 주든, 이 판이 아직 그 창구를 모르는 옛 서버에
+ *   붙었든 — 어느 경우에도 원격 접속이 끊기면 안 된다. 그래서 모든 실패는 null 이고,
+ *   부르는 쪽은 쓰던 주소를 그대로 쓴다.
+ */
+async function fetchRelayEndpoint(): Promise<string | null> {
+  const controller = new AbortController();
+  // 연결 시도 전에 붙는 지연이므로 짧게. 못 받으면 그냥 예전 주소로 간다.
+  const timer = setTimeout(() => controller.abort(), 4_000);
+  try {
+    const response = await fetch(`${webBaseUrl()}/api/mobile-pair/v1/relay-endpoint`, {
+      signal: controller.signal,
+      headers: { accept: "application/json" },
+    });
+    if (!response.ok) return null;
+    const body: unknown = await response.json();
+    const raw = body && typeof body === "object" ? (body as { url?: unknown }).url : null;
+    if (typeof raw !== "string" || raw.length === 0 || raw.length > 512) return null;
+    const url = new URL(raw);
+    // 평문은 받지 않는다 — 이 소켓에는 로그인 쿠키가 실린다.
+    if (url.protocol !== "wss:") return null;
+    if (!url.hostname) return null;
+    if (url.pathname === "/" || !url.pathname) url.pathname = "/v1/mobile/relay";
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function relayUrl(endpoint: string, params: Record<string, string>): string {
   const url = new URL(endpoint);
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
@@ -164,7 +206,11 @@ function rawBytes(data: unknown): number {
 }
 
 export class MobileBridgeCloudRelay {
-  private readonly endpoint = relayEndpoint();
+  // 서버가 알려주면 갱신된다. 못 받으면 여기 있는 값(환경변수 또는 웹 주소)을 계속 쓴다.
+  private endpoint = relayEndpoint();
+  // 환경변수로 못 박아 둔 경우에는 서버에 묻지 않는다 — 명시적 지정이 항상 이긴다.
+  private readonly endpointIsPinned = Boolean(process.env.AGENTLAS_RELAY_URL?.trim());
+  private endpointCheckedAt = 0;
   private readonly secret: string;
   private control: RelaySocket | null = null;
   private retryTimer: NodeJS.Timeout | null = null;
@@ -216,7 +262,28 @@ export class MobileBridgeCloudRelay {
     else console.info(`[mobile-bridge-relay] ${message}`);
   }
 
+  /**
+   * 붙기 직전에 서버에 주소를 한 번 물어본다. 5분에 한 번만 묻고, 못 받으면 쓰던 주소를
+   * 그대로 쓴다 — 이 확인이 실패해서 원격 접속이 끊기는 일은 없어야 한다.
+   */
+  private async refreshEndpoint(): Promise<void> {
+    if (this.endpointIsPinned) return;
+    const now = Date.now();
+    if (now - this.endpointCheckedAt < 300_000) return;
+    this.endpointCheckedAt = now;
+    const resolved = await fetchRelayEndpoint();
+    if (!resolved || resolved === this.endpoint) return;
+    console.info(`[mobile-bridge-relay] relay endpoint moved to ${new URL(resolved).host}`);
+    this.endpoint = resolved;
+  }
+
   private connectControl(): void {
+    if (this.stopped || this.control) return;
+    // 주소 확인은 붙는 것을 막지 않는다. 실패해도 그대로 진행한다.
+    void this.refreshEndpoint().finally(() => this.openControl());
+  }
+
+  private openControl(): void {
     if (this.stopped || this.control) return;
     const cookie = getSessionCookieHeader();
     if (!cookie) {
