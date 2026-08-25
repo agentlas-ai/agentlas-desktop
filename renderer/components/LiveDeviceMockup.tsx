@@ -87,6 +87,9 @@ export function LiveDeviceMockup({ url, title, runtimeLabel, viewId, locale = "k
       ? "LIVE"
       : (ko ? "연결 중" : "CONNECTING");
 
+  /** 미리보고 있는 대상의 이름. 이름이 없으면 지어내지 않고 종류만 말한다. */
+  const previewName = title.trim() || (ko ? "앱 미리보기" : "App preview");
+
   const reload = () => {
     void window.agentlas?.workLiveView?.reload(effectiveViewId);
   };
@@ -105,12 +108,25 @@ export function LiveDeviceMockup({ url, title, runtimeLabel, viewId, locale = "k
       data-live-device-mockup="true"
       data-expanded={expanded ? "true" : "false"}
       data-powered-off={poweredOff ? "true" : "false"}
-      aria-label={ko ? `${title} 실제 앱 목업` : `${title} live device mockup`}
+      aria-label={ko ? `${previewName} 앱 미리보기` : `${previewName} app preview`}
     >
       <header className={styles.windowBar}>
         <div className={styles.windowTitle}>
           <span className={styles.windowDot} aria-hidden="true" />
-          <strong>{ko ? "iOS 시뮬레이터" : "iOS simulator"}</strong>
+          {/*
+           * ★ 창 제목은 **실제로 도는 것**의 이름이어야 한다.
+           *
+           * 여기에는 "iOS 시뮬레이터"가 박혀 있었다. 이 컴포넌트 자신의 주석이 바로 위에서
+           * "iOS/Android 바이너리인 척하지 않는다"고 적어 두었는데, 정작 제목이 그 척을 하고
+           * 있었다 — 안에서 도는 것은 Xcode 시뮬레이터가 아니라 Main 이 소유한 로컬
+           * 미리보기(WebContentsView, 웹은 iframe)다. 오너가 화면을 보고 바로 잡아냈다.
+           *
+           * OS 이름은 박지 않는다: 이 틀은 표현일 뿐이고 뷰포트는 폰/데스크탑을 오갈 수 있다.
+           * 관측된 사실("무엇을 미리보고 있는가")만 적고, 이름이 없으면 종류만 말한다.
+           * LIVE 배지가 "관측된 사실일 때만 단다"와 같은 규칙이다.
+           */}
+          <strong>{previewName}</strong>
+          <span className={styles.windowKind}>{ko ? "미리보기" : "Preview"}</span>
           <span className={styles.liveBadge} data-live-state={serverGone || viewState === "error" ? "offline" : viewState}>{badge}</span>
         </div>
         <div className={styles.windowActions}>
@@ -168,14 +184,32 @@ export function LiveDeviceMockup({ url, title, runtimeLabel, viewId, locale = "k
         </div>
       </div>
 
-      <footer className={styles.deviceControls} aria-label={ko ? "시뮬레이터 제어" : "Simulator controls"}>
+      <footer className={styles.deviceControls} aria-label={ko ? "미리보기 제어" : "Preview controls"}>
         <button type="button" onClick={goHome} aria-label={ko ? "홈" : "Home"} title={ko ? "홈" : "Home"}>
           <IconHome size={15} />
         </button>
-        <button type="button" className={styles.passiveControl} aria-label={ko ? "스크린샷" : "Screenshot"} title={ko ? "스크린샷 (준비 중)" : "Screenshot (coming soon)"}>
+        {/*
+         * ★ 아직 없는 기능을 있는 것처럼 부르지 않는다 (같은 계열, 한 겹 아래).
+         * 이 둘은 `onClick` 이 없다 — 눌러도 아무 일도 일어나지 않는다. 그런데 "(준비 중)"
+         * 은 마우스를 올려야 보이는 title 에만 있고, 화면 낭독기가 읽는 이름은 그냥
+         * "스크린샷"·"화면 녹화"였다. 이름에도 상태를 적고 실제로 비활성으로 둔다.
+         */}
+        <button
+          type="button"
+          className={styles.passiveControl}
+          disabled
+          aria-label={ko ? "스크린샷 (준비 중)" : "Screenshot (coming soon)"}
+          title={ko ? "스크린샷 (준비 중)" : "Screenshot (coming soon)"}
+        >
           <IconCamera size={15} />
         </button>
-        <button type="button" className={styles.passiveControl} aria-label={ko ? "화면 녹화" : "Record screen"} title={ko ? "화면 녹화 (준비 중)" : "Record screen (coming soon)"}>
+        <button
+          type="button"
+          className={styles.passiveControl}
+          disabled
+          aria-label={ko ? "화면 녹화 (준비 중)" : "Record screen (coming soon)"}
+          title={ko ? "화면 녹화 (준비 중)" : "Record screen (coming soon)"}
+        >
           <IconFilm size={15} />
         </button>
         <button type="button" onClick={reload} aria-label={ko ? "앱 새로고침" : "Reload app"} title={ko ? "앱 새로고침" : "Reload app"}>

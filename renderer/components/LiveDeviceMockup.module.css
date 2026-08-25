@@ -39,6 +39,15 @@
   font-weight: 700;
 }
 
+/* 창 제목 옆의 종류 표기 — 무엇을 보고 있는지(미리보기)를 말하되 장치를 단정하지 않는다. */
+.windowKind {
+  flex: 0 0 auto;
+  color: #8b9195;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .windowDot {
   width: 8px;
   height: 8px;
