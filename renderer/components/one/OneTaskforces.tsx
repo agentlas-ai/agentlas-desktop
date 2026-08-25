@@ -5,6 +5,7 @@ import { IconCheck, IconClose, IconPlus, IconUsers } from "@/components/Icon";
 import type { OneOrgMember, OneOrgState } from "@shared/one-org";
 import type { OneTaskforce } from "@shared/one-taskforces";
 import { ipc } from "@/lib/ipc";
+import { memberUnavailable, speakableCountIncludingOne } from "@/lib/one-team-availability";
 import { OneAgentPortrait } from "./OneAgentPortrait";
 import { OneBottomSheet } from "./OneBottomSheet";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
@@ -15,9 +16,8 @@ function isWebSurface(): boolean {
   return typeof window !== "undefined" && !(window as { agentlas?: unknown }).agentlas;
 }
 
-function memberUnavailable(member: OneOrgMember | undefined): boolean {
-  return !member || Boolean(member.archivedAt) || member.statusKind === "locked" || member.statusKind === "failed";
-}
+// 판정은 공용 한 벌을 쓴다 — 회색 칠하는 조건과 인원수 세는 조건이 갈리면 화면이 서로를
+// 부정한다(UX-D-7). `renderer/lib/one-team-availability.ts`
 
 function memberStatus(member: OneOrgMember | undefined, locale: "ko" | "en"): string {
   if (!member) return locale === "ko" ? "삭제되었거나 찾을 수 없음" : "Deleted or unavailable";
@@ -98,7 +98,8 @@ export function OneTaskforceRail({
               문법 오류였다(2026-08-23 실제 화면에서 발견). 한국어는 수에 따라 안 바뀐다.
             */}
             <small>{(() => {
-              const people = taskforce.memberAgentIds.length + 1;
+              // 명단 길이가 아니라 **지금 말할 수 있는 사람**을 센다(UX-D-7).
+              const people = speakableCountIncludingOne(taskforce.memberAgentIds, org);
               if (locale === "ko") {
                 return `One 포함 ${people}명${unavailable ? ` · ${unavailable}명 확인 필요` : ""}`;
               }

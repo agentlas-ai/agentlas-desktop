@@ -26,7 +26,7 @@ import { emitDesktopStoreChange } from "../store/change-bus";
 import { listInstalledAgentsReadOnly } from "../mcp/registry";
 import { materializeAgentFiles } from "../agents/files";
 import { appendChatMessage, createChat } from "../store/chats";
-import { replaceSeatOccupant } from "../store/seats";
+import { closeAgentOccupancies, replaceSeatOccupant } from "../store/seats";
 import { seatEventText } from "../../shared/one-seat-events";
 import { currentUiLocale } from "../ui-locale";
 import {
@@ -827,6 +827,25 @@ export function archiveOneOrgMember(input: ArchiveOneOrgMemberInput): OneOrgStat
   // 내려야, 나중에 복원했을 때 옛 실행의 요약이 새 상태처럼 보이지 않는다.
   getDb().prepare("DELETE FROM one_org_completion_cache WHERE installed_agent_id = ?").run(row.installed_agent_id);
   getDb().prepare("UPDATE one_org_members SET archived_at = ?, updated_at = ?, revision = revision + 1 WHERE id = ?").run(now, now, id);
+  /*
+   * ★ 보관은 **자리에서 일어나는 일**이다 (SEAT-SESSION-PLAN-v2 I4, UX-D-4).
+   *
+   * 지금까지 보관은 `one_org_members.archived_at` 한 칸만 적고 좌석 원장은 건드리지 않았다.
+   * 그래서 화면이 서로를 부정했다 — 대화에는 "나갔습니다" 구분선이 찍히는데(그 줄은
+   * archived_at 을 본다), 좌석은 여전히 그 팀원을 점유자로 들고 있어서 좌석을 근거로 하는
+   * 가드·배너·빈자리 카드가 **전부 조용히 비켜갔다.** 결과가 "나갔다고 적힌 바로 밑에서
+   * 그 팀원이 정상적으로 대답하는" 상태였다.
+   *
+   * 봇 삭제(T1)가 이미 쓰는 것과 같은 자리 비우기를 보관에도 쓴다. 좌석·세션·점유 이력은
+   * 전부 보존되므로(닫힌 행으로 남는다) 대화는 그대로 남고, 빈 자리 표시와 재배정 경로가
+   * 살아난다. 복원은 조직 멤버만 되돌리고 자리는 자동으로 채우지 않는다 — 그 사이 다른
+   * 담당이 앉았을 수 있으므로, 앉히는 것은 사용자가 빈자리 카드에서 고른다.
+   */
+  try {
+    closeAgentOccupancies(row.installed_agent_id);
+  } catch {
+    // 좌석 원장이 없는 구세대 DB — 보관 자체는 진행한다(다음 기동의 v103 재시딩이 흡수).
+  }
   emitOrgChanged();
   return getOneOrgState();
 }

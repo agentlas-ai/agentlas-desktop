@@ -182,9 +182,24 @@ export function OneRecoveryPlane() {
       const evidence = detail?.evidence?.trim();
       // Missing evidence is not a failure class and code may not invent one.
       if (!scope || !evidence) return;
+      /*
+       * ★ 실패한 방을 여기서 잃어버리면 안 된다. 아래 드레인은 `detail.chatId` 를 보고
+       * "실패가 일어난 방에서 이어간다"(PRD §4.6)를 실행하는데, 정규화가 그 칸을 빼고
+       * 새 객체를 만드는 바람에 **그 경로가 한 번도 타지지 않았다.** 대신 항상 "가장 최근
+       * One 대화" — 즉 사용자가 지금 쓰고 있는 방 — 로 복구가 들어가, 사용자의 실행과
+       * 같은 방에서 동시에 돌았다.
+       */
+      // 형식 판정은 발신부(`requestOneOperationalRecovery`)가 이미 했고, 여기서 다시
+      // 정규식을 들이면 "복구 평면은 증거를 스스로 분류하지 않는다"는 계약을 깬다.
+      // 잘못된 id 는 아래 `api.chats.get(...).catch(() => null)` + originSurface 검사에서
+      // 조용히 걸러진다(닫히는 쪽으로 실패).
+      const chatId = typeof detail?.chatId === "string" && detail.chatId.trim()
+        ? detail.chatId.trim().slice(0, 128)
+        : undefined;
       const normalized: OneOperationalRecoveryDetail = {
         scope,
         evidence,
+        ...(chatId ? { chatId } : {}),
       };
       const fingerprint = `${normalized.scope}\u0000${normalized.evidence}`;
       const now = Date.now();

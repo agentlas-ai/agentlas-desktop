@@ -1,5 +1,15 @@
+/*
+ * ★ 넓은 코드블록이 단톡 줄 전체를 늘리지 않게 한다 (렌더링 스윕 R-4).
+ *
+ * `pre` 에 `max-width: 100%` 를 걸어 두어도, 그 위의 그리드 열이 `auto` 면 열 자체가
+ * 코드의 max-content 만큼 벌어진다 — 100% 의 기준이 함께 늘어나므로 클램프가 무의미해진다.
+ * 그 결과 말풍선·발신자 이름·오른쪽 시각까지 통째로 가로로 밀려 화면 밖으로 나갔다
+ * (실측: 1440 폭에서 행이 1048px, 시각이 x=1506). 열을 minmax(0, 1fr) 로 못박아야
+ * 열이 컨테이너 폭을 넘지 않고, 넘치는 코드는 자기 블록 안에서만 스크롤된다.
+ */
 .conversation {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 18px;
   min-width: 0;
   margin: 4px 0;
@@ -7,6 +17,7 @@
 
 .entry {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto auto;
   gap: 7px;
   min-width: 0;
@@ -129,7 +140,7 @@
 .bubble[data-doc="true"] .mention { display: block; margin: 0 0 10px; }
 
 /* SNS 식 접힌 답글 — "+N replies" 필. */
-.thread { display: grid; gap: 10px; min-width: 0; }
+.thread { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; min-width: 0; }
 .replies {
   justify-self: start;
   min-height: 30px;

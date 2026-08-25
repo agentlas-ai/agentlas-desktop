@@ -257,6 +257,28 @@
 .notice[data-level="error"] { color: var(--work-fail); }
 .notice[data-level="success"] { color: var(--work-ok); }
 
+/* 답을 받지 못한 턴에서 다시 묻는 길 (UX-D-1). */
+.retryRow {
+  display: flex;
+  align-items: center;
+  padding: 4px 0 2px 16px;
+}
+.retryButton {
+  min-height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--work-line, #e0e2e3);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--work-ink);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 620;
+  cursor: pointer;
+}
+.retryButton:hover:not(:disabled) { background: #f4f5f5; }
+.retryButton:disabled { cursor: not-allowed; opacity: .55; }
+.retryButton:focus-visible { outline: 2px solid rgba(96, 122, 54, 0.35); outline-offset: 2px; }
+
 /* ── conversation boundary (compaction) ───────────────────────────────── */
 .divider {
   display: inline-flex;

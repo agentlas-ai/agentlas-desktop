@@ -163,6 +163,7 @@ import {
   type OutputPresentationKind,
 } from "@/lib/output-presentation";
 import { planOneThreadWork, projectThreadRuns, type OneThreadRunBlock } from "@/lib/one-thread-work";
+import { memberUnavailable, speakableCountIncludingOne } from "@/lib/one-team-availability";
 import { ToolApprovalInline } from "@/components/ToolApprovalInline";
 import {
   OneComposerControls,
@@ -564,18 +565,31 @@ function attachmentTypeLabel(mediaType: string, name: string): string {
 function toUiMessages(history: ChatHistoryEntry[]): UiMessage[] {
   const visible: UiMessage[] = [];
   let suppressRecoveryReply = false;
+  let userTurnAwaitingAnswer = false;
   for (const entry of history) {
     if (entry.role === "system" && /^Private operational evidence\./.test(entry.text.trim())) {
       // This prompt and the reply it elicits are an internal recovery attempt,
       // not a user-authored turn or a trustworthy final result.
-      suppressRecoveryReply = true;
+      /*
+       * ★ 단, 사람의 질문이 아직 답을 못 받은 상태라면 다음 assistant 줄은 이 복구의 답이
+       * 아니라 **그 질문의 답**이다. 복구 실행(OneRecoveryPlane)은 사용자가 쓰고 있는 바로
+       * 그 방에서 동시에 돌 수 있어서, 저장 순서가 질문 → 복구프롬프트 → 진짜 답 으로
+       * 섞인다. 그때 "복구 프롬프트 다음 assistant 줄"이라는 자리만 보고 지우면, 사람이
+       * 기다리던 답을 화면에서 영구히 지운다(저장은 돼 있는데 다시 열어도 안 보인다).
+       * 지우는 쪽이 틀렸을 때의 대가가 훨씬 크므로, 애매하면 남긴다.
+       */
+      suppressRecoveryReply = !userTurnAwaitingAnswer;
       continue;
     }
     if (entry.role === "assistant" && suppressRecoveryReply) {
       suppressRecoveryReply = false;
       continue;
     }
-    if (entry.role === "user") suppressRecoveryReply = false;
+    if (entry.role === "user") {
+      suppressRecoveryReply = false;
+      userTurnAwaitingAnswer = true;
+    }
+    if (entry.role === "assistant") userTurnAwaitingAnswer = false;
     visible.push({
       id: entry.id,
       role: entry.role === "assistant" ? "assistant" : entry.role,
@@ -4477,6 +4491,21 @@ export function OneShell() {
     void startRun(focus.chatId, null, null, prompt, "conversation", { displayUserMessage: true }).catch((cause) => requestOneOperationalRecovery("one-failure-retry", cause));
   }, [appLocale, busy, failureFocus, startRun]);
 
+  /**
+   * ★ 답을 받지 못한 턴을 다시 묻는다 (UX-D-1).
+   *
+   * 앱이 실행 도중 멈추면 그 실행은 원장에 `interrupted`로 남고 답은 저장되지 않는다.
+   * 부분 본문은 죽은 프로세스의 메모리에 있었으므로 되살릴 수 없다 — 되살릴 수 없는 것을
+   * 되살린 척하지 않고, 같은 질문을 다시 보내는 길만 정직하게 연다.
+   */
+  const retryUnansweredTurn = useCallback((promptText: string) => {
+    const chatId = selected?.chatId ?? conversation?.id;
+    const prompt = promptText.trim();
+    if (!chatId || !prompt || busy) return;
+    void startRun(chatId, null, null, prompt, "conversation", { displayUserMessage: true })
+      .catch((cause) => requestOneOperationalRecovery("one-unanswered-retry", cause));
+  }, [busy, conversation?.id, selected?.chatId, startRun]);
+
   const sendFocusedFailureToOne = useCallback(() => {
     if (!failureFocus || busy) return;
     const chatId = failureFocus.chatId ?? conversation?.id;
@@ -5575,8 +5604,8 @@ export function OneShell() {
                     <OneAgentPortrait status={busy ? "working" : "quiet"} label="One" tone={oneAvatarTone} size="small" />
                     {activeTaskforce.memberAgentIds.slice(0, 2).map((agentId) => {
                       const member = oneOrgState?.members.find((item) => item.installedAgentId === agentId);
-                      const unavailable = !member || Boolean(member.archivedAt) || member.statusKind === "locked" || member.statusKind === "failed";
-                      return <OneAgentPortrait key={agentId} status={unavailable ? "locked" : member.statusKind} label={member?.displayName ?? "Unavailable"} tone={member?.icon ?? "blue"} size="small" />;
+                      const unavailable = memberUnavailable(member);
+                      return <OneAgentPortrait key={agentId} status={unavailable || !member ? "locked" : member.statusKind} label={member?.displayName ?? "Unavailable"} tone={member?.icon ?? "blue"} size="small" />;
                     })}
                   </span> : activeSeatEmpty ? (
                     // 빈 자리는 점선 자리로 그린다 — 담당이 없는 것을 One 의 얼굴로 덮지 않는다(§4-2).
@@ -5608,9 +5637,12 @@ export function OneShell() {
                     {!activeSeatDissolved && activeSeatEmpty && <small data-one-empty-seat-badge="true">{appLocale === "ko"
                       ? (previousOccupantName ? `빈 자리 · 이전 담당 ${previousOccupantName}` : "빈 자리")
                       : (previousOccupantName ? `Empty seat · previously ${previousOccupantName}` : "Empty seat")}</small>}
-                    {activeTaskforce && <small>{appLocale === "ko"
-                      ? `One 포함 ${activeTaskforce.memberAgentIds.length + 1}명`
-                      : `${activeTaskforce.memberAgentIds.length + 1} members incl. One`}</small>}
+                    {/* 명단 길이가 아니라 지금 말할 수 있는 사람을 센다 — 나간 팀원은 아바타만
+                        회색이 되고 머릿수는 그대로였다(UX-D-7). 아바타를 회색으로 칠하는
+                        바로 그 판정으로 센다. */}
+                    {activeTaskforce && <small data-one-taskforce-count="true">{appLocale === "ko"
+                      ? `One 포함 ${speakableCountIncludingOne(activeTaskforce.memberAgentIds, oneOrgState)}명`
+                      : `${speakableCountIncludingOne(activeTaskforce.memberAgentIds, oneOrgState)} members incl. One`}</small>}
                   </span>
                 </div>
                 {activeTaskforce && <button
@@ -5621,7 +5653,7 @@ export function OneShell() {
                     setTaskforceDialogOpen(true);
                   }}
                   aria-label={appLocale === "ko" ? "태스크포스 멤버 관리" : "Manage Taskforce members"}
-                ><IconUsers size={15} /><span>{activeTaskforce.memberAgentIds.length + 1}</span></button>}
+                ><IconUsers size={15} /><span data-one-taskforce-badge="true">{speakableCountIncludingOne(activeTaskforce.memberAgentIds, oneOrgState)}</span></button>}
                 <button
                   type="button"
                   className={styles.taskToolbarOutputToggle}
@@ -5788,6 +5820,7 @@ export function OneShell() {
                       <OneTurnWork
                         state={block.state}
                         busy={false}
+                        runStatus={block.status}
                         startedAt={Date.parse(block.startedAt)}
                         locale={appLocale}
                         workspacePath={workspacePath}
@@ -5907,6 +5940,10 @@ export function OneShell() {
                               startedAt={Date.parse(block.startedAt)}
                               locale={appLocale}
                               workspacePath={workspacePath}
+                              runStatus={block.status}
+                              {...(message.role === "user" && message.text.trim()
+                                ? { onRetry: () => retryUnansweredTurn(message.text), retryDisabled: busy }
+                                : {})}
                             />
                             {activeTaskforce && <OneTaskforceConversation state={block.state} org={oneOrgState} locale={appLocale} />}
                           </Fragment>

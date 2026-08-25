@@ -5893,6 +5893,53 @@ export function registerIpcHandlers(): void {
               : "This group chat was dissolved and is kept as a read-only archive. Start a new group chat with the same members to continue.",
           );
         }
+        /*
+         * ★ 나간 사람은 대답하지 않는다 (UX-D-4).
+         *
+         * 대화에는 "나갔습니다" 구분선이 찍히는데 바로 그 밑에서 그 팀원이 정상적으로
+         * 대답하고 있었다. 담당이 자리를 비워도 `chats.agent_id` 는 마지막 담당을 그대로
+         * 들고 있고, 실행은 그 owner 를 무조건 참여자로 세우기 때문이다. 화면 가드는
+         * 렌더러가 우회할 수 있으므로 권위 가드는 해체와 같은 자리에 둔다.
+         *
+         * **떠났다는 것을 증명할 수 있을 때만** 막는다 — 열린 점유가 없다는 사실만으로는
+         * "나갔다"가 아니다(좌석 원장이 아직 시딩되지 않은 구세대 대화도 0행이다).
+         * 점유 이력이 있는데 열린 행이 하나도 없을 때, 그때만 사람이 자리를 뜬 것이다.
+         * 없는 데이터를 사실로 승격시키지 않는다.
+         */
+        {
+          let departed = false;
+          if (seat && seat.kind === "solo" && seat.occupants.length === 0) {
+            try {
+              departed = listSeatOccupantHistory(seat.id).length > 0;
+            } catch {
+              // 좌석 이력을 못 읽으면 증명이 없는 것이다 — 막지 않는다.
+            }
+          }
+          /*
+           * 좌석을 비우기 전(이 수리 이전)에 보관된 팀원은 좌석 원장에 열린 점유가 그대로
+           * 남아 있다. 그 사람도 조직에서는 이미 나간 사람이므로, 조직 원장 쪽 사실로도
+           * 같은 판정을 내린다 — 안 그러면 "예전에 보관한 사람만 계속 대답하는" 상태가 남는다.
+           */
+          if (!departed) {
+            try {
+              const ownerAgentId = getChat(request.chatId)?.agentId;
+              if (ownerAgentId) {
+                const owner = getOneOrgState().members
+                  .find((member) => member.installedAgentId === ownerAgentId);
+                departed = Boolean(owner?.archivedAt);
+              }
+            } catch {
+              // 조직 상태를 못 읽으면 증명이 없는 것이다 — 막지 않는다.
+            }
+          }
+          if (departed) {
+            throw new Error(
+              currentUiLocale() === "ko"
+                ? "이 자리의 담당이 조직에서 나가 지금은 빈 자리입니다. 대화는 그대로 남아 있으니, 위의 빈 자리 카드에서 담당을 앉히거나 조직 화면의 '보관됨'에서 복원한 뒤 이어가세요."
+                : "The member who held this seat has left, so the seat is empty. The conversation is kept — assign someone from the empty-seat card above, or restore them from Archived in the organisation view, then continue.",
+            );
+          }
+        }
       }
       // Best-effort with a tight budget: a miss remains unresolved and must
       // never be replaced by a lexical or static verdict.

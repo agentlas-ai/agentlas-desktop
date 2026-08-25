@@ -1,6 +1,7 @@
 "use client";
 
 import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
+import type { InvocationRunReceipt } from "@shared/types";
 import { IconChevronDown } from "@/components/Icon";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { extractAutomationRegistrations, type OneActivityState } from "@/lib/one-activity";
@@ -317,6 +318,9 @@ export function OneTurnWork({
   startedAt,
   locale,
   workspacePath,
+  runStatus,
+  onRetry,
+  retryDisabled = false,
 }: {
   state: OneActivityState;
   /** True only for the live run this block belongs to. */
@@ -326,6 +330,19 @@ export function OneTurnWork({
   startedAt: number | null;
   locale: "ko" | "en";
   workspacePath: string | null;
+  /**
+   * ★ 실행이 답 없이 끝난 것을 화면이 말하게 하는 칸 (UX-D-1).
+   *
+   * 원장은 "시작 줄만 있고 종료 줄이 없는" 실행을 `interrupted`로 이미 알고 있다
+   * (`store/run-events.ts` getInvocationRunReceipt). 그런데 이 블록은 종료 *이벤트*로만
+   * 실패를 판정해서, 앱이 통째로 죽어 종료 줄 자체가 안 남은 실행은 실패로 보이지 않았다.
+   * 화면에는 "N초 동안 작업"만 남고 답은 없어, 사용자에게는 답이 조용히 증발한 것으로 읽힌다
+   * (실측 2026-08-25: 같은 대화에서 질문 3개 중 2개가 이 상태였다).
+   */
+  runStatus?: InvocationRunReceipt["status"];
+  /** 낸 오류에는 푸는 길이 있어야 한다 — 중단된 턴의 질문을 다시 보낸다. */
+  onRetry?: () => void;
+  retryDisabled?: boolean;
 }) {
   const ko = locale === "ko";
   const presentation = useMemo(() => buildOneWorkPresentation(state, locale, workspacePath), [state, locale, workspacePath]);
@@ -338,7 +355,17 @@ export function OneTurnWork({
     setExpanded(active);
   }, [active]);
   const liveElapsedMs = useElapsed(startedAt, active);
-  const settledMs = presentation.durationMs ?? (startedAt != null && !active ? liveElapsedMs : undefined);
+  // 답 없이 끊긴 실행. 종료 이벤트가 아니라 원장 판정을 근거로 삼는다 — 앱이 죽으면
+  // 종료 줄을 쓸 주체가 없으므로, "종료 이벤트가 없다"는 사실 자체가 유일한 증거다.
+  const interrupted = !active && runStatus === "interrupted";
+  /*
+   * ★못 잰 시간을 지어내지 않는다. 끝나지 않은 실행에는 종료 시각이 없어서, 시작 시각부터
+   * "지금"까지를 재면 질문한 지 오래될수록 숫자가 계속 자란다 — 실측에서 20초쯤 돌다 멈춘
+   * 실행이 "1시간 26분 동안 작업"으로 보였다. 실제로 얼마나 돌았는지는 아무도 모르므로
+   * 시간 칸을 비우고, 대신 답을 못 받았다는 사실만 적는다.
+   */
+  const settledMs = presentation.durationMs
+    ?? (startedAt != null && !active && !interrupted ? liveElapsedMs : undefined);
   const recordedRows = presentation.cells.length > 0;
   const headline = preparing && !recordedRows
     ? (ko ? "준비하는 중" : "Preparing")
@@ -365,7 +392,7 @@ export function OneTurnWork({
     : presentation.cells.filter((_cell, index) => index !== liveHeadlineCell);
   const hasRows = visibleCells.length > 0;
 
-  if (!active && !hasRows && !presentation.terminalMessage) {
+  if (!active && !hasRows && !presentation.terminalMessage && !interrupted) {
     // Nothing happened beyond the answer itself (no thought, no tool). Codex
     // shows no work line for such a turn.
     return null;
@@ -427,6 +454,11 @@ export function OneTurnWork({
               · {terminal === "cancelled" ? (ko ? "중단됨" : "stopped") : (ko ? "실패" : "failed")}
             </span>
           )}
+          {!failed && interrupted && (
+            <span className={styles.headerTerminal}>
+              · {ko ? "답을 받지 못함" : "no answer"}
+            </span>
+          )}
           <span className={styles.headerChevron} aria-hidden="true"><IconChevronDown size={12} /></span>
         </button>
       )}
@@ -449,6 +481,39 @@ export function OneTurnWork({
               <span className={styles.rowText}><span className={styles.notice} data-level="error">{presentation.terminalMessage}</span></span>
             </span>
           </div>
+        </div>
+      )}
+      {/* ★ 답이 사라진 자리에는 사라졌다고 적는다 (UX-D-1).
+          앱이 실행 도중 멈추면 종료 줄을 쓸 주체가 없어 답도, 실패 표시도 남지 않았다.
+          사용자에게는 자기 질문만 나란히 남아 "왜 답이 없는지" 알 길이 자체가 없었다.
+          접힘과 무관하게 보이고, 다시 물을 수 있는 길을 같은 자리에 둔다. */}
+      {interrupted && (
+        <div className={styles.rows} data-one-turn-interrupted="true">
+          <div className={styles.row} data-kind="notice" data-status="failed">
+            <span className={styles.rowHead}>
+              <span className={styles.rowMark} data-status="failed" aria-hidden="true" />
+              <span className={styles.rowText}>
+                <span className={styles.notice} data-level="error">
+                  {ko
+                    ? "이 질문은 답을 받지 못했습니다 — 실행 도중 앱이 멈춰 답이 저장되지 않았습니다."
+                    : "This question never received an answer — the app stopped mid-run, so nothing was saved."}
+                </span>
+              </span>
+            </span>
+          </div>
+          {onRetry && (
+            <div className={styles.retryRow}>
+              <button
+                type="button"
+                className={styles.retryButton}
+                onClick={onRetry}
+                disabled={retryDisabled}
+                data-one-turn-retry="true"
+              >
+                {ko ? "다시 시도" : "Retry"}
+              </button>
+            </div>
+          )}
         </div>
       )}
     </section>

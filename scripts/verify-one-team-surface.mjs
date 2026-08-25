@@ -30,7 +30,22 @@ const adaptiveResult = readFileSync(resolve(root, "renderer/components/one/OneAd
 // overlapping portraits and One remains part of the participant count.
 assert.match(taskforces, /function TaskforcePortraits/);
 assert.match(taskforces, /taskforce\.memberAgentIds\.slice\(0, 2\)/);
-assert.match(taskforces, /taskforce\.memberAgentIds\.length \+ 1/);
+// One 은 여전히 인원수에 포함된다. 다만 세는 대상은 **명단 길이가 아니라 지금 말할 수 있는
+// 사람**이다 — 나간 팀원이 아바타만 회색이 되고 머릿수는 그대로 남던 것을 고쳤다(UX-D-7).
+// 포함 규칙(+1)은 공용 헬퍼 안에 한 벌로 있고, 표시 자리는 그 헬퍼만 부른다.
+assert.match(taskforces, /speakableCountIncludingOne\(taskforce\.memberAgentIds, org\)/);
+assert.doesNotMatch(
+  taskforces,
+  /taskforce\.memberAgentIds\.length \+ 1/,
+  "인원수는 명단 길이로 세지 않는다 — 나간 사람이 계속 세어진다",
+);
+const availability = readFileSync(resolve(root, "renderer/lib/one-team-availability.ts"), "utf8");
+assert.match(availability, /return availableMemberCount\([^)]*\) \+ 1/, "One 은 인원수에 포함된다");
+assert.match(
+  availability,
+  /member\.archivedAt[\s\S]*statusKind === "locked"[\s\S]*statusKind === "failed"/,
+  "말할 수 있는지 판정은 아바타를 회색으로 칠하는 조건과 같아야 한다",
+);
 assert.match(taskforceStyles, /grid-auto-flow:\s*column/);
 assert.match(taskforceStyles, /grid-template-rows:\s*40px minmax\(0, auto\)/);
 assert.match(taskforceStyles, /\.portraitStack\s*>\s*span\s*\{\s*position:\s*absolute/);

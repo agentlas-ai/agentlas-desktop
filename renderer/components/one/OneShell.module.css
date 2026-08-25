@@ -3086,9 +3086,29 @@
     grid-template-columns: 0 minmax(0, 1fr) 0;
   }
 
-  /* A narrower window must not reserve an invisible third column. Keep the
-     conversation at full width and present Outputs as a real, resizable
-     overlay below the title bar. */
+  .homeHistoryRail { display: none; }
+}
+
+/* Contract 8 holds at every width a desktop window can reach: opening Outputs
+   narrows the conversation, it never covers it. Below 1080px the panel used to
+   leave the flow and become an absolute overlay, which cut answer text
+   mid-sentence and put the composer's mic/send buttons underneath the panel
+   (audit UX-D-3 / R-1). The panel stays in flow here and its track is clamped
+   so the conversation — and therefore the send button — always keeps a
+   reachable minimum width. The phone-width sheet below is unaffected. */
+@media (min-width: 761px) and (max-width: 1080px) {
+  .body[data-task-active="true"][data-context-rail="true"] {
+    grid-template-columns: 224px minmax(0, 1fr) min(var(--one-rail-width, 210px), calc(100% - 544px));
+  }
+
+  .body[data-task-active="true"][data-rail-collapsed="true"][data-context-rail="true"] {
+    grid-template-columns: 0 minmax(0, 1fr) min(var(--one-rail-width, 210px), calc(100% - 320px));
+  }
+}
+
+/* Phone widths keep the Outputs panel as an overlay sheet — there is no room
+   for a second column there. */
+@media (max-width: 760px) {
   .body > [data-one-runtime-artifacts="true"] {
     position: absolute;
     z-index: 58;
@@ -3101,8 +3121,6 @@
     border-left: 1px solid #e4e6e7;
     box-shadow: -16px 0 36px rgba(24, 29, 32, .09);
   }
-
-  .homeHistoryRail { display: none; }
 }
 
 @media (max-width: 760px) {
