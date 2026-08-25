@@ -1269,6 +1269,9 @@ export function OneShell() {
     if (!stage) return;
     event.preventDefault();
     const pointerId = event.pointerId;
+    // 끄는 동안에는 모션을 끈다 — 이 표식이 One 의 모션 토큰을 0ms 로 눌러 분할선이
+    // 손가락을 그대로 따라온다. 놓으면 지워지므로 키보드 이동(화살표)은 다시 흐른다.
+    document.documentElement.setAttribute("data-one-resizing", "true");
     const move = (moveEvent: PointerEvent) => {
       if (moveEvent.pointerId !== pointerId) return;
       const box = stage.getBoundingClientRect();
@@ -1280,6 +1283,7 @@ export function OneShell() {
     };
     const end = (endEvent: PointerEvent) => {
       if (endEvent.pointerId !== pointerId) return;
+      document.documentElement.removeAttribute("data-one-resizing");
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", end);
       window.removeEventListener("pointercancel", end);

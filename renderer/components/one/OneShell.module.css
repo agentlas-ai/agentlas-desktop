@@ -84,7 +84,8 @@
   display: grid;
   grid-template-columns: 252px minmax(0, 1fr) 0;
   overflow: hidden;
-  transition: grid-template-columns 180ms ease;
+  /* 모션 토큰은 이 파일 맨 끝 "모션 시스템" 절에서 한 벌로 정의한다. */
+  transition: grid-template-columns var(--one-motion-panel, 200ms) var(--one-ease-panel, ease);
 }
 
 :global(html[data-one-output-resizing="true"]) .body {
@@ -151,7 +152,9 @@
   border-right: 1px solid var(--one-line);
   background: #fafafa;
   opacity: 1;
-  transition: opacity 120ms ease, transform 180ms ease;
+  transition:
+    opacity var(--one-motion-fast, 120ms) linear,
+    transform var(--one-motion-panel, 200ms) var(--one-ease-panel, ease);
 }
 
 /* 신호등 옆 상단 여백을 창 손잡이로 쓴다. .rail 의 padding-top 48px 안쪽이라
@@ -3826,5 +3829,147 @@
 .workspace[data-split-active="true"] .windowBar,
 .workspace[data-split-active="true"] .composerDock {
   right: calc(100% - var(--split-col, 50%));
+}
+
+/* ===========================================================================
+ * 모션 시스템 — 한 벌의 토큰 (오너 지적 2026-08-25
+ *   "클로드 브라우저 봐봐, 저렇게 스무스하게. 사이드바 보여주는 곳들이 전부
+ *    움직여줘야 함. 렌더링 품질.")
+ *
+ * 지속시간·이징을 바꾸는 자리는 여기 하나다. 각 자리는 var() 로만 쓰고 폴백을
+ * 함께 적어, 이 파일보다 먼저 그려지는 순간에도 값이 비지 않게 한다.
+ *
+ * 토큰을 0 으로 눌러 "즉시"로 만드는 스위치가 둘 있다. 토큰은 상속되므로 이
+ * 두 곳만 눌러도 아래 모든 자리가 동시에 즉시 전환이 된다:
+ *
+ *  1) html[data-one-resizing="true"] — 사람이 손잡이를 끄는 중.
+ *     모션이 남아 있으면 패널이 손가락을 못 따라오고 고무줄처럼 늘어져
+ *     오히려 더 나빠진다. 표식은 네 드래그(결과 패널 폭 / 미리보기 분할선 /
+ *     기록 높이 / 세션 분할 모서리)가 직접 세우고 놓는 순간 지운다.
+ *     지우는 순간부터 다시 흐르므로, 놓을 때의 되돌림·키보드·더블클릭·
+ *     프로그램적 변경은 애니메이션이 붙는다.
+ *
+ *  2) prefers-reduced-motion: reduce — 접근성. 필수.
+ *
+ * 왜 폭을 transform 이 아니라 실제 width/트랙으로 흐르게 하는가: 레퍼런스에서
+ * 패널이 좁아지면 왼쪽 대화 칸의 글이 다시 줄바꿈되고 중앙을 다시 잡는다
+ * (f13 의 메시지 덩어리가 x≈50, f17 에선 x≈150 에서 시작). transform 으로
+ * 눌러 늘리면 내용이 찌그러져 이 재정렬 자체가 사라진다. 대신 비용을 세 겹으로
+ * 묶는다 — (a) 드래그 중에는 전환을 아예 끄고(위 1번) (b) 흐르는 시간을 200ms 로
+ * 못박고 (c) will-change:width 를 결과 패널이 조작되는 동안에만 건다
+ * (OneActivityTimeline.module.css 의 .artifactRail[data-resizing="true"]).
+ * 영구 승격은 비용만 내고 얻는 게 없다. contain 은 일부러 안 쓴다 — 그 패널은
+ * 라이브 브라우저·앱 미리보기를 담고, contain:layout 이 그 안의 position:fixed
+ * 자식을 가둔다.
+ * =========================================================================== */
+/*
+ * 토큰은 :root 가 아니라 .body 에 건다. CSS Modules 는 로컬 클래스가 하나도 없는
+ * 규칙(`:global(:root){}`)을 거절한다 — 빌드가 통째로 깨진다. .body 는 One 화면의
+ * 최상위 격자이므로 아래 모든 자리가 상속으로 받는다. 유일한 예외는 포털로 나가는
+ * 시트(OneBottomSheet)이고, 거기서는 같은 값을 .layer 에 한 번 더 선언한다.
+ */
+.body {
+  --one-motion-fast: 120ms;     /* 손잡이·그립처럼 뜨고 지는 어포던스 */
+  --one-motion-panel: 200ms;    /* 폭·높이·그리드 트랙이 흐르는 시간 */
+  --one-motion-overlay: 220ms;  /* 서랍·전체화면 오버레이가 들어오는 시간 */
+  --one-motion-exit: 150ms;     /* 나가는 건 들어오는 것보다 빠르다 */
+  /* 끝에서 부드럽게 멈추고 되튐이 없다 — 레퍼런스에 스냅 구간이 없는 이유. */
+  --one-ease-panel: cubic-bezier(0.32, 0.72, 0, 1);
+  --one-ease-exit: cubic-bezier(0.4, 0, 1, 1);
+}
+
+/* 스위치 1 — 사람이 끄는 중. (0,2,1) 이라 위 .body(0,1,0)를 확실히 이긴다. */
+:global(html[data-one-resizing="true"]) .body {
+  --one-motion-fast: 0ms;
+  --one-motion-panel: 0ms;
+  --one-motion-overlay: 0ms;
+  --one-motion-exit: 0ms;
+}
+
+/* 스위치 2 — 접근성. 같은 특이도지만 소스가 뒤라 base 를 이긴다. */
+@media (prefers-reduced-motion: reduce) {
+  .body {
+    /* 0 이 아니라 1ms — transitionend/animationend 를 기다리는 코드가 있어도
+       영영 안 오는 일이 없게. 눈에는 즉시 전환이다. */
+    --one-motion-fast: 1ms;
+    --one-motion-panel: 1ms;
+    --one-motion-overlay: 1ms;
+    --one-motion-exit: 1ms;
+    --one-ease-panel: linear;
+    --one-ease-exit: linear;
+  }
+}
+
+/* --- 홈 기록 열 ------------------------------------------------------------
+ * 열 폭(44px ↔ 360px)은 .body 의 grid-template-columns 가 이미 흐른다.
+ * 다만 접힘 띠와 펼친 열은 서로 다른 조건부 렌더라 내용이 튀어나온다 —
+ * 폭이 흐르는 동안 내용도 같이 붙게 페이드를 준다. */
+.homeHistoryRail,
+.homeHistoryRailCollapsed {
+  animation: oneColumnFadeIn var(--one-motion-panel, 200ms) var(--one-ease-panel, ease) both;
+}
+
+/* --- 세션 분할 패널 (데스크탑) ---------------------------------------------
+ * 비율은 --split-col/--split-row 로 들어온다. 모서리를 끄는 동안에는 위 1번
+ * 스위치가 0ms 로 눌러 손가락을 그대로 따라가고, 키보드(화살표 4%/Shift 1%)와
+ * 칸 개수 변화만 흐른다. */
+.splitStage[data-split="true"] {
+  transition:
+    grid-template-columns var(--one-motion-panel, 200ms) var(--one-ease-panel, ease),
+    grid-template-rows var(--one-motion-panel, 200ms) var(--one-ease-panel, ease);
+}
+
+.splitCorner {
+  transition:
+    left var(--one-motion-panel, 200ms) var(--one-ease-panel, ease),
+    top var(--one-motion-panel, 200ms) var(--one-ease-panel, ease);
+}
+
+.splitCorner::after {
+  transition: background var(--one-motion-fast, 120ms) linear;
+}
+
+/* 툴바·컴포저 도크는 --split-col 을 따라 오른쪽 끝이 움직인다. 같이 흘러야
+   분할선만 미끄러지고 헤더는 뚝 끊기는 어긋남이 안 생긴다. */
+.workspace[data-split-active="true"] .windowBar,
+.workspace[data-split-active="true"] .composerDock {
+  transition: right var(--one-motion-panel, 200ms) var(--one-ease-panel, ease);
+}
+
+/* --- 모바일 서랍 (≤760px) --------------------------------------------------
+ * base 의 .rail 전환 규칙은 소스 앞이라 여기서 다시 쓴다. 웹 전용 동기화
+ * 패치가 이 미디어 블록에 규칙을 덧대므로, 파일 맨 끝에서 덮어야 이긴다
+ * (같은 특이도면 뒤에 오는 쪽이 이긴다 — 모바일이 통째로 안 먹던 그 자리). */
+@media (max-width: 760px) {
+  .rail {
+    transition:
+      transform var(--one-motion-overlay, 220ms) var(--one-ease-panel, ease),
+      opacity var(--one-motion-fast, 120ms) linear;
+  }
+
+  /* 서랍 뒤 가림막은 조건부 렌더라 그냥 켜졌다 — 서랍과 같은 시간에 배어들게. */
+  .railScrim {
+    animation: oneScrimFadeIn var(--one-motion-overlay, 220ms) var(--one-ease-panel, ease) both;
+  }
+
+  /* 모바일에서 결과 패널은 전체화면 오버레이로 올라온다. 튀어나오지 않게. */
+  .body > [data-one-runtime-artifacts="true"] {
+    animation: oneOverlayRise var(--one-motion-overlay, 220ms) var(--one-ease-panel, ease) both;
+  }
+}
+
+@keyframes oneColumnFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes oneScrimFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes oneOverlayRise {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
 }
 

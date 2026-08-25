@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { HubAgentBookmark, InstalledAgent, InstalledMcpServer, MarketplaceListing, McpServerStatus, McpToolCatalogEntry } from "@shared/types";
 import type { OneOrgCollaborationStyle, OneOrgMember, OneOrgState } from "@shared/one-org";
-import { ONE_CHARACTER_OPTIONS } from "@/lib/one-characters";
 import { OneAgentPortrait } from "./OneAgentPortrait";
 import { OneBottomSheet } from "./OneBottomSheet";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
@@ -169,14 +168,20 @@ export function OneOrgChart({
   const [addTab, setAddTab] = useState<"my" | "cloud" | "hub">("my");
   const [addSearch, setAddSearch] = useState("");
   const [selectedAgent, setSelectedAgent] = useState("");
-  const [name, setName] = useState("");
   const [leaseDays, setLeaseDays] = useState("0");
   const [busy, setBusy] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [editorMember, setEditorMember] = useState<OneOrgMember | null>(null);
-  // 앉힐 때 고르는 캐릭터. 만들기 화면과 같은 목록에서 고른다(오너 지적 2026-08-23).
-  const [addCharacterId, setAddCharacterId] = useState<string>(ONE_CHARACTER_OPTIONS[0]?.id ?? "");
+  /*
+   * 앉힐 때는 이름도 캐릭터도 묻지 않는다(오너 지적 2026-08-25:
+   * "이미 2번째 사진에서 에이전트 캐릭터 이름 다 설정하는데 왜 또 하냐고").
+   *
+   * 데려오는 에이전트는 원본 패키지가 이미 이름과 얼굴을 갖고 있다. 그래서 좌석
+   * 배치는 **원본 그대로 앉히는 것**이 기본이고, 바꾸고 싶으면 앉힌 뒤 조직도 행의
+   * 편집(= 만들기와 같은 창)에서 바꾼다. 2026-08-23 에 여기에 캐릭터 고르기를 넣은
+   * 이유였던 "앉히면 얼굴을 못 고른다"는 그 편집 경로로 이미 해결돼 있다.
+   */
   const [editStyle, setEditStyle] = useState<OneOrgCollaborationStyle>("default");
   const [replaceId, setReplaceId] = useState("");
   const [handover, setHandover] = useState(false);
@@ -191,7 +196,6 @@ export function OneOrgChart({
     if (!addRequest?.token) return;
     setAddTab(addRequest.source);
     setSelectedAgent("");
-    setName("");
     setLeaseDays(addRequest.source === "hub" ? "7" : "0");
     setAddSearch("");
     setAddError(null);
@@ -215,8 +219,13 @@ export function OneOrgChart({
      * 이 진입점만 예전 조직원 설정 시트를 그대로 열고 있었다. 그래서 같은
      * 사람을 고치는 창이 두 개로 보였다(오너 지적 2026-08-24: 사진 두 장).
      * 통합 창이 있으면 언제나 그쪽이다.
+     *
+     * 단 **"담당 교체"는 예외다**(2026-08-25 실측). 그 요청은 "교체 화면을 열어 달라"는
+     * 명시적 요청인데, 여기서 통합 편집 창으로 되돌리면 통합 창이 닫혔다가 똑같은 창이
+     * 다시 열린다 — 누르면 아무 일도 안 일어나고 이유도 안 알려주는 죽은 버튼이었다.
+     * (OneShell 이 onEditIdentity 를 항상 넘기므로 교체 시트는 도달 불가였다.)
      */
-    if (onEditIdentity) { onEditIdentity(member); return; }
+    if (onEditIdentity && sheetRequest.kind !== "replace") { onEditIdentity(member); return; }
     setEditorMember(member);
     setEditName(member.displayName);
     setEditStyle(member.collaborationStyle ?? "default");
@@ -273,9 +282,10 @@ export function OneOrgChart({
     slots: "슬롯", used: "사용 중", remaining: "자리 남음", sourceAria: "에이전트 출처",
     myAgents: "내 에이전트", installed: "로컬 에이전트", choose: "에이전트를 선택하세요", search: "에이전트 검색",
     matchingRole: (role: string) => `${role} 역할에 맞는 에이전트`, noMatch: "설치된 에이전트 중 일치하는 역할이 없습니다.", showAll: "전체 목록 보기",
-    displayName: "표시 이름(선택)", displayPlaceholder: "예: 리서치 스태프", lease: "대여 기간", permanent: "상주 · 만료 없음",
+    lease: "대여 기간", permanent: "상주 · 만료 없음",
     modelAuto: "모델 · 자동 배정", modelPreferred: (backend: string) => `에이전트 권장 엔진 ${backend}을 우선 사용합니다.`, modelDefault: "One이 작업과 사용 가능한 런타임에 맞춰 고릅니다.",
-    nameNote: "이름만 바뀌며 원본 에이전트와 실행 기록은 유지됩니다.", team: "팀", single: "단일", add: "추가", cancel: "취소",
+    identityNote: "원본의 이름과 캐릭터 그대로 앉습니다. 바꾸려면 앉힌 뒤 조직도에서 편집하세요.",
+    team: "팀", single: "단일", add: "추가", cancel: "취소",
     localNote: "이 Mac에 설치된 에이전트입니다. 상주 직원으로 추가되며 대여 기간이 없습니다.",
     cloudNote: "내 Agent Cloud에 저장된 에이전트가 바로 표시됩니다. 상주 직원으로 추가되며 대여 기간이 없습니다.",
     hubNote: "Hub에서 북마크한 에이전트만 표시됩니다. 상주 좌석에 붙일 때만 대여 기간을 정합니다.",
@@ -287,9 +297,10 @@ export function OneOrgChart({
     slots: "Slots", used: "used", remaining: "available", sourceAria: "Agent source",
     myAgents: "My agents", installed: "Local agent", choose: "Choose an agent", search: "Search agents",
     matchingRole: (role: string) => `Agents matching ${role}`, noMatch: "No installed agent matches this role.", showAll: "View all agents",
-    displayName: "Display name (optional)", displayPlaceholder: "e.g. Research Staff", lease: "Lease", permanent: "Standing · No expiry",
+    lease: "Lease", permanent: "Standing · No expiry",
     modelAuto: "Model · Automatic", modelPreferred: (backend: string) => `Prefers the agent's recommended ${backend} runtime.`, modelDefault: "One chooses for each task from the available runtimes.",
-    nameNote: "Only the display name changes. The source agent and execution history stay intact.", team: "Team", single: "Single", add: "Add", cancel: "Cancel",
+    identityNote: "Joins with the name and character it already has. To change them, edit it in the organisation chart after it joins.",
+    team: "Team", single: "Single", add: "Add", cancel: "Cancel",
     localNote: "These agents are installed on this Mac. They join as standing staff with no lease term.",
     cloudNote: "Agents saved in your Agent Cloud appear immediately. They join as standing staff with no lease term.",
     hubNote: "Only agents you bookmarked in Hub appear here. Choose a lease only when attaching one to a standing seat.",
@@ -373,8 +384,12 @@ export function OneOrgChart({
       const leaseExpiresAt = addTab === "hub" && Number.isFinite(days) && days > 0
         ? new Date(Date.now() + days * 24 * 60 * 60 * 1_000).toISOString()
         : null;
-      await onAdd(installed.id, name.trim() || undefined, leaseExpiresAt, addCharacterId);
-      setSelectedAgent(""); setName(""); setLeaseDays("0"); setAddSearch(""); setRoleFilter(null); setAddOpen(false); setAddCharacterId(ONE_CHARACTER_OPTIONS[0]?.id ?? "");
+      /*
+       * 이름·캐릭터를 보내지 않는다 = 원본 패키지의 이름과 얼굴 그대로 앉는다.
+       * (org.ts 의 `chosen?.icon ?? agent.tone` 이 그 얼굴을 고른다.)
+       */
+      await onAdd(installed.id, undefined, leaseExpiresAt, undefined);
+      setSelectedAgent(""); setLeaseDays("0"); setAddSearch(""); setRoleFilter(null); setAddOpen(false);
     } catch (cause) {
       setAddError(cause instanceof Error ? cause.message : String(cause));
     } finally { setBusy(false); }
@@ -439,7 +454,7 @@ export function OneOrgChart({
         {active.length === 0 && <>
           <div className={styles.empty}>{locale === "ko" ? "아직 상주 스태프가 없습니다. 아래 역할을 골라 시작하세요." : "No standing staff yet. Pick a role to get started."}</div>
           <div className={styles.ghosts} aria-label={locale === "ko" ? "추천 역할" : "Suggested roles"}>
-          {ghostRoles.map((role) => <button key={role} type="button" className={styles.ghost} onClick={() => { setName(role); setRoleFilter(role); setAddTab("my"); setAddOpen(true); }} disabled={!state || state.slots.available <= 0}><span><IconPlus size={14} /></span><strong>{role}</strong><small>{locale === "ko" ? "아직 없음" : "Not assigned"}</small></button>)}
+          {ghostRoles.map((role) => <button key={role} type="button" className={styles.ghost} onClick={() => { setRoleFilter(role); setAddTab("my"); setAddOpen(true); }} disabled={!state || state.slots.available <= 0}><span><IconPlus size={14} /></span><strong>{role}</strong><small>{locale === "ko" ? "아직 없음" : "Not assigned"}</small></button>)}
           </div>
         </>}
         {active.map((member) => (
@@ -565,7 +580,7 @@ export function OneOrgChart({
 
       <OneBottomSheet
         open={addOpen}
-        onClose={() => { if (!busy) { setSelectedAgent(""); setName(""); setLeaseDays("0"); setAddSearch(""); setAddError(null); setRoleFilter(null); setAddOpen(false); } }}
+        onClose={() => { if (!busy) { setSelectedAgent(""); setLeaseDays("0"); setAddSearch(""); setAddError(null); setRoleFilter(null); setAddOpen(false); } }}
         closeLabel={locale === "ko" ? "에이전트 추가 닫기" : "Close add agent"}
         closeDisabled={busy}
         closeOnBackdrop={!busy}
@@ -580,53 +595,46 @@ export function OneOrgChart({
         description={addTab === "my" ? addCopy.localNote : addTab === "cloud" ? addCopy.cloudNote : addCopy.hubNote}
       >
         <div className={styles.addSheet}>
-          <div className={styles.tabs} role="tablist" aria-label={addCopy.sourceAria}>{([['my', addCopy.myAgents], ['cloud', 'Cloud'], ['hub', 'Hub']] as const).map(([key, label]) => <button key={key} type="button" role="tab" aria-selected={addTab === key} data-active={addTab === key} onClick={() => { setAddTab(key); setSelectedAgent(""); setName(""); setLeaseDays(key === "hub" ? "7" : "0"); setAddError(null); }}>{label}</button>)}</div>
+          <div className={styles.tabs} role="tablist" aria-label={addCopy.sourceAria}>{([['my', addCopy.myAgents], ['cloud', 'Cloud'], ['hub', 'Hub']] as const).map(([key, label]) => <button key={key} type="button" role="tab" aria-selected={addTab === key} data-active={addTab === key} onClick={() => { setAddTab(key); setSelectedAgent(""); setLeaseDays(key === "hub" ? "7" : "0"); setAddError(null); }}>{label}</button>)}</div>
           <label className={styles.addSearch}><IconSearch size={15} /><input value={addSearch} onChange={(event) => setAddSearch(event.target.value)} placeholder={addCopy.search} aria-label={addCopy.search} />{addSearch && <button type="button" onClick={() => setAddSearch("")} aria-label={locale === "ko" ? "검색 지우기" : "Clear search"}><IconClose size={14} /></button>}</label>
-          <p className={styles.sourceNote}>{addTab === "my" ? addCopy.localNote : addTab === "cloud" ? addCopy.cloudNote : addCopy.hubNote}</p>
+          {/*
+            출처 안내는 시트 머리말(description)이 이미 같은 문장을 찍는다. 여기 한 번 더
+            찍으면 같은 말이 두 줄로 나오고 그만큼 후보 목록이 눌린다(오너 지적 2026-08-25).
+          */}
           {/* "새 에이전트 만들기 또는 추가" 라벨로 들어온 시트에 '만들기' 경로가
               없었다 (U-D-2) — 검색 결과와 무관하게 만들기 진입점을 상시 제공한다. */}
           {addTab === "my" && onCreateAgent && (
             <button
               type="button"
               className={styles.secondaryAction}
-              onClick={() => { setSelectedAgent(""); setName(""); setLeaseDays("0"); setAddSearch(""); setAddError(null); setRoleFilter(null); setAddOpen(false); onCreateAgent(); }}
+              onClick={() => { setSelectedAgent(""); setLeaseDays("0"); setAddSearch(""); setAddError(null); setRoleFilter(null); setAddOpen(false); onCreateAgent(); }}
             ><IconPlus size={13} />{ko ? "새 에이전트 만들기" : "Create a new agent"}</button>
           )}
 
           {addTab === "my" ? (
             inventoryLoading && candidates.length === 0 ? <AgentInventoryLoading locale={locale} />
-              : candidates.length > 0 ? <div className={styles.candidateGrid} role="list" aria-label={addCopy.installed}>{candidates.map((agent) => <button type="button" role="listitem" key={agent.id} data-active={selectedAgent === agent.id ? "true" : "false"} onClick={() => { setSelectedAgent(agent.id); setName(""); setAddError(null); }}><span><strong>{agent.localDisplayName || (ko ? agent.name : agent.nameEn) || agent.name}</strong><small>{agent.kind === "team" ? addCopy.team : addCopy.single} · {ko ? "로컬" : "Local"}</small><em>{(ko ? agent.tagline : agent.taglineEn) || agent.tagline || agent.taglineEn}</em></span>{selectedAgent === agent.id && <IconCheck size={15} />}</button>)}</div>
-              : <div className={styles.sheetEmpty}>{roleFilter ? addCopy.noMatch : (ko ? "사용 가능한 로컬 에이전트가 없습니다." : "No local agents are available.")}{roleFilter && <button type="button" className={styles.inlineLink} onClick={() => setRoleFilter(null)}>{addCopy.showAll}</button>}{onCreateAgent && <button type="button" className={styles.inlineLink} onClick={() => { setSelectedAgent(""); setName(""); setLeaseDays("0"); setAddSearch(""); setAddError(null); setRoleFilter(null); setAddOpen(false); onCreateAgent(); }}>{ko ? "새 에이전트 만들기" : "Create a new agent"}</button>}</div>
+              : candidates.length > 0 ? <div className={styles.candidateGrid} role="list" aria-label={addCopy.installed}>{candidates.map((agent) => <button type="button" role="listitem" key={agent.id} data-active={selectedAgent === agent.id ? "true" : "false"} onClick={() => { setSelectedAgent(agent.id); setAddError(null); }}><span><strong>{agent.localDisplayName || (ko ? agent.name : agent.nameEn) || agent.name}</strong><small>{agent.kind === "team" ? addCopy.team : addCopy.single} · {ko ? "로컬" : "Local"}</small><em>{(ko ? agent.tagline : agent.taglineEn) || agent.tagline || agent.taglineEn}</em></span>{selectedAgent === agent.id && <IconCheck size={15} />}</button>)}</div>
+              : <div className={styles.sheetEmpty}>{roleFilter ? addCopy.noMatch : (ko ? "사용 가능한 로컬 에이전트가 없습니다." : "No local agents are available.")}{roleFilter && <button type="button" className={styles.inlineLink} onClick={() => setRoleFilter(null)}>{addCopy.showAll}</button>}{onCreateAgent && <button type="button" className={styles.inlineLink} onClick={() => { setSelectedAgent(""); setLeaseDays("0"); setAddSearch(""); setAddError(null); setRoleFilter(null); setAddOpen(false); onCreateAgent(); }}>{ko ? "새 에이전트 만들기" : "Create a new agent"}</button>}</div>
           ) : inventoryLoading && remoteCandidates.length === 0 ? <AgentInventoryLoading locale={locale} /> : remoteCandidates.length > 0 ? (
-            <div className={styles.candidateGrid} role="list" aria-label={addTab === "cloud" ? "Cloud" : "Hub"}>{remoteCandidates.map((listing) => <button type="button" role="listitem" key={`${addTab}:${listing.entityKind || "agent"}:${listing.slug}`} data-active={selectedAgent === listing.slug ? "true" : "false"} onClick={() => { setSelectedAgent(listing.slug); setName(""); setLeaseDays(addTab === "hub" ? "7" : "0"); setAddError(null); }}><span><strong>{(ko ? listing.name : listing.nameEn) || listing.name || listing.slug}</strong><small>{listing.entityKind === "team" || (listing.agentCount ?? 0) > 1 ? addCopy.team : addCopy.single} · {addTab === "cloud" ? "Cloud" : "Hub"}</small><em>{(ko ? listing.tagline : listing.taglineEn) || listing.tagline || listing.taglineEn}</em></span>{selectedAgent === listing.slug && <IconCheck size={15} />}</button>)}</div>
+            <div className={styles.candidateGrid} role="list" aria-label={addTab === "cloud" ? "Cloud" : "Hub"}>{remoteCandidates.map((listing) => <button type="button" role="listitem" key={`${addTab}:${listing.entityKind || "agent"}:${listing.slug}`} data-active={selectedAgent === listing.slug ? "true" : "false"} onClick={() => { setSelectedAgent(listing.slug); setLeaseDays(addTab === "hub" ? "7" : "0"); setAddError(null); }}><span><strong>{(ko ? listing.name : listing.nameEn) || listing.name || listing.slug}</strong><small>{listing.entityKind === "team" || (listing.agentCount ?? 0) > 1 ? addCopy.team : addCopy.single} · {addTab === "cloud" ? "Cloud" : "Hub"}</small><em>{(ko ? listing.tagline : listing.taglineEn) || listing.tagline || listing.taglineEn}</em></span>{selectedAgent === listing.slug && <IconCheck size={15} />}</button>)}</div>
           ) : <div className={styles.sheetEmpty}><span>{accountSignedIn === false
             /* 미로그인을 빈 계정처럼 보이게 하지 않는다(D-10) — signedIn===false 로 확인된 때만 로그인 안내. */
             ? (addTab === "cloud" ? addCopy.cloudSignedOut : addCopy.hubSignedOut)
             : (addTab === "cloud" ? addCopy.cloudEmpty : addCopy.hubEmpty)}</span>{onBrowseSource && <button type="button" onClick={() => onBrowseSource(addTab)}>{addTab === "cloud" ? addCopy.cloudBrowse : addCopy.hubBrowse}</button>}</div>}
 
+          {/*
+            고른 뒤에 나오는 칸은 **좌석에서만 정하는 것**만 남긴다(대여 기간).
+            이름·캐릭터를 여기서 또 받으면 목록이 눌려 고를 수 없게 되고, 방금 만들기
+            창에서 정한 것을 한 번 더 묻는 꼴이 된다(오너 지적 2026-08-25).
+          */}
           {(selectedCandidate || selectedListing) && <section className={styles.selectedAgentPanel}>
-            <label className={styles.editorField}>{addCopy.displayName}<input value={name} onChange={(event) => setName(event.target.value)} placeholder={addCopy.displayPlaceholder} /></label>
-            <div className={styles.editorField}>
-              <span>{locale === "ko" ? "캐릭터" : "Character"}</span>
-              <div className={styles.characterRow} role="listbox" aria-label={locale === "ko" ? "캐릭터 고르기" : "Choose a character"}>
-                {ONE_CHARACTER_OPTIONS.map((character) => <button
-                  key={character.id}
-                  type="button"
-                  role="option"
-                  aria-selected={addCharacterId === character.id}
-                  data-active={addCharacterId === character.id ? "true" : "false"}
-                  title={character.label}
-                  onClick={() => setAddCharacterId(character.id)}
-                >{/* eslint-disable-next-line @next/next/no-img-element */}<img src={character.src} alt={character.label} /></button>)}
-              </div>
-            </div>
             {addTab === "hub" && <label className={styles.editorField}>{addCopy.lease}<select value={leaseDays} onChange={(event) => setLeaseDays(event.target.value)}><option value="7">7 {ko ? "일" : "days"}</option><option value="30">30 {ko ? "일" : "days"}</option></select></label>}
             <div className={styles.modelPolicy}><IconSparkles size={15} /><div><strong>{addCopy.modelAuto}</strong><span>{selectedCandidate?.preferredBackend ? addCopy.modelPreferred(selectedCandidate.preferredBackend) : addCopy.modelDefault}</span></div></div>
-            <p className={styles.note}>{addCopy.nameNote}</p>
+            <p className={styles.note}>{addCopy.identityNote}</p>
           </section>}
           {addError && <p className={styles.addError} role="alert">{addError}</p>}
           {busy && <div className={styles.addBusy} role="status" aria-live="polite"><span className={styles.inventorySpinner} aria-hidden="true" /><span>{ko ? "에이전트를 조직에 연결하고 전용 채팅을 준비하고 있습니다." : "Connecting the agent to the organisation and preparing its dedicated chat."}<LoadingEstimate locale={ko ? "ko" : "en"} operationKey="one-agent-org-add" expectedSeconds={[2, 30]} /></span></div>}
-          <div className={styles.sheetActions}><button type="button" disabled={busy} onClick={() => { setSelectedAgent(""); setName(""); setLeaseDays("0"); setAddSearch(""); setAddError(null); setRoleFilter(null); setAddOpen(false); }}>{addCopy.cancel}</button><button type="button" className={styles.primaryAction} disabled={!selectedAgent || busy} onClick={() => void submitAdd()}>{busy ? (ko ? "추가 중…" : "Adding…") : addCopy.add}</button></div>
+          <div className={styles.sheetActions}><button type="button" disabled={busy} onClick={() => { setSelectedAgent(""); setLeaseDays("0"); setAddSearch(""); setAddError(null); setRoleFilter(null); setAddOpen(false); }}>{addCopy.cancel}</button><button type="button" className={styles.primaryAction} disabled={!selectedAgent || busy} onClick={() => void submitAdd()}>{busy ? (ko ? "추가 중…" : "Adding…") : addCopy.add}</button></div>
         </div>
       </OneBottomSheet>
 

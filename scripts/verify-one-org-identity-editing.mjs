@@ -50,7 +50,22 @@ assert.match(shell, /onEditIdentity=\{\(member\)/, "the org chart's edit entry m
 const chart = read("renderer/components/one/OneOrgChart.tsx");
 assert.match(chart, /if \(agent\.parentTeamId\) return false;/, "team member sub-agents must not be seatable on their own");
 assert.match(chart, /replacementCandidates = installedAgents\.filter\(\(agent\) => !usedIds\.has\(agent\.id\) && !agent\.parentTeamId\)/, "the same rule must apply to replacements");
-assert.match(chart, /ONE_CHARACTER_OPTIONS\.map\(\(character\)/, "the seat sheet must offer the same character list as the create dialog");
+// ── D. 앉힐 때는 이름·캐릭터를 다시 묻지 않는다 (오너 지적 2026-08-25) ────────
+//
+// 2026-08-23 에는 이 자리에 "좌석 시트도 캐릭터 목록을 제공해야 한다"가 있었다. 그때의
+// 진짜 결함은 "앉히면 얼굴을 못 바꾼다"였고, 그건 같은 수리에서 만든 편집 경로(B절:
+// 조직도 행 편집 → 만들기 창)로 이미 해결됐다. 좌석 시트에까지 남겨 두니 방금 만들기
+// 창에서 정한 이름·캐릭터를 한 화면 뒤에서 또 묻고, 그 칸들이 후보 목록을 눌러
+// "고르라면서 고를 수 없는" 목록이 됐다. 그래서 계약을 뒤집는다.
+assert.doesNotMatch(chart, /ONE_CHARACTER_OPTIONS/, "the seat sheet must not ask for a character again — the source package's face is the default and the edit dialog is where it changes");
+assert.doesNotMatch(chart, /addCopy\.displayName/, "the seat sheet must not ask for a display name again — it arrives with the name it already has");
+// 원본 그대로 앉는다는 것이 실제 호출로도 참이어야 한다(문구만 바꾸고 값을 계속 보내면 소용없다).
+assert.match(chart, /await onAdd\(installed\.id, undefined, leaseExpiresAt, undefined\);/, "seating must send no name and no character so the source package's own identity is used");
+// 바꿀 길은 반드시 남아 있어야 한다 — 묻지 않는 것과 못 바꾸는 것은 다르다.
+assert.match(chart, /onEditIdentity\(member\); return;/, "the org chart row's edit entry must still open the create dialog to change name and character");
+// "담당 교체"는 통합 편집 창으로 되돌리면 안 된다 — 되돌리면 같은 창이 다시 열려
+// 누른 사람 입장에서는 아무 일도 일어나지 않는 죽은 버튼이 된다(2026-08-25 실측).
+assert.match(chart, /sheetRequest\.kind !== "replace"/, "an explicit replace request must reach the replace sheet, not bounce back into the edit dialog");
 
 // ── 죽은 경로 사본 합치기(같은 에이전트가 43개로 불어난 사고) ─────────────
 const dedupe = read("electron/store/agent-dedupe.ts");

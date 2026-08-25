@@ -1523,11 +1523,16 @@ export function OneActivityArtifactRail({
     const priorBodyCursor = body.style.cursor;
     const priorBodyUserSelect = body.style.userSelect;
     root.setAttribute("data-one-output-resizing", "true");
+    // 끄는 동안에는 모션을 끈다. 이 표식 하나가 One 의 모션 토큰을 통째로 0ms 로
+    // 눌러, 폭이 손가락을 그대로 따라온다(모션이 남으면 고무줄처럼 늘어져 더 나쁘다).
+    // 놓는 순간 표식이 사라지므로, 접힘 복원 같은 되돌림은 다시 흐른다.
+    root.setAttribute("data-one-resizing", "true");
     root.style.cursor = "col-resize";
     root.style.userSelect = "none";
     body.style.cursor = "col-resize";
     body.style.userSelect = "none";
     return () => {
+      root.removeAttribute("data-one-resizing");
       if (prior == null) root.removeAttribute("data-one-output-resizing");
       else root.setAttribute("data-one-output-resizing", prior);
       root.style.cursor = priorRootCursor;
@@ -1536,6 +1541,34 @@ export function OneActivityArtifactRail({
       body.style.userSelect = priorBodyUserSelect;
     };
   }, [resizing]);
+  /**
+   * 가로 손잡이 둘(미리보기 ↔ 아래 칸 분할선, 기록 패널 높이)도 같은 계약을 쓴다.
+   * 끄는 동안 모션을 끄고 커서를 row-resize 로 잡아, 포인터가 손잡이 밖으로
+   * 나가도 화면이 흔들리지 않는다. 세로 드래그와 동시에 일어날 수 없으므로
+   * 표식은 하나로 충분하다.
+   */
+  const rowResizing = previewResizing || historyResizing;
+  useEffect(() => {
+    if (!rowResizing) return;
+    const root = document.documentElement;
+    const body = document.body;
+    const priorRootCursor = root.style.cursor;
+    const priorRootUserSelect = root.style.userSelect;
+    const priorBodyCursor = body.style.cursor;
+    const priorBodyUserSelect = body.style.userSelect;
+    root.setAttribute("data-one-resizing", "true");
+    root.style.cursor = "row-resize";
+    root.style.userSelect = "none";
+    body.style.cursor = "row-resize";
+    body.style.userSelect = "none";
+    return () => {
+      root.removeAttribute("data-one-resizing");
+      root.style.cursor = priorRootCursor;
+      root.style.userSelect = priorRootUserSelect;
+      body.style.cursor = priorBodyCursor;
+      body.style.userSelect = priorBodyUserSelect;
+    };
+  }, [rowResizing]);
   const sources = useMemo(() => {
     const current = activity?.sources ?? [];
     if (!preferredBrowserUrl || current.some((source) => source.url === preferredBrowserUrl)) return current;

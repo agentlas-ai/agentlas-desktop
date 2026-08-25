@@ -428,19 +428,22 @@
 .addSearch input { min-width: 0; border: 0; outline: 0; background: transparent; color: var(--one-sheet-ink); font: inherit; font-size: 12px; }
 .addSearch > button { width: 28px; height: 28px; display: grid; place-items: center; border: 0; border-radius: 7px; background: transparent; color: var(--one-sheet-muted); cursor: pointer; }
 .addSearch > button:hover { background: var(--one-sheet-card-muted); }
-.sourceNote { margin: -4px 0 0; color: var(--one-sheet-muted); font-size: 11px; line-height: 1.5; }
-.candidateGrid { min-height: 0; flex: 1; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-content: start; gap: 8px; overflow-y: auto; padding-right: 2px; }
-.candidateGrid > button { min-height: 70px; display: grid; grid-template-columns: minmax(0, 1fr) 18px; align-items: center; gap: 10px; padding: 11px 12px; border: 1px solid var(--one-sheet-control-border); border-radius: var(--one-sheet-card-radius); background: var(--one-sheet-control-surface); color: var(--one-sheet-ink); font: inherit; text-align: left; cursor: pointer; }
+/* 후보 목록이 이 시트의 본론이다. 아래 칸들이 자라도 목록이 먼저 눌리면 안 된다
+   (오너 지적 2026-08-25: "허브 에이전트 조그맣게 보이는데 저게 고를 수가 있냐").
+   min-height 는 카드 두 줄 + 다음 줄이 살짝 보이는 높이 — 스크롤할 게 있다는 신호. */
+.candidateGrid { min-height: 264px; flex: 1 1 auto; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-content: start; gap: 8px; overflow-y: auto; padding-right: 2px; }
+.candidateGrid > button { min-height: 88px; display: grid; grid-template-columns: minmax(0, 1fr) 18px; align-items: center; gap: 10px; padding: 12px 13px; border: 1px solid var(--one-sheet-control-border); border-radius: var(--one-sheet-card-radius); background: var(--one-sheet-control-surface); color: var(--one-sheet-ink); font: inherit; text-align: left; cursor: pointer; }
 .candidateGrid > button:hover,
 .candidateGrid > button:focus-visible { border-color: #c8cbd0; outline: 0; }
 .candidateGrid > button[data-active="true"] { border-color: var(--one-sheet-accent); background: color-mix(in srgb, var(--one-sheet-accent) 6%, #fff); box-shadow: var(--one-sheet-focus); color: var(--one-sheet-accent); }
 .candidateGrid > button > span { min-width: 0; display: grid; gap: 3px; }
 .candidateGrid strong,
-.candidateGrid small,
-.candidateGrid em { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.candidateGrid strong { color: var(--one-sheet-ink); font-size: 12px; font-style: normal; }
-.candidateGrid small { color: var(--one-sheet-muted); font-size: 9px; }
-.candidateGrid em { color: #686e72; font-size: 10px; font-style: normal; }
+.candidateGrid small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.candidateGrid strong { color: var(--one-sheet-ink); font-size: 13px; font-style: normal; }
+.candidateGrid small { color: var(--one-sheet-muted); font-size: 10px; }
+/* 설명이 한 줄로 잘리면 "무엇을 하는 에이전트인지"가 사라져 고를 수가 없다.
+   두 줄까지 보여주고 그 뒤로만 자른다. */
+.candidateGrid em { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; color: #686e72; font-size: 11px; font-style: normal; line-height: 1.45; }
 .sheetEmpty { min-height: 88px; flex: 1; display: grid; place-items: center; gap: 8px; margin: 0; padding: 18px; border: 1px solid var(--one-sheet-line); border-radius: var(--one-sheet-card-radius); background: var(--one-sheet-card-muted); color: var(--one-sheet-muted); font-size: 11px; line-height: 1.5; text-align: center; }
 .sheetEmpty > button { min-height: 34px; padding: 0 12px; border: 1px solid var(--one-sheet-control-border); border-radius: var(--one-sheet-control-radius); background: var(--one-sheet-control-surface); color: var(--one-sheet-ink); font: inherit; font-size: 11px; font-weight: 650; cursor: pointer; }
 .inventoryLoading { min-height: 112px; flex: 1; display: flex; align-items: center; justify-content: center; gap: 12px; padding: 20px; border: 1px solid var(--one-sheet-line); border-radius: var(--one-sheet-card-radius); background: var(--one-sheet-card-muted); color: var(--one-sheet-ink); }
@@ -449,7 +452,9 @@
 .inventoryLoading small { color: var(--one-sheet-muted); font-size: 10px; line-height: 1.45; }
 .inventorySpinner { width: 18px; height: 18px; flex: 0 0 auto; border: 2px solid #d5d8d6; border-top-color: #343936; border-radius: 50%; animation: oneInventorySpin .75s linear infinite; }
 .addBusy { display: flex; align-items: center; gap: 9px; padding: 10px 12px; border: 1px solid #dedfdd; border-radius: 10px; background: #f4f4f3; color: #565c59; font-size: 10px; line-height: 1.45; }
-.selectedAgentPanel { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; padding: 16px; border: 1px solid var(--one-sheet-line); border-radius: var(--one-sheet-card-radius); background: #fafafa; }
+/* 고른 뒤 나오는 확인 칸. 이름·캐릭터를 더 묻지 않으므로 짧다 — 이 칸이 짧아야
+   위의 후보 목록이 살아 있다(오너 지적 2026-08-25). */
+.selectedAgentPanel { flex: 0 0 auto; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 12px 14px; border: 1px solid var(--one-sheet-line); border-radius: var(--one-sheet-card-radius); background: #fafafa; }
 .selectedAgentPanel .modelPolicy,
 .selectedAgentPanel .note { grid-column: 1 / -1; }
 .addError { margin: 0; padding: 10px 12px; border: 1px solid var(--one-sheet-danger-line); border-radius: 10px; background: var(--one-sheet-danger-surface); color: var(--one-sheet-danger); font-size: 11px; line-height: 1.45; }
@@ -484,8 +489,5 @@
 @keyframes oneInventorySpin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .inventorySpinner { animation-duration: 1.8s; } }
 
-/* 좌석 배치 시트의 캐릭터 고르기 — 만들기 화면과 같은 목록을 같은 크기로 보여준다. */
-.characterRow { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 0; }
-.characterRow button { width: 44px; height: 44px; padding: 2px; border: 1px solid #e3eae5; border-radius: 10px; background: #fbfdfb; cursor: pointer; }
-.characterRow button[data-active="true"] { border-color: #1d7e67; box-shadow: 0 0 0 2px rgba(29, 126, 103, .18); }
-.characterRow img { width: 100%; height: 100%; object-fit: contain; }
+/* 좌석 배치 시트의 캐릭터 고르기는 제거됐다(오너 지적 2026-08-25 — 만들기 창에서
+   이미 정한 것을 또 묻던 자리). 얼굴은 원본 패키지 것을 쓰고, 바꾸는 곳은 편집 창이다. */

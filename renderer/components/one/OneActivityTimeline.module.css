@@ -1140,3 +1140,72 @@ button.artifactVisual { cursor: pointer; }
 }
 
 .artifactEmptyList > button:hover { background: #f7f8f8; color: #1d2023; }
+
+/* ===========================================================================
+ * 모션 — 결과 패널 폭 / 미리보기 분할선 / 기록 높이 / 손잡이
+ *
+ * 토큰(--one-motion-*, --one-ease-*)의 정의는 OneShell.module.css 맨 끝
+ * "모션 시스템" 절 한 곳에 있다. 여기서는 쓰기만 한다.
+ *
+ * 드래그 중에는 html[data-one-resizing="true"] 가 그 토큰들을 0ms 로 눌러
+ * 폭·높이가 손가락을 그대로 따라온다. 표식을 지우는 순간부터 다시 흐르므로
+ * 놓을 때의 되돌림·키보드(←/→, ↑/↓, Home/End)·더블클릭 되돌리기·
+ * 프로그램적 변경(브라우저/앱 탭이 열리며 560px 로 넓어지는 자리)만 흐른다.
+ * =========================================================================== */
+
+/* 폭이 흐르면 안쪽 내용도 함께 다시 잡힌다 — 레퍼런스에서 패널이 좁아질 때
+   포트 목록이 새 폭으로 다시 배치되던 그 움직임(f16→f17). */
+.artifactRail {
+  transition:
+    width var(--one-motion-panel, 200ms) var(--one-ease-panel, ease),
+    box-shadow var(--one-motion-panel, 200ms) var(--one-ease-panel, ease),
+    border-radius var(--one-motion-panel, 200ms) var(--one-ease-panel, ease),
+    border-color var(--one-motion-fast, 120ms) linear;
+  animation: oneRailEnter var(--one-motion-panel, 200ms) var(--one-ease-panel, ease) both;
+}
+
+/* 끄는 동안에만 승격한다. 항상 걸어 두면 이 패널이 영구히 별도 레이어로 남아
+   비용만 내고 얻는 게 없다. */
+.artifactRail[data-resizing="true"] {
+  will-change: width;
+}
+
+/* 손잡이는 다가가면 배어 나온다 — 항상 떠 있지 않다(레퍼런스 f14 엔 없고
+   f15/f16 에서 나타난다). 커지는 폭까지 같이 흐르게 해 딸깍거리지 않게. */
+.artifactResizeHandle::after {
+  transition:
+    opacity var(--one-motion-fast, 120ms) linear,
+    width var(--one-motion-fast, 120ms) var(--one-ease-panel, ease),
+    background var(--one-motion-fast, 120ms) linear;
+}
+
+.artifactResizeHandle:hover::after,
+.artifactResizeHandle:focus-visible::after,
+.artifactRail[data-resizing="true"] .artifactResizeHandle::after {
+  width: 4px;
+  background: #b9bec1;
+}
+
+/* 가로 손잡이 둘(미리보기 분할선·기록 높이)은 전환이 아예 없어 딱 바뀌었다. */
+.previewSplitHandle::after,
+.artifactHistoryResizeHandle::after {
+  transition:
+    opacity var(--one-motion-fast, 120ms) linear,
+    background var(--one-motion-fast, 120ms) linear;
+}
+
+/* 높이는 인라인 값으로 들어온다(--one-preview-height / style.height).
+   드래그 중엔 위 스위치가 0ms 로 눌러 손가락을 따라가고, 더블클릭으로
+   되돌릴 때·키보드로 옮길 때만 흐른다. */
+.artifactList[data-preview-fixed="true"] > .livePane {
+  transition: height var(--one-motion-panel, 200ms) var(--one-ease-panel, ease);
+}
+
+.artifactHistoryPane {
+  transition: height var(--one-motion-panel, 200ms) var(--one-ease-panel, ease);
+}
+
+@keyframes oneRailEnter {
+  from { opacity: 0; transform: translateX(10px); }
+  to { opacity: 1; transform: none; }
+}
