@@ -1143,9 +1143,20 @@ function LibraryAgentsView() {
       : source === "cloud"
         ? (locale === "ko" ? "Agent Cloud 원격 자산도 삭제" : "the Agent Cloud asset will also be deleted")
         : (locale === "ko" ? "Hub 북마크도 제거" : "the Hub bookmark will also be removed");
+    // 좌석 모델(T1): 봇 삭제 = 자리 비우기 — 대화·세션은 보존된다. 확인 문구는 정확한
+    // 수(사전 COUNT)로 그것을 말한다(SEAT-SESSION-PLAN-v2 §4-7, 계약 7-D 기준 9).
+    let preservation = locale === "ko"
+      ? " 대화 기록은 그대로 남습니다."
+      : " Conversations are kept.";
+    try {
+      const preview = await api.team.uninstallPreview(agent.id);
+      preservation = locale === "ko"
+        ? ` 좌석 ${preview.seatCount}곳이 빈 자리가 됩니다. 대화 ${preview.chatCount}개는 그대로 남습니다.`
+        : ` ${preview.seatCount} seat${preview.seatCount === 1 ? "" : "s"} become${preview.seatCount === 1 ? "s" : ""} empty. ${preview.chatCount} conversation${preview.chatCount === 1 ? "" : "s"} stay${preview.chatCount === 1 ? "s" : ""}.`;
+    } catch { /* 수를 못 세면 수 없는 보존 문구로 낸다 — 지어내지 않는다 */ }
     if (!window.confirm(locale === "ko"
-      ? `'${displayName}'을(를) 조직도에서 삭제할까요? ${sourceLabel}합니다.${impact}`
-      : `Delete '${displayName}' from the organization chart? ${sourceLabel}.${impact}`)) return;
+      ? `'${displayName}'을(를) 조직도에서 삭제할까요? ${sourceLabel}합니다.${preservation}${impact}`
+      : `Delete '${displayName}' from the organization chart? ${sourceLabel}.${preservation}${impact}`)) return;
     try {
       // Detachment is a consequence of the removal itself now
       // (electron/store/projects.ts detachProjectPoolReferences), so every

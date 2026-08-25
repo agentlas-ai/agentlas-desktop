@@ -1,6 +1,7 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { WorkLiveViewState } from "@/lib/types";
 import {
   IconCamera,
   IconExpand,
@@ -45,6 +46,46 @@ export function LiveDeviceMockup({ url, title, runtimeLabel, viewId, locale = "k
   const effectiveViewId = viewIdRef.current;
   const [expanded, setExpanded] = useState(false);
   const [poweredOff, setPoweredOff] = useState(false);
+  // "LIVE"는 관측된 사실일 때만 단다 (U-D-1 범위 밖 3종 ③): 네이티브 뷰의
+  // 실제 상태 + 루프백 서버 도달성 프로브(OneActivityTimeline과 같은 계약 —
+  // 보이는 동안만 6초 주기, 죽음/부활 매 주기 재평가).
+  const [viewState, setViewState] = useState<WorkLiveViewState>("opening");
+  const [serverGone, setServerGone] = useState(false);
+  const localOrigin = useMemo(() => {
+    try {
+      const parsed = new URL(url);
+      return /^(127\.0\.0\.1|localhost|\[::1\])$/i.test(parsed.hostname) ? parsed.origin : null;
+    } catch {
+      return null;
+    }
+  }, [url]);
+  useEffect(() => {
+    if (!localOrigin || poweredOff) {
+      setServerGone(false);
+      return;
+    }
+    let disposed = false;
+    const probe = async () => {
+      if (document.visibilityState === "hidden") return;
+      try {
+        await fetch(localOrigin, { method: "HEAD", mode: "no-cors", cache: "no-store", signal: AbortSignal.timeout(1_500) });
+        if (!disposed) setServerGone(false);
+      } catch {
+        if (!disposed) setServerGone(true);
+      }
+    };
+    void probe();
+    const timer = window.setInterval(() => { void probe(); }, 6_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [localOrigin, poweredOff]);
+  const badge = serverGone || viewState === "error"
+    ? (ko ? "연결 끊김" : "OFFLINE")
+    : viewState === "ready"
+      ? "LIVE"
+      : (ko ? "연결 중" : "CONNECTING");
 
   const reload = () => {
     void window.agentlas?.workLiveView?.reload(effectiveViewId);
@@ -70,7 +111,7 @@ export function LiveDeviceMockup({ url, title, runtimeLabel, viewId, locale = "k
         <div className={styles.windowTitle}>
           <span className={styles.windowDot} aria-hidden="true" />
           <strong>{ko ? "iOS 시뮬레이터" : "iOS simulator"}</strong>
-          <span className={styles.liveBadge}>LIVE</span>
+          <span className={styles.liveBadge} data-live-state={serverGone || viewState === "error" ? "offline" : viewState}>{badge}</span>
         </div>
         <div className={styles.windowActions}>
           <button
@@ -118,6 +159,7 @@ export function LiveDeviceMockup({ url, title, runtimeLabel, viewId, locale = "k
                     mode="app"
                     bare
                     viewId={effectiveViewId}
+                    onStatus={(status) => setViewState(status.state)}
                   />
                 </div>
               )}

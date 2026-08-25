@@ -554,6 +554,28 @@ class CdpLiveStream {
     if (this.disposed) return;
     this.disposed = true;
     this.rejectPending("stream-disconnected");
+    // 마지막으로 "이제 볼 수 없다"는 프레임을 한 번 밀어 준다. 이것 없이는
+    // 렌더러가 마지막 정상 프레임을 영원히 들고 있어, 죽은 페이지가 살아있는
+    // 것처럼 보였다(U-D-1 범위 밖 3종 ①, 2026-08-25). 정상 종료(close())는
+    // closing 플래그로 이 경로에 오기 전에 disposed 처리되므로 해당 없음.
+    if (!this.closing) {
+      try {
+        this.sink({
+          available: false,
+          dataUrl: null,
+          targetId: this.target.id,
+          title: this.target.title.slice(0, 200),
+          url: displayUrl(this.target.url),
+          width: this.width,
+          height: this.height,
+          viewport: this.viewport,
+          capturedAt: new Date().toISOString(),
+          error: "browser-offline",
+          sessionId: this.sessionId,
+          sequence: ++this.frameSequence,
+        });
+      } catch { /* 알림 실패가 종료 자체를 막으면 안 된다 */ }
+    }
     this.notifyClosed();
   }
 

@@ -90,7 +90,7 @@ function deliveryLabel(handoff: OneActivityHandoff, message: OneActivityHandoffM
   return locale === "ko" ? "전달됨" : "Sent";
 }
 
-function visibleAgentText(value: string, locale: Locale): string {
+function visibleAgentText(value: string, locale: Locale, speakerName?: string): string {
   // Machine receipts remain in the run ledger. The group room is for what the
   // teammate said, so strip the explicit receipt appendix without inferring
   // state from prose.
@@ -99,8 +99,29 @@ function visibleAgentText(value: string, locale: Locale): string {
       ? "앞서 완료된 동료들의 작업 결과를 공유했어요. 이어서 검토해 주세요."
       : "I shared the completed teammates' results. Please continue the review.";
   }
-  const receiptAt = value.search(/(?:#{1,6}\s*)?HANDOFF FACTS\b/i);
-  const withoutReceipt = receiptAt >= 0 ? value.slice(0, receiptAt) : value;
+  // Records written by an older build were whitespace-flattened, so markdown
+  // structure ("## 근거", "---") sat inline as literal text (G-1). Restore the
+  // line breaks those markers imply before any line-anchored cleanup below.
+  const restored = value.includes("\n")
+    ? value
+    : value
+        .replace(/\s+(#{1,6})\s+(?=\S)/gu, "\n\n$1 ")
+        .replace(/\s+---+\s+/gu, "\n\n");
+  // The interactive ask fence renders as its own option card; its raw JSON is
+  // wire format, not room prose (G-1 — also stripped at event creation).
+  const withoutAskFence = restored
+    .replace(/(?:```[a-z]*\s*)?<<agentlas-ask>>[\s\S]*?(?:<<\/agentlas-ask>>\s*(?:```)?|$)/giu, "");
+  // 헤더가 발화자를 이미 표기한다 — 워커가 스스로 붙인 이름표 머리말
+  // ("**[기획자]**")는 프로토콜 잔재다. 정확히 자기 이름일 때만 벗긴다
+  // (구버전 기록 호환; 새 이벤트는 emit 시점에 같은 규칙으로 정리된다).
+  const withoutSelfTag = speakerName?.trim()
+    ? withoutAskFence.replace(
+        new RegExp(`^\\s*\\*{0,2}\\[${speakerName.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\]\\*{0,2}\\s*[:：]?\\s*`, "u"),
+        "",
+      )
+    : withoutAskFence;
+  const receiptAt = withoutSelfTag.search(/(?:#{1,6}\s*)?HANDOFF FACTS\b/i);
+  const withoutReceipt = receiptAt >= 0 ? withoutSelfTag.slice(0, receiptAt) : withoutSelfTag;
   // These are host/model control envelopes, never words that One said in the
   // room. New events are cleaned before they are emitted; this renderer guard
   // also keeps transcripts recorded by an older build readable.
@@ -138,17 +159,29 @@ function visibleAgentText(value: string, locale: Locale): string {
   // shared room. Historical events may already be whitespace-compacted, so
   // remove the short protocol preamble here as well as at event creation.
   const withoutRuntimePreamble = withoutReceiptJargon
-    .replace(/^\s*(?:Skills used|사용 스킬)\s*:[^.!?\n]*(?:[.!?]\s+|(?:\r?\n)+)/iu, "")
-    .replace(/^\s*(?:Reason|이유)\s*:[^.!?\n]*(?:[.!?]\s+|(?:\r?\n)+)/iu, "")
+    // Router/persona protocol lines can sit mid-answer, not only at the start
+    // ("Skill used:" singular and "Agents used:" are the same family — G-3).
+    .replace(/^\s*(?:Skills?\s+used|Agents?\s+used|사용\s*스킬|사용\s*에이전트)\s*:[^.!?\n]*(?:[.!?]\s+|(?:\r?\n)+|[.!?]?\s*$)/gimu, "")
+    .replace(/^\s*(?:Reason|이유)\s*:[^.!?\n]*(?:[.!?]\s+|(?:\r?\n)+|[.!?]?\s*$)/gimu, "")
     .replace(/^\s*(?:I['’]m using|Using)\b.*?\.\s+(?=(?:\*\*)?\[Hope\]|(?:\*\*)?Finding\b|Initial\b|The\b|#)/iu, "")
     .replace(/\*{0,2}\[Hope\]\*{0,2}\s*/giu, "")
+    // Global-persona name reference beside a teammate name ("기획자(Hope)") —
+    // ambient host identity, never room content (G-2).
+    .replace(/\(\s*Hope\s*\)/gu, "")
     .replace(/\*{0,2}Finding\s*\/\s*result\s*:?\*{0,2}\s*/giu, "")
-    .replace(/\s*#{0,6}\s*STATUS\s+(?:COMPLETED|PARTIAL|FAILED)\b[\s\S]*$/iu, "");
+    // Worker report appendix (LIMITATIONS → STATUS) is the orchestrator's
+    // review payload; the room shows what the teammate said (G-1). LIMITATIONS
+    // matches case-sensitively unless it carries a heading marker.
+    .replace(/\s*(?:-{3,}\s*)?(?:#{1,6}\s*)?\*{0,2}LIMITATIONS\*{0,2}\s*[:：]?[\s\S]*$/u, "")
+    .replace(/\s*(?:-{3,}\s*)?(?:#{1,6}\s*\*{0,2}|\*{1,2})(?:제한\s*사항|한계)\*{0,2}\s*[:：]?[\s\S]*$/u, "")
+    .replace(/\s*(?:-{3,}\s*)?(?:#{1,6}\s*)?\*{0,2}STATUS\*{0,2}\s*[:：]?\s*\*{0,2}(?:COMPLETED|PARTIAL|FAILED)\b[\s\S]*$/iu, "")
+    // 부록 절단 뒤 고아 구분선/여는 강조 기호 정리(구버전 기록 호환).
+    .replace(/\s*-{3,}\s*\*{0,2}\s*$/u, "");
   return withoutRuntimePreamble.trim();
 }
 
-function visibleCoordinatorText(value: string, locale: Locale): string {
-  const cleaned = visibleAgentText(value, locale);
+function visibleCoordinatorText(value: string, locale: Locale, speakerName?: string): string {
+  const cleaned = visibleAgentText(value, locale, speakerName);
   const unsupportedPastClaim = /\b(?:I|we)\s+(?:have\s+|already\s+)?(?:saved|created|completed|finished|uploaded|published|verified|generated|updated|fixed|built)\b|(?:저장|생성|완료|업로드|게시|검증|수정|빌드)(?:했|됐|해뒀|되었습니다)/iu;
   return (cleaned.match(/[^.!?]+(?:[.!?]+|$)/gu) ?? [])
     .map((sentence) => sentence.trim())
@@ -162,21 +195,26 @@ function MessageText({
   messageId,
   locale,
   coordinationOnly = false,
+  speakerName,
 }: {
   text: string;
   messageId: string;
   locale: Locale;
   coordinationOnly?: boolean;
+  speakerName?: string;
 }) {
   const [expanded, setExpanded] = useState(false);
   const normalized = coordinationOnly
-    ? visibleCoordinatorText(text, locale)
-    : visibleAgentText(text, locale);
+    ? visibleCoordinatorText(text, locale, speakerName)
+    : visibleAgentText(text, locale, speakerName);
   const finding = (() => {
-    const match = normalized.match(/\bfinding\s*\/\s*result\s*:\s*/i);
+    // Korean workers translate the report labels ("발견/결과:", "근거:",
+    // "가정:", "리스크:") — the collapse must recognise both languages or the
+    // internal report format dumps raw into the bubble (G-1, desktop-103a).
+    const match = normalized.match(/(?:\bfinding\s*\/\s*result|발견\s*[/·]?\s*결과|결과\s*[/·]?\s*발견)\s*[:：]\s*/iu);
     if (!match || match.index == null) return null;
     const rest = normalized.slice(match.index + match[0].length);
-    const detailAt = rest.search(/\s+(?:evidence\s*(?:\/\s*(?:reasoning\s*)?basis)?|assumptions?|risks?|LIMITATIONS|STATUS)\s*:/i);
+    const detailAt = rest.search(/\s+(?:#{1,6}\s*)?(?:evidence\s*(?:\/\s*(?:reasoning\s*)?basis)?|assumptions?|risks?|LIMITATIONS|STATUS|근거|가정|리스크|한계|제한\s*사항|권장\s*사항|오케스트레이터[^:：\n]*)\s*[:：]/iu);
     const summary = (detailAt >= 0 ? rest.slice(0, detailAt) : rest).trim();
     return summary || null;
   })();
@@ -223,8 +261,8 @@ export function OneTaskforceConversation({
         // available to the internal ledger without creating an empty or
         // receipt-shaped chat bubble for the user.
         const visibleText = speaker.one && message.direction === "orchestrator-to-worker"
-          ? visibleCoordinatorText(message.text, locale)
-          : visibleAgentText(message.text, locale);
+          ? visibleCoordinatorText(message.text, locale, speaker.name)
+          : visibleAgentText(message.text, locale, speaker.name);
         if (!visibleText) continue;
         seen.add(message.id);
         rows.push({
@@ -299,8 +337,8 @@ export function OneTaskforceConversation({
               ? (locale === "ko" ? `${replyTarget.speaker.name}에게 답장` : `Reply to ${replyTarget.speaker.name}`)
               : (locale === "ko" ? `${replyTarget.speaker.name}의 메시지에 댓글` : `Comment on ${replyTarget.speaker.name}'s message`)}</strong>
             <span>{(replyTarget.speaker.one && replyTarget.message.direction === "orchestrator-to-worker"
-              ? visibleCoordinatorText(replyTarget.message.text, locale)
-              : visibleAgentText(replyTarget.message.text, locale)).slice(0, 140)}</span>
+              ? visibleCoordinatorText(replyTarget.message.text, locale, replyTarget.speaker.name)
+              : visibleAgentText(replyTarget.message.text, locale, replyTarget.speaker.name)).slice(0, 140)}</span>
           </div>
         )}
         <div className={styles.bubble} data-doc={documentLike ? "true" : undefined}>
@@ -310,6 +348,7 @@ export function OneTaskforceConversation({
             messageId={message.id}
             locale={locale}
             coordinationOnly={speaker.one && message.direction === "orchestrator-to-worker"}
+            speakerName={speaker.name}
           />
         </div>
       </article>

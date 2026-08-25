@@ -30,6 +30,7 @@ import { clearInlineSelect, type InlineKeyboardMarkup } from "./inline-select";
 import { getAgentById, listInstalledAgents } from "../mcp/registry";
 import { createChat, getChat, getChatWorkingFolder, setChatWorkingFolder } from "../store/chats";
 import { getDb } from "../store/db";
+import { applySeatSnapshotToChats, ensureTelegramRoomSeat } from "../store/seats";
 import { getFirm } from "../store/firms";
 import { getProject } from "../store/projects";
 import { getAutomation } from "../store/automations";
@@ -2236,6 +2237,28 @@ export function setTelegramDesignatedGraph(bindingId: string, graphId: string | 
     .run(graphId, nowIso(), bindingId);
 }
 
+/**
+ * 이 방의 좌석에 세션을 묶는다(좌석 기획 §2.4 · 8단계).
+ * `/new` 로 세션을 비워도 방은 그대로이므로, 새 세션은 같은 좌석에 붙어 방의 지난
+ * 대화들과 한 자리를 이룬다. 좌석 원장이 없는 구세대 DB 에서는 조용히 넘어간다.
+ */
+function bindChatToTelegramRoomSeat(binding: TelegramBindingRow, chatId: string): void {
+  try {
+    const seatId = ensureTelegramRoomSeat({
+      bindingId: binding.id,
+      agentId: binding.target_kind === "agent" ? binding.target_id : null,
+      title: binding.target_kind === "one" ? "Telegram · One" : `Telegram · ${binding.target_id}`,
+    });
+    getDb().prepare("UPDATE chats SET seat_id = ? WHERE id = ?").run(seatId, chatId);
+    getDb()
+      .prepare("UPDATE telegram_bindings SET seat_id = ?, updated_at = ? WHERE id = ?")
+      .run(seatId, nowIso(), binding.id);
+    applySeatSnapshotToChats(seatId);
+  } catch {
+    // 좌석은 표시·정합용이다 — 실패해도 텔레그램 대화 자체를 막지 않는다.
+  }
+}
+
 async function ensureBindingChat(binding: TelegramBindingRow) {
   if (binding.chat_session_id) {
     const existing = getChat(binding.chat_session_id);
@@ -2254,6 +2277,7 @@ async function ensureBindingChat(binding: TelegramBindingRow) {
     getDb()
       .prepare("UPDATE telegram_bindings SET chat_session_id = ?, updated_at = ? WHERE id = ?")
       .run(chat.id, nowIso(), binding.id);
+    bindChatToTelegramRoomSeat(binding, chat.id);
     // /new 로 세션을 비워도 지정한 프로젝트는 살아 있어야 한다. 여기서 다시 걸지 않으면
     // 지정이 조용히 증발해 다음 작업이 엉뚱한 폴더에서 돈다.
     applyDesignatedProjectFolder(binding, chat.id);
@@ -2277,6 +2301,7 @@ async function ensureBindingChat(binding: TelegramBindingRow) {
   getDb()
     .prepare("UPDATE telegram_bindings SET chat_session_id = ?, updated_at = ? WHERE id = ?")
     .run(chat.id, nowIso(), binding.id);
+  bindChatToTelegramRoomSeat(binding, chat.id);
   return chat;
 }
 

@@ -38,6 +38,12 @@ interface CellBase {
   id: string;
   status: OneWorkCellStatus;
   startedAt: string;
+  /**
+   * Delegated teammate who performed this step (typed event attribution). In a
+   * group room the tool log must say *who* called the tool (G-4); absent for
+   * One's own orchestrator steps.
+   */
+  agent?: string;
 }
 
 export type OneWorkCell =
@@ -68,6 +74,8 @@ export interface OneWorkPresentation {
   headline: string;
   /** Immutable run duration once the lifecycle row settled. */
   durationMs?: number;
+  /** Model/runtime label the run actually executed with (표시=실행, C-D-1). */
+  model?: string;
   terminal?: "completed" | "failed" | "cancelled";
   /** Message carried by a failed/cancelled terminal row, if any. */
   terminalMessage?: string;
@@ -261,7 +269,9 @@ function classifyTool(item: OneActivityItem, workspacePath: string | null): Clas
 function pushExplore(cells: OneWorkCell[], item: OneActivityItem, entries: OneWorkExploreEntry[]) {
   const status = itemStatus(item);
   const last = cells.at(-1);
-  if (last && last.kind === "explore") {
+  // Never coalesce steps performed by different teammates into one row — the
+  // row's attribution (G-4) must stay truthful.
+  if (last && last.kind === "explore" && (last.agent ?? "") === (item.agentName?.trim() ?? "")) {
     // Codex coalesces consecutive reads ("Read a, b") and keeps list/search lines in order.
     for (const entry of entries) {
       const tail = last.entries.at(-1);
@@ -275,13 +285,20 @@ function pushExplore(cells: OneWorkCell[], item: OneActivityItem, entries: OneWo
     last.status = mergeStatus(last.status, status);
     return;
   }
-  cells.push({ kind: "explore", id: item.id, status, startedAt: item.observedAt, entries: [...entries] });
+  cells.push({
+    kind: "explore",
+    id: item.id,
+    status,
+    startedAt: item.observedAt,
+    entries: [...entries],
+    ...(item.agentName?.trim() ? { agent: item.agentName.trim() } : {}),
+  });
 }
 
 function pushEdit(cells: OneWorkCell[], item: OneActivityItem, file: OneWorkEditFile, diff?: string) {
   const status = itemStatus(item);
   const last = cells.at(-1);
-  if (last && last.kind === "edit") {
+  if (last && last.kind === "edit" && (last.agent ?? "") === (item.agentName?.trim() ?? "")) {
     const existing = last.files.find((candidate) => candidate.path === file.path);
     if (existing) {
       existing.op = file.op === "write" ? existing.op : "edit";
@@ -294,7 +311,15 @@ function pushEdit(cells: OneWorkCell[], item: OneActivityItem, file: OneWorkEdit
     last.status = mergeStatus(last.status, status);
     return;
   }
-  cells.push({ kind: "edit", id: item.id, status, startedAt: item.observedAt, files: [{ ...file }], ...(diff ? { diff } : {}) });
+  cells.push({
+    kind: "edit",
+    id: item.id,
+    status,
+    startedAt: item.observedAt,
+    files: [{ ...file }],
+    ...(diff ? { diff } : {}),
+    ...(item.agentName?.trim() ? { agent: item.agentName.trim() } : {}),
+  });
 }
 
 export function buildOneWorkPresentation(
@@ -383,6 +408,7 @@ export function buildOneWorkPresentation(
       case "tool": {
         if (!item.tool) break;
         const classified = classifyTool(item, cwd);
+        const agent = item.agentName?.trim();
         switch (classified.cell) {
           case "explore":
             pushExplore(cells, item, classified.entries);
@@ -399,10 +425,11 @@ export function buildOneWorkPresentation(
               command: classified.command,
               ...(classified.output ? { output: classified.output } : {}),
               ...(classified.exitCode !== undefined ? { exitCode: classified.exitCode } : {}),
+              ...(agent ? { agent } : {}),
             });
             break;
           case "web_search":
-            cells.push({ kind: "web_search", id: item.id, status: itemStatus(item), startedAt: item.observedAt, query: classified.query });
+            cells.push({ kind: "web_search", id: item.id, status: itemStatus(item), startedAt: item.observedAt, query: classified.query, ...(agent ? { agent } : {}) });
             break;
           case "fetch":
             cells.push({
@@ -412,6 +439,7 @@ export function buildOneWorkPresentation(
               startedAt: item.observedAt,
               url: classified.url,
               ...(classified.statusCode !== undefined ? { statusCode: classified.statusCode } : {}),
+              ...(agent ? { agent } : {}),
             });
             break;
           case "call":
@@ -425,6 +453,7 @@ export function buildOneWorkPresentation(
               ...(classified.detail ? { detail: classified.detail } : {}),
               ...(item.tool.args ? { args: item.tool.args } : {}),
               ...(item.tool.result ? { result: item.tool.result } : {}),
+              ...(agent ? { agent } : {}),
             });
             break;
         }
@@ -454,6 +483,7 @@ export function buildOneWorkPresentation(
     running,
     headline: liveHeadline(cells, state, locale),
     ...(durationMs !== undefined ? { durationMs } : {}),
+    ...(state.model ? { model: state.model } : {}),
     ...(terminal ? { terminal } : {}),
     ...(terminalMessage ? { terminalMessage } : {}),
   };

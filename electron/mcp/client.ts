@@ -4143,7 +4143,7 @@ ${effectiveUserPrompt}`;
         // 계속 이어 붙는 것처럼 보이고, 앱이 중간에 꺼져도 그때까지 기록은 남는다.
         appendChatMessage(chat.id, "assistant", redactOneAttachmentText(req, continuation.text));
         // 세션 워터마크 전진 — 다음 resume 턴이 방금 자기 답변을 gap으로 재주입하지 않게.
-        if (sessionCapableRuntime) touchRuntimeSession(chat.id, active.kind);
+        if (sessionCapableRuntime) touchRuntimeSession(chat.id, active.kind, agent.id);
         sink({
           kind: "tool-use",
           status: goalDrivenPass
@@ -4987,7 +4987,7 @@ ${effectiveUserPrompt}`;
       }
       // 세션 워터마크 전진 — 이 kind의 세션은 방금 답변까지 봤다. 다음 resume 턴의
       // gap-replay가 자기 답변을 중복 주입하지 않고, 스웜/다른 러너 턴만 메우게 된다.
-      if (sessionCapableRuntime) touchRuntimeSession(chat.id, active.kind);
+      if (sessionCapableRuntime) touchRuntimeSession(chat.id, active.kind, agent.id);
     }
     const finalObservedTokens = Math.max(result.tokens ?? 0, liveUsageHigh);
     if (finalObservedTokens > 0) {

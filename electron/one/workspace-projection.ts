@@ -219,6 +219,9 @@ function publicReceipt(receipt: InvocationRunReceipt | null): Record<string, unk
     updatedAt: receipt.updatedAt,
     ...(receipt.finishedAt ? { finishedAt: receipt.finishedAt } : {}),
     eventCount: receipt.eventCount,
+    // 표시=실행 (C-D-1): run.json 이 실행 모델을 나른다 — 과금 정직성 계약의
+    // 사용자 검증 표면.
+    ...(receipt.model ? { model: receipt.model } : {}),
     ...(receipt.hasImages !== undefined ? { hasImages: receipt.hasImages } : {}),
     ...(receipt.errorCode ? { errorCode: receipt.errorCode } : {}),
   };

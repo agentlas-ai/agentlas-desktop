@@ -87,6 +87,8 @@ function ExpandableRow({
         title={expandable ? (locale === "ko" ? "자세히" : "Details") : undefined}
       >
         <span className={styles.rowMark} data-status={cell.status} aria-hidden="true" />
+        {/* 단톡 실행에서는 이 행을 누가 했는지가 곧 내용이다 (G-4). */}
+        {cell.agent && <span className={styles.muted} data-cell-agent="true">{cell.agent} ·</span>}
         <span className={running ? `${styles.rowText} ${styles.shimmer}` : styles.rowText}>{head}</span>
         {expandable && <span className={styles.rowChevron} aria-hidden="true"><IconChevronDown size={12} /></span>}
       </button>
@@ -418,6 +420,8 @@ export function OneTurnWork({
           data-terminal={terminal ?? "completed"}
         >
           <span>{workedFor}</span>
+          {/* 표시=실행 (C-D-1): 이 턴이 실제로 돈 모델을 실행 기록 표면에 남긴다. */}
+          {presentation.model && <span className={styles.muted} data-run-model="true">· {presentation.model}</span>}
           {failed && (
             <span className={styles.headerTerminal}>
               · {terminal === "cancelled" ? (ko ? "중단됨" : "stopped") : (ko ? "실패" : "failed")}

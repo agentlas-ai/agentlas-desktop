@@ -1,7 +1,13 @@
-// CLI 런타임 세션 매핑 — chat × backend(kind)별로 CLI 세션 id를 보관한다.
+// CLI 런타임 세션 매핑 — chat × backend(kind) × 점유자(agentId)별로 CLI 세션 id를 보관한다.
 // 세션 resume를 지원하는 러너(Claude Code/Codex)가 두 번째 턴부터 시스템 프롬프트/히스토리를
 // 재전송하지 않고 이어가도록 한다. fingerprint는 호출 표면이 정한 안정 세션 정체성이고,
 // 정체성이 달라질 때만 기존 세션을 버리고 새로 시작한다.
+//
+// ★ agentId 가 키에 들어간 이유(SEAT-SESSION-PLAN-v2 I5, v103): 점유자 교체 후 두 봇이
+// 같은 (chatId, kind) 행을 서로 덮어써 이전 봇의 세션이 사라졌다. 오폭(다른 봇 세션 재사용)
+// 자체는 지문 시드의 agentId 가 이미 막고 있었지만, 행이 덮이는 유실은 키만이 막는다.
+// 구버전 행은 agentId='' 레거시 키로 남아 있고, 정확한 키에 행이 없을 때만 지문 검증을
+// 전제로 승계 대상으로 읽힌다(지문이 다르면 러너가 스스로 새 세션을 시작한다).
 //
 // updatedAt은 "이 세션이 대화를 어디까지 봤는가"의 워터마크다. 러너는 resume 시
 // updatedAt 이후에 쌓인 채팅 메시지(스웜/Ollama 등 다른 경로의 턴)를 gap-replay하고,
@@ -27,38 +33,48 @@ export interface RuntimeSession {
 }
 
 const memSessions = new Map<string, RuntimeSession>();
-const memKey = (chatId: string, kind: string): string => `${chatId}\0${kind}`;
+const memKey = (chatId: string, kind: string, agentId: string): string => `${chatId}\0${kind}\0${agentId}`;
+const normalizeAgentId = (agentId?: string | null): string => agentId ?? "";
 
-export function getRuntimeSession(chatId: string, kind: string): RuntimeSession | null {
-  const mem = memSessions.get(memKey(chatId, kind)) ?? null;
+type SessionRow = {
+  session_id: string;
+  fingerprint: string;
+  updated_at: string | null;
+  reported_output_tokens?: number | null;
+  reported_input_tokens?: number | null;
+  reported_cached_input_tokens?: number | null;
+};
+
+function toSession(row: SessionRow): RuntimeSession {
+  return {
+    sessionId: row.session_id,
+    fingerprint: row.fingerprint,
+    updatedAt: row.updated_at ?? null,
+    reportedOutputTokens: Number.isInteger(row.reported_output_tokens) ? row.reported_output_tokens! : null,
+    reportedInputTokens: Number.isInteger(row.reported_input_tokens) ? row.reported_input_tokens! : null,
+    reportedCachedInputTokens: Number.isInteger(row.reported_cached_input_tokens) ? row.reported_cached_input_tokens! : null,
+  };
+}
+
+export function getRuntimeSession(chatId: string, kind: string, agentId?: string | null): RuntimeSession | null {
+  const agent = normalizeAgentId(agentId);
+  const mem = memSessions.get(memKey(chatId, kind, agent)) ?? null;
   if (mem) return mem;
   try {
-    const row = getDb()
-      .prepare(
-        "SELECT session_id, fingerprint, updated_at, reported_output_tokens, reported_input_tokens, reported_cached_input_tokens FROM chat_runtime_sessions WHERE chat_id = ? AND kind = ?",
-      )
-      .get(chatId, kind) as
-        | {
-          session_id: string;
-          fingerprint: string;
-          updated_at: string | null;
-          reported_output_tokens?: number | null;
-          reported_input_tokens?: number | null;
-          reported_cached_input_tokens?: number | null;
-        }
-        | undefined;
+    const select = getDb().prepare(
+      "SELECT session_id, fingerprint, updated_at, reported_output_tokens, reported_input_tokens, reported_cached_input_tokens FROM chat_runtime_sessions WHERE chat_id = ? AND kind = ? AND agent_id = ?",
+    );
+    let row = select.get(chatId, kind, agent) as SessionRow | undefined;
+    // v103 이전 행은 agent_id='' 로 이관돼 있다. 정확한 키에 행이 없으면 레거시 행을
+    // 승계 후보로 읽는다 — 다른 봇의 세션이면 러너의 지문 검증이 스스로 버린다.
+    if (!row && agent !== "") {
+      row = select.get(chatId, kind, "") as SessionRow | undefined;
+    }
     if (!row) return null;
-    const resolved = {
-      sessionId: row.session_id,
-      fingerprint: row.fingerprint,
-      updatedAt: row.updated_at ?? null,
-      reportedOutputTokens: Number.isInteger(row.reported_output_tokens) ? row.reported_output_tokens! : null,
-      reportedInputTokens: Number.isInteger(row.reported_input_tokens) ? row.reported_input_tokens! : null,
-      reportedCachedInputTokens: Number.isInteger(row.reported_cached_input_tokens) ? row.reported_cached_input_tokens! : null,
-    };
+    const resolved = toSession(row);
     // 첫 DB 읽기도 메모리에 승격한다. 이후 DB가 잠기거나 일시 실패해도 같은
     // 프로세스의 다음 턴은 이미 확인한 세션을 잃지 않는다.
-    memSessions.set(memKey(chatId, kind), resolved);
+    memSessions.set(memKey(chatId, kind, agent), resolved);
     return resolved;
   } catch {
     // 테이블 없음(구버전 DB) 등 — 세션 미사용으로 폴백.
@@ -71,10 +87,16 @@ export function saveRuntimeSession(
   kind: string,
   sessionId: string,
   fingerprint: string,
-  options?: { reportedOutputTokens?: number | null; reportedInputTokens?: number | null; reportedCachedInputTokens?: number | null },
+  options?: {
+    reportedOutputTokens?: number | null;
+    reportedInputTokens?: number | null;
+    reportedCachedInputTokens?: number | null;
+    agentId?: string | null;
+  },
 ): boolean {
+  const agent = normalizeAgentId(options?.agentId);
   const now = new Date().toISOString();
-  const previous = memSessions.get(memKey(chatId, kind)) ?? null;
+  const previous = memSessions.get(memKey(chatId, kind, agent)) ?? null;
   const sameSession = previous?.sessionId === sessionId && previous.fingerprint === fingerprint;
   const carry = (
     next: number | null | undefined,
@@ -84,7 +106,7 @@ export function saveRuntimeSession(
   const reportedInputTokens = carry(options?.reportedInputTokens, previous?.reportedInputTokens);
   const reportedCachedInputTokens = carry(options?.reportedCachedInputTokens, previous?.reportedCachedInputTokens);
   // 메모리 먼저 — DB가 실패해도 이 프로세스 안에서는 세션이 절대 유실되지 않는다.
-  memSessions.set(memKey(chatId, kind), {
+  memSessions.set(memKey(chatId, kind, agent), {
     sessionId,
     fingerprint,
     updatedAt: now,
@@ -95,10 +117,17 @@ export function saveRuntimeSession(
   try {
     getDb()
       .prepare(
-        `INSERT OR REPLACE INTO chat_runtime_sessions(chat_id, kind, session_id, fingerprint, updated_at, reported_output_tokens, reported_input_tokens, reported_cached_input_tokens)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT OR REPLACE INTO chat_runtime_sessions(chat_id, kind, agent_id, session_id, fingerprint, updated_at, reported_output_tokens, reported_input_tokens, reported_cached_input_tokens)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(chatId, kind, sessionId, fingerprint, now, reportedOutputTokens, reportedInputTokens, reportedCachedInputTokens);
+      .run(chatId, kind, agent, sessionId, fingerprint, now, reportedOutputTokens, reportedInputTokens, reportedCachedInputTokens);
+    // 레거시 행을 승계했다면 이제 새 키가 정본이다 — 같은 세션을 가리키는 '' 행을
+    // 정리해 다음 점유자가 이 봇의 세션을 승계 후보로 오인하지 않게 한다.
+    if (agent !== "") {
+      getDb()
+        .prepare("DELETE FROM chat_runtime_sessions WHERE chat_id = ? AND kind = ? AND agent_id = '' AND session_id = ?")
+        .run(chatId, kind, sessionId);
+    }
     return true;
   } catch {
     // false = 디스크 영속화 실패(재시작 시 유실 가능) — 호출자가 lifecycle receipt를 남긴다.
@@ -112,25 +141,30 @@ export function saveRuntimeSession(
  * assistant 메시지를 채팅에 append한 "뒤에" 호출해야 다음 resume 턴이 자기 자신의 직전
  * 답변을 gap으로 오인해 재주입하지 않는다.
  */
-export function touchRuntimeSession(chatId: string, kind: string): void {
+export function touchRuntimeSession(chatId: string, kind: string, agentId?: string | null): void {
+  const agent = normalizeAgentId(agentId);
   const now = new Date().toISOString();
-  const mem = memSessions.get(memKey(chatId, kind));
+  const mem = memSessions.get(memKey(chatId, kind, agent));
   if (mem) mem.updatedAt = now;
   try {
+    // 레거시 '' 행도 함께 전진시킨다 — 승계 직후 아직 새 키로 저장되기 전의 턴이
+    // 자기 답변을 gap으로 오인하지 않게 한다.
     getDb()
-      .prepare("UPDATE chat_runtime_sessions SET updated_at = ? WHERE chat_id = ? AND kind = ?")
-      .run(now, chatId, kind);
+      .prepare("UPDATE chat_runtime_sessions SET updated_at = ? WHERE chat_id = ? AND kind = ? AND agent_id IN (?, '')")
+      .run(now, chatId, kind, agent);
   } catch {
     // 무시 — 인메모리 워터마크가 프로세스 내 연속성을 지킨다.
   }
 }
 
-export function clearRuntimeSession(chatId: string, kind: string): void {
-  memSessions.delete(memKey(chatId, kind));
+export function clearRuntimeSession(chatId: string, kind: string, agentId?: string | null): void {
+  const agent = normalizeAgentId(agentId);
+  memSessions.delete(memKey(chatId, kind, agent));
   try {
+    // 정확한 키와 레거시 '' 행을 함께 지운다 — "이 chat×kind 세션을 버려라"는 의도다.
     getDb()
-      .prepare("DELETE FROM chat_runtime_sessions WHERE chat_id = ? AND kind = ?")
-      .run(chatId, kind);
+      .prepare("DELETE FROM chat_runtime_sessions WHERE chat_id = ? AND kind = ? AND agent_id IN (?, '')")
+      .run(chatId, kind, agent);
   } catch {
     // 무시
   }

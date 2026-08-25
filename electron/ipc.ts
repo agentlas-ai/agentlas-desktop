@@ -93,6 +93,7 @@ import {
 import {
   createOneTaskforce,
   listOneTaskforces,
+  oneTaskforceRemovalPreview,
   removeOneTaskforce,
   updateOneTaskforce,
 } from "./one/taskforces";
@@ -197,6 +198,8 @@ import { previewBuildAllocation, runHephaestusBuild } from "./hephaestus/builder
 import { resolveHephaestusBuildRequest, resolveHephaestusBuildRequestForRun } from "./hephaestus/build-access";
 import { pickLocale } from "./runtime/status-i18n";
 import { currentUiLocale } from "./ui-locale";
+import { agentRemovalPreview, assignSeatOccupant, getSeatForChat, listSeatOccupantHistory } from "./store/seats";
+import { koSubjectParticle, seatEventText } from "../shared/one-seat-events";
 import { SYSTEM_OPTIMIZER_PROMPT_MARKER } from "./system-agents/system-optimizer";
 import { stripAutomationContinuityCapsule } from "./automation-continuity";
 import { buildChatRecap, markChatRecapViewed } from "./chat/recap";
@@ -2908,6 +2911,8 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("team:list", () => listInstalledAgents());
   ipcMain.handle("team:install", (_e, slug: string) => installAgent(slug));
   ipcMain.handle("team:installMine", (_e, id: string) => installMyAgent(id));
+  // 봇 삭제 확인 문구용 정확한 수 — "좌석 N곳이 빈 자리가 됩니다. 대화 M개는 그대로 남습니다".
+  ipcMain.handle("team:uninstallPreview", (_e, id: string) => agentRemovalPreview(id));
   ipcMain.handle("team:uninstall", async (_e, id: string, options?: { removeSource?: boolean }) => {
     const existing = getAgentById(id);
     if (!existing) return { removed: false, sourceMovedToTrash: false };
@@ -2958,7 +2963,32 @@ export function registerIpcHandlers(): void {
     if (taskforce && invocationService.activeChatIds().includes(taskforce.chatId)) {
       throw new Error("Stop the active Taskforce run before deleting it.");
     }
+    // 이 "삭제"는 좌석 해체(T7)다 — 대화는 지워지지 않고 읽기 전용 아카이브로 남는다.
     removeOneTaskforce(input);
+  });
+  // 해체 확인 문구용 정확한 수(사전 COUNT) — "대화 N개는 기록으로 남습니다".
+  ipcMain.handle("oneTaskforces:removePreview", (_e, input) => oneTaskforceRemovalPreview(input));
+  // 세션의 좌석 1급 조회 — 해체 배너·빈 자리 표시가 이 창구로 읽는다.
+  ipcMain.handle("seats:forChat", (_e, chatId: string) => getSeatForChat(chatId));
+  // "그때 누가 있었나" 재구성(I6) — 닫힌 점유 포함 append-only 이력.
+  ipcMain.handle("seats:historyForChat", (_e, chatId: string) => {
+    const seat = getSeatForChat(chatId);
+    return seat ? listSeatOccupantHistory(seat.id) : [];
+  });
+  // T10 빈 좌석 배정 — 착석 + 세션에 시스템 줄 1개(누가 앉았는지 대화가 스스로 말한다).
+  ipcMain.handle("seats:assign", (_e, input: { chatId: string; agentId: string; slot?: number }) => {
+    const seat = getSeatForChat(input.chatId);
+    if (!seat) throw new Error("This conversation has no seat yet.");
+    const assigned = assignSeatOccupant(seat.id, input.agentId, input.slot ?? 0);
+    const name = assigned.occupants.find((row) => row.agentId === input.agentId)?.displayName ?? "";
+    if (name) {
+      appendChatMessage(
+        input.chatId,
+        "system",
+        seatEventText(currentUiLocale() === "ko" ? `이 자리를 ${name}${koSubjectParticle(name)} 맡았습니다` : `${name} took this seat`),
+      );
+    }
+    return assigned;
   });
 
   // ── Computer History (explicit local opt-in; no raw history leaves disk) ──
@@ -5851,6 +5881,19 @@ export function registerIpcHandlers(): void {
     // A Work project turn goes directly to the project execution contract and
     // must not silently spend time in, or inherit policy from, One's judges.
     if (request.oneMode === true) {
+      // T7 읽기 전용 아카이브(SEAT-SESSION-PLAN-v2 I3) — 해체된 좌석의 세션은 열람만
+      // 가능하다. 권위 가드는 여기(렌더러 우회 불가)이고, 거절 문구는 막다른 길이
+      // 아니라 다음 행동(새 단톡으로 이어가기)을 함께 낸다. Work 표면은 무접촉.
+      if (request.chatId) {
+        const seat = getSeatForChat(request.chatId);
+        if (seat?.dissolvedAt) {
+          throw new Error(
+            currentUiLocale() === "ko"
+              ? "이 단톡은 해체되어 기록으로만 보존됩니다. 같은 멤버로 새 단톡을 만들어 이어가세요."
+              : "This group chat was dissolved and is kept as a read-only archive. Start a new group chat with the same members to continue.",
+          );
+        }
+      }
       // Best-effort with a tight budget: a miss remains unresolved and must
       // never be replaced by a lexical or static verdict.
       await Promise.all([

@@ -676,7 +676,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         .update(req.permission ?? "")
         .digest("hex")
       : null;
-    const savedSession = req.chatId ? getRuntimeSession(req.chatId, sessionKind) : null;
+    const savedSession = req.chatId ? getRuntimeSession(req.chatId, sessionKind, req.agentId) : null;
     const storedSessionId = savedSession && fingerprint && savedSession.fingerprint === fingerprint ? savedSession.sessionId : null;
     const resumeSessionId = req.runtimeSessionId ?? storedSessionId;
 
@@ -905,7 +905,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       );
       client.finish();
       // 세션은 이제 실재한다 — 거절/빈 답이어도 다음 턴이 이어갈 수 있게 먼저 저장한다.
-      if (req.chatId && fingerprint && !saveRuntimeSession(req.chatId, sessionKind, sessionId, fingerprint)) {
+      if (req.chatId && fingerprint && !saveRuntimeSession(req.chatId, sessionKind, sessionId, fingerprint, { agentId: req.agentId })) {
         events.onStatus(`[runtime-session] store_failed kind=${sessionKind}`);
       }
       if (req.signal?.aborted) throw abortReasonError(req);

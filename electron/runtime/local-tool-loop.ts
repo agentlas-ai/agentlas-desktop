@@ -474,13 +474,13 @@ export async function runLocalOpenAiChat(
         .update(req.sessionFingerprintSeed ?? req.systemPrompt ?? "")
         .digest("hex")
     : null;
-  const previousSession = req.chatId ? getRuntimeSession(req.chatId, runtimeKind) : null;
+  const previousSession = req.chatId ? getRuntimeSession(req.chatId, runtimeKind, req.agentId) : null;
   if (req.chatId && sessionFingerprint) {
     // OpenAI-compatible local servers have no provider conversation ID. The
     // durable Agentlas chat history is the source of truth, while this
     // logical session record makes continuity visible and detects model/host
     // changes without pretending the server supports native resume.
-    saveRuntimeSession(req.chatId, runtimeKind, req.chatId, sessionFingerprint);
+    saveRuntimeSession(req.chatId, runtimeKind, req.chatId, sessionFingerprint, { agentId: req.agentId });
     if (previousSession && previousSession.fingerprint === sessionFingerprint) {
       events.onStatus(req.locale === "ko" ? "로컬 모델 대화 기록 이어가는 중..." : "Continuing local model conversation history...");
     }

@@ -1671,6 +1671,39 @@ export interface Chat {
   originSurface?: "one" | "work";
   /** Exact chat-scoped orchestrator pin. null means follow the role default. */
   runtimeSelection?: RuntimeSelection | null;
+  /** 좌석 상호참조 — 끊길 수 있는 참조(좌석 해체·소멸 후에도 세션은 유효). */
+  seatId?: string | null;
+  /** 좌석 표시 스냅샷(쓰는 시점 기록) — 좌석 테이블 조인 없이 이 칸만으로 렌더한다. */
+  seatLabel?: string | null;
+  seatKind?: "solo" | "group" | null;
+  participants?: Array<{ slot: number; agentId: string | null; displayName: string }> | null;
+}
+
+/**
+ * 좌석 1급 뷰 — 세션(chats)과 생존이 분리된 고정 자리(SEAT-SESSION-PLAN-v2).
+ * dissolvedAt 이 있으면 해체된 좌석: 소속 세션은 전부 보존된 읽기 전용 아카이브다.
+ */
+export interface OneSeatOccupancy {
+  slot: number;
+  agentId: string | null;
+  /** 그 시점의 표시 이름 스냅샷 — 봇이 삭제돼도 남는다. */
+  displayName: string;
+  since: string;
+  /** null = 지금 앉아 있음. 값이 있으면 그때 자리를 떠났다(행은 수정·삭제되지 않는다). */
+  until: string | null;
+}
+
+export interface OneSeatView {
+  id: string;
+  kind: "solo" | "group";
+  title: string;
+  projectId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+  dissolvedAt: string | null;
+  /** 현재 점유(열린 행)만 — 빈 배열이면 빈 좌석. */
+  occupants: OneSeatOccupancy[];
 }
 
 /**
@@ -5791,6 +5824,12 @@ export interface InvocationRunReceipt {
   hasImages?: boolean;
   borrowAgents?: string[];
   taskForceTargets?: OrchestrationTarget[];
+  /**
+   * Model/runtime label the orchestrator actually executed with, replayed from
+   * the run's own final/result ledger rows (표시=실행, 계약 7-C-8 / C-D-1).
+   * Absent for runs that never reached a model call.
+   */
+  model?: string;
   errorCode?: string;
   errorMessage?: string;
   /**
@@ -6552,6 +6591,8 @@ export interface AgentlasIpc {
     /** 내 에이전트(cargo) 설치 — 로그인 사용자가 agentlas.cloud에서 만든 것 */
     installMine: (id: string) => Promise<InstalledAgent>;
     uninstall: (id: string, options?: InstalledAgentRemovalOptions) => Promise<RosterRemovalResult>;
+    /** 삭제 확인 문구용 사전 COUNT — 좌석(빈 자리가 될 곳)·대화(보존될 것) 정확한 수. */
+    uninstallPreview: (id: string) => Promise<{ seatCount: number; chatCount: number }>;
     /** NFC 1-80 code-point local alias; empty text clears it. */
     setLocalDisplayName: (id: string, value: string) => Promise<InstalledAgent>;
     /** 로컬 폴더(기존 에이전트/팀)를 임포트 — 런타임 감지·라벨링 후 라우팅 저장. */
@@ -6578,7 +6619,18 @@ export interface AgentlasIpc {
     list: () => Promise<OneTaskforce[]>;
     create: (input: CreateOneTaskforceInput) => Promise<OneTaskforce>;
     update: (input: UpdateOneTaskforceInput) => Promise<OneTaskforce>;
+    /** 단톡 "삭제" = 좌석 해체(T7) — 대화는 지워지지 않고 읽기 전용 아카이브로 남는다. */
     remove: (input: RemoveOneTaskforceInput) => Promise<void>;
+    /** 해체 확인 문구용 정확한 수 — "대화 N개는 기록으로 남습니다". */
+    removePreview: (input: { id: string }) => Promise<{ sessionCount: number }>;
+  };
+  /** 좌석 1급 조회·조작 — 세션의 좌석(해체 여부·현재 점유자·이력·배정). */
+  seats: {
+    forChat: (chatId: string) => Promise<OneSeatView | null>;
+    /** append-only 점유 이력(닫힌 행 포함) — "그때 누가 있었나" 재구성. */
+    historyForChat: (chatId: string) => Promise<OneSeatOccupancy[]>;
+    /** 빈 슬롯에 착석(T10). 이미 점유 중이면 거절된다(교체는 조직 화면의 교체 동작). */
+    assign: (input: { chatId: string; agentId: string; slot?: number }) => Promise<OneSeatView>;
   };
   /** Opt-in local Computer History summaries and read-only recommendations. */
   computerHistory: {

@@ -108,6 +108,12 @@ export interface OneActivityState {
   terminalStatus?: "completed" | "failed" | "cancelled";
   /** The run's working folder from the lifecycle start fact — tool paths are shown relative to it. */
   cwd?: string;
+  /**
+   * Model/runtime label the orchestrator run actually executed with, from the
+   * runtime's own `final` event (ledger: mcp_final payload.model). Display =
+   * execution (contract 7-C-8 / C-D-1) — never the settings' current default.
+   */
+  model?: string;
 }
 
 /** Same ceiling as Main's reasoning span cap — a thought row is evidence, not a transcript. */
@@ -398,6 +404,7 @@ export function reduceOneActivity(
   let effectivePermission = state.effectivePermission;
   let selectedPermissionMode = state.selectedPermissionMode;
   let cwd = state.cwd;
+  let model = state.model;
   let handoffs = state.handoffs;
   let terminalStatus: OneActivityState["terminalStatus"] = undefined;
 
@@ -657,6 +664,10 @@ export function reduceOneActivity(
     if (typeof event.tokens === "number" && Number.isFinite(event.tokens)) {
       tokens = Math.max(tokens ?? 0, event.tokens);
     }
+    // The orchestrator's own final event names what actually ran this turn.
+    // Worker events never reach this branch (they end as tool-use rows), so
+    // this is the run-level execution model, not a delegate's (C-D-1).
+    if (typeof event.model === "string" && event.model.trim()) model = event.model.trim();
     terminalStatus = "completed";
   } else if (event.kind === "error") {
     // A run the person stopped ends through the same error channel as a
@@ -704,6 +715,7 @@ export function reduceOneActivity(
     ...(effectivePermission ? { effectivePermission } : {}),
     ...(selectedPermissionMode ? { selectedPermissionMode } : {}),
     ...(cwd ? { cwd } : {}),
+    ...(model ? { model } : {}),
     ...(terminalStatus ? { terminalStatus } : {}),
   };
 }
@@ -991,10 +1003,14 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
     if (row.kind === "mcp_final" || row.kind === "invoke_completed") {
       const tokenValue = Number(payload.tokens);
       const textLenValue = Number(payload.textLen);
+      const executedModel = ledgerString(payload, "model");
       apply({
         kind: "final",
         ...(Number.isFinite(tokenValue) ? { tokens: tokenValue } : {}),
         ...(Number.isFinite(textLenValue) && textLenValue > 0 ? { textLen: textLenValue } : {}),
+        // 실행 기록의 모델 표기(C-D-1): 원장에 남은 final의 model이 유일한
+        // "실제 실행" 근거다 — 재방문/재기동 후에도 표시=실행이 유지된다.
+        ...(executedModel ? { model: executedModel } : {}),
       }, row.ts);
       continue;
     }

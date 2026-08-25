@@ -351,9 +351,9 @@ export const runKimi: Runner = async (req, events): Promise<RunnerResult> => {
   const staged = await stageCliImageAttachments(req);
   const runReq = { ...req, userPrompt: staged.userPrompt };
   const fingerprint = runReq.chatId ? systemFingerprint(runReq) : null;
-  const saved = runReq.chatId ? getRuntimeSession(runReq.chatId, KIND) : null;
+  const saved = runReq.chatId ? getRuntimeSession(runReq.chatId, KIND, runReq.agentId) : null;
   if (saved && fingerprint && saved.fingerprint !== fingerprint && runReq.chatId) {
-    clearRuntimeSession(runReq.chatId, KIND);
+    clearRuntimeSession(runReq.chatId, KIND, runReq.agentId);
   }
   const storedSessionId = saved && fingerprint && saved.fingerprint === fingerprint ? saved.sessionId : null;
   const resumeSessionId = runReq.runtimeSessionId ?? storedSessionId;
@@ -403,7 +403,7 @@ export const runKimi: Runner = async (req, events): Promise<RunnerResult> => {
   if (result.code === 0) {
     const nextSessionId = result.sessionId ?? resumeSessionId ?? undefined;
     if (runReq.chatId && fingerprint && nextSessionId) {
-      if (!saveRuntimeSession(runReq.chatId, KIND, nextSessionId, fingerprint)) {
+      if (!saveRuntimeSession(runReq.chatId, KIND, nextSessionId, fingerprint, { agentId: runReq.agentId })) {
         events.onStatus(`[runtime-session] store_failed kind=${KIND}`);
       }
     }
@@ -417,7 +417,7 @@ export const runKimi: Runner = async (req, events): Promise<RunnerResult> => {
   if (resumeSessionId && runReq.chatId) {
     // Interactive recovery preserves the same Agentlas chat and seeds a fresh
     // provider session from its complete durable history.
-    clearRuntimeSession(runReq.chatId, KIND);
+    clearRuntimeSession(runReq.chatId, KIND, runReq.agentId);
     events.onStatus(runReq.locale === "ko" ? "대화 기록을 그대로 유지해 다시 연결하는 중..." : "Reconnecting while preserving this conversation...");
     return runKimi({ ...runReq, runtimeSessionId: undefined }, events);
   }

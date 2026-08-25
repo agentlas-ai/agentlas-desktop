@@ -327,6 +327,7 @@ const api: AgentlasIpc = {
     installMine: (id: string) => ipcRenderer.invoke("team:installMine", id),
     uninstall: (id: string, options?: { removeSource?: boolean }) =>
       ipcRenderer.invoke("team:uninstall", id, options),
+    uninstallPreview: (id: string) => ipcRenderer.invoke("team:uninstallPreview", id),
     setLocalDisplayName: (id: string, value: string) =>
       ipcRenderer.invoke("team:setLocalDisplayName", id, value),
     importLocalFolder: (input) =>
@@ -351,6 +352,12 @@ const api: AgentlasIpc = {
     create: (input) => ipcRenderer.invoke("oneTaskforces:create", input),
     update: (input) => ipcRenderer.invoke("oneTaskforces:update", input),
     remove: (input) => ipcRenderer.invoke("oneTaskforces:remove", input),
+    removePreview: (input) => ipcRenderer.invoke("oneTaskforces:removePreview", input),
+  },
+  seats: {
+    forChat: (chatId: string) => ipcRenderer.invoke("seats:forChat", chatId),
+    historyForChat: (chatId: string) => ipcRenderer.invoke("seats:historyForChat", chatId),
+    assign: (input) => ipcRenderer.invoke("seats:assign", input),
   },
   computerHistory: {
     get: () => ipcRenderer.invoke("computerHistory:get"),

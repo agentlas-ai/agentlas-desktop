@@ -17,6 +17,7 @@ import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
 import { installFromCatalog } from "../mcp-tools/registry";
 import { getInstalledAgentHubBinding, replaceInstalledAgentHubBinding } from "../ontology/hub-bindings";
 import { detachProjectPoolReferences } from "../store/projects";
+import { closeAgentOccupancies } from "../store/seats";
 import { dedupeLocalInstalledAgents } from "../store/agent-dedupe";
 import type { SeedListingFull } from "../marketplace/source";
 import type {
@@ -489,6 +490,10 @@ export function uninstallAgent(id: string): void {
     .get(id) as { slug?: string } | undefined;
   const binding = getInstalledAgentHubBinding(id);
 
+  // T1 봇 삭제 = 자리 비우기(SEAT-SESSION-PLAN-v2 I4). 삭제 전에 이 봇의 열린 점유
+  // 행을 닫아 좌석을 빈 자리로 남긴다 — 좌석·세션·점유 이력은 전부 보존되고,
+  // chats.agent_id 는 v102 FK(ON DELETE SET NULL)가 대화를 지키게 한다.
+  try { closeAgentOccupancies(id); } catch { /* 좌석 원장이 없는 구세대 DB — 삭제 자체는 진행 */ }
   const deleted = db.prepare("DELETE FROM installed_agents WHERE id = ?").run(id).changes > 0;
   // 로컬 임포트 라우팅도 정리 (원본 폴더는 건드리지 않음).
   if (deleted) {

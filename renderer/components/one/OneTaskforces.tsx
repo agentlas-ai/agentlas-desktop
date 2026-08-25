@@ -4,10 +4,16 @@ import { useEffect, useMemo, useState } from "react";
 import { IconCheck, IconClose, IconPlus, IconUsers } from "@/components/Icon";
 import type { OneOrgMember, OneOrgState } from "@shared/one-org";
 import type { OneTaskforce } from "@shared/one-taskforces";
+import { ipc } from "@/lib/ipc";
 import { OneAgentPortrait } from "./OneAgentPortrait";
 import { OneBottomSheet } from "./OneBottomSheet";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import styles from "./OneTaskforces.module.css";
+
+/** 웹인지 데스크탑인지는 Main 브릿지의 유무로 가른다(웹은 window.agentlas 를 심지 않는다). */
+function isWebSurface(): boolean {
+  return typeof window !== "undefined" && !(window as { agentlas?: unknown }).agentlas;
+}
 
 function memberUnavailable(member: OneOrgMember | undefined): boolean {
   return !member || Boolean(member.archivedAt) || member.statusKind === "locked" || member.statusKind === "failed";
@@ -135,6 +141,8 @@ export function OneTaskforceDialog({
   const [selected, setSelected] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
+  // 해체 확인 문구의 정확한 수(사전 COUNT) — "대화 N개는 기록으로 남습니다".
+  const [preservedSessionCount, setPreservedSessionCount] = useState<number | null>(null);
   useEffect(() => {
     if (!open) return;
     setTitle(taskforce?.title ?? "");
@@ -142,7 +150,18 @@ export function OneTaskforceDialog({
     setSelected(taskforce?.memberAgentIds ?? []);
     setError(null);
     setConfirmRemove(false);
+    setPreservedSessionCount(null);
   }, [open, taskforce]);
+  useEffect(() => {
+    if (!confirmRemove || !taskforce) return;
+    const api = ipc();
+    if (!api?.oneTaskforces?.removePreview) return;
+    let cancelled = false;
+    void api.oneTaskforces.removePreview({ id: taskforce.id })
+      .then((preview) => { if (!cancelled) setPreservedSessionCount(preview.sessionCount); })
+      .catch(() => { /* 수를 못 세면 수 없는 문구로 낸다 — 지어내지 않는다 */ });
+    return () => { cancelled = true; };
+  }, [confirmRemove, taskforce]);
   const rows = useMemo(() => {
     const active = org?.members ?? [];
     const known = new Set(active.map((member) => member.installedAgentId));
@@ -241,7 +260,22 @@ export function OneTaskforceDialog({
       </section>
       {error && <p className={styles.error} role="alert">{error}</p>}
       {confirmRemove && taskforce && <div className={styles.removeConfirm} role="alert">
-        <span><strong>{locale === "ko" ? "이 태스크포스를 삭제할까요?" : "Delete this Taskforce?"}</strong><small>{locale === "ko" ? "그룹 대화와 메시지가 함께 삭제됩니다." : "Its group conversation and messages will also be deleted."}</small></span>
+        {/* 두 표면의 약속이 각자의 실제 동작과 같아야 한다(좌석 기획 I10 — 계약은 같고
+            구조는 각자). 데스크탑은 해체된 방을 읽기 전용 기록으로 남기고, 웹은 소속만
+            풀어 One 과의 대화로 이어간다. 어느 쪽이든 **대화는 지워지지 않는다.** */}
+        <span><strong>{locale === "ko" ? "이 태스크포스를 삭제할까요?" : "Delete this Taskforce?"}</strong><small>{
+          isWebSurface()
+            ? (locale === "ko"
+              ? "팀은 사라지지만 지금까지의 대화와 메시지는 남아, One과의 대화로 이어집니다."
+              : "The team goes away, but its conversations and messages stay and continue with One.")
+            : locale === "ko"
+              ? (preservedSessionCount !== null
+                ? `대화 ${preservedSessionCount}개는 기록으로 남습니다.`
+                : "대화는 지워지지 않고 기록으로 남습니다.")
+              : (preservedSessionCount !== null
+                ? `${preservedSessionCount} conversation${preservedSessionCount === 1 ? "" : "s"} will stay as a read-only archive.`
+                : "Conversations are kept as a read-only archive.")
+        }</small></span>
         <button type="button" onClick={() => setConfirmRemove(false)} disabled={busy}><IconClose size={12} />{locale === "ko" ? "취소" : "Cancel"}</button>
         <button type="button" className={styles.dangerButton} onClick={() => void onRemove({ id: taskforce.id, expectedRevision: taskforce.revision })} disabled={busy}>{locale === "ko" ? "삭제" : "Delete"}</button>
       </div>}

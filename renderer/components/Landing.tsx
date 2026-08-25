@@ -171,6 +171,7 @@ export function Landing({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const cancelledRef = useRef(false);
   useGlobe(canvasRef);
 
   // 크롬 등 이미 로그인된 기본 브라우저 재사용 → 미완료 시 창 로그인 폴백 (AccountChip과 동일).
@@ -187,15 +188,19 @@ export function Landing({
     }
     setBusy(true);
     setNotice(null);
+    cancelledRef.current = false;
     try {
       const next = await api.auth.signInWithBrowser();
       if (next.signedIn) {
         onSignedIn(next);
         return;
       }
+      // 사용자가 대기를 취소했다면 두 번째(창 로그인) 폴백을 새로 열지 않는다 —
+      // 취소했는데 또 다른 로그인 창이 뜨는 것이 갇힘의 두 번째 형태다(U-D-7).
+      if (cancelledRef.current) return;
       const fallback = await api.auth.signInWithGoogle();
       if (fallback.signedIn) onSignedIn(fallback);
-      else {
+      else if (!cancelledRef.current) {
         setNotice(
           locale === "ko"
             ? "로그인이 완료되지 않았습니다. 브라우저 창을 확인하거나 다시 시도하세요."
@@ -203,11 +208,19 @@ export function Landing({
         );
       }
     } catch (err) {
-      setNotice(err instanceof Error ? err.message : String(err));
+      if (!cancelledRef.current) setNotice(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
   }, [busy, locale, onSignedIn]);
+  // 로그인 대기에서 빠져나올 길 (U-D-7): 대기 화면에 취소가 없어 사용자가
+  // location.href 강제 이탈로만 탈출했다(S9). 취소는 화면을 즉시 되돌린다.
+  // 이미 브라우저에서 로그인을 끝냈다면 그 성공(onSignedIn)은 그대로 존중한다.
+  const cancelWait = useCallback(() => {
+    cancelledRef.current = true;
+    setBusy(false);
+    setNotice(null);
+  }, []);
 
   return (
     <div
@@ -427,6 +440,29 @@ export function Landing({
               </svg>
             )}
           </button>
+          {busy && (
+            // 대기 화면의 탈출구 (U-D-7): 취소가 없으면 로그인을 못/안 하는
+            // 사용자는 이 화면에 갇힌다.
+            <button
+              type="button"
+              className="titlebar-nodrag"
+              onClick={cancelWait}
+              style={{
+                display: "block",
+                margin: "14px auto 0",
+                padding: "8px 18px",
+                borderRadius: 999,
+                fontSize: 13.5,
+                fontFamily: "inherit",
+                cursor: "pointer",
+                color: C.ink2,
+                background: "transparent",
+                border: "1px solid rgba(255,255,255,.22)",
+              }}
+            >
+              {locale === "ko" ? "로그인 취소" : "Cancel sign-in"}
+            </button>
+          )}
           {notice && (
             <div
               role="status"

@@ -1173,7 +1173,7 @@ async function runCodexResidentTurn(input: {
             broken = true;
             throw new Error(`Automation runtime session resume failed for ${KIND}; refusing to create a fresh CLI session.`);
           }
-          clearRuntimeSession(chatId, KIND);
+          clearRuntimeSession(chatId, KIND, req.agentId);
         }
       }
       if (!resumed) {
@@ -1224,7 +1224,7 @@ async function runCodexResidentTurn(input: {
 
     if (req.signal?.aborted) {
       // 취소여도 스레드가 생겼으면 저장 → 이어지는 steering 메시지가 문맥을 유지한다.
-      saveRuntimeSession(chatId, KIND, session.threadId, fingerprint, {
+      saveRuntimeSession(chatId, KIND, session.threadId, fingerprint, { agentId: req.agentId,
         ...(usage.total ? {
           reportedOutputTokens: usage.total.outputTokens,
           reportedInputTokens: usage.total.inputTokens,
@@ -1273,7 +1273,7 @@ async function runCodexResidentTurn(input: {
       const refusal = detectRuntimeRefusal(text);
       if (refusal) failure = { kind: refusal.kind, message: refusal.message, runtime: KIND, source: "heuristic" };
     }
-    if (!saveRuntimeSession(chatId, KIND, session.threadId, fingerprint, {
+    if (!saveRuntimeSession(chatId, KIND, session.threadId, fingerprint, { agentId: req.agentId,
       ...(usage.total ? {
         reportedOutputTokens: usage.total.outputTokens,
         reportedInputTokens: usage.total.inputTokens,
@@ -1438,7 +1438,7 @@ export const runCodex: Runner = async (
 
   // 세션 resume 가능 여부 — chatId 저장 세션 또는 Build 같은 호출자가 직접 넘긴 세션 id.
   const fingerprint = runReq.chatId ? systemFingerprint(runReq) : null;
-  const existing = runReq.chatId ? getRuntimeSession(runReq.chatId, KIND) : null;
+  const existing = runReq.chatId ? getRuntimeSession(runReq.chatId, KIND, runReq.agentId) : null;
   const storedSessionId =
     existing && fingerprint && existing.fingerprint === fingerprint
       ? existing.sessionId
@@ -1563,13 +1563,13 @@ export const runCodex: Runner = async (
     if (runReq.signal?.aborted) {
       // 취소여도 스레드가 생겼으면 저장 → steering 메시지가 이 세션을 resume해 문맥 유지.
       if (runReq.chatId && fingerprint && r.threadId) {
-        saveRuntimeSession(runReq.chatId, KIND, r.threadId, fingerprint, codexUsageCounters(r));
+        saveRuntimeSession(runReq.chatId, KIND, r.threadId, fingerprint, { ...codexUsageCounters(r), agentId: runReq.agentId });
       }
       throw abortReasonError(runReq);
     }
     if (r.code === 0) {
       if (runReq.chatId && fingerprint && r.threadId) {
-        if (!saveRuntimeSession(runReq.chatId, KIND, r.threadId, fingerprint, codexUsageCounters(r))) {
+        if (!saveRuntimeSession(runReq.chatId, KIND, r.threadId, fingerprint, { ...codexUsageCounters(r), agentId: runReq.agentId })) {
           events.onStatus(`[runtime-session] store_failed kind=${KIND}`);
         }
       }
@@ -1598,7 +1598,7 @@ export const runCodex: Runner = async (
       throw new Error(`Automation runtime session resume failed for ${KIND}; refusing to create a fresh CLI session.`);
     }
     // Interactive chat may recover with the full durable history after an explicit receipt.
-    if (runReq.chatId) clearRuntimeSession(runReq.chatId, KIND);
+    if (runReq.chatId) clearRuntimeSession(runReq.chatId, KIND, runReq.agentId);
   }
 
   // CREATE: 시스템 프롬프트 + 히스토리 + user를 stdin으로 보내 새 세션을 시드한다.
@@ -1616,13 +1616,13 @@ export const runCodex: Runner = async (
   const created = await runCodexProcess(bin, createArgs, buildPrompt(runReq), runReq, events, { output: 0, input: 0, cachedInput: 0 });
   if (runReq.signal?.aborted) {
     if (runReq.chatId && fingerprint && created.threadId) {
-      saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint, codexUsageCounters(created));
+      saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint, { ...codexUsageCounters(created), agentId: runReq.agentId });
     }
     throw abortReasonError(runReq);
   }
   if (created.code === 0) {
     if (runReq.chatId && fingerprint && created.threadId) {
-      if (!saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint, codexUsageCounters(created))) {
+      if (!saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint, { ...codexUsageCounters(created), agentId: runReq.agentId })) {
         events.onStatus(`[runtime-session] store_failed kind=${KIND}`);
       }
     }

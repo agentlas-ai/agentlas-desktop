@@ -112,6 +112,21 @@ function readDraft(): StoredDraft {
     const raw = window.localStorage.getItem(DRAFT_KEY);
     if (!raw) return EMPTY_DRAFT;
     const parsed = JSON.parse(raw) as Partial<StoredDraft>;
+    /*
+     * D-7 소급 정리 (2026-08-25): 편집/생성 초안 분리 전에 "One 편집을
+     * 취소한 초안"이 새 팀원 초안 키로 누출된 기록이 남아 있을 수 있다.
+     * 정확히 그 누출 시그니처(Name="One" + Title="Agentlas One" — One의
+     * 고정 정체성 쌍)일 때만 이름/직함 두 칸을 비운다. 사용자가 실제로 그
+     * 쌍을 새 팀원 초안으로 쓸 일은 없고(One은 이미 존재), 다른 칸(설명·
+     * 캐릭터·런타임)은 보존되므로 오폭 파괴 범위가 없다.
+     */
+    if (parsed.name?.trim() === "One" && parsed.title?.trim() === "Agentlas One") {
+      parsed.name = "";
+      parsed.title = "";
+      try {
+        window.localStorage.setItem(DRAFT_KEY, JSON.stringify(parsed));
+      } catch { /* 저장 실패 시 다음 읽기에서 다시 정리된다 */ }
+    }
     const mode = typeof parsed.mode === "string" && MODES.has(parsed.mode as AvatarMode)
       ? parsed.mode as AvatarMode
       : EMPTY_DRAFT.mode;

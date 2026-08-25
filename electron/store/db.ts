@@ -18,7 +18,7 @@ import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-p
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 102;
+const SCHEMA_VERSION = 103;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -5133,6 +5133,208 @@ export function initStore(options: StoreInitOptions = {}): void {
       );
     } finally {
       _db.pragma("foreign_keys = ON");
+    }
+  }
+
+  // v103: 좌석-세션 상호참조 (SEAT-SESSION-PLAN-v2 §3.2 사다리).
+  //
+  // v102 는 좌석 원장을 만들고 시딩까지 했지만 **그 뒤에 태어난 대화는 좌석이 없다**
+  // (createChat 이 seat_id 를 안 넣었다 — 원장 동결). 이 단계는:
+  //   ① 스키마 증분 — 전부 ADD COLUMN / IF NOT EXISTS. chats 재작성 없음(v102 와 다르다).
+  //   ② solo 좌석 재시딩(멱등 backfill) — v102 이후 생긴 seat_id NULL 대화 흡수.
+  //   ③ 단톡(one_taskforces) → group 좌석 이관. 방 삭제가 대화를 지우지 않는 보존
+  //      계약(I3)의 원장 기반. one_taskforces 테이블 자체는 호환 창구로 남긴다.
+  //   ④ 세션 표시 스냅샷(seat_label·seat_kind·participants_json) — 좌석이 소멸해도
+  //      세션이 스스로를 설명한다(I2). 쓰는 시점 기록 원칙(I9)의 backfill 판.
+  //   ⑤ 런타임 세션 키에 agent_id — 점유자 교체 시 두 봇이 서로의 CLI 세션 행을
+  //      덮어쓰지 않는다(I5). 소형 테이블이라 단순 재작성.
+  // 마지막에 스스로 검증하고, 실패하면 백업 경로를 오류에 실어 말한다(I10).
+  if (userVersion < 103) {
+    const seatSessionBackup = backupDatabaseFile(_db, "v103-seat-session");
+    try {
+      const migrateSeatSession = _db.transaction(() => {
+        // ① 스키마 증분 — 재실행 안전(열 존재 확인 뒤 ALTER).
+        const seatColumns = new Set(schemaColumns(_db!, "one_seats").map((column) => column.name));
+        if (!seatColumns.has("dissolved_at")) {
+          _db!.exec("ALTER TABLE one_seats ADD COLUMN dissolved_at TEXT");
+        }
+        const chatColumns = new Set(schemaColumns(_db!, "chats").map((column) => column.name));
+        if (!chatColumns.has("seat_label")) _db!.exec("ALTER TABLE chats ADD COLUMN seat_label TEXT");
+        if (!chatColumns.has("seat_kind")) _db!.exec("ALTER TABLE chats ADD COLUMN seat_kind TEXT");
+        if (!chatColumns.has("participants_json")) _db!.exec("ALTER TABLE chats ADD COLUMN participants_json TEXT");
+        _db!.exec("CREATE INDEX IF NOT EXISTS idx_occupants_seat_time ON one_seat_occupants(seat_id, since)");
+        // 텔레그램 방 = 좌석(원기획 §2.4). 방의 자리를 원장에 적어 두면 `/new` 로 세션을
+        // 새로 열어도 방의 지난 대화들과 같은 자리에 모인다.
+        if (tableExists(_db!, "telegram_bindings")) {
+          const telegramColumns = new Set(schemaColumns(_db!, "telegram_bindings").map((column) => column.name));
+          if (!telegramColumns.has("seat_id")) {
+            _db!.exec("ALTER TABLE telegram_bindings ADD COLUMN seat_id TEXT");
+          }
+        }
+
+        // ② solo 좌석 재시딩 — v102 의 시딩 규칙 그대로, seat_id NULL 행만 대상.
+        //    자연 키(seat_id, slot, since)와 부분 유니크(현재 점유 ≤1)가 멱등을 보장한다.
+        // ★열 존재를 가드한다 (v102 와 같은 이유). 아주 오래된 스키마에서 올라오는 DB 의
+        //   chats 에는 agent_id·parent_chat_id 가 아예 없다 — v102 재작성은 "있는 열만"
+        //   옮기므로 여기서도 없는 열을 참조하면 사다리가 통째로 멈춘다(v84 픽스처 실측).
+        const chatHas = (name: string): boolean => chatColumns.has(name) || schemaColumns(_db!, "chats").some((column) => column.name === name);
+        if (chatHas("agent_id")) {
+        _db!.exec(`
+          INSERT OR IGNORE INTO one_seats (id, kind, title, project_id, created_at, updated_at)
+          SELECT
+            'seat_' || c.agent_id, 'solo', '',
+            ${chatHas("project_id") ? `(SELECT c2.project_id FROM chats c2
+              WHERE c2.agent_id = c.agent_id AND c2.project_id IS NOT NULL
+              ORDER BY c2.created_at ASC LIMIT 1)` : "NULL"},
+            MIN(c.created_at), MAX(c.updated_at)
+          FROM chats c
+          WHERE c.agent_id IS NOT NULL AND c.seat_id IS NULL
+          GROUP BY c.agent_id;
+
+          INSERT OR IGNORE INTO one_seat_occupants (seat_id, slot, agent_id, display_name, since, until)
+          SELECT
+            'seat_' || c.agent_id, 0, c.agent_id,
+            COALESCE((SELECT a.name FROM installed_agents a WHERE a.id = c.agent_id), ''),
+            MIN(c.created_at), NULL
+          FROM chats c
+          WHERE c.agent_id IS NOT NULL AND c.seat_id IS NULL
+          GROUP BY c.agent_id;
+
+          UPDATE chats SET seat_id = 'seat_' || agent_id
+           WHERE seat_id IS NULL AND agent_id IS NOT NULL
+             AND EXISTS (SELECT 1 FROM one_seats s WHERE s.id = 'seat_' || chats.agent_id);
+        `);
+        }
+        // 하위 실행 세션(division)은 뿌리 좌석을 물려받는다 — v102 ③ 과 같은 규칙.
+        if (chatHas("parent_chat_id")) {
+          const inheritSeatV103 = _db!.prepare(`
+            UPDATE chats
+               SET seat_id = (SELECT p.seat_id FROM chats p WHERE p.id = chats.parent_chat_id)
+             WHERE seat_id IS NULL AND parent_chat_id IS NOT NULL
+               AND (SELECT p.seat_id FROM chats p WHERE p.id = chats.parent_chat_id) IS NOT NULL
+          `);
+          for (let pass = 0; pass < 32; pass += 1) {
+            if (inheritSeatV103.run().changes === 0) break;
+          }
+        }
+
+        // ③ 단톡 → group 좌석 이관. member 목록은 JSON 이라 JS 에서 푼다.
+        let taskforceSeatCount = 0;
+        if (tableExists(_db!, "one_taskforces")) {
+          const taskforceRows = _db!.prepare(
+            "SELECT id, chat_id, title, member_agent_ids_json, created_at, updated_at FROM one_taskforces",
+          ).all() as Array<{ id: string; chat_id: string; title: string; member_agent_ids_json: string; created_at: string; updated_at: string }>;
+          const insertSeat = _db!.prepare(
+            "INSERT OR IGNORE INTO one_seats (id, kind, title, project_id, created_at, updated_at) VALUES (?, 'group', ?, NULL, ?, ?)",
+          );
+          const insertOccupant = _db!.prepare(
+            `INSERT OR IGNORE INTO one_seat_occupants (seat_id, slot, agent_id, display_name, since, until)
+             VALUES (?, ?, ?, COALESCE((SELECT a.name FROM installed_agents a WHERE a.id = ?), ''), ?, NULL)`,
+          );
+          const bindChat = _db!.prepare("UPDATE chats SET seat_id = ? WHERE id = ?");
+          for (const tf of taskforceRows) {
+            const seatId = `seat_tf_${tf.id}`;
+            insertSeat.run(seatId, tf.title ?? "", tf.created_at, tf.updated_at);
+            let memberIds: string[] = [];
+            try {
+              const parsed = JSON.parse(tf.member_agent_ids_json);
+              if (Array.isArray(parsed)) memberIds = parsed.filter((value): value is string => typeof value === "string");
+            } catch { /* 손상된 멤버 목록 — 빈 좌석으로 이관 */ }
+            memberIds.forEach((agentId, slot) => {
+              insertOccupant.run(seatId, slot, agentId, agentId, tf.created_at);
+            });
+            // 단톡 대화의 좌석은 그 단톡의 group 좌석이다 — v102 가 agent_id(=One 루트)로
+            // 잘못 붙인 solo 좌석이 있어도 여기서 바로잡는다.
+            bindChat.run(seatId, tf.chat_id);
+            taskforceSeatCount += 1;
+          }
+        }
+
+        // ④ 표시 스냅샷 backfill. 라벨을 만들 수 없는 행(빈 제목 + 점유자 없음)은
+        //    NULL 로 둔다 — 렌더는 그 칸을 그리지 않는다(I9, 지어낸 값 금지).
+        _db!.exec(`
+          UPDATE chats SET
+            seat_kind = (SELECT s.kind FROM one_seats s WHERE s.id = chats.seat_id),
+            seat_label = (
+              SELECT NULLIF(
+                CASE WHEN s.title <> '' THEN s.title ELSE COALESCE((
+                  SELECT o.display_name FROM one_seat_occupants o
+                   WHERE o.seat_id = s.id AND o.until IS NULL AND o.display_name <> ''
+                   ORDER BY o.slot LIMIT 1
+                ), '') END, '')
+              FROM one_seats s WHERE s.id = chats.seat_id)
+          WHERE seat_id IS NOT NULL AND (seat_kind IS NULL OR seat_label IS NULL);
+        `);
+        const seatIdsNeedingParticipants = _db!.prepare(
+          "SELECT DISTINCT seat_id FROM chats WHERE seat_id IS NOT NULL AND participants_json IS NULL",
+        ).all() as Array<{ seat_id: string }>;
+        const readOccupants = _db!.prepare(
+          "SELECT slot, agent_id, display_name FROM one_seat_occupants WHERE seat_id = ? AND until IS NULL ORDER BY slot",
+        );
+        const writeParticipants = _db!.prepare(
+          "UPDATE chats SET participants_json = ? WHERE seat_id = ? AND participants_json IS NULL",
+        );
+        for (const { seat_id } of seatIdsNeedingParticipants) {
+          const occupants = readOccupants.all(seat_id) as Array<{ slot: number; agent_id: string | null; display_name: string }>;
+          writeParticipants.run(
+            JSON.stringify(occupants.map((row) => ({ slot: row.slot, agentId: row.agent_id, displayName: row.display_name }))),
+            seat_id,
+          );
+        }
+
+        // ⑤ 런타임 세션 키에 agent_id — (chat_id, kind) → (chat_id, kind, agent_id).
+        //    기존 행은 agent_id='' 레거시 키로 남기고, 읽기 쪽이 지문 검증 하에 승계한다.
+        if (tableExists(_db!, "chat_runtime_sessions")) {
+          const runtimeColumns = new Set(schemaColumns(_db!, "chat_runtime_sessions").map((column) => column.name));
+          if (!runtimeColumns.has("agent_id")) {
+            _db!.exec(`
+              DROP TABLE IF EXISTS chat_runtime_sessions_v103;
+              CREATE TABLE chat_runtime_sessions_v103 (
+                chat_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                agent_id TEXT NOT NULL DEFAULT '',
+                session_id TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                reported_output_tokens INTEGER,
+                reported_input_tokens INTEGER,
+                reported_cached_input_tokens INTEGER,
+                PRIMARY KEY (chat_id, kind, agent_id),
+                FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE
+              );
+              INSERT INTO chat_runtime_sessions_v103
+                (chat_id, kind, agent_id, session_id, fingerprint, updated_at,
+                 reported_output_tokens, reported_input_tokens, reported_cached_input_tokens)
+                SELECT chat_id, kind, '', session_id, fingerprint, updated_at,
+                       reported_output_tokens, reported_input_tokens, reported_cached_input_tokens
+                FROM chat_runtime_sessions;
+              DROP TABLE chat_runtime_sessions;
+              ALTER TABLE chat_runtime_sessions_v103 RENAME TO chat_runtime_sessions;
+            `);
+          }
+        }
+
+        // ⑥ 자기 검증 — 초록은 "실패 없음"이 아니라 "이만큼 검사했다"여야 한다.
+        //    (agent_id·kind 가 없던 고대 스키마는 시딩 원천 자체가 없으므로 검사 대상 0.)
+        const orphanUserChats = chatHas("agent_id") && chatHas("kind")
+          ? (_db!.prepare(
+              "SELECT COUNT(*) AS n FROM chats WHERE seat_id IS NULL AND kind = 'user' AND agent_id IS NOT NULL",
+            ).get() as { n: number }).n
+          : 0;
+        if (orphanUserChats > 0) {
+          throw new Error(`v103 seat-session migration left ${orphanUserChats} user chat(s) without a seat`);
+        }
+        const seatTotal = (_db!.prepare("SELECT COUNT(*) AS n FROM one_seats").get() as { n: number }).n;
+        console.log(
+          `[store] v103 seat-session: checks=orphan-user-chats(0), seats=${seatTotal}, taskforce-seats=${taskforceSeatCount}`,
+        );
+      });
+      migrateSeatSession();
+    } catch (error) {
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}`
+        + (seatSessionBackup ? ` — 이 단계 직전 백업: ${seatSessionBackup}` : " — 백업을 만들지 못했다"),
+      );
     }
   }
 

@@ -57,11 +57,34 @@ import { isAuthenticSystemTimeMcpLaunch } from "../mcp-tools/system-time-server"
  * tool_result. Admit only exact paths from known mutation tools; Main still
  * opens and seals every candidate before it can reach One Outputs. */
 export function claudeArtifactPathsFromToolUse(name: string, input: unknown): string[] {
-  if (!/^(?:Write|Edit|MultiEdit|NotebookEdit)$/iu.test(name) || !input || typeof input !== "object") return [];
+  if (!input || typeof input !== "object") return [];
   const record = input as Record<string, unknown>;
-  const candidates = [record.file_path, record.path];
-  const paths = candidates.filter((value): value is string => typeof value === "string" && path.isAbsolute(value));
-  return [...new Set(paths)];
+  if (/^(?:Write|Edit|MultiEdit|NotebookEdit)$/iu.test(name)) {
+    const candidates = [record.file_path, record.path];
+    const paths = candidates.filter((value): value is string => typeof value === "string" && path.isAbsolute(value));
+    return [...new Set(paths)];
+  }
+  // Bash가 만든 파일도 산출물이다 — 리다이렉트/tee/cp/mv의 목적지가 절대
+  // 경로이고 확장자를 가진 경우만 보수적으로 등재한다(장치 파일·옵션 제외).
+  // 이것 없이는 셸로 쓴 index.html이 결과 탭에 영영 안 올랐다
+  // (U-D-1 범위 밖 3종 ②, 2026-08-25).
+  if (/^Bash$/iu.test(name) && typeof record.command === "string") {
+    const command = record.command;
+    const paths = new Set<string>();
+    const collect = (value: string | undefined) => {
+      if (!value) return;
+      const raw = value.replace(/^["']|["']$/g, "");
+      if (!path.isAbsolute(raw)) return;
+      if (raw.startsWith("/dev/") || raw.startsWith("/proc/")) return;
+      if (!/\.[A-Za-z0-9]{1,8}$/.test(raw)) return;
+      paths.add(raw);
+    };
+    for (const match of command.matchAll(/>{1,2}\s*("[^"]+"|'[^']+'|\S+)/gu)) collect(match[1]);
+    for (const match of command.matchAll(/\btee\s+(?:-a\s+)?("[^"]+"|'[^']+'|\S+)/gu)) collect(match[1]);
+    for (const match of command.matchAll(/\b(?:cp|mv)\s+(?:-\S+\s+)*(?:"[^"]+"|'[^']+'|\S+)\s+("[^"]+"|'[^']+'|\S+)/gu)) collect(match[1]);
+    return [...paths];
+  }
+  return [];
 }
 
 /**
@@ -483,14 +506,14 @@ const runClaudeTurn = async (
     runReq.workforceRuntimeToolGrant,
   );
   const fingerprint = !runReq.untrustedNoTools && runReq.chatId ? systemFingerprint(runReq) : null;
-  const savedSession = !runReq.untrustedNoTools && runReq.chatId ? getRuntimeSession(runReq.chatId, KIND) : null;
+  const savedSession = !runReq.untrustedNoTools && runReq.chatId ? getRuntimeSession(runReq.chatId, KIND, runReq.agentId) : null;
   const storedSessionId =
     savedSession && fingerprint && savedSession.fingerprint === fingerprint
       ? savedSession.sessionId
       : null;
   if (runReq.chatId && savedSession && fingerprint && savedSession.fingerprint !== fingerprint) {
     events.onStatus(`[runtime-session] fingerprint_changed kind=${KIND}`);
-    clearRuntimeSession(runReq.chatId, KIND);
+    clearRuntimeSession(runReq.chatId, KIND, runReq.agentId);
   }
   const resumeSessionId = runReq.untrustedNoTools ? null : (runReq.runtimeSessionId ?? storedSessionId);
   // gap-replay — 이 세션이 마지막으로 본 이후 다른 경로(스웜/다른 러너)로 진행된 턴을 메운다.
@@ -1322,7 +1345,7 @@ const runClaudeTurn = async (
         // 취소여도 CLI가 이미 세션을 디스크에 남겼으면 저장한다 → 사용자가 이어서 보내는
         // steering 메시지가 이 세션을 resume해 "실행 중 방향 전환"처럼 문맥을 유지한다.
         if (req.chatId && fingerprint && sessionId) {
-          saveRuntimeSession(req.chatId, KIND, sessionId, fingerprint);
+          saveRuntimeSession(req.chatId, KIND, sessionId, fingerprint, { agentId: req.agentId });
         }
         rejectRuntime(abortReasonError(req));
         return;
@@ -1374,7 +1397,7 @@ const runClaudeTurn = async (
         const display = streamed || finalText;
         if (display) events.onPartial(display);
         if (req.chatId && fingerprint && sessionId) {
-          if (!saveRuntimeSession(req.chatId, KIND, sessionId, fingerprint)) {
+          if (!saveRuntimeSession(req.chatId, KIND, sessionId, fingerprint, { agentId: req.agentId })) {
             events.onStatus(`[runtime-session] store_failed kind=${KIND}`);
           }
         }
@@ -1453,7 +1476,7 @@ const runClaudeTurn = async (
           reject(new Error(`claude CLI exit ${code}${stderr ? `\n${stderr.slice(0, 500)}` : ""}`));
           return;
         }
-        if (resumeSessionId && req.chatId) clearRuntimeSession(req.chatId, KIND);
+        if (resumeSessionId && req.chatId) clearRuntimeSession(req.chatId, KIND, req.agentId);
         if (resumeSessionId) {
           events.onStatus(`[runtime-session] resume_failed kind=${KIND} exit=${code}`);
           if (req.unattended) {

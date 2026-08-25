@@ -272,9 +272,17 @@ export function OrgTree() {
     if (!api || busy) return;
     const agent = agentById.get(id);
     const source = agent ? agentSource(agent) : "local";
+    // 좌석 모델(T1): 봇 삭제 = 자리 비우기 — 대화는 보존. 확인 문구는 정확한 수로 말한다.
+    let preservation = ko ? " 대화 기록은 그대로 남습니다." : " Conversations are kept.";
+    try {
+      const preview = await api.team.uninstallPreview(id);
+      preservation = ko
+        ? ` 좌석 ${preview.seatCount}곳이 빈 자리가 됩니다. 대화 ${preview.chatCount}개는 그대로 남습니다.`
+        : ` ${preview.seatCount} seat${preview.seatCount === 1 ? "" : "s"} become${preview.seatCount === 1 ? "s" : ""} empty. ${preview.chatCount} conversation${preview.chatCount === 1 ? "" : "s"} stay${preview.chatCount === 1 ? "s" : ""}.`;
+    } catch { /* 수를 못 세면 수 없는 보존 문구로 낸다 */ }
     if (!window.confirm(ko
-      ? `${name}을(를) 조직도에서 삭제할까요? 출처: ${sourceLabel(source)}. 로컬이면 원본 폴더를 휴지통으로 옮기고, Cloud/Hub이면 원본 또는 북마크도 함께 정리합니다.`
-      : `Remove ${name} from the org chart? Source: ${sourceLabel(source)}. Local sources move to Trash; Cloud/Hub also removes the owned source or bookmark.`)) return;
+      ? `${name}을(를) 조직도에서 삭제할까요? 출처: ${sourceLabel(source)}. 로컬이면 원본 폴더를 휴지통으로 옮기고, Cloud/Hub이면 원본 또는 북마크도 함께 정리합니다.${preservation}`
+      : `Remove ${name} from the org chart? Source: ${sourceLabel(source)}. Local sources move to Trash; Cloud/Hub also removes the owned source or bookmark.${preservation}`)) return;
     setBusy(true);
     try {
       if (agent) await removeAgentCore(api, agent);

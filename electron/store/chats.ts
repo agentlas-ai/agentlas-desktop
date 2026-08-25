@@ -22,6 +22,7 @@ import type {
   RuntimeSelection,
 } from "../../shared/types";
 import { currentUiLocale } from "../ui-locale";
+import { applySeatSnapshotToChats, ensureSoloSeatForAgent } from "./seats";
 import {
   ensureCanonicalTaskForChat,
   findCanonicalTaskForChat,
@@ -43,6 +44,10 @@ interface ChatRow {
   goal_id: string | null;
   origin_surface: string | null;
   runtime_selection_json: string | null;
+  seat_id: string | null;
+  seat_label: string | null;
+  seat_kind: string | null;
+  participants_json: string | null;
 }
 
 const CHAT_RUNTIME_KINDS = new Set<RuntimeKind>(RUNTIME_KINDS);
@@ -138,7 +143,33 @@ function toChat(row: ChatRow): Chat {
     goalId: row.goal_id ?? null,
     originSurface: row.origin_surface === "one" ? "one" : "work",
     runtimeSelection: parseChatRuntimeSelection(row.runtime_selection_json),
+    // 좌석 상호참조 + 표시 스냅샷(I2) — 좌석이 소멸해도 이 칸만으로 렌더된다.
+    seatId: row.seat_id ?? null,
+    seatLabel: row.seat_label ?? null,
+    seatKind: row.seat_kind === "solo" || row.seat_kind === "group" ? row.seat_kind : null,
+    participants: parseChatParticipants(row.participants_json),
   };
+}
+
+function parseChatParticipants(raw: string | null): Chat["participants"] {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return null;
+    const rows = parsed.filter(
+      (entry): entry is { slot: number; agentId: string | null; displayName: string } =>
+        !!entry && typeof entry === "object"
+        && Number.isInteger((entry as { slot?: unknown }).slot)
+        && typeof (entry as { displayName?: unknown }).displayName === "string",
+    );
+    return rows.length > 0 ? rows.map((row) => ({
+      slot: row.slot,
+      agentId: typeof row.agentId === "string" ? row.agentId : null,
+      displayName: row.displayName,
+    })) : null;
+  } catch {
+    return null;
+  }
 }
 
 /** 사이드바용 — 활성 사용자 채팅만 (보관·숨김 본부 세션 제외) */
@@ -371,12 +402,30 @@ export function createChat(input: {
 
   const id = randomUUID();
   const now = new Date().toISOString();
+  // 좌석 부여 — 새 세션은 태어날 때 좌석을 참조한다(SEAT-SESSION-PLAN-v2 §6-1,
+  // 스펙 §3 ①-2′ "좌석 원장 동결" 해소). 하위 실행 세션(division)은 뿌리의 좌석을
+  // 물려받고, 그 외에는 담당 봇의 solo 좌석을 확보한다(없으면 만든다). 단톡 대화는
+  // 생성 직후 taskforces.ts 가 group 좌석으로 재배정한다.
+  let seatId: string | null = null;
+  try {
+    if (input.kind === "division" && input.parentChatId) {
+      const parent = getDb()
+        .prepare("SELECT seat_id AS seatId FROM chats WHERE id = ?")
+        .get(input.parentChatId) as { seatId: string | null } | undefined;
+      seatId = parent?.seatId ?? null;
+    }
+    if (!seatId) seatId = ensureSoloSeatForAgent(resolvedAgentId);
+  } catch {
+    // 좌석 확보 실패가 대화 생성을 막아서는 안 된다 — seat_id NULL 은 유효한 세션이고
+    // v103 재시딩이 다음 기동에서 흡수한다(I2: NULL 허용이 계약).
+    seatId = null;
+  }
   // title은 빈 문자열로 저장 — UI 표시 시 locale에 따라 "새 채팅" / "New chat"으로 표시.
   // 첫 user 메시지 도착 시 autoTitleFromFirstMessage가 채움.
   getDb()
     .prepare(
-      `INSERT INTO chats (id, project_id, firm_id, agent_id, title, kind, parent_chat_id, working_folder, created_at, updated_at, origin_surface)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO chats (id, project_id, firm_id, agent_id, title, kind, parent_chat_id, working_folder, created_at, updated_at, origin_surface, seat_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -390,7 +439,12 @@ export function createChat(input: {
       now,
       now,
       originSurface,
+      seatId,
     );
+  // 표시 스냅샷은 쓰는 시점에 기록한다(I9) — 좌석이 소멸해도 세션이 스스로를 설명한다.
+  if (seatId) {
+    try { applySeatSnapshotToChats(seatId); } catch { /* 스냅샷 실패는 렌더 폴백(파생)으로 흡수 */ }
+  }
   if (input.projectId) touchProject(input.projectId);
   // One always starts as a conversation. Its invocation/preflight authority
   // may promote it after a typed task verdict; chat creation itself must never

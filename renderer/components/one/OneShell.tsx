@@ -109,6 +109,7 @@ import { useJudgedOneDecision } from "@/lib/one-decision-judged";
 import { visibleDecisionReceipt } from "@/lib/one-decision-receipt";
 import { alwaysApprovedChatIds, grantAlwaysApproval, subscribeAlwaysApproved } from "@/lib/always-approved-chats";
 import type { OneRecurrenceSelectionV1 } from "@shared/one-recurrence";
+import { seatEventLine } from "@shared/one-seat-events";
 import { shouldPresentOneWeeklyReflection } from "@shared/one-weekly-reflection";
 import {
   ONE_ATTACHMENT_LIMITS,
@@ -116,7 +117,7 @@ import {
   type OneAttachmentSafeItem,
   type PreparedOneAttachments,
 } from "@shared/one-attachments";
-import type { FsPathGrant, HubAgentBookmark, MarketplaceListing, OrchestrationTarget, RuntimeSelection, RuntimeStatus } from "@shared/types";
+import type { FsPathGrant, HubAgentBookmark, MarketplaceListing, OneSeatView, OrchestrationTarget, RuntimeSelection, RuntimeStatus } from "@shared/types";
 import { ONE_BRIEFING_CONTRACT_VERSION, isOneProactiveBriefing } from "@shared/one-briefing";
 import {
   isPendingConfirmationSnoozed,
@@ -691,6 +692,13 @@ function visibleOneMessageText(message: UiMessage): string {
   }
   const systemPromptLabel = oneSystemPromptLabel(message);
   if (systemPromptLabel) return systemPromptLabel;
+  // 좌석 사건 줄(자리 담당이 바뀌었다·누가 맡았다)은 내부 프롬프트가 아니라 **대화에
+  // 남는 사실**이다. 표식이 붙은 줄만 열어 준다 — 표식 없는 system 줄은 아래에서 그대로
+  // 비공개다(좌석 기획 §4-5; 표식 계약은 shared/one-seat-events.ts).
+  if (message.role === "system") {
+    const seatLine = seatEventLine(message.text);
+    if (seatLine) return seatLine;
+  }
   // Recovery/preflight prompts are durable model context, not conversation
   // authored by the person. Only the explicitly translated labels above may
   // appear in One; every other system turn stays private.
@@ -874,6 +882,12 @@ function seatLabelForChat(
   if (member) {
     const name = (locale === "ko" ? member.displayName : member.nameEn || member.displayName).trim();
     if (name) return member.archivedAt ? `${name}${locale === "ko" ? " (나감)" : " (left)"}` : name;
+  }
+  // 좌석 표시 스냅샷(I2) — 방이 해체되거나 팀원이 삭제돼 위 파생이 전부 실패해도,
+  // 세션이 쓰는 시점에 적어 둔 라벨만으로 스스로를 설명한다(좌석 테이블 조인 없음, I8).
+  const snapshot = chat.seatLabel?.trim();
+  if (snapshot) {
+    return chat.seatKind === "group" && locale === "ko" ? `${snapshot} (해체됨)` : chat.seatKind === "group" ? `${snapshot} (dissolved)` : snapshot;
   }
   return "One";
 }
@@ -1188,6 +1202,30 @@ export function OneShell() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
+  }, [sessionSheetOpen]);
+  /**
+   * 세션 시트의 실행 모델 표기 (표시=실행, C-D-1): 각 세션의 마지막 실행
+   * receipt에 원장이 남긴 실제 실행 모델을 시트가 열릴 때 한 번 읽어 단다.
+   * 설정의 "현재 기본값"은 과거 실행의 증빙이 아니므로 쓰지 않는다.
+   */
+  const [sessionModels, setSessionModels] = useState<Record<string, string>>({});
+  useEffect(() => {
+    if (!sessionSheetOpen) return;
+    const api = ipc();
+    if (!api?.invoke?.latestReceipt) return;
+    let cancelled = false;
+    void (async () => {
+      const ids = conversations.map((chat) => chat.id).slice(0, 60);
+      const entries = await Promise.all(ids.map(async (id) => {
+        const receipt = await api.invoke.latestReceipt(id).catch(() => null);
+        return [id, receipt?.model ?? ""] as const;
+      }));
+      if (cancelled) return;
+      setSessionModels(Object.fromEntries(entries.filter(([, model]) => model)));
+    })();
+    return () => { cancelled = true; };
+    // conversations 목록 자체는 시트가 열린 동안 안정적이다 — 열림 시점 1회 조회.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionSheetOpen]);
   /** 이 대화에서 켠 생성 앱 미리보기 서버들. 대화를 떠날 때 끈다. */
   const livePreviewAppIdsRef = useRef<Set<string>>(new Set());
@@ -2569,11 +2607,29 @@ export function OneShell() {
       rows.push({ kind: "task" as const, key: `task:${item.taskId}`, task: item, chat: null, sortAt: item.status.asOf });
     }
     rows.sort((a, b) => String(b.sortAt).localeCompare(String(a.sortAt)));
+    const fresh = rows.filter((row) => !(row.chat && isDormantSession(row.chat.updatedAt)));
+    /*
+     * 날짜 버킷(오늘/어제/지난 7일…) 복원 — f3d2be29 가 분할 보기 작업에 딸려
+     * 언급 없이 걷어낸 미기록 회귀(감사 2026-08-25 F-inv, 웹과 패리티).
+     * 합쳐진 단일 목록(작업 줄 없음, 오너 결정 2026-08-24)은 그대로 두고,
+     * 그 목록을 시간 덩어리로만 묶는다.
+     */
+    const order = ["today", "yesterday", "week", "month", "older"];
+    const buckets = new Map<string, { key: string; label: string; rows: OneSessionRow[] }>();
+    for (const row of fresh) {
+      const bucket = sessionBucket(String(row.sortAt), appLocale);
+      const existing = buckets.get(bucket.key);
+      if (existing) existing.rows.push(row);
+      else buckets.set(bucket.key, { ...bucket, rows: [row] });
+    }
     return {
-      rows: rows.filter((row) => !(row.chat && isDormantSession(row.chat.updatedAt))),
+      rows: fresh,
+      groups: order
+        .map((key) => buckets.get(key))
+        .filter((group): group is { key: string; label: string; rows: OneSessionRow[] } => Boolean(group)),
       dormant: conversations.filter((chat) => isDormantSession(chat.updatedAt)),
     };
-  }, [conversations, projections]);
+  }, [conversations, projections, appLocale]);
   const activeThreadPromptFallback = selected?.display.title ?? conversation?.title ?? "";
   const activeTaskforce = useMemo(
     () => taskforces.find((taskforce) => taskforce.chatId === activeThreadChatId) ?? null,
@@ -2583,6 +2639,66 @@ export function OneShell() {
     () => taskforceEditingId ? taskforces.find((taskforce) => taskforce.id === taskforceEditingId) ?? null : null,
     [taskforceEditingId, taskforces],
   );
+  // 활성 세션의 좌석 1급 조회(SEAT-SESSION-PLAN-v2) — 해체(T7) 여부가 읽기 전용
+  // 아카이브 배너·전송 대체 CTA 를 결정한다. 좌석이 없거나 조회가 실패하면 평소대로.
+  const [activeSeat, setActiveSeat] = useState<OneSeatView | null>(null);
+  useEffect(() => {
+    const chatId = activeThreadChatId;
+    const api = ipc();
+    if (!chatId || !api?.seats?.forChat) { setActiveSeat(null); return; }
+    let cancelled = false;
+    void api.seats.forChat(chatId)
+      .then((seat) => { if (!cancelled) setActiveSeat(seat); })
+      .catch(() => { if (!cancelled) setActiveSeat(null); });
+    return () => { cancelled = true; };
+  }, [activeThreadChatId, taskforces]);
+  const activeSeatDissolved = Boolean(activeSeat?.dissolvedAt);
+  /*
+   * 빈 자리(§4-2·T10). 담당 봇이 삭제되면 좌석은 남고 점유만 닫힌다 — 그때 화면이
+   * 헤더를 "One"으로 그리면 **누구와 하는 대화인지 거짓말을 한다**(라이브 실측으로 잡음:
+   * 삭제된 팀원의 방에 보낸 말에 One 이 조용히 답했다). 빈 자리는 빈 자리로 말하고,
+   * 앉힐 사람을 그 자리에서 고르게 한다. 전송 자체는 막지 않는다(기획 §4-3).
+   */
+  const activeSeatEmpty = Boolean(activeSeat && !activeSeat.dissolvedAt && activeSeat.occupants.length === 0);
+  const activeChatRecord = useMemo(
+    () => conversations.find((chat) => chat.id === activeThreadChatId) ?? conversation ?? null,
+    [activeThreadChatId, conversation, conversations],
+  );
+  /** 이전 담당 이름 — 좌석 스냅샷(참여자)에서. 없으면 그 줄을 그리지 않는다(I9). */
+  const previousOccupantName = useMemo(() => {
+    if (!activeSeatEmpty) return null;
+    const fromSnapshot = (activeChatRecord?.participants ?? [])
+      .map((participant) => participant.displayName?.trim())
+      .find((name) => Boolean(name));
+    return fromSnapshot ?? activeChatRecord?.seatLabel?.trim() ?? null;
+  }, [activeChatRecord, activeSeatEmpty]);
+  const [seatAssignBusy, setSeatAssignBusy] = useState(false);
+  const seatAssignCandidates = useMemo(() => (oneOrgState?.members ?? []).filter(
+    (member) => !member.archivedAt && member.statusKind !== "locked" && member.statusKind !== "failed",
+  ).slice(0, 6), [oneOrgState?.members]);
+  const assignSeat = useCallback(async (agentId: string) => {
+    const api = ipc();
+    if (!api?.seats?.assign || !activeThreadChatId) return;
+    setSeatAssignBusy(true);
+    try {
+      const seat = await api.seats.assign({ chatId: activeThreadChatId, agentId });
+      setActiveSeat(seat);
+      await refreshAll({ includeOrg: false });
+      /*
+       * 착석은 대화에 줄 하나를 남긴다("이 자리를 X가 맡았습니다"). 그 줄은 durable
+       * 기록에 저장되는데, 여기서 다시 읽지 않으면 **새로고침해야만 보인다**(라이브 실측).
+       * 방금 일어난 일이 화면에 없으면 사용자는 배정이 됐는지 알 수 없다 — 기록을 다시
+       * 읽어 그 자리에서 보이게 한다. 서버 기록이 비면 화면을 지우지 않는다.
+       */
+      const history = await api.invoke.history(activeThreadChatId).catch(() => null);
+      if (history && shownThreadChatIdRef.current === activeThreadChatId) {
+        const next = toUiMessages(history);
+        setMessages((current) => (next.length === 0 && current.length > 0 ? current : next));
+      }
+    } finally {
+      setSeatAssignBusy(false);
+    }
+  }, [activeThreadChatId, refreshAll]);
   const activeTaskforceAgentIds = useMemo(() => {
     if (!activeTaskforce) return [];
     const members = oneOrgState?.members ?? [];
@@ -4447,6 +4563,27 @@ export function OneShell() {
     }
   }, [refreshAll, router]);
 
+  // "같은 멤버로 새 단톡 만들기" — 해체(T7) 세션의 참여자 스냅샷(I2)에서 재구성하되,
+  // 지금 조직에 살아 있는 멤버만 앉힌다(만들기 계약이 활성 스태프만 허용).
+  const continueDissolvedSeat = useCallback(async () => {
+    const sourceChat = conversations.find((chat) => chat.id === activeThreadChatId) ?? null;
+    const activeMembers = new Set(
+      (oneOrgState?.members ?? [])
+        .filter((member) => !member.archivedAt && member.statusKind !== "locked" && member.statusKind !== "failed")
+        .map((member) => member.installedAgentId),
+    );
+    const memberAgentIds = (sourceChat?.participants ?? [])
+      .map((participant) => participant.agentId)
+      .filter((agentId): agentId is string => Boolean(agentId && activeMembers.has(agentId)));
+    const baseTitle = (activeSeat?.title || sourceChat?.seatLabel || sourceChat?.title || "").trim()
+      || (appLocale === "ko" ? "단톡방" : "Group");
+    await createTaskforce({
+      title: appLocale === "ko" ? `${baseTitle} (이어가기)` : `${baseTitle} (continued)`,
+      description: "",
+      memberAgentIds,
+    });
+  }, [activeSeat, activeThreadChatId, appLocale, conversations, createTaskforce, oneOrgState?.members]);
+
   const updateTaskforce = useCallback(async (input: { id: string; title: string; description: string; memberAgentIds: string[]; expectedRevision: number }) => {
     const api = ipc();
     if (!api?.oneTaskforces) throw new Error("Desktop bridge unavailable");
@@ -5335,23 +5472,29 @@ export function OneShell() {
             {sessionGroups.rows.length === 0 && sessionGroups.dormant.length === 0 && (
               <div className={styles.railEmpty}>{appLocale === "ko" ? "아직 대화가 없어요. 위에서 새 대화를 시작하세요." : "No conversations yet. Start one above."}</div>
             )}
-            {/* 하나의 목록, 최근 순. 날짜 덩어리로 나누지 않는다(오너 결정 2026-08-24). */}
-            <div className={styles.railList}>
-              {sessionGroups.rows.map((row) => (row.chat ? (
-                <ConversationListButton
-                  key={row.key}
-                  item={row.chat}
-                  active={row.chat.id === selectedConversationId || (row.task ? row.task.taskId === selectedTaskId : false)}
-                  locale={appLocale}
-                  onOpen={openConversation}
-                  onRemove={removeConversation}
-                  seatLabel={seatLabelForChat(row.chat, taskforces, oneOrgState, appLocale)}
-                  running={activeChatIds.includes(row.chat.id)}
-                />
-              ) : row.task ? (
-                <TaskListButton key={row.key} item={row.task} active={row.task.taskId === selectedTaskId} locale={appLocale} onOpen={openTask} />
-              ) : null))}
-            </div>
+            {/* 합쳐진 한 목록(작업 줄 없음, 오너 결정 2026-08-24)을 시간 덩어리로 묶는다 —
+                날짜 버킷은 f3d2be29 가 언급 없이 걷어낸 미기록 회귀의 복원(웹 패리티). */}
+            {sessionGroups.groups.map((group) => (
+              <Fragment key={group.key}>
+                <div className={styles.railTop}><strong>{group.label}</strong></div>
+                <div className={styles.railList}>
+                  {group.rows.map((row) => (row.chat ? (
+                    <ConversationListButton
+                      key={row.key}
+                      item={row.chat}
+                      active={row.chat.id === selectedConversationId || (row.task ? row.task.taskId === selectedTaskId : false)}
+                      locale={appLocale}
+                      onOpen={openConversation}
+                      onRemove={removeConversation}
+                      seatLabel={seatLabelForChat(row.chat, taskforces, oneOrgState, appLocale)}
+                      running={activeChatIds.includes(row.chat.id)}
+                    />
+                  ) : row.task ? (
+                    <TaskListButton key={row.key} item={row.task} active={row.task.taskId === selectedTaskId} locale={appLocale} onOpen={openTask} />
+                  ) : null))}
+                </div>
+              </Fragment>
+            ))}
             {sessionGroups.dormant.length > 0 && (
               <details className={styles.railDormant}>
                 <summary>{appLocale === "ko" ? `30일 넘게 안 쓴 대화 ${sessionGroups.dormant.length}개` : `${sessionGroups.dormant.length} untouched for over 30 days`}</summary>
@@ -5435,7 +5578,18 @@ export function OneShell() {
                       const unavailable = !member || Boolean(member.archivedAt) || member.statusKind === "locked" || member.statusKind === "failed";
                       return <OneAgentPortrait key={agentId} status={unavailable ? "locked" : member.statusKind} label={member?.displayName ?? "Unavailable"} tone={member?.icon ?? "blue"} size="small" />;
                     })}
-                  </span> : <OneAgentPortrait
+                  </span> : activeSeatEmpty ? (
+                    // 빈 자리는 점선 자리로 그린다 — 담당이 없는 것을 One 의 얼굴로 덮지 않는다(§4-2).
+                    <span
+                      className={styles.emptySeatPortrait}
+                      data-one-empty-seat-portrait="true"
+                      role="img"
+                      aria-label={appLocale === "ko" ? "빈 자리" : "Empty seat"}
+                      title={previousOccupantName
+                        ? (appLocale === "ko" ? `빈 자리 · 이전 담당 ${previousOccupantName}` : `Empty seat · previously ${previousOccupantName}`)
+                        : (appLocale === "ko" ? "빈 자리" : "Empty seat")}
+                    />
+                  ) : <OneAgentPortrait
                     status={busy ? "working" : visibleSelectedConfirmation ? "waiting" : activeOneMember?.statusKind ?? "quiet"}
                     label={activeOneMember?.displayName ?? "One"}
                     tone={activeOneMember?.icon ?? "purple"}
@@ -5445,7 +5599,15 @@ export function OneShell() {
                     {/* 이름만 쓴다. "상주 동료 · 전용 터미널" 같은 설명 부제는 아무것도
                         알려주지 않으면서 이름 아래 자리를 차지했다(오너 결정 2026-08-24).
                         단톡방만 사람 수를 쓴다 — 그건 실제로 바뀌는 정보다. */}
-                    <strong>{activeTaskforce?.title ?? activeOneMember?.displayName ?? "One"}</strong>
+                    <strong>{activeTaskforce?.title
+                      ?? ((activeSeatDissolved || activeSeatEmpty) && activeSeat?.title?.trim() ? activeSeat.title.trim() : null)
+                      ?? activeOneMember?.displayName
+                      ?? (activeSeatEmpty ? previousOccupantName : null)
+                      ?? "One"}</strong>
+                    {activeSeatDissolved && <small data-one-dissolved-badge="true">{appLocale === "ko" ? "해체됨 · 기록 보존" : "Dissolved · records kept"}</small>}
+                    {!activeSeatDissolved && activeSeatEmpty && <small data-one-empty-seat-badge="true">{appLocale === "ko"
+                      ? (previousOccupantName ? `빈 자리 · 이전 담당 ${previousOccupantName}` : "빈 자리")
+                      : (previousOccupantName ? `Empty seat · previously ${previousOccupantName}` : "Empty seat")}</small>}
                     {activeTaskforce && <small>{appLocale === "ko"
                       ? `One 포함 ${activeTaskforce.memberAgentIds.length + 1}명`
                       : `${activeTaskforce.memberAgentIds.length + 1} members incl. One`}</small>}
@@ -5621,13 +5783,15 @@ export function OneShell() {
                   )}
                   {threadWorkPlan.leading.map((block) => (
                     <Fragment key={`work:${block.runId}`}>
-                      {!activeTaskforce && <OneTurnWork
+                      {/* 단톡에도 1:1과 같은 도구 호출 로그 표면을 남긴다 (G-4).
+                          워커 도구 이벤트는 agentName이 붙어 오므로 행에 발화자가 보인다. */}
+                      <OneTurnWork
                         state={block.state}
                         busy={false}
                         startedAt={Date.parse(block.startedAt)}
                         locale={appLocale}
                         workspacePath={workspacePath}
-                      />}
+                      />
                       {activeTaskforce && <OneTaskforceConversation state={block.state} org={oneOrgState} locale={appLocale} />}
                     </Fragment>
                   ))}
@@ -5736,13 +5900,14 @@ export function OneShell() {
                         )}
                         {blocksAfter.map((block) => (
                           <Fragment key={`work:${block.runId}`}>
-                            {!activeTaskforce && <OneTurnWork
+                            {/* 단톡에도 1:1과 같은 도구 호출 로그 표면 (G-4). */}
+                            <OneTurnWork
                               state={block.state}
                               busy={false}
                               startedAt={Date.parse(block.startedAt)}
                               locale={appLocale}
                               workspacePath={workspacePath}
-                            />}
+                            />
                             {activeTaskforce && <OneTaskforceConversation state={block.state} org={oneOrgState} locale={appLocale} />}
                           </Fragment>
                         ))}
@@ -6152,8 +6317,38 @@ export function OneShell() {
                 </button>
               </div>
             ))}
-            <form className={styles.composer} data-one-composer="true" onSubmit={(event) => {
+            {/* T10 빈 자리 배정 제안 — 전송을 막지 않고(기획 §4-3) 그 자리에서 앉힐 사람을
+                고르게 한다. 고르면 착석 + 시스템 줄 1개가 남고, 그 뒤 턴부터 그 팀원이 맡는다. */}
+            {activeSeatEmpty && !activeSeatDissolved && <div className={styles.steeringQueue} role="status" data-one-empty-seat-card="true">
+              <span>{appLocale === "ko" ? "이 자리는 비어 있습니다" : "This seat is empty"}</span>
+              <strong>{appLocale === "ko"
+                ? (previousOccupantName ? `이전 담당은 ${previousOccupantName}였습니다. 지금 이 자리를 맡을 팀원을 고르세요 — 고르지 않고 보내면 One이 맡습니다.` : "이 자리를 맡을 팀원을 고르세요 — 고르지 않고 보내면 One이 맡습니다.")
+                : (previousOccupantName ? `${previousOccupantName} used to sit here. Pick who takes this seat — send without picking and One handles it.` : "Pick who takes this seat — send without picking and One handles it.")}</strong>
+              {seatAssignCandidates.map((member) => (
+                <button
+                  key={member.installedAgentId}
+                  type="button"
+                  data-one-seat-assign="true"
+                  disabled={seatAssignBusy}
+                  onClick={() => void assignSeat(member.installedAgentId)}
+                >{member.displayName}</button>
+              ))}
+            </div>}
+            {/* T7 읽기 전용 아카이브 — 해체된 단톡의 입력창은 "비활성"이 아니라 다음
+                행동(같은 멤버로 새 단톡)으로 대체된다(막다른 길 금지, 기획 §4-6). */}
+            {activeSeatDissolved && <div className={styles.steeringQueue} role="status" data-one-dissolved-banner="true">
+              <span>{appLocale === "ko" ? "이 단톡은 해체되었습니다" : "This group chat was dissolved"}</span>
+              <strong>{appLocale === "ko" ? "기록은 그대로 보존됩니다 — 열람은 계속할 수 있습니다." : "Its records are preserved — you can keep reading."}</strong>
+              <button
+                type="button"
+                data-one-dissolved-continue="true"
+                onClick={() => void continueDissolvedSeat()}
+                disabled={taskforceBusy}
+              >{appLocale === "ko" ? "같은 멤버로 새 단톡 만들기" : "Start a new group chat with the same members"}</button>
+            </div>}
+            <form className={styles.composer} data-one-composer="true" style={activeSeatDissolved ? { display: "none" } : undefined} onSubmit={(event) => {
               event.preventDefault();
+              if (activeSeatDissolved) return;
               const submittedValue = composerInputRef.current?.value ?? composer;
               if (busy && !submittedValue.trim()) stopRun();
               else void submit(submittedValue);
@@ -6393,6 +6588,8 @@ export function OneShell() {
                       >
                         <span className={styles.sessionSheetSeat}>{seatLabelForChat(chat, taskforces, oneOrgState, appLocale)}</span>
                         <span className={styles.sessionSheetName}>{chat.title || (appLocale === "ko" ? "새 대화" : "New conversation")}</span>
+                        {/* 표시=실행 (C-D-1): 이 세션의 마지막 실행이 실제로 돈 모델. */}
+                        {sessionModels[chat.id] && <span className={styles.sessionSheetHint} data-session-model="true">{sessionModels[chat.id]}</span>}
                         {activeChatIds.includes(chat.id) && <span className={styles.sessionRunningDot} aria-hidden="true" />}
                       </button>
                       <button

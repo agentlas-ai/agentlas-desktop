@@ -611,7 +611,7 @@ async function runPreparedAntigravity(
         .update(runReq.model ?? "")
         .digest("hex")
     : null;
-  const agySaved = runReq.chatId ? getRuntimeSession(runReq.chatId, ANTIGRAVITY_KIND) : null;
+  const agySaved = runReq.chatId ? getRuntimeSession(runReq.chatId, ANTIGRAVITY_KIND, runReq.agentId) : null;
   const agyResumeId =
     agySaved && agyFingerprint && agySaved.fingerprint === agyFingerprint ? agySaved.sessionId : null;
   const prompt = agyResumeId
@@ -957,7 +957,7 @@ async function runPreparedAntigravity(
          * 문맥으로 물려받는다.
          */
         if (runReq.chatId && agyFingerprint && agyState.conversationId && !failure) {
-          saveRuntimeSession(runReq.chatId, ANTIGRAVITY_KIND, agyState.conversationId, agyFingerprint);
+          saveRuntimeSession(runReq.chatId, ANTIGRAVITY_KIND, agyState.conversationId, agyFingerprint, { agentId: runReq.agentId });
         }
         resolve({
           text: trimmed,

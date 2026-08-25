@@ -2428,24 +2428,25 @@ function buildAutocompleteOptions(
       return app.status !== "archived" && (!q || name.includes(q) || app.id.toLowerCase().includes(q));
     })
     .slice(0, 5);
+  // @멘션 검색은 두 언어 표시명(및 로컬 별칭)을 모두 본다 (U-D-4): 등록
+  // 표시명이 영문으로 굳은 'Researcher'를 한글 UI에서 '리서처'로 못 찾으면
+  // 사용자는 방금 만든 팀원이 사라졌다고 본다. 표시는 로케일 규칙 그대로다.
+  const nameMatches = (
+    item: { name: string; nameEn?: string; localDisplayName?: string },
+    slug: string,
+  ) => !q
+    || item.name.toLowerCase().includes(q)
+    || (item.nameEn ?? "").toLowerCase().includes(q)
+    || (item.localDisplayName ?? "").toLowerCase().includes(q)
+    || slug.toLowerCase().includes(q);
   const agents = context.agents
-    .filter((a) => {
-      const loc = pickLocalized(a, locale);
-      return !q || loc.name.toLowerCase().includes(q) || a.slug.includes(q);
-    })
+    .filter((a) => nameMatches(a, a.slug))
     .slice(0, 5);
   const hubBookmarks = callableHubBookmarks(context.hubBookmarks ?? [], context.agents)
-    .filter((bookmark) => {
-      const listing = bookmark.listing;
-      const loc = pickLocalized(listing, locale);
-      return !q || loc.name.toLowerCase().includes(q) || listing.slug.toLowerCase().includes(q);
-    })
+    .filter((bookmark) => nameMatches(bookmark.listing, bookmark.listing.slug))
     .slice(0, 5);
   const firms = context.firms
-    .filter((f) => {
-      const loc = pickLocalized(f, locale);
-      return !q || loc.name.toLowerCase().includes(q) || f.slug.includes(q);
-    })
+    .filter((f) => nameMatches(f, f.slug))
     .slice(0, 5);
   const projects = context.projects
     .filter((p) => !q || p.name.toLowerCase().includes(q))
@@ -3211,18 +3212,22 @@ function AgentPickerPopup({
   const [search, setSearch] = useState("");
   const q = search.toLowerCase();
 
-  const filteredFirms = firms.filter((f) => {
-    const loc = pickLocalized(f, locale);
-    return !q || loc.name.toLowerCase().includes(q) || f.slug.includes(q);
-  });
-  const filteredAgents = agents.filter((a) => {
-    const loc = pickLocalized(a, locale);
-    return !q || loc.name.toLowerCase().includes(q) || a.slug.includes(q);
-  });
-  const filteredHubBookmarks = callableHubBookmarks(hubBookmarks, agents).filter((bookmark) => {
-    const loc = pickLocalized(bookmark.listing, locale);
-    return !q || loc.name.toLowerCase().includes(q) || bookmark.slug.toLowerCase().includes(q);
-  });
+  // 검색은 두 언어 표시명을 모두 본다 (U-D-4): 등록 표시명이 영문으로 굳은
+  // 에이전트('Researcher')를 한글('리서처') UI에서 못 찾거나, 그 반대가 되면
+  // 사용자는 "만들었는데 없다"를 본다. 로컬 별칭(localDisplayName)도 포함.
+  const matchesAllNames = (
+    item: { name: string; nameEn?: string; localDisplayName?: string },
+    slug: string,
+  ) => !q
+    || item.name.toLowerCase().includes(q)
+    || (item.nameEn ?? "").toLowerCase().includes(q)
+    || (item.localDisplayName ?? "").toLowerCase().includes(q)
+    || slug.toLowerCase().includes(q);
+  const filteredFirms = firms.filter((f) => matchesAllNames(f, f.slug));
+  const filteredAgents = agents.filter((a) => matchesAllNames(a, a.slug));
+  const filteredHubBookmarks = callableHubBookmarks(hubBookmarks, agents).filter(
+    (bookmark) => matchesAllNames(bookmark.listing, bookmark.slug),
+  );
 
   const selectedCount = selected.size;
 

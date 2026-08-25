@@ -617,6 +617,17 @@
   white-space: nowrap;
 }
 
+/* 빈 자리 — 담당이 없는 것을 얼굴로 덮지 않고 점선 자리로 그린다(좌석 기획 §4-2). */
+.emptySeatPortrait {
+  width: 34px;
+  height: 34px;
+  min-width: 34px;
+  border-radius: 50%;
+  border: 1.5px dashed var(--one-border-strong, rgba(120, 120, 128, 0.45));
+  background: transparent;
+  display: inline-block;
+}
+
 .taskforceToolbarPortraits {
   position: relative;
   width: 94px;

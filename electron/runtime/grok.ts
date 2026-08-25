@@ -358,7 +358,7 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
         .update(req.model ?? "")
         .digest("hex")
     : null;
-  const savedSession = req.chatId ? getRuntimeSession(req.chatId, KIND) : null;
+  const savedSession = req.chatId ? getRuntimeSession(req.chatId, KIND, req.agentId) : null;
   const storedSessionId = savedSession && fingerprint && savedSession.fingerprint === fingerprint ? savedSession.sessionId : null;
   const resumeSessionId = req.runtimeSessionId ?? storedSessionId;
   // 새 세션에서만 시스템을 플래그로 승격한다 — resume 턴은 세션이 이미 시스템을 안다.
@@ -617,7 +617,7 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
       if (code === 0 || text.trim()) {
         clearProviderHealth("grok");
         invalidateUsage("grok");
-        if (req.chatId && fingerprint && sessionId) saveRuntimeSession(req.chatId, KIND, sessionId, fingerprint);
+        if (req.chatId && fingerprint && sessionId) saveRuntimeSession(req.chatId, KIND, sessionId, fingerprint, { agentId: req.agentId });
         resolve({ text: text.trim(), tokens, sessionId });
         return;
       }

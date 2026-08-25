@@ -25,7 +25,10 @@ import { getDb } from "../store/db";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import { listInstalledAgentsReadOnly } from "../mcp/registry";
 import { materializeAgentFiles } from "../agents/files";
-import { createChat } from "../store/chats";
+import { appendChatMessage, createChat } from "../store/chats";
+import { replaceSeatOccupant } from "../store/seats";
+import { seatEventText } from "../../shared/one-seat-events";
+import { currentUiLocale } from "../ui-locale";
 import {
   decodeOneTeamAvatarDataUrl,
   removeOneTeamAvatarDirectory,
@@ -778,6 +781,36 @@ export function replaceOneOrgMember(input: ReplaceOneOrgMemberInput): OneOrgStat
     const clearCache = getDb().prepare("DELETE FROM one_org_completion_cache WHERE installed_agent_id = ?");
     clearCache.run(agent.id);
     if (row.installed_agent_id !== agent.id) clearCache.run(row.installed_agent_id);
+    // T2 점유자 교체(SEAT-SESSION-PLAN-v2 I5·I6·I9) — 같은 좌석에서 이전 봇의 열린
+    // 점유 행을 닫고 새 봇을 앉힌다. 세션은 그대로 이어지고(chats 불변), "마지막 담당"
+    // (chats.agent_id)만 새 봇으로 갱신해 기존 조회 경로의 연속성을 지킨다. 열린 세션엔
+    // 시스템 줄 1개를 남긴다 — 이전 발화는 이전 발화자 명의 그대로다.
+    if (row.installed_agent_id !== agent.id) {
+      try {
+        const db = getDb();
+        const seatRow = db.prepare(
+          `SELECT o.seat_id AS seatId FROM one_seat_occupants o
+            JOIN one_seats s ON s.id = o.seat_id
+           WHERE o.agent_id = ? AND o.until IS NULL AND s.kind = 'solo' AND s.dissolved_at IS NULL
+           ORDER BY o.since DESC LIMIT 1`,
+        ).get(row.installed_agent_id) as { seatId: string } | undefined;
+        if (seatRow) {
+          replaceSeatOccupant(seatRow.seatId, row.installed_agent_id, agent.id);
+          db.prepare("UPDATE chats SET agent_id = ? WHERE seat_id = ?").run(agent.id, seatRow.seatId);
+          const previousName = row.display_name || row.agent_slug;
+          const nextName = agent.name || agent.slug;
+          const line = seatEventText(currentUiLocale() === "ko"
+            ? `이 자리 담당이 ${previousName} → ${nextName}(으)로 바뀌었습니다`
+            : `This seat's occupant changed: ${previousName} → ${nextName}`);
+          const openChats = db.prepare(
+            "SELECT id FROM chats WHERE seat_id = ? AND archived_at IS NULL AND kind = 'user'",
+          ).all(seatRow.seatId) as Array<{ id: string }>;
+          for (const chat of openChats) appendChatMessage(chat.id, "system", line);
+        }
+      } catch {
+        // 좌석 원장이 없는 구세대 DB — 교체 자체는 진행한다(다음 기동의 v103 재시딩이 흡수).
+      }
+    }
   });
   transaction();
   emitOrgChanged();

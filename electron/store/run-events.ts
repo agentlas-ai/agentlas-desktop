@@ -827,6 +827,24 @@ export function getInvocationRunReceipt(runId: string): InvocationRunReceipt | n
     .prepare("SELECT * FROM failure_events WHERE run_id = ? ORDER BY datetime(ts) DESC, rowid DESC LIMIT 1")
     .get(runId) as FailureEventRow | undefined;
 
+  // 표시=실행 (계약 7-C-8 / C-D-1): 이 실행이 실제로 돈 모델은 원장의
+  // final/invoke_result 행에만 있다. 설정의 "현재 기본값"은 과거 실행의
+  // 증빙이 아니므로 receipt가 원장 값을 직접 나른다.
+  let executedModel = stringPayload(terminalPayload, "model");
+  if (!executedModel) {
+    for (let index = rows.length - 1; index >= 0; index -= 1) {
+      const row = rows[index];
+      if (row.kind !== "mcp_final" && row.kind !== "invoke_result") continue;
+      const payload = parsePayload(row.payload_json);
+      const modelValue = stringPayload(payload, "model");
+      const role = stringPayload(payload, "modelRole");
+      if (modelValue && (!role || role === "orchestrator")) {
+        executedModel = modelValue;
+        break;
+      }
+    }
+  }
+
   return {
     runId,
     chatId: start.chat_id ?? stringPayload(startPayload, "chatId") ?? "",
@@ -846,6 +864,7 @@ export function getInvocationRunReceipt(runId: string): InvocationRunReceipt | n
     ...(executionPermissionPayload(startPayload)
       ? { executionPermission: executionPermissionPayload(startPayload) }
       : {}),
+    ...(executedModel ? { model: executedModel } : {}),
     ...(failure?.error_code ? { errorCode: failure.error_code } : {}),
     ...(failure?.error_message
       ? { errorMessage: failure.error_message }
