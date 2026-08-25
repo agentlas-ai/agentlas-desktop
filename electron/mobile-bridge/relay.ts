@@ -104,7 +104,38 @@ function readOrCreateSecret(userDataPath: string): string {
   return secret;
 }
 
+/*
+ * 중계 주소는 웹 주소에서 파생하되, **따로 지정할 수 있게 열어 둔다** (2026-08-25).
+ *
+ * ★ 왜 지금 열어 두는가 — 순서 때문이다
+ *   지금 중계는 웹 서버 프로세스 안에 있다. 그래서 ① 웹을 배포할 때마다 폰 연결이 끊기고
+ *   ② 웹을 여러 대로 늘리면 데스크탑과 폰이 서로 다른 대에 붙어 못 만난다.
+ *   답은 중계를 별도 서비스로 떼는 것이다(같은 구조를 쓰는 다른 제품들이 그렇게 한다).
+ *
+ *   그런데 **데스크탑이 먼저 준비돼야 한다.** 서버만 옮기면 이미 나가 있는 데스크탑들은
+ *   여전히 웹 주소로 찾아오고, 새 릴리스가 사용자에게 도달하는 데는 시간이 걸린다.
+ *   그래서 "옮길 수 있는 버전"을 먼저 퍼뜨리고, 그 다음에 서버를 옮긴다.
+ *
+ *   값을 안 주면 지금과 **완전히 같게** 동작한다 — 이 변경만으로는 아무것도 바뀌지 않는다.
+ */
 function relayEndpoint(): string {
+  const explicit = process.env.AGENTLAS_RELAY_URL?.trim();
+  if (explicit) {
+    try {
+      const url = new URL(explicit);
+      if (url.protocol === "https:") url.protocol = "wss:";
+      else if (url.protocol === "http:") url.protocol = "ws:";
+      // 경로를 안 적었으면 기본 경로를 붙인다. 적었으면 그대로 존중한다.
+      if (url.pathname === "/" || !url.pathname) url.pathname = "/v1/mobile/relay";
+      url.search = "";
+      url.hash = "";
+      return url.toString();
+    } catch {
+      // 주소가 잘못돼 있으면 조용히 무시하고 예전 경로로 간다 — 오타 하나로 원격 접속이
+      // 통째로 죽는 것보다, 예전처럼 도는 편이 낫다.
+      console.warn("[mobile-bridge-relay] AGENTLAS_RELAY_URL is not a valid URL; falling back to the web address");
+    }
+  }
   const url = new URL(webBaseUrl());
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.pathname = "/v1/mobile/relay";
