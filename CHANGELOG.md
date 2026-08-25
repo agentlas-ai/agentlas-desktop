@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.40 — 2026-08-25
+
+Bundled runtime: Agentlas OS v1.2.16 (6d0d7e7eafaa96ebbed92e1a2223b01f13eed245).
+Source readiness does not prove a public installer or update feed; the
+Releases page stays the authority.
+
+- Remote access no longer drops every time the website ships. The relay that
+  carries your phone through to this Desktop used to live inside the website
+  process, so each website deploy closed it and every connected phone fell
+  off. The relay is now its own service, and the Desktop asks the server where
+  it lives instead of assuming — so it can move later without another update.
+  If the server cannot answer, the Desktop keeps using the address it already
+  had, and phones already paired follow along without scanning anything again.
+- One: eight defects found by walking the product as a user. Activity now
+  shows what actually happened rather than a generic line, the bottom sheet
+  stops covering the composer, creating an agent no longer loses a field you
+  filled in, and the org chart stops collapsing when a member has no title.
+
 ## 1.0.39 — 2026-08-25
 
 Bundled runtime: Agentlas OS v1.2.16 (6d0d7e7eafaa96ebbed92e1a2223b01f13eed245).
