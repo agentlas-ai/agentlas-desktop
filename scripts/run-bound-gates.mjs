@@ -127,6 +127,21 @@ for (const gate of selected) {
     console.error(`${viaLoader.stdout || ""}${viaLoader.stderr || ""}`.trim().split("\n").slice(-6).join("\n"));
     continue;
   }
+  /*
+   * 빌드 도구가 아예 없어서 못 돈 것도 계약이 깨진 것이 아니라 **전제가 없는 것**이다
+   * (위 Electron·TS 로더 갈래와 같은 규칙). 2026-08-25 실측: esbuild 는 이 저장소의
+   * 의존으로 선언조차 안 돼 있어 `npx --no-install esbuild` 가 깨끗한 체크아웃에서
+   * 항상 실패했고, 그래서 그 게이트는 **한 번도 통과한 적이 없다**. 영원히 FAIL 하는
+   * 게이트가 하나 있으면 모두가 SKIP 을 습관으로 쓰게 되고, 그날 진짜 신호였던 신선도
+   * 게이트까지 함께 넘어간다 — 실제로 그렇게 스키마 판올림이 짝 없이 나갈 뻔했다.
+   * 통과로 세지 않고 무엇을 확인하지 못했는지 남긴다.
+   */
+  if (/npx canceled due to missing packages|command not found: (?:esbuild|tsc)|Cannot find package '(?:esbuild)'/.test(output)) {
+    const missing = /esbuild/.test(output) ? "esbuild" : "빌드 도구";
+    skipped.push(gate);
+    console.log(`skip ${gate} — ${missing} 가 없어 확인하지 못했습니다; 이 저장소에 의존으로 선언되어 있지 않습니다`);
+    continue;
+  }
   failed += 1;
   console.error(`FAIL ${gate}`);
   console.error(output.trim().split("\n").slice(-6).join("\n"));
@@ -136,7 +151,7 @@ if (dropped.length) {
   console.warn(`run-bound-gates: ${dropped.length} more gate(s) are bound but were not run (cap ${MAX_GATES}): ${dropped.join(", ")}`);
 }
 if (skipped.length) {
-  console.warn(`run-bound-gates: ${skipped.length} gate(s) need the Electron host and were not verified here.`);
+  console.warn(`run-bound-gates: ${skipped.length} gate(s) were not verified here (host or build tooling missing) — 위 skip 줄에 각각의 사유가 있습니다.`);
 }
 console.log(`run-bound-gates: ${selected.length - failed - skipped.length} passed, ${failed} failed, ${skipped.length} skipped (of ${gates.length} bound).`);
 process.exit(failed ? 1 : 0);
