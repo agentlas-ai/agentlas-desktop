@@ -623,10 +623,19 @@ function normalizedBrowserAddress(value: string): string | null {
   }
 }
 
-function OneBrowserLiveView({ active, locale, preferredUrl }: { active: boolean; locale: "ko" | "en"; preferredUrl?: string }) {
+function OneBrowserLiveView({ active, locale, preferredUrl, previewScopeId }: { active: boolean; locale: "ko" | "en"; preferredUrl?: string; previewScopeId?: string }) {
   const [frame, setFrame] = useState<BrowserLiveFrame | null>(null);
   const [loading, setLoading] = useState(false);
   const [interactive, setInteractive] = useState(false);
+  /*
+   * 로컬 검증 서버 생명주기 — U-D-1/U-D-5.
+   * One이 검증용 임시 서버를 정리한 뒤에도 이 탭은 죽은 127.0.0.1 주소에
+   * LIVE 배지를 유지했고, 만들어진 파일을 인앱에서 다시 볼 길이 없었다.
+   * localPreviewGone 은 매 주기 재평가한다(죽음도 살아남도 낙인이 아니다).
+   */
+  const [localPreviewGone, setLocalPreviewGone] = useState(false);
+  const [filePreview, setFilePreview] = useState<{ name: string; html: string } | null>(null);
+  const [fileCandidate, setFileCandidate] = useState<{ name: string; path: string } | null>(null);
   const [viewport, setViewport] = useState<"desktop" | "phone">("desktop");
   const [menuOpen, setMenuOpen] = useState(false);
   const [tabs, setTabs] = useState<BrowserShellTab[]>(() => [{
@@ -765,6 +774,102 @@ function OneBrowserLiveView({ active, locale, preferredUrl }: { active: boolean;
     if (pointerFrameRef.current != null) window.cancelAnimationFrame(pointerFrameRef.current);
   }, []);
 
+  // 도달성은 루프백 주소에만 묻는다 — 외부 사이트는 이 생명주기의 대상이 아니다.
+  const localOrigin = useMemo(() => {
+    if (!effectiveUrl) return null;
+    try {
+      const parsed = new URL(effectiveUrl);
+      return /^(127\.0\.0\.1|localhost|\[::1\])$/i.test(parsed.hostname) ? parsed.origin : null;
+    } catch {
+      return null;
+    }
+  }, [effectiveUrl]);
+
+  useEffect(() => {
+    if (!active || !localOrigin) {
+      setLocalPreviewGone(false);
+      return;
+    }
+    let disposed = false;
+    const probe = async () => {
+      // 뒤로 간 창에서까지 묻지 않는다(유휴 비용).
+      if (document.visibilityState === "hidden") return;
+      try {
+        // no-cors: 응답을 읽지 않고 도달성만 본다 — 연결 거부만 reject 된다.
+        await fetch(localOrigin, { method: "HEAD", mode: "no-cors", cache: "no-store", signal: AbortSignal.timeout(1_500) });
+        if (!disposed) setLocalPreviewGone(false);
+      } catch {
+        if (!disposed) setLocalPreviewGone(true);
+      }
+    };
+    void probe();
+    const timer = window.setInterval(() => { void probe(); }, 6_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [active, localOrigin]);
+
+  // 서버가 사라졌을 때만 재열람 후보를 찾는다. 경로 권위는 Main(fs 스코프)이다:
+  // 대화 연결 폴더 → 기본 실행 폴더 순서로, 주소의 파일명과 같은 .html 을 먼저 찾고
+  // 없으면 가장 최근에 바뀐 .html 하나를 고른다.
+  useEffect(() => {
+    setFilePreview(null);
+    if (!localPreviewGone || !previewScopeId) {
+      setFileCandidate(null);
+      return;
+    }
+    const bridge = ipc();
+    if (!bridge?.fs?.listDirectory || !bridge.workspace?.defaultRunFolder) return;
+    let cancelled = false;
+    void (async () => {
+      const scope = { kind: "chat-assets", chatId: previewScopeId } as const;
+      const roots: string[] = [];
+      const linked = await bridge.workspace.get(previewScopeId).catch(() => null);
+      if (typeof linked === "string" && linked) roots.push(linked);
+      const fallback = await bridge.workspace.defaultRunFolder().catch(() => null);
+      if (typeof fallback === "string" && fallback && !roots.includes(fallback)) roots.push(fallback);
+      const wantedName = (() => {
+        try {
+          return decodeURIComponent(new URL(effectiveUrl ?? "").pathname.split("/").filter(Boolean).pop() ?? "");
+        } catch {
+          return "";
+        }
+      })();
+      const htmlFiles: Array<{ name: string; path: string; size: number }> = [];
+      for (const root of roots) {
+        const top = await bridge.fs.listDirectory(root, scope).catch(() => null);
+        if (!top?.exists) continue;
+        const dirs: string[] = [];
+        for (const node of top.entries) {
+          if (node.kind === "file" && /\.html?$/i.test(node.name)) htmlFiles.push(node);
+          else if (node.kind === "dir") dirs.push(node.path);
+        }
+        // 한 단계 아래까지만 본다 — 실행 폴더 전체를 걷는 것은 이 배너의 몫이 아니다.
+        for (const dir of dirs.slice(0, 12)) {
+          const sub = await bridge.fs.listDirectory(dir, scope).catch(() => null);
+          for (const node of sub?.entries ?? []) {
+            if (node.kind === "file" && /\.html?$/i.test(node.name)) htmlFiles.push(node);
+          }
+        }
+        if (htmlFiles.length > 0) break;
+      }
+      if (cancelled) return;
+      const exact = wantedName ? htmlFiles.find((file) => file.name === wantedName) : undefined;
+      const pick = exact ?? htmlFiles[0] ?? null;
+      setFileCandidate(pick ? { name: pick.name, path: pick.path } : null);
+    })();
+    return () => { cancelled = true; };
+  }, [localPreviewGone, previewScopeId, effectiveUrl]);
+
+  const openFilePreview = useCallback(async () => {
+    if (!fileCandidate || !previewScopeId) return;
+    const bridge = ipc();
+    if (!bridge?.fs?.readTextFile) return;
+    const preview = await bridge.fs.readTextFile(fileCandidate.path, { kind: "chat-assets", chatId: previewScopeId }).catch(() => null);
+    if (preview && typeof preview.content === "string") setFilePreview({ name: fileCandidate.name, html: preview.content });
+  }, [fileCandidate, previewScopeId]);
+
   const pointInFrame = (element: HTMLElement, clientX: number, clientY: number) => {
     const rect = element.getBoundingClientRect();
     return {
@@ -858,7 +963,8 @@ function OneBrowserLiveView({ active, locale, preferredUrl }: { active: boolean;
         </div>)}
       </div>
       <button type="button" className={styles.browserNewTab} onClick={addTab} aria-label={locale === "ko" ? "새 탭" : "New tab"}><IconPlus size={14} /></button>
-      {interactive && <span className={styles.browserLiveBadge}><i />LIVE</span>}
+      {interactive && !localPreviewGone && <span className={styles.browserLiveBadge}><i />LIVE</span>}
+      {localPreviewGone && <span className={styles.browserLiveBadge} data-gone="true"><i />{locale === "ko" ? "정리됨" : "Cleaned up"}</span>}
     </div>}
     <div className={styles.browserNavigationBar}>
       <button type="button" onClick={() => dispatch({ kind: "navigation", action: "back" })} disabled={!interactive} aria-label={locale === "ko" ? "뒤로" : "Back"}><IconArrowLeft size={14} /></button>
@@ -875,7 +981,8 @@ function OneBrowserLiveView({ active, locale, preferredUrl }: { active: boolean;
         />
       </form>
       {tabs.length <= 1 && <button type="button" className={styles.browserNewTab} onClick={addTab} aria-label={locale === "ko" ? "새 탭" : "New tab"}><IconPlus size={14} /></button>}
-      {tabs.length <= 1 && interactive && <span className={styles.browserLiveBadge}><i />LIVE</span>}
+      {tabs.length <= 1 && interactive && !localPreviewGone && <span className={styles.browserLiveBadge}><i />LIVE</span>}
+      {tabs.length <= 1 && localPreviewGone && <span className={styles.browserLiveBadge} data-gone="true"><i />{locale === "ko" ? "정리됨" : "Cleaned up"}</span>}
       <div className={styles.browserMenuAnchor}>
         <button type="button" aria-label={locale === "ko" ? "브라우저 메뉴" : "Browser menu"} aria-expanded={menuOpen} onClick={() => setMenuOpen((value) => !value)}><IconMoreHorizontal size={15} /></button>
         {menuOpen && <div className={styles.browserMenu} role="menu">
@@ -887,7 +994,24 @@ function OneBrowserLiveView({ active, locale, preferredUrl }: { active: boolean;
         </div>}
       </div>
     </div>
-    {available
+    {localPreviewGone && <div className={styles.browserGoneNotice} role="status">
+      <span>
+        <strong>{locale === "ko" ? "미리보기 임시 서버가 정리되었습니다" : "The temporary preview server was cleaned up"}</strong>
+        <small>{locale === "ko"
+          ? "One이 검증을 마치고 서버를 종료해 이 주소는 더 열리지 않습니다."
+          : "One shut the server down after verifying, so this address no longer loads."}</small>
+      </span>
+      {filePreview
+        ? <button type="button" onClick={() => setFilePreview(null)}>{locale === "ko" ? "브라우저 화면 보기" : "Show browser view"}</button>
+        : fileCandidate && <button type="button" onClick={() => void openFilePreview()}>{locale === "ko" ? `만든 파일 미리보기 (${fileCandidate.name})` : `Preview the built file (${fileCandidate.name})`}</button>}
+    </div>}
+    {filePreview
+      ? <div className={styles.browserFilePreview} data-mode={viewport}>
+          {/* 정리된 서버 대신 디스크의 산출물을 그대로 연다 — 웹 One 미리보기와 같은
+              srcDoc 방식(원격 로드 없음), 스크립트만 허용한 sandbox. */}
+          <iframe srcDoc={filePreview.html} sandbox="allow-scripts" title={filePreview.name} />
+        </div>
+      : available
       // eslint-disable-next-line @next/next/no-img-element
       ? <div className={styles.browserViewport} data-mode={viewport}>
           <div
@@ -1466,7 +1590,7 @@ export function OneActivityArtifactRail({
           </OutputDisclosure>
         </>}
         {railView === "browser" && <>
-          <OneBrowserLiveView active={railView === "browser"} locale={locale} preferredUrl={preferredBrowserUrl} />
+          <OneBrowserLiveView active={railView === "browser"} locale={locale} preferredUrl={preferredBrowserUrl} previewScopeId={browserScopeKey} />
           <OutputDisclosure section="sources" label={locale === "ko" ? "출처" : "Sources"} count={sources.length} expanded={sectionExpanded("sources")} onToggle={toggleSection}>
             {sources.length === 0
               ? <p className={styles.artifactEmpty}>{locale === "ko" ? "브라우저 출처 없음" : "No browser sources"}</p>

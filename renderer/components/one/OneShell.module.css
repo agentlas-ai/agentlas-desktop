@@ -3644,3 +3644,80 @@
   cursor: default;
 }
 
+/* 미리보기 생명주기(U-D-1/U-D-5) — 검증용 임시 서버가 정리되면 LIVE 대신
+   "정리됨"을 달고, 산출물 파일 재열람 배너를 세운다. */
+.browserLiveBadge[data-gone="true"] {
+  color: #8b9096;
+}
+
+.browserLiveBadge[data-gone="true"] > i {
+  background: #b9bec4;
+}
+
+.browserGoneNotice {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 10px 0;
+  padding: 8px 12px;
+  border: 1px solid #e6e2d4;
+  border-radius: 10px;
+  background: #fbf9f2;
+}
+
+.browserGoneNotice > span {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.browserGoneNotice strong {
+  color: #4d4a3d;
+  font-size: 12px;
+}
+
+.browserGoneNotice small {
+  color: #7d7a6c;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.browserGoneNotice button {
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 0 12px;
+  border: 1px solid #d8d4c4;
+  border-radius: 8px;
+  background: #fff;
+  color: #33302a;
+  font-size: 11.5px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.browserFilePreview {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  padding: 10px;
+}
+
+.browserFilePreview > iframe {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  border: 1px solid #e2e4e5;
+  border-radius: 10px;
+  background: #fff;
+}
+
+/* 분할 중에는 툴바와 컴포저 도크가 메인 칸 폭까지만 덮는다. 전체 폭 오버레이
+   그대로면 보조 칸의 헤더 버튼(z 아래로 깔림)과 컴포저(도크에 가림)가 조작
+   불능이 된다(D-5/D-6). --split-col 은 워크스페이스 인라인 스타일이 공급한다.
+   이 규칙은 같은 특이도의 결과 레일 right 규칙들보다 뒤에 있어야 이긴다. */
+.workspace[data-split-active="true"] .windowBar,
+.workspace[data-split-active="true"] .composerDock {
+  right: calc(100% - var(--split-col, 50%));
+}
+

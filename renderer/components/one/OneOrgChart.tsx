@@ -78,6 +78,7 @@ export function OneOrgChart({
   cloudListings,
   hubBookmarks,
   inventoryLoading = false,
+  accountSignedIn = null,
   locale,
   onAdd,
   onCreateAgent,
@@ -118,6 +119,8 @@ export function OneOrgChart({
   cloudListings: MarketplaceListing[];
   hubBookmarks: HubAgentBookmark[];
   inventoryLoading?: boolean;
+  /** null = 세션 미확인 — 그때는 로그인 안내 대신 기존 빈 상태 문구를 쓴다(D-10). */
+  accountSignedIn?: boolean | null;
   locale: string;
   onAdd: (installedAgentId: string, displayName?: string, leaseExpiresAt?: string | null, characterId?: string) => Promise<void>;
   onCreateAgent?: () => void;
@@ -278,6 +281,8 @@ export function OneOrgChart({
     hubNote: "Hub에서 북마크한 에이전트만 표시됩니다. 상주 좌석에 붙일 때만 대여 기간을 정합니다.",
     cloudEmpty: "Agent Cloud에 저장된 에이전트가 없습니다.",
     hubEmpty: "북마크한 Hub 에이전트가 없습니다.", cloudBrowse: "Agent Cloud 관리", hubBrowse: "Hub에서 북마크하기",
+    cloudSignedOut: "Agentlas 로그인이 필요합니다. 로그인하면 Agent Cloud에 저장한 에이전트가 여기 표시됩니다.",
+    hubSignedOut: "Agentlas 로그인이 필요합니다. 로그인하면 Hub에서 북마크한 에이전트가 여기 표시됩니다.",
   } : {
     slots: "Slots", used: "used", remaining: "available", sourceAria: "Agent source",
     myAgents: "My agents", installed: "Local agent", choose: "Choose an agent", search: "Search agents",
@@ -290,6 +295,8 @@ export function OneOrgChart({
     hubNote: "Only agents you bookmarked in Hub appear here. Choose a lease only when attaching one to a standing seat.",
     cloudEmpty: "No agents are saved in Agent Cloud.",
     hubEmpty: "No Hub agents are bookmarked.", cloudBrowse: "Manage Agent Cloud", hubBrowse: "Bookmark in Hub",
+    cloudSignedOut: "Sign in to Agentlas to see the agents saved in your Agent Cloud.",
+    hubSignedOut: "Sign in to Agentlas to see the Hub agents you bookmarked.",
   };
   const editorCopy = ko ? {
     edit: "편집", defaultTitle: "조직원 편집", basic: "기본 정보", orgName: "이 조직에서 부를 이름", original: "원본 담당", originalFallback: "설치된 에이전트의 역할 정의를 사용합니다.",
@@ -583,7 +590,10 @@ export function OneOrgChart({
               : <div className={styles.sheetEmpty}>{roleFilter ? addCopy.noMatch : (ko ? "사용 가능한 로컬 에이전트가 없습니다." : "No local agents are available.")}{roleFilter && <button type="button" className={styles.inlineLink} onClick={() => setRoleFilter(null)}>{addCopy.showAll}</button>}</div>
           ) : inventoryLoading && remoteCandidates.length === 0 ? <AgentInventoryLoading locale={locale} /> : remoteCandidates.length > 0 ? (
             <div className={styles.candidateGrid} role="list" aria-label={addTab === "cloud" ? "Cloud" : "Hub"}>{remoteCandidates.map((listing) => <button type="button" role="listitem" key={`${addTab}:${listing.entityKind || "agent"}:${listing.slug}`} data-active={selectedAgent === listing.slug ? "true" : "false"} onClick={() => { setSelectedAgent(listing.slug); setName(""); setLeaseDays(addTab === "hub" ? "7" : "0"); setAddError(null); }}><span><strong>{(ko ? listing.name : listing.nameEn) || listing.name || listing.slug}</strong><small>{listing.entityKind === "team" || (listing.agentCount ?? 0) > 1 ? addCopy.team : addCopy.single} · {addTab === "cloud" ? "Cloud" : "Hub"}</small><em>{(ko ? listing.tagline : listing.taglineEn) || listing.tagline || listing.taglineEn}</em></span>{selectedAgent === listing.slug && <IconCheck size={15} />}</button>)}</div>
-          ) : <div className={styles.sheetEmpty}><span>{addTab === "cloud" ? addCopy.cloudEmpty : addCopy.hubEmpty}</span>{onBrowseSource && <button type="button" onClick={() => onBrowseSource(addTab)}>{addTab === "cloud" ? addCopy.cloudBrowse : addCopy.hubBrowse}</button>}</div>}
+          ) : <div className={styles.sheetEmpty}><span>{accountSignedIn === false
+            /* 미로그인을 빈 계정처럼 보이게 하지 않는다(D-10) — signedIn===false 로 확인된 때만 로그인 안내. */
+            ? (addTab === "cloud" ? addCopy.cloudSignedOut : addCopy.hubSignedOut)
+            : (addTab === "cloud" ? addCopy.cloudEmpty : addCopy.hubEmpty)}</span>{onBrowseSource && <button type="button" onClick={() => onBrowseSource(addTab)}>{addTab === "cloud" ? addCopy.cloudBrowse : addCopy.hubBrowse}</button>}</div>}
 
           {(selectedCandidate || selectedListing) && <section className={styles.selectedAgentPanel}>
             <label className={styles.editorField}>{addCopy.displayName}<input value={name} onChange={(event) => setName(event.target.value)} placeholder={addCopy.displayPlaceholder} /></label>

@@ -30,6 +30,50 @@ type OneBottomSheetProps = {
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
+/*
+ * inert/aria-hidden 원장 — 시트별 스냅샷 복원 금지.
+ *
+ * 시트 A가 열린 채 시트 B가 열리면 B의 스냅샷이 A가 설정한 inert="" 를
+ * "원래 값"으로 캡처한다. A가 먼저 닫힌 뒤 B가 닫히며 그 스냅샷을 복원하면
+ * inert 가 앱 루트에 잔류해 전 화면 입력 불능이 된다(D-3, 간헐).
+ * 원본 속성은 아무 시트도 잡고 있지 않던 최초 획득 시점에만 기록하고,
+ * 마지막 해제에서만 복원한다. 해제는 상태와 무관하게 무조건 실행된다.
+ */
+type InertLedgerRecord = { count: number; ariaHidden: string | null; inert: string | null };
+const inertLedger = new WeakMap<HTMLElement, InertLedgerRecord>();
+
+function acquireInert(element: HTMLElement) {
+  const record = inertLedger.get(element);
+  if (record) {
+    record.count += 1;
+    return;
+  }
+  inertLedger.set(element, {
+    count: 1,
+    ariaHidden: element.getAttribute("aria-hidden"),
+    inert: element.getAttribute("inert"),
+  });
+  element.setAttribute("aria-hidden", "true");
+  element.setAttribute("inert", "");
+}
+
+function releaseInert(element: HTMLElement) {
+  const record = inertLedger.get(element);
+  if (!record) {
+    // 원장에 없다 = 추적이 끊겼다. 잔류가 곧 앱 먹통이므로 무조건 벗긴다.
+    element.removeAttribute("aria-hidden");
+    element.removeAttribute("inert");
+    return;
+  }
+  record.count -= 1;
+  if (record.count > 0) return;
+  inertLedger.delete(element);
+  if (record.ariaHidden === null) element.removeAttribute("aria-hidden");
+  else element.setAttribute("aria-hidden", record.ariaHidden);
+  if (record.inert === null) element.removeAttribute("inert");
+  else element.setAttribute("inert", record.inert);
+}
+
 function getFocusableElements(root: HTMLElement): HTMLElement[] {
   return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
     (element) => element.getAttribute("aria-hidden") !== "true",
@@ -76,7 +120,7 @@ export function OneBottomSheet({
 
     const priorFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const priorBodyOverflow = document.body.style.overflow;
-    const hiddenSiblings: Array<{ element: HTMLElement; ariaHidden: string | null; inert: string | null }> = [];
+    const hiddenSiblings: HTMLElement[] = [];
 
     document.body.style.overflow = "hidden";
 
@@ -90,13 +134,8 @@ export function OneBottomSheet({
       const parent: HTMLElement = branch.parentElement;
       for (const sibling of Array.from(parent.children)) {
         if (!(sibling instanceof HTMLElement) || sibling === branch) continue;
-        hiddenSiblings.push({
-          element: sibling,
-          ariaHidden: sibling.getAttribute("aria-hidden"),
-          inert: sibling.getAttribute("inert"),
-        });
-        sibling.setAttribute("aria-hidden", "true");
-        sibling.setAttribute("inert", "");
+        hiddenSiblings.push(sibling);
+        acquireInert(sibling);
       }
       branch = parent === document.body ? null : parent;
     }
@@ -136,12 +175,7 @@ export function OneBottomSheet({
       window.clearTimeout(focusTimer);
       window.removeEventListener("keydown", onKeyDown);
       document.body.style.overflow = priorBodyOverflow;
-      for (const record of hiddenSiblings.reverse()) {
-        if (record.ariaHidden === null) record.element.removeAttribute("aria-hidden");
-        else record.element.setAttribute("aria-hidden", record.ariaHidden);
-        if (record.inert === null) record.element.removeAttribute("inert");
-        else record.element.setAttribute("inert", record.inert);
-      }
+      for (const element of hiddenSiblings) releaseInert(element);
       if (priorFocus && document.contains(priorFocus)) priorFocus.focus();
     };
   }, [closeOnEscape, open]);

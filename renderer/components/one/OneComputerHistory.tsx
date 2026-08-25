@@ -135,7 +135,8 @@ export function OneComputerHistory({
     subtitle: "컴퓨터에서 관찰한 작업의 요약",
     clear: "기록 지우기",
     ask: "기록에 대해 물어보기",
-    offTitle: "Computer History가 꺼져 있어요.",
+    /* ko 명칭은 웹 "컴퓨터 사용 기록" 과 통일(A3/D-9). */
+    offTitle: "컴퓨터 사용 기록이 꺼져 있어요.",
     offBody: "명시적으로 켜면 10분 사실과 6시간 요약만 로컬에 저장합니다. 원본은 7일 후 자동 삭제됩니다.",
     enable: "기록 켜기",
     empty: "아직 기록이 없습니다. 기록이 쌓이면 이곳에서 확인할 수 있어요.",

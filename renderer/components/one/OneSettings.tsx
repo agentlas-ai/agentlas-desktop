@@ -99,7 +99,9 @@ const SETTINGS_META: Record<OneSettingsKey, { titleKo: string; titleEn: string; 
   models: { titleKo: "모델", titleEn: "Models", descriptionKo: "CEO 오케스트레이터인 One의 기본 모델을 정합니다.", descriptionEn: "Choose the default model for One, the CEO orchestrator." },
   multimodal: { titleKo: "멀티모달", titleEn: "Multimodal", descriptionKo: "이미지·영상 작업에 사용할 엔진과 키를 연결합니다.", descriptionEn: "Connect engines and keys for image and video work." },
   concurrency: { titleKo: "동시 실행", titleEn: "Concurrency", descriptionKo: "One과 터미널 에이전트가 동시에 사용할 수 있는 슬롯 수입니다.", descriptionEn: "Set how many slots One and terminal agents may use at once." },
-  history: { titleKo: "Computer History", titleEn: "Computer History", descriptionKo: "로컬 작업 요약과 에이전트 빌드 추천의 기록 범위를 관리합니다.", descriptionEn: "Manage local work summaries and agent-build recommendations." },
+  /* ko 라벨은 웹 "컴퓨터 사용 기록" 과 통일(A3) — 채널마다 같은 설정이 다른
+     이름으로 불리면 안 된다. */
+  history: { titleKo: "컴퓨터 사용 기록", titleEn: "Computer History", descriptionKo: "로컬 작업 요약과 에이전트 빌드 추천의 기록 범위를 관리합니다.", descriptionEn: "Manage local work summaries and agent-build recommendations." },
 };
 
 const PERMISSIONS: Array<{ id: OnePermissionMode; ko: string; en: string; detailKo: string; detailEn: string }> = [
@@ -144,7 +146,7 @@ export function OneSettingsRail({ locale, profileName, pendingMemoryCount, onBac
         <RailRow icon={<IconSparkles size={15} />} title={ko ? "브리핑" : "Briefing"} detail={ko ? "주기·데스크탑 알림·방해 금지" : "Cadence, desktop alerts, quiet hours"} onClick={() => onOpen("briefing")} />
       </div>
       <div className={styles.railGroup}><span>{ko ? "개인정보" : "Privacy"}</span>
-        <RailRow icon={<IconLock size={15} />} title="Computer History" onClick={() => onOpen("history")} />
+        <RailRow icon={<IconLock size={15} />} title={ko ? "컴퓨터 사용 기록" : "Computer History"} onClick={() => onOpen("history")} />
       </div>
       <div className={styles.railGroup}><span>{ko ? "앱" : "App"}</span>
         <RailRow icon={<IconSettings size={15} />} title={ko ? "언어" : "Language"} detail={ko ? "English로 전환" : "한국어로 전환"} onClick={onToggleLocale} />

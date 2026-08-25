@@ -1096,6 +1096,22 @@ export function OneShell() {
   const [inventoryLoading, setInventoryLoading] = useState(true);
   const [cloudListings, setCloudListings] = useState<MarketplaceListing[]>(() => readViewData<MarketplaceListing[]>("dashboard.cloud-listings")?.value ?? []);
   const [hubBookmarks, setHubBookmarks] = useState<HubAgentBookmark[]>(() => readViewData<HubAgentBookmark[]>("dashboard.hub-bookmarks")?.value ?? []);
+  /* 미로그인과 "빈 계정"은 다른 상태다(D-10). Cloud/Hub 빈 목록을 로그인
+     안내로 구분하기 위한 세션 신호 — 조회 실패는 사실로 승격하지 않고
+     "모름(null)"으로 남겨 기존 빈 상태 문구를 유지한다. */
+  const [accountSignedIn, setAccountSignedIn] = useState<boolean | null>(null);
+  useEffect(() => {
+    const api = ipc();
+    if (!api?.auth) return;
+    let cancelled = false;
+    void api.auth.getSession()
+      .then((session) => { if (!cancelled) setAccountSignedIn(session?.signedIn === true); })
+      .catch(() => undefined);
+    const unsubscribe = api.auth.onSessionChanged?.((session) => {
+      if (!cancelled) setAccountSignedIn(session?.signedIn === true);
+    });
+    return () => { cancelled = true; unsubscribe?.(); };
+  }, []);
   const [installedPlugins, setInstalledPlugins] = useState<InstalledMcpServer[]>([]);
   const [pluginCatalog, setPluginCatalog] = useState<McpToolCatalogEntry[]>([]);
   const [pluginStatuses, setPluginStatuses] = useState<McpServerStatus[]>([]);
@@ -1160,6 +1176,19 @@ export function OneShell() {
   }, []);
   const [taskMenuOpen, setTaskMenuOpen] = useState(false);
   const [sessionSheetOpen, setSessionSheetOpen] = useState(false);
+  // 에이전트 세션 시트는 OneBottomSheet 를 쓰지 않는 자체 다이얼로그라 Escape
+  // 계약(설정·검색 시트와 동일)이 빠져 있었다(D-8). 닫기는 포커스 위치와
+  // 무관하게 무조건 들어야 한다.
+  useEffect(() => {
+    if (!sessionSheetOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setSessionSheetOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [sessionSheetOpen]);
   /** 이 대화에서 켠 생성 앱 미리보기 서버들. 대화를 떠날 때 끈다. */
   const livePreviewAppIdsRef = useRef<Set<string>>(new Set());
   /**
@@ -5233,6 +5262,7 @@ export function OneShell() {
               cloudListings={cloudListings}
               hubBookmarks={hubBookmarks}
               inventoryLoading={inventoryLoading}
+              accountSignedIn={accountSignedIn}
               locale={appLocale}
               addRequest={agentPickerRequest}
               onAdd={addOneOrg}
@@ -5366,6 +5396,11 @@ export function OneShell() {
           data-runtime-artifacts={runtimeArtifacts.length > 0 ? "true" : "false"}
           data-context-rail={(selected || conversation) && contextRailOpen ? "true" : "false"}
           data-context-rail-kind={oneOutputKind}
+          data-split-active={splitPanes.length > 0 ? "true" : "false"}
+          // 분할 폭 변수를 워크스페이스에도 실어야 툴바·컴포저 도크(무대 밖 형제)가
+          // 메인 칸 폭을 알 수 있다 — 전체 폭 오버레이가 보조 칸을 덮으면 오른쪽
+          // 칸이 조작 불능이 된다(D-5/D-6).
+          style={splitPanes.length > 0 ? { ["--split-col" as string]: `${splitRatio.col}%` } : undefined}
         >
           <div className={`${styles.windowBar} titlebar-drag`}>
             {selected || conversation ? (
@@ -6578,8 +6613,8 @@ export function OneShell() {
         closeOnEscape={!historyClearBusy}
         dialogRole="alertdialog"
         size="wide"
-        eyebrow="Computer History"
-        title={appLocale === "ko" ? "Computer History를 지울까요?" : "Clear Computer History?"}
+        eyebrow={appLocale === "ko" ? "컴퓨터 사용 기록" : "Computer History"}
+        title={appLocale === "ko" ? "컴퓨터 사용 기록을 지울까요?" : "Clear Computer History?"}
         titleId="one-computer-history-clear-title"
         ariaLabelledBy="one-computer-history-clear-title"
         description={appLocale === "ko" ? "One에 현재 표시된 기록을 모두 숨깁니다. 원본 앱의 기록이나 파일은 삭제하지 않습니다." : "This hides every history item currently shown in One. It does not delete files or history kept by the source apps."}

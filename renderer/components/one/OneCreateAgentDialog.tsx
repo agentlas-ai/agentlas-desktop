@@ -353,6 +353,37 @@ export function OneCreateAgentDialog({
     if (open) setError(null);
   }, [open]);
 
+  /*
+   * 편집을 거친 뒤 생성 모드로 다시 열리면, 화면 상태에 남은 편집 대상의
+   * 이름·성격이 New Agent 폼에 그대로 프리필된다(D-7 — 취소해도 남는다).
+   * 이 다이얼로그는 상시 마운트 단일 인스턴스라 언마운트 리셋이 없다.
+   * 편집 모드를 한 번이라도 지났다면, 생성 모드로 열릴 때 저장된
+   * "새 에이전트 초안"만 다시 읽어 편집 잔류를 끊는다.
+   */
+  const editVisitedRef = useRef(false);
+  useEffect(() => {
+    if (edit || editOne) {
+      editVisitedRef.current = true;
+      return;
+    }
+    if (!open || !editVisitedRef.current) return;
+    editVisitedRef.current = false;
+    skipNextDraftWriteRef.current = true;
+    const restored = readDraft();
+    setAvatarMode(restored.mode);
+    setCharacterId(restored.characterId);
+    setName(restored.name);
+    setTitle(restored.title);
+    setDescription(restored.description);
+    setGeneratePrompt(restored.generatePrompt);
+    setGeneratedSrc(restored.generatedSrc);
+    setUploadedSrc(restored.uploadedSrc);
+    setUploadedName(restored.uploadedName);
+    setRuntimeSelection(restored.runtimeSelection);
+    setCollaborationStyle("default");
+    setDraftStatus(restored.name || restored.description || restored.generatedSrc || restored.uploadedSrc ? "saved" : "idle");
+  }, [open, edit, editOne]);
+
   useEffect(() => {
     if (!open) return;
     const api = ipc();
@@ -767,10 +798,11 @@ export function OneCreateAgentDialog({
       </section>
 
       <section className={styles.fields}>
-        <label>Name<input value={name} onChange={(event) => setName(event.target.value)} maxLength={80} placeholder="inbox-triage" autoFocus /></label>
+        {/* 라벨 ko 표기는 웹 New Agent 폼과 통일(D-9) — 이름/제목/설명. */}
+        <label>{ko ? "이름" : "Name"}<input value={name} onChange={(event) => setName(event.target.value)} maxLength={80} placeholder="inbox-triage" autoFocus /></label>
         {/* 만들 때와 고칠 때가 같은 칸을 쓴다. 편집이면 지금 값이 이미 적혀 있고, 그것이 곧 수정이다. */}
-        {(!edit || edit.identityEditable) && <label>{editOne ? (ko ? "역할" : "Role") : "Title"}<input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={editOne ? 120 : 100} placeholder={editOne ? "Agentlas One" : "e.g. Inbox Triage"} /></label>}
-        {(!edit || edit.identityEditable) && <label>{editOne ? (ko ? "말투·성격과 내 선호" : "Voice, personality, and preferences") : "Description"}<textarea value={description} onChange={(event) => setDescription(event.target.value)} maxLength={editOne ? 4_000 : 1_200} placeholder={ko ? (editOne ? "예: 항상 턴 끝에 진척도를 표로 보여 주고, 내가 결정할 것이 있으면 먼저 말해 줘." : "이 에이전트에게 말투와 성격, 영혼을 부여하세요.") : (editOne ? "e.g. End every turn with a progress table and tell me what needs my decision." : "Give this agent a voice, personality, and soul.")} /></label>}
+        {(!edit || edit.identityEditable) && <label>{editOne ? (ko ? "역할" : "Role") : (ko ? "제목" : "Title")}<input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={editOne ? 120 : 100} placeholder={editOne ? "Agentlas One" : "e.g. Inbox Triage"} /></label>}
+        {(!edit || edit.identityEditable) && <label>{editOne ? (ko ? "말투·성격과 내 선호" : "Voice, personality, and preferences") : (ko ? "설명" : "Description")}<textarea value={description} onChange={(event) => setDescription(event.target.value)} maxLength={editOne ? 4_000 : 1_200} placeholder={ko ? (editOne ? "예: 항상 턴 끝에 진척도를 표로 보여 주고, 내가 결정할 것이 있으면 먼저 말해 줘." : "이 에이전트에게 말투와 성격, 영혼을 부여하세요.") : (editOne ? "e.g. End every turn with a progress table and tell me what needs my decision." : "Give this agent a voice, personality, and soul.")} /></label>}
         {edit && !edit.identityEditable && <p className={styles.lockedIdentity}>
           {ko
             ? "이 팀원은 밖에서 설치한 에이전트라 역할과 성격은 원본 패키지가 정합니다. 이름·캐릭터·모델은 여기서 바꿉니다."

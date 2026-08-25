@@ -32,7 +32,10 @@
 .panel {
   position: absolute;
   z-index: 30;
-  left: 0;
+  /* 트리거(마이크)는 컴포저 우측 끝에 있다. left:0 기준이면 패널이 뷰포트
+     오른쪽을 벗어나 안내문이 잘린다(D-4, 1240px 에서 139px 오버플로).
+     오른쪽 끝을 트리거에 맞춰 왼쪽으로 펼친다. */
+  right: 0;
   bottom: calc(100% + 12px);
   width: min(330px, calc(100vw - 40px));
   max-height: min(70vh, 460px);
