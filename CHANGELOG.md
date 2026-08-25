@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.0.41 — 2026-08-26
+
+Bundled runtime: Agentlas OS v1.2.16 (6d0d7e7eafaa96ebbed92e1a2223b01f13eed245).
+Source readiness does not prove a public installer or update feed; the
+Releases page stays the authority.
+
+- Group chats with borrowed teammates work again. Seating an agent you borrowed
+  from the Hub used to leave it out of the run; that was fixed, but the other
+  half of the run never learned about it, so those rooms stopped starting at
+  all — five sends across three rooms produced zero runs while a local-only
+  room ran fine. A borrowed teammate is called by name rather than installed,
+  so it is not part of the list that pins installed versions. It no longer
+  invalidates that list, and the room runs.
+- One team: the people you brought in are not asked for twice. Adding a
+  teammate asked for the name and character on one screen and then again on
+  the next, and those extra fields squeezed the candidate list into a strip too
+  narrow to choose from. The button offering to swap who holds a seat reopened
+  the same dialog instead of doing anything.
+- Panels and sheets move instead of snapping. Eighteen places that appeared and
+  disappeared instantly now slide, with dragging exempt so the divider still
+  tracks the pointer exactly, and motion reduced to nothing when the system
+  asks for that.
+- One: a turn that never got an answer now says so instead of sitting in
+  progress forever, a seat someone left is actually emptied, and the preview
+  window names what is really running rather than claiming to be a phone
+  simulator.
+- Seats and conversations are separate now. Replacing who sits in a seat, or
+  removing an agent, keeps the conversation that belongs to that seat.
+
 ## 1.0.40 — 2026-08-25
 
 Bundled runtime: Agentlas OS v1.2.16 (6d0d7e7eafaa96ebbed92e1a2223b01f13eed245).
