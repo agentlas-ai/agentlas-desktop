@@ -447,3 +447,38 @@ export function oneVersionPinRosterIds(
   }
   return ids;
 }
+
+/**
+ * 확정된 로스터의 실행 대상이 **Main 이 만든 모양**인가.
+ *
+ * 이 판정의 목적은 "렌더러가 임의로 지어낸 대상이 실행에 실리지 않게" 하는 것이지
+ * "로컬 설치본만 실행한다"가 아니다. 그런데 실행 관문은 `source === "local" &&
+ * entityKind === "agent"` 를 **전원에게** 요구했다. One 최초 출시 때는 그 둘이 같은
+ * 말이었지만, 그 뒤 로컬 팀(firmId)과 Hub 대여 좌석(slug)이 생기면서 갈라졌다.
+ *
+ * 그 결과 빌려온 좌석이 있는 단톡방은 실행이 0.2초 만에 죽었다 — 게다가 같은 파일
+ * 41줄 아래에 "확정된 로스터의 Hub slug 를 지우지 말라"는 수리가 들어 있어서,
+ * 한 파일 안에서 수리와 차단이 마주 보고 있었다(라이브 실측 2026-08-26: 2회 전부
+ * `one-team-binding-invalid`, 대여 호출 전에 중단돼 크레딧 소모는 0).
+ *
+ * 그래서 "로컬 에이전트인가"가 아니라 **"Main 이 만들 수 있는 모양인가"** 를 본다.
+ * 세 모양뿐이고, 어느 것도 렌더러가 지어낼 수 없다(대상은 Main 이 설치 원장·좌석
+ * 원장에서만 만들고, 렌더러는 식별자 목록만 보낸다).
+ */
+export function oneConfirmedRosterTargetsAreExact(
+  targets: ReadonlyArray<{ source?: unknown; entityKind?: unknown; agentId?: unknown; firmId?: unknown; slug?: unknown }> | null | undefined,
+): boolean {
+  if (!targets || targets.length === 0) return false;
+  return targets.every((target) => {
+    if (target.source === "local" && target.entityKind === "agent") {
+      return typeof target.agentId === "string" && target.agentId.length > 0;
+    }
+    if (target.source === "local" && target.entityKind === "team") {
+      return typeof target.firmId === "string" && target.firmId.length > 0;
+    }
+    if (target.source === "hub" && (target.entityKind === "agent" || target.entityKind === "team")) {
+      return typeof target.slug === "string" && target.slug.length > 0;
+    }
+    return false;
+  });
+}

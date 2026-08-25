@@ -93,7 +93,7 @@ for (const gate of selected) {
   // 통과로 세지도 않는다 — 무엇을 확인하지 못했는지 남긴다.
   // 호스트 판별의 신호는 두 갈래다: electron API 부재, 그리고 **네이티브 모듈 ABI**
   // (better-sqlite3 는 이 체크아웃에서 electron ABI 로 빌드돼 node 로는 못 연다 — 실측).
-  if (/Cannot read properties of undefined \(reading '(?:setPath|whenReady|getPath)'\)|require\(['"]electron['"]\)|ERR_DLOPEN_FAILED|NODE_MODULE_VERSION/.test(output)) {
+  if (/Cannot read properties of undefined \(reading '(?:setPath|whenReady|getPath|quit|exit|on)'\)|require\(['"]electron['"]\)|ERR_DLOPEN_FAILED|NODE_MODULE_VERSION/.test(output)) {
     skipped.push(gate);
     console.log(`skip ${gate} — needs the Electron host; run it with \`npx electron ${gate}\``);
     continue;

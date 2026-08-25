@@ -69,6 +69,7 @@ import { findCanonicalTaskForChat } from "../store/tasks";
 import { touchRuntimeSession } from "../store/runtime-sessions";
 import { getInterviewMode } from "../store/interview-mode";
 import { isUserFacingProjectAgent } from "../../shared/project-agent-pool";
+import { oneConfirmedRosterTargetsAreExact } from "../../shared/one-team-preflight";
 import { projectRosterSpecs } from "../../shared/project-roster-specs";
 import { classifyTurnEscalation, describeTurnEscalation } from "../../shared/turn-escalation";
 import { stripPermissionEscalationMarker } from "../../shared/permission-escalation";
@@ -1432,11 +1433,16 @@ export async function runMcpInvocation(
   const oneTeamExecutionPolicy = mainOneTeamExecutionPolicy(req);
   const boundOneTeamRuntime = mainOneTeamRuntimeBinding(req);
   if (oneTeamExecutionPolicy) {
-    const exactLocalTargets = req.taskForceTargets?.every((target) =>
-      target.source === "local" && target.entityKind === "agent");
+    /*
+     * 여기서 묻는 것은 "Main 이 만든 모양인가"이지 "로컬 설치본인가"가 아니다 —
+     * 판정과 그 이유는 shared/one-team-preflight.ts 에 있다. 로컬 에이전트만
+     * 통과시키던 동안 빌려온 좌석이 있는 단톡방은 실행이 0.2초 만에 죽었고,
+     * 바로 아래에 있는 Hub slug 수리까지 도달하지도 못했다.
+     */
+    const exactRosterTargets = oneConfirmedRosterTargetsAreExact(req.taskForceTargets);
     if (
       oneTeamExecutionPolicy === "confirmed_existing_roster"
-      && (!boundOneTeamRuntime || !req.taskForceTargets?.length || !exactLocalTargets)
+      && (!boundOneTeamRuntime || !exactRosterTargets)
     ) {
       sink({
         kind: "error",

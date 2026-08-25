@@ -7,12 +7,13 @@ Source readiness does not prove a public installer or update feed; the
 Releases page stays the authority.
 
 - Group chats with borrowed teammates work again. Seating an agent you borrowed
-  from the Hub used to leave it out of the run; that was fixed, but the other
-  half of the run never learned about it, so those rooms stopped starting at
-  all — five sends across three rooms produced zero runs while a local-only
-  room ran fine. A borrowed teammate is called by name rather than installed,
-  so it is not part of the list that pins installed versions. It no longer
-  invalidates that list, and the room runs.
+  from the Hub used to leave it out of the run; that was fixed, but two later
+  points still turned the whole roster away for not being locally installed, so
+  those rooms stopped starting at all — five sends across three rooms produced
+  zero runs while a local-only room ran fine. A borrowed teammate is called by
+  name rather than installed, so it has no installed version to pin and no
+  installed identity to invent. Both points now ask whether the roster is the
+  one the app itself built, instead of whether every seat is a local install.
 - One team: the people you brought in are not asked for twice. Adding a
   teammate asked for the name and character on one screen and then again on
   the next, and those extra fields squeezed the candidate list into a strip too
