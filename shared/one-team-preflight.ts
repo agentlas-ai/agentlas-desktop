@@ -381,3 +381,69 @@ export function isOneTeamPreflightProposal(value: unknown): value is OneTeamPref
   if (["team_started", "workforce_started", "solo_started"].includes(String(proposal.status)) !== (proposal.startedRun !== null)) return false;
   return true;
 }
+
+/**
+ * 이 실행 대상이 **로컬 설치본 버전 못박기 명단**에 오르는가.
+ *
+ * 못박기 명단은 "이 실행에 참여하는 설치본 하나하나의 버전을 고정한다". 그래서
+ * 설치본이 아닌 대상은 여기 올라갈 수 없다 — 팀은 구성원을 가진 그래프이고,
+ * call-only Hub 좌석은 slug 로 빌려 부르는 대상이라 못박을 로컬 버전이 없다.
+ *
+ * 이 판정이 인라인 조건문으로만 존재하던 동안, 편성은 Hub 좌석을 싣도록 고쳐졌는데
+ * 실행 시작 관문은 그대로여서 **허브 좌석이 든 단톡은 실행이 아예 시작되지 않았다**
+ * (인수 실측 2026-08-26: 3방 5회 시작 0건). 문장 대조 게이트는 전부 초록이었다.
+ * 그래서 판정을 밖으로 꺼내 동작으로 검사한다.
+ *
+ * "제외"는 실행에서 빠진다는 뜻이 아니다: 팀과 Hub 좌석은 taskForceTargets /
+ * borrowAgents 로 실행기에 따로 실린다.
+ */
+export function onePinsInstalledVersion(
+  target: { source?: unknown; entityKind?: unknown },
+): boolean {
+  if (target.entityKind === "team") return false;
+  if (target.source === "hub") return false;
+  return target.source === "local";
+}
+
+/** One 참여자 식별자의 모양. 실행 명단에 오르는 값은 이 모양이어야 한다. */
+export const ONE_PARTICIPANT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+
+/**
+ * 버전을 못박을 **로컬 설치본 참여자 목록**을 만든다. 만들 수 없으면 null.
+ *
+ * 이 판단이 실행 시작 함수 안에 인라인으로만 살아 있는 동안, 편성은 Hub 좌석을
+ * 싣도록 고쳐졌는데 이쪽은 "local 이 아니면 명단 전체 무효"인 채로 남았다. 그래서
+ * 수리 이후 오히려 **허브 좌석이 든 단톡은 실행이 아예 시작되지 않았다**
+ * (인수 실측 2026-08-26: 3방 5회 시작 0건 / 로컬 전용 방 7건 정상). 그때 관련
+ * 게이트는 전부 초록이었다 — 전부 문장 대조였기 때문이다.
+ *
+ * 그래서 판단을 밖으로 꺼냈다. 이 함수는 부수효과가 없어 게이트가 실제로 불러
+ * 볼 수 있다: Hub 좌석이 섞여도 null 이 아니어야 한다는 것이 그 계약이다.
+ *
+ * 명단에서 빠지는 것은 실행에서 빠지는 것이 아니다 — 팀과 Hub 좌석은
+ * taskForceTargets / borrowAgents 로 실행기에 따로 실린다.
+ */
+export function oneVersionPinRosterIds(
+  ownerAgentId: string,
+  mode: "solo" | "team" | "workforce" | null,
+  targets: ReadonlyArray<{ source?: unknown; entityKind?: unknown; agentId?: unknown }> | null,
+): string[] | null {
+  if (!ONE_PARTICIPANT_ID_RE.test(ownerAgentId)) return null;
+  const ids = [ownerAgentId];
+  const seen = new Set(ids);
+  if (targets) {
+    if ((mode === "solo" && targets.length !== 0) || (mode === "team" && targets.length < 1)) return null;
+    for (const target of targets) {
+      if (!onePinsInstalledVersion(target)) continue;
+      if (
+        target.entityKind !== "agent"
+        || typeof target.agentId !== "string"
+        || !ONE_PARTICIPANT_ID_RE.test(target.agentId)
+        || seen.has(target.agentId)
+      ) return null;
+      seen.add(target.agentId);
+      ids.push(target.agentId);
+    }
+  }
+  return ids;
+}
