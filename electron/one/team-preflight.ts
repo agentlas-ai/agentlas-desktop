@@ -69,7 +69,7 @@ interface CandidateSnapshot {
   slug: string;
   installedAt: string;
   packageHash: string | null;
-  source: "installed" | "firm-node";
+  source: "installed" | "firm-node" | "hub-borrow";
 }
 
 interface InternalOneTeamPreflight {
@@ -318,12 +318,17 @@ function inputScopes(chat: Chat): OneTeamPreflightRole["inputScopes"] {
     : ["current_user_request", "approved_one_profile_memory"];
 }
 
-function permissionScopes(permission: OneTeamPreflightPermission): OneTeamPreflightRole["permissionScopes"] {
+function permissionScopes(
+  permission: OneTeamPreflightPermission,
+  /* Hub borrow 는 크레딧을 쓴다 — 그 역할에 "결제 없음"을 적으면 거짓말이다.
+   * 모집(recruitment)은 여전히 없다: 사람이 이미 앉힌 좌석만 부른다. */
+  hubBorrow = false,
+): OneTeamPreflightRole["permissionScopes"] {
   return [
     "workspace.read",
     ...(permission === "write" ? ["workspace.write" as const] : []),
     "external.recruitment.denied",
-    "external.payment.denied",
+    ...(hubBorrow ? [] : ["external.payment.denied" as const]),
   ];
 }
 
@@ -365,7 +370,7 @@ function roleFromCandidate(
       releaseRef: candidate.packageHash,
     },
     inputScopes: inputScopes(chat),
-    permissionScopes: permissionScopes(permission),
+    permissionScopes: permissionScopes(permission, candidate.source === "hub-borrow"),
     expectedOutput: coordinator
       ? "One integrated result with each specialist contribution and unresolved items identified."
       : `One bounded contribution within ${agent.taglineEn || agent.tagline || "the installed specialist's declared scope"}; return it to the coordinator for synthesis.`,
@@ -383,11 +388,19 @@ function roleFromCandidate(
  * 답했다(오너 지적 2026-08-24 "팀은 당연히 부르는 거고").
  *
  * 소스가 사라진 패키지는 여전히 부를 수 없다 — 실행할 파일이 없다.
+ *
+ * ★call-only Hub 좌석은 부를 수 있다(수리 2026-08-25). 예전에는 여기서
+ * `!isCallOnlyHubAgent` 로 걸러 냈는데, 그 좌석은 "실행할 수 없는 것"이 아니라
+ * "로컬 프롬프트로 실행하면 안 되는 것"이다 — 실행 경로가 Hub borrow 로 다를
+ * 뿐이다. 걸러 내니 사람이 직접 앉힌 팀원 둘이 통째로 사라지고 One 혼자
+ * 답했다(실측: 좌석 2명 모두 `call_only`, 제안 `solo_started`, 대상 0개).
+ * 아래 exactInstalledRoster 가 이 좌석을 로컬 대상이 아니라 hub 대상으로
+ * 만든다. 자동 선발(eligibleRosterSpecialists)에서는 여전히 제외한다 —
+ * 아무도 지목하지 않았는데 유료 Hub 호출을 켜면 비용이 사람 모르게 커진다.
  */
 function eligibleExplicitMember(installed: InstalledAgent, coordinatorId: string): boolean {
   return installed.id !== coordinatorId
     && !installed.sourceMissingSince
-    && !isCallOnlyHubAgent(installed)
     && installed.visibility !== "background"
     && installed.visibility !== "private";
 }
@@ -481,15 +494,21 @@ function exactInstalledRoster(
       continue;
     }
     seen.add(installed.id);
-    const snapshot = candidateSnapshot(installed, "installed");
+    // call-only Hub 좌석은 로컬 지시문이 비어 있다 — 로컬 대상으로 실으면 빈
+    // 지시문 실행이 되어 항상 오답이다. 실행 경로는 Hub borrow 다.
+    const hubBorrow = isCallOnlyHubAgent(installed);
+    const snapshot = candidateSnapshot(installed, hubBorrow ? "hub-borrow" : "installed");
     candidates.push(snapshot);
     roles.push(roleFromCandidate(installed, snapshot, chat, false, permission, "explicit-turn-agent"));
     // 팀을 에이전트로 실으면 실행기가 팀 그래프를 잃는다. 로컬 팀의 대상
     // 식별자는 firmId 이고, 이 저장소는 설치 행의 id 를 그대로 쓴다
     // (electron/hephaestus/recommendation.ts localTarget 과 같은 규칙).
-    targets.push(installed.kind === "team"
-      ? { source: "local", entityKind: "team", firmId: installed.id }
-      : { source: "local", entityKind: "agent", agentId: installed.id });
+    // Hub 좌석의 대상 식별자는 slug 다 — borrowed-task-force 가 그걸로 빌린다.
+    targets.push(hubBorrow
+      ? { source: "hub", entityKind: installed.kind === "team" ? "team" : "agent", slug: installed.slug }
+      : installed.kind === "team"
+        ? { source: "local", entityKind: "team", firmId: installed.id }
+        : { source: "local", entityKind: "agent", agentId: installed.id });
   }
   if (
     allowDeterministicLocalSelection
@@ -529,7 +548,7 @@ function isCandidateSnapshot(value: unknown): value is CandidateSnapshot {
     && typeof item.slug === "string" && item.slug.length > 0 && item.slug.length <= 256
     && typeof item.installedAt === "string" && Number.isFinite(Date.parse(item.installedAt))
     && (item.packageHash === null || (typeof item.packageHash === "string" && /^sha256:[0-9a-f]{64}$/.test(item.packageHash)))
-    && ["installed", "firm-node"].includes(String(item.source));
+    && ["installed", "firm-node", "hub-borrow"].includes(String(item.source));
 }
 
 function isRuntimeBinding(value: unknown): value is OneTeamRuntimeBinding {
@@ -560,6 +579,17 @@ function isRuntimeBinding(value: unknown): value is OneTeamRuntimeBinding {
 function isLocalAgentTarget(value: unknown): value is OrchestrationTarget {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const item = value as Record<string, unknown>;
+  /*
+   * ★사람이 직접 앉힌 call-only Hub 좌석은 hub 대상으로 실린다(수리 2026-08-25).
+   * 이 목록을 local 로만 좁혔던 것이 좌석을 실행에서 지우던 마지막 관문이었다.
+   * 렌더러가 임의 slug 를 밀어 넣을 수는 없다 — 이 대상은 Main 이 설치 원장의
+   * 행에서만 만들고, 렌더러는 agentId 목록만 보낸다.
+   */
+  if (item.source === "hub") {
+    return Object.keys(item).sort().join(",") === "entityKind,slug,source"
+      && (item.entityKind === "agent" || item.entityKind === "team")
+      && typeof item.slug === "string" && item.slug.length > 0 && item.slug.length <= 256;
+  }
   if (item.source !== "local") return false;
   const shape = Object.keys(item).sort().join(",");
   if (shape === "agentId,entityKind,source") {
@@ -957,6 +987,9 @@ export async function prepareOneTeamPreflight(
    * 있으면 그들로 간다. 못 온 사람은 사유와 함께 제안에 실어 보여 준다.
    */
   const canConfirmTeam = roster.roles.length >= 2;
+  // 사람이 앉힌 좌석 중 Hub borrow 가 하나라도 있으면 이 실행은 크레딧을 쓴다.
+  // 카드가 "비용 없음"이라고 말하면 안 된다.
+  const rosterBorrowsFromHub = roster.targets.some((target) => target.source === "hub");
   // When the installed roster cannot cover the work, external staffing is the
   // remaining route — not a dead end. Main already implements that run end to
   // end (`confirmed_external_workforce` + `hub-first`); this is the door that
@@ -988,7 +1021,7 @@ export async function prepareOneTeamPreflight(
     complexityReasons: reasons,
     roles: canConfirmTeam ? roster.roles : roster.roles.slice(0, 1),
     cost: {
-      hubBorrowing: canConfirmTeam ? "none" : "unknown",
+      hubBorrowing: canConfirmTeam && !rosterBorrowsFromHub ? "none" : "unknown",
       runtimeUsage: "unknown",
       currency: null,
       authoritativeQuoteRef: null,

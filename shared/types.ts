@@ -293,6 +293,7 @@ export type {
 } from "./one-project-deadline";
 export type {
   AutoResolveOneTeamPreflightInput,
+  OneTeamMemberUnavailableReason,
   OneTeamPreflightComplexityReason,
   OneTeamPreflightInputScope,
   OneTeamPreflightPermission,

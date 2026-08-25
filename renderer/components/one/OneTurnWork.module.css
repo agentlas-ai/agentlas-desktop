@@ -179,6 +179,13 @@
   overflow-wrap: anywhere;
 }
 
+/*
+ * flex 항목의 기본 min-width 는 auto 라, 끊을 데 없는 긴 명령 한 줄은 칸보다 작아지지
+ * 못하고 밖으로 삐져나가 잘렸다(오너 관측 2026-08-25 — 활동 로그의 명령 블록이 좁은
+ * 폭을 넘쳐 잘림). 부모의 overflow-wrap 은 항목이 줄어들 수 있을 때만 듣는다.
+ */
+.rowText > * { min-width: 0; max-width: 100%; }
+
 .rowText strong {
   color: var(--work-ink);
   font-weight: 590;
@@ -211,8 +218,9 @@
   overflow-wrap: anywhere;
 }
 
-.files { display: inline-flex; flex-wrap: wrap; gap: 6px 10px; }
-.file { display: inline-flex; align-items: baseline; gap: 5px; }
+.files { min-width: 0; max-width: 100%; display: inline-flex; flex-wrap: wrap; gap: 6px 10px; }
+.file { min-width: 0; max-width: 100%; display: inline-flex; align-items: baseline; gap: 5px; }
+.file > * { min-width: 0; max-width: 100%; }
 .diffStat em { font-style: normal; font-size: 12px; font-variant-numeric: tabular-nums; }
 .added { color: #4c8a3f; }
 .removed { color: #b3473c; margin-left: 4px; }
@@ -243,7 +251,8 @@
   padding: 0 0 0 2px;
   list-style: none;
 }
-.exploreLine { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+.exploreLine { display: flex; gap: 8px; align-items: baseline; min-width: 0; max-width: 100%; }
+.exploreLine > * { min-width: 0; max-width: 100%; }
 .exploreOp { flex: 0 0 auto; color: var(--work-faint); font-size: 12px; }
 .exploreTarget { color: var(--work-muted); font-family: var(--work-mono); font-size: 12px; overflow-wrap: anywhere; }
 

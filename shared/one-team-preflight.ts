@@ -46,7 +46,13 @@ export interface OneTeamPreflightRole {
     candidateRef: string;
     displayName: string;
     slug: string;
-    source: "installed" | "firm-node";
+    /**
+     * `hub-borrow` 는 사람이 직접 앉힌 call-only Hub 좌석이다. 로컬 지시문이
+     * 없으므로 실행은 Hub borrow 로 가고 크레딧이 든다 — 카드가 그렇게 말해야
+     * 한다. 조용히 빼면 "왜 One 만 답하지" 로만 보인다(오너 지적 2026-08-24,
+     * 실측 2026-08-25: 좌석 2명이 call_only 로 탈락해 solo_started).
+     */
+    source: "installed" | "firm-node" | "hub-borrow";
     /** 팀 패키지를 부르면 팀으로 기록한다 — 에이전트로 적으면 실행기가 팀 그래프를 잃는다. */
     entityKind: "agent" | "team";
     availability: "installed_present";
@@ -289,7 +295,7 @@ export function isOneTeamPreflightRole(value: unknown): value is OneTeamPrefligh
     "releaseState", "releaseRef",
   ])) return false;
   if (!safeId(candidate.candidateRef) || !safeText(candidate.displayName, 120) || !safeText(candidate.slug, 160)) return false;
-  if (!["installed", "firm-node"].includes(String(candidate.source))) return false;
+  if (!["installed", "firm-node", "hub-borrow"].includes(String(candidate.source))) return false;
   if (candidate.entityKind !== "agent" && candidate.entityKind !== "team") return false;
   if (candidate.availability !== "installed_present") return false;
   if (!["exact_package_hash", "installed_release_unversioned"].includes(String(candidate.releaseState))) return false;

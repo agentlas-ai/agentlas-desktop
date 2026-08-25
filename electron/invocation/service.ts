@@ -17,6 +17,12 @@ import {
   type InvocationWorkspaceBinding,
 } from "./workspace-binding";
 import { pickLocale } from "../runtime/status-i18n";
+import { getRuntimeToolPermissionArbiter } from "../runtime/tool-approval";
+import {
+  PERMISSION_ESCALATION_TOOL,
+  hasPermissionEscalationMarker,
+  stripPermissionEscalationMarker,
+} from "../../shared/permission-escalation";
 import { markInterruptedPartial } from "./interrupted-partial";
 import { untrustedRuntimeFailurePayload } from "../runtime/untrusted-error";
 import {
@@ -783,6 +789,19 @@ export class InvocationService {
       if (runId !== preparedOneTeamPreflight.ref.reservedRunId) {
         throw new Error("One team preflight run binding changed");
       }
+      /*
+       * ★수리 2026-08-25 — 화면이 보여준 팀이 실행에 실리게.
+       * 예전에는 `borrowAgents: []` 가 하드코딩이고 hubMode 가 workforce 가
+       * 아니면 무조건 local-only 였다. 그래서 사람이 단톡방에 앉힌 Hub 대여
+       * 좌석은 실행 페이로드에 실릴 통로 자체가 없었다(실측: 좌석 2명,
+       * 실행 0건, `borrowed_agent_career_runs` 인스턴스 전체 0건).
+       * 확정된 로스터가 Hub 좌석을 담고 있으면 그 slug 를 그대로 싣고,
+       * 허브 호출을 켠 모드로 시작한다.
+       */
+      const rosterHubBorrowSlugs = [...new Set(
+        preparedOneTeamPreflight.taskForceTargets.flatMap((target) =>
+          target.source === "hub" ? [target.slug] : []),
+      )];
       invocationRequest = {
         ...invocationRequest,
         runId: preparedOneTeamPreflight.ref.reservedRunId,
@@ -794,8 +813,12 @@ export class InvocationService {
           ? preparedOneTeamPreflight.permission
           : authoritativeOnePermission(selectedOnePermissionMode, "task"),
         sessionRouting: false,
-        hubMode: preparedOneTeamPreflight.mode === "workforce" ? "hub-first" : "local-only",
-        borrowAgents: [],
+        hubMode: preparedOneTeamPreflight.mode === "workforce"
+          ? "hub-first"
+          : rosterHubBorrowSlugs.length > 0
+            ? "hub-allowed"
+            : "local-only",
+        borrowAgents: rosterHubBorrowSlugs,
         borrowVersions: undefined,
         taskForceTargets: preparedOneTeamPreflight.taskForceTargets,
         pipelineStages: undefined,
@@ -1291,6 +1314,18 @@ export class InvocationService {
     this.publishEvent({ runId, chatId: runReq.chatId, event: lifecycleStartEvent });
 
     let terminalObserved = false;
+    /*
+     * 권한 승격 표식(오너 결정 2026-08-25) — 읽기 전용 실행이 쓰기를 만나 표식을 냈는가.
+     * 표식은 본문에서 지워지고, 완주한 뒤 그 대화 안 승인칩으로 "전체 액세스로
+     * 진행할까요?"를 묻는다. 대화가 붙은 사용자 실행에서만 — 사이트/모바일 경계와
+     * 헤드리스(사전 부여) 경로는 기존 결정 그대로 둔다.
+     */
+    let permissionEscalationRequested = false;
+    const permissionEscalationEligible =
+      !runReq.agentAppMode
+      && !runWorkspaceBinding
+      && Boolean(runReq.chatId)
+      && (runReq.permissions ?? "read") === "read";
     void runMcpInvocation(
       runReq,
       (rawEvent) => {
@@ -1318,6 +1353,21 @@ export class InvocationService {
           runReq.agentAppMode && boundedEvent.kind === "error"
             ? { ...boundedEvent, error: untrustedRuntimeFailurePayload() }
             : boundedEvent;
+        /*
+         * 권한 승격 표식은 사용자에게 보여줄 문장이 아니다 — 감지 즉시 화면·기록
+         * 본문에서 지우고, 그 사실만 남겨 완주 후 승인칩이 잇는다. 부분 스트림과
+         * 최종 본문을 같은 함수로 지워 델타 좌표계가 갈라지지 않게 한다.
+         */
+        if (
+          permissionEscalationEligible
+          && !event.agentId
+          && (event.kind === "final" || event.kind === "partial")
+          && typeof event.text === "string"
+          && hasPermissionEscalationMarker(event.text)
+        ) {
+          if (event.kind === "final") permissionEscalationRequested = true;
+          event = { ...event, text: stripPermissionEscalationMarker(event.text) };
+        }
         const attributedAgentId = event.runtimeAgentId ?? event.agentId;
         if (attributedAgentId) record.actualAgentId = attributedAgentId;
         const participantPresentation = attributedAgentId
@@ -1616,6 +1666,22 @@ export class InvocationService {
               // The completed Task remains authoritative and no durable Memory is created.
             }
           }
+          if (
+            permissionEscalationRequested
+            && terminalKind === "invoke_completed"
+            && !controller.signal.aborted
+          ) {
+            /*
+             * 완주한 읽기 전용 턴이 쓰기 승격을 표식으로 요청했다 — 그 대화 안에서
+             * 기존 승인칩 한 벌로 묻는다. 승인 없이는 아무것도 승격되지 않는다.
+             */
+            void this.offerPermissionEscalation({
+              chatId: runReq.chatId,
+              agentId: record.actualAgentId,
+              oneMode: requestedOneMode,
+              locale: pickLocale(runReq),
+            });
+          }
           if (this.activeRuns.settle(runId)) this.publishActiveChats();
         }
       },
@@ -1746,6 +1812,58 @@ export class InvocationService {
       });
 
     return { runId };
+  }
+
+  /**
+   * 읽기 전용 턴이 표식으로 요청한 권한 승격 — 오너 결정 2026-08-25.
+   *
+   * "권한이 모자라 실행 불가"는 거절이 아니라 행동 시점 승인칩으로 승격을 묻는다.
+   * 기존 승인 한 벌(중재자 → capability_grants 규칙 → 그 대화 안 live 칩)을 그대로
+   * 지난다 — 새 승인 채널은 없다. "항상 허용"은 tool:permission-escalation 영구
+   * 규칙으로 남고, 무응답은 기존 계약대로 5분 뒤 거부로 닫힌다(자동 승격 없음).
+   * 승인되면 같은 대화에 Main 발행(system) 연속 턴을 전체 액세스로 시작한다.
+   * 거부되면 아무것도 더 하지 않는다 — 모델이 남긴 "쓰기가 필요하다" 문장이 곧
+   * 정직한 거절 기록이고, 원 실행의 결과는 그대로 선다.
+   */
+  private async offerPermissionEscalation(input: {
+    chatId: string;
+    agentId?: string;
+    oneMode: boolean;
+    locale: "ko" | "en";
+  }): Promise<void> {
+    const arbiter = getRuntimeToolPermissionArbiter();
+    if (!arbiter) return; // 물을 관문이 없으면 승격도 없다 — fail-closed.
+    let allowed = false;
+    try {
+      allowed = (await arbiter({
+        runtime: "agentlas",
+        sessionKey: `permission-escalation:${input.chatId}`,
+        tool: PERMISSION_ESCALATION_TOOL,
+        kind: "escalate",
+        permission: "read",
+        mutating: true,
+        chatId: input.chatId,
+        ...(input.agentId ? { agentId: input.agentId } : {}),
+      })) !== "deny";
+    } catch {
+      return; // 중재자 실패는 거부다 — 실패가 승격이 되면 관문이 아니다.
+    }
+    if (!allowed) return;
+    const continuation = input.locale === "ko"
+      ? "전체 액세스가 승인되었다. 방금 권한이 없어 멈춘 작업을 이어서 완료하라."
+      : "Full access has been approved. Continue and finish the work that was blocked by the read-only permission.";
+    try {
+      this.start({
+        chatId: input.chatId,
+        userPrompt: continuation,
+        promptOrigin: "system",
+        taskIntent: "task",
+        permissions: "full",
+        ...(input.oneMode ? { oneMode: true, onePermissionMode: "full" } : {}),
+      } as McpInvocationRequest);
+    } catch {
+      // 재개 시작 실패는 승격 기회를 잃을 뿐이다 — 다음 요청 때 칩이 다시 묻는다.
+    }
   }
 
   cancel(runId: string): "requested" | "already-requested" | "not-found" {

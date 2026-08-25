@@ -47,6 +47,11 @@ import styles from "./OneActivityTimeline.module.css";
 
 const ONE_OUTPUT_SECTIONS_STORAGE_KEY = "agentlas.one.output-sections.v1";
 const ONE_OUTPUT_HISTORY_HEIGHT_STORAGE_KEY = "agentlas.one.output-history-height.v1";
+/** 미리보기 ↔ 아래 섹션 분할선의 높이. 없으면 "미리보기가 남는 높이를 전부" 가 기본. */
+const ONE_OUTPUT_PREVIEW_HEIGHT_STORAGE_KEY = "agentlas.one.output-preview-height.v1";
+const ONE_OUTPUT_PREVIEW_HEIGHT_MIN = 160;
+/** 아래 섹션이 최소한 한 줄은 보이도록 남겨 두는 높이. */
+const ONE_OUTPUT_BELOW_MIN = 120;
 type OutputSectionKey = "files" | "agents" | "processes" | "computer" | "sources";
 type OutputRailView = "result" | "activity" | "terminal" | "browser" | "app";
 
@@ -86,6 +91,19 @@ function readOutputHistoryHeight(): number {
   if (typeof window === "undefined") return 250;
   const value = Number(window.localStorage.getItem(ONE_OUTPUT_HISTORY_HEIGHT_STORAGE_KEY));
   return Number.isFinite(value) ? Math.min(480, Math.max(150, Math.round(value))) : 250;
+}
+
+/** null = 아직 사용자가 정한 적 없음 → 미리보기가 남는 높이를 전부 먹는다(기본). */
+function readOutputPreviewHeight(): number | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(ONE_OUTPUT_PREVIEW_HEIGHT_STORAGE_KEY);
+    if (!raw) return null;
+    const value = Number(raw);
+    return Number.isFinite(value) && value >= ONE_OUTPUT_PREVIEW_HEIGHT_MIN ? Math.round(value) : null;
+  } catch {
+    return null;
+  }
 }
 
 function elapsedLabel(ms: number): string {
@@ -887,7 +905,16 @@ function OneBrowserLiveView({ active, locale, preferredUrl, previewScopeId }: { 
     (event.altKey ? 1 : 0) | (event.ctrlKey ? 2 : 0) | (event.metaKey ? 4 : 0) | (event.shiftKey ? 8 : 0);
 
   const currentFrame = frame?.viewport === viewport ? frame : null;
-  const available = Boolean(currentFrame?.available && currentFrame.dataUrl);
+  /*
+   * 우리가 껐다는 걸 아는 주소에서는 스트림 화면을 그리지 않는다 (오너 관측 2026-08-25).
+   *
+   * 프레임은 "사진"일 뿐이라, 임시 서버가 죽은 뒤에도 스트림은 계속 찍힌다 — 그리고 그
+   * 사진의 내용이 크롬 자체의 오류 페이지("사이트에 연결할 수 없음 / localhost에서 연결을
+   * 거부했습니다 / ERR_CONNECTION_REFUSED / [세부정보][새로고침]") 였다. 우리 화면 자리에
+   * 남의 오류 프레임이 그대로 뜬 것이다. 바로 위 배너에 "정리되었습니다" 라고 우리가 이미
+   * 적어 놓고서. available 은 "프레임이 있다" 는 사실이지 "보여줄 만하다" 는 뜻이 아니다.
+   */
+  const available = Boolean(currentFrame?.available && currentFrame.dataUrl) && !localPreviewGone;
   const addTab = () => {
     const id = `browser-tab-${++tabSequenceRef.current}`;
     setTabs((current) => [...current, {
@@ -994,7 +1021,9 @@ function OneBrowserLiveView({ active, locale, preferredUrl, previewScopeId }: { 
         </div>}
       </div>
     </div>
-    {localPreviewGone && <div className={styles.browserGoneNotice} role="status">
+    {/* 아래 빈 상태가 같은 사실과 같은 행동을 이미 가운데에 크게 말하고 있을 때는 배너를
+        띄우지 않는다 — 같은 버튼이 한 화면에 두 번 나오던 것. */}
+    {localPreviewGone && (available || filePreview) && <div className={styles.browserGoneNotice} role="status">
       <span>
         <strong>{locale === "ko" ? "미리보기 임시 서버가 정리되었습니다" : "The temporary preview server was cleaned up"}</strong>
         <small>{locale === "ko"
@@ -1065,7 +1094,38 @@ function OneBrowserLiveView({ active, locale, preferredUrl, previewScopeId }: { 
             <textarea ref={inputRef} className={styles.browserInputCapture} aria-label={locale === "ko" ? "브라우저 키보드 입력" : "Browser keyboard input"} value="" onChange={() => undefined} />
           </div>
         </div>
-      : <div className={styles.browserEmpty}><IconPanelRight size={22} /><strong>{loading ? (locale === "ko" ? "브라우저 화면 불러오는 중…" : "Loading browser view…") : effectiveUrl ? (locale === "ko" ? "이 사이트에 연결할 수 없습니다" : "This site can't be reached") : (locale === "ko" ? "새 탭" : "New tab")}</strong><small>{loading ? (locale === "ko" ? "실제 페이지를 인앱 브라우저에 연결하고 있습니다." : "Connecting the real page to the in-app browser.") : effectiveUrl ? (locale === "ko" ? "연결 상태를 확인한 뒤 새로고침해 주세요." : "Check the connection, then reload this page.") : (locale === "ko" ? "주소창에 사이트 주소를 입력하세요." : "Enter a site in the address bar.")}</small>{loading && <LoadingEstimate locale={locale} operationKey="one-browser-live-frame" expectedSeconds={[1, 10]} />}</div>}
+      : <div className={styles.browserEmpty}>
+          <IconPanelRight size={22} />
+          {/*
+            * 도달 불가일 때 남의 오류 화면 문구를 흉내 내지 않는다 (오너 관측 2026-08-25).
+            * 예전 문구 "이 사이트에 연결할 수 없습니다 / 연결 상태를 확인한 뒤 새로고침해
+            * 주세요" 는 크롬 오류 페이지의 문장 그대로였다 — 우리 화면 자리에 남의 오류가
+            * 뜬 것처럼 보였을 뿐 아니라, 우리가 스스로 끈 서버에 대고 "연결 상태를 확인"
+            * 하라고 시켜서 사용자가 고칠 수 없는 일을 하게 만든다. 정리된 것을 이미 아는
+            * 화면이므로(localPreviewGone) 그 사실과 다음 행동을 말한다.
+            */}
+          {loading ? <>
+            <strong>{locale === "ko" ? "브라우저 화면 불러오는 중…" : "Loading browser view…"}</strong>
+            <small>{locale === "ko" ? "실제 페이지를 인앱 브라우저에 연결하고 있습니다." : "Connecting the real page to the in-app browser."}</small>
+            <LoadingEstimate locale={locale} operationKey="one-browser-live-frame" expectedSeconds={[1, 10]} />
+          </> : localPreviewGone ? <>
+            <strong>{locale === "ko" ? "미리보기를 정리했습니다" : "The preview was cleaned up"}</strong>
+            <small>{locale === "ko"
+              ? "One이 확인을 마치고 임시 서버를 껐습니다. 만든 파일은 그대로 있습니다."
+              : "One finished checking and shut the temporary server down. The files it built are still there."}</small>
+            {fileCandidate && <button type="button" onClick={() => void openFilePreview()}>
+              {locale === "ko" ? `만든 파일 열기 (${fileCandidate.name})` : `Open the built file (${fileCandidate.name})`}
+            </button>}
+          </> : effectiveUrl ? <>
+            <strong>{locale === "ko" ? "이 주소는 지금 열리지 않습니다" : "This address isn't answering"}</strong>
+            <small>{locale === "ko"
+              ? "서버가 꺼져 있거나 아직 준비 중입니다. 주소창의 새로고침으로 다시 시도할 수 있습니다."
+              : "The server is off or still starting. Reload from the address bar to try again."}</small>
+          </> : <>
+            <strong>{locale === "ko" ? "새 탭" : "New tab"}</strong>
+            <small>{locale === "ko" ? "주소창에 사이트 주소를 입력하세요." : "Enter a site in the address bar."}</small>
+          </>}
+        </div>}
   </section>;
 }
 
@@ -1210,6 +1270,77 @@ export function OneActivityArtifactRail({
     setHistoryHeight(next);
     try { window.localStorage.setItem(ONE_OUTPUT_HISTORY_HEIGHT_STORAGE_KEY, String(next)); } catch { /* persistence is best effort */ }
   };
+  /**
+   * 미리보기 ↔ 아래 섹션 분할선 (오너 요구 2026-08-25).
+   * 어포던스·키보드·저장 계약은 위 기록 패널 높이 드래그와 동형이다. 차이는 하나 —
+   * 여기서는 "정한 적 없음"(null) 이 유효한 상태이고, 그때 미리보기가 남는 높이를
+   * 전부 먹는다. 두 번 클릭하면 그 기본으로 되돌아간다.
+   */
+  const [previewHeight, setPreviewHeight] = useState<number | null>(readOutputPreviewHeight);
+  const [previewResizing, setPreviewResizing] = useState(false);
+  const previewResizeRef = useRef<{ pointerId: number; startY: number; startHeight: number } | null>(null);
+  const livePaneRef = useRef<HTMLDivElement | null>(null);
+  const liveListRef = useRef<HTMLDivElement | null>(null);
+  const clampPreviewHeight = (value: number) => {
+    const available = liveListRef.current?.clientHeight ?? 0;
+    const ceiling = available > 0
+      ? Math.max(ONE_OUTPUT_PREVIEW_HEIGHT_MIN, available - ONE_OUTPUT_BELOW_MIN)
+      : Number.MAX_SAFE_INTEGER;
+    return Math.min(ceiling, Math.max(ONE_OUTPUT_PREVIEW_HEIGHT_MIN, Math.round(value)));
+  };
+  const commitPreviewHeight = (value: number | null) => {
+    const next = value === null ? null : clampPreviewHeight(value);
+    setPreviewHeight(next);
+    try {
+      if (next === null) window.localStorage.removeItem(ONE_OUTPUT_PREVIEW_HEIGHT_STORAGE_KEY);
+      else window.localStorage.setItem(ONE_OUTPUT_PREVIEW_HEIGHT_STORAGE_KEY, String(next));
+    } catch { /* persistence is best effort */ }
+  };
+  /** 드래그를 시작한 순간의 실제 높이 — null(자동 채움) 상태에서도 이어서 끌 수 있어야 한다. */
+  const measuredPreviewHeight = () => previewHeight ?? livePaneRef.current?.clientHeight ?? ONE_OUTPUT_PREVIEW_HEIGHT_MIN;
+  const previewSplitHandle = (
+    <div
+      className={styles.previewSplitHandle}
+      role="separator"
+      aria-orientation="horizontal"
+      aria-label={locale === "ko" ? "미리보기 높이 조절" : "Resize preview"}
+      aria-valuemin={ONE_OUTPUT_PREVIEW_HEIGHT_MIN}
+      aria-valuenow={Math.round(measuredPreviewHeight())}
+      tabIndex={0}
+      data-resizing={previewResizing ? "true" : "false"}
+      onPointerDown={(event) => {
+        if (event.button !== 0) return;
+        previewResizeRef.current = { pointerId: event.pointerId, startY: event.clientY, startHeight: measuredPreviewHeight() };
+        event.currentTarget.setPointerCapture(event.pointerId);
+        setPreviewResizing(true);
+        event.preventDefault();
+      }}
+      onPointerMove={(event) => {
+        const drag = previewResizeRef.current;
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        setPreviewHeight(clampPreviewHeight(drag.startHeight + (event.clientY - drag.startY)));
+      }}
+      onPointerUp={(event) => {
+        if (previewResizeRef.current?.pointerId !== event.pointerId) return;
+        previewResizeRef.current = null;
+        setPreviewResizing(false);
+        commitPreviewHeight(measuredPreviewHeight());
+      }}
+      onPointerCancel={() => {
+        previewResizeRef.current = null;
+        setPreviewResizing(false);
+      }}
+      onDoubleClick={() => commitPreviewHeight(null)}
+      onKeyDown={(event) => {
+        if (event.key === "ArrowUp") commitPreviewHeight(measuredPreviewHeight() - 16);
+        else if (event.key === "ArrowDown") commitPreviewHeight(measuredPreviewHeight() + 16);
+        else if (event.key === "Home") commitPreviewHeight(ONE_OUTPUT_PREVIEW_HEIGHT_MIN);
+        else if (event.key === "End") commitPreviewHeight(null);
+        else return;
+        event.preventDefault();
+      }}
+    />
+  );
   const agents = useMemo(() => {
     const candidates = activity?.items.filter((item) => item.kind === "agent" || (item.kind === "tool" && item.agentName)) ?? [];
     const unique = new Map<string, OneActivityItem>();
@@ -1554,7 +1685,16 @@ export function OneActivityArtifactRail({
         </div>
       )}
       <div className={styles.artifactContentStack}>
-      <div className={styles.artifactList}>
+      <div
+        className={styles.artifactList}
+        ref={liveListRef}
+        /* 분할선이 있는 뷰(브라우저)에서 사용자가 높이를 정했을 때만 고정한다 — 앱 뷰는
+           아래에 맞바꿀 섹션이 없어 분할선을 달지 않는다. */
+        data-preview-fixed={railView === "browser" && previewHeight != null ? "true" : undefined}
+        style={railView === "browser" && previewHeight != null
+          ? ({ "--one-preview-height": `${previewHeight}px` } as React.CSSProperties)
+          : undefined}
+      >
         {railView === "result" && (openedArtifact || result) && <div className={styles.resultView}>
           {openedArtifact && <>
             <button type="button" className={styles.artifactBackButton} onClick={() => setOpenedArtifact(null)}>
@@ -1590,23 +1730,30 @@ export function OneActivityArtifactRail({
           </OutputDisclosure>
         </>}
         {railView === "browser" && <>
-          <OneBrowserLiveView active={railView === "browser"} locale={locale} preferredUrl={preferredBrowserUrl} previewScopeId={browserScopeKey} />
-          <OutputDisclosure section="sources" label={locale === "ko" ? "출처" : "Sources"} count={sources.length} expanded={sectionExpanded("sources")} onToggle={toggleSection}>
-            {sources.length === 0
-              ? <p className={styles.artifactEmpty}>{locale === "ko" ? "브라우저 출처 없음" : "No browser sources"}</p>
-              : sources.slice(-5).map((source) => <SourceRow key={source.id} source={source} />)}
-          </OutputDisclosure>
+          <div className={styles.livePane} ref={livePaneRef}>
+            <OneBrowserLiveView active={railView === "browser"} locale={locale} preferredUrl={preferredBrowserUrl} previewScopeId={browserScopeKey} />
+          </div>
+          {previewSplitHandle}
+          <div className={styles.liveBelow}>
+            <OutputDisclosure section="sources" label={locale === "ko" ? "출처" : "Sources"} count={sources.length} expanded={sectionExpanded("sources")} onToggle={toggleSection}>
+              {sources.length === 0
+                ? <p className={styles.artifactEmpty}>{locale === "ko" ? "브라우저 출처 없음" : "No browser sources"}</p>
+                : sources.slice(-5).map((source) => <SourceRow key={source.id} source={source} />)}
+            </OutputDisclosure>
+          </div>
         </>}
         {railView === "app" && appPreview && appViewId && (
-          <div {...designOutputSurfaceProps("web", styles.appPreviewView)} data-one-live-app="true" data-app-id={appPreview.appId}>
-            <LiveDeviceMockup
-              url={appPreview.url}
-              title={appPreview.title}
-              runtimeLabel={appPreview.runtime ?? "managed preview"}
-              locale={locale}
-              viewId={appViewId}
-              onClose={onClose}
-            />
+          <div className={styles.livePane} ref={livePaneRef}>
+            <div {...designOutputSurfaceProps("web", styles.appPreviewView)} data-one-live-app="true" data-app-id={appPreview.appId}>
+              <LiveDeviceMockup
+                url={appPreview.url}
+                title={appPreview.title}
+                runtimeLabel={appPreview.runtime ?? "managed preview"}
+                locale={locale}
+                viewId={appViewId}
+                onClose={onClose}
+              />
+            </div>
           </div>
         )}
       </div>

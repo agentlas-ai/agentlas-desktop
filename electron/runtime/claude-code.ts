@@ -19,6 +19,7 @@ import {
 import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
 import { detectApprovalRequired } from "./runtime-refusal";
 import { announceToolDenied } from "./tool-approval";
+import { PERMISSION_ESCALATION_MARKER } from "../../shared/permission-escalation";
 import {
   claudePoolKey,
   claudeResidentSessionAlive,
@@ -537,8 +538,8 @@ const runClaudeTurn = async (
   const readOnlyToolNotice =
     !runReq.untrustedNoTools && req.permission !== "write" && req.permission !== "full"
       ? (runReq.locale === "ko"
-        ? "\n\n[읽기 전용 실행] 이 세션에는 파일 쓰기·편집·셸 도구가 없다(제거됨). 서브에이전트 위임이나 다른 도구로 우회하지 마라. 작업에 쓰기가 필요하면 그 사실만 말하고, 사용자가 권한을 올리게 하라. 읽기·검색·분석은 평소대로 하면 된다."
-        : "\n\n[Read-only run] This session has no file write, edit, or shell tools — they were removed. Do not work around it by delegating to a subagent or substituting another tool. If the task needs writing, say so and let the user raise the permission. Reading, searching, and analysis work as usual.")
+        ? `\n\n[읽기 전용 실행] 이 세션에는 파일 쓰기·편집·셸 도구가 없다(제거됨). 서브에이전트 위임이나 다른 도구로 우회하지 마라. 작업에 쓰기·실행이 필요하면 무엇이 왜 필요한지 한 문장으로 말한 뒤, 답의 마지막 줄에 정확히 ${PERMISSION_ESCALATION_MARKER} 를 한 줄로 남겨라 — 앱이 사용자에게 전체 액세스 승격을 묻고, 승인되면 이어서 실행된다. 읽기·검색·분석은 평소대로 하면 된다.`
+        : `\n\n[Read-only run] This session has no file write, edit, or shell tools — they were removed. Do not work around it by delegating to a subagent or substituting another tool. If the task needs writing or shell execution, say in one sentence what is needed and why, then put exactly ${PERMISSION_ESCALATION_MARKER} on its own final line — the app will ask the user to escalate to full access and resume. Reading, searching, and analysis work as usual.`)
       : "";
   const seededSystemPrompt = (!resumeSessionId && runReq.turnContext?.trim()
     ? `${systemPrompt}\n\n${runReq.turnContext.trim()}`

@@ -71,6 +71,7 @@ import { getInterviewMode } from "../store/interview-mode";
 import { isUserFacingProjectAgent } from "../../shared/project-agent-pool";
 import { projectRosterSpecs } from "../../shared/project-roster-specs";
 import { classifyTurnEscalation, describeTurnEscalation } from "../../shared/turn-escalation";
+import { stripPermissionEscalationMarker } from "../../shared/permission-escalation";
 import { getFirm, listFirms } from "../store/firms";
 import { recordBorrowedAgentCareer } from "../agents/borrowed-profiles";
 import {
@@ -1463,17 +1464,33 @@ export async function runMcpInvocation(
       });
       return earlyResult();
     }
+    /*
+     * ★수리 2026-08-25 — 확정된 로스터의 Hub 대여 좌석을 여기서 다시 지우면
+     * service.ts 가 실은 borrowAgents 가 무효가 된다(같은 병의 두 번째 자리).
+     * 확정된 로스터 대상 중 hub 좌석의 slug 만 남긴다 — 렌더러가 임의 slug 를
+     * 넣을 수는 없다. 이 목록은 Main 이 설치 원장에서 만든 대상에서만 나온다.
+     */
+    const confirmedRosterTargets = oneTeamExecutionPolicy === "confirmed_existing_roster"
+      ? req.taskForceTargets
+      : undefined;
+    const confirmedRosterBorrowSlugs = [...new Set(
+      (confirmedRosterTargets ?? [])
+        .filter((target) => target.source === "hub")
+        .map((target) => (target as { slug: string }).slug),
+    )];
     req = {
       ...req,
       sessionRouting: false,
-      hubMode: oneTeamExecutionPolicy === "confirmed_external_workforce" ? "hub-first" : "local-only",
-      borrowAgents: [],
+      hubMode: oneTeamExecutionPolicy === "confirmed_external_workforce"
+        ? "hub-first"
+        : confirmedRosterBorrowSlugs.length > 0
+          ? "hub-allowed"
+          : "local-only",
+      borrowAgents: confirmedRosterBorrowSlugs,
       borrowVersions: undefined,
       pipelineStages: undefined,
       routerAgent: undefined,
-      taskForceTargets: oneTeamExecutionPolicy === "confirmed_existing_roster"
-        ? req.taskForceTargets
-        : undefined,
+      taskForceTargets: confirmedRosterTargets,
     };
   }
   const storedChat = getChat(req.chatId);
@@ -4141,7 +4158,7 @@ ${effectiveUserPrompt}`;
       if (continuousMode) {
         // 이 턴의 완료된 결과를 즉시 별도 assistant 메시지로 남긴다 — 화면엔 새 말풍선이
         // 계속 이어 붙는 것처럼 보이고, 앱이 중간에 꺼져도 그때까지 기록은 남는다.
-        appendChatMessage(chat.id, "assistant", redactOneAttachmentText(req, continuation.text));
+        appendChatMessage(chat.id, "assistant", stripPermissionEscalationMarker(redactOneAttachmentText(req, continuation.text)));
         // 세션 워터마크 전진 — 다음 resume 턴이 방금 자기 답변을 gap으로 재주입하지 않게.
         if (sessionCapableRuntime) touchRuntimeSession(chat.id, active.kind, agent.id);
         sink({
@@ -4967,6 +4984,12 @@ ${effectiveUserPrompt}`;
       req,
       partialFloor ? `${partialFloor}\n${displayText}` : displayText,
     ));
+    /*
+     * 권한 승격 표식은 저장 본문에서 지운다 — 화면/승인칩 감지는 final 이벤트
+     * (displayWithFloor 원문)를 받는 invocation service 가 맡는다. 히스토리 새로고침
+     * 때 표식 줄이 되살아나지 않게 하는 것이 이 한 줄의 전부다.
+     */
+    const persistedDisplay = stripPermissionEscalationMarker(displayWithFloor);
     if (!req.agentAppMode) {
       /*
        * ★빈 답은 빈 말풍선으로 남기지 않는다 — 대화창 하단에 아무것도 안 적힌 잔해만
@@ -4974,8 +4997,8 @@ ${effectiveUserPrompt}`;
        * 중간 턴이 길이 0 assistant 메시지로 저장됨).
        * 삼키지도 않는다 — 빈 답 자체가 진단 신호이므로 사실은 원장에 남긴다.
        */
-      if (displayWithFloor.trim()) {
-        appendChatMessage(chat.id, "assistant", displayWithFloor);
+      if (persistedDisplay.trim()) {
+        appendChatMessage(chat.id, "assistant", persistedDisplay);
       } else {
         tryRecordRunEvent({
           runId: req.runId ?? `chat:${chat.id}`,

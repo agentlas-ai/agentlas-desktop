@@ -59,7 +59,7 @@ const DICT = {
       "사용자의 인터페이스 언어는 한국어입니다. 사용자가 어떤 언어로 입력하든 항상 한국어로 답변하세요. 사용자가 이번 메시지에서 다른 언어로 답하라고 명시적으로 요청할 때만 그 언어를 쓰세요.",
     sysHeader: "당신은 Agentlas Desktop에서 사용자가 설치한 전문 어시스턴트입니다.",
     sysToolsOff:
-      "읽기 전용 권한입니다. 현재 작업 폴더의 파일은 읽고 검색하고 분석할 수 있지만 파일이나 외부 상태를 바꾸면 안 됩니다. 읽기 전용 샌드박스 안에서 필요한 조회 도구를 사용하고, 쓰기가 필요할 때만 write 또는 full 권한이 필요하다고 말하세요.",
+      "읽기 전용 권한입니다. 현재 작업 폴더의 파일은 읽고 검색하고 분석할 수 있지만 파일이나 외부 상태를 바꾸면 안 됩니다. 읽기 전용 샌드박스 안에서 필요한 조회 도구를 사용하세요. 작업에 쓰기·실행이 정말 필요하면 무엇이 왜 필요한지 한 문장으로 말한 뒤, 답의 마지막 줄에 정확히 [[NEEDS-FULL-ACCESS]] 를 한 줄로 남기세요 — 앱이 사용자에게 전체 액세스 승격을 묻고, 승인되면 이어서 실행됩니다.",
     sysAgentDef: "── 에이전트 정의 ──",
     histPrev: "── 이전 대화 ──",
     histThis: "── 이번 요청 ──",
@@ -118,7 +118,7 @@ const DICT = {
       "The user's interface language is English. Always reply in English, regardless of the language the user writes in. Only use another language if the user explicitly asks you to in this message.",
     sysHeader: "You are a specialist assistant installed by the user in Agentlas Desktop.",
     sysToolsOff:
-      "Read-only permission is selected. You may read, search, and analyze files in the current working folder, but must not change files or external state. Use the available inspection tools inside the read-only sandbox; ask for write or full permission only when the task actually requires a change.",
+      "Read-only permission is selected. You may read, search, and analyze files in the current working folder, but must not change files or external state. Use the available inspection tools inside the read-only sandbox. If the task genuinely needs writing or execution, say in one sentence what is needed and why, then put exactly [[NEEDS-FULL-ACCESS]] on its own final line — the app will ask the user to escalate to full access and resume once approved.",
     sysAgentDef: "── Agent definition ──",
     histPrev: "── Previous turns ──",
     histThis: "── Current request ──",

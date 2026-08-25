@@ -99,6 +99,7 @@ export type {
   OneProjectDeadlineLeadMinutes,
   OneProjectDeadlineState,
   RemoveOneProjectDeadlineInput,
+  OneTeamMemberUnavailableReason,
   OneTeamPreflightComplexityReason,
   OneTeamPreflightInputScope,
   OneTeamPreflightPermission,

@@ -77,6 +77,7 @@ import type {
   OneProactiveBriefing,
   OneSearchHitV1,
   OneSuggestionState,
+  OneTeamMemberUnavailableReason,
   OneTeamPreflightProposal,
   OneTeamPreflightRef,
   OneValueClosureState,
@@ -207,6 +208,8 @@ const ONE_LEFT_RAIL_COLLAPSED_STORAGE_KEY = "agentlas.one.left-rail-collapsed.v1
  * 이제 닫힌 채로 시작하고, 그 대화가 실제로 무언가를 만들면 한 번 열린다.
  */
 const ONE_CONTEXT_RAIL_OPEN_STORAGE_KEY = "agentlas.one.context-rail-open.v2";
+/** 홈 화면 기록 열의 펼침 상태. 기본 닫힘 — 오너 결정 2026-08-25 "다 접힌 상태". */
+const ONE_HOME_HISTORY_OPEN_STORAGE_KEY = "agentlas.one.home-history-open.v1";
 /** The right rail is resizable (owner request 2026-08-16); the width persists like its open state. */
 /*
  * v2 로 올린 이유(오너 결정 2026-08-24 "디폴트 값 지금의 반으로 줄여라"):
@@ -1190,6 +1193,17 @@ export function OneShell() {
   const [settingsSheet, setSettingsSheet] = useState<OneSettingsKey | null>(null);
   const [pluginPickerOpen, setPluginPickerOpen] = useState(false);
   const [contextRailOpen, setContextRailOpenState] = useState(() => readStoredBoolean(ONE_CONTEXT_RAIL_OPEN_STORAGE_KEY, false));
+  /*
+   * 홈 화면 기록 열도 접힌 채로 시작한다 (오너 결정 2026-08-25: "다 접힌 상태").
+   * 첫 화면에서 오른쪽을 차지하던 패널은 둘이었다 — 결과 패널(위 v2)과 이 기록 열.
+   * 접되 **출구를 남긴다**: 접힘 폭은 0이 아니라 펴기 버튼 하나가 들어가는 띠이고,
+   * 사용자가 편 상태는 기존 계약대로 기억한다.
+   */
+  const [homeHistoryOpen, setHomeHistoryOpenState] = useState(() => readStoredBoolean(ONE_HOME_HISTORY_OPEN_STORAGE_KEY, false));
+  const setHomeHistoryOpen = useCallback((next: boolean) => {
+    setHomeHistoryOpenState(next);
+    try { window.localStorage.setItem(ONE_HOME_HISTORY_OPEN_STORAGE_KEY, String(next)); } catch { /* persistence is best effort */ }
+  }, []);
   const [contextRailWidth, setContextRailWidthState] = useState<number>(readStoredContextRailWidth);
   const setContextRailWidth = useCallback((next: number | ((current: number) => number)) => {
     setContextRailWidthState((current) => {
@@ -3912,8 +3926,17 @@ export function OneShell() {
           ...(oneRuntimeSelection ? { runtimeSelection: oneRuntimeSelection } : {}),
           ...((() => {
             // 이번 턴에 지정한 팀원이 우선이고, 없으면 방의 팀원이 기본이다.
+            // ★수리 2026-08-25 — 예전에는 local 칩만 남기고 Hub 대여 좌석 칩을
+            // 버렸다. 그래서 허브 좌석만 앉은 방은 "이번 턴 지정"이 통째로
+            // 비고 One 혼자 실행됐다. 좌석의 설치행 id 로 되돌려 함께 보낸다.
             const chipIds = taskForceTargetSnapshot
-              .map((target) => target.source === "local" && target.entityKind === "agent" ? target.agentId : "")
+              .map((target) => {
+                if (target.source === "local" && target.entityKind === "agent") return target.agentId;
+                if (target.source === "hub") {
+                  return availableAgents.find((item) => item.slug === target.slug)?.id ?? "";
+                }
+                return "";
+              })
               .filter(Boolean);
             const requestedAgentIds = chipIds.length > 0 ? chipIds : taskforceMemberIds;
             return requestedAgentIds.length > 0 ? { requestedAgentIds } : {};
@@ -5373,6 +5396,7 @@ export function OneShell() {
         data-context-rail-kind={oneOutputKind}
         data-task-active={selected || conversation ? "true" : "false"}
         data-home={!selected && !conversation ? "true" : "false"}
+        data-home-history={!selected && !conversation ? (homeHistoryOpen ? "open" : "closed") : undefined}
         data-rail-mode={railMode}
         style={{ "--one-rail-width": `${contextRailWidth}px` } as CSSProperties}
       >
@@ -5999,6 +6023,33 @@ export function OneShell() {
                   <p className={styles.teamPreflightRecovery} role="status">
                     {tFor(appLocale, "one.shell.thread.recovery")}
                   </p>
+                )}
+                {/*
+                  ★수리 2026-08-25 — 부를 수 없던 팀원을 화면이 말한다.
+                  원장에는 사유가 적혀 있었는데(좌석 2명 `call_only`) 화면은
+                  한 글자도 말하지 않아, 사람에게는 "왜 One 만 답하지"로만
+                  보였다(오너 지적). 사유는 닫힌 목록이므로 화면이 번역한다.
+                */}
+                {teamPreflight
+                  && (teamPreflight.unavailableMembers?.length ?? 0) > 0
+                  && !busy
+                  && !teamPreflightBusy && (
+                  <section className={styles.teamPreflightConsent} role="status" aria-live="polite">
+                    <strong>
+                      {appLocale === "ko"
+                        ? "이번에 부르지 못한 팀원이 있습니다"
+                        : "Some teammates could not join this run"}
+                    </strong>
+                    <ul>
+                      {teamPreflight.unavailableMembers?.map((member) => (
+                        <li key={member.agentId}>
+                          {member.displayName}
+                          {" — "}
+                          {oneTeamMemberUnavailableText(member.reason, appLocale)}
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
                 )}
                 {/*
                   PRD §4.14 — 만료·취소에는 카드도 버튼도 없어서 대화가 그냥 멈췄다.
@@ -6699,8 +6750,40 @@ export function OneShell() {
             </button>
           )}
         </main>
-        {!selected && !conversation && (
+        {/*
+          * 접힘이 기본이지만 **출구가 반드시 보인다** — 접힌 자리에 펴기 버튼 한 칸을 남긴다.
+          * 폭 0으로 숨기면 다시 열 길이 없어진다(오너 규칙: 내는 상태에는 푸는 길이 있어야 한다).
+          */}
+        {!selected && !conversation && !homeHistoryOpen && (
+          <aside
+            className={styles.homeHistoryRailCollapsed}
+            aria-label={appLocale === "ko" ? "기록과 추천" : "History and recommendations"}
+          >
+            <button
+              type="button"
+              className={styles.homeHistoryExpand}
+              data-one-home-history-toggle="true"
+              aria-expanded={false}
+              aria-label={appLocale === "ko" ? "기록과 추천 펼치기" : "Expand history and recommendations"}
+              onClick={() => setHomeHistoryOpen(true)}
+            >
+              <IconPanelRight size={15} />
+              <span>{appLocale === "ko" ? "기록" : "History"}</span>
+            </button>
+          </aside>
+        )}
+        {!selected && !conversation && homeHistoryOpen && (
           <aside className={styles.homeHistoryRail} aria-label={appLocale === "ko" ? "기록과 추천" : "History and recommendations"}>
+            <button
+              type="button"
+              className={styles.homeHistoryCollapse}
+              data-one-home-history-toggle="true"
+              aria-expanded
+              aria-label={appLocale === "ko" ? "기록과 추천 접기" : "Collapse history and recommendations"}
+              onClick={() => setHomeHistoryOpen(false)}
+            >
+              <IconClose size={14} />
+            </button>
             <OneComputerHistory
               state={computerHistory}
               locale={appLocale}
@@ -7065,6 +7148,32 @@ function SearchHitRow({ hit, active, locale, mutationBusy, onOpenTask, onOpenCon
       )}
     </article>
   );
+}
+
+/**
+ * 부를 수 없던 팀원의 사유를 사람 말로. 사유는 닫힌 목록이므로 화면이 번역한다
+ * — Main 이 문장을 보내면 번역도 못 하고 문구도 못 고친다.
+ */
+function oneTeamMemberUnavailableText(
+  reason: OneTeamMemberUnavailableReason,
+  locale: "ko" | "en",
+): string {
+  if (locale === "ko") {
+    switch (reason) {
+      case "not_installed": return "이 기기에 설치되어 있지 않습니다.";
+      case "source_missing": return "원본 폴더가 사라져 실행할 파일이 없습니다.";
+      case "call_only": return "허브에서 빌려 쓰는 좌석이라 이번 실행에 실리지 않았습니다.";
+      case "hidden": return "숨김 상태라 부를 수 없습니다.";
+      default: return "이번 턴에는 부를 수 없었습니다.";
+    }
+  }
+  switch (reason) {
+    case "not_installed": return "It is not installed on this machine.";
+    case "source_missing": return "Its source folder is gone, so there is nothing to run.";
+    case "call_only": return "It is a borrowed Hub seat and was not carried into this run.";
+    case "hidden": return "It is hidden, so it cannot be called.";
+    default: return "It could not be called on this turn.";
+  }
 }
 
 function decisionFieldValue(field: OneDecisionField, locale: "ko" | "en"): string {

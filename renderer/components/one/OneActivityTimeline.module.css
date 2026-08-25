@@ -128,18 +128,32 @@
 .rowIcon[data-status="cancelled"] { color: #7b746d; }
 .rowIcon[data-status="cancelling"] { color: #8b6f47; }
 
+/*
+ * 글자 겹침의 자리 (오너 관측 2026-08-25 — "Agentlas One" 과 "실행함" 이 같은 자리에
+ * 포개져 "A실행함s" 처럼 보였다).
+ *
+ * strong 이 flex: 0 0 auto 라 절대 줄지 않는데 부모엔 overflow 가드가 없었다. 이름이
+ * 칸보다 길면 strong 이 컨테이너 밖으로 새어 나가 옆 그리드 칸(요약·시간)의 글자 위에
+ * 그대로 겹쳐 그려진다 — 잘리는 게 아니라 포개진다. 줄어들 수 있게 하고(0 1 auto),
+ * 못 줄면 말줄임으로 끝내고, 부모가 새는 것을 막는다.
+ */
 .rowCopy {
   min-width: 0;
   display: flex;
   align-items: baseline;
   gap: 7px;
+  overflow: hidden;
 }
 
 .rowCopy strong {
-  flex: 0 0 auto;
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
   color: var(--activity-ink);
   font-size: 12px;
   font-weight: 620;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .rowCopy span {
@@ -319,26 +333,104 @@
   overflow-y: auto;
 }
 
-.artifactRail[data-rail-view="result"] .artifactList,
 /*
- * 라이브 화면(브라우저·앱)은 칸을 꽉 채워야 하므로 목록의 여백을 없앤다.
- * 다만 그 아래 붙는 접이식 섹션("출처")까지 여백을 잃어 글자가 벽에
- * 붙어 있었다 — 여백은 라이브 화면에서만 빼고 섹션은 그대로 둔다.
+ * 결과 뷰는 한 덩어리가 칸을 꽉 채운다. 기본 그리드는 align-content:start + auto 행이라
+ * 내용이 제 높이로만 서고 남는 자리를 아무 행도 먹지 않는다.
+ */
+.artifactRail[data-rail-view="result"] .artifactList {
+  padding: 0;
+  grid-template-rows: minmax(0, 1fr);
+  align-content: stretch;
+}
+
+/*
+ * 라이브 화면(브라우저·앱)은 [미리보기 | 분할선 | 아래 섹션] 을 세로로 쌓고,
+ * 그 합이 항상 패널 높이와 같아야 한다.
+ *
+ * 실측 2026-08-25 (창 1446×871, 레일 548×871, 목록 547×824):
+ *   grid-template-rows: 447px 123px  → 행 합 570px
+ *   align-content: start             → 남는 254px 을 아무 행도 안 먹음
+ *   scrollHeight(824) == clientHeight(824)  → 넘치는 게 아니라 "남는" 것
+ *   빈 띠 한가운데 elementFromPoint == 컨테이너 자신 (자식 없는 순수 여백)
+ * 세로 flex 로 바꾸면 남는 높이가 반드시 어느 칸엔가 배정되므로 이 빈 띠가 생길 수 없다.
+ * (아래 여백은 라이브 화면에서만 빼고 접이식 섹션엔 되돌린다 — 글자가 벽에 붙던 것.)
  */
 .artifactRail[data-rail-view="browser"] .artifactList,
 .artifactRail[data-rail-view="app"] .artifactList {
+  display: flex;
+  flex-direction: column;
   padding: 0;
+  overflow: hidden;
 }
 
-.artifactRail[data-rail-view="browser"] .artifactList > .artifactSection,
-.artifactRail[data-rail-view="app"] .artifactList > .artifactSection {
+/* 미리보기 칸: 기본은 남는 높이를 전부 먹고, 사용자가 분할선을 끌면 그 높이로 고정된다. */
+.livePane {
+  position: relative;
+  min-height: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.livePane > * { min-height: 0; flex: 1 1 auto; }
+
+/* 분할선 아래 칸: 기본은 제 높이, 미리보기가 고정되면 나머지를 먹고 스스로 스크롤한다. */
+.liveBelow {
+  min-height: 0;
+  flex: 0 0 auto;
+  max-height: 55%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.artifactList[data-preview-fixed="true"] > .livePane {
+  flex: 0 0 auto;
+  height: var(--one-preview-height, 420px);
+}
+.artifactList[data-preview-fixed="true"] > .liveBelow {
+  flex: 1 1 auto;
+  max-height: none;
+}
+
+.artifactRail[data-rail-view="browser"] .liveBelow > .artifactSection,
+.artifactRail[data-rail-view="app"] .liveBelow > .artifactSection {
   padding: 0 20px;
 }
 
-.artifactRail[data-rail-view="browser"] .artifactList > .artifactSection:last-child,
-.artifactRail[data-rail-view="app"] .artifactList > .artifactSection:last-child {
+.artifactRail[data-rail-view="browser"] .liveBelow > .artifactSection:last-child,
+.artifactRail[data-rail-view="app"] .liveBelow > .artifactSection:last-child {
   padding-bottom: 16px;
 }
+
+/*
+ * 미리보기 ↔ 아래 섹션 분할선 (오너 요구 2026-08-25).
+ * 어포던스·키보드·저장 계약은 기록 패널 높이 드래그(.artifactHistoryResizeHandle)와 동형.
+ */
+.previewSplitHandle {
+  position: relative;
+  flex: 0 0 11px;
+  cursor: row-resize;
+  border-top: 1px solid #eceeef;
+  border-bottom: 1px solid #eceeef;
+  background: #fff;
+  touch-action: none;
+}
+.previewSplitHandle::after {
+  position: absolute;
+  top: 4px;
+  left: 50%;
+  width: 42px;
+  height: 3px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: #d5d8db;
+  opacity: .55;
+  content: "";
+}
+.previewSplitHandle:hover::after,
+.previewSplitHandle:focus-visible::after,
+.previewSplitHandle[data-resizing="true"]::after { opacity: 1; background: #9aa3a9; }
+.previewSplitHandle:focus-visible { outline: 2px solid rgba(96, 122, 54, .35); outline-offset: -2px; }
 
 .appPreviewView {
   min-width: 0;
@@ -529,8 +621,14 @@ button.artifactVisual { cursor: pointer; }
 .artifactPreviewCopy button { min-height: 32px; padding: 0 10px; border: 1px solid #d9dddb; border-radius: 8px; background: #fff; color: #505753; font: inherit; font-size: 10px; font-weight: 650; cursor: pointer; }
 .artifactPreviewCopy button:hover, .artifactPreviewCopy button:focus-visible { border-color: #b7bdba; background: #f3f4f3; outline: none; }
 
+/*
+ * 세로 flex 여야 툴바(탭·주소창·안내)가 제 높이를 갖고 화면 칸이 나머지를 전부 먹는다.
+ * grid(암시 auto 행)였을 때는 화면 칸이 제 콘텐츠 높이로만 서서 아래가 비었다.
+ */
 .browserLive {
-  display: grid;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
   margin: 0;
   border: 0;
@@ -538,6 +636,62 @@ button.artifactVisual { cursor: pointer; }
   background: #fff;
   box-shadow: 0 1px 2px rgba(20, 24, 28, .025);
 }
+.browserLive > .browserTabBar,
+.browserLive > .browserNavigationBar,
+.browserLive > .browserGoneNotice { flex: 0 0 auto; }
+
+/*
+ * "미리보기 임시 서버가 정리되었습니다" 안내.
+ * 이 클래스는 TSX 가 참조하는데 정의가 없었다 — CSS 모듈이라 className 이 undefined 로
+ * 나가 스타일이 통째로 0이었고, 제목·본문·버튼이 한 줄로 뭉쳐 렌더됐다(오너 관측 2026-08-25).
+ */
+.browserGoneNotice {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid #eceeef;
+  background: #fbfaf6;
+}
+.browserGoneNotice > span {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.browserGoneNotice strong {
+  color: #4a4034;
+  font-size: 11.5px;
+  font-weight: 650;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.browserGoneNotice small {
+  color: #8a8272;
+  font-size: 10.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.browserGoneNotice > button {
+  min-height: 28px;
+  flex: 0 0 auto;
+  max-width: 100%;
+  padding: 0 10px;
+  border: 1px solid #ded8c8;
+  border-radius: 8px;
+  background: #fff;
+  color: #5c5344;
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.browserGoneNotice > button:hover,
+.browserGoneNotice > button:focus-visible { border-color: #c3b99f; background: #f7f4ec; outline: none; }
 .browserTabBar {
   min-width: 0;
   min-height: 46px;
@@ -742,7 +896,13 @@ button.artifactVisual { cursor: pointer; }
 .browserMenu button[data-selected="true"] { color: #202427; font-weight: 700; }
 .browserMenu button:disabled { color: #b2b6b9; cursor: default; }
 .browserMenu small { color: #92979a; font-size: 8px; font-weight: 500; }
-.browserViewport { min-height: 360px; display: grid; place-items: start center; overflow: auto; background: #eef0f1; }
+/*
+ * 화면 칸은 남는 높이를 전부 먹는다. 스트리밍 스크린샷은 naturalSize 1280×800 이라
+ * 폭이 정해지면 높이가 종횡비로만 결정된다(547 ÷ 1.6 = 342px 실측) — 예전처럼 칸이
+ * 콘텐츠 높이로 서면 그 아래가 통째로 빈 공간이 됐다. 칸을 채우고 화면을 가운데 두면
+ * 남는 자리는 브라우저 배경(회색)이 되고, 높이는 분할선으로 사용자가 정한다.
+ */
+.browserViewport { min-height: 0; flex: 1 1 auto; display: grid; place-items: center; overflow: auto; background: #eef0f1; }
 .browserStreamInput { width: 100%; max-height: none; position: relative; overflow: hidden; cursor: default; touch-action: none; outline: none; user-select: none; }
 .browserStreamInput:focus-within { box-shadow: inset 0 0 0 2px rgba(42, 105, 75, .45); }
 .browserStreamInput img { width: 100%; max-height: none; display: block; object-fit: contain; pointer-events: none; }
@@ -750,7 +910,34 @@ button.artifactVisual { cursor: pointer; }
 .browserViewport[data-mode="phone"] { padding: 14px; background: #e7e9e8; }
 .browserViewport[data-mode="phone"] .browserStreamInput { width: min(220px, 74%); max-height: none; border: 6px solid #303532; border-radius: 24px; background: #fff; box-shadow: 0 6px 18px rgba(33, 38, 35, .16); }
 .browserViewport[data-mode="phone"] .browserStreamInput img { width: 100%; max-height: none; aspect-ratio: 390 / 844; object-fit: cover; object-position: top; }
-.browserEmpty { min-height: 360px; display: grid; place-items: center; align-content: center; gap: 8px; padding: 28px; color: #8b918e; text-align: center; }
+/*
+ * 정리된 서버 대신 디스크의 산출물을 여는 칸. 이 클래스도 정의가 없어서 iframe 이
+ * 기본 크기(300×150)로 서 있었다 — browserGoneNotice 와 같은 계열의 미정의 클래스.
+ */
+.browserFilePreview { min-height: 0; flex: 1 1 auto; display: grid; overflow: auto; background: #eef0f1; }
+.browserFilePreview > iframe { width: 100%; height: 100%; min-height: 0; border: 0; background: #fff; }
+.browserFilePreview[data-mode="phone"] { place-items: center; padding: 14px; background: #e7e9e8; }
+.browserFilePreview[data-mode="phone"] > iframe { width: min(220px, 74%); height: min(100%, 476px); border: 6px solid #303532; border-radius: 24px; }
+
+.browserEmpty { min-height: 0; flex: 1 1 auto; display: grid; place-items: center; align-content: center; gap: 8px; padding: 28px; color: #8b918e; text-align: center; }
+.browserEmpty > button {
+  min-height: 30px;
+  margin-top: 2px;
+  padding: 0 12px;
+  border: 1px solid #d9dddb;
+  border-radius: 8px;
+  background: #fff;
+  color: #505753;
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.browserEmpty > button:hover, .browserEmpty > button:focus-visible { border-color: #b7bdba; background: #f3f4f3; outline: none; }
 .browserEmpty strong { color: #41464a; font-size: 13px; }
 .browserEmpty small { max-width: 290px; color: #888e92; font-size: 10px; line-height: 1.55; }
 

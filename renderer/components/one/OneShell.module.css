@@ -2657,6 +2657,15 @@
   grid-template-columns: 0 minmax(0, 1fr) 360px;
 }
 
+/* 홈 기록 열이 접히면 3번째 트랙은 펴기 버튼 한 칸(44px)만 남고 나머지는 가운데가 먹는다. */
+.body[data-home-history="closed"] {
+  grid-template-columns: 252px minmax(0, 1fr) 44px;
+}
+
+.body[data-home-history="closed"][data-rail-collapsed="true"] {
+  grid-template-columns: 0 minmax(0, 1fr) 44px;
+}
+
 .body[data-task-active="true"] {
   grid-template-columns: 252px minmax(0, 1fr) 0;
 }
@@ -2951,6 +2960,71 @@
   background: #fff;
 }
 
+/*
+ * 홈 기록 열 접기 (오너 결정 2026-08-25 "다 접힌 상태").
+ * 접힘 폭은 0이 아니라 44px — 펴기 버튼이 들어갈 자리다. 폭 0으로 숨기면 다시 열 길이
+ * 사라진다. 열 폭은 .body 의 3번째 트랙이고 transition 이 이미 걸려 있어 그대로 미끄러진다.
+ */
+.homeHistoryRailCollapsed {
+  position: relative;
+  grid-column: 3;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  overflow: hidden;
+  padding-top: 14px;
+  border-left: 1px solid #ececed;
+  background: #fbfbfb;
+}
+
+.homeHistoryExpand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  /*
+   * 세로쓰기에서는 height 가 "글자가 흐르는 축"이라, 높이를 못박으면 글자가 잘린다
+   * (실측 2026-08-25: height:32px 에서 "History" 가 "Histor" 로 잘림). 두께는 width 로
+   * 정하고 글자 길이는 내용이 정하게 둔다.
+   */
+  width: 26px;
+  padding: 11px 0;
+  border: 1px solid #e2e4e5;
+  border-radius: 9px;
+  background: #fff;
+  color: #6b7276;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  /* 좁은 띠 안에서는 세로로 세워 글자까지 읽히게 한다 — 아이콘만 있는 출구는 못 찾는다. */
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+}
+.homeHistoryExpand:hover,
+.homeHistoryExpand:focus-visible { border-color: #c6cacc; background: #f4f5f5; color: #3f4649; outline: none; }
+.homeHistoryExpand svg { transform: rotate(180deg); }
+
+.homeHistoryCollapse {
+  position: absolute;
+  z-index: 2;
+  top: 12px;
+  right: 12px;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #e6e8e9;
+  border-radius: 8px;
+  background: #fff;
+  color: #7b8286;
+  cursor: pointer;
+}
+.homeHistoryCollapse:hover,
+.homeHistoryCollapse:focus-visible { border-color: #c6cacc; background: #f4f5f5; color: #3f4649; outline: none; }
+
 /* Conversation fidelity: compact neutral bubbles with Markdown hierarchy
    preserved inside the bubble instead of one oversized document column. */
 .body[data-task-active="true"] .threadContent {
@@ -3076,17 +3150,21 @@
 @media (max-width: 1080px) {
   .body,
   .body[data-task-active="true"],
-  .body[data-task-active="true"][data-context-rail="true"] {
+  .body[data-task-active="true"][data-context-rail="true"],
+  .body[data-home-history="closed"] {
     grid-template-columns: 224px minmax(0, 1fr) 0;
   }
 
   .body[data-rail-collapsed="true"],
   .body[data-task-active="true"][data-rail-collapsed="true"],
-  .body[data-task-active="true"][data-rail-collapsed="true"][data-context-rail="true"] {
+  .body[data-task-active="true"][data-rail-collapsed="true"][data-context-rail="true"],
+  .body[data-home-history="closed"][data-rail-collapsed="true"] {
     grid-template-columns: 0 minmax(0, 1fr) 0;
   }
 
-  .homeHistoryRail { display: none; }
+  /* 좁은 화면은 이 열을 통째로 뺀다 — 접힘 띠도 여기서는 되살아나면 안 된다(R-1 폭 예산). */
+  .homeHistoryRail,
+  .homeHistoryRailCollapsed { display: none; }
 }
 
 /* Contract 8 holds at every width a desktop window can reach: opening Outputs
