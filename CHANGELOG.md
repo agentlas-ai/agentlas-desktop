@@ -6,14 +6,20 @@ Bundled runtime: Agentlas OS v1.2.16 (6d0d7e7eafaa96ebbed92e1a2223b01f13eed245).
 Source readiness does not prove a public installer or update feed; the
 Releases page stays the authority.
 
-- Group chats with borrowed teammates work again. Seating an agent you borrowed
-  from the Hub used to leave it out of the run; that was fixed, but two later
-  points still turned the whole roster away for not being locally installed, so
-  those rooms stopped starting at all — five sends across three rooms produced
-  zero runs while a local-only room ran fine. A borrowed teammate is called by
-  name rather than installed, so it has no installed version to pin and no
-  installed identity to invent. Both points now ask whether the roster is the
-  one the app itself built, instead of whether every seat is a local install.
+- A group chat with a borrowed teammate is no longer turned away before it
+  starts. Seating an agent you borrowed from the Hub used to leave it out of the
+  run; that was fixed, but two later points still refused the whole roster for
+  not being locally installed, so those rooms stopped starting at all — five
+  sends across three rooms produced zero runs while a local-only room ran fine.
+  A borrowed teammate is called by name rather than installed, so it has no
+  installed version to pin and no installed identity to invent. Both points now
+  ask whether the roster is the one this app itself built, instead of whether
+  every seat is a local install. Measured on a live machine: the run now starts
+  and works for as long as the local part of it takes. It then still stops at
+  the borrow call itself, because every leased listing on the test account
+  answers that its exact release is not eligible to run — that is on the Hub
+  side, reproduces without this app, and no Desktop version can fix it. So this
+  release removes the Desktop wall, not the whole one.
 - One team: the people you brought in are not asked for twice. Adding a
   teammate asked for the name and character on one screen and then again on
   the next, and those extra fields squeezed the candidate list into a strip too
