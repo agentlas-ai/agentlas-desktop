@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import path from "node:path";
 
 import { listInstalledAgents } from "../mcp/registry";
+import { readCloudAgentRestoreMarker } from "../cloud-agents/restore";
 import { automationRunNeedsAttention } from "../../shared/automation-attention";
 import { listMyAgentsCached } from "../marketplace";
 import { isUserFacingProjectAgent } from "../../shared/project-agent-pool";
@@ -433,6 +434,34 @@ function cloudEntityDto(
   };
 }
 
+/**
+ * 해시로 못 이은 설치본을 복원 마커의 cloudId 로 잇는다.
+ *
+ * cloudId 는 개정(revision)을 넘어 안정적이라, 사용자가 에이전트를 고쳐 다시 올려
+ * package hash 가 움직여도 같은 클라우드 선반 행을 가리킨다.
+ */
+function cloudListingForInstalledAgent(
+  agent: { localPath?: string | null },
+  byCloudId: Map<string, import("../../shared/types").MarketplaceListing>,
+): import("../../shared/types").MarketplaceListing | undefined {
+  if (!agent.localPath || byCloudId.size === 0) return undefined;
+  let marker: ReturnType<typeof readCloudAgentRestoreMarker> = null;
+  try {
+    marker = readCloudAgentRestoreMarker(agent.localPath);
+  } catch {
+    return undefined;
+  }
+  const registrations = marker?.registrations ?? {};
+  for (const scope of ["owner-private", "hub-public"] as const) {
+    const cloudId = registrations[scope]?.cloudId;
+    if (typeof cloudId === "string" && cloudId.trim()) {
+      const found = byCloudId.get(cloudId.trim());
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
 function agentsDto(
   presentEnvKeys: ReadonlySet<string>,
   cloudListings: readonly import("../../shared/types").MarketplaceListing[],
@@ -446,16 +475,25 @@ function agentsDto(
   // cloudId 로 각각 키를 잡아 같은 에이전트가 서로 다른 칸에 앉기 때문이다.
   // (소유자 클라우드 행에는 Hub definition/release 쌍이 아예 없어 기존
   // definitionId 기준 중복 제거가 한 번도 발화하지 못한다.)
+  // ★ 그런데 package hash 는 **재발행하면 바뀐다.** 그 순간 이 링크가 끊겨 폰의 Cloud
+  //   탭에 같은 에이전트가 두 번 뜬다 — 고쳐 올린 사람에게 그대로 보이는 증상이다.
+  //   그래서 해시가 첫 열쇠이되 **유일한 열쇠는 아니다**: 복원 마커의 cloudId 는
+  //   개정을 넘어 안정적이므로 두 번째 열쇠로 쓴다(소유자 클라우드 행에는 Hub
+  //   definition/release 쌍이 없어 그쪽으로는 이을 수 없다).
   const cloudListingByPackageHash = new Map<string, import("../../shared/types").MarketplaceListing>();
+  const cloudListingByCloudId = new Map<string, import("../../shared/types").MarketplaceListing>();
   for (const listing of cloudListings) {
     const hash = typeof listing.packageHash === "string" ? listing.packageHash.trim() : "";
     if (hash && !cloudListingByPackageHash.has(hash)) cloudListingByPackageHash.set(hash, listing);
+    const cloudId = typeof listing.cloudId === "string" ? listing.cloudId.trim() : "";
+    if (cloudId && !cloudListingByCloudId.has(cloudId)) cloudListingByCloudId.set(cloudId, listing);
   }
   const installed = listInstalledAgents().map<MobileBridgeAgentDto>((agent) => {
     const binding = bindingByAgentId.get(agent.id);
-    const cloudListing = agent.packageHash
+    const cloudListing = (agent.packageHash
       ? cloudListingByPackageHash.get(agent.packageHash.trim())
-      : undefined;
+      : undefined)
+      ?? cloudListingForInstalledAgent(agent, cloudListingByCloudId);
     const installedCloudEntity = cloudListing ? cloudEntityDto(cloudListing) : null;
     return {
       id: agent.id,
