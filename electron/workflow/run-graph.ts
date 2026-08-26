@@ -1920,13 +1920,22 @@ export async function runGraph(
     }
     const cached = nodeChatCache.get(ref);
     if (cached) return cached;
+    // ★ 노드가 선언한 종류를 **먼저** 본다.
+    //
+    // 예전에는 로컬 조회가 앞섰다. 그런데 hub 노드의 `ref` 는 Hub 이름이고, 로컬에는
+    // id 가 곧 이름인 행이 62개 있다(옛 마이그레이션이 그렇게 찍었다). 이름이 하나만
+    // 겹쳐도 hub 노드가 로컬 에이전트 세션에 붙는다 — 오류도 경고도 없이, 다른 프롬프트로,
+    // 다른 기억 셀에, 다른 과금 귀속으로 돈다. 선언이 있으면 추측보다 선언이 먼저다.
     let resolved = chat;
-    if (getAgentById(ref)) {
+    const declaredTargetType = str(node.config, "targetType");
+    if (declaredTargetType === "hub") {
+      resolved = getOrCreateAutomationSession({ automationId: `${automation.id}::h:${ref}`, hubId: ref }).chat;
+    } else if (declaredTargetType === "firm" && getFirm(ref)) {
+      resolved = getOrCreateAutomationSession({ automationId: `${automation.id}::f:${ref}`, firmId: ref }).chat;
+    } else if (getAgentById(ref)) {
       resolved = getOrCreateAutomationSession({ automationId: `${automation.id}::a:${ref}`, agentId: ref }).chat;
     } else if (getFirm(ref)) {
       resolved = getOrCreateAutomationSession({ automationId: `${automation.id}::f:${ref}`, firmId: ref }).chat;
-    } else if (str(node.config, "targetType") === "hub") {
-      resolved = getOrCreateAutomationSession({ automationId: `${automation.id}::h:${ref}`, hubId: ref }).chat;
     }
     nodeChatCache.set(ref, resolved);
     return resolved;

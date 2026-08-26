@@ -3922,7 +3922,12 @@ async function runBorrowedAgentTurn(
       kind: "workload_allocation",
       chatId: p.chat.id,
       nodeId: id,
+      // `spec.slug` 는 신원이 아니라 `installed:<이름>` 같은 합성 라벨이다. 그 값이
+      // 원장(`run_events.agent_id` → `agent_usage.agent_key`, 둘 다 FK 없음)에 그대로
+      // 쌓이면 실제 에이전트로는 영영 조회되지 않는다 — 경험 보정도 그 행을 못 찾는다.
+      // 같은 파일 :4742·:939 는 이미 설치본 id 를 싣는다. 여기만 빠져 있었다.
       agentId: spec.slug,
+      ...(spec.installedAgentId ? { runtimeAgentId: spec.installedAgentId } : {}),
       payload: {
         ...workloadAllocationReceipt(executedResolution, result.observedUsage),
         role: outcome.role,

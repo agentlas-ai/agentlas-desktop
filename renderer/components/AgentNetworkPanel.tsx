@@ -139,9 +139,12 @@ export function AgentNetworkPanel({
       ) ? agent : null;
       const resolved = installed ?? current;
       if (isInternalSystemRole(key, resolved?.slug ?? item.name, item.role)) return [];
+      // 신원이 안 풀렸는데 이름 자리에 기계값이 들어 있으면 그대로 보여주지 않는다.
+      // 구두점 검사만으로는 구두점 없는 32자리 hex 를 놓친다 — 사용자에게 원시 id 가
+      // 이름처럼 보이는 자리는 남기지 않는다.
       const unresolvedMachineLabel = !resolved
         && item.name === key
-        && /[-_:/.]/u.test(item.name);
+        && (/[-_:/.]/u.test(item.name) || /^[0-9a-f]{16,}$/i.test(item.name));
       const status = cleanAgentStatus(item.status);
       return [[key, resolved
         ? { ...item, name: pickLocalized(resolved, locale).name, status }
