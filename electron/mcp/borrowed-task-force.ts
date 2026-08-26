@@ -23,6 +23,7 @@ import type {
   WorkforcePermissionEnforcementReceipt,
 } from "../runtime/runner";
 import type { RuntimeLocale } from "../runtime/status-i18n";
+import type { RuntimeRole } from "../../shared/runtime-roles";
 import { hepCall } from "../hephaestus/commands";
 import {
   appendChatMessage,
@@ -556,6 +557,26 @@ export interface BorrowedTaskForceResult {
 
 function sameRuntime(left: RuntimeStatus, right: RuntimeStatus): boolean {
   return left.kind === right.kind && left.backend === right.backend && left.source === right.source;
+}
+
+/**
+ * 이 역할 자리에 **사용자가 앉힌** 런타임만 남긴다.
+ *
+ * ★근본 수리 2026-08-26. 단계별 모델 배정(상위 AI)이 고를 수 있는 후보가 "이 기계의
+ * 모든 런타임" 이었다. 그래서 사람이 오케스트레이터·워커·좌석을 전부 한 모델로
+ * 지정해도, 배정은 그것과 무관하게 다른 모델을 집었다 — 실측에서 전부 제미나이로
+ * 못박은 기계가 haiku 를 골랐고, 그 계정의 주간 한도에 걸려 종합이 죽었다.
+ *
+ * 배정의 역할은 "주어진 선택지 안에서 단계에 맞는 것을 고르는 것"이지 **사람의 선택
+ * 밖으로 나가는 것이 아니다.** 그래서 후보를 사람이 그 자리에 앉힌 것으로 좁힌다.
+ *
+ * 아무도 그 역할을 선언하지 않은 기계(역할 설정 전)에서는 좁히지 않는다 — 좁혔다가는
+ * 후보가 0이 되어 아무것도 못 돌린다. 요구를 만들면 그 값을 실제로 내려주는 자리가
+ * 있어야 한다는 이 저장소의 규칙과 같다.
+ */
+function runtimesAssignedToRole(list: RuntimeStatus[], role: RuntimeRole): RuntimeStatus[] {
+  const assigned = list.filter((runtime) => runtime.activeRoles?.includes(role));
+  return assigned.length > 0 ? assigned : list;
 }
 
 function taskForceCandidateRuntimes(p: BorrowedTaskForceParams): RuntimeStatus[] {
@@ -3115,7 +3136,8 @@ async function runBorrowedAgentTurn(
       }
     : resolveWorkloadAllocationAcrossRuntimes({
         allocation: packet.allocation,
-        runtimes: candidateRuntimes,
+        // 팀원 실행은 워커 자리다 — 사람이 그 자리에 앉힌 것 안에서만 고른다.
+        runtimes: runtimesAssignedToRole(candidateRuntimes, "worker"),
         fallbackRuntime: workerDefault,
         phase: "delegate",
         manualOverride: agentRuntimeChoice?.override ?? p.runtimeOverride,
@@ -4109,7 +4131,8 @@ async function runPlanner(
     model: modelLabel(p.active),
   });
   if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
-  const plannerCandidateRuntimes = taskForceCandidateRuntimes(p);
+  // 계획도 오케스트레이터 자리다.
+  const plannerCandidateRuntimes = runtimesAssignedToRole(taskForceCandidateRuntimes(p), "orchestrator");
   const executionContext = p.workforceSelectionReceipt?.executionContext;
   if (
     p.workforceSelectionReceipt &&
@@ -4855,7 +4878,8 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     });
     for (const index of ready) pending.delete(index);
   }
-  const synthesisCandidateRuntimes = taskForceCandidateRuntimes(p);
+  // 종합은 오케스트레이터 자리다 — 사람이 그 자리에 앉힌 것 안에서만 고른다.
+  const synthesisCandidateRuntimes = runtimesAssignedToRole(taskForceCandidateRuntimes(p), "orchestrator");
   const synthesisResolution = resolveWorkloadAllocationAcrossRuntimes({
     allocation: plan.synthesisAllocation,
     runtimes: synthesisCandidateRuntimes,
