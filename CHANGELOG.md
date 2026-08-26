@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.0.44 — 2026-08-26
+
+Bundled runtime: Agentlas OS v1.2.29 (f3722c6c3bcc709103ce304fc94fb09f1ace44db).
+Source readiness does not prove a public installer or update feed; the
+Releases page stays the authority.
+
+- A message that was delivered is no longer marked as failed. A teammate's full
+  answer sat on screen while the line carrying it — and the line that had asked
+  for it — both read "Delivery failed". The run had failed, but much later and
+  for an unrelated reason: the final step ran into the model's usage limit. That
+  ending rose to the whole exchange, so everything inside it was painted as
+  failed, including what had plainly arrived. Arrival does not reverse: a
+  teammate speaking is the evidence that the work reached them and came back.
+  A request that never got an answer still says so.
+
 ## 1.0.43 — 2026-08-26
 
 Bundled runtime: Agentlas OS v1.2.29 (f3722c6c3bcc709103ce304fc94fb09f1ace44db).
