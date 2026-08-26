@@ -23,6 +23,7 @@ import { tryRecordRunEvent } from "../store/run-events";
 // looksSecret is the single chokepoint before memory writes, including the agent_repo nest
 // mirroring that crosses projects — a miss here reaches the widest surface in the product.
 import { looksSecret } from "../../shared/secret-patterns";
+import { normalizeMemoryOwnership } from "../../shared/memory-ownership";
 import type { SemanticMemoryDecision } from "./semantic-curator";
 import {
   beginMemoryTicket,
@@ -615,8 +616,19 @@ export function curateEvents(
     const routed = ctx.teamRun
       ? routeTeamLearning(scope, ev.memory_kind, ctx.agentId, ctx.teamRun)
       : { scope, agentId: ctx.agentId };
-    const effectiveScope = routed.scope;
-    const effectiveAgentId = routed.agentId;
+    // 마지막 관문: 개인 칸을 못 가지는 주인(팀 낙인 `agt_team_`, 또는 설치 에이전트가 없는
+    // 조직 노드)에게 향한 agent_repo 학습을 팀 공유로 되돌린다. 주인 판정은 여기 한 곳에서만
+    // 한다 — 이 함수가 모든 표면(One·조직·빌린 팀)의 공통 sink 이므로, 위쪽 라우터가 몇 개든
+    // 고아 행이 표에 들어가지 못한다. 실측: 그렇게 들어간 행은 정리기가 주인을 못 찾아
+    // 조용히 건너뛰어 영원히 쌓였다.
+    const owned = normalizeMemoryOwnership<MemoryScope>(
+      routed.scope,
+      routed.agentId,
+      "agent_repo",
+      "team_memory",
+    );
+    const effectiveScope = owned.scope;
+    const effectiveAgentId = owned.agentId;
 
     const projectPath = effectiveScope === "project" ? ctx.projectPath : null;
     const requestContext = buildRequestContext(ev, ctx, projectPath);

@@ -15,6 +15,7 @@ import type {
   ResolvedOrg,
   RuntimeStatus,
 } from "../../shared/types";
+import { memoryOwnerAgentId } from "../../shared/memory-ownership";
 import type { Runner, RunnerRequest } from "../runtime/runner";
 import type { RuntimeLocale } from "../runtime/status-i18n";
 import {
@@ -210,11 +211,13 @@ function firmMemoryTurnId(p: FirmRunParams, nodeId: string, phase: NodeTurn["pha
 
 function firmTeamMemoryRoute(
   p: FirmRunParams,
-  memberAgentId: string,
+  memberAgentId: string | null,
 ): NonNullable<Parameters<typeof curateReply>[1]["teamRun"]> {
   return {
     orchestratorAgentId: p.ceoAgent.id,
-    memberAgentId: memberAgentId === p.ceoAgent.id ? null : memberAgentId,
+    // 멤버 칸이 없는 턴(팀 낙인·설치 에이전트 없는 조직 노드)은 null 이다.
+    // 큐레이터의 마지막 관문이 그때 팀 공유 칸으로 보낸다.
+    memberAgentId: !memberAgentId || memberAgentId === p.ceoAgent.id ? null : memberAgentId,
   };
 }
 
@@ -595,11 +598,19 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
 }> {
   const { node, tier, phase } = turn;
   const nodePermission = firmNodePermission(p, turn);
-  const memoryOwnerId = node.agentId ?? node.id;
+  // 두 id 를 가른다 — 섞으면 고아 기억이 생긴다.
+  //  · nodeRuntimeId: **관측용**. 이 노드가 실제로 무엇으로 돌았나(이벤트 태깅·실행 기록).
+  //    설치 에이전트가 없으면 노드 id 로 부르는 것이 맞다 — 화면이 그 줄을 그린다.
+  //  · memoryOwnerId: **기억용**. 개인 칸을 가질 수 있는 신원만. 팀 낙인이거나 설치 에이전트가
+  //    없으면 null 이고, 그때 학습은 팀 공유 칸으로 간다(`normalizeMemoryOwnership`).
+  //    실측 2026-08-26: 예전엔 이 둘이 같은 값이라 조직 노드 id 가 그대로 기억 주인이 됐고,
+  //    정리기가 그 주인을 못 찾아 조용히 건너뛰어 쌓이기만 했다.
+  const nodeRuntimeId = node.agentId ?? node.id;
+  const memoryOwnerId = memoryOwnerAgentId(node.agentId);
   const tag = (ev: McpInvocationEvent): McpInvocationEvent => ({
     ...ev,
     agentId: node.id,
-    runtimeAgentId: memoryOwnerId,
+    runtimeAgentId: nodeRuntimeId,
     nodeId: node.id,
     agentName: node.name,
     role: node.role,
@@ -791,7 +802,9 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
         : phase === "plan" && Boolean(turn.reports?.length)
           ? undefined
           : turn.chatId ?? undefined,
-      agentId: memoryOwnerId,
+      // 러너의 agentId 는 능력 규칙 대상·런타임 세션 키·상주 판정에 쓰인다(기억이 아니다).
+      // 값이 바뀌면 세션이 갈리므로 실제로 돈 신원을 그대로 넘긴다.
+      agentId: nodeRuntimeId,
       orchestrationAgentId: node.id,
       mcpConfigPath: phase === "plan" && Boolean(turn.reports?.length)
         ? undefined
@@ -910,7 +923,8 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       kind: "workload_allocation",
       chatId: p.chat.id,
       nodeId: node.id,
-      agentId: memoryOwnerId,
+      // 관측 기록이므로 기억 주인이 아니라 실제로 돈 신원을 적는다.
+      agentId: nodeRuntimeId,
       payload: workloadAllocationReceipt(executedResolution, result.observedUsage),
     });
   }
