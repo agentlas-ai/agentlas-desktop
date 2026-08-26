@@ -20,6 +20,13 @@ Releases page stays the authority.
   schema, and a Korean role name no longer collapses into an empty concept that
   wiped out every candidate. Signing in is one command, and a command run while
   signed out opens the sign-in window instead of failing.
+- The model you chose is the model that runs. Work was handed to a model picker
+  that could reach for anything installed on the machine, so setting the
+  orchestrator, One, and every seat to one model still left it choosing
+  something else — and when that something else had run out of its weekly
+  allowance, the run stopped. The picker now chooses only from what you put in
+  that seat. A machine that has not assigned roles yet is left alone, since
+  narrowing an unset list would leave nothing to run.
 - A teammate's answer is no longer thrown away by the last step. When a
   borrowed teammate replied and the final summary then hit its model's usage
   limit, the whole turn was marked failed while the replies sat there on
