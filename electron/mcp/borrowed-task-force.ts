@@ -402,10 +402,12 @@ export interface BorrowedTaskForceParams {
   /** Explicit scoped selection wins over parent-AI workload allocation. */
   runtimeOverride?: AgentRuntimeOverride | null;
   /**
-   * 사람이 이 방에서 고른 런타임이 실제로 존중됐는가.
+   * One 에서 고른 모델이 실제로 존중됐는가.
    *
-   * 참이면 `active` 는 화면에 적힌 그 선택이다. 오케스트레이터 자리는 그때
-   * 역할 정책으로 다시 고르지 않는다 — 다시 고르면 화면과 실제가 갈린다.
+   * ★이것은 **One 자신의 모델**이지 오케스트레이터 자리의 모델이 아니다. 둘은
+   * 따로 설정된다(오케스트레이터 · One · 에이전트 좌석 세 층). 한때 이 값으로
+   * 오케스트레이터 기본값을 덮었는데, 그것은 두 층을 하나로 뭉개는 잘못이라
+   * 되돌렸다. 지금은 기록·표시용으로만 쓴다.
    */
   runtimePinHonored?: boolean;
   workingFolder?: string | null;
@@ -3090,22 +3092,7 @@ async function runBorrowedAgentTurn(
   if (!orchestratorRuntimes.some((runtime) => sameRuntime(runtime, p.active))) {
     orchestratorRuntimes.unshift(p.active);
   }
-  /*
-   * ★사람이 고른 모델이 오케스트레이터 자리에서 밀리지 않는다.
-   *
-   * 여기는 `pickActive(..., "orchestrator")` 로 **역할 정책**을 먼저 물었다. 그래서
-   * 방 작성창에 `gemini-3.7-flash-high` 라고 적혀 있는데 실제로는 Claude 를 불렀고,
-   * 그 계정의 주간 한도에 걸려 종합이 죽었다. 결과가 나빴던 방식이 특히 나쁘다 —
-   * **빌려온 팀원은 제대로 답을 보내 왔는데** 그 뒤 종합이 죽는 바람에 그 멀쩡한
-   * 답변에 "전달 실패" 배지가 붙었다. 사람은 답을 받고도 실패로 읽는다
-   * (라이브 실측 2026-08-26).
-   *
-   * 역할 정책은 **사람이 고르지 않았을 때의 기본값**이지 사람의 선택을 덮는 규칙이
-   * 아니다. 골랐으면 그것으로 돈다(계약: 고른 모델 = 실행 모델).
-   */
-  const orchestratorDefault = (p.runtimePinHonored ? p.active : null)
-    ?? pickActive(orchestratorRuntimes, "orchestrator")
-    ?? p.active;
+  const orchestratorDefault = pickActive(orchestratorRuntimes, "orchestrator") ?? p.active;
   const orchestratorDefaultRunner = sameRuntime(orchestratorDefault, p.active)
     ? p.picked
     : pickRunner(orchestratorDefault) ?? p.picked;
