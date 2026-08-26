@@ -961,15 +961,50 @@ function recordAutoIntakeReceipt(input: {
   );
 }
 
+/**
+ * 이 에이전트가 이 프로젝트·환경에서 쓰는 자동 경험 팩. 없으면 만든다.
+ *
+ * ★좌표에서 판 해시를 뺐다. 예전에는 `base_package_hash` 까지 정확히 같아야 기존 팩을
+ * 찾았다. 그 해시는 패키지 전체를 덮으므로 에이전트를 한 번 고쳐 다시 올리면 값이 바뀌고,
+ * 그 순간 팩이 하나 더 생긴다 — 옛 경험은 옛 팩에 남고, 같은 기억이 새 팩에 처음부터
+ * 다시 들어온다. 사용자에게는 "이미 승급한 칩을 왜 또 검토하라고 하지"로 보인다
+ * (실측: 좌표 2곳이 팩 6개로 갈렸고 재검토 요청 18건).
+ *
+ * 경험은 판이 아니라 에이전트 앞으로 발급된다(오너 결정). 그래서 조회는 신원 좌표
+ * (에이전트 · 프로젝트 · 환경)로만 하고, 판 해시는 "언제 쟀는가"로 팩에 남긴다.
+ * 좌표가 안정되면 `UNIQUE(pack_id, source_memory_id)` 가 같은 기억의 재유입도 막는다.
+ *
+ * 승급이 많은 팩을 먼저 고른다 — 사용자가 실제로 작업한 팩이 그것이다. 이미 갈라진
+ * 설치본은 사다리가 하나로 모은다(`store/db.ts` consolidateSplitAutoExperiencePacks).
+ */
+/**
+ * 이 신원 좌표에서 살아 있는 자동 팩 — **판 해시를 보지 않는다.**
+ *
+ * 판단을 여기 꺼내 둔 이유: 게이트가 "판이 바뀌어도 같은 팩을 고르는가"를 실제로 부를 수
+ * 있어야 한다. 아래 ensureAutoExperiencePack 안에 묻어 두면 게이트는 전체 수집 경로
+ * (안전 검사·환경 분류·기억 큐레이션)를 통째로 세워야 하고, 그러다 결국 SQL 문장을
+ * 눈으로 대조하는 검사가 된다 — 이 저장소가 이미 겪은 계열이다.
+ */
+export function findActiveAutoExperiencePack(
+  agentId: string,
+  scopeKey: string,
+  environmentKey: string,
+): PackRow | undefined {
+  return getDb().prepare(
+    `SELECT p.* FROM experience_packs p
+      WHERE p.agent_id = ? AND p.project_scope_key = ? AND p.environment_key = ?
+        AND p.auto_managed = 1 AND p.status = 'active'
+      ORDER BY (SELECT COUNT(*) FROM experience_candidates c
+                 WHERE c.pack_id = p.id AND c.status = 'promoted') DESC,
+               p.created_at ASC, p.id ASC
+      LIMIT 1`,
+  ).get(agentId, scopeKey, environmentKey) as PackRow | undefined;
+}
+
 function ensureAutoExperiencePack(input: AutoExperienceIntakeInput): PackRow {
   const environmentKey = experienceEnvironmentKey(input.environment);
   const scopeKey = experienceProjectScopeKey(input);
-  const existing = getDb().prepare(
-    `SELECT * FROM experience_packs
-      WHERE agent_id = ? AND project_scope_key = ? AND environment_key = ?
-        AND base_package_hash = ? AND auto_managed = 1 AND status = 'active'
-      LIMIT 1`,
-  ).get(input.agentId, scopeKey, environmentKey, input.basePackageHash) as PackRow | undefined;
+  const existing = findActiveAutoExperiencePack(input.agentId, scopeKey, environmentKey);
   if (existing) return existing;
 
   const agent = getAgentById(input.agentId);

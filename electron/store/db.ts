@@ -739,6 +739,108 @@ export function reclaimUnreachableAgentMemory(db: Database.Database): number {
   `).run().changes;
 }
 
+/**
+ * 갈라진 자동 경험 팩을 다시 하나로 모은다. 옮기고 보관할 뿐, 지우지 않는다.
+ *
+ * ★무엇이 갈라졌나: 자동 팩의 좌표에 `base_package_hash` 가 들어 있었다. 그 해시는
+ * 패키지 전체를 덮으므로 에이전트를 한 번 고쳐 다시 올리면 값이 바뀌고, 조회가 어긋나
+ * **팩이 하나 더 생긴다**. 그때부터 새 경험은 새 팩에, 옛 경험은 옛 팩에 쌓인다.
+ *
+ * 사용자에게 보이는 피해는 숨는 것에서 끝나지 않았다. 새 팩에는 같은 기억이 처음부터
+ * 다시 들어오므로, **이미 승급한 칩을 또 검토하라고 묻는다.** 실측(이 기기): 좌표 2곳이
+ * 팩 6개로 갈렸고, 그 안에서 이미 승급된 기억에 대한 재검토 요청이 18건 있었다.
+ *
+ * 지킴이는 "가장 오래된 팩"이 아니라 **승급이 가장 많은 팩**이다. 실측에서 승급 12건이
+ * 전부 형제 쪽에 있었다 — 오래된 순으로 골랐다면 사용자가 실제로 작업한 팩을 보관함으로
+ * 보낼 뻔했다.
+ *
+ * 행 수는 어느 쪽도 줄지 않는다. `experience_packs` 와 `experience_candidates` 는 둘 다
+ * 업데이트 연속성 보호 표라, 행이 하나라도 줄면 다음 업데이트가 fail-closed 로 막힌다
+ * (`updater/controller.ts` CONTINUITY_CORE_TABLES). 그래서 합치는 방식은 이동(pack_id)과
+ * 보관(status)뿐이고, 신원 해시는 기본키만 덮으므로 둘 다 그 해시를 건드리지 않는다.
+ *
+ * 옮길 수 없는 행(지킴이에 같은 기억이 이미 있다)은 제자리에 남고 그 팩이 보관된다 —
+ * 그것이 바로 중복이므로, 보관은 곧 재검토 요청을 없애는 일이다.
+ *
+ * @returns 다룬 묶음 수, 옮긴 후보 수, 보관한 팩 수
+ */
+export function consolidateSplitAutoExperiencePacks(db: Database.Database): {
+  groups: number;
+  moved: number;
+  archived: number;
+} {
+  const empty = { groups: 0, moved: 0, archived: 0 };
+  if (!tableExists(db, "experience_packs") || !tableExists(db, "experience_candidates")) return empty;
+  const packColumns = new Set(schemaColumns(db, "experience_packs").map((column) => column.name));
+  const candidateColumns = new Set(schemaColumns(db, "experience_candidates").map((column) => column.name));
+  for (const required of ["agent_id", "project_scope_key", "environment_key", "auto_managed", "status", "created_at"]) {
+    if (!packColumns.has(required)) return empty;
+  }
+  if (!candidateColumns.has("pack_id") || !candidateColumns.has("source_memory_id")) return empty;
+
+  const groups = db.prepare(`
+    SELECT agent_id, project_scope_key, environment_key
+      FROM experience_packs
+     WHERE auto_managed = 1 AND status = 'active'
+     GROUP BY agent_id, project_scope_key, environment_key
+    HAVING COUNT(*) > 1
+  `).all() as Array<{ agent_id: string; project_scope_key: string; environment_key: string }>;
+  if (groups.length === 0) return empty;
+
+  const now = new Date().toISOString();
+  let moved = 0;
+  let archived = 0;
+  for (const group of groups) {
+    const packs = db.prepare(`
+      SELECT p.id AS id
+        FROM experience_packs p
+       WHERE p.agent_id = ? AND p.project_scope_key = ? AND p.environment_key = ?
+         AND p.auto_managed = 1 AND p.status = 'active'
+       ORDER BY (SELECT COUNT(*) FROM experience_candidates c
+                  WHERE c.pack_id = p.id AND c.status = 'promoted') DESC,
+                p.created_at ASC, p.id ASC
+    `).all(group.agent_id, group.project_scope_key, group.environment_key) as Array<{ id: string }>;
+    if (packs.length < 2) continue;
+    const keeper = packs[0].id;
+    const siblings = packs.slice(1).map((pack) => pack.id);
+
+    for (const sibling of siblings) {
+      // 한 형제씩 옮긴다. 여러 형제를 한 문장으로 옮기면 "지킴이에 이미 있는가"가
+      // 옮기는 도중 바뀌어, 두 형제가 같은 기억을 함께 밀어 넣으려다 UNIQUE 에 걸린다.
+      moved += db.prepare(`
+        UPDATE experience_candidates
+           SET pack_id = ?
+         WHERE pack_id = ?
+           AND source_memory_id NOT IN
+               (SELECT source_memory_id FROM experience_candidates WHERE pack_id = ?)
+      `).run(keeper, sibling, keeper).changes;
+    }
+
+    // 옮길 수 있었는데 남은 행이 있으면 보관하지 않는다 — 보관은 곧 화면에서 사라지는
+    // 일이라, "중복이라서 남았다"가 참일 때만 안전하다. 값으로 확인하고 넘어간다.
+    const strandedRow = db.prepare(`
+      SELECT COUNT(*) AS n
+        FROM experience_candidates c
+       WHERE c.pack_id IN (${siblings.map(() => "?").join(", ")})
+         AND NOT EXISTS (SELECT 1 FROM experience_candidates k
+                          WHERE k.pack_id = ? AND k.source_memory_id = c.source_memory_id)
+    `).get(...siblings, keeper) as { n?: number } | undefined;
+    if (Number(strandedRow?.n ?? 0) > 0) {
+      console.error(
+        `[store] auto experience pack consolidation skipped ${group.agent_id} — ` +
+          `${strandedRow?.n} candidate(s) could not move into the surviving pack`,
+      );
+      continue;
+    }
+
+    archived += db.prepare(
+      `UPDATE experience_packs SET status = 'archived'${packColumns.has("updated_at") ? ", updated_at = ?" : ""}
+        WHERE id IN (${siblings.map(() => "?").join(", ")})`,
+    ).run(...(packColumns.has("updated_at") ? [now] : []), ...siblings).changes;
+  }
+  return { groups: groups.length, moved, archived };
+}
+
 function backupDatabaseFile(db: Database.Database, tag: string): string | null {
   try {
     const source = db.name;
@@ -5426,6 +5528,19 @@ export function initStore(options: StoreInitOptions = {}): void {
     // `agt_team_` 낙인)만 대상이고, 멀쩡한 개인 기억은 건드리지 않는다.
     const reclaimed = reclaimUnreachableAgentMemory(_db);
     if (reclaimed > 0) console.log(`[store] v104 reclaimed ${reclaimed} unreachable agent memory row(s) into team memory`);
+
+    // 판 해시 때문에 갈라진 자동 경험 팩을 다시 하나로 모은다.
+    //
+    // 조회 좌표에서 해시를 뺀 것(`experience/store.ts` ensureAutoExperiencePack)은 앞으로
+    // 갈라지지 않게 할 뿐, 이미 갈라진 것은 그대로다. 갈라진 채로 두면 사용자는 이미
+    // 승급한 칩을 다시 검토하라는 요청을 계속 받는다.
+    const consolidated = consolidateSplitAutoExperiencePacks(_db);
+    if (consolidated.groups > 0) {
+      console.log(
+        `[store] v104 consolidated ${consolidated.groups} split auto experience coordinate(s) — ` +
+          `moved ${consolidated.moved} candidate(s), archived ${consolidated.archived} duplicate pack(s)`,
+      );
+    }
   }
 
   } catch (error) {
