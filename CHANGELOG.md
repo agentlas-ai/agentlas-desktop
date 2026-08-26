@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.0.45 — 2026-08-27
+
+Bundled runtime: Agentlas OS v1.2.29 (f3722c6c3bcc709103ce304fc94fb09f1ace44db).
+Source readiness does not prove a public installer or update feed; the
+Releases page stays the authority.
+
+- An app left open no longer goes quiet, and stops taking its updates with it.
+  Measured on one machine: four hours without a single line written, the process
+  alive but no longer recognised as an application, and update checks stopped —
+  so it sat on an old version with a fix already waiting for it. None of it was
+  visible, because the record that exists to show such things was the thing that
+  had stopped. Three ways it could happen are closed: the size ceiling is now
+  checked as lines are written rather than only at startup, a dropped handle is
+  reopened instead of silencing the rest of the session, and a log removed out
+  from under a live handle is noticed instead of swallowing every line after it.
+
 ## 1.0.44 — 2026-08-26
 
 Bundled runtime: Agentlas OS v1.2.29 (f3722c6c3bcc709103ce304fc94fb09f1ace44db).
