@@ -355,33 +355,55 @@ export function OneTaskforceConversation({
     );
   };
 
+  /*
+   * ★댓글의 댓글도 그린다.
+   *
+   * 여기는 뿌리와 **직계 자식**만 그렸다. 그래서 릴레이 3번째 자리에 선 팀원은
+   * — 출처가 로컬이든 빌려온 좌석이든 — 자기 이름 말풍선이 화면에서 통째로
+   * 사라졌다. 원장에는 멀쩡히 있고, One 종합이 그 몫을 요약해 다시 적기 때문에
+   * 턴은 성공으로 끝난다. 그래서 **그 사람이 자기 이름으로 말한 것만** 조용히
+   * 없어졌다(실측 2026-08-26: 3자 릴레이 2회, 매번 3번째가 증발).
+   *
+   * 깊이 상한과 방문 표시를 둔다. 부모 포인터는 원장에서 오므로 이론상 고리가
+   * 생길 수 있고, 화면이 무한히 들어가는 것보다 거기서 멈추는 편이 낫다.
+   */
+  const MAX_THREAD_DEPTH = 8;
+  const renderThread = (
+    row: (typeof messages)[number],
+    depth: number,
+    seen: ReadonlySet<string>,
+  ): JSX.Element => {
+    const children = depth >= MAX_THREAD_DEPTH || seen.has(row.message.id)
+      ? []
+      : (threads.childrenByParent.get(row.message.id) ?? []);
+    const open = expandedThreads.has(row.message.id);
+    const nextSeen = new Set(seen).add(row.message.id);
+    return (
+      <div key={row.message.id} className={styles.thread}>
+        {renderEntry(row)}
+        {children.length > 0 && (
+          <button
+            type="button"
+            className={styles.replies}
+            aria-expanded={open}
+            onClick={() => setExpandedThreads((current) => {
+              const next = new Set(current);
+              if (next.has(row.message.id)) next.delete(row.message.id);
+              else next.add(row.message.id);
+              return next;
+            })}
+          >
+            {open
+              ? (locale === "ko" ? "답글 접기" : "Hide replies")
+              : (locale === "ko" ? `답글 ${children.length}개 보기` : `+${children.length} ${children.length === 1 ? "reply" : "replies"}`)}
+          </button>
+        )}
+        {open && children.map((child) => renderThread(child, depth + 1, nextSeen))}
+      </div>
+    );
+  };
+
   return <div className={styles.conversation} role="list" aria-label={locale === "ko" ? "태스크포스 대화" : "Taskforce conversation"}>
-    {threads.topLevel.map((row) => {
-      const children = threads.childrenByParent.get(row.message.id) ?? [];
-      const open = expandedThreads.has(row.message.id);
-      return (
-        <div key={row.message.id} className={styles.thread}>
-          {renderEntry(row)}
-          {children.length > 0 && (
-            <button
-              type="button"
-              className={styles.replies}
-              aria-expanded={open}
-              onClick={() => setExpandedThreads((current) => {
-                const next = new Set(current);
-                if (next.has(row.message.id)) next.delete(row.message.id);
-                else next.add(row.message.id);
-                return next;
-              })}
-            >
-              {open
-                ? (locale === "ko" ? "답글 접기" : "Hide replies")
-                : (locale === "ko" ? `답글 ${children.length}개 보기` : `+${children.length} ${children.length === 1 ? "reply" : "replies"}`)}
-            </button>
-          )}
-          {open && children.map((child) => renderEntry(child))}
-        </div>
-      );
-    })}
+    {threads.topLevel.map((row) => renderThread(row, 0, new Set<string>()))}
   </div>;
 }
