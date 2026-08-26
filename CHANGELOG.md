@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.0.42 — 2026-08-26
+
+Bundled runtime: Agentlas OS v1.2.28 (4ee43820e4e33fdd8b4fc797a2f62ba67aff157f).
+Source readiness does not prove a public installer or update feed; the
+Releases page stays the authority.
+
+- The bundled engine moves twelve versions forward, from v1.2.16 to v1.2.28.
+  The Desktop ships the engine inside itself, so work that landed in the engine
+  over the past days could not reach anyone here until this pin moved: staffing
+  now shortlists four candidates instead of eight (the right one was inside the
+  top four in 97.4% of measured cases), a role can be searched with several
+  phrasings at once, tools can be found in two steps instead of loading every
+  schema, and a Korean role name no longer collapses into an empty concept that
+  wiped out every candidate. Signing in is one command, and a command run while
+  signed out opens the sign-in window instead of failing.
+- A teammate's answer is no longer thrown away by the last step. When a
+  borrowed teammate replied and the final summary then hit its model's usage
+  limit, the whole turn was marked failed while the replies sat there on
+  screen. Teammate runs already continued once on another live model when
+  theirs was blocked; the summary now does the same. A pinned or benchmark run
+  still stops rather than substituting anything, and when nothing else is live
+  it stops instead of asking the same blocked model twice.
+- Running into a usage limit says so in plain words — which model stopped, what
+  to do about it, and that replies already delivered are still above — instead
+  of passing through the provider's English sentence next to an internal id.
+  The reset time in the original text is kept.
+
 ## 1.0.41 — 2026-08-26
 
 Bundled runtime: Agentlas OS v1.2.16 (6d0d7e7eafaa96ebbed92e1a2223b01f13eed245).
