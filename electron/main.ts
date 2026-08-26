@@ -1157,10 +1157,25 @@ app.whenReady().then(async () => {
   // 미룬다(runDeferredLegacyLearningReconciliation). 멱등이라 이번 실행에서
   // 못 돌면 다음 실행이 이어받는다.
   const runDeferredLegacyLearningReconciliation = () => {
+    // ★ 단계마다 따로 감싼다. 예전에는 전부 한 try 안이었고 catch 가 삼켰다 — 앞 단계
+    //   하나가 던지면 그 뒤가 통째로 안 돌았다. 특히 `migrateRegisteredAgents` 는 업데이트가
+    //   등록된 모든 에이전트에 도달하는 유일한 통로라, 조용히 죽으면 새 아키텍처가 영영
+    //   닿지 않는다(실측 2026-08-26). 한 단계의 실패가 나머지를 막지 않아야 한다.
+    const step = <T,>(name: string, run: () => T): T | null => {
+      try {
+        return run();
+      } catch (err) {
+        console.error(`[experience] ${name} 단계 실패 (나머지는 계속 진행):`, err);
+        return null;
+      }
+    };
     try {
-      const definitions = backfillLegacyLocalRouteDefinitionHashes();
-      const duplicates = dedupeLocalInstalledAgents();
-      const experience = reconcileExistingCuratedMemoryCandidates();
+      const definitions = step("route-definition-backfill", backfillLegacyLocalRouteDefinitionHashes)
+        ?? { updated: 0, failed: 0 };
+      const duplicates = step("dedupe-local-agents", dedupeLocalInstalledAgents)
+        ?? { groups: 0, merged: 0 };
+      const experience = step("experience-reconcile", () => reconcileExistingCuratedMemoryCandidates())
+        ?? { scanned: 0, candidateCreated: 0, blocked: 0, skipped: 0, deferred: 0 };
       /*
        * 등록된 모든 에이전트를 현재 아키텍처로 올린다.
        *
@@ -1168,7 +1183,7 @@ app.whenReady().then(async () => {
        * 오래 쓴 에이전트일수록 새 기능이 비어 있었다(실측: 913회 실행에 경험 칩 0). 원장이
        * (에이전트 × 단계)라 새 단계는 설치 시점과 무관하게 전원에게 한 번씩 돈다.
        */
-      const migrated = migrateRegisteredAgents();
+      const migrated = step("architecture-migrations", migrateRegisteredAgents) ?? { stepsRun: 0 };
       if (migrated.stepsRun > 0) {
         console.log("[architecture] migrated registered agents", migrated);
       }

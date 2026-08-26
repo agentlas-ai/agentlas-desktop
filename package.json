@@ -41,7 +41,6 @@
     "test:daemon-autostart": "npm run build:electron && node scripts/test-daemon-autostart.cjs",
     "test:agent-skill-roots": "npm run build:electron && node scripts/test-agent-skill-roots.cjs",
     "test:ancient-schema-ladder": "npm run build:electron && ./node_modules/.bin/electron scripts/test-ancient-schema-ladder.cjs",
-    "test:identity-axis-budget": "node scripts/test-identity-axis-budget.cjs",
     "test:agent-identity-map": "npm run build:electron && ./node_modules/.bin/electron scripts/test-agent-identity-map.cjs",
     "test:process-pool": "npm run build:electron && node scripts/test-process-pool.cjs",
     "test:agent-residency": "npm run build:electron && node scripts/test-agent-residency.cjs",

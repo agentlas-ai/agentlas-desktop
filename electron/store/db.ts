@@ -5368,18 +5368,24 @@ export function initStore(options: StoreInitOptions = {}): void {
   if (userVersion < 104) {
     _db.exec(`
       CREATE TABLE IF NOT EXISTS agent_identity_map (
-        local_id       TEXT PRIMARY KEY REFERENCES installed_agents(id) ON DELETE RESTRICT,
-        agent_id       TEXT NOT NULL,
-        agent_version  INTEGER NOT NULL DEFAULT 1,
+        -- CASCADE 다. 대응표는 **파생 데이터**이고 정본은 패키지의 agentId 다.
+        -- RESTRICT 로 두면 에이전트 삭제가 6곳에서 막힌다 — 사용자 삭제, 중복정리 2곳,
+        -- 설치 실패 롤백, One 멤버 생성 실패 롤백, 터미널 삭제. 롤백이 막히면
+        -- "설치 실패"가 "설치 실패 + 복구 실패 + 유령 행"이 된다.
+        local_id            TEXT PRIMARY KEY REFERENCES installed_agents(id) ON DELETE CASCADE,
+        -- 이름을 agent_id 로 두면 agent-dedupe 의 컬럼명 스윕에 걸린다. 값이 달라
+        -- 지금은 매칭이 0건이지만, 이름 우연에 기대는 구조 자체가 지뢰다.
+        immutable_agent_id  TEXT NOT NULL,
+        agent_version       INTEGER NOT NULL DEFAULT 1,
         -- package: 패키지 agentlas.json 에서 읽음 (정본)
         -- builtin-reserved: 앱에 구워진 에이전트 — 패키지가 없어 예약 네임스페이스를 쓴다
         -- minted-local: 출처가 없어 이 기기에서 발급 (다음에 패키지를 받으면 package 가 이긴다)
-        mapping_source TEXT NOT NULL,
-        bound_at       TEXT NOT NULL
+        mapping_source      TEXT NOT NULL,
+        bound_at            TEXT NOT NULL
       );
       -- agent_id 에 UNIQUE 를 걸지 않는다: 같은 패키지가 두 행으로 깔린 사용자가 실존한다
       -- (실측: local-vibecoder / vibecoder). UNIQUE 면 그 사용자의 승급이 통째로 실패한다.
-      CREATE INDEX IF NOT EXISTS idx_agent_identity_map_agent ON agent_identity_map(agent_id);
+      CREATE INDEX IF NOT EXISTS idx_agent_identity_map_agent ON agent_identity_map(immutable_agent_id);
       CREATE INDEX IF NOT EXISTS idx_agent_identity_map_source ON agent_identity_map(mapping_source);
     `);
   }

@@ -335,6 +335,20 @@ function mergeReferences(db: Database.Database, duplicateId: string, canonicalId
     // OR IGNORE handles per-agent singleton rows (for example an exact
     // binding/asset version) without aborting the whole repair transaction.
     db.prepare(`UPDATE OR IGNORE ${table} SET ${column} = ? WHERE ${column} = ?`).run(canonicalId, duplicateId);
+    // ★ 건너뛴 행이 남으면 **삭제하면 안 된다.** 바로 다음 단계가
+    // `DELETE FROM installed_agents` 이고, 그 표들 중 12곳이 ON DELETE CASCADE 다
+    // (경험칩·후보·승급영수증·자동수집영수증·대화). OR IGNORE 가 유니크 충돌로
+    // 조용히 건너뛴 행은 옮겨지지 못한 채 **삭제에 딸려간다** — 사용자에게 확인도,
+    // 오류도 없이. 남은 게 있으면 이 병합을 통째로 포기하는 편이 낫다.
+    const stranded = (db
+      .prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE ${column} = ?`)
+      .get(duplicateId) as { n: number }).n;
+    if (stranded > 0) {
+      throw new Error(
+        `agent_merge_would_orphan: ${reference.table}.${reference.column} 에 ${stranded}행이 남아 ` +
+          `병합을 중단했습니다 (duplicate=${duplicateId}). 이대로 지우면 그 행들이 함께 사라집니다.`,
+      );
+    }
   }
   if (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_runtime_overrides'").get()) {
     db.prepare("UPDATE OR IGNORE agent_runtime_overrides SET target_id = ? WHERE scope = 'agent' AND target_id = ?")
