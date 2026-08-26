@@ -2734,9 +2734,26 @@ export function OneShell() {
   const activeTaskforceAgentIds = useMemo(() => {
     if (!activeTaskforce) return [];
     const members = oneOrgState?.members ?? [];
-    const byId = new Map(members.map((member) => [member.installedAgentId, member]));
+    /*
+     * ★좌석을 **설치본 id 하나로만** 찾으면 빌려온 좌석이 사라진다.
+     *
+     * 웹 One 에는 "이 기계에 설치된 것"이라는 개념이 없어 Hub 대여 좌석의
+     * `installedAgentId` 가 방 명단의 값과 맞지 않는다. 그래서 그 좌석은 방에 멀쩡히
+     * 앉아 있고 목록도 정상으로 돌아오는데 **"이번 턴" 지목 후보에서만 통째로
+     * 빠졌다** — 돈 내고 빌린 자리에 부분 지목을 쓸 수 없었다(웹 실측 2026-08-26).
+     *
+     * 좌석의 정체는 하나가 아니다. 설치본 id · 좌석 id · 슬러그 중 무엇으로 불려도
+     * 같은 좌석이다. 걸러 내려던 것(보관됨·잠김·실패)은 그대로 걸러진다.
+     * 이 파일은 웹으로 그대로 복사되므로 수리는 여기(정본)에 둔다.
+     */
+    const byAnyId = new Map<string, typeof members[number]>();
+    for (const member of members) {
+      for (const key of [member.installedAgentId, member.id, member.agentSlug]) {
+        if (typeof key === "string" && key && !byAnyId.has(key)) byAnyId.set(key, member);
+      }
+    }
     return activeTaskforce.memberAgentIds.filter((agentId) => {
-      const member = byId.get(agentId);
+      const member = byAnyId.get(agentId);
       return member && !member.archivedAt && member.statusKind !== "locked" && member.statusKind !== "failed";
     });
   }, [activeTaskforce, oneOrgState?.members]);
