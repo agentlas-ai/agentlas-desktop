@@ -401,6 +401,13 @@ export interface BorrowedTaskForceParams {
   picked: { runner: Runner; label: string };
   /** Explicit scoped selection wins over parent-AI workload allocation. */
   runtimeOverride?: AgentRuntimeOverride | null;
+  /**
+   * 사람이 이 방에서 고른 런타임이 실제로 존중됐는가.
+   *
+   * 참이면 `active` 는 화면에 적힌 그 선택이다. 오케스트레이터 자리는 그때
+   * 역할 정책으로 다시 고르지 않는다 — 다시 고르면 화면과 실제가 갈린다.
+   */
+  runtimePinHonored?: boolean;
   workingFolder?: string | null;
   /** Main-process-only resolved read boundary for Soul/Sitemap/Code Map/curated memory. */
   memoryReadPath?: string | null;
@@ -3083,7 +3090,22 @@ async function runBorrowedAgentTurn(
   if (!orchestratorRuntimes.some((runtime) => sameRuntime(runtime, p.active))) {
     orchestratorRuntimes.unshift(p.active);
   }
-  const orchestratorDefault = pickActive(orchestratorRuntimes, "orchestrator") ?? p.active;
+  /*
+   * ★사람이 고른 모델이 오케스트레이터 자리에서 밀리지 않는다.
+   *
+   * 여기는 `pickActive(..., "orchestrator")` 로 **역할 정책**을 먼저 물었다. 그래서
+   * 방 작성창에 `gemini-3.7-flash-high` 라고 적혀 있는데 실제로는 Claude 를 불렀고,
+   * 그 계정의 주간 한도에 걸려 종합이 죽었다. 결과가 나빴던 방식이 특히 나쁘다 —
+   * **빌려온 팀원은 제대로 답을 보내 왔는데** 그 뒤 종합이 죽는 바람에 그 멀쩡한
+   * 답변에 "전달 실패" 배지가 붙었다. 사람은 답을 받고도 실패로 읽는다
+   * (라이브 실측 2026-08-26).
+   *
+   * 역할 정책은 **사람이 고르지 않았을 때의 기본값**이지 사람의 선택을 덮는 규칙이
+   * 아니다. 골랐으면 그것으로 돈다(계약: 고른 모델 = 실행 모델).
+   */
+  const orchestratorDefault = (p.runtimePinHonored ? p.active : null)
+    ?? pickActive(orchestratorRuntimes, "orchestrator")
+    ?? p.active;
   const orchestratorDefaultRunner = sameRuntime(orchestratorDefault, p.active)
     ? p.picked
     : pickRunner(orchestratorDefault) ?? p.picked;
@@ -3955,13 +3977,32 @@ async function runBorrowedAgentTurn(
         ok: false,
       };
     }
+    /*
+     * ★한도가 찼으면 "한도가 찼다"고 말한다.
+     *
+     * 여기는 제공자가 준 영어 문장을 그대로 실어 보냈다. 그래서 한국어 화면에
+     * `[frontend-developer error] claude runtime quota: You've hit your weekly
+     * limit · resets Aug 29 at 6pm` 이 떴다 — 사람이 읽고 "무엇을 하면 되는지"를
+     * 알 수 없다(라이브 실측 2026-08-26, 오너 지적).
+     *
+     * 한도는 고장이 아니라 **기다리거나 모델을 바꾸면 풀리는 상태**다. 그러니
+     * 어느 런타임이 왜 멈췄고 무엇을 하면 되는지 한 줄로 말하고, 제공자 원문은
+     * 뒤에 그대로 붙인다(리셋 시각 같은 사실이 거기 있다 — 지우지 않는다).
+     */
+    const quotaFailure = typedRuntimeFailure?.failure.kind === "quota"
+      ? typedRuntimeFailure.failure
+      : null;
     const message = timedOut
       ? p.locale === "ko"
         ? "응답 시간 초과"
         : "timed out"
-      : err instanceof Error
-        ? err.message
-        : String(err);
+      : quotaFailure
+        ? p.locale === "ko"
+          ? `${quotaFailure.runtime} 사용 한도가 찼습니다. 다른 모델로 바꾸거나 한도가 풀린 뒤 다시 보내세요. (${quotaFailure.message})`
+          : `${quotaFailure.runtime} has hit its usage limit. Switch models or send again after it resets. (${quotaFailure.message})`
+        : err instanceof Error
+          ? err.message
+          : String(err);
     p.sink(tag({
       kind: "tool-use",
       done: true,

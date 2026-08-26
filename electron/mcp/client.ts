@@ -2763,6 +2763,12 @@ ${effectiveUserPrompt}`;
       runtimes,
       picked,
       runtimeOverride: runtimeChoice.override,
+      // 사람이 방에서 고른 런타임이 실제로 존중됐는가. 단톡 오케스트레이터는
+      // 이것이 참이면 역할 정책보다 그 선택을 앞세운다 — 안 그러면 화면에 적힌
+      // 모델과 실제로 부르는 모델이 갈린다(실측 2026-08-26: 방은 gemini 인데
+      // Claude 를 불러 주간 한도에 걸렸고, 그 실패가 멀쩡한 팀원 답변에
+      // '전달 실패' 배지를 붙였다).
+      runtimePinHonored: runtimeResolution.pinHonored,
       workingFolder,
       ...(workspaceBinding ? { workspaceBinding } : {}),
       ...(restrictedOrchestrationBoundary ? { restrictedReadBoundary: true as const } : {}),
@@ -2995,6 +3001,12 @@ ${effectiveUserPrompt}`;
         runtimes,
         picked,
         runtimeOverride: runtimeChoice.override,
+      // 사람이 방에서 고른 런타임이 실제로 존중됐는가. 단톡 오케스트레이터는
+      // 이것이 참이면 역할 정책보다 그 선택을 앞세운다 — 안 그러면 화면에 적힌
+      // 모델과 실제로 부르는 모델이 갈린다(실측 2026-08-26: 방은 gemini 인데
+      // Claude 를 불러 주간 한도에 걸렸고, 그 실패가 멀쩡한 팀원 답변에
+      // '전달 실패' 배지를 붙였다).
+      runtimePinHonored: runtimeResolution.pinHonored,
         workingFolder,
         ...(workspaceBinding ? { workspaceBinding } : {}),
         ...(restrictedOrchestrationBoundary ? { restrictedReadBoundary: true as const } : {}),
@@ -3078,6 +3090,12 @@ ${effectiveUserPrompt}`;
         runtimes,
         picked,
         runtimeOverride: runtimeChoice.override,
+      // 사람이 방에서 고른 런타임이 실제로 존중됐는가. 단톡 오케스트레이터는
+      // 이것이 참이면 역할 정책보다 그 선택을 앞세운다 — 안 그러면 화면에 적힌
+      // 모델과 실제로 부르는 모델이 갈린다(실측 2026-08-26: 방은 gemini 인데
+      // Claude 를 불러 주간 한도에 걸렸고, 그 실패가 멀쩡한 팀원 답변에
+      // '전달 실패' 배지를 붙였다).
+      runtimePinHonored: runtimeResolution.pinHonored,
         workingFolder,
         ...(workspaceBinding ? { workspaceBinding } : {}),
         ...(restrictedOrchestrationBoundary ? { restrictedReadBoundary: true as const } : {}),
@@ -3161,6 +3179,12 @@ ${effectiveUserPrompt}`;
           runtimes,
           picked,
           runtimeOverride: runtimeChoice.override,
+      // 사람이 방에서 고른 런타임이 실제로 존중됐는가. 단톡 오케스트레이터는
+      // 이것이 참이면 역할 정책보다 그 선택을 앞세운다 — 안 그러면 화면에 적힌
+      // 모델과 실제로 부르는 모델이 갈린다(실측 2026-08-26: 방은 gemini 인데
+      // Claude 를 불러 주간 한도에 걸렸고, 그 실패가 멀쩡한 팀원 답변에
+      // '전달 실패' 배지를 붙였다).
+      runtimePinHonored: runtimeResolution.pinHonored,
           workingFolder,
           ...(workspaceBinding ? { workspaceBinding } : {}),
           ...(restrictedOrchestrationBoundary ? { restrictedReadBoundary: true as const } : {}),
@@ -3214,6 +3238,12 @@ ${effectiveUserPrompt}`;
         runtimes,
         picked,
         runtimeOverride: runtimeChoice.override,
+      // 사람이 방에서 고른 런타임이 실제로 존중됐는가. 단톡 오케스트레이터는
+      // 이것이 참이면 역할 정책보다 그 선택을 앞세운다 — 안 그러면 화면에 적힌
+      // 모델과 실제로 부르는 모델이 갈린다(실측 2026-08-26: 방은 gemini 인데
+      // Claude 를 불러 주간 한도에 걸렸고, 그 실패가 멀쩡한 팀원 답변에
+      // '전달 실패' 배지를 붙였다).
+      runtimePinHonored: runtimeResolution.pinHonored,
         workingFolder,
         ...(workspaceBinding ? { workspaceBinding } : {}),
         ...(restrictedOrchestrationBoundary ? { restrictedReadBoundary: true as const } : {}),
@@ -3244,6 +3274,12 @@ ${effectiveUserPrompt}`;
         runtimes,
         picked,
         runtimeOverride: runtimeChoice.override,
+      // 사람이 방에서 고른 런타임이 실제로 존중됐는가. 단톡 오케스트레이터는
+      // 이것이 참이면 역할 정책보다 그 선택을 앞세운다 — 안 그러면 화면에 적힌
+      // 모델과 실제로 부르는 모델이 갈린다(실측 2026-08-26: 방은 gemini 인데
+      // Claude 를 불러 주간 한도에 걸렸고, 그 실패가 멀쩡한 팀원 답변에
+      // '전달 실패' 배지를 붙였다).
+      runtimePinHonored: runtimeResolution.pinHonored,
         workingFolder,
         ...(workspaceBinding ? { workspaceBinding } : {}),
         ...(restrictedOrchestrationBoundary ? { restrictedReadBoundary: true as const } : {}),
@@ -3299,6 +3335,12 @@ ${effectiveUserPrompt}`;
         runtimes,
         picked,
         runtimeOverride: runtimeChoice.override,
+      // 사람이 방에서 고른 런타임이 실제로 존중됐는가. 단톡 오케스트레이터는
+      // 이것이 참이면 역할 정책보다 그 선택을 앞세운다 — 안 그러면 화면에 적힌
+      // 모델과 실제로 부르는 모델이 갈린다(실측 2026-08-26: 방은 gemini 인데
+      // Claude 를 불러 주간 한도에 걸렸고, 그 실패가 멀쩡한 팀원 답변에
+      // '전달 실패' 배지를 붙였다).
+      runtimePinHonored: runtimeResolution.pinHonored,
         workingFolder,
         ...(workspaceBinding ? { workspaceBinding } : {}),
         ...(restrictedOrchestrationBoundary ? { restrictedReadBoundary: true as const } : {}),
