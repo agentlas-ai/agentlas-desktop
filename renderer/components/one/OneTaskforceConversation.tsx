@@ -82,9 +82,33 @@ function timeLabel(value: string, locale: Locale): string {
   });
 }
 
+/**
+ * 이 메시지에 실제로 무슨 일이 있었는가 — **묶음 전체가 아니라 이 줄에 대해.**
+ *
+ * ★실측 2026-08-26 (오너 화면): 팀원이 답을 다 써서 화면에 떠 있는데 그 줄에도, 그 줄을
+ * 부른 One 의 줄에도 "전달 실패" 가 붙어 있었다. 진짜 원인은 한참 뒤 마지막 정리 단계에서
+ * 모델 사용량 한도에 걸린 것이었는데(기록: `claude runtime quota`), 그 실패가 묶음 상태로
+ * 올라오면서 **이미 도착한 메시지까지 실패로 칠해졌다.**
+ *
+ * 도착은 되돌릴 수 없는 사실이다. 뒤에 무슨 일이 나든 이미 전달된 것은 전달된 것이고,
+ * 사용자는 눈앞의 답변을 보면서 "실패"를 읽게 되면 제품을 믿을 수 없게 된다.
+ *
+ * 그래서 실패·중단 딱지는 **도착한 증거가 없는 줄에만** 붙인다:
+ *  - 팀원이 말한 줄은 그 자체가 도착의 증거다.
+ *  - 팀원에게 보낸 줄은, 같은 묶음에 팀원의 답이 있으면 도착한 것이다.
+ */
+function messageWasDelivered(handoff: OneActivityHandoff, message: OneActivityHandoffMessage): boolean {
+  // 팀원이 말했다 = 그 팀원에게 일이 닿았고 돌아왔다.
+  if (message.direction === "worker-to-orchestrator") return true;
+  // 보낸 줄은 답이 있으면 닿은 것이다. 시각으로 자르지 않는다 — 같은 묶음의 답이면 충분하고,
+  // 관측 시각은 런타임마다 흔들려 경계로 쓰면 도착한 줄을 실패로 되돌린다.
+  return handoff.messages.some((candidate) => candidate.direction === "worker-to-orchestrator");
+}
+
 function deliveryLabel(handoff: OneActivityHandoff, message: OneActivityHandoffMessage, locale: Locale): string {
-  if (handoff.status === "failed") return locale === "ko" ? "전달 실패" : "Delivery failed";
-  if (handoff.status === "cancelled") return locale === "ko" ? "중단됨" : "Stopped";
+  const delivered = messageWasDelivered(handoff, message);
+  if (!delivered && handoff.status === "failed") return locale === "ko" ? "전달 실패" : "Delivery failed";
+  if (!delivered && handoff.status === "cancelled") return locale === "ko" ? "중단됨" : "Stopped";
   if (message.direction === "worker-to-orchestrator") return locale === "ko" ? "공유함" : "Shared";
   if (handoff.status === "running") return locale === "ko" ? "작업 중" : "Working";
   return locale === "ko" ? "전달됨" : "Sent";

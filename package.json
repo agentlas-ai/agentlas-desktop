@@ -45,6 +45,7 @@
     "test:experience-survives-republish": "npm run build:electron && ./node_modules/.bin/electron scripts/test-experience-survives-republish.cjs",
     "test:orphan-memory-reclaim": "npm run build:electron && ./node_modules/.bin/electron scripts/test-orphan-memory-reclaim.cjs",
     "test:auto-pack-consolidation": "npm run build:electron && ./node_modules/.bin/electron scripts/test-auto-pack-consolidation.cjs",
+    "test:delivery-label-truth": "node scripts/test-delivery-label-truth.cjs",
     "test:process-pool": "npm run build:electron && node scripts/test-process-pool.cjs",
     "test:agent-residency": "npm run build:electron && node scripts/test-agent-residency.cjs",
     "test:claude-residency": "npm run build:electron && node scripts/test-claude-residency.cjs",
