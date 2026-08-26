@@ -1,5 +1,43 @@
 # Changelog
 
+## 1.0.43 — 2026-08-26
+
+Bundled runtime: Agentlas OS v1.2.29 (f3722c6c3bcc709103ce304fc94fb09f1ace44db).
+Source readiness does not prove a public installer or update feed; the
+Releases page stays the authority.
+
+- Improving an agent no longer kills what it learned. A chip only attached to
+  the exact build it was measured on, so publishing a fix meant promotion,
+  collection, export, cloud sync, and attachment all stopped at once — and
+  renaming an agent did the same, because the record was keyed by the name.
+  A chip now belongs to the agent, and the build it was measured on is kept as
+  a note rather than a gate.
+- Experience that had already split apart is put back together. Because the
+  draft was also found by the build number, republishing quietly started a
+  second draft: older experience stayed in the old one while new experience
+  went to the new one, and the same memories were collected again from scratch
+  — so you were asked to review chips you had already approved. The drafts are
+  merged, keeping the one you actually worked in, and nothing is deleted.
+- Learning that belonged to nobody is returned to the team. When an org-chart
+  position had no agent behind it, what was learned there was filed under the
+  position itself, where no agent could ever read it back. Those entries move
+  to the team's shared memory, and personal entries are left alone.
+- An agent and a team that share a name are both shown again, instead of both
+  being hidden. The same agent no longer appears twice on the phone after a
+  republish.
+- Removing an agent works again. Deletion was refused outright in six places,
+  including two paths that only ran while undoing a failed install.
+- Removing a Telegram connection no longer destroys the bot's token along with
+  it, so the bot can be reconnected instead of rebuilt.
+- Skills are named by their folder on every path, and a skill still holding
+  the scaffold's blank slots is refused instead of shipped.
+- Teams carry their kind in their own identity, and every member of a team now
+  has one of its own — so what a member learns accrues to that member.
+- Identity is never written into your own agent folder. Doing so changed files
+  the updater checks, which would have blocked the next update outright.
+- Upgrading from a very old install is proven, not assumed: a database from
+  v0.7.0 is carried all the way forward with every seeded row intact.
+
 ## 1.0.42 — 2026-08-26
 
 Bundled runtime: Agentlas OS v1.2.29 (f3722c6c3bcc709103ce304fc94fb09f1ace44db).
