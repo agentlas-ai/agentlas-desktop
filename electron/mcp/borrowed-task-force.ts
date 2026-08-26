@@ -4919,12 +4919,29 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         ? p.req.images
         : undefined
       : p.req.images;
-  const final = await observeTaskForceModelCall(p, {
+  /*
+   * ★종합도 막히면 다른 살아 있는 모델로 한 번 이어간다.
+   *
+   * 팀원 실행에는 이 장치가 있었다(`runPacketWithRecovery` → `taskForceRecoveryRuntime`
+   * → `allocated-runtime-failed-fell-back-to-live-runtime`). **종합에는 없었다.**
+   * 그래서 라이브 실측 2026-08-26 에서 이런 일이 났다: 빌려온 팀원이 답을 두 번
+   * 제대로 보내 왔고 화면에도 다 떠 있는데, 마지막 종합이 배정받은 Claude 의 주간
+   * 한도에 걸려 죽으면서 **턴 전체가 "실패"로 표시**됐다. 사람은 도착한 답을 보고도
+   * 실패로 읽는다.
+   *
+   * 한도·인증 거절은 고장이 아니라 그 제공자만의 상태다. 팀원에게 허용한 "한 번
+   * 이어가기"를 종합에만 막을 이유가 없다. 같은 판정기를 쓰므로 고정 계약
+   * (Workforce·벤치마크·Agent App)에서는 그대로 닫힌다.
+   */
+  const runSynthesisOn = (
+    runtimeForCall: RuntimeStatus,
+    pickedForCall: { runner: Runner; label: string },
+  ) => observeTaskForceModelCall(p, {
     nodeId: orchestratorId,
     phase: "synthesis",
     agentId: p.orchestratorAgent.id,
-    runtime: synthesisActive,
-  }, () => synthesisPicked.runner(
+    runtime: runtimeForCall,
+  }, () => pickedForCall.runner(
     {
       systemPrompt: [
         buildSynthesisSystemPrompt(
@@ -4995,6 +5012,35 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       },
     },
   ));
+
+  let final: Awaited<ReturnType<typeof runSynthesisOn>>;
+  try {
+    final = await runSynthesisOn(synthesisActive, synthesisPicked);
+  } catch (error) {
+    const typed = error instanceof TaskForceRuntimeFailureError ? error : null;
+    const recovery = typed
+      ? taskForceRecoveryRuntime(p, typed.runtime, typed.failure)
+      : null;
+    // 고정 계약이거나 이어갈 다른 런타임이 없으면 그대로 실패한다 — 같은 죽은
+    // 제공자에게 똑같은 요청을 다시 물리지 않는다(팀원 쪽과 같은 규칙).
+    if (!recovery) throw error;
+    p.sink({
+      kind: "tool-use",
+      status: p.locale === "ko"
+        ? "종합에 배정된 실행 환경을 사용할 수 없어 다른 사용 가능한 모델로 한 번 이어갑니다."
+        : "The runtime assigned to synthesis is unavailable; continuing once on another live model.",
+      agentId: orchestratorId,
+      agentName: orchestratorName,
+      role: "orchestrator",
+      tier: 1,
+      phase: "synthesize",
+    });
+    final = await runSynthesisOn(
+      recovery,
+      sameRuntime(recovery, p.active) ? p.picked : pickRunner(recovery) ?? p.picked,
+    );
+  }
+
   const continuation = stripStormbreakerContinueMarker(redactSensitiveText(final.text));
   let displayText = p.req.agentAppMode
     ? cleanAgentAppControlBlocks(continuation.text)

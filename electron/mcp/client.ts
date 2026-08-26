@@ -429,16 +429,38 @@ function stripDanglingLanguageFence(text: string): string {
   return text.replace(/\n[ \t]*```[A-Za-z0-9_+.-]+[ \t]*$/u, "").trim();
 }
 
+/**
+ * 실행이 실패했을 때 사람에게 보여줄 것.
+ *
+ * ★한도는 고장이 아니라 **풀 수 있는 상태**다. 여기는 제공자가 준 문장을 그대로
+ * 실어 보냈고, 그래서 한국어 화면에 `claude runtime quota: You've hit your weekly
+ * limit · resets Aug 29 at 6pm` 이 떴다 — 읽어도 무엇을 하면 되는지 알 수 없다
+ * (라이브 실측 2026-08-26, 오너 지적). 팀 작업에서는 더 나빴다: **팀원은 답을
+ * 보내 왔는데** 그 뒤 정리 단계가 한도에 걸려, 사람은 도착한 답을 실패로 읽었다.
+ *
+ * 어느 런타임이 왜 멈췄고 무엇을 하면 되는지 먼저 말하고, 리셋 시각이 담긴 원문은
+ * 뒤에 그대로 붙인다(사실을 지우지 않는다).
+ */
 function invocationFailure(
   req: McpInvocationRequest,
   fallbackCode: string,
   error: unknown,
 ): { code: string; message: string } {
   if (req.agentAppMode) return untrustedRuntimeFailurePayload();
-  return {
-    code: fallbackCode,
-    message: error instanceof Error ? error.message : String(error),
-  };
+  const raw = error instanceof Error ? error.message : String(error);
+  const quota = /\bquota\b|hit your weekly limit|usage limit/i.test(raw)
+    ? raw.match(/^([a-z0-9-]+) runtime quota:/i)?.[1] ?? null
+    : undefined;
+  if (quota !== undefined) {
+    const who = quota ?? (pickLocale(req) === "ko" ? "이 모델" : "this model");
+    return {
+      code: fallbackCode,
+      message: pickLocale(req) === "ko"
+        ? `${who} 사용 한도가 찼습니다. 다른 모델로 바꾸거나 한도가 풀린 뒤 다시 보내세요. 이미 도착한 팀원 답변은 위에 그대로 있습니다. (${raw})`
+        : `${who} has hit its usage limit. Switch models or send again after it resets. Any teammate replies that already arrived are still above. (${raw})`,
+    };
+  }
+  return { code: fallbackCode, message: raw };
 }
 
 function throwIfInvocationAborted(signal: AbortSignal | undefined, locale: "ko" | "en"): void {
