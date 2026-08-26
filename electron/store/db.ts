@@ -1171,6 +1171,20 @@ export function initStore(options: StoreInitOptions = {}): void {
     return;
   }
 
+  // ── 아주 오래된 DB 를 위한 안전망 ───────────────────────────────────────
+  // 사다리는 90단계이고 `user_version` 은 **맨 마지막에 한 번만** 찍힌다(이 함수 끝).
+  // 중간 한 단계가 던지면 앞 단계의 DDL 은 이미 적용됐는데 버전은 옛날 그대로라, 다음
+  // 실행이 같은 지점에서 또 던진다 — 앱이 영영 안 열린다. v0.7.0 은 스키마 35 를
+  // 출하했으므로 그런 사용자는 68단계를 한 번에 밟는다.
+  // 여기서 딱 두 가지를 한다: (1) 밟기 전에 파일 사본을 남긴다 (2) 던지면 어느 버전에서
+  // 무엇 때문에 멈췄고 사본이 어디 있는지 말한다. 조용한 영구 실패를 없애는 것이 목적이지
+  // 실패 자체를 삼키는 것이 아니다 — 게이트: `npm run test:ancient-schema-ladder`.
+  let upgradeBackupPath: string | null = null;
+  if (userVersion > 0 && userVersion < SCHEMA_VERSION) {
+    upgradeBackupPath = backupDatabaseFile(_db, `pre-upgrade-v${userVersion}`);
+  }
+  try {
+
   // ── v0 → v1: 초기 스키마 (active_runtime, installed_agents) ─
   if (userVersion < 1) {
     _db.exec(`
@@ -5336,6 +5350,16 @@ export function initStore(options: StoreInitOptions = {}): void {
         + (seatSessionBackup ? ` — 이 단계 직전 백업: ${seatSessionBackup}` : " — 백업을 만들지 못했다"),
       );
     }
+  }
+
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `store_upgrade_failed: 스키마 ${userVersion} → ${SCHEMA_VERSION} 승급이 멈췄습니다 — ${reason}` +
+        (upgradeBackupPath ? ` (승급 직전 사본: ${upgradeBackupPath})` : "") +
+        " · user_version 은 그대로라 다음 실행도 같은 지점에서 멈춥니다. 사본으로 되돌린 뒤 보고해 주세요.",
+      { cause: error instanceof Error ? error : undefined },
+    );
   }
 
   if (userVersion < SCHEMA_VERSION) _db.pragma(`user_version = ${SCHEMA_VERSION}`);

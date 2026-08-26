@@ -40,6 +40,7 @@
     "daemon": "cross-env ELECTRON_RUN_AS_NODE=1 electron dist/electron/daemon/main.js",
     "test:daemon-autostart": "npm run build:electron && node scripts/test-daemon-autostart.cjs",
     "test:agent-skill-roots": "npm run build:electron && node scripts/test-agent-skill-roots.cjs",
+    "test:ancient-schema-ladder": "npm run build:electron && ./node_modules/.bin/electron scripts/test-ancient-schema-ladder.cjs",
     "test:process-pool": "npm run build:electron && node scripts/test-process-pool.cjs",
     "test:agent-residency": "npm run build:electron && node scripts/test-agent-residency.cjs",
     "test:claude-residency": "npm run build:electron && node scripts/test-claude-residency.cjs",
