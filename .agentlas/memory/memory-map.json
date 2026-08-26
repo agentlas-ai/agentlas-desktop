@@ -1,6 +1,0 @@
-{
-  "schemaVersion": "1.0",
-  "scope": "global",
-  "owner": "agentlas-memory",
-  "rule": "missing-only bootstrap; no secrets or raw transcripts"
-}
