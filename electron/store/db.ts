@@ -714,6 +714,31 @@ function insertRecoveryAgent(
  * 복사에 실패해도 마이그레이션을 막지는 않는다. 다만 그 사실을 오류에 실어 보낸다
  * ("백업을 만들지 못했다") — 조용히 넘어가면 복구할 게 없다는 걸 사고 나서 안다.
  */
+/**
+ * 닿을 수 없는 개인 기억을 팀 공유 칸으로 되돌린다. 옮기기만 하고 지우지 않는다.
+ *
+ * 사다리 안에 인라인으로 두면 게이트가 그 판단을 부를 수 없어, 검사가 "사다리를 다시
+ * 태우는 시늉"만 하게 된다(이 저장소가 이미 겪은 계열 — 문장 대조 게이트는 이 병을
+ * 원리적으로 못 잡는다). 판단을 꺼내 두면 게이트가 값으로 단언할 수 있다.
+ *
+ * @returns 옮긴 행 수
+ */
+export function reclaimUnreachableAgentMemory(db: Database.Database): number {
+  if (!tableExists(db, "memory_entries") || !tableExists(db, "installed_agents")) return 0;
+  const columns = new Set(schemaColumns(db, "memory_entries").map((column) => column.name));
+  if (!columns.has("agent_id") || !columns.has("scope")) return 0;
+  return db.prepare(`
+    UPDATE memory_entries
+       SET scope = 'team_memory', agent_id = NULL
+     WHERE scope = 'agent_repo'
+       AND agent_id IS NOT NULL
+       AND (
+         agent_id LIKE 'agt\\_team\\_%' ESCAPE '\\'
+         OR agent_id NOT IN (SELECT id FROM installed_agents)
+       )
+  `).run().changes;
+}
+
 function backupDatabaseFile(db: Database.Database, tag: string): string | null {
   try {
     const source = db.name;
@@ -5388,6 +5413,19 @@ export function initStore(options: StoreInitOptions = {}): void {
       CREATE INDEX IF NOT EXISTS idx_agent_identity_map_agent ON agent_identity_map(immutable_agent_id);
       CREATE INDEX IF NOT EXISTS idx_agent_identity_map_source ON agent_identity_map(mapping_source);
     `);
+
+    // 이미 쌓인 고아 개인 기억을 팀 공유 칸으로 되돌린다.
+    //
+    // 조직도 노드에 실체 에이전트 행이 없으면 실행 층이 노드 id 를 그대로 기억 주인으로
+    // 썼다(`mcp/firm-orchestrator.ts`). `memory_entries.agent_id` 에는 FK 가 없어 그 값이
+    // 그냥 들어갔고, 그러면 그 기억은 어느 에이전트로도 조회되지 않는다 — 삭제된 것이
+    // 아니라 **닿을 수 없는** 상태다. 새로 생기는 것은 큐레이터 sink 가 막지만
+    // (`shared/memory-ownership.ts`), 이미 들어간 줄은 여기서 되돌린다.
+    //
+    // 옮기는 것뿐이고 지우지 않는다. 개인 칸을 가질 수 없는 주인(설치본이 없거나
+    // `agt_team_` 낙인)만 대상이고, 멀쩡한 개인 기억은 건드리지 않는다.
+    const reclaimed = reclaimUnreachableAgentMemory(_db);
+    if (reclaimed > 0) console.log(`[store] v104 reclaimed ${reclaimed} unreachable agent memory row(s) into team memory`);
   }
 
   } catch (error) {
