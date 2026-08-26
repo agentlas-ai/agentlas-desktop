@@ -45,6 +45,7 @@
     "test:experience-survives-republish": "npm run build:electron && ./node_modules/.bin/electron scripts/test-experience-survives-republish.cjs",
     "test:orphan-memory-reclaim": "npm run build:electron && ./node_modules/.bin/electron scripts/test-orphan-memory-reclaim.cjs",
     "test:logging-survives": "npm run build:electron && ./node_modules/.bin/electron scripts/test-logging-survives.cjs",
+    "test:startup-recovery-without-judge": "npm run build:electron && ./node_modules/.bin/electron scripts/test-startup-recovery-without-judge.cjs",
     "test:auto-pack-consolidation": "npm run build:electron && ./node_modules/.bin/electron scripts/test-auto-pack-consolidation.cjs",
     "test:delivery-label-truth": "node scripts/test-delivery-label-truth.cjs",
     "test:process-pool": "npm run build:electron && node scripts/test-process-pool.cjs",
