@@ -2264,6 +2264,18 @@ function routingCardProblem(card: Record<string, unknown>): string | null {
         values.some((value) => typeof value !== "string" || !pattern.test(value))) {
       return `workforce.${field} contains an invalid or duplicate semantic ID`;
     }
+    // Scaffold slots that were never filled in. `{{SKILL_ID_1}}` slugifies into
+    // `skill:skill-id-1` — a well-formed id that names nothing and matches no
+    // work. A skill is named by its <host>/skills/<name>/SKILL.md folder, so an
+    // unfilled slot means "not declared", never "declared as skill-id-1".
+    // 접두는 필드명이 아니라 패턴에서 뽑는다 — communities 는 community 이지 communitie 가 아니다.
+    const prefix = (/\^([a-z]+):/.exec(pattern.source) || [, field])[1];
+    const unfilled = values.filter((value) =>
+      /\{\{.*?\}\}/.test(String(value)) ||
+      new RegExp(`^${prefix}:${prefix}-id-\\d+$`).test(String(value)));
+    if (unfilled.length) {
+      return `workforce.${field} still carries unfilled scaffold slots: ${unfilled.slice(0, 3).join(", ")}`;
+    }
   }
   for (const field of ["languages", "modalities"]) {
     const values = workforce[field];
