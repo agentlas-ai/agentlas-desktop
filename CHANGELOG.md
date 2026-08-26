@@ -2,11 +2,16 @@
 
 ## 1.0.42 — 2026-08-26
 
-Bundled runtime: Agentlas OS v1.2.28 (4ee43820e4e33fdd8b4fc797a2f62ba67aff157f).
+Bundled runtime: Agentlas OS v1.2.29 (f3722c6c3bcc709103ce304fc94fb09f1ace44db).
 Source readiness does not prove a public installer or update feed; the
 Releases page stays the authority.
 
-- The bundled engine moves twelve versions forward, from v1.2.16 to v1.2.28.
+- Borrowed public agents run again. Preparing a borrowed teammate refused every
+  public listing because the stored seal number no longer matched a fresh
+  recount — the contents were identical, only the number differed — so a paid
+  seat opened onto nothing. Identity is still checked; the recount is now
+  recorded instead of blocking.
+- The bundled engine moves thirteen versions forward, from v1.2.16 to v1.2.29.
   The Desktop ships the engine inside itself, so work that landed in the engine
   over the past days could not reach anyone here until this pin moved: staffing
   now shortlists four candidates instead of eight (the right one was inside the
