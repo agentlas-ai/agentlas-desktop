@@ -124,6 +124,17 @@ export function OneBottomSheet({
 
     document.body.style.overflow = "hidden";
 
+    // Move focus into the dialog BEFORE hiding the background — order is the
+    // whole fix. The trigger that opened this sheet still holds focus and lives
+    // inside the shell we are about to mark inert/aria-hidden; hiding an
+    // ancestor that contains the focused element is exactly what the browser
+    // refuses ("Blocked aria-hidden on an element because its descendant
+    // retained focus"), and it left a screen reader on a stale focus node.
+    // Focusing the panel first vacates the trigger, so the inert loop below
+    // never hides a focused ancestor. (Was a setTimeout(…, 0) that fired after
+    // the loop, which is what created the gap.)
+    dialog.focus();
+
     // Keep the rest of the One surface out of the accessibility tree while the
     // modal is open. This also prevents background controls from being tabbed.
     // Start at the modal layer, not the dialog panel. The panel's sibling is
@@ -140,7 +151,12 @@ export function OneBottomSheet({
       branch = parent === document.body ? null : parent;
     }
 
-    const focusTimer = window.setTimeout(() => dialog.focus(), 0);
+    // A second focus on the next frame covers the case where the panel was not
+    // yet focusable at effect time (async portal mount); harmless once focus is
+    // already inside, because the background is no longer hiding a focused node.
+    const focusTimer = window.setTimeout(() => {
+      if (!dialog.contains(document.activeElement)) dialog.focus();
+    }, 0);
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         if (!closeOnEscape) return;
