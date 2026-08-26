@@ -485,8 +485,13 @@ function packageIdentity(pack: CloudPackRow): {
   packageHashVersion: string;
 } {
   const agent = getAgentById(pack.agent_id);
-  if (!agent || !pack.base_package_hash || agent.packageHash !== pack.base_package_hash) {
-    throw new Error("Experience Pack base package is missing or stale.");
+  if (!agent) throw new Error("Experience Pack has no installed agent.");
+  // 팩 자신이 기준을 안 갖고 있는 것은 데이터 결손이라 여전히 막는다 (판 불일치와는 다르다).
+  if (!pack.base_package_hash) throw new Error("Experience Pack has no recorded base package.");
+  // 위 내보내기와 같은 이유로 막지 않는다. 서버가 판을 확정해 되쓰는 경로이므로
+  // 지금 설치본과 팩의 기준이 달라도 해석 자체는 성립한다.
+  if (agent.packageHash !== pack.base_package_hash) {
+    console.log(`[experience] resolving cloud base for pack ${pack.id} measured on an older build`);
   }
   const marker = agent.localPath ? readCloudAgentRestoreMarker(agent.localPath) : null;
   const registration = marker?.registrations?.["owner-private"] ?? marker?.registrations?.["hub-public"];

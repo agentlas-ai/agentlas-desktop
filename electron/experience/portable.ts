@@ -523,8 +523,15 @@ function getPortablePack(packId: string): PortablePackRow {
   if (!row) throw new Error("Experience Pack not found.");
   if (row.status !== "active") throw new Error("Archived Experience Packs cannot be uploaded.");
   const agent = getAgentById(row.agent_id);
-  if (!agent || !row.base_package_hash || agent.packageHash !== row.base_package_hash) {
-    throw new Error("Experience Pack base package is missing or stale.");
+  if (!agent) throw new Error("Experience Pack has no installed agent.");
+  if (!row.base_package_hash) throw new Error("Experience Pack has no recorded base package.");
+  // 판이 달라도 막지 않는다 — 번들이 신고하는 호환 대상은 지금 설치본이 아니라 팩에
+  // 저장된 `base_agent_release_id`(잰 당시의 판)이므로, 에이전트가 앞서 나가도 번들은
+  // 여전히 정직하다. 예전에는 여기서 던져서 개선 한 번에 내보내기가 막혔다.
+  if (agent.packageHash !== row.base_package_hash) {
+    console.log(
+      `[experience] exporting pack ${row.id} measured on an older build — bundle declares its measured release, not the installed one`,
+    );
   }
   if (!row.base_agent_definition_id || !row.base_agent_release_id || !row.base_package_hash_version) {
     throw new Error("Experience Pack exact base release has not been resolved by Agent Cloud.");

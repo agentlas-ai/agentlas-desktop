@@ -42,6 +42,7 @@
     "test:agent-skill-roots": "npm run build:electron && node scripts/test-agent-skill-roots.cjs",
     "test:ancient-schema-ladder": "npm run build:electron && ./node_modules/.bin/electron scripts/test-ancient-schema-ladder.cjs",
     "test:agent-identity-map": "npm run build:electron && ./node_modules/.bin/electron scripts/test-agent-identity-map.cjs",
+    "test:experience-survives-republish": "npm run build:electron && ./node_modules/.bin/electron scripts/test-experience-survives-republish.cjs",
     "test:process-pool": "npm run build:electron && node scripts/test-process-pool.cjs",
     "test:agent-residency": "npm run build:electron && node scripts/test-agent-residency.cjs",
     "test:claude-residency": "npm run build:electron && node scripts/test-claude-residency.cjs",

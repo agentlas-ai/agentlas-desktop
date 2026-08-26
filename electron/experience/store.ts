@@ -560,8 +560,14 @@ function isBuiltinInstalledAgent(agentId: string): boolean {
 function effectiveExperienceBaseHash(agent: { id: string; slug: string; packageHash?: string }): string | null {
   if (agent.packageHash && /^[a-f0-9]{64}$/.test(agent.packageHash)) return agent.packageHash;
   if (agent.packageHash) return null;
+  // ★ 신원에서 파생한다 — **이름이 아니라 id 에서.**
+  //   예전에는 slug 를 해싱했는데, slug 는 클라우드 등록 때 서버 값으로 갱신된다
+  //   (`cloud-agents/registry-transaction.ts:443`). 그래서 "이름만 바꿨는데 칩이 막혔다"가
+  //   났다. `installed_agents.id` 는 이 앱에서 절대 바꾸지 않는 값이라 안정적이다.
+  //   기존 팩이 옛 기준(slug 해시)을 들고 있어도 이제 그것으로 막지 않으므로
+  //   (assertPackBaseCurrent 참조) 갈아타는 데 이행이 필요 없다.
   if (isBuiltinInstalledAgent(agent.id)) return builtinExperienceBasePackageHash(agent.slug);
-  return localExperienceBasePackageHash(agent.slug || agent.id);
+  return localExperienceBasePackageHash(agent.id);
 }
 
 /** 패키지가 없는 로컬 에이전트의 안정 기준 — 신원에서 파생하므로 실행마다 바뀌지 않는다. */
@@ -575,11 +581,29 @@ export function currentExperienceBaseHash(agentId: string): string | null {
   return agent ? effectiveExperienceBaseHash(agent) : null;
 }
 
+/**
+ * 팩이 아직 이 에이전트의 것인가 — **누구 것인가만 본다. 어느 판인가로 막지 않는다.**
+ *
+ * 예전에는 지금 설치본의 기준 해시가 팩에 박힌 값과 **정확히 같아야** 통과했다. 그래서
+ * 에이전트를 한 번 개선해 다시 올리면 그 순간부터 승급·수집·내보내기·클라우드 동기화가
+ * 전부 막혔다 — 사용자에게는 "고쳤더니 경험이 죽었다"로 보인다. 이름만 바꿔도 같았다
+ * (패키지 없는 에이전트의 기준값은 slug 해시이고 slug 는 설치 때 갱신된다).
+ *
+ * 오너 결정: **칩은 에이전트의 부속품이 아니라 그 에이전트 앞으로 발급된 독립 자산이다.**
+ * agentId 만 같으면 어느 판에든 붙는다. 판 번호는 지우지 않고 "언제 쟀는가"로 남긴다.
+ *
+ * 소유자 검증은 여기가 아니라 서버 리스·권리 검사가 한다 — 그쪽은 결제 경계라 그대로 둔다.
+ */
 function assertPackBaseCurrent(pack: PackRow): void {
   const agent = getAgentById(pack.agent_id);
-  const current = agent ? effectiveExperienceBaseHash(agent) : null;
-  if (!pack.base_package_hash || !/^[a-f0-9]{64}$/.test(pack.base_package_hash) || current !== pack.base_package_hash) {
-    throw new Error("Experience Pack base package is missing or no longer matches the installed agent.");
+  if (!agent) {
+    throw new Error("Experience Pack has no installed agent.");
+  }
+  if (effectiveExperienceBaseHash(agent) !== pack.base_package_hash) {
+    // 막지 않는다. 기록만 남긴다 — 어느 판에서 잰 경험인지 나중에 되짚을 수 있어야 한다.
+    console.log(
+      `[experience] pack ${pack.id} was measured on a different build (pack=${String(pack.base_package_hash).slice(0, 12)} current=${String(effectiveExperienceBaseHash(agent)).slice(0, 12)}) — attaching anyway, same agent`,
+    );
   }
 }
 
