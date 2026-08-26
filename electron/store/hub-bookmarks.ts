@@ -558,24 +558,13 @@ export function applyLiveHubBookmarkValidation(
 ): void {
   const scope = normalizedWorkspaceId(workspaceId);
   const liveByIdentity = new Map<string, MarketplaceListing>();
-  const liveKindsBySlug = new Map<string, Set<string>>();
   for (const raw of liveListings ?? []) {
     const live = normalizeHubBookmarkListing(raw);
     if (!live.slug) continue;
+    // 북마크는 (종류, 이름) 합성 신원으로 보관한다 — 같은 이름의 에이전트와 팀이
+    // 서로를 덮지 않는다.
     liveByIdentity.set(identityKey(live.slug, String(live.entityKind ?? "agent")), live);
-    if (isServerSyncableEntityKind(String(live.entityKind))) {
-      const slug = live.slug.trim().toLowerCase();
-      const kinds = liveKindsBySlug.get(slug) ?? new Set<string>();
-      kinds.add(String(live.entityKind));
-      liveKindsBySlug.set(slug, kinds);
-    }
   }
-  const ambiguousLiveSlugs = new Set(
-    [...liveKindsBySlug.entries()]
-      .filter(([, kinds]) => kinds.size > 1)
-      .map(([slug]) => slug),
-  );
-
   const rows = listHubBookmarkStoreRows(scope);
   const update = getDb().prepare(
     `UPDATE hub_agent_bookmarks
@@ -587,9 +576,11 @@ export function applyLiveHubBookmarkValidation(
     for (const row of rows) {
       const current = listingFromRow(row);
       const live = liveByIdentity.get(identityKey(row.slug, row.entity_kind));
-      const liveIdentityAmbiguous = ambiguousLiveSlugs.has(row.slug.trim().toLowerCase());
+      // 같은 이름의 에이전트/팀이 있어도 더 이상 양쪽을 죽이지 않는다. 실행 타깃이
+      // entityKind 를 싣고(`shared/types.ts:5461`) 런타임이 그것으로 갈리므로
+      // (`mcp/borrowed-task-force.ts:2780`), 이름만으로 구분 못 하던 전제가 사라졌다.
+      // 북마크는 (종류, 이름) 합성 신원으로 이미 따로 보관된다.
       const explicitlyCallable =
-        !liveIdentityAmbiguous &&
         live?.callable === true &&
         live.kind !== "install-only" &&
         live.routingReady !== false;
@@ -604,9 +595,7 @@ export function applyLiveHubBookmarkValidation(
             routingReady: explicitlyCallable,
             routingStatus: explicitlyCallable
               ? live.routingStatus || "public-profile"
-              : liveIdentityAmbiguous
-                ? "hub_slug_identity_ambiguous"
-                : live.routingStatus || "hub_profile_not_callable",
+              : live.routingStatus || "hub_profile_not_callable",
           })
         : failClosedHubBookmarkListing(current);
       update.run({

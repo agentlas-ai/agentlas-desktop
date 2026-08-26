@@ -75,25 +75,14 @@ export function callableHubBookmarks(
   bookmarks: HubAgentBookmark[],
   localAgents: Array<Pick<InstalledAgent, "slug">> = [],
 ): HubAgentBookmark[] {
-  // Runtime invocation identity is globally slug-only today. The durable cache
-  // keeps (entityKind, slug) distinct so neither asset is lost, but an agent and
-  // team sharing one slug cannot be routed unambiguously. Exclude both from all
-  // call surfaces until the runtime protocol gains an entity-kind identity.
-  const entityKindsBySlug = new Map<string, Set<string>>();
-  for (const bookmark of bookmarks) {
-    const slug = normalizedSlug(bookmark.slug || bookmark.listing.slug);
-    if (!slug) continue;
-    const kinds = entityKindsBySlug.get(slug) ?? new Set<string>();
-    kinds.add(String(bookmark.listing.entityKind || "agent").toLowerCase());
-    entityKindsBySlug.set(slug, kinds);
-  }
-  const ambiguousSlugs = new Set(
-    [...entityKindsBySlug.entries()]
-      .filter(([, kinds]) => kinds.size > 1)
-      .map(([slug]) => slug),
-  );
+  // 예전에는 에이전트와 팀이 같은 이름이면 **양쪽 다** 호출 목록에서 뺐다. 사유는
+  // "실행 신원이 전역적으로 이름뿐이라 구분할 수 없다" 였는데, 그 전제가 더 이상
+  // 사실이 아니다 — `OrchestrationTarget` 은 hub 대상에 `entityKind: "agent" | "team"`
+  // 을 이미 싣고(`shared/types.ts:5461`), 실행 쪽도 그것으로 갈린다
+  // (`mcp/borrowed-task-force.ts:2780, 3336, 5286`). 부르는 쪽이 그 칸을 "agent" 로
+  // 못박고 있었을 뿐이다. 이제 종류를 그대로 넘기므로 둘 다 부를 수 있고,
+  // 사용자에게 "에이전트가 사라졌다"로 보이던 증상이 없어진다.
   return hubBookmarksWithoutLocalDuplicates(bookmarks, localAgents)
-    .filter((bookmark) => !ambiguousSlugs.has(normalizedSlug(bookmark.slug || bookmark.listing.slug)))
     .filter(isVerifiedCallableHubBookmark);
 }
 

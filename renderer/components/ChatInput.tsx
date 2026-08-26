@@ -1193,7 +1193,11 @@ function ChatInputComponent({
               if (id.startsWith("hub:")) {
                 const slug = id.slice("hub:".length);
                 const bookmark = (context.hubBookmarks ?? []).find((item) => item.slug === slug);
-                return { key: id, label: bookmark ? pickLocalized(bookmark.listing, locale).name : slug, target: { source: "hub", entityKind: "agent", slug } as OrchestrationTarget };
+                // 북마크가 팀이면 팀으로 부른다. 예전에는 여기서 "agent" 로 못박아
+                // 팀과 에이전트가 같은 이름일 때 구분이 안 됐고, 그래서 호출 목록이
+                // 아예 **양쪽 다 숨겼다**(callableHubBookmarks). 종류는 이미 알고 있다.
+                const bookmarkKind = String(bookmark?.listing?.entityKind || "agent").toLowerCase() === "team" ? "team" : "agent";
+                return { key: id, label: bookmark ? pickLocalized(bookmark.listing, locale).name : slug, target: { source: "hub", entityKind: bookmarkKind, slug } as OrchestrationTarget };
               }
               const selectedAgent = context.agents.find((item) => item.id === id);
               return { key: `a-${id}`, label: selectedAgent ? pickLocalized(selectedAgent, locale).name : id, target: { source: "local", entityKind: "agent", agentId: id } as OrchestrationTarget };
@@ -2487,7 +2491,11 @@ function buildAutocompleteOptions(
       title: loc.name,
       subtitle: loc.tagline,
       replacement: `@${loc.name}`,
-      target: { source: "hub", entityKind: "agent", slug: bookmark.slug },
+      target: {
+        source: "hub",
+        entityKind: String(bookmark.listing?.entityKind || "agent").toLowerCase() === "team" ? "team" : "agent",
+        slug: bookmark.slug,
+      },
     });
   }
   for (const f of firms) {
