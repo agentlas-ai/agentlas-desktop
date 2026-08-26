@@ -501,40 +501,78 @@ export function computeAgentPackageHash(agentId: string, requestedTarget: string
 
 /**
  * Exact package-root skills appended by the main process to the next invocation.
- * The renderer never supplies these bytes. Only regular `skills/<slug>/SKILL.md`
+ * The renderer never supplies these bytes. Only regular `<root>/<slug>/SKILL.md`
  * files owned by the selected agent package are loaded, with a bounded aggregate
  * size and no symbolic-link traversal.
+ *
+ * A skill's name IS its folder name. This read only `skills/<slug>/SKILL.md`,
+ * which is the layout the desktop's own builder writes — but a package built by
+ * Agentlas-OS or shipped from the Hub puts the same files under the host roots
+ * (`.claude/skills/…`, `.codex/skills/…`, …) and has no top-level `skills/` at
+ * all. Measured 2026-08-26: such a package returned "" here, so a borrowed
+ * agent ran with none of its skills in the prompt. Scan every root the engine's
+ * `discover_skill_manifests()` scans, first root wins for a duplicate slug
+ * (the build mirrors the same bytes into all of them).
  */
+const AGENT_SKILL_ROOTS = ["skills", ".claude/skills", ".codex/skills", ".gemini/skills", ".agents/skills"];
+
+/**
+ * The package's skills, one entry per skill name, first root wins.
+ * Exported so a gate can exercise the root set without a database row.
+ */
+export function listAgentSkillEntries(dir: string): Array<{ root: string; name: string }> {
+  const entries: Array<{ root: string; name: string }> = [];
+  const seen = new Set<string>();
+  for (const root of AGENT_SKILL_ROOTS) {
+    // An optional root we cannot safely read is simply not a source of skills.
+    // Skipping it beats throwing: a package that symlinks `.claude/skills` at
+    // its own `skills/` would otherwise lose every skill, and the real
+    // protection is per-file (ensureInside + O_NOFOLLOW + lstat) below.
+    let skillsDir: string;
+    try {
+      skillsDir = ensureInside(dir, root);
+      const rootStat = fs.lstatSync(skillsDir);
+      if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) continue;
+    } catch {
+      continue;
+    }
+    const names = fs.readdirSync(skillsDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && /^[a-z0-9][a-z0-9._-]{0,127}$/i.test(entry.name))
+      .map((entry) => entry.name)
+      .sort((a, b) => a.localeCompare(b, "en"));
+    for (const name of names) {
+      const key = name.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      entries.push({ root, name });
+    }
+  }
+  return entries;
+}
+
 export function buildAgentSkillsRuntimeContext(agentId: string): string {
   const row = getRow(agentId);
   if (!row) return "";
   const { dir, isLocal } = resolveDir(agentId, row.slug);
   if (!isLocal) materializeAgentFiles(agentId);
-  const skillsDir = ensureInside(dir, "skills");
-  try {
-    const rootStat = fs.lstatSync(skillsDir);
-    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return "";
-  } catch {
-    return "";
-  }
 
   const maxSkills = 128;
   const maxBytes = 3 * 1024 * 1024;
   const maxSkillBytes = 512 * 1024;
   const loaded: Array<{ slug: string; content: string }> = [];
   let totalBytes = 0;
-  const entries = fs.readdirSync(skillsDir, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && /^[a-z0-9][a-z0-9._-]{0,127}$/i.test(entry.name))
-    .sort((a, b) => a.name.localeCompare(b.name, "en"));
+
+  const entries = listAgentSkillEntries(dir);
+  if (entries.length === 0) return "";
   if (entries.length > maxSkills) throw new Error("Agent skill package exceeds the runtime skill-count limit");
 
   for (const entry of entries) {
-    const skillDirectory = ensureInside(dir, path.join("skills", entry.name));
+    const skillDirectory = ensureInside(dir, path.join(entry.root, entry.name));
     const directoryStat = fs.lstatSync(skillDirectory);
     if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) {
       throw new Error("Agent runtime skill directory must not be a symbolic link");
     }
-    const skillPath = ensureInside(dir, path.join("skills", entry.name, "SKILL.md"));
+    const skillPath = ensureInside(dir, path.join(entry.root, entry.name, "SKILL.md"));
     let fd: number;
     try {
       fd = fs.openSync(skillPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
