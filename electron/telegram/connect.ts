@@ -1089,7 +1089,13 @@ export async function pruneOrphanedTelegramBindings(): Promise<{ removed: number
   const db = getDb();
   for (const row of orphans) {
     db.prepare("DELETE FROM telegram_bindings WHERE id = ?").run(row.id);
-    await deleteSecret(secretKey(row.id));
+    // ★ 봇 토큰은 지우지 않는다.
+    //
+    // `target_id` 는 FK 가 없는 칸이라 "대상을 못 찾았다"가 곧 "대상이 없다"는 뜻이
+    // 아니다 — 신원 축이 흔들리는 동안에도, 로컬 DB 가 잠시 어긋난 동안에도 같은 답이
+    // 나온다. 그런데 토큰을 지우면 사용자는 BotFather 에서 재발급받는 것 말고는 복구할
+    // 길이 없다. 되돌릴 수 있는 것(바인딩 행)만 지우고, 되돌릴 수 없는 것(토큰)은 남긴다.
+    // 토큰은 사용자가 봇 자체를 지울 때 함께 정리된다.
   }
   if (orphans.length > 0) await reconcileTelegramWorkers();
   return { removed: orphans.length };
