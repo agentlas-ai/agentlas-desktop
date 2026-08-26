@@ -32,6 +32,7 @@ import {
 } from "../experience/store";
 import { backfillExperienceFromRunHistory } from "../experience/backfill";
 import { hasDurableRunStartReceipt } from "../store/run-events";
+import { bindAgentIdentity } from "../agents/identity";
 
 export interface AgentMigrationOutcome {
   outcome: "applied" | "noop" | "failed";
@@ -78,6 +79,22 @@ function durableRunIdFor(agentId: string): string | null {
  * "앞으로의 실행"에만 붙이고 끝내면, 이미 등록된 에이전트에게는 영원히 도달하지 않는다.
  */
 export const AGENT_MIGRATION_STEPS: AgentMigrationStep[] = [
+  {
+    id: "bind-agent-identity-2026-08",
+    description: "패키지가 이미 발급해 둔 불변 신원(agentId)을 이 에이전트에 붙인다 — 옛 로컬 id 는 그대로 둔다",
+    run(agentId) {
+      // 이 단계는 **얹기만** 한다. `installed_agents.id` 를 바꾸지 않는다 — 그 id 를 부모로
+      // 삼는 FK 16곳 중 12곳이 ON DELETE CASCADE 라, 바꾸는 순간 경험칩·후보·승급영수증이
+      // 딸려 사라진다(실측 2026-08-26).
+      const result = bindAgentIdentity(agentId);
+      if (!result.agentId) return { outcome: "noop", changed: 0, detail: "agent-row-missing" };
+      return {
+        outcome: result.bound ? "applied" : "noop",
+        changed: result.bound ? 1 : 0,
+        detail: `${result.source} ${result.agentId}`,
+      };
+    },
+  },
   {
     id: "experience-base-hash-2026-08",
     description: "패키지가 없는 에이전트도 안정된 경험 기준을 갖게 하고, 기준이 없어 버려졌던 기억을 다시 수집한다",

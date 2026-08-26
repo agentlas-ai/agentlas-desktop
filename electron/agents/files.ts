@@ -41,6 +41,10 @@ function agentsRoot(): string {
 }
 
 /** 이 에이전트의 파일이 실제로 사는 폴더. 로컬 임포트면 원본 폴더, 아니면 userData/agents/<slug>. */
+export function resolveAgentPackageDir(agentId: string, slug: string): { dir: string; isLocal: boolean } {
+  return resolveDir(agentId, slug);
+}
+
 function resolveDir(agentId: string, slug: string): { dir: string; isLocal: boolean } {
   const route = getRoute(agentId);
   if (route) return { dir: route.path, isLocal: true };

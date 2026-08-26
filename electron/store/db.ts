@@ -18,7 +18,7 @@ import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-p
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 103;
+const SCHEMA_VERSION = 104;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -5350,6 +5350,38 @@ export function initStore(options: StoreInitOptions = {}): void {
         + (seatSessionBackup ? ` — 이 단계 직전 백업: ${seatSessionBackup}` : " — 백업을 만들지 못했다"),
       );
     }
+  }
+
+  // ── v104: 에이전트 신원 대응표 (얹기만 한다, 아무것도 옮기지 않는다) ──────────
+  // `agentId`(`agt_<32hex>`)는 이미 빌드가 발급해 패키지 `agentlas.json` 에 박아 두는
+  // 불변 신원이다(오너 결정 2026-08-08 R5). 그런데 이 앱은 그 값을 읽는 곳이 한 곳도
+  // 없었고, 로컬은 네 갈래 id 로 일해 왔다 — uuid / id==slug / team-member:<sha> / builtin-*.
+  //
+  // ★ `installed_agents.id` 는 절대 바꾸지 않는다. 그 id 를 부모로 삼는 FK 가 16곳이고
+  //   그중 12곳이 ON DELETE CASCADE 다(경험칩·후보·승급영수증·자동수집영수증).
+  //   런타임은 foreign_keys=ON 이라 제자리 UPDATE 는 실패하지만, 이 사다리가 표 재작성을
+  //   위해 이미 foreign_keys=OFF 창을 세 번 연다 — 그 안에서라면 조용히 성공하고 자식이
+  //   전부 고아가 된다. 그래서 신원은 **옆에 얹는다**.
+  //
+  // 양방향(옛→새, 새→옛)을 모두 답할 수 있어야 한다. 한 방향만 두면 쓰기를 새 id 로 돌린
+  // 시점부터 되돌릴 수 없어진다.
+  if (userVersion < 104) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_identity_map (
+        local_id       TEXT PRIMARY KEY REFERENCES installed_agents(id) ON DELETE RESTRICT,
+        agent_id       TEXT NOT NULL,
+        agent_version  INTEGER NOT NULL DEFAULT 1,
+        -- package: 패키지 agentlas.json 에서 읽음 (정본)
+        -- builtin-reserved: 앱에 구워진 에이전트 — 패키지가 없어 예약 네임스페이스를 쓴다
+        -- minted-local: 출처가 없어 이 기기에서 발급 (다음에 패키지를 받으면 package 가 이긴다)
+        mapping_source TEXT NOT NULL,
+        bound_at       TEXT NOT NULL
+      );
+      -- agent_id 에 UNIQUE 를 걸지 않는다: 같은 패키지가 두 행으로 깔린 사용자가 실존한다
+      -- (실측: local-vibecoder / vibecoder). UNIQUE 면 그 사용자의 승급이 통째로 실패한다.
+      CREATE INDEX IF NOT EXISTS idx_agent_identity_map_agent ON agent_identity_map(agent_id);
+      CREATE INDEX IF NOT EXISTS idx_agent_identity_map_source ON agent_identity_map(mapping_source);
+    `);
   }
 
   } catch (error) {
