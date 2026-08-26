@@ -3024,6 +3024,15 @@ interface BorrowedAgentResult {
   handoffId: string;
   model: string;
   provider: string;
+  /**
+   * 이 팀원이 **실제로 부른** 도구 이름들(중복 제거, 관측값).
+   *
+   * ★시연 화면의 `Skill used: …` 줄은 제품이 만든 것이 아니라 호스트 인격의 라우터
+   * 템플릿이 답변 본문으로 샌 것이었고, 그래서 막혔다(G-2/G-3, 2026-08-25). 사람이
+   * 보고 싶어 한 것 — "이 팀원이 무엇을 써서 일했나" — 은 정당한 요구이므로, 모델이
+   * 쓴 산문이 아니라 **관측된 사실**로 만든다. 지어낼 수 없는 값이다.
+   */
+  usedTools?: string[];
   /** Internal-only typed provider failure used for one bounded recovery. */
   runtimeFailure?: RunnerFailure;
   failedRuntime?: RuntimeStatus;
@@ -3226,6 +3235,11 @@ async function runBorrowedAgentTurn(
         )
       : "";
   const nodeMemory = [localNodeMemory, borrowedNodeMemory].filter(Boolean).join("\n\n");
+  /*
+   * 이 팀원이 실제로 부른 도구를 모은다 — 관측값이지 모델이 쓴 말이 아니다.
+   * 화면은 이것으로 "무엇을 써서 일했나"를 말한다(시연의 Skill used 줄이 원하던 것).
+   */
+  const observedTools: string[] = [];
   const nodeMemoryEmitter = !p.req.agentAppMode && !p.restrictedReadBoundary
     ? memoryEmitterPromptFor(nodeTask)
     : "";
@@ -3868,6 +3882,7 @@ async function runBorrowedAgentTurn(
           onStatus: (status) => p.sink(tag({ kind: "tool-use", status: redactSensitiveText(status) })),
           onPartial: () => {},
           onTool: (name, args, result, toolId, isError, artifactPaths) => {
+            if (typeof name === "string" && name && !observedTools.includes(name)) observedTools.push(name);
             const oneArtifacts = taskForceOneArtifacts(p, toolId, isError, artifactPaths);
             p.sink(tag({
               kind: "tool-use",
@@ -3941,6 +3956,7 @@ async function runBorrowedAgentTurn(
     }));
     return {
       ...resultMeta,
+      ...(observedTools.length > 0 ? { usedTools: [...observedTools] } : {}),
       model: modelLabel(observedDirectRuntime),
       provider: providerLabel(observedDirectRuntime),
       spec,
@@ -3972,6 +3988,8 @@ async function runBorrowedAgentTurn(
   } catch (err) {
     if (p.signal?.aborted) throw err;
     const typedRuntimeFailure = err instanceof TaskForceRuntimeFailureError ? err : null;
+    // Agent App 실패는 원인을 남기지 않기로 한 자리다 — 관측한 도구 이름도 여기서는
+    // 싣지 않는다(고정 실패 한 벌이라는 계약).
     if (p.req.agentAppMode) {
       p.sink(tag({
         kind: "tool-use",
@@ -4733,6 +4751,9 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         toAgentId: orchestratorId,
         ...(replyToMessageId ? { replyToMessageId } : {}),
         text,
+        // 이 팀원이 실제로 부른 도구 — 관측값이다. 화면이 "무엇을 써서 일했나"를
+        // 이것으로 말한다(모델이 쓴 산문이 아니라 지어낼 수 없는 사실).
+        ...(result.usedTools && result.usedTools.length > 0 ? { usedTools: result.usedTools } : {}),
         handoffDepth: 2,
         handoffRoundtrip: 2,
         handoffPermission: "read",

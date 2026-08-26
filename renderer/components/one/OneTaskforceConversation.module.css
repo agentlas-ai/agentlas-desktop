@@ -194,3 +194,25 @@
   .entry[data-threaded="true"] { margin-left: 18px; }
   .replyContext span { display: none; }
 }
+
+/* 실제로 부른 도구 — 이름 아래 부제 자리. 본문이 아니라 화면 크롬이다. */
+.usedTools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: -2px 0 0 50px;
+  min-width: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: #6b7280;
+}
+.usedTools strong { font-weight: 600; color: #4b5563; }
+.usedTools span {
+  padding: 1px 8px;
+  border: 1px solid #e3e7e4;
+  border-radius: 999px;
+  background: #f7f9f6;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}

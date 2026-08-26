@@ -4313,6 +4313,15 @@ export interface AgentMessageEvent {
   /** Host-enforced typed-handoff facts. Depth is 1..3; a pair may round-trip at most 4 times. */
   handoffDepth?: number;
   handoffRoundtrip?: number;
+  /**
+   * 이 발언을 만들며 **실제로 부른** 도구 이름들(중복 제거, 관측값).
+   *
+   * 시연 화면의 `Skill used: …` 줄은 호스트 인격의 라우터 템플릿이 본문으로 샌
+   * 것이라 막혔다(G-2/G-3, 2026-08-25). 사람이 보고 싶어 한 것 — "이 팀원이 무엇을
+   * 써서 일했나" — 은 정당하므로, 모델이 쓴 산문 대신 관측된 사실로 싣는다.
+   * 지어낼 수 없는 값이다.
+   */
+  usedTools?: string[];
   /** Explicit child grant minted by Main; it is never copied from the parent. */
   handoffPermission?: "read" | "write" | "full";
   /** Always false for a successful typed handoff; present for auditability. */

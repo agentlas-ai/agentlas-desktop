@@ -341,6 +341,20 @@ export function OneTaskforceConversation({
               : visibleAgentText(replyTarget.message.text, locale, replyTarget.speaker.name)).slice(0, 140)}</span>
           </div>
         )}
+        {/*
+          ★"무엇을 써서 일했나" 는 관측된 사실로만 말한다.
+
+          시연 화면의 `Skill used: …` 줄은 제품이 만든 것이 아니라 호스트 인격의 라우터
+          템플릿이 답변 본문으로 샌 것이었고, 그래서 양쪽에서 막혔다(G-2/G-3, 2026-08-25).
+          사람이 보고 싶어 한 것 자체는 정당하므로, 모델이 쓴 산문 대신 **실제로 부른 도구**
+          를 싣는다. 지어낼 수 없는 값이고, 인격이 스밀 자리가 없다.
+        */}
+        {message.usedTools && message.usedTools.length > 0 && (
+          <div className={styles.usedTools} data-used-tools={message.usedTools.length}>
+            <strong>{locale === "ko" ? "사용한 도구" : "Tools used"}</strong>
+            {message.usedTools.map((tool) => <span key={tool}>{tool}</span>)}
+          </div>
+        )}
         <div className={styles.bubble} data-doc={documentLike ? "true" : undefined}>
           {(replyTarget || !recipient.one) && <span className={styles.mention}>@{replyTarget?.speaker.name ?? recipient.name}</span>}
           <MessageText

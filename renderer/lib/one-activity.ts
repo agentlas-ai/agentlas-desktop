@@ -17,6 +17,8 @@ export interface OneActivityHandoffMessage {
   fromAgentId: string;
   toAgentId: string;
   replyToMessageId?: string;
+  /** 이 발언을 만들며 실제로 부른 도구 이름들 — 관측값이지 모델이 쓴 말이 아니다. */
+  usedTools?: string[];
   text: string;
   observedAt: string;
 }
@@ -288,6 +290,9 @@ function mergeHandoffs(
             toAgentId: targetId,
             ...(message.replyToMessageId?.trim()
               ? { replyToMessageId: message.replyToMessageId.trim() }
+              : {}),
+            ...(message.usedTools && message.usedTools.length > 0
+              ? { usedTools: message.usedTools }
               : {}),
             text: message.text.trim(),
             observedAt,
@@ -744,9 +749,17 @@ function ledgerAgentMessage(payload: Record<string, unknown>): NonNullable<McpIn
   const toAgentId = ledgerString(payload, "agentMessageTo");
   const replyToMessageId = ledgerString(payload, "agentMessageReplyTo");
   const text = ledgerString(payload, "agentMessageText");
+  const usedTools = Array.isArray(payload.agentMessageTools)
+    ? payload.agentMessageTools.filter((item): item is string => typeof item === "string" && item.length > 0).slice(0, 12)
+    : [];
   if (!messageId || !fromAgentId || !toAgentId || !text) return undefined;
   if (direction !== "orchestrator-to-worker" && direction !== "worker-to-orchestrator") return undefined;
-  return { messageId, direction, fromAgentId, toAgentId, ...(replyToMessageId ? { replyToMessageId } : {}), text };
+  return {
+    messageId, direction, fromAgentId, toAgentId,
+    ...(replyToMessageId ? { replyToMessageId } : {}),
+    ...(usedTools.length > 0 ? { usedTools } : {}),
+    text,
+  };
 }
 
 function ledgerHttpsUrls(payload: Record<string, unknown>, key: string): string[] | undefined {

@@ -395,6 +395,7 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     agentMessageTo: ev.agentMessage?.toAgentId,
     agentMessageReplyTo: ev.agentMessage?.replyToMessageId,
     agentMessageText: ev.agentMessage?.text,
+    agentMessageTools: ev.agentMessage?.usedTools,
     handoffDepth: ev.agentMessage?.handoffDepth,
     handoffRoundtrip: ev.agentMessage?.handoffRoundtrip,
     handoffPermission: ev.agentMessage?.handoffPermission,
