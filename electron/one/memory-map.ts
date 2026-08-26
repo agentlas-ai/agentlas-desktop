@@ -14,7 +14,7 @@ import {
 import { getDb } from "../store/db";
 import type { OneDurableMemoryEntryUi } from "../../shared/types";
 
-const ONE_AGENT_ID = "builtin-agentlas-one";
+import { BUILTIN_ONE_AGENT_ID as ONE_AGENT_ID } from "../../shared/builtin-agent-ids";
 const MAX_RENDERED_RELATIONS_PER_NODE = 12;
 const MAX_RENDERED_RELATIONS = 40_000;
 

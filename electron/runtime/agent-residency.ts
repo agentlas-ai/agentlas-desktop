@@ -25,7 +25,8 @@ import type {
 } from "../../shared/types";
 
 /** One 은 리퍼 면제다(오너 비전: "One 제외 마지막 메시지 후 12시간 무입력이면 자동 종료"). */
-export const ONE_AGENT_ID = "builtin-agentlas-one";
+import { BUILTIN_ONE_AGENT_ID } from "../../shared/builtin-agent-ids";
+export const ONE_AGENT_ID = BUILTIN_ONE_AGENT_ID;
 
 /** 마지막 활동 후 이 시간이 지나면 상주를 거둔다(One 제외). 데몬 스위퍼와 같은 값. */
 export const AGENT_RESIDENCY_IDLE_REAP_MS = 12 * 60 * 60_000;

@@ -24,7 +24,8 @@ import { insertMemoryEntry, listMemoryEvidenceTokensForAgent } from "./store";
 import type { MemoryKind, MemoryScope } from "../architecture/manifest";
 
 /** Desktop `BUILTIN_AGENTS` 의 `agentlas-one` 과 같은 값이어야 한다. */
-export const ONE_AGENT_ID = "builtin-agentlas-one";
+import { BUILTIN_ONE_AGENT_ID } from "../../shared/builtin-agent-ids";
+export const ONE_AGENT_ID = BUILTIN_ONE_AGENT_ID;
 
 const ONE_SOUL_RELATIVE = path.join(".agentlas", "project-soul-memory.md");
 
