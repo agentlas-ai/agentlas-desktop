@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.46 — 2026-08-27
+
+Bundled runtime: Agentlas OS v1.2.29 (f3722c6c3bcc709103ce304fc94fb09f1ace44db).
+Source readiness does not prove a public installer or update feed; the
+Releases page stays the authority.
+
+- An app that will not open now shows a way out, even when nothing can describe
+  it. A recovery screen existed for exactly this, but it gave up the moment a
+  model could not be reached — which is what a signed-out launch looks like, and
+  an offline one, and a usage limit. Measured on one machine: a startup failure
+  left a window with no words and no buttons for thirty-five minutes, until a
+  person launched the app again by hand. The things that can be done — try
+  again, clear the app's own temporary files, open the data folder — were
+  already decided in code and need no model, so they are now offered as they
+  are. The screen also says the conversations, agents, and settings are
+  untouched, because that is what someone staring at an app that will not open
+  is actually afraid of.
+
 ## 1.0.45 — 2026-08-27
 
 Bundled runtime: Agentlas OS v1.2.29 (f3722c6c3bcc709103ce304fc94fb09f1ace44db).
