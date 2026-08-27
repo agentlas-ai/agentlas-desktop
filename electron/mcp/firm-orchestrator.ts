@@ -16,7 +16,7 @@ import type {
   RuntimeStatus,
 } from "../../shared/types";
 import { memoryOwnerAgentId } from "../../shared/memory-ownership";
-import type { Runner, RunnerRequest } from "../runtime/runner";
+import { runnerFailureFromError, type Runner, type RunnerFailure, type RunnerRequest, type RunnerResult } from "../runtime/runner";
 import type { RuntimeLocale } from "../runtime/status-i18n";
 import {
   appendChatMessage,
@@ -42,7 +42,7 @@ import { parseSurfaces } from "../surface-emitter";
 import { stripStormbreakerContinueMarker } from "../hephaestus/loop-engineering";
 import { buildDelegateProtocol, parseDelegations, type Delegation } from "./delegate";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
-import { pickRunner, selectRuntimeForTargets } from "../runtime/selection";
+import { pickRunner, rolePriorityRuntimes, selectRuntimeForTargets } from "../runtime/selection";
 import { getAgentConcurrency } from "../store/concurrency";
 import { tryRecordRunEvent } from "../store/run-events";
 import { buildEffectiveAgentSystemPrompt } from "../agents/files";
@@ -76,15 +76,27 @@ function sameRuntime(left: RuntimeStatus, right: RuntimeStatus): boolean {
   return left.kind === right.kind && left.backend === right.backend && left.source === right.source;
 }
 
+function sameRuntimeModel(left: RuntimeStatus, right: RuntimeStatus): boolean {
+  return sameRuntime(left, right) && left.model === right.model;
+}
+
 function firmCandidateRuntimes(
   p: FirmRunParams,
   baseActive: RuntimeStatus,
+  role: "orchestrator" | "worker",
   manuallyPinned: boolean,
 ): RuntimeStatus[] {
-  const supplied = p.req.agentAppMode || manuallyPinned ? [baseActive] : [...p.runtimes];
-  if (!supplied.some((runtime) => sameRuntime(runtime, baseActive))) supplied.unshift(baseActive);
+  const rolePriority = rolePriorityRuntimes(p.runtimes, role);
+  const supplied = p.req.agentAppMode
+    ? [baseActive]
+    : manuallyPinned
+      ? [baseActive, ...rolePriority]
+      : rolePriority.length > 0
+        ? rolePriority
+        : [baseActive];
+  if (!supplied.some((runtime) => sameRuntimeModel(runtime, baseActive))) supplied.push(baseActive);
   const runnable = supplied.filter((runtime, index, list) => (
-    list.findIndex((candidate) => sameRuntime(candidate, runtime)) === index && Boolean(pickRunner(runtime))
+    list.findIndex((candidate) => sameRuntimeModel(candidate, runtime)) === index && Boolean(pickRunner(runtime))
   ));
   const candidates = runnable;
   return candidates.length > 0 ? candidates : [baseActive];
@@ -133,6 +145,13 @@ export interface FirmRunParams {
   agentAppMcpRuntimeEnv?: NodeJS.ProcessEnv;
   /** Marks the main-owned one-run grant unavailable after a runtime MCP fatal. */
   onAgentAppMcpRuntimeUnavailable?: () => void;
+  /** Main persists a controller fallback and updates the visible One picker. */
+  onControllerRuntimeFallback?: (
+    runtime: RuntimeStatus,
+    failure: RunnerFailure,
+  ) => void;
+  /** True when the visible One composer pin was actually used for this run. */
+  runtimePinHonored?: boolean;
   runnerEnv?: NodeJS.ProcessEnv;
   locale: RuntimeLocale;
   sink: EventSink;
@@ -597,6 +616,14 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   synthesisAllocation: WorkloadAllocation | null;
 }> {
   const { node, tier, phase } = turn;
+  const runtimeRole: "orchestrator" | "worker" = tier === 1 ? "orchestrator" : "worker";
+  // One's visible model is the controller's first attempt for an in-One team
+  // run. It is a preference with a typed fallback, not a replacement for the
+  // orchestrator role pool after a provider failure.
+  const oneControllerPreferred = runtimeRole === "orchestrator"
+    && p.req.oneMode === true
+    && p.runtimePinHonored === true
+    && Boolean(p.req.runtimeSelection);
   const nodePermission = firmNodePermission(p, turn);
   // 두 id 를 가른다 — 섞으면 고아 기억이 생긴다.
   //  · nodeRuntimeId: **관측용**. 이 노드가 실제로 무엇으로 돌았나(이벤트 태깅·실행 기록).
@@ -681,7 +708,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       // ignore memory failures
     }
   }
-  const runtimeChoice = p.req.agentAppMode
+  const runtimeChoice = p.req.agentAppMode || oneControllerPreferred
     ? null
     : selectRuntimeForTargets(
         p.runtimes,
@@ -699,11 +726,22 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
         // A firm's CEO is the quality-bearing orchestrator. Every delegated
         // division/specialist turn uses the worker role, including a division
         // manager's own plan/synthesis inside that delegated branch.
-        turn.tier === 1 ? "orchestrator" : "worker",
+        runtimeRole,
       );
-  const baseActive = runtimeChoice?.picked ? runtimeChoice.active : p.active;
-  const basePicked = runtimeChoice?.picked ?? p.picked;
-  const candidateRuntimes = firmCandidateRuntimes(p, baseActive, Boolean(runtimeChoice?.override));
+  const baseActive = oneControllerPreferred
+    ? p.active
+    : runtimeChoice?.picked
+      ? runtimeChoice.active
+      : p.active;
+  const basePicked = oneControllerPreferred
+    ? p.picked
+    : runtimeChoice?.picked ?? p.picked;
+  const candidateRuntimes = firmCandidateRuntimes(
+    p,
+    baseActive,
+    runtimeRole,
+    oneControllerPreferred || Boolean(runtimeChoice?.override),
+  );
   if (turn.reports && turn.reports.length > 0) {
     systemPrompt += `\n\n${buildDelegateProtocol(
       turn.reports.map((r) => ({ role: r.role, name: r.name })),
@@ -730,6 +768,10 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
         fallbackRuntime: baseActive,
         phase: turn.allocation.phase,
         manualOverride: runtimeChoice?.override ?? null,
+        // Firm runtime choice is host-owned. The model may suggest capacity,
+        // but it cannot reorder the DB role pool or smuggle another provider
+        // ahead of the selected role's priority chain.
+        explicitPinned: !p.req.agentAppMode,
       })
     : null;
   const active = workloadResolution?.runtime ?? baseActive;
@@ -781,72 +823,126 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
     validSiteAgentAppMcpGrantTools(p.mcpAllowedTools)
     ? p.mcpAllowedTools
     : undefined;
-  const result = await picked.runner(
-    {
-      systemPrompt,
-      history: p.req.agentAppMode ? [] : turn.history,
-      userPrompt: turn.userPrompt,
-      images: p.req.agentAppMode ? undefined : turn.withImages ? p.req.images : undefined,
-      backendLabel: picked.label,
-      model: active.model ?? undefined,
-      longContext: active.longContextEnabled ?? false,
-      effort: active.effort ?? undefined,
-      signal: turn.signal ?? p.signal,
-      permission: p.req.agentAppMode || (phase === "plan" && Boolean(turn.reports?.length))
-        ? "read"
-        : nodePermission,
-      restrictedReadBoundary: p.restrictedReadBoundary,
-      cwd: p.req.agentAppMode ? undefined : workingFolder ?? undefined,
-      chatId: p.req.agentAppMode
-        ? `site-agent-app:${p.req.runId ?? "run"}:${node.id}:${phase}:${randomUUID()}`
-        : phase === "plan" && Boolean(turn.reports?.length)
-          ? undefined
-          : turn.chatId ?? undefined,
-      // 러너의 agentId 는 능력 규칙 대상·런타임 세션 키·상주 판정에 쓰인다(기억이 아니다).
-      // 값이 바뀌면 세션이 갈리므로 실제로 돈 신원을 그대로 넘긴다.
-      agentId: nodeRuntimeId,
-      orchestrationAgentId: node.id,
-      mcpConfigPath: phase === "plan" && Boolean(turn.reports?.length)
-        ? undefined
-        : p.req.agentAppMode
-          ? (agentAppAllowedTools ? p.mcpConfigPath : undefined)
-          : p.mcpConfigPath,
-      mcpAllowedTools: phase === "plan" && Boolean(turn.reports?.length)
-        ? undefined
-        : p.req.agentAppMode
-          ? agentAppAllowedTools
-          : p.mcpAllowedTools,
-      mcpCodexConfigArgs: p.req.agentAppMode || (phase === "plan" && Boolean(turn.reports?.length))
-        ? undefined
-        : p.mcpCodexConfigArgs,
-      env: p.req.agentAppMode
-        ? buildAgentAppRunnerEnv(p.runnerEnv ?? process.env, p.agentAppMcpRuntimeEnv)
-        : p.runnerEnv,
-      untrustedNoTools: p.req.agentAppMode === true,
-      untrustedAllowedMcpTools: agentAppAllowedTools,
-      onAgentAppMcpRuntimeUnavailable: p.req.agentAppMode
-        ? p.onAgentAppMcpRuntimeUnavailable
-        : undefined,
-      locale: p.locale,
-    },
-    {
-      onStatus: (status) => {
-        emit({ kind: "tool-use", status });
-        if (turn.toMainBubble) p.sink({ kind: "tool-use", status });
-      },
-      onPartial: (text) => {
-        if (!p.req.agentAppMode && !firmProjectReadOnly(p, nodePermission)) {
-          emit({ kind: "partial", text });
-          if (turn.toMainBubble) p.sink({ kind: "partial", text });
-        }
-      },
-      onTool: (name, args, result, id, isError) => {
-        const tool = { name, args, result, id, isError };
-        emit({ kind: "tool-use", tool });
-        if (turn.toMainBubble) p.sink({ kind: "tool-use", tool });
-      },
-    },
-  );
+  const runNodeOn = async (
+    runtime: RuntimeStatus,
+    runtimePicked: { runner: Runner; label: string },
+  ): Promise<RunnerResult> => {
+    try {
+      return await runtimePicked.runner(
+        {
+          systemPrompt,
+          history: p.req.agentAppMode ? [] : turn.history,
+          userPrompt: turn.userPrompt,
+          images: p.req.agentAppMode ? undefined : turn.withImages ? p.req.images : undefined,
+          backendLabel: runtimePicked.label,
+          model: runtime.model ?? undefined,
+          longContext: runtime.longContextEnabled ?? false,
+          effort: runtime.effort ?? undefined,
+          signal: turn.signal ?? p.signal,
+          permission: p.req.agentAppMode || (phase === "plan" && Boolean(turn.reports?.length))
+            ? "read"
+            : nodePermission,
+          restrictedReadBoundary: p.restrictedReadBoundary,
+          cwd: p.req.agentAppMode ? undefined : workingFolder ?? undefined,
+          chatId: p.req.agentAppMode
+            ? `site-agent-app:${p.req.runId ?? "run"}:${node.id}:${phase}:${randomUUID()}`
+            : phase === "plan" && Boolean(turn.reports?.length)
+              ? undefined
+              : turn.chatId ?? undefined,
+          // 러너의 agentId 는 능력 규칙 대상·런타임 세션 키·상주 판정에 쓰인다(기억이 아니다).
+          // 값이 바뀌면 세션이 갈리므로 실제로 돈 신원을 그대로 넘긴다.
+          agentId: nodeRuntimeId,
+          orchestrationAgentId: node.id,
+          mcpConfigPath: phase === "plan" && Boolean(turn.reports?.length)
+            ? undefined
+            : p.req.agentAppMode
+              ? (agentAppAllowedTools ? p.mcpConfigPath : undefined)
+              : p.mcpConfigPath,
+          mcpAllowedTools: phase === "plan" && Boolean(turn.reports?.length)
+            ? undefined
+            : p.req.agentAppMode
+              ? agentAppAllowedTools
+              : p.mcpAllowedTools,
+          mcpCodexConfigArgs: p.req.agentAppMode || (phase === "plan" && Boolean(turn.reports?.length))
+            ? undefined
+            : p.mcpCodexConfigArgs,
+          env: p.req.agentAppMode
+            ? buildAgentAppRunnerEnv(p.runnerEnv ?? process.env, p.agentAppMcpRuntimeEnv)
+            : p.runnerEnv,
+          untrustedNoTools: p.req.agentAppMode === true,
+          untrustedAllowedMcpTools: agentAppAllowedTools,
+          onAgentAppMcpRuntimeUnavailable: p.req.agentAppMode
+            ? p.onAgentAppMcpRuntimeUnavailable
+            : undefined,
+          locale: p.locale,
+        },
+        {
+          onStatus: (status) => {
+            emit({ kind: "tool-use", status });
+            if (turn.toMainBubble) p.sink({ kind: "tool-use", status });
+          },
+          onPartial: (text) => {
+            if (!p.req.agentAppMode && !firmProjectReadOnly(p, nodePermission)) {
+              emit({ kind: "partial", text });
+              if (turn.toMainBubble) p.sink({ kind: "partial", text });
+            }
+          },
+          onTool: (name, args, result, id, isError) => {
+            const tool = { name, args, result, id, isError };
+            emit({ kind: "tool-use", tool });
+            if (turn.toMainBubble) p.sink({ kind: "tool-use", tool });
+          },
+        },
+      );
+    } catch (error) {
+      if ((turn.signal ?? p.signal)?.aborted) throw error;
+      return { text: "", failure: runnerFailureFromError(error, runtime.kind) };
+    }
+  };
+  let executedRuntime = active;
+  let executedPicked = picked;
+  let result = await runNodeOn(executedRuntime, executedPicked);
+  while (result.failure && !p.req.agentAppMode && !(turn.signal ?? p.signal)?.aborted) {
+    const fallback = rolePriorityRuntimes(candidateRuntimes, runtimeRole, {
+      failedRuntime: executedRuntime,
+      failure: result.failure,
+    })[0];
+    const fallbackPicked = fallback ? pickRunner(fallback) : null;
+    if (!fallback || !fallbackPicked) break;
+    if (tier === 1) {
+      p.onControllerRuntimeFallback?.(fallback, result.failure);
+    }
+    emit({
+      kind: "tool-use",
+      status: p.locale === "ko"
+        ? `${executedRuntime.model ?? executedRuntime.kind} 실행이 거절되어 ${fallback.model ?? fallback.kind}로 재시도합니다.`
+        : `${executedRuntime.model ?? executedRuntime.kind} was rejected; retrying on ${fallback.model ?? fallback.kind}.`,
+    });
+    executedRuntime = fallback;
+    executedPicked = fallbackPicked;
+    result = await runNodeOn(executedRuntime, executedPicked);
+  }
+  if (result.failure) {
+    throw new Error(`${result.failure.runtime} runtime ${result.failure.kind}: ${result.failure.message}`);
+  }
+  // Keep later CEO/manager turns in the same firm run on the runtime that
+  // actually survived the fallback. Worker turns still resolve independently
+  // from the Worker role pool.
+  if (oneControllerPreferred && tier === 1 && !sameRuntime(executedRuntime, p.active)) {
+    p.active = executedRuntime;
+    p.picked = executedPicked;
+  }
+  const executionResolution = workloadResolution && !sameRuntime(executedRuntime, active)
+    ? {
+        ...workloadResolution,
+        runtime: { ...executedRuntime },
+        source: "safe-fallback" as const,
+        resolutionCodes: [
+          ...workloadResolution.resolutionCodes,
+          "runtime-failed-fell-back-to-role-priority",
+        ],
+      }
+    : workloadResolution;
   // delegation 블록 분리 → 메모리 큐레이션(노드 agentId로) → 정리된 텍스트
   const safeResultText = restrictedFirmText(
     p,
@@ -877,7 +973,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
               experienceIntake: {
                 platform: process.platform,
                 arch: process.arch,
-                runtimeKind: active.kind,
+                runtimeKind: executedRuntime.kind,
                 basePackageHash: getAgentById(node.agentId)?.packageHash ?? null,
                 taskHint: turn.userPrompt,
               },
@@ -886,10 +982,10 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       };
       const semanticOptions = await runSemanticMemoryReview({
         replyText: display,
-        runner: picked.runner,
-        backendLabel: picked.label,
-        model: active.model ?? undefined,
-        effort: active.effort ?? undefined,
+        runner: executedPicked.runner,
+        backendLabel: executedPicked.label,
+        model: executedRuntime.model ?? undefined,
+        effort: executedRuntime.effort ?? undefined,
         env: p.runnerEnv,
         locale: p.locale,
         signal: turn.signal ?? p.signal,
@@ -916,8 +1012,8 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       console.error("[memory] firm curation failed:", error);
     }
   }
-  if (workloadResolution) {
-    const executedResolution = reconcileWorkloadRunnerResult(workloadResolution, result);
+  if (executionResolution) {
+    const executedResolution = reconcileWorkloadRunnerResult(executionResolution, result);
     tryRecordRunEvent({
       runId: p.req.runId ?? `firm:${p.chat.id}`,
       kind: "workload_allocation",

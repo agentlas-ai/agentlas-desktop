@@ -7,7 +7,11 @@
  * 물어본 요청(live)만 여기 온다. 이미 거부되고 지나간 것(post-denial)은 러너가 남긴
  * 알림 한 줄이 전부이며 카드가 되지 않는다.
  *
- * 세 답: [이번만 허용] [이 작업에서 계속 허용] [거부]. 답은 한 번만 간다.
+ * Graph 칩은 네 답([이번만 허용] [이 작업에서 계속 허용] [항상 허용] [거부])을
+ * 보여 준다. One의 기존 compact AskCard는 세 답을 유지한다.
+ *
+ * 승인 자체는 대화를 멈추는 경계지만, 화면을 차지하는 질문 시트가 아니다. Graph 칩은
+ * 제목·런타임·네 선택지를 한 줄로 보여 주고, One은 기존 질문 카드를 그대로 쓴다.
  */
 import { useEffect } from "react";
 import { AskCard, type AskCardOption } from "@/components/AskCard";
@@ -27,7 +31,16 @@ const RUNTIME_LABEL: Record<string, string> = {
   agentlas: "Agentlas",
 };
 
-export function ToolApprovalCard({ request, compact = false }: { request: ToolApprovalRequestEvent; compact?: boolean }) {
+export function ToolApprovalCard({
+  request,
+  compact = false,
+  chip = false,
+}: {
+  request: ToolApprovalRequestEvent;
+  compact?: boolean;
+  /** The compact Graph surface is opt-in; One keeps its existing AskCard. */
+  chip?: boolean;
+}) {
   const { locale } = useT();
   const ko = locale === "ko";
   const runtimeName = RUNTIME_LABEL[request.runtime] ?? request.runtime;
@@ -65,12 +78,12 @@ export function ToolApprovalCard({ request, compact = false }: { request: ToolAp
         ? (ko ? "이 대화에서는 승격을 다시 묻지 않습니다." : "No more escalation questions in this conversation.")
         : (ko ? "이 작업이 끝날 때까지 다시 묻지 않습니다." : "No more questions until this task ends."),
     },
-    ...(compact ? [] : [{
+    ...(compact && !chip ? [] : [{
       id: "allow_always",
       title: ko ? "항상 허용" : "Always allow",
       note: escalation
         ? (ko ? "권한이 모자랄 때 항상 전체 액세스로 진행합니다." : "Always continue with full access when permission falls short.")
-        : (ko ? "어떤 에이전트에서도 이 도구를 다시 묻지 않습니다." : "Never ask again for this tool, in any agent."),
+        : (ko ? "이 도구의 같은 작업 패턴을 다시 묻지 않습니다." : "Do not ask again for this tool's matching action pattern."),
     }]),
     {
       id: "deny",
@@ -81,26 +94,74 @@ export function ToolApprovalCard({ request, compact = false }: { request: ToolAp
     },
   ];
 
+  const choose = (id: string) => {
+    void decideToolApproval(request.id, id as Parameters<typeof decideToolApproval>[1]);
+  };
+
+  if (compact && chip) {
+    return (
+      <section
+        className="tool-approval-chip"
+        role="alertdialog"
+        aria-live="assertive"
+        aria-label={askTitle}
+        data-ask-card="true"
+        data-testid="tool-approval-card"
+      >
+        <div className="tool-approval-chip-copy">
+          <span className="tool-approval-chip-kicker">{ko ? "승인 필요" : "Approval needed"}</span>
+          <strong>{askTitle}</strong>
+          <small>{ko ? `${runtimeName} · 실행 전 확인` : `${runtimeName} · confirm before running`}</small>
+        </div>
+        <div className="tool-approval-chip-actions" role="group" aria-label={ko ? "승인 선택" : "Approval choices"}>
+          {askOptions.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              className={`tool-approval-chip-action tool-approval-chip-action-${option.id.replace("allow_", "")}`}
+              data-ask-option={option.id}
+              data-active={option.active ? "true" : "false"}
+              title={option.note}
+              aria-label={`${option.title}: ${option.note}`}
+              onClick={() => choose(option.id)}
+            >
+              {option.title}
+            </button>
+          ))}
+        </div>
+      </section>
+    );
+  }
+
   return (
     <AskCard
       title={askTitle}
       locale={ko ? "ko" : "en"}
       options={askOptions}
-      onChoose={(id) => decideToolApproval(request.id, id as Parameters<typeof decideToolApproval>[1])}
+      onChoose={choose}
       data-testid="tool-approval-card"
     />
   );
 }
 
-export function ToolApprovalInline({ chatId, compact = false }: { chatId: string | null | undefined; compact?: boolean }) {
+export function ToolApprovalInline({
+  chatId,
+  compact = false,
+  chip = false,
+}: {
+  chatId: string | null | undefined;
+  compact?: boolean;
+  /** Enables the Graph approval chip without changing One's existing card. */
+  chip?: boolean;
+}) {
   const { queue } = useToolApprovals();
   useEffect(() => markChatVisible(chatId), [chatId]);
   if (!chatId) return null;
   const mine = queue.filter((item) => item.chatId === chatId);
   if (mine.length === 0) return null;
   return (
-    <div data-testid="tool-approval-inline">
-      {mine.map((request) => <ToolApprovalCard key={request.id} request={request} compact={compact} />)}
+    <div className={chip ? "tool-approval-inline" : undefined} data-testid="tool-approval-inline">
+      {mine.map((request) => <ToolApprovalCard key={request.id} request={request} compact={compact} chip={chip} />)}
     </div>
   );
 }

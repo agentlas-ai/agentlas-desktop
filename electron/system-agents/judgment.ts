@@ -17,12 +17,12 @@
 
 import { detectRuntimes } from "../runtime/detect";
 import { isJudgmentRefusal } from "../runtime/judgment-refusal";
-import { pickActive, pickRecoveryRunner, pickRunner } from "../runtime/selection";
+import { pickActive, pickRecoveryRunner, pickRunner, selectExactRuntime } from "../runtime/selection";
 import { readRuntimeSelectionMirror } from "../runtime/selection-mirror";
 import type { RuntimeLocale } from "../runtime/status-i18n";
 import type { RunnerFailure, RunnerFailureKind } from "../runtime/runner";
 import { looksSecret, redactSecrets } from "../../shared/secret-patterns";
-import type { RuntimeStatus } from "../../shared/types";
+import type { RuntimeSelection, RuntimeStatus } from "../../shared/types";
 
 /** A wordlist demoted to a hint: "these words *suggest* this label — verify by meaning." */
 export interface JudgeHint<V extends string> {
@@ -51,6 +51,8 @@ export interface JudgeSpec<V extends string> {
   timeoutMs?: number;
   signal?: AbortSignal;
   locale?: RuntimeLocale;
+  /** Graph callers may bind this decision to the same runtime as the work. */
+  runtimeSelection?: RuntimeSelection;
 }
 
 export interface Verdict<V extends string> {
@@ -91,6 +93,8 @@ export interface RequiredJudgeSpec<V extends string> {
   timeoutMs?: number;
   signal?: AbortSignal;
   locale?: RuntimeLocale;
+  /** Graph evals pass their automation/node runtime so judgment cannot cross providers. */
+  runtimeSelection?: RuntimeSelection;
 }
 
 // Measured on this machine: a CLI runtime answers a judgment prompt in 12–18s
@@ -229,6 +233,16 @@ function judgmentCacheKey(kind: string, input: string): string {
   return `${kind}\u0000${intentSignature(input)}`;
 }
 
+function runtimeSelectionCacheScope(selection?: RuntimeSelection): string {
+  if (!selection) return "";
+  return `\u0000runtime:${JSON.stringify({
+    kind: selection.kind,
+    backend: selection.backend ?? null,
+    source: selection.source ?? null,
+    model: selection.model ?? null,
+  })}`;
+}
+
 function subsetCacheKey(kind: string, labels: readonly string[], input: string): string {
   return `${kind}\u0000${labels.join(",")}\u0000${intentSignature(input)}`;
 }
@@ -313,6 +327,8 @@ export async function callConnectedModel(opts: {
   timeoutMs?: number;
   signal?: AbortSignal;
   locale?: RuntimeLocale;
+  /** When supplied by a graph, judgment must use the graph's exact runtime pin. */
+  runtimeSelection?: RuntimeSelection;
   /**
    * 모델이 답을 써 내려가는 동안 부분 텍스트를 흘려준다.
    *
@@ -335,6 +351,8 @@ export async function callConnectedModelDetailed(opts: {
   timeoutMs?: number;
   signal?: AbortSignal;
   locale?: RuntimeLocale;
+  /** When supplied by a graph, judgment must use the graph's exact runtime pin. */
+  runtimeSelection?: RuntimeSelection;
   onPartial?: (text: string) => void;
   /**
    * 짓는 일이면 켠다 — 조회 도구가 함께 간다. 판정에는 절대 켜지 않는다.
@@ -356,6 +374,8 @@ async function callJudgmentModelDetailed(opts: {
   timeoutMs?: number;
   signal?: AbortSignal;
   locale?: RuntimeLocale;
+  /** An explicit graph pin is authoritative; do not silently judge on another provider. */
+  runtimeSelection?: RuntimeSelection;
   onPartial?: (text: string) => void;
   /**
    * ★출력이 **쓸 만한가**를 이 콜백이 정한다. 판정은 텍스트가 왔다고 끝이 아니라
@@ -390,7 +410,10 @@ async function callJudgmentModelDetailed(opts: {
     runtimes = [];
     operationalStoreUnavailable = true;
   }
-  const active = pickActive(runtimes);
+  const pinnedChoice = opts.runtimeSelection
+    ? selectExactRuntime(runtimes, opts.runtimeSelection)
+    : null;
+  const active = opts.runtimeSelection ? pinnedChoice?.active ?? null : pickActive(runtimes);
   // Judgment is a lightweight classification of text the user already owns, so
   // it is not tied to the runtime picked for real work. Try the active runtime
   // first — that is the user's choice — then any other connected runtime that
@@ -401,10 +424,20 @@ async function callJudgmentModelDetailed(opts: {
   // persists history). Binding the judge to the active runtime therefore left
   // every CLI user with a silently dead judge: the verdict fell back forever,
   // which is indistinguishable from "the judge decided to be conservative".
-  const ordered = [
-    ...(active ? [active] : []),
-    ...runtimes.filter((runtime) => runtime !== active),
-  ];
+  const ordered = opts.runtimeSelection
+    ? (active ? [active] : [])
+    : [
+      ...(active ? [active] : []),
+      ...runtimes.filter((runtime) => runtime !== active),
+    ];
+  if (opts.runtimeSelection) {
+    console.info(
+      `[judgment-runtime-selection] kind=${opts.runtimeSelection.kind} `
+        + `backend=${opts.runtimeSelection.backend ?? "-"} source=${opts.runtimeSelection.source ?? "-"} `
+        + `model=${opts.runtimeSelection.model ?? active?.model ?? "-"} `
+        + `resolved=${active ? "yes" : "no"}`,
+    );
+  }
 
   const controller = new AbortController();
   const timeoutMs = Math.max(1, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
@@ -486,7 +519,7 @@ async function callJudgmentModelDetailed(opts: {
         if (controller.signal.aborted) return { text: null, failure: lastFailure };
       }
     }
-    if (operationalStoreUnavailable) {
+    if (!opts.runtimeSelection && operationalStoreUnavailable) {
       const selection = readRuntimeSelectionMirror();
       const recovery = selection ? pickRecoveryRunner(selection) : null;
       if (selection && recovery && !controller.signal.aborted) {
@@ -563,8 +596,9 @@ export async function judge<V extends string>(spec: JudgeSpec<V>): Promise<Verdi
     judgedInput = floor.redacted;
   }
 
-  const signature = intentSignature(judgedInput);
-  const cacheKey = judgmentCacheKey(spec.kind, judgedInput);
+  const runtimeScope = runtimeSelectionCacheScope(spec.runtimeSelection);
+  const signature = `${intentSignature(judgedInput)}${runtimeScope}`;
+  const cacheKey = `${judgmentCacheKey(spec.kind, judgedInput)}${runtimeScope}`;
   const cached = cacheGet<V>(cacheKey);
   if (cached) return { ...cached, redactedInput, containedSecret };
   // 세션 캐시가 비어도(앱 재시작) 같은 뜻의 입력이면 기록된 판정을 쓴다.
@@ -603,6 +637,7 @@ export async function judge<V extends string>(spec: JudgeSpec<V>): Promise<Verdi
     timeoutMs: spec.timeoutMs,
     signal: spec.signal,
     locale: spec.locale,
+    ...(spec.runtimeSelection ? { runtimeSelection: spec.runtimeSelection } : {}),
   });
   const text = detailed.text;
   if (text === null) {
@@ -643,8 +678,9 @@ export async function judgeRequired<V extends string>(
     redactedInput = floor.redacted;
     containedSecret = floor.containedSecret;
   }
-  const signature = intentSignature(judgedInput);
-  const cacheKey = judgmentCacheKey(spec.kind, judgedInput);
+  const runtimeScope = runtimeSelectionCacheScope(spec.runtimeSelection);
+  const signature = `${intentSignature(judgedInput)}${runtimeScope}`;
+  const cacheKey = `${judgmentCacheKey(spec.kind, judgedInput)}${runtimeScope}`;
   const cached = cacheGet<V>(cacheKey);
   if (cached) {
     return { ...cached, source: "llm", redactedInput, containedSecret };
@@ -669,6 +705,7 @@ export async function judgeRequired<V extends string>(
     timeoutMs: spec.timeoutMs,
     signal: spec.signal,
     locale: spec.locale,
+    ...(spec.runtimeSelection ? { runtimeSelection: spec.runtimeSelection } : {}),
   });
   const text = detailed.text;
   if (text === null) {
@@ -709,6 +746,8 @@ export async function judgeRequiredAction(spec: {
   observation: string;
   actions: RequiredActionOption[];
   locale?: RuntimeLocale;
+  /** The failed unattended automation's exact runtime also judges its recovery action. */
+  runtimeSelection?: RuntimeSelection;
   signal?: AbortSignal;
   timeoutMs?: number;
 }): Promise<RequiredActionDecision> {
@@ -731,6 +770,7 @@ export async function judgeRequiredAction(spec: {
     timeoutMs: spec.timeoutMs,
     signal: spec.signal,
     locale: spec.locale,
+    ...(spec.runtimeSelection ? { runtimeSelection: spec.runtimeSelection } : {}),
   });
   if (!text) return { actionId: null, summary: "", question: null, options: [], source: "unavailable" };
   const match = text.match(/\{[\s\S]*\}/);
@@ -1005,6 +1045,8 @@ interface ChecklistJudgeSpec {
   timeoutMs?: number;
   signal?: AbortSignal;
   locale?: RuntimeLocale;
+  /** Graph evals pass their automation/node runtime so judgment cannot cross providers. */
+  runtimeSelection?: RuntimeSelection;
   maxInputChars?: number;
   /**
    * 사람의 교정 기록 — "이런 결과를 판정이 틀리게 봤고, 사람은 이렇게 판단했다".
@@ -1089,7 +1131,15 @@ export async function judgeChecklist(spec: ChecklistJudgeSpec): Promise<Checklis
   const correctionLines = corrections.map((c) =>
     `- A result like: "${secretValueFloor(c.subjectPreview).redacted.slice(0, 200)}" — the person ruled ${c.correctedVerdict.toUpperCase()}${c.note ? ` (${c.note.slice(0, 150)})` : ""}`);
   // ★교정이 캐시 키에 들어가야 한다 — 아니면 새 교정이 와도 캐시된 옛 판정이 그대로 나온다.
-  const cacheKey = [spec.kind, spec.salt ?? "", itemLines.join("\n"), correctionLines.join("\n"), evidence ?? "", subject].join("\u0000");
+  const cacheKey = [
+    spec.kind,
+    spec.salt ?? "",
+    runtimeSelectionCacheScope(spec.runtimeSelection),
+    itemLines.join("\n"),
+    correctionLines.join("\n"),
+    evidence ?? "",
+    subject,
+  ].join("\u0000");
   const cached = checklistCacheGet(cacheKey);
   if (cached) return cached;
 
@@ -1127,6 +1177,7 @@ export async function judgeChecklist(spec: ChecklistJudgeSpec): Promise<Checklis
     ...(spec.timeoutMs !== undefined ? { timeoutMs: spec.timeoutMs } : {}),
     ...(spec.signal ? { signal: spec.signal } : {}),
     ...(spec.locale ? { locale: spec.locale } : {}),
+    ...(spec.runtimeSelection ? { runtimeSelection: spec.runtimeSelection } : {}),
   });
   const text = detailed.text;
   if (text === null) {

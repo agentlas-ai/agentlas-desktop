@@ -331,6 +331,30 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
   if (ev.kind === "partial" || ev.kind === "usage") return;
   // reasoning delta는 partial과 같은 고빈도 live 스트림 — end의 전문만 남긴다.
   if (ev.kind === "reasoning" && ev.reasoning?.phase === "delta") return;
+  // The runtime-selected notice is a host fact, not model prose. Keep it in a
+  // dedicated row so history can prove the provider/model that received the
+  // prompt even when the run emits no tool call or fails immediately.
+  if (ev.kind === "notice" && ev.notice?.code === "runtime-selected" && ev.runtimeSelection) {
+    const selected = ev.runtimeSelection;
+    tryRecordRunEvent({
+      runId,
+      kind: "runtime_selection",
+      chatId: req.chatId,
+      automationId: req.automationId ?? null,
+      nodeId: ev.nodeId ?? null,
+      agentId: ev.runtimeAgentId ?? ev.agentId,
+      payload: {
+        eventKind: "runtime-selected",
+        runtimeRole: ev.modelRole ?? ev.role ?? "orchestrator",
+        runtimeKind: selected.kind,
+        runtimeBackend: selected.backend,
+        runtimeSource: selected.source,
+        runtimeModel: selected.model,
+        runtimeLongContext: selected.longContext,
+        runtimeEffort: selected.effort,
+      },
+    });
+  }
   const payload = {
     eventKind: ev.kind,
     status: ev.status,
@@ -346,6 +370,12 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     modelRole: ev.modelRole,
     agentName: ev.agentName,
     model: ev.model,
+    runtimeKind: ev.runtimeSelection?.kind,
+    runtimeBackend: ev.runtimeSelection?.backend,
+    runtimeSource: ev.runtimeSelection?.source,
+    runtimeModel: ev.runtimeSelection?.model,
+    runtimeLongContext: ev.runtimeSelection?.longContext,
+    runtimeEffort: ev.runtimeSelection?.effort,
     nodeState: ev.nodeState,
     surfaceId: ev.surfaceId,
     oneArtifacts: ev.oneArtifacts,
@@ -410,6 +440,7 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     runId,
     kind: `mcp_${ev.kind}`,
     chatId: req.chatId,
+    automationId: req.automationId ?? null,
     nodeId: ev.nodeId,
     agentId: ev.runtimeAgentId ?? ev.agentId,
     payload,
@@ -419,6 +450,7 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
       runId,
       source: "invoke",
       chatId: req.chatId,
+      automationId: req.automationId ?? null,
       nodeId: ev.nodeId,
       agentId: ev.runtimeAgentId ?? ev.agentId,
       errorCode: ev.error?.code ?? "runtime_error",
@@ -430,6 +462,7 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
       runId,
       source: "tool",
       chatId: req.chatId,
+      automationId: req.automationId ?? null,
       nodeId: ev.nodeId,
       agentId: ev.runtimeAgentId ?? ev.agentId,
       errorCode: "tool_error",
@@ -441,6 +474,7 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
       runId,
       source: "workflow_node",
       chatId: req.chatId,
+      automationId: req.automationId ?? null,
       nodeId: ev.nodeId,
       agentId: ev.runtimeAgentId ?? ev.agentId,
       errorCode: "node_failed",

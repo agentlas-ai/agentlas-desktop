@@ -69,6 +69,9 @@ interface Props {
   hasPipeline?: boolean;
   width?: number;
   onResizeWidth?: (width: number) => void;
+  /** null = 세로 전체(기본). 숫자 = 상단 가장자리를 끌어 줄여 둔 높이. */
+  height?: number | null;
+  onResizeHeight?: (height: number | null) => void;
   /** 파일을 **내용까지 읽어서** 뷰어에 올린다. 부모만 chatId 스코프의 fs 접근을 갖는다. */
   onHydrateFilePreview?: (preview: WorkspaceFilePreview) => void | Promise<void>;
 }
@@ -98,12 +101,22 @@ export function ChatRightPanel({
   hasPipeline,
   width,
   onResizeWidth,
+  height,
+  onResizeHeight,
 }: Props) {
   const { locale } = useT();
   const ko = locale === "ko";
   const [filePreview, setFilePreview] = useState<WorkspaceFilePreview | null>(null);
   const [viewerSource, setViewerSource] = useState<PanelViewerSource>("workbench");
   const [resizing, setResizing] = useState(false);
+  const [isNarrow, setIsNarrow] = useState(false);
+  const shellRef = useRef<HTMLElement | null>(null);
+
+  // 패널이 세로로 차지할 수 있는 최대치 — 부모(task-cockpit-shell)의 실제 높이다.
+  function availableHeight() {
+    const parent = shellRef.current?.parentElement;
+    return parent?.clientHeight || (typeof window === "undefined" ? 720 : window.innerHeight);
+  }
   const hasPanelContent = Boolean(artifact || surface || filePreview);
   const showFilePreview = viewerSource === "file" && filePreview;
   const showWorkbench = viewerSource === "workbench" && (artifact || surface);
@@ -123,6 +136,28 @@ export function ChatRightPanel({
     setFilePreview(null);
     setViewerSource("workbench");
   }, [chatId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return;
+    const query = window.matchMedia("(max-width: 760px)");
+    const sync = () => setIsNarrow(query.matches);
+    sync();
+    query.addEventListener("change", sync);
+    return () => query.removeEventListener("change", sync);
+  }, []);
+
+  // ★저장된 높이는 마운트 즉시 재검사해야 한다. 큰 화면에서 줄여 둔 값을 작은 화면에서
+  //   그대로 쓰면, 부모가 overflow:hidden 이고 패널이 하단 정렬이라 헤더·탭·닫기 버튼이
+  //   위로 잘려 나가 패널을 아예 조작할 수 없게 된다.
+  useEffect(() => {
+    if (typeof height !== "number" || !onResizeHeight) return;
+    const check = () => {
+      if (height >= availableHeight()) onResizeHeight(null);
+    };
+    check();
+    window.addEventListener("resize", check);
+    return () => window.removeEventListener("resize", check);
+  }, [height, onResizeHeight]);
 
   useEffect(() => {
     if (artifact || surface) setViewerSource("workbench");
@@ -169,6 +204,45 @@ export function ChatRightPanel({
     window.addEventListener("pointerup", onUp, { once: true });
   }
 
+  function beginResizeHeight(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!onResizeHeight || isNarrow) return;
+    event.preventDefault();
+    const startY = event.clientY;
+    const available = availableHeight();
+    const startHeight = height ?? available;
+    setResizing(true);
+    const onUp = () => {
+      setResizing(false);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    const onMove = (moveEvent: PointerEvent) => {
+      // ★좁은 화면에서는 globals.css가 height 를 !important 로 덮는다. 드래그 도중
+      //   경계를 넘어가면 계산값이 반영되지 않으면서 저장만 되어 값이 튄다 — 즉시 중단.
+      if (window.innerWidth <= 760) { onUp(); return; }
+      const next = Math.round(startHeight + startY - moveEvent.clientY);
+      const clamped = Math.min(available, Math.max(RIGHT_PANEL_MIN_HEIGHT, next));
+      // 다시 꽉 채우면 null 로 되돌려 창 크기 변화를 그대로 따라가게 둔다.
+      onResizeHeight(clamped >= available ? null : clamped);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp, { once: true });
+  }
+
+  function resizeHeightByKeyboard(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (!onResizeHeight || !["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const available = availableHeight();
+    const current = height ?? available;
+    const next = event.key === "Home"
+      ? RIGHT_PANEL_MIN_HEIGHT
+      : event.key === "End"
+        ? available
+        : current + (event.key === "ArrowUp" ? 16 : -16);
+    const clamped = Math.min(available, Math.max(RIGHT_PANEL_MIN_HEIGHT, next));
+    onResizeHeight(clamped >= available ? null : clamped);
+  }
+
   function resizeByKeyboard(event: ReactKeyboardEvent<HTMLDivElement>) {
     if (!onResizeWidth || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
@@ -186,6 +260,7 @@ export function ChatRightPanel({
 
   return (
     <aside
+      ref={shellRef}
       className="chat-right-panel titlebar-nodrag"
       data-active-tab={activeTab}
       data-rich-output={activeTab === "panel" && hasPanelContent ? "true" : "false"}
@@ -193,7 +268,17 @@ export function ChatRightPanel({
       data-output-wide={isWideOutputKind(outputKind) ? "true" : "false"}
       data-output-auto-width={activeTab === "panel" && isWideOutputKind(outputKind) ? "true" : "false"}
       data-resizing={resizing ? "true" : "false"}
-      style={{ ...shellStyle, width: width ?? shellStyle.width, maxWidth: "none", transition: resizing ? "none" : shellStyle.transition }}
+      data-height-adjusted={typeof height === "number" ? "true" : "false"}
+      style={{
+        ...shellStyle,
+        width: width ?? shellStyle.width,
+        maxWidth: "none",
+        height: typeof height === "number" ? height : shellStyle.height,
+        // 아래를 기준으로 줄어든다 — 상단 가장자리를 끄는 방향과 일치한다.
+        // 비는 위쪽은 채우지 않고 페이지 배경을 그대로 노출한다(오너 결정).
+        alignSelf: typeof height === "number" ? "flex-end" : undefined,
+        transition: resizing ? "none" : shellStyle.transition,
+      }}
     >
       {onResizeWidth && (
         <div
@@ -208,6 +293,21 @@ export function ChatRightPanel({
           onPointerDown={beginResize}
           onKeyDown={resizeByKeyboard}
           style={resizeHandleStyle}
+        />
+      )}
+      {onResizeHeight && !isNarrow && (
+        <div
+          role="separator"
+          tabIndex={0}
+          aria-orientation="horizontal"
+          aria-valuemin={RIGHT_PANEL_MIN_HEIGHT}
+          aria-valuenow={typeof height === "number" ? height : undefined}
+          aria-label={ko ? "우측 패널 높이" : "Right panel height"}
+          title={ko ? "패널 높이 조절 (더블클릭: 전체 높이)" : "Resize panel height (double-click: full height)"}
+          onPointerDown={beginResizeHeight}
+          onKeyDown={resizeHeightByKeyboard}
+          onDoubleClick={() => onResizeHeight(null)}
+          style={resizeHeightHandleStyle}
         />
       )}
       <header style={headerStyle}>
@@ -782,20 +882,23 @@ function FileTab({
 function FileViewer({ file }: { file: WorkspaceFilePreview }) {
   const { locale } = useT();
   const ko = locale === "ko";
+  const codePreview = isCodeFilePreview(file);
   const typeLabel = viewerKindLabel(file.viewerKind, ko);
   return (
     <section style={fileViewerStyle}>
-      <header style={fileViewerHeaderStyle}>
-        <span style={fileViewerIconStyle}>{iconForViewerKind(file.viewerKind)}</span>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <strong style={fileViewerTitleStyle} title={file.path}>{file.name}</strong>
-          <span style={fileViewerMetaStyle}>{typeLabel} · {formatBytes(file.size)}{file.live ? <b style={{ marginLeft: 6, color: "#23724d", fontSize: 9, letterSpacing: ".04em" }}>● LIVE</b> : null}</span>
-        </div>
-      </header>
+      {!codePreview && (
+        <header style={fileViewerHeaderStyle}>
+          <span style={fileViewerIconStyle}>{iconForViewerKind(file.viewerKind)}</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <strong style={fileViewerTitleStyle} title={file.path}>{file.name}</strong>
+            <span style={fileViewerMetaStyle}>{typeLabel} · {formatBytes(file.size)}{file.live ? <b style={{ marginLeft: 6, color: "#23724d", fontSize: 9, letterSpacing: ".04em" }}>● LIVE</b> : null}</span>
+          </div>
+        </header>
+      )}
       {file.available === false && <div role="status" style={fileNoticeStyle}>{ko ? "파일 교체를 감지했습니다. 새 버전을 기다리는 중…" : "File replacement detected. Waiting for the new version…"}</div>}
       <div style={fileViewerBodyStyle}>
-        {isCodeFilePreview(file) ? (
-          <CodeIdeViewer name={file.name} locale={ko ? "ko" : "en"} initialContent={file.viewerKind === "json" ? prettyJson(file.content || "") : file.content || ""} fill />
+        {codePreview ? (
+          <CodeIdeViewer path={file.path} name={file.name} locale={ko ? "ko" : "en"} initialContent={file.viewerKind === "json" ? prettyJson(file.content || "") : file.content || ""} fill />
         ) : file.viewerKind === "browser" ? (
           <BrowserViewer file={file} />
         ) : isLiveOutputKind(file.viewerKind) ? (
@@ -807,6 +910,7 @@ function FileViewer({ file }: { file: WorkspaceFilePreview }) {
             size={file.size}
             locale={ko ? "ko" : "en"}
             fill
+            placement="sidebar"
           />
         ) : isTextualViewerKind(file.viewerKind) && !file.content ? (
           /* ★내용이 없으면 **백지 대신 이유를 말한다.** 헤더만 뜨고 본문이 비어 있는
@@ -1093,7 +1197,7 @@ const shellStyle: CSSProperties = {
   flexDirection: "column",
   minHeight: 0,
   overflow: "hidden",
-  transition: "width 180ms ease",
+  transition: "width 180ms ease, height 180ms ease",
 };
 
 const resizeHandleStyle: CSSProperties = {
@@ -1104,6 +1208,22 @@ const resizeHandleStyle: CSSProperties = {
   width: 7,
   cursor: "col-resize",
   zIndex: 6,
+  touchAction: "none",
+};
+
+/** 패널을 세로로 줄일 수 있는 최소 높이 — TaskCockpit 이 저장값 검증에 함께 쓴다. */
+export const RIGHT_PANEL_MIN_HEIGHT = 240;
+
+// 좌상단 모서리는 폭 핸들(zIndex 6)이 가져간다. 헤더 탭 버튼은 상단에서 7.5px 지점에
+// 시작하므로(헤더 47 - 탭 32, 센터 정렬) 5px 로 잡아 히트영역이 겹치지 않게 한다.
+const resizeHeightHandleStyle: CSSProperties = {
+  position: "absolute",
+  top: 0,
+  left: 7,
+  right: 0,
+  height: 5,
+  cursor: "row-resize",
+  zIndex: 5,
   touchAction: "none",
 };
 

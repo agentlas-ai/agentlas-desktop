@@ -1534,6 +1534,8 @@ export interface AutomationSession {
   /** Execution-ledger chat that owns this transcript. The automation screen sends
    *  ordinary turns into it, so the session panel is a real conversation. */
   chatId: string;
+  /** The automation pin used by manual follow-ups from this transcript. */
+  runtimeSelection: RuntimeSelection | null;
   messages: ChatHistoryEntry[];
   updatedAt: string;
 }
@@ -4472,6 +4474,8 @@ export interface McpInvocationEvent {
   done?: boolean;
   /** 이 노드가 실행 중인 모델/런타임 라벨(예: "grok-4.3", "claude", "gpt-5") — 트리에 "모델 사용 중" 표시. */
   model?: string;
+  /** Main-confirmed runtime selection actually used for this invocation. */
+  runtimeSelection?: RuntimeSelection;
   /** Explicit orchestrator/worker envelope; separate from ordinary status prose. */
   agentMessage?: AgentMessageEvent;
   /** Actual CLI process lifecycle; never inferred from `done` or `final`. */
@@ -4485,6 +4489,14 @@ export interface McpInvocationEvent {
 
 /** 워크플로우 그래프 노드의 라이브 실행 상태(설계 §5 P2 — 캔버스 오버레이). */
 export type WorkflowNodeRunState = "pending" | "running" | "done" | "failed" | "skipped";
+
+/** Main-confirmed runtime actually used by one graph run. */
+export interface WorkflowRunRuntimeFact {
+  nodeId?: string;
+  /** "worker" for graph work, "judgment" for an eval node, or a future role. */
+  role?: string;
+  selection: RuntimeSelection;
+}
 
 /** 워크플로우 1회 실행의 per-node 상태 스냅샷(automation_runs.node_states_json에 직렬화). */
 export interface WorkflowRunSnapshot {
@@ -4500,6 +4512,8 @@ export interface WorkflowRunSnapshot {
    * 매일 도는 자동화가 얼마를 쓰는지 모른 채 켜 두게 된다.
    */
   tokensUsed?: number;
+  /** 실제 연결이 원장에 남은 경우에만 제공한다. 설정값으로 추정하지 않는다. */
+  runtimeSelections?: WorkflowRunRuntimeFact[];
   /**
    * 노드 id → 왜 멈췄고 지금 무엇을 누르면 되는지.
    * 상태 단어만으로는 실패 카드가 아무 말도 할 수 없다.

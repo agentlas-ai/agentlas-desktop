@@ -6,10 +6,31 @@ import { useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { pickLocalized, useT } from "@/lib/i18n";
 import { humanSchedule } from "@shared/graph-blueprint";
-import type { Automation, InstalledAgent, InstalledFirm } from "@/lib/types";
+import type { Automation, InstalledAgent, InstalledFirm, RuntimeSelection } from "@/lib/types";
 import { IconBolt, IconBuilding, IconPlus, IconTrash } from "@/components/Icon";
 import { DescribeAutomation } from "@/components/automation/DescribeAutomation";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
+
+function runtimeSelectionLabel(selection: RuntimeSelection | null | undefined, locale: string): string {
+  if (!selection) return locale === "en" ? "follows active runtime" : "활성 런타임 따라가기";
+  const kindLabels: Record<string, string> = {
+    "claude-code": "Claude Code",
+    codex: "Codex",
+    antigravity: "Antigravity",
+    kimi: "Kimi",
+    grok: "Grok",
+    cursor: "Cursor",
+    byok: "BYOK",
+    ollama: "Ollama",
+    lmstudio: "LM Studio",
+    mlx: "MLX",
+    acp: "ACP",
+    agentlas: "Agentlas",
+  };
+  const kind = kindLabels[selection.kind] ?? selection.kind;
+  const model = selection.model?.trim();
+  return model ? `${kind} · ${model}` : kind;
+}
 
 export default function AutomationListPage() {
   const { t, locale } = useT();
@@ -326,6 +347,12 @@ export default function AutomationListPage() {
                     <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
                       {targetLabel(a).icon}
                       {targetLabel(a).name}
+                    </span>
+                    <span
+                      data-testid={`automation-runtime-${a.id}`}
+                      style={{ color: "var(--ink-soft)" }}
+                    >
+                      · {locale === "en" ? "runs on" : "실행 모델"} {runtimeSelectionLabel(a.runtimeSelection, locale)}
                     </span>
                   </div>
                 </div>

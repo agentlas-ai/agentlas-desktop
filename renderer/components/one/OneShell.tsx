@@ -2185,6 +2185,36 @@ export function OneShell() {
       cacheOneActivity(chatId, next);
       return next;
     });
+    if (event.kind === "notice" && event.notice?.code === "runtime-fallback" && event.runtimeSelection) {
+      const selection = event.runtimeSelection;
+      // Main has already persisted the new chat pin. Update the composer
+      // immediately as well, then refresh the exact live runtime so a provider
+      // switch (for example Antigravity -> Codex) changes the model menu too.
+      setOneRuntimePinned(true);
+      writeStoredOneRuntimeSelection(selection);
+      setActiveThreadChat((current) => current ? { ...current, runtimeSelection: selection } : current);
+      setOneRuntime((current) => {
+        if (!current || current.kind !== selection.kind || (selection.backend && current.backend !== selection.backend)) {
+          return current;
+        }
+        return withOneRuntimeSelection({ ...current, active: true }, selection.model ?? current.model ?? null, selection.effort ?? current.effort);
+      });
+      const api = ipc();
+      void api?.chats.setRuntimeSelection(chatId, selection).catch(() => null);
+      void api?.runtime.detect().then((runtimes) => {
+        const matched = runtimes.find((runtime) => (
+          runtime.kind === selection.kind
+          && (!selection.backend || runtime.backend === selection.backend)
+          && (!selection.source || runtime.source === selection.source)
+        )) ?? runtimes.find((runtime) => (
+          runtime.kind === selection.kind
+          && (!selection.backend || runtime.backend === selection.backend)
+        ));
+        if (!matched) return;
+        setOneRuntimeInventory(runtimes);
+        setOneRuntime(withOneRuntimeSelection({ ...matched, active: true }, selection.model ?? matched.model ?? null, selection.effort ?? matched.effort));
+      }).catch(() => null);
+    }
     if (event.kind === "mcp-key-request") {
       if (event.keyRequest && event.keyRequest.expiresAt > Date.now()) {
         setKeyRequestSheet(event.keyRequest);

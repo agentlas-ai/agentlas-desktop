@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { Chat } from "../../shared/types";
+import type { Chat, RuntimeSelection } from "../../shared/types";
 import { emitDesktopStoreChange } from "./change-bus";
-import { createChat, getChat } from "./chats";
+import { createChat, getChat, setChatRuntimeSelection } from "./chats";
 import { getDb } from "./db";
 
 export type AutomationSessionTarget =
@@ -81,6 +81,24 @@ function rowToSession(row: AutomationSessionRow): AutomationExecutionSession | n
   };
 }
 
+/**
+ * An automation transcript is also a runnable chat. Keep its chat-scoped pin
+ * synchronized with the automation's saved pin so a manual follow-up from the
+ * session panel cannot silently fall back to the global role pool (for example
+ * from Antigravity to Claude). `undefined` means this caller does not own the
+ * pin; explicit null clears a stale pin when the automation follows the pool.
+ */
+function syncSessionRuntimeSelection(
+  chat: Chat,
+  selection: RuntimeSelection | null | undefined,
+): Chat {
+  if (selection === undefined) return chat;
+  const current = chat.runtimeSelection ?? null;
+  const next = selection ?? null;
+  if (JSON.stringify(current) === JSON.stringify(next)) return chat;
+  return setChatRuntimeSelection(chat.id, next);
+}
+
 /** Canonical owner for an automation transcript. Chat is an execution ledger only. */
 export function getOrCreateAutomationSession(input: {
   automationId: string;
@@ -88,6 +106,7 @@ export function getOrCreateAutomationSession(input: {
   firmId?: string | null;
   hubId?: string | null;
   projectId?: string | null;
+  runtimeSelection?: RuntimeSelection | null;
 }): AutomationExecutionSession {
   const db = getDb();
   const target = targetFor(input);
@@ -97,12 +116,12 @@ export function getOrCreateAutomationSession(input: {
   if (existing) {
     const session = rowToSession(existing);
     if (session) {
+      let chat = syncSessionRuntimeSelection(session.chat, input.runtimeSelection);
       if ((session.chat.projectId ?? null) !== (input.projectId ?? null)) {
         db.prepare("UPDATE chats SET project_id = ? WHERE id = ?").run(input.projectId ?? null, session.chat.id);
-        const updated = rowToSession(existing);
-        if (updated) return updated;
+        chat = getChat(session.chat.id) ?? chat;
       }
-      return session;
+      return { ...session, chat };
     }
     db.prepare("DELETE FROM automation_sessions WHERE id = ?").run(existing.id);
   }
@@ -128,6 +147,8 @@ export function getOrCreateAutomationSession(input: {
       });
   if (!chat) throw new Error("automation_session_ledger_unavailable");
 
+  const syncedChat = syncSessionRuntimeSelection(chat, input.runtimeSelection);
+
   const now = new Date().toISOString();
   const id = randomUUID();
   db.prepare(
@@ -136,7 +157,7 @@ export function getOrCreateAutomationSession(input: {
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
   ).run(id, input.automationId, target.kind, target.id, chat.id, now, now);
   emitDesktopStoreChange({ entity: "automation", id: input.automationId });
-  return { id, automationId: input.automationId, target, chat, createdAt: now, updatedAt: now };
+  return { id, automationId: input.automationId, target, chat: syncedChat, createdAt: now, updatedAt: now };
 }
 
 export function removeAutomationSessions(automationId: string): void {

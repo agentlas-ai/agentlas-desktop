@@ -46,6 +46,10 @@ export function LiveDeviceMockup({ url, title, runtimeLabel, viewId, locale = "k
   const effectiveViewId = viewIdRef.current;
   const [expanded, setExpanded] = useState(false);
   const [poweredOff, setPoweredOff] = useState(false);
+  // Web output is the default surface. The phone frame remains available as a
+  // deliberate viewport choice, but must not be the surrounding card users
+  // see for ordinary app rendering.
+  const [device, setDevice] = useState<"desktop" | "phone">("desktop");
   // "LIVE"는 관측된 사실일 때만 단다 (U-D-1 범위 밖 3종 ③): 네이티브 뷰의
   // 실제 상태 + 루프백 서버 도달성 프로브(OneActivityTimeline과 같은 계약 —
   // 보이는 동안만 6초 주기, 죽음/부활 매 주기 재평가).
@@ -151,40 +155,73 @@ export function LiveDeviceMockup({ url, title, runtimeLabel, viewId, locale = "k
         </div>
       </header>
 
-      <div className={styles.deviceArea}>
-        <div className={styles.deviceFrame}>
-          <span className={`${styles.sideButton} ${styles.sideButtonTop}`} aria-hidden="true" />
-          <span className={`${styles.sideButton} ${styles.sideButtonMiddle}`} aria-hidden="true" />
-          <div className={styles.bezel}>
-            <div className={styles.deviceScreen}>
-              <div className={styles.dynamicIsland} aria-hidden="true" />
-              {poweredOff ? (
-                <div className={styles.poweredOff} role="status">
-                  <IconPower size={24} />
-                  <strong>{ko ? "앱 목업이 꺼져 있습니다" : "App mockup is powered off"}</strong>
-                  <button type="button" onClick={() => setPoweredOff(false)}>
-                    {ko ? "다시 켜기" : "Turn on"}
-                  </button>
-                </div>
-              ) : (
-                <div className={styles.screenViewport}>
-                  <NativeLiveWebView
-                    url={url}
-                    title={title}
-                    runtimeLabel={runtimeLabel}
-                    mode="app"
-                    bare
-                    viewId={effectiveViewId}
-                    onStatus={(status) => setViewState(status.state)}
-                  />
-                </div>
-              )}
+      <div className={styles.deviceArea} data-device={device}>
+        {device === "desktop" ? (
+          <div className={styles.desktopSurface}>
+            {poweredOff ? (
+              <div className={styles.poweredOff} role="status">
+                <IconPower size={24} />
+                <strong>{ko ? "미리보기가 꺼져 있습니다" : "Preview is powered off"}</strong>
+                <button type="button" onClick={() => setPoweredOff(false)}>
+                  {ko ? "다시 켜기" : "Turn on"}
+                </button>
+              </div>
+            ) : (
+              <NativeLiveWebView
+                url={url}
+                title={title}
+                runtimeLabel={runtimeLabel}
+                mode="app"
+                bare
+                viewId={effectiveViewId}
+                onStatus={(status) => setViewState(status.state)}
+              />
+            )}
+          </div>
+        ) : (
+          <div className={styles.deviceFrame}>
+            <span className={`${styles.sideButton} ${styles.sideButtonTop}`} aria-hidden="true" />
+            <span className={`${styles.sideButton} ${styles.sideButtonMiddle}`} aria-hidden="true" />
+            <div className={styles.bezel}>
+              <div className={styles.deviceScreen}>
+                <div className={styles.dynamicIsland} aria-hidden="true" />
+                {poweredOff ? (
+                  <div className={styles.poweredOff} role="status">
+                    <IconPower size={24} />
+                    <strong>{ko ? "앱 목업이 꺼져 있습니다" : "App mockup is powered off"}</strong>
+                    <button type="button" onClick={() => setPoweredOff(false)}>
+                      {ko ? "다시 켜기" : "Turn on"}
+                    </button>
+                  </div>
+                ) : (
+                  <div className={styles.screenViewport}>
+                    <NativeLiveWebView
+                      url={url}
+                      title={title}
+                      runtimeLabel={runtimeLabel}
+                      mode="app"
+                      bare
+                      viewId={effectiveViewId}
+                      onStatus={(status) => setViewState(status.state)}
+                    />
+                  </div>
+                )}
+              </div>
             </div>
           </div>
-        </div>
+        )}
       </div>
 
       <footer className={styles.deviceControls} aria-label={ko ? "미리보기 제어" : "Preview controls"}>
+        <button
+          type="button"
+          className={styles.deviceToggle}
+          onClick={() => setDevice((current) => (current === "desktop" ? "phone" : "desktop"))}
+          aria-label={ko ? "미리보기 화면 크기 전환" : "Toggle preview viewport"}
+          title={device === "desktop" ? (ko ? "데스크탑 · 눌러서 폰" : "Desktop · tap for phone") : (ko ? "폰 · 눌러서 데스크탑" : "Phone · tap for desktop")}
+        >
+          {device === "desktop" ? (ko ? "데스크탑" : "Desktop") : (ko ? "폰" : "Phone")}
+        </button>
         <button type="button" onClick={goHome} aria-label={ko ? "홈" : "Home"} title={ko ? "홈" : "Home"}>
           <IconHome size={15} />
         </button>

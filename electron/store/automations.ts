@@ -30,6 +30,7 @@ import type {
   Trigger,
   TriggerKind,
   WorkflowNodeRunState,
+  WorkflowRunRuntimeFact,
   WorkflowRunSnapshot,
 } from "../../shared/types";
 
@@ -737,6 +738,52 @@ interface AutomationRunSnapshotRow {
   resume_of_run_id: string | null;
 }
 
+function runtimeFactsForRun(runId: string): WorkflowRunRuntimeFact[] {
+  if (!runId) return [];
+  try {
+    const rows = getDb().prepare(
+      `SELECT node_id, payload_json FROM run_events
+       WHERE run_id = ? AND kind = 'runtime_selection'
+       ORDER BY seq ASC LIMIT 200`,
+    ).all(runId) as Array<{ node_id: string | null; payload_json: string | null }>;
+    const latestByNodeAndRole = new Map<string, WorkflowRunRuntimeFact>();
+    for (const row of rows) {
+      let payload: Record<string, unknown>;
+      try {
+        const parsed = row.payload_json ? JSON.parse(row.payload_json) : null;
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+        payload = parsed as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      const kind = typeof payload.runtimeKind === "string" ? payload.runtimeKind : "";
+      if (!kind) continue;
+      const decoded = decodeRuntimeSelection(JSON.stringify({
+        kind,
+        ...(typeof payload.runtimeBackend === "string" ? { backend: payload.runtimeBackend } : {}),
+        ...(typeof payload.runtimeSource === "string" ? { source: payload.runtimeSource } : {}),
+        ...(typeof payload.runtimeModel === "string" ? { model: payload.runtimeModel } : {}),
+        ...(typeof payload.runtimeLongContext === "boolean" ? { longContext: payload.runtimeLongContext } : {}),
+        ...(typeof payload.runtimeEffort === "string" ? { effort: payload.runtimeEffort } : {}),
+      }));
+      if (decoded.state !== "valid" || !decoded.value) continue;
+      const role = typeof payload.runtimeRole === "string" ? payload.runtimeRole : undefined;
+      const nodeId = typeof row.node_id === "string" && row.node_id ? row.node_id : undefined;
+      const key = `${nodeId ?? ""}\0${role ?? ""}`;
+      latestByNodeAndRole.set(key, {
+        ...(nodeId ? { nodeId } : {}),
+        ...(role ? { role } : {}),
+        selection: decoded.value,
+      });
+    }
+    return [...latestByNodeAndRole.values()];
+  } catch {
+    // Legacy stores or an incomplete migration may not have run_events yet.
+    // Runtime facts are observability only and must never hide the run state.
+    return [];
+  }
+}
+
 const MAX_AUTOMATION_CHECKPOINT_BYTES = 1024 * 1024;
 
 export interface FailedGraphCheckpoint {
@@ -1057,6 +1104,8 @@ export function getLatestGraphRun(automationId: string): WorkflowRunSnapshot | n
     }
   } catch { /* 저널을 못 읽어도 실행 상태는 돌려준다 */ }
 
+  const runtimeSelections = runtimeFactsForRun(row.id);
+
   return {
     runId: row.id,
     automationId: row.automation_id ?? automationId,
@@ -1064,6 +1113,7 @@ export function getLatestGraphRun(automationId: string): WorkflowRunSnapshot | n
     status: (row.status as WorkflowRunSnapshot["status"]) ?? "running",
     nodeStates,
     ...(typeof tokensUsed === "number" ? { tokensUsed } : {}),
+    ...(runtimeSelections.length > 0 ? { runtimeSelections } : {}),
     ...(Object.keys(nodeFailures).length > 0 ? { nodeFailures } : {}),
   };
 }

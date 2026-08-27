@@ -2,6 +2,7 @@
 
 import dynamic from "next/dynamic";
 import { useEffect, useState } from "react";
+import { useMediaDisplayPreferences } from "@/lib/media-display-preferences";
 import styles from "./LiveOutputViewer.module.css";
 
 const UniversalFileViewerEngine = dynamic(
@@ -23,6 +24,7 @@ export function LiveOutputViewer({
   locale,
   compact = false,
   fill = false,
+  placement = "chat",
 }: {
   source: string;
   name: string;
@@ -33,9 +35,23 @@ export function LiveOutputViewer({
   compact?: boolean;
   /** The in-app result sidebar occupies the whole available viewer stage. */
   fill?: boolean;
+  /** Sidebars respect the user's per-media visibility settings; chat does not. */
+  placement?: "chat" | "sidebar";
 }) {
   const [mediaState, setMediaState] = useState<"loading" | "ready" | "error">("loading");
+  const { preferences } = useMediaDisplayPreferences();
   useEffect(() => setMediaState("loading"), [source]);
+
+  const hiddenMedia = placement === "sidebar"
+    && ((kind === "image" && !preferences.image)
+      || (kind === "video" && !preferences.video)
+      || (kind === "audio" && !preferences.audio));
+
+  if (hiddenMedia) {
+    return <div className={styles.mediaHidden} role="status">
+      {locale === "ko" ? "이 미디어는 설정에서 숨겨져 있습니다." : "This media is hidden by your settings."}
+    </div>;
+  }
 
   if (kind === "image") {
     return <div className={styles.mediaStage} data-media-kind="image" data-compact={compact} data-fill={fill} data-state={mediaState}>

@@ -5182,7 +5182,7 @@ export function initStore(options: StoreInitOptions = {}): void {
               ORDER BY c2.created_at ASC LIMIT 1)`
           : "NULL";
         _db!.exec(`
-          INSERT INTO one_seats (id, kind, title, project_id, created_at, updated_at)
+          INSERT OR IGNORE INTO one_seats (id, kind, title, project_id, created_at, updated_at)
           SELECT
             'seat_' || c.agent_id,
             'solo',
@@ -5194,7 +5194,7 @@ export function initStore(options: StoreInitOptions = {}): void {
           WHERE c.agent_id IS NOT NULL
           GROUP BY c.agent_id;
 
-          INSERT INTO one_seat_occupants (seat_id, slot, agent_id, display_name, since, until)
+          INSERT OR IGNORE INTO one_seat_occupants (seat_id, slot, agent_id, display_name, since, until)
           SELECT
             'seat_' || c.agent_id,
             0,

@@ -40,9 +40,11 @@ import type {
   OneActivityState,
 } from "@/lib/one-activity";
 import { buildToolCallDisplay, normalizeToolCall } from "@shared/tool-call-detail";
+import { parseMcpResult } from "@shared/mcp-result-rendering";
 import { isCommandTool, isComputerUseTool } from "@shared/tool-taxonomy";
 import type { OnePermissionMode } from "./OneComposerControls";
 import { OneComputerHistory } from "./OneComputerHistory";
+import { McpResultPreview } from "../McpResultPreview";
 import styles from "./OneActivityTimeline.module.css";
 
 const ONE_OUTPUT_SECTIONS_STORAGE_KEY = "agentlas.one.output-sections.v1";
@@ -52,7 +54,7 @@ const ONE_OUTPUT_PREVIEW_HEIGHT_STORAGE_KEY = "agentlas.one.output-preview-heigh
 const ONE_OUTPUT_PREVIEW_HEIGHT_MIN = 160;
 /** 아래 섹션이 최소한 한 줄은 보이도록 남겨 두는 높이. */
 const ONE_OUTPUT_BELOW_MIN = 120;
-type OutputSectionKey = "files" | "agents" | "processes" | "computer" | "sources";
+type OutputSectionKey = "files" | "mcp" | "agents" | "processes" | "computer" | "sources";
 type OutputRailView = "result" | "activity" | "terminal" | "browser" | "app";
 
 /** 탭마다 제 아이콘 — 글자만 있으면 어느 탭인지 눈으로 못 고른다. */
@@ -80,7 +82,7 @@ function readCollapsedOutputSections(): Set<OutputSectionKey> {
   try {
     const stored = JSON.parse(window.localStorage.getItem(ONE_OUTPUT_SECTIONS_STORAGE_KEY) ?? "[]") as unknown;
     if (!Array.isArray(stored)) return new Set();
-    const allowed = new Set<OutputSectionKey>(["files", "agents", "processes", "computer", "sources"]);
+    const allowed = new Set<OutputSectionKey>(["files", "mcp", "agents", "processes", "computer", "sources"]);
     return new Set(stored.filter((value): value is OutputSectionKey => typeof value === "string" && allowed.has(value as OutputSectionKey)));
   } catch {
     return new Set();
@@ -508,7 +510,7 @@ function ArtifactPreviewCard({ item, locale, wide = false }: { item: OneActivity
     {preview && <div className={`${styles.artifactVisual} ${preview.kind === "audio" ? styles.artifactAudio : ""}`}>
       {preview.kind === "data" && isCodeArtifactName(item.label)
         ? <CodeIdeViewer source={preview.capabilityUrl} name={item.label} locale={locale} compact={!wide} />
-        : <LiveOutputViewer source={preview.capabilityUrl} name={item.label} kind={liveKindForCapability(preview)} mimeType={preview.mimeType} size={preview.sizeBytes} locale={locale} compact={!wide} />}
+        : <LiveOutputViewer source={preview.capabilityUrl} name={item.label} kind={liveKindForCapability(preview)} mimeType={preview.mimeType} size={preview.sizeBytes} locale={locale} compact={!wide} placement="sidebar" />}
     </div>}
     {!preview && <div className={styles.artifactFileFallback} data-loading={!settled ? "true" : "false"}><IconFileUp size={18} /></div>}
     <div className={styles.artifactPreviewCopy}>
@@ -583,7 +585,7 @@ function ArtifactOpenViewer({ target, locale, wide }: { target: OneArtifactOpenR
   if (failed || !capability) return <div className={styles.artifactFileFallback} role="alert"><span>{locale === "ko" ? "아티팩트를 인앱에서 열지 못했습니다." : "This artifact could not be opened in the app."}</span><button type="button" onClick={issue}>{locale === "ko" ? "다시 시도" : "Retry"}</button></div>;
   return capability.kind === "data" && isCodeArtifactName(target.label)
     ? <CodeIdeViewer source={capability.capabilityUrl} name={target.label} locale={locale} fill={wide} />
-    : <LiveOutputViewer source={capability.capabilityUrl} name={target.label} kind={liveKindForCapability(capability)} mimeType={capability.mimeType} size={capability.sizeBytes} locale={locale} fill />;
+    : <LiveOutputViewer source={capability.capabilityUrl} name={target.label} kind={liveKindForCapability(capability)} mimeType={capability.mimeType} size={capability.sizeBytes} locale={locale} fill placement="sidebar" />;
 }
 
 export function taskBrowserUrl(items: OneActivityItem[]): string | undefined {
@@ -1262,6 +1264,7 @@ export function OneActivityArtifactRail({
   const presentedAppTargetRef = useRef<string | null>(null);
   const presentedResultKeyRef = useRef<string | null>(null);
   const presentedArtifactIdRef = useRef<string | null>(null);
+  const presentedMcpResultIdRef = useRef<string | null>(null);
   const clampWidth = (value: number) => Math.min(maxWidth, Math.max(minWidth, Math.round(value)));
   const collapseThreshold = Math.max(120, Math.min(220, minWidth - 48));
   const clampHistoryHeight = (value: number) => Math.min(480, Math.max(150, Math.round(value)));
@@ -1350,6 +1353,14 @@ export function OneActivityArtifactRail({
     }
     return [...unique.values()];
   }, [activity?.items, locale]);
+  const mcpResults = useMemo(
+    () => (activity?.items ?? []).filter((item) => (
+      item.kind === "tool"
+      && typeof item.tool?.result === "string"
+      && parseMcpResult(item.tool.result, item.tool.name).blocks.length > 0
+    )).slice(-8),
+    [activity?.items],
+  );
   /*
    * 분류는 도구 이름의 단어가 아니라 그 도구가 한 일로 한다 — shared/tool-taxonomy.ts.
    * 단어 매칭은 claude 의 `Bash` 하나만 잡고 codex `bash`(소문자 통과), grok `write`,
@@ -1430,6 +1441,15 @@ export function OneActivityArtifactRail({
     // 도착할 때마다 Activity 로 튕기면 사람이 보던 화면이 사라진다(P0: 재열람 시 Browser 유지).
     setRailView((current) => (current === "browser" ? current : "activity"));
   }, [latestArtifactId, result]);
+  useEffect(() => {
+    const latest = mcpResults.at(-1)?.id ?? null;
+    if (!latest || presentedMcpResultIdRef.current === latest) return;
+    presentedMcpResultIdRef.current = latest;
+    setOpenTabs((tabs) => (tabs.includes("activity") ? tabs : [...tabs, "activity"]));
+    // Keep a user-selected Result/Browser/App view stable; otherwise expose
+    // the new MCP result in the activity tab as soon as the rail is opened.
+    setRailView((current) => current ?? "activity");
+  }, [mcpResults]);
   useEffect(() => {
     if (!preferredBrowserUrl) return;
     const targetKey = `${browserScopeKey ?? "unscoped"}\u0000${preferredBrowserUrl}`;
@@ -1742,6 +1762,18 @@ export function OneActivityArtifactRail({
             {items.length === 0 && <p className={styles.artifactEmpty}>{locale === "ko" ? "만든 파일 또는 사이트가 여기에 표시됩니다" : "Files or sites you create appear here"}</p>}
             {items.map((item) => <ArtifactPreviewCard key={item.id} item={item} locale={locale} wide={(width ?? defaultWidth) >= 560} />)}
           </OutputDisclosure>
+          {mcpResults.length > 0 && <OutputDisclosure section="mcp" label={locale === "ko" ? "MCP 결과" : "MCP results"} count={mcpResults.length} expanded={sectionExpanded("mcp")} onToggle={toggleSection}>
+            {mcpResults.map((item) => (
+              <McpResultPreview
+                key={`mcp-rail-preview:${item.id}`}
+                result={item.tool?.result}
+                toolName={item.tool?.name}
+                locale={locale}
+                compact
+                placement="sidebar"
+              />
+            ))}
+          </OutputDisclosure>}
           <OutputDisclosure section="agents" label={locale === "ko" ? "하위 에이전트" : "Subagents"} count={agents.length} expanded={sectionExpanded("agents")} onToggle={toggleSection}>
             {agents.length === 0
               ? <p className={styles.artifactEmpty}>{locale === "ko" ? "실행된 하위 에이전트 없음" : "No subagents used"}</p>

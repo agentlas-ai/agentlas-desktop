@@ -1,6 +1,7 @@
 import type {
   AgentRuntimeOverride,
   RuntimeRole,
+  RuntimeSelection,
   RuntimeStatus,
 } from "../../shared/types";
 import { findAgentRuntimeOverride, type RuntimeOverrideTarget } from "../store/agent-runtime-overrides";
@@ -32,8 +33,9 @@ import { agentActivityKey, registerAgentResidency, touchAgentResidency } from ".
 import { acpOrLegacyRunner, acpSessionKind, createAcpRunner } from "./acp";
 import { resolveAcpAgentSpec } from "./acp-agents";
 import { acquireLocalInferenceSlot } from "./local-inference-run-slots";
-import type { Runner } from "./runner";
+import type { Runner, RunnerFailure } from "./runner";
 import { peekProviderUsedPercent } from "../usage";
+import { listModelRoleMembers } from "../store/model-roles";
 
 /**
  * CLI 러너를 전역 실행 슬롯으로 래핑 — 챗·firm·swarm·워크플로우·자동화가 각자 캡으로
@@ -375,6 +377,115 @@ function runtimeStatusSelection(runtime: RuntimeStatus): import("../../shared/ty
   };
 }
 
+function runtimeMatchesSelection(
+  runtime: RuntimeStatus,
+  selection: Pick<RuntimeSelection, "kind" | "backend" | "source">,
+): boolean {
+  return runtime.kind === selection.kind
+    && (!selection.backend || runtime.backend === selection.backend)
+    && (!selection.source || runtime.source === selection.source);
+}
+
+function applyStoredRoleSelection(
+  runtime: RuntimeStatus,
+  selection: RuntimeSelection,
+): RuntimeStatus {
+  const model = selection.model ?? runtime.model;
+  return {
+    ...runtime,
+    active: true,
+    model,
+    effort: effortForSelectedModel(runtime, model, selection.effort ?? runtime.effort),
+    longContextEnabled: selection.longContext ?? runtime.longContextEnabled,
+  };
+}
+
+/**
+ * Returns live runtimes in the exact order stored in model_role_members.
+ *
+ * `pickActive()` is intentionally a UI/legacy helper: it follows the detected
+ * runtime array and activeRoles. Execution fallback must not use that order,
+ * because detection order is not the owner's priority list. An empty worker
+ * pool inherits the orchestrator pool, matching the store contract.
+ */
+export function rolePriorityRuntimes(
+  runtimes: RuntimeStatus[],
+  role: RuntimeRole,
+  options: {
+    failedRuntime?: RuntimeStatus;
+    failure?: Pick<RunnerFailure, "kind">;
+    exclude?: RuntimeStatus[];
+  } = {},
+): RuntimeStatus[] {
+  const ownMembers = listModelRoleMembers(role);
+  const inherited = role === "worker" && ownMembers.length === 0;
+  const members = inherited ? listModelRoleMembers("orchestrator") : ownMembers;
+  const excluded = options.exclude ?? [];
+  const blocked = (candidate: RuntimeStatus): boolean => {
+    if (excluded.some((item) => sameRuntimeIdentity(candidate, item))) return true;
+    if (
+      options.failedRuntime
+      && options.failure
+      && runtimeFailureSharesProviderDomain(candidate, options.failedRuntime, options.failure)
+    ) return true;
+    return false;
+  };
+  const out: RuntimeStatus[] = [];
+  const pushCandidate = (candidate: RuntimeStatus | null): void => {
+    if (!candidate || blocked(candidate) || !pickRunner(candidate)) return;
+    const unavailable = runtimeSelectionUnavailableReason(candidate, runtimeStatusSelection(candidate));
+    if (unavailable) return;
+    if (!out.some((item) => sameRuntimeIdentity(item, candidate) && item.model === candidate.model)) {
+      out.push(candidate);
+    }
+  };
+
+  if (members.length > 0) {
+    for (const member of members) {
+      const matched = runtimes.find((runtime) => runtimeMatchesSelection(runtime, member.selection));
+      if (!matched) continue;
+      pushCandidate(applyStoredRoleSelection(matched, {
+        ...member.selection,
+        role,
+        inherit: inherited,
+      }));
+    }
+    return out;
+  }
+
+  // Legacy/unconfigured stores have no ordered pool yet. Keep the old active
+  // role behavior only in that case; once a pool exists, no detection-order
+  // runtime may be smuggled in ahead of its DB rows.
+  const legacyActive = pickActive(runtimes, role);
+  pushCandidate(legacyActive);
+  if (out.length === 0) {
+    for (const runtime of runtimes) pushCandidate({ ...runtime, active: true });
+  }
+  return out;
+}
+
+function sameRuntimeIdentity(left: RuntimeStatus, right: RuntimeStatus): boolean {
+  return left.kind === right.kind
+    && left.backend === right.backend
+    && left.source === right.source
+    && left.acpAgentId === right.acpAgentId;
+}
+
+/** Quota/auth is provider-wide; other failures stay scoped to one runtime/model pair. */
+export function runtimeFailureSharesProviderDomain(
+  candidate: RuntimeStatus,
+  failed: RuntimeStatus,
+  failure: Pick<RunnerFailure, "kind">,
+): boolean {
+  if (failure.kind === "auth" || failure.kind === "quota") {
+    return candidate.kind === failed.kind && candidate.backend === failed.backend;
+  }
+  // A transport/exit failure on one model must still allow the next model
+  // configured on the same executable to run. Quota/auth remains provider-wide
+  // above because that state is shared by the account, not the model.
+  return sameRuntimeIdentity(candidate, failed) && candidate.model === failed.model;
+}
+
 export function selectExactRuntime(
   runtimes: RuntimeStatus[],
   selection: import("../../shared/types").RuntimeSelection,
@@ -386,13 +497,20 @@ export function selectExactRuntime(
     return true;
   });
   if (!matched) return null;
-  const model = selection.model ?? matched.model;
+  // A graph node override may intentionally pin only the runtime kind. In that
+  // case, resolve the model from the requested role instead of borrowing the
+  // automation's other-provider model (for example, Claude + gemini). An
+  // explicit model remains authoritative and is never replaced by a role pick.
+  const roleSelected = !selection.model && selection.role
+    ? applyRoleSelection(matched, selection.role)
+    : matched;
+  const model = selection.model ?? roleSelected.model;
   const active: RuntimeStatus = {
-    ...matched,
+    ...roleSelected,
     active: true,
     model,
-    longContextEnabled: selection.longContext ?? matched.longContextEnabled,
-    effort: effortForSelectedModel(matched, model, selection.effort ?? matched.effort),
+    longContextEnabled: selection.longContext ?? roleSelected.longContextEnabled,
+    effort: effortForSelectedModel(roleSelected, model, selection.effort ?? roleSelected.effort),
   };
   return { active, picked: pickRunner(active), override: null, unavailableOverride: null };
 }
@@ -438,26 +556,30 @@ export function selectRuntimeForTargets(
       return { active, picked: pickRunner(active), override, unavailableOverride: null };
     }
 
-    // Explicit One Team contract: selected model -> orchestrator's worker role
-    // -> any other connected working runtime. This is narrower than changing
-    // the global role pool and applies only when an agent-scoped preference is
-    // known unavailable or over its measured usage threshold.
-    const worker = pickActive(runtimes, "worker");
-    const workerReason = worker
-      ? runtimeSelectionUnavailableReason(worker, runtimeStatusSelection(worker))
+    // An unavailable scoped seat falls back within the same execution role.
+    // Specialist seats use the worker pool; CEO/controller seats use the
+    // orchestrator pool. Never use detection order as the hidden fallback.
+    const rolePriority = rolePriorityRuntimes(runtimes, role);
+    const roleFallback = rolePriority[0] ?? null;
+    const roleFallbackReason = roleFallback
+      ? runtimeSelectionUnavailableReason(roleFallback, runtimeStatusSelection(roleFallback))
       : "runtime-unavailable";
-    if (worker && !workerReason && (
+    if (roleFallback && !roleFallbackReason && (
       !matched
-      || worker.kind !== matched.kind
-      || worker.backend !== matched.backend
-      || worker.model !== override.selection.model
+      || roleFallback.kind !== matched.kind
+      || roleFallback.backend !== matched.backend
+      || roleFallback.model !== override.selection.model
     )) {
       return {
-        active: worker,
-        picked: pickRunner(worker),
+        active: roleFallback,
+        picked: pickRunner(roleFallback),
         override: null,
         unavailableOverride: override,
-        fallbackStage: "worker",
+        // Preserve the existing UI distinction for an absent model while the
+        // actual candidate is now resolved from the requested role's DB pool.
+        fallbackStage: role === "worker" || unavailableReason === "model-unavailable"
+          ? "worker"
+          : "connected",
         fallbackReason: unavailableReason ?? "runtime-unavailable",
       };
     }
@@ -483,7 +605,7 @@ export function selectRuntimeForTargets(
     return null;
   }
 
-  const active = pickActive(runtimes, role);
+  const active = rolePriorityRuntimes(runtimes, role)[0] ?? pickActive(runtimes, role);
   if (!active) return null;
   return {
     active,

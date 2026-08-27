@@ -2,7 +2,7 @@
 // 실행 기록 + "확인 필요" 처리. 이 패널의 계약: 확인이 필요하다고 말할 때는 반드시
 // (1) 무엇이 멈췄는지 실제 사유와 (2) 사용자가 지금 누를 수 있는 행동을 함께 준다.
 // 사유도 행동도 없는 "확인이 필요해요"는 사용자를 막다른 길에 세운다.
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { automationRunNeedsAttention } from "@shared/automation-attention";
 import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
@@ -17,6 +17,7 @@ import type {
   AutomationRunRecord,
   AutomationTriggerEventAttention,
   WorkflowRunSnapshot,
+  WorkflowRunRuntimeFact,
   WorkflowNodeRunState,
 } from "@/lib/types";
 
@@ -75,6 +76,7 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
   const [fixPlan, setFixPlan] = useState<AutomationFixPlan | null>(null);
   const [fixBusy, setFixBusy] = useState<string | null>(null);
   const [fixMessage, setFixMessage] = useState("");
+  const reconciliationAttemptRef = useRef<string | null>(null);
 
   /* ★"눌렀는데 아무 일도 안 일어남"을 구조적으로 금지한다.
      어떤 행동이든 (1) 실행하고 (2) 다시 읽는다. 조용히 그대로 두면 사용자는 같은
@@ -98,8 +100,12 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
     }
     if (!automation.graph || !snap || snap.status !== "error") {
       setReconciliation(null);
+      reconciliationAttemptRef.current = null;
       return;
     }
+    const reconciliationKey = `${snap.runId}:${JSON.stringify(automation.graph)}`;
+    if (reconciliationAttemptRef.current === reconciliationKey) return;
+    reconciliationAttemptRef.current = reconciliationKey;
     try {
       const nextReconciliation = await api.automations.getGraphReconciliation(automation.id);
       setReconciliation(nextReconciliation);
@@ -133,7 +139,22 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
     setNodeDecisions(drafts);
   }, [reconciliation?.checkpointDigest, reconciliation?.runId]);
 
-  const current = useMemo(() => summarizeSnapshot(latest, ko), [latest, ko]);
+  // The graph snapshot answers whether the kernel reached its terminal state;
+  // the newest history row answers whether the produced result was accepted.
+  // Both facts belong in the same visible story. Otherwise a mechanically
+  // complete run whose controller verdict is `rejected` is headlined as
+  // "완료했어요" while the history row says the result fell short.
+  const current = useMemo(() => summarizeSnapshot(latest, runs[0] ?? null, ko), [latest, ko, runs]);
+  /*
+   * The automation header shows the saved pin. This separate line is the
+   * execution ledger: it is populated only from runtime_selection events in
+   * the completed graph run, so a stale setting can never masquerade as proof
+   * of what actually ran.
+   */
+  const runtimeFactLabels = useMemo(() => {
+    const facts = latest?.runtimeSelections ?? [];
+    return [...new Set(facts.map((fact) => runtimeFactLabel(fact, ko)))];
+  }, [ko, latest?.runtimeSelections]);
   // 가장 최근 성공 실행의 시각. 이보다 앞선 미확인 건은 "지금 확인이 필요한 상태"가
   // 아니다 — 그 뒤로 같은 자동화가 정상 완주했기 때문이다. 기록은 남기되 현재 상태로
   // 올리지 않는다.
@@ -228,10 +249,11 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
     || Object.values(latest?.nodeStates ?? {}).some((state) => state === "running");
   const latestKernelOk = latest?.status === "ok"
     && Object.keys(latest?.nodeFailures ?? {}).length === 0;
+  const latestOutcomeNeedsHelp = runs[0] ? automationRunNeedsAttention(runs[0]) : false;
   const blockingRunOpen = Boolean(blockingRun) && !(
     Number.isFinite(clearedAt) && blockingRun && Date.parse(blockingRun.ranAt) <= clearedAt
   );
-  const needsHelp = !canvasOwnsDecision && !liveRunning && !latestKernelOk
+  const needsHelp = !canvasOwnsDecision && !liveRunning && (!latestKernelOk || latestOutcomeNeedsHelp)
     && Boolean(reconciliation || regularAttentions.length > 0
       || (latest?.status === "error" && !latestAcknowledged) || blockingRunOpen);
   // 기록 원문(판정 코드 접두사 제거). 평이한 설명 아래 "자세히"로만 노출한다.
@@ -432,6 +454,17 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
         <div className="automation-run-snapshot" data-status={latest.status}>
           <span>{formatDateTime(latest.startedAt, ko)}</span>
           <span>{current.detail}</span>
+          <span
+            data-testid="run-runtime-fact"
+            data-runtime-fact-state={runtimeFactLabels.length > 0 ? "recorded" : "unrecorded"}
+            title={runtimeFactLabels.length > 0
+              ? (ko ? "실행 원장에 기록된 실제 연결" : "Actual connection recorded in the run ledger")
+              : (ko ? "이전 실행에는 실제 연결 원장이 없습니다" : "This run has no recorded actual connection")}
+          >
+            {runtimeFactLabels.length > 0
+              ? (ko ? `실제 연결 ${runtimeFactLabels.join(" · ")}` : `Actual connection ${runtimeFactLabels.join(" · ")}`)
+              : (ko ? "실제 연결 원장 없음(이전 실행)" : "Actual connection not recorded (legacy run)")}
+          </span>
           {/* ★이 실행이 쓴 토큰. 커널은 처음부터 세고 있었는데 읽는 곳이 없어 화면이 몰랐다 —
               매일 도는 자동화가 얼마를 쓰는지 모른 채 켜 두게 된다. 금액은 모델마다 달라
               지어내지 않고, 세어 둔 숫자만 그대로 보여준다. */}
@@ -455,11 +488,9 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
               <strong>{blockingRun ? plainRun(blockingRun, ko).title : plainOutcome("error", ko).title}</strong>
             </div>
           </div>
-          {/* 상황 설명은 제품이 실제 상태(브라우저 세션·권한·로그인·런타임)를 보고 만든 문장을
-              우선한다. 계산이 아직/불가면 상태 기반 기본 문장으로 내려간다. */}
-          <p>{fixPlan && !fixPlan.unavailable && fixPlan.summary
-            ? fixPlan.summary
-            : blockingRun ? plainRun(blockingRun, ko).body : plainOutcome("error", ko).body}</p>
+          {/* 이 칸은 모델의 재서술이 아니라 이번 실행 원장을 그대로 따른다. 모델이
+              이전 실행을 설명하면 우측 상태칩과 대화 스토리가 서로 다른 사건을 가리킨다. */}
+          <p>{blockingRun ? plainRun(blockingRun, ko).body : plainOutcome("error", ko).body}</p>
           {fixPlan?.question ? <p className="automation-fix-question">{fixPlan.question}</p> : null}
           {/* 모델 제안과 우리 버튼이 같은 동작이면 하나만 남긴다(아래 주석 참조). */}
           <div className="automation-reconcile-actions">
@@ -775,7 +806,11 @@ function reconciliationErrorMessage(error: unknown, ko: boolean): string {
   return ko ? `복구 작업을 완료하지 못했습니다. ${raw}` : `Could not complete reconciliation. ${raw}`;
 }
 
-function summarizeSnapshot(snap: WorkflowRunSnapshot | null, ko: boolean): { title: string; detail: string } {
+function summarizeSnapshot(
+  snap: WorkflowRunSnapshot | null,
+  history: AutomationRunRecord | null,
+  ko: boolean,
+): { title: string; detail: string } {
   if (!snap)
     return {
       title: ko ? "아직 실행 전이에요" : "Not run yet",
@@ -790,6 +825,13 @@ function summarizeSnapshot(snap: WorkflowRunSnapshot | null, ko: boolean): { tit
       title: ko ? "작업하고 있어요" : "Working on it",
       detail: ko ? "필요한 단계를 순서대로 진행하고 있어요." : "The required steps are running in order.",
     };
+  }
+  // A completed graph can still produce a result that the controller rejected
+  // or needs a person to resolve. Reuse the same wording as the run-history
+  // row so the snapshot and the story never point at different truths.
+  if (history?.status === "ok" && history.outcome && history.outcome !== "accepted") {
+    const resultStory = plainRun(history, ko);
+    return { title: resultStory.title, detail: resultStory.body };
   }
   if (snap.status === "error" || failed > 0) {
     return {
@@ -960,7 +1002,7 @@ function plainRun(run: AutomationRunRecord, ko: boolean): { title: string; body:
    * 권하는 [대화에서 이어서 해결]로는 OS 권한을 절대 못 켠다 — 아는 쪽은 제품인데
    * 모르는 쪽이 사람이 됐다. 판별은 모양이 아니라 **한글이 섞여 있고 길이가 사람 문장인가**로 한다.
    */
-  const recorded = (run.error ?? "").trim();
+  const recorded = stripReasonCode((run.error ?? "").trim());
   const readable = recorded.length > 0 && recorded.length <= 400 && (!ko || /[\uac00-\ud7a3]/.test(recorded));
   return readable ? { title: plain.title, body: recorded } : plain;
 }
@@ -972,6 +1014,8 @@ function plainRun(run: AutomationRunRecord, ko: boolean): { title: string; body:
 function outcomeFirstLabel(run: AutomationRunRecord, ko: boolean): string {
   if (run.outcome === "needs_input") return ko ? "내 확인 필요" : "Needs your decision";
   if (run.outcome === "blocked") return ko ? "바깥에서 막힘" : "Blocked outside";
+  if (run.outcome === "rejected") return ko ? "결과가 기준에 못 미침" : "Result fell short";
+  if (run.outcome === "unjudged") return ko ? "결과 판정 못 함" : "Result not judged";
   return statusLabel(run.status, ko);
 }
 
@@ -994,6 +1038,34 @@ function formatDateTime(iso: string | null | undefined, ko: boolean): string {
     hour: "2-digit",
     minute: "2-digit",
   }).format(date);
+}
+
+function runtimeFactLabel(fact: WorkflowRunRuntimeFact, ko: boolean): string {
+  const kindLabels: Record<string, string> = {
+    "claude-code": "Claude Code",
+    codex: "Codex",
+    antigravity: "Antigravity",
+    kimi: "Kimi",
+    grok: "Grok",
+    cursor: "Cursor",
+    byok: "BYOK",
+    ollama: "Ollama",
+    lmstudio: "LM Studio",
+    mlx: "MLX",
+    acp: "ACP",
+    agentlas: "Agentlas",
+  };
+  const selection = fact.selection;
+  const kind = kindLabels[selection.kind] ?? selection.kind;
+  const model = selection.model?.trim();
+  const runtime = model ? `${kind} · ${model}` : kind;
+  if (!fact.role) return runtime;
+  const roleLabels: Record<string, string> = {
+    worker: ko ? "워커" : "worker",
+    orchestrator: ko ? "오케스트레이터" : "orchestrator",
+    judgment: ko ? "판정" : "judgment",
+  };
+  return `${roleLabels[fact.role] ?? fact.role}: ${runtime}`;
 }
 
 export function statusTone(state: WorkflowNodeRunState): CSSProperties {

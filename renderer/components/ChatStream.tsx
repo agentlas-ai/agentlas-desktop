@@ -20,6 +20,7 @@ import {
   stripAgentControlBlocks,
   stripAgentIdentityBadges,
 } from "@shared/agent-control-blocks";
+import { McpResultPreview } from "./McpResultPreview";
 
 /** 작업 중 패널에 누적되는 단일 단계. 새 이벤트마다 push (replace 아님). */
 export interface StreamStep {
@@ -1318,35 +1319,41 @@ function ToolGroupBlock({
     const view = toolView(cur.tool!, cur.args, locale, cur.result, workspaceRootForRun);
     const liveFilePath = toolStepFilePath(cur);
     const liveLabel = liveFilePath ? baseName(liveFilePath) : view.label;
+    const completedResultSteps = steps.filter((step) => step.result?.trim()).slice(-3);
     return (
-      <div
-        role="status"
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 6,
-          fontSize: 13,
-          fontWeight: 550,
-          color: "var(--muted-deep)",
-        }}
-      >
-        <span>{progressiveToolVerb(view.group, locale)}</span>
-        {liveLabel && (
-          <span
-            title={view.label}
-            style={{
-              minWidth: 0,
-              maxWidth: "min(62ch, 64vw)",
-              overflow: "hidden",
-              color: "var(--ink-soft)",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {liveLabel}
-          </span>
-        )}
-        <span aria-hidden style={{ color: "var(--muted)", fontSize: 14, lineHeight: 1 }}>›</span>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0 }}>
+        <div
+          role="status"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            fontSize: 13,
+            fontWeight: 550,
+            color: "var(--muted-deep)",
+          }}
+        >
+          <span>{progressiveToolVerb(view.group, locale)}</span>
+          {liveLabel && (
+            <span
+              title={view.label}
+              style={{
+                minWidth: 0,
+                maxWidth: "min(62ch, 64vw)",
+                overflow: "hidden",
+                color: "var(--ink-soft)",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {liveLabel}
+            </span>
+          )}
+          <span aria-hidden style={{ color: "var(--muted)", fontSize: 14, lineHeight: 1 }}>›</span>
+        </div>
+        {completedResultSteps.map((step) => (
+          <McpResultPreview key={`mcp-preview:${step.id}`} result={step.result} toolName={step.tool} locale={locale} compact />
+        ))}
       </div>
     );
   }
@@ -1395,6 +1402,9 @@ function ToolGroupBlock({
           ›
         </span>
       </button>
+      {steps.filter((step) => step.result?.trim()).slice(-3).map((step) => (
+        <McpResultPreview key={`mcp-preview:${step.id}`} result={step.result} toolName={step.tool} locale={locale} compact />
+      ))}
       {open && (
         <div
           style={{
@@ -2505,6 +2515,7 @@ function ToolActivityCard({
           {step.role ? `${step.agentName} · ${step.role}` : step.agentName}
         </div>
       )}
+      <McpResultPreview result={step.result} toolName={step.tool} locale={locale} compact />
       {argsOpen && hasArgs && (
         <pre style={{ ...toolPre, borderColor: tone.border }}>{prettyJson(step.args!)}</pre>
       )}
@@ -2666,6 +2677,7 @@ function ToolRow({ step, current }: { step: StreamStep; current?: boolean }) {
           </button>
         )}
       </div>
+      <McpResultPreview result={step.result} toolName={step.tool} locale={locale} compact />
       {hasDisclosure && argsOpen && hasArgs && (
         <pre
           style={{

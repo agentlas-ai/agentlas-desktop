@@ -545,7 +545,17 @@ export async function probeAcpModels(
     const created = await session.conn.request("session/new", { cwd: opts?.cwd ?? agentRunCwd(), mcpServers: [] }, { timeoutMs });
     const rows = modelOptionsFromNewSession(created);
     const outcome = classifyDiscovery({ stdout: rows.length ? rows.map((r) => r.id).join("\n") : "", models: rows.map((r) => r.id), source: "acp" });
-    if (rows.length === 0) outcome.reason = "acp:no-model-config-option";
+    // A successful ACP session with no model config option is a valid fixed-model
+    // provider, not a failed connection. Treating this as failed made every
+    // startup emit a scary discovery error for GitHub Copilot CLI even though
+    // the transport and session/new handshake had completed normally.
+    if (rows.length === 0) {
+      return {
+        ...outcome,
+        status: "unsupported",
+        reason: "acp:no-model-config-option",
+      };
+    }
     // The agent's own current model is the right default — never the first row of
     // an alphabetical list (live E2E 2026-08-15: OpenCode's first row was a Vertex
     // model whose credential file was gone, so a fresh chat failed on auth).

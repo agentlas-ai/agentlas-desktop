@@ -39,9 +39,10 @@ import type { ComputerHistoryState } from "@shared/computer-history";
 import type { OneBriefingCadence, OneBriefingPreferences } from "@shared/one-briefing";
 import type { OneComposerModelOption, OnePermissionMode } from "./OneComposerControls";
 import { OneBottomSheet, type OneBottomSheetSize } from "./OneBottomSheet";
+import { MediaDisplaySettings } from "../MediaDisplaySettings";
 import styles from "./OneSettings.module.css";
 
-export type OneSettingsKey = "mcp" | "plugins" | "permission" | "models" | "multimodal" | "concurrency" | "history" | "briefing";
+export type OneSettingsKey = "mcp" | "plugins" | "permission" | "models" | "multimodal" | "media" | "concurrency" | "history" | "briefing";
 
 /**
  * 시트 폭은 내용이 정한다.
@@ -55,6 +56,7 @@ const SHEET_WIDTH: Record<OneSettingsKey, OneBottomSheetSize> = {
   plugins: "wide",
   models: "wide",
   multimodal: "wide",
+  media: "compact",
   permission: "compact",
   concurrency: "compact",
   history: "compact",
@@ -98,6 +100,7 @@ const SETTINGS_META: Record<OneSettingsKey, { titleKo: string; titleEn: string; 
   permission: { titleKo: "실행 권한", titleEn: "Execution permission", descriptionKo: "One이 대화와 작업에서 사용할 기본 권한을 정합니다.", descriptionEn: "Choose One's default authority for conversations and work." },
   models: { titleKo: "모델", titleEn: "Models", descriptionKo: "CEO 오케스트레이터인 One의 기본 모델을 정합니다.", descriptionEn: "Choose the default model for One, the CEO orchestrator." },
   multimodal: { titleKo: "멀티모달", titleEn: "Multimodal", descriptionKo: "이미지·영상 작업에 사용할 엔진과 키를 연결합니다.", descriptionEn: "Connect engines and keys for image and video work." },
+  media: { titleKo: "결과 미디어", titleEn: "Result media", descriptionKo: "사이드바 결과에서 사진·영상·음성을 표시할지 정합니다.", descriptionEn: "Choose which photos, videos, and audio appear in result sidebars." },
   concurrency: { titleKo: "동시 실행", titleEn: "Concurrency", descriptionKo: "One과 터미널 에이전트가 동시에 사용할 수 있는 슬롯 수입니다.", descriptionEn: "Set how many slots One and terminal agents may use at once." },
   /* ko 라벨은 웹 "컴퓨터 사용 기록" 과 통일(A3) — 채널마다 같은 설정이 다른
      이름으로 불리면 안 된다. */
@@ -140,6 +143,7 @@ export function OneSettingsRail({ locale, profileName, pendingMemoryCount, onBac
         <RailRow icon={<IconShield size={15} />} title={ko ? "권한" : "Permission"} onClick={() => onOpen("permission")} />
         <RailRow icon={<IconSparkles size={15} />} title={ko ? "모델" : "Models"} detail={ko ? "One CEO 기본 모델" : "One CEO default"} onClick={() => onOpen("models")} />
         <RailRow icon={<IconImage size={15} />} title={ko ? "멀티모달" : "Multimodal"} onClick={() => onOpen("multimodal")} />
+        <RailRow icon={<IconImage size={15} />} title={ko ? "결과 미디어" : "Result media"} detail={ko ? "사이드바에 표시" : "Show in sidebars"} onClick={() => onOpen("media")} />
         <RailRow icon={<IconApps size={15} />} title={ko ? "동시 실행" : "Concurrency"} onClick={() => onOpen("concurrency")} />
       </div>
       <div className={styles.railGroup}><span>{ko ? "알림" : "Notifications"}</span>
@@ -433,6 +437,7 @@ export function OneSettingsSheet({ open, locale, installedPlugins, pluginCatalog
       {open === "permission" && <PermissionSettings locale={locale} value={permission} onChange={onSelectPermission} />}
       {open === "models" && <ModelSettings locale={locale} runtime={runtime} models={models} onSelect={onSelectModel} />}
       {open === "multimodal" && <MultimodalSettingsPanel locale={locale} active={open === "multimodal"} />}
+      {open === "media" && <MediaDisplaySettings locale={locale} compact />}
       {open === "concurrency" && <ConcurrencySettings locale={locale} active={open === "concurrency"} />}
       {open === "history" && <HistorySettings locale={locale} state={history} onConsent={onHistoryConsent} />}
       {open === "briefing" && <BriefingSettings locale={locale} />}

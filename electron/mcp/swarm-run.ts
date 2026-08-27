@@ -23,7 +23,8 @@ import {
   workloadRuntimeInventory,
   type WorkloadAllocation,
 } from "../runtime/workload-routing";
-import { pickActive, pickRunner } from "../runtime/selection";
+import { pickActive, pickRunner, rolePriorityRuntimes } from "../runtime/selection";
+import { runnerFailureFromError } from "../runtime/runner";
 import { buildAgentRuntimeOntologyContext } from "../ontology/runtime-context";
 import {
   isMobileReadRuntimeAllowed,
@@ -268,7 +269,8 @@ export async function runSwarmInvocation(
     );
   }
   if (candidateRuntimes.length === 0) candidateRuntimes.push(p.active);
-  const workerDefault = pickActive(candidateRuntimes, "worker") ?? p.active;
+  const workerPriority = rolePriorityRuntimes(candidateRuntimes, "worker");
+  const workerDefault = workerPriority[0] ?? pickActive(candidateRuntimes, "worker") ?? p.active;
   const workerDefaultRunner = sameRuntime(workerDefault, p.active)
     ? p.picked
     : pickRunner(workerDefault) ?? p.picked;
@@ -421,6 +423,7 @@ export async function runSwarmInvocation(
         fallbackRuntime: workerDefault,
         phase: "delegate",
         manualOverride: p.runtimeOverride,
+        explicitPinned: !p.workforceSelectionReceipt,
       })
     : null;
     const active = resolution?.runtime ?? workerDefault;
@@ -499,65 +502,76 @@ export async function runSwarmInvocation(
       projectContextSlice ?? "",
       ontology.prompt,
     ].filter(Boolean).join("\n\n");
-    const runWorkerOn = (target: typeof p.active, targetRunner: typeof taskRunner) =>
-      targetRunner.runner(
-        {
-          systemPrompt: workerSystemPrompt,
-          history: [],
-          userPrompt: task.brief || task.title,
-          backendLabel: targetRunner.label,
-          model: target.model ?? undefined,
-          longContext: target.longContextEnabled ?? false,
-          effort: target.effort ?? undefined,
-          signal: signal ?? p.signal,
-          permission: p.req.permissions,
-          restrictedReadBoundary: p.restrictedReadBoundary,
-          cwd: p.workingFolder ?? undefined,
-          mcpConfigPath: p.mcpConfigPath,
-          mcpAllowedTools: p.mcpAllowedTools,
-          mcpCodexConfigArgs: p.mcpCodexConfigArgs,
-          env: p.runnerEnv,
-          locale: p.locale,
-        },
-        {
-          onStatus: (status) => emit(task, { kind: "tool-use", status }),
-          onPartial: (text) => {
-            if (!p.restrictedReadBoundary) emit(task, { kind: "partial", text });
+    const runWorkerOn = async (target: typeof p.active, targetRunner: typeof taskRunner) => {
+      try {
+        return await targetRunner.runner(
+          {
+            systemPrompt: workerSystemPrompt,
+            history: [],
+            userPrompt: task.brief || task.title,
+            backendLabel: targetRunner.label,
+            model: target.model ?? undefined,
+            longContext: target.longContextEnabled ?? false,
+            effort: target.effort ?? undefined,
+            signal: signal ?? p.signal,
+            permission: p.req.permissions,
+            restrictedReadBoundary: p.restrictedReadBoundary,
+            cwd: p.workingFolder ?? undefined,
+            mcpConfigPath: p.mcpConfigPath,
+            mcpAllowedTools: p.mcpAllowedTools,
+            mcpCodexConfigArgs: p.mcpCodexConfigArgs,
+            env: p.runnerEnv,
+            locale: p.locale,
           },
-          onTool: (name, args, r, id, isError) => emit(task, { kind: "tool-use", tool: { name, args, result: r, id, isError } }),
-        },
-      );
-    // 배정 안전망 — 카탈로그 별칭 광고는 계정 자격까지 보증하지 못하므로(model-advertisement
-    // 어댑터 §규칙 2), ai-assigned 워커가 실패하면 검증된 기본 워커로 1회 재시도한다.
-    // 조용한 하향 대체가 아니다: 상태 이벤트와 resolutionCodes에 그대로 남는다.
-    const allocationDiffersFromDefault = resolution?.source === "ai-assigned" &&
-      !(sameRuntime(active, workerDefault) && (active.model ?? null) === (workerDefault.model ?? null));
+          {
+            onStatus: (status) => emit(task, { kind: "tool-use", status }),
+            onPartial: (text) => {
+              if (!p.restrictedReadBoundary) emit(task, { kind: "partial", text });
+            },
+            onTool: (name, args, r, id, isError) => emit(task, { kind: "tool-use", tool: { name, args, result: r, id, isError } }),
+          },
+        );
+      } catch (error) {
+        if ((signal ?? p.signal)?.aborted) throw error;
+        return { text: "", failure: runnerFailureFromError(error, target.kind) };
+      }
+    };
+    // A worker failure advances through the configured worker pool. The
+    // parent allocation is descriptive input; the host's role order is the
+    // executable source of truth for ordinary local/One swarm runs.
     let workerFellBack = false;
-    const announceFallback = (why: string): void => {
+    let executedRuntime = active;
+    let executedRunner = taskRunner;
+    const announceFallback = (from: typeof active, to: typeof active, why: string): void => {
       workerFellBack = true;
       emit(task, {
         kind: "tool-use",
         status: p.locale === "ko"
-          ? `배정된 모델(${active.model ?? active.kind}) 실행 실패 — 기본 워커(${workerDefault.model ?? workerDefault.kind})로 재시도: ${why}`
-          : `Allocated model (${active.model ?? active.kind}) failed — retrying on the default worker (${workerDefault.model ?? workerDefault.kind}): ${why}`,
+          ? `워커 모델(${from.model ?? from.kind}) 실행 실패 — 우선순위 다음 모델(${to.model ?? to.kind})로 재시도: ${why}`
+          : `Worker model (${from.model ?? from.kind}) failed — retrying on the next priority model (${to.model ?? to.kind}): ${why}`,
       });
     };
     let result: Awaited<ReturnType<typeof runWorkerOn>>;
-    try {
-      result = await runWorkerOn(active, taskRunner);
-      if (result.failure && allocationDiffersFromDefault && !(signal ?? p.signal)?.aborted) {
-        announceFallback(result.failure.message.slice(0, 160));
-        result = await runWorkerOn(workerDefault, workerDefaultRunner);
-      }
-    } catch (error) {
-      if (!allocationDiffersFromDefault || (signal ?? p.signal)?.aborted) throw error;
-      announceFallback(error instanceof Error ? error.message.slice(0, 160) : String(error).slice(0, 160));
-      result = await runWorkerOn(workerDefault, workerDefaultRunner);
+    result = await runWorkerOn(executedRuntime, executedRunner);
+    while (result.failure && !(signal ?? p.signal)?.aborted) {
+      const fallback = rolePriorityRuntimes(candidateRuntimes, "worker", {
+        failedRuntime: executedRuntime,
+        failure: result.failure,
+      })[0];
+      const fallbackRunner = fallback ? pickRunner(fallback) : null;
+      if (!fallback || !fallbackRunner) break;
+      announceFallback(executedRuntime, fallback, result.failure.kind);
+      executedRuntime = fallback;
+      executedRunner = fallbackRunner;
+      result = await runWorkerOn(executedRuntime, executedRunner);
+    }
+    if (result.failure) {
+      throw new Error(`${result.failure.runtime} runtime ${result.failure.kind}: ${result.failure.message}`);
     }
     const effectiveResolution = resolution && workerFellBack
       ? {
           ...resolution,
-          runtime: { ...workerDefault },
+          runtime: { ...executedRuntime },
           source: "safe-fallback" as const,
           resolutionCodes: [...resolution.resolutionCodes, "allocated-worker-failed-fell-back-to-default"],
         }
@@ -595,12 +609,22 @@ export async function runSwarmInvocation(
     p.sink({ ...ev, agentId: "swarm-synthesizer", agentName: "Swarm Synthesizer", role: "synthesizer", phase: "synthesize" });
   const synthesize = async (board: SwarmBoard, signal?: AbortSignal): Promise<string> => {
     const done = board.tasks.filter((t) => t.status === "done" && t.result);
+    const oneControllerPreferred = p.req.oneMode === true
+      && p.runtimePinHonored === true
+      && Boolean(p.req.runtimeSelection);
+    const controllerPriority = rolePriorityRuntimes(candidateRuntimes, "orchestrator");
+    const controllerDefault = oneControllerPreferred
+      ? p.active
+      : p.runtimeOverride
+        ? p.active
+        : controllerPriority[0] ?? p.active;
     const resolution = resolveWorkloadAllocationAcrossRuntimes({
       allocation: board.synthesisAllocation ?? defaultWorkloadAllocation("synthesize"),
       runtimes: candidateRuntimes,
-      fallbackRuntime: p.active,
+      fallbackRuntime: controllerDefault,
       phase: "synthesize",
       manualOverride: p.runtimeOverride,
+      explicitPinned: !p.workforceSelectionReceipt,
     });
     const active = resolution.runtime;
     const synthesisRunner = sameRuntime(active, p.active) ? p.picked : pickRunner(active) ?? p.picked;
@@ -641,48 +665,98 @@ export async function runSwarmInvocation(
       );
     }
     if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
-    const result = await synthesisRunner.runner(
-      {
-        systemPrompt: [
-          buildEffectiveAgentSystemPrompt(
-            p.orchestratorAgent.id,
-            p.orchestratorAgent.systemPrompt,
-          ),
-          !p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "",
-          coreHarnessPrompt,
-          p.stormbreakerMode ? STORMBREAKER_LOOP_PROTOCOL : "",
-          "You are the synthesizer of an agent swarm. Below are the results your peers produced for the shared goal.",
-          "Integrate them into ONE coherent final answer for the user. Reconcile overlaps, note anything incomplete.",
-          "Do not just concatenate. Do not include a `## Spawn` block.",
-          `SHARED GOAL: ${goal}`,
-          conversationContext
-            ? `ONGOING CONVERSATION (this swarm continues the user's chat — answer as its natural next reply, and never call it a previous session):\n${conversationContext}`
-            : "",
-          projectContextSlice ?? "",
-          ontology.prompt,
-        ].join("\n"),
-        history: [],
-        userPrompt: pieces || "(no completed results)",
-        backendLabel: synthesisRunner.label,
-        model: active.model ?? undefined,
-        longContext: active.longContextEnabled ?? false,
-        effort: active.effort ?? undefined,
-        signal: signal ?? p.signal,
-        permission: p.req.permissions,
-        restrictedReadBoundary: p.restrictedReadBoundary,
-        cwd: p.workingFolder ?? undefined,
-        env: p.runnerEnv,
-        locale: p.locale,
-      },
-      {
-        onStatus: (status) => synthEmit({ kind: "tool-use", status }),
-        onPartial: (text) => {
-          if (!p.restrictedReadBoundary) synthEmit({ kind: "partial", text });
-        },
-        onTool: (name, args, r, id, isError) => synthEmit({ kind: "tool-use", tool: { name, args, result: r, id, isError } }),
-      },
+    const runSynthesisOn = async (
+      targetRuntime: typeof active,
+      targetRunner: typeof synthesisRunner,
+    ) => {
+      try {
+        return await targetRunner.runner(
+          {
+            systemPrompt: [
+              buildEffectiveAgentSystemPrompt(
+                p.orchestratorAgent.id,
+                p.orchestratorAgent.systemPrompt,
+              ),
+              !p.workspaceBinding && !p.req.agentAppMode ? mainOneProfileContext(p.req) : "",
+              coreHarnessPrompt,
+              p.stormbreakerMode ? STORMBREAKER_LOOP_PROTOCOL : "",
+              "You are the synthesizer of an agent swarm. Below are the results your peers produced for the shared goal.",
+              "Integrate them into ONE coherent final answer for the user. Reconcile overlaps, note anything incomplete.",
+              "Do not just concatenate. Do not include a `## Spawn` block.",
+              `SHARED GOAL: ${goal}`,
+              conversationContext
+                ? `ONGOING CONVERSATION (this swarm continues the user's chat — answer as its natural next reply, and never call it a previous session):\n${conversationContext}`
+                : "",
+              projectContextSlice ?? "",
+              ontology.prompt,
+            ].join("\n"),
+            history: [],
+            userPrompt: pieces || "(no completed results)",
+            backendLabel: targetRunner.label,
+            model: targetRuntime.model ?? undefined,
+            longContext: targetRuntime.longContextEnabled ?? false,
+            effort: targetRuntime.effort ?? undefined,
+            signal: signal ?? p.signal,
+            permission: p.req.permissions,
+            restrictedReadBoundary: p.restrictedReadBoundary,
+            cwd: p.workingFolder ?? undefined,
+            env: p.runnerEnv,
+            locale: p.locale,
+          },
+          {
+            onStatus: (status) => synthEmit({ kind: "tool-use", status }),
+            onPartial: (text) => {
+              if (!p.restrictedReadBoundary) synthEmit({ kind: "partial", text });
+            },
+            onTool: (name, args, r, id, isError) => synthEmit({ kind: "tool-use", tool: { name, args, result: r, id, isError } }),
+          },
+        );
+      } catch (error) {
+        if ((signal ?? p.signal)?.aborted) throw error;
+        return { text: "", failure: runnerFailureFromError(error, targetRuntime.kind) };
+      }
+    };
+    let executedRuntime = active;
+    let executedRunner = synthesisRunner;
+    let result = await runSynthesisOn(executedRuntime, executedRunner);
+    while (
+      result.failure
+      && !p.workforceSelectionReceipt
+      && !p.req.agentAppMode
+      && !p.benchmarkMode
+      && !(signal ?? p.signal)?.aborted
+    ) {
+      const fallback = rolePriorityRuntimes(candidateRuntimes, "orchestrator", {
+        failedRuntime: executedRuntime,
+        failure: result.failure,
+      })[0];
+      const fallbackRunner = fallback ? pickRunner(fallback) : null;
+      if (!fallback || !fallbackRunner) break;
+      if (oneControllerPreferred) p.onControllerRuntimeFallback?.(fallback, result.failure);
+      synthEmit({
+        kind: "tool-use",
+        status: p.locale === "ko"
+          ? "스웜 종합 런타임이 막혀 오케스트레이터 우선순위 다음 모델로 이어갑니다."
+          : "The swarm synthesis runtime is unavailable; continuing on the next orchestrator-priority model.",
+      });
+      executedRuntime = fallback;
+      executedRunner = fallbackRunner;
+      result = await runSynthesisOn(executedRuntime, executedRunner);
+    }
+    if (result.failure) {
+      throw new Error(`${result.failure.runtime} runtime ${result.failure.kind}: ${result.failure.message}`);
+    }
+    const executedResolution = reconcileWorkloadRunnerResult(
+      executedRuntime === active
+        ? resolution
+        : {
+            ...resolution,
+            runtime: { ...executedRuntime },
+            source: "safe-fallback" as const,
+            resolutionCodes: [...resolution.resolutionCodes, "synthesis-runtime-failed-fell-back-to-priority"],
+          },
+      result,
     );
-    const executedResolution = reconcileWorkloadRunnerResult(resolution, result);
     tryRecordRunEvent({
       runId,
       kind: "workload_allocation",

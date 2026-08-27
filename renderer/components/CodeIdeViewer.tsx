@@ -29,14 +29,14 @@ function highlight(code: string): ReactNode[] {
   while ((match = TOKEN.exec(code)) !== null) {
     if (match.index > last) output.push(code.slice(last, match.index));
     let color: string | undefined;
-    if (match[1]) color = "#6b7888";
-    else if (match[2]) color = "#9ece6a";
-    else if (match[3]) color = "#ff9e64";
+    if (match[1]) color = "#718078";
+    else if (match[2]) color = "#1f7a4d";
+    else if (match[3]) color = "#a15c00";
     else if (match[4]) {
       const word = match[4];
-      if (KEYWORDS.has(word)) color = "#bb9af7";
-      else if (/^[A-Z]/.test(word)) color = "#2ac3de";
-      else if (code[match.index + word.length] === "(") color = "#7aa2f7";
+      if (KEYWORDS.has(word)) color = "#6f42c1";
+      else if (/^[A-Z]/.test(word)) color = "#116a8a";
+      else if (code[match.index + word.length] === "(") color = "#1f5fbd";
     }
     output.push(color ? <span key={key++} style={{ color }}>{match[0]}</span> : match[0]);
     last = match.index + match[0].length;
@@ -52,6 +52,7 @@ export function isCodeArtifactName(name: string): boolean {
 export function CodeIdeViewer({
   source,
   name,
+  path,
   locale,
   initialContent,
   compact = false,
@@ -59,12 +60,15 @@ export function CodeIdeViewer({
 }: {
   source?: string;
   name: string;
+  /** Workspace-relative or provider-supplied location. Never synthesize an absolute path here. */
+  path?: string;
   mimeType?: string;
   locale: "ko" | "en";
   initialContent?: string;
   compact?: boolean;
   fill?: boolean;
 }) {
+  const displayPath = path?.trim() || name;
   const [code, setCode] = useState<string | null>(initialContent ?? null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(initialContent == null && Boolean(source));
@@ -105,7 +109,7 @@ export function CodeIdeViewer({
   }, [initialContent, locale, source]);
 
   const lines = useMemo(() => (code ?? "").split("\n"), [code]);
-  const language = languageFromName(name);
+  const language = languageFromName(displayPath);
   const copy = async () => {
     if (code == null) return;
     await navigator.clipboard?.writeText(code).catch(() => undefined);
@@ -113,10 +117,9 @@ export function CodeIdeViewer({
     window.setTimeout(() => setCopied(false), 1_200);
   };
   return (
-    <section className={styles.shell} data-code-ide="true" data-fill={fill ? "true" : "false"} data-compact={compact ? "true" : "false"} aria-label={`${name} ${locale === "ko" ? "코드 IDE" : "code IDE"}`}>
-      <header className={styles.toolbar}>
-        <span className={styles.traffic} aria-hidden="true"><i /><i /><i /></span>
-        <strong className={styles.filename} title={name}>{name}</strong>
+    <section className={styles.shell} data-code-ide="true" data-fill={fill ? "true" : "false"} data-compact={compact ? "true" : "false"} aria-label={`${displayPath} ${locale === "ko" ? "코드 IDE" : "code IDE"}`}>
+      <header className={styles.pathBar}>
+        <strong className={styles.path} data-code-path="true" title={displayPath}>{displayPath}</strong>
         <span className={styles.language}>{language}</span>
         <span className={styles.readonly}>{locale === "ko" ? "읽기 전용" : "read only"}</span>
         <button type="button" className={styles.copy} onClick={() => void copy()} disabled={code == null}>{copied ? (locale === "ko" ? "복사됨" : "Copied") : (locale === "ko" ? "복사" : "Copy")}</button>

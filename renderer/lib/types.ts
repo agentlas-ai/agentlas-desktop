@@ -316,6 +316,7 @@ export type {
   WorkflowNode,
   WorkflowNodeType,
   WorkflowNodeRunState,
+  WorkflowRunRuntimeFact,
   WorkflowRunSnapshot,
   WorkflowEdge,
   EarningsTransferResult,

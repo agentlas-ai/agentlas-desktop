@@ -61,7 +61,7 @@ export function ToolApprovalSheet() {
       )}
       {orphan.length > 0 && expanded && (
         <div className="tab-cards">
-          {orphan.map((request) => <ToolApprovalCard key={request.id} request={request} compact />)}
+          {orphan.map((request) => <ToolApprovalCard key={request.id} request={request} compact chip />)}
         </div>
       )}
       <style jsx>{`

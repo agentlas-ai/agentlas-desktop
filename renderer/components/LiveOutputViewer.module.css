@@ -43,3 +43,60 @@
 .documentError { background: color-mix(in srgb, var(--design-danger) 12%, var(--design-bg)); color: var(--design-danger); }
 .documentError small { color: var(--design-muted); }
 .loading > span { border-color: var(--design-line-2); border-top-color: var(--design-accent); }
+
+/* Clean output surfaces: the media itself gets the light edge/shadow; the
+   result/sidebar container does not look like a nested picture frame. */
+.mediaStage {
+  height: auto;
+  min-height: 0;
+  overflow: visible;
+  border: 1px solid color-mix(in srgb, var(--design-line) 88%, var(--design-accent) 12%);
+  border-radius: 6px;
+  background: var(--design-panel);
+  box-shadow: 0 3px 12px rgba(24, 29, 32, .08);
+}
+.mediaStage[data-fill="true"] {
+  width: 100%;
+  height: auto;
+  min-height: 0;
+  padding: 8px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.mediaStage img,
+.mediaStage video {
+  width: 100%;
+  height: auto;
+  max-height: none;
+}
+.mediaStage[data-fill="true"] img {
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  max-height: none;
+}
+.mediaStage[data-fill="true"] video {
+  width: 100%;
+  height: auto;
+  max-height: none;
+  aspect-ratio: 16 / 9;
+}
+.audioStage { min-height: 84px; padding: 14px; }
+.mediaStage[data-fill="true"].audioStage { padding: 10px 0; }
+.documentEngine,
+.loading {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+.mediaHidden {
+  min-height: 74px;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  color: var(--design-muted);
+  font-size: 11px;
+  text-align: center;
+}

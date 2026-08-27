@@ -45,7 +45,7 @@ import { dropChatViewSnapshot, readChatViewSnapshot, saveChatViewSnapshot } from
 import { ChatInput } from "@/components/ChatInput";
 import type { SurfaceStatePatchHandler, WorkbenchSurface } from "@/components/WorkbenchPanel";
 import type { LiveAgent, NetTimelineItem } from "@/components/AgentNetworkPanel";
-import { ChatRightPanel, type ChatRightPanelTab } from "@/components/ChatRightPanel";
+import { ChatRightPanel, RIGHT_PANEL_MIN_HEIGHT, type ChatRightPanelTab } from "@/components/ChatRightPanel";
 import { ProjectFolderBar } from "@/components/ProjectFolderBar";
 import {
   firstMediaArtifactInText,
@@ -422,6 +422,8 @@ const RIGHT_PANEL_DEFAULT_WIDTH = 392;
 const RIGHT_PANEL_MIN_WIDTH = 320;
 const RIGHT_PANEL_MAX_WIDTH = 1280;
 const RIGHT_PANEL_RESULT_RATIO = 0.432;
+// 세로 높이는 폭과 달리 기본이 '전체'다 — null 이면 키를 지워 창 크기를 그대로 따라간다.
+const RIGHT_PANEL_HEIGHT_KEY = "agentlas.chat.right_panel_height";
 
 /** picker 모델 옵션 — runtime.listModels가 실시간 조회해 채워준다. */
 type ModelOption = { id: string; label: string; tag?: string };
@@ -484,6 +486,26 @@ function preferredRichResultWidth(): number {
     ? Math.round(window.innerWidth * 0.86)
     : Math.round(window.innerWidth * RIGHT_PANEL_RESULT_RATIO);
   return clampRightPanelWidth(requested);
+}
+
+function readRightPanelHeight(): number | null {
+  try {
+    const raw = window.localStorage.getItem(RIGHT_PANEL_HEIGHT_KEY);
+    if (!raw) return null;
+    const value = Number(raw);
+    return Number.isFinite(value) && value >= RIGHT_PANEL_MIN_HEIGHT ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeRightPanelHeight(height: number | null) {
+  try {
+    if (height === null) window.localStorage.removeItem(RIGHT_PANEL_HEIGHT_KEY);
+    else window.localStorage.setItem(RIGHT_PANEL_HEIGHT_KEY, String(height));
+  } catch {
+    // ignore
+  }
 }
 
 function readRightPanelWidth(): number {
@@ -777,7 +799,27 @@ function reconcileTranscriptSnapshot(
 ): StreamMessage[] {
   if (current.some((message) => message.busy || message.streaming)) return current;
   const signature = (message: StreamMessage) => `${message.role}\u0000${message.text.trim()}`;
-  const durableIndexById = new Map(durable.map((message, index) => [message.id, index]));
+  // History rows intentionally store only the assistant text. Preserve the
+  // rich tool steps that arrived live when a terminal reconciliation races
+  // the history read; otherwise the MCP card flashes and disappears as soon
+  // as the run finishes.
+  const richBySignature = new Map<string, StreamMessage>();
+  for (const message of current) {
+    if (message.role !== "agent" || !message.steps?.some((step) => step.tool && step.result)) continue;
+    richBySignature.set(signature(message), message);
+  }
+  const durableWithRichSteps = durable.map((message) => {
+    const live = richBySignature.get(signature(message));
+    return live?.steps?.length
+      ? {
+          ...message,
+          steps: live.steps,
+          ...(live.finishedAt != null ? { finishedAt: live.finishedAt } : {}),
+          ...(live.tokens != null ? { tokens: live.tokens } : {}),
+        }
+      : message;
+  });
+  const durableIndexById = new Map(durableWithRichSteps.map((message, index) => [message.id, index]));
   // Anchor at the newest row both snapshots genuinely share. Comparing every
   // historical signature would suppress a new answer when it happens to have
   // the same text as an older answer in the session.
@@ -789,7 +831,7 @@ function reconcileTranscriptSnapshot(
     currentAnchor = index;
     durableAnchor = durableIndex;
   });
-  const durableTailSignatures = new Set(durable.slice(durableAnchor + 1).map(signature));
+  const durableTailSignatures = new Set(durableWithRichSteps.slice(durableAnchor + 1).map(signature));
   const currentTail = current.slice(currentAnchor + 1);
   const pendingDirections = currentTail.filter((message) => optimisticIds.has(message.id));
   const freshlySettled = currentTail.filter((message) => (
@@ -802,9 +844,66 @@ function reconcileTranscriptSnapshot(
   const tail = [...freshlySettled, ...pendingDirections].filter((message, index, rows) => (
     rows.findIndex((candidate) => candidate.id === message.id) === index
   ));
-  const next = [...durable, ...tail];
+  const next = [...durableWithRichSteps, ...tail];
   if (recovery && !new Set(next.map(signature)).has(signature(recovery))) next.push(recovery);
   return next;
+}
+
+/** Convert redacted durable tool-use rows back into chat steps after reload. */
+function mcpStepsFromLedger(events: RunEventUi[]): StreamStep[] {
+  const steps: StreamStep[] = [];
+  const byToolId = new Map<string, number>();
+  for (const event of events) {
+    if (event.kind !== "mcp_tool-use") continue;
+    const payload = event.payload ?? {};
+    const toolName = typeof payload.toolName === "string" ? payload.toolName.trim() : "";
+    if (!toolName) continue;
+    const toolId = typeof payload.toolId === "string" ? payload.toolId : undefined;
+    const result = typeof payload.toolResultPreview === "string" ? payload.toolResultPreview : undefined;
+    const args = typeof payload.toolArgs === "string" ? payload.toolArgs : undefined;
+    const existingIndex = toolId ? byToolId.get(toolId) : undefined;
+    const createdAt = Date.parse(event.ts);
+    const base: StreamStep = {
+      id: `ledger-tool:${event.id}`,
+      kind: "tool",
+      text: toolName,
+      tool: toolName,
+      ...(args ? { args } : {}),
+      ...(toolId ? { toolUseId: toolId } : {}),
+      ...(result !== undefined ? { result } : {}),
+      ...(payload.toolIsError === true ? { resultIsError: true } : {}),
+      ...(typeof payload.agentName === "string" ? { agentName: payload.agentName } : {}),
+      ...(typeof payload.role === "string" ? { role: payload.role } : {}),
+      activity: "tool",
+      ...(Number.isFinite(createdAt) ? { createdAt } : {}),
+    };
+    if (existingIndex == null) {
+      if (toolId) byToolId.set(toolId, steps.length);
+      steps.push(base);
+    } else {
+      steps[existingIndex] = {
+        ...steps[existingIndex],
+        ...(args ? { args } : {}),
+        ...(result !== undefined ? { result } : {}),
+        ...(payload.toolIsError === true ? { resultIsError: true } : {}),
+        ...(Number.isFinite(createdAt) ? { createdAt } : {}),
+      };
+    }
+  }
+  return steps.slice(-32);
+}
+
+function attachMcpStepsToLatestAgent(messages: StreamMessage[], steps: StreamStep[]): StreamMessage[] {
+  if (steps.length === 0) return messages;
+  let agentIndex = -1;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i].role === "agent") {
+      agentIndex = i;
+      break;
+    }
+  }
+  if (agentIndex < 0) return messages;
+  return messages.map((message, index) => index === agentIndex ? { ...message, steps } : message);
 }
 
 // 재진입(히스토리 재로드) 시 이미 답한 질문이 다시 '미답변'으로 보여 사용자가 재선택→중복 전송하는
@@ -1173,6 +1272,7 @@ function ChatPage() {
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [rightPanelTab, setRightPanelTab] = useState<ChatRightPanelTab>("agent");
   const [rightPanelWidth, setRightPanelWidth] = useState(() => readRightPanelWidth());
+  const [rightPanelHeight, setRightPanelHeight] = useState<number | null>(() => readRightPanelHeight());
   const workspaceOpen = rightPanelOpen && rightPanelTab === "file";
   const networkOpen = rightPanelOpen && rightPanelTab === "agent";
   // 슬래시 명령(/folder·/global)으로 워킹 폴더를 바꾸면 하단 폴더 바를 다시 읽게 하는 토큰
@@ -1372,6 +1472,11 @@ function ChatPage() {
     const next = clampRightPanelWidth(width);
     setRightPanelWidth(next);
     writeRightPanelWidth(next);
+  }, []);
+  // 가용 높이는 패널만 알 수 있어 clamp 는 패널이 한다. 여기는 소유와 저장만 맡는다.
+  const resizeRightPanelHeight = useCallback((next: number | null) => {
+    setRightPanelHeight(next);
+    writeRightPanelHeight(next);
   }, []);
 
   // 한 실행의 이벤트(라이브 스트림 OR 재접속 리플레이)를 메인 버블 + 네트워크 패널에 반영.
@@ -1687,6 +1792,32 @@ function ChatPage() {
       } else if (ev.kind === "notice" && ev.notice) {
         // ★호스트 고지는 답변 본문에 섞지 않는다. 자기 행으로 붙는다.
         const notice = ev.notice;
+        if (notice.code === "runtime-fallback" && ev.runtimeSelection) {
+          const selection = ev.runtimeSelection;
+          setChat((prev) => prev ? { ...prev, runtimeSelection: selection } : prev);
+          const api = ipc();
+          if (api) {
+            void api.runtime.detect().then((list) => {
+              const matched = list.find((runtime) => (
+                runtime.kind === selection.kind
+                && (!selection.backend || runtime.backend === selection.backend)
+                && (!selection.source || runtime.source === selection.source)
+              )) ?? list.find((runtime) => (
+                runtime.kind === selection.kind
+                && (!selection.backend || runtime.backend === selection.backend)
+              ));
+              if (matched) {
+                setActiveRuntime({
+                  ...matched,
+                  active: true,
+                  model: selection.model ?? matched.model,
+                  effort: selection.effort ?? matched.effort,
+                  longContextEnabled: selection.longContext ?? matched.longContextEnabled,
+                });
+              }
+            }).catch(() => undefined);
+          }
+        }
         setMessages((prev) => {
           const lastAgent = [...prev].reverse().find((m) => m.role === "agent");
           if (!lastAgent) {
@@ -2160,8 +2291,12 @@ function ChatPage() {
         fetchCommittedReplies(api, chatId),
         api.invoke.latestReceipt(chatId).catch(() => null),
       ])
-        .then(([history, committedReplies, receipt]) => {
+        .then(async ([history, committedReplies, receipt]) => {
           if (cancelled) return;
+          const ledgerEvents = receipt && receipt.status !== "running" && receipt.status !== "cancelling"
+            ? await api.runLedger.events(receipt.runId, 500).catch(() => [])
+            : [];
+          const mcpSteps = mcpStepsFromLedger(ledgerEvents);
           if (
             requestedFocusMessageId
             && !history.some((entry) => entry.id === requestedFocusMessageId)
@@ -2176,8 +2311,9 @@ function ChatPage() {
             history.map(historyEntryToStreamMessage),
             committedReplies,
           );
+          const historyWithMcp = attachMcpStepsToLatestAgent(historyMessages, mcpSteps);
           const recovery = receiptRecoveryMessage(receipt, locale);
-          const restoredMessages = recovery ? [...historyMessages, recovery] : historyMessages;
+          const restoredMessages = recovery ? [...historyWithMcp, recovery] : historyWithMcp;
           setMessages((current) => {
             if (transcriptRevisionRef.current !== hydrationRevision) return current;
             const hasLiveDraft = current.some((msg) => msg.busy || msg.streaming);
@@ -2484,8 +2620,14 @@ function ChatPage() {
         api.invoke.history(chatId),
         receiptPromise,
         fetchCommittedReplies(api, chatId),
-      ]).then(([h, receipt, committedReplies]) => {
-        const next = restoreAnsweredQuestions(h.map(historyEntryToStreamMessage), committedReplies);
+      ]).then(async ([h, receipt, committedReplies]) => {
+        const ledgerEvents = receipt && receipt.status !== "running" && receipt.status !== "cancelling"
+          ? await api.runLedger.events(receipt.runId, 500).catch(() => [])
+          : [];
+        const next = attachMcpStepsToLatestAgent(
+          restoreAnsweredQuestions(h.map(historyEntryToStreamMessage), committedReplies),
+          mcpStepsFromLedger(ledgerEvents),
+        );
         const recovery = receiptRecoveryMessage(receipt, locale);
         const status = receiptRecoveryStatus(receipt, locale);
         setLiveAgents((prev) =>
@@ -2534,8 +2676,14 @@ function ChatPage() {
             : Promise.resolve(null),
           fetchCommittedReplies(api, chatId),
         ]);
+        const ledgerEvents = receipt && receipt.status !== "running" && receipt.status !== "cancelling"
+          ? await api.runLedger.events(receipt.runId, 500).catch(() => [])
+          : [];
         if (!stopped) {
-          const next = restoreAnsweredQuestions(h.map(historyEntryToStreamMessage), committedReplies);
+          const next = attachMcpStepsToLatestAgent(
+            restoreAnsweredQuestions(h.map(historyEntryToStreamMessage), committedReplies),
+            mcpStepsFromLedger(ledgerEvents),
+          );
           const recovery = receiptRecoveryMessage(receipt, locale);
           const status = receiptRecoveryStatus(receipt, locale);
           setLiveAgents((prev) =>
@@ -4055,7 +4203,7 @@ function ChatPage() {
           focusMessageId={requestedFocusMessageId}
         />
         {/* 도구 승인은 이 대화 안에서, 묻는 순간에(오너 결정 2026-08-15) */}
-        <ToolApprovalInline chatId={chat?.id ?? null} />
+        <ToolApprovalInline chatId={chat?.id ?? null} compact chip />
       </div>
       {/* 실행 전 API 키 요청 바텀 시트 — 값은 vault(env.set)로만, IPC는 완료 신호만 */}
       {keyRequestSheet && (
@@ -4158,6 +4306,8 @@ function ChatPage() {
           hasPipeline={hasPipeline}
           width={rightPanelWidth}
           onResizeWidth={resizeRightPanel}
+          height={rightPanelHeight}
+          onResizeHeight={resizeRightPanelHeight}
         />
       )}
     </div>

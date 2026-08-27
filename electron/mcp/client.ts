@@ -58,6 +58,7 @@ import {
   getChatWorkingFolder,
   listChatMessages,
   repairRootChatSurfaceController,
+  setChatRuntimeSelection,
   setChatGoalBinding,
   setChatWorkingFolder,
 } from "../store/chats";
@@ -163,8 +164,21 @@ import {
   revalidateInvocationWorkspaceBinding,
   type InvocationWorkspaceBinding,
 } from "../invocation/workspace-binding";
-import { type Runner, SURFACE_INTENT_MARKER, UNATTENDED_NO_ASK_DIRECTIVE } from "../runtime/runner";
-import { effortForSelectedModel, pickActive, pickRunner, selectInvocationRuntime } from "../runtime/selection";
+import {
+  runnerFailureFromError,
+  type Runner,
+  type RunnerFailure,
+  type RunnerRequest,
+  SURFACE_INTENT_MARKER,
+  UNATTENDED_NO_ASK_DIRECTIVE,
+} from "../runtime/runner";
+import {
+  effortForSelectedModel,
+  pickActive,
+  pickRunner,
+  rolePriorityRuntimes,
+  selectInvocationRuntime,
+} from "../runtime/selection";
 import { pickLocale, tStatus } from "../runtime/status-i18n";
 import { untrustedRuntimeFailurePayload } from "../runtime/untrusted-error";
 import { extractBuildInterviewQuestions } from "../../shared/build-turn";
@@ -202,6 +216,7 @@ import type {
   ProjectAgentPoolMember,
   RecStage,
   RecRouterAgent,
+  RuntimeSelection,
   RuntimeStatus,
 } from "../../shared/types";
 
@@ -1359,6 +1374,11 @@ export async function runMcpInvocation(
   workspaceBinding?: InvocationWorkspaceBinding,
   executionContext?: InvocationExecutionContext,
 ): Promise<McpInvocationResult> {
+  // A scheduled invocation is the worker leg of the automation, even though
+  // it shares this implementation with an interactive orchestrator turn.
+  // Keep usage and replay attribution aligned with the runtime that actually
+  // received the prompt.
+  const invocationModelRole = executionContext?.source === "automation" ? "worker" : "orchestrator";
   // 한 마이크로태스크 양보 — ipc:run 핸들러가 { runId }를 반환하고 렌더러가 이벤트 채널을
   // 구독한 뒤에야 sink가 발화하도록 보장한다. 이게 없으면 동기 early-return(no-chat/no-agent)
   // 에러가 구독 전에 발화돼 렌더러가 종료 이벤트를 놓치고 busy(정지 버튼)가 영구 고착된다.
@@ -2079,16 +2099,46 @@ ${effectiveUserPrompt}`;
     { scope: "agent" as const, targetId: agent.id },
     { scope: "firm" as const, targetId: chat.firmId },
   ];
-  // A chat runtime pin is a conversation default and must not silently discard
-  // the narrower per-agent/per-firm runtime assigned in Library; selectInvocationRuntime
-  // owns that precedence and reports which surface won. Only the unattended
-  // Main-owned automation pin stays authoritative (fail-closed contract).
+  // One's composer selection is the controller's first runtime for both One
+  // chat and One Work/graph runs. A normal Library assignment remains the
+  // default for other surfaces; One only leaves its pin after a typed runtime
+  // failure, at which point the ordered orchestrator pool takes over.
   const runtimeResolution = selectInvocationRuntime(runtimes, runtimeTargets, {
     pin: req.runtimeSelection,
-    pinIsAuthoritative: isUnattendedExecution(executionContext),
+    pinIsAuthoritative: isUnattendedExecution(executionContext) || req.oneMode === true,
     agentAppMode: req.agentAppMode === true,
   });
-  const runtimeChoice = runtimeResolution.choice;
+  let runtimeChoice = runtimeResolution.choice;
+  let controllerFallbackBeforeRun: RuntimeStatus | null = null;
+  // A One composer pin is a preference with an ordered recovery chain, not a
+  // reason to stop before a runner starts. If the selected executable vanished
+  // between the picker and dispatch, begin at orchestrator priority 1.
+  if (!runtimeChoice && req.oneMode === true && runtimeResolution.pinHonored) {
+    const fallback = rolePriorityRuntimes(runtimes, "orchestrator")[0];
+    const fallbackPicked = fallback ? pickRunner(fallback) : null;
+    if (fallback && fallbackPicked) {
+      runtimeChoice = {
+        active: fallback,
+        picked: fallbackPicked,
+        override: null,
+        unavailableOverride: null,
+      };
+      controllerFallbackBeforeRun = fallback;
+    }
+  }
+  if (runtimeChoice && !runtimeChoice.picked && req.oneMode === true && runtimeResolution.pinHonored) {
+    const fallback = rolePriorityRuntimes(runtimes, "orchestrator")[0];
+    const fallbackPicked = fallback ? pickRunner(fallback) : null;
+    if (fallback && fallbackPicked) {
+      runtimeChoice = {
+        active: fallback,
+        picked: fallbackPicked,
+        override: null,
+        unavailableOverride: null,
+      };
+      controllerFallbackBeforeRun = fallback;
+    }
+  }
   if (!runtimeChoice) {
     sink({
       kind: "error",
@@ -2167,6 +2217,105 @@ ${effectiveUserPrompt}`;
       },
     });
     return earlyResult();
+  }
+  const pickedForWorkforceLeader = picked;
+  const confirmedRuntime: RuntimeSelection = {
+    kind: active.kind,
+    backend: active.backend,
+    source: active.source,
+    model: active.model ?? undefined,
+    longContext: active.longContextEnabled,
+    effort: active.effort ?? undefined,
+  };
+  const runtimeLabel = `${confirmedRuntime.kind}${confirmedRuntime.model ? ` · ${confirmedRuntime.model}` : ""}`;
+  console.info(
+    `[runtime-selection] run=${req.runId ?? "-"} node=${executionContext?.nodeId ?? "root"} `
+      + `kind=${confirmedRuntime.kind} backend=${confirmedRuntime.backend ?? "-"} `
+      + `source=${confirmedRuntime.source ?? "-"} model=${confirmedRuntime.model ?? "-"}`,
+  );
+  sink({
+    kind: "notice",
+    model: confirmedRuntime.model ?? confirmedRuntime.kind,
+    modelRole: invocationModelRole,
+    runtimeSelection: confirmedRuntime,
+    notice: {
+      level: "info",
+      code: "runtime-selected",
+      message: locale === "ko"
+        ? `이번 실행은 ${runtimeLabel}로 연결되었습니다.`
+        : `This run is connected to ${runtimeLabel}.`,
+      i18n: {
+        ko: `이번 실행은 ${runtimeLabel}로 연결되었습니다.`,
+        en: `This run is connected to ${runtimeLabel}.`,
+      },
+      details: JSON.stringify(confirmedRuntime),
+    },
+  });
+  let controllerSelectionForFallback: RuntimeSelection = req.runtimeSelection ?? confirmedRuntime;
+  const oneControllerFallbackEligible = req.oneMode === true && runtimeResolution.pinHonored;
+  const emitControllerRuntimeFallback = (
+    fallback: RuntimeStatus,
+    failure: Pick<RunnerFailure, "kind" | "runtime" | "retryAfterHint"> | null,
+  ): void => {
+    if (!oneControllerFallbackEligible) return;
+    const nextSelection: RuntimeSelection = {
+      kind: fallback.kind,
+      backend: fallback.backend,
+      source: fallback.source,
+      model: fallback.model ?? undefined,
+      longContext: fallback.longContextEnabled,
+      effort: fallback.effort ?? undefined,
+      role: "orchestrator",
+      inherit: false,
+    };
+    const sameSelection = controllerSelectionForFallback.kind === nextSelection.kind
+      && controllerSelectionForFallback.backend === nextSelection.backend
+      && controllerSelectionForFallback.source === nextSelection.source
+      && controllerSelectionForFallback.model === nextSelection.model;
+    if (sameSelection) return;
+    const previous = controllerSelectionForFallback;
+    controllerSelectionForFallback = nextSelection;
+    req = { ...req, runtimeSelection: nextSelection };
+    let persisted = true;
+    try {
+      setChatRuntimeSelection(chat.id, nextSelection);
+    } catch (error) {
+      persisted = false;
+      console.error("[runtime-selection] failed to persist One fallback:", error);
+    }
+    const fromLabel = `${previous.kind}${previous.model ? ` · ${previous.model}` : ""}`;
+    const toLabel = `${nextSelection.kind}${nextSelection.model ? ` · ${nextSelection.model}` : ""}`;
+    const reason = failure?.kind === "quota"
+      ? locale === "ko" ? "사용 한도에 걸려" : "hit its usage limit"
+      : locale === "ko" ? "실행할 수 없어" : "became unavailable";
+    const koMessage = `One 모델 ${fromLabel}이 ${reason} 오케스트레이터 우선순위 모델 ${toLabel}로 전환했습니다.`;
+    const enMessage = `One's ${fromLabel} ${failure?.kind === "quota" ? "hit its usage limit" : "became unavailable"}; switched to orchestrator-priority model ${toLabel}.`;
+    const message = locale === "ko"
+      ? koMessage
+      : enMessage;
+    sink({
+      kind: "notice",
+      model: nextSelection.model ?? nextSelection.kind,
+      modelRole: "orchestrator",
+      runtimeSelection: nextSelection,
+      notice: {
+        level: "warning",
+        code: "runtime-fallback",
+        message,
+        i18n: { ko: koMessage, en: enMessage },
+        details: JSON.stringify({
+          from: previous,
+          to: nextSelection,
+          reason: failure?.kind ?? "unavailable-before-run",
+          runtime: failure?.runtime ?? null,
+          retryAfterHint: failure?.retryAfterHint ?? null,
+          persisted,
+        }),
+      },
+    });
+  };
+  if (controllerFallbackBeforeRun) {
+    emitControllerRuntimeFallback(controllerFallbackBeforeRun, null);
   }
   if (oneTeamExecutionPolicy) {
     const hostRunFacts = locale === "ko"
@@ -2624,6 +2773,7 @@ ${effectiveUserPrompt}`;
   ) => runBorrowedTaskForceInvocation({
     ...params,
     ...(isolatedMcpConfig ? { isolatedMcpConfig: true as const } : {}),
+    onControllerRuntimeFallback: params.onControllerRuntimeFallback ?? emitControllerRuntimeFallback,
     bindOneRuntimeToolArtifacts: bindInvocationOneArtifacts,
   });
   const workforceProjectDir = workingFolder ?? process.cwd();
@@ -2889,7 +3039,7 @@ ${effectiveUserPrompt}`;
         }),
         leader: async (turn) => {
           throwIfInvocationAborted(signal, locale);
-          const result = await picked.runner(
+          const result = await pickedForWorkforceLeader.runner(
             {
               systemPrompt: turn.systemPrompt,
               history: [],
@@ -2897,7 +3047,7 @@ ${effectiveUserPrompt}`;
               // Attachments stay inside the selected local/BYOM leader runtime. Hub receives
               // only the validated redacted WorkOrder, never image bytes or attachment paths.
               images: req.images,
-              backendLabel: picked.label,
+              backendLabel: pickedForWorkforceLeader.label,
               model: active.model ?? undefined,
               longContext: active.longContextEnabled ?? false,
               effort: active.effort ?? undefined,
@@ -3412,6 +3562,8 @@ ${effectiveUserPrompt}`;
             mcpCodexConfigArgs,
             agentAppMcpRuntimeEnv: mcpRuntimeEnv,
             onAgentAppMcpRuntimeUnavailable: markAgentAppMcpRuntimeUnavailable,
+            onControllerRuntimeFallback: emitControllerRuntimeFallback,
+            runtimePinHonored: runtimeResolution.pinHonored,
             runnerEnv: orchestrationRunnerEnv,
             locale,
             sink,
@@ -3998,6 +4150,27 @@ ${effectiveUserPrompt}`;
       // lightweight and plain-text capable.
       forceSurface: oneTeamExecutionPolicy ? true : undefined,
     };
+    const runnerRequestForRuntime = (
+      runtime: RuntimeStatus,
+      runtimePicked: { runner: Runner; label: string },
+      userPrompt = runtimeUserPrompt,
+    ) => {
+      const sessionCapable = runtime.kind === "claude-code" || runtime.kind === "codex" || runtime.kind === "kimi";
+      return {
+        ...runnerReq,
+        systemPrompt: sessionCapable || !turnContext
+          ? systemPrompt
+          : systemPrompt + "\n\n" + turnContext,
+        ...(sessionCapable && turnContext ? { turnContext } : { turnContext: undefined }),
+        userPrompt,
+        backendLabel: runtimePicked.label,
+        model: runtime.model ?? undefined,
+        longContext: runtime.longContextEnabled ?? false,
+        effort: req.oneMode && req.fastMode === true && runtime.kind === "codex"
+          ? effortForSelectedModel(runtime, runtime.model, "minimal") ?? undefined
+          : runtime.effort ?? undefined,
+      };
+    };
     // ★관문이 "설치됨"인지는 런타임이 실제로 받은 것으로 판정한다. settingsPath 하나만
     // 보면 grok 실행은 관문을 받고도 영원히 미설치로 기록된다.
     toolBrokerInstalled = Boolean(runnerReq.toolBrokerSettingsPath || runnerReq.toolBrokerPluginDir);
@@ -4124,6 +4297,51 @@ ${effectiveUserPrompt}`;
       // 상태줄과 달리 대화에 남는다.
       onNotice: (notice: NonNullable<McpInvocationEvent["notice"]>) => sink({ kind: "notice", notice }),
     };
+    const directRuntimeFallbackAllowed = !req.agentAppMode && !isUnattendedExecution(executionContext);
+    const invokeCurrentRuntime = async (request: RunnerRequest): Promise<Awaited<ReturnType<Runner>>> => {
+      const currentPicked = picked;
+      if (!currentPicked) throw new Error("no-runner");
+      let requestForRuntime: RunnerRequest = {
+        ...runnerRequestForRuntime(active, currentPicked, request.userPrompt),
+        images: request.images,
+      };
+      while (true) {
+        let result: Awaited<ReturnType<Runner>>;
+        try {
+          const selected = picked;
+          if (!selected) throw new Error("no-runner");
+          result = await selected.runner(requestForRuntime, runnerEvents);
+        } catch (error) {
+          if (!directRuntimeFallbackAllowed || signal?.aborted) throw error;
+          result = {
+            text: "",
+            failure: runnerFailureFromError(error, active.kind),
+          };
+        }
+        if (!result.failure || !directRuntimeFallbackAllowed || signal?.aborted) return result;
+        const failed = result.failure;
+        const fallback = rolePriorityRuntimes(runtimes, "orchestrator", {
+          failedRuntime: active,
+          failure: failed,
+        })[0];
+        const fallbackPicked = fallback ? pickRunner(fallback) : null;
+        if (!fallback || !fallbackPicked) return result;
+        if (oneControllerFallbackEligible) emitControllerRuntimeFallback(fallback, failed);
+        sink({
+          kind: "tool-use",
+          status: locale === "ko"
+            ? "선택한 실행 환경을 사용할 수 없어 오케스트레이터 우선순위 다음 모델로 이어갑니다."
+            : "The selected runtime is unavailable; continuing on the next orchestrator-priority model.",
+          activity: { code: "recovery_retry" },
+        });
+        active = fallback;
+        picked = fallbackPicked;
+        requestForRuntime = {
+          ...runnerRequestForRuntime(active, picked, request.userPrompt),
+          images: request.images,
+        };
+      }
+    };
     const advanceUsageFloor = () => {
       liveUsageFloor = liveUsageHigh;
     };
@@ -4146,9 +4364,9 @@ ${effectiveUserPrompt}`;
       restrictedDiscardedMemoryEvents += parsed.events.length;
       return { ...passResult, text: parsed.cleanedText };
     };
-    let activeRunnerReq = runnerReq;
+    let activeRunnerReq = runnerRequestForRuntime(active, picked);
     modelTurnStarted = true;
-    let result = await picked.runner(activeRunnerReq, runnerEvents);
+    let result = await invokeCurrentRuntime(activeRunnerReq);
     /*
      * ★런타임이 표식으로 실패를 말했으면 그 text는 답이 아니다 — 거절 고지문이다.
      * 여기서 막지 않으면 고지문이 assistant 챗 답변으로 영속되고(appendChatMessage),
@@ -4264,7 +4482,7 @@ ${effectiveUserPrompt}`;
           : continuationPrompt,
         images: undefined,
       };
-      result = await picked.runner(activeRunnerReq, runnerEvents);
+      result = await invokeCurrentRuntime(activeRunnerReq);
       if (result.failure) {
         throw new Error(`${result.failure.runtime} runtime ${result.failure.kind}: ${result.failure.message}`);
       }
@@ -4297,7 +4515,7 @@ ${effectiveUserPrompt}`;
             : recoveryPrompt,
           images: undefined,
         };
-        result = await picked.runner(activeRunnerReq, runnerEvents);
+        result = await invokeCurrentRuntime(activeRunnerReq);
         if (result.failure) {
           throw new Error(`${result.failure.runtime} runtime ${result.failure.kind}: ${result.failure.message}`);
         }
@@ -4321,7 +4539,7 @@ ${effectiveUserPrompt}`;
             : buildOneRecoveryDecisionPrompt(result.text, locale),
           images: undefined,
         };
-        result = await picked.runner(activeRunnerReq, runnerEvents);
+        result = await invokeCurrentRuntime(activeRunnerReq);
         if (result.failure) {
           throw new Error(`${result.failure.runtime} runtime ${result.failure.kind}: ${result.failure.message}`);
         }
@@ -5091,7 +5309,7 @@ ${effectiveUserPrompt}`;
         agentId: agent.id,
         payload: {
           invocationId: memoryTurnId,
-          modelRole: "orchestrator",
+          modelRole: invocationModelRole,
           provider: active.backend ?? active.kind,
           model: active.model ?? null,
           tokens: finalObservedTokens,
@@ -5125,7 +5343,7 @@ ${effectiveUserPrompt}`;
       text: displayWithFloor,
       tokens: finalObservedTokens || undefined,
       model: active.model ?? active.kind,
-      modelRole: "orchestrator",
+      modelRole: invocationModelRole,
     });
     return {
       finalText: displayWithFloor,

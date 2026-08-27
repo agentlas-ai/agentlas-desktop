@@ -71,7 +71,7 @@ import {
 } from "./automation-watchdog";
 import { recoverStaleAutomationRuns } from "./store/db";
 import { detectRuntimes } from "./runtime/detect";
-import { pickActive } from "./runtime/selection";
+import { rolePriorityRuntimes } from "./runtime/selection";
 import { withRunPriority } from "./runtime/run-priority";
 import { synthesizeLegacyGraph } from "./automation-emitter";
 import { suspendAutomationForGraphReconciliation } from "./store/graph-reconciliation";
@@ -288,10 +288,12 @@ function automationSessionInput(a: Automation): {
   agentId?: string;
   firmId?: string | null;
   projectId?: string | null;
+  runtimeSelection?: RuntimeSelection | null;
 } {
   return {
     automationId: a.id,
     projectId: a.projectId ?? null,
+    runtimeSelection: a.runtimeSelection ?? null,
     ...(a.targetType === "firm" ? { firmId: a.targetId } : a.targetType === "agent" ? { agentId: a.targetId } : {}),
   };
 }
@@ -307,8 +309,89 @@ function schedulerExecutionPermission(_a: Automation): "read" | "write" {
   return automationRuntimePermission({ simulation: false });
 }
 
+/**
+ * 실패 복구 진단은 저장된 자동화 계약보다 넓은 권한으로 올라가면 안 된다.
+ * 본 실행은 구형 `read` 행도 조회 도구를 쓸 수 있도록 런타임 write를 받지만,
+ * optimizer가 그 행을 write로 재해석하면 실패 원인과 복구 권한이 달라진다.
+ */
+function schedulerOptimizerPermission(a: Automation): "read" | "write" {
+  return a.executionPermission === "read" ? "read" : automationRuntimePermission({ simulation: false });
+}
+
+function stripAutomationFailureCode(error: string): string {
+  return error.replace(/^\s*\[[a-z0-9_.:-]+\]\s*/i, "").trim().slice(0, 1200);
+}
+
+function automationRuntimeLabel(selection: RuntimeSelection, ko: boolean): string {
+  const labels: Record<string, string> = {
+    "claude-code": ko ? "Claude Code" : "Claude Code",
+    codex: "Codex",
+    antigravity: "Antigravity",
+    kimi: "Kimi",
+    grok: "Grok",
+    cursor: "Cursor",
+    byok: ko ? "BYOK" : "BYOK",
+    ollama: "Ollama",
+    lmstudio: "LM Studio",
+    mlx: "MLX",
+    acp: "ACP",
+    agentlas: "Agentlas",
+  };
+  const label = labels[selection.kind] ?? selection.kind;
+  return selection.model ? `${label} · ${selection.model}` : label;
+}
+
 /** 실패 원인을 표출하고 아는 원인은 수리한다. 반복 실패도 자동화를 끄지는 않는다. */
-function handleAutomationFailure(a: Automation, error: string): void {
+function appendAutomationFailureNotice(
+  chatId: string,
+  error: string,
+  runId?: string | null,
+  currentRuntime?: RuntimeSelection | null,
+): void {
+  const ko = currentUiLocale() === "ko";
+  const reason = stripAutomationFailureCode(error) || (ko ? "기록된 실패 사유가 없습니다." : "No failure reason was recorded.");
+  const currentRuntimeLine = currentRuntime
+    ? ko
+      ? `현재 자동화 설정 실행 모델: ${automationRuntimeLabel(currentRuntime, true)}.`
+      : `Current automation runtime setting: ${automationRuntimeLabel(currentRuntime, false)}.`
+    : ko
+      ? "현재 자동화 설정 실행 모델: 별도 고정 없음."
+      : "Current automation runtime setting: no separate pin.";
+  let toolEvidence = "";
+  if (runId) {
+    try {
+      const activity = observedToolActivity(runId);
+      toolEvidence = ko
+        ? `호스트 실행 원장에 기록된 외부 도구 호출: ${activity.callCount}건.`
+        : `External tool calls recorded by the host run ledger: ${activity.callCount}.`;
+    } catch {
+      /* A missing evidence row must not replace the authoritative failure reason. */
+    }
+  }
+  const lines = ko
+    ? [
+      "자동화 최신 실행 상태: 완료되지 않았습니다.",
+      currentRuntimeLine,
+      `기록된 실행 사유: ${reason}`,
+      toolEvidence,
+      "이 안내가 이번 실행의 최신 사실입니다. 이전 대화의 브라우저·로그인 안내는 이번 실행 결과가 아닙니다.",
+    ]
+    : [
+      "Latest automation run status: it did not complete.",
+      currentRuntimeLine,
+      `Recorded run reason: ${reason}`,
+      toolEvidence,
+      "This notice is the latest fact for this run. Earlier browser or login guidance in the conversation was not this run's result.",
+    ];
+  try {
+    appendChatMessage(chatId, "system", lines.filter(Boolean).join("\n"));
+  } catch (err) {
+    console.error("[automation] deterministic failure notice could not be written:", err);
+  }
+}
+
+/** 실패 원인을 표출하고 아는 원인은 수리한다. 반복 실패도 자동화를 끄지는 않는다. */
+function handleAutomationFailure(a: Automation, error: string, failedRunId?: string | null): void {
   let streak = 1;
   try {
     streak = Math.max(1, countConsecutiveFailures(a.id));
@@ -318,6 +401,7 @@ function handleAutomationFailure(a: Automation, error: string): void {
 
   try {
     const chat = getOrCreateAutomationSession(automationSessionInput(a));
+    let deterministicNoticeScheduled = false;
     // Operational evidence never becomes chat copy. The controller receives it
     // privately and authors the recovery action/result in the automation's own
     // session. No error dictionary or deterministic doctor chooses the route.
@@ -339,13 +423,18 @@ function handleAutomationFailure(a: Automation, error: string): void {
       const req = {
         runId,
         chatId: chat.chat.id,
+        automationId: a.id,
         userPrompt: prompt,
         // 제품이 스스로 보내는 복구 지시다. 표시하면 "사용자가 이렇게 말했다"로 읽히고,
         // 세션 대화에 내부 프롬프트("Private evidence …")가 그대로 노출된다.
         promptOrigin: "system" as const,
-        permissions: schedulerExecutionPermission(a),
+        permissions: schedulerOptimizerPermission(a),
         toolMode: "auto" as const,
         hubMode: a.hubMode ?? "hub-allowed",
+        // Recovery belongs to the failed automation. Without this pin the
+        // optimizer silently used the global orchestrator (often Claude)
+        // even when the automation itself was fixed to Antigravity.
+        runtimeSelection: a.runtimeSelection,
       };
       tryRecordRunEvent({
         runId,
@@ -389,8 +478,8 @@ function handleAutomationFailure(a: Automation, error: string): void {
       void Promise.race([optimizerRun, abortGate])
         .catch((err) => {
           console.error("[automation] system optimizer run failed:", err);
-          // 복구 시도가 죽은 사실은 콘솔에만 남으면 없는 것과 같다. 사용자는 자동화가
-          // 실패한 것만 보고, 제품이 고치려다 실패한 것은 영영 모른다 — 사유를 세션에 남긴다.
+          // 복구 시도가 죽은 사실은 콘솔에만 남으면 없는 것과 같다. 원래 자동화
+          // 실패 고지와 분리된 호스트 행으로 남겨, 취소·타임아웃도 사용자가 확인하게 한다.
           const reason = err instanceof Error ? err.message : String(err);
           try {
             appendChatMessage(
@@ -408,8 +497,11 @@ function handleAutomationFailure(a: Automation, error: string): void {
           if (optimizerControllers.get(a.id) === optimizerController) {
             optimizerControllers.delete(a.id);
           }
+          appendAutomationFailureNotice(chat.chat.id, error, failedRunId, a.runtimeSelection);
         });
+      deterministicNoticeScheduled = true;
     }
+    if (!deterministicNoticeScheduled) appendAutomationFailureNotice(chat.chat.id, error, failedRunId, a.runtimeSelection);
   } catch (err) {
     console.error("[automation] failure feedback failed:", err);
   }
@@ -570,7 +662,9 @@ async function runOne(
       );
     }
     if (storedContract.runtimeSelection === "missing") {
-      const activeRuntime = pickActive(await detectRuntimes());
+      // Automations execute as workers. Resolve an unpinned automation from the
+      // stored Worker role order; detection order must never choose its model.
+      const activeRuntime = rolePriorityRuntimes(await detectRuntimes(), "worker")[0] ?? null;
       if (!activeRuntime) throw new Error("No runtime is available to pin for this automation.");
       a = pinAutomationRuntimeIfUnset(a.id, {
           kind: activeRuntime.kind,
@@ -781,6 +875,7 @@ async function runOne(
         // ★판정에 **호스트가 센 도구 호출**을 함께 준다. 모델이 "게시했다"고 써도
         //   도구 호출이 0건이면 바깥은 그대로다 — 그 사실은 지어낼 수 없다.
         const classified = await classifyAutomationOutcome(output, {
+          runtimeSelection: a.runtimeSelection,
           ...(currentRunId ? { toolActivity: observedToolActivity(currentRunId) } : {}),
           ...(runRecord.steps.length > 0 ? { runRecord } : {}),
           // 사람이 승인한 목표 — 이것 없이는 "시킨 대로 한 것"과 "다 못 한 것"을 못 가른다.
@@ -794,7 +889,9 @@ async function runOne(
           : classified.reason;
         // runStatus는 건드리지 않는다. 후속 정책은 아래에서 두 값을 함께 보고 정한다.
       } else {
-        const classified = await classifyAutomationFailure(graphError);
+        const classified = await classifyAutomationFailure(graphError, {
+          runtimeSelection: a.runtimeSelection,
+        });
         runStatus = outVals.length > 0 ? "partial" : classified.status;
         runError = classified.reasonCode
           ? `[${classified.reasonCode}] ${classified.reason ?? graphError ?? "automation failed"}`
@@ -859,6 +956,7 @@ async function runOne(
       const chat = getOrCreateAutomationSession({
         automationId: a.id,
         projectId: a.projectId ?? null,
+        runtimeSelection: a.runtimeSelection ?? null,
         ...(a.targetType === "firm" ? { firmId: a.targetId } : a.targetType === "agent" ? { agentId: a.targetId } : {}),
       });
       try {
@@ -866,6 +964,7 @@ async function runOne(
         const req = {
           runId,
           chatId: chat.chat.id,
+          automationId: a.id,
           userPrompt: withGoalCompletionProtocol(
             buildAutomationContinuityPrompt(
               chat.chat.id,
@@ -943,6 +1042,7 @@ async function runOne(
         // ★판정에 **호스트가 센 도구 호출**을 함께 준다. 모델이 "게시했다"고 써도
         //   도구 호출이 0건이면 바깥은 그대로다 — 그 사실은 지어낼 수 없다.
         const classified = await classifyAutomationOutcome(output, {
+          runtimeSelection: a.runtimeSelection,
           ...(currentRunId ? { toolActivity: observedToolActivity(currentRunId) } : {}),
           declaredGoal: { name: a.name ?? null, goal: a.goal ?? null },
         });
@@ -1068,7 +1168,9 @@ async function runOne(
     // 판정은 원문을 읽기 좋은 한 문장으로 **교체**하므로, 교체된 문장에서 다시 표식을 찾으면
     // 없다. 원문을 따로 붙들어 둔다.
     machineError = rawError;
-    const classified = await classifyAutomationFailure(rawError);
+    const classified = await classifyAutomationFailure(rawError, {
+      runtimeSelection: a.runtimeSelection,
+    });
     runStatus = classified.status;
     runError = classified.reasonCode
       ? `[${classified.reasonCode}] ${classified.reason ?? rawError}`
@@ -1180,7 +1282,7 @@ async function runOne(
       !judgmentUnavailableRun && !parentMissing && !leaseOwnershipLost
     ) {
       try {
-        handleAutomationFailure(a, runError ?? "unknown error");
+        handleAutomationFailure(a, runError ?? "unknown error", currentRunId);
       } catch (err) {
         console.error("[automation] handleAutomationFailure failed:", err);
       }
@@ -1245,15 +1347,36 @@ async function runOne(
     typeof runError === "string" &&
     runError.includes("[claimed_without_tools]")
   ) {
+    // Main-owned automation pins are authoritative. A zero-tool claim is already
+    // a failed exact run; retrying on the global worker pool would silently cross
+    // providers (for example, Antigravity -> Claude) and make the dashboard chip
+    // a lie. The original failure is durable and requires an explicit pin change.
+    if (a.runtimeSelection) {
+      console.error(
+        `[automation] ${a.id} claimed success with zero tool calls — refusing cross-runtime retry for pinned ${a.runtimeSelection.kind}/${a.runtimeSelection.model ?? "default"}`,
+      );
+      return { accepted: true, status: runStatus, error: runError, output };
+    }
+    // The retry must follow the dashboard's worker role. A hard-coded Claude
+    // fallback made an Antigravity automation silently cross provider
+    // boundaries and was indistinguishable from an accidental Claude call.
+    const fallbackRuntime = rolePriorityRuntimes(await detectRuntimes(), "worker")[0] ?? null;
+    if (!fallbackRuntime) {
+      const retryError = "[zero_tool_retry_unavailable] no worker runtime is connected";
+      console.error(`[automation] ${a.id} ${retryError}`);
+      return { accepted: false, status: "error", error: retryError, output };
+    }
     const fallback: RuntimeSelection = {
-      kind: "claude-code",
-      backend: "anthropic",
-      source: "claude",
-      model: "sonnet",
-      longContext: false,
+      kind: fallbackRuntime.kind,
+      backend: fallbackRuntime.backend,
+      source: fallbackRuntime.source,
+      model: fallbackRuntime.model ?? undefined,
+      longContext: fallbackRuntime.longContextEnabled,
+      effort: fallbackRuntime.effort ?? undefined,
     };
-    const sameKind =
-      a.runtimeSelection?.kind === fallback.kind && a.runtimeSelection?.model === fallback.model;
+    // The authoritative-pin branch returned above, so this legacy retry path
+    // intentionally has no saved runtime to compare against.
+    const sameKind = false;
     if (!sameKind) {
       try {
         console.error(

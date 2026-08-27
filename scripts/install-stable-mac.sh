@@ -4,6 +4,7 @@ set -euo pipefail
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 repo="${AGENTLAS_DESKTOP_STABLE_REPO:-agentlas-ai/agentlas-desktop-releases}"
 local_dmg=""
+force_reinstall=0
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/agentlas-stable-install.XXXXXX")"
 mount_point=""
 stage_container=""
@@ -18,6 +19,7 @@ install_committed=0
 for argument in "$@"; do
   case "$argument" in
     --dmg=*) local_dmg="${argument#--dmg=}" ;;
+    --force-reinstall) force_reinstall=1 ;;
     *)
       echo "Unknown installer argument: $argument" >&2
       exit 1
@@ -80,6 +82,28 @@ verify_official_app() {
     "--source=$1" \
     "--destination=/Applications/Agentlas.app" \
     "--policy=$project_dir/build-resources/macos-release-signing-policy.json" >/dev/null
+}
+
+agentlas_main_pids() {
+  # Only the packaged main process is named Agentlas. Helpers and unrelated
+  # Electron/Claude processes must never be treated as install blockers.
+  pgrep -x Agentlas || true
+}
+
+wait_for_agentlas_exit() {
+  local attempts=0
+  local pids=""
+  while (( attempts < 30 )); do
+    pids="$(agentlas_main_pids)"
+    if [[ -z "$pids" ]]; then
+      return 0
+    fi
+    sleep 1
+    attempts=$((attempts + 1))
+  done
+
+  echo "Agentlas is still running after 30 seconds; refusing to replace a live app. PIDs: ${pids//$'\n'/ }" >&2
+  return 1
 }
 
 rollback_install() {
@@ -252,8 +276,12 @@ if [[ -n "$local_dmg" ]]; then
       }
       process.exit(1);
     ' "$current_version" "$version"; then
-      echo "Local DMG is not a newer stable version: installed=${current_version}, candidate=${version}" >&2
-      exit 1
+      if [[ "$force_reinstall" == "1" ]]; then
+        echo "Reinstalling the same stable version by explicit --force-reinstall: ${version}"
+      else
+        echo "Local DMG is not a newer stable version: installed=${current_version}, candidate=${version}" >&2
+        exit 1
+      fi
     fi
   fi
 elif [[ "$installed_version" != "$version" ]]; then
@@ -279,13 +307,10 @@ fi
 verify_official_app "$stage_path"
 
 if [[ "${AGENTLAS_APP_ALREADY_STOPPED:-0}" == "1" ]]; then
-  if pgrep -x Agentlas >/dev/null 2>&1; then
-    echo "Agentlas is still running; refusing the pre-stopped installation path." >&2
-    exit 1
-  fi
+  wait_for_agentlas_exit
 else
   osascript -e 'tell application "Agentlas" to quit' >/dev/null 2>&1 || true
-  sleep 2
+  wait_for_agentlas_exit
 fi
 
 if [[ -d /Applications/Agentlas.app ]]; then

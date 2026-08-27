@@ -362,6 +362,7 @@ export async function planAutomationFix(automationId: string): Promise<Automatio
     }),
     actions: caps.map((cap) => cap.option),
     locale: currentUiLocale(),
+    runtimeSelection: automation.runtimeSelection,
   });
 
   if (decision.source !== "llm") return empty;

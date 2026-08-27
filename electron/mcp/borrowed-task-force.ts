@@ -53,7 +53,7 @@ import {
   createUntrustedRuntimeFailure,
   UNTRUSTED_RUNTIME_FAILURE_MESSAGE,
 } from "../runtime/untrusted-error";
-import { SURFACE_INTENT_MARKER } from "../runtime/runner";
+import { runnerFailureFromError, SURFACE_INTENT_MARKER } from "../runtime/runner";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 import { tryRecordRunEvent } from "../store/run-events";
 import {
@@ -69,7 +69,12 @@ import {
   type WorkloadAllocation,
   type WorkloadResolution,
 } from "../runtime/workload-routing";
-import { pickActive, pickRunner, selectRuntimeForTargets } from "../runtime/selection";
+import {
+  pickActive,
+  pickRunner,
+  rolePriorityRuntimes,
+  selectRuntimeForTargets,
+} from "../runtime/selection";
 import { getAgentById } from "./registry";
 import { runFirmInvocation } from "./firm-orchestrator";
 import { buildAgentRuntimeOntologyContext } from "../ontology/runtime-context";
@@ -403,14 +408,13 @@ export interface BorrowedTaskForceParams {
   /** Explicit scoped selection wins over parent-AI workload allocation. */
   runtimeOverride?: AgentRuntimeOverride | null;
   /**
-   * One 에서 고른 모델이 실제로 존중됐는가.
-   *
-   * ★이것은 **One 자신의 모델**이지 오케스트레이터 자리의 모델이 아니다. 둘은
-   * 따로 설정된다(오케스트레이터 · One · 에이전트 좌석 세 층). 한때 이 값으로
-   * 오케스트레이터 기본값을 덮었는데, 그것은 두 층을 하나로 뭉개는 잘못이라
-   * 되돌렸다. 지금은 기록·표시용으로만 쓴다.
+   * One에서 고른 모델을 컨트롤 플레인의 첫 시도로 실제 사용했는가.
+   * One 팀/Work 실행에서는 이 값이 true일 때 planner/synthesis도 One 모델로
+   * 시작하고, 실패하면 오케스트레이터 DB 우선순위 풀로 내려간다.
    */
   runtimePinHonored?: boolean;
+  /** Main persists a controller fallback and updates the visible One picker. */
+  onControllerRuntimeFallback?: (runtime: RuntimeStatus, failure: RunnerFailure) => void;
   workingFolder?: string | null;
   /** Main-process-only resolved read boundary for Soul/Sitemap/Code Map/curated memory. */
   memoryReadPath?: string | null;
@@ -559,6 +563,10 @@ function sameRuntime(left: RuntimeStatus, right: RuntimeStatus): boolean {
   return left.kind === right.kind && left.backend === right.backend && left.source === right.source;
 }
 
+function sameRuntimeModel(left: RuntimeStatus, right: RuntimeStatus): boolean {
+  return sameRuntime(left, right) && left.model === right.model;
+}
+
 /**
  * 이 역할 자리에 **사용자가 앉힌** 런타임만 남긴다.
  *
@@ -584,7 +592,7 @@ function taskForceCandidateRuntimes(p: BorrowedTaskForceParams): RuntimeStatus[]
   // model. Letting workload allocation switch worker providers would confound
   // model quality with orchestration quality.
   const supplied = p.req.agentAppMode || p.benchmarkMode ? [p.active] : [...(p.runtimes ?? [p.active])];
-  if (!supplied.some((runtime) => sameRuntime(runtime, p.active))) supplied.unshift(p.active);
+  if (!supplied.some((runtime) => sameRuntimeModel(runtime, p.active))) supplied.unshift(p.active);
   // Actual Codex 0.144.4 probing exposed collaboration authority after
   // `--disable multi_agent`. Do not advertise a runtime that the Workforce
   // worker boundary will necessarily reject; the host LLM must choose only
@@ -593,13 +601,19 @@ function taskForceCandidateRuntimes(p: BorrowedTaskForceParams): RuntimeStatus[]
     ? supplied.filter((runtime) => runtime.kind !== "codex")
     : supplied;
   const runnable = authorityEligible.filter((runtime, index, list) => (
-    list.findIndex((candidate) => sameRuntime(candidate, runtime)) === index && Boolean(pickRunner(runtime))
+    list.findIndex((candidate) => sameRuntimeModel(candidate, runtime)) === index && Boolean(pickRunner(runtime))
   ));
   const candidates = runnable;
   if (p.workforceSelectionReceipt && candidates.length === 0) {
     throw new Error("workforce_runtime_isolation_unverified:no-executable-runtime");
   }
   return candidates.length > 0 ? candidates : [p.active];
+}
+
+function oneControllerRuntimePreferred(p: BorrowedTaskForceParams): boolean {
+  return p.req.oneMode === true
+    && p.runtimePinHonored === true
+    && Boolean(p.req.runtimeSelection);
 }
 
 function taskForceRuntimeInventoryId(
@@ -610,24 +624,11 @@ function taskForceRuntimeInventoryId(
   return index >= 0 ? `runtime-${index + 1}` : null;
 }
 
-function sameRuntimeFailureDomain(
-  candidate: RuntimeStatus,
-  failed: RuntimeStatus,
-  failure: RunnerFailure,
-): boolean {
-  // Authentication and quota refusals normally cover the provider/account,
-  // not one executable path. Exit/timeout failures stay scoped to the exact
-  // runtime so another installation or backend remains eligible.
-  if (failure.kind === "auth" || failure.kind === "quota") {
-    return candidate.kind === failed.kind && candidate.backend === failed.backend;
-  }
-  return sameRuntime(candidate, failed);
-}
-
 function taskForceRecoveryRuntime(
   p: BorrowedTaskForceParams,
   failed: RuntimeStatus,
   failure: RunnerFailure,
+  role: RuntimeRole = "worker",
 ): RuntimeStatus | null {
   // Exact prepared Workforce, benchmarks, and Agent Apps are fail-closed
   // contracts. Ordinary One Team model choices are preferences with an
@@ -640,10 +641,10 @@ function taskForceRecoveryRuntime(
   ) {
     return null;
   }
-  const candidates = taskForceCandidateRuntimes(p).filter((runtime) => (
-    !sameRuntimeFailureDomain(runtime, failed, failure) && Boolean(pickRunner(runtime))
-  ));
-  return pickActive(candidates, "worker") ?? candidates[0] ?? null;
+  return rolePriorityRuntimes(taskForceCandidateRuntimes(p), role, {
+    failedRuntime: failed,
+    failure,
+  })[0] ?? null;
 }
 
 function cleanString(value: unknown): string {
@@ -1003,6 +1004,16 @@ async function observeTaskForceModelCall<T>(
       ...input,
       status: p.signal?.aborted ? "cancelled" : "failed",
     });
+    // Some runners return a typed failure, while others reject before a
+    // RunnerResult exists (CLI startup, ACP handshake, or transport error).
+    // Keep both cases on the same recovery path for ordinary One/Work calls;
+    // strict callers still fail closed in taskForceRecoveryRuntime.
+    if (!p.signal?.aborted && !(error instanceof TaskForceRuntimeFailureError)) {
+      throw new TaskForceRuntimeFailureError(
+        runnerFailureFromError(error, input.runtime.kind),
+        input.runtime,
+      );
+    }
     throw error;
   }
 }
@@ -3050,6 +3061,7 @@ interface WorkforceInvocationEvidence {
   requestedEffort: string | null;
   result: Pick<RunnerResult, "appliedEffort" | "workforcePermissionEnforcement">;
   status: "completed" | "failed" | "blocked";
+  fallbackUsed?: boolean;
   reasonCodes?: string[];
   escalatedFromRole?: "worker";
   failureCount?: 2;
@@ -3060,7 +3072,7 @@ interface WorkforceNestedExecutionEvidence {
   nestedExecutionId: string;
   managerPlan: WorkforceInvocationEvidence & {
     parseSuccess: boolean;
-    fallbackUsed: false;
+    fallbackUsed: boolean;
     plannedWorkerIds: string[];
   };
   workers: Array<WorkforceInvocationEvidence & { id: string }>;
@@ -3115,14 +3127,23 @@ async function runBorrowedAgentTurn(
   const agentRuntimeChoice = installedAgent && !p.workforceSelectionReceipt && !p.req.agentAppMode
     ? selectRuntimeForTargets(candidateRuntimes, [{ scope: "agent", targetId: installedAgent.id }], "worker")
     : null;
-  const workerDefault = agentRuntimeChoice?.active ?? pickActive(candidateRuntimes, "worker") ?? p.active;
+  const workerPriority = rolePriorityRuntimes(candidateRuntimes, "worker");
+  const workerDefault = agentRuntimeChoice?.active
+    ?? workerPriority[0]
+    ?? pickActive(candidateRuntimes, "worker")
+    ?? p.active;
   const workerDefaultRunner = agentRuntimeChoice?.picked
     ?? (sameRuntime(workerDefault, p.active) ? p.picked : pickRunner(workerDefault) ?? p.picked);
   const orchestratorRuntimes = [...(p.runtimes ?? [p.active])];
   if (!orchestratorRuntimes.some((runtime) => sameRuntime(runtime, p.active))) {
     orchestratorRuntimes.unshift(p.active);
   }
-  const orchestratorDefault = pickActive(orchestratorRuntimes, "orchestrator") ?? p.active;
+  const orchestratorPriority = rolePriorityRuntimes(orchestratorRuntimes, "orchestrator");
+  const orchestratorDefault = oneControllerRuntimePreferred(p)
+    ? p.active
+    : p.runtimeOverride
+      ? p.active
+      : orchestratorPriority[0] ?? pickActive(orchestratorRuntimes, "orchestrator") ?? p.active;
   const orchestratorDefaultRunner = sameRuntime(orchestratorDefault, p.active)
     ? p.picked
     : pickRunner(orchestratorDefault) ?? p.picked;
@@ -3132,6 +3153,7 @@ async function runBorrowedAgentTurn(
     fallbackRuntime: orchestratorDefault,
     phase: "synthesize",
     manualOverride: p.runtimeOverride,
+    explicitPinned: !p.workforceSelectionReceipt,
   });
   const workloadResolution: WorkloadResolution = recoveryRuntime
     ? {
@@ -3150,7 +3172,7 @@ async function runBorrowedAgentTurn(
         fallbackRuntime: workerDefault,
         phase: "delegate",
         manualOverride: agentRuntimeChoice?.override ?? p.runtimeOverride,
-        explicitPinned: Boolean(agentRuntimeChoice?.unavailableOverride),
+        explicitPinned: !p.workforceSelectionReceipt,
         requirementsVerified: p.workforceSelectionReceipt ? true : undefined,
       });
   if (p.workforceSelectionReceipt) {
@@ -3312,6 +3334,8 @@ async function runBorrowedAgentTurn(
         mcpCodexConfigArgs: p.mcpCodexConfigArgs,
         agentAppMcpRuntimeEnv: p.agentAppMcpRuntimeEnv,
         onAgentAppMcpRuntimeUnavailable: p.onAgentAppMcpRuntimeUnavailable,
+        runtimePinHonored: p.runtimePinHonored,
+        onControllerRuntimeFallback: p.onControllerRuntimeFallback,
         runnerEnv: p.runnerEnv,
         locale: p.locale,
         sink: nestedSink,
@@ -3347,18 +3371,27 @@ async function runBorrowedAgentTurn(
       const managerPlanAllocation = p.workforceSelectionReceipt
         ? packet.allocation
         : defaultWorkloadAllocation("plan");
+      const managerControllerPriority = rolePriorityRuntimes(candidateRuntimes, "orchestrator");
+      const managerControllerDefault = oneControllerRuntimePreferred(p)
+        ? p.active
+        : p.runtimeOverride
+          ? p.active
+          : managerControllerPriority[0] ?? p.active;
       const managerPlanBaseResolution = resolveWorkloadAllocationAcrossRuntimes({
         allocation: managerPlanAllocation,
         runtimes: candidateRuntimes,
-        fallbackRuntime: p.active,
+        fallbackRuntime: managerControllerDefault,
         phase: "plan",
         manualOverride: p.runtimeOverride,
+        explicitPinned: !p.workforceSelectionReceipt,
         requirementsVerified: p.workforceSelectionReceipt ? true : undefined,
       });
-      const managerPlanActive = managerPlanBaseResolution.runtime;
-      const managerPlanPicked = sameRuntime(managerPlanActive, p.active)
+      let managerPlanActive = managerPlanBaseResolution.runtime;
+      let managerPlanPicked = sameRuntime(managerPlanActive, p.active)
         ? p.picked
         : pickRunner(managerPlanActive) ?? p.picked;
+      let managerPlanResolutionBase = managerPlanBaseResolution;
+      let managerPlanFallbackUsed = false;
       const teamEvent = (node: string, name: string, event: McpInvocationEvent): McpInvocationEvent => ({
         ...event,
         agentId: `${id}:hub-team:${node}`,
@@ -3384,13 +3417,16 @@ async function runBorrowedAgentTurn(
       for (let attempt = 1; attempt <= MAX_TEAM_MANAGER_SCHEMA_ATTEMPTS; attempt += 1) {
         managerPlanInvocationId = `${nestedExecutionId}:manager-plan:${attempt}`;
         const repair = attempt > 1;
-        managerPlan = await observeTaskForceModelCall(p, {
-          nodeId: `${id}:hub-team:manager`,
-          phase: "manager-plan",
-          attempt,
-          agentId: null,
-          runtime: managerPlanActive,
-        }, () => managerPlanPicked.runner(
+        let managerPlanAttempt: RunnerResult | null = null;
+        while (!managerPlanAttempt) {
+          try {
+            managerPlanAttempt = await observeTaskForceModelCall(p, {
+              nodeId: `${id}:hub-team:manager`,
+              phase: "manager-plan",
+              attempt,
+              agentId: null,
+              runtime: managerPlanActive,
+            }, () => managerPlanPicked.runner(
           {
             systemPrompt: [
               buildBorrowedAgentSystemPrompt(managerSpec, packagePermission),
@@ -3435,7 +3471,40 @@ async function runBorrowedAgentTurn(
               }));
             },
           },
-        ));
+            ));
+          } catch (error) {
+            const typed = error instanceof TaskForceRuntimeFailureError ? error : null;
+            if (!typed) throw error;
+            const recovery = taskForceRecoveryRuntime(p, typed.runtime, typed.failure, "orchestrator");
+            if (!recovery) throw error;
+            if (oneControllerRuntimePreferred(p)) {
+              p.onControllerRuntimeFallback?.(recovery, typed.failure);
+            }
+            p.sink(teamEvent("manager", spec.name, {
+              kind: "tool-use",
+              status: p.locale === "ko"
+                ? `${managerPlanActive.model ?? managerPlanActive.kind} 계획 호출이 거절되어 오케스트레이터 우선순위 다음 모델로 이어갑니다.`
+                : `${managerPlanActive.model ?? managerPlanActive.kind} planning was rejected; continuing on the next orchestrator-priority model.`,
+            }));
+            managerPlanActive = recovery;
+            managerPlanPicked = sameRuntime(recovery, p.active)
+              ? p.picked
+              : pickRunner(recovery) ?? p.picked;
+            managerPlanResolutionBase = {
+              ...managerPlanBaseResolution,
+              runtime: { ...recovery },
+              resolvedRuntimeId: taskForceRuntimeInventoryId(candidateRuntimes, recovery),
+              resolvedTier: null,
+              source: "safe-fallback",
+              resolutionCodes: [
+                ...managerPlanBaseResolution.resolutionCodes,
+                "runtime-failed-fell-back-to-orchestrator-priority",
+              ],
+            };
+            managerPlanFallbackUsed = true;
+          }
+        }
+        managerPlan = managerPlanAttempt;
         managerPlan = {
           ...managerPlan,
           text: restrictedTaskForceText(p, managerPlan.text, {
@@ -3459,7 +3528,7 @@ async function runBorrowedAgentTurn(
         throw new Error("workforce_team_manager_plan_parse_failed");
       }
       const managerPlanResolution = reconcileWorkloadRunnerResult(
-        managerPlanBaseResolution,
+        managerPlanResolutionBase,
         managerPlan,
       );
       if (p.workforceSelectionReceipt) {
@@ -3484,6 +3553,8 @@ async function runBorrowedAgentTurn(
         let observedWorkerRole: WorkerHandoffRole = "worker";
         let observedWorkerRuntime = active;
         let observedWorkerPicked = picked;
+        let selectedWorkerRuntime = active;
+        let selectedWorkerPicked = picked;
         let observedWorkerInvocationId = `${workerInvocationId}:worker:1`;
         let observedWorkerResolution = workloadResolution;
         let observedWorkerReasonCodes: string[] = [];
@@ -3493,8 +3564,8 @@ async function runBorrowedAgentTurn(
         try {
           const outcome = await runWorkerHandoffWithEscalation(async (role, attempt, directive) => {
             observedWorkerRole = role;
-            observedWorkerRuntime = role === "worker" ? active : orchestratorDefault;
-            observedWorkerPicked = role === "worker" ? picked : orchestratorDefaultRunner;
+            observedWorkerRuntime = role === "worker" ? selectedWorkerRuntime : orchestratorDefault;
+            observedWorkerPicked = role === "worker" ? selectedWorkerPicked : orchestratorDefaultRunner;
             observedWorkerResolution = role === "worker" ? workloadResolution : escalationBaseResolution;
             observedWorkerInvocationId = `${workerInvocationId}:${role}:${attempt}`;
             if (role === "orchestrator") {
@@ -3503,7 +3574,7 @@ async function runBorrowedAgentTurn(
               observedWorkerFailureCount = 2;
               observedWorkerEscalationAttempt = 1;
             }
-            const attemptResult = await observeTaskForceModelCall(p, {
+            const invokeWorkerAttempt = () => observeTaskForceModelCall(p, {
               nodeId: `${id}:hub-team:${worker.id}`,
               phase: role === "worker" ? "worker" : "worker-escalation",
               attempt,
@@ -3554,6 +3625,40 @@ async function runBorrowedAgentTurn(
                 },
               },
             ));
+            let attemptResult: RunnerResult | null = null;
+            while (!attemptResult) {
+              try {
+                attemptResult = await invokeWorkerAttempt();
+              } catch (error) {
+                const typed = error instanceof TaskForceRuntimeFailureError ? error : null;
+                if (!typed || role !== "worker") throw error;
+                const recovery = taskForceRecoveryRuntime(p, typed.runtime, typed.failure, "worker");
+                if (!recovery) throw error;
+                p.sink(teamEvent(worker.id, worker.id, {
+                  kind: "tool-use",
+                  status: p.locale === "ko"
+                    ? `${observedWorkerRuntime.model ?? observedWorkerRuntime.kind} 실행이 거절되어 워커 우선순위 다음 모델로 이어갑니다.`
+                    : `${observedWorkerRuntime.model ?? observedWorkerRuntime.kind} was rejected; continuing on the next worker-priority model.`,
+                }));
+                selectedWorkerRuntime = recovery;
+                selectedWorkerPicked = sameRuntime(recovery, p.active)
+                  ? p.picked
+                  : pickRunner(recovery) ?? p.picked;
+                observedWorkerRuntime = selectedWorkerRuntime;
+                observedWorkerPicked = selectedWorkerPicked;
+                observedWorkerResolution = {
+                  ...workloadResolution,
+                  runtime: { ...recovery },
+                  resolvedRuntimeId: taskForceRuntimeInventoryId(candidateRuntimes, recovery),
+                  resolvedTier: null,
+                  source: "safe-fallback",
+                  resolutionCodes: [
+                    ...workloadResolution.resolutionCodes,
+                    "runtime-failed-fell-back-to-worker-priority",
+                  ],
+                };
+              }
+            }
             observedWorkerResult = attemptResult;
             return attemptResult;
           });
@@ -3625,11 +3730,15 @@ async function runBorrowedAgentTurn(
             },
           };
         } catch (error) {
+          const typedRuntimeFailure = error instanceof TaskForceRuntimeFailureError ? error : null;
           return {
             worker,
             ok: false,
             text: redactSensitiveText(error instanceof Error ? error.message : String(error)),
             tokens: 0,
+            ...(typedRuntimeFailure
+              ? { runtimeFailure: typedRuntimeFailure.failure, failedRuntime: typedRuntimeFailure.runtime }
+              : {}),
             invocationEvidence: {
               invocationId: observedWorkerInvocationId,
               runtimeId: observedWorkerResolution.resolvedRuntimeId
@@ -3660,21 +3769,27 @@ async function runBorrowedAgentTurn(
       const managerSynthesisBaseResolution = resolveWorkloadAllocationAcrossRuntimes({
         allocation: managerSynthesisAllocation,
         runtimes: candidateRuntimes,
-        fallbackRuntime: p.active,
+        fallbackRuntime: managerControllerDefault,
         phase: "synthesize",
         manualOverride: p.runtimeOverride,
+        explicitPinned: !p.workforceSelectionReceipt,
         requirementsVerified: p.workforceSelectionReceipt ? true : undefined,
       });
-      const managerSynthesisActive = managerSynthesisBaseResolution.runtime;
-      const managerSynthesisPicked = sameRuntime(managerSynthesisActive, p.active)
+      let managerSynthesisActive = managerSynthesisBaseResolution.runtime;
+      let managerSynthesisPicked = sameRuntime(managerSynthesisActive, p.active)
         ? p.picked
         : pickRunner(managerSynthesisActive) ?? p.picked;
-      const managerSynthesis = await observeTaskForceModelCall(p, {
+      let managerSynthesisResolutionBase = managerSynthesisBaseResolution;
+      let managerSynthesisFallbackUsed = false;
+      let managerSynthesis: RunnerResult | null = null;
+      while (!managerSynthesis) {
+        try {
+          managerSynthesis = await observeTaskForceModelCall(p, {
         nodeId: `${id}:hub-team:manager`,
         phase: "manager-synthesis",
         agentId: null,
         runtime: managerSynthesisActive,
-      }, () => managerSynthesisPicked.runner(
+          }, () => managerSynthesisPicked.runner(
         {
           systemPrompt: [
             buildBorrowedAgentSystemPrompt(managerSpec, packagePermission),
@@ -3719,7 +3834,39 @@ async function runBorrowedAgentTurn(
             }));
           },
         },
-      ));
+          ));
+        } catch (error) {
+          const typed = error instanceof TaskForceRuntimeFailureError ? error : null;
+          if (!typed) throw error;
+          const recovery = taskForceRecoveryRuntime(p, typed.runtime, typed.failure, "orchestrator");
+          if (!recovery) throw error;
+          if (oneControllerRuntimePreferred(p)) {
+            p.onControllerRuntimeFallback?.(recovery, typed.failure);
+          }
+          p.sink(teamEvent("manager", spec.name, {
+            kind: "tool-use",
+            status: p.locale === "ko"
+              ? `${managerSynthesisActive.model ?? managerSynthesisActive.kind} 종합 호출이 거절되어 오케스트레이터 우선순위 다음 모델로 이어갑니다.`
+              : `${managerSynthesisActive.model ?? managerSynthesisActive.kind} synthesis was rejected; continuing on the next orchestrator-priority model.`,
+          }));
+          managerSynthesisActive = recovery;
+          managerSynthesisPicked = sameRuntime(recovery, p.active)
+            ? p.picked
+            : pickRunner(recovery) ?? p.picked;
+          managerSynthesisResolutionBase = {
+            ...managerSynthesisBaseResolution,
+            runtime: { ...recovery },
+            resolvedRuntimeId: taskForceRuntimeInventoryId(candidateRuntimes, recovery),
+            resolvedTier: null,
+            source: "safe-fallback",
+            resolutionCodes: [
+              ...managerSynthesisBaseResolution.resolutionCodes,
+              "runtime-failed-fell-back-to-orchestrator-priority",
+            ],
+          };
+          managerSynthesisFallbackUsed = true;
+        }
+      }
       const teamText = await curateOwnedTaskForceResult({
         p,
         spec,
@@ -3737,7 +3884,7 @@ async function runBorrowedAgentTurn(
         phase: "manager-synthesis",
       });
       const managerSynthesisResolution = reconcileWorkloadRunnerResult(
-        managerSynthesisBaseResolution,
+        managerSynthesisResolutionBase,
         managerSynthesis,
       );
       if (p.workforceSelectionReceipt) {
@@ -3794,7 +3941,7 @@ async function runBorrowedAgentTurn(
             },
             status: "completed",
             parseSuccess: true,
-            fallbackUsed: false,
+            fallbackUsed: managerPlanFallbackUsed,
             plannedWorkerIds: parsedManagerPlan.plannedWorkerIds,
           },
           workers: workerResults.map((item) => ({
@@ -3812,6 +3959,7 @@ async function runBorrowedAgentTurn(
               workforcePermissionEnforcement: managerSynthesis.workforcePermissionEnforcement,
             },
             status: "completed",
+            fallbackUsed: managerSynthesisFallbackUsed,
           },
           status: workerResults.every((item) => item.ok) ? "completed" : "failed",
         },
@@ -4128,6 +4276,8 @@ async function runPlanner(
   attempts: WorkforcePlannerSchemaAttempt[];
   result?: RunnerResult;
   capabilityBinding?: FinalizedWorkforceCapabilityBinding;
+  /** Controller runtime that actually completed planning after fallback, if any. */
+  controllerRuntime?: RuntimeStatus;
 }> {
   const orchestratorId = `${p.chat.id}:borrow-orchestrator`;
   const orchestratorName = p.orchestratorAgent.nameEn || p.orchestratorAgent.name || "Agentlas Orchestrator";
@@ -4143,6 +4293,8 @@ async function runPlanner(
         task: p.req.userPrompt,
       });
   const plannerInvocationBaseId = taskForceSessionId(p, "borrow-orchestrator");
+  let plannerRuntime = p.active;
+  let plannerPicked = p.picked;
   p.sink({
     kind: "thinking",
     status: taskForcePlannerStatus(p),
@@ -4151,7 +4303,7 @@ async function runPlanner(
     role: "orchestrator",
     tier: 1,
     phase: "plan",
-    model: modelLabel(p.active),
+    model: modelLabel(plannerRuntime),
   });
   if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
   // 계획도 오케스트레이터 자리다.
@@ -4204,7 +4356,7 @@ async function runPlanner(
     invocationId: string,
     systemPrompt: string,
     validationError = "",
-  ): Promise<RunnerResult> => p.picked.runner(
+  ): Promise<RunnerResult> => plannerPicked.runner(
     {
       systemPrompt,
       history: boundedTaskForceHistory(history),
@@ -4212,14 +4364,14 @@ async function runPlanner(
         ? `${baseUserPrompt}\n\nSchema repair validation error (sanitized): ${validationError}`
         : baseUserPrompt,
       images: p.req.agentAppMode ? undefined : p.req.images,
-      backendLabel: p.picked.label,
-      model: p.active.model ?? undefined,
-      longContext: p.active.longContextEnabled ?? false,
+      backendLabel: plannerPicked.label,
+      model: plannerRuntime.model ?? undefined,
+      longContext: plannerRuntime.longContextEnabled ?? false,
       // Packet routing is a compact schema task. Inheriting the owner's max
       // reasoning setting made the control plane spend more tokens than the
       // workers it was dispatching. Keep the selected model, but use its low
       // reasoning tier for this bounded, locally validated envelope.
-      effort: taskForceControlEffort(p.active),
+      effort: taskForceControlEffort(plannerRuntime),
       signal: p.signal,
       ...plannerRunnerBoundary,
       cwd: taskForceStageCwd(p, "planner"),
@@ -4253,6 +4405,48 @@ async function runPlanner(
     },
   );
 
+  const invokePlannerWithFallback = async (
+    invocationId: string,
+    systemPrompt: string,
+    validationError: string,
+    attempt: number,
+  ): Promise<RunnerResult> => {
+    while (true) {
+      try {
+        return await observeTaskForceModelCall(p, {
+          nodeId: orchestratorId,
+          phase: "planner",
+          attempt,
+          agentId: p.orchestratorAgent.id,
+          runtime: plannerRuntime,
+        }, () => invokePlanner(invocationId, systemPrompt, validationError));
+      } catch (error) {
+        const typed = error instanceof TaskForceRuntimeFailureError ? error : null;
+        if (!typed) throw error;
+        const recovery = taskForceRecoveryRuntime(p, typed.runtime, typed.failure, "orchestrator");
+        if (!recovery) throw error;
+        if (oneControllerRuntimePreferred(p)) {
+          p.onControllerRuntimeFallback?.(recovery, typed.failure);
+        }
+        p.sink({
+          kind: "tool-use",
+          status: p.locale === "ko"
+            ? "계획에 사용한 실행 환경을 사용할 수 없어 오케스트레이터 우선순위 다음 모델로 이어갑니다."
+            : "The planning runtime is unavailable; continuing on the next orchestrator-priority model.",
+          agentId: orchestratorId,
+          agentName: orchestratorName,
+          role: "orchestrator",
+          tier: 1,
+          phase: "plan",
+        });
+        plannerRuntime = recovery;
+        plannerPicked = sameRuntime(recovery, p.active)
+          ? p.picked
+          : pickRunner(recovery) ?? p.picked;
+      }
+    }
+  };
+
   const attempts: WorkforcePlannerSchemaAttempt[] = [];
   let plannerInvocationId = plannerInvocationBaseId;
   let plannerText = "";
@@ -4271,19 +4465,14 @@ async function runPlanner(
         ? plannerInvocationBaseId
         : `${plannerInvocationBaseId}:schema-repair-${attempt}:${randomUUID()}`;
       const schemaRepair = attempt > 1;
-      const attemptResult = await observeTaskForceModelCall(p, {
-        nodeId: orchestratorId,
-        phase: "planner",
-        attempt,
-        agentId: p.orchestratorAgent.id,
-        runtime: p.active,
-      }, () => invokePlanner(
+      const attemptResult = await invokePlannerWithFallback(
         plannerInvocationId,
         schemaRepair
           ? plannerRepairSystemPrompt(baseSystemPrompt, previousError, previousOutput, plannerCandidateRuntimes, specs)
           : baseSystemPrompt,
         schemaRepair ? previousError : "",
-      ));
+        attempt,
+      );
       const attemptText = restrictedTaskForceText(p, attemptResult.text, {
         nodeId: orchestratorId,
         phase: "planner",
@@ -4339,8 +4528,8 @@ async function runPlanner(
           attempt,
           maxAttempts: MAX_WORKFORCE_PLANNER_SCHEMA_ATTEMPTS,
           invocationId: plannerInvocationId,
-          modelId: modelLabel(p.active),
-          runtimeId: [p.active.kind, p.active.backend, p.active.source].filter(Boolean).join(":"),
+          modelId: modelLabel(plannerRuntime),
+          runtimeId: [plannerRuntime.kind, plannerRuntime.backend, plannerRuntime.source].filter(Boolean).join(":"),
           status: "accepted",
           rawOutputIncluded: false,
           outputDigest,
@@ -4382,8 +4571,8 @@ async function runPlanner(
           attempt,
           maxAttempts: MAX_WORKFORCE_PLANNER_SCHEMA_ATTEMPTS,
           invocationId: plannerInvocationId,
-          modelId: modelLabel(p.active),
-          runtimeId: [p.active.kind, p.active.backend, p.active.source].filter(Boolean).join(":"),
+          modelId: modelLabel(plannerRuntime),
+          runtimeId: [plannerRuntime.kind, plannerRuntime.backend, plannerRuntime.source].filter(Boolean).join(":"),
           status: "rejected",
           validationError: previousError,
           rawOutputIncluded: false,
@@ -4411,7 +4600,7 @@ async function runPlanner(
           const blockedReceipt = {
             schemaVersion: "agentlas.workforce-planner-receipt.v1",
             invocationId: plannerInvocationId,
-            modelId: modelLabel(p.active),
+            modelId: modelLabel(plannerRuntime),
             parseSuccess: false,
             fallbackUsed: false,
             status: "blocked",
@@ -4446,13 +4635,7 @@ async function runPlanner(
       }
     }
   } else {
-    result = await observeTaskForceModelCall(p, {
-      nodeId: orchestratorId,
-      phase: "planner",
-      attempt: 1,
-      agentId: p.orchestratorAgent.id,
-      runtime: p.active,
-    }, () => invokePlanner(plannerInvocationId, baseSystemPrompt));
+    result = await invokePlannerWithFallback(plannerInvocationId, baseSystemPrompt, "", 1);
     plannerText = restrictedTaskForceText(p, result.text, {
       nodeId: orchestratorId,
       phase: "planner",
@@ -4478,13 +4661,12 @@ async function runPlanner(
         `Return a fresh plan that includes every selected slug at least once: ${specs.map((spec) => spec.slug).join(", ")}.`,
         "Do not repeat host/control envelopes in any visible brief. Keep explicit sequencing in stepId/dependsOn and use oneReply for One's coordination messages.",
       ].join("\n");
-      const repairedResult = await observeTaskForceModelCall(p, {
-        nodeId: orchestratorId,
-        phase: "planner",
-        attempt: 2,
-        agentId: p.orchestratorAgent.id,
-        runtime: p.active,
-      }, () => invokePlanner(plannerInvocationId, repairSystemPrompt, validationError));
+      const repairedResult = await invokePlannerWithFallback(
+        plannerInvocationId,
+        repairSystemPrompt,
+        validationError,
+        2,
+      );
       const repairedText = restrictedTaskForceText(p, repairedResult.text, {
         nodeId: orchestratorId,
         phase: "planner",
@@ -4506,7 +4688,7 @@ async function runPlanner(
     const blockedReceipt = {
       schemaVersion: "agentlas.workforce-planner-receipt.v1",
       invocationId: plannerInvocationId,
-      modelId: modelLabel(p.active),
+      modelId: modelLabel(plannerRuntime),
       parseSuccess,
       fallbackUsed,
       status: "blocked",
@@ -4562,6 +4744,7 @@ async function runPlanner(
     attempts,
     result,
     capabilityBinding,
+    controllerRuntime: plannerRuntime,
   };
 }
 
@@ -4634,6 +4817,9 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         p.req.borrowVersions,
       );
   const plan = await runPlanner(p, specs, history);
+  // If planner had to leave One's selected model, keep that successful
+  // controller runtime for synthesis instead of retrying the failed model.
+  const plannedControllerRuntime = plan.controllerRuntime ?? p.active;
   const approvalContinuation = taskForceTurnHasCommittedApproval(p.chat.id, history);
   const approvalPartition = partitionTaskForcePacketsForApproval(plan.packets, {
     approvalContinuation,
@@ -4834,31 +5020,34 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     packet: (typeof plan.packets)[number],
     peerResults: BorrowedAgentResult[] = [],
   ) => {
-    const first = await runPacket(packet, peerResults);
-    if (first.ok || p.signal?.aborted) return first;
-    if (first.runtimeFailure && first.failedRuntime) {
+    let result = await runPacket(packet, peerResults);
+    if (result.ok || p.signal?.aborted) return result;
+    // A typed provider refusal is never an output-format problem. Walk the
+    // remaining worker pool in DB priority order, once per configured member,
+    // instead of retrying the same failed provider or using detection order.
+    while (result.runtimeFailure && result.failedRuntime && !p.signal?.aborted) {
       const recoveryRuntime = taskForceRecoveryRuntime(
         p,
-        first.failedRuntime,
-        first.runtimeFailure,
+        result.failedRuntime,
+        result.runtimeFailure,
+        "worker",
       );
-      // A typed provider refusal is never an output-format problem. If this is
-      // a frozen/pinned surface or no different live runtime exists, fail now
-      // instead of charging the same dead provider for an identical retry.
-      if (!recoveryRuntime) return first;
+      if (!recoveryRuntime) return result;
       p.sink({
         kind: "tool-use",
         status: p.locale === "ko"
-          ? `배정된 실행 환경을 사용할 수 없어 다른 사용 가능한 모델로 한 번 이어갑니다. (${first.spec.name})`
-          : `The assigned runtime is unavailable; continuing once on another live model. (${first.spec.name})`,
+          ? `배정된 실행 환경을 사용할 수 없어 워커 우선순위 다음 모델로 이어갑니다. (${result.spec.name})`
+          : `The assigned runtime is unavailable; continuing on the next worker-priority model. (${result.spec.name})`,
       });
-      return runPacket(packet, peerResults, recoveryRuntime);
+      result = await runPacket(packet, peerResults, recoveryRuntime);
+      if (result.ok) return result;
     }
+    if (result.runtimeFailure) return result;
     p.sink({
       kind: "tool-use",
       status: p.locale === "ko"
-        ? `한 단계가 막혀 다시 진행하는 중… (${first.spec.slug})`
-        : `Retrying a blocked step… (${first.spec.slug})`,
+        ? `한 단계가 막혀 다시 진행하는 중… (${result.spec.slug})`
+        : `Retrying a blocked step… (${result.spec.slug})`,
     });
     return runPacket(packet, peerResults);
   };
@@ -4906,12 +5095,19 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
   }
   // 종합은 오케스트레이터 자리다 — 사람이 그 자리에 앉힌 것 안에서만 고른다.
   const synthesisCandidateRuntimes = runtimesAssignedToRole(taskForceCandidateRuntimes(p), "orchestrator");
+  const controllerPriority = rolePriorityRuntimes(synthesisCandidateRuntimes, "orchestrator");
+  const controllerDefault = oneControllerRuntimePreferred(p)
+    ? plannedControllerRuntime
+    : p.runtimeOverride
+      ? p.active
+      : controllerPriority[0] ?? p.active;
   const synthesisResolution = resolveWorkloadAllocationAcrossRuntimes({
     allocation: plan.synthesisAllocation,
     runtimes: synthesisCandidateRuntimes,
-    fallbackRuntime: p.active,
+    fallbackRuntime: controllerDefault,
     phase: "synthesize",
     manualOverride: p.runtimeOverride,
+    explicitPinned: !p.workforceSelectionReceipt,
     requirementsVerified: p.workforceSelectionReceipt ? true : undefined,
   });
   if (p.workforceSelectionReceipt) {
@@ -5064,31 +5260,38 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
   ));
 
   let final: Awaited<ReturnType<typeof runSynthesisOn>>;
-  try {
-    final = await runSynthesisOn(synthesisActive, synthesisPicked);
-  } catch (error) {
-    const typed = error instanceof TaskForceRuntimeFailureError ? error : null;
-    const recovery = typed
-      ? taskForceRecoveryRuntime(p, typed.runtime, typed.failure)
-      : null;
-    // 고정 계약이거나 이어갈 다른 런타임이 없으면 그대로 실패한다 — 같은 죽은
-    // 제공자에게 똑같은 요청을 다시 물리지 않는다(팀원 쪽과 같은 규칙).
-    if (!recovery) throw error;
-    p.sink({
-      kind: "tool-use",
-      status: p.locale === "ko"
-        ? "종합에 배정된 실행 환경을 사용할 수 없어 다른 사용 가능한 모델로 한 번 이어갑니다."
-        : "The runtime assigned to synthesis is unavailable; continuing once on another live model.",
-      agentId: orchestratorId,
-      agentName: orchestratorName,
-      role: "orchestrator",
-      tier: 1,
-      phase: "synthesize",
-    });
-    final = await runSynthesisOn(
-      recovery,
-      sameRuntime(recovery, p.active) ? p.picked : pickRunner(recovery) ?? p.picked,
-    );
+  let synthesisRuntime = synthesisActive;
+  let synthesisRunner = synthesisPicked;
+  while (true) {
+    try {
+      final = await runSynthesisOn(synthesisRuntime, synthesisRunner);
+      break;
+    } catch (error) {
+      const typed = error instanceof TaskForceRuntimeFailureError ? error : null;
+      if (!typed) throw error;
+      const recovery = taskForceRecoveryRuntime(p, typed.runtime, typed.failure, "orchestrator");
+      // Fixed contracts or an exhausted ordered pool fail honestly. Ordinary
+      // One/Work runs continue on the next configured orchestrator member.
+      if (!recovery) throw error;
+      if (oneControllerRuntimePreferred(p)) {
+        p.onControllerRuntimeFallback?.(recovery, typed.failure);
+      }
+      p.sink({
+        kind: "tool-use",
+        status: p.locale === "ko"
+          ? "종합에 배정된 실행 환경을 사용할 수 없어 오케스트레이터 우선순위 다음 모델로 이어갑니다."
+          : "The runtime assigned to synthesis is unavailable; continuing on the next orchestrator-priority model.",
+        agentId: orchestratorId,
+        agentName: orchestratorName,
+        role: "orchestrator",
+        tier: 1,
+        phase: "synthesize",
+      });
+      synthesisRuntime = recovery;
+      synthesisRunner = sameRuntime(recovery, p.active)
+        ? p.picked
+        : pickRunner(recovery) ?? p.picked;
+    }
   }
 
   const continuation = stripStormbreakerContinueMarker(redactSensitiveText(final.text));

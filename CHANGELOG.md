@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.47 — 2026-08-27
+
+Bundled runtime: Agentlas OS v1.2.29 (f3722c6c3bcc709103ce304fc94fb09f1ace44db).
+Source readiness does not prove a public installer or update feed; the
+Releases page stays the authority.
+
+- MCP tool results now render as bounded text, status, data, link/file, inline
+  image/video/audio, and embedded-resource previews across Work and One.
+- Result-media settings let people control which photos, videos, and audio
+  appear in sidebars while chat output remains visible.
+- Automation, graph, and runtime recovery keep saved model/role pins, fallback
+  stages, failure reasons, and host run evidence aligned.
+
 ## 1.0.46 — 2026-08-27
 
 Bundled runtime: Agentlas OS v1.2.29 (f3722c6c3bcc709103ce304fc94fb09f1ace44db).

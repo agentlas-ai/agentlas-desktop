@@ -973,3 +973,44 @@
 .root .action { border-color: var(--result-line); background: var(--result-panel); color: var(--result-ink); }
 .root .actionPrimary { border-color: var(--result-accent); background: var(--result-accent); color: var(--design-accent-ink); }
 .root :where(button, summary):focus-visible { outline-color: var(--result-accent); }
+
+/* In the One output rail the rail is already the surface. Do not put another
+   report/card frame around media and document previews. */
+.root[data-output-rail="true"] .result {
+  background: transparent;
+}
+.root[data-output-rail="true"] .galleryItem,
+.root[data-output-rail="true"] .primaryMedia,
+.root[data-output-rail="true"] .documentPreview {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.root[data-output-rail="true"] .galleryItem { overflow: visible; }
+.root[data-output-rail="true"] .galleryFrame {
+  aspect-ratio: auto;
+  min-height: 0;
+  overflow: visible;
+  background: transparent;
+}
+.root[data-output-rail="true"] .galleryFrame img {
+  width: 100%;
+  height: auto;
+  max-height: none;
+  object-fit: contain;
+  border: 1px solid color-mix(in srgb, var(--result-line) 88%, var(--result-accent) 12%);
+  border-radius: 6px;
+  box-shadow: 0 3px 12px rgba(24, 29, 32, .08);
+}
+.root[data-output-rail="true"] .primaryMedia,
+.root[data-output-rail="true"] .documentPreview { padding: 0; }
+.root[data-output-rail="true"] .mediaHidden {
+  min-height: 74px;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  color: var(--result-muted);
+  font-size: 11px;
+  text-align: center;
+}

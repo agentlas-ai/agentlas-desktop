@@ -18,6 +18,8 @@ export interface CodeArtifact {
   id: string;
   language: string;
   code: string;
+  /** 실제 파일로 연결된 경우에만 제공한다. 생성된 fenced block에는 없다. */
+  path?: string;
 }
 
 export interface MediaArtifact {
@@ -695,14 +697,14 @@ function highlightCode(code: string): React.ReactNode[] {
   while ((m = CODE_TOKEN.exec(code)) !== null) {
     if (m.index > last) out.push(code.slice(last, m.index));
     let color: string | undefined;
-    if (m[1]) color = "#6b7888"; // 주석
-    else if (m[2]) color = "#9ece6a"; // 문자열
-    else if (m[3]) color = "#ff9e64"; // 숫자
+    if (m[1]) color = "#718078"; // 주석
+    else if (m[2]) color = "#1f7a4d"; // 문자열
+    else if (m[3]) color = "#a15c00"; // 숫자
     else if (m[4]) {
       const id = m[4];
-      if (CODE_KEYWORDS.has(id)) color = "#bb9af7"; // 키워드
-      else if (/^[A-Z]/.test(id)) color = "#2ac3de"; // 타입/클래스
-      else if (code[m.index + id.length] === "(") color = "#7aa2f7"; // 함수 호출
+      if (CODE_KEYWORDS.has(id)) color = "#6f42c1"; // 키워드
+      else if (/^[A-Z]/.test(id)) color = "#116a8a"; // 타입/클래스
+      else if (code[m.index + id.length] === "(") color = "#1f5fbd"; // 함수 호출
     }
     out.push(color ? <span key={k++} style={{ color }}>{m[0]}</span> : m[0]);
     last = m.index + m[0].length;
@@ -727,10 +729,10 @@ function CodeBlock({
     <div
       style={{
         margin: "8px 0",
-        border: "1px solid #1f2937",
-        borderRadius: "var(--radius-md)",
+        border: "none",
+        borderRadius: 0,
         overflow: "hidden",
-        background: "#0d1117",
+        background: "#fbfcfb",
       }}
     >
       <div
@@ -738,23 +740,23 @@ function CodeBlock({
           display: "flex",
           alignItems: "center",
           gap: 8,
-          padding: "6px 10px",
-          background: "#0f1626",
-          borderBottom: "1px solid #1f2937",
+          padding: "8px 0",
+          background: "transparent",
+          borderBottom: "1px solid #edf1ee",
         }}
       >
         <span
           style={{
             fontSize: 10,
             fontFamily: "var(--font-mono)",
-            color: "#a1a1aa",
+            color: "#60736a",
             textTransform: "uppercase",
             letterSpacing: 0.6,
           }}
         >
           {block.lang}
         </span>
-        <span style={{ fontSize: 10, color: "#71717a" }}>· {label("chatstream.lines", { count: linesCount })}</span>
+        <span style={{ fontSize: 10, color: "#8a968f" }}>· {label("chatstream.lines", { count: linesCount })}</span>
         <div style={{ flex: 1 }} />
         {onOpen && (
           <button
@@ -764,9 +766,9 @@ function CodeBlock({
             style={{
               fontSize: 10,
               padding: "2px 8px",
-              borderRadius: 999,
-              background: "rgba(255,255,255,0.06)",
-              color: "white",
+              borderRadius: 5,
+              background: "transparent",
+              color: "#53645a",
               border: "none",
               fontWeight: 600,
             }}
@@ -780,9 +782,9 @@ function CodeBlock({
           style={{
             fontSize: 10,
             padding: "2px 8px",
-            borderRadius: 999,
-            background: "rgba(255,255,255,0.06)",
-            color: "white",
+            borderRadius: 5,
+            background: "transparent",
+            color: "#53645a",
             border: "none",
             fontWeight: 600,
           }}
@@ -798,7 +800,7 @@ function CodeBlock({
             padding: "12px 12px 12px 14px",
             textAlign: "right",
             userSelect: "none",
-            color: "#3b475a",
+            color: "#9aa6a0",
             fontFamily: "var(--font-mono)",
             fontSize: 12.5,
             lineHeight: 1.55,
@@ -811,7 +813,7 @@ function CodeBlock({
           style={{
             margin: 0,
             padding: "12px 14px 12px 4px",
-            color: "#c9d1d9",
+            color: "#243129",
             fontFamily: "var(--font-mono)",
             fontSize: 12.5,
             lineHeight: 1.55,

@@ -26,7 +26,7 @@ import {
 import "@xyflow/react/dist/style.css";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
-import type { Automation, WorkflowGraph, WorkflowNode, WorkflowNodeRunState } from "@/lib/types";
+import type { Automation, RuntimeSelection, WorkflowGraph, WorkflowNode, WorkflowNodeRunState } from "@/lib/types";
 import { layoutGraph, needsLayout } from "@shared/graph-layout";
 import { validateWorkflow, type WorkflowIssue } from "@/lib/workflow-validate";
 import { workflowNodeTypes, type NodeStrings, type WorkflowNodeData } from "@/components/automation/nodes";
@@ -38,6 +38,27 @@ import { RunHistoryPanel } from "@/components/automation/RunHistoryPanel";
 import { AutomationSessionPanel } from "@/components/automation/AutomationSessionPanel";
 import { IconBolt } from "@/components/Icon";
 import { ConnectionsDialog } from "@/components/automation/ConnectionsDialog";
+
+function runtimeSelectionLabel(selection: RuntimeSelection | null | undefined, locale: string): string {
+  if (!selection) return locale === "en" ? "follows active runtime" : "활성 런타임 따라가기";
+  const kindLabels: Record<string, string> = {
+    "claude-code": "Claude Code",
+    codex: "Codex",
+    antigravity: "Antigravity",
+    kimi: "Kimi",
+    grok: "Grok",
+    cursor: "Cursor",
+    byok: "BYOK",
+    ollama: "Ollama",
+    lmstudio: "LM Studio",
+    mlx: "MLX",
+    acp: "ACP",
+    agentlas: "Agentlas",
+  };
+  const kind = kindLabels[selection.kind] ?? selection.kind;
+  const model = selection.model?.trim();
+  return model ? `${kind} · ${model}` : kind;
+}
 
 /** 좌/우 패널 접힘 상태 — 화면을 다시 열어도 사용자가 정한 레이아웃을 유지한다. */
 const PANEL_STATE_KEY = "agentlas.automation.flow.panels";
@@ -1410,6 +1431,22 @@ return (
               nowrap이 없으면 "Hourly, on the / hour"로 접혀 헤더 높이가 흔들린다. */}
           <div style={{ fontSize: 11, color: "var(--muted-deep)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
             {humanSchedule(automation.scheduleHuman, locale)}
+            <span
+              data-testid="automation-runtime-chip"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                marginLeft: 8,
+                padding: "2px 7px",
+                borderRadius: 999,
+                border: "1px solid var(--paper-edge)",
+                color: "var(--ink-soft)",
+                background: "var(--paper-2)",
+                fontWeight: 600,
+              }}
+            >
+              {locale === "en" ? "Runs on" : "실행 모델"} {runtimeSelectionLabel(automation.runtimeSelection, locale)}
+            </span>
           </div>
         </div>
 
@@ -1906,7 +1943,16 @@ return (
               {/* ★세션 대화 스트림 — 별도 열이 아니라 이 패널 안에서 흐른다.
                   실행 기록·질문 카드·어시스턴트 응답이 로그와 같은 자리에서 이어진다. */}
               {!editing ? (
-                <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: logOpen && bottomTab === "session" ? "block" : "none" }}>
+                <div
+                  style={{
+                    flex: 1,
+                    minHeight: 0,
+                    minWidth: 0,
+                    overflow: "hidden",
+                    display: logOpen && bottomTab === "session" ? "flex" : "none",
+                    flexDirection: "column",
+                  }}
+                >
                   <AutomationSessionPanel
                     automationId={automation.id}
                     locale={locale}

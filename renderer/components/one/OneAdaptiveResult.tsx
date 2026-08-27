@@ -51,6 +51,7 @@ import { ipc } from "@/lib/ipc";
 import { tFor } from "@/lib/i18n";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import { requestOneArtifactOpen } from "@/lib/one-artifact-open";
+import { useMediaDisplayPreferences } from "@/lib/media-display-preferences";
 import { designOutputSurfaceProps } from "@/lib/design-output-tokens";
 import { OneLiveMap } from "./OneLiveMap";
 import styles from "./OneAdaptiveResult.module.css";
@@ -233,6 +234,7 @@ export function OneAdaptiveResult({
   return (
     <section
       {...designOutputSurfaceProps("report", styles.root)}
+      data-output-rail={inOutputRail ? "true" : "false"}
       aria-label={tFor(locale, "one.res.aria.work_result")}
     >
       {hasDedicatedResult && (
@@ -762,30 +764,36 @@ function GalleryItem({
   inOutputRail?: boolean;
 }) {
   const preview = useArtifactPreview(artifactContext, item.artifactRef, item.label);
+  const { preferences } = useMediaDisplayPreferences();
   const [mediaFailed, setMediaFailed] = useState(false);
+  const hidden = inOutputRail && !preferences.image;
   const unavailable = preview.state.status === "unavailable" || mediaFailed;
   return (
     <article className={styles.galleryItem} data-output-rail={inOutputRail ? "true" : "false"} role="listitem" aria-busy={preview.state.status === "loading"}>
       <div className={styles.galleryFrame}>
-        {preview.state.status === "loading" && <div className={styles.mediaSkeleton} role="status" aria-label={tFor(locale, "one.res.gallery.loading_image")}><LoadingEstimate locale={locale} operationKey="one-artifact-image-preview" expectedSeconds={[1, 15]} /></div>}
-        {preview.state.status === "ready" && !mediaFailed && (
-          // The source is a short-lived Main capability, never a file path or remote model URL.
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={preview.state.capability.capabilityUrl}
-            alt={displayValue(item.altText)}
-            loading="lazy"
-            draggable={false}
-            referrerPolicy="no-referrer"
-            onError={() => setMediaFailed(true)}
-          />
-        )}
-        {unavailable && (
-          <div className={styles.mediaUnavailable} role="status">
-            <span>{tFor(locale, "one.res.media.preview_unavailable")}</span>
-            <button type="button" onClick={() => { setMediaFailed(false); preview.retry(); }}>{tFor(locale, "one.res.retry")}</button>
-          </div>
-        )}
+        {hidden
+          ? <div className={styles.mediaHidden} role="status">{locale === "ko" ? "사진이 설정에서 숨겨져 있습니다." : "Photo hidden by your settings."}</div>
+          : <>
+            {preview.state.status === "loading" && <div className={styles.mediaSkeleton} role="status" aria-label={tFor(locale, "one.res.gallery.loading_image")}><LoadingEstimate locale={locale} operationKey="one-artifact-image-preview" expectedSeconds={[1, 15]} /></div>}
+            {preview.state.status === "ready" && !mediaFailed && (
+              // The source is a short-lived Main capability, never a file path or remote model URL.
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={preview.state.capability.capabilityUrl}
+                alt={displayValue(item.altText)}
+                loading="lazy"
+                draggable={false}
+                referrerPolicy="no-referrer"
+                onError={() => setMediaFailed(true)}
+              />
+            )}
+            {unavailable && (
+              <div className={styles.mediaUnavailable} role="status">
+                <span>{tFor(locale, "one.res.media.preview_unavailable")}</span>
+                <button type="button" onClick={() => { setMediaFailed(false); preview.retry(); }}>{tFor(locale, "one.res.retry")}</button>
+              </div>
+            )}
+          </>}
       </div>
       <div className={styles.mediaMeta}>
         <div><strong>{displayValue(item.label)}</strong><span>{provenanceLabel(item.provenance, locale)}</span></div>
@@ -813,7 +821,7 @@ function MediaBlock({
     <div className={styles.mediaLayout}>
       <div className={styles.primaryMedia} aria-busy={preview.state.status === "loading"}>
         {preview.state.status === "loading" && <div className={styles.mediaSkeleton} role="status" aria-label={tFor(locale, "one.res.media.loading")}><LoadingEstimate locale={locale} operationKey="one-artifact-media-preview" expectedSeconds={[1, 20]} /></div>}
-        {capabilityUrl && <LiveOutputViewer source={capabilityUrl} name={displayValue(block.caption ?? block.title)} kind={block.mediaType} mimeType={preview.state.status === "ready" ? preview.state.capability.mimeType : undefined} size={preview.state.status === "ready" ? preview.state.capability.sizeBytes : undefined} locale={locale} fill={inOutputRail} />}
+        {capabilityUrl && <LiveOutputViewer source={capabilityUrl} name={displayValue(block.caption ?? block.title)} kind={block.mediaType} mimeType={preview.state.status === "ready" ? preview.state.capability.mimeType : undefined} size={preview.state.status === "ready" ? preview.state.capability.sizeBytes : undefined} locale={locale} fill={inOutputRail} placement={inOutputRail ? "sidebar" : "chat"} />}
         {unavailable && (
           <div className={styles.mediaUnavailable} role="status">
             <span>{tFor(locale, "one.res.media.source_preserved")}</span>
@@ -887,7 +895,7 @@ function DocumentBlock({
     </div>
     {preview.state.status === "loading" && <div className={styles.mediaSkeleton} role="status"><LoadingEstimate locale={locale} operationKey="one-artifact-document-preview" expectedSeconds={[1, 20]} /></div>}
     {capability
-      ? <LiveOutputViewer source={capability.capabilityUrl} name={displayValue(block.title)} kind={viewerKind} mimeType={capability.mimeType} size={capability.sizeBytes} locale={locale} fill={inOutputRail} />
+      ? <LiveOutputViewer source={capability.capabilityUrl} name={displayValue(block.title)} kind={viewerKind} mimeType={capability.mimeType} size={capability.sizeBytes} locale={locale} fill={inOutputRail} placement={inOutputRail ? "sidebar" : "chat"} />
       : preview.state.status === "unavailable" && <div className={styles.documentFallback}><p>{displayValue(block.excerpt)}</p><button type="button" onClick={preview.retry}>{tFor(locale, "one.res.retry")}</button></div>}
   </article>;
 }

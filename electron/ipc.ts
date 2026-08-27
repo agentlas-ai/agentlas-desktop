@@ -5359,6 +5359,7 @@ export function registerIpcHandlers(): void {
     const session = getOrCreateAutomationSession({
       automationId: automation.id,
       projectId: automation.projectId ?? null,
+      runtimeSelection: automation.runtimeSelection ?? null,
       ...(automation.targetType === "firm"
         ? { firmId: automation.targetId }
         : automation.targetType === "agent"
@@ -5369,6 +5370,7 @@ export function registerIpcHandlers(): void {
       id: session.id,
       automationId: automation.id,
       chatId: session.chat.id,
+      runtimeSelection: session.chat.runtimeSelection ?? null,
       // 제품이 스스로 보낸 복구 지시는 대화가 아니다. 예전에 user 턴으로 저장된 것들이
       // "요청"으로 보이면서 내부 프롬프트("Private evidence …")까지 노출됐다.
       messages: listChatMessages(session.chat.id)

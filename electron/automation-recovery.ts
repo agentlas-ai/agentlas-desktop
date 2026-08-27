@@ -46,6 +46,7 @@ function appendAutomationChatMessage(automation: Automation, text: string): void
   try {
     const chat = getOrCreateAutomationSession({
       automationId: automation.id,
+      runtimeSelection: automation.runtimeSelection ?? null,
       ...(automation.targetType === "firm"
         ? { firmId: automation.targetId }
         : automation.targetType === "agent"

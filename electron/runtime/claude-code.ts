@@ -1033,6 +1033,20 @@ const runClaudeTurn = async (
     const stringifyToolPayload = (payload: unknown): string => {
       if (typeof payload === "string") return payload;
       if (Array.isArray(payload)) {
+        // MCP tool results use this array for more than prose. The old
+        // compatibility shortcut joined only `text` fields, which silently
+        // discarded standard `image`, `audio`, `resource`, and
+        // `resource_link` content before it reached the Desktop surfaces.
+        // Keep the readable shortcut for text-only arrays, but preserve the
+        // typed envelope whenever a rich content item is present.
+        const hasRichContent = payload.some((item) => (
+          item && typeof item === "object" && !Array.isArray(item)
+          && typeof (item as { type?: unknown }).type === "string"
+          && (item as { type: string }).type !== "text"
+        ));
+        if (hasRichContent) {
+          try { return JSON.stringify(payload); } catch { return String(payload); }
+        }
         const text = payload
           .map((item) => {
             if (typeof item === "string") return item;

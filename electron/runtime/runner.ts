@@ -383,6 +383,32 @@ export interface RunnerResult {
   workforcePermissionEnforcement?: WorkforcePermissionEnforcementReceipt;
 }
 
+/**
+ * A runner may reject before it can return RunnerResult (missing executable,
+ * transport failure, ACP startup error, or a provider refusal surfaced as an
+ * exception). Normalize that boundary so ordinary interactive calls can walk
+ * the same ordered role pool as marker-based quota failures. Strict/unattended
+ * callers still decide whether this typed failure is recoverable.
+ */
+export function runnerFailureFromError(error: unknown, runtime: string): RunnerFailure {
+  const message = (error instanceof Error ? error.message : String(error)).trim() || "runtime execution failed";
+  const kind: RunnerFailureKind = /\b429\b|rate.?limit|quota|usage limit|weekly limit|credits?|resets?/i.test(message)
+    ? "quota"
+    : /unauthori[sz]ed|authentication|not logged in|please run \/login|\blogin\b|\bsign in\b|token.*(?:expired|invalid)|\bforbidden\b/i.test(message)
+      ? "auth"
+      : /timed? ?out|timeout/i.test(message)
+        ? "timeout"
+        : /unsupported|not supported|not installed|not found|missing .*\bcli\b/i.test(message)
+          ? "unsupported"
+          : "exit";
+  return {
+    kind,
+    message: message.slice(0, 2_000),
+    runtime,
+    source: "exit",
+  };
+}
+
 /** 소비자용 한 줄 판정 — if/else 흩어짐 방지. */
 export function runnerOutcome(res: RunnerResult):
   | { ok: true; text: string }

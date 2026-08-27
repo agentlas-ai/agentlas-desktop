@@ -25,6 +25,7 @@ import { navigate } from "@/lib/navigation";
 import { IconCheck, IconFilm, IconImage, IconKey, IconLock, IconRefresh, IconWand } from "@/components/Icon";
 import { AgentFileEditor, runtimeEditorSource } from "@/components/AgentFileEditor";
 import { MigrationPanel } from "@/components/MigrationPanel";
+import { MediaDisplaySettings } from "@/components/MediaDisplaySettings";
 import QRCode from "qrcode";
 import type { HephaestusUpdateJournal, MobileBridgeDeviceSummary, MobileBridgeRuntimeStatus } from "@shared/types";
 import type { MobileBridgePairingPayload } from "@shared/mobile-bridge";
@@ -499,6 +500,8 @@ export default function SettingsPage() {
             );
           })}
         </div>}
+
+        <MediaDisplaySettings locale={locale} />
 
         {/* 에이전트 동시성(스웜 크기) — 게임 그래픽 세팅처럼 내 컴 사양 기반 추천 + 슬라이더 */}
         {concurrency && (

@@ -1209,3 +1209,45 @@ button.artifactVisual { cursor: pointer; }
   from { opacity: 0; transform: translateX(10px); }
   to { opacity: 1; transform: none; }
 }
+
+/* The output rail is the surface itself. Results stay separated by whitespace
+   and light rules; nested cards no longer read as picture frames. */
+.artifactRail {
+  border: 0;
+  border-left: 1px solid #e4e6e7;
+  border-radius: 0;
+  box-shadow: none;
+}
+.artifactRail[data-collapse-ready="true"] { box-shadow: none; }
+.artifactResizeHandle { border-radius: 0; }
+.artifactPreviewCard {
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.artifactVisual {
+  min-height: 0;
+  overflow: visible;
+  border-bottom: 0;
+  background: transparent;
+}
+.artifactVisual > * { width: 100%; }
+.artifactVisual img,
+.artifactVisual video {
+  max-height: none;
+  background: transparent;
+}
+.artifactAudio { min-height: 0; padding: 0; }
+.artifactFileFallback {
+  border-bottom: 0;
+  background: transparent;
+}
+.artifactPreviewCopy {
+  padding-right: 0;
+  padding-left: 0;
+  border-top: 1px solid #eceeef;
+}
+.appPreviewView,
+.appPreviewView > section,
+.browserLive { border: 0; border-radius: 0; box-shadow: none; }

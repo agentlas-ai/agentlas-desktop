@@ -6,6 +6,7 @@ import { IconChevronDown } from "@/components/Icon";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { extractAutomationRegistrations, type OneActivityState } from "@/lib/one-activity";
 import { OneAutomationRegistrationCard } from "./OneAdaptiveResult";
+import { McpResultPreview } from "../McpResultPreview";
 import {
   CONNECTED_TOOL_LABEL,
   buildOneWorkPresentation,
@@ -240,13 +241,16 @@ function WorkRow({ cell, locale }: { cell: OneWorkCell; locale: "ko" | "en" }) {
         ? (ko ? "연결된 도구 사용" : "Use connected tool")
         : cell.label;
       return (
-        <ExpandableRow
-          cell={cell}
-          locale={locale}
-          head={<><strong>{verb}</strong><span className={styles.object}>{label}</span>{statusSuffix(cell, locale)}</>}
-        >
-          {body ? <pre className={styles.output}>{body}</pre> : undefined}
-        </ExpandableRow>
+        <div>
+          <ExpandableRow
+            cell={cell}
+            locale={locale}
+            head={<><strong>{verb}</strong><span className={styles.object}>{label}</span>{statusSuffix(cell, locale)}</>}
+          >
+            {body ? <pre className={styles.output}>{body}</pre> : undefined}
+          </ExpandableRow>
+          <McpResultPreview result={cell.result} toolName={cell.label} locale={locale} compact />
+        </div>
       );
     }
     case "agent":

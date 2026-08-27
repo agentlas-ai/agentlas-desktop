@@ -1,6 +1,7 @@
 import { judgeRequired } from "./system-agents/judgment";
 import { currentUiLocale } from "./ui-locale";
 import { GRAPH_VERBATIM_CODES } from "../shared/graph-vocabulary.generated";
+import type { RuntimeSelection } from "../shared/types";
 
 /**
  * 판정 이유는 그대로 사용자 화면에 실린다. 언어와 어휘를 지정하지 않으면 영어 기술 문장이
@@ -196,6 +197,8 @@ export async function classifyAutomationOutcome(
   text: string | null | undefined,
   opts: {
     signal?: AbortSignal;
+    /** An automation's saved pin is authoritative for its result judge too. */
+    runtimeSelection?: RuntimeSelection | null;
     toolActivity?: ObservedToolActivity;
     runRecord?: ObservedRunRecord;
     declaredGoal?: DeclaredAutomationGoal;
@@ -247,6 +250,7 @@ export async function classifyAutomationOutcome(
     ].join(" "),
     locale,
     scanSecrets: true,
+    ...(opts.runtimeSelection ? { runtimeSelection: opts.runtimeSelection } : {}),
     ...(opts.signal ? { signal: opts.signal } : {}),
   });
   if (!verdict.verdict) return judgmentUnavailable(locale);
@@ -287,7 +291,7 @@ export async function classifyAutomationOutcome(
  * internal error and is never reinterpreted by a code fallback. */
 export async function classifyAutomationFailure(
   text: string | null | undefined,
-  opts: { signal?: AbortSignal } = {},
+  opts: { signal?: AbortSignal; runtimeSelection?: RuntimeSelection | null } = {},
 ): Promise<AutomationResultClassification> {
   const value = text?.trim() ?? "";
   const locale = currentUiLocale();
@@ -302,6 +306,7 @@ export async function classifyAutomationFailure(
     ].join(" "),
     locale,
     scanSecrets: true,
+    ...(opts.runtimeSelection ? { runtimeSelection: opts.runtimeSelection } : {}),
     ...(opts.signal ? { signal: opts.signal } : {}),
   });
   if (!verdict.verdict) return unresolved("judgment_unavailable", null);

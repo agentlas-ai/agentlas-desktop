@@ -16,6 +16,7 @@ import type {
   AutomationToolMode,
   ChatHistoryEntry,
   McpInvocationEvent,
+  RuntimeSelection,
 } from "@/lib/types";
 
 /** RunHistoryPanel → 세션 대화 프리필/전송 요청. 창 이벤트로 느슨하게 연결한다. */
@@ -32,6 +33,25 @@ export interface AutomationSessionPromptDetail {
 
 function pendingKey(automationId: string): string {
   return `agentlas.automation.pendingPrompt.${automationId}`;
+}
+
+/**
+ * 자동화 대화에서 보여 줄 수 있는 호스트 작성 상태 공지.
+ *
+ * 일반 system 행에는 모델에 전달할 내부 프롬프트나 좌석/연속성 메타데이터도
+ * 들어온다. 그것을 전부 노출하면 내부 배관이 대화로 새지만, 실행 실패의 결정적
+ * 원인과 부수효과 불명확 정지는 사람이 지금 조치해야 하는 사용자-facing 사실이다.
+ * 이 좁은 접두사 집합만 허용해 오래된 assistant 산문이 최신 실행 사실을 덮지 못하게 한다.
+ */
+function isVisibleAutomationSystemNotice(message: ChatHistoryEntry): boolean {
+  if (message.role !== "system") return false;
+  const text = message.text.trim();
+  return (
+    text.startsWith("자동화 최신 실행 상태:")
+    || text.startsWith("Latest automation run status:")
+    || text.startsWith("이전 실행이 외부에 무언가를 반영했는지 확인되지 않아")
+    || text.startsWith("A previous run may have affected external state")
+  );
 }
 
 /**
@@ -110,6 +130,7 @@ export function AutomationSessionPanel({
   const ko = locale === "ko";
   const [messages, setMessages] = useState<ChatHistoryEntry[]>([]);
   const [chatId, setChatId] = useState<string | null>(null);
+  const [runtimeSelection, setRuntimeSelection] = useState<RuntimeSelection | null>(null);
   const [unavailable, setUnavailable] = useState(false);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
@@ -131,8 +152,11 @@ export function AutomationSessionPanel({
     if (!api) return;
     try {
       const session = await api.automations.getSession(automationId);
-      setMessages(session.messages.filter((message) => message.role !== "system"));
+      setMessages(session.messages.filter((message) => (
+        message.role !== "system" || isVisibleAutomationSystemNotice(message)
+      )));
       setChatId(session.chatId ?? null);
+      setRuntimeSelection(session.runtimeSelection ?? null);
       setUnavailable(false);
     } catch {
       setUnavailable(true);
@@ -287,6 +311,10 @@ export function AutomationSessionPanel({
         permissions: (executionPermission === "read" ? "read" : "write") as "read" | "write",
         ...(toolMode ? { toolMode } : {}),
         ...(hubMode ? { hubMode } : {}),
+        // The automation transcript is a runnable surface too. Carry the same
+        // exact pin as the scheduled graph run so a manual follow-up cannot
+        // silently select the global role pool (for example Claude).
+        ...(runtimeSelection ? { runtimeSelection } : {}),
       };
       try {
         if (alreadyRunning) {
@@ -305,7 +333,7 @@ export function AutomationSessionPanel({
         finish(sendFailureMessage(err, ko));
       }
     },
-    [executionPermission, hubMode, ko, load, locale, toolMode],
+    [executionPermission, hubMode, ko, load, locale, runtimeSelection, toolMode],
   );
 
   // RunHistoryPanel의 "대화에서 이어서 해결" 등 외부 요청 수신.
@@ -387,8 +415,18 @@ export function AutomationSessionPanel({
             ? extractQuestions(message.text, message.id)
             : { text: message.text, questions: [] };
           return (
-            <article key={message.id} data-role={message.role}>
-              <small>{message.role === "user" ? (ko ? "요청" : "Request") : "Agentlas"}</small>
+            <article
+              key={message.id}
+              data-role={message.role}
+              data-authoritative-run-notice={message.role === "system" ? "true" : undefined}
+            >
+              <small>
+                {message.role === "user"
+                  ? (ko ? "요청" : "Request")
+                  : message.role === "system"
+                    ? (ko ? "실행 기록" : "Run record")
+                    : "Agentlas"}
+              </small>
               {parsed.text.trim() ? <p>{parsed.text}</p> : null}
               {parsed.questions.map((q) => (
                 <div key={q.id} className="automation-session-ask">

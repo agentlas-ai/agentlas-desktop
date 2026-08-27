@@ -18,6 +18,7 @@ import type {
   SurfaceStatePatchRequest,
 } from "@/lib/types";
 import type { CodeArtifact } from "./Markdown";
+import { CodeIdeViewer } from "./CodeIdeViewer";
 import {
   IconBolt,
   IconCircleDollar,
@@ -1489,19 +1490,15 @@ function EvidencePill({ kind }: { kind: string }) {
 }
 
 function CodeWorkbench({ artifact }: { artifact: CodeArtifact }) {
-  const { t } = useT();
-  const lines = artifact.code.split("\n");
-  const lineNumWidth = String(lines.length).length;
+  const { locale } = useT();
   return (
-    <pre style={codePre}>
-      {lines.map((line, i) => (
-        <div key={i} style={codeLine}>
-          <span style={{ ...lineNumber, minWidth: lineNumWidth * 9 }}>{i + 1}</span>
-          <span style={{ whiteSpace: "pre", flex: 1 }}>{line || " "}</span>
-        </div>
-      ))}
-      {lines.length === 0 && <div style={{ padding: 16 }}>{t("chatstream.lines", { count: 0 })}</div>}
-    </pre>
+    <CodeIdeViewer
+      path={artifact.path}
+      name={artifact.path || artifact.language || "code"}
+      locale={locale}
+      initialContent={artifact.code}
+      fill
+    />
   );
 }
 
@@ -3014,29 +3011,4 @@ const emptyState: CSSProperties = {
   color: "var(--muted-deep)",
   background: "var(--paper)",
   fontSize: 12,
-};
-
-const codePre: CSSProperties = {
-  flex: 1,
-  margin: 0,
-  padding: "16px 0",
-  overflow: "auto",
-  fontFamily: "var(--font-mono)",
-  fontSize: 12.5,
-  lineHeight: 1.6,
-  color: "#fafafa",
-  background: "#1c1a17",
-};
-
-const codeLine: CSSProperties = {
-  display: "flex",
-  gap: 16,
-  padding: "0 16px",
-};
-
-const lineNumber: CSSProperties = {
-  color: "#52525b",
-  fontVariantNumeric: "tabular-nums",
-  userSelect: "none",
-  textAlign: "right",
 };

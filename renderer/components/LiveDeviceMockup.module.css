@@ -105,6 +105,20 @@
     var(--device-shell-bg);
 }
 
+/* Default app output is a clean responsive web surface. The device frame is
+   an explicit alternate viewport selected from the footer. */
+.deviceArea[data-device="desktop"] {
+  display: block;
+  padding: 0;
+}
+.desktopSurface {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--device-shell-bg);
+}
+
 .deviceFrame {
   position: relative;
   width: min(340px, 100%);
@@ -230,6 +244,15 @@
   width: 31px;
   height: 31px;
   border-radius: 50%;
+}
+
+.deviceToggle {
+  width: auto !important;
+  min-width: 62px;
+  padding: 0 9px;
+  border: 1px solid var(--device-shell-line) !important;
+  border-radius: 999px !important;
+  font-size: 10px;
 }
 
 .deviceControls .passiveControl { color: #b5bab5; }
