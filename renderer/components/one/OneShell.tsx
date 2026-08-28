@@ -1587,6 +1587,7 @@ export function OneShell() {
   const onePaneCommitWaiterRef = useRef(createOnePaneCommitWaiter());
   const navigationEpochRef = useRef(0);
   const homeTransitionPendingRef = useRef(false);
+  const pendingNewChatDraftCarryRef = useRef<{ chatId: string; navigationEpoch: number } | null>(null);
   const introDeferralInFlightRef = useRef<string | null>(null);
   const searchRequestRef = useRef(0);
   attachmentDraftsRef.current = attachmentDrafts;
@@ -3076,6 +3077,7 @@ export function OneShell() {
     // submit landing on the chat it just created, whose steers are already
     // queued in Main behind the run that is starting.
     if (!activeThreadChatId || runChatIdRef.current !== activeThreadChatId) setQueuedSteers([]);
+    if (homeTransitionPendingRef.current && composerDraftKeyRef.current === "new" && composerDraftKey !== "new") return;
     if (composerDraftKeyRef.current === composerDraftKey) return;
     const previousKey = composerDraftKeyRef.current;
     composerDraftKeyRef.current = composerDraftKey;
@@ -3086,8 +3088,18 @@ export function OneShell() {
     // 2026-08-16: text sent during "준비하는 중" vanished without a trace).
     // Carry in-progress text over instead of replacing it with nothing.
     const inProgress = composerInputRef.current?.value ?? "";
-    if (previousKey === "new" && restored.composer.trim() === "" && inProgress.trim() !== "") {
+    const pendingCarry = pendingNewChatDraftCarryRef.current;
+    const freshSubmitLanding = previousKey === "new"
+      && Boolean(pendingCarry)
+      && composerDraftKey === `chat:${pendingCarry?.chatId}`
+      && pendingCarry?.navigationEpoch === navigationEpochRef.current;
+    if (previousKey === "new") pendingNewChatDraftCarryRef.current = null;
+    if (freshSubmitLanding && restored.composer.trim() === "" && inProgress.trim() !== "") {
       writeOneComposerDraft(composerDraftKey, { composer: inProgress });
+      // The in-progress text now belongs to the exact chat that was just
+      // created. Leaving the same text under `new` makes the next explicit New
+      // action resurrect it as an unrelated draft.
+      writeOneComposerDraft("new", { composer: "", stagedSteer: null });
       setComposerState(inProgress);
     } else {
       setComposerState(restored.composer);
@@ -4169,6 +4181,7 @@ export function OneShell() {
       // back to its chat or restore that chat as the active composer target.
       if (navigationEpochRef.current === submissionNavigationEpoch) {
         homeTransitionPendingRef.current = false;
+        pendingNewChatDraftCarryRef.current = { chatId: chat.id, navigationEpoch: submissionNavigationEpoch };
         setConversation(chat);
         selectedConversationIdRef.current = chat.id;
         // 화면에는 이미 이 대화의 첫 턴이 떠 있다(낙관적 렌더). 소유를 지금 넘겨 두지
@@ -4424,7 +4437,11 @@ export function OneShell() {
       // chip would turn the newly materialized Task into write authority even
       // though the preceding conversation was read-only.
       const continuationPermission: OnePermissionMode = sourceReceipt?.executionPermission ?? "read";
-      await api.confirm.commitAnswer({ chatId: confirmation.chatId, reply: label });
+      await api.confirm.commitAnswer({
+        chatId: confirmation.chatId,
+        sourceMessageId: confirmation.sourceMessageId,
+        reply: label,
+      });
       setCommittedAnswers(await api.confirm.committedAnswers(confirmation.chatId).catch(() => []));
       setConfirmations((items) => items.filter((item) => item.sourceMessageId !== confirmation.sourceMessageId));
       if (shouldStart) {
@@ -4439,18 +4456,33 @@ export function OneShell() {
           );
         } else {
           const task = await api.tasks.findForChat(confirmation.chatId);
-          if (!task) throw new Error("One could not bind the decision to its task");
           await startRun(
             confirmation.chatId,
-            task.id,
-            task.version,
+            task?.id ?? null,
+            task?.version ?? null,
             label,
-            "task",
+            task ? "task" : "conversation",
             { permissionMode: continuationPermission },
           );
         }
       }
     } catch (cause) {
+      // The question can be replaced between render and click. Re-read Main's
+      // exact pending identities before treating the rejection as an outage:
+      // starting an operational-recovery turn in that case would append a new
+      // system turn to this chat and hide the replacement question itself.
+      const pending = await api.confirm.listPending().catch(() => null);
+      if (pending) {
+        setConfirmations(pending);
+        const exactQuestionStillPending = pending.some((item) => (
+          item.chatId === confirmation.chatId
+          && item.sourceMessageId === confirmation.sourceMessageId
+        ));
+        if (!exactQuestionStillPending) {
+          setError(null);
+          return;
+        }
+      }
       requestOneOperationalRecovery("one-decision-answer", cause);
       setError(null);
     }
@@ -4546,6 +4578,11 @@ export function OneShell() {
     // conversation during that navigation window.
     navigationEpochRef.current += 1;
     homeTransitionPendingRef.current = true;
+    pendingNewChatDraftCarryRef.current = null;
+    writeOneComposerDraft("new", { composer: "", stagedSteer: null });
+    composerDraftKeyRef.current = "new";
+    setComposerState("");
+    setStagedSteerState(null);
     selectedTaskIdRef.current = null;
     selectedConversationIdRef.current = null;
     rememberLastOneConversation(null);
@@ -4572,7 +4609,6 @@ export function OneShell() {
     setKeyRequestSheet(null);
     setTurnAgentIds([]);
     setTurnOverrides({});
-    setComposer("");
     setRailOpen(false);
     setSearchOpen(false);
     clearAttachmentDrafts();
@@ -6311,7 +6347,7 @@ export function OneShell() {
               seatLabel={seatLabelForChat(pane, taskforces, oneOrgState, appLocale)}
               locale={appLocale}
               running={activeChatIds.includes(pane.id)}
-              onFocus={() => {
+              onActivate={() => {
                 // 옆칸을 누르면 그 칸이 입력창을 가져간다. 지금 보던 대화는
                 // 사라지지 않고 옆칸으로 자리를 바꾼다.
                 const previous = selectedConversationId;

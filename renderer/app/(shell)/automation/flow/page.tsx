@@ -1831,7 +1831,7 @@ return (
               때문이다. 예전 조건(`!editing || logRows.length > 0`)이면 검증 이슈가 하나도
               없는 정상 편집 상태에서 패널 자체가 렌더되지 않아, [노드 추가]를 눌러도
               팔레트가 갈 곳이 없었다 — 눌러도 아무 일이 없는 버튼(게이트 실측 2026-08-09). */}
-          {(!editing || logRows.length > 0 || paletteOpen || selectedNodeId || selectedEdgeId) ? (
+          {(!editing || Boolean(message) || dirty || logRows.length > 0 || paletteOpen || selectedNodeId || selectedEdgeId) ? (
             /* ★터미널처럼 한 패널 — 로그가 위, 챗 입력이 아래 고정(오너 지시: 플로팅 금지·합치기). */
             <div className="automation-issue-log titlebar-nodrag" style={{ height: logOpen ? logHeight : (editing ? 30 : 92), display: "flex", flexDirection: "column" }}>
               <div

@@ -2631,10 +2631,11 @@ export function registerIpcHandlers(): void {
 
   // ── confirm (확인 요청 — 챗에서 사용자 결정 대기) ────────
   ipcMain.handle("confirm:listPending", () => listPendingConfirmations());
-  ipcMain.handle("confirm:commitAnswer", (_e, input: { chatId?: unknown; reply?: unknown }) =>
+  ipcMain.handle("confirm:commitAnswer", (_e, input: { chatId?: unknown; reply?: unknown; sourceMessageId?: unknown }) =>
     commitPendingConfirmationAnswer(
       typeof input?.chatId === "string" ? input.chatId : "",
       typeof input?.reply === "string" ? input.reply : "",
+      typeof input?.sourceMessageId === "string" ? input.sourceMessageId : undefined,
     ));
   ipcMain.handle("confirm:committedAnswers", (_e, chatId: unknown) =>
     listCommittedQuestionAnswers(typeof chatId === "string" ? chatId : ""));

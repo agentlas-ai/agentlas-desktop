@@ -52,7 +52,11 @@ function recoveryRetryDelay(attempts: number): number {
  */
 export function OneRecoveryPlane() {
   const { locale } = useT();
-  const [notice, setNotice] = useState<{ scope: string } | null>(null);
+  const [notice, setNotice] = useState<{
+    scope: string;
+    chatId?: string;
+    message?: string;
+  } | null>(null);
   const activeRef = useRef(false);
   const queueRef = useRef<QueuedRecovery[]>([]);
   const queuedFingerprintsRef = useRef<Set<string>>(new Set());
@@ -161,7 +165,9 @@ export function OneRecoveryPlane() {
         queueRef.current.shift();
         queuedFingerprintsRef.current.delete(queued.fingerprint);
         recentRef.current.set(queued.fingerprint, Date.now());
-        setNotice(null);
+        // An operation-specific message describes the original failed action,
+        // not the background recovery attempt. Keep it visible until dismissed.
+        setNotice((current) => (current?.message ? current : null));
         scheduleDrain(0);
       } else if (queued.attempts >= RECOVERY_MAX_ATTEMPTS) {
         // 상한에 닿았다. 이 항목은 큐에서 내려 **뒤에 밀린 복구가 돌게 하고**, 조용히 사라지는
@@ -169,7 +175,11 @@ export function OneRecoveryPlane() {
         queueRef.current.shift();
         queuedFingerprintsRef.current.delete(queued.fingerprint);
         recentRef.current.set(queued.fingerprint, Date.now());
-        setNotice({ scope: queued.detail.scope });
+        setNotice((current) => (current?.message ? current : {
+          scope: queued.detail.scope,
+          ...(queued.detail.chatId ? { chatId: queued.detail.chatId } : {}),
+          ...(queued.detail.userMessage ? { message: queued.detail.userMessage } : {}),
+        }));
         scheduleDrain(0);
       } else {
         scheduleDrain(queued.started ? 1_000 : recoveryRetryDelay(queued.attempts));
@@ -196,11 +206,25 @@ export function OneRecoveryPlane() {
       const chatId = typeof detail?.chatId === "string" && detail.chatId.trim()
         ? detail.chatId.trim().slice(0, 128)
         : undefined;
+      const userMessage = typeof detail?.userMessage === "string" && detail.userMessage.trim()
+        ? detail.userMessage.trim().slice(0, 500)
+        : undefined;
       const normalized: OneOperationalRecoveryDetail = {
         scope,
         evidence,
         ...(chatId ? { chatId } : {}),
+        ...(userMessage ? { userMessage } : {}),
       };
+      // This text is authored by the product call site and contains no private
+      // operational evidence. Show it for the exact affected chat immediately,
+      // even when the matching background recovery is already queued/cooling down.
+      if (userMessage) {
+        setNotice({
+          scope,
+          ...(chatId ? { chatId } : {}),
+          message: userMessage,
+        });
+      }
       const fingerprint = `${normalized.scope}\u0000${normalized.evidence}`;
       const now = Date.now();
       const last = recentRef.current.get(fingerprint) ?? 0;
@@ -238,11 +262,15 @@ export function OneRecoveryPlane() {
   // 조용함은 거짓말이 된다(PRD §4.6). 내부 코드·경로는 노출하지 않고 사실만 한 줄로 남긴다.
   if (!notice) return null;
   return (
-    <div role="status" className={styles.recoveryNotice}>
+    <div
+      role="status"
+      className={styles.recoveryNotice}
+      data-one-recovery-chat-id={notice.chatId}
+    >
       <span>
-        {locale === "ko"
+        {notice.message ?? (locale === "ko"
           ? "일부 작업을 자동으로 되돌리지 못했습니다. 다시 시도해 주세요."
-          : "One could not finish an automatic repair. Please try that action again."}
+          : "One could not finish an automatic repair. Please try that action again.")}
       </span>
       <button type="button" onClick={() => setNotice(null)}>
         {locale === "ko" ? "닫기" : "Dismiss"}

@@ -6522,7 +6522,7 @@ export interface AgentlasIpc {
   confirm: {
     listPending: () => Promise<PendingConfirmation[]>;
     /** 답변 제출 수락을 durable 영수증으로 확정 — 실행 분기와 무관하게 질문을 해소한다. */
-    commitAnswer: (input: { chatId: string; reply: string }) =>
+    commitAnswer: (input: { chatId: string; reply: string; sourceMessageId?: string }) =>
       Promise<{ chatId: string; sourceMessageId: string }>;
     /** 정확한 현재 Decision만 24시간 미룬다. 실행·승인 상태는 바꾸지 않는다. */
     snooze: (input: { chatId: string; sourceMessageId: string; resumeAt: string }) =>

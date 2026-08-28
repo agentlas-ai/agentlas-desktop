@@ -241,7 +241,7 @@ const api: AgentlasIpc = {
   },
   confirm: {
     listPending: () => ipcRenderer.invoke("confirm:listPending"),
-    commitAnswer: (input: { chatId: string; reply: string }) =>
+    commitAnswer: (input: { chatId: string; reply: string; sourceMessageId?: string }) =>
       ipcRenderer.invoke("confirm:commitAnswer", input),
     snooze: (input: { chatId: string; sourceMessageId: string; resumeAt: string }) =>
       ipcRenderer.invoke("confirm:snooze", input),

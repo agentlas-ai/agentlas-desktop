@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Markdown } from "@/components/Markdown";
 import { ipc } from "@/lib/ipc";
 import { projectOneActivityFromLedger } from "@/lib/one-activity";
+import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import type { OneActivityArtifact } from "@/lib/one-activity";
 import { OneActivityArtifactRail } from "./OneActivityTimeline";
 import styles from "./OneShell.module.css";
@@ -29,7 +30,7 @@ export function OneSplitPane({
   seatLabel,
   locale,
   running,
-  onFocus,
+  onActivate,
   onClose,
   permissionMode,
   runtimeSelection,
@@ -40,7 +41,7 @@ export function OneSplitPane({
   seatLabel: string;
   locale: "ko" | "en";
   running: boolean;
-  onFocus: () => void;
+  onActivate: () => void;
   onClose: () => void;
   permissionMode: string;
   runtimeSelection?: unknown;
@@ -124,7 +125,8 @@ export function OneSplitPane({
     if (!api) return;
     setSending(true);
     // 낙관적으로 먼저 그린다. 폴링이 다음 바퀴에 진짜 기록으로 바꾼다.
-    setMessages((current) => [...(current ?? []), { id: `local:${Date.now()}`, role: "user", text }]);
+    const optimisticId = `local:${Date.now()}`;
+    setMessages((current) => [...(current ?? []), { id: optimisticId, role: "user", text }]);
     setDraft("");
     try {
       await api.invoke.run({
@@ -138,17 +140,32 @@ export function OneSplitPane({
         permissions: permissionMode === "auto" ? "read" : permissionMode,
         ...(runtimeSelection ? { runtimeSelection } : {}),
       } as never);
-    } catch {
-      // 실패는 다음 폴링에서 대화 기록으로 드러난다. 여기서 문구를 지어내지 않는다.
+    } catch (cause) {
+      setMessages((current) => (current ?? []).filter((message) => message.id !== optimisticId));
+      // The request may fail after the composer has already accepted more input.
+      // Restore the failed payload without overwriting that newer draft.
+      setDraft((current) => (
+        !current.trim()
+          ? text
+          : current === text
+            ? current
+            : `${text}\n${current}`
+      ));
+      requestOneOperationalRecovery("one-split-pane-send", cause, {
+        chatId,
+        userMessage: locale === "ko"
+          ? "이 세션에 메시지를 보내지 못했습니다. 입력은 그대로 두었습니다. 다시 시도해 주세요."
+          : "The message was not sent to this session. Your draft was restored; please try again.",
+      });
     } finally {
       setSending(false);
     }
-  }, [appLocale, chatId, draft, permissionMode, runtimeSelection, sending]);
+  }, [appLocale, chatId, draft, locale, permissionMode, runtimeSelection, sending]);
 
   return (
     <section className={styles.splitPane} data-one-split-pane={chatId}>
       <header className={styles.splitPaneHeader}>
-        <button type="button" className={styles.splitPaneTitle} onClick={onFocus} title={title}>
+        <button type="button" className={styles.splitPaneTitle} onClick={onActivate} title={title}>
           <span className={styles.splitPaneSeat}>{seatLabel}</span>
           <span className={styles.splitPaneName}>{title}</span>
         </button>
@@ -174,7 +191,7 @@ export function OneSplitPane({
         </button>
       </header>
       <div className={styles.splitPaneStage}>
-      <div ref={bodyRef} className={styles.splitPaneBody} onClick={onFocus}>
+      <div ref={bodyRef} className={styles.splitPaneBody} onClick={onActivate}>
         {messages === null && <p className={styles.splitPaneNote}>{locale === "ko" ? "불러오는 중" : "Loading"}</p>}
         {messages !== null && messages.length === 0 && (
           <p className={styles.splitPaneNote}>{locale === "ko" ? "아직 오간 말이 없습니다." : "No messages yet."}</p>
@@ -215,7 +232,6 @@ export function OneSplitPane({
           value={draft}
           rows={1}
           placeholder={locale === "ko" ? "이 세션에 말하기" : "Message this session"}
-          onFocus={onFocus}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {

@@ -11,6 +11,7 @@ export type OneOperationalRecoveryDetail = {
    * 열고 있던 대화를 여기서 붙잡는다 — 그 방이 곧 실패한 방이다.
    */
   chatId?: string;
+  userMessage?: string;
 };
 
 let recoveryDispatchSuppressionDepth = 0;
@@ -33,7 +34,11 @@ export async function withOneOperationalRecoveryDispatchSuppressed<T>(
 }
 
 /** Send private operational evidence to the mounted One controller. */
-export function requestOneOperationalRecovery(scope: string, cause: unknown): void {
+export function requestOneOperationalRecovery(
+  scope: string,
+  cause: unknown,
+  options?: { userMessage?: string; chatId?: string },
+): void {
   if (typeof window === "undefined" || recoveryDispatchSuppressionDepth > 0) return;
   let rawEvidence: string;
   if (cause instanceof Error) {
@@ -47,15 +52,24 @@ export function requestOneOperationalRecovery(scope: string, cause: unknown): vo
   const evidence = redactSecrets(rawEvidence, "[private value removed]")
     .replace(/\s+/g, " ")
     .trim();
-  let chatId: string | undefined;
+  let chatId = options?.chatId;
   try {
-    const current = new URL(window.location.href).searchParams.get("chat");
-    if (current && /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/.test(current)) chatId = current;
+    if (!chatId) {
+      const current = new URL(window.location.href).searchParams.get("chat");
+      if (current && /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/.test(current)) chatId = current;
+    }
   } catch {
     // 주소를 못 읽는 것은 실패 사유가 아니다 — 대상 없이 진행한다.
   }
   window.dispatchEvent(new CustomEvent<OneOperationalRecoveryDetail>(
     ONE_OPERATIONAL_RECOVERY_EVENT,
-    { detail: { scope: scope.slice(0, 120), evidence: evidence.slice(0, 4_000), ...(chatId ? { chatId } : {}) } },
+    {
+      detail: {
+        scope: scope.slice(0, 120),
+        evidence: evidence.slice(0, 4_000),
+        ...(chatId && /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/.test(chatId) ? { chatId } : {}),
+        ...(options?.userMessage?.trim() ? { userMessage: options.userMessage.trim().slice(0, 500) } : {}),
+      },
+    },
   ));
 }

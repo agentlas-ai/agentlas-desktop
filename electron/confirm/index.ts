@@ -169,10 +169,12 @@ export function recordCommittedAnswerReceipt(
 export function commitPendingConfirmationAnswer(
   chatId: string,
   reply: string,
+  sourceMessageId?: string,
 ): { chatId: string; sourceMessageId: string } {
   const last = getLastChatMessage(chatId);
   if (
     !last ||
+    (sourceMessageId && last.id !== sourceMessageId) ||
     last.role !== "assistant" ||
     !last.text.includes(OPEN) ||
     !firstQuestion(last.text)
