@@ -18,7 +18,7 @@ import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-p
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 104;
+const SCHEMA_VERSION = 105;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -845,7 +845,13 @@ function backupDatabaseFile(db: Database.Database, tag: string): string | null {
   try {
     const source = db.name;
     if (!source || source === ":memory:") return null;
-    try { db.pragma("wal_checkpoint(TRUNCATE)"); } catch {}
+    // A resident follower may still hold WAL/SHM mappings while the Desktop
+    // migration owner starts. FULL makes the main file copyable without
+    // resizing either shared sidecar under that peer; TRUNCATE here can SIGBUS
+    // a mapped wal-index page. If a reader prevents a full checkpoint, skip the
+    // optional backup rather than copy an incomplete main file.
+    const checkpoint = db.pragma("wal_checkpoint(FULL)") as Array<{ busy?: number }>;
+    if (checkpoint.some((row) => Number(row.busy ?? 0) !== 0)) return null;
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const target = `${source}.${tag}-${stamp}.bak`;
     fs.copyFileSync(source, target);
@@ -4921,6 +4927,7 @@ export function initStore(options: StoreInitOptions = {}): void {
       pending_count INTEGER NOT NULL DEFAULT 0,
       pending_kind TEXT NOT NULL DEFAULT 'approval' CHECK(pending_kind IN ('approval','review','input')),
       unread_count INTEGER NOT NULL DEFAULT 0,
+      unread_generation INTEGER NOT NULL DEFAULT 0,
       credit_state TEXT NOT NULL DEFAULT 'unknown' CHECK(credit_state IN ('ok','insufficient','unknown')),
       auto_select_tools INTEGER NOT NULL DEFAULT 1 CHECK(auto_select_tools IN (0,1)),
       collaboration_style TEXT NOT NULL DEFAULT 'default' CHECK(collaboration_style IN ('default','concise','warm','direct')),
@@ -4960,7 +4967,35 @@ export function initStore(options: StoreInitOptions = {}): void {
   addColumnIfMissing(_db, "one_org_members", "auto_select_tools", "auto_select_tools INTEGER NOT NULL DEFAULT 1 CHECK(auto_select_tools IN (0,1))");
   addColumnIfMissing(_db, "one_org_members", "collaboration_style", "collaboration_style TEXT NOT NULL DEFAULT 'default' CHECK(collaboration_style IN ('default','concise','warm','direct'))");
   addColumnIfMissing(_db, "one_org_members", "handover_note", "handover_note TEXT");
+  addColumnIfMissing(_db, "one_org_members", "unread_generation", "unread_generation INTEGER NOT NULL DEFAULT 0");
+  _db.prepare(
+    "UPDATE one_org_members SET unread_generation = 1 WHERE unread_count > 0 AND unread_generation = 0",
+  ).run();
   addColumnIfMissing(_db, "one_taskforces", "description", "description TEXT NOT NULL DEFAULT ''");
+
+  // v105 — exact queued steering survives renderer/app restarts. The request
+  // stays in the private local store; hashes and run bindings are queryable
+  // without parsing user text.
+  _db.exec(`
+    CREATE TABLE IF NOT EXISTS invocation_steers (
+      id TEXT PRIMARY KEY,
+      chat_id TEXT NOT NULL,
+      original_run_id TEXT NOT NULL,
+      prompt_text TEXT NOT NULL,
+      prompt_hash TEXT NOT NULL,
+      request_json TEXT NOT NULL,
+      workspace_binding_json TEXT,
+      execution_context_json TEXT,
+      status TEXT NOT NULL CHECK(status IN ('queued','draining','started','cancelled','failed')),
+      drained_run_id TEXT,
+      queued_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_invocation_steers_queue
+      ON invocation_steers(status, queued_at, id);
+    CREATE INDEX IF NOT EXISTS idx_invocation_steers_chat
+      ON invocation_steers(chat_id, queued_at, id);
+  `);
 
   // PRD §5.25 — 산출물 바인딩 표가 마이그레이션 사다리 **밖에서**(첫 사용 시 지연 생성)
   // 만들어져 스키마 게이트가 그 존재를 보지 못했다. 사다리 안으로 옮긴다. 버전 가드 밖에
@@ -5576,4 +5611,17 @@ export function getDb(): Database.Database {
     throw new Error("Store not initialized. Call initStore() in app.whenReady().");
   }
   return _db;
+}
+
+/**
+ * Release this process's SQLite handles during a normal host shutdown. This
+ * does not touch WAL/SHM files: another authorized process may still own read
+ * marks, and SQLite alone decides when those sidecars can be retired.
+ */
+export function closeStore(): void {
+  const db = _db;
+  _db = null;
+  _postContinuityRepairsDeferred = false;
+  if (!db) return;
+  db.close();
 }

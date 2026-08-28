@@ -188,6 +188,7 @@ export function OneTaskforceDialog({
         pendingCount: 0,
         pendingKind: "review" as const,
         unreadCount: 0,
+        unreadGeneration: 0,
         creditState: "unknown" as const,
         completionSummary: { produced: [], pending: [] },
         autoSelectTools: false,

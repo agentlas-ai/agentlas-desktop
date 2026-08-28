@@ -39,6 +39,8 @@ export const MOBILE_BRIDGE_METHODS = [
   "team.list",
   "one.org.get",
   "one.org.add",
+  "one.org.openMember",
+  "one.org.markRead",
   "firms.list",
   "projects.list",
   "projects.get",
@@ -125,6 +127,8 @@ export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new 
   "chats.setRuntimeSelection",
   "projects.setAgentPool",
   "one.org.add",
+  "one.org.openMember",
+  "one.org.markRead",
   "tasks.createProject",
   "tasks.acceptResult",
   "terminal.takeover",
@@ -1508,6 +1512,8 @@ export interface MobileBridgeAutomationDto {
   triggerType: string;
   toolMode: string;
   hubMode: string;
+  /** Same preallocated identity in queued, running, history, progress, and final projections. */
+  runId: string | null;
   runState: "unknown" | "idle" | "queued" | "running" | "completed" | "failed";
   /** Stable marker only; raw scheduler errors may contain local paths. */
   lastError: "automation_failed" | "automation_partial" | "automation_blocked" | "automation_needs_input" | null;
@@ -2312,6 +2318,23 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
             optionalString(params, "displayName", 80),
           )
         : "one.org.add accepts only installedAgentId and displayName";
+    case "one.org.openMember":
+      return hasOnlyKeys(params, ["id", "expectedRevision"])
+        ? firstError(
+            requiredString(params, "id", 80),
+            optionalInteger(params, "expectedRevision", 1, Number.MAX_SAFE_INTEGER),
+          )
+        : `${method} accepts only id and expectedRevision`;
+    case "one.org.markRead":
+      return hasOnlyKeys(params, ["id", "expectedUnreadGeneration"])
+        ? firstError(
+            requiredString(params, "id", 80),
+            optionalInteger(params, "expectedUnreadGeneration", 0, Number.MAX_SAFE_INTEGER),
+            Number.isSafeInteger(params.expectedUnreadGeneration)
+              ? null
+              : "expectedUnreadGeneration is required",
+          )
+        : `${method} accepts only id and expectedUnreadGeneration`;
     case "tasks.createProject":
       return hasOnlyKeys(params, ["projectId", "title"])
         ? firstError(requiredString(params, "projectId"), optionalString(params, "title", 200))

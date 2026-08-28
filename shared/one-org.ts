@@ -56,6 +56,8 @@ export interface OneOrgMember {
   pendingCount: number;
   pendingKind: "approval" | "review" | "input";
   unreadCount: number;
+  /** Monotonic result generation used to acknowledge exactly what was opened. */
+  unreadGeneration: number;
   creditState: "ok" | "insufficient" | "unknown";
   completionSummary: OneOrgCompletionSummary;
   /** Whether this member participates in host-side automatic MCP selection. */
@@ -188,7 +190,8 @@ export interface ArchiveOneOrgMemberInput {
 
 export interface MarkOneOrgMemberReadInput {
   id: string;
-  expectedRevision?: number;
+  /** The generation returned when the result was opened. */
+  expectedUnreadGeneration: number;
 }
 
 export interface SetOneOrgMemberToolsInput {

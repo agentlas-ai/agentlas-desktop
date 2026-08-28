@@ -25,7 +25,7 @@ import { getDb } from "../store/db";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import { listInstalledAgentsReadOnly } from "../mcp/registry";
 import { materializeAgentFiles } from "../agents/files";
-import { appendChatMessage, createChat } from "../store/chats";
+import { appendChatMessage, createChat, getOrCreateOneMemberChat } from "../store/chats";
 import { closeAgentOccupancies, replaceSeatOccupant } from "../store/seats";
 import { seatEventText } from "../../shared/one-seat-events";
 import { currentUiLocale } from "../ui-locale";
@@ -58,6 +58,7 @@ type Row = {
   pending_count: number;
   pending_kind?: "approval" | "review" | "input";
   unread_count: number;
+  unread_generation: number;
   credit_state: "ok" | "insufficient" | "unknown";
   auto_select_tools: number;
   collaboration_style: "default" | "concise" | "warm" | "direct";
@@ -485,6 +486,7 @@ function toMember(row: Row, now = Date.now()): OneOrgMember {
     pendingCount: Math.max(0, Number(row.pending_count) || 0),
     pendingKind: row.pending_kind ?? "approval",
     unreadCount: Math.max(0, Number(row.unread_count) || 0),
+    unreadGeneration: Math.max(0, Number(row.unread_generation) || 0),
     creditState: row.credit_state,
     completionSummary,
     autoSelectTools: row.auto_select_tools !== 0,
@@ -866,12 +868,36 @@ export function markOneOrgMemberRead(input: MarkOneOrgMemberReadInput): OneOrgSt
   const id = assertText(input.id, "id", 80);
   const row = getDb().prepare("SELECT * FROM one_org_members WHERE id = ? AND archived_at IS NULL").get(id) as Row | undefined;
   if (!row) throw new Error("One Team member not found.");
-  assertExpectedRevision(row, input.expectedRevision);
+  if (!Number.isSafeInteger(input.expectedUnreadGeneration) || input.expectedUnreadGeneration < 0) {
+    throw new Error("One Team unread generation is invalid.");
+  }
+  if (row.unread_generation !== input.expectedUnreadGeneration) {
+    throw new Error("A newer result arrived after this member was opened. Open the latest result before marking it read.");
+  }
   if (row.unread_count === 0) return getOneOrgState();
   const now = new Date().toISOString();
-  getDb().prepare("UPDATE one_org_members SET unread_count = 0, updated_at = ?, revision = revision + 1 WHERE id = ?").run(now, id);
+  const update = getDb().prepare(
+    "UPDATE one_org_members SET unread_count = 0, updated_at = ? WHERE id = ? AND unread_generation = ?",
+  ).run(now, id, input.expectedUnreadGeneration);
+  if (update.changes !== 1) {
+    throw new Error("A newer result arrived while this member was being marked read.");
+  }
   emitOrgChanged();
   return getOneOrgState();
+}
+
+export function openOneOrgMember(input: { id: string; expectedRevision?: number }) {
+  const id = assertText(input.id, "id", 80);
+  const row = getDb().prepare("SELECT * FROM one_org_members WHERE id = ? AND archived_at IS NULL").get(id) as Row | undefined;
+  if (!row) throw new Error("One Team member not found.");
+  assertExpectedRevision(row, input.expectedRevision);
+  const chat = getOrCreateOneMemberChat(row.installed_agent_id, row.display_name ?? row.agent_slug);
+  return {
+    memberId: row.id,
+    memberRevision: row.revision,
+    unreadGeneration: row.unread_generation,
+    chat,
+  };
 }
 
 export function setOneOrgMemberTools(input: SetOneOrgMemberToolsInput): OneOrgState {
@@ -929,16 +955,18 @@ export function setOneOrgMemberStatus(input: {
   // 상태 갱신(작업 중/완료/실패)까지 판번호를 올리면, 화면이 열려 있는 동안 실행이 한 번만
   // 돌아도 사용자의 이름 변경·순서 변경이 "다른 화면에서 바뀌었다"로 헛되이 거절된다.
   // 상태는 값만 갱신하고 판번호는 건드리지 않는다.
+  const nextUnread = Math.max(0, Math.floor(input.unreadCount ?? row.unread_count));
   getDb().prepare(`
     UPDATE one_org_members SET status_kind = ?, status_line = ?, pending_count = ?, pending_kind = ?,
-      unread_count = ?, credit_state = ?, last_activity_at = ?, updated_at = ?
+      unread_count = ?, unread_generation = unread_generation + ?, credit_state = ?, last_activity_at = ?, updated_at = ?
     WHERE id = ?
   `).run(
     input.statusKind, boundedLine(input.statusLine, row.status_line),
     Math.max(0, Math.floor(input.pendingCount ?? row.pending_count)),
     // 업그레이드된 설치본에는 이 칸의 CHECK 가 없다(ALTER 로 붙일 수 없음). 정당성은 여기서 지킨다.
     normalizePendingKind(input.pendingKind ?? row.pending_kind),
-    Math.max(0, Math.floor(input.unreadCount ?? row.unread_count)),
+    nextUnread,
+    input.unreadCount !== undefined && nextUnread > 0 ? 1 : 0,
     input.creditState ?? row.credit_state,
     input.lastActivityAt === undefined ? row.last_activity_at : input.lastActivityAt,
     now, row.id,

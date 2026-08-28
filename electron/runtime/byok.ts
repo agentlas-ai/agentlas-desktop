@@ -225,7 +225,7 @@ async function runAnthropicMessages(
   const toolPermission = (req.permission ?? "read") as ToolPermission;
   const toolsEnabled = !req.untrustedNoTools && Boolean(req.cwd);
   const anthropicTools = toolsEnabled
-    ? builtinToolsAsAnthropic(toolPermission, { canAskUser: req.unattended !== true })
+    ? builtinToolsAsAnthropic(toolPermission, { canAskUser: req.unattended !== true && req.noSynchronousAsk !== true })
     : [];
   const approval: BuiltinApprovalContext = {
     runtimeKind: "byok",

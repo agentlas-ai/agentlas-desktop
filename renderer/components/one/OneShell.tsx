@@ -258,6 +258,7 @@ function oneOrgBrowserPreviewState(): OneOrgState {
       pendingCount: 0,
       pendingKind: "review",
       unreadCount: 1,
+      unreadGeneration: 1,
       creditState: "ok",
       completionSummary: { produced: [], pending: [] },
       autoSelectTools: true,
@@ -980,6 +981,7 @@ export function OneShell() {
    * 허락이 런타임 도구 승인 카드에도 그대로 적용돼야 "항상"이 말 그대로가 된다.
    */
   const [alwaysApprovedChats, setAlwaysApprovedChats] = useState<readonly string[]>(alwaysApprovedChatIds);
+  const manualAlwaysApprovalRef = useRef(new Set<string>());
   useEffect(() => subscribeAlwaysApproved(setAlwaysApprovedChats), []);
   const [updaterState, setUpdaterState] = useState<UpdaterState | null>(null);
   const [mobileStatus, setMobileStatus] = useState<MobileBridgeRuntimeStatus | null>(null);
@@ -1977,11 +1979,6 @@ export function OneShell() {
     const api = ipc();
     if (!api) return Promise.reject(new Error("Desktop bridge unavailable"));
     return api.oneOrg.restore({ id: member.id, expectedRevision: member.revision });
-  }), [mutateOneOrg]);
-  const markOneOrgRead = useCallback((member: OneOrgMember) => mutateOneOrg(() => {
-    const api = ipc();
-    if (!api) return Promise.reject(new Error("Desktop bridge unavailable"));
-    return api.oneOrg.markRead({ id: member.id, expectedRevision: member.revision });
   }), [mutateOneOrg]);
   const reorderOneOrg = useCallback((orderedIds: string[], expectedRevision: number) => mutateOneOrg(() => {
     const api = ipc();
@@ -4413,9 +4410,18 @@ export function OneShell() {
    * 저장이 화면 상태가 아니라 localStorage 인 이유: 앱을 껐다 켜면 잊는 허락은 사용자
    * 입장에서 "눌렀는데 또 묻는다"가 되고, 그러면 아무도 두 번째부터 신뢰하지 않는다.
    */
-  const markChatAlwaysApproved = useCallback((chatId: string) => {
-    grantAlwaysApproval(chatId);
-  }, []);
+  const markChatAlwaysApproved = useCallback(async (confirmation: PendingConfirmation) => {
+    manualAlwaysApprovalRef.current.add(confirmation.sourceMessageId);
+    try {
+      await grantAlwaysApproval(confirmation.chatId);
+      await answerConfirmation(
+        confirmation,
+        firstApprovalLabel(confirmation) ?? "Approve. Proceed with the proposed action.",
+      );
+    } finally {
+      manualAlwaysApprovalRef.current.delete(confirmation.sourceMessageId);
+    }
+  }, [answerConfirmation]);
 
   /*
    * 허락을 이미 준 대화에 새 결정 요청이 오면 사람을 다시 세우지 않는다.
@@ -4426,7 +4432,8 @@ export function OneShell() {
    */
   useEffect(() => {
     if (busy || alwaysApprovedChats.length === 0) return;
-    const auto = confirmations.find((item) => alwaysApprovedChats.includes(item.chatId));
+    const auto = confirmations.find((item) => alwaysApprovedChats.includes(item.chatId)
+      && !manualAlwaysApprovalRef.current.has(item.sourceMessageId));
     if (!auto) return;
     const reply = firstApprovalLabel(auto) ?? "Approve. Proceed with the proposed action.";
     void answerConfirmation(auto, reply);
@@ -4538,8 +4545,9 @@ export function OneShell() {
       requestOneOperationalRecovery("one-member-channel", new Error("Desktop bridge unavailable"));
       return;
     }
-    void api.chats.openOneMember({ agentId: member.installedAgentId, title: member.displayName })
-      .then((chat) => {
+    void (async () => {
+      try {
+        const chat = await api.chats.openOneMember({ agentId: member.installedAgentId, title: member.displayName });
         setRailOpen(false);
         setSearchOpen(false);
         selectedTaskIdRef.current = null;
@@ -4551,9 +4559,21 @@ export function OneShell() {
         // `one.txt` RSC sidecar to the main document. Replace follows the same
         // proven path used when a newly started run receives its chat binding.
         router.replace(`/one?chat=${encodeURIComponent(chat.id)}`);
-        void refreshAll({ includeOrg: false });
-      })
-      .catch((cause) => requestOneOperationalRecovery("one-member-channel", cause));
+        // Entering the exact result conversation is the acknowledgement. The
+        // blue dot is only cleared after that chat exists and navigation has
+        // committed; a separate "View result" button is no longer required.
+        if (member.unreadCount > 0) {
+          const state = await api.oneOrg.markRead({
+            id: member.id,
+            expectedUnreadGeneration: member.unreadGeneration,
+          });
+          setOneOrgState(state);
+        }
+        await refreshAll({ includeOrg: member.unreadCount <= 0 });
+      } catch (cause) {
+        requestOneOperationalRecovery("one-member-channel", cause);
+      }
+    })();
   }, [refreshAll, router]);
 
   const retryFocusedFailure = useCallback(() => {
@@ -4597,10 +4617,44 @@ export function OneShell() {
   }, [appLocale, busy, conversation?.id, failureFocus, startRun]);
 
   const openTask = useCallback((taskId: string) => {
-    setRailOpen(false);
-    setSearchOpen(false);
-    router.replace(`/one?task=${encodeURIComponent(taskId)}`);
-  }, [router]);
+    void (async () => {
+      const api = ipc();
+      if (!api) {
+        requestOneOperationalRecovery("one-search-open-task", new Error("Desktop bridge unavailable"));
+        return;
+      }
+      try {
+        // Search hits are snapshots. Resolve the exact Task and its chat again
+        // before navigation so an archived/deleted/stale hit cannot lead to an
+        // empty same-route render.
+        const projection = await getOneTaskProjection(
+          api,
+          taskId,
+          activeChatIds,
+          confirmations,
+          oneProfile,
+          appLocale,
+        );
+        if (!projection?.chatId || !projection.chat) {
+          throw new Error("The selected Task or its conversation no longer exists");
+        }
+
+        setRailOpen(false);
+        setSearchOpen(false);
+        selectedTaskIdRef.current = projection.taskId;
+        selectedConversationIdRef.current = null;
+        setSelected(projection);
+        setConversation(null);
+        setMessages([]);
+        setReceipt(null);
+        rememberLastOneConversation(projection.chatId);
+        router.replace(`/one?task=${encodeURIComponent(projection.taskId)}`);
+        await refreshAll({ includeOrg: false });
+      } catch (cause) {
+        requestOneOperationalRecovery("one-search-open-task", cause);
+      }
+    })();
+  }, [activeChatIds, appLocale, confirmations, oneProfile, refreshAll, router]);
 
   const openConversation = useCallback((chatId: string) => {
     setRailOpen(false);
@@ -5514,7 +5568,6 @@ export function OneShell() {
               onReplace={replaceOneOrg}
               onArchive={archiveOneOrg}
               onRestore={restoreOneOrg}
-              onRead={markOneOrgRead}
               onReorder={reorderOneOrg}
               onFailure={openOneFailure}
               onOpenMember={openOneMember}
@@ -6120,7 +6173,20 @@ export function OneShell() {
                         : "Send what you wanted again and One will continue from there."}
                     </p>
                     <div className={styles.teamPreflightConsentActions}>
-                      <button type="button" onClick={() => setTeamPreflight(null)}>
+                      <button type="button" onClick={() => {
+                        const api = ipc();
+                        if (!api || !teamPreflight) return;
+                        setTeamPreflightBusy(true);
+                        void api.oneTeamPreflight.acknowledge({
+                          proposalId: teamPreflight.proposalId,
+                          expectedProposalVersion: teamPreflight.version,
+                          confirmedByUser: true,
+                        }).then(() => {
+                          setTeamPreflight(null);
+                        }).catch((cause) => {
+                          requestOneOperationalRecovery("one-team-preflight-acknowledge", cause);
+                        }).finally(() => setTeamPreflightBusy(false));
+                      }}>
                         {appLocale === "ko" ? "확인" : "Got it"}
                       </button>
                     </div>
@@ -6259,7 +6325,7 @@ export function OneShell() {
                 locale={appLocale}
                 disabled={busy || selectedReadOnly}
                 onAnswer={answerConfirmation}
-                onAlwaysApprove={(confirmation) => markChatAlwaysApproved(confirmation.chatId)}
+                onAlwaysApprove={(confirmation) => { void markChatAlwaysApproved(confirmation); }}
                 onClarify={clarifyConfirmation}
                 onSnooze={snoozeConfirmation}
                 onDismiss={() => setDismissedDecisionId(visibleSelectedConfirmation.sourceMessageId)}

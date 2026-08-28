@@ -63,6 +63,8 @@ export interface RunnerRequest {
   /** Main-authored marker for scheduled/background execution. Resume failure must fail closed
    * instead of silently creating a fresh CLI conversation. */
   unattended?: true;
+  /** Interactive remote surface can show durable Decisions but cannot answer a blocking host tool call. */
+  noSynchronousAsk?: true;
   /** Stable configuration identity for durable unattended sessions. Mutable routing/tool
    * overlays stay in the prompt but do not force a new CLI conversation every run. */
   sessionFingerprintSeed?: string;
@@ -543,6 +545,10 @@ This run is unattended — no user is present and nobody can answer questions.
 - Never emit <<agentlas-ask>> blocks: nobody can answer, and the run would end as a silent failure.
 - When a decision has an obvious safe default, take it and state the assumption in your reply.
 - If required information or a decision has no safe default, do NOT guess or fabricate. Stop and reply with a single line starting with "NEEDS-INPUT:" describing exactly what is missing.`;
+
+export const MOBILE_DURABLE_ASK_DIRECTIVE = `## Mobile decision surface (final authority)
+The synchronous ask_user tool is unavailable on this remote surface. Never call it.
+When an explicit answer is required, emit the <<agentlas-ask>> fenced Decision contract above and STOP. The user will answer from Mobile in the next turn. Never guess an answer.`;
 
 const BUILD_PROMPT_SENTINEL = "<!-- agentlas-build-system-prompt/v1 -->";
 // Budget for the Build system prompt.

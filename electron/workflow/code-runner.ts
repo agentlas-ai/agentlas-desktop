@@ -21,6 +21,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { resolveHephaestusPython } from "../hephaestus/engine";
 import { withPythonCacheBoundary } from "../runtime/python-cache";
 import { agentRunCwd, killCliTree, nodeExecPathForCode } from "../runtime/exec";
@@ -65,9 +66,54 @@ export interface CodeRunResult {
    * 원문 traceback만 던지면 화면이 판정 문장으로 덮어쓴다(기계 표식 소실 사고의 재발 방지).
    */
   failureCode?: "CODE_DEPENDENCY_MISSING";
+  /** Host-measured file delta; declarations and model prose never mint this. */
+  effectReceipt?: {
+    kind: "file-write";
+    changedFileCount: number;
+    digest: string;
+    observedAt: string;
+  };
 }
 
 const RESULT_MARKER = "__AGENTLAS_CODE_RESULT__";
+
+function fileState(root: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const queue = [root];
+  while (queue.length > 0 && out.size < 2_000) {
+    const dir = queue.shift()!;
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      if (out.size >= 2_000 || entry.isSymbolicLink()) break;
+      const absolute = path.join(dir, entry.name);
+      if (entry.isDirectory()) { queue.push(absolute); continue; }
+      if (!entry.isFile()) continue;
+      try {
+        const stat = fs.statSync(absolute);
+        const relative = path.relative(root, absolute);
+        const contentDigest = stat.size <= 2 * 1024 * 1024
+          ? createHash("sha256").update(fs.readFileSync(absolute)).digest("hex")
+          : `${stat.size}:${Math.trunc(stat.mtimeMs)}`;
+        out.set(relative, `${stat.size}:${contentDigest}`);
+      } catch { /* raced with the child; the after snapshot will capture the stable result */ }
+    }
+  }
+  return out;
+}
+
+function effectReceipt(before: Map<string, string>, after: Map<string, string>): CodeRunResult["effectReceipt"] {
+  const changed = [...new Set([...before.keys(), ...after.keys()])]
+    .filter((key) => before.get(key) !== after.get(key))
+    .sort();
+  if (changed.length === 0) return undefined;
+  return {
+    kind: "file-write",
+    changedFileCount: changed.length,
+    digest: createHash("sha256").update(JSON.stringify(changed.map((key) => [key, after.get(key) ?? null]))).digest("hex"),
+    observedAt: new Date().toISOString(),
+  };
+}
 
 /**
  * 사용자(AI) 코드를 감싸는 하니스. 계약은 단순하다:
@@ -318,6 +364,7 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
       return { code, stdout, stderr };
     };
 
+    const beforeFiles = input.effect === "mutation" ? fileState(cwd) : null;
     let run = await runOnce();
     if (input.signal?.aborted) {
       return { ok: false, isolation, reason: "실행이 중지되었습니다." };
@@ -359,7 +406,14 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
     }
     const { result, logs } = splitResult(run.stdout);
     const logOut = [provisionNotes.join("\n"), logs].filter(Boolean).join("\n");
-    return { ok: true, result, isolation, stdout: logOut.slice(0, 4000) };
+    const receipt = beforeFiles ? effectReceipt(beforeFiles, fileState(cwd)) : undefined;
+    return {
+      ok: true,
+      result,
+      isolation,
+      stdout: logOut.slice(0, 4000),
+      ...(receipt ? { effectReceipt: receipt } : {}),
+    };
   } finally {
     cleanup();
   }

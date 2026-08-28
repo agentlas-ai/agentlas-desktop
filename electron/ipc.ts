@@ -460,6 +460,7 @@ import {
   reserveOneBriefingActionExecution,
 } from "./one/briefing-actions";
 import {
+  acknowledgeOneTeamPreflight,
   autoResolveOneTeamPreflight,
   failOneTeamPreflightStart,
   getOneTeamPreflightForChat,
@@ -4391,6 +4392,8 @@ export function registerIpcHandlers(): void {
     autoResolveOneTeamPreflight(input));
   ipcMain.handle("oneTeamPreflight:resolve", (_e, input: ResolveOneTeamPreflightInput) =>
     resolveOneTeamPreflight(input));
+  ipcMain.handle("oneTeamPreflight:acknowledge", (_e, input) =>
+    acknowledgeOneTeamPreflight(input));
   ipcMain.handle("oneTeamPreflight:failStart", (_e, ref: OneTeamPreflightRef) =>
     failOneTeamPreflightStart(ref));
   ipcMain.handle("oneBriefing:prepareAction", (_e, input: PrepareOneBriefingActionInput) =>

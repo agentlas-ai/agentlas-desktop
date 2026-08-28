@@ -88,7 +88,6 @@ export function OneOrgChart({
   onReplace,
   onArchive,
   onRestore,
-  onRead,
   onReorder,
   onFailure,
   onOpenMember,
@@ -130,7 +129,6 @@ export function OneOrgChart({
   onReplace: (member: OneOrgMember, installedAgentId: string, handoverNote?: string) => Promise<void>;
   onArchive: (member: OneOrgMember) => Promise<void>;
   onRestore: (member: OneOrgMember) => Promise<void>;
-  onRead: (member: OneOrgMember) => Promise<void>;
   onReorder: (orderedIds: string[], expectedRevision: number) => Promise<void>;
   onFailure?: (member: OneOrgMember) => void;
   onOpenMember?: (member: OneOrgMember) => void;
@@ -474,7 +472,11 @@ export function OneOrgChart({
             </div>
             <span className={styles.source}>{activityTimeLabel(member, locale)}</span>
             {member.creditState === "insufficient" && <span className={styles.creditBadge}><IconShield size={11} />{locale === "ko" ? "크레딧 부족" : "Credits needed"}</span>}
-            {member.unreadCount > 0 && <button type="button" className={styles.readButton} onClick={(event) => { event.stopPropagation(); void onRead(member); }}>{locale === "ko" ? "결과 확인" : "View result"}</button>}
+            {member.unreadCount > 0 && <span
+              className={styles.unreadDot}
+              role="img"
+              aria-label={locale === "ko" ? "확인하지 않은 결과" : "Unread result"}
+            />}
             {member.statusKind === "failed" && onFailure && <button type="button" className={styles.failureButton} onClick={(event) => { event.stopPropagation(); onFailure(member); }}>{locale === "ko" ? "One에게" : "Ask One"}</button>}
             <div className={styles.rowActions}>
               <button

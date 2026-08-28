@@ -1,5 +1,5 @@
 import { isHostPreflightTool } from "../../shared/tool-activity";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { agentRunCwd } from "../runtime/exec";
 import { resolveInvocationRunId } from "../runtime/run-id";
 import {
@@ -36,10 +36,20 @@ import {
   tryRecordRunEvent,
 } from "../store/run-events";
 import { getProject } from "../store/projects";
+import { getDb } from "../store/db";
+import {
+  beginQueuedSteerDrain,
+  cancelQueuedSteersForChat,
+  listRecoverableQueuedSteers,
+  persistQueuedSteer,
+  settleQueuedSteer,
+} from "../store/invocation-steers";
 import {
   appendChatMessage,
   getChat,
   getChatWorkingFolder,
+  hasDurableAssistantMessage,
+  latestDurableAssistantMessage,
   listChatMessages,
   repairRootChatSurfaceController,
 } from "../store/chats";
@@ -181,9 +191,14 @@ interface RunRecord {
 }
 
 interface QueuedSteer {
+  id: string;
+  originalRunId: string;
+  promptHash: string;
   request: McpInvocationRequest;
   queuedAt: string;
   workspaceBinding?: InvocationWorkspaceBinding;
+  executionContext?: InvocationExecutionContext;
+  drainedRunId?: string;
 }
 
 type OneInvocationRequest = McpInvocationRequest & {
@@ -649,6 +664,37 @@ export class InvocationService {
     return this.activeRuns.activeChatIds();
   }
 
+  /** Rehydrate exact accepted directions after SQLite is initialized on boot. */
+  recoverQueuedSteers(): number {
+    const rows = listRecoverableQueuedSteers();
+    const chats = new Set<string>();
+    for (const row of rows) {
+      if (row.drainedRunId && hasInvocationRunReceipt(row.drainedRunId)) {
+        settleQueuedSteer(row.id, "started");
+        continue;
+      }
+      const queue = this.steerQueues.get(row.chatId) ?? [];
+      if (queue.length >= MAX_STEER_QUEUE_DEPTH) {
+        settleQueuedSteer(row.id, "failed");
+        continue;
+      }
+      queue.push({
+        id: row.id,
+        originalRunId: row.originalRunId,
+        promptHash: row.promptHash,
+        request: { ...row.request, runId: undefined },
+        queuedAt: row.queuedAt,
+        ...(row.workspaceBinding ? { workspaceBinding: immutableWorkspaceBinding(row.workspaceBinding) } : {}),
+        ...(row.executionContext ? { executionContext: row.executionContext } : {}),
+        ...(row.drainedRunId ? { drainedRunId: row.drainedRunId } : {}),
+      });
+      this.steerQueues.set(row.chatId, queue);
+      chats.add(row.chatId);
+    }
+    for (const chatId of chats) queueMicrotask(() => this.drainSteerQueue(chatId));
+    return rows.length;
+  }
+
   start(
     req: McpInvocationRequest,
     workspaceBinding?: InvocationWorkspaceBinding,
@@ -1060,6 +1106,9 @@ export class InvocationService {
             // reconstruct it later from human-readable Activity text.
             taskIntent: runReq.taskIntent,
             invocationSource: runWorkspaceBinding?.source,
+            synchronousAskSurface: executionContext?.source === "mobile"
+              ? "durable-decision"
+              : undefined,
             oneTaskKindRef: oneTaskKindRef ?? undefined,
             oneParticipantVersionBindings,
             oneTeamPreflightProposalId: preparedOneTeamPreflight?.proposalId,
@@ -1366,8 +1415,18 @@ export class InvocationService {
           };
         }
 
+        // Some native runtimes persist the assistant row and then emit a
+        // content-free final signal. The durable transcript is the canonical
+        // answer in that ordering; using the empty transport event would lose
+        // both the Decision and the waiting-decision task state on restart.
+        if (event.kind === "final" && !(event.text ?? "").trim()) {
+          const durableFinal = latestDurableAssistantMessage(runReq.chatId, startedAt);
+          if (durableFinal?.text.trim()) {
+            event = { ...event, text: stripPermissionEscalationMarker(durableFinal.text) };
+          }
+        }
         const terminalRequestsDecision = event.kind === "final" &&
-          (event.text ?? record.partialText).includes("<<agentlas-ask");
+          (event.text ?? "").includes("<<agentlas-ask");
         if (terminalRequestsDecision) record.pendingQuestion = true;
         if (!taskMaterialized && (invocationEventPromotesTask(event) || terminalRequestsDecision)) {
           tryRecordRunEvent({
@@ -1403,6 +1462,33 @@ export class InvocationService {
               });
             }
           }
+        }
+
+        let decisionTerminalCommitted = false;
+        if (terminalRequestsDecision && event.kind === "final") {
+          // The assistant Decision row is already durable. Seal the companion
+          // waiting Task and completion receipt in one SQLite transaction
+          // before either surface is published, so a crash cannot expose a
+          // Decision whose Task still says partial/running (or vice versa).
+          const sealDecision = getDb().transaction(() => {
+            canonicalTask = trySetTaskStatus(
+              runReq.chatId,
+              "waiting-decision",
+              true,
+              invocationOrigin,
+            );
+            if (!canonicalTask) throw new Error("decision-task-projection-failed");
+            taskMaterialized = true;
+            recordRunEvent({
+              runId,
+              kind: "invoke_completed",
+              chatId: runReq.chatId,
+              agentId: attributedAgentId ?? record.actualAgentId,
+              payload: { resultFolder: record.resultFolder, decisionRequested: true },
+            });
+          });
+          sealDecision.immediate();
+          decisionTerminalCommitted = true;
         }
 
         const rawSurfaceForArtifactBinding = event.kind === "surface" ? event.surface : undefined;
@@ -1520,6 +1606,28 @@ export class InvocationService {
           sequence: observableStepSequence,
           observedAt: new Date().toISOString(),
         };
+        if (
+          event.kind === "final"
+          && !runReq.agentAppMode
+          && !runWorkspaceBinding
+          && typeof event.text === "string"
+          && event.text.trim()
+          && !hasDurableAssistantMessage(runReq.chatId, stripPermissionEscalationMarker(event.text), startedAt)
+        ) {
+          // A native/IO failure can occur between model completion and the
+          // transcript write. Never publish or ledger a successful completion
+          // unless reopening this chat can read the exact result back.
+          event = {
+            kind: "error",
+            runtimeAgentId: record.actualAgentId,
+            error: {
+              code: "result-not-durable",
+              message: "The response finished but its saved result could not be verified.",
+            },
+            sequence: observableStepSequence,
+            observedAt: event.observedAt,
+          };
+        }
         recordObservableRunStep(canonicalTask, runId, event, observableStepSequence);
 
         let wireEvent = event;
@@ -1577,6 +1685,19 @@ export class InvocationService {
         if (record.events.length > MAX_BUFFERED_EVENTS) {
           record.events.splice(0, record.events.length - MAX_BUFFERED_EVENTS);
         }
+        if (event.kind === "final" && !decisionTerminalCommitted) {
+          // This throwing insert is the publication gate. tryRecordRunEvent is
+          // intentionally not used: a renderer-visible completion without a
+          // durable terminal receipt would become "running"/missing after a
+          // restart even though the user already saw success.
+          recordRunEvent({
+            runId,
+            kind: "invoke_completed",
+            chatId: runReq.chatId,
+            agentId: attributedAgentId ?? record.actualAgentId,
+            payload: { resultFolder: record.resultFolder },
+          });
+        }
         recordMcpInvocationEvent(runId, runReq, event);
         this.publishEvent({ runId, chatId: runReq.chatId, event: wireEvent });
 
@@ -1606,17 +1727,19 @@ export class InvocationService {
           );
           taskMaterialized = Boolean(canonicalTask);
           terminalObserved = true;
-          tryRecordRunEvent({
-            runId,
-            kind: terminalKind,
-            chatId: runReq.chatId,
-            agentId: attributedAgentId ?? record.actualAgentId,
-            payload: {
-              resultFolder: record.resultFolder,
-              errorCode: event.error?.code,
-              errorMessage: event.error?.message,
-            },
-          });
+          if (terminalKind !== "invoke_completed") {
+            tryRecordRunEvent({
+              runId,
+              kind: terminalKind,
+              chatId: runReq.chatId,
+              agentId: attributedAgentId ?? record.actualAgentId,
+              payload: {
+                resultFolder: record.resultFolder,
+                errorCode: event.error?.code,
+                errorMessage: event.error?.message,
+              },
+            });
+          }
           recordTaskTerminalEvidence({ task: canonicalTask, runId, terminalKind });
           if (requestedOneMode && canonicalTask) {
             tryProjectOneWorkspace({
@@ -1857,6 +1980,7 @@ export class InvocationService {
     // queued behind the active turn. Steering itself never calls cancel.
     if (record?.chatId) {
       this.steerQueues.delete(record.chatId);
+      cancelQueuedSteersForChat(record.chatId);
     }
     const result = this.activeRuns.requestCancel(runId);
     if (result === "requested") {
@@ -1915,12 +2039,21 @@ export class InvocationService {
     if (queue.length >= MAX_STEER_QUEUE_DEPTH) {
       throw new Error("Steering queue is full; wait for the current Desktop run to settle");
     }
-    queue.push({
+    const durable = persistQueuedSteer({
+      chatId: req.chatId,
+      originalRunId: active[0],
       request: { ...steerRequest, runId: undefined },
-      queuedAt: new Date().toISOString(),
-      ...(workspaceBinding
-        ? { workspaceBinding: immutableWorkspaceBinding(workspaceBinding) }
-        : {}),
+      ...(workspaceBinding ? { workspaceBinding: immutableWorkspaceBinding(workspaceBinding) } : {}),
+      ...(executionContext ? { executionContext } : {}),
+    });
+    queue.push({
+      id: durable.id,
+      originalRunId: durable.originalRunId,
+      promptHash: durable.promptHash,
+      request: durable.request,
+      queuedAt: durable.queuedAt,
+      ...(durable.workspaceBinding ? { workspaceBinding: durable.workspaceBinding } : {}),
+      ...(durable.executionContext ? { executionContext: durable.executionContext } : {}),
     });
     this.steerQueues.set(req.chatId, queue);
     // 진화 트리거 근거 — 사용자가 실행 중 방향을 바꾸면(스티어링) content-free 신호를
@@ -1957,6 +2090,7 @@ export class InvocationService {
     const index = position - 1;
     if (index < 0 || index >= queue.length) return false;
     if (queue[index].request.userPrompt !== text) return false;
+    settleQueuedSteer(queue[index].id, "cancelled");
     queue.splice(index, 1);
     if (!queue.length) this.steerQueues.delete(chatId);
     return true;
@@ -2145,15 +2279,26 @@ export class InvocationService {
   }
 
   private drainSteerQueue(chatId: string): void {
+    if ([...this.activeRuns.entries()].some(([, record]) => record.chatId === chatId)) return;
     const queue = this.steerQueues.get(chatId);
     if (!queue?.length) return;
     const next = queue.shift();
     if (!queue.length) this.steerQueues.delete(chatId);
     if (!next) return;
     queueMicrotask(() => {
+      const drainedRunId = next.drainedRunId ?? randomUUID();
       try {
-        this.start(next.request, next.workspaceBinding);
+        if (!beginQueuedSteerDrain(next.id, drainedRunId)) return;
+        if (!hasInvocationRunReceipt(drainedRunId)) {
+          this.start(
+            { ...next.request, runId: drainedRunId },
+            next.workspaceBinding,
+            next.executionContext,
+          );
+        }
+        settleQueuedSteer(next.id, "started");
       } catch (error) {
+        settleQueuedSteer(next.id, "failed");
         const message = error instanceof Error ? error.message : String(error);
         this.publishEvent({
           runId: "steer",

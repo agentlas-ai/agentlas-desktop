@@ -195,6 +195,10 @@ function resolveAgentFileTarget(agentId: string, requested: string): { dir: stri
   return { dir, safe: ensureInside(dir, requested) };
 }
 
+function isCanonicalSystemPrompt(dir: string, safe: string): boolean {
+  return path.resolve(safe) === path.resolve(dir, "system-prompt.md");
+}
+
 function assertNotSymlink(filePath: string): void {
   try {
     if (fs.lstatSync(filePath).isSymbolicLink()) {
@@ -328,7 +332,7 @@ export function readAgentPromptSource(agentId: string): AgentFileTextSnapshot | 
 
 /** Safe removal used only by receipted rollback of an asset that was originally absent. */
 export function removeAgentFile(agentId: string, requested: string): { ok: boolean; removed: boolean } {
-  const { safe } = resolveAgentFileTarget(agentId, requested);
+  const { dir, safe } = resolveAgentFileTarget(agentId, requested);
   assertNotSymlink(safe);
   try {
     fs.unlinkSync(safe);
@@ -336,7 +340,7 @@ export function removeAgentFile(agentId: string, requested: string): { ok: boole
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ok: true, removed: false };
     throw error;
   }
-  if (path.basename(safe) === "system-prompt.md") {
+  if (isCanonicalSystemPrompt(dir, safe)) {
     getDb().prepare("UPDATE installed_agents SET system_prompt = '' WHERE id = ?").run(agentId);
   }
   try {
@@ -358,7 +362,7 @@ export function removeAgentFile(agentId: string, requested: string): { ok: boole
  * creates the target first, EEXIST is returned and their bytes are untouched.
  */
 export function createAgentFile(agentId: string, requested: string, content: string): { ok: boolean } {
-  const { safe } = resolveAgentFileTarget(agentId, requested);
+  const { dir, safe } = resolveAgentFileTarget(agentId, requested);
   fs.mkdirSync(path.dirname(safe), { recursive: true });
   assertNotSymlink(safe);
   const tempPath = path.join(path.dirname(safe), `.${path.basename(safe)}.${randomUUID()}.create`);
@@ -393,7 +397,7 @@ export function createAgentFile(agentId: string, requested: string, content: str
       // Best effort after link commit or failed creation.
     }
   }
-  if (path.basename(safe) === "system-prompt.md") {
+  if (isCanonicalSystemPrompt(dir, safe)) {
     getDb().prepare("UPDATE installed_agents SET system_prompt = ? WHERE id = ?").run(content, agentId);
   }
   return { ok: true };
@@ -682,10 +686,10 @@ export async function readAgentFile(agentId: string, absPath: string): Promise<T
 }
 
 export function writeAgentFile(agentId: string, absPath: string, content: string): { ok: boolean } {
-  const { safe } = resolveAgentFileTarget(agentId, absPath);
+  const { dir, safe } = resolveAgentFileTarget(agentId, absPath);
   atomicWriteTextFile(safe, content);
   // system-prompt.md 편집은 DB에도 반영해 새 메시지에 즉시 적용.
-  if (path.basename(safe) === "system-prompt.md") {
+  if (isCanonicalSystemPrompt(dir, safe)) {
     getDb().prepare("UPDATE installed_agents SET system_prompt = ? WHERE id = ?").run(content, agentId);
   }
   return { ok: true };

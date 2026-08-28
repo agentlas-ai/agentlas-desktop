@@ -17,7 +17,7 @@
 import { useSyncExternalStore } from "react";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import type { ToolApprovalRequestEvent, ToolApprovalDecision } from "@/lib/types";
-import { isChatAlwaysApproved } from "./always-approved-chats";
+import { isChatAlwaysApproved, waitForAlwaysApprovedChats } from "./always-approved-chats";
 
 let queue: ToolApprovalRequestEvent[] = [];
 const visibleChats = new Map<string, number>();
@@ -35,8 +35,10 @@ function emit(): void {
   for (const fn of listeners) fn();
 }
 
-function upsert(next: ToolApprovalRequestEvent): void {
+async function upsert(next: ToolApprovalRequestEvent): Promise<void> {
   if (next.mode !== "live") return; // 사후 고지는 카드가 아니다.
+  if (decided.has(next.id) || queue.some((item) => item.id === next.id)) return;
+  await waitForAlwaysApprovedChats();
   if (decided.has(next.id) || queue.some((item) => item.id === next.id)) return;
   /*
    * 이 대화에 이미 "항상 승인"을 준 사용자에게는 카드를 만들지 않는다.
@@ -60,10 +62,10 @@ function ensureSubscribed(): void {
   const api = ipc();
   if (!events?.onToolApproval || !api) return;
   subscribed = true;
-  events.onToolApproval(upsert);
+  events.onToolApproval((item) => { void upsert(item); });
   // 화면이 뜨기 전에 온 요청 — 메인이 아직 답을 기다리고 있으면 여기서 따라잡는다.
   void api.listToolApprovals?.().then((pending) => {
-    for (const item of pending ?? []) upsert(item);
+    for (const item of pending ?? []) void upsert(item);
   }).catch(() => {});
 }
 

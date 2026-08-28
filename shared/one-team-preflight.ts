@@ -173,6 +173,20 @@ export interface ResolveOneTeamPreflightInput {
   confirmedByUser: true;
 }
 
+/** Persistently dismisses only a terminal proposal the user actually saw. */
+export interface AcknowledgeOneTeamPreflightInput {
+  proposalId: string;
+  expectedProposalVersion: number;
+  confirmedByUser: true;
+}
+
+export interface AcknowledgeOneTeamPreflightResult {
+  acknowledged: true;
+  proposalId: string;
+  chatId: string;
+  acknowledgedProposalVersion: number;
+}
+
 /**
  * Main-owned safe default. The renderer cannot choose a mode: Main uses the
  * exact installed roster when it is already verified and free, otherwise it

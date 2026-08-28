@@ -171,6 +171,7 @@ import {
   type RunnerRequest,
   SURFACE_INTENT_MARKER,
   UNATTENDED_NO_ASK_DIRECTIVE,
+  MOBILE_DURABLE_ASK_DIRECTIVE,
 } from "../runtime/runner";
 import {
   effortForSelectedModel,
@@ -1138,10 +1139,10 @@ export async function pickActiveRunner(): Promise<
 /** Main-process-only invocation provenance. Never deserialize this from IPC/wire input.
  *  - automation / site-studio / trex: 무인 실행 — 질문에 답할 사람이 없다(unattended).
  *  - telegram: 원격 대화형 — 질문이 평문으로 전달되고 사용자가 다음 메시지로 답한다.
- *  context 미지정(undefined)은 렌더러/모바일 대화형 경로다. 새 헤드리스 통합은 반드시
+ *  context 미지정(undefined)은 로컬 렌더러 대화형 경로다. 새 원격/헤드리스 통합은 반드시
  *  여기 source를 추가하고 넘겨라 — 안 넘기면 대화형으로 오인된다(fail-open). */
 export interface InvocationExecutionContext {
-  source: "automation" | "site-studio" | "telegram" | "trex";
+  source: "automation" | "site-studio" | "telegram" | "trex" | "mobile";
   /**
    * 표면이 붙이는 안내(방 정보·언어 규칙·모드 지시). **userPrompt 에 섞으면 안 된다** —
    * userPrompt 는 "사람이 실제로 한 말"이고 goal 목표·수락 기준·대화 제목·기억이
@@ -1226,6 +1227,10 @@ function isUnattendedExecution(executionContext?: InvocationExecutionContext): b
     executionContext?.source === "site-studio" ||
     executionContext?.source === "trex"
   );
+}
+
+function usesMobileDurableDecision(executionContext?: InvocationExecutionContext): boolean {
+  return executionContext?.source === "mobile";
 }
 
 // ── One 태스크 Surface 레시피 — 선택은 판정기(LLM) 경유 ──────────────────────
@@ -3991,6 +3996,8 @@ ${effectiveUserPrompt}`;
   // 유도한다. automation-result.ts 분류기가 이 계약을 짝으로 감지한다(조용한 가짜 성공 방지).
   if (isUnattendedExecution(executionContext)) {
     systemPrompt = `${systemPrompt}\n\n${UNATTENDED_NO_ASK_DIRECTIVE}`;
+  } else if (usesMobileDurableDecision(executionContext)) {
+    systemPrompt = `${systemPrompt}\n\n${MOBILE_DURABLE_ASK_DIRECTIVE}`;
   }
 
   // 사용자 메시지 영구화 + 첫 메시지면 제목 자동 생성
@@ -4085,6 +4092,7 @@ ${effectiveUserPrompt}`;
       permission: req.permissions,
       ...(restrictedReadBoundary ? { restrictedReadBoundary: true as const } : {}),
       ...(isUnattendedExecution(executionContext) ? { unattended: true as const } : {}),
+      ...(usesMobileDurableDecision(executionContext) ? { noSynchronousAsk: true as const } : {}),
       // 세션 지문 시드 — 인터랙티브 채팅은 모델·effort·권한·턴별 주입이 바뀌어도
       // 같은 CLI 세션을 이어간다. 단, 명시적으로 바꾼 UI 언어는 시스템 프롬프트를
       // 다시 심어야 하므로 세션 정체성에 포함한다. 그렇지 않으면 resume이 첫 턴의

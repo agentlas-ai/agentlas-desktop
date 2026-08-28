@@ -27,6 +27,8 @@ import type {
 import {
   ONE_TEAM_PREFLIGHT_CONTRACT_VERSION,
   isOneTeamPreflightProposal,
+  type AcknowledgeOneTeamPreflightInput,
+  type AcknowledgeOneTeamPreflightResult,
   type AutoResolveOneTeamPreflightInput,
   type OneTeamPreflightComplexityReason,
   type OneTeamPreflightPermission,
@@ -1460,6 +1462,52 @@ export function getOneTeamPreflightForChat(
     .filter((item) => item.proposal.binding.chatId === chatId)
     .sort((left, right) => Date.parse(right.proposal.updatedAt) - Date.parse(left.proposal.updatedAt));
   return records[0] ? expireIfNeeded(records[0], deps).proposal : null;
+}
+
+export function acknowledgeOneTeamPreflight(
+  input: AcknowledgeOneTeamPreflightInput,
+  deps: OneTeamPreflightDependencies = {},
+): AcknowledgeOneTeamPreflightResult {
+  if (
+    !input || typeof input !== "object"
+    || Object.keys(input as unknown as Record<string, unknown>).sort().join(",") !== "confirmedByUser,expectedProposalVersion,proposalId"
+    || !ID_RE.test(input.proposalId)
+    || !Number.isSafeInteger(input.expectedProposalVersion) || input.expectedProposalVersion < 1
+    || input.confirmedByUser !== true
+  ) throw new OneTeamPreflightError("invalid_request", "Invalid One team preflight acknowledgement");
+
+  recoverReservations(deps);
+  const record = currentRecord(input.proposalId);
+  if (!record) throw new OneTeamPreflightError("stale_binding", "The team proposal no longer exists");
+  const terminal = expireIfNeeded(record, deps);
+  if (terminal.proposal.version !== input.expectedProposalVersion) {
+    throw new OneTeamPreflightError("stale_binding", "The team proposal changed before acknowledgement");
+  }
+  if (!['expired', 'cancelled'].includes(terminal.proposal.status)) {
+    throw new OneTeamPreflightError("already_resolved", "Only a terminal team proposal can be acknowledged");
+  }
+
+  const db = getDb();
+  const acknowledged = db.transaction(() => {
+    const { state, raw } = readStore(db);
+    const index = state.proposals.findIndex((item) => item.proposal.proposalId === terminal.proposal.proposalId);
+    if (index < 0) throw new OneTeamPreflightError("stale_binding", "The team proposal no longer exists");
+    const live = state.proposals[index];
+    if (live.proposal.version !== terminal.proposal.version || live.proposal.status !== terminal.proposal.status) {
+      throw new OneTeamPreflightError("stale_binding", "The team proposal changed before acknowledgement");
+    }
+    state.version += 1;
+    state.proposals.splice(index, 1);
+    persistStore(state, raw, db);
+    return {
+      acknowledged: true as const,
+      proposalId: live.proposal.proposalId,
+      chatId: live.proposal.binding.chatId,
+      acknowledgedProposalVersion: live.proposal.version,
+    };
+  }).immediate();
+  PROCESS_PROMPTS.delete(input.proposalId);
+  return acknowledged;
 }
 
 export function prepareOneTeamPreflightClaim(

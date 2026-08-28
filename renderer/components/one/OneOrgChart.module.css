@@ -48,7 +48,7 @@
 .taskForceRow small { color: #9aa29d; font-size: 8px; }
 .rowActions { display: flex; gap: 3px; opacity: 1; }
 .rowActions button, .rowActions select { border: 0; border-radius: 5px; background: #f3f5f4; color: #707874; font-size: 8px; cursor: pointer; }
-.readButton { flex: none; min-height: 22px; padding: 0 6px; border: 1px solid #c7e7d9; border-radius: 6px; background: #f1fbf6; color: #19775c; font-size: 8px; font-weight: 700; cursor: pointer; }
+.unreadDot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 999px; background: #2f80ed; box-shadow: 0 0 0 2px #e9f3ff; }
 .failureButton { flex: none; min-height: 22px; padding: 0 6px; border: 1px solid #edc1bd; border-radius: 6px; background: #fff5f3; color: #a84b42; font-size: 8px; font-weight: 700; cursor: pointer; }
 .handover { display: inline-flex; align-items: center; gap: 3px; color: #7a837d; font-size: 8px; white-space: nowrap; }
 .inlineForm input { width: 100px; min-height: 22px; border: 1px solid #b6dacc; border-radius: 5px; padding: 0 5px; font-size: 10px; }

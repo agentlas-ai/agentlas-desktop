@@ -582,7 +582,9 @@ export function toggleAutomation(id: string, enabled: boolean): Automation {
           scheduleJson: existing.scheduleSpec ? JSON.stringify(existing.scheduleSpec) : null,
           timezone: existing.timezone,
         })
-      : existing.nextRunAt;
+      : timeDriven
+        ? existing.nextRunAt
+        : null;
   getDb()
     .prepare("UPDATE automations SET enabled = ?, next_run_at = ? WHERE id = ?")
     .run(enabled ? 1 : 0, nextRunAt, id);
@@ -916,6 +918,29 @@ export function getAutomationLiveRunState(
     return null;
   }
   return "queued";
+}
+
+/** Exact scheduler identity exposed across queued, running, and terminal views. */
+export function getAutomationLiveRunId(id: string): string | null {
+  const db = getDb();
+  const active = db.prepare(
+    `SELECT id FROM automation_runs
+     WHERE automation_id = ? AND status = 'running'
+     ORDER BY COALESCE(last_activity_at, started_at) DESC LIMIT 1`,
+  ).get(id) as { id: string } | undefined;
+  if (active?.id) return active.id;
+  if (getAutomationLiveRunState(id) === "queued") {
+    const requested = db.prepare(
+      `SELECT run_id FROM run_events
+       WHERE automation_id = ? AND kind = 'automation_run_requested'
+       ORDER BY ts DESC, rowid DESC LIMIT 1`,
+    ).get(id) as { run_id: string } | undefined;
+    if (requested?.run_id) return requested.run_id;
+  }
+  const terminal = db.prepare(
+    "SELECT id FROM run_history WHERE automation_id = ? ORDER BY ran_at DESC, rowid DESC LIMIT 1",
+  ).get(id) as { id: string } | undefined;
+  return terminal?.id ?? null;
 }
 
 /** 그래프 실행 시작 시 automation_runs 행 생성(상태 running). node_states는 초기 pending 맵. */
@@ -1590,7 +1615,7 @@ export function markAutomationRun(
          (id, automation_id, scheduled_for, ran_at, status, skipped_count, error, outcome, outcome_reason)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
-      randomUUID(), id, row.next_run_at, atIso, terminalStatus,
+      sourceRunId ?? randomUUID(), id, row.next_run_at, atIso, terminalStatus,
       skipped > 0 ? skipped : 0, opts?.error ?? null,
       opts?.outcome ?? null, opts?.outcomeReason ?? null,
     );

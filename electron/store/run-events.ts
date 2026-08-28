@@ -42,6 +42,14 @@ interface FailureEventRow {
   payload_json: string;
 }
 
+/**
+ * The dashboard's failure list is an operational view, not the append-only
+ * history used by learning and recovery. An error remains visible for three
+ * days after its most recent occurrence; the raw rows stay in the ledger so
+ * historical receipts and learning evidence are not destroyed.
+ */
+export const FAILURE_EVENT_ACTIVE_WINDOW_MS = 3 * 24 * 60 * 60 * 1_000;
+
 export const ONE_SURFACE_SNAPSHOT_EVENT_KIND = "one_surface_snapshot";
 export const ONE_DOMAIN_EVENT_KIND = "one_domain_event";
 
@@ -667,12 +675,21 @@ export function observedToolActivity(runId: string): { callCount: number; toolNa
   if (!runId) return { callCount: 0, toolNames: [] };
   // run_events 에 title 컬럼은 없다(db.ts 의 CREATE TABLE 이 정본) — 이름은 payload 에만 있다.
   const rows = getDb()
-    .prepare("SELECT payload_json FROM run_events WHERE run_id = ? AND kind = 'mcp_tool-use' ORDER BY seq ASC LIMIT 500")
-    .all(runId) as { payload_json: string | null }[];
+    .prepare("SELECT kind, payload_json FROM run_events WHERE run_id = ? AND kind IN ('mcp_tool-use','graph_host_effect') ORDER BY seq ASC LIMIT 500")
+    .all(runId) as { kind: string; payload_json: string | null }[];
   const raw: string[] = [];
   for (const row of rows) {
     try {
       const payload = row.payload_json ? JSON.parse(row.payload_json) : null;
+      if (
+        row.kind === "graph_host_effect" &&
+        payload?.effectKind === "file-write" &&
+        Number(payload?.changedFileCount) > 0 &&
+        typeof payload?.digest === "string"
+      ) {
+        raw.push("graph:code-file-write");
+        continue;
+      }
       // 실측 payload 는 {"eventKind":"tool-use","toolName":…} — toolName 이 정본, 옛 모양은 폴백.
       const name = payload?.toolName ?? payload?.tool?.name ?? payload?.name;
       if (typeof name === "string" && name.trim()) raw.push(name.trim().slice(0, 120));
@@ -755,11 +772,39 @@ export function listFailureEvents(input: {
     clauses.push("agent_id = ?");
     params.push(input.agentId);
   }
+  // Do not let an old failure keep occupying the current-error list forever.
+  // The comparison is strict: once 72 hours have elapsed without a new row,
+  // the error leaves this view. A later record with the same identity naturally
+  // makes it visible again.
+  clauses.push("ts > ?");
+  params.push(new Date(Date.now() - FAILURE_EVENT_ACTIVE_WINDOW_MS).toISOString());
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   const rows = getDb()
-    .prepare(`SELECT * FROM failure_events ${where} ORDER BY datetime(ts) DESC LIMIT ?`)
-    .all(...params, capped) as FailureEventRow[];
-  return rows.map(failureRowToUi);
+    .prepare(`SELECT * FROM failure_events ${where} ORDER BY datetime(ts) DESC, rowid DESC`)
+    .all(...params) as FailureEventRow[];
+
+  // Scheduled retries can append the same failure many times. Keep the
+  // newest occurrence for each scoped error identity instead of turning the
+  // dashboard into a duplicate stream. The run id is deliberately excluded:
+  // a recurrence is the same current error, not a new list item.
+  const seen = new Set<string>();
+  const active: FailureEventUi[] = [];
+  for (const row of rows) {
+    const message = row.error_message.replace(/\s+/g, " ").trim();
+    const identity = [
+      row.source,
+      row.chat_id ?? "",
+      row.automation_id ?? "",
+      row.node_id ?? "",
+      row.agent_id ?? "",
+      row.error_code ? `code:${row.error_code}` : `message:${message}`,
+    ].join("\u001f");
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    active.push(failureRowToUi(row));
+    if (active.length >= capped) break;
+  }
+  return active;
 }
 
 function stringPayload(payload: Record<string, unknown>, key: string): string | undefined {

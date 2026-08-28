@@ -31,6 +31,7 @@ type Listener = (chatIds: readonly string[]) => void;
 
 let chatIds: string[] = [];
 let hydrated = false;
+let hydration: Promise<void> | null = null;
 const listeners = new Set<Listener>();
 
 function emit(): void {
@@ -44,7 +45,8 @@ function applyServerList(ids: unknown): void {
 }
 
 /** 첫 소비 시 1회: 레거시 localStorage → DB 이관 후 서버 목록으로 대체. */
-function hydrate(): void {
+async function hydrate(): Promise<void> {
+  if (hydration) return hydration;
   if (hydrated || typeof window === "undefined") return;
   hydrated = true;
   const api = ipc();
@@ -54,41 +56,62 @@ function hydrate(): void {
     const parsed = JSON.parse(window.localStorage.getItem(LEGACY_STORAGE_KEY) ?? "[]");
     if (Array.isArray(parsed)) legacy = parsed.filter((id): id is string => typeof id === "string");
   } catch { /* 없거나 깨진 레거시 값 — 이관할 것이 없다 */ }
-  void (async () => {
+  hydration = (async () => {
     try {
       for (const id of legacy) await api.grantChatAlwaysApproval?.(id);
       if (legacy.length > 0) window.localStorage.removeItem(LEGACY_STORAGE_KEY);
       applyServerList(await api.listAlwaysApprovedChats());
-    } catch { /* main 미준비 — 다음 grant/revoke 가 다시 동기화한다 */ }
+    } catch {
+      // A failed first read is not a valid empty baseline. Let the next caller
+      // retry before it decides whether a pending approval may auto-resolve.
+      hydrated = false;
+      hydration = null;
+    }
   })();
+  return hydration;
+}
+
+export function waitForAlwaysApprovedChats(): Promise<void> {
+  return hydrate();
 }
 
 export function alwaysApprovedChatIds(): readonly string[] {
-  hydrate();
+  void hydrate();
   return chatIds;
 }
 
 export function isChatAlwaysApproved(chatId: string | null | undefined): boolean {
-  hydrate();
+  void hydrate();
   return Boolean(chatId) && chatIds.includes(String(chatId));
 }
 
-export function grantAlwaysApproval(chatId: string): void {
-  if (!chatId || chatIds.includes(chatId)) return;
-  chatIds = [...chatIds, chatId]; // 낙관적 미러 — 카드 억제는 즉시 동작해야 한다.
-  emit();
-  void ipc()?.grantChatAlwaysApproval?.(chatId).then(applyServerList).catch(() => {});
+export async function grantAlwaysApproval(chatId: string): Promise<void> {
+  if (!chatId) return;
+  await hydrate();
+  if (chatIds.includes(chatId)) return;
+  const api = ipc();
+  if (!api?.grantChatAlwaysApproval) throw new Error("Always-approval bridge unavailable");
+  const next = await api.grantChatAlwaysApproval(chatId);
+  if (!Array.isArray(next) || !next.includes(chatId)) {
+    throw new Error("Always-approval grant was not durably confirmed");
+  }
+  applyServerList(next);
 }
 
-export function revokeAlwaysApproval(chatId: string): void {
+export async function revokeAlwaysApproval(chatId: string): Promise<void> {
+  await hydrate();
   if (!chatIds.includes(chatId)) return;
-  chatIds = chatIds.filter((id) => id !== chatId);
-  emit();
-  void ipc()?.revokeChatAlwaysApproval?.(chatId).then(applyServerList).catch(() => {});
+  const api = ipc();
+  if (!api?.revokeChatAlwaysApproval) throw new Error("Always-approval bridge unavailable");
+  const next = await api.revokeChatAlwaysApproval(chatId);
+  if (!Array.isArray(next) || next.includes(chatId)) {
+    throw new Error("Always-approval revoke was not durably confirmed");
+  }
+  applyServerList(next);
 }
 
 export function subscribeAlwaysApproved(listener: Listener): () => void {
-  hydrate();
+  void hydrate();
   listeners.add(listener);
   listener(chatIds);
   return () => { listeners.delete(listener); };

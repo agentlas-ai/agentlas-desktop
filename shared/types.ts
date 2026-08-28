@@ -54,6 +54,8 @@ import type {
   RemoveOneProjectDeadlineInput,
 } from "./one-project-deadline";
 import type {
+  AcknowledgeOneTeamPreflightInput,
+  AcknowledgeOneTeamPreflightResult,
   AutoResolveOneTeamPreflightInput,
   OneTeamPreflightProposal,
   OneTeamPreflightRef,
@@ -292,6 +294,8 @@ export type {
   RemoveOneProjectDeadlineInput,
 } from "./one-project-deadline";
 export type {
+  AcknowledgeOneTeamPreflightInput,
+  AcknowledgeOneTeamPreflightResult,
   AutoResolveOneTeamPreflightInput,
   OneTeamMemberUnavailableReason,
   OneTeamPreflightComplexityReason,
@@ -7207,6 +7211,8 @@ export interface AgentlasIpc {
     getForChat: (chatId: string) => Promise<OneTeamPreflightProposal | null>;
     autoResolve: (input: AutoResolveOneTeamPreflightInput) => Promise<ResolveOneTeamPreflightResult>;
     resolve: (input: ResolveOneTeamPreflightInput) => Promise<ResolveOneTeamPreflightResult>;
+    /** Persist a user's acknowledgement of an expired/cancelled proposal. */
+    acknowledge: (input: AcknowledgeOneTeamPreflightInput) => Promise<AcknowledgeOneTeamPreflightResult>;
     /** Fail-close a reservation whose renderer-to-Main start handoff was rejected. */
     failStart: (ref: OneTeamPreflightRef) => Promise<OneTeamPreflightProposal | null>;
   };

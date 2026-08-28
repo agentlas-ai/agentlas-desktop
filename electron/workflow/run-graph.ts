@@ -2881,6 +2881,23 @@ export async function runGraph(
             });
           return;
         }
+        if (run.effectReceipt) {
+          // Only a host-measured before/after file delta counts as code-node
+          // effect evidence. `effect: mutation` by itself is merely intent.
+          tryRecordRunEvent({
+            runId,
+            kind: "graph_host_effect",
+            automationId: automation.id,
+            payload: {
+              nodeId: node.id,
+              effectKind: run.effectReceipt.kind,
+              changedFileCount: run.effectReceipt.changedFileCount,
+              digest: run.effectReceipt.digest,
+              isolation: run.isolation,
+              observedAt: run.effectReceipt.observedAt,
+            },
+          });
+        }
         const codeText2 = run.result == null
           ? ""
           : (typeof run.result === "string" ? run.result : JSON.stringify(run.result));

@@ -217,31 +217,6 @@ function fileContainsOpenCrabCredential(file: string): boolean {
   }
 }
 
-function assertLiveCheckpointComplete(db: ReturnType<typeof getDb>): void {
-  const rows = db.pragma("wal_checkpoint(TRUNCATE)") as Array<{ busy?: number }>;
-  if (rows.some((row) => Number(row.busy ?? 0) !== 0)) {
-    throw new Error("live SQLite checkpoint is busy during OpenCrab credential scrub");
-  }
-}
-
-function overwriteAndRemoveFile(file: string): void {
-  if (!fs.existsSync(file)) return;
-  const stat = fs.lstatSync(file);
-  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("unsafe SQLite sidecar path");
-  const fd = fs.openSync(file, "r+");
-  try {
-    const zeros = Buffer.alloc(64 * 1024);
-    for (let offset = 0; offset < stat.size; offset += zeros.length) {
-      fs.writeSync(fd, zeros, 0, Math.min(zeros.length, stat.size - offset), offset);
-    }
-    fs.ftruncateSync(fd, 0);
-    fs.fsyncSync(fd);
-  } finally {
-    fs.closeSync(fd);
-  }
-  fs.rmSync(file, { force: true });
-}
-
 export function scrubLegacyOpenCrabCredentialUrls(): { scrubbed: number } {
   const db = getDb();
   const databasePath = db.name;
@@ -253,8 +228,12 @@ export function scrubLegacyOpenCrabCredentialUrls(): { scrubbed: number } {
   const legacy = rows.filter((row) => row.url !== OPENCRAB_MCP_URL_SENTINEL && isOpenCrabCredentialUrl(row.url));
   if (legacy.length === 0 && !residualBytesBefore) return { scrubbed: 0 };
 
-  // secure_delete overwrites updated cells; VACUUM removes stale free pages and
-  // the truncated WAL prevents a previous URL value surviving beside the row.
+  // This is a live, multi-process database: Desktop, agentlasd, and a headless
+  // wake can all hold WAL read marks. Never VACUUM, truncate a checkpoint, or
+  // overwrite/remove -wal/-shm here. Resizing a mapped WAL index underneath a
+  // peer caused native walIndexAppend/page-in SIGBUS crashes. The row mutation
+  // remains atomic and secure_delete covers the main database cell; inactive
+  // recovery databases have their own exclusive scrub path.
   db.pragma("secure_delete = ON");
   if (legacy.length > 0) {
     const safeCatalogRows = rows.filter(
@@ -292,16 +271,11 @@ export function scrubLegacyOpenCrabCredentialUrls(): { scrubbed: number } {
           .run(canonical.id, row.id);
         db.prepare("DELETE FROM mcp_servers WHERE id = ?").run(row.id);
       }
-    })();
+    }).immediate();
   }
-  assertLiveCheckpointComplete(db);
-  db.exec("VACUUM");
-  assertLiveCheckpointComplete(db);
-  const journalPath = `${databasePath}-journal`;
-  if (fileContainsOpenCrabCredential(journalPath)) overwriteAndRemoveFile(journalPath);
-  if (artifacts.some(fileContainsOpenCrabCredential)) {
-    throw new Error("live SQLite artifacts still contain an OpenCrab credential");
-  }
+  // PASSIVE copies what it safely can and never waits for, truncates, or
+  // invalidates another process's mapped WAL/SHM pages.
+  try { db.pragma("wal_checkpoint(PASSIVE)"); } catch { /* next normal checkpoint retries */ }
   return { scrubbed: legacy.length };
 }
 

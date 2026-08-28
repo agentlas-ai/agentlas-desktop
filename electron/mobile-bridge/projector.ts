@@ -8,6 +8,7 @@ import { listMyAgentsCached } from "../marketplace";
 import { isUserFacingProjectAgent } from "../../shared/project-agent-pool";
 import { detectRuntimes } from "../runtime/detect";
 import {
+  getAutomationLiveRunId,
   getAutomationLiveRunState,
   listAutomations,
   listRunHistory,
@@ -1292,6 +1293,7 @@ export function projectMobileBridgeAutomation(
 ): MobileBridgeAutomationDto {
   const latestRun = listRunHistory(automation.id, 1)[0];
   const liveRunState = getAutomationLiveRunState(automation.id);
+  const runId = getAutomationLiveRunId(automation.id);
   // 규칙은 shared/automation-attention.ts 한 벌이 소유한다. 예전에는 여기서
   // status 만 봐서, 판정이 **반려**한 실행이 폰에 "완료"로 도착하고 알림 종도
   // 울리지 않았다(데스크탑 패널은 같은 상황을 확인 대상으로 셌다).
@@ -1323,6 +1325,7 @@ export function projectMobileBridgeAutomation(
     triggerType: automation.triggerType ?? "schedule",
     toolMode: automation.toolMode ?? "auto",
     hubMode: automation.hubMode ?? "hub-allowed",
+    runId,
     runState: liveRunState ?? (latestRun == null
       ? "unknown"
       : latestNeedsAttention

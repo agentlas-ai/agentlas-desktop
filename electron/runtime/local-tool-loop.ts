@@ -501,7 +501,7 @@ export async function runLocalOpenAiChat(
     req.mcpConfigPath,
     req.cwd,
     (req.permission ?? "read") as ToolPermission,
-    req.unattended !== true,
+    req.unattended !== true && req.noSynchronousAsk !== true,
     multimodalImageSlot() !== null,
   );
   if (tools.length > 0) {

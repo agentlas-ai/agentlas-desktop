@@ -730,6 +730,7 @@ const api: AgentlasIpc = {
     getForChat: (chatId) => ipcRenderer.invoke("oneTeamPreflight:getForChat", chatId),
     autoResolve: (input) => ipcRenderer.invoke("oneTeamPreflight:autoResolve", input),
     resolve: (input) => ipcRenderer.invoke("oneTeamPreflight:resolve", input),
+    acknowledge: (input) => ipcRenderer.invoke("oneTeamPreflight:acknowledge", input),
     failStart: (ref) => ipcRenderer.invoke("oneTeamPreflight:failStart", ref),
   },
   system: {

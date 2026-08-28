@@ -118,6 +118,37 @@ function buildPrompt(req: RunnerRequest): string {
   return parts.join("\n");
 }
 
+/**
+ * app-server has a first-class developer-instruction channel. Putting this
+ * envelope in turn/start.input records it as a user utterance, so One showed
+ * the private `[SYSTEM]` block in the conversation when the Codex thread was
+ * reopened. Keep the exec fallback above unchanged, but never seed a resident
+ * app-server thread with a fake user message.
+ */
+function buildDeveloperInstructions(req: RunnerRequest): string {
+  return wrapSystemPrompt(
+    req.systemPrompt,
+    req.locale,
+    req.permission,
+    cumulativeSurfaceGateText(req.history, req.userPrompt),
+    req.forceSurface,
+    req.restrictedReadBoundary,
+    req.untrustedNoTools,
+  );
+}
+
+function buildResidentInitialTurnPrompt(req: RunnerRequest): string {
+  const parts: string[] = [];
+  if (req.history.length > 0) {
+    const { block } = renderConversationContext(req.history, req.locale, CLI_HISTORY_CONTEXT_TOKENS);
+    parts.push(block, "");
+  }
+  const turnContext = req.turnContext?.trim();
+  if (turnContext) parts.push(turnContext, "");
+  parts.push(tStatus(req.locale, "histThisSection"), req.userPrompt);
+  return parts.join("\n");
+}
+
 function permissionArgs(permission?: RunnerRequest["permission"]): string[] {
   if (permission === "full") {
     return ["--dangerously-bypass-approvals-and-sandbox"];
@@ -1153,6 +1184,7 @@ async function runCodexResidentTurn(input: {
         approvalPolicy: policy.approvalPolicy,
         approvalsReviewer,
         sandbox: policy.sandbox,
+        developerInstructions: buildDeveloperInstructions(req),
         ...(req.model ? { model: req.model } : {}),
       };
       let resumed = false;
@@ -1196,7 +1228,7 @@ async function runCodexResidentTurn(input: {
         [gapContext, req.turnContext ?? ""].filter(Boolean).join("\n\n"),
         req.locale,
       )
-      : buildPrompt(req);
+      : buildResidentInitialTurnPrompt(req);
     const turnParams: Record<string, unknown> = {
       threadId: session.threadId,
       input: [{ type: "text", text: promptText }],

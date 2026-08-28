@@ -764,6 +764,37 @@ export function appendChatMessage(
   };
 }
 
+/** Completion may be published only after its exact assistant body is durable. */
+export function hasDurableAssistantMessage(chatId: string, text: string, notBefore?: string): boolean {
+  if (!chatId || !text.trim()) return false;
+  const row = getDb().prepare(
+    `SELECT 1 AS found FROM chat_messages
+     WHERE chat_id = ? AND role = 'assistant' AND text = ?
+       AND (? IS NULL OR created_at >= ?)
+     ORDER BY created_at DESC LIMIT 1`,
+  ).get(chatId, text, notBefore ?? null, notBefore ?? null) as { found?: number } | undefined;
+  return row?.found === 1;
+}
+
+/** Canonical final body already committed by the runtime before it emits final. */
+export function latestDurableAssistantMessage(
+  chatId: string,
+  notBefore?: string,
+): { id: string; text: string; createdAt: string } | null {
+  if (!chatId) return null;
+  const row = getDb().prepare(
+    `SELECT id, text, created_at FROM chat_messages
+     WHERE chat_id = ? AND role = 'assistant' AND text <> ''
+       AND (? IS NULL OR created_at >= ?)
+     ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+  ).get(chatId, notBefore ?? null, notBefore ?? null) as {
+    id: string;
+    text: string;
+    created_at: string;
+  } | undefined;
+  return row ? { id: row.id, text: row.text, createdAt: row.created_at } : null;
+}
+
 export function listChatMessages(chatId: string, limit = 200): ChatHistoryEntry[] {
   const rows = getDb()
     .prepare(

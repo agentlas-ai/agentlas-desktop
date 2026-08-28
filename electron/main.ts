@@ -33,7 +33,7 @@ import {
 } from "./install-identity";
 import { registerIpcHandlers } from "./ipc";
 import { buildAppMenu } from "./menu";
-import { initStore, runPostContinuityStoreRepairs } from "./store/db";
+import { closeStore, initStore, runPostContinuityStoreRepairs } from "./store/db";
 import { onDesktopStoreChange } from "./store/change-bus";
 import { repairPlaceholderTaskTitles } from "./store/chats";
 import { settleInterruptedTasksOnBoot } from "./store/tasks";
@@ -722,13 +722,23 @@ app.on("window-all-closed", () => {
 
 app.on("activate", () => {
   if (!shellReadyForWindows) return;
-  if (BrowserWindow.getAllWindows().length === 0) void createWindow();
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    void createWindow();
+    return;
+  }
+  // A hidden main window (or an unrelated auxiliary window) still makes
+  // getAllWindows() non-empty. Dock activation must restore the product window
+  // itself, not merely prove that some BrowserWindow object exists.
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
 });
 
 // 앱 종료 정리 — 백그라운드 타이머/자식 프로세스를 누수 없이 거둔다.
 // 자동 업데이트는 renderer 창이 모두 닫힌 will-quit에서만 연기하므로, continuity
 // 캡처 뒤 renderer IPC write가 새로 들어올 수 없다.
 let quitCleanupDone = false;
+let quitCleanupPromise: Promise<void> | null = null;
 let quitServicesStopPromise: Promise<void> | null = null;
 let systemShutdownInProgress = false;
 let systemShutdownResetTimer: NodeJS.Timeout | null = null;
@@ -784,15 +794,25 @@ async function prepareAutomaticUpdateQuit(): Promise<void> {
   }
 }
 
-function finishQuitCleanup(): void {
-  if (quitCleanupDone) return;
-  quitCleanupDone = true;
-  // ★호스트 공통 정리 — 실행 중인 CLI 자식 트리 킬이 여기 등록돼 있다.
-  //   데몬(agentlasd)은 같은 함수를 SIGTERM/SIGINT 에서 부른다(host-lifecycle.ts).
-  try { runHostShutdownHooks(); } catch {}
-  try { stopCliRuntimeAutoUpdate(); } catch {}
-  void stopQuitServices().catch(() => {});
-  try { disposeAutoUpdater(); } catch {}
+function finishQuitCleanup(): Promise<void> {
+  if (quitCleanupPromise) return quitCleanupPromise;
+  quitCleanupPromise = (async () => {
+    // ★호스트 공통 정리 — 실행 중인 CLI 자식 트리 킬이 여기 등록돼 있다.
+    //   데몬(agentlasd)은 같은 함수를 SIGTERM/SIGINT 에서 부른다(host-lifecycle.ts).
+    try { runHostShutdownHooks(); } catch {}
+    try { stopCliRuntimeAutoUpdate(); } catch {}
+    await stopQuitServices().catch(() => {});
+    // Child termination resolves through the invocation lifecycle. Do not
+    // close SQLite underneath a terminal receipt that is still settling.
+    const settleDeadline = Date.now() + 15_000;
+    while (invocationService.activeChatIds().length > 0 && Date.now() < settleDeadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
+    try { closeStore(); } catch (error) { console.error("[store] close failed", error); }
+    try { disposeAutoUpdater(); } catch {}
+    quitCleanupDone = true;
+  })();
+  return quitCleanupPromise;
 }
 
 const automaticQuitInstaller = createAutomaticQuitInstaller({
@@ -814,7 +834,9 @@ app.on("will-quit", (event) => {
   // controller's full verified transaction, then allow the native updater's
   // second quit through after state advances to `installing`.
   if (automaticQuitInstaller.handle(event)) return;
-  finishQuitCleanup();
+  if (quitCleanupDone) return;
+  event.preventDefault();
+  void finishQuitCleanup().finally(() => app.quit());
 });
 
 let startupStage = "before-ready";
@@ -1271,6 +1293,16 @@ app.whenReady().then(async () => {
   void startMcpProxyApprovalServer().catch((err) =>
     console.error("[mcp] proxy approval server failed:", err),
   );
+  // Accepted directions are resumed only after runtime/bootstrap gates are
+  // ready. Recovering immediately after SQLite open would convert a healthy
+  // queued turn into a permanent failed row merely because auth/plugins had
+  // not finished restoring yet.
+  try {
+    const recoveredSteers = invocationService.recoverQueuedSteers();
+    if (recoveredSteers > 0) console.info(`[invocation] recovered ${recoveredSteers} queued steer(s)`);
+  } catch (error) {
+    console.error("[invocation] queued steer recovery failed", error);
+  }
   startAutomationScheduler(); // 자동화 스케줄러 — 60초마다 due 자동화를 백그라운드로 실행
   /*
    * ★데몬 자동 기동 (설계 §6 Phase 2 — "앱이 켜지면 데몬을 찾고, 없으면 자기가 띄운다").

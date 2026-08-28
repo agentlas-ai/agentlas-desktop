@@ -2,6 +2,7 @@
 // 실행 = 타깃(firm/agent)의 백그라운드(division) chat을 만들어 runMcpInvocation로 promptTemplate을 돌린다.
 // (M1: 인프로세스 타이머. 앱이 꺼져 있으면 안 돎 — launchd persistent 데몬은 후속 작업.)
 import { app, Notification } from "electron";
+import { randomUUID } from "node:crypto";
 import type { Automation, AutomationRunRecord, RuntimeSelection } from "../shared/types";
 import {
   dueAutomations,
@@ -56,6 +57,7 @@ import {
 import { observedToolActivity } from "./store/run-events";
 import {
   recordMcpInvocationEvent,
+  recordRunEvent,
   tryRecordFailureEvent,
   tryRecordRunEvent,
 } from "./store/run-events";
@@ -544,6 +546,9 @@ async function runOne(
     fireTime?: Date;
     /** 완주 루프 ④의 1회 재시도 표식 — 재시도의 재시도를 막는다. */
     zeroToolRetried?: boolean;
+    /** Preallocated by an immediate-ack caller and already durably requested. */
+    runId?: string;
+    preclaimed?: boolean;
   },
 ): Promise<TriggerDispatchResult> {
   if (installQuiescing) return { accepted: false };
@@ -551,7 +556,7 @@ async function runOne(
   // 모든 실행 경로가 같은 크로스프로세스 리스를 사용한다. GUI의 Run now나 이벤트 트리거도
   // headless due 실행과 겹치면 외부 게시/결제 같은 부작용을 두 번 낼 수 있으므로 건너뛴다.
   if (
-    opts?.claim &&
+    opts?.claim && !opts.preclaimed &&
     !claimAutomationRun(a.id, LEASE_OWNER, new Date(), { allowDisabled: opts.allowDisabledLease === true })
   ) return { accepted: false };
   try {
@@ -748,7 +753,7 @@ async function runOne(
         "정확한 Hub 패키지 버전을 선택해야 자동화를 실행할 수 있습니다. 자동화 편집 화면에서 Hub 대상을 다시 선택하세요.";
     } else if (a.graph && a.graph.nodes.length > 0) {
       // 그래프 경로 — 위상 러너로 실행. per-node 상태를 라이브 채널로 방송해 캔버스가 애니메이션.
-      const runId = `run-${a.id}-${Date.now()}`;
+      const runId = opts?.runId ?? `run-${a.id}-${Date.now()}`;
       currentRunId = runId;
       opts?.triggerDelivery?.onRunBound(runId);
       // 사람이 대기시켜 둔 입력을 이 실행에 묶는다. 소비는 한 번만 성공하므로
@@ -899,7 +904,7 @@ async function runOne(
       }
     } else {
       // 레거시 단일 프롬프트 경로(완전 backward-compat).
-      const runId = `run-${a.id}-${Date.now()}`;
+      const runId = opts?.runId ?? `run-${a.id}-${Date.now()}`;
       currentRunId = runId;
       let lastDurableHeartbeatAt = 0;
       const persistLegacyHeartbeat = (at = Date.now()): void => {
@@ -1445,6 +1450,48 @@ export async function runAutomationNow(id: string, opts?: { dryRun?: boolean }):
     allowDisabledLease: true,
     ...(opts?.dryRun ? { dryRun: true } : {}),
   });
+}
+
+export interface AutomationRunNowAck {
+  accepted: boolean;
+  automationId: string;
+  runId: string | null;
+  status: "queued" | "rejected";
+}
+
+/**
+ * Mobile must not hold one RPC open for an entire automation. Acquire the same
+ * cross-process lease synchronously, durably bind a runId, then execute in the
+ * background. listRuns/live state are the result channel.
+ */
+export function enqueueAutomationRunNow(id: string): AutomationRunNowAck {
+  if (installQuiescing) return { accepted: false, automationId: id, runId: null, status: "rejected" };
+  const automation = getAutomation(id);
+  if (!automation) throw new Error(`Automation not found: ${id}`);
+  if (running.has(id)) return { accepted: false, automationId: id, runId: null, status: "rejected" };
+  if (!claimAutomationRun(id, LEASE_OWNER, new Date(), { allowDisabled: true })) {
+    return { accepted: false, automationId: id, runId: null, status: "rejected" };
+  }
+  const runId = `run-${id}-${Date.now()}-${randomUUID().slice(0, 8)}`;
+  try {
+    recordRunEvent({
+      runId,
+      kind: "automation_run_requested",
+      automationId: id,
+      payload: { source: "mobile", status: "queued" },
+    });
+  } catch (error) {
+    try { releaseAutomationRun(id, LEASE_OWNER); } catch {}
+    throw error;
+  }
+  void runOne(automation, {
+    claim: true,
+    preclaimed: true,
+    runId,
+    advanceSchedule: false,
+    allowDisabledLease: true,
+  }).catch((error) => console.error(`[automation] queued run failed (${id})`, error));
+  return { accepted: true, automationId: id, runId, status: "queued" };
 }
 
 /**

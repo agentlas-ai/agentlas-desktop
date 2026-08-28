@@ -68,7 +68,7 @@ import {
 import { listModelRoleMembers, setModelRoleMembers } from "../store/model-roles";
 import { listRuntimeCommands } from "../runtime/commands";
 import { listInstalledAgents } from "../mcp/registry";
-import { addOneOrgMember, getOneOrgState } from "../one/org";
+import { addOneOrgMember, getOneOrgState, markOneOrgMemberRead, openOneOrgMember } from "../one/org";
 import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
 import { listInstalledServers } from "../mcp-tools/registry";
 import { routeOnly } from "../hephaestus/commands";
@@ -1876,6 +1876,41 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const displayName = optionalIdentifier(params, "displayName", 80);
         return asJsonValue(addOneOrgMember({ installedAgentId, ...(displayName ? { displayName } : {}) }), request.method);
       }
+      case "one.org.openMember": {
+        const params = guardedParams(request, ["id", "expectedRevision"]);
+        const opened = openOneOrgMember({
+          id: requiredIdentifier(params, "id"),
+          expectedRevision: optionalInteger(params, "expectedRevision", 1, Number.MAX_SAFE_INTEGER) ?? undefined,
+        });
+        // Opening may create a dedicated member chat. Publish that projection
+        // independently of the later read CAS so Mobile never lands on an
+        // empty thread when markRead is delayed or refused.
+        this.scheduleSnapshotUpdated(opened.chat.id);
+        return asJsonValue({
+          memberId: opened.memberId,
+          memberRevision: opened.memberRevision,
+          unreadGeneration: opened.unreadGeneration,
+          chat: projectMobileBridgeChat(
+            opened.chat,
+            invocationService.activeChatIds().includes(opened.chat.id),
+          ),
+        }, request.method);
+      }
+      case "one.org.markRead": {
+        const params = guardedParams(request, ["id", "expectedUnreadGeneration"]);
+        const memberId = requiredIdentifier(params, "id");
+        const state = markOneOrgMemberRead({
+          id: memberId,
+          expectedUnreadGeneration: optionalInteger(
+            params,
+            "expectedUnreadGeneration",
+            0,
+            Number.MAX_SAFE_INTEGER,
+          ) ?? -1,
+        });
+        this.scheduleSnapshotUpdated(memberId);
+        return asJsonValue({ memberId, org: state }, request.method);
+      }
       case "firms.list": {
         noParams(request);
         return asJsonValue((await this.projectSnapshot()).firms, request.method);
@@ -2444,6 +2479,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           result = invocationService.start(
             invocation,
             captureMobileOneInvocationBinding(),
+            { source: "mobile" },
           );
         } catch (error) {
           // No accepted run exists, so do not leave a misleading empty One
@@ -2481,7 +2517,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           : null;
         let result;
         try {
-          result = invocationService.start(effectiveInvocation, workspaceBinding);
+          result = invocationService.start(effectiveInvocation, workspaceBinding, { source: "mobile" });
         } catch (error) {
           rollbackQuestionClaim?.();
           throw error;
@@ -2513,7 +2549,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           : null;
         let result;
         try {
-          result = invocationService.steer(effectiveInvocation, expectedRunId, workspaceBinding);
+          result = invocationService.steer(effectiveInvocation, expectedRunId, workspaceBinding, { source: "mobile" });
         } catch (error) {
           rollbackQuestionClaim?.();
           throw error;
@@ -2643,10 +2679,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const params = guardedParams(request, ["id"]);
         const id = requiredIdentifier(params, "id");
         if (!getAutomation(id)) throw new Error(`Automation not found: ${id}`);
-        const { runAutomationNow } = await import("../automation-scheduler");
-        const result = await runAutomationNow(id);
+        const { enqueueAutomationRunNow } = await import("../automation-scheduler");
+        const result = enqueueAutomationRunNow(id);
         this.scheduleSnapshotUpdated(id);
-        return asJsonValue({ automationId: id, ...result }, request.method);
+        return asJsonValue(result, request.method);
       }
       case "automations.listRuns": {
         const params = guardedParams(request, ["id", "limit"]);

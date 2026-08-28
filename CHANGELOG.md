@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.0.48 — 2026-08-28
+
+This release binds Agentlas OS v1.2.33 at 143be5987823baef136675e660efcd8402e99b65.
+Source readiness does not prove a public installer or update feed; the
+Releases page stays the authority.
+
+- One search results now reopen the exact conversation, team confirmations
+  stay handled after leaving and returning, and completed replies are committed
+  before the UI announces that a run is done.
+- Desktop, Mobile, and Graph actions now keep their durable run IDs, steering,
+  unread state, final evidence, and failure boundaries aligned across restart
+  and reconnect paths.
+- The shared SQLite store no longer removes or truncates live WAL/SHM files,
+  and shutdown, checkpoint, schema migration, and window-reopen paths are
+  ordered so a completed action is not lost to a competing lifecycle event.
+
 ## 1.0.47 — 2026-08-27
 
 Bundled runtime: Agentlas OS v1.2.29 (f3722c6c3bcc709103ce304fc94fb09f1ace44db).
