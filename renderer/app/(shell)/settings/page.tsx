@@ -29,6 +29,7 @@ import { MediaDisplaySettings } from "@/components/MediaDisplaySettings";
 import QRCode from "qrcode";
 import type { HephaestusUpdateJournal, MobileBridgeDeviceSummary, MobileBridgeRuntimeStatus } from "@shared/types";
 import type { MobileBridgePairingPayload } from "@shared/mobile-bridge";
+import { classifyHephaestusUpdateJournal, hephaestusPendingHostLabels } from "@shared/hephaestus-update-contract";
 
 // BYOK 백엔드 목록은 shared/models.ts의 ByokBackend(단일 출처)를 그대로 쓴다.
 const BYOK_BACKENDS: ByokBackend[] = [
@@ -1983,6 +1984,15 @@ function CoreEngineLine({
   const [running, setRunning] = useState(false);
   const [outcome, setOutcome] = useState<string | null>(null);
 
+  const pendingReloadMessage = (
+    state: "applied" | "current" | "unknown" | "unobserved",
+    hosts: string,
+  ) => state === "applied"
+    ? t("settings.update.core_update_applied_pending_reload", { hosts })
+    : state === "current"
+      ? t("settings.update.core_update_current_pending_reload", { hosts })
+      : t("settings.update.core_update_unknown_pending_reload", { hosts });
+
   useEffect(() => {
     let cancelled = false;
     void ipc()?.hephaestus.updateJournal()
@@ -2021,11 +2031,16 @@ function CoreEngineLine({
     try {
       const result = await api.hephaestus.runUpdate();
       setJournal(result.journal);
+      const updateDisposition = classifyHephaestusUpdateJournal(result.journal);
+      const pendingHostLabel = hephaestusPendingHostLabels(result.journal).join("/")
+        || (locale === "ko" ? "호스트 앱" : "host apps");
       // Every branch here is a state the user can understand and, where it
       // matters, keep waiting on. None of them is a dead end: a long download
       // continues on its own, and no network resolves itself once there is one.
       setOutcome(
-        result.outcome === "applied" ? t("settings.update.core_update_applied")
+        updateDisposition.reloadRequired
+          ? pendingReloadMessage(updateDisposition.state, pendingHostLabel)
+        : result.outcome === "applied" ? t("settings.update.core_update_applied")
           : result.outcome === "current" ? t("settings.update.core_update_already_current")
           : result.outcome === "working" ? t("settings.update.core_update_working")
           : result.outcome === "busy" ? t("settings.update.core_update_busy")
@@ -2044,6 +2059,12 @@ function CoreEngineLine({
 
   const lastChecked = journal?.lastCheckedEpoch
     ? new Date(journal.lastCheckedEpoch * 1000).toLocaleString(locale === "ko" ? "ko-KR" : "en-US")
+    : null;
+  const journalDisposition = classifyHephaestusUpdateJournal(journal);
+  const journalPendingHostLabel = hephaestusPendingHostLabels(journal).join("/")
+    || (locale === "ko" ? "호스트 앱" : "host apps");
+  const journalPendingOutcome = journalDisposition.reloadRequired
+    ? pendingReloadMessage(journalDisposition.state, journalPendingHostLabel)
     : null;
 
   return (
@@ -2089,9 +2110,9 @@ function CoreEngineLine({
         </div>
       )}
       <CoreAccountLine attached={Boolean(core.root)} />
-      {(outcome || lastChecked) && (
+      {(outcome || journalPendingOutcome || lastChecked) && (
         <div style={{ fontSize: 11, color: "var(--muted-deep)", marginTop: 3, lineHeight: 1.5 }}>
-          {outcome ?? t("settings.update.core_last_checked", { when: lastChecked ?? "" })}
+          {outcome ?? journalPendingOutcome ?? t("settings.update.core_last_checked", { when: lastChecked ?? "" })}
         </div>
       )}
     </div>

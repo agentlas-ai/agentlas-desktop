@@ -243,6 +243,7 @@ export type {
   AgentlasSurfaceConnectorSpec,
   AgentlasSurfaceDataSet,
   AgentlasSurfaceDeploymentSpec,
+  AgentlasSurfaceFlintInput,
   AgentlasSurfaceManifest,
   AgentlasSurfaceProvenance,
   AgentlasSurfaceRecord,

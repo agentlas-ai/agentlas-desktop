@@ -48,8 +48,9 @@
 .taskForceRow small { color: #9aa29d; font-size: 8px; }
 .rowActions { display: flex; gap: 3px; opacity: 1; }
 .rowActions button, .rowActions select { border: 0; border-radius: 5px; background: #f3f5f4; color: #707874; font-size: 8px; cursor: pointer; }
-.unreadDot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 999px; background: #2f80ed; box-shadow: 0 0 0 2px #e9f3ff; }
-.failureButton { flex: none; min-height: 22px; padding: 0 6px; border: 1px solid #edc1bd; border-radius: 6px; background: #fff5f3; color: #a84b42; font-size: 8px; font-weight: 700; cursor: pointer; }
+.unreadDot, .failureDot { width: 6px; height: 6px; flex: 0 0 auto; margin-top: 3px; border-radius: 50%; }
+.unreadDot { background: #2f7cf6; box-shadow: 0 0 0 2px rgba(47, 124, 246, .14); }
+.failureDot { background: #d45151; box-shadow: 0 0 0 2px rgba(212, 81, 81, .12); }
 .handover { display: inline-flex; align-items: center; gap: 3px; color: #7a837d; font-size: 8px; white-space: nowrap; }
 .inlineForm input { width: 100px; min-height: 22px; border: 1px solid #b6dacc; border-radius: 5px; padding: 0 5px; font-size: 10px; }
 .footer { display: flex; justify-content: space-between; padding: 3px 6px 0; color: #8f9793; font-size: 9px; }
@@ -65,6 +66,8 @@
 .searchSection > button { display: flex; min-width: 0; align-items: center; gap: 7px; padding: 5px 6px; border: 0; border-radius: 7px; background: transparent; text-align: left; cursor: pointer; }
 .searchSection > button:hover, .searchSection > button:focus-visible { background: #f0f7f3; outline: 2px solid transparent; }
 .searchSection > button > span { display: grid; min-width: 0; gap: 2px; }
+.searchSection > button > .searchMemberFeedback { display: flex; flex: 0 0 auto; align-items: center; margin-left: auto; }
+.searchMemberFeedback .unreadDot, .searchMemberFeedback .failureDot { margin-top: 0; }
 .searchSection b, .searchSection small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .searchSection b { color: #3b4540; font-size: 9px; font-weight: 700; }
 .searchSection small { color: #929b96; font-size: 8px; }

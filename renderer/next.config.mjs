@@ -15,6 +15,16 @@ const nextConfig = {
   images: { unoptimized: true },
   trailingSlash: false,
   assetPrefix: isStaticRendererBuild ? "./" : undefined,
+  // Vega's browser SVG renderer does not need the optional native `canvas`
+  // package. Mark it external to the renderer bundle so webpack does not try
+  // to resolve Vega's Node-only fallback (and so Desktop does not pull in a
+  // native canvas binary just for Flint charts).
+  webpack(config) {
+    config.resolve ??= {};
+    config.resolve.alias ??= {};
+    config.resolve.alias.canvas = false;
+    return config;
+  },
 };
 
 export default nextConfig;

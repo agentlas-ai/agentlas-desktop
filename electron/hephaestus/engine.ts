@@ -19,6 +19,7 @@ import { withPythonCacheBoundary, withPythonRuntimeBoundary } from "../runtime/p
 import { currentUiLocale } from "../ui-locale";
 import { hephaestusRoot, hephaestusRootDetail, readHephaestusVersion, resetHephaestusRootCache } from "./root";
 import type { HephaestusStatus, HephaestusUpdateJournal } from "../../shared/types";
+import { classifyHephaestusUpdateJournal, parseHephaestusUpdateJournal } from "../../shared/hephaestus-update-contract";
 
 export { hephaestusRoot, hephaestusRootDetail, readHephaestusVersion } from "./root";
 
@@ -399,18 +400,7 @@ export function readHephaestusUpdateJournal(): HephaestusUpdateJournal | null {
   const base = process.env.HEPHAESTUS_RUNTIME_BASE?.trim() || path.join(os.homedir(), ".agentlas", "runtime");
   try {
     const raw = fs.readFileSync(path.join(base, "auto-update.json"), "utf8");
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const str = (key: string) => (typeof parsed[key] === "string" ? (parsed[key] as string) : null);
-    const num = (key: string) => (typeof parsed[key] === "number" ? (parsed[key] as number) : null);
-    return {
-      status: str("status"),
-      reason: str("reason"),
-      current: str("current"),
-      latest: str("latest"),
-      lastCheckedEpoch: num("last_checked_epoch"),
-      lastAppliedTag: str("last_applied_tag"),
-      lastAppliedEpoch: num("last_applied_epoch"),
-    };
+    return parseHephaestusUpdateJournal(JSON.parse(raw));
   } catch {
     // No journal yet (fresh install, bundled-only, or an updater that never
     // got to run). Absent is a distinct answer from failed — return null and
@@ -530,18 +520,16 @@ export async function runHephaestusRuntimeUpdate(
       child.once("close", () => done({ finished: true }));
     });
 
-  const APPLIED_STATUSES = new Set(["updated", "repaired_current", "recovered_missing_release_marker"]);
-  const CURRENT_STATUSES = new Set(["current"]);
   const verdict = (journal: HephaestusUpdateJournal | null) => {
-    const status = journal?.status ?? null;
+    const disposition = classifyHephaestusUpdateJournal(journal);
     // "not applied" is not the same as "already newest". Core also reports
     // `skipped` (e.g. a non-SemVer RELEASE it cannot compare) and statuses this
     // build has never seen. Calling those "already up to date" told the user
     // the one thing that had not been established.
-    if (status && !APPLIED_STATUSES.has(status) && !CURRENT_STATUSES.has(status)) {
+    if (disposition.state === "unknown" || disposition.state === "unobserved") {
       return { ok: true, outcome: "unknown" as const, journal };
     }
-    const applied = status !== null && APPLIED_STATUSES.has(status);
+    const applied = disposition.state === "applied";
     // Deliberately NOT clearing the rejection set. Rejections are keyed by
     // realpath, so a genuine new release lands in a new directory and is not
     // rejected to begin with — the clear was a no-op there. Where it was not a

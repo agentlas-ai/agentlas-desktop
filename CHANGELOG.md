@@ -2,7 +2,7 @@
 
 ## 1.0.48 — 2026-08-28
 
-This release binds Agentlas OS v1.2.33 at 143be5987823baef136675e660efcd8402e99b65.
+This release binds Agentlas OS v1.2.34 at 2f344a6fafdd96c1130c611c4817bf50e3dce773.
 Source readiness does not prove a public installer or update feed; the
 Releases page stays the authority.
 

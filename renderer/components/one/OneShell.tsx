@@ -232,6 +232,57 @@ const ONE_CONTEXT_RAIL_WIDTH_MAX = 1280;
 /* 오너 지시 2026-08-24: "켜져도 지금의 반만". 0.432 -> 0.216. */
 const ONE_CONTEXT_RAIL_RESULT_RATIO = 0.216;
 
+type OnePaneCommitWaiter = Readonly<{
+  wait: (chatId: string) => Promise<void>;
+  observe: (routeChatId: string | null, paneChatId: string | null) => void;
+  reject: (chatId: string, cause: unknown) => void;
+  dispose: () => void;
+}>;
+
+function createOnePaneCommitWaiter(timeoutMs = 5_000): OnePaneCommitWaiter {
+  type Pending = {
+    promise: Promise<void>;
+    resolve: () => void;
+    reject: (cause: unknown) => void;
+    timer: ReturnType<typeof setTimeout>;
+  };
+  const pending = new Map<string, Pending>();
+  const reject = (chatId: string, cause: unknown) => {
+    const request = pending.get(chatId);
+    if (!request) return;
+    clearTimeout(request.timer);
+    pending.delete(chatId);
+    request.reject(cause);
+  };
+  return {
+    wait(chatId) {
+      const existing = pending.get(chatId);
+      if (existing) return existing.promise;
+      let resolve!: () => void;
+      let rejectPromise!: (cause: unknown) => void;
+      const promise = new Promise<void>((resolveCommit, rejectCommit) => {
+        resolve = resolveCommit;
+        rejectPromise = rejectCommit;
+      });
+      const timer = setTimeout(() => reject(chatId, new Error(`One conversation pane did not commit: ${chatId}`)), timeoutMs);
+      pending.set(chatId, { promise, resolve, reject: rejectPromise, timer });
+      return promise;
+    },
+    observe(routeChatId, paneChatId) {
+      if (!routeChatId || routeChatId !== paneChatId) return;
+      const request = pending.get(routeChatId);
+      if (!request) return;
+      clearTimeout(request.timer);
+      pending.delete(routeChatId);
+      request.resolve();
+    },
+    reject,
+    dispose() {
+      for (const chatId of [...pending.keys()]) reject(chatId, new Error("One conversation pane waiter disposed"));
+    },
+  };
+}
+
 function oneOrgBrowserPreviewState(): OneOrgState {
   const now = new Date().toISOString();
   return {
@@ -1533,6 +1584,7 @@ export function OneShell() {
   const unsubscribeRunRef = useRef<(() => void) | null>(null);
   const selectedTaskIdRef = useRef(selectedTaskId);
   const selectedConversationIdRef = useRef(selectedConversationId);
+  const onePaneCommitWaiterRef = useRef(createOnePaneCommitWaiter());
   const navigationEpochRef = useRef(0);
   const homeTransitionPendingRef = useRef(false);
   const introDeferralInFlightRef = useRef<string | null>(null);
@@ -2555,6 +2607,10 @@ export function OneShell() {
   }, [projections, selectedTaskId]);
 
   const activeThreadChatId = selected?.chatId ?? conversation?.id ?? null;
+  useEffect(() => {
+    onePaneCommitWaiterRef.current.observe(selectedConversationId, activeThreadChatId);
+  }, [activeThreadChatId, selectedConversationId]);
+  useEffect(() => () => onePaneCommitWaiterRef.current.dispose(), []);
   /*
    * 세션 목록 — **하나의 목록**이다 (오너 결정 2026-08-24).
    *
@@ -4548,6 +4604,8 @@ export function OneShell() {
     void (async () => {
       try {
         const chat = await api.chats.openOneMember({ agentId: member.installedAgentId, title: member.displayName });
+        const paneCommit = onePaneCommitWaiterRef.current.wait(chat.id);
+        onePaneCommitWaiterRef.current.observe(selectedConversationId, activeThreadChatId);
         setRailOpen(false);
         setSearchOpen(false);
         selectedTaskIdRef.current = null;
@@ -4558,7 +4616,14 @@ export function OneShell() {
         // Same-route push navigation in a static export can promote Next's
         // `one.txt` RSC sidecar to the main document. Replace follows the same
         // proven path used when a newly started run receives its chat binding.
-        router.replace(`/one?chat=${encodeURIComponent(chat.id)}`);
+        try {
+          router.replace(`/one?chat=${encodeURIComponent(chat.id)}`);
+        } catch (cause) {
+          onePaneCommitWaiterRef.current.reject(chat.id, cause);
+          await paneCommit;
+          throw cause;
+        }
+        await paneCommit;
         // Entering the exact result conversation is the acknowledgement. The
         // blue dot is only cleared after that chat exists and navigation has
         // committed; a separate "View result" button is no longer required.
@@ -4574,7 +4639,7 @@ export function OneShell() {
         requestOneOperationalRecovery("one-member-channel", cause);
       }
     })();
-  }, [refreshAll, router]);
+  }, [activeThreadChatId, refreshAll, router, selectedConversationId]);
 
   const retryFocusedFailure = useCallback(() => {
     const focus = failureFocus;

@@ -2474,6 +2474,23 @@ export interface AgentlasSurfaceDataSet {
   [key: string]: unknown;
 }
 
+/** Portable, JSON-only Flint input carried by a declarative Surface dataset. */
+export interface AgentlasSurfaceFlintInput {
+  chart_spec: {
+    chartType: string;
+    title?: string;
+    subtitle?: string;
+    encodings: Record<string, string | JsonObject>;
+    baseSize?: { width: number; height: number };
+    canvasSize?: { width: number; height: number };
+    chartProperties?: JsonObject;
+  };
+  semantic_types?: Record<string, string | JsonObject>;
+  theme_spec?: string | JsonObject;
+  options?: JsonObject;
+  field_display_names?: Record<string, string>;
+}
+
 export type AgentlasSurfaceWidgetType =
   | "map"
   | "cards"
@@ -5301,6 +5318,11 @@ export interface HephaestusUpdateJournal {
   lastCheckedEpoch: number | null;
   lastAppliedTag: string | null;
   lastAppliedEpoch: number | null;
+  /** Core runtime may be current while a running host still loads the old plugin. */
+  reloadRequired: boolean;
+  pendingHosts: string[];
+  /** Preserve Core's post-activation receipt for forward-compatible diagnosis. */
+  activation: Record<string, unknown> | null;
 }
 export interface HephaestusUpdateResult {
   ok: boolean;

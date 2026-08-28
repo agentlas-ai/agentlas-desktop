@@ -33,6 +33,7 @@ export const BUILTIN_PLUGIN_MANIFEST_PATHS = [
   "../../plugins/agentlas-browser/plugin.json",
   "../../plugins/agentlas-computer-use/plugin.json",
   "../../plugins/agentlas-time/plugin.json",
+  "../../plugins/flint-chart/plugin.json",
 ] as const;
 
 const loadFailures: string[] = [];

@@ -16,12 +16,12 @@
     "minimumRuntimeVersion": "1.0.4",
     "minimumSchemaVersion": 35,
     "targetSchemaVersion": 105,
-    "bundledRuntimeVersion": "1.2.33"
+    "bundledRuntimeVersion": "1.2.34"
   },
   "agentlasBundledRuntimeSource": {
     "repository": "https://github.com/agentlas-ai/Agentlas-OS.git",
-    "ref": "v1.2.33",
-    "commit": "143be5987823baef136675e660efcd8402e99b65"
+    "ref": "v1.2.34",
+    "commit": "2f344a6fafdd96c1130c611c4817bf50e3dce773"
   },
   "scripts": {
     "dev": "concurrently -k --success first -n NEXT,ELECTRON -c blue,magenta \"npm:dev:renderer\" \"npm:dev:electron\"",
@@ -525,11 +525,15 @@
     "cross-env": "^7.0.3",
     "electron": "^43.1.0",
     "electron-builder": "^26.15.6",
+    "flint-chart": "0.5.1",
     "next": "^15.0.0",
     "playwright": "^1.60.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "typescript": "^5.6.2",
+    "vega": "6.4.0",
+    "vega-interpreter": "2.3.2",
+    "vega-lite": "6.4.3",
     "wait-on": "^8.0.1"
   },
   "engines": {

@@ -32,6 +32,14 @@ function statusLine(member: OneOrgMember, locale: string): string {
   return locale === "ko" ? member.statusLine : member.statusLineEn;
 }
 
+function memberEntryAriaLabel(member: OneOrgMember, locale: string): string {
+  return `${member.displayName} · ${statusLine(member, locale)}${member.statusKind === "failed" ? ` · ${locale === "ko" ? "실행 실패" : "Run failed"}` : ""}${member.unreadCount > 0 ? ` · ${locale === "ko" ? `읽지 않은 결과 ${member.unreadCount}개` : `${member.unreadCount} unread result${member.unreadCount === 1 ? "" : "s"}`}` : ""}`;
+}
+
+function shouldOpenOneOrgRowFromKeyboard(key: string, eventOriginatesOnRow: boolean): boolean {
+  return eventOriginatesOnRow && (key === "Enter" || key === " ");
+}
+
 function activityTimeLabel(member: OneOrgMember, locale: string): string {
   if (!member.lastActivityAt) return sourceLabel(member.source, locale);
   const date = new Date(member.lastActivityAt);
@@ -420,7 +428,7 @@ export function OneOrgChart({
       {searchOpen && <div className={styles.searchBox} role="search">
         <div className={styles.searchInputWrap}><IconSearch size={13} /><input autoFocus value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder={searchCopy.placeholder} aria-label={searchCopy.placeholder} /><button type="button" onClick={() => { setSearchQuery(""); setSearchOpen(false); }} aria-label={searchCopy.close}><IconClose size={13} /></button></div>
         {searchValue && <div className={styles.searchResults}>
-          <div className={styles.searchSection}><strong>{searchCopy.people}</strong>{peopleResults.length === 0 ? <span className={styles.searchEmpty}>{searchCopy.noPeople}</span> : peopleResults.slice(0, 4).map((member) => <button type="button" key={member.id} onClick={() => { onOpenMember?.(member); setSearchOpen(false); setSearchQuery(""); }}><OneAgentPortrait status={member.statusKind} label={member.displayName} size="small" /><span><b>{member.displayName}</b><small>{statusLine(member, locale)}</small></span></button>)}</div>
+          <div className={styles.searchSection}><strong>{searchCopy.people}</strong>{peopleResults.length === 0 ? <span className={styles.searchEmpty}>{searchCopy.noPeople}</span> : peopleResults.slice(0, 4).map((member) => <button type="button" key={member.id} aria-label={memberEntryAriaLabel(member, locale)} onClick={() => { onOpenMember?.(member); setSearchOpen(false); setSearchQuery(""); }}><OneAgentPortrait status={member.statusKind} label={member.displayName} size="small" /><span><b>{member.displayName}</b><small>{statusLine(member, locale)}</small></span><span className={styles.searchMemberFeedback} aria-hidden="true">{member.unreadCount > 0 && <span className={styles.unreadDot} />}{member.statusKind === "failed" && member.unreadCount === 0 && <span className={styles.failureDot} />}</span></button>)}</div>
           <div className={styles.searchSection}><strong>{searchCopy.conversations}</strong>{matchingConversations.length === 0 ? <span className={styles.searchEmpty}>{searchCopy.noConversations}</span> : matchingConversations.map((item) => <button type="button" key={item.id} onClick={() => { onOpenConversation?.(item.id); setSearchOpen(false); }}><span><b>{item.title}</b><small>{item.detail}</small></span></button>)}</div>
           <div className={styles.searchSection}><strong>{searchCopy.history}</strong>{matchingHistory.length === 0 ? <span className={styles.searchEmpty}>{searchCopy.noHistory}</span> : matchingHistory.map((item) => <button type="button" key={item.id} onClick={() => { onOpenHistory?.(item); setSearchOpen(false); }}>{<span><b>{item.title}</b><small>{item.detail}</small></span>}</button>)}</div>
         </div>}
@@ -431,7 +439,7 @@ export function OneOrgChart({
         tabIndex={onOpenOne ? 0 : undefined}
         onClick={onOpenOne}
         onKeyDown={(event) => {
-          if (!onOpenOne || (event.key !== "Enter" && event.key !== " ")) return;
+          if (!onOpenOne || !shouldOpenOneOrgRowFromKeyboard(event.key, event.target === event.currentTarget)) return;
           event.preventDefault();
           onOpenOne();
         }}
@@ -456,7 +464,7 @@ export function OneOrgChart({
           </div>
         </>}
         {active.map((member) => (
-          <div className={styles.row} key={member.id} data-status={member.statusKind} data-active={activeMemberId === member.installedAgentId ? "true" : "false"} draggable role="button" tabIndex={0} aria-current={activeMemberId === member.installedAgentId ? "page" : undefined} aria-label={`${member.displayName} · ${statusLine(member, locale)}`} onClick={() => onOpenMember?.(member)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onOpenMember?.(member); } }} onDragStart={() => setDraggedId(member.id)} onDragEnd={() => setDraggedId(null)} onDragOver={(event) => event.preventDefault()} onDrop={() => {
+          <div className={styles.row} key={member.id} data-status={member.statusKind} data-active={activeMemberId === member.installedAgentId ? "true" : "false"} draggable role="button" tabIndex={0} aria-current={activeMemberId === member.installedAgentId ? "page" : undefined} aria-label={memberEntryAriaLabel(member, locale)} onClick={() => onOpenMember?.(member)} onKeyDown={(event) => { if (shouldOpenOneOrgRowFromKeyboard(event.key, event.target === event.currentTarget)) { event.preventDefault(); onOpenMember?.(member); } }} onDragStart={() => setDraggedId(member.id)} onDragEnd={() => setDraggedId(null)} onDragOver={(event) => event.preventDefault()} onDrop={() => {
             if (!draggedId || draggedId === member.id || !state) return;
             const ordered = active.map((item) => item.id);
             const from = ordered.indexOf(draggedId); const to = ordered.indexOf(member.id);
@@ -472,12 +480,8 @@ export function OneOrgChart({
             </div>
             <span className={styles.source}>{activityTimeLabel(member, locale)}</span>
             {member.creditState === "insufficient" && <span className={styles.creditBadge}><IconShield size={11} />{locale === "ko" ? "크레딧 부족" : "Credits needed"}</span>}
-            {member.unreadCount > 0 && <span
-              className={styles.unreadDot}
-              role="img"
-              aria-label={locale === "ko" ? "확인하지 않은 결과" : "Unread result"}
-            />}
-            {member.statusKind === "failed" && onFailure && <button type="button" className={styles.failureButton} onClick={(event) => { event.stopPropagation(); onFailure(member); }}>{locale === "ko" ? "One에게" : "Ask One"}</button>}
+            {member.unreadCount > 0 && <span className={styles.unreadDot} aria-hidden="true" title={locale === "ko" ? `읽지 않은 결과 ${member.unreadCount}개` : `${member.unreadCount} unread result${member.unreadCount === 1 ? "" : "s"}`} />}
+            {member.statusKind === "failed" && member.unreadCount === 0 && <span className={styles.failureDot} aria-hidden="true" title={locale === "ko" ? "실행 실패 — 대화를 열어 상세 확인" : "Run failed — open the conversation for details"} />}
             <div className={styles.rowActions}>
               <button
                 type="button"

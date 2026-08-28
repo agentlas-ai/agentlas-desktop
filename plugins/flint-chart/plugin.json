@@ -1,0 +1,50 @@
+{
+  "schema": "agentlas.plugin/v2",
+  "slug": "flint-chart",
+  "name": "Flint Charts",
+  "version": "0.1.0",
+  "builtin": true,
+  "publisher": {
+    "name": "Agentlas",
+    "url": "https://agentlas.cloud"
+  },
+  "surface": {
+    "displayName": "Flint Charts",
+    "displayNameKo": "Flint 차트",
+    "tagline": "Describe trustworthy charts as portable data",
+    "taglineKo": "이식 가능한 데이터로 신뢰할 수 있는 차트를 설명합니다",
+    "description": "Author bounded Flint chart inputs for Agentlas declarative surfaces. Desktop compiles them offline; Web compiles the same input on the server.",
+    "descriptionKo": "Agentlas 선언형 Surface에서 사용할 제한된 Flint 차트 입력을 작성합니다. Desktop은 오프라인으로, Web은 서버에서 같은 입력을 컴파일합니다.",
+    "category": "data",
+    "brandColor": "#2563EB"
+  },
+  "invocation": {
+    "mention": "@flint-chart",
+    "implicit": "router",
+    "standalone": true
+  },
+  "provides": {
+    "skills": {
+      "router": "skills/index/SKILL.md",
+      "workflows": ["author"]
+    }
+  },
+  "requires": {
+    "prereq": [
+      {
+        "id": "node",
+        "provided-by": "app"
+      }
+    ],
+    "os": ["darwin", "win32", "linux"]
+  },
+  "permissions": {
+    "fileWrite": "none",
+    "network": "none",
+    "shell": "deny"
+  },
+  "state": {
+    "files": [],
+    "assets": false
+  }
+}

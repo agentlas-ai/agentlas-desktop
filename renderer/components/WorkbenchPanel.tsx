@@ -11,6 +11,7 @@ import { sanitizePublicAppCopy } from "@shared/brand-safety";
 import type {
   AgentlasSurfaceAction,
   AgentlasSurfaceDataSet,
+  AgentlasSurfaceFlintInput,
   AgentlasSurfaceManifest,
   JsonObject,
   JsonValue,
@@ -40,6 +41,8 @@ import {
 import { useT } from "@/lib/i18n";
 import { LiveDeviceMockup } from "./LiveDeviceMockup";
 import { OneLiveMap } from "./one/OneLiveMap";
+import { FlintChart } from "./FlintChart";
+import type { FlintChartRenderInput } from "@/lib/flint-runtime";
 import type { OneSurfaceMapBlock } from "@shared/one-surface";
 import { designOutputSurfaceProps, designSurfaceKindForOutput } from "@/lib/design-output-tokens";
 
@@ -857,6 +860,10 @@ function GenericSurface({
   const first = Object.entries(manifest.data)[0];
   const rows = rowsOf(first?.[1]);
   const mapBlock = surfaceMapBlock(manifest);
+  const chartBlocks = manifest.widgets.flatMap((widget, index) => {
+    const input = surfaceChartInput(manifest, widget);
+    return input ? [{ input, title: widget.title || `${manifest.title} chart ${index + 1}` }] : [];
+  });
   return (
     <div style={surfaceBody}>
       <section style={genericHero}>
@@ -874,6 +881,12 @@ function GenericSurface({
           <OneLiveMap block={mapBlock} locale={locale} compact={!wide} />
         </section>
       )}
+      {chartBlocks.map(({ input, title }) => (
+        <section key={title} style={genericMapSection} data-surface-block-type="chart">
+          <SectionTitle icon={<IconSparkles size={14} />} label={title} />
+          <FlintChart input={input} title={title} />
+        </section>
+      ))}
       <section className="agentlas-generic-content" style={genericContent}>
         <div style={genericColumn}>
           <SectionTitle icon={<IconLayers size={14} />} label="Widgets" />
@@ -1696,6 +1709,68 @@ export function surfaceMapBlock(manifest: AgentlasSurfaceManifest): OneSurfaceMa
     title: widget.title || dataset?.summary || manifest.title,
     locations,
   };
+}
+
+/**
+ * Resolve the portable Flint payload from a declarative Surface. Keeping this
+ * adapter here means the manifest remains JSON-only and older surfaces still
+ * render their table fallback when no valid chart payload is present.
+ */
+export function surfaceChartInput(
+  manifest: AgentlasSurfaceManifest,
+  widget: AgentlasSurfaceManifest["widgets"][number],
+): FlintChartRenderInput | null {
+  if (String(widget.type).toLowerCase() !== "chart") return null;
+  const dataset = (widget.data ? dataByName(manifest, widget.data) : undefined) ?? firstData(manifest, "table");
+  if (!dataset) return null;
+  const flint = isObject(widget.flint)
+    ? widget.flint
+    : isObject(dataset.flint)
+      ? dataset.flint
+      : null;
+  if (!flint) return null;
+  const rawSpec = isObject(flint.chart_spec)
+    ? flint.chart_spec
+    : isObject(flint.chartSpec)
+      ? flint.chartSpec
+      : null;
+  if (!rawSpec) return null;
+  const chartType = typeof rawSpec.chartType === "string"
+    ? rawSpec.chartType
+    : typeof rawSpec.chart_type === "string"
+      ? rawSpec.chart_type
+      : "";
+  const rawEncodings = isObject(rawSpec.encodings) ? rawSpec.encodings : null;
+  if (!chartType || !rawEncodings) return null;
+  const encodings = Object.fromEntries(
+    Object.entries(rawEncodings).flatMap(([channel, value]) => (
+      typeof value === "string" || isObject(value) ? [[channel, value] as const] : []
+    )),
+  );
+  if (Object.keys(encodings).length === 0) return null;
+  const input: FlintChartRenderInput = {
+    data: {
+      values: rowsOf(dataset),
+    },
+    chart_spec: {
+      chartType,
+      encodings,
+      ...(typeof rawSpec.title === "string" ? { title: rawSpec.title } : {}),
+      ...(typeof rawSpec.subtitle === "string" ? { subtitle: rawSpec.subtitle } : {}),
+      ...(isObject(rawSpec.baseSize) ? { baseSize: rawSpec.baseSize as { width: number; height: number } } : {}),
+      ...(isObject(rawSpec.canvasSize) ? { canvasSize: rawSpec.canvasSize as { width: number; height: number } } : {}),
+      ...(isObject(rawSpec.chartProperties) ? { chartProperties: rawSpec.chartProperties } : {}),
+    },
+    ...(isObject(flint.semantic_types)
+      ? { semantic_types: flint.semantic_types as AgentlasSurfaceFlintInput["semantic_types"] }
+      : isObject(flint.semanticTypes)
+        ? { semantic_types: flint.semanticTypes as AgentlasSurfaceFlintInput["semantic_types"] }
+        : {}),
+    ...(typeof flint.theme_spec === "string" || isObject(flint.theme_spec) ? { theme_spec: flint.theme_spec as AgentlasSurfaceFlintInput["theme_spec"] } : {}),
+    ...(isObject(flint.options) ? { options: flint.options } : {}),
+    ...(isObject(flint.field_display_names) ? { field_display_names: flint.field_display_names as Record<string, string> } : {}),
+  };
+  return input;
 }
 
 function numericField(row: JsonObject, ...keys: string[]): number | null {

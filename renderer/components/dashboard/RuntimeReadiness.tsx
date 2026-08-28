@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
+import { classifyHephaestusUpdateJournal, hephaestusPendingHostLabels } from "@shared/hephaestus-update-contract";
 import type {
   AuthSession,
   HephaestusCommandResult,
@@ -196,6 +197,12 @@ export function RuntimeReadiness() {
     const engineRecovery = fulfilled(engineResult) as HephaestusRecoveryResult | null;
     const engine = engineRecovery?.status ?? null;
     const engineJournal = fulfilled(engineJournalResult) as HephaestusUpdateJournal | null;
+    const engineUpdate = classifyHephaestusUpdateJournal(engineJournal);
+    const engineUpdateUnknown = Boolean(
+      engineJournal && (engineUpdate.state === "unknown" || engineUpdate.state === "unobserved"),
+    );
+    const pendingHostLabel = hephaestusPendingHostLabels(engineJournal).join("/")
+      || (ko ? "호스트 앱" : "host apps");
     let doctor: HephaestusCommandResult | null = null;
     if (deep && engine?.available) {
       doctor = await api.hephaestus.doctor().catch(() => null);
@@ -243,8 +250,24 @@ export function RuntimeReadiness() {
           ? (engineRecovery?.presentation?.summary ?? "")
           : deep && !doctor?.ok
             ? (ko ? "엔진은 있지만 자가진단을 통과하지 못했습니다." : "The engine exists but did not pass its self-check.")
+            : engineUpdate.reloadRequired
+              ? engineUpdate.state === "applied"
+                ? (ko
+                  ? `런타임 업데이트됨${engine.version ? ` · v${engine.version}` : ""}, ${pendingHostLabel} 재시작 대기`
+                  : `Runtime updated${engine.version ? ` · v${engine.version}` : ""}; waiting for ${pendingHostLabel} to restart.`)
+                : engineUpdate.state === "current"
+                  ? (ko
+                    ? `런타임은 최신입니다${engine.version ? ` · v${engine.version}` : ""}, ${pendingHostLabel} 재시작 대기`
+                    : `Runtime is current${engine.version ? ` · v${engine.version}` : ""}; waiting for ${pendingHostLabel} to restart.`)
+                  : (ko
+                    ? `런타임 상태 확인 필요${engine.version ? ` · v${engine.version}` : ""}, ${pendingHostLabel} 재시작 대기`
+                    : `Runtime status needs verification${engine.version ? ` · v${engine.version}` : ""}; waiting for ${pendingHostLabel} to restart.`)
+            : engineUpdateUnknown
+              ? (ko
+                ? `엔진 사용 가능${engine.version ? ` · v${engine.version}` : ""} · 업데이트 결과를 판단하지 못했습니다.`
+                : `Engine available${engine.version ? ` · v${engine.version}` : ""} · the update result could not be interpreted.`)
             : engine.source === "bundled"
-              ? engineJournal?.status === "current"
+              ? engineUpdate.state === "current" || engineUpdate.state === "applied"
                 ? (ko
                   ? `현재 엔진 확인 완료${engine.version ? ` · v${engine.version}` : ""}`
                   : `Current engine verified${engine.version ? ` · v${engine.version}` : ""}`)
@@ -275,11 +298,8 @@ export function RuntimeReadiness() {
           ? (engineRecovery?.presentation ? "attention" : "checking")
           : engine.source === "override"
             ? "attention"
-            // Only an existing journal that has not settled means a check is
-            // actually running. Absence of a journal is a pinned engine, which
-            // is a settled state.
-            : engine.source === "bundled" && engineJournal && engineJournal.status !== "current"
-              ? "checking"
+            : engineUpdate.reloadRequired || engineUpdateUnknown
+              ? "attention"
             : "ready",
         actions: engineRecovery?.presentation?.options,
       },
