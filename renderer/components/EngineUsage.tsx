@@ -202,7 +202,7 @@ function ModelRoleUsage({ value, ko }: {
                 data-model-role-usage-row
                 title={`${entry.provider} · ${model} · ${effort}`}
               >
-                <b>{role}</b> · {model} · {effort} · {formatTokens(entry.observedTokens)} · {entry.invocationCount}
+                <b>{role}</b> · {entry.provider} · {model} · {effort} · {formatTokens(entry.observedTokens)} · {entry.invocationCount}
               </span>
             );
           })}
