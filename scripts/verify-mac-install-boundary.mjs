@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // gate-args: --self-test
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -43,6 +43,55 @@ function verifyInstallContract() {
   assert.match(installer, /if ! mkdir "\$install_lock"/);
   assert.match(installer, /acquire_install_lock\nrecover_interrupted_transaction/);
   assert.match(installer, /rm -rf "\$install_lock"/);
+
+  const identityFunction = installer.match(
+    /(agentlas_main_pids\(\) \{\n[\s\S]*?\n\})\n\nwait_for_agentlas_exit/,
+  )?.[1];
+  assert.ok(identityFunction, "installer must expose the main-process identity guard");
+  assert.match(identityFunction, /ps eww -p "\$pid" -o command=/);
+  assert.match(identityFunction, /ELECTRON_RUN_AS_NODE=1/);
+
+  // Exercise the installer function itself with disposable command shims. The
+  // shims never touch /Applications or print a process environment: they only
+  // model the PID/ps rows needed to prove the identity boundary.
+  const identityTemp = mkdtempSync(join(tmpdir(), "agentlas-install-identity-verify-"));
+  const identityHarness = join(identityTemp, "identity-harness.sh");
+  try {
+    writeFileSync(identityHarness, [
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      "pgrep() {",
+      "  [[ \"${1:-}\" == \"-x\" && \"${2:-}\" == \"Agentlas\" ]] || return 2",
+      "  printf '%s\\n' 101 102 103 104 105 106 107",
+      "}",
+      "ps() {",
+      "  local pid=\"\"",
+      "  while (( $# > 0 )); do",
+      "    if [[ \"$1\" == \"-p\" && $# -ge 2 ]]; then pid=\"$2\"; shift 2; else shift; fi",
+      "  done",
+      "  case \"$pid\" in",
+      "    101) printf '%s\\n' '/Applications/Agentlas.app/Contents/MacOS/Agentlas' ;;",
+      "    102) printf '%s ELECTRON_RUN_AS_NODE=1\\n' '/Applications/Agentlas.app/Contents/MacOS/Agentlas /fixture/dist/electron/mcp-tools/proxy-child.cjs' ;;",
+      "    103) printf '%s ELECTRON_RUN_AS_NODE=1\\n' '/Applications/Agentlas.app/Contents/MacOS/Agentlas /fixture/mcp-child-env-wrapper.cjs' ;;",
+      "    104) printf '%s\\n' '/Applications/Agentlas.app/Contents/MacOS/Agentlas --headless-automations' ;;",
+      "    105) return 1 ;;",
+      "    106) printf '%s ELECTRON_RUN_AS_NODE=10\\n' '/Applications/Agentlas.app/Contents/MacOS/Agentlas' ;;",
+      "    107) printf '%s prefixELECTRON_RUN_AS_NODE=1suffix\\n' '/Applications/Agentlas.app/Contents/MacOS/Agentlas' ;;",
+      "    *) return 1 ;;",
+      "  esac",
+      "}",
+      identityFunction,
+      "agentlas_main_pids",
+      "",
+    ].join("\n"), { mode: 0o700 });
+    const identity = spawnSync("/bin/bash", [identityHarness], { encoding: "utf8" });
+    assert.equal(identity.status, 0, identity.stderr);
+    assert.equal(identity.stdout.trim(), "101\n104\n105\n106\n107");
+    assert.doesNotMatch(identity.stdout, /ELECTRON_RUN_AS_NODE/);
+    assert.doesNotMatch(identity.stderr, /ELECTRON_RUN_AS_NODE/);
+  } finally {
+    rmSync(identityTemp, { recursive: true, force: true });
+  }
 
   assert.match(localConfig, /appId:\s*com\.agentlas\.desktop\.candidate/);
   assert.match(localConfig, /productName:\s*Agentlas-Local-Candidate/);
@@ -86,6 +135,7 @@ function verifyInstallContract() {
     atomicSwap: true,
     journalRecovery: true,
     localIdentityIsolated: true,
+    mainProcessIdentity: true,
   }));
 }
 

@@ -85,9 +85,17 @@ verify_official_app() {
 }
 
 agentlas_main_pids() {
-  # Only the packaged main process is named Agentlas. Helpers and unrelated
-  # Electron/Claude processes must never be treated as install blockers.
-  pgrep -x Agentlas || true
+  # The packaged Electron executable is also used as a Node host for MCP and
+  # daemon children. Only an exact run-as-node marker identifies those helpers;
+  # if ps cannot prove the marker, keep the PID as a blocker.
+  local pid process_environment
+  while IFS= read -r pid; do
+    process_environment="$(ps eww -p "$pid" -o command= 2>/dev/null || true)"
+    if grep -Eq '(^|[[:space:]])ELECTRON_RUN_AS_NODE=1([[:space:]]|$)' <<<"$process_environment"; then
+      continue
+    fi
+    printf '%s\n' "$pid"
+  done < <(pgrep -x Agentlas || true)
 }
 
 wait_for_agentlas_exit() {

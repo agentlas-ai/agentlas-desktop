@@ -20,6 +20,11 @@ page stays the authority.
 - Agent growth cards now label approval-waiting proposals separately from
   low-risk changes that were already applied automatically. Both states show
   the rollback safety, and the latter uses an explicit “Undo this change” action.
+- The stable macOS installer now distinguishes the GUI main from Electron-as-Node
+  MCP and daemon helpers, ignoring only an exact `ELECTRON_RUN_AS_NODE=1` token
+  while keeping unverified processes as install blockers.
+- Public package scripts no longer advertise unshipped private-test or smoke
+  commands whose required files are not shipped.
 
 ## 1.0.52 — 2026-08-29
 
