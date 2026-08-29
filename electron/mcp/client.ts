@@ -5310,6 +5310,12 @@ ${effectiveUserPrompt}`;
     }
     const finalObservedTokens = Math.max(result.tokens ?? 0, liveUsageHigh);
     if (finalObservedTokens > 0) {
+      // A runner-owned `null` is authoritative: it means no explicit effort
+      // reached the provider. Only runners that predate `appliedEffort` may
+      // fall back to the resolved runtime selection.
+      const recordedEffort = Object.prototype.hasOwnProperty.call(result, "appliedEffort")
+        ? result.appliedEffort ?? null
+        : active.effort ?? null;
       tryRecordRunEvent({
         runId: req.runId ?? `chat:${chat.id}`,
         kind: "invoke_result",
@@ -5324,7 +5330,7 @@ ${effectiveUserPrompt}`;
           // have clamped a stale UI value (for example Spark max -> xhigh), so
           // the runner result is authoritative; the resolved runtime value is
           // only the fallback for runtimes that do not return one.
-          effort: result.appliedEffort ?? active.effort ?? null,
+          effort: recordedEffort,
           tokens: finalObservedTokens,
           measurement: active.kind === "codex" ? "output-delta-or-visible-estimate" : "output-only",
           phase: "chat",

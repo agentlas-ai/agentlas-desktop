@@ -965,6 +965,11 @@ async function observeTaskForceModelCall<T>(
     const outputTokens = Number((result as { tokens?: unknown })?.tokens);
     if (Number.isInteger(outputTokens) && outputTokens > 0) {
       const modelRole = input.phase === "worker" ? "worker" : "orchestrator";
+      // Preserve an explicit runner `null`; only an old runner with no
+      // `appliedEffort` field may fall back to the selected runtime value.
+      const recordedEffort = Object.prototype.hasOwnProperty.call(result, "appliedEffort")
+        ? (result as { appliedEffort?: unknown }).appliedEffort ?? null
+        : input.runtime.effort ?? null;
       tryRecordRunEvent({
         runId: p.req.runId ?? `task-force:${p.chat.id}`,
         kind: "invoke_result",
@@ -976,7 +981,7 @@ async function observeTaskForceModelCall<T>(
           modelRole,
           provider: input.runtime.backend ?? input.runtime.kind,
           model: input.runtime.model ?? null,
-          effort: (result as { appliedEffort?: unknown }).appliedEffort ?? input.runtime.effort ?? null,
+          effort: recordedEffort,
           tokens: outputTokens,
           measurement: "output-only",
           phase: input.phase,
