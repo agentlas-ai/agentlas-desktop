@@ -1778,6 +1778,28 @@ button[data-dashboard-import="true"]:disabled {
   font-size: 9px;
 }
 
+.dashboard-role-usage-models {
+  display: grid;
+  gap: 3px;
+  max-height: 132px;
+  overflow: auto;
+  padding-top: 2px;
+  border-top: 1px solid color-mix(in oklch, var(--dash-line) 65%, transparent);
+  color: var(--dash-muted);
+  font-family: var(--rd-f-mono);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.dashboard-role-usage-models span {
+  overflow-wrap: anywhere;
+}
+
+.dashboard-role-usage-models b {
+  color: var(--dash-ink);
+  font-weight: 760;
+}
+
 /* 프로바이더 카드 — 잡카드형(로고 좌상단, 상태칩 우상단, 사용량 본문, 하단 액션). */
 .dashboard-engine-groups {
   display: flex;

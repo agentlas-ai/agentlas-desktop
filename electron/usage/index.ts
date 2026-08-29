@@ -52,6 +52,8 @@ const MODEL_ROLE_USAGE_WINDOW_MS = 7 * 24 * 60 * 60_000;
 
 export function modelRoleUsageSnapshot(now: number): ModelRoleUsageSnapshot {
   const sinceMs = now - MODEL_ROLE_USAGE_WINDOW_MS;
+  const since = new Date(sinceMs).toISOString();
+  const until = new Date(now).toISOString();
   const empty = (role: "orchestrator" | "worker") => ({
     role,
     observedTokens: 0,
@@ -62,8 +64,56 @@ export function modelRoleUsageSnapshot(now: number): ModelRoleUsageSnapshot {
     worker: empty("worker"),
   };
   let outputOnlyRows = 0;
+  const byModel = new Map<string, ModelRoleUsageSnapshot["byModel"][number]>();
+
+  // `invoke_result` historically carried the model but not the applied effort.
+  // Keep a short in-memory index of the same run's runtime-selection receipts so
+  // those older rows still get the exact model/effort pair when it is available.
+  // New rows write `effort` directly; the selection join is only a compatibility
+  // bridge and never guesses an effort from a model name.
+  type SelectionRow = {
+    run_id: string;
+    node_id: string | null;
+    seq: number;
+    ts: string;
+    role: "orchestrator" | "worker" | null;
+    provider: string | null;
+    model: string | null;
+    effort: string | null;
+  };
+  const selectionRows: SelectionRow[] = [];
+  const parseObject = (value: unknown): Record<string, unknown> | null => (
+    value && typeof value === "object" && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : null
+  );
+  const textOrNull = (value: unknown): string | null => (
+    typeof value === "string" && value.trim() ? value.trim() : null
+  );
+  const selectedEffortFor = (
+    runId: string,
+    nodeId: string | null,
+    role: "orchestrator" | "worker",
+    provider: string | null,
+    model: string | null,
+    ts: string,
+  ): { provider: string | null; model: string | null; effort: string | null } => {
+    const candidates = selectionRows.filter((row) =>
+      row.run_id === runId
+      && row.ts <= ts
+      && row.role === role
+      && (row.node_id === nodeId || row.node_id === null || nodeId === null)
+      && (model == null || row.model === model)
+      && (provider == null || row.provider === provider),
+    );
+    const hit = candidates.at(-1);
+    return hit
+      ? { provider: hit.provider, model: hit.model, effort: hit.effort }
+      : { provider: null, model: null, effort: null };
+  };
   try {
-    const rows = getDb().prepare(
+    const db = getDb();
+    const rows = db.prepare(
       `SELECT
          json_extract(payload_json, '$.modelRole') AS role,
          COUNT(*) AS invocation_count,
@@ -81,7 +131,7 @@ export function modelRoleUsageSnapshot(now: number): ModelRoleUsageSnapshot {
          AND ts >= ?
          AND json_extract(payload_json, '$.modelRole') IN ('orchestrator', 'worker')
        GROUP BY json_extract(payload_json, '$.modelRole')`,
-    ).all(new Date(sinceMs).toISOString()) as Array<{
+    ).all(since) as Array<{
       role: "orchestrator" | "worker";
       invocation_count: number;
       observed_tokens: number;
@@ -92,6 +142,89 @@ export function modelRoleUsageSnapshot(now: number): ModelRoleUsageSnapshot {
       bucket.invocationCount = Math.max(0, Math.trunc(Number(row.invocation_count) || 0));
       bucket.observedTokens = Math.max(0, Math.trunc(Number(row.observed_tokens) || 0));
       outputOnlyRows += Math.max(0, Math.trunc(Number(row.output_only_rows) || 0));
+    }
+
+    const rawSelections = db.prepare(
+      `SELECT run_id, node_id, seq, ts, payload_json
+       FROM run_events
+       WHERE kind = 'runtime_selection' AND ts >= ? AND ts <= ?
+       ORDER BY ts ASC, seq ASC`,
+    ).all(since, until) as Array<{
+      run_id: string;
+      node_id: string | null;
+      seq: number;
+      ts: string;
+      payload_json: string;
+    }>;
+    for (const row of rawSelections) {
+      let payload: Record<string, unknown> | null = null;
+      try { payload = parseObject(JSON.parse(row.payload_json)); } catch { /* malformed legacy row */ }
+      const role = textOrNull(payload?.runtimeRole);
+      selectionRows.push({
+        run_id: row.run_id,
+        node_id: row.node_id ?? null,
+        seq: Number(row.seq) || 0,
+        ts: row.ts,
+        role: role === "orchestrator" || role === "worker" ? role : null,
+        provider: textOrNull(payload?.runtimeBackend),
+        model: textOrNull(payload?.runtimeModel),
+        effort: textOrNull(payload?.runtimeEffort),
+      });
+    }
+
+    const rawInvocations = db.prepare(
+      `SELECT run_id, node_id, seq, ts, payload_json
+       FROM run_events
+       WHERE kind = 'invoke_result'
+         AND ts >= ? AND ts <= ?
+         AND json_extract(payload_json, '$.modelRole') IN ('orchestrator', 'worker')
+       ORDER BY ts ASC, seq ASC`,
+    ).all(since, until) as Array<{
+      run_id: string;
+      node_id: string | null;
+      seq: number;
+      ts: string;
+      payload_json: string;
+    }>;
+    for (const row of rawInvocations) {
+      let payload: Record<string, unknown> | null = null;
+      try { payload = parseObject(JSON.parse(row.payload_json)); } catch { /* malformed legacy row */ }
+      const role = textOrNull(payload?.modelRole);
+      if (role !== "orchestrator" && role !== "worker") continue;
+      const payloadProvider = textOrNull(payload?.provider);
+      const payloadModel = textOrNull(payload?.model);
+      const payloadEffort = textOrNull(payload?.effort)
+        ?? textOrNull(payload?.runtimeEffort)
+        ?? textOrNull(payload?.appliedEffort);
+      const selected = selectedEffortFor(
+        row.run_id,
+        row.node_id ?? null,
+        role,
+        payloadProvider,
+        payloadModel,
+        row.ts,
+      );
+      const provider = payloadProvider ?? selected.provider ?? "unknown";
+      const model = payloadModel ?? selected.model;
+      const effort = payloadEffort ?? selected.effort;
+      const key = [role, provider, model ?? "", effort ?? ""].join("\u0000");
+      const tokens = Number.isSafeInteger(Number(payload?.tokens))
+        ? Math.max(0, Number(payload?.tokens))
+        : 0;
+      const current = byModel.get(key);
+      if (current) {
+        current.observedTokens += tokens;
+        current.invocationCount += 1;
+      } else {
+        byModel.set(key, {
+          role,
+          provider,
+          model,
+          effort,
+          observedTokens: tokens,
+          invocationCount: 1,
+        });
+      }
     }
   } catch {
     // Older or partially migrated profiles get an explicit zero snapshot.
@@ -108,6 +241,14 @@ export function modelRoleUsageSnapshot(now: number): ModelRoleUsageSnapshot {
     workerSharePercent: totalObservedTokens > 0
       ? Math.round((buckets.worker.observedTokens / totalObservedTokens) * 100)
       : 0,
+    byModel: [...byModel.values()].sort((left, right) =>
+      right.observedTokens - left.observedTokens
+      || right.invocationCount - left.invocationCount
+      || left.role.localeCompare(right.role)
+      || left.provider.localeCompare(right.provider)
+      || (left.model ?? "").localeCompare(right.model ?? "")
+      || (left.effort ?? "").localeCompare(right.effort ?? ""),
+    ),
   };
 }
 

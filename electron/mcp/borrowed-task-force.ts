@@ -976,6 +976,7 @@ async function observeTaskForceModelCall<T>(
           modelRole,
           provider: input.runtime.backend ?? input.runtime.kind,
           model: input.runtime.model ?? null,
+          effort: (result as { appliedEffort?: unknown }).appliedEffort ?? input.runtime.effort ?? null,
           tokens: outputTokens,
           measurement: "output-only",
           phase: input.phase,

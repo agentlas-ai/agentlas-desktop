@@ -4743,6 +4743,16 @@ export interface ModelRoleUsageBucket {
   invocationCount: number;
 }
 
+/** One exact model/effort pair observed in a conversational invocation. */
+export interface ModelRoleUsageModelBucket extends ModelRoleUsageBucket {
+  /** Provider/backend that received the invocation (for example `openai`). */
+  provider: string;
+  /** Exact model id reported by the runner. Null means the runner did not expose one. */
+  model: string | null;
+  /** Exact applied effort when the host/runner exposed it; null means default/unknown. */
+  effort: string | null;
+}
+
 export interface ModelRoleUsageSnapshot {
   /** Inclusive UTC window used by Main's append-only run-event query. */
   since: string;
@@ -4753,6 +4763,12 @@ export interface ModelRoleUsageSnapshot {
   worker: ModelRoleUsageBucket;
   totalObservedTokens: number;
   workerSharePercent: number;
+  /**
+   * Exact model/effort attribution from local invocation receipts. This is
+   * observed token usage, not a provider quota percentage: Codex/Claude quota
+   * endpoints expose account-level windows and do not split them by model.
+   */
+  byModel: ModelRoleUsageModelBucket[];
 }
 
 /** 전체 엔진 사용량 스냅샷 — 대시보드 "엔진 연결·사용량" 모듈이 소비. */

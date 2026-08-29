@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.50 — 2026-08-29
+
+This release binds Agentlas OS v1.2.37 at
+2b169ba44742735d1ce7f550fefee071b70324fc. Its public runtime asset
+`hephaestus-runtime-v1.2.37.tar.gz` is pinned at SHA-256
+`50caf78a9c028fcf088039dd862753c25fbb9bed19df9fa248502b442dc306a6`.
+The dashboard now shows locally observed model/effort usage for each
+orchestrator and worker invocation. Provider quota windows remain account-level
+because Codex and Claude do not expose per-model quota percentages.
+Source readiness does not prove a public installer or update feed; the Releases
+page stays the authority.
+
+- Exact applied effort is recorded on chat and task-force invocation receipts,
+  including runner-clamped values such as Codex Spark `max` → `xhigh`.
+- Legacy receipts recover effort only from their matching runtime-selection
+  receipt; no model name is used to guess a value.
+- Switching models clears an effort that the new model does not advertise, and
+  stale cached selections render as the model default instead of an impossible
+  executable pair.
+
 ## 1.0.49 — 2026-08-29
 
 This release binds Agentlas OS v1.2.37 at

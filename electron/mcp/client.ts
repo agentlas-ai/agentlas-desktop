@@ -5320,6 +5320,11 @@ ${effectiveUserPrompt}`;
           modelRole: invocationModelRole,
           provider: active.backend ?? active.kind,
           model: active.model ?? null,
+          // Persist the exact effort that the runner applied. The model may
+          // have clamped a stale UI value (for example Spark max -> xhigh), so
+          // the runner result is authoritative; the resolved runtime value is
+          // only the fallback for runtimes that do not return one.
+          effort: result.appliedEffort ?? active.effort ?? null,
           tokens: finalObservedTokens,
           measurement: active.kind === "codex" ? "output-delta-or-visible-estimate" : "output-only",
           phase: "chat",

@@ -154,6 +154,10 @@ function ModelRoleUsage({ value, ko }: {
   ko: boolean;
 }) {
   if (!value) return null;
+  // A cached snapshot may have been written by a pre-model-breakdown build.
+  // Keep that old card renderable while the next Main snapshot backfills the
+  // new exact model/effort rows.
+  const modelBuckets = value.byModel ?? [];
   const workerPct = value.workerSharePercent;
   const orchestratorPct = value.totalObservedTokens > 0 ? 100 - workerPct : 0;
   const measurementLabel = value.measurement === "output-only"
@@ -184,8 +188,26 @@ function ModelRoleUsage({ value, ko }: {
       <div className="dashboard-role-usage-legend">
         <span><i data-role="orchestrator" />Orch {formatTokens(value.orchestrator.observedTokens)} · {value.orchestrator.invocationCount}</span>
         <span><i data-role="worker" />Worker {formatTokens(value.worker.observedTokens)} · {value.worker.invocationCount}</span>
-        <small>{measurementLabel}</small>
+        <small>{measurementLabel} · {ko ? "공급자 쿼터는 계정 단위" : "provider quota is account-level"}</small>
       </div>
+      {modelBuckets.length > 0 && (
+        <div className="dashboard-role-usage-models" aria-label={ko ? "모델·작업량별 관측 사용량" : "Observed usage by model and effort"}>
+          {modelBuckets.map((entry) => {
+            const role = entry.role === "orchestrator" ? "Orch" : "Worker";
+            const model = entry.model ?? (ko ? "모델 미상" : "unknown model");
+            const effort = entry.effort ?? (ko ? "기본/미상" : "default/unknown");
+            return (
+              <span
+                key={`${entry.role}:${entry.provider}:${entry.model ?? ""}:${entry.effort ?? ""}`}
+                data-model-role-usage-row
+                title={`${entry.provider} · ${model} · ${effort}`}
+              >
+                <b>{role}</b> · {model} · {effort} · {formatTokens(entry.observedTokens)} · {entry.invocationCount}
+              </span>
+            );
+          })}
+        </div>
+      )}
     </section>
   );
 }

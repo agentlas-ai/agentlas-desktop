@@ -48,6 +48,22 @@ function effortLabel(id: string): string {
   };
   return known[id] ?? id.charAt(0).toUpperCase() + id.slice(1);
 }
+
+/**
+ * Stored pools can predate per-model capability discovery. An effort is
+ * displayable only when the selected model advertises it; an empty capability
+ * list means the host did not expose a model-specific list and must remain
+ * backward-compatible with the runtime-level value.
+ */
+function effortIsSupported(
+  runtime: RuntimeStatus | null | undefined,
+  modelId: string | null | undefined,
+  effort: string | null | undefined,
+): boolean {
+  if (!effort) return true;
+  const supported = effortsFor(runtime, modelId);
+  return supported.length === 0 || supported.some((entry) => entry.id === effort);
+}
 type RoleView = {
   role: RuntimeRole;
   runtime: RuntimeStatus | null;
@@ -393,9 +409,21 @@ export function RuntimeControl() {
   ) {
     const current = poolSelections(role)[index];
     if (!current) return;
+    const runtime = runtimeForSelection(current);
+    const nextModel = model || undefined;
+    const nextEfforts = effortsFor(runtime, nextModel);
+    // An explicit effort belongs to the selected model. Keeping `max` while
+    // switching to Spark made the row advertise an impossible pair and left a
+    // stale option selected until the provider rejected the turn. Clear it
+    // unless the new model explicitly exposes the same effort; the runner will
+    // still apply the host-provided default when the field is omitted.
+    const nextEffort = nextModel && current.effort && nextEfforts.some((entry) => entry.id === current.effort)
+      ? current.effort
+      : undefined;
     await updateMember(role, index, {
       ...current,
-      model: model || undefined,
+      model: nextModel,
+      effort: nextEffort,
     });
   }
 
@@ -635,6 +663,9 @@ export function RuntimeControl() {
               const runtime = runtimeForSelection(selection);
               const models = modelRowsForSelection(selection);
               const efforts = effortsFor(runtime, selection.model);
+              const effortValue = effortIsSupported(runtime, selection.model, selection.effort)
+                ? selection.effort ?? ""
+                : "";
               const duplicate =
                 members.filter(
                   (candidate) =>
@@ -786,17 +817,14 @@ export function RuntimeControl() {
                       {efforts.length > 0 || selection.effort ? (
                         <select
                           aria-label={`${rowLabel} ${ko ? "작업량" : "effort"}`}
-                          value={selection.effort ?? ""}
+                          value={effortValue}
+                          aria-invalid={selection.effort && effortValue === "" ? "true" : undefined}
                           onChange={(event) =>
                             void updateMemberEffort(role, index, event.target.value)
                           }
                           disabled={busy}
-                        >
-                          <option value="">{ko ? "기본" : "Default"}</option>
-                          {selection.effort &&
-                            !efforts.some((effort) => effort.id === selection.effort) && (
-                              <option value={selection.effort}>{selection.effort}</option>
-                            )}
+                          >
+                            <option value="">{ko ? "기본" : "Default"}</option>
                           {efforts.map((effort) => (
                             <option key={effort.id} value={effort.id}>
                               {effort.label}
