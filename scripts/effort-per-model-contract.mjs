@@ -41,6 +41,30 @@ assert.ok(
   "the model profile must win over the runtime list, matching the kernel order",
 );
 
+// ── 1b. Chat and agent-assignment pickers use the same model-specific list ──
+const chatInput = read("renderer/components/ChatInput.tsx");
+assert.match(
+  chatInput,
+  /function effortOptionsForModel\(runtime: RuntimeStatus\)/,
+  "the chat model menu must resolve effort from the selected model",
+);
+assert.match(
+  chatInput,
+  /const efforts = effortOptionsForModel\(runtime\)/,
+  "the chat model menu must not use a runtime-only effort list",
+);
+const agentLibrary = read("renderer/app/(shell)/library/agents/page.tsx");
+assert.match(
+  agentLibrary,
+  /function effortsForModel\(/,
+  "agent runtime assignment must resolve effort from the selected model",
+);
+assert.match(
+  agentLibrary,
+  /const effortOptions = effortsForModel\(selectedRuntime, selectedModel\)/,
+  "agent runtime assignment must render the selected model's capabilities",
+);
+
 // ── 2. Same precedence as the kernel, so screen and execution agree ──────
 const routing = read("electron/runtime/workload-routing.ts");
 const kernelAt = routing.indexOf("function supportedEfforts");

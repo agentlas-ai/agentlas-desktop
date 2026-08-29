@@ -70,6 +70,23 @@ function modelChipLabel(s: RuntimeStatus, opts: ModelOption[]): string {
   const base = CLI_LABEL[s.kind] ?? s.kind;
   return label ? `${base} · ${label}` : base;
 }
+
+function effortOptionsForModel(runtime: RuntimeStatus): Array<{ id: string; label: string }> {
+  const perModel = runtime.model
+    ? runtime.allocationModelProfiles?.[runtime.model]?.efforts
+    : undefined;
+  if (perModel && perModel.length > 0) {
+    const labels: Record<string, string> = {
+      none: "None", minimal: "Minimal", low: "Low", medium: "Medium",
+      high: "High", xhigh: "XHigh", max: "Max", ultra: "Ultra",
+    };
+    return perModel.map((id) => ({
+      id,
+      label: labels[id] ?? id.charAt(0).toUpperCase() + id.slice(1),
+    }));
+  }
+  return runtime.efforts ?? [];
+}
 import {
   IconApps,
   IconArrowUp,
@@ -2857,7 +2874,10 @@ function ModelMenu({
   onSelectEffort: (id: string) => void;
   t: TFunction;
 }) {
-  const efforts = runtime.efforts ?? [];
+  const efforts = effortOptionsForModel(runtime);
+  const currentEffort = efforts.some((effort) => effort.id === runtime.effort)
+    ? runtime.effort
+    : null;
   // CLI(claude-code/codex/antigravity)는 "구독 기본" 선택 가능. BYOK/로컬(ollama/lmstudio/mlx)은 항상 구체 모델.
   // Agentlas 서빙도 마찬가지다 — 고를 것이 세기뿐이라 "구독 기본"이라 부를 것이 없고,
   // 그렇게 부르면 사용자는 자기 구독 CLI 가 도는 줄로 읽는다.
@@ -2894,18 +2914,18 @@ function ModelMenu({
           <Divider />
           <GroupLabel>{t("chatinput.effort")}</GroupLabel>
           <Row
-            onClick={() => onSelectEffort("")}
-            icon={effortIcon}
-            title={t("chat.model.cli_default")}
-            right={!runtime.effort ? check : undefined}
-          />
+          onClick={() => onSelectEffort("")}
+          icon={effortIcon}
+          title={t("chat.model.cli_default")}
+          right={!currentEffort ? check : undefined}
+        />
           {efforts.map((e) => (
             <Row
               key={e.id}
               onClick={() => onSelectEffort(e.id)}
               icon={effortIcon}
               title={e.label}
-              right={runtime.effort === e.id ? check : undefined}
+              right={currentEffort === e.id ? check : undefined}
             />
           ))}
         </>

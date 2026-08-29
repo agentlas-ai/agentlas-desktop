@@ -3231,6 +3231,23 @@ function selectionSummary(selection?: RuntimeSelection | null, locale: Locale = 
   return [base, selection.model, selection.effort ? `effort ${selection.effort}` : ""].filter(Boolean).join(" · ");
 }
 
+function effortLabel(id: string): string {
+  const known: Record<string, string> = {
+    none: "None", minimal: "Minimal", low: "Low", medium: "Medium",
+    high: "High", xhigh: "XHigh", max: "Max", ultra: "Ultra",
+  };
+  return known[id] ?? id.charAt(0).toUpperCase() + id.slice(1);
+}
+
+function effortsForModel(
+  runtime: RuntimeStatus | null,
+  model: string,
+): Array<{ id: string; label: string }> {
+  const perModel = model ? runtime?.allocationModelProfiles?.[model]?.efforts : undefined;
+  if (perModel && perModel.length > 0) return perModel.map((id) => ({ id, label: effortLabel(id) }));
+  return runtime?.efforts ?? [];
+}
+
 function RuntimeAssignmentPanel({
   node,
   agent,
@@ -3307,9 +3324,11 @@ function RuntimeAssignmentPanel({
             (!selectedOverride.selection.backend || runtime.backend === selectedOverride.selection.backend),
         ) ?? fallback
       : fallback;
+    const model = selectedOverride?.selection.model ?? source?.model ?? "";
+    const effort = selectedOverride?.selection.effort ?? source?.effort ?? "";
     setRuntimeKey(source ? runtimeStatusKey(source) : "");
-    setSelectedModel(selectedOverride?.selection.model ?? source?.model ?? "");
-    setSelectedEffort(selectedOverride?.selection.effort ?? source?.effort ?? "");
+    setSelectedModel(model);
+    setSelectedEffort(effortsForModel(source ?? null, model).some((option) => option.id === effort) ? effort : "");
   }, [selectedOverride, runtimeStatuses]);
 
   const selectedRuntime = runtimeStatuses.find((runtime) => runtimeStatusKey(runtime) === runtimeKey) ?? null;
@@ -3337,7 +3356,7 @@ function RuntimeAssignmentPanel({
     };
   }, [selectedRuntime]);
 
-  const effortOptions = selectedRuntime?.efforts ?? [];
+  const effortOptions = effortsForModel(selectedRuntime, selectedModel);
 
   async function refreshOverrides() {
     const api = ipc();
@@ -3439,7 +3458,17 @@ function RuntimeAssignmentPanel({
       <div style={{ display: "grid", gridTemplateColumns: effortOptions.length > 0 ? "1fr 1fr" : "1fr", gap: 10 }}>
         <label style={{ display: "flex", flexDirection: "column", gap: 5, fontSize: 11, color: "var(--muted-deep)", fontWeight: 600 }}>
           {locale === "ko" ? "모델" : "Model"}
-          <select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)} style={runtimeSelectStyle}>
+          <select
+            value={selectedModel}
+            onChange={(e) => {
+              const model = e.target.value;
+              setSelectedModel(model);
+              if (selectedEffort && !effortsForModel(selectedRuntime, model).some((option) => option.id === selectedEffort)) {
+                setSelectedEffort("");
+              }
+            }}
+            style={runtimeSelectStyle}
+          >
             <option value="">{locale === "ko" ? "구독/역할 기본" : "Subscription / role default"}</option>
             {modelOptions.map((model) => (
               <option key={model.id} value={model.id}>
