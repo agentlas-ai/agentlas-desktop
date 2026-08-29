@@ -32,7 +32,7 @@ import {
   type ToolPermission,
 } from "../../shared/builtin-tools";
 import { askUser } from "../confirm/ask-user";
-import { multimodalImageSlot } from "../multimodal/slot";
+import { multimodalImageSlot, multimodalImageSlotDiagnosis } from "../multimodal/slot";
 import { generateImage } from "../multimodal/image";
 
 export type LocalChatContent =
@@ -497,12 +497,16 @@ export async function runLocalOpenAiChat(
     unattended: req.unattended === true,
     ...(req.signal ? { signal: req.signal } : {}),
   };
+  // A stored assignment is not enough: after its CLI is removed, advertising
+  // generate_image leaves the model a tool that can only fail. Diagnosis uses
+  // the same detected-runtime authority as the dashboard and is cached there.
+  const imageSlotDiagnosis = await multimodalImageSlotDiagnosis();
   const { tools, byName } = await loadOpenAiTools(
     req.mcpConfigPath,
     req.cwd,
     (req.permission ?? "read") as ToolPermission,
     req.unattended !== true && req.noSynchronousAsk !== true,
-    multimodalImageSlot() !== null,
+    imageSlotDiagnosis.state === "ready",
   );
   if (tools.length > 0) {
     events.onStatus(tStatus(req.locale, "mcpToolsAttached", { count: tools.length }));

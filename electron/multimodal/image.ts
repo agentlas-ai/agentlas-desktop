@@ -226,8 +226,8 @@ const COOLDOWN_MS = 15 * 60 * 1000;
 
 /**
  * 이미지 생성. model="auto"면 codex→gemini 순으로 시도하고, 실패한 엔진은 쿨다운을 걸어
- * 남은 사용량이 있는 쪽을 자동으로 쓴다(사용자 요구: 사용량 부족 시 남는 곳 자동 사용).
- * 명시 모델(codex/gemini)이어도 실패 시 반대쪽을 1회 시도한다 — 이미지 없는 덱보다 낫다.
+ * 남은 사용량이 있는 쪽을 자동으로 쓴다. 명시 모델은 그 엔진만 쓴다. Dashboard 역할
+ * 슬롯에서 온 선택을 몰래 다른 공급자로 바꾸면 저장된 선택과 실제 영수증이 달라진다.
  */
 export async function generateImage(model: ImageModel, prompt: string): Promise<ImageResult> {
   try {
@@ -240,8 +240,10 @@ export async function generateImage(model: ImageModel, prompt: string): Promise<
     const now = Date.now();
     const preferred: Array<"codex" | "gemini"> =
       model === "gemini"
-        ? ["gemini", "codex"]
-        : ["codex", "gemini"];
+        ? ["gemini"]
+        : model === "codex"
+          ? ["codex"]
+          : ["codex", "gemini"];
     // auto일 때만 쿨다운으로 순서 재배열(명시 모델은 사용자의 의도를 우선 존중).
     const order =
       model === "auto"

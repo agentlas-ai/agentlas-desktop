@@ -14,6 +14,9 @@ page stays the authority.
   adapters; video and API providers remain in Settings > Multimodal.
 - Existing role databases are widened transactionally without losing rows, and
   an empty multimodal slot no longer inherits an unrelated chat runtime.
+- A role-selected image engine is no longer silently replaced by another
+  provider after failure, and `generate_image` is offered only while the
+  assigned CLI is still present.
 - Agent growth cards now label approval-waiting proposals separately from
   low-risk changes that were already applied automatically. Both states show
   the rollback safety, and the latter uses an explicit “Undo this change” action.
