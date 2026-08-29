@@ -97,12 +97,17 @@ export function modelRoleUsageSnapshot(now: number): ModelRoleUsageSnapshot {
     provider: string | null,
     model: string | null,
     ts: string,
+    seq: number,
   ): { provider: string | null; model: string | null; effort: string | null } => {
     const candidates = selectionRows.filter((row) =>
       row.run_id === runId
-      && row.ts <= ts
+      && (row.ts < ts || (row.ts === ts && row.seq <= seq))
       && row.role === role
-      && (row.node_id === nodeId || row.node_id === null || nodeId === null)
+      // A null invocation node is not evidence for an arbitrary worker node.
+      // Legacy rows may still be node-less, but they can only join a node-less
+      // selection; otherwise the exact effort remains unknown instead of being
+      // borrowed from a different branch.
+      && row.node_id === nodeId
       && (model == null || row.model === model)
       && (provider == null || row.provider === provider),
     );
@@ -203,6 +208,7 @@ export function modelRoleUsageSnapshot(now: number): ModelRoleUsageSnapshot {
         payloadProvider,
         payloadModel,
         row.ts,
+        Number(row.seq) || 0,
       );
       const provider = payloadProvider ?? selected.provider ?? "unknown";
       const model = payloadModel ?? selected.model;
