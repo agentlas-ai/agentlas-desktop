@@ -4,6 +4,7 @@ import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   ToolApprovalDecision,
   ToolApprovalRequestEvent,
+  ToolApprovalResolutionReceipt,
   AgentlasIpc,
   RendererJudgmentSpec,
   RendererSubsetJudgmentSpec,
@@ -168,8 +169,11 @@ const api: AgentlasIpc = {
   promptHub: {
     list: (params?: { q?: string; category?: string }) => ipcRenderer.invoke("promptHub:list", params),
     get: (slug: string) => ipcRenderer.invoke("promptHub:get", slug),
-    unlock: (slug: string) => ipcRenderer.invoke("promptHub:unlock", slug),
-    taste: (slug: string) => ipcRenderer.invoke("promptHub:taste", slug),
+    unlock: (input: { slug: string; unlockIntentId: string }) => ipcRenderer.invoke("promptHub:unlock", input),
+    unlockStatus: (input: { slug: string; unlockIntentId: string }) => ipcRenderer.invoke("promptHub:unlockStatus", input),
+    taste: (input: { slug: string; tasteIntentId: string }) => ipcRenderer.invoke("promptHub:taste", input),
+    tasteStatus: (input: { slug: string; tasteIntentId: string }) => ipcRenderer.invoke("promptHub:tasteStatus", input),
+    startChat: (input: { intentId: string; body: string; seedOnly?: boolean }) => ipcRenderer.invoke("promptHub:startChat", input),
     tastes: () => ipcRenderer.invoke("promptHub:tastes"),
     bookmarks: () => ipcRenderer.invoke("promptHub:bookmarks"),
     bookmarkAdd: (slug: string) => ipcRenderer.invoke("promptHub:bookmarkAdd", slug),
@@ -177,7 +181,8 @@ const api: AgentlasIpc = {
   },
   quests: {
     list: () => ipcRenderer.invoke("quests:list"),
-    claim: (questId: string) => ipcRenderer.invoke("quests:claim", questId),
+    claim: (input: { questId: string; claimIntentId: string }) => ipcRenderer.invoke("quests:claim", input),
+    claimStatus: (input: { questId: string; claimIntentId: string }) => ipcRenderer.invoke("quests:claimStatus", input),
   },
   agentMemory: {
     entries: (agentId: string, limit?: number) => ipcRenderer.invoke("agentMemory:entries", agentId, limit),
@@ -508,8 +513,10 @@ const api: AgentlasIpc = {
   },
   // 도구 승인 결정 — live 요청은 이 호출이 대기 중인 실행을 풀고,
   // post-denial 은 다음 실행의 허용 범위에만 반영된다.
-  resolveToolApproval: (id: string, decision: ToolApprovalDecision) =>
-    ipcRenderer.invoke("runtime:resolveToolApproval", id, decision),
+  resolveToolApproval: (id: string, decision: ToolApprovalDecision, actionId: string) =>
+    ipcRenderer.invoke("runtime:resolveToolApproval", id, decision, actionId),
+  getToolApprovalResolution: (id: string) =>
+    ipcRenderer.invoke("runtime:getToolApprovalResolution", id),
   listToolApprovals: () => ipcRenderer.invoke("runtime:listToolApprovals"),
   // 데몬 자동 시작(로그인 기동) — 기본 off. 값 변경 시 main 이 부팅 항목까지 정합시킨다.
   getDaemonAutostart: () => ipcRenderer.invoke("daemon:getAutostart"),
@@ -770,7 +777,8 @@ const api: AgentlasIpc = {
       >,
     restoreGraphVersion: (id: string, versionId: string) =>
       ipcRenderer.invoke("automations:restoreGraphVersion", id, versionId) as Promise<
-        { ok: true; automation: Automation } | { ok: false; reason: string }
+        | { ok: true; automationId: string; versionId: string; automation: Automation }
+        | { ok: false; reason: string }
       >,
     runNow: (id: string, opts?: { dryRun?: boolean; input?: Record<string, unknown> }) =>
       ipcRenderer.invoke("automations:runNow", id, opts) as Promise<import("../shared/types").AutomationRunNowResult>,
@@ -1077,6 +1085,11 @@ contextBridge.exposeInMainWorld("agentlasEvents", {
     const wrapped = (_evt: Electron.IpcRendererEvent, req: ToolApprovalRequestEvent) => handler(req);
     ipcRenderer.on("runtime:toolApprovalRequest", wrapped);
     return () => ipcRenderer.removeListener("runtime:toolApprovalRequest", wrapped);
+  },
+  onToolApprovalResolution: (handler: (receipt: ToolApprovalResolutionReceipt) => void) => {
+    const wrapped = (_evt: Electron.IpcRendererEvent, receipt: ToolApprovalResolutionReceipt) => handler(receipt);
+    ipcRenderer.on("runtime:toolApprovalResolution", wrapped);
+    return () => ipcRenderer.removeListener("runtime:toolApprovalResolution", wrapped);
   },
   // Browser 승인 요청 — 되돌릴 수 없는 브라우저 행동 전 경량 바텀시트를 띄운다.
   onBrowserApproval: (handler: (req: BrowserApprovalRequestEvent) => void) => {

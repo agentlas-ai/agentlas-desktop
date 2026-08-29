@@ -1532,6 +1532,12 @@ export interface AutomationFixResult {
   plan: AutomationFixPlan | null;
 }
 
+/** Main-bound identity for one user-selected fix mutation. */
+export interface AutomationFixActionReceipt extends AutomationFixResult {
+  automationId: string;
+  actionId: string;
+}
+
 export interface AutomationSession {
   id: string;
   automationId: string;
@@ -2072,6 +2078,10 @@ export interface AutomationRunRecord {
 
 /** Main이 실제 스케줄러 판정을 끝낸 뒤 반환하는 수동 실행 결과. */
 export interface AutomationRunNowResult {
+  /** Exact automation whose terminal result this receipt describes. */
+  automationId: string;
+  /** Durable graph run when one was created; null for a preflight-only terminal result. */
+  runId: string | null;
   /** false면 리스 충돌·업데이트 quiesce 등으로 실행이 접수되지 않았다. */
   accepted: boolean;
   /** accepted=true인 실행의 최종 커널 상태. */
@@ -2100,6 +2110,18 @@ export interface AutomationTriggerEventReconcileInput {
   expectedUpdatedAt: string;
   /** completed = external action happened; retry = external action did not happen. */
   resolution: "completed" | "retry";
+}
+
+export interface AutomationTriggerEventReconcileResult {
+  eventId: string;
+  automationId: string;
+  resolution: AutomationTriggerEventReconcileInput["resolution"];
+  status: "delivered" | "pending";
+}
+
+export interface InvocationCancelReceipt {
+  runId: string;
+  status: "requested" | "already-requested" | "not-found";
 }
 
 export interface AutomationGraphReconciliationNode {
@@ -2276,6 +2298,19 @@ export type BrowserLiveInput =
       kind: "navigation";
       action: "navigate";
       url: string;
+    };
+export type BrowserLiveDispatchResult =
+  | {
+      ok: true;
+      sessionId: string;
+      /** Latest frame sequence after the exact input settled. */
+      sequence: number;
+      /** Actual settled page after navigation, including redirects. */
+      finalUrl: string | null;
+    }
+  | {
+      ok: false;
+      code: "invalid_input" | "session_missing" | "no_history" | "dispatch_failed";
     };
 export interface ComputerUsePreviewSource {
   id: string;
@@ -4234,12 +4269,17 @@ export interface McpInvocationRequest {
 /** Main-owned Codex-style steering acknowledgement shared by Desktop and Mobile. */
 export interface InvocationSteerResult {
   accepted: true;
+  /** Exact conversation whose queue/run accepted this direction. */
+  chatId: string;
   queued: boolean;
   /** Steering never aborts the active model turn. A queued turn starts after it settles. */
   interruptsCurrent: false;
   activeRunId?: string;
   position?: number;
   runId?: string;
+  /** Durable queue ledger identity, present only when queued=true. */
+  queuedRequestId?: string;
+  promptHash?: string;
 }
 
 export interface MobileBridgeDeviceSummary {
@@ -5375,6 +5415,10 @@ export interface HephaestusRecoveryResult {
   attempted: boolean;
   presentation: HephaestusRecoveryPresentation | null;
 }
+export interface HephaestusRecoveryReceipt extends HephaestusRecoveryResult {
+  /** Exact action requested through IPC; null for inspection/automatic judgment. */
+  actionId: string | null;
+}
 /** 엔진 CLI 명령 결과(JSON 출력 + 원시 stdout/stderr). */
 export interface HephaestusCommandResult<T = unknown> {
   ok: boolean;
@@ -5647,14 +5691,41 @@ export interface HubPromptDetailResult {
 /** 언락/맛보기 공통 결과 — code: subscription_required / already_tasted / unauthenticated / network. */
 export interface HubPromptOpenResult {
   ok: boolean;
+  receiptVersion?: 1;
+  status?: "ready" | "processing" | "completed" | "consumed" | "not_required" | "already_unlocked";
+  slug?: string;
+  tasteIntentId?: string;
+  unlockIntentId?: string;
   body?: string;
   tipsKo?: string;
   tipsEn?: string;
   alreadyUnlocked?: boolean;
+  unlocked?: boolean;
+  isOwner?: boolean;
+  charged?: number;
   tasted?: boolean;
+  replayed?: boolean;
+  completedAt?: string;
+  outcomeUnknown?: boolean;
   code?: string;
   error?: string;
   upgradeUrl?: string;
+}
+
+export interface PromptChatStartInput {
+  intentId: string;
+  body: string;
+  seedOnly?: boolean;
+}
+
+export interface PromptChatStartReceipt {
+  ok: true;
+  receiptVersion: 1;
+  status: "created" | "replayed";
+  intentId: string;
+  promptDigest: string;
+  seedOnly: boolean;
+  chat: Chat;
 }
 
 export interface HubPromptTastesResult {
@@ -5666,7 +5737,13 @@ export interface HubPromptTastesResult {
 
 export interface HubPromptBookmarkResult {
   ok: boolean;
+  /** Exact prompt identity for the mutation/readback receipt. */
+  slug?: string;
   bookmarked?: boolean;
+  /** True only after GET /bookmarks confirmed the final requested state. */
+  verified?: boolean;
+  /** Mutation may have committed but its authoritative projection was unavailable. */
+  outcomeUnknown?: boolean;
   code?: string;
   error?: string;
 }
@@ -5693,10 +5770,21 @@ export interface QuestListResult {
 
 export interface QuestClaimResult {
   ok: boolean;
+  receiptVersion?: 1;
+  status?: "ready" | "completed" | "already_claimed";
   questId?: string;
+  claimIntentId?: string;
   rewardCredits?: number;
+  claimedAt?: string;
+  replayed?: boolean;
+  outcomeUnknown?: boolean;
   code?: string;
   error?: string;
+}
+
+export interface QuestClaimInput {
+  questId: string;
+  claimIntentId: string;
 }
 
 // ── 에이전트 durable 메모리(런타임 큐레이터 DB) — 자가진화/타임라인 UI 소스 ────
@@ -6155,8 +6243,17 @@ export interface AgentLeaseRow {
 }
 
 export interface AgentlasIpc {
-  /** 도구 승인 결정 — live 요청만 대기 중인 실행을 푼다. post-denial 은 다음 실행에 반영. */
-  resolveToolApproval: (id: string, decision: ToolApprovalDecision) => Promise<boolean>;
+  /**
+   * 도구 승인 결정 — Main의 exact resolution 원장이 같은 request/decision/action 을
+   * 확인한 뒤에만 성공이다. 응답이 유실돼도 getToolApprovalResolution 으로 재전송
+   * 없이 실제 결정을 확인한다.
+   */
+  resolveToolApproval: (
+    id: string,
+    decision: ToolApprovalDecision,
+    actionId: string,
+  ) => Promise<ToolApprovalResolutionReceipt>;
+  getToolApprovalResolution: (id: string) => Promise<ToolApprovalResolutionReceipt>;
   listToolApprovals: () => Promise<ToolApprovalRequestEvent[]>;
   /** 데몬 자동 시작(로그인 기동) — 기본 off. 켜면 부팅 항목까지 같은 턴에 정합된다. */
   getDaemonAutostart: () => Promise<{ enabled: boolean }>;
@@ -6413,8 +6510,11 @@ export interface AgentlasIpc {
   promptHub: {
     list: (params?: { q?: string; category?: string }) => Promise<HubPromptCatalog>;
     get: (slug: string) => Promise<HubPromptDetailResult>;
-    unlock: (slug: string) => Promise<HubPromptOpenResult>;
-    taste: (slug: string) => Promise<HubPromptOpenResult>;
+    unlock: (input: { slug: string; unlockIntentId: string }) => Promise<HubPromptOpenResult>;
+    unlockStatus: (input: { slug: string; unlockIntentId: string }) => Promise<HubPromptOpenResult>;
+    taste: (input: { slug: string; tasteIntentId: string }) => Promise<HubPromptOpenResult>;
+    tasteStatus: (input: { slug: string; tasteIntentId: string }) => Promise<HubPromptOpenResult>;
+    startChat: (input: PromptChatStartInput) => Promise<PromptChatStartReceipt>;
     tastes: () => Promise<HubPromptTastesResult>;
     bookmarks: () => Promise<{ ok: boolean; slugs: string[]; code?: string }>;
     bookmarkAdd: (slug: string) => Promise<HubPromptBookmarkResult>;
@@ -6423,7 +6523,8 @@ export interface AgentlasIpc {
   /** 퀘스트 — 대시보드 신규 유저 튜토리얼(온보딩 대체). 클레임 성공 시 크레딧 지급. */
   quests: {
     list: () => Promise<QuestListResult>;
-    claim: (questId: string) => Promise<QuestClaimResult>;
+    claim: (input: QuestClaimInput) => Promise<QuestClaimResult>;
+    claimStatus: (input: QuestClaimInput) => Promise<QuestClaimResult>;
   };
   /** 에이전트 전역 durable 메모리. 프로젝트 메모리는 프로젝트 화면에서만 조회한다. */
   agentMemory: {
@@ -6938,7 +7039,7 @@ export interface AgentlasIpc {
     /** Start a persistent, task-scoped CDP screencast. It never selects an unrelated tab. */
     startLiveView: (preferredUrl: string, viewport?: BrowserLiveViewport) => Promise<BrowserLiveSessionResult>;
     stopLiveView: (sessionId: string) => Promise<{ ok: boolean }>;
-    dispatchLiveInput: (input: BrowserLiveInput) => Promise<{ ok: boolean }>;
+    dispatchLiveInput: (input: BrowserLiveInput) => Promise<BrowserLiveDispatchResult>;
     onLiveFrame: (handler: (frame: BrowserLiveStreamFrame) => void) => () => void;
     focusLiveTarget: (targetId?: string) => Promise<{ ok: boolean }>;
   };
@@ -7268,7 +7369,8 @@ export interface AgentlasIpc {
     /** 저장할 때마다 남는 직전 판(최신 순). 되돌리기의 목록. */
     listGraphVersions: (id: string) => Promise<Array<{ id: string; savedAt: string; note?: string; nodeCount: number }>>;
     restoreGraphVersion: (id: string, versionId: string) => Promise<
-      { ok: true; automation: Automation } | { ok: false; reason: string }
+      | { ok: true; automationId: string; versionId: string; automation: Automation }
+      | { ok: false; reason: string }
     >;
     /** opts.dryRun: 시뮬레이션 실행 — 외부 변경을 막고 무엇이 막혔는지 남긴다. */
     runNow: (id: string, opts?: { dryRun?: boolean; input?: Record<string, unknown> }) => Promise<AutomationRunNowResult>;
@@ -7303,7 +7405,7 @@ export interface AgentlasIpc {
      * 그래프를 고친 뒤 **이전 실패를 잊고 처음부터** 돌릴 수 있게 한다.
      * `forgot:false` 면 사유가 온다 — 그래프가 안 바뀌었으면 잊지 않는다(이중 실행 방지).
      */
-    forgetFailedRun: (id: string) => Promise<{ ok: boolean; forgot: boolean; reason?: string }>;
+    forgetFailedRun: (id: string) => Promise<{ automationId: string; ok: boolean; forgot: boolean; reason?: string }>;
     /**
      * 저장 **전에** 한 번 돌려 보고, 막히면 이어갈 길을 함께 받는다. 저장하지 않는다.
      *
@@ -7385,7 +7487,10 @@ export interface AgentlasIpc {
     applyGraphPatch: (
       id: string,
       patch: { ops: unknown[]; rationale?: string },
-    ) => Promise<{ ok: boolean; code?: string; reason?: string; nextAction?: string }>;
+    ) => Promise<
+      | { ok: true; automationId: string; automation: Automation }
+      | { ok: false; code?: string; reason?: string; nextAction?: string }
+    >;
     /** 승인 브레이크가 걸린 단계의 결정을 기록한다. 승인은 판정이 아니라 사람의 결정이다. */
     /** 좋은 예시 하나 → 채점표 제안. 제안일 뿐 — 편집기에 채워지고 사람이 고친 뒤 저장된다. */
     proposeChecklistFromExample: (
@@ -7415,7 +7520,7 @@ export interface AgentlasIpc {
     listTriggerAttention: (automationId: string) => Promise<AutomationTriggerEventAttention[]>;
     reconcileTriggerEvent: (
       input: AutomationTriggerEventReconcileInput,
-    ) => Promise<AutomationTriggerEventAttention | null>;
+    ) => Promise<AutomationTriggerEventReconcileResult>;
     getGraphReconciliation: (
       automationId: string,
     ) => Promise<AutomationGraphReconciliation | null>;
@@ -7431,7 +7536,7 @@ export interface AgentlasIpc {
     /** 멈춘 자동화에 대해 지금 실행 가능한 조치까지 포함한 복구 계획. */
     planFix: (automationId: string) => Promise<AutomationFixPlan>;
     /** 사용자가 고른 조치를 실행. 계획에 없는 id는 아무 일도 하지 않는다. */
-    applyFix: (automationId: string, actionId: string) => Promise<AutomationFixResult>;
+    applyFix: (automationId: string, actionId: string) => Promise<AutomationFixActionReceipt>;
   };
   /** launchd LaunchAgent — 앱이 꺼져도 자동화를 도는 macOS 영속성(opt-in, 설계 §2.6). */
   launchd: {
@@ -7576,7 +7681,7 @@ export interface AgentlasIpc {
     steer: (req: McpInvocationRequest) => Promise<InvocationSteerResult>;
     eventChannel: (runId: string) => string;
     /** 진행 중인 실행을 취소 — CLI 자식 프로세스 kill / API fetch abort. 병렬 세션 각각 독립 취소. */
-    cancel: (runId: string) => Promise<void>;
+    cancel: (runId: string) => Promise<InvocationCancelReceipt>;
     /** Pull a queued direction back before its run starts (1-based queue position + exact text). */
     unsteer: (req: { chatId: string; position: number; text: string }) => Promise<boolean>;
     history: (chatId: string) => Promise<ChatHistoryEntry[]>;
@@ -7584,7 +7689,12 @@ export interface AgentlasIpc {
     /** 현재 실행 중인 chatId 목록 — 사이드바 "실행 중" 인디케이터 초기 시드용. */
     activeChats: () => Promise<string[]>;
     /** 채팅 진입 시 진행 중 실행에 재접속 — 그 chat의 runId + 지금까지 버퍼된 이벤트 + 시작 시각. 없으면 null. */
-    attach: (chatId: string) => Promise<{ runId: string; events: McpInvocationEvent[]; startedAt?: string } | null>;
+    attach: (chatId: string) => Promise<{
+      runId: string;
+      events: McpInvocationEvent[];
+      startedAt?: string;
+      queuedSteers?: Array<{ text: string; queuedAt: string; position: number }>;
+    } | null>;
     /** 실행 ID의 live+durable 상태. 앱 재시작 뒤 미종결 started receipt는 interrupted로 판정한다. */
     receipt: (runId: string) => Promise<InvocationRunReceipt | null>;
     /** 채팅의 가장 최근 실행 receipt — 결과 폴더/실패 진단 복원용. */
@@ -7602,7 +7712,7 @@ export interface AgentlasIpc {
     /** 엔진 가용성(번들 + Python). UI 게이트에 사용. */
     status: (locale?: "ko" | "en") => Promise<HephaestusStatus>;
     /** One이 복구 행동을 선택·실행하고 같은 엔진을 다시 검증한다. */
-    recover: (input?: { locale?: "ko" | "en"; actionId?: string }) => Promise<HephaestusRecoveryResult>;
+    recover: (input?: { locale?: "ko" | "en"; actionId?: string }) => Promise<HephaestusRecoveryReceipt>;
     /** Engine updater journal (read-only; null when it has never run). */
     updateJournal: () => Promise<HephaestusUpdateJournal | null>;
     /** Run the engine updater now and report what it actually did. */
@@ -7764,6 +7874,23 @@ export interface ToolApprovalRequestEvent {
  * 대기 중인 이번 호출에는 allow_session 과 같게 작용하고, 기록은 capability_grants 로 간다.
  */
 export type ToolApprovalDecision = "allow_once" | "allow_session" | "allow_always" | "deny";
+
+/**
+ * 런타임 승인 한 번의 authoritative receipt. `pending=false`만으로 성공을 추측하지
+ * 않는다: requestId + requested/resolved decision + deterministic actionId가 모두
+ * 맞아야 사용자가 누른 선택이 실제 실행 경계에 전달된 것이다.
+ */
+export interface ToolApprovalResolutionReceipt {
+  ok: boolean;
+  receiptVersion: 1;
+  requestId: string;
+  requestedDecision: ToolApprovalDecision | null;
+  resolvedDecision: ToolApprovalDecision | null;
+  actionId: string | null;
+  status: "resolved" | "replayed" | "pending" | "expired" | "conflict" | "not_found" | "invalid_action";
+  pending: boolean;
+  decidedAt: string | null;
+}
 
 /** One's durable memory row as the renderer may see it: bounded content, project slug only, never a local path. */
 export interface OneDurableMemoryEntryUi {

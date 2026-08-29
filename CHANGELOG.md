@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.0.49 — 2026-08-29
+
+This release binds Agentlas OS v1.2.37 at
+2b169ba44742735d1ce7f550fefee071b70324fc. Its public runtime asset
+`hephaestus-runtime-v1.2.37.tar.gz` is pinned at SHA-256
+`50caf78a9c028fcf088039dd862753c25fbb9bed19df9fa248502b442dc306a6`.
+Source readiness does not prove a public installer or update feed; the Releases
+page stays the authority.
+
+- One, Work, automation, settings, workspace, browser, and Mobile actions now
+  change visible state only after the exact Desktop receipt or authoritative
+  readback agrees with what the person selected. Ambiguous response loss keeps
+  the recoverable draft or action identity instead of claiming success or
+  inviting a duplicate run.
+- Mobile-created Work keeps the exact Task/chat and runtime binding through
+  transport ambiguity, while remote terminal dispatch, approval, cancellation,
+  and control transfer reuse one action key until Desktop confirms the result.
+- Bundled plugins are staged as complete exact releases and swapped atomically.
+  Removed bundle files disappear, explicit host state survives, concurrent
+  installers serialize, and a failed partial update cannot advertise the new
+  plugin version as current.
+
 ## 1.0.48 — 2026-08-28
 
 This release binds Agentlas OS v1.2.34 at 2f344a6fafdd96c1130c611c4817bf50e3dce773.

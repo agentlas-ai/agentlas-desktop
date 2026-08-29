@@ -245,8 +245,47 @@ function verifyExactWorkforceContract(tools) {
   };
 }
 
-if (!source?.repository || !source?.ref || !/^[0-9a-f]{40}$/.test(source.commit ?? "")) {
-  fail("package.json agentlasBundledRuntimeSource must pin repository, ref, and a full commit.");
+if (
+  !source?.repository
+  || !source?.ref
+  || !/^[0-9a-f]{40}$/.test(source.commit ?? "")
+  || source.assetName !== `hephaestus-runtime-${source.ref}.tar.gz`
+  || !/^[0-9a-f]{64}$/.test(source.assetSha256 ?? "")
+) {
+  fail("package.json agentlasBundledRuntimeSource must pin repository, ref, full commit, release asset, and SHA-256.");
+}
+
+async function verifyPublicRuntimeAssetPin() {
+  const match = /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/.exec(source.repository);
+  if (!match) throw new Error("runtime repository must be a canonical GitHub HTTPS URL");
+  const headers = {
+    Accept: "application/vnd.github+json",
+    "User-Agent": `agentlas-desktop-release-preflight/${pkg.version}`,
+    "X-GitHub-Api-Version": "2022-11-28",
+  };
+  if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
+  const response = await fetch(
+    `https://api.github.com/repos/${match[1]}/${match[2]}/releases/tags/${encodeURIComponent(source.ref)}`,
+    { headers, signal: AbortSignal.timeout(20_000) },
+  );
+  if (!response.ok) throw new Error(`GitHub release lookup returned HTTP ${response.status}`);
+  const release = await response.json();
+  const asset = Array.isArray(release?.assets)
+    ? release.assets.find((row) => row?.name === source.assetName)
+    : null;
+  if (!asset) throw new Error(`${source.ref} does not publish ${source.assetName}`);
+  if (asset.digest !== `sha256:${source.assetSha256}`) {
+    throw new Error(
+      `${source.assetName} digest is ${String(asset.digest ?? "missing")}, expected sha256:${source.assetSha256}`,
+    );
+  }
+  console.log(`[release-preflight] public runtime asset ${source.assetName} sha256:${source.assetSha256.slice(0, 16)}...`);
+}
+
+try {
+  await verifyPublicRuntimeAssetPin();
+} catch (error) {
+  fail(`public Agentlas OS runtime asset pin failed: ${error instanceof Error ? error.message : String(error)}`);
 }
 
 // Per-commit path: a cache entry can never be stale for the commit it names, so
@@ -300,11 +339,19 @@ function verifyReleaseSourceContract(runtimeRoot, manifestVersion) {
   for (const [name, workflow] of [["release.yml", releaseWorkflow], ["release-signed-mac.yml", signedWorkflow]]) {
     const refs = [...workflow.matchAll(/HEPHAESTUS_REF:\s*([^\s]+)/g)].map((match) => match[1]);
     const commits = [...workflow.matchAll(/HEPHAESTUS_COMMIT:\s*([^\s]+)/g)].map((match) => match[1]);
+    const assets = [...workflow.matchAll(/HEPHAESTUS_ASSET_NAME:\s*([^\s]+)/g)].map((match) => match[1]);
+    const digests = [...workflow.matchAll(/HEPHAESTUS_ASSET_SHA256:\s*([^\s]+)/g)].map((match) => match[1]);
     if (!refs.length || refs.some((value) => value !== source.ref)) {
       throw new Error(`${name} does not pin only ${source.ref}`);
     }
     if (!commits.length || commits.some((value) => value !== source.commit)) {
       throw new Error(`${name} does not pin only ${source.commit}`);
+    }
+    if (!assets.length || assets.some((value) => value !== source.assetName)) {
+      throw new Error(`${name} does not pin only runtime asset ${source.assetName}`);
+    }
+    if (!digests.length || digests.some((value) => value !== source.assetSha256)) {
+      throw new Error(`${name} does not pin only runtime asset SHA-256 ${source.assetSha256}`);
     }
   }
   if ((releaseWorkflow.match(/verify-packaged-workforce-runtime\.cjs/g) || []).length !== 2) {
@@ -353,7 +400,12 @@ function verifyReleaseSourceContract(runtimeRoot, manifestVersion) {
   const readmeCurrent = releaseSection(readme, `v${pkg.version}`, "\n- **", "README");
   const changelogCurrent = releaseSection(changelog, `## ${pkg.version}`, "\n## ", "CHANGELOG");
   for (const [label, section] of [["README", readmeCurrent], ["CHANGELOG", changelogCurrent]]) {
-    if (!section.includes(`Agentlas OS v${manifestVersion}`) || !section.includes(source.commit)) {
+    if (
+      !section.includes(`Agentlas OS v${manifestVersion}`)
+      || !section.includes(source.commit)
+      || !section.includes(source.assetName)
+      || !section.includes(source.assetSha256)
+    ) {
       throw new Error(`${label} current release does not bind Agentlas OS v${manifestVersion} at ${source.commit}`);
     }
     if (!/(does not prove|is not proof of|do not themselves publish)/i.test(section)) {

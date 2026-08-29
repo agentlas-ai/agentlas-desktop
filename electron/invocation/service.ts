@@ -2025,6 +2025,7 @@ export class InvocationService {
     if (!active) {
       return {
         accepted: true,
+        chatId: req.chatId,
         queued: false,
         interruptsCurrent: false,
         runId: this.start({ ...steerRequest, runId: undefined }, workspaceBinding, executionContext).runId,
@@ -2070,10 +2071,13 @@ export class InvocationService {
     // so writing to stdin here would either close or corrupt their protocol.
     return {
       accepted: true,
+      chatId: req.chatId,
       queued: true,
       interruptsCurrent: false,
       activeRunId: active[0],
       position: queue.length,
+      queuedRequestId: durable.id,
+      promptHash: durable.promptHash,
     };
   }
 

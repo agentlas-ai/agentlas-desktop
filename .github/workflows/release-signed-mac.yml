@@ -55,8 +55,10 @@ jobs:
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.59,v0.8.60"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.2.34
-      HEPHAESTUS_COMMIT: 2f344a6fafdd96c1130c611c4817bf50e3dce773
+      HEPHAESTUS_REF: v1.2.37
+      HEPHAESTUS_COMMIT: 2b169ba44742735d1ce7f550fefee071b70324fc
+      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.37.tar.gz
+      HEPHAESTUS_ASSET_SHA256: 50caf78a9c028fcf088039dd862753c25fbb9bed19df9fa248502b442dc306a6
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -139,6 +141,8 @@ jobs:
           lockrootver=$(node -p "require('./package-lock.json').packages[''].version")
           runtimever=$(node -p "require('./package.json').agentlasUpdateCompatibility.bundledRuntimeVersion")
           runtimecommit=$(node -p "require('./package.json').agentlasBundledRuntimeSource.commit")
+          runtimeasset=$(node -p "require('./package.json').agentlasBundledRuntimeSource.assetName")
+          runtimedigest=$(node -p "require('./package.json').agentlasBundledRuntimeSource.assetSha256")
           if [ "$pkgver" != "$version" ] || [ "$lockver" != "$version" ] || [ "$lockrootver" != "$version" ]; then
             echo "::error::Tag $tag requires package.json/package-lock root version=$version (got package=$pkgver lock=$lockver root=$lockrootver)."
             exit 1
@@ -149,6 +153,10 @@ jobs:
           fi
           if [ "$HEPHAESTUS_COMMIT" != "$runtimecommit" ]; then
             echo "::error::HEPHAESTUS_COMMIT does not match package immutable runtime pin."
+            exit 1
+          fi
+          if [ "$HEPHAESTUS_ASSET_NAME" != "$runtimeasset" ] || [ "$HEPHAESTUS_ASSET_SHA256" != "$runtimedigest" ]; then
+            echo "::error::Agentlas OS release asset name/digest does not match package immutable runtime pin."
             exit 1
           fi
           {
@@ -256,8 +264,10 @@ jobs:
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.59,v0.8.60"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.2.34
-      HEPHAESTUS_COMMIT: 2f344a6fafdd96c1130c611c4817bf50e3dce773
+      HEPHAESTUS_REF: v1.2.37
+      HEPHAESTUS_COMMIT: 2b169ba44742735d1ce7f550fefee071b70324fc
+      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.37.tar.gz
+      HEPHAESTUS_ASSET_SHA256: 50caf78a9c028fcf088039dd862753c25fbb9bed19df9fa248502b442dc306a6
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -318,12 +328,18 @@ jobs:
           lockrootver="$(node -p "require('./package-lock.json').packages[''].version")"
           runtimever="$(node -p "require('./package.json').agentlasUpdateCompatibility.bundledRuntimeVersion")"
           runtimecommit="$(node -p "require('./package.json').agentlasBundledRuntimeSource.commit")"
+          runtimeasset="$(node -p "require('./package.json').agentlasBundledRuntimeSource.assetName")"
+          runtimedigest="$(node -p "require('./package.json').agentlasBundledRuntimeSource.assetSha256")"
           if [ "$head_commit" != "$GITHUB_SHA" ] || [ "$pkgver" != "$version" ] || [ "$lockver" != "$version" ] || [ "$lockrootver" != "$version" ]; then
             echo "::error::Release source commit/package identity mismatch."
             exit 1
           fi
           if [ "${HEPHAESTUS_REF#v}" != "$runtimever" ] || [ "$HEPHAESTUS_COMMIT" != "$runtimecommit" ]; then
             echo "::error::Bundled runtime source pin mismatch."
+            exit 1
+          fi
+          if [ "$HEPHAESTUS_ASSET_NAME" != "$runtimeasset" ] || [ "$HEPHAESTUS_ASSET_SHA256" != "$runtimedigest" ]; then
+            echo "::error::Bundled runtime release asset pin mismatch."
             exit 1
           fi
           {
@@ -414,8 +430,10 @@ jobs:
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.59,v0.8.60"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.2.34
-      HEPHAESTUS_COMMIT: 2f344a6fafdd96c1130c611c4817bf50e3dce773
+      HEPHAESTUS_REF: v1.2.37
+      HEPHAESTUS_COMMIT: 2b169ba44742735d1ce7f550fefee071b70324fc
+      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.37.tar.gz
+      HEPHAESTUS_ASSET_SHA256: 50caf78a9c028fcf088039dd862753c25fbb9bed19df9fa248502b442dc306a6
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

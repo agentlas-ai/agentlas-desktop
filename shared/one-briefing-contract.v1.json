@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "contractVersion": "1.0.0",
+  "kinds": [
+    { "wire": "risk", "dart": "risk" },
+    { "wire": "opportunity", "dart": "opportunity" },
+    { "wire": "anomaly", "dart": "anomaly" },
+    { "wire": "repetition", "dart": "repetition" },
+    { "wire": "decision", "dart": "decision" },
+    { "wire": "completion", "dart": "completion" }
+  ],
+  "cadences": [
+    { "wire": "important_only", "dart": "importantOnly" },
+    { "wire": "daily", "dart": "daily" },
+    { "wire": "weekdays", "dart": "weekdays" },
+    { "wire": "weekly", "dart": "weekly" }
+  ],
+  "confidences": [
+    { "wire": "high", "dart": "high" },
+    { "wire": "medium", "dart": "medium" },
+    { "wire": "low", "dart": "low" }
+  ],
+  "sources": [
+    { "wire": "project_folder", "dart": "projectFolder" },
+    { "wire": "automation_run", "dart": "automationRun" },
+    { "wire": "canonical_task", "dart": "canonicalTask" }
+  ],
+  "actions": [
+    { "wire": "open_project", "dart": "openProject", "source": "project_folder" },
+    { "wire": "open_automation", "dart": "openAutomation", "source": "automation_run" },
+    { "wire": "open_task", "dart": "openTask", "source": "canonical_task" }
+  ],
+  "reasons": [
+    { "wire": "project_folder_missing", "dart": "projectFolderMissing", "source": "project_folder" },
+    { "wire": "project_folder_unreadable", "dart": "projectFolderUnreadable", "source": "project_folder" },
+    { "wire": "project_folder_not_directory", "dart": "projectFolderNotDirectory", "source": "project_folder" },
+    { "wire": "project_deadline_conflict", "dart": "projectDeadlineConflict", "source": "project_folder" },
+    { "wire": "automation_error", "dart": "automationError", "source": "automation_run" },
+    { "wire": "automation_blocked", "dart": "automationBlocked", "source": "automation_run" },
+    { "wire": "automation_needs_input", "dart": "automationNeedsInput", "source": "automation_run" },
+    { "wire": "automation_partial", "dart": "automationPartial", "source": "automation_run" },
+    { "wire": "task_waiting_decision_stale", "dart": "taskWaitingDecisionStale", "source": "canonical_task" },
+    { "wire": "task_running_without_active_run", "dart": "taskRunningWithoutActiveRun", "source": "canonical_task" },
+    { "wire": "task_failed_repeated", "dart": "taskFailedRepeated", "source": "canonical_task" },
+    { "wire": "task_failed_abandoned", "dart": "taskFailedAbandoned", "source": "canonical_task" },
+    { "wire": "task_partial_abandoned", "dart": "taskPartialAbandoned", "source": "canonical_task" }
+  ]
+}

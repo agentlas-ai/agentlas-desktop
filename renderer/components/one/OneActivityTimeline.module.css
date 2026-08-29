@@ -638,7 +638,18 @@ button.artifactVisual { cursor: pointer; }
 }
 .browserLive > .browserTabBar,
 .browserLive > .browserNavigationBar,
+.browserLive > .browserActionNotice,
 .browserLive > .browserGoneNotice { flex: 0 0 auto; }
+
+.browserActionNotice {
+  padding: 7px 12px;
+  border-bottom: 1px solid #e6e8e9;
+  background: #f5f8f6;
+  color: #42604f;
+  font-size: 10px;
+  line-height: 1.4;
+}
+.browserActionNotice[data-tone="error"] { background: #fff5f3; color: #8b3f34; }
 
 /*
  * "미리보기 임시 서버가 정리되었습니다" 안내.

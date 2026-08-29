@@ -37,11 +37,13 @@ import type {
 import { ChatStream, type StreamMessage, type StreamStep, type PipelineStage } from "@/components/ChatStream";
 import { ToolApprovalInline } from "@/components/ToolApprovalInline";
 import { normalizeToolCall } from "@shared/tool-call-detail";
+import { runtimeSelectionReceiptMatches } from "@shared/runtime-selection-receipt";
 import { ChatQuestionSheet, type QuestionSheetAnswer } from "@/components/ChatQuestionSheet";
 import { McpKeyRequestSheet } from "@/components/McpKeyRequestSheet";
 import { extractQuestions } from "@/lib/ask-question";
 import { stripMultimodalSetup } from "@/lib/multimodal-setup";
 import { dropChatViewSnapshot, readChatViewSnapshot, saveChatViewSnapshot } from "@/lib/chat-view-cache";
+import { completePromptStartIntent } from "@/lib/prompt-actions";
 import { ChatInput } from "@/components/ChatInput";
 import type { SurfaceStatePatchHandler, WorkbenchSurface } from "@/components/WorkbenchPanel";
 import type { LiveAgent, NetTimelineItem } from "@/components/AgentNetworkPanel";
@@ -1189,6 +1191,7 @@ function ChatPage() {
       };
     }>
   >([]);
+  const cancelRollbackSteersRef = useRef<(typeof steerQueueRef)["current"] | null>(null);
   const [queuedSteers, setQueuedSteers] = useState<string[]>([]);
   const [artifact, setArtifact] = useState<CodeArtifact | null>(null);
   const [surface, setSurface] = useState<WorkbenchSurface | null>(null);
@@ -1282,6 +1285,8 @@ function ChatPage() {
   const [restoredFolder, setRestoredFolder] = useState<string | null>(null);
   // /clear 뒤에 메시지를 다시 적재하지 않고도 실제 컨텍스트 리셋이 끝났음을 알려준다.
   const [sessionNotice, setSessionNotice] = useState<string | null>(null);
+  const [questionCommitPending, setQuestionCommitPending] = useState(false);
+  const questionCommitPendingRef = useRef<string | null>(null);
   // 세션 recap — 자리를 비운 사이 도착한 에이전트 응답 한 줄 요약(있을 때만 배너).
   const [recap, setRecap] = useState<{ summary: string; count: number } | null>(null);
   const [defaultRunFolder, setDefaultRunFolder] = useState<string | null>(null);
@@ -2348,14 +2353,26 @@ function ChatPage() {
         // 단, list가 비면 "설치된 게 없음"과 "탐지 실패"를 구분할 수 없으므로 핀을 건드리지 않는다.
         if (selection && !matched && list.length > 0) {
           const fallback = list.find((runtime) => runtime.active) ?? null;
-          void api.chats.setRuntimeSelection(chatId, null).catch(() => undefined);
-          setChat((prev) => (prev && prev.id === chatId ? { ...prev, runtimeSelection: null } : prev));
-          setActiveRuntime(fallback ? { ...fallback, active: true } : null);
-          setSessionNotice(
-            locale === "ko"
-              ? `이 채팅에 고정돼 있던 실행 엔진(${selection.kind}${selection.model ? ` · ${selection.model}` : ""})을 더 이상 찾을 수 없어 고정을 해제했습니다. 현재 활성 엔진으로 계속 대화할 수 있습니다.`
-              : `The engine pinned to this chat (${selection.kind}${selection.model ? ` · ${selection.model}` : ""}) is no longer available, so the pin was released. This chat now uses the active engine.`,
-          );
+          void api.chats.setRuntimeSelection(chatId, null).then((updated) => {
+            if (cancelled) return;
+            if (!updated || updated.id !== chatId || updated.runtimeSelection !== null) {
+              throw new Error("Desktop did not acknowledge the cleared runtime pin");
+            }
+            setChat(updated);
+            setActiveRuntime(fallback ? { ...fallback, active: true } : null);
+            setSessionNotice(
+              locale === "ko"
+                ? `이 채팅에 고정돼 있던 실행 엔진(${selection.kind}${selection.model ? ` · ${selection.model}` : ""})을 더 이상 찾을 수 없어 고정을 해제했습니다. 현재 활성 엔진으로 계속 대화할 수 있습니다.`
+                : `The engine pinned to this chat (${selection.kind}${selection.model ? ` · ${selection.model}` : ""}) is no longer available, so the pin was released. This chat now uses the active engine.`,
+            );
+          }).catch(() => {
+            if (cancelled) return;
+            setSessionNotice(
+              locale === "ko"
+                ? `이 채팅의 사용할 수 없는 실행 엔진 고정을 해제하지 못했습니다. 기존 고정은 유지됩니다. Desktop 연결을 확인한 뒤 이 작업을 다시 여세요.`
+                : "The unavailable engine pin could not be released, so the existing pin remains. Check the Desktop connection and reopen this task to retry.",
+            );
+          });
           return;
         }
         setActiveRuntime(
@@ -2739,6 +2756,41 @@ function ChatPage() {
     };
   }, [activeRuntime]);
 
+  const requestRunCancellation = useCallback((runId: string) => {
+    const api = ipc();
+    const restoreRejectedCancellation = () => {
+      const rollback = cancelRollbackSteersRef.current ?? [];
+      const knownIds = new Set(rollback.map((item) => item.optimisticMessageId));
+      const restored = [
+        ...rollback,
+        ...steerQueueRef.current.filter((item) => !knownIds.has(item.optimisticMessageId)),
+      ];
+      steerQueueRef.current = restored;
+      setQueuedSteers(restored.map((item) => item.text));
+      cancelRollbackSteersRef.current = null;
+      cancelRequestedRef.current = false;
+      setCancelPending(false);
+      setSessionNotice(locale === "ko"
+        ? "작업 중단 요청이 거절되었습니다. 실행과 대기 중 지시는 그대로입니다. 다시 시도해 주세요."
+        : "The stop request was rejected. The run and queued directions are unchanged; try again.");
+    };
+    if (!api) {
+      restoreRejectedCancellation();
+      return;
+    }
+    void api.invoke.cancel(runId).then((receipt) => {
+      if (
+        receipt?.runId !== runId
+        || (receipt.status !== "requested" && receipt.status !== "already-requested")
+      ) {
+        throw new Error("invoke_cancel_receipt_mismatch");
+      }
+      // Accepted cancellation settles only on the terminal event; keep the
+      // stop-pending UI until that event arrives.
+      cancelRollbackSteersRef.current = null;
+    }).catch(restoreRejectedCancellation);
+  }, [locale]);
+
   const send = useCallback(
     async (
       userPrompt: string,
@@ -2920,9 +2972,7 @@ function ChatPage() {
           runtimeSelection: chat.runtimeSelection ?? undefined,
         });
         // runId 도착 전에 Stop을 눌렀다면(레이스) 구독을 건 직후 즉시 취소 — abort 종료 이벤트를 수신해 busy 해제.
-        if (cancelRequestedRef.current) {
-          void api.invoke.cancel(runId);
-        }
+        if (cancelRequestedRef.current) requestRunCancellation(runId);
         return true;
       } catch {
         // invoke 실패 — 미리 건 구독을 정리해 유령 리스너가 남지 않게 한다.
@@ -2967,24 +3017,32 @@ function ChatPage() {
       subscribeRun,
       t,
       validatedTaskChatId,
+      requestRunCancellation,
     ],
   );
+
   // 진행 중 실행 취소 — 입력창의 정지 버튼(전송 버튼이 busy일 때 변신) / Cmd/Ctrl+Esc.
   const stop = useCallback(() => {
     const api = ipc();
-    if (!api) return;
     if (cancelRequestedRef.current) return;
+    if (!api) {
+      setSessionNotice(locale === "ko"
+        ? "Desktop에 연결되지 않아 작업을 멈추지 못했습니다. 실행은 계속되고 있습니다."
+        : "The work could not be stopped because Desktop is unavailable. The run is still active.");
+      return;
+    }
     setCancelPending(true);
     cancelRequestedRef.current = true;
     // 정지 = 인플라이트 전부 취소. 대기 중이던 steering 메시지도 비워 busy→false 시 자동
     // 발사되지 않게 한다(정지했는데 큐가 알아서 날아가던 버그).
+    cancelRollbackSteersRef.current = steerQueueRef.current.slice();
     steerQueueRef.current = [];
     setQueuedSteers([]);
     // runId가 아직 안 왔으면(invoke:run 왕복 중) 취소 의사만 기록 → 도착 즉시 취소된다.
     const runId = runIdRef.current ?? lastRunIdRef.current;
     if (!runId) return;
-    void api.invoke.cancel(runId);
-  }, []);
+    requestRunCancellation(runId);
+  }, [locale, requestRunCancellation]);
 
   // 실행 중 steering — 사용자의 새 지시는 즉시 대화에 보이지만 현재 모델 턴을
   // 취소하지 않는다. Main이 현재 턴의 terminal settlement를 확인한 뒤 같은 세션의
@@ -3054,14 +3112,30 @@ function ChatPage() {
       role: "orchestrator",
       inherit: false,
     };
-    const updated = await api.chats.setRuntimeSelection(chat.id, selection);
-    setChat(updated);
-    setActiveRuntime({
-      ...activeRuntime,
-      model: selection.model ?? null,
-      effort: selection.effort ?? null,
-      longContextEnabled: selection.longContext,
-    });
+    try {
+      const updated = await api.chats.setRuntimeSelection(chat.id, selection);
+      if (
+        !updated
+        || updated.id !== chat.id
+        || !runtimeSelectionReceiptMatches(selection, updated.runtimeSelection)
+      ) {
+        throw new Error("Desktop did not acknowledge the exact task runtime selection");
+      }
+      setChat(updated);
+      setActiveRuntime({
+        ...activeRuntime,
+        model: selection.model ?? null,
+        effort: selection.effort ?? null,
+        longContextEnabled: selection.longContext,
+      });
+      setSessionNotice(null);
+    } catch {
+      setSessionNotice(
+        locale === "ko"
+          ? "이 작업의 모델 선택을 저장하지 못했습니다. 기존 선택은 유지됩니다. 연결을 확인한 뒤 다시 시도해 주세요."
+          : "The model selection was not saved for this task, so the previous selection remains. Check the connection and try again.",
+      );
+    }
   }
   const switchModel = (model: string) => void applySelection({ model });
   const switchEffort = (effort: string) => void applySelection({ effort });
@@ -3073,33 +3147,65 @@ function ChatPage() {
    * 시트에서 안 고른 질문도 잠금("—")해 시트가 다시 뜨지 않게 한다.
    */
   const answerQuestionBatch = useCallback(
-    (messageId: string, reply: string, perQuestion: QuestionSheetAnswer[]) => {
-      if (busy) return;
-      setMessages((m) =>
-        m.map((msg) =>
-          msg.id === messageId
-            ? {
-                ...msg,
-                questions: msg.questions?.map((q) => {
-                  const hit = perQuestion.find((p) => p.questionId === q.id);
-                  if (hit && hit.answers.length) return { ...q, answer: hit.answers };
-                  return q.answer && q.answer.length ? q : { ...q, answer: ["—"] };
-                }),
-              }
-            : msg,
-        ),
-      );
+    async (messageId: string, reply: string, perQuestion: QuestionSheetAnswer[]) => {
+      if (busy || questionCommitPendingRef.current) return;
+      const api = ipc();
+      if (!api?.confirm?.commitAnswer) {
+        setSessionNotice(locale === "ko"
+          ? "Desktop에 연결되지 않아 답변을 저장하지 못했습니다. 입력은 그대로 유지됩니다."
+          : "The answer was not saved because Desktop is unavailable. Your input is unchanged.");
+        return;
+      }
+      questionCommitPendingRef.current = messageId;
+      setQuestionCommitPending(true);
+      setSessionNotice(null);
       const perms = perQuestion.map((p) => inferPermissionFromAnswer(p.answers)).find(Boolean);
-      // 답변 제출을 durable 영수증으로 즉시 확정 — 후속 실행이 어떤 분기로 빠지든 배지·
-      // "답변 필요" 목록·시트가 이 질문을 다시 띄우지 않는다. 확정 직후 배지도 즉시 갱신.
-      void ipc()?.confirm?.commitAnswer?.({ chatId, reply })
-        .then(() => window.dispatchEvent(new Event("agentlas:attention-refresh")))
-        .catch(() => undefined);
-      void send(reply, { permissions: perms ?? DEFAULT_PERMISSION });
+      try {
+        try {
+          // The exact current question must be durably accepted before either the
+          // answered UI or the follow-up run changes. A stale/mismatched receipt
+          // leaves the sheet and every typed answer intact.
+          const receipt = await api.confirm.commitAnswer({ chatId, reply, sourceMessageId: messageId });
+          if (!receipt || receipt.chatId !== chatId || receipt.sourceMessageId !== messageId) {
+            throw new Error("question_commit_receipt_mismatch");
+          }
+        } catch {
+          setSessionNotice(locale === "ko"
+            ? "이 질문의 답변을 저장하지 못했습니다. 질문과 입력은 그대로이므로 다시 시도해 주세요."
+            : "The answer was not saved for this exact question. The question and your input are unchanged; try again.");
+          return;
+        }
+        setMessages((m) =>
+          m.map((msg) =>
+            msg.id === messageId
+              ? {
+                  ...msg,
+                  questions: msg.questions?.map((q) => {
+                    const hit = perQuestion.find((p) => p.questionId === q.id);
+                    if (hit && hit.answers.length) return { ...q, answer: hit.answers };
+                    return q.answer && q.answer.length ? q : { ...q, answer: ["—"] };
+                  }),
+                }
+              : msg,
+          ),
+        );
+        window.dispatchEvent(new Event("agentlas:attention-refresh"));
+        const sent = await send(reply, { permissions: perms ?? DEFAULT_PERMISSION }).catch(() => false);
+        if (!sent) {
+          setSessionNotice(locale === "ko"
+            ? "답변은 저장됐지만 후속 작업은 시작하지 못했습니다. 같은 대화에서 다시 지시해 주세요."
+            : "The answer was saved, but the follow-up work did not start. Send the instruction again in this task.");
+        }
+      } finally {
+        if (questionCommitPendingRef.current === messageId) {
+          questionCommitPendingRef.current = null;
+          setQuestionCommitPending(false);
+        }
+      }
     },
     // send는 동일 useCallback에 의존
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [busy, chatId, send],
+    [busy, chatId, locale, send],
   );
 
   /** 질문 시트 × 닫기 — 이 배치의 미답 질문을 잠가("—") 시트를 접는다. 전송 없음. */
@@ -3483,7 +3589,13 @@ function ChatPage() {
   const handleSessionAction = useCallback(
     (action: "new" | "clear") => {
       const api = ipc();
-      if (!api || !chat) return;
+      if (!chat) return;
+      if (!api) {
+        setSessionNotice(locale === "ko"
+          ? "Desktop에 연결되지 않아 세션 작업을 수행하지 못했습니다. 현재 대화는 그대로 유지됩니다."
+          : "The session action could not run because Desktop is unavailable. This conversation is unchanged.");
+        return;
+      }
       if (action === "clear") {
         if (busy) {
           setSessionNotice(locale === "ko" ? "실행 중인 대화는 비울 수 없습니다. 먼저 실행을 멈춰 주세요." : "You cannot clear while this run is active. Stop it first.");
@@ -3512,7 +3624,24 @@ function ChatPage() {
       } else {
         void api.chats
           .create({ agentId: chat.agentId, projectId: chat.projectId, firmId: chat.firmId, continueFromChatId: chat.id })
-          .then((c) => router.push(`/workspace/task?id=${c.id}`));
+          .then((created) => {
+            if (
+              !created?.id
+              || created.id === chat.id
+              || created.agentId !== chat.agentId
+              || (created.projectId ?? null) !== (chat.projectId ?? null)
+              || (created.firmId ?? null) !== (chat.firmId ?? null)
+            ) {
+              throw new Error("chat_create_receipt_mismatch");
+            }
+            setSessionNotice(null);
+            router.push(`/workspace/task?id=${created.id}`);
+          })
+          .catch(() => {
+            setSessionNotice(locale === "ko"
+              ? "새 대화를 만들지 못했습니다. 현재 대화는 그대로 유지됩니다. 연결을 확인한 뒤 다시 시도해 주세요."
+              : "A new conversation was not created. This conversation is unchanged. Check the connection and try again.");
+          });
       }
     },
     [busy, chat, locale, router],
@@ -3521,13 +3650,20 @@ function ChatPage() {
   // A linked prompt may prefill or start a task, but product actions never ride in chat text.
   useEffect(() => {
     const seedPrompt = searchParams.get("prompt") ?? "";
+    const promptStartIntent = searchParams.get("promptStartIntent")?.trim() ?? "";
     const seedPermission = parsePermission(
       searchParams.get("permission") ?? searchParams.get("permissions"),
     );
 
     if (!seedPrompt || !chat || !agent) return;
     if (seededRef.current === chatId) return;
-    if (messages.length > 0) return; // 이미 히스토리 있으면 무시
+    if (messages.length > 0) {
+      // A reload after the exact user message was persisted is terminal proof
+      // that this prompt-start intent reached its destination chat.
+      if (promptStartIntent) completePromptStartIntent(promptStartIntent);
+      router.replace(`/workspace/task?id=${chatId}`);
+      return;
+    }
     seededRef.current = chatId;
     
     if (seedPrompt) {
@@ -3535,6 +3671,7 @@ function ChatPage() {
       // 프롬프트: 사용자가 사진/문서를 첨부한 뒤 직접 전송해야 결과가 정상).
       if (searchParams.get("seedOnly") === "1") {
         setComposerPrefill(seedPrompt);
+        if (promptStartIntent) completePromptStartIntent(promptStartIntent);
         router.replace(`/workspace/task?id=${chatId}`);
         return;
       }
@@ -3542,8 +3679,10 @@ function ChatPage() {
         router.replace(`/workspace/task?id=${chatId}`);
         return;
       }
-      void send(seedPrompt, { permissions: seedPermission ?? DEFAULT_PERMISSION });
-        router.replace(`/workspace/task?id=${chatId}`);
+      void send(seedPrompt, { permissions: seedPermission ?? DEFAULT_PERMISSION }).then((accepted) => {
+        if (accepted && promptStartIntent) completePromptStartIntent(promptStartIntent);
+      });
+      router.replace(`/workspace/task?id=${chatId}`);
     }
   }, [chat, agent, chatId, locale, messages.length, send, router, searchParams]);
 
@@ -4216,7 +4355,7 @@ function ChatPage() {
       {pendingQuestionSheet && (
         <ChatQuestionSheet
           questions={pendingQuestionSheet.questions}
-          busy={busy}
+          busy={busy || questionCommitPending}
           onConfirm={(reply, perQuestion) =>
             answerQuestionBatch(pendingQuestionSheet.messageId, reply, perQuestion)
           }

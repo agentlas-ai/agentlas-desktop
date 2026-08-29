@@ -1,7 +1,7 @@
 // Chat CRUD + chat_messages.
 // 사이드바 "최근 채팅" 섹션은 listRecent로 채운다.
 // 프로젝트 페이지는 listByProject로, 회사 페이지는 listByFirm으로 채운다.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { RUNTIME_KINDS } from "../../shared/runtime-kinds";
 import { RUNTIME_BACKENDS } from "../../shared/runtime-backends";
 import { getDb } from "./db";
@@ -455,6 +455,102 @@ export function createChat(input: {
   const chat = getChat(id) as Chat;
   emitDesktopStoreChange({ entity: "chat", id });
   return chat;
+}
+
+const PROMPT_CHAT_INTENT_RE = /^prompt_start_[A-Za-z0-9_-]{24,120}$/u;
+
+function exactPromptStartChat(chat: Chat | null): chat is Chat {
+  return Boolean(chat
+    && chat.id
+    && chat.originSurface === "one"
+    && chat.kind === "user"
+    && chat.projectId === null
+    && chat.firmId === null
+    && chat.archivedAt === null
+    && !chat.taskId);
+}
+
+export interface PromptChatStartReceipt {
+  ok: true;
+  receiptVersion: 1;
+  status: "created" | "replayed";
+  intentId: string;
+  promptDigest: string;
+  seedOnly: boolean;
+  chat: Chat;
+}
+
+/**
+ * Create or replay the exact One chat bound to a Prompt Store start action.
+ * The intent row and chat are committed in one IMMEDIATE transaction, so an
+ * ipcRenderer response loss cannot turn a user retry into a duplicate chat.
+ */
+export function createOrReplayPromptChat(input: {
+  intentId: string;
+  body: string;
+  seedOnly?: boolean;
+}): PromptChatStartReceipt {
+  const intentId = typeof input?.intentId === "string" ? input.intentId.trim() : "";
+  const body = typeof input?.body === "string" ? input.body : "";
+  const seedOnly = input?.seedOnly === true;
+  if (!PROMPT_CHAT_INTENT_RE.test(intentId)) throw new TypeError("invalid prompt chat intent");
+  if (!body.trim() || body.length > 250_000 || body.includes("\u0000")) {
+    throw new TypeError("invalid prompt chat body");
+  }
+  const promptDigest = `sha256:${createHash("sha256").update(body, "utf8").digest("hex")}`;
+  const db = getDb();
+  const run = db.transaction((): PromptChatStartReceipt => {
+    const existing = db.prepare(
+      `SELECT intent_id, chat_id, prompt_digest, seed_only
+         FROM prompt_chat_start_intents
+        WHERE intent_id = ?`,
+    ).get(intentId) as {
+      intent_id: string;
+      chat_id: string;
+      prompt_digest: string;
+      seed_only: number;
+    } | undefined;
+    if (existing) {
+      if (existing.prompt_digest !== promptDigest || existing.seed_only !== (seedOnly ? 1 : 0)) {
+        throw new Error("prompt chat intent payload conflict");
+      }
+      const chat = getChat(existing.chat_id);
+      if (!exactPromptStartChat(chat)) throw new Error("prompt chat recovery target is unavailable");
+      return {
+        ok: true,
+        receiptVersion: 1,
+        status: "replayed",
+        intentId,
+        promptDigest,
+        seedOnly,
+        chat,
+      };
+    }
+
+    const chat = createChat({
+      projectId: null,
+      firmId: null,
+      title: "",
+      taskMode: "conversation",
+      originSurface: "one",
+    });
+    if (!exactPromptStartChat(chat)) throw new Error("prompt chat create receipt mismatch");
+    db.prepare(
+      `INSERT INTO prompt_chat_start_intents
+        (intent_id, chat_id, prompt_digest, seed_only, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(intentId, chat.id, promptDigest, seedOnly ? 1 : 0, new Date().toISOString());
+    return {
+      ok: true,
+      receiptVersion: 1,
+      status: "created",
+      intentId,
+      promptDigest,
+      seedOnly,
+      chat,
+    };
+  });
+  return run.immediate();
 }
 
 /**

@@ -31,7 +31,15 @@ const runtimeSource = desktopPackage?.agentlasBundledRuntimeSource ?? {};
 const canonicalRepository = String(runtimeSource.repository ?? "").trim();
 const canonicalRef = String(runtimeSource.ref ?? "").trim();
 const canonicalCommit = String(runtimeSource.commit ?? "").trim().toLowerCase();
-if (!canonicalRepository || canonicalRef !== `v${bundledRuntimeVersion}` || !/^[0-9a-f]{40}$/.test(canonicalCommit)) {
+const canonicalAssetName = String(runtimeSource.assetName ?? "").trim();
+const canonicalAssetSha256 = String(runtimeSource.assetSha256 ?? "").trim().toLowerCase();
+if (
+  !canonicalRepository
+  || canonicalRef !== `v${bundledRuntimeVersion}`
+  || !/^[0-9a-f]{40}$/.test(canonicalCommit)
+  || canonicalAssetName !== `hephaestus-runtime-v${bundledRuntimeVersion}.tar.gz`
+  || !/^[0-9a-f]{64}$/.test(canonicalAssetSha256)
+) {
   throw new Error("package.json has an invalid agentlasBundledRuntimeSource immutable pin");
 }
 const repo = process.env.HEPHAESTUS_REPO || canonicalRepository;

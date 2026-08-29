@@ -615,6 +615,28 @@ export class DesktopMobileTerminalController
     for (const preview of terminal.previews.values()) this.expirePreview(preview);
     const lines = terminal.output.filter((line) => line.seq > since).slice(-limit);
     const busy = [...terminal.requests.values()].some((request) => request.status === "running" || request.status === "queued");
+    const pendingPreviews = [...terminal.previews.values()]
+      .sort((left, right) => left.expiresAtMs - right.expiresAtMs)
+      .slice(-8)
+      .map((preview) => ({
+        schemaVersion: 1 as const,
+        terminalId: preview.terminalId,
+        previewId: preview.previewId,
+        command: preview.command,
+        risk: preview.risk,
+        requiresApproval: preview.requiresApproval,
+        ownerEpoch: preview.ownerEpoch,
+        expiresAt: preview.expiresAt,
+        ...(preview.approvalId ? { approvalId: preview.approvalId } : {}),
+      }));
+    const requests = [...terminal.requests.values()]
+      .sort((left, right) => left.startedAt - right.startedAt)
+      .slice(-32)
+      .map((request) => ({
+        requestId: request.requestId,
+        status: request.status,
+        startedAt: new Date(request.startedAt).toISOString(),
+      }));
     return {
       schemaVersion: 1,
       terminalId: input.terminalId,
@@ -624,6 +646,8 @@ export class DesktopMobileTerminalController
       lines,
       nextSeq: terminal.nextSeq,
       truncated: terminal.dropped || (lines.length > 0 && lines[0].seq > since + 1),
+      pendingPreviews,
+      requests,
       ...(terminal.exited
         ? { refusal: refusal("terminal_control_unavailable", "The Desktop terminal process exited.") }
         : {}),

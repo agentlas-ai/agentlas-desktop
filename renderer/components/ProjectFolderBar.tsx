@@ -26,27 +26,44 @@ interface Props {
 }
 
 export function ProjectFolderBar({ chatId, onChanged, onOpenPanel, reloadToken }: Props) {
-  const { t } = useT();
+  const { t, locale } = useT();
   const [folder, setFolder] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const chatIdRef = useRef(chatId);
+  const requestEpochRef = useRef(0);
+  chatIdRef.current = chatId;
 
   // 현재 채팅의 워킹 폴더 로드
   useEffect(() => {
     const api = ipc();
+    setBusy(false);
+    setError(null);
     if (!api || !chatId) {
       setFolder(null);
       return;
     }
+    const requestEpoch = ++requestEpochRef.current;
     let cancelled = false;
     void api.workspace.get(chatId).then((f) => {
-      if (!cancelled) setFolder(f ?? null);
+      if (!cancelled && requestEpochRef.current === requestEpoch && chatIdRef.current === chatId) {
+        setFolder(f ?? null);
+        setError(null);
+      }
+    }).catch(() => {
+      if (!cancelled && requestEpochRef.current === requestEpoch && chatIdRef.current === chatId) {
+        setError(locale === "ko"
+          ? "이 대화의 폴더 연결 상태를 불러오지 못했습니다. 다시 열어 확인해 주세요."
+          : "The folder connection for this task could not be loaded. Reopen it and try again.");
+      }
     });
     return () => {
       cancelled = true;
     };
-  }, [chatId, reloadToken]);
+  }, [chatId, locale, reloadToken]);
 
   useDismissibleLayer({
     open,
@@ -58,32 +75,57 @@ export function ProjectFolderBar({ chatId, onChanged, onOpenPanel, reloadToken }
   const apply = useCallback(
     async (next: FsPathGrant | null) => {
       const api = ipc();
-      if (!api || !chatId) return;
-      await api.workspace.set(chatId, next);
+      if (!api || !chatId || busy) return false;
+      const targetChatId = chatId;
+      const requestEpoch = ++requestEpochRef.current;
       const nextPath = next?.path ?? null;
-      setFolder(nextPath);
-      onChanged?.(nextPath);
+      setBusy(true);
+      setError(null);
+      try {
+        await api.workspace.set(targetChatId, next);
+        const persistedPath = await api.workspace.get(targetChatId);
+        if (persistedPath !== nextPath) throw new Error("workspace_receipt_mismatch");
+        if (requestEpochRef.current !== requestEpoch || chatIdRef.current !== targetChatId) return false;
+        setFolder(nextPath);
+        onChanged?.(nextPath);
+        setOpen(false);
+        return true;
+      } catch {
+        if (requestEpochRef.current === requestEpoch && chatIdRef.current === targetChatId) {
+          setError(locale === "ko"
+            ? "폴더 변경 요청의 최종 상태를 확인하지 못했습니다. 화면은 바꾸지 않았습니다. 반복 적용하지 말고 이 대화를 다시 열어 확인해 주세요."
+            : "The final folder state could not be verified. This screen was not changed. Do not repeat the action; reopen this task to check it.");
+        }
+        return false;
+      } finally {
+        if (requestEpochRef.current === requestEpoch && chatIdRef.current === targetChatId) setBusy(false);
+      }
     },
-    [chatId, onChanged],
+    [busy, chatId, locale, onChanged],
   );
 
   const pick = useCallback(async () => {
     const api = ipc();
-    if (!api) return;
-    const picked = await api.fs.pickDirectory();
-    if (picked) await apply(picked);
-    setOpen(false);
-  }, [apply]);
+    if (!api || busy) return;
+    try {
+      const picked = await api.fs.pickDirectory();
+      if (picked) await apply(picked);
+    } catch {
+      setError(locale === "ko"
+        ? "폴더 선택 창을 열지 못했습니다. 다시 시도해 주세요."
+        : "The folder picker could not be opened. Try again.");
+    }
+  }, [apply, busy, locale]);
 
   const inFolder = !!folder;
 
   return (
-    <div ref={rootRef} style={{ position: "relative", display: "inline-flex" }}>
+    <div ref={rootRef} style={{ position: "relative", display: "inline-flex" }} aria-busy={busy}>
       <button
         ref={triggerRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
-        disabled={!chatId}
+        disabled={!chatId || busy}
         title={folder ?? t("workspace.bar.global")}
         style={{
           display: "inline-flex",
@@ -131,10 +173,8 @@ export function ProjectFolderBar({ chatId, onChanged, onOpenPanel, reloadToken }
             title={t("workspace.bar.global")}
             sub={t("workspace.bar.global_sub")}
             active={!inFolder}
-            onClick={() => {
-              void apply(null);
-              setOpen(false);
-            }}
+            disabled={busy}
+            onClick={() => { void apply(null); }}
           />
           {/* 현재 폴더 (있을 때) */}
           {inFolder && (
@@ -143,6 +183,7 @@ export function ProjectFolderBar({ chatId, onChanged, onOpenPanel, reloadToken }
               title={basename(folder as string)}
               sub={t("workspace.bar.in_folder_sub")}
               active
+              disabled={busy}
               onClick={() => {
                 onOpenPanel?.();
                 setOpen(false);
@@ -154,19 +195,31 @@ export function ProjectFolderBar({ chatId, onChanged, onOpenPanel, reloadToken }
           <MenuRow
             icon={<IconFolder size={14} />}
             title={inFolder ? t("workspace.bar.change") : t("workspace.bar.pick")}
+            disabled={busy}
             onClick={() => void pick()}
           />
           {inFolder && (
             <MenuRow
               icon={<IconClose size={14} />}
               title={t("workspace.bar.to_global")}
-              onClick={() => {
-                void apply(null);
-                setOpen(false);
-              }}
+              disabled={busy}
+              onClick={() => { void apply(null); }}
             />
           )}
         </div>
+      )}
+      {error && (
+        <span
+          role="alert"
+          style={{
+            position: "absolute", left: 0, top: "calc(100% + 4px)", zIndex: 45,
+            width: 300, padding: "6px 8px", borderRadius: 7,
+            border: "1px solid color-mix(in srgb, #c0392b 35%, var(--paper-edge))",
+            background: "var(--paper)", color: "#c0392b", fontSize: 11, lineHeight: 1.35,
+          }}
+        >
+          {error}
+        </span>
       )}
     </div>
   );
@@ -177,18 +230,21 @@ function MenuRow({
   title,
   sub,
   active,
+  disabled,
   onClick,
 }: {
   icon: React.ReactNode;
   title: string;
   sub?: string;
   active?: boolean;
+  disabled?: boolean;
   onClick: () => void;
 }) {
   return (
     <button
       type="button"
       role="menuitem"
+      disabled={disabled}
       onClick={onClick}
       style={{
         display: "flex",
@@ -199,7 +255,8 @@ function MenuRow({
         border: "none",
         background: "transparent",
         borderRadius: 8,
-        cursor: "pointer",
+        cursor: disabled ? "not-allowed" : "pointer",
+        opacity: disabled ? 0.55 : 1,
         textAlign: "left",
         color: "var(--ink)",
       }}

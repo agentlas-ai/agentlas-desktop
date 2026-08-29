@@ -4995,6 +4995,21 @@ export function initStore(options: StoreInitOptions = {}): void {
       ON invocation_steers(status, queued_at, id);
     CREATE INDEX IF NOT EXISTS idx_invocation_steers_chat
       ON invocation_steers(chat_id, queued_at, id);
+
+    -- Prompt Store creates the durable chat before the renderer can navigate.
+    -- The stable renderer intent makes an IPC response loss replay the exact
+    -- same chat instead of creating a second empty conversation. This table is
+    -- intentionally not cascaded when a chat is deleted: an old pending intent
+    -- must fail closed rather than silently manufacture a replacement chat.
+    CREATE TABLE IF NOT EXISTS prompt_chat_start_intents (
+      intent_id TEXT PRIMARY KEY,
+      chat_id TEXT NOT NULL UNIQUE,
+      prompt_digest TEXT NOT NULL,
+      seed_only INTEGER NOT NULL CHECK(seed_only IN (0,1)),
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_prompt_chat_start_chat
+      ON prompt_chat_start_intents(chat_id);
   `);
 
   // PRD §5.25 — 산출물 바인딩 표가 마이그레이션 사다리 **밖에서**(첫 사용 시 지연 생성)

@@ -75,6 +75,9 @@ export interface TriggerDeliveryHooks {
 }
 
 export interface TriggerDispatchResult {
+  /** Exact execution identity when this result came from a concrete run. */
+  automationId?: string;
+  runId?: string | null;
   accepted: boolean;
   status?: AutomationRunRecord["status"];
   error?: string | null;

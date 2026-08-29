@@ -105,6 +105,7 @@ import type {
 import { toCustomerSafeText } from "@shared/one-customer-safe";
 import { stripAgentControlBlocks, stripAgentIdentityBadges } from "@shared/agent-control-blocks";
 import { classifyOneRequestIntent } from "@shared/one-request-intent";
+import { runtimeSelectionReceiptMatches } from "@shared/runtime-selection-receipt";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import { useJudgedOneDecision } from "@/lib/one-decision-judged";
 import { visibleDecisionReceipt } from "@/lib/one-decision-receipt";
@@ -495,6 +496,7 @@ type PendingTeamPrompt = {
   recurrence: OneRecurrenceSelectionV1 | null;
   overrides: OneTurnOverrides;
   taskForceTargets: OrchestrationTarget[];
+  runtimeSelection?: RuntimeSelection;
 };
 
 type OneTurnOverrides = {
@@ -1225,6 +1227,7 @@ export function OneShell() {
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
   const [attachmentDrafts, setAttachmentDrafts] = useState<OneAttachmentDraft[]>([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [attachmentDragActive, setAttachmentDragActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -1554,6 +1557,8 @@ export function OneShell() {
   const attachmentDraftsRef = useRef<OneAttachmentDraft[]>([]);
   const attachmentThreadRef = useRef<string | null>(null);
   const autoResolvingProposalRef = useRef<string | null>(null);
+  const automationRunPendingRef = useRef(new Set<string>());
+  const pluginMutationPendingRef = useRef(new Set<string>());
   const runIdRef = useRef<string | null>(null);
   const runTaskIdRef = useRef<string | null>(null);
   const runChatIdRef = useRef<string | null>(null);
@@ -1563,13 +1568,34 @@ export function OneShell() {
     const api = ipc();
     const runId = runIdRef.current;
     if (!runId) return;
-    setQueuedSteers([]);
     if (!api) {
       requestOneOperationalRecovery(reason, new Error("Desktop bridge unavailable"));
+      setActionNotice(appLocale === "ko"
+        ? "Desktop에 연결되지 않아 작업을 멈추지 못했습니다. 실행은 계속되고 있습니다."
+        : "The work could not be stopped because Desktop is unavailable. The run is still active.");
       return;
     }
-    void api.invoke.cancel(runId);
-  }, []);
+    void api.invoke.cancel(runId).then((receipt) => {
+      if (
+        receipt?.runId !== runId
+        || (receipt.status !== "requested" && receipt.status !== "already-requested")
+      ) {
+        throw new Error("invoke_cancel_receipt_mismatch");
+      }
+      // Main accepted the terminal action. The run remains visibly busy until
+      // its terminal event arrives, but directions Main just discarded must
+      // disappear from the local queue now.
+      pendingSteersRef.current = [];
+      setQueuedSteers([]);
+      setActionNotice(appLocale === "ko" ? "중단 요청을 전달했습니다. 종료 결과를 기다리는 중입니다…" : "Stop requested. Waiting for the terminal result…");
+    }).catch(() => {
+      // Rejection means nothing was cancelled; preserve the active run and its
+      // queued directions instead of leaving a false stopped/pending screen.
+      setActionNotice(appLocale === "ko"
+        ? "작업 중단 요청이 거절되었습니다. 실행과 대기 중 지시는 그대로입니다. 다시 시도해 주세요."
+        : "The stop request was rejected. The run and queued directions are unchanged; try again.");
+    });
+  }, [appLocale]);
   /*
    * ★화면에 지금 떠 있는 메시지가 **어느 대화의 것인가**.
    *
@@ -2608,6 +2634,11 @@ export function OneShell() {
   }, [projections, selectedTaskId]);
 
   const activeThreadChatId = selected?.chatId ?? conversation?.id ?? null;
+  const activeThreadChatIdRef = useRef(activeThreadChatId);
+  // Keep the guard synchronous with render. An effect leaves one commit where
+  // a picker started in chat A can settle after navigation and paint A's path
+  // into chat B.
+  activeThreadChatIdRef.current = activeThreadChatId;
   useEffect(() => {
     onePaneCommitWaiterRef.current.observe(selectedConversationId, activeThreadChatId);
   }, [activeThreadChatId, selectedConversationId]);
@@ -3360,15 +3391,51 @@ export function OneShell() {
       role: "orchestrator",
       inherit: false,
     };
-    setOneRuntime(nextRuntime);
-    setOneRuntimePinned(true);
-    writeStoredOneRuntimeSelection(selection);
-    setComposerMenu(null);
     const api = ipc();
-    if (api && activeThreadChatId) {
-      await api.chats.setRuntimeSelection(activeThreadChatId, selection).catch(() => null);
+    let acknowledgedSelection = selection;
+    let acknowledgedRuntime = nextRuntime;
+    if (activeThreadChatId) {
+      if (!api) {
+        setActionNotice(appLocale === "ko"
+          ? "Desktop에 연결되지 않아 모델 선택을 저장하지 못했습니다. 기존 선택을 유지합니다."
+          : "The model selection was not saved because Desktop is unavailable. The previous selection is unchanged.");
+        return;
+      }
+      try {
+        const updated = await api.chats.setRuntimeSelection(activeThreadChatId, selection);
+        const receipt = updated?.runtimeSelection;
+        if (
+          !updated
+          || updated.id !== activeThreadChatId
+          || !runtimeSelectionReceiptMatches(selection, receipt)
+        ) {
+          throw new Error("Desktop did not acknowledge the exact chat runtime selection");
+        }
+        const receiptRuntime = oneRuntimeInventory.find((runtime) => (
+          runtime.kind === receipt.kind
+          && (!receipt.backend || runtime.backend === receipt.backend)
+        ));
+        if (!receiptRuntime) throw new Error("Desktop acknowledged an unavailable runtime selection");
+        acknowledgedSelection = receipt;
+        acknowledgedRuntime = withOneRuntimeSelection(
+          { ...receiptRuntime, active: true },
+          receipt.model ?? receiptRuntime.model ?? null,
+          receipt.effort ?? (receipt.model ? undefined : receiptRuntime.effort),
+        );
+        setActiveThreadChat(updated);
+      } catch {
+        setActionNotice(appLocale === "ko"
+          ? "이 대화의 모델 선택을 저장하지 못했습니다. 기존 선택을 유지한 채 다시 시도해 주세요."
+          : "The model selection was not saved for this conversation. The previous selection is unchanged; try again.");
+        return;
+      }
     }
-  }, [activeThreadChatId, oneRuntime]);
+    setOneRuntime(acknowledgedRuntime);
+    setOneRuntimePinned(true);
+    writeStoredOneRuntimeSelection(acknowledgedSelection);
+    setComposerMenu(null);
+    setActionNotice(null);
+  }, [activeThreadChatId, appLocale, oneRuntime, oneRuntimeInventory]);
 
   // 실행 타깃 결정: 좌석(설치행)이 call-only Hub 자산이면 로컬 프롬프트 실행이 아니라
   // Hub borrow 경로로 보낸다({source:"hub", slug}) — 로컬 프롬프트가 없으므로 local 타깃은
@@ -3403,11 +3470,14 @@ export function OneShell() {
        * This prevents an Auto conversation from widening to write merely
        * because answering its question materializes a Task. */
       permissionMode?: OnePermissionMode;
+      /** Exact chat pin receipt for a freshly-created conversation. */
+      runtimeSelection?: RuntimeSelection;
     },
   ) => {
     const api = ipc();
     const events = ipcEvents();
     const runLocale = normalizedLocale;
+    const effectiveRuntimeSelection = options?.runtimeSelection ?? oneRuntimeSelection;
     if (!api || !events) throw new Error(tFor(runLocale, "one.shell.run.desktop_unavailable"));
     // A Taskforce is the conversation's durable roster, not a one-turn
     // composer decoration. Decision answers, clarification turns, and recovery
@@ -3532,7 +3602,7 @@ export function OneShell() {
         locale: runLocale,
         onePermissionMode: runPermissionMode,
         permissions: executionPermission,
-        ...(oneRuntimeSelection ? { runtimeSelection: oneRuntimeSelection } : {}),
+        ...(effectiveRuntimeSelection ? { runtimeSelection: effectiveRuntimeSelection } : {}),
         ...(options?.overrides?.goalMode ? { goalMode: true } : {}),
         ...(options?.overrides?.planMode ? { planMode: true } : {}),
         ...(options?.overrides?.sessionRouting ? { sessionRouting: true } : { sessionRouting: false }),
@@ -3555,7 +3625,7 @@ export function OneShell() {
             locale: runLocale,
             onePermissionMode: runPermissionMode,
             permissions: executionPermission,
-            ...(oneRuntimeSelection ? { runtimeSelection: oneRuntimeSelection } : {}),
+            ...(effectiveRuntimeSelection ? { runtimeSelection: effectiveRuntimeSelection } : {}),
             sessionRouting: false,
           });
         } catch (cause) {
@@ -3650,6 +3720,7 @@ export function OneShell() {
           recurrence: prompt.recurrence,
           overrides: prompt.overrides,
           taskForceTargets: prompt.taskForceTargets,
+          runtimeSelection: prompt.runtimeSelection,
           userAlreadyShown,
           displayUserMessage: userAlreadyShown,
         },
@@ -3711,6 +3782,7 @@ export function OneShell() {
       recurrence: null,
       overrides: {},
       taskForceTargets: [],
+      runtimeSelection: oneRuntimeSelection,
     };
     if (!api) {
       requestOneOperationalRecovery("one-team-preflight-consent", new Error("Desktop bridge unavailable"));
@@ -3745,6 +3817,7 @@ export function OneShell() {
           recurrence: prompt.recurrence,
           overrides: prompt.overrides,
           taskForceTargets: prompt.taskForceTargets,
+          runtimeSelection: prompt.runtimeSelection,
           userAlreadyShown: true,
           displayUserMessage: true,
         },
@@ -3758,7 +3831,7 @@ export function OneShell() {
     } finally {
       setTeamPreflightBusy(false);
     }
-  }, [pendingTeamPrompt, router, startRun, teamPreflight]);
+  }, [oneRuntimeSelection, pendingTeamPrompt, router, startRun, teamPreflight]);
 
   const awaitingWorkforceConsent = Boolean(
     teamPreflight
@@ -3863,6 +3936,7 @@ export function OneShell() {
       }
     };
     const value = explicitValue || tFor(appLocale, "one.shell.composer.attachment_prompt", { n: attachmentSnapshot.length, s: attachmentSnapshot.length === 1 ? "" : "s" });
+    let submissionRuntimeSelection = oneRuntimeSelection;
     const api = ipc();
     if (!api) {
       setError(null);
@@ -4028,6 +4102,7 @@ export function OneShell() {
               recurrence: recurrenceSnapshot,
               overrides: overrideSnapshot,
               taskForceTargets: taskForceTargetSnapshot,
+              runtimeSelection: submissionRuntimeSelection,
               userAlreadyShown: true,
             },
           );
@@ -4039,7 +4114,7 @@ export function OneShell() {
           expectedTaskId: taskId,
           expectedTaskVersion: taskVersion,
           permission: onePermission === "read" ? "read" : "write",
-          ...(oneRuntimeSelection ? { runtimeSelection: oneRuntimeSelection } : {}),
+          ...(submissionRuntimeSelection ? { runtimeSelection: submissionRuntimeSelection } : {}),
           ...((() => {
             // 이번 턴에 지정한 팀원이 우선이고, 없으면 방의 팀원이 기본이다.
             // ★수리 2026-08-25 — 예전에는 local 칩만 남기고 Hub 대여 좌석 칩을
@@ -4071,6 +4146,7 @@ export function OneShell() {
               recurrence: recurrenceSnapshot,
               overrides: overrideSnapshot,
               taskForceTargets: taskForceTargetSnapshot,
+              runtimeSelection: submissionRuntimeSelection,
               userAlreadyShown: true,
             },
           );
@@ -4091,6 +4167,7 @@ export function OneShell() {
           recurrence: recurrenceSnapshot,
           overrides: overrideSnapshot,
           taskForceTargets: taskForceTargetSnapshot,
+          runtimeSelection: submissionRuntimeSelection,
         };
         setPendingTeamPrompt(pendingPrompt);
         setMessages((current) => [
@@ -4153,6 +4230,26 @@ export function OneShell() {
       setSubmissionBusy(true);
     });
     scrollToLatest();
+    let freshCreatedChatId: string | null = null;
+    const recoverFreshCreatedChatDraft = (notice: string) => {
+      if (!freshCreatedChatId || navigationEpochRef.current !== submissionNavigationEpoch) return;
+      setSubmissionBusy(false);
+      setPreflightPrompt(null);
+      setMessages((current) => current.filter((item) => item.id !== preflightId));
+      setComposer((current) => {
+        if (!current.trim()) return value;
+        if (current === value) return current;
+        return `${value}\n${current}`;
+      });
+      setTurnOverrides(overrideSnapshot);
+      setTurnAgentIds(turnAgentIds);
+      if (attachmentSnapshot.length > 0) {
+        const restored = attachmentSnapshot.map((item) => ({ ...item, previewUrl: null }));
+        attachmentDraftsRef.current = restored;
+        setAttachmentDrafts(restored);
+      }
+      setActionNotice(notice);
+    };
     try {
       if (selected?.chatId && !homeTransitionPendingRef.current && selectedTaskIdRef.current === selected.taskId) {
         // A result is one turn in this conversation, not a reason to fork a new
@@ -4165,17 +4262,15 @@ export function OneShell() {
         await prepareOrRun(conversation.id, null, null, "conversation");
         return;
       }
-      const chat = await api.chats.create({
+      let chat = await api.chats.create({
         title: value.split(/\r?\n/)[0].slice(0, 72),
         taskMode: "conversation",
         originSurface: "one",
       });
-      if (workspaceGrant) {
-        await api.workspace.set(chat.id, workspaceGrant);
+      if (!chat?.id || chat.originSurface !== "one") {
+        throw new Error("fresh_chat_receipt_mismatch");
       }
-      if (oneRuntimeSelection) {
-        await api.chats.setRuntimeSelection(chat.id, oneRuntimeSelection).catch(() => chat);
-      }
+      freshCreatedChatId = chat.id;
       // A later "New conversation" action owns navigation. An older async
       // submission may still finish preparing, but it must not pull the UI
       // back to its chat or restore that chat as the active composer target.
@@ -4189,11 +4284,60 @@ export function OneShell() {
         shownThreadChatIdRef.current = chat.id;
         router.replace(`/one?chat=${encodeURIComponent(chat.id)}`);
       }
+      if (workspaceGrant) {
+        await api.workspace.set(chat.id, workspaceGrant);
+        const persistedPath = await api.workspace.get(chat.id);
+        if (persistedPath !== workspaceGrant.path) {
+          throw new Error("fresh_chat_workspace_receipt_mismatch");
+        }
+      }
+      if (submissionRuntimeSelection) {
+        try {
+          const pinned = await api.chats.setRuntimeSelection(chat.id, submissionRuntimeSelection);
+          const receipt = pinned?.runtimeSelection;
+          if (
+            !pinned
+            || pinned.id !== chat.id
+            || !runtimeSelectionReceiptMatches(submissionRuntimeSelection, receipt)
+          ) {
+            throw new Error("Desktop did not acknowledge the fresh chat runtime selection");
+          }
+          const receiptRuntime = oneRuntimeInventory.find((runtime) => (
+            runtime.kind === receipt.kind
+            && (!receipt.backend || runtime.backend === receipt.backend)
+          ));
+          if (!receiptRuntime) throw new Error("Desktop acknowledged an unavailable fresh chat runtime");
+          submissionRuntimeSelection = receipt;
+          chat = pinned;
+          setConversation((current) => current?.id === pinned.id ? pinned : current);
+          setActiveThreadChat(pinned);
+          setOneRuntime(withOneRuntimeSelection(
+            { ...receiptRuntime, active: true },
+            receipt.model ?? receiptRuntime.model ?? null,
+            receipt.effort ?? (receipt.model ? undefined : receiptRuntime.effort),
+          ));
+          setOneRuntimePinned(true);
+          writeStoredOneRuntimeSelection(receipt);
+        } catch {
+          // The empty chat already exists and is now the visible recovery
+          // target, but no invocation may start without the exact pin receipt.
+          recoverFreshCreatedChatDraft(appLocale === "ko"
+            ? "새 대화는 열렸지만 모델 선택을 저장하지 못해 실행하지 않았습니다. 이 대화에서 모델을 다시 고른 뒤 보내 주세요."
+            : "The new conversation is open, but its model selection was not saved, so nothing ran. Choose the model again in this conversation and resend.");
+          return;
+        }
+      }
       await resolveActivationConcern(chat.id);
       await prepareOrRun(chat.id, null, null, "conversation");
     } catch (cause) {
       setSubmissionBusy(false);
       setPreflightPrompt(null);
+      if (freshCreatedChatId && !runIdRef.current) {
+        recoverFreshCreatedChatDraft(appLocale === "ko"
+          ? "새 대화는 열렸지만 실행 준비를 저장하고 확인하지 못해 아무 작업도 시작하지 않았습니다. 입력과 첨부는 이 대화에 복원했습니다. 다시 시도해 주세요."
+          : "The new conversation is open, but its setup could not be saved and verified, so nothing ran. Your draft and attachments were restored here; try again.");
+        return;
+      }
       // Preparing an attachment failed before an invocation exists. Recovering
       // an unrelated prior run here silently changes the prompt, model, and
       // permission the user sees. Keep the exact draft retryable instead.
@@ -4210,7 +4354,7 @@ export function OneShell() {
       requestOneOperationalRecovery("one-submit", cause);
       setError(null);
     }
-  }, [activeTaskforceAgentIds, autoStartTeamPreflight, busy, clearAttachmentDrafts, conversation, appLocale, normalizedLocale, onePermission, oneRuntimeSelection, orchestrationTargetForAgentId, resolveActivationConcern, router, scrollToLatest, selected, startRun, teamPreflight, teamPreflightBusy, turnAgentIds, turnOverrides, workspaceGrant]);
+  }, [activeTaskforceAgentIds, autoStartTeamPreflight, busy, clearAttachmentDrafts, conversation, appLocale, normalizedLocale, onePermission, oneRuntimeInventory, oneRuntimeSelection, orchestrationTargetForAgentId, resolveActivationConcern, router, scrollToLatest, selected, startRun, teamPreflight, teamPreflightBusy, turnAgentIds, turnOverrides, workspaceGrant]);
 
   const stopRun = useCallback(() => {
     // Stop is terminal for the visible work item: Main drops the directions
@@ -5198,8 +5342,56 @@ export function OneShell() {
       const automationId = rawRef.startsWith("automation:") ? rawRef.slice("automation:".length) : rawRef;
       if (action.intent === "run_automation" && automationId) {
         const api = ipc();
-        void api?.automations.runNow(automationId).catch(() => undefined);
-        focusOneOutput();
+        if (!api) {
+          setActionNotice(appLocale === "ko"
+            ? "Desktop에 연결되지 않아 자동화를 실행하지 못했습니다. 연결을 확인한 뒤 다시 시도해 주세요."
+            : "The automation did not run because Desktop is unavailable. Check the connection and try again.");
+          return;
+        }
+        if (automationRunPendingRef.current.has(automationId)) {
+          setActionNotice(appLocale === "ko"
+            ? "이 자동화의 실행 결과를 확인하는 중입니다."
+            : "Waiting for this automation's run result.");
+          return;
+        }
+        automationRunPendingRef.current.add(automationId);
+        setActionNotice(appLocale === "ko" ? "자동화를 실행하고 최종 상태를 확인하는 중입니다…" : "Running the automation and checking its final status…");
+        void api.automations.runNow(automationId).then((result) => {
+          if (!result?.accepted || result.automationId !== automationId || !result.status) {
+            throw new Error(result?.error || "automation_run_receipt_incomplete");
+          }
+          const safeOutput = toCustomerSafeText(result.output, appLocale).slice(0, 1_200);
+          const safeError = toCustomerSafeText(result.error, appLocale).slice(0, 600);
+          const actualResult = [safeOutput, safeError && safeError !== safeOutput ? safeError : ""]
+            .filter(Boolean)
+            .join(" · ");
+          if (actualResult) {
+            setActionNotice(appLocale === "ko"
+              ? `자동화 실행 결과(${result.status}): ${actualResult}`
+              : `Automation result (${result.status}): ${actualResult}`);
+            return;
+          }
+          // A terminal receipt without a safe textual result still has a
+          // durable graph/run history. Open that exact automation instead of
+          // reducing a real action to a generic "completed" toast.
+          router.push(`/automation/flow?id=${encodeURIComponent(automationId)}`);
+        }).catch((cause: unknown) => {
+          const raw = cause instanceof Error
+            ? cause.message.replace(/^Error invoking remote method '[^']+':\s*Error:\s*/, "")
+            : "";
+          if (/reconciliation_pending|ambiguous_side_effect|reconciliation required/i.test(raw)) {
+            setActionNotice(appLocale === "ko"
+              ? "이전 실행의 실제 결과를 먼저 확정해 주세요. 중복 동작을 막기 위해 새 실행은 시작하지 않았습니다."
+              : "Confirm the previous run's actual result first. A new run was not started to prevent duplicate actions.");
+          } else {
+            const detail = toCustomerSafeText(raw, appLocale);
+            setActionNotice(detail || (appLocale === "ko"
+              ? "자동화를 실행하지 못했습니다. 실행 기록과 연결 상태를 확인한 뒤 다시 시도해 주세요."
+              : "The automation did not run. Check its run history and connections, then try again."));
+          }
+        }).finally(() => {
+          automationRunPendingRef.current.delete(automationId);
+        });
       } else {
         const request = action.instruction || action.description || action.label;
         setComposer(`@graph ${request}`);
@@ -6461,6 +6653,7 @@ export function OneShell() {
               </div>
             )}
             {attachmentError && <p className={styles.attachmentError} role="alert">{attachmentError}</p>}
+            {actionNotice && <p className={styles.attachmentError} role="status" aria-live="polite" data-one-action-notice="true">{actionNotice}</p>}
             {turnAgentIds.length > 0 && (
               <div className={styles.oneTurnAgentChips} aria-label={appLocale === "ko" ? "이번 턴 에이전트" : "Agents for this turn"}>
                 <span>{appLocale === "ko" ? "이번 턴" : "This turn"}</span>
@@ -6504,21 +6697,69 @@ export function OneShell() {
                 onAddFolder={() => {
                   const api = ipc();
                   setComposerMenu(null);
-                  if (!api) return;
-                  void api.fs.pickDirectory().then((grant) => {
-                    if (!grant?.path) return;
-                    setWorkspaceGrant(grant);
-                    setWorkspacePath(grant.path);
-                    if (activeThreadChatId) void api.workspace.set(activeThreadChatId, grant);
-                    window.setTimeout(() => composerInputRef.current?.focus(), 0);
-                  }).catch(() => undefined);
+                  if (!api) {
+                    setActionNotice(appLocale === "ko"
+                      ? "Desktop에 연결되지 않아 폴더를 연결하지 못했습니다."
+                      : "The folder was not connected because Desktop is unavailable.");
+                    return;
+                  }
+                  void (async () => {
+                    try {
+                      const grant = await api.fs.pickDirectory();
+                      if (!grant?.path) return;
+                      const targetChatId = activeThreadChatId;
+                      if (targetChatId) {
+                        await api.workspace.set(targetChatId, grant);
+                        const persistedPath = await api.workspace.get(targetChatId);
+                        if (persistedPath !== grant.path) {
+                          throw new Error("workspace_path_receipt_mismatch");
+                        }
+                        // A slow picker/save must never overwrite the workspace shown
+                        // for a conversation the user opened in the meantime.
+                        if (activeThreadChatIdRef.current !== targetChatId) return;
+                      }
+                      setWorkspaceGrant(grant);
+                      setWorkspacePath(grant.path);
+                      setActionNotice(null);
+                      window.setTimeout(() => composerInputRef.current?.focus(), 0);
+                    } catch {
+                      setActionNotice(appLocale === "ko"
+                        ? "폴더 연결 요청의 최종 상태를 확인하지 못했습니다. 화면은 바꾸지 않았습니다. 반복 적용하지 말고 이 대화를 다시 열어 확인해 주세요."
+                        : "The final folder state could not be verified. This screen was not changed. Do not repeat the action; reopen this conversation to check it.");
+                    }
+                  })();
                 }}
                 onClearFolder={() => {
                   const api = ipc();
                   setComposerMenu(null);
-                  setWorkspaceGrant(null);
-                  setWorkspacePath(null);
-                  if (api && activeThreadChatId) void api.workspace.set(activeThreadChatId, null);
+                  const targetChatId = activeThreadChatId;
+                  if (!targetChatId) {
+                    setWorkspaceGrant(null);
+                    setWorkspacePath(null);
+                    setActionNotice(null);
+                    return;
+                  }
+                  if (!api) {
+                    setActionNotice(appLocale === "ko"
+                      ? "Desktop에 연결되지 않아 폴더 연결을 해제하지 못했습니다. 기존 폴더를 유지합니다."
+                      : "The folder was not disconnected because Desktop is unavailable. The current folder remains connected.");
+                    return;
+                  }
+                  void (async () => {
+                    try {
+                      await api.workspace.set(targetChatId, null);
+                      const persistedPath = await api.workspace.get(targetChatId);
+                      if (persistedPath !== null) throw new Error("workspace_clear_receipt_mismatch");
+                      if (activeThreadChatIdRef.current !== targetChatId) return;
+                      setWorkspaceGrant(null);
+                      setWorkspacePath(null);
+                      setActionNotice(null);
+                    } catch {
+                      setActionNotice(appLocale === "ko"
+                        ? "폴더 연결 해제 요청의 최종 상태를 확인하지 못했습니다. 화면은 바꾸지 않았습니다. 반복 적용하지 말고 이 대화를 다시 열어 확인해 주세요."
+                        : "The final folder state after disconnecting could not be verified. This screen was not changed. Do not repeat the action; reopen this conversation to check it.");
+                    }
+                  })();
                 }}
                 onOpenPlugins={() => {
                   setComposerMenu(null);
@@ -6535,20 +6776,49 @@ export function OneShell() {
                     return;
                   }
                   const api = ipc();
-                  if (!api) return;
+                  if (!api) {
+                    setActionNotice(appLocale === "ko"
+                      ? "Desktop에 연결되지 않아 플러그인 상태를 바꾸지 못했습니다."
+                      : "The plugin setting did not change because Desktop is unavailable.");
+                    return;
+                  }
+                  if (pluginMutationPendingRef.current.has(pluginId)) {
+                    setActionNotice(appLocale === "ko"
+                      ? "이 플러그인의 이전 변경을 확인하는 중입니다. 완료된 뒤 다시 눌러 주세요."
+                      : "The previous change for this plugin is still being verified. Try again after it finishes.");
+                    return;
+                  }
                   const nextEnabled = !target.enabled;
+                  pluginMutationPendingRef.current.add(pluginId);
                   // 낙관적 반영 — 왕복을 기다리면 스위치가 한 박자 늦게 움직인다.
                   setInstalledPlugins((current) => current.map((plugin) => (
                     plugin.id === pluginId ? { ...plugin, enabled: nextEnabled } : plugin
                   )));
                   void api.mcpTools.setEnabled(pluginId, nextEnabled)
-                    .then(() => api.mcpTools.listInstalled())
-                    .then((plugins) => setInstalledPlugins(plugins))
-                    .catch(() => {
-                      // 실패하면 되돌린다 — 꺼진 도구가 켜진 것처럼 남으면 안 된다.
+                    .then((updated) => {
+                      if (!updated || updated.id !== pluginId || updated.enabled !== nextEnabled) {
+                        throw new Error("plugin_toggle_receipt_mismatch");
+                      }
+                      setInstalledPlugins((current) => current.map((plugin) => (
+                        plugin.id === pluginId ? updated : plugin
+                      )));
+                      setActionNotice(null);
+                    })
+                    .catch((cause: unknown) => {
+                      // 실패하면 되돌리고, 원인/다음 행동을 같은 화면에서 보인다.
                       setInstalledPlugins((current) => current.map((plugin) => (
                         plugin.id === pluginId ? { ...plugin, enabled: target.enabled } : plugin
                       )));
+                      const raw = cause instanceof Error
+                        ? cause.message.replace(/^Error invoking remote method '[^']+':\s*Error:\s*/, "")
+                        : "";
+                      const detail = toCustomerSafeText(raw, appLocale);
+                      setActionNotice(detail || (appLocale === "ko"
+                        ? "플러그인 상태를 바꾸지 못했습니다. 연결 설정을 확인한 뒤 다시 시도해 주세요."
+                        : "The plugin setting did not change. Check its connection settings and try again."));
+                    })
+                    .finally(() => {
+                      pluginMutationPendingRef.current.delete(pluginId);
                     });
                 }}
                 onToggleAgent={(agentId) => {

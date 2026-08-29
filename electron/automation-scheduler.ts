@@ -1360,7 +1360,7 @@ async function runOne(
       console.error(
         `[automation] ${a.id} claimed success with zero tool calls — refusing cross-runtime retry for pinned ${a.runtimeSelection.kind}/${a.runtimeSelection.model ?? "default"}`,
       );
-      return { accepted: true, status: runStatus, error: runError, output };
+      return { accepted: true, automationId: a.id, runId: currentRunId, status: runStatus, error: runError, output };
     }
     // The retry must follow the dashboard's worker role. A hard-coded Claude
     // fallback made an Antigravity automation silently cross provider
@@ -1369,7 +1369,7 @@ async function runOne(
     if (!fallbackRuntime) {
       const retryError = "[zero_tool_retry_unavailable] no worker runtime is connected";
       console.error(`[automation] ${a.id} ${retryError}`);
-      return { accepted: false, status: "error", error: retryError, output };
+      return { accepted: true, automationId: a.id, runId: currentRunId, status: "error", error: retryError, output };
     }
     const fallback: RuntimeSelection = {
       kind: fallbackRuntime.kind,
@@ -1419,7 +1419,7 @@ async function runOne(
       }
     }
   }
-  return { accepted: true, status: runStatus, error: runError, output };
+  return { accepted: true, automationId: a.id, runId: currentRunId, status: runStatus, error: runError, output };
 }
 
 export async function runDueAutomationsNow(now: Date = new Date()): Promise<void> {

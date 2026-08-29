@@ -58,12 +58,12 @@ function load(): HephaestusSettings {
 }
 
 function persist(next: HephaestusSettings): void {
+  // A toggle shown as saved must survive restart. Updating the in-memory cache
+  // after a swallowed disk failure made Settings return a successful receipt
+  // for a value that disappeared on relaunch (especially unsafe for paid Hub
+  // auto-hiring). Let the IPC reject and keep the prior cache instead.
+  fs.writeFileSync(settingsPath(), JSON.stringify(next, null, 2), "utf8");
   cache = next;
-  try {
-    fs.writeFileSync(settingsPath(), JSON.stringify(next, null, 2), "utf8");
-  } catch {
-    // 비치명적 — 메모리 캐시는 갱신됨.
-  }
 }
 
 /** Stormbreaker 슈퍼바이저 활성 여부. 저장된 사용자 선택을 존중(기본 ON). */

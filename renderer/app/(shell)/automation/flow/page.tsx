@@ -60,6 +60,15 @@ function runtimeSelectionLabel(selection: RuntimeSelection | null | undefined, l
   return model ? `${kind} · ${model}` : kind;
 }
 
+function exactAutomationProjection(value: unknown, automationId: string): Automation | null {
+  if (!value || typeof value !== "object") return null;
+  return (value as { id?: unknown }).id === automationId ? value as Automation : null;
+}
+
+function sameWorkflowGraph(left: WorkflowGraph | null | undefined, right: WorkflowGraph | null | undefined): boolean {
+  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+}
+
 /** 좌/우 패널 접힘 상태 — 화면을 다시 열어도 사용자가 정한 레이아웃을 유지한다. */
 const PANEL_STATE_KEY = "agentlas.automation.flow.panels";
 
@@ -952,6 +961,7 @@ function AutomationFlowPage() {
   async function restoreVersion(versionId: string) {
     const api = ipc();
     if (!api || !automation || restoring) return;
+    const previous = automation;
     setRestoring(versionId);
     try {
       const result = await api.automations.restoreGraphVersion(automation.id, versionId);
@@ -959,9 +969,33 @@ function AutomationFlowPage() {
         setMessage(locale === "en" ? "Could not restore that version." : "그 판으로 되돌리지 못했습니다.");
         return;
       }
+      const restored = exactAutomationProjection(result.automation, previous.id);
+      if (result.automationId !== previous.id || result.versionId !== versionId || !restored) {
+        throw new Error("automation_restore_receipt_mismatch");
+      }
       setVersionsOpen(false);
-      await load();
+      setAutomation(restored);
       setMessage(locale === "en" ? "Restored. The version you were on is still in the list." : "되돌렸습니다. 방금까지의 판도 목록에 남아 있습니다.");
+    } catch {
+      try {
+        const current = exactAutomationProjection(await api.automations.get(previous.id), previous.id);
+        if (!current) throw new Error("automation_restore_readback_missing");
+        if (sameWorkflowGraph(current.graph, previous.graph)) {
+          setMessage(locale === "en"
+            ? "The current graph still matches the graph from before this request. The requested version was not confirmed; reopen version history before trying again."
+            : "현재 그래프는 요청 전과 같습니다. 요청한 판으로의 복구는 확인되지 않았습니다. 다시 누르기 전에 버전 기록을 새로 여세요.");
+        } else {
+          setVersionsOpen(false);
+          setAutomation(current);
+          setMessage(locale === "en"
+            ? "The saved graph changed, but the requested version could not be verified because its response was lost. Review this graph and do not restore again just to check."
+            : "저장된 그래프는 바뀌었지만 응답이 유실되어 요청한 판인지 확인하지 못했습니다. 현재 그래프를 검토하고 확인 목적으로 복구를 반복하지 마세요.");
+        }
+      } catch {
+        setMessage(locale === "en"
+          ? "The restore request may already have changed the saved graph, but its final state could not be read. Do not repeat it; reopen this automation and inspect version history first."
+          : "복구 요청이 저장된 그래프를 이미 바꿨을 수 있으나 최종 상태를 읽지 못했습니다. 반복하지 말고 자동화를 다시 연 뒤 버전 기록부터 확인하세요.");
+      }
     } finally {
       setRestoring("");
     }
@@ -970,10 +1004,16 @@ function AutomationFlowPage() {
   async function save() {
     const api = ipc();
     if (!api || !automation) return;
+    const previous = automation;
+    const requestedGraph = toGraph();
     setSaving(true);
     setMessage("");
     try {
-      const next = await api.automations.updateGraph(automation.id, toGraph());
+      const receipt = await api.automations.updateGraph(previous.id, requestedGraph);
+      const next = exactAutomationProjection(receipt, previous.id);
+      if (!next || !sameWorkflowGraph(next.graph, requestedGraph)) {
+        throw new Error("automation_save_receipt_mismatch");
+      }
       // ★저장 직후에는 캔버스가 진실이다. setAutomation이 하이드레이션을 다시 돌리면
       //   needsLayout(겹침 휴리스틱)이 사용자가 손으로 잡은 배치를 결정적 재배치로
       //   덮어썼다 — "저장을 눌렀더니 그래프 생김새가 바뀐다"(오너 실측 2026-08-08).
@@ -983,7 +1023,30 @@ function AutomationFlowPage() {
       setDirty(false);
       setMessage(t("auto.flow.saved"));
     } catch {
-      setMessage(t("auto.flow.save_failed"));
+      try {
+        const current = exactAutomationProjection(await api.automations.get(previous.id), previous.id);
+        if (!current) throw new Error("automation_save_readback_missing");
+        if (sameWorkflowGraph(current.graph, requestedGraph)) {
+          skipNextHydrationRef.current = true;
+          setAutomation(current);
+          setDirty(false);
+          setMessage(locale === "en"
+            ? "Saved. The reply was incomplete, so the saved graph was read back and confirmed."
+            : "저장했습니다. 응답이 불완전해 저장된 그래프를 다시 읽어 확인했습니다.");
+        } else if (sameWorkflowGraph(current.graph, previous.graph)) {
+          setMessage(locale === "en"
+            ? "The saved graph is still the previous version. Your edit remains here and can be saved again."
+            : "저장된 그래프는 이전 판 그대로입니다. 편집 내용은 이 화면에 남아 있어 다시 저장할 수 있습니다.");
+        } else {
+          setMessage(locale === "en"
+            ? "The saved graph is neither the previous version nor this edit. Your edit remains on screen; reopen the automation to inspect the saved version before saving again."
+            : "저장된 그래프가 이전 판도, 지금 편집한 판도 아닙니다. 편집 내용은 화면에 남아 있으니 다시 저장하기 전에 자동화를 다시 열어 저장본을 확인하세요.");
+        }
+      } catch {
+        setMessage(locale === "en"
+          ? "The save request may have been applied, but the saved graph could not be verified. Your edit remains here; do not save again until you reopen and inspect it."
+          : "저장 요청이 반영됐을 수 있으나 저장된 그래프를 확인하지 못했습니다. 편집 내용은 남아 있으니 다시 열어 확인하기 전에는 저장을 반복하지 마세요.");
+      }
     } finally {
       setSaving(false);
     }
@@ -992,6 +1055,8 @@ function AutomationFlowPage() {
   async function toggleEnabled() {
     const api = ipc();
     if (!api || !automation || togglingRef.current) return;
+    const previous = automation;
+    const requestedEnabled = !previous.enabled;
     // ★누르면 **먼저** 반응한다. 예전에는 켜기 게이트(연결 검사)가 도는 몇 초 동안
     //   버튼이 그대로여서, 사람은 "안 눌렸나?" 하고 다시 눌렀다.
     togglingRef.current = true;
@@ -1000,19 +1065,47 @@ function AutomationFlowPage() {
       ? (locale === "en" ? "Turning it off…" : "끄는 중입니다…")
       : (locale === "en" ? "Turning it on — checking what it needs…" : "켜는 중입니다 — 필요한 연결을 확인합니다…"));
     try {
-      const next = await api.automations.toggle(automation.id, !automation.enabled);
-      setAutomation((cur) => (cur ? { ...cur, enabled: next.enabled, nextRunAt: next.nextRunAt } : next));
+      const receipt = await api.automations.toggle(previous.id, requestedEnabled);
+      const next = exactAutomationProjection(receipt, previous.id);
+      if (!next || next.enabled !== requestedEnabled) throw new Error("automation_toggle_receipt_mismatch");
+      setAutomation(next);
+      setMessage(requestedEnabled
+        ? (locale === "en" ? "Automation is on." : "자동화를 켰습니다.")
+        : (locale === "en" ? "Automation is off." : "자동화를 껐습니다."));
     } catch (error) {
       // 켜기 게이트가 막았으면 **그 사유를 그대로** 보여주고 연결 창을 연다.
       // "상태를 바꾸지 못했습니다"만 남기면 사용자는 왜인지 영영 모른다(실사용 실측의 반복).
       const raw = error instanceof Error ? error.message : String(error ?? "");
       const notConnected = raw.includes("AUTOMATION_NOT_CONNECTED") || raw.includes("연결되지 않은");
-      if (notConnected) {
-        setMessage(raw.replace(/^Error:\s*/, "").replace(/^.*AUTOMATION_NOT_CONNECTED[^:]*:\s*/, ""));
-        setConnectionsOpen(true);
-        return;
+      try {
+        const current = exactAutomationProjection(await api.automations.get(previous.id), previous.id);
+        if (!current) throw new Error("automation_toggle_readback_missing");
+        if (current.enabled === requestedEnabled) {
+          setAutomation(current);
+          setMessage(requestedEnabled
+            ? (locale === "en" ? "Automation is on. The reply was incomplete, so the saved status was read back and confirmed." : "자동화를 켰습니다. 응답이 불완전해 저장 상태를 다시 읽어 확인했습니다.")
+            : (locale === "en" ? "Automation is off. The reply was incomplete, so the saved status was read back and confirmed." : "자동화를 껐습니다. 응답이 불완전해 저장 상태를 다시 읽어 확인했습니다."));
+        } else if (current.enabled === previous.enabled) {
+          setAutomation(current);
+          if (notConnected) {
+            setMessage(raw.replace(/^Error:\s*/, "").replace(/^.*AUTOMATION_NOT_CONNECTED[^:]*:\s*/, ""));
+            setConnectionsOpen(true);
+          } else {
+            setMessage(locale === "en"
+              ? "The saved status did not change. You can try this action again."
+              : "저장된 상태는 바뀌지 않았습니다. 이 작업은 다시 시도할 수 있습니다.");
+          }
+        } else {
+          setAutomation(current);
+          setMessage(locale === "en"
+            ? "The saved status changed to a different value. Review it before trying another status change."
+            : "저장 상태가 요청과 다른 값으로 바뀌었습니다. 다른 상태 변경을 시도하기 전에 확인하세요.");
+        }
+      } catch {
+        setMessage(locale === "en"
+          ? "The status request may have been applied, but the saved status could not be verified. Do not repeat it; reopen this automation first."
+          : "상태 요청이 반영됐을 수 있으나 저장 상태를 확인하지 못했습니다. 반복하지 말고 자동화를 먼저 다시 여세요.");
       }
-      setMessage(locale === "en" ? "Status did not change." : "상태를 바꾸지 못했습니다.");
     } finally {
       togglingRef.current = false;
       setToggling(false);
@@ -1093,19 +1186,41 @@ function AutomationFlowPage() {
   async function applyProposal() {
     const api = ipc();
     if (!api || !automation || !proposal) return;
+    const previous = automation;
     setArchitectBusy(true);
     try {
-      const result = await api.automations.applyGraphPatch(automation.id, proposal.patch);
+      const result = await api.automations.applyGraphPatch(previous.id, proposal.patch);
       if (!result.ok) {
         setMessage(`${result.reason ?? ""} ${result.nextAction ?? ""}`.trim() || (locale === "en" ? "Not applied." : "적용하지 못했습니다."));
         return;
       }
+      const applied = exactAutomationProjection(result.automation, previous.id);
+      if (result.automationId !== previous.id || !applied) throw new Error("automation_patch_receipt_mismatch");
       setProposal(null);
       setArchitectDraft("");
+      setAutomation(applied);
       setMessage(locale === "en" ? "Applied." : "적용했습니다.");
-      await load();
     } catch {
-      setMessage(locale === "en" ? "Not applied." : "적용하지 못했습니다.");
+      try {
+        const current = exactAutomationProjection(await api.automations.get(previous.id), previous.id);
+        if (!current) throw new Error("automation_patch_readback_missing");
+        if (sameWorkflowGraph(current.graph, previous.graph)) {
+          setMessage(locale === "en"
+            ? "The saved graph still matches the graph from before this request. The proposal remains available to review."
+            : "저장된 그래프는 요청 전과 같습니다. 제안은 계속 검토할 수 있도록 남겨뒀습니다.");
+        } else {
+          setAutomation(current);
+          setProposal(null);
+          setMessage(locale === "en"
+            ? "The saved graph changed, but the lost reply makes it impossible to prove that this exact proposal caused it. Review the current graph and do not apply the proposal again."
+            : "저장된 그래프는 바뀌었지만 응답이 유실되어 이 제안이 정확히 반영된 것인지 증명할 수 없습니다. 현재 그래프를 검토하고 제안을 다시 적용하지 마세요.");
+        }
+      } catch {
+        setProposal(null);
+        setMessage(locale === "en"
+          ? "The proposal may already have changed the graph, but its final state could not be read. Do not apply it again; reopen this automation and inspect the saved graph."
+          : "제안이 그래프를 이미 바꿨을 수 있으나 최종 상태를 읽지 못했습니다. 다시 적용하지 말고 자동화를 다시 열어 저장본을 확인하세요.");
+      }
     } finally {
       setArchitectBusy(false);
     }
@@ -1114,16 +1229,25 @@ function AutomationFlowPage() {
   async function runNow(dryRun = false, inputValue?: string) {
     const api = ipc();
     if (!api || !automation) return;
+    let requirement: Awaited<ReturnType<typeof api.automations.inputRequirement>> = null;
     // 시작 값을 받아야 하는 그래프는 값을 받고 나서 실행한다. 예전에는 그냥 시작해서
     // 빈 값으로 돌았고, 사용자는 결과를 열어보고서야 값이 빠진 걸 알았다.
-    if (!dryRun && inputValue === undefined) {
+    if (!dryRun) {
       // ★조회가 도는 동안에도 눌린 티가 나야 한다 — 값이 필요한 그래프에서는 이 await가
       //   유일하게 화면이 조용한 구간이었다.
       setRunning(true);
       setMessage(locale === "en" ? "Checking what it needs…" : "필요한 값을 확인하는 중입니다…");
-      const requirement = await api.automations.inputRequirement(automation.id).catch(() => null);
-      setRunning(false);
-      if (requirement?.required) {
+      try {
+        requirement = await api.automations.inputRequirement(automation.id);
+      } catch {
+        setRunning(false);
+        setMessage(locale === "en"
+          ? "The required start input could not be checked, so nothing ran. Check the connection and try again."
+          : "실행에 필요한 시작 값을 확인하지 못해 아무것도 실행하지 않았습니다. 연결을 확인한 뒤 다시 시도해 주세요.");
+        return;
+      }
+      if (inputValue === undefined && requirement?.required) {
+        setRunning(false);
         setInputPrompt({ label: requirement.label, value: "" });
         setMessage("");
         return;
@@ -1137,11 +1261,10 @@ function AutomationFlowPage() {
           : "시뮬레이션을 시작합니다. 바깥으로 나가는 작업은 실행되지 않습니다.")
         : (locale === "en" ? "Starting background run..." : "백그라운드 실행을 시작하는 중입니다..."),
     );
+    const previousRun = await api.automations.latestRun(automation.id).catch(() => undefined);
+    let result: Awaited<ReturnType<typeof api.automations.runNow>>;
     try {
-      const requirement = inputValue !== undefined
-        ? await api.automations.inputRequirement(automation.id).catch(() => null)
-        : null;
-      const result = await api.automations.runNow(
+      result = await api.automations.runNow(
         automation.id,
         dryRun
           ? { dryRun: true }
@@ -1149,24 +1272,57 @@ function AutomationFlowPage() {
             ? { input: { [requirement.varName]: inputValue } }
             : undefined),
       );
-      if (!result.accepted) throw new Error("automation_run_not_accepted");
-      setInputPrompt(null);
-      setMessage(
-        result.status !== "ok"
-          ? (result.error || (locale === "en"
-            ? `Run ended with status ${result.status ?? "failed"}.`
-            : `실행이 ${result.status ?? "실패"} 상태로 끝났습니다.`))
-          : dryRun
-          ? (locale === "en"
-            ? "Simulation completed. External-changing steps were skipped and recorded."
-            : "시뮬레이션을 완료했습니다. 바깥을 바꾸는 단계는 건너뛰고 기록했습니다.")
-          : (locale === "en" ? "Run completed. The final steps and log are shown here." : "실행을 완료했습니다. 최종 단계와 기록을 이 화면에서 확인할 수 있습니다."),
-      );
+      if (!result.accepted || result.automationId !== automation.id || !result.status) {
+        throw new Error("automation_run_receipt_mismatch");
+      }
+    } catch {
+      try {
+        const currentRun = await api.automations.latestRun(automation.id);
+        if (currentRun && currentRun.automationId === automation.id && previousRun !== undefined && currentRun.runId !== previousRun?.runId) {
+          setInputPrompt(null);
+          setRunStates(currentRun.nodeStates);
+          applySnapshotFailures(currentRun.nodeFailures);
+          setRunStartedAt(currentRun.startedAt);
+          setMessage(locale === "en"
+            ? `A new run ${currentRun.runId} is in history with status ${currentRun.status}, but its reply was lost. Inspect that run and do not start another one just to check.`
+            : `새 실행 ${currentRun.runId}이(가) 기록에 ${currentRun.status} 상태로 남아 있지만 응답이 유실됐습니다. 해당 실행을 확인하고 확인 목적으로 다시 실행하지 마세요.`);
+        } else if (previousRun !== undefined && currentRun?.runId === previousRun?.runId) {
+          setMessage(locale === "en"
+            ? "Run history still shows the same run as before this request. No new run was confirmed; inspect history before trying again."
+            : "실행 기록에는 요청 전과 같은 실행만 보입니다. 새 실행은 확인되지 않았으니 다시 시도하기 전에 기록을 확인하세요.");
+        } else {
+          setMessage(locale === "en"
+            ? "The run request may have started, but the returned receipt could not be matched to this action. Inspect run history and do not repeat it until you know the outcome."
+            : "실행 요청이 시작됐을 수 있으나 반환 영수증을 이 작업과 일치시킬 수 없습니다. 결과를 알기 전에는 반복하지 말고 실행 기록을 확인하세요.");
+        }
+      } catch {
+        setMessage(locale === "en"
+          ? "The run request may have started, but its result and run history could not be read. Do not repeat it until the history is available."
+          : "실행 요청이 시작됐을 수 있으나 결과와 실행 기록을 읽지 못했습니다. 기록을 확인할 수 있을 때까지 반복하지 마세요.");
+      }
+      setRunning(false);
+      return;
+    }
+    setInputPrompt(null);
+    const terminalMessage =
+      result.status !== "ok"
+        ? (result.error || (locale === "en"
+          ? `Run ended with status ${result.status ?? "failed"}.`
+          : `실행이 ${result.status ?? "실패"} 상태로 끝났습니다.`))
+        : dryRun
+        ? (locale === "en"
+          ? "Simulation completed. External-changing steps were skipped and recorded."
+          : "시뮬레이션을 완료했습니다. 바깥을 바꾸는 단계는 건너뛰고 기록했습니다.")
+        : (locale === "en" ? "Run completed. The final steps and log are shown here." : "실행을 완료했습니다. 최종 단계와 기록을 이 화면에서 확인할 수 있습니다.");
+    setMessage(terminalMessage);
+    try {
       const snap = await api.automations.latestRun(automation.id);
       if (snap?.nodeStates) setRunStates(snap.nodeStates);
       applySnapshotFailures(snap?.nodeFailures);
     } catch {
-      setMessage(locale === "en" ? "Run did not start." : "실행을 시작하지 못했습니다.");
+      setMessage(locale === "en"
+        ? `${terminalMessage} The run-history view could not refresh. Do not rerun solely to refresh this screen.`
+        : `${terminalMessage} 실행 기록 화면을 새로고침하지 못했습니다. 이 화면 갱신만을 위해 다시 실행하지 마세요.`);
     } finally {
       setRunning(false);
     }

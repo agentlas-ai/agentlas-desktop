@@ -230,13 +230,43 @@ function MultimodalSettingsPanel({ locale, active }: { locale: string; active: b
   const selectedFor = (modality: MultimodalModality) => modality === "image" ? settings.imageProvider : modality === "video" ? settings.videoProvider : settings.audioProvider;
   const select = async (modality: MultimodalModality, providerId: string) => {
     const patch = modality === "image" ? { imageProvider: providerId } : modality === "video" ? { videoProvider: providerId } : { audioProvider: providerId };
+    const api = ipc();
+    if (!api) {
+      setNotice(locale === "ko" ? "Desktop에 연결되지 않아 저장하지 못했습니다. 이전 설정을 유지합니다." : "Could not save because Desktop is unavailable. The prior setting remains.");
+      return;
+    }
     setBusy(true);
     try {
-      const api = ipc();
-      const next = api ? await api.multimodal.saveSettings({ ...settings, ...patch }) : { ...settings, ...patch };
-      setSettings(next); setNotice(locale === "ko" ? "저장했습니다." : "Saved.");
-      if (api) setStatuses(await api.multimodal.status().catch(() => statuses));
-    } catch { setNotice(locale === "ko" ? "저장하지 못했습니다. 이전 설정을 유지합니다." : "Could not save. The prior setting remains."); }
+      const next = await api.multimodal.saveSettings({ ...settings, ...patch });
+      const acknowledged = modality === "image" ? next?.imageProvider : modality === "video" ? next?.videoProvider : next?.audioProvider;
+      if (acknowledged !== providerId) throw new Error("multimodal_settings_receipt_mismatch");
+      setSettings(next);
+      setNotice(locale === "ko" ? "저장했습니다." : "Saved.");
+      try {
+        setStatuses(await api.multimodal.status());
+      } catch {
+        setNotice(locale === "ko"
+          ? "설정은 저장했지만 연결 상태를 새로고침하지 못했습니다. 다시 저장하지 말고 이 화면만 다시 열어 주세요."
+          : "The setting was saved, but connection status could not refresh. Do not save again; reopen this panel instead.");
+      }
+    } catch {
+      try {
+        const readback = await api.multimodal.getSettings();
+        const actual = modality === "image" ? readback.imageProvider : modality === "video" ? readback.videoProvider : readback.audioProvider;
+        setSettings(readback);
+        if (actual === providerId) {
+          setNotice(locale === "ko" ? "요청한 엔진 설정이 저장된 것을 다시 확인했습니다." : "Verified that the requested engine setting was saved.");
+        } else if (actual === selectedFor(modality)) {
+          setNotice(locale === "ko" ? "변경이 반영되지 않아 이전 엔진 설정을 유지합니다." : "The change was not applied, so the prior engine setting remains active.");
+        } else {
+          setNotice(locale === "ko" ? "요청과 다른 실제 엔진 설정을 다시 읽어 화면에 반영했습니다." : "An actual engine setting different from the request was read back and is now shown.");
+        }
+      } catch {
+        setNotice(locale === "ko"
+          ? "저장 요청 뒤 실제 엔진 설정을 확인하지 못했습니다. 화면은 이전 설정을 유지합니다. 반복 저장하지 말고 이 패널을 다시 열어 확인해 주세요."
+          : "The actual engine setting could not be read after the save request. This screen keeps the prior setting. Do not save again; reopen this panel to check it.");
+      }
+    }
     finally { setBusy(false); }
   };
   const saveKey = async (key: string) => {
@@ -244,8 +274,35 @@ function MultimodalSettingsPanel({ locale, active }: { locale: string; active: b
     const api = ipc();
     if (!api || !value) return;
     setBusy(true);
-    try { await api.env.set(key, value); setDrafts((current) => ({ ...current, [key]: "" })); setStatuses(await api.multimodal.status()); setNotice(locale === "ko" ? "키를 저장했습니다. 값은 다시 표시하지 않습니다." : "Key saved. Its value will not be shown again."); }
-    catch { setNotice(locale === "ko" ? "키를 저장하지 못했습니다." : "Could not save the key."); }
+    const hadKeyBefore = await api.env.has(key).catch(() => null);
+    try {
+      await api.env.set(key, value);
+      setDrafts((current) => ({ ...current, [key]: "" }));
+      setNotice(locale === "ko" ? "키를 저장했습니다. 값은 다시 표시하지 않습니다." : "Key saved. Its value will not be shown again.");
+      try {
+        setStatuses(await api.multimodal.status());
+      } catch {
+        setNotice(locale === "ko"
+          ? "키는 저장했습니다. 연결 상태만 새로고침하지 못했습니다. 키를 다시 저장하지 말고 이 화면을 다시 열어 주세요."
+          : "The key was saved. Only connection status failed to refresh. Do not save the key again; reopen this panel.");
+      }
+    } catch {
+      const hasKeyAfter = await api.env.has(key).catch(() => null);
+      if (hasKeyAfter === false) {
+        setNotice(locale === "ko" ? "키가 저장되지 않은 것을 확인했습니다. 값을 고친 뒤 다시 시도할 수 있습니다." : "Verified that no key was saved. Correct the value and try again.");
+      } else {
+        // The vault intentionally cannot return the plaintext, so an existing
+        // key cannot prove whether this request or an older value won.
+        setDrafts((current) => ({ ...current, [key]: "" }));
+        setNotice(locale === "ko"
+          ? hasKeyAfter === true && hadKeyBefore === false
+            ? "저장 요청 뒤 새 키가 존재하지만 값 자체는 다시 읽을 수 없어 정확한 반영 여부를 확인할 수 없습니다. 다시 저장하지 말고 연결 상태를 확인해 주세요."
+            : "저장 요청 뒤 키 값의 최종 상태를 확인할 수 없습니다. 중복 저장하지 말고 이 패널을 다시 열어 연결 상태를 확인해 주세요."
+          : hasKeyAfter === true && hadKeyBefore === false
+            ? "A new key exists after the save request, but its plaintext cannot be read back, so the exact value is unverified. Do not save again; check connection status."
+            : "The key's final value cannot be verified after the save request. Do not save it again; reopen this panel and check connection status.");
+      }
+    }
     finally { setBusy(false); }
   };
   // 음성(audio) 모달리티는 뺀다 — 프로바이더(openai-audio·elevenlabs-audio)는 정의돼 있지만
@@ -275,17 +332,49 @@ function ConcurrencySettings({ locale, active }: { locale: string; active: boole
   const [info, setInfo] = useState<AgentConcurrencyInfo | null>(null);
   const [draft, setDraft] = useState(1);
   const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   useEffect(() => {
     if (!active) return;
     const api = ipc();
     if (!api) { const preview = { cores: 10, totalMemGB: 32, recommended: 4, current: 4, hardMax: 8, userSet: false }; setInfo(preview); setDraft(preview.current); return; }
-    void api.system.concurrencyInfo().then((next) => { setInfo(next); setDraft(next.current); });
-  }, [active]);
+    void api.system.concurrencyInfo().then((next) => { setInfo(next); setDraft(next.current); setNotice(null); }).catch(() => {
+      setNotice(locale === "ko" ? "저장된 동시 실행 수를 불러오지 못했습니다." : "The saved concurrency could not be loaded.");
+    });
+  }, [active, locale]);
   if (!info) return <div className={styles.emptyState}>{locale === "ko" ? "하드웨어 권장값을 확인하는 중입니다." : "Checking the hardware recommendation."}</div>;
   const save = async () => {
     const api = ipc();
+    if (!api) {
+      setNotice(locale === "ko" ? "Desktop에 연결되지 않아 저장하지 못했습니다." : "Could not save because Desktop is unavailable.");
+      return;
+    }
     setBusy(true);
-    try { const next = api ? await api.system.setConcurrency(draft) : { ...info, current: draft, userSet: true }; setInfo(next); setDraft(next.current); }
+    setNotice(null);
+    try {
+      const next = await api.system.setConcurrency(draft);
+      if (!next || next.current !== draft) throw new Error("concurrency_receipt_mismatch");
+      setInfo(next);
+      setDraft(next.current);
+      setNotice(locale === "ko" ? `${next.current}개 슬롯을 저장했습니다.` : `Saved ${next.current} slots.`);
+    } catch {
+      setDraft(info.current);
+      try {
+        const readback = await api.system.concurrencyInfo();
+        setInfo(readback);
+        setDraft(readback.current);
+        if (readback.current === draft) {
+          setNotice(locale === "ko" ? `${readback.current}개 슬롯이 저장된 것을 다시 확인했습니다.` : `Verified that ${readback.current} slots were saved.`);
+        } else if (readback.current === info.current) {
+          setNotice(locale === "ko" ? "변경이 반영되지 않아 이전 슬롯 수를 유지합니다." : "The change was not applied, so the prior slot count remains active.");
+        } else {
+          setNotice(locale === "ko" ? `요청과 다른 실제 슬롯 수 ${readback.current}개를 다시 읽었습니다.` : `Read back ${readback.current} actual slots, which differs from the request.`);
+        }
+      } catch {
+        setNotice(locale === "ko"
+          ? "저장 요청 뒤 실제 슬롯 수를 확인하지 못했습니다. 화면은 이전 값으로 되돌렸습니다. 반복 저장하지 말고 이 패널을 다시 열어 주세요."
+          : "The actual slot count could not be read after the save request. This screen reverted to its prior value. Do not save again; reopen this panel.");
+      }
+    }
     finally { setBusy(false); }
   };
   return <div className={styles.concurrency}>
@@ -297,7 +386,8 @@ function ConcurrencySettings({ locale, active }: { locale: string; active: boole
     <input type="range" min={1} max={info.hardMax} value={draft} onChange={(event) => setDraft(Number(event.target.value))} aria-label={locale === "ko" ? "동시 실행 슬롯" : "Concurrent slots"} />
     <div className={styles.slotScale}><span>1</span><span>{locale === "ko" ? `권장 ${info.recommended}` : `Recommended ${info.recommended}`}</span><span>{info.hardMax}</span></div>
     <p>{locale === "ko" ? `${info.cores}코어 · ${info.totalMemGB}GB RAM 기준입니다. One도 슬롯 1개를 사용하며 각 직원은 별도 컴퓨터가 아니라 별도 터미널·데몬 세션을 사용합니다.` : `Based on ${info.cores} cores and ${info.totalMemGB}GB RAM. One uses one slot; each worker gets a terminal or daemon session, not a separate computer.`}</p>
-    <div className={styles.actionRow}><button type="button" onClick={() => setDraft(info.recommended)}>{locale === "ko" ? "권장값" : "Recommended"}</button><button type="button" className={styles.primary} disabled={busy || draft === info.current} onClick={() => void save()}>{locale === "ko" ? "적용" : "Apply"}</button></div>
+    {notice && <p className={styles.notice} role="status">{notice}</p>}
+    <div className={styles.actionRow}><button type="button" disabled={busy} onClick={() => setDraft(info.recommended)}>{locale === "ko" ? "권장값" : "Recommended"}</button><button type="button" className={styles.primary} disabled={busy || draft === info.current} onClick={() => void save()}>{locale === "ko" ? "적용" : "Apply"}</button></div>
   </div>;
 }
 

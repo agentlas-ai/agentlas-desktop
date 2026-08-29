@@ -280,6 +280,8 @@ import { getBillingCredits, transferEarnings } from "./billing";
 import {
   addHubPromptBookmark,
   getHubPrompt,
+  getHubPromptTasteStatus,
+  getHubPromptUnlockStatus,
   listHubPromptBookmarks,
   listHubPrompts,
   listHubPromptTastes,
@@ -297,7 +299,7 @@ import {
   failCloseActiveHubBookmarks,
   syncHubBookmarks,
 } from "./hub-bookmark-sync";
-import { claimQuest, listQuests } from "./quests";
+import { claimQuest, getQuestClaimStatus, listQuests } from "./quests";
 import { listMemoryEntriesForAgentUi } from "./memory/store";
 import { importMemoryPreview, importMemoryApply } from "./memory/import";
 import {
@@ -380,6 +382,7 @@ import {
   archiveChat,
   clearChatContext,
   createChat,
+  createOrReplayPromptChat,
   getChat,
   getOrCreateOneMemberChat,
   getChatWorkingFolder,
@@ -787,8 +790,10 @@ import {
 import {
   announceToolDenied,
   capabilityClassFor,
+  getToolApprovalResolution,
   listPendingToolApprovals,
   onToolApprovalRequested,
+  onToolApprovalResolved,
   requestToolApproval,
   resolveToolApproval,
   setCapabilityGrantPersister,
@@ -2505,8 +2510,26 @@ export function registerIpcHandlers(): void {
   // ── 프롬프트 저장소 — 웹 /api/prompts 프록시(쿠키+Origin, billing 패턴) ──────
   ipcMain.handle("promptHub:list", (_e, params?: { q?: string; category?: string }) => listHubPrompts(params));
   ipcMain.handle("promptHub:get", (_e, slug: string) => getHubPrompt(slug));
-  ipcMain.handle("promptHub:unlock", (_e, slug: string) => unlockHubPrompt(slug));
-  ipcMain.handle("promptHub:taste", (_e, slug: string) => tasteHubPrompt(slug));
+  ipcMain.handle(
+    "promptHub:unlock",
+    (_e, input: { slug: string; unlockIntentId: string }) => unlockHubPrompt(input),
+  );
+  ipcMain.handle(
+    "promptHub:unlockStatus",
+    (_e, input: { slug: string; unlockIntentId: string }) => getHubPromptUnlockStatus(input),
+  );
+  ipcMain.handle(
+    "promptHub:taste",
+    (_e, input: { slug: string; tasteIntentId: string }) => tasteHubPrompt(input),
+  );
+  ipcMain.handle(
+    "promptHub:tasteStatus",
+    (_e, input: { slug: string; tasteIntentId: string }) => getHubPromptTasteStatus(input),
+  );
+  ipcMain.handle(
+    "promptHub:startChat",
+    (_e, input: { intentId: string; body: string; seedOnly?: boolean }) => createOrReplayPromptChat(input),
+  );
   ipcMain.handle("promptHub:tastes", () => listHubPromptTastes());
   ipcMain.handle("promptHub:bookmarks", () => listHubPromptBookmarks());
   ipcMain.handle("promptHub:bookmarkAdd", (_e, slug: string) => addHubPromptBookmark(slug));
@@ -2514,7 +2537,8 @@ export function registerIpcHandlers(): void {
 
   // ── 퀘스트 — 대시보드 신규 유저 튜토리얼(온보딩 대체) ──────────────────────
   ipcMain.handle("quests:list", () => listQuests());
-  ipcMain.handle("quests:claim", (_e, questId: string) => claimQuest(questId));
+  ipcMain.handle("quests:claim", (_e, input) => claimQuest(input));
+  ipcMain.handle("quests:claimStatus", (_e, input) => getQuestClaimStatus(input));
 
   // ── 에이전트 전역 durable 메모리 — 프로젝트 귀속 콘텐츠는 이 표면에서 제외 ──
   ipcMain.handle("agentMemory:entries", (_e, agentId: string, limit?: number) =>
@@ -3550,8 +3574,20 @@ export function registerIpcHandlers(): void {
     return listAlwaysApprovedChatIds();
   });
   ipcMain.handle("runtime:listToolApprovals", () => listPendingToolApprovals());
-  ipcMain.handle("runtime:resolveToolApproval", (_e, id: string, decision: ToolApprovalDecision) =>
-    resolveToolApproval(id, decision),
+  ipcMain.handle("runtime:getToolApprovalResolution", (_e, id: string) =>
+    getToolApprovalResolution(typeof id === "string" ? id.slice(0, 256) : ""),
+  );
+  ipcMain.handle("runtime:resolveToolApproval", (
+    _e,
+    id: string,
+    decision: ToolApprovalDecision,
+    actionId: string,
+  ) =>
+    resolveToolApproval(
+      typeof id === "string" ? id.slice(0, 256) : "",
+      decision,
+      typeof actionId === "string" ? actionId.slice(0, 512) : "",
+    ),
   );
   /*
    * ACP는 전수 조사에서 **유일하게 런타임이 실행 전에 묻는** 경로다
@@ -3654,6 +3690,20 @@ export function registerIpcHandlers(): void {
         window.webContents.send("runtime:toolApprovalRequest", request);
       } catch {
         // 화면 하나가 사라져도 실행 경계는 그대로다.
+      }
+    }
+  });
+  // A phone or another renderer can answer the same live card. Broadcast the
+  // authoritative ledger receipt so stale cards disappear only after Main has
+  // actually resolved (or expired) the runtime request.
+  onToolApprovalResolved((id) => {
+    const receipt = getToolApprovalResolution(id);
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (window.isDestroyed() || window.webContents.isDestroyed()) continue;
+      try {
+        window.webContents.send("runtime:toolApprovalResolution", receipt);
+      } catch {
+        // One dead renderer cannot affect the runtime decision or other views.
       }
     }
   });
@@ -4578,7 +4628,15 @@ export function registerIpcHandlers(): void {
   );
   ipcMain.handle(
     "automations:reconcileTriggerEvent",
-    (_e, input: AutomationTriggerEventReconcileInput) => reconcileParkedTriggerEvent(input),
+    (_e, input: AutomationTriggerEventReconcileInput) => {
+      reconcileParkedTriggerEvent(input);
+      return {
+        eventId: input.eventId,
+        automationId: input.automationId,
+        resolution: input.resolution,
+        status: input.resolution === "completed" ? "delivered" as const : "pending" as const,
+      };
+    },
   );
   ipcMain.handle("automations:getGraphReconciliation", (_e, automationId: string) =>
     getAutomationGraphReconciliation(automationId),
@@ -4617,7 +4675,13 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("automations:listGraphVersions", (_e, id: string) => listGraphVersions(id));
   ipcMain.handle("automations:restoreGraphVersion", (_e, id: string, versionId: string) => {
     try {
-      return { ok: true as const, automation: restoreGraphVersion(id, versionId) };
+      const automation = restoreGraphVersion(id, versionId);
+      return {
+        ok: true as const,
+        automationId: automation.id,
+        versionId,
+        automation,
+      };
     } catch (error) {
       return { ok: false as const, reason: error instanceof Error ? error.message : "restore_failed" };
     }
@@ -5082,9 +5146,9 @@ export function registerIpcHandlers(): void {
    */
   ipcMain.handle("automations:forgetFailedRun", (_e, id: unknown) => {
     const automationId = String(id ?? "").trim();
-    if (!automationId) return { ok: false as const, forgot: false, reason: "no_automation" };
+    if (!automationId) return { automationId, ok: false as const, forgot: false, reason: "no_automation" };
     const automation = getAutomation(automationId);
-    if (!automation?.graph) return { ok: false as const, forgot: false, reason: "no_graph" };
+    if (!automation?.graph) return { automationId, ok: false as const, forgot: false, reason: "no_graph" };
     const { forgetStaleGraphCheckpoint } = require("./store/graph-reconciliation") as
       typeof import("./store/graph-reconciliation");
     const { graphExecutionDigest } = require("../shared/graph-execution-digest") as
@@ -5093,7 +5157,7 @@ export function registerIpcHandlers(): void {
       automationId,
       graphExecutionDigest(automation, automation.graph),
     );
-    return { ok: true as const, ...result };
+    return { automationId, ok: true as const, ...result };
   });
 
   ipcMain.handle("automations:createFromBlueprint", (_e, payload: unknown) => {
@@ -5154,8 +5218,8 @@ export function registerIpcHandlers(): void {
     if (!decision.ok) return decision;
     // 여기 도달했다는 것은 사용자가 diff를 보고 눌렀다는 뜻이다. 검증은 한 번 더 한다 —
     // 제안과 적용 사이에 그래프가 바뀌었으면 위 평가에서 이미 걸린다.
-    updateAutomationGraph(id, decision.next, { note: "말로 고치기" });
-    return { ok: true as const };
+    const automation = updateAutomationGraph(id, decision.next, { note: "말로 고치기" });
+    return { ok: true as const, automationId: automation.id, automation };
   });
   ipcMain.handle("automations:runNow", async (
     _e,
@@ -5196,6 +5260,9 @@ export function registerIpcHandlers(): void {
       const error = new Error("automation_run_not_accepted") as Error & { code?: string };
       error.code = "automation_run_not_accepted";
       throw error;
+    }
+    if (result.automationId !== id || result.runId === undefined) {
+      throw new Error("automation_run_receipt_identity_missing");
     }
     return result;
   });
@@ -5355,7 +5422,7 @@ export function registerIpcHandlers(): void {
   });
   ipcMain.handle("automations:applyFix", async (_e, id: string, actionId: string) => {
     const { applyAutomationFix } = await import("./automation-fix");
-    return applyAutomationFix(id, actionId);
+    return { ...(await applyAutomationFix(id, actionId)), automationId: id, actionId };
   });
   ipcMain.handle("automations:getSession", (_e, id: string) => {
     const automation = getAutomation(id);
@@ -5957,7 +6024,10 @@ export function registerIpcHandlers(): void {
     return invocationService.start(request);
   });
   ipcMain.handle("invoke:steer", (_event, req: McpInvocationRequest) => invocationService.steer(rendererInvocationRequest(req)));
-  ipcMain.handle("invoke:cancel", (_event, runId: string) => invocationService.cancel(runId));
+  ipcMain.handle("invoke:cancel", (_event, runId: string) => ({
+    runId,
+    status: invocationService.cancel(runId),
+  }));
   ipcMain.handle(
     "invoke:unsteer",
     (_event, req: { chatId: string; position: number; text: string }) =>
@@ -5999,7 +6069,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("hephaestus:status", (_e, locale?: "ko" | "en") => hephaestusAvailable(locale));
   ipcMain.handle("hephaestus:recover", async (_e, input?: { locale?: "ko" | "en"; actionId?: string }) => {
     const { recoverHephaestusRuntime } = await import("./one/hephaestus-recovery");
-    return recoverHephaestusRuntime(input);
+    return { ...(await recoverHephaestusRuntime(input)), actionId: input?.actionId ?? null };
   });
   ipcMain.handle("hephaestus:coreAuthStatus", () => hepAuthStatus());
   // 로그인은 브라우저를 띄우고 최대 3분 기다린다. 두 번 겹치면 Core 의 콜백 서버가

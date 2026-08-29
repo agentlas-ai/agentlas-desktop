@@ -9,8 +9,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { getSnapshot as getBuildSnapshot } from "@/lib/build-session";
+import {
+  clearQuestClaimIntent,
+  exactCompletedQuestClaim,
+  getOrCreateQuestClaimIntent,
+} from "@/lib/quest-claim-actions";
 import { loadViewData, readViewData } from "@/lib/view-data-cache";
-import type { QuestInfo } from "@shared/types";
+import type { QuestClaimResult, QuestInfo } from "@shared/types";
 
 // client-attested 퀘스트 로컬 증거 — questId → true(증거 확보) / false·부재(불명 → confirm 후 클레임).
 type EvidenceMap = Partial<Record<string, boolean>>;
@@ -151,9 +156,48 @@ export function QuestBoard() {
       setClaimingId(q.id);
       setNotice(null);
       try {
-        const res = await api.quests.claim(q.id);
-        if (res.ok) {
-          const credits = res.rewardCredits ?? q.rewardCredits;
+        const session = await api.auth.getSession();
+        const workspaceId = session.workspaceId?.trim() ?? "";
+        if (!session.signedIn || !workspaceId) {
+          setAuthenticated(false);
+          setNotice({ id: q.id, text: ko ? "로그인 후 보상을 받을 수 있어요." : "Sign in to claim rewards." });
+          return;
+        }
+        const claimIntentId = getOrCreateQuestClaimIntent(workspaceId, q.id);
+        if (!claimIntentId) {
+          setNotice({
+            id: q.id,
+            text: ko
+              ? "안전한 수령 요청을 저장하지 못해 보상 요청을 시작하지 않았습니다. 앱 저장 공간을 확인해 주세요."
+              : "The claim did not start because its safe request could not be saved. Check app storage.",
+          });
+          return;
+        }
+        const input = { questId: q.id, claimIntentId };
+        let res: QuestClaimResult;
+        try {
+          res = await api.quests.claim(input);
+        } catch {
+          try {
+            res = await api.quests.claimStatus(input);
+          } catch {
+            res = { ...input, ok: false, code: "outcome_unknown", outcomeUnknown: true };
+          }
+        }
+        const responseIsBound = exactCompletedQuestClaim(res, q.id, claimIntentId)
+          || (res.ok === false
+            && (res.questId === undefined || res.questId === q.id)
+            && (res.claimIntentId === undefined || res.claimIntentId === claimIntentId));
+        if (!responseIsBound) {
+          try {
+            res = await api.quests.claimStatus(input);
+          } catch {
+            res = { ...input, ok: false, code: "outcome_unknown", outcomeUnknown: true };
+          }
+        }
+        if (exactCompletedQuestClaim(res, q.id, claimIntentId)) {
+          clearQuestClaimIntent(workspaceId, q.id, claimIntentId);
+          const credits = res.rewardCredits;
           showCelebrate(ko ? `+${credits} 크레딧 지급 완료!` : `+${credits} credits added!`);
           // 크레딧 위젯 갱신 힌트(리스너가 생기면 즉시 반영; 현재는 60초 폴링이 따라잡는다).
           try {
@@ -162,10 +206,28 @@ export function QuestBoard() {
             // ignore
           }
           await load(true);
-        } else if (res.code === "already_claimed") {
+        } else if (res.code === "already_claimed"
+          && res.status === "already_claimed"
+          && res.questId === q.id
+          && res.claimIntentId === claimIntentId) {
+          clearQuestClaimIntent(workspaceId, q.id, claimIntentId);
           setQuests((prev) => prev.map((it) => (it.id === q.id ? { ...it, claimed: true } : it)));
           setNotice({ id: q.id, text: ko ? "이미 수령한 퀘스트예요." : "Already claimed." });
           await load(true);
+        } else if (res.outcomeUnknown || res.code === "outcome_unknown") {
+          setNotice({
+            id: q.id,
+            text: ko
+              ? "보상 처리 결과를 아직 확인하지 못했습니다. 같은 수령 버튼으로 저장된 요청을 다시 확인해 주세요. 새 보상 요청은 만들지 않습니다."
+              : "The claim outcome is not confirmed yet. Use the same button to check the saved request; no new claim will be created.",
+          });
+        } else if (res.status === "ready" && res.code === "not_started") {
+          setNotice({
+            id: q.id,
+            text: ko
+              ? "보상 요청이 처리되지 않았습니다. 같은 수령 버튼으로 저장된 요청을 안전하게 다시 보낼 수 있습니다."
+              : "The claim was not processed. Use the same button to safely retry the saved request.",
+          });
         } else if (res.code === "not_completed") {
           setNotice({
             id: q.id,
@@ -178,7 +240,12 @@ export function QuestBoard() {
           setNotice({ id: q.id, text: ko ? "수령에 실패했습니다. 잠시 후 다시 시도해 주세요." : "Claim failed. Try again shortly." });
         }
       } catch {
-        setNotice({ id: q.id, text: ko ? "수령에 실패했습니다. 잠시 후 다시 시도해 주세요." : "Claim failed. Try again shortly." });
+        setNotice({
+          id: q.id,
+          text: ko
+            ? "보상 요청을 시작하지 못했습니다. 로그인과 연결 상태를 확인해 주세요."
+            : "The claim did not start. Check your sign-in and connection.",
+        });
       } finally {
         setClaimingId(null);
       }

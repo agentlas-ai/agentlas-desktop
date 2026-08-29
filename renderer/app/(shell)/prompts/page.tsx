@@ -11,6 +11,14 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
+import {
+  clearPromptTasteIntent,
+  exactPromptUnlockBody,
+  getOrCreatePromptUnlockIntent,
+  getOrCreatePromptTasteIntent,
+  storedPromptUnlockIntent,
+  storedPromptTasteIntent,
+} from "@/lib/prompt-actions";
 import type { HubPromptSummary, HubPromptViewer } from "@shared/types";
 import { UpgradeCta, openPricing } from "@/components/UpgradeCta";
 import { PromptInputsConfirmDialog, startChatWithPrompt } from "@/components/PromptPickerDialog";
@@ -43,10 +51,20 @@ export default function PromptStorePage() {
   const [allCategories, setAllCategories] = useState<string[]>([]);
   const [tasteCount, setTasteCount] = useState(0);
   const [active, setActive] = useState<HubPromptSummary | null>(null);
-  const [notice, setNotice] = useState<{ tone: "ok" | "error"; text: string; action?: "pricing" | "signin" } | null>(null);
-  const [pendingStart, setPendingStart] = useState<{ body: string; inputs: string; failed: boolean } | null>(null);
+  const [notice, setNotice] = useState<{
+    tone: "ok" | "error";
+    text: string;
+    action?: "pricing" | "signin" | "refresh-bookmarks";
+  } | null>(null);
+  const [pendingStart, setPendingStart] = useState<{
+    body: string;
+    inputs: string;
+    slug: string;
+    failed: boolean;
+  } | null>(null);
   const [pendingStartBusy, setPendingStartBusy] = useState(false);
   const [bookmarkBusy, setBookmarkBusy] = useState<string | null>(null);
+  const [bookmarkOutcomeUnknown, setBookmarkOutcomeUnknown] = useState<Set<string>>(new Set());
   const seqRef = useRef(0);
 
   const refresh = useCallback(
@@ -58,21 +76,26 @@ export default function PromptStorePage() {
         return;
       }
       const seq = ++seqRef.current;
-      const res = await api.promptHub.list(params);
-      if (seqRef.current !== seq) return;
-      if (!res.ok) {
+      try {
+        const res = await api.promptHub.list(params);
+        if (seqRef.current !== seq) return;
+        if (!res.ok) {
+          setLoadState("error");
+          return;
+        }
+        setPrompts(res.prompts);
+        setViewer(res.viewer);
+        setLoadState("ready");
+        // 카테고리 탭 — 카탈로그에서 본 카테고리의 누적 합집합(필터 중에도 탭 유지).
+        setAllCategories((prev) => {
+          const next = new Set(prev);
+          for (const p of res.prompts) if (p.category?.trim()) next.add(p.category.trim());
+          return [...next].sort();
+        });
+      } catch {
+        if (seqRef.current !== seq) return;
         setLoadState("error");
-        return;
       }
-      setPrompts(res.prompts);
-      setViewer(res.viewer);
-      setLoadState("ready");
-      // 카테고리 탭 — 카탈로그에서 본 카테고리의 누적 합집합(필터 중에도 탭 유지).
-      setAllCategories((prev) => {
-        const next = new Set(prev);
-        for (const p of res.prompts) if (p.category?.trim()) next.add(p.category.trim());
-        return [...next].sort();
-      });
     },
     [],
   );
@@ -105,16 +128,30 @@ export default function PromptStorePage() {
 
   async function ensureSignedIn(): Promise<boolean> {
     const api = ipc();
-    if (!api) return false;
-    const current = await api.auth.getSession();
-    if (!current.signedIn) {
-      const next = await api.auth.signInWithGoogle();
-      if (!next.signedIn) return false;
+    if (!api) {
+      setNotice({ tone: "error", text: ko ? "로그인 연결을 사용할 수 없습니다." : "Sign-in is unavailable." });
+      return false;
     }
-    // 로그인 반영된 unlocked/tasted/bookmarked/viewer 재로드.
-    await refresh({ q: q.trim() || undefined, category: category === "all" ? undefined : category });
-    void refreshTastes();
-    return true;
+    try {
+      const current = await api.auth.getSession();
+      if (!current.signedIn) {
+        const next = await api.auth.signInWithGoogle();
+        if (!next.signedIn) {
+          setNotice({ tone: "error", text: ko ? "로그인이 완료되지 않았습니다." : "Sign-in was not completed." });
+          return false;
+        }
+      }
+      // 로그인 반영된 unlocked/tasted/bookmarked/viewer 재로드.
+      await refresh({ q: q.trim() || undefined, category: category === "all" ? undefined : category });
+      void refreshTastes();
+      return true;
+    } catch {
+      setNotice({
+        tone: "error",
+        text: ko ? "로그인 결과를 확인하지 못했습니다. 연결을 확인해 주세요." : "Could not verify sign-in. Check your connection.",
+      });
+      return false;
+    }
   }
 
   /** 목록과 상세 모달 양쪽의 프롬프트 상태 플래그를 패치. */
@@ -123,10 +160,45 @@ export default function PromptStorePage() {
     setActive((prev) => (prev && prev.slug === slug ? { ...prev, ...patch } : prev));
   }
 
+  async function refreshBookmarks() {
+    const api = ipc();
+    if (!api?.promptHub || bookmarkBusy) return;
+    setBookmarkBusy("__refresh__");
+    try {
+      const projected = await api.promptHub.bookmarks();
+      if (!projected.ok) throw new Error(projected.code ?? "bookmark_read_failed");
+      const exact = new Set(projected.slugs);
+      setPrompts((prev) => prev.map((row) => ({ ...row, bookmarked: exact.has(row.slug) })));
+      setActive((prev) => prev ? { ...prev, bookmarked: exact.has(prev.slug) } : prev);
+      setBookmarkOutcomeUnknown(new Set());
+      setNotice({ tone: "ok", text: ko ? "저장 상태를 다시 확인했습니다." : "Saved state was refreshed." });
+    } catch {
+      setNotice({
+        tone: "error",
+        action: "refresh-bookmarks",
+        text: ko
+          ? "저장 결과를 아직 확인하지 못했습니다. 같은 버튼을 반복하지 말고 연결 후 다시 확인하세요."
+          : "The saved outcome is still unknown. Do not repeat the mutation; reconnect and refresh again.",
+      });
+    } finally {
+      setBookmarkBusy(null);
+    }
+  }
+
   // 북마크 토글 — 유료만. 무료는 402 subscription_required → 구독 CTA.
   async function toggleBookmark(p: HubPromptSummary) {
     const api = ipc();
     if (!api?.promptHub || bookmarkBusy) return;
+    if (bookmarkOutcomeUnknown.has(p.slug)) {
+      setNotice({
+        tone: "error",
+        action: "refresh-bookmarks",
+        text: ko
+          ? "이 프롬프트의 저장 결과가 아직 확인되지 않았습니다. 반복 적용 전에 상태를 다시 확인하세요."
+          : "This prompt's saved outcome is unknown. Refresh its state before submitting again.",
+      });
+      return;
+    }
     if (!paid) {
       setNotice({
         tone: "error",
@@ -142,9 +214,34 @@ export default function PromptStorePage() {
       const res = p.bookmarked
         ? await api.promptHub.bookmarkRemove(p.slug)
         : await api.promptHub.bookmarkAdd(p.slug);
-      if (res.ok) {
-        patchPrompt(p.slug, { bookmarked: res.bookmarked ?? !p.bookmarked });
+      const requested = !p.bookmarked;
+      if (res.ok
+        && res.slug === p.slug
+        && res.verified === true
+        && res.bookmarked === requested) {
+        patchPrompt(p.slug, { bookmarked: requested });
         setNotice(null);
+        return;
+      }
+      if (res.slug === p.slug && res.verified === true && typeof res.bookmarked === "boolean") {
+        patchPrompt(p.slug, { bookmarked: res.bookmarked });
+        setNotice({
+          tone: "error",
+          text: ko
+            ? `저장 요청이 적용되지 않았습니다. 현재 상태는 ${res.bookmarked ? "저장됨" : "저장 안 됨"}입니다.`
+            : `The bookmark request was not applied. The current state is ${res.bookmarked ? "saved" : "not saved"}.`,
+        });
+        return;
+      }
+      if (res.outcomeUnknown === true || res.code === "outcome_unknown") {
+        setBookmarkOutcomeUnknown((prev) => new Set(prev).add(p.slug));
+        setNotice({
+          tone: "error",
+          action: "refresh-bookmarks",
+          text: ko
+            ? "저장 요청은 전달됐지만 최종 상태를 확인하지 못했습니다. 반복 적용하지 말고 상태를 다시 확인하세요."
+            : "The save request was sent, but its final state is unknown. Do not repeat it; refresh the saved state.",
+        });
         return;
       }
       if (res.code === "subscription_required") {
@@ -163,19 +260,29 @@ export default function PromptStorePage() {
         });
         return;
       }
-      setNotice({ tone: "error", text: ko ? "저장에 실패했습니다." : "Could not save the prompt." });
+      setNotice({ tone: "error", text: ko ? "저장 요청이 거절되어 기존 상태를 유지했습니다." : "The save request was refused; the previous state is unchanged." });
+    } catch {
+      setBookmarkOutcomeUnknown((prev) => new Set(prev).add(p.slug));
+      setNotice({
+        tone: "error",
+        action: "refresh-bookmarks",
+        text: ko
+          ? "저장 결과를 확인하지 못했습니다. 같은 버튼을 반복하지 말고 상태를 다시 확인하세요."
+          : "The saved outcome is unknown. Do not repeat the action; refresh the saved state.",
+      });
     } finally {
       setBookmarkBusy(null);
     }
   }
 
   // 써보기 — body 확보 후: 입력물 안내(있으면) → 새 채팅 시작(?prompt= 시드).
-  async function handleStart(body: string, inputs: string): Promise<boolean> {
+  async function handleStart(body: string, inputs: string, slug: string): Promise<boolean> {
     if (inputs.trim()) {
-      setPendingStart({ body, inputs: inputs.trim(), failed: false });
+      setPendingStart({ body, inputs: inputs.trim(), slug, failed: false });
       return true;
     }
-    return startChatWithPrompt(body);
+    const result = await startChatWithPrompt(body, { promptSlug: slug });
+    return result.ok;
   }
 
   async function confirmPendingStart() {
@@ -187,12 +294,17 @@ export default function PromptStorePage() {
       // Keep the exact one-time prompt body and required-input note mounted
       // until chat creation succeeds. A failed create can therefore retry
       // without re-unlocking or consuming another taste.
-      const ok = await startChatWithPrompt(request.body, { seedOnly: true });
-      if (ok) {
+      const result = await startChatWithPrompt(request.body, {
+        promptSlug: request.slug,
+        seedOnly: true,
+      });
+      if (result.ok) {
         setPendingStart(null);
       } else {
         setPendingStart((current) =>
-          current && current.body === request.body ? { ...current, failed: true } : current,
+          current && current.body === request.body
+            ? { ...current, failed: true }
+            : current,
         );
       }
     } finally {
@@ -315,6 +427,18 @@ export default function PromptStorePage() {
                         {t("account.sign_in")}
                       </button>
                     )}
+                    {notice.action === "refresh-bookmarks" && (
+                      <button
+                        type="button"
+                        className="btn sm"
+                        disabled={bookmarkBusy != null}
+                        onClick={() => void refreshBookmarks()}
+                      >
+                        {bookmarkBusy === "__refresh__"
+                          ? ko ? "확인 중…" : "Refreshing…"
+                          : ko ? "저장 상태 확인" : "Refresh saved state"}
+                      </button>
+                    )}
                   </div>
                 )}
 
@@ -333,6 +457,17 @@ export default function PromptStorePage() {
                       <div style={{ fontSize: 13, color: "var(--rd-ink-3)", lineHeight: 1.55, marginTop: 6 }}>
                         {ko ? "네트워크 상태를 확인한 뒤 다시 시도하세요." : "Check your network and try again."}
                       </div>
+                      <button
+                        type="button"
+                        className="btn sm"
+                        style={{ marginTop: 10 }}
+                        onClick={() => {
+                          setLoadState("loading");
+                          void refresh({ q: q.trim() || undefined, category: category === "all" ? undefined : category });
+                        }}
+                      >
+                        {ko ? "다시 불러오기" : "Retry"}
+                      </button>
                     </div>
                   ) : visible.length > 0 ? (
                     <div className="market-card-grid">
@@ -343,6 +478,7 @@ export default function PromptStorePage() {
                           ko={ko}
                           paid={paid}
                           bookmarkBusy={bookmarkBusy === p.slug}
+                          bookmarkBlocked={bookmarkOutcomeUnknown.has(p.slug)}
                           onOpen={() => setActive(p)}
                           onToggleBookmark={() => void toggleBookmark(p)}
                         />
@@ -436,6 +572,7 @@ function PromptCard({
   ko,
   paid,
   bookmarkBusy,
+  bookmarkBlocked,
   onOpen,
   onToggleBookmark,
 }: {
@@ -443,6 +580,7 @@ function PromptCard({
   ko: boolean;
   paid: boolean;
   bookmarkBusy: boolean;
+  bookmarkBlocked: boolean;
   onOpen: () => void;
   onToggleBookmark: () => void;
 }) {
@@ -485,7 +623,7 @@ function PromptCard({
           type="button"
           className="btn sm"
           onClick={onToggleBookmark}
-          disabled={bookmarkBusy}
+          disabled={bookmarkBusy || bookmarkBlocked}
           title={
             paid
               ? p.bookmarked
@@ -527,14 +665,26 @@ function PromptDetailDialog({
   onPatched: (slug: string, patch: Partial<HubPromptSummary>) => void;
   onTasted: () => void;
   onSignIn: () => Promise<boolean>;
-  onStart: (body: string, inputs: string) => Promise<boolean>;
+  onStart: (body: string, inputs: string, slug: string) => Promise<boolean>;
 }) {
   const [detail, setDetail] = useState<PromptDetail | null>(null);
   const [body, setBody] = useState<string | null>(null);
   const [tips, setTips] = useState<string | null>(null);
   const [busy, setBusy] = useState<"unlock" | "taste" | null>(null);
-  const [gate, setGate] = useState<"subscription" | "tasted-gone" | "unauthenticated" | "error" | null>(null);
+  const [gate, setGate] = useState<
+    | "subscription"
+    | "tasted-gone"
+    | "taste-pending"
+    | "unlock-pending"
+    | "intent-error"
+    | "unlock-intent-error"
+    | "unauthenticated"
+    | "error"
+    | null
+  >(null);
   const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState(false);
+  const [detailLoadError, setDetailLoadError] = useState(false);
   const [startBusy, setStartBusy] = useState(false);
   const [startFailed, setStartFailed] = useState(false);
 
@@ -547,22 +697,119 @@ function PromptDetailDialog({
   // 상세 GET — 소장/소유 시 body 포함(무료 맛보기 body는 절대 여기 오지 않는다).
   useEffect(() => {
     const api = ipc();
-    if (!api?.promptHub) return;
+    if (!api?.promptHub) {
+      setDetailLoadError(true);
+      return;
+    }
     let cancelled = false;
-    void api.promptHub.get(prompt.slug).then((res) => {
-      if (cancelled || !res.ok || !res.prompt) return;
-      setDetail(res.prompt);
-      if (res.prompt.body) {
-        setBody(res.prompt.body);
-        setTips(pickText(ko, res.prompt.tipsKo, res.prompt.tipsEn) || null);
-      }
-    });
+    setDetailLoadError(false);
+    void api.promptHub.get(prompt.slug)
+      .then((res) => {
+        if (cancelled) return;
+        if (!res.ok || !res.prompt) {
+          setDetailLoadError(true);
+          return;
+        }
+        setDetail(res.prompt);
+        if (res.prompt.body) {
+          setBody(res.prompt.body);
+          setTips(pickText(ko, res.prompt.tipsKo, res.prompt.tipsEn) || null);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setDetailLoadError(true);
+      });
     return () => {
       cancelled = true;
     };
     // ko 변경은 tips 표시 언어만 바꾸므로 재조회하지 않는다.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prompt.slug]);
+
+  function applyTasteReceipt(res: Awaited<ReturnType<NonNullable<ReturnType<typeof ipc>>["promptHub"]["taste"]>>) {
+    if (res.ok !== true
+      || res.receiptVersion !== 1
+      || res.status !== "completed"
+      || res.slug !== prompt.slug
+      || typeof res.tasteIntentId !== "string"
+      || res.tasted !== true
+      || typeof res.replayed !== "boolean"
+      || typeof res.body !== "string"
+      || typeof res.completedAt !== "string"
+      || !Number.isFinite(Date.parse(res.completedAt))) return false;
+    setBody(res.body);
+    setTips(pickText(ko, res.tipsKo, res.tipsEn) || null);
+    onPatched(prompt.slug, { tasted: true });
+    onTasted();
+    setGate(null);
+    return true;
+  }
+
+  function applyUnlockReceipt(
+    res: Awaited<ReturnType<NonNullable<ReturnType<typeof ipc>>["promptHub"]["unlock"]>>,
+    intent: string,
+  ) {
+    const exactBody = exactPromptUnlockBody(res, prompt.slug, intent);
+    if (exactBody == null) return false;
+    setBody(exactBody);
+    setTips(pickText(ko, res.tipsKo, res.tipsEn) || null);
+    onPatched(prompt.slug, { unlocked: true });
+    setGate(null);
+    return true;
+  }
+
+  // Paid open uses the same durable intent after renderer/app restart. This
+  // recovers the exact immutable body, not merely a generic "already owned" flag.
+  useEffect(() => {
+    if (body || !prompt.unlocked) return;
+    const intent = storedPromptUnlockIntent(prompt.slug);
+    const api = ipc();
+    if (!intent || !api?.promptHub) return;
+    let cancelled = false;
+    void api.promptHub.unlockStatus({ slug: prompt.slug, unlockIntentId: intent })
+      .then((res) => {
+        if (cancelled) return;
+        if (applyUnlockReceipt(res, intent)) return;
+        setGate(res.outcomeUnknown === true ? "unlock-pending" : "error");
+      })
+      .catch(() => {
+        if (!cancelled) setGate("unlock-pending");
+      });
+    return () => { cancelled = true; };
+    // `applyUnlockReceipt` deliberately reads current locale callbacks.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [body, prompt.slug, prompt.unlocked]);
+
+  // A renderer/app restart after the one-time mutation recovers the exact
+  // body from the durable Web receipt instead of degrading to "already used".
+  useEffect(() => {
+    if (body || !prompt.tasted) return;
+    const intent = storedPromptTasteIntent(prompt.slug);
+    const api = ipc();
+    if (!intent || !api?.promptHub) return;
+    let cancelled = false;
+    void api.promptHub.tasteStatus({ slug: prompt.slug, tasteIntentId: intent })
+      .then((res) => {
+        if (cancelled) return;
+        if (applyTasteReceipt(res)) return;
+        if (res.slug !== prompt.slug || res.tasteIntentId !== intent) {
+          setGate("taste-pending");
+          return;
+        }
+        if (res.status === "consumed") {
+          clearPromptTasteIntent(prompt.slug, intent);
+          setGate("tasted-gone");
+        } else if (res.status === "processing") {
+          setGate("taste-pending");
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setGate("taste-pending");
+      });
+    return () => { cancelled = true; };
+    // `applyTasteReceipt` deliberately reads current locale callbacks.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [body, prompt.slug, prompt.tasted]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -576,16 +823,16 @@ function PromptDetailDialog({
   async function doUnlock() {
     const api = ipc();
     if (!api?.promptHub || busy) return;
+    const intent = getOrCreatePromptUnlockIntent(prompt.slug);
+    if (!intent) {
+      setGate("unlock-intent-error");
+      return;
+    }
     setBusy("unlock");
     setGate(null);
     try {
-      const res = await api.promptHub.unlock(prompt.slug);
-      if (res.ok && res.body) {
-        setBody(res.body);
-        setTips(pickText(ko, res.tipsKo, res.tipsEn) || null);
-        onPatched(prompt.slug, { unlocked: true });
-        return;
-      }
+      const res = await api.promptHub.unlock({ slug: prompt.slug, unlockIntentId: intent });
+      if (applyUnlockReceipt(res, intent)) return;
       if (res.code === "subscription_required") {
         setGate("subscription");
         return;
@@ -594,9 +841,13 @@ function PromptDetailDialog({
         setGate("unauthenticated");
         return;
       }
+      if (res.outcomeUnknown === true) {
+        setGate("unlock-pending");
+        return;
+      }
       setGate("error");
     } catch {
-      setGate("error");
+      setGate("unlock-pending");
     } finally {
       setBusy(null);
     }
@@ -606,18 +857,18 @@ function PromptDetailDialog({
   async function doTaste() {
     const api = ipc();
     if (!api?.promptHub || busy) return;
+    const intent = getOrCreatePromptTasteIntent(prompt.slug);
+    if (!intent) {
+      setGate("intent-error");
+      return;
+    }
     setBusy("taste");
     setGate(null);
     try {
-      const res = await api.promptHub.taste(prompt.slug);
-      if (res.ok && res.body) {
-        setBody(res.body);
-        setTips(pickText(ko, res.tipsKo, res.tipsEn) || null);
-        onPatched(prompt.slug, { tasted: true });
-        onTasted();
-        return;
-      }
+      const res = await api.promptHub.taste({ slug: prompt.slug, tasteIntentId: intent });
+      if (applyTasteReceipt(res)) return;
       if (res.code === "already_tasted") {
+        clearPromptTasteIntent(prompt.slug, intent);
         onPatched(prompt.slug, { tasted: true });
         setGate("tasted-gone");
         return;
@@ -630,9 +881,14 @@ function PromptDetailDialog({
         setGate("unauthenticated");
         return;
       }
+      if (res.code === "processing" || res.outcomeUnknown === true) {
+        onPatched(prompt.slug, { tasted: true });
+        setGate("taste-pending");
+        return;
+      }
       setGate("error");
     } catch {
-      setGate("error");
+      setGate("taste-pending");
     } finally {
       setBusy(null);
     }
@@ -640,12 +896,14 @@ function PromptDetailDialog({
 
   async function copyBody() {
     if (!body) return;
+    setCopyError(false);
     try {
       await navigator.clipboard.writeText(body);
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
-      // 클립보드 권한 실패 — 조용히 무시
+      setCopied(false);
+      setCopyError(true);
     }
   }
 
@@ -654,14 +912,15 @@ function PromptDetailDialog({
     setStartBusy(true);
     setStartFailed(false);
     try {
-      const accepted = await onStart(body, inputs);
+      const accepted = await onStart(body, inputs, prompt.slug);
       if (!accepted) setStartFailed(true);
     } finally {
       setStartBusy(false);
     }
   }
 
-  const tastedGone = gate === "tasted-gone" || (!body && !paid && signedIn && merged.tasted === true);
+  const tastedGone = gate === "tasted-gone"
+    || (gate !== "taste-pending" && !body && !paid && signedIn && merged.tasted === true);
 
   return (
     <div style={detailOverlay} role="dialog" aria-modal="true" aria-label={title}>
@@ -691,6 +950,14 @@ function PromptDetailDialog({
         </div>
 
         {summary && <div style={{ fontSize: 13, lineHeight: 1.6, color: "var(--rd-ink-2)" }}>{summary}</div>}
+
+        {detailLoadError && (
+          <div role="alert" style={{ ...detailBlock, color: "var(--rd-warn)" }}>
+            {ko
+              ? "상세 정보를 불러오지 못했습니다. 목록의 기본 정보는 유지되지만 본문 상태는 확인되지 않았습니다."
+              : "Could not load prompt details. The catalog summary is preserved, but the body state is unverified."}
+          </div>
+        )}
 
         <div className="portal-chip-row">
           {(merged.models ?? []).map((m) => (
@@ -751,6 +1018,13 @@ function PromptDetailDialog({
                   : "This taste is shown only here. Once you close it, it cannot be reopened."}
               </div>
             )}
+            {copyError && (
+              <div role="alert" style={{ fontSize: 12, color: "var(--rd-warn)", lineHeight: 1.5 }}>
+                {ko
+                  ? "클립보드에 복사하지 못했습니다. 위 본문을 직접 선택하거나 클립보드 권한을 확인하세요."
+                  : "Could not copy to the clipboard. Select the body above or check clipboard permission."}
+              </div>
+            )}
             {startFailed && (
               <div
                 role="alert"
@@ -795,6 +1069,56 @@ function PromptDetailDialog({
                 >
                   {ko ? "Google로 로그인" : "Sign in with Google"}
                 </button>
+              </div>
+            ) : gate === "taste-pending" ? (
+              <div style={{ display: "grid", gap: 8 }} role="alert">
+                <span style={{ fontSize: 12.5, color: "var(--rd-warn)", lineHeight: 1.5 }}>
+                  {ko
+                    ? "같은 맛보기 요청은 저장됐지만 완료 본문을 아직 확인하지 못했습니다. 새 요청을 만들지 말고 같은 요청을 이어가세요."
+                    : "The same taste request is saved, but its completed body is not confirmed yet. Resume this request; do not create another one."}
+                </span>
+                <button
+                  type="button"
+                  className="btn sm"
+                  style={{ justifySelf: "start" }}
+                  onClick={() => void doTaste()}
+                  disabled={busy != null}
+                >
+                  {busy === "taste" ? (ko ? "확인 중…" : "Checking…") : ko ? "같은 요청 이어가기" : "Resume same request"}
+                </button>
+              </div>
+            ) : gate === "unlock-pending" ? (
+              <div style={{ display: "grid", gap: 8 }} role="alert">
+                <span style={{ fontSize: 12.5, color: "var(--rd-warn)", lineHeight: 1.5 }}>
+                  {ko
+                    ? "같은 열람 요청은 저장됐지만 실제 소유권과 본문을 아직 확인하지 못했습니다. 새 요청을 만들지 말고 같은 요청 상태를 다시 확인하세요."
+                    : "This open request is saved, but ownership and the exact body are not confirmed yet. Check the same request instead of creating a new one."}
+                </span>
+                <button
+                  type="button"
+                  className="btn sm"
+                  style={{ justifySelf: "start" }}
+                  onClick={() => void doUnlock()}
+                  disabled={busy != null}
+                >
+                  {busy === "unlock" ? (ko ? "확인 중…" : "Checking…") : ko ? "같은 요청 이어가기" : "Resume same request"}
+                </button>
+              </div>
+            ) : gate === "intent-error" ? (
+              <div style={{ display: "grid", gap: 8 }} role="alert">
+                <span style={{ fontSize: 12.5, color: "var(--rd-warn)", lineHeight: 1.5 }}>
+                  {ko
+                    ? "중복 방지 요청 키를 이 기기에 저장하지 못해 맛보기를 시작하지 않았습니다. 앱 저장소 권한을 확인한 뒤 다시 시도하세요."
+                    : "The taste did not start because its duplicate-safe request key could not be stored on this device. Check app storage access and retry."}
+                </span>
+              </div>
+            ) : gate === "unlock-intent-error" ? (
+              <div style={{ display: "grid", gap: 8 }} role="alert">
+                <span style={{ fontSize: 12.5, color: "var(--rd-warn)", lineHeight: 1.5 }}>
+                  {ko
+                    ? "중복 방지 요청 키를 이 기기에 저장하지 못해 유료 열람을 시작하지 않았습니다. 앱 저장소 권한을 확인한 뒤 다시 시도하세요."
+                    : "The paid open did not start because its duplicate-safe request key could not be stored. Check app storage access and retry."}
+                </span>
               </div>
             ) : tastedGone ? (
               // 무료 + 이미 맛봄 — 1회 제공 원칙, 재열람은 구독 필요.

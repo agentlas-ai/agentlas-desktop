@@ -164,6 +164,9 @@ export default function SettingsPage() {
   const [multimodalRefreshing, setMultimodalRefreshing] = useState(false);
   const [runtimeMessage, setRuntimeMessage] = useState("");
   const [concurrency, setConcurrency] = useState<AgentConcurrencyInfo | null>(null);
+  const [concurrencyDraft, setConcurrencyDraft] = useState<number | null>(null);
+  const [concurrencyBusy, setConcurrencyBusy] = useState(false);
+  const [concurrencyNotice, setConcurrencyNotice] = useState<string | null>(null);
   // 데몬 자동 시작(로그인 기동) — 기본 off. 값과 부팅 항목이 어긋나면 사유를 그대로 보여준다.
   const [daemonAutostart, setDaemonAutostart] = useState(false);
   const [daemonAutostartBusy, setDaemonAutostartBusy] = useState(false);
@@ -174,6 +177,8 @@ export default function SettingsPage() {
       .catch(() => {});
   }, []);
   const [interviewMode, setInterviewMode] = useState<"smart" | "build-only" | "off">("build-only");
+  const [interviewBusy, setInterviewBusy] = useState(false);
+  const [interviewNotice, setInterviewNotice] = useState<string | null>(null);
 
   const refreshMultimodal = useCallback(async () => {
     const api = ipc();
@@ -199,8 +204,19 @@ export default function SettingsPage() {
   const refresh = useCallback(async () => {
     const api = ipc();
     if (!api) return;
-    api.system?.concurrencyInfo().then(setConcurrency).catch(() => {});
-    api.interview?.getMode().then(setInterviewMode).catch(() => {});
+    api.system?.concurrencyInfo().then((info) => {
+      setConcurrency(info);
+      setConcurrencyDraft(info.current);
+      setConcurrencyNotice(null);
+    }).catch(() => setConcurrencyNotice(locale === "ko"
+      ? "저장된 동시 실행 수를 불러오지 못했습니다. 다시 열어 확인해 주세요."
+      : "The saved concurrency could not be loaded. Reopen Settings to check it."));
+    api.interview?.getMode().then((mode) => {
+      setInterviewMode(mode);
+      setInterviewNotice(null);
+    }).catch(() => setInterviewNotice(locale === "ko"
+      ? "저장된 인터뷰 모드를 불러오지 못했습니다."
+      : "The saved interview mode could not be loaded."));
     const runtimeRefresh = api.runtime.detect().then((nextStatuses) => {
       setStatuses(nextStatuses);
       // New provider families are discovered from the runtime inventory rather
@@ -242,11 +258,82 @@ export default function SettingsPage() {
     // 런타임·키·멀티모달은 서로 다른 설정 도메인이다. 한 도메인의 IPC 실패가
     // 나머지 화면까지 초기화하지 못하게 만들지 않도록 각각 독립적으로 정착시킨다.
     await Promise.allSettled([runtimeRefresh, keyRefresh, refreshMultimodal()]);
-  }, [refreshMultimodal]);
+  }, [locale, refreshMultimodal]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  async function saveConcurrency(value: number) {
+    const api = ipc();
+    if (!api?.system || !concurrency || concurrencyBusy) {
+      if (!api?.system) setConcurrencyNotice(locale === "ko"
+        ? "Desktop에 연결되지 않아 값을 저장하지 못했습니다."
+        : "The value was not saved because Desktop is unavailable.");
+      return;
+    }
+    const requested = Math.max(1, Math.min(concurrency.hardMax, Math.floor(value)));
+    setConcurrencyBusy(true);
+    setConcurrencyNotice(null);
+    try {
+      const receipt = await api.system.setConcurrency(requested);
+      if (!receipt || receipt.current !== requested) throw new Error("concurrency_receipt_mismatch");
+      setConcurrency(receipt);
+      setConcurrencyDraft(receipt.current);
+      setConcurrencyNotice(locale === "ko" ? `동시 실행 수 ${receipt.current}개를 저장했습니다.` : `Saved ${receipt.current} concurrent slots.`);
+    } catch {
+      setConcurrencyDraft(concurrency.current);
+      try {
+        const readback = await api.system.concurrencyInfo();
+        setConcurrency(readback);
+        setConcurrencyDraft(readback.current);
+        if (readback.current === requested) {
+          setConcurrencyNotice(locale === "ko" ? `동시 실행 수 ${readback.current}개가 저장된 것을 다시 확인했습니다.` : `Verified that ${readback.current} concurrent slots were saved.`);
+        } else if (readback.current === concurrency.current) {
+          setConcurrencyNotice(locale === "ko" ? "변경이 반영되지 않아 이전 값으로 돌아왔습니다." : "The change was not applied, so the prior value is shown.");
+        } else {
+          setConcurrencyNotice(locale === "ko" ? `요청값과 다른 실제 값 ${readback.current}개를 다시 읽었습니다.` : `Read back ${readback.current} actual slots, which differs from the request.`);
+        }
+      } catch {
+        setConcurrencyNotice(locale === "ko"
+          ? "저장 요청 뒤 실제 값을 확인하지 못했습니다. 화면은 이전 값으로 되돌렸습니다. 반복 저장하지 말고 설정을 다시 열어 확인해 주세요."
+          : "The actual value could not be read after the save request. This screen reverted to its prior value. Do not save again; reopen Settings to check it.");
+      }
+    } finally {
+      setConcurrencyBusy(false);
+    }
+  }
+
+  async function saveInterviewMode(requested: "smart" | "build-only" | "off") {
+    const api = ipc();
+    if (!api?.interview || interviewBusy || requested === interviewMode) return;
+    setInterviewBusy(true);
+    setInterviewNotice(null);
+    try {
+      const receipt = await api.interview.setMode(requested);
+      if (receipt !== requested) throw new Error("interview_mode_receipt_mismatch");
+      setInterviewMode(receipt);
+      setInterviewNotice(locale === "ko" ? "인터뷰 모드를 저장했습니다." : "Interview mode saved.");
+    } catch {
+      try {
+        const readback = await api.interview.getMode();
+        setInterviewMode(readback);
+        if (readback === requested) {
+          setInterviewNotice(locale === "ko" ? "요청한 인터뷰 모드가 저장된 것을 다시 확인했습니다." : "Verified that the requested interview mode was saved.");
+        } else if (readback === interviewMode) {
+          setInterviewNotice(locale === "ko" ? "변경이 반영되지 않아 이전 모드를 유지합니다." : "The change was not applied, so the prior mode remains active.");
+        } else {
+          setInterviewNotice(locale === "ko" ? "요청과 다른 저장 모드를 다시 읽어 화면에 반영했습니다." : "A saved mode different from the request was read back and is now shown.");
+        }
+      } catch {
+        setInterviewNotice(locale === "ko"
+          ? "저장 요청 뒤 실제 모드를 확인하지 못했습니다. 화면은 이전 모드를 유지합니다. 반복하지 말고 설정을 다시 열어 확인해 주세요."
+          : "The actual mode could not be read after the save request. This screen keeps the prior mode. Do not repeat the action; reopen Settings to check it.");
+      }
+    } finally {
+      setInterviewBusy(false);
+    }
+  }
 
   // Ollama 모델 선택 — 같은 ollama 런타임을 model만 바꿔 활성화.
   async function activateOllamaModel(model: string) {
@@ -529,23 +616,25 @@ export default function SettingsPage() {
                   type="range"
                   min={1}
                   max={concurrency.hardMax}
-                  value={concurrency.current}
+                  value={concurrencyDraft ?? concurrency.current}
+                  disabled={concurrencyBusy}
                   onChange={(e) => {
                     const v = Number(e.target.value);
-                    setConcurrency({ ...concurrency, current: v, userSet: true });
+                    setConcurrencyDraft(v);
+                    setConcurrencyNotice(null);
                   }}
-                  onMouseUp={(e) => {
+                  onPointerUp={(e) => {
                     const v = Number((e.target as HTMLInputElement).value);
-                    void ipc()?.system?.setConcurrency(v).then((info) => info && setConcurrency(info));
+                    void saveConcurrency(v);
                   }}
-                  onTouchEnd={(e) => {
-                    const v = Number((e.target as HTMLInputElement).value);
-                    void ipc()?.system?.setConcurrency(v).then((info) => info && setConcurrency(info));
+                  onKeyUp={(e) => {
+                    if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(e.key)) return;
+                    void saveConcurrency(Number((e.target as HTMLInputElement).value));
                   }}
                   style={{ flex: 1, accentColor: "var(--accent)" }}
                 />
                 <strong style={{ fontSize: 20, minWidth: 32, textAlign: "center" }}>
-                  {concurrency.current}
+                  {concurrencyDraft ?? concurrency.current}
                 </strong>
               </div>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8, gap: 8, flexWrap: "wrap" }}>
@@ -556,9 +645,8 @@ export default function SettingsPage() {
                 </span>
                 <button
                   type="button"
-                  onClick={() => {
-                    void ipc()?.system?.setConcurrency(concurrency.recommended).then((info) => info && setConcurrency(info));
-                  }}
+                  disabled={concurrencyBusy}
+                  onClick={() => void saveConcurrency(concurrency.recommended)}
                   style={{
                     fontSize: 11,
                     padding: "3px 10px",
@@ -578,6 +666,11 @@ export default function SettingsPage() {
                   {locale === "ko"
                     ? "⚠️ 추천보다 높아요 — 이 컴에선 느려지거나 버벅일 수 있어요."
                     : "⚠️ Above recommended — this machine may slow down or stutter."}
+                </p>
+              )}
+              {concurrencyNotice && (
+                <p role="status" style={{ fontSize: 11, color: "var(--warn-deep, #b8860b)", margin: "8px 0 0" }}>
+                  {concurrencyNotice}
                 </p>
               )}
             </div>
@@ -662,9 +755,8 @@ export default function SettingsPage() {
               <button
                 key={opt.id}
                 type="button"
-                onClick={() => {
-                  void ipc()?.interview?.setMode(opt.id).then((m) => setInterviewMode(m));
-                }}
+                disabled={interviewBusy}
+                onClick={() => void saveInterviewMode(opt.id)}
                 style={{
                   fontSize: 12,
                   padding: "6px 14px",
@@ -680,6 +772,11 @@ export default function SettingsPage() {
               </button>
             ))}
           </div>
+          {interviewNotice && (
+            <p role="status" style={{ fontSize: 11, color: "var(--warn-deep, #b8860b)", margin: "8px 0 0" }}>
+              {interviewNotice}
+            </p>
+          )}
         </div>
 
         <LaunchdPanel />
@@ -1481,6 +1578,8 @@ function MemoryDiagnosticsPanel() {
    * 자동 동작에는 끄는 길이 있어야 한다.
    */
   const [networkAuto, setNetworkAuto] = useState<boolean | null>(null);
+  const [toggleBusy, setToggleBusy] = useState<"dreaming" | "supervisor" | "network" | null>(null);
+  const [toggleNotice, setToggleNotice] = useState<string | null>(null);
   const [doctorOut, setDoctorOut] = useState<string | null>(null);
   const [doctorBusy, setDoctorBusy] = useState(false);
 
@@ -1494,30 +1593,67 @@ function MemoryDiagnosticsPanel() {
 
   const toggleDreaming = async () => {
     const api = ipc();
-    if (!api || !dreaming) return;
-    const next = await api.memoryDreaming.setEnabled(!dreaming.enabled);
-    setDreaming(next);
+    if (!api || !dreaming || toggleBusy) return;
+    const requested = !dreaming.enabled;
+    setToggleBusy("dreaming");
+    setToggleNotice(null);
+    try {
+      const receipt = await api.memoryDreaming.setEnabled(requested);
+      if (receipt?.enabled !== requested) throw new Error("dreaming_receipt_mismatch");
+      const readback = await api.memoryDreaming.status();
+      if (readback?.enabled !== requested) throw new Error("dreaming_readback_mismatch");
+      setDreaming(readback);
+      setToggleNotice(ko ? "드리밍 설정을 저장하고 다시 확인했습니다." : "Dreaming was saved and verified.");
+    } catch {
+      setToggleNotice(ko
+        ? "드리밍 변경의 최종 상태를 확인하지 못했습니다. 화면은 바꾸지 않았습니다. 반복해서 누르지 말고 설정을 다시 열어 확인해 주세요."
+        : "The final dreaming state could not be verified. This screen was not changed. Do not repeat the action; reopen Settings to check it.");
+    } finally {
+      setToggleBusy(null);
+    }
   };
 
   const toggleSupervisor = async () => {
     const api = ipc();
-    if (!api || supervisor == null) return;
+    if (!api || supervisor == null || toggleBusy) return;
+    const requested = !supervisor;
+    setToggleBusy("supervisor");
+    setToggleNotice(null);
     try {
-      await api.hephaestus.setSupervisor(!supervisor);
-      setSupervisor(!supervisor);
+      const receipt = await api.hephaestus.setSupervisor(requested);
+      if (receipt?.enabled !== requested) throw new Error("supervisor_receipt_mismatch");
+      const readback = await api.hephaestus.getSupervisor();
+      if (readback?.enabled !== requested) throw new Error("supervisor_readback_mismatch");
+      setSupervisor(readback.enabled);
+      setToggleNotice(ko ? "슈퍼바이저 설정을 저장하고 다시 확인했습니다." : "Supervisor was saved and verified.");
     } catch {
-      // 엔진 미가용 — 상태 유지
+      setToggleNotice(ko
+        ? "슈퍼바이저 변경의 최종 상태를 확인하지 못했습니다. 화면은 바꾸지 않았습니다. 설정을 다시 열어 확인해 주세요."
+        : "The final supervisor state could not be verified. This screen was not changed. Reopen Settings to check it.");
+    } finally {
+      setToggleBusy(null);
     }
   };
 
   const toggleNetworkAuto = async () => {
     const api = ipc();
-    if (!api || networkAuto == null) return;
+    if (!api || networkAuto == null || toggleBusy) return;
+    const requested = !networkAuto;
+    setToggleBusy("network");
+    setToggleNotice(null);
     try {
-      await api.hephaestus.setEngineToggle({ id: "network", enabled: !networkAuto });
-      setNetworkAuto(!networkAuto);
+      const receipt = await api.hephaestus.setEngineToggle({ id: "network", enabled: requested });
+      if (receipt?.networkAuto !== requested) throw new Error("network_toggle_receipt_mismatch");
+      const readback = await api.hephaestus.getEngineToggles();
+      if (readback?.networkAuto !== requested) throw new Error("network_toggle_readback_mismatch");
+      setNetworkAuto(readback.networkAuto);
+      setToggleNotice(ko ? "Hub 자동 고용 설정을 저장하고 다시 확인했습니다." : "Automatic Hub hiring was saved and verified.");
     } catch {
-      // 엔진 미가용 — 상태 유지
+      setToggleNotice(ko
+        ? "유료 Hub 자동 고용의 최종 상태를 확인하지 못했습니다. 화면은 바꾸지 않았습니다. 반복해서 누르지 말고 설정을 다시 열어 확인해 주세요."
+        : "The final paid Hub auto-hiring state could not be verified. This screen was not changed. Do not repeat the action; reopen Settings to check it.");
+    } finally {
+      setToggleBusy(null);
     }
   };
 
@@ -1564,6 +1700,11 @@ function MemoryDiagnosticsPanel() {
       <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "28px 0 12px" }}>
         {ko ? "메모리 & 진단" : "Memory & Diagnostics"}
       </h2>
+      {toggleNotice && (
+        <p role="status" style={{ fontSize: 11.5, color: "var(--warn-deep, #b8860b)", margin: "0 0 10px" }}>
+          {toggleNotice}
+        </p>
+      )}
 
       <div style={rowStyle}>
         <div style={{ minWidth: 0 }}>
@@ -1579,8 +1720,8 @@ function MemoryDiagnosticsPanel() {
               : ""}
           </div>
         </div>
-        <button onClick={() => void toggleDreaming()} style={{ ...btnStyle, minWidth: 64 }} disabled={!dreaming}>
-          {dreaming ? (dreaming.enabled ? "ON" : "OFF") : "…"}
+        <button onClick={() => void toggleDreaming()} style={{ ...btnStyle, minWidth: 64 }} disabled={!dreaming || toggleBusy !== null}>
+          {toggleBusy === "dreaming" ? "…" : dreaming ? (dreaming.enabled ? "ON" : "OFF") : "…"}
         </button>
       </div>
 
@@ -1593,8 +1734,8 @@ function MemoryDiagnosticsPanel() {
             {ko ? "Stormbreaker 견고-실행 감독 레이어" : "Stormbreaker robust-execution supervision layer"}
           </div>
         </div>
-        <button onClick={() => void toggleSupervisor()} style={{ ...btnStyle, minWidth: 64 }} disabled={supervisor == null}>
-          {supervisor == null ? "…" : supervisor ? "ON" : "OFF"}
+        <button onClick={() => void toggleSupervisor()} style={{ ...btnStyle, minWidth: 64 }} disabled={supervisor == null || toggleBusy !== null}>
+          {toggleBusy === "supervisor" ? "…" : supervisor == null ? "…" : supervisor ? "ON" : "OFF"}
         </button>
       </div>
 
@@ -1609,8 +1750,8 @@ function MemoryDiagnosticsPanel() {
               : "Borrows people from the public Hub when installed agents fall short — this spends credits."}
           </div>
         </div>
-        <button onClick={() => void toggleNetworkAuto()} style={{ ...btnStyle, minWidth: 64 }} disabled={networkAuto == null}>
-          {networkAuto == null ? "…" : networkAuto ? "ON" : "OFF"}
+        <button onClick={() => void toggleNetworkAuto()} style={{ ...btnStyle, minWidth: 64 }} disabled={networkAuto == null || toggleBusy !== null}>
+          {toggleBusy === "network" ? "…" : networkAuto == null ? "…" : networkAuto ? "ON" : "OFF"}
         </button>
       </div>
 

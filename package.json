@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "1.0.48",
+  "version": "1.0.49",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Antigravity 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -16,12 +16,14 @@
     "minimumRuntimeVersion": "1.0.4",
     "minimumSchemaVersion": 35,
     "targetSchemaVersion": 105,
-    "bundledRuntimeVersion": "1.2.34"
+    "bundledRuntimeVersion": "1.2.37"
   },
   "agentlasBundledRuntimeSource": {
     "repository": "https://github.com/agentlas-ai/Agentlas-OS.git",
-    "ref": "v1.2.34",
-    "commit": "2f344a6fafdd96c1130c611c4817bf50e3dce773"
+    "ref": "v1.2.37",
+    "commit": "2b169ba44742735d1ce7f550fefee071b70324fc",
+    "assetName": "hephaestus-runtime-v1.2.37.tar.gz",
+    "assetSha256": "50caf78a9c028fcf088039dd862753c25fbb9bed19df9fa248502b442dc306a6"
   },
   "scripts": {
     "dev": "concurrently -k --success first -n NEXT,ELECTRON -c blue,magenta \"npm:dev:renderer\" \"npm:dev:electron\"",
@@ -29,7 +31,9 @@
     "dev:electron": "wait-on http://localhost:3100 && node scripts/build-macos-input-driver.cjs && tsc -p electron/tsconfig.json && cross-env NODE_ENV=development ELECTRON_START_URL=http://localhost:3100 electron .",
     "build": "npm run build:renderer && npm run build:electron",
     "build:renderer": "npm run --silent sync:renderer-assets && cd renderer && cross-env AGENTLAS_NEXT_DIST_DIR=.next-build next build && node -e \"require('fs').cpSync('.next-build','../dist/renderer',{recursive:true})\"",
-    "build:electron": "node scripts/build-macos-input-driver.cjs && tsc -p electron/tsconfig.json && node scripts/copy-builtin-plugins.cjs && node -e \"require('fs').copyFileSync('electron/memory/code-map-gen.mjs','dist/electron/memory/code-map-gen.mjs');require('fs').copyFileSync('electron/memory/curator-ruleset.json','dist/electron/memory/curator-ruleset.json');require('fs').copyFileSync('electron/mcp-tools/proxy-child.cjs','dist/electron/mcp-tools/proxy-child.cjs')\"",
+    "generate:one-briefing-contract": "node scripts/generate-one-briefing-contract.cjs",
+    "check:one-briefing-contract": "node scripts/generate-one-briefing-contract.cjs --check",
+    "build:electron": "npm run --silent check:one-briefing-contract && node scripts/build-macos-input-driver.cjs && tsc -p electron/tsconfig.json && node scripts/copy-builtin-plugins.cjs && node -e \"require('fs').copyFileSync('electron/memory/code-map-gen.mjs','dist/electron/memory/code-map-gen.mjs');require('fs').copyFileSync('electron/memory/curator-ruleset.json','dist/electron/memory/curator-ruleset.json');require('fs').copyFileSync('electron/mcp-tools/proxy-child.cjs','dist/electron/mcp-tools/proxy-child.cjs')\"",
     "prebuild:renderer": "node -e \"const fs=require('fs');['dist/renderer','renderer/.next-build','renderer/out'].forEach(d=>fs.rmSync(d,{recursive:true,force:true,maxRetries:5,retryDelay:100}))\"",
     "postinstall": "electron-rebuild --force",
     "sync:renderer-assets": "npm run --silent sync:maplibre-worker && npm run --silent sync:file-viewer-assets",

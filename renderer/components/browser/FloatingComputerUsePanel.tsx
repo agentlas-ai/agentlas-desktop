@@ -36,6 +36,8 @@ export default function FloatingComputerUsePanel() {
   const [browserFrame, setBrowserFrame] = useState<BrowserLiveFrame | null>(null);
   const [computerFrame, setComputerFrame] = useState<ComputerUsePreview | null>(null);
   const [sourceId, setSourceId] = useState<string | undefined>();
+  const [focusBusy, setFocusBusy] = useState(false);
+  const [focusNotice, setFocusNotice] = useState<string | null>(null);
   const busy = useRef(false);
   const finishTimer = useRef<number | null>(null);
   const panelRef = useRef<HTMLElement | null>(null);
@@ -149,13 +151,28 @@ export default function FloatingComputerUsePanel() {
   }, []);
 
   const focusPreview = useCallback(async () => {
-    if (!api) return;
-    if (mode === "browser") {
-      await api.browser.focusLiveTarget(browserFrame?.targetId ?? undefined).catch(() => ({ ok: false }));
-      return;
+    if (!api || focusBusy) return;
+    setFocusBusy(true);
+    setFocusNotice(null);
+    try {
+      const receipt = mode === "browser"
+        ? await api.browser.focusLiveTarget(browserFrame?.targetId ?? undefined)
+        : await api.computerUse.revealPreview();
+      setFocusNotice(receipt.ok
+        ? mode === "browser"
+          ? ko ? "브라우저 화면을 앞으로 가져왔습니다." : "Browser brought to the front."
+          : ko ? "컴퓨터 화면을 열었습니다." : "Computer view opened."
+        : mode === "browser"
+          ? ko ? "열 수 있는 브라우저 화면이 없습니다." : "No browser target is available to open."
+          : ko ? "컴퓨터 화면을 열지 못했습니다. 화면 기록 권한을 확인해 주세요." : "The computer view could not be opened. Check Screen Recording permission.");
+    } catch {
+      setFocusNotice(mode === "browser"
+        ? ko ? "브라우저 화면을 열지 못했습니다. 다시 시도해 주세요." : "The browser view could not be opened. Try again."
+        : ko ? "컴퓨터 화면을 열지 못했습니다. 다시 시도해 주세요." : "The computer view could not be opened. Try again.");
+    } finally {
+      setFocusBusy(false);
     }
-    await api.computerUse.revealPreview().catch(() => ({ ok: false }));
-  }, [api, browserFrame?.targetId, mode]);
+  }, [api, browserFrame?.targetId, focusBusy, ko, mode]);
 
   const image = mode === "browser" ? browserFrame?.dataUrl : computerFrame?.dataUrl;
   const ready = mode === "browser" ? browserFrame?.available : computerFrame?.observationAvailable;
@@ -225,6 +242,8 @@ export default function FloatingComputerUsePanel() {
         type="button"
         className="cua-canvas"
         onClick={() => void focusPreview()}
+        disabled={focusBusy}
+        aria-busy={focusBusy}
         aria-label={mode === "browser"
           ? ko ? "브라우저 화면 앞으로 가져오기" : "Bring browser to front"
           : ko ? "컴퓨터 화면 열기" : "Show computer screen"}
@@ -245,6 +264,8 @@ export default function FloatingComputerUsePanel() {
           </div>
         )}
       </button>
+
+      {focusNotice && <div className="cua-focus-notice" role="status">{focusNotice}</div>}
 
       {mode === "computer" && computerFrame && (
         <footer>
@@ -289,8 +310,10 @@ export default function FloatingComputerUsePanel() {
         .cua-controls button.close { font-size: 17px; }
         .cua-controls button.close:hover { background: rgba(181, 45, 45, 0.1); color: #ad3030; }
         .cua-canvas { width: 100%; aspect-ratio: 16 / 10; display: grid; place-items: center; overflow: hidden; border: 0; padding: 0; background: #111416; cursor: pointer; }
+        .cua-canvas:disabled { cursor: wait; opacity: 0.82; }
         .cua-canvas img { display: block; width: 100%; height: 100%; object-fit: contain; }
         .cua-canvas:hover img { filter: brightness(1.035); }
+        .cua-focus-notice { min-height: 28px; display: flex; align-items: center; padding: 5px 10px; border-top: 1px solid color-mix(in srgb, var(--line) 75%, transparent); color: var(--muted-deep); font-size: 10px; line-height: 1.35; }
         .cua-empty { display: flex; flex-direction: column; align-items: center; gap: 5px; color: rgba(255,255,255,0.82); text-align: center; }
         .cua-empty strong { font-size: 12px; }
         .cua-empty > span:last-child { max-width: 280px; font-size: 10.5px; line-height: 1.45; opacity: 0.5; }

@@ -1,33 +1,44 @@
-export const ONE_BRIEFING_CONTRACT_VERSION = "1.0.0" as const;
+import {
+  ONE_BRIEFING_ACTION_SOURCE,
+  ONE_BRIEFING_CADENCES,
+  ONE_BRIEFING_CONFIDENCES,
+  ONE_BRIEFING_CONTRACT_VERSION,
+  ONE_BRIEFING_KINDS,
+  ONE_BRIEFING_PREPARED_ACTION_KINDS,
+  ONE_BRIEFING_REASON_CODES,
+  ONE_BRIEFING_REASON_SOURCE,
+  ONE_BRIEFING_SOURCE_KINDS,
+  type OneBriefingCadence,
+  type OneBriefingConfidence,
+  type OneBriefingKind,
+  type OneBriefingPreparedActionKind,
+  type OneBriefingReasonCode,
+} from "./one-briefing-contract.generated";
+
+export {
+  ONE_BRIEFING_ACTION_SOURCE,
+  ONE_BRIEFING_CADENCES,
+  ONE_BRIEFING_CONFIDENCES,
+  ONE_BRIEFING_CONTRACT_VERSION,
+  ONE_BRIEFING_KINDS,
+  ONE_BRIEFING_PREPARED_ACTION_KINDS,
+  ONE_BRIEFING_REASON_CODES,
+  ONE_BRIEFING_REASON_SOURCE,
+  ONE_BRIEFING_SOURCE_KINDS,
+};
+export type {
+  OneBriefingCadence,
+  OneBriefingConfidence,
+  OneBriefingKind,
+  OneBriefingPreparedActionKind,
+  OneBriefingReasonCode,
+  OneBriefingSourceKind,
+} from "./one-briefing-contract.generated";
+
 export const ONE_BRIEFING_ACTION_PACKET_CONTRACT_VERSION = "1.0.0" as const;
-
-export type OneBriefingKind =
-  | "risk"
-  | "opportunity"
-  | "anomaly"
-  | "repetition"
-  | "decision"
-  | "completion";
-
-export type OneBriefingCadence = "important_only" | "daily" | "weekdays" | "weekly";
 export type OneBriefingChannel = "in_app" | "desktop_notification" | "mobile_push";
-export type OneBriefingConfidence = "high" | "medium" | "low";
 export type OneBriefingFreshness = "fresh" | "aging" | "stale";
 export type OneBriefingFeedback = "later" | "not_important" | "wrong";
-export type OneBriefingReasonCode =
-  | "project_folder_missing"
-  | "project_folder_unreadable"
-  | "project_folder_not_directory"
-  | "project_deadline_conflict"
-  | "automation_error"
-  | "automation_blocked"
-  | "automation_needs_input"
-  | "automation_partial"
-  | "task_waiting_decision_stale"
-  | "task_running_without_active_run"
-  | "task_failed_repeated"
-  | "task_failed_abandoned"
-  | "task_partial_abandoned";
 
 export interface OneBriefingEvidence {
   label: string;
@@ -37,7 +48,7 @@ export interface OneBriefingEvidence {
 }
 
 export interface OneBriefingPreparedAction {
-  kind: "open_project" | "open_automation" | "open_task";
+  kind: OneBriefingPreparedActionKind;
   targetId: string;
   label: string;
   /** A prepared action is navigation only until the user explicitly continues. */
@@ -214,6 +225,13 @@ function safeIso(value: unknown): value is string {
   return typeof value === "string" && Number.isFinite(Date.parse(value));
 }
 
+function isStringMember<const T extends readonly string[]>(
+  values: T,
+  value: unknown,
+): value is T[number] {
+  return typeof value === "string" && values.includes(value as T[number]);
+}
+
 function exactKeys(value: Record<string, unknown>, keys: string[]): boolean {
   const allowed = new Set(keys);
   return Object.keys(value).every((key) => allowed.has(key));
@@ -230,14 +248,8 @@ export function isOneProactiveBriefing(value: unknown): value is OneProactiveBri
   if (item.contractVersion !== ONE_BRIEFING_CONTRACT_VERSION) return false;
   if (typeof item.candidateId !== "string" || !ID_RE.test(item.candidateId)) return false;
   if (typeof item.dedupeKey !== "string" || !ID_RE.test(item.dedupeKey)) return false;
-  if (!["risk", "opportunity", "anomaly", "repetition", "decision", "completion"].includes(String(item.kind))) return false;
-  if (![
-    "project_folder_missing", "project_folder_unreadable", "project_folder_not_directory",
-    "project_deadline_conflict",
-    "automation_error", "automation_blocked", "automation_needs_input", "automation_partial",
-    "task_waiting_decision_stale", "task_running_without_active_run", "task_failed_repeated",
-    "task_failed_abandoned", "task_partial_abandoned",
-  ].includes(String(item.reasonCode))) return false;
+  if (!isStringMember(ONE_BRIEFING_KINDS, item.kind)) return false;
+  if (!isStringMember(ONE_BRIEFING_REASON_CODES, item.reasonCode)) return false;
   if (![1, 2, 3, 4].includes(Number(item.severity))) return false;
   if (!safeIso(item.detectedAt) || !safeIso(item.expiresAt) || Date.parse(item.expiresAt) <= Date.parse(item.detectedAt)) return false;
   if (!safeText(item.discovery, 600) || !safeText(item.impact, 600) || !safeText(item.prepared, 600)) return false;
@@ -259,7 +271,7 @@ export function isOneProactiveBriefing(value: unknown): value is OneProactiveBri
     if (typeof sourceRecord.activeRunPresent !== "boolean") return false;
   } else {
     if (!exactKeys(sourceRecord, ["kind", "refId", "label"])) return false;
-    if (!["project_folder", "automation_run"].includes(String(sourceRecord.kind))) return false;
+    if (!isStringMember(ONE_BRIEFING_SOURCE_KINDS, sourceRecord.kind) || sourceRecord.kind === "canonical_task") return false;
     if (typeof sourceRecord.refId !== "string" || !ID_RE.test(sourceRecord.refId) || !safeText(sourceRecord.label, 160)) return false;
   }
 
@@ -267,7 +279,7 @@ export function isOneProactiveBriefing(value: unknown): value is OneProactiveBri
   if (!confidence || typeof confidence !== "object" || Array.isArray(confidence)) return false;
   const confidenceRecord = confidence as Record<string, unknown>;
   if (!exactKeys(confidenceRecord, ["level", "basis"])) return false;
-  if (!["high", "medium", "low"].includes(String(confidenceRecord.level)) || !safeText(confidenceRecord.basis, 320)) return false;
+  if (!isStringMember(ONE_BRIEFING_CONFIDENCES, confidenceRecord.level) || !safeText(confidenceRecord.basis, 320)) return false;
 
   const decision = item.decision;
   if (!decision || typeof decision !== "object" || Array.isArray(decision)) return false;
@@ -288,8 +300,13 @@ export function isOneProactiveBriefing(value: unknown): value is OneProactiveBri
   if (!action || typeof action !== "object" || Array.isArray(action)) return false;
   const actionRecord = action as Record<string, unknown>;
   if (!exactKeys(actionRecord, ["kind", "targetId", "label", "executionStarted"])) return false;
-  if (!["open_project", "open_automation", "open_task"].includes(String(actionRecord.kind))) return false;
+  if (!isStringMember(ONE_BRIEFING_PREPARED_ACTION_KINDS, actionRecord.kind)) return false;
   if (typeof actionRecord.targetId !== "string" || !ID_RE.test(actionRecord.targetId) || !safeText(actionRecord.label, 96)) return false;
+  if (
+    ONE_BRIEFING_REASON_SOURCE[item.reasonCode] !== sourceRecord.kind
+    || ONE_BRIEFING_ACTION_SOURCE[actionRecord.kind] !== sourceRecord.kind
+    || actionRecord.targetId !== sourceRecord.refId
+  ) return false;
   return actionRecord.executionStarted === false;
 }
 

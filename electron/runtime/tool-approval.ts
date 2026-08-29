@@ -23,7 +23,12 @@
  * 사람이 거절한 것과 런타임이 자동 거부한 것을 절대 같은 말로 적지 않게 하기 위해서다.
  */
 
-import type { ToolApprovalRequestEvent, ToolApprovalDecision } from "../../shared/types";
+import type {
+  ToolApprovalRequestEvent,
+  ToolApprovalDecision,
+  ToolApprovalResolutionReceipt,
+} from "../../shared/types";
+import { toolApprovalActionId } from "../../shared/tool-approval-action";
 import {
   builtinToolByName,
   runBuiltinTool,
@@ -168,6 +173,62 @@ const pending = new Map<string, Pending>();
 const sessionGrants = new Map<string, Set<string>>();
 const listeners = new Set<(request: ToolApprovalRequest) => void>();
 const resolvedListeners = new Set<(id: string, outcome: ToolApprovalOutcome) => void>();
+type ResolutionRecord = {
+  requestId: string;
+  decision: ToolApprovalDecision;
+  actionId: string | null;
+  status: "resolved" | "expired";
+  decidedAt: string;
+};
+const resolutions = new Map<string, ResolutionRecord>();
+const RESOLUTION_LIMIT = 500;
+
+function rememberResolution(record: ResolutionRecord): void {
+  // Refresh insertion order when an exact replay finds the same request.
+  resolutions.delete(record.requestId);
+  resolutions.set(record.requestId, record);
+  while (resolutions.size > RESOLUTION_LIMIT) {
+    const oldest = resolutions.keys().next();
+    if (oldest.done) break;
+    resolutions.delete(oldest.value);
+  }
+}
+
+function resolutionReceipt(
+  record: ResolutionRecord,
+  requestedDecision: ToolApprovalDecision | null,
+  status: "resolved" | "replayed" | "expired" | "conflict",
+): ToolApprovalResolutionReceipt {
+  return {
+    ok: status === "resolved" || status === "replayed",
+    receiptVersion: 1,
+    requestId: record.requestId,
+    requestedDecision,
+    resolvedDecision: record.decision,
+    actionId: record.actionId,
+    status,
+    pending: false,
+    decidedAt: record.decidedAt,
+  };
+}
+
+function unresolvedReceipt(
+  requestId: string,
+  requestedDecision: ToolApprovalDecision | null,
+  status: "pending" | "not_found" | "invalid_action",
+): ToolApprovalResolutionReceipt {
+  return {
+    ok: false,
+    receiptVersion: 1,
+    requestId,
+    requestedDecision,
+    resolvedDecision: null,
+    actionId: null,
+    status,
+    pending: status === "pending",
+    decidedAt: null,
+  };
+}
 
 /** 같은 도구·대상을 한 세션에서 다시 묻지 않기 위한 키. */
 function grantKey(request: Pick<ToolApprovalRequest, "tool" | "detail">): string {
@@ -226,6 +287,13 @@ export function requestToolApproval(
     const timer = setTimeout(() => {
       pending.delete(request.id);
       const outcome: ToolApprovalOutcome = { decision: "deny", decidedAt: new Date().toISOString() };
+      rememberResolution({
+        requestId: request.id,
+        decision: outcome.decision,
+        actionId: null,
+        status: "expired",
+        decidedAt: outcome.decidedAt,
+      });
       for (const fn of resolvedListeners) { try { fn(request.id, outcome); } catch { /* 화면 하나가 실행을 깨지 못한다 */ } }
       resolve(outcome);
     }, timeoutMs);
@@ -282,23 +350,82 @@ export function announceToolDenied(
   return request;
 }
 
-/** 사용자의 선택을 반영한다. live 요청만 대기 중인 실행을 푼다. */
-export function resolveToolApproval(id: string, decision: ToolApprovalDecision): boolean {
+/**
+ * 사용자의 선택을 반영하고 exact receipt를 남긴다. 응답이 유실된 renderer는 같은
+ * actionId를 재전송하지 않고 getToolApprovalResolution으로 실제 결정을 확인한다.
+ */
+export function resolveToolApproval(
+  id: string,
+  decision: ToolApprovalDecision,
+  actionId = toolApprovalActionId(id, decision),
+): ToolApprovalResolutionReceipt {
+  if (actionId !== toolApprovalActionId(id, decision)) {
+    return unresolvedReceipt(id, decision, "invalid_action");
+  }
+
+  const prior = resolutions.get(id);
+  if (prior) {
+    rememberResolution(prior);
+    if (prior.status === "expired") {
+      return resolutionReceipt(prior, decision, "expired");
+    }
+    return resolutionReceipt(
+      prior,
+      decision,
+      prior.decision === decision ? "replayed" : "conflict",
+    );
+  }
+
   const entry = pending.get(id);
   const outcome: ToolApprovalOutcome = { decision, decidedAt: new Date().toISOString() };
   if (entry) {
     clearTimeout(entry.timer);
     pending.delete(id);
+    rememberResolution({
+      requestId: id,
+      decision,
+      actionId,
+      status: "resolved",
+      decidedAt: outcome.decidedAt,
+    });
     entry.resolve(outcome);
-  } else if (decision === "allow_session" || decision === "allow_always") {
+  } else if (announced.has(id)) {
     // 이미 거부된 호출이라 이번 실행은 되살릴 수 없다 — 그래서 이 선택이 뜻하는 바는
     // 오직 "다음부터는 묻지 말고 허용하라"이고, 그것만은 반드시 남아야 한다.
     const known = announced.get(id);
-    if (known?.sessionKey) rememberSessionGrant(known.sessionKey, known.request);
+    if ((decision === "allow_session" || decision === "allow_always") && known?.sessionKey) {
+      rememberSessionGrant(known.sessionKey, known.request);
+    }
     if (known && decision === "allow_always") persistAlwaysGrant(known.request);
+    rememberResolution({
+      requestId: id,
+      decision,
+      actionId,
+      status: "resolved",
+      decidedAt: outcome.decidedAt,
+    });
+  } else {
+    return unresolvedReceipt(id, decision, "not_found");
   }
   for (const fn of resolvedListeners) { try { fn(id, outcome); } catch { /* 같은 이유 */ } }
-  return Boolean(entry);
+  return resolutionReceipt(
+    resolutions.get(id) as ResolutionRecord,
+    decision,
+    "resolved",
+  );
+}
+
+/** Main의 live queue와 resolution ledger를 한 요청 id로 다시 읽는다. */
+export function getToolApprovalResolution(id: string): ToolApprovalResolutionReceipt {
+  const record = resolutions.get(id);
+  if (record) {
+    return resolutionReceipt(
+      record,
+      null,
+      record.status === "expired" ? "expired" : "resolved",
+    );
+  }
+  return unresolvedReceipt(id, null, pending.has(id) ? "pending" : "not_found");
 }
 
 /**

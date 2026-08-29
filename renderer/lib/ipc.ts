@@ -2,6 +2,7 @@
 import type {
   ToolApprovalRequestEvent,
   ToolApprovalDecision,
+  ToolApprovalResolutionReceipt,
   AgentlasIpc,
   AgentlasUpdaterEvents,
   McpInvocationEvent,
@@ -58,6 +59,8 @@ interface AgentlasEvents {
    * 구 preload에는 없어 optional.
    */
   onToolApproval?: (handler: (req: ToolApprovalRequestEvent) => void) => () => void;
+  /** Main-confirmed terminal resolution, including decisions made from Mobile/another window. */
+  onToolApprovalResolution?: (handler: (receipt: ToolApprovalResolutionReceipt) => void) => () => void;
   /** 스토어 변경 방송({entity, id}) — 읽기 캐시 무효화용. 구 preload에는 없어 optional. */
   onStoreChanged?: (handler: (change: { entity: string; id?: string }) => void) => () => void;
   /** Site Copilot의 사용자용 처리 단계·타이핑 피드백 구독. */

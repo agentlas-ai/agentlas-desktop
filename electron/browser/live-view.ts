@@ -6,6 +6,7 @@ import { getBrowserStatus } from "./connect";
 import type {
   BrowserLiveFrame,
   BrowserLiveInput,
+  BrowserLiveDispatchResult,
   BrowserLiveSessionResult,
   BrowserLiveStreamFrame,
   BrowserLiveViewport,
@@ -61,14 +62,38 @@ function unavailable(error: BrowserLiveFrame["error"], viewport: BrowserLiveView
   };
 }
 
+const SENSITIVE_URL_PARAMETER = /^(?:access_?token|auth|authorization|code|credential|key|password|refresh_?token|secret|signature|sig)$/iu;
+
+/**
+ * User-visible action identity. Normal query parameters and fragments are
+ * significant (SPA routes and redirect intents depend on them), so they are
+ * preserved. URL credentials and explicitly credential-shaped values are
+ * removed before a frame or receipt crosses into the renderer.
+ */
 function displayUrl(raw: string): string | null {
   try {
     const parsed = new URL(raw);
     if (!/^https?:$/u.test(parsed.protocol)) return null;
     parsed.username = "";
     parsed.password = "";
-    parsed.search = "";
-    parsed.hash = "";
+    for (const key of [...parsed.searchParams.keys()]) {
+      if (SENSITIVE_URL_PARAMETER.test(key)) parsed.searchParams.set(key, "[redacted]");
+    }
+    parsed.hash = parsed.hash.replace(
+      /([?&#](?:access_?token|auth|authorization|code|credential|key|password|refresh_?token|secret|signature|sig)=)[^&#]*/giu,
+      "$1[redacted]",
+    );
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+function actionUrl(raw: string | undefined): string | null {
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw);
+    if (!/^https?:$/u.test(parsed.protocol) || parsed.username || parsed.password) return null;
     return parsed.toString();
   } catch {
     return null;
@@ -329,9 +354,18 @@ class CdpLiveStream {
     throw new Error("navigation-history-did-not-settle");
   }
 
-  private async captureNavigationFrame(expectedUrl?: string): Promise<void> {
+  private async captureNavigationFrame(options: {
+    initialUrl?: string | null;
+    requestedUrl?: string | null;
+    allowSameUrl?: boolean;
+  } = {}): Promise<BrowserLiveStreamFrame> {
     const deadline = Date.now() + 4_000;
-    const expected = matchUrl(expectedUrl);
+    const initial = actionUrl(options.initialUrl ?? undefined);
+    const requested = actionUrl(options.requestedUrl ?? undefined);
+    // Give CDP a bounded chance to replace the old execution context. Without
+    // this floor a redirecting navigation can capture the already-ready source
+    // page before Page.frameNavigated arrives.
+    const earliestCapture = Date.now() + 80;
     while (Date.now() < deadline) {
       try {
         const evaluated = await this.call("Runtime.evaluate", {
@@ -339,9 +373,16 @@ class CdpLiveStream {
           returnByValue: true,
         }) as { result?: { value?: { href?: unknown; title?: unknown; readyState?: unknown } } };
         const value = evaluated.result?.value;
-        const current = typeof value?.href === "string" ? matchUrl(value.href) : null;
+        const current = typeof value?.href === "string" ? actionUrl(value.href) : null;
         const ready = value?.readyState === "interactive" || value?.readyState === "complete";
-        if (current && ready && (!expected || current === expected)) {
+        const changed = Boolean(current && current !== initial);
+        const requestedReached = Boolean(current && requested && current === requested);
+        if (
+          current
+          && ready
+          && Date.now() >= earliestCapture
+          && (options.allowSameUrl === true || changed || requestedReached)
+        ) {
           this.target.url = current;
           if (typeof value?.title === "string") this.target.title = value.title;
           const screenshot = await this.call("Page.captureScreenshot", {
@@ -354,8 +395,9 @@ class CdpLiveStream {
             // History traversal can restore a static page from the back-forward
             // cache without emitting another screencast frame. Seed one exact
             // frame so the in-app viewport and address bar never stay stale.
-            this.sink(this.frame(screenshot.data));
-            return;
+            const frame = this.frame(screenshot.data);
+            this.sink(frame);
+            return frame;
           }
         }
       } catch {
@@ -367,19 +409,26 @@ class CdpLiveStream {
     throw new Error("navigation-frame-did-not-settle");
   }
 
-  async dispatch(input: BrowserLiveInput): Promise<void> {
+  async dispatch(input: BrowserLiveInput): Promise<{ sequence: number; finalUrl: string | null }> {
     if (input.kind === "navigation") {
       if (input.action === "navigate") {
-        const target = matchUrl(input.url);
+        const target = actionUrl(input.url);
         if (!target) throw new Error("invalid-navigation-target");
-        await this.call("Page.navigate", { url: target });
-        await this.captureNavigationFrame(target);
-        return;
+        const initialUrl = this.target.url;
+        const result = await this.call("Page.navigate", { url: target }) as { errorText?: unknown };
+        if (typeof result.errorText === "string" && result.errorText) throw new Error("navigation-refused");
+        const frame = await this.captureNavigationFrame({
+          initialUrl,
+          requestedUrl: target,
+          allowSameUrl: initialUrl === target,
+        });
+        return { sequence: frame.sequence, finalUrl: frame.url };
       }
       if (input.action === "reload") {
+        const initialUrl = this.target.url;
         await this.call("Page.reload", { ignoreCache: false });
-        await this.captureNavigationFrame(this.target.url);
-        return;
+        const frame = await this.captureNavigationFrame({ initialUrl, allowSameUrl: true });
+        return { sequence: frame.sequence, finalUrl: frame.url };
       }
       const history = await this.call("Page.getNavigationHistory") as {
         currentIndex?: unknown;
@@ -388,18 +437,22 @@ class CdpLiveStream {
       const currentIndex = Number(history.currentIndex);
       const targetIndex = input.action === "back" ? currentIndex - 1 : currentIndex + 1;
       const entryId = Number(history.entries?.[targetIndex]?.id);
-      if (Number.isFinite(entryId)) {
-        await this.call("Page.navigateToHistoryEntry", { entryId });
-        // CDP acknowledges before the history cursor always moves. Waiting for
-        // that cursor prevents a quick Back → Forward sequence from resolving
-        // Forward against the stale index and becoming a silent no-op.
-        await this.waitForHistoryEntry(targetIndex, entryId);
-        const expectedUrl = typeof history.entries?.[targetIndex]?.url === "string"
-          ? history.entries[targetIndex].url as string
-          : undefined;
-        await this.captureNavigationFrame(expectedUrl);
-      }
-      return;
+      if (!Number.isFinite(entryId)) throw new Error("no-history");
+      const initialUrl = this.target.url;
+      await this.call("Page.navigateToHistoryEntry", { entryId });
+      // CDP acknowledges before the history cursor always moves. Waiting for
+      // that cursor prevents a quick Back → Forward sequence from resolving
+      // Forward against the stale index and becoming a silent no-op.
+      await this.waitForHistoryEntry(targetIndex, entryId);
+      const expectedUrl = typeof history.entries?.[targetIndex]?.url === "string"
+        ? history.entries[targetIndex].url as string
+        : undefined;
+      const frame = await this.captureNavigationFrame({
+        initialUrl,
+        requestedUrl: expectedUrl,
+        allowSameUrl: initialUrl === expectedUrl,
+      });
+      return { sequence: frame.sequence, finalUrl: frame.url };
     }
     if (input.kind === "pointer") {
       const type = input.phase === "down" ? "mousePressed" : input.phase === "up" ? "mouseReleased" : "mouseMoved";
@@ -410,7 +463,7 @@ class CdpLiveStream {
         button: input.phase === "move" ? "none" : input.button ?? "left",
         clickCount: Math.round(finiteBetween(input.clickCount ?? 1, 1, 3)),
       });
-      return;
+      return { sequence: this.frameSequence, finalUrl: displayUrl(this.target.url) };
     }
     if (input.kind === "wheel") {
       await this.call("Input.dispatchMouseEvent", {
@@ -420,12 +473,12 @@ class CdpLiveStream {
         deltaX: finiteBetween(input.deltaX, -2_000, 2_000),
         deltaY: finiteBetween(input.deltaY, -2_000, 2_000),
       });
-      return;
+      return { sequence: this.frameSequence, finalUrl: displayUrl(this.target.url) };
     }
     if (input.kind === "text") {
       const text = input.text.slice(0, 4_096);
       if (text) await this.call("Input.insertText", { text });
-      return;
+      return { sequence: this.frameSequence, finalUrl: displayUrl(this.target.url) };
     }
     const key = input.key.slice(0, 64);
     const code = input.code?.slice(0, 64);
@@ -438,6 +491,7 @@ class CdpLiveStream {
       unmodifiedText: printable,
       modifiers: Math.round(finiteBetween(input.modifiers ?? 0, 0, 15)),
     });
+    return { sequence: this.frameSequence, finalUrl: displayUrl(this.target.url) };
   }
 
   async close(): Promise<void> {
@@ -839,15 +893,23 @@ export async function stopBrowserLiveSessionsForOwner(ownerId: number): Promise<
   }));
 }
 
-export async function dispatchBrowserLiveInput(ownerId: number, value: unknown): Promise<{ ok: boolean }> {
-  if (!isBrowserLiveInput(value)) return { ok: false };
+export async function dispatchBrowserLiveInput(
+  ownerId: number,
+  value: unknown,
+): Promise<BrowserLiveDispatchResult> {
+  if (!isBrowserLiveInput(value)) return { ok: false, code: "invalid_input" };
   const record = liveSessions.get(value.sessionId);
-  if (!record || record.ownerId !== ownerId) return { ok: false };
+  if (!record || record.ownerId !== ownerId) return { ok: false, code: "session_missing" };
   try {
-    await record.stream.dispatch(value);
-    return { ok: true };
-  } catch {
-    return { ok: false };
+    const result = await record.stream.dispatch(value);
+    return { ok: true, sessionId: value.sessionId, ...result };
+  } catch (error) {
+    return {
+      ok: false,
+      code: error instanceof Error && error.message === "no-history"
+        ? "no_history"
+        : "dispatch_failed",
+    };
   }
 }
 

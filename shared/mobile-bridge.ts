@@ -3,6 +3,15 @@ import type { AgentlasOneTaskProjectionV1 } from "./one-task-projection";
 import { ONE_DECISION_CONTRACT_VERSION, type OneDecisionViewV1 } from "./one-decision";
 import type { OneMobileEcosystemSuggestionV1 } from "./one-mobile-suggestion";
 import { PROJECT_AGENT_POOL_MAX } from "./project-agent-pool";
+import {
+  ONE_BRIEFING_CONTRACT_VERSION,
+  type OneBriefingCadence,
+  type OneBriefingConfidence,
+  type OneBriefingKind,
+  type OneBriefingPreparedActionKind,
+  type OneBriefingReasonCode,
+  type OneBriefingSourceKind,
+} from "./one-briefing-contract.generated";
 // runtime-kinds/runtime-backends import nothing but `./types` (type-only), so
 // the dependency-free contract below stays dependency-free at runtime.
 import { RUNTIME_KINDS } from "./runtime-kinds";
@@ -266,6 +275,20 @@ export interface MobileBridgeTerminalRefusalDto {
   message: string;
 }
 
+export type MobileBridgeTerminalWriteMethod =
+  | "terminal.takeover"
+  | "terminal.release"
+  | "terminal.dispatch"
+  | "terminal.cancel";
+
+/** Exact negative receipt for one protected terminal write. */
+export interface MobileBridgeTerminalWriteRefusalDto
+  extends MobileBridgeTerminalRefusalDto {
+  method: MobileBridgeTerminalWriteMethod;
+  terminalId: string;
+  idempotencyKey: string;
+}
+
 export interface MobileBridgeTerminalLineDto {
   seq: number;
   stream: "stdout" | "stderr" | "system";
@@ -282,6 +305,16 @@ export interface MobileBridgeTerminalReadDto {
   nextSeq: number;
   truncated: boolean;
   refusal?: MobileBridgeTerminalRefusalDto;
+  /** Live previews let Mobile resume the same protected intent after remount. */
+  pendingPreviews?: MobileBridgeTerminalPreviewDto[];
+  /** Recent exact requests reconcile response loss and restore cancellation. */
+  requests?: MobileBridgeTerminalRequestDto[];
+}
+
+export interface MobileBridgeTerminalRequestDto {
+  requestId: string;
+  status: "queued" | "running" | "completed" | "cancelled";
+  startedAt: string;
 }
 
 export interface MobileBridgeTerminalPreviewDto {
@@ -974,6 +1007,9 @@ export interface MobileBridgeProjectTaskStartReceiptDto {
   taskId: string;
   chatId: string;
   title: string;
+  controllerAgentId: string;
+  /** Exact durable Work chat created by this action; Mobile must validate it before pin/invoke. */
+  chat: MobileBridgeChatDto;
 }
 
 export interface MobileBridgeChatDto {
@@ -1734,34 +1770,21 @@ export interface MobileBridgeOneProfileDto {
 }
 
 export interface MobileBridgeOneBriefingCandidateDto {
-  contractVersion: "1.0.0";
+  contractVersion: typeof ONE_BRIEFING_CONTRACT_VERSION;
   candidateId: string;
-  kind: "risk" | "opportunity" | "anomaly" | "repetition" | "decision" | "completion";
-  reasonCode:
-    | "project_folder_missing"
-    | "project_folder_unreadable"
-    | "project_folder_not_directory"
-    | "project_deadline_conflict"
-    | "automation_error"
-    | "automation_blocked"
-    | "automation_needs_input"
-    | "automation_partial"
-    | "task_waiting_decision_stale"
-    | "task_running_without_active_run"
-    | "task_failed_repeated"
-    | "task_failed_abandoned"
-    | "task_partial_abandoned";
+  kind: OneBriefingKind;
+  reasonCode: OneBriefingReasonCode;
   severity: 1 | 2 | 3 | 4;
   source: {
-    kind: "project_folder" | "automation_run" | "canonical_task";
+    kind: OneBriefingSourceKind;
     refId: string;
     label: string;
   };
   detectedAt: string;
   expiresAt: string;
-  confidence: "high" | "medium" | "low";
+  confidence: OneBriefingConfidence;
   preparedAction: {
-    kind: "open_project" | "open_automation" | "open_task";
+    kind: OneBriefingPreparedActionKind;
     targetId: string;
     label: string;
     /** Navigation only. Mobile cannot infer that execution has begun. */
@@ -1775,10 +1798,10 @@ export interface MobileBridgeOneBriefingCandidateDto {
  * Mobile renders this exact candidate and never re-runs the detector.
  */
 export interface MobileBridgeOneBriefingDto {
-  contractVersion: "1.0.0";
+  contractVersion: typeof ONE_BRIEFING_CONTRACT_VERSION;
   evaluatedAt: string;
   preferences: {
-    cadence: "important_only" | "daily" | "weekdays" | "weekly";
+    cadence: OneBriefingCadence;
     /** Only the channel that is actually implemented across this bridge. */
     channels: ["in_app"];
     quietHours: {

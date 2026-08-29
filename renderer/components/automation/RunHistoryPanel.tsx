@@ -52,6 +52,7 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
     setForgetting(true);
     try {
       const res = await api.automations.forgetFailedRun(automation.id);
+      if (res.automationId !== automation.id) throw new Error("automation_forget_receipt_mismatch");
       if (res.forgot) {
         setRecoveryError("");
         setMessage(ko
@@ -65,7 +66,23 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
           : "The graph has not changed yet. Change it first, then try again.")
         : (ko ? "정리할 이전 실패가 없습니다." : "There is no earlier failure to clear."));
     } catch {
-      setRecoveryError(ko ? "정리하지 못했습니다." : "Could not clear it.");
+      try {
+        const remaining = await api.automations.getGraphReconciliation(automation.id);
+        if (!remaining) {
+          setRecoveryError("");
+          setMessage(ko
+            ? "이전 실패는 정리된 상태임을 다시 읽어 확인했습니다. 응답이 유실됐으므로 같은 정리를 반복하지 마세요."
+            : "A readback confirms that the earlier failure is cleared. Its reply was lost, so do not repeat the same clear action.");
+        } else {
+          setRecoveryError(ko
+            ? "이전 실패 기록이 아직 남아 있습니다. 그래프와 기록을 다시 확인한 뒤에만 정리를 다시 시도하세요."
+            : "The earlier failure record is still present. Recheck the graph and record before trying to clear it again.");
+        }
+      } catch {
+        setRecoveryError(ko
+          ? "정리 요청이 이미 반영됐을 수 있으나 실패 기록을 다시 읽지 못했습니다. 반복하지 말고 화면을 다시 여세요."
+          : "The clear request may already have applied, but the failure record could not be read back. Do not repeat it; reopen this page.");
+      }
     } finally {
       setForgetting(false);
     }
@@ -81,9 +98,9 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
   /* ★"눌렀는데 아무 일도 안 일어남"을 구조적으로 금지한다.
      어떤 행동이든 (1) 실행하고 (2) 다시 읽는다. 조용히 그대로 두면 사용자는 같은
      버튼을 다시 누르고, 그게 "아무리 눌러도 안 된다"의 정체였다. */
-  const load = useCallback(async () => {
+  const load = useCallback(async (options: { reportFailure?: boolean } = {}): Promise<boolean> => {
     const api = ipc();
-    if (!api) return;
+    if (!api) return false;
     let snap: WorkflowRunSnapshot | null = null;
     try {
       const [history, nextSnap, nextAttentions] = await Promise.all([
@@ -96,23 +113,28 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
       setLatest(nextSnap);
       setAttentions(nextAttentions);
     } catch (err) {
-      setMessage(ko ? "실행 기록을 불러오지 못했어요. 잠시 뒤 다시 시도해 주세요." : "Could not load run history. Try again shortly.");
+      if (options.reportFailure !== false) {
+        setMessage(ko ? "실행 기록을 불러오지 못했어요. 잠시 뒤 다시 시도해 주세요." : "Could not load run history. Try again shortly.");
+      }
+      return false;
     }
     if (!automation.graph || !snap || snap.status !== "error") {
       setReconciliation(null);
       reconciliationAttemptRef.current = null;
-      return;
+      return true;
     }
     const reconciliationKey = `${snap.runId}:${JSON.stringify(automation.graph)}`;
-    if (reconciliationAttemptRef.current === reconciliationKey) return;
+    if (reconciliationAttemptRef.current === reconciliationKey) return true;
     reconciliationAttemptRef.current = reconciliationKey;
     try {
       const nextReconciliation = await api.automations.getGraphReconciliation(automation.id);
       setReconciliation(nextReconciliation);
       setRecoveryError("");
+      return true;
     } catch (err) {
       setReconciliation(null);
       setRecoveryError(reconciliationErrorMessage(err, ko));
+      return false;
     }
   }, [automation.graph, automation.id, compact, ko]);
 
@@ -123,13 +145,15 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
 
   // 복구 계획은 모델 호출을 포함하므로 폴링하지 않는다. 확인이 필요한 상태가 됐을 때 한 번,
   // 그리고 조치를 실행한 뒤 다시 계산한다.
-  const loadFixPlan = useCallback(async () => {
+  const loadFixPlan = useCallback(async (options: { preserveOnFailure?: boolean } = {}): Promise<boolean> => {
     const api = ipc();
-    if (!api) return;
+    if (!api) return false;
     try {
       setFixPlan(await api.automations.planFix(automation.id));
+      return true;
     } catch {
-      setFixPlan(null);
+      if (!options.preserveOnFailure) setFixPlan(null);
+      return false;
     }
   }, [automation.id]);
 
@@ -317,12 +341,30 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
     setFixMessage("");
     try {
       const result = await api.automations.applyFix(automation.id, option.actionId);
-      setFixMessage(result.message);
+      if (result.automationId !== automation.id || result.actionId !== option.actionId) {
+        throw new Error("automation_fix_receipt_mismatch");
+      }
+      if (!result.ok) {
+        setFixMessage(result.message || (ko ? "선택한 조치를 실행하지 않았습니다." : "The selected action was not completed."));
+        return;
+      }
+      const terminalMessage = result.message || (ko ? "선택한 조치를 완료했습니다." : "The selected action completed.");
+      setFixMessage(terminalMessage);
+      setFixPlan(result.plan);
       if (result.navigate) navigate(result.navigate);
-      await load();
-      await loadFixPlan();
+      const [historyReady, planReady] = await Promise.all([
+        load({ reportFailure: false }),
+        loadFixPlan({ preserveOnFailure: true }),
+      ]);
+      if (!historyReady || !planReady) {
+        setFixMessage(`${terminalMessage} ${ko
+          ? "화면만 새로고침하지 못했습니다. 같은 조치를 반복하지 말고 이 화면을 다시 열어 주세요."
+          : "Only the screen failed to refresh. Do not repeat the action; reopen this page."}`);
+      }
     } catch (err) {
-      setFixMessage(rerunFailureMessage(err, ko));
+      setFixMessage(ko
+        ? "선택한 조치의 최종 결과를 확인하지 못했습니다. 이미 반영됐을 수 있으니 반복하지 말고 화면을 다시 열어 확인해 주세요."
+        : "The selected action's final result could not be verified. It may already have applied; do not repeat it, and reopen this page to check.");
     } finally {
       setFixBusy(null);
     }
@@ -335,15 +377,23 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
     setMessage("");
     try {
       const result = await api.automations.runNow(automation.id);
-      if (!result.accepted) throw new Error("automation_run_not_accepted");
-      if (result.status === "ok") {
-        setMessage(ko ? "다시 실행을 완료했습니다." : "The run completed.");
-      } else {
-        setMessage(result.error || (ko
-          ? `실행이 ${result.status ?? "실패"} 상태로 끝났습니다.`
-          : `The run ended with status ${result.status ?? "failed"}.`));
+      if (!result.accepted || result.automationId !== automation.id || !result.status) {
+        throw new Error("automation_run_receipt_mismatch");
       }
-      await load();
+      let terminalMessage: string;
+      if (result.status === "ok") {
+        terminalMessage = ko ? "다시 실행을 완료했습니다." : "The run completed.";
+      } else {
+        terminalMessage = result.error || (ko
+          ? `실행이 ${result.status ?? "실패"} 상태로 끝났습니다.`
+          : `The run ended with status ${result.status ?? "failed"}.`);
+      }
+      setMessage(terminalMessage);
+      if (!await load({ reportFailure: false })) {
+        setMessage(`${terminalMessage} ${ko
+          ? "실행 기록 화면만 새로고침하지 못했습니다. 화면 갱신을 위해 다시 실행하지 마세요."
+          : "Only the run-history view failed to refresh. Do not rerun just to refresh the screen."}`);
+      }
     } catch (err) {
       setMessage(rerunFailureMessage(err, ko));
     } finally {
@@ -373,7 +423,7 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
           ...(draft.resolution === "completed" && draft.output.length > 0 ? { output: draft.output } : {}),
         };
       });
-      const result = await api.automations.reconcileGraph({
+      const request = {
         automationId: reconciliation.automationId,
         runId: reconciliation.runId,
         occurrenceId: reconciliation.occurrenceId,
@@ -383,19 +433,34 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
         eventId: reconciliation.triggerEvent?.id ?? null,
         expectedEventUpdatedAt: reconciliation.triggerEvent?.updatedAt ?? null,
         decisions,
-      });
-      await load();
-      setMessage(
+      };
+      const result = await api.automations.reconcileGraph(request);
+      if (
+        result.automationId !== request.automationId
+        || result.runId !== request.runId
+        || result.checkpointDigest !== request.checkpointDigest
+        || !result.updatedAt
+      ) {
+        throw new Error("automation_graph_reconciliation_receipt_mismatch");
+      }
+      const terminalMessage =
         result.resumeRequired
           ? ko
             ? "확인 내용을 저장했습니다. 남은 노드를 안전하게 다시 시작합니다."
             : "Saved the confirmation. Safely resuming the remaining nodes."
           : ko
             ? "확인 내용을 저장했습니다. 이 발생은 완료 처리됐습니다."
-            : "Saved the confirmation. This occurrence is complete.",
-      );
+            : "Saved the confirmation. This occurrence is complete.";
+      setMessage(terminalMessage);
+      if (!await load({ reportFailure: false })) {
+        setMessage(`${terminalMessage} ${ko
+          ? "최신 기록 화면만 불러오지 못했습니다. 같은 확인을 반복하지 말고 화면을 다시 여세요."
+          : "Only the latest history failed to load. Do not repeat the confirmation; reopen this page."}`);
+      }
     } catch (err) {
-      setRecoveryError(reconciliationErrorMessage(err, ko));
+      const conflicted = /conflict|stale/.test(String(err));
+      const reloaded = conflicted ? await load({ reportFailure: false }) : false;
+      setRecoveryError(reconciliationErrorMessage(err, ko, reloaded));
     } finally {
       setReconciling(false);
     }
@@ -417,24 +482,39 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
     setEventActionId(attention.id);
     setRecoveryError("");
     try {
-      await api.automations.reconcileTriggerEvent({
+      const request = {
         eventId: attention.id,
         automationId: attention.automationId,
         expectedUpdatedAt: attention.updatedAt,
         resolution,
-      });
-      await load();
-      setMessage(
+      };
+      const result = await api.automations.reconcileTriggerEvent(request);
+      if (
+        result.eventId !== request.eventId
+        || result.automationId !== request.automationId
+        || result.resolution !== resolution
+        || result.status !== (resolution === "completed" ? "delivered" : "pending")
+      ) {
+        throw new Error("automation_trigger_reconciliation_receipt_mismatch");
+      }
+      const terminalMessage =
         resolution === "completed"
           ? ko
             ? "발생을 완료 처리했습니다."
             : "Marked the occurrence complete."
           : ko
             ? "발생을 다시 대기열에 넣었습니다."
-            : "Queued the occurrence for retry.",
-      );
+            : "Queued the occurrence for retry.";
+      setMessage(terminalMessage);
+      if (!await load({ reportFailure: false })) {
+        setMessage(`${terminalMessage} ${ko
+          ? "최신 기록 화면만 불러오지 못했습니다. 같은 조정을 반복하지 말고 화면을 다시 여세요."
+          : "Only the latest history failed to load. Do not repeat the reconciliation; reopen this page."}`);
+      }
     } catch (err) {
-      setRecoveryError(reconciliationErrorMessage(err, ko));
+      const conflicted = /conflict|stale/.test(String(err));
+      const reloaded = conflicted ? await load({ reportFailure: false }) : false;
+      setRecoveryError(reconciliationErrorMessage(err, ko, reloaded));
     } finally {
       setEventActionId(null);
     }
@@ -779,10 +859,12 @@ function rerunFailureMessage(error: unknown, ko: boolean): string {
       ? "아래에서 실제 실행 여부를 먼저 확정해 주세요. 확정 전에는 같은 동작이 두 번 일어날 수 있어 다시 실행하지 않습니다."
       : "Confirm below what actually ran first. Until then a rerun could repeat the same action, so it is held.";
   }
-  return ko ? "다시 실행하지 못했어요. 잠시 뒤 다시 시도해 주세요." : "The run could not start. Try again shortly.";
+  return ko
+    ? "실행의 최종 접수 결과를 확인하지 못했습니다. 이미 시작됐을 수 있으니 기록을 새로고침하기 전에는 다시 실행하지 마세요."
+    : "The final run acknowledgement could not be verified. It may already have started; do not rerun until you refresh the history.";
 }
 
-function reconciliationErrorMessage(error: unknown, ko: boolean): string {
+function reconciliationErrorMessage(error: unknown, ko: boolean, reloaded = false): string {
   const raw = String(error);
   if (/graph_drift/.test(raw)) {
     return ko
@@ -793,7 +875,9 @@ function reconciliationErrorMessage(error: unknown, ko: boolean): string {
     return ko ? "완료된 노드의 실제 결과를 입력해 주세요." : "Enter the actual output for every completed node.";
   }
   if (/conflict|stale/.test(raw)) {
-    return ko ? "상태가 다른 실행에서 변경되었습니다. 최신 상태를 다시 불러왔습니다." : "Another runner changed this state. Reloaded the latest state.";
+    return reloaded
+      ? (ko ? "상태가 다른 실행에서 변경되었습니다. 최신 상태를 다시 불러왔습니다." : "Another runner changed this state. Reloaded the latest state.")
+      : (ko ? "상태가 다른 실행에서 변경되었지만 최신 상태를 불러오지 못했습니다. 같은 조정을 반복하지 말고 화면을 다시 여세요." : "Another runner changed this state, but the latest state could not be loaded. Do not repeat the reconciliation; reopen this page.");
   }
   if (/bound_event_active/.test(raw)) {
     return ko ? "다른 실행기가 이 발생을 처리 중입니다. 잠시 후 다시 확인해 주세요." : "Another runner is processing this occurrence. Try again shortly.";
@@ -803,7 +887,9 @@ function reconciliationErrorMessage(error: unknown, ko: boolean): string {
       ? "복구 기록이 손상됐거나 구버전이라 안전하게 판단할 수 없습니다. 자동 재실행은 차단된 상태입니다."
       : "The recovery record is malformed or from an older schema. Automatic replay remains blocked.";
   }
-  return ko ? `복구 작업을 완료하지 못했습니다. ${raw}` : `Could not complete reconciliation. ${raw}`;
+  return ko
+    ? "조정의 최종 결과를 확인하지 못했습니다. 이미 반영됐을 수 있으니 반복하지 말고 실행 기록을 다시 열어 확인해 주세요."
+    : "The reconciliation's final result could not be verified. It may already have applied; do not repeat it, and reopen the run history to check.";
 }
 
 function summarizeSnapshot(

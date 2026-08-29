@@ -313,6 +313,11 @@ export default function DocumentStudioPage() {
             ? "No AI runtime connected. Connect the agy or codex CLI, then generate — no template fallback."
             : "AI 런타임이 연결되지 않았습니다. agy 또는 codex CLI를 연결한 뒤 생성하세요 — 템플릿 폴백 없음.",
       );
+    } catch {
+      setGenEngine(null);
+      setError(locale === "en"
+        ? "The draft could not be generated. Your current document and goal are unchanged; check the AI runtime and try again."
+        : "초안을 생성하지 못했습니다. 현재 문서와 목표는 그대로입니다. AI 런타임을 확인한 뒤 다시 시도하세요.");
     } finally {
       setGenerating(false);
     }
@@ -349,6 +354,10 @@ export default function DocumentStudioPage() {
             : "AI 런타임 미연결 — 편집 불가. agy 또는 codex를 연결하세요.",
         );
       }
+    } catch {
+      setError(locale === "en"
+        ? "The edit could not be applied. The selected text and document are unchanged; try again."
+        : "편집을 적용하지 못했습니다. 선택한 텍스트와 문서는 그대로입니다. 다시 시도하세요.");
     } finally {
       setRevising(null);
     }
@@ -379,6 +388,10 @@ export default function DocumentStudioPage() {
             : "이미지 런타임 미연결(codex/agy) — 도표를 만들 수 없습니다.",
         );
       }
+    } catch {
+      setError(locale === "en"
+        ? "The figure could not be generated. The current figure and note are unchanged; check the image runtime and try again."
+        : "도표를 생성하지 못했습니다. 현재 도표와 메모는 그대로입니다. 이미지 런타임을 확인한 뒤 다시 시도하세요.");
     } finally {
       setFigureBusy(false);
     }

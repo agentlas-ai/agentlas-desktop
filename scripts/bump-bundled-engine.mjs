@@ -52,7 +52,7 @@ const slug = repository.replace(/^https?:\/\/github\.com\//i, "").replace(/\.git
 let release;
 try {
   release = JSON.parse(execFileSync("gh", [
-    "release", "view", "--repo", slug, "--json", "tagName,targetCommitish",
+    "release", "view", "--repo", slug, "--json", "tagName,targetCommitish,assets",
   ], { encoding: "utf8" }));
 } catch (error) {
   fail(`최신 릴리스를 읽지 못했다 (gh 인증/네트워크 확인): ${error.message.split("\n")[0]}`);
@@ -61,16 +61,13 @@ try {
 const latestTag = String(release.tagName ?? "").trim();
 if (!/^v\d+\.\d+\.\d+/.test(latestTag)) fail(`릴리스 태그 형식이 예상과 다르다: ${latestTag}`);
 const latestVersion = latestTag.slice(1);
-
-if (latestVersion === currentVersion) {
-  console.log(`[bump-engine] 이미 최신이다 (v${currentVersion})`);
-  process.exit(0);
-}
-
-if (checkOnly) {
-  console.error(`[bump-engine] 번들 엔진이 뒤처졌다: v${currentVersion} → ${latestTag}`);
-  console.error("[bump-engine] 올리려면: node scripts/bump-bundled-engine.mjs && npm run ensure:engine");
-  process.exit(1);
+const assetName = `hephaestus-runtime-${latestTag}.tar.gz`;
+const releaseAsset = Array.isArray(release.assets)
+  ? release.assets.find((asset) => asset?.name === assetName)
+  : null;
+const assetSha256 = String(releaseAsset?.digest ?? "").replace(/^sha256:/, "").toLowerCase();
+if (!releaseAsset || !/^[0-9a-f]{64}$/.test(assetSha256)) {
+  fail(`${latestTag} 릴리스의 ${assetName} SHA-256을 확인하지 못했다`);
 }
 
 // `targetCommitish` 는 브랜치 이름일 수 있다. 태그가 가리키는 **커밋**을 직접 해석한다 —
@@ -85,8 +82,29 @@ try {
 }
 if (!/^[0-9a-f]{40}$/.test(String(commit ?? ""))) fail(`커밋 SHA 형식이 아니다: ${commit}`);
 
+const exactLatest = latestVersion === currentVersion
+  && String(source.commit ?? "").toLowerCase() === commit
+  && source.assetName === assetName
+  && source.assetSha256 === assetSha256;
+if (exactLatest) {
+  console.log(`[bump-engine] 이미 최신이다 (${latestTag}, ${assetName} sha256:${assetSha256.slice(0, 16)}...)`);
+  process.exit(0);
+}
+
+if (checkOnly) {
+  console.error(`[bump-engine] 번들 엔진 핀이 뒤처졌다: v${currentVersion} → ${latestTag}`);
+  console.error("[bump-engine] 올리려면: node scripts/bump-bundled-engine.mjs && npm run ensure:engine");
+  process.exit(1);
+}
+
 desktop.agentlasUpdateCompatibility.bundledRuntimeVersion = latestVersion;
-desktop.agentlasBundledRuntimeSource = { ...source, ref: latestTag, commit };
+desktop.agentlasBundledRuntimeSource = {
+  ...source,
+  ref: latestTag,
+  commit,
+  assetName,
+  assetSha256,
+};
 writeFileSync(packagePath, `${JSON.stringify(desktop, null, 2)}\n`);
 
 // 릴리스 워크플로에도 **같은 핀이 손으로 복사돼 있다**(2026-07-28 실측: 4곳).
@@ -99,6 +117,8 @@ const workflowFiles = [
 ];
 const previousRef = `v${currentVersion}`;
 const previousCommit = String(source.commit ?? "").trim().toLowerCase();
+const previousAssetName = String(source.assetName ?? "").trim();
+const previousAssetSha256 = String(source.assetSha256 ?? "").trim().toLowerCase();
 let rewritten = 0;
 for (const relative of workflowFiles) {
   const file = path.join(root, relative);
@@ -110,7 +130,9 @@ for (const relative of workflowFiles) {
   }
   const next = body
     .split(`HEPHAESTUS_REF: ${previousRef}`).join(`HEPHAESTUS_REF: ${latestTag}`)
-    .split(`HEPHAESTUS_COMMIT: ${previousCommit}`).join(`HEPHAESTUS_COMMIT: ${commit}`);
+    .split(`HEPHAESTUS_COMMIT: ${previousCommit}`).join(`HEPHAESTUS_COMMIT: ${commit}`)
+    .split(`HEPHAESTUS_ASSET_NAME: ${previousAssetName}`).join(`HEPHAESTUS_ASSET_NAME: ${assetName}`)
+    .split(`HEPHAESTUS_ASSET_SHA256: ${previousAssetSha256}`).join(`HEPHAESTUS_ASSET_SHA256: ${assetSha256}`);
   if (next !== body) {
     writeFileSync(file, next);
     rewritten += 1;
@@ -168,12 +190,15 @@ for (const target of docTargets) {
   }
   // 섹션 안에 같은 문장이 여러 번 있을 수 있다(같은 블록에 이전 항목이 섞인 경우).
   // **첫 번째**만 바꾼다. 그게 이 릴리스 자신의 바인딩이다.
+  let nextSection = section.replace(
+    oldLine,
+    (_match, whitespace) => `This release binds Agentlas OS v${latestVersion} at${whitespace}${commit}.`,
+  );
+  if (previousAssetName) nextSection = nextSection.split(previousAssetName).join(assetName);
+  if (previousAssetSha256) nextSection = nextSection.split(previousAssetSha256).join(assetSha256);
   writeFileSync(
     file,
-    body.slice(0, from) + section.replace(
-      oldLine,
-      (_match, whitespace) => `This release binds Agentlas OS v${latestVersion} at${whitespace}${commit}.`,
-    ) + body.slice(sectionEnd),
+    body.slice(0, from) + nextSection + body.slice(sectionEnd),
   );
 }
 

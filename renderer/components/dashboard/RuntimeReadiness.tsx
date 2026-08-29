@@ -167,18 +167,20 @@ export function RuntimeReadiness() {
   const requestId = useRef(0);
   const [snapshot, setSnapshot] = useState<ReadinessSnapshot | null>(() => readinessCache.get(locale) ?? null);
   const [checking, setChecking] = useState(() => !readinessCache.has(locale));
+  const [recoveryActionBusy, setRecoveryActionBusy] = useState<string | null>(null);
+  const [recoveryNotice, setRecoveryNotice] = useState<string | null>(null);
 
   const inspect = useCallback(async (deep: boolean) => {
     const api = ipc();
     if (!api) {
       setChecking(false);
-      return;
+      return false;
     }
     const cached = readinessCache.get(locale);
     if (!deep && cached && Date.now() - cached.checkedAt <= READINESS_CACHE_MAX_AGE_MS) {
       setSnapshot(cached);
       setChecking(false);
-      return;
+      return true;
     }
     const currentRequest = ++requestId.current;
     setChecking(true);
@@ -207,7 +209,7 @@ export function RuntimeReadiness() {
     if (deep && engine?.available) {
       doctor = await api.hephaestus.doctor().catch(() => null);
     }
-    if (currentRequest !== requestId.current) return;
+    if (currentRequest !== requestId.current) return false;
 
     const runtimes = (fulfilled(runtimeResult) ?? []) as RuntimeStatus[];
     const session = fulfilled(sessionResult) as AuthSession | null;
@@ -349,7 +351,45 @@ export function RuntimeReadiness() {
     readinessCache.set(locale, nextSnapshot);
     setSnapshot(nextSnapshot);
     setChecking(false);
+    return true;
   }, [ko, locale]);
+
+  const runRecoveryAction = useCallback(async (action: { actionId: string; label: string }) => {
+    const api = ipc();
+    if (!api || recoveryActionBusy) return;
+    setRecoveryActionBusy(action.actionId);
+    setRecoveryNotice(null);
+    try {
+      const receipt = await api.hephaestus.recover({ locale, actionId: action.actionId });
+      if (receipt.actionId !== action.actionId || (!receipt.attempted && !receipt.verified)) {
+        throw new Error("hephaestus_recovery_receipt_mismatch");
+      }
+      const terminalMessage = receipt.verified
+        ? receipt.attempted
+          ? (ko ? "선택한 복구를 실행했고 Agentlas OS를 다시 확인했습니다." : "Ran the selected recovery and verified Agentlas OS again.")
+          : (ko ? "이미 Agentlas OS가 준비되어 있어 추가 변경은 하지 않았습니다." : "Agentlas OS was already ready, so no additional change was made.")
+        : receipt.presentation?.summary || (ko
+          ? "선택한 복구를 실행했지만 Agentlas OS는 아직 확인이 필요합니다."
+          : "The selected recovery ran, but Agentlas OS still needs attention.");
+      setRecoveryNotice(terminalMessage);
+      if (!await inspect(true)) {
+        setRecoveryNotice(`${terminalMessage} ${ko
+          ? "화면 상태만 새로고침하지 못했습니다. 같은 복구를 반복하지 말고 다시 확인해 주세요."
+          : "Only the screen state failed to refresh. Do not repeat the recovery; run checks again."}`);
+      }
+    } catch {
+      const refreshed = await inspect(true).catch(() => false);
+      setRecoveryNotice(refreshed
+        ? (ko
+          ? "복구 응답의 정확한 결과를 확인하지 못해 현재 상태만 다시 읽었습니다. Agentlas OS 행을 확인하기 전에는 같은 복구를 반복하지 마세요."
+          : "The exact recovery outcome could not be verified, so only the current state was re-read. Do not repeat the recovery until you check the Agentlas OS row.")
+        : (ko
+          ? "복구 요청 뒤 실제 상태를 확인하지 못했습니다. 같은 버튼을 반복하지 말고 전체 확인을 다시 실행해 주세요."
+          : "The actual state could not be checked after the recovery request. Do not repeat the action; run all checks again."));
+    } finally {
+      setRecoveryActionBusy(null);
+    }
+  }, [inspect, ko, locale, recoveryActionBusy]);
 
   useEffect(() => {
     void inspect(false);
@@ -386,6 +426,7 @@ export function RuntimeReadiness() {
         <strong>{overallCopy}</strong>
         <span>{ko ? "실제 계정·런타임·엔진·Hub·플러그인·업데이트 상태입니다." : "Live account, runtime, engine, Hub, plugin, and update state."}</span>
       </div>
+      {recoveryNotice ? <div className="dashboard-module-empty" role="status">{recoveryNotice}</div> : null}
       <div className="dashboard-readiness-grid">
         {(snapshot?.items ?? []).map((item) => (
           <div key={item.id} className="dashboard-readiness-item" data-readiness-id={item.id} data-readiness-status={item.status}>
@@ -397,12 +438,10 @@ export function RuntimeReadiness() {
                   type="button"
                   key={action.actionId}
                   data-dashboard-action="true"
-                  onClick={async () => {
-                    const result = await ipc()?.hephaestus.recover({ locale, actionId: action.actionId });
-                    if (result) void inspect(true);
-                  }}
+                  disabled={recoveryActionBusy !== null}
+                  onClick={() => void runRecoveryAction(action)}
                 >
-                  {action.label}
+                  {recoveryActionBusy === action.actionId ? (ko ? "확인 중…" : "Checking…") : action.label}
                 </button>
               ))}
             </div>

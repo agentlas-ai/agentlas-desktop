@@ -50,6 +50,9 @@ function HubProfileEmbedPage() {
   const [error, setError] = useState<string | null>(null);
   const [opened, setOpened] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [copyPending, setCopyPending] = useState(false);
+  const [copyError, setCopyError] = useState(false);
+  const copiedTimerRef = useRef<number | null>(null);
 
   // 임베드는 CSS가 아니라 창 좌표로 놓인다 — 리사이즈·사이드바 접힘까지 이 한 함수로 따라간다.
   const readBounds = useCallback(() => {
@@ -121,6 +124,31 @@ function HubProfileEmbedPage() {
     };
   }, [opened, readBounds]);
 
+  useEffect(() => () => {
+    if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
+  }, []);
+
+  const copyCall = useCallback(async () => {
+    if (copyPending) return;
+    setCopyPending(true);
+    setCopied(false);
+    setCopyError(false);
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("clipboard_unavailable");
+      await navigator.clipboard.writeText(`/hep-call ${slug}`);
+      setCopied(true);
+      if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
+      copiedTimerRef.current = window.setTimeout(() => {
+        setCopied(false);
+        copiedTimerRef.current = null;
+      }, 1600);
+    } catch {
+      setCopyError(true);
+    } finally {
+      setCopyPending(false);
+    }
+  }, [copyPending, slug]);
+
   return (
     <section style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
       {/* 데스크탑 액션 바 — 임베드된 웹 페이지는 이 앱의 기능을 부를 수 없으므로,
@@ -147,15 +175,22 @@ function HubProfileEmbedPage() {
           type="button"
           className="btn sm"
           style={{ marginLeft: "auto" }}
-          onClick={() => {
-            void navigator.clipboard.writeText(`/hep-call ${slug}`);
-            setCopied(true);
-            window.setTimeout(() => setCopied(false), 1600);
-          }}
+          disabled={copyPending}
+          onClick={() => { void copyCall(); }}
           title={ko ? "복사한 호출어를 대화에 붙여넣으세요." : "Paste the copied call into a conversation."}
         >
-          {copied ? (ko ? "복사됨" : "Copied") : (ko ? "호출어 복사" : "Copy call")}
+          {copyPending
+            ? (ko ? "복사 중…" : "Copying…")
+            : copied
+              ? (ko ? "복사됨" : "Copied")
+              : (ko ? "호출어 복사" : "Copy call")}
         </button>
+        {copyError && (
+          <span role="alert" style={{ fontSize: 11, color: "#c0392b", lineHeight: 1.3 }}>
+            {ko ? "복사 권한이 없어 자동 복사하지 못했습니다. 직접 선택하세요: " : "Clipboard access failed. Select the call directly: "}
+            <code style={{ userSelect: "all", color: "var(--ink)" }}>{`/hep-call ${slug}`}</code>
+          </span>
+        )}
       </header>
 
       {/* 임베드가 놓일 자리. 실제 페이지는 이 사각형 위에 main이 얹는다. */}

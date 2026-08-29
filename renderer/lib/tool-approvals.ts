@@ -17,6 +17,13 @@
 import { useSyncExternalStore } from "react";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import type { ToolApprovalRequestEvent, ToolApprovalDecision } from "@/lib/types";
+import {
+  commitToolApprovalDecision,
+  isToolApprovalResolutionReceipt,
+  reconcileToolApprovalDecision,
+  toolApprovalActionId,
+  type ToolApprovalDecisionResult,
+} from "@shared/tool-approval-action";
 import { isChatAlwaysApproved, waitForAlwaysApprovedChats } from "./always-approved-chats";
 
 let queue: ToolApprovalRequestEvent[] = [];
@@ -24,14 +31,25 @@ const visibleChats = new Map<string, number>();
 const listeners = new Set<() => void>();
 let subscribed = false;
 const decided = new Set<string>();
+export type ToolApprovalActionState = {
+  phase: "submitting" | "retryable" | "unknown" | "terminal";
+  decision: ToolApprovalDecision;
+  terminalStatus?: "expired" | "conflict";
+  resolvedDecision?: ToolApprovalDecision | null;
+};
+const actions = new Map<string, ToolApprovalActionState>();
 
-type Snapshot = { queue: ToolApprovalRequestEvent[]; visible: ReadonlySet<string> };
-let current: Snapshot = { queue, visible: new Set() };
+type Snapshot = {
+  queue: ToolApprovalRequestEvent[];
+  visible: ReadonlySet<string>;
+  actions: ReadonlyMap<string, ToolApprovalActionState>;
+};
+let current: Snapshot = { queue, visible: new Set(), actions: new Map() };
 
 function emit(): void {
   // useSyncExternalStore 는 스냅샷 참조가 바뀌어야 다시 그린다 — 큐든 가시성이든 변할 때
   // 새 객체를 만든다.
-  current = { queue, visible: new Set(visibleChats.keys()) };
+  current = { queue, visible: new Set(visibleChats.keys()), actions: new Map(actions) };
   for (const fn of listeners) fn();
 }
 
@@ -49,7 +67,12 @@ async function upsert(next: ToolApprovalRequestEvent): Promise<void> {
    * 영수증과 기록은 그대로 남는다.
    */
   if (isChatAlwaysApproved(next.chatId)) {
-    decideToolApproval(next.id, "allow_session");
+    // Auto-approval still needs an exact Main receipt. Keep the card in the
+    // shared queue while it is being committed so a failed bridge cannot make
+    // a live runtime question disappear without feedback.
+    queue = [...queue, next];
+    emit();
+    void decideToolApproval(next.id, "allow_session");
     return;
   }
   queue = [...queue, next];
@@ -63,6 +86,35 @@ function ensureSubscribed(): void {
   if (!events?.onToolApproval || !api) return;
   subscribed = true;
   events.onToolApproval((item) => { void upsert(item); });
+  events.onToolApprovalResolution?.((receipt) => {
+    if (!isToolApprovalResolutionReceipt(receipt)) return;
+    if (receipt.pending) return;
+    const currentAction = actions.get(receipt.requestId);
+    const exactOwnAction = currentAction?.phase === "submitting"
+      && receipt.ok
+      && receipt.resolvedDecision === currentAction.decision
+      && receipt.actionId === toolApprovalActionId(receipt.requestId, currentAction.decision)
+      && (receipt.status === "resolved" || receipt.status === "replayed");
+    if (exactOwnAction || !queue.some((item) => item.id === receipt.requestId)) {
+      // Main emitted this only after recording the exact runtime result. Our
+      // own click may therefore finish from the event before the invoke reply.
+      decided.add(receipt.requestId);
+      actions.delete(receipt.requestId);
+      queue = queue.filter((item) => item.id !== receipt.requestId);
+      emit();
+      return;
+    }
+    // A timeout or a decision from Mobile/another window is terminal, but it
+    // is not the choice this card just sent. Keep one explicit result until the
+    // user acknowledges it instead of silently dropping a stale-looking card.
+    actions.set(receipt.requestId, {
+      phase: "terminal",
+      decision: currentAction?.decision ?? receipt.resolvedDecision ?? "deny",
+      terminalStatus: receipt.status === "expired" ? "expired" : "conflict",
+      resolvedDecision: receipt.resolvedDecision,
+    });
+    emit();
+  });
   // 화면이 뜨기 전에 온 요청 — 메인이 아직 답을 기다리고 있으면 여기서 따라잡는다.
   void api.listToolApprovals?.().then((pending) => {
     for (const item of pending ?? []) void upsert(item);
@@ -75,7 +127,7 @@ function subscribe(fn: () => void): () => void {
   return () => { listeners.delete(fn); };
 }
 
-const SERVER: Snapshot = { queue: [], visible: new Set() };
+const SERVER: Snapshot = { queue: [], visible: new Set(), actions: new Map() };
 function snapshot(): Snapshot {
   return current;
 }
@@ -85,13 +137,82 @@ export function useToolApprovals(): Snapshot {
   return useSyncExternalStore(subscribe, snapshot, () => SERVER);
 }
 
-/** 사용자의 답. 큐에서 지우고 메인으로 보낸다 — 두 번 보내지 않는다. */
-export function decideToolApproval(id: string, decision: ToolApprovalDecision): void {
-  if (decided.has(id)) return;
+function applyDecisionResult(
+  id: string,
+  decision: ToolApprovalDecision,
+  result: ToolApprovalDecisionResult,
+): void {
+  // The exact Main event can arrive before the invoke promise. Do not replace
+  // that already-confirmed outcome with a later transport/readback error.
+  if (decided.has(id)) {
+    actions.delete(id);
+    queue = queue.filter((item) => item.id !== id);
+    emit();
+    return;
+  }
+  if (result.state === "resolved") {
+    decided.add(id);
+    queue = queue.filter((item) => item.id !== id);
+    actions.delete(id);
+    emit();
+    return;
+  }
+  if (result.state === "pending") {
+    actions.set(id, { phase: "retryable", decision });
+    emit();
+    return;
+  }
+  if (result.state === "terminal") {
+    actions.set(id, {
+      phase: "terminal",
+      decision,
+      terminalStatus: result.receipt.status === "expired" ? "expired" : "conflict",
+      resolvedDecision: result.receipt.resolvedDecision,
+    });
+    emit();
+    return;
+  }
+  actions.set(id, { phase: "unknown", decision });
+  emit();
+}
+
+/**
+ * 사용자의 답. exact Main receipt 전에는 큐에서 지우지 않는다. false/reject/응답 유실은
+ * resolution ledger + pending queue를 재조회하고, 실제 미적용이면 같은 카드를 복구한다.
+ */
+export async function decideToolApproval(id: string, decision: ToolApprovalDecision): Promise<void> {
+  if (decided.has(id) || actions.get(id)?.phase === "submitting") return;
+  const api = ipc();
+  if (!api) {
+    actions.set(id, { phase: "unknown", decision });
+    emit();
+    return;
+  }
+  actions.set(id, { phase: "submitting", decision });
+  emit();
+  const result = await commitToolApprovalDecision(api, id, decision);
+  applyDecisionResult(id, decision, result);
+}
+
+/** Outcome-unknown 상태에서 결정을 다시 보내지 않고 Main 원장만 재조회한다. */
+export async function refreshToolApprovalDecision(id: string): Promise<void> {
+  const previous = actions.get(id);
+  if (!previous || previous.phase === "submitting") return;
+  const api = ipc();
+  if (!api) return;
+  actions.set(id, { ...previous, phase: "submitting" });
+  emit();
+  const result = await reconcileToolApprovalDecision(api, id, previous.decision);
+  applyDecisionResult(id, previous.decision, result);
+}
+
+/** 만료·다른 표면의 결정처럼 이미 terminal인 카드만 사용자가 닫는다. */
+export function dismissToolApproval(id: string): void {
+  if (actions.get(id)?.phase !== "terminal") return;
   decided.add(id);
+  actions.delete(id);
   queue = queue.filter((item) => item.id !== id);
   emit();
-  void ipc()?.resolveToolApproval(id, decision);
 }
 
 /*

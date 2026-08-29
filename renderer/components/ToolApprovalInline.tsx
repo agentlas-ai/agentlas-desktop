@@ -17,7 +17,13 @@ import { useEffect } from "react";
 import { AskCard, type AskCardOption } from "@/components/AskCard";
 import { useT } from "@/lib/i18n";
 import type { ToolApprovalRequestEvent } from "@/lib/types";
-import { decideToolApproval, markChatVisible, useToolApprovals } from "@/lib/tool-approvals";
+import {
+  decideToolApproval,
+  dismissToolApproval,
+  markChatVisible,
+  refreshToolApprovalDecision,
+  useToolApprovals,
+} from "@/lib/tool-approvals";
 
 const RUNTIME_LABEL: Record<string, string> = {
   "claude-code": "Claude Code",
@@ -42,7 +48,10 @@ export function ToolApprovalCard({
   chip?: boolean;
 }) {
   const { locale } = useT();
+  const { actions } = useToolApprovals();
   const ko = locale === "ko";
+  const action = actions.get(request.id);
+  const locked = action?.phase === "submitting" || action?.phase === "unknown" || action?.phase === "terminal";
   const runtimeName = RUNTIME_LABEL[request.runtime] ?? request.runtime;
   const imageTool = /(?:image|dall|flux|midjourney|imagen)/i.test(request.tool);
   /*
@@ -70,6 +79,7 @@ export function ToolApprovalCard({
         ? (ko ? "이번 이어가기 실행에만 전체 액세스를 줍니다." : "Full access for this resumed run only.")
         : (ko ? `${runtimeName} 가 지금 이 호출에만 씁니다.` : `${runtimeName} uses it for this call only.`),
       active: true,
+      disabled: locked,
     },
     {
       id: "allow_session",
@@ -77,6 +87,7 @@ export function ToolApprovalCard({
       note: escalation
         ? (ko ? "이 대화에서는 승격을 다시 묻지 않습니다." : "No more escalation questions in this conversation.")
         : (ko ? "이 작업이 끝날 때까지 다시 묻지 않습니다." : "No more questions until this task ends."),
+      disabled: locked,
     },
     ...(compact && !chip ? [] : [{
       id: "allow_always",
@@ -84,6 +95,7 @@ export function ToolApprovalCard({
       note: escalation
         ? (ko ? "권한이 모자랄 때 항상 전체 액세스로 진행합니다." : "Always continue with full access when permission falls short.")
         : (ko ? "이 도구의 같은 작업 패턴을 다시 묻지 않습니다." : "Do not ask again for this tool's matching action pattern."),
+      disabled: locked,
     }]),
     {
       id: "deny",
@@ -91,12 +103,71 @@ export function ToolApprovalCard({
       note: escalation
         ? (ko ? "읽기 전용을 유지합니다 — 요청된 변경은 실행되지 않습니다." : "Stay read-only — the requested change is not executed.")
         : (ko ? "이 호출만 거부되고 나머지는 그대로 진행됩니다." : "Only this call is refused; the rest of the run continues."),
+      disabled: locked,
     },
   ];
 
   const choose = (id: string) => {
     void decideToolApproval(request.id, id as Parameters<typeof decideToolApproval>[1]);
   };
+
+  const decisionLabel = action?.resolvedDecision === "allow_once"
+    ? (ko ? "이번만 허용" : "Allow once")
+    : action?.resolvedDecision === "allow_session"
+      ? (ko ? "이 작업에서 계속 허용" : "Allow for this task")
+      : action?.resolvedDecision === "allow_always"
+        ? (ko ? "항상 허용" : "Always allow")
+        : action?.resolvedDecision === "deny"
+          ? (ko ? "거부" : "Deny")
+          : null;
+  const feedback = action?.phase === "submitting"
+    ? (ko ? "결정을 전달하고 실제 실행 상태를 확인하는 중입니다." : "Sending the decision and verifying the actual runtime state.")
+    : action?.phase === "retryable"
+      ? (ko ? "결정이 적용되지 않았습니다. 승인 카드는 그대로 유지됐습니다. 다시 선택해 주세요." : "The decision was not applied. This approval is still waiting; choose again.")
+      : action?.phase === "unknown"
+        ? (ko ? "결정 요청 뒤 실제 상태를 확인하지 못했습니다. 같은 선택을 다시 보내지 말고 상태를 다시 확인하세요." : "The decision outcome could not be verified. Check status before sending the choice again.")
+        : action?.phase === "terminal" && action.terminalStatus === "expired"
+          ? (ko ? "승인 요청 시간이 만료되어 이 호출은 실행되지 않았습니다." : "This approval expired, so the call was not run.")
+          : action?.phase === "terminal"
+            ? (ko
+              ? `이 요청은${decisionLabel ? ` '${decisionLabel}' 선택으로` : ""} 이미 처리되었습니다.`
+              : `This request was already resolved${decisionLabel ? ` as '${decisionLabel}'` : ""}.`)
+            : null;
+
+  const feedbackNode = feedback ? (
+    <div
+      role={action?.phase === "submitting" ? "status" : "alert"}
+      data-testid="tool-approval-outcome"
+      style={{
+        marginTop: 8,
+        padding: "8px 10px",
+        borderRadius: 10,
+        border: "1px solid color-mix(in srgb, currentColor 18%, transparent)",
+        fontSize: 12,
+        lineHeight: 1.45,
+      }}
+    >
+      <span>{feedback}</span>
+      {action?.phase === "unknown" && (
+        <button
+          type="button"
+          onClick={() => { void refreshToolApprovalDecision(request.id); }}
+          style={{ marginInlineStart: 8 }}
+        >
+          {ko ? "상태 다시 확인" : "Check status"}
+        </button>
+      )}
+      {action?.phase === "terminal" && (
+        <button
+          type="button"
+          onClick={() => dismissToolApproval(request.id)}
+          style={{ marginInlineStart: 8 }}
+        >
+          {ko ? "확인" : "Dismiss"}
+        </button>
+      )}
+    </div>
+  ) : null;
 
   if (compact && chip) {
     return (
@@ -123,24 +194,29 @@ export function ToolApprovalCard({
               data-active={option.active ? "true" : "false"}
               title={option.note}
               aria-label={`${option.title}: ${option.note}`}
+              disabled={locked}
               onClick={() => choose(option.id)}
             >
               {option.title}
             </button>
           ))}
         </div>
+        {feedbackNode}
       </section>
     );
   }
 
   return (
-    <AskCard
-      title={askTitle}
-      locale={ko ? "ko" : "en"}
-      options={askOptions}
-      onChoose={choose}
-      data-testid="tool-approval-card"
-    />
+    <div data-testid="tool-approval-card-shell">
+      <AskCard
+        title={askTitle}
+        locale={ko ? "ko" : "en"}
+        options={askOptions}
+        onChoose={choose}
+        data-testid="tool-approval-card"
+      />
+      {feedbackNode}
+    </div>
   );
 }
 

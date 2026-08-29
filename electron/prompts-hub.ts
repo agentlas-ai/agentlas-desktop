@@ -64,54 +64,346 @@ export async function getHubPrompt(slug: string): Promise<HubPromptDetailResult>
   }
 }
 
-function normalizeOpen(json: Record<string, unknown>, httpOk: boolean, status: number): HubPromptOpenResult {
+const TASTE_INTENT_RE = /^taste_[A-Za-z0-9_-]{24,120}$/u;
+const UNLOCK_INTENT_RE = /^unlock_[A-Za-z0-9_-]{24,120}$/u;
+
+function validTasteInput(input: { slug?: unknown; tasteIntentId?: unknown }): input is { slug: string; tasteIntentId: string } {
+  return typeof input?.slug === "string"
+    && Boolean(input.slug.trim())
+    && input.slug.length <= 160
+    && typeof input.tasteIntentId === "string"
+    && TASTE_INTENT_RE.test(input.tasteIntentId);
+}
+
+function validUnlockInput(input: { slug?: unknown; unlockIntentId?: unknown }): input is { slug: string; unlockIntentId: string } {
+  return typeof input?.slug === "string"
+    && Boolean(input.slug.trim())
+    && input.slug.length <= 160
+    && typeof input.unlockIntentId === "string"
+    && UNLOCK_INTENT_RE.test(input.unlockIntentId);
+}
+
+function normalizeUnlockStatus(
+  value: unknown,
+  expected: { slug: string; unlockIntentId: string },
+): HubPromptOpenResult | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  if (row.ok !== true
+    || row.receiptVersion !== 1
+    || row.slug !== expected.slug
+    || row.unlockIntentId !== expected.unlockIntentId
+    || typeof row.status !== "string") return null;
+
+  const copy = {
+    ok: true as const,
+    receiptVersion: 1 as const,
+    slug: expected.slug,
+    unlockIntentId: expected.unlockIntentId,
+    ...(typeof row.tipsKo === "string" ? { tipsKo: row.tipsKo } : {}),
+    ...(typeof row.tipsEn === "string" ? { tipsEn: row.tipsEn } : {}),
+  };
+  if (row.status === "ready") {
+    return row.unlocked === false
+      ? { ...copy, status: "ready", unlocked: false }
+      : null;
+  }
+  if (row.status === "not_required") {
+    return row.unlocked === true
+      && row.alreadyUnlocked === true
+      && row.isOwner === true
+      && typeof row.body === "string"
+      ? {
+          ...copy,
+          status: "not_required",
+          unlocked: true,
+          alreadyUnlocked: true,
+          isOwner: true,
+          body: row.body,
+        }
+      : null;
+  }
+  if (row.status === "already_unlocked") {
+    return row.unlocked === true
+      && row.alreadyUnlocked === true
+      && row.isOwner === false
+      && typeof row.body === "string"
+      ? {
+          ...copy,
+          status: "already_unlocked",
+          unlocked: true,
+          alreadyUnlocked: true,
+          isOwner: false,
+          body: row.body,
+        }
+      : null;
+  }
+  if (row.status !== "completed"
+    || row.unlocked !== true
+    || typeof row.alreadyUnlocked !== "boolean"
+    || row.isOwner !== false
+    || typeof row.replayed !== "boolean"
+    || row.charged !== 0
+    || typeof row.body !== "string"
+    || typeof row.completedAt !== "string"
+    || !Number.isFinite(Date.parse(row.completedAt))) return null;
   return {
-    ok: httpOk && json.ok !== false,
-    body: typeof json.body === "string" ? json.body : undefined,
-    tipsKo: typeof json.tipsKo === "string" ? json.tipsKo : undefined,
-    tipsEn: typeof json.tipsEn === "string" ? json.tipsEn : undefined,
-    alreadyUnlocked: json.alreadyUnlocked === true,
-    tasted: json.tasted === true,
-    code: typeof json.code === "string" ? json.code : httpOk ? undefined : `http_${status}`,
-    error: typeof json.error === "string" ? json.error : undefined,
-    upgradeUrl: typeof json.upgradeUrl === "string" ? json.upgradeUrl : undefined,
+    ...copy,
+    status: "completed",
+    unlocked: true,
+    alreadyUnlocked: row.alreadyUnlocked,
+    isOwner: false,
+    replayed: row.replayed,
+    charged: 0,
+    body: row.body,
+    completedAt: row.completedAt,
   };
 }
 
-/** POST /api/prompts/[slug]/unlock — 구독자 열람(과금 0). 무료 플랜은 402 subscription_required. */
-export async function unlockHubPrompt(slug: string): Promise<HubPromptOpenResult> {
+function normalizeTasteStatus(
+  value: unknown,
+  expected: { slug: string; tasteIntentId: string },
+): HubPromptOpenResult | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  if (row.ok !== true
+    || row.receiptVersion !== 1
+    || row.slug !== expected.slug
+    || row.tasteIntentId !== expected.tasteIntentId
+    || typeof row.status !== "string") return null;
+  if (row.status === "ready" || row.status === "not_required") {
+    if (row.tasted !== false) return null;
+    if (row.body !== undefined && typeof row.body !== "string") return null;
+    if (row.tipsKo !== undefined && typeof row.tipsKo !== "string") return null;
+    if (row.tipsEn !== undefined && typeof row.tipsEn !== "string") return null;
+    return {
+      ok: true,
+      receiptVersion: 1,
+      status: row.status,
+      slug: expected.slug,
+      tasteIntentId: expected.tasteIntentId,
+      tasted: false,
+      ...(typeof row.body === "string" ? { body: row.body } : {}),
+      ...(typeof row.tipsKo === "string" ? { tipsKo: row.tipsKo } : {}),
+      ...(typeof row.tipsEn === "string" ? { tipsEn: row.tipsEn } : {}),
+    };
+  }
+  if (row.status === "processing" || row.status === "consumed") {
+    if (row.tasted !== true) return null;
+    return {
+      ok: true,
+      receiptVersion: 1,
+      status: row.status,
+      slug: expected.slug,
+      tasteIntentId: expected.tasteIntentId,
+      tasted: true,
+    };
+  }
+  if (row.status !== "completed"
+    || row.tasted !== true
+    || typeof row.replayed !== "boolean"
+    || typeof row.body !== "string"
+    || typeof row.completedAt !== "string"
+    || !Number.isFinite(Date.parse(row.completedAt))) return null;
+  if (row.tipsKo !== undefined && typeof row.tipsKo !== "string") return null;
+  if (row.tipsEn !== undefined && typeof row.tipsEn !== "string") return null;
+  return {
+    ok: true,
+    receiptVersion: 1,
+    status: "completed",
+    slug: expected.slug,
+    tasteIntentId: expected.tasteIntentId,
+    tasted: true,
+    replayed: row.replayed,
+    body: row.body,
+    completedAt: row.completedAt,
+    ...(typeof row.tipsKo === "string" ? { tipsKo: row.tipsKo } : {}),
+    ...(typeof row.tipsEn === "string" ? { tipsEn: row.tipsEn } : {}),
+  };
+}
+
+/** Read-only recovery/replay for one stable paid-open intent. */
+export async function getHubPromptUnlockStatus(
+  input: { slug: string; unlockIntentId: string },
+): Promise<HubPromptOpenResult> {
+  if (!validUnlockInput(input)) return { ok: false, code: "invalid_unlock_intent" };
   const cookie = getSessionCookieHeader();
   if (!cookie) return { ok: false, code: "unauthenticated" };
   try {
     const base = webBaseUrl();
-    const res = await timedFetch(`${base}/api/prompts/${encodeURIComponent(slug)}/unlock`, {
-      method: "POST",
-      headers: { cookie, "content-type": "application/json", origin: base },
-      body: "{}",
+    const query = new URLSearchParams({ unlockIntentId: input.unlockIntentId });
+    const res = await timedFetch(`${base}/api/prompts/${encodeURIComponent(input.slug)}/unlock?${query.toString()}`, {
+      headers: { cookie },
     });
-    const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    return normalizeOpen(json, res.ok, res.status);
+    const raw = await res.json().catch(() => null);
+    if (!res.ok) {
+      const row = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+      return {
+        ok: false,
+        slug: input.slug,
+        unlockIntentId: input.unlockIntentId,
+        code: typeof row.code === "string" ? row.code : `http_${res.status}`,
+        error: typeof row.error === "string" ? row.error : undefined,
+        upgradeUrl: typeof row.upgradeUrl === "string" ? row.upgradeUrl : undefined,
+      };
+    }
+    return normalizeUnlockStatus(raw, input) ?? {
+      ok: false,
+      slug: input.slug,
+      unlockIntentId: input.unlockIntentId,
+      code: "outcome_unknown",
+      outcomeUnknown: true,
+    };
   } catch {
-    return { ok: false, code: "network" };
+    return {
+      ok: false,
+      slug: input.slug,
+      unlockIntentId: input.unlockIntentId,
+      code: "outcome_unknown",
+      outcomeUnknown: true,
+    };
   }
 }
 
-/** POST /api/prompts/[slug]/taste — 무료 1회 맛보기. body는 이 응답에서만 온다. 재시도 409. */
-export async function tasteHubPrompt(slug: string): Promise<HubPromptOpenResult> {
+/** POST a stable paid-open intent, then reconcile the same intent after ambiguous transport. */
+export async function unlockHubPrompt(
+  input: { slug: string; unlockIntentId: string },
+): Promise<HubPromptOpenResult> {
+  if (!validUnlockInput(input)) return { ok: false, code: "invalid_unlock_intent" };
+  const cookie = getSessionCookieHeader();
+  if (!cookie) return { ok: false, code: "unauthenticated" };
+  let knownRefusal: HubPromptOpenResult | null = null;
+  try {
+    const base = webBaseUrl();
+    const res = await timedFetch(`${base}/api/prompts/${encodeURIComponent(input.slug)}/unlock`, {
+      method: "POST",
+      headers: { cookie, "content-type": "application/json", origin: base },
+      body: JSON.stringify({ unlockIntentId: input.unlockIntentId }),
+    });
+    const raw = await res.json().catch(() => null);
+    if (res.ok) {
+      const exact = normalizeUnlockStatus(raw, input);
+      if (exact) return exact;
+    } else {
+      const row = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+      const code = typeof row.code === "string" ? row.code : `http_${res.status}`;
+      if ([400, 401, 402, 403, 404, 409, 429].includes(res.status)) {
+        knownRefusal = {
+          ok: false,
+          slug: input.slug,
+          unlockIntentId: input.unlockIntentId,
+          code,
+          error: typeof row.error === "string" ? row.error : undefined,
+          upgradeUrl: typeof row.upgradeUrl === "string" ? row.upgradeUrl : undefined,
+        };
+      }
+    }
+  } catch {
+    // The server may have committed ownership before the response was lost.
+  }
+  if (knownRefusal) return knownRefusal;
+
+  const status = await getHubPromptUnlockStatus(input);
+  if (!status.ok) return status;
+  if (status.status === "completed"
+    || status.status === "already_unlocked"
+    || status.status === "not_required") return status;
+  if (status.status === "ready") return { ...status, ok: false, code: "not_started" };
+  return { ...status, ok: false, code: "outcome_unknown", outcomeUnknown: true };
+}
+
+/** Read-only recovery for one stable taste intent. */
+export async function getHubPromptTasteStatus(
+  input: { slug: string; tasteIntentId: string },
+): Promise<HubPromptOpenResult> {
+  if (!validTasteInput(input)) return { ok: false, code: "invalid_taste_intent" };
   const cookie = getSessionCookieHeader();
   if (!cookie) return { ok: false, code: "unauthenticated" };
   try {
     const base = webBaseUrl();
-    const res = await timedFetch(`${base}/api/prompts/${encodeURIComponent(slug)}/taste`, {
+    const query = new URLSearchParams({ tasteIntentId: input.tasteIntentId });
+    const res = await timedFetch(`${base}/api/prompts/${encodeURIComponent(input.slug)}/taste?${query.toString()}`, {
+      headers: { cookie },
+    });
+    const raw = await res.json().catch(() => null);
+    if (!res.ok) {
+      const row = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+      return {
+        ok: false,
+        slug: input.slug,
+        tasteIntentId: input.tasteIntentId,
+        code: typeof row.code === "string" ? row.code : `http_${res.status}`,
+      };
+    }
+    return normalizeTasteStatus(raw, input) ?? {
+      ok: false,
+      slug: input.slug,
+      tasteIntentId: input.tasteIntentId,
+      code: "outcome_unknown",
+      outcomeUnknown: true,
+    };
+  } catch {
+    return {
+      ok: false,
+      slug: input.slug,
+      tasteIntentId: input.tasteIntentId,
+      code: "outcome_unknown",
+      outcomeUnknown: true,
+    };
+  }
+}
+
+/** POST a stable taste intent, then reconcile the same intent on ambiguous transport/receipts. */
+export async function tasteHubPrompt(
+  input: { slug: string; tasteIntentId: string },
+): Promise<HubPromptOpenResult> {
+  if (!validTasteInput(input)) return { ok: false, code: "invalid_taste_intent" };
+  const cookie = getSessionCookieHeader();
+  if (!cookie) return { ok: false, code: "unauthenticated" };
+  let knownRefusal: HubPromptOpenResult | null = null;
+  try {
+    const base = webBaseUrl();
+    const res = await timedFetch(`${base}/api/prompts/${encodeURIComponent(input.slug)}/taste`, {
       method: "POST",
       headers: { cookie, "content-type": "application/json", origin: base },
-      body: "{}",
+      body: JSON.stringify({ tasteIntentId: input.tasteIntentId }),
     });
-    const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    return normalizeOpen(json, res.ok, res.status);
+    const raw = await res.json().catch(() => null);
+    if (res.ok) {
+      const exact = normalizeTasteStatus(raw, input);
+      if (exact) return exact;
+    } else {
+      const row = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+      const code = typeof row.code === "string" ? row.code : `http_${res.status}`;
+      if ([400, 401, 402, 403, 404, 409, 429].includes(res.status)) {
+        knownRefusal = {
+          ok: false,
+          slug: input.slug,
+          tasteIntentId: input.tasteIntentId,
+          code,
+          error: typeof row.error === "string" ? row.error : undefined,
+          upgradeUrl: typeof row.upgradeUrl === "string" ? row.upgradeUrl : undefined,
+        };
+      }
+    }
   } catch {
-    return { ok: false, code: "network" };
+    // The server may have durably completed the exact intent. Reconcile below.
   }
+  if (knownRefusal) return knownRefusal;
+
+  const status = await getHubPromptTasteStatus(input);
+  if (!status.ok) return status;
+  if (status.status === "completed") return status;
+  if (status.status === "ready") {
+    return { ...status, ok: false, code: "not_started" };
+  }
+  if (status.status === "consumed") {
+    return { ...status, ok: false, code: "already_tasted" };
+  }
+  if (status.status === "not_required") {
+    return { ...status, ok: false, code: "not_required" };
+  }
+  return { ...status, ok: false, code: "processing", outcomeUnknown: true };
 }
 
 /** GET /api/prompts/tastes — 내 맛보기 사용 이력(CTA 판단용: 3회 이상이면 구독 유도). */
@@ -146,7 +438,8 @@ export async function listHubPromptBookmarks(): Promise<{ ok: boolean; slugs: st
 /** POST /api/prompts/bookmarks {slug} — 저장. 무료 플랜 402 subscription_required. */
 export async function addHubPromptBookmark(slug: string): Promise<HubPromptBookmarkResult> {
   const cookie = getSessionCookieHeader();
-  if (!cookie) return { ok: false, code: "unauthenticated" };
+  if (!cookie) return { ok: false, slug, bookmarked: false, code: "unauthenticated" };
+  let mutationKnownRefusal: HubPromptBookmarkResult | null = null;
   try {
     const base = webBaseUrl();
     const res = await timedFetch(`${base}/api/prompts/bookmarks`, {
@@ -156,31 +449,102 @@ export async function addHubPromptBookmark(slug: string): Promise<HubPromptBookm
     });
     const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
     if (!res.ok) {
-      return {
-        ok: false,
-        code: typeof json.code === "string" ? json.code : `http_${res.status}`,
-        error: typeof json.error === "string" ? json.error : undefined,
-      };
+      const code = typeof json.code === "string" ? json.code : `http_${res.status}`;
+      if (["unauthenticated", "authentication_required", "subscription_required", "invalid_slug", "not_found"].includes(code)) {
+        mutationKnownRefusal = {
+          ok: false,
+          slug,
+          bookmarked: false,
+          code,
+          error: typeof json.error === "string" ? json.error : undefined,
+        };
+      }
+    } else if (json.bookmarked !== true
+      || !json.bookmark
+      || typeof json.bookmark !== "object"
+      || (json.bookmark as Record<string, unknown>).promptSlug !== slug) {
+      // The mutation may have committed even when its receipt was malformed.
+      // Fall through to the authoritative bookmark projection below.
     }
-    return { ok: true, bookmarked: true };
   } catch {
-    return { ok: false, code: "network" };
+    // A transport failure can happen after the server committed the mutation.
+    // Never invite a repeat until an authoritative read resolves the outcome.
   }
+
+  if (mutationKnownRefusal) return mutationKnownRefusal;
+  const projected = await listHubPromptBookmarks();
+  if (!projected.ok) {
+    return {
+      ok: false,
+      slug,
+      code: "outcome_unknown",
+      outcomeUnknown: true,
+      error: projected.code,
+    };
+  }
+  const bookmarked = projected.slugs.includes(slug);
+  if (!bookmarked) {
+    return {
+      ok: false,
+      slug,
+      bookmarked: false,
+      verified: true,
+      code: "state_mismatch",
+    };
+  }
+  return { ok: true, slug, bookmarked: true, verified: true };
 }
 
 /** DELETE /api/prompts/bookmarks/[slug] — 저장 해제. */
 export async function removeHubPromptBookmark(slug: string): Promise<HubPromptBookmarkResult> {
   const cookie = getSessionCookieHeader();
-  if (!cookie) return { ok: false, code: "unauthenticated" };
+  if (!cookie) return { ok: false, slug, bookmarked: true, code: "unauthenticated" };
+  let mutationKnownRefusal: HubPromptBookmarkResult | null = null;
   try {
     const base = webBaseUrl();
     const res = await timedFetch(`${base}/api/prompts/bookmarks/${encodeURIComponent(slug)}`, {
       method: "DELETE",
       headers: { cookie, origin: base },
     });
-    if (!res.ok) return { ok: false, code: `http_${res.status}` };
-    return { ok: true, bookmarked: false };
+    const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!res.ok) {
+      const code = typeof json.code === "string" ? json.code : `http_${res.status}`;
+      if (["unauthenticated", "authentication_required", "subscription_required", "invalid_slug", "not_found"].includes(code)) {
+        mutationKnownRefusal = {
+          ok: false,
+          slug,
+          bookmarked: true,
+          code,
+          error: typeof json.error === "string" ? json.error : undefined,
+        };
+      }
+    } else if (json.bookmarked !== false || json.promptSlug !== slug || typeof json.deleted !== "boolean") {
+      // Malformed success is ambiguous until the authoritative projection is read.
+    }
   } catch {
-    return { ok: false, code: "network" };
+    // See addHubPromptBookmark: reconcile before a user-visible retry.
   }
+
+  if (mutationKnownRefusal) return mutationKnownRefusal;
+  const projected = await listHubPromptBookmarks();
+  if (!projected.ok) {
+    return {
+      ok: false,
+      slug,
+      code: "outcome_unknown",
+      outcomeUnknown: true,
+      error: projected.code,
+    };
+  }
+  const bookmarked = projected.slugs.includes(slug);
+  if (bookmarked) {
+    return {
+      ok: false,
+      slug,
+      bookmarked: true,
+      verified: true,
+      code: "state_mismatch",
+    };
+  }
+  return { ok: true, slug, bookmarked: false, verified: true };
 }

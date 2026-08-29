@@ -115,7 +115,18 @@ export function refreshBrowserCredentialsIfDue(opts?: { force?: boolean }): Prom
         console.warn("[browser-credentials] auto refresh skipped:", result.error);
         return;
       }
-      writeConsent({ ...consent, lastSyncedAt: new Date().toISOString() });
+      // Import can take long enough for the user to revoke consent (or perform
+      // a new manual import) while it is running. Never write the captured
+      // snapshot back: that would re-grant a revoked scope or overwrite a
+      // newer profile/domain selection. Only timestamp the still-exact grant.
+      const current = getBrowserCredentialConsent();
+      const sameDomains = current.domains.length === consent.domains.length
+        && current.domains.every((domain, index) => domain === consent.domains[index]);
+      if (!current.granted
+        || current.grantedAt !== consent.grantedAt
+        || current.profileId !== consent.profileId
+        || !sameDomains) return;
+      writeConsent({ ...current, lastSyncedAt: new Date().toISOString() });
       if (result.cookiesAdded > 0) {
         console.log(`[browser-credentials] refreshed ${result.linkedSites.length} site(s), +${result.cookiesAdded} cookies`);
       }
@@ -123,8 +134,9 @@ export function refreshBrowserCredentialsIfDue(opts?: { force?: boolean }): Prom
       console.warn("[browser-credentials] auto refresh failed:", err);
     }
   })();
-  refreshInFlight = flight.finally(() => {
-    if (refreshInFlight === flight) refreshInFlight = null;
+  const tracked = flight.finally(() => {
+    if (refreshInFlight === tracked) refreshInFlight = null;
   });
-  return refreshInFlight;
+  refreshInFlight = tracked;
+  return tracked;
 }

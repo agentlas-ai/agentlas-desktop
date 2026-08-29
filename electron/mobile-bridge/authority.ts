@@ -163,6 +163,7 @@ import {
   type MobileBridgeTerminalPreviewDto,
   type MobileBridgeTerminalReadDto,
   type MobileBridgeTerminalRefusalDto,
+  type MobileBridgeTerminalWriteRefusalDto,
   type MobileBridgeTerminalReleaseDto,
   type MobileBridgeTerminalTakeoverDto,
   type MobileBridgeToolCallDisplayDto,
@@ -419,6 +420,31 @@ function terminalRefusal(
   message: string,
 ): MobileBridgeTerminalRefusalDto {
   return { schemaVersion: 1, status: "refused", code, message };
+}
+
+function terminalWriteRefusal(
+  request: MobileBridgeRpcRequest,
+  terminalId: string,
+  code: MobileBridgeTerminalRefusalDto["code"],
+  message: string,
+): MobileBridgeTerminalWriteRefusalDto {
+  if (!request.idempotencyKey) {
+    throw new TypeError(`${request.method} requires an idempotencyKey`);
+  }
+  if (
+    request.method !== "terminal.takeover"
+    && request.method !== "terminal.release"
+    && request.method !== "terminal.dispatch"
+    && request.method !== "terminal.cancel"
+  ) {
+    throw new TypeError("terminal refusal method is not a protected write");
+  }
+  return {
+    ...terminalRefusal(code, message),
+    method: request.method,
+    terminalId,
+    idempotencyKey: request.idempotencyKey,
+  };
 }
 
 interface MobileTerminalPreviewState {
@@ -1646,18 +1672,19 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
   private async terminalTakeover(
     params: Record<string, unknown>,
     context: MobileBridgeConnectionContext,
+    request: MobileBridgeRpcRequest,
   ): Promise<MobileBridgeJsonValue> {
     const terminalId = requiredIdentifier(params, "terminalId", RUN_ID_RE);
     const expectedOwnerEpoch = optionalInteger(params, "expectedOwnerEpoch", 0, Number.MAX_SAFE_INTEGER);
     if (expectedOwnerEpoch === undefined) throw new TypeError("expectedOwnerEpoch is required");
     const control = this.options.terminalControl;
-    if (!control) return asJsonValue(terminalRefusal(
+    if (!control) return asJsonValue(terminalWriteRefusal(request, terminalId,
       "terminal_unavailable",
       "This Desktop has no authoritative mobile terminal controller.",
     ), "terminal.takeover");
     const lease = this.terminalLease(terminalId);
     if (lease.owner === "mobile") {
-      return asJsonValue(terminalRefusal(
+      return asJsonValue(terminalWriteRefusal(request, terminalId,
         lease.ownerDeviceId === context.deviceId ? "terminal_owner_conflict" : "terminal_owner_conflict",
         lease.ownerDeviceId === context.deviceId
           ? "This phone already owns the terminal."
@@ -1665,7 +1692,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       ), "terminal.takeover");
     }
     if (lease.ownerEpoch !== expectedOwnerEpoch) {
-      return asJsonValue(terminalRefusal(
+      return asJsonValue(terminalWriteRefusal(request, terminalId,
         "terminal_epoch_conflict",
         "The terminal changed on Desktop. Reload it before taking control.",
       ), "terminal.takeover");
@@ -1679,34 +1706,35 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       return asJsonValue({ schemaVersion: 1, terminalId, owner: "mobile", ownerEpoch: nextOwnerEpoch } satisfies MobileBridgeTerminalTakeoverDto, "terminal.takeover");
     } catch (error) {
       this.onError(errorOf(error));
-      return asJsonValue(terminalRefusal(
-        "terminal_control_unavailable",
-        "The Desktop terminal could not be paused for takeover.",
-      ), "terminal.takeover");
+      // The controller may have applied the takeover before its response was
+      // lost. Surface an authority failure so Mobile reconciles terminal.read;
+      // never forge an exact negative receipt after mutation began.
+      throw errorOf(error);
     }
   }
 
   private async terminalRelease(
     params: Record<string, unknown>,
     context: MobileBridgeConnectionContext,
+    request: MobileBridgeRpcRequest,
   ): Promise<MobileBridgeJsonValue> {
     const terminalId = requiredIdentifier(params, "terminalId", RUN_ID_RE);
     const ownerEpoch = optionalInteger(params, "ownerEpoch", 1, Number.MAX_SAFE_INTEGER);
     if (ownerEpoch === undefined) throw new TypeError("ownerEpoch is required");
     const control = this.options.terminalControl;
-    if (!control) return asJsonValue(terminalRefusal(
+    if (!control) return asJsonValue(terminalWriteRefusal(request, terminalId,
       "terminal_unavailable",
       "This Desktop has no authoritative mobile terminal controller.",
     ), "terminal.release");
     const lease = this.terminalLease(terminalId);
     if (lease.owner !== "mobile" || lease.ownerDeviceId !== context.deviceId) {
-      return asJsonValue(terminalRefusal(
+      return asJsonValue(terminalWriteRefusal(request, terminalId,
         "terminal_owner_conflict",
         "This phone does not own the terminal.",
       ), "terminal.release");
     }
     if (lease.ownerEpoch !== ownerEpoch) {
-      return asJsonValue(terminalRefusal(
+      return asJsonValue(terminalWriteRefusal(request, terminalId,
         "terminal_epoch_conflict",
         "The terminal changed before control was returned.",
       ), "terminal.release");
@@ -1721,16 +1749,14 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       return asJsonValue({ schemaVersion: 1, terminalId, owner: "agent", ownerEpoch: nextOwnerEpoch } satisfies MobileBridgeTerminalReleaseDto, "terminal.release");
     } catch (error) {
       this.onError(errorOf(error));
-      return asJsonValue(terminalRefusal(
-        "terminal_control_unavailable",
-        "The Desktop terminal could not return control to the agent.",
-      ), "terminal.release");
+      throw errorOf(error);
     }
   }
 
   private async terminalDispatch(
     params: Record<string, unknown>,
     context: MobileBridgeConnectionContext,
+    request: MobileBridgeRpcRequest,
   ): Promise<MobileBridgeJsonValue> {
     const terminalId = requiredIdentifier(params, "terminalId", RUN_ID_RE);
     const ownerEpoch = optionalInteger(params, "ownerEpoch", 1, Number.MAX_SAFE_INTEGER);
@@ -1738,46 +1764,46 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     const approvalId = optionalIdentifier(params, "approvalId", 160);
     if (ownerEpoch === undefined) throw new TypeError("ownerEpoch is required");
     const control = this.options.terminalControl;
-    if (!control) return asJsonValue(terminalRefusal(
+    if (!control) return asJsonValue(terminalWriteRefusal(request, terminalId,
       "terminal_unavailable",
       "This Desktop has no authoritative mobile terminal controller.",
     ), "terminal.dispatch");
     const lease = this.terminalLease(terminalId);
     if (lease.owner !== "mobile" || lease.ownerDeviceId !== context.deviceId) {
-      return asJsonValue(terminalRefusal(
+      return asJsonValue(terminalWriteRefusal(request, terminalId,
         "terminal_owner_conflict",
         "Take over the terminal before sending a command.",
       ), "terminal.dispatch");
     }
     if (lease.ownerEpoch !== ownerEpoch) {
-      return asJsonValue(terminalRefusal(
+      return asJsonValue(terminalWriteRefusal(request, terminalId,
         "terminal_epoch_conflict",
         "The terminal changed before this command was sent.",
       ), "terminal.dispatch");
     }
     const preview = lease.previews.get(previewId);
     if (!preview || preview.terminalId !== terminalId) {
-      return asJsonValue(terminalRefusal(
+      return asJsonValue(terminalWriteRefusal(request, terminalId,
         "terminal_preview_required",
         "Preview this command again before sending it.",
       ), "terminal.dispatch");
     }
     if (preview.ownerEpoch !== lease.ownerEpoch) {
-      return asJsonValue(terminalRefusal(
+      return asJsonValue(terminalWriteRefusal(request, terminalId,
         "terminal_epoch_conflict",
         "The command was previewed before the current takeover epoch.",
       ), "terminal.dispatch");
     }
     if (preview.expiresAtMs <= Date.now()) {
       lease.previews.delete(previewId);
-      return asJsonValue(terminalRefusal(
+      return asJsonValue(terminalWriteRefusal(request, terminalId,
         "terminal_preview_expired",
         "The command preview expired. Preview it again.",
       ), "terminal.dispatch");
     }
     if (preview.risk === "dangerous") {
       if (!approvalId || !TERMINAL_APPROVAL_ID_RE.test(approvalId)) {
-        return asJsonValue(terminalRefusal(
+        return asJsonValue(terminalWriteRefusal(request, terminalId,
           "terminal_approval_required",
           "Dangerous terminal commands require a separate approval.",
         ), "terminal.dispatch");
@@ -1791,35 +1817,33 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       return asJsonValue({ ...result, schemaVersion: 1, terminalId, ownerEpoch }, "terminal.dispatch");
     } catch (error) {
       this.onError(errorOf(error));
-      return asJsonValue(terminalRefusal(
-        "terminal_control_unavailable",
-        "The Desktop terminal controller did not accept the command.",
-      ), "terminal.dispatch");
+      throw errorOf(error);
     }
   }
 
   private async terminalCancel(
     params: Record<string, unknown>,
     context: MobileBridgeConnectionContext,
+    request: MobileBridgeRpcRequest,
   ): Promise<MobileBridgeJsonValue> {
     const terminalId = requiredIdentifier(params, "terminalId", RUN_ID_RE);
     const ownerEpoch = optionalInteger(params, "ownerEpoch", 1, Number.MAX_SAFE_INTEGER);
     const requestId = requiredIdentifier(params, "requestId", RUN_ID_RE);
     if (ownerEpoch === undefined) throw new TypeError("ownerEpoch is required");
     const control = this.options.terminalControl;
-    if (!control) return asJsonValue(terminalRefusal(
+    if (!control) return asJsonValue(terminalWriteRefusal(request, terminalId,
       "terminal_unavailable",
       "This Desktop has no authoritative mobile terminal controller.",
     ), "terminal.cancel");
     const lease = this.terminalLease(terminalId);
     if (lease.owner !== "mobile" || lease.ownerDeviceId !== context.deviceId) {
-      return asJsonValue(terminalRefusal(
+      return asJsonValue(terminalWriteRefusal(request, terminalId,
         "terminal_owner_conflict",
         "Take over the terminal before cancelling a command.",
       ), "terminal.cancel");
     }
     if (lease.ownerEpoch !== ownerEpoch) {
-      return asJsonValue(terminalRefusal(
+      return asJsonValue(terminalWriteRefusal(request, terminalId,
         "terminal_epoch_conflict",
         "The terminal changed before this command was cancelled.",
       ), "terminal.cancel");
@@ -1832,10 +1856,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       return asJsonValue({ ...result, schemaVersion: 1, terminalId, requestId, ownerEpoch }, "terminal.cancel");
     } catch (error) {
       this.onError(errorOf(error));
-      return asJsonValue(terminalRefusal(
-        "terminal_control_unavailable",
-        "The Desktop terminal controller did not cancel the command.",
-      ), "terminal.cancel");
+      throw errorOf(error);
     }
   }
 
@@ -2081,6 +2102,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
             chatId: chat.id,
             title: task.title,
             controllerAgentId: chat.agentId,
+            // Creation is already durable. Return the exact projected chat in
+            // the same receipt so Mobile can open and recover the empty task
+            // even when the following optional runtime-pin action is rejected.
+            chat: projectMobileBridgeChat(chat, false),
           }, request.method);
         } catch (error) {
           removeChat(chat.id);
@@ -2333,13 +2358,13 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       case "terminal.preview":
         return this.terminalPreview(guardedParams(request, ["terminalId", "command"]), context);
       case "terminal.takeover":
-        return this.terminalTakeover(guardedParams(request, ["terminalId", "expectedOwnerEpoch"]), context);
+        return this.terminalTakeover(guardedParams(request, ["terminalId", "expectedOwnerEpoch"]), context, request);
       case "terminal.release":
-        return this.terminalRelease(guardedParams(request, ["terminalId", "ownerEpoch"]), context);
+        return this.terminalRelease(guardedParams(request, ["terminalId", "ownerEpoch"]), context, request);
       case "terminal.dispatch":
-        return this.terminalDispatch(guardedParams(request, ["terminalId", "ownerEpoch", "previewId", "approvalId"]), context);
+        return this.terminalDispatch(guardedParams(request, ["terminalId", "ownerEpoch", "previewId", "approvalId"]), context, request);
       case "terminal.cancel":
-        return this.terminalCancel(guardedParams(request, ["terminalId", "ownerEpoch", "requestId"]), context);
+        return this.terminalCancel(guardedParams(request, ["terminalId", "ownerEpoch", "requestId"]), context, request);
       case "one.artifact.imagePreview": {
         const params = guardedParams(request, [
           "taskId", "taskVersion", "chatId", "runId", "manifestId", "artifactRef",
@@ -2631,10 +2656,18 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           "decision",
           ["allow_once", "allow_session", "allow_always", "deny"] as const,
         );
-        const resolved = resolveToolApproval(id, decision);
+        const receipt = resolveToolApproval(id, decision);
         this.scheduleSnapshotUpdated();
         // live 요청이 아니면(이미 지나간 고지) 대기 중인 실행은 없다 — 그 사실을 그대로 돌려준다.
-        return asJsonValue({ resolved }, request.method);
+        return asJsonValue({
+          resolved: receipt.ok
+            && receipt.resolvedDecision === decision
+            && (receipt.status === "resolved" || receipt.status === "replayed"),
+          id,
+          decision,
+          receipt,
+          idempotencyKey: request.idempotencyKey ?? null,
+        }, request.method);
       }
 
       // DESKTOP_MOBILE_BRIDGE: Automation reads/writes use the same SQLite store

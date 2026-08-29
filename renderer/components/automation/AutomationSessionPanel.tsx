@@ -104,8 +104,8 @@ function sendFailureMessage(error: unknown, ko: boolean): string {
   const raw = error instanceof Error ? error.message : String(error);
   if (/active invocation/i.test(raw)) {
     return ko
-      ? "이 자동화가 지금 실행 중이라 바로 보낼 수 없어요. 끝나면 이어서 보내드릴게요."
-      : "This automation is running right now, so it could not be sent yet. It will go out when the run ends.";
+      ? "이 자동화가 지금 실행 중이라 보내지 못했어요. 이 요청은 대기열에 들어가지 않았습니다. 실행이 끝난 뒤 다시 보내 주세요."
+      : "This automation is running, so the message was not sent or queued. Send it again after the run ends.";
   }
   if (/auth|token|login|unauthori[sz]ed|forbidden/i.test(raw)) {
     return ko ? "연결이 만료돼 보내지 못했어요. 다시 연결한 뒤 시도해 주세요." : "The connection expired. Reconnect and try again.";
@@ -134,6 +134,8 @@ export function AutomationSessionPanel({
   const [unavailable, setUnavailable] = useState(false);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  const [stopPending, setStopPending] = useState(false);
+  const [sendOutcomeUnknown, setSendOutcomeUnknown] = useState(false);
   const [status, setStatus] = useState("");
   const [streamText, setStreamText] = useState("");
   const [error, setError] = useState("");
@@ -207,6 +209,7 @@ export function AutomationSessionPanel({
     void api.invoke.attach(chatId).then((attached) => {
       if (cancelled || !attached || busyRef.current) return;
       runIdRef.current = attached.runId;
+      setStopPending(false);
       setBusy(true);
       busyRef.current = true;
       setStatus(ko ? "자동화가 실행 중이에요…" : "The automation is running…");
@@ -226,6 +229,7 @@ export function AutomationSessionPanel({
           unsubRef.current?.();
           unsubRef.current = null;
           runIdRef.current = null;
+          setStopPending(false);
           setBusy(false);
           busyRef.current = false;
           setStatus("");
@@ -244,11 +248,21 @@ export function AutomationSessionPanel({
       const prompt = text.trim();
       const targetChatId = chatIdRef.current;
       if (!api || !prompt) return;
+      if (sendOutcomeUnknown) {
+        setError(ko
+          ? "이전 전송의 결과를 아직 확인하지 못했습니다. 중복 전송을 막기 위해 이 화면을 다시 열기 전에는 다시 보낼 수 없습니다."
+          : "The previous send outcome is still unknown. To prevent a duplicate, reopen this screen before sending again.");
+        return;
+      }
       if (!targetChatId) {
         setError(ko ? "세션을 아직 열지 못했습니다. 잠시 뒤 다시 시도해 주세요." : "The session is not open yet. Try again shortly.");
         return;
       }
       const alreadyRunning = busyRef.current;
+      const activeRunId = alreadyRunning ? runIdRef.current : null;
+      const previousReceipt = alreadyRunning
+        ? await api.invoke.latestReceipt(targetChatId).catch(() => undefined)
+        : undefined;
       setError("");
       setDraft("");
       setBusy(true);
@@ -269,6 +283,7 @@ export function AutomationSessionPanel({
         unsubRef.current?.();
         unsubRef.current = null;
         runIdRef.current = null;
+        setStopPending(false);
         setBusy(false);
         busyRef.current = false;
         setStatus("");
@@ -277,9 +292,18 @@ export function AutomationSessionPanel({
         void load();
       }
 
-      if (events && !alreadyRunning) {
-        // subscribe-before-trigger — 런타임이 즉시 내보내는 초기 이벤트도 놓치지 않는다.
-        unsubRef.current = events.on(api.invoke.eventChannel(runId), (ev: McpInvocationEvent) => {
+      function preservePrompt() {
+        setDraft((current) => {
+          if (!current.trim()) return prompt;
+          if (current === prompt) return current;
+          return `${prompt}\n${current}`;
+        });
+      }
+
+      function subscribeToRun(targetRunId: string) {
+        if (!events) return;
+        unsubRef.current?.();
+        unsubRef.current = events.on(api!.invoke.eventChannel(targetRunId), (ev: McpInvocationEvent) => {
           if (ev.kind === "partial") {
             accumulated = typeof ev.delta === "string" ? accumulated + ev.delta : ev.text ?? accumulated;
             setStreamText(accumulated);
@@ -297,6 +321,11 @@ export function AutomationSessionPanel({
             finish(ev.error?.message || (ko ? "응답을 받지 못했습니다." : "No response was returned."));
           }
         });
+      }
+
+      if (events && !alreadyRunning) {
+        // subscribe-before-trigger — 런타임이 즉시 내보내는 초기 이벤트도 놓치지 않는다.
+        subscribeToRun(runId);
       }
 
       const request = {
@@ -320,20 +349,115 @@ export function AutomationSessionPanel({
         if (alreadyRunning) {
           // 이미 도는 턴이 있으면 취소하지 않고 뒤에 세운다. 사용자의 말은 버려지지 않는다.
           const steered = await api.invoke.steer(request);
+          if (steered.accepted !== true || steered.chatId !== targetChatId || steered.interruptsCurrent !== false) {
+            throw new Error("invoke_steer_receipt_mismatch");
+          }
+          if (steered.queued && (
+            !activeRunId
+            || steered.activeRunId !== activeRunId
+            || !steered.queuedRequestId
+            || !steered.promptHash
+            || !Number.isInteger(steered.position)
+            || (steered.position ?? 0) < 1
+          )) {
+            throw new Error("invoke_steer_queue_receipt_mismatch");
+          }
+          if (!steered.queued && !steered.runId) throw new Error("invoke_steer_run_receipt_mismatch");
           setStatus(
             steered.queued
               ? ko ? "지금 실행이 끝나면 이어서 보낼게요." : "It will be sent right after the current run."
               : ko ? "이어서 진행 중이에요…" : "Continuing…",
           );
-          if (steered.runId) runIdRef.current = steered.runId;
+          if (steered.queued) {
+            runIdRef.current = steered.activeRunId ?? activeRunId;
+          } else if (steered.runId) {
+            runIdRef.current = steered.runId;
+            subscribeToRun(steered.runId);
+          }
           return;
         }
-        await api.invoke.run(request);
+        const started = await api.invoke.run(request);
+        if (started?.runId !== runId) throw new Error("invoke_run_receipt_mismatch");
       } catch (err) {
-        finish(sendFailureMessage(err, ko));
+        if (alreadyRunning) {
+          try {
+            const attached = await api.invoke.attach(targetChatId);
+            const queued = attached?.queuedSteers?.find((entry) => entry.text === prompt);
+            if (attached && queued && (!activeRunId || attached.runId === activeRunId)) {
+              runIdRef.current = attached.runId;
+              setStatus(ko
+                ? `현재 실행 뒤 ${queued.position}번째로 보낼 요청이 대기열에 저장됐음을 확인했습니다.`
+                : `Confirmed that this message is durably queued at position ${queued.position} after the current run.`);
+              return;
+            }
+            if (attached) {
+              runIdRef.current = attached.runId;
+              preservePrompt();
+              setBusy(true);
+              busyRef.current = true;
+              setStatus(ko ? "자동화가 실행 중이에요…" : "The automation is running…");
+              setError(sendFailureMessage(err, ko));
+              void load();
+              return;
+            }
+            const latestReceipt = await api.invoke.latestReceipt(targetChatId);
+            if (
+              latestReceipt
+              && latestReceipt.chatId === targetChatId
+              && latestReceipt.runId !== previousReceipt?.runId
+            ) {
+              runIdRef.current = latestReceipt.runId;
+              if (latestReceipt.status === "running" || latestReceipt.status === "cancelling") {
+                subscribeToRun(latestReceipt.runId);
+                setStatus(ko
+                  ? "새 실행은 시작됐지만 전송 응답이 유실됐습니다. 이 실행 결과를 기다리는 중입니다…"
+                  : "A new run started, but its send acknowledgement was lost. Waiting for this run to settle…");
+                return;
+              }
+              finish(ko
+                ? `전송 응답은 유실됐지만 실행 ${latestReceipt.runId}이(가) ${latestReceipt.status} 상태로 기록됐습니다. 중복 전송하지 마세요.`
+                : `The send acknowledgement was lost, but run ${latestReceipt.runId} is recorded as ${latestReceipt.status}. Do not send it again.`);
+              return;
+            }
+            preservePrompt();
+            finish(sendFailureMessage(err, ko));
+            return;
+          } catch {
+            preservePrompt();
+            finish(ko
+              ? "전송이 대기열에 들어갔는지 확인하지 못했습니다. 중복을 막기 위해 다시 보내지 말고 이 화면을 다시 여세요."
+              : "Could not verify whether the message entered the queue. To prevent a duplicate, do not resend it; reopen this screen.");
+            setSendOutcomeUnknown(true);
+            return;
+          }
+        }
+        try {
+          const receipt = await api.invoke.receipt(runId);
+          if (receipt && receipt.runId === runId && receipt.chatId === targetChatId) {
+            if (receipt.status === "running" || receipt.status === "cancelling") {
+              runIdRef.current = runId;
+              setStatus(ko
+                ? "실행은 시작됐지만 전송 응답이 유실됐습니다. 이 실행 결과를 기다리는 중입니다…"
+                : "The run started, but its send acknowledgement was lost. Waiting for this run to settle…");
+              return;
+            }
+            finish(ko
+              ? `전송 응답은 유실됐지만 실행 ${runId}이(가) ${receipt.status} 상태로 기록됐습니다. 중복 전송하지 마세요.`
+              : `The send acknowledgement was lost, but run ${runId} is recorded as ${receipt.status}. Do not send it again.`);
+            return;
+          }
+          preservePrompt();
+          finish(sendFailureMessage(err, ko));
+        } catch {
+          preservePrompt();
+          finish(ko
+            ? "전송 요청이 이미 시작됐을 수 있으나 실행 기록을 확인하지 못했습니다. 중복을 막기 위해 다시 보내지 말고 이 화면을 다시 여세요."
+            : "The send may already have started, but its run record could not be verified. To prevent a duplicate, do not resend it; reopen this screen.");
+          setSendOutcomeUnknown(true);
+        }
       }
     },
-    [executionPermission, hubMode, ko, load, locale, runtimeSelection, toolMode],
+    [executionPermission, hubMode, ko, load, locale, runtimeSelection, sendOutcomeUnknown, toolMode],
   );
 
   // RunHistoryPanel의 "대화에서 이어서 해결" 등 외부 요청 수신.
@@ -377,11 +501,56 @@ export function AutomationSessionPanel({
     }
   }, [automationId, chatId, send]);
 
-  function stop() {
+  async function stop() {
     const api = ipc();
     const runId = runIdRef.current;
-    if (!api || !runId) return;
-    void api.invoke.cancel(runId).catch(() => undefined);
+    if (!api || !runId || stopPending) return;
+    setStopPending(true);
+    setError("");
+    try {
+      const receipt = await api.invoke.cancel(runId);
+      if (
+        receipt?.runId !== runId
+        || (receipt.status !== "requested" && receipt.status !== "already-requested")
+      ) {
+        throw new Error("invoke_cancel_receipt_mismatch");
+      }
+      // Keep the running projection until the exact terminal event arrives.
+      setStatus(ko ? "중단 요청을 전달했습니다. 종료 결과를 기다리는 중입니다…" : "Stop requested. Waiting for the terminal result…");
+    } catch {
+      try {
+        const receipt = await api.invoke.receipt(runId);
+        if (!receipt || receipt.runId !== runId || receipt.chatId !== chatIdRef.current) {
+          throw new Error("invoke_cancel_readback_missing");
+        }
+        if (receipt.status === "cancelling") {
+          setStatus(ko ? "중단 요청이 반영됐음을 실행 기록에서 확인했습니다. 종료 결과를 기다리는 중입니다…" : "The run record confirms the stop request. Waiting for the terminal result…");
+          return;
+        }
+        if (receipt.status === "running") {
+          setStopPending(false);
+          setError(ko
+            ? "실행 기록에는 아직 실행 중으로 남아 있어 중단이 확인되지 않았습니다. 현재 상태를 새로고침한 뒤 다시 시도하세요."
+            : "The run record still says running, so the stop was not confirmed. Refresh the current state before trying again.");
+          return;
+        }
+        setStopPending(false);
+        setBusy(false);
+        busyRef.current = false;
+        setStatus("");
+        setError(ko
+          ? `실행이 이미 ${receipt.status} 상태로 끝났음을 확인했습니다.`
+          : `The run is already recorded as ${receipt.status}.`);
+        void load();
+      } catch {
+        // A lost response may come after cancel() cleared the durable steer queue.
+        // Keep the button locked until a terminal event or remount instead of
+        // inviting a blind repeat or claiming that either the run or queue is unchanged.
+        setError(ko
+          ? "중단 요청이 반영됐는지와 대기열이 지워졌는지 확인하지 못했습니다. 중단을 반복하지 말고 실행 기록이 갱신될 때까지 기다리거나 화면을 다시 여세요."
+          : "Could not verify whether the stop applied or cleared the queue. Do not repeat it; wait for the run record to update or reopen this screen.");
+      }
+    }
   }
 
   return (
@@ -489,6 +658,7 @@ export function AutomationSessionPanel({
             if (e.key !== "Enter" || e.shiftKey) return;
             if (isImeSubmit(e)) return;
             e.preventDefault();
+            if (sendOutcomeUnknown) return;
             void send(draft);
           }}
           rows={3}
@@ -502,11 +672,11 @@ export function AutomationSessionPanel({
         <div className="automation-session-composer-actions">
           <span>{ko ? "Enter 전송 · Shift+Enter 줄바꿈" : "Enter to send · Shift+Enter for a new line"}</span>
           {busy ? (
-            <button type="button" onClick={stop} data-variant="stop">
-              {ko ? "정지" : "Stop"}
+            <button type="button" onClick={() => void stop()} data-variant="stop" disabled={stopPending}>
+              {stopPending ? (ko ? "중단 확인 중…" : "Stopping…") : ko ? "정지" : "Stop"}
             </button>
           ) : (
-            <button type="button" onClick={() => void send(draft)} disabled={!draft.trim() || unavailable}>
+            <button type="button" onClick={() => void send(draft)} disabled={!draft.trim() || unavailable || sendOutcomeUnknown}>
               {ko ? "보내기" : "Send"}
             </button>
           )}

@@ -29,7 +29,7 @@ import {
 } from "@/lib/output-presentation";
 import { designOutputSurfaceProps, designSurfaceKindForOutput } from "@/lib/design-output-tokens";
 import { isOneArtifactOpenRequest, ONE_ARTIFACT_OPEN_EVENT, requestOneArtifactOpen, type OneArtifactOpenRequest } from "@/lib/one-artifact-open";
-import type { BrowserLiveFrame, BrowserLiveInput } from "@/lib/types";
+import type { BrowserLiveDispatchResult, BrowserLiveFrame, BrowserLiveInput } from "@/lib/types";
 import type { OneArtifactPreviewCapabilityV1 } from "@shared/one-artifacts";
 import type { ComputerHistoryEntry, ComputerHistoryState } from "@shared/computer-history";
 import type {
@@ -658,6 +658,8 @@ function OneBrowserLiveView({ active, locale, preferredUrl, previewScopeId }: { 
   const [fileCandidate, setFileCandidate] = useState<{ name: string; path: string } | null>(null);
   const [viewport, setViewport] = useState<"desktop" | "phone">("desktop");
   const [menuOpen, setMenuOpen] = useState(false);
+  const [actionPending, setActionPending] = useState<string | null>(null);
+  const [actionFeedback, setActionFeedback] = useState<{ tone: "success" | "error"; message: string } | null>(null);
   const [tabs, setTabs] = useState<BrowserShellTab[]>(() => [{
     id: "task-output",
     title: locale === "ko" ? "이 사이트에 연결" : "Connected site",
@@ -897,11 +899,59 @@ function OneBrowserLiveView({ active, locale, preferredUrl, previewScopeId }: { 
       y: Math.min(1, Math.max(0, (clientY - rect.top) / Math.max(1, rect.height))),
     };
   };
-  const dispatch = (input: BrowserLiveInputBody) => {
+  const dispatch = async (
+    input: BrowserLiveInputBody,
+    options: { label?: string; busy?: boolean; quietSuccess?: boolean; quietFailure?: boolean } = {},
+  ): Promise<BrowserLiveDispatchResult | null> => {
     const sessionId = sessionRef.current;
     const bridge = ipc();
-    if (!sessionId || !bridge?.browser?.dispatchLiveInput) return;
-    void bridge.browser.dispatchLiveInput({ ...input, sessionId } as BrowserLiveInput);
+    if (!sessionId || !bridge?.browser?.dispatchLiveInput) {
+      if (!options.quietFailure) {
+        setActionFeedback({
+          tone: "error",
+          message: locale === "ko" ? "실시간 브라우저 세션이 끝나 이 작업을 보내지 못했습니다." : "The live browser session ended, so this action was not sent.",
+        });
+      }
+      setInteractive(false);
+      return null;
+    }
+    if (options.busy) setActionPending(options.label ?? "browser-action");
+    try {
+      const result = await bridge.browser.dispatchLiveInput({ ...input, sessionId } as BrowserLiveInput);
+      if (sessionRef.current !== sessionId || result?.ok !== true) {
+        if (!options.quietFailure) {
+          const noHistory = result?.ok === false && result.code === "no_history";
+          setActionFeedback({
+            tone: "error",
+            message: noHistory
+              ? (locale === "ko" ? "이 방향으로 이동할 방문 기록이 없습니다." : "There is no history entry in that direction.")
+              : (locale === "ko" ? "브라우저가 이 작업을 받지 않았습니다. 현재 화면을 확인한 뒤 다시 시도하세요." : "The browser did not accept this action. Check the current page before trying again."),
+          });
+        }
+        if (
+          sessionRef.current !== sessionId
+          || (result?.ok === false && result.code === "session_missing")
+        ) setInteractive(false);
+        return result ?? null;
+      }
+      if (!options.quietSuccess) {
+        setActionFeedback({
+          tone: "success",
+          message: locale === "ko" ? `${options.label ?? "브라우저 작업"}을(를) 전달했습니다.` : `${options.label ?? "Browser action"} was accepted.`,
+        });
+      }
+      return result;
+    } catch {
+      if (!options.quietFailure) {
+        setActionFeedback({
+          tone: "error",
+          message: locale === "ko" ? "브라우저 작업의 결과를 확인하지 못했습니다. 현재 프레임이 바뀌는지 확인하고 반복하지 마세요." : "The browser action outcome could not be verified. Check whether the frame changes before repeating it.",
+        });
+      }
+      return null;
+    } finally {
+      if (options.busy) setActionPending(null);
+    }
   };
   const modifierMask = (event: { altKey: boolean; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }) =>
     (event.altKey ? 1 : 0) | (event.ctrlKey ? 2 : 0) | (event.metaKey ? 4 : 0) | (event.shiftKey ? 8 : 0);
@@ -945,14 +995,47 @@ function OneBrowserLiveView({ active, locale, preferredUrl, previewScopeId }: { 
     setTabs(next);
     if (activeTabId === id) setActiveTabId(next[Math.min(index, next.length - 1)].id);
   };
-  const navigateFromAddress = () => {
+  const runNavigationAction = async (action: "back" | "forward" | "reload") => {
+    const labels = action === "back"
+      ? { ko: "뒤로 이동", en: "Back" }
+      : action === "forward"
+        ? { ko: "앞으로 이동", en: "Forward" }
+        : { ko: "새로고침", en: "Reload" };
+    const result = await dispatch(
+      { kind: "navigation", action },
+      { label: labels[locale], busy: true },
+    );
+    if (result?.ok && result.finalUrl) {
+      const finalUrl = result.finalUrl;
+      setAddress(finalUrl);
+      setTabs((current) => current.map((tab) => tab.id === activeTabId
+        ? { ...tab, url: finalUrl, title: new URL(finalUrl).hostname }
+        : tab));
+    }
+  };
+  const navigateFromAddress = async () => {
     const url = normalizedBrowserAddress(address);
-    if (!url || !activeTab) return;
+    if (!url || !activeTab) {
+      setActionFeedback({ tone: "error", message: locale === "ko" ? "열 수 있는 http 또는 https 주소를 입력하세요." : "Enter a valid http or https address." });
+      return;
+    }
     const sessionId = sessionRef.current;
     const bridge = ipc();
     if (sessionId && bridge?.browser?.dispatchLiveInput) {
-      setAddress(url);
-      void bridge.browser.dispatchLiveInput({ sessionId, kind: "navigation", action: "navigate", url });
+      const actualAddress = currentFrame?.url ?? activeTab.url ?? "";
+      const receipt = await dispatch(
+        { kind: "navigation", action: "navigate", url },
+        { label: locale === "ko" ? "주소 열기" : "Open address", busy: true },
+      );
+      if (receipt?.ok) {
+        const settledUrl = receipt.finalUrl ?? url;
+        setAddress(settledUrl);
+        setTabs((current) => current.map((tab) => tab.id === activeTab.id
+          ? { ...tab, url: settledUrl, title: new URL(settledUrl).hostname }
+          : tab));
+      } else {
+        setAddress(actualAddress);
+      }
       return;
     }
     setTabs((current) => current.map((tab) => tab.id === activeTab.id
@@ -961,6 +1044,21 @@ function OneBrowserLiveView({ active, locale, preferredUrl, previewScopeId }: { 
     setAddress(url);
     setFrame(null);
     setInteractive(false);
+    setActionFeedback({ tone: "success", message: locale === "ko" ? "새 주소를 여는 중입니다." : "Opening the new address." });
+  };
+
+  const copyAddress = async () => {
+    if (!effectiveUrl || actionPending) return;
+    setActionPending("copy-address");
+    try {
+      await navigator.clipboard.writeText(effectiveUrl);
+      setActionFeedback({ tone: "success", message: locale === "ko" ? "주소를 복사했습니다." : "Address copied." });
+      setMenuOpen(false);
+    } catch {
+      setActionFeedback({ tone: "error", message: locale === "ko" ? "주소를 복사하지 못했습니다. 주소창에서 직접 선택해 복사하세요." : "The address could not be copied. Select it directly in the address bar." });
+    } finally {
+      setActionPending(null);
+    }
   };
 
   return <section className={styles.browserLive} data-available={available ? "true" : "false"} data-viewport={viewport} data-interactive={interactive ? "true" : "false"}>
@@ -996,10 +1094,10 @@ function OneBrowserLiveView({ active, locale, preferredUrl, previewScopeId }: { 
       {localPreviewGone && <span className={styles.browserLiveBadge} data-gone="true"><i />{locale === "ko" ? "정리됨" : "Cleaned up"}</span>}
     </div>}
     <div className={styles.browserNavigationBar}>
-      <button type="button" onClick={() => dispatch({ kind: "navigation", action: "back" })} disabled={!interactive} aria-label={locale === "ko" ? "뒤로" : "Back"}><IconArrowLeft size={14} /></button>
-      <button type="button" onClick={() => dispatch({ kind: "navigation", action: "forward" })} disabled={!interactive} aria-label={locale === "ko" ? "앞으로" : "Forward"}><IconChevronRight size={14} /></button>
-      <button type="button" onClick={() => dispatch({ kind: "navigation", action: "reload" })} disabled={!interactive} aria-label={locale === "ko" ? "새로고침" : "Reload"}><IconRefresh size={13} /></button>
-      <form className={styles.browserAddressForm} onSubmit={(event) => { event.preventDefault(); navigateFromAddress(); }}>
+      <button type="button" onClick={() => void runNavigationAction("back")} disabled={!interactive || actionPending !== null} aria-label={locale === "ko" ? "뒤로" : "Back"}><IconArrowLeft size={14} /></button>
+      <button type="button" onClick={() => void runNavigationAction("forward")} disabled={!interactive || actionPending !== null} aria-label={locale === "ko" ? "앞으로" : "Forward"}><IconChevronRight size={14} /></button>
+      <button type="button" onClick={() => void runNavigationAction("reload")} disabled={!interactive || actionPending !== null} aria-label={locale === "ko" ? "새로고침" : "Reload"}><IconRefresh size={13} /></button>
+      <form className={styles.browserAddressForm} onSubmit={(event) => { event.preventDefault(); void navigateFromAddress(); }}>
         <IconNetwork size={12} />
         <input
           value={address}
@@ -1018,11 +1116,12 @@ function OneBrowserLiveView({ active, locale, preferredUrl, previewScopeId }: { 
           <button type="button" role="menuitem" onClick={() => { setViewport("desktop"); setMenuOpen(false); }} data-selected={viewport === "desktop" ? "true" : undefined}>{locale === "ko" ? "웹 화면" : "Web viewport"}<small>1280×800</small></button>
           <button type="button" role="menuitem" onClick={() => { setViewport("phone"); setMenuOpen(false); }} data-selected={viewport === "phone" ? "true" : undefined}>{locale === "ko" ? "휴대폰 화면" : "Phone viewport"}<small>390×844</small></button>
           <span />
-          <button type="button" role="menuitem" disabled={!effectiveUrl} onClick={() => { if (effectiveUrl) void navigator.clipboard.writeText(effectiveUrl); setMenuOpen(false); }}>{locale === "ko" ? "주소 복사" : "Copy address"}</button>
+          <button type="button" role="menuitem" disabled={!effectiveUrl || actionPending !== null} onClick={() => void copyAddress()}>{actionPending === "copy-address" ? (locale === "ko" ? "복사 중…" : "Copying…") : (locale === "ko" ? "주소 복사" : "Copy address")}</button>
           <button type="button" role="menuitem" onClick={() => { closeTab(activeTabId); setMenuOpen(false); }}>{locale === "ko" ? "탭 닫기" : "Close tab"}</button>
         </div>}
       </div>
     </div>
+    {actionFeedback && <div className={styles.browserActionNotice} data-tone={actionFeedback.tone} role={actionFeedback.tone === "error" ? "alert" : "status"}>{actionFeedback.message}</div>}
     {/* 아래 빈 상태가 같은 사실과 같은 행동을 이미 가운데에 크게 말하고 있을 때는 배너를
         띄우지 않는다 — 같은 버튼이 한 화면에 두 번 나오던 것. */}
     {localPreviewGone && (available || filePreview) && <div className={styles.browserGoneNotice} role="status">
@@ -1048,48 +1147,57 @@ function OneBrowserLiveView({ active, locale, preferredUrl, previewScopeId }: { 
           <div
             className={styles.browserStreamInput}
             role="application"
-            aria-label={locale === "ko" ? "실시간 브라우저. 클릭, 스크롤, 키보드 입력 가능" : "Live browser. Click, scroll, and type here"}
+            aria-label={interactive
+              ? (locale === "ko" ? "실시간 브라우저. 클릭, 스크롤, 키보드 입력 가능" : "Live browser. Click, scroll, and type here")
+              : (locale === "ko" ? "브라우저 화면. 실시간 조작 세션 없음" : "Browser view. No live interaction session")}
             onPointerDown={(event) => {
+              if (!interactive) return;
               event.currentTarget.setPointerCapture(event.pointerId);
               inputRef.current?.focus({ preventScroll: true });
               const point = pointInFrame(event.currentTarget, event.clientX, event.clientY);
-              dispatch({ kind: "pointer", phase: "down", ...point, button: event.button === 1 ? "middle" : event.button === 2 ? "right" : "left", clickCount: event.detail || 1 });
+              void dispatch({ kind: "pointer", phase: "down", ...point, button: event.button === 1 ? "middle" : event.button === 2 ? "right" : "left", clickCount: event.detail || 1 }, { label: locale === "ko" ? "클릭" : "Click", quietSuccess: true });
             }}
             onPointerUp={(event) => {
+              if (!interactive) return;
               const point = pointInFrame(event.currentTarget, event.clientX, event.clientY);
-              dispatch({ kind: "pointer", phase: "up", ...point, button: event.button === 1 ? "middle" : event.button === 2 ? "right" : "left", clickCount: event.detail || 1 });
+              void dispatch({ kind: "pointer", phase: "up", ...point, button: event.button === 1 ? "middle" : event.button === 2 ? "right" : "left", clickCount: event.detail || 1 }, { label: locale === "ko" ? "클릭" : "Click", quietSuccess: true });
             }}
             onPointerMove={(event) => {
+              if (!interactive) return;
               queuedPointerRef.current = pointInFrame(event.currentTarget, event.clientX, event.clientY);
               if (pointerFrameRef.current != null) return;
               pointerFrameRef.current = window.requestAnimationFrame(() => {
                 pointerFrameRef.current = null;
                 const point = queuedPointerRef.current;
-                if (point) dispatch({ kind: "pointer", phase: "move", ...point });
+                if (point) void dispatch({ kind: "pointer", phase: "move", ...point }, { quietSuccess: true, quietFailure: true });
               });
             }}
             onWheel={(event) => {
+              if (!interactive) return;
               event.preventDefault();
               const point = pointInFrame(event.currentTarget, event.clientX, event.clientY);
-              dispatch({ kind: "wheel", ...point, deltaX: event.deltaX, deltaY: event.deltaY });
+              void dispatch({ kind: "wheel", ...point, deltaX: event.deltaX, deltaY: event.deltaY }, { label: locale === "ko" ? "스크롤" : "Scroll", quietSuccess: true });
             }}
             onContextMenu={(event) => event.preventDefault()}
             onKeyDown={(event) => {
+              if (!interactive) return;
               if (composingRef.current || event.nativeEvent.isComposing) return;
               event.preventDefault();
               const modifiers = modifierMask(event);
-              dispatch({ kind: "key", phase: "down", key: event.key, code: event.code, modifiers });
-              dispatch({ kind: "key", phase: "up", key: event.key, code: event.code, modifiers });
+              void (async () => {
+                const down = await dispatch({ kind: "key", phase: "down", key: event.key, code: event.code, modifiers }, { label: locale === "ko" ? "키 입력" : "Key input", quietSuccess: true });
+                if (down?.ok) await dispatch({ kind: "key", phase: "up", key: event.key, code: event.code, modifiers }, { label: locale === "ko" ? "키 입력" : "Key input", quietSuccess: true });
+              })();
             }}
             onCompositionStart={() => { composingRef.current = true; }}
             onCompositionEnd={(event) => {
               composingRef.current = false;
-              if (event.data) dispatch({ kind: "text", text: event.data });
+              if (interactive && event.data) void dispatch({ kind: "text", text: event.data }, { label: locale === "ko" ? "텍스트 입력" : "Text input", quietSuccess: true });
             }}
             onPaste={(event) => {
               event.preventDefault();
               const text = event.clipboardData.getData("text/plain");
-              if (text) dispatch({ kind: "text", text });
+              if (interactive && text) void dispatch({ kind: "text", text }, { label: locale === "ko" ? "붙여넣기" : "Paste", quietSuccess: true });
             }}
           >
             <img src={currentFrame!.dataUrl!} draggable={false} alt={currentFrame?.title || (locale === "ko" ? "인앱 브라우저 라이브 화면" : "Live in-app browser view")} />

@@ -7,8 +7,16 @@
 import { useEffect, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
+import {
+  clearPromptTasteIntent,
+  exactPromptUnlockBody,
+  getOrCreatePromptStartIntent,
+  getOrCreatePromptTasteIntent,
+  getOrCreatePromptUnlockIntent,
+  storedPromptTasteIntent,
+} from "@/lib/prompt-actions";
 import { useT } from "@/lib/i18n";
-import type { HubPromptSummary, HubPromptViewer } from "@shared/types";
+import type { Chat, HubPromptSummary, HubPromptViewer } from "@shared/types";
 import { UpgradeCta } from "./UpgradeCta";
 import { IconClose, IconLock, IconSearch, IconSparkles } from "./Icon";
 import { LoadingEstimate } from "./LoadingEstimate";
@@ -24,18 +32,75 @@ function pickText(ko: boolean, koText?: string, enText?: string): string {
  * 채운다 — 입력물(사진/문서)이 필요한 프롬프트는 사용자가 첨부를 붙인 뒤 직접 전송해야
  * 결과가 이상하게 나오지 않는다.
  */
+export type PromptChatStartResult =
+  | { ok: true; chatId: string }
+  | { ok: false; chatId?: string; code: "bridge_unavailable" | "intent_persistence_failed" | "create_failed" | "receipt_mismatch" | "readback_failed" };
+
+export function isExactPromptChat(value: Chat | null | undefined, expectedId?: string): value is Chat {
+  if (!value || typeof value.id !== "string" || !value.id.trim()) return false;
+  if (expectedId && value.id !== expectedId) return false;
+  return value.originSurface === "one"
+    && value.kind === "user"
+    && value.projectId === null
+    && value.firmId === null
+    && value.archivedAt === null
+    && typeof value.agentId === "string"
+    && Boolean(value.agentId.trim())
+    && (value.taskId === undefined || value.taskId === null);
+}
+
 export async function startChatWithPrompt(
   body: string,
-  opts?: { seedOnly?: boolean },
-): Promise<boolean> {
+  opts: { promptSlug: string; seedOnly?: boolean },
+): Promise<PromptChatStartResult> {
   const api = ipc();
-  if (!api) return false;
+  if (!api) return { ok: false, code: "bridge_unavailable" };
+  const seedOnly = opts.seedOnly === true;
+  const intent = await getOrCreatePromptStartIntent({
+    slug: opts.promptSlug,
+    body,
+    seedOnly,
+  });
+  if (!intent) return { ok: false, code: "intent_persistence_failed" };
+  let chatId = "";
   try {
-    const seedFlag = opts?.seedOnly ? "&seedOnly=1" : "";
-    navigate(`/one?prompt=${encodeURIComponent(body)}${seedFlag}`);
-    return true;
+    const receipt = await api.promptHub.startChat({
+      intentId: intent.intentId,
+      body,
+      seedOnly,
+    });
+    const receivedChat = receipt?.chat;
+    if (receipt?.ok !== true
+      || receipt.receiptVersion !== 1
+      || (receipt.status !== "created" && receipt.status !== "replayed")
+      || receipt.intentId !== intent.intentId
+      || receipt.promptDigest !== intent.promptDigest
+      || receipt.seedOnly !== seedOnly
+      || !isExactPromptChat(receivedChat)) {
+      const receivedId = typeof receivedChat?.id === "string" && receivedChat.id.trim() ? receivedChat.id : undefined;
+      return { ok: false, ...(receivedId ? { chatId: receivedId } : {}), code: "receipt_mismatch" };
+    }
+    chatId = receivedChat.id;
+
+    let projected: Chat | null;
+    try {
+      projected = await api.chats.get(chatId);
+    } catch {
+      return { ok: false, chatId, code: "readback_failed" };
+    }
+    if (!isExactPromptChat(projected, chatId)) {
+      return { ok: false, chatId, code: "receipt_mismatch" };
+    }
+
+    const seedFlag = seedOnly ? "&seedOnly=1" : "";
+    navigate(
+      `/workspace/task?id=${encodeURIComponent(chatId)}`
+      + `&prompt=${encodeURIComponent(body)}${seedFlag}`
+      + `&promptStartIntent=${encodeURIComponent(intent.intentId)}`,
+    );
+    return { ok: true, chatId };
   } catch {
-    return false;
+    return { ok: false, ...(chatId ? { chatId } : {}), code: chatId ? "readback_failed" : "create_failed" };
   }
 }
 
@@ -171,6 +236,10 @@ export function PromptInputsConfirmDialog({
 type PickerNotice =
   | { kind: "tasted-gone"; slug: string }
   | { kind: "offer-taste"; slug: string }
+  | { kind: "taste-pending"; slug: string }
+  | { kind: "unlock-pending"; slug: string }
+  | { kind: "intent-error"; slug: string }
+  | { kind: "unlock-intent-error"; slug: string }
   | { kind: "unauthenticated"; slug: string }
   | { kind: "error"; slug: string };
 
@@ -188,11 +257,17 @@ export function PromptPickerDialog({
   const [viewer, setViewer] = useState<HubPromptViewer | null>(null);
   const [bookmarkSlugs, setBookmarkSlugs] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [q, setQ] = useState("");
+  const [reloadGeneration, setReloadGeneration] = useState(0);
   const [busySlug, setBusySlug] = useState<string | null>(null);
   const [notice, setNotice] = useState<PickerNotice | null>(null);
   const [pendingStart, setPendingStart] = useState<{ body: string; inputs: string; slug: string } | null>(null);
-  const [startFailure, setStartFailure] = useState<{ body: string; seedOnly: boolean; slug: string } | null>(null);
+  const [startFailure, setStartFailure] = useState<{
+    body: string;
+    seedOnly: boolean;
+    slug: string;
+  } | null>(null);
   const [startBusy, setStartBusy] = useState(false);
   const seqRef = useRef(0);
 
@@ -204,6 +279,7 @@ export function PromptPickerDialog({
       return;
     }
     const seq = ++seqRef.current;
+    setLoading(true);
     const timer = setTimeout(() => {
       void (async () => {
         try {
@@ -215,13 +291,16 @@ export function PromptPickerDialog({
           setPrompts(catalog.ok ? catalog.prompts : []);
           setViewer(catalog.viewer);
           if (bm.ok) setBookmarkSlugs(new Set(bm.slugs));
+          setLoadError(!catalog.ok);
+        } catch {
+          if (seqRef.current === seq) setLoadError(true);
         } finally {
           if (seqRef.current === seq) setLoading(false);
         }
       })();
     }, q ? 200 : 0);
     return () => clearTimeout(timer);
-  }, [q]);
+  }, [q, reloadGeneration]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -250,14 +329,33 @@ export function PromptPickerDialog({
     void startNow(body, false, p.slug);
   }
 
+  function exactTasteBody(
+    res: Awaited<ReturnType<NonNullable<ReturnType<typeof ipc>>["promptHub"]["taste"]>>,
+    p: HubPromptSummary,
+    intent: string,
+  ): string | null {
+    return res.ok === true
+      && res.receiptVersion === 1
+      && res.status === "completed"
+      && res.slug === p.slug
+      && res.tasteIntentId === intent
+      && res.tasted === true
+      && typeof res.replayed === "boolean"
+      && typeof res.body === "string"
+      && typeof res.completedAt === "string"
+      && Number.isFinite(Date.parse(res.completedAt))
+      ? res.body
+      : null;
+  }
+
   async function startNow(body: string, seedOnly = false, slug = "") {
     if (startBusy) return;
     setStartBusy(true);
     setStartFailure(null);
     try {
       // 입력물 필요 프롬프트는 자동 전송 대신 입력창 시드만 — 첨부를 붙일 기회를 준다.
-      const ok = await startChatWithPrompt(body, { seedOnly });
-      if (ok) {
+      const result = await startChatWithPrompt(body, { seedOnly, promptSlug: slug });
+      if (result.ok) {
         setPendingStart(null);
         onStarted?.();
         onClose();
@@ -278,9 +376,41 @@ export function PromptPickerDialog({
     setNotice(null);
     setBusySlug(p.slug);
     try {
-      const res = await api.promptHub.unlock(p.slug);
-      if (res.ok && res.body) {
-        maybeStart(p, res.body);
+      if (p.tasted && !p.unlocked && !paid) {
+        const intent = storedPromptTasteIntent(p.slug);
+        if (!intent) {
+          setNotice({ kind: "tasted-gone", slug: p.slug });
+          return;
+        }
+        const status = await api.promptHub.tasteStatus({ slug: p.slug, tasteIntentId: intent });
+        const recovered = exactTasteBody(status, p, intent);
+        if (recovered != null) {
+          setNotice(null);
+          maybeStart(p, recovered);
+          return;
+        }
+        if (status.slug !== p.slug || status.tasteIntentId !== intent || status.outcomeUnknown === true) {
+          setNotice({ kind: "taste-pending", slug: p.slug });
+          return;
+        }
+        if (status.status === "processing") {
+          setNotice({ kind: "taste-pending", slug: p.slug });
+          return;
+        }
+        if (status.status === "consumed") clearPromptTasteIntent(p.slug, intent);
+        setNotice({ kind: "tasted-gone", slug: p.slug });
+        return;
+      }
+      const unlockIntent = getOrCreatePromptUnlockIntent(p.slug);
+      if (!unlockIntent) {
+        setNotice({ kind: "unlock-intent-error", slug: p.slug });
+        return;
+      }
+      const res = await api.promptHub.unlock({ slug: p.slug, unlockIntentId: unlockIntent });
+      const unlockedBody = exactPromptUnlockBody(res, p.slug, unlockIntent);
+      if (unlockedBody != null) {
+        setPrompts((prev) => prev.map((row) => row.slug === p.slug ? { ...row, unlocked: true } : row));
+        maybeStart(p, unlockedBody);
         return;
       }
       if (res.code === "subscription_required") {
@@ -292,9 +422,13 @@ export function PromptPickerDialog({
         setNotice({ kind: "unauthenticated", slug: p.slug });
         return;
       }
+      if (res.outcomeUnknown === true) {
+        setNotice({ kind: "unlock-pending", slug: p.slug });
+        return;
+      }
       setNotice({ kind: "error", slug: p.slug });
     } catch {
-      setNotice({ kind: "error", slug: p.slug });
+      setNotice({ kind: "unlock-pending", slug: p.slug });
     } finally {
       setBusySlug(null);
     }
@@ -304,15 +438,23 @@ export function PromptPickerDialog({
   async function tasteOnce(p: HubPromptSummary) {
     const api = ipc();
     if (!api?.promptHub || busySlug) return;
+    const intent = getOrCreatePromptTasteIntent(p.slug);
+    if (!intent) {
+      setNotice({ kind: "intent-error", slug: p.slug });
+      return;
+    }
     setBusySlug(p.slug);
     try {
-      const res = await api.promptHub.taste(p.slug);
-      if (res.ok && res.body) {
+      const res = await api.promptHub.taste({ slug: p.slug, tasteIntentId: intent });
+      const exactBody = exactTasteBody(res, p, intent);
+      if (exactBody != null) {
         setNotice(null);
-        maybeStart(p, res.body);
+        setPrompts((prev) => prev.map((row) => row.slug === p.slug ? { ...row, tasted: true } : row));
+        maybeStart(p, exactBody);
         return;
       }
       if (res.code === "already_tasted") {
+        clearPromptTasteIntent(p.slug, intent);
         setNotice({ kind: "tasted-gone", slug: p.slug });
         return;
       }
@@ -320,9 +462,13 @@ export function PromptPickerDialog({
         setNotice({ kind: "unauthenticated", slug: p.slug });
         return;
       }
+      if (res.code === "processing" || res.outcomeUnknown === true) {
+        setNotice({ kind: "taste-pending", slug: p.slug });
+        return;
+      }
       setNotice({ kind: "error", slug: p.slug });
     } catch {
-      setNotice({ kind: "error", slug: p.slug });
+      setNotice({ kind: "taste-pending", slug: p.slug });
     } finally {
       setBusySlug(null);
     }
@@ -331,8 +477,12 @@ export function PromptPickerDialog({
   async function signIn() {
     const api = ipc();
     if (!api) return;
-    const session = await api.auth.signInWithGoogle();
-    if (session.signedIn) {
+    try {
+      const session = await api.auth.signInWithGoogle();
+      if (!session.signedIn) {
+        setNotice({ kind: "error", slug: notice?.slug ?? "" });
+        return;
+      }
       setNotice(null);
       // 로그인 직후 목록·북마크를 즉시 재로드(unlocked/tasted 플래그 반영).
       const catalog = await api.promptHub.list({ q: q.trim() || undefined });
@@ -340,6 +490,9 @@ export function PromptPickerDialog({
       setViewer(catalog.viewer);
       const bm = await api.promptHub.bookmarks();
       if (bm.ok) setBookmarkSlugs(new Set(bm.slugs));
+      setLoadError(!catalog.ok);
+    } catch {
+      setNotice({ kind: "error", slug: notice?.slug ?? "" });
     }
   }
 
@@ -471,6 +624,18 @@ export function PromptPickerDialog({
               <span>{ko ? "프롬프트 불러오는 중..." : "Loading prompts..."}</span>
               <LoadingEstimate locale={ko ? "ko" : "en"} operationKey="desktop-prompt-picker" expectedSeconds={[1, 15]} />
             </div>
+          ) : loadError ? (
+            <div role="alert" style={{ padding: "10px 8px", color: "var(--red-deep)", fontSize: 12.5, lineHeight: 1.5, display: "grid", gap: 8 }}>
+              <span>{ko ? "프롬프트 목록을 불러오지 못했습니다." : "Could not load prompts."}</span>
+              <button
+                type="button"
+                className="neu-btn-primary"
+                style={{ justifySelf: "start", padding: "6px 10px", borderRadius: 8, fontSize: 12 }}
+                onClick={() => setReloadGeneration((value) => value + 1)}
+              >
+                {ko ? "다시 불러오기" : "Retry"}
+              </button>
+            </div>
           ) : sorted.length === 0 ? (
             <div style={{ padding: "10px 8px", color: "var(--muted-deep)", fontSize: 12.5, lineHeight: 1.5 }}>
               {ko
@@ -599,6 +764,54 @@ export function PromptPickerDialog({
                           </div>
                           <UpgradeCta />
                         </>
+                      )}
+                      {rowNotice.kind === "taste-pending" && (
+                        <>
+                          <span>
+                            {ko
+                              ? "같은 맛보기 요청의 완료 본문을 아직 확인하지 못했습니다. 새 요청을 만들지 말고 이어서 확인하세요."
+                              : "The completed body for this taste request is not confirmed yet. Resume the same request instead of creating another one."}
+                          </span>
+                          <button
+                            type="button"
+                            className="neu-btn-primary"
+                            onClick={() => void tasteOnce(p)}
+                            style={{ padding: "6px 12px", borderRadius: 9, fontSize: 12, justifySelf: "start" }}
+                          >
+                            {ko ? "같은 요청 이어가기" : "Resume same request"}
+                          </button>
+                        </>
+                      )}
+                      {rowNotice.kind === "unlock-pending" && (
+                        <>
+                          <span>
+                            {ko
+                              ? "같은 열람 요청의 소유권과 본문을 아직 확인하지 못했습니다. 새 요청을 만들지 말고 같은 요청을 이어서 확인하세요."
+                              : "Ownership and the body for this open request are not confirmed yet. Resume the same request instead of creating another one."}
+                          </span>
+                          <button
+                            type="button"
+                            className="neu-btn-primary"
+                            onClick={() => void pick(p)}
+                            style={{ padding: "6px 12px", borderRadius: 9, fontSize: 12, justifySelf: "start" }}
+                          >
+                            {ko ? "같은 요청 이어가기" : "Resume same request"}
+                          </button>
+                        </>
+                      )}
+                      {rowNotice.kind === "intent-error" && (
+                        <span>
+                          {ko
+                            ? "중복 방지 요청 키를 저장하지 못해 맛보기를 시작하지 않았습니다. 앱 저장소 권한을 확인하세요."
+                            : "The taste did not start because its duplicate-safe request key could not be stored. Check app storage access."}
+                        </span>
+                      )}
+                      {rowNotice.kind === "unlock-intent-error" && (
+                        <span>
+                          {ko
+                            ? "중복 방지 요청 키를 저장하지 못해 유료 열람을 시작하지 않았습니다. 앱 저장소 권한을 확인하세요."
+                            : "The paid open did not start because its duplicate-safe request key could not be stored. Check app storage access."}
+                        </span>
                       )}
                       {rowNotice.kind === "unauthenticated" && (
                         <>

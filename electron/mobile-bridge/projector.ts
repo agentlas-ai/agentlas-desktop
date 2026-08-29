@@ -55,6 +55,10 @@ import type {
   RuntimeRole,
 } from "../../shared/types";
 import {
+  ONE_BRIEFING_ACTION_SOURCE,
+  ONE_BRIEFING_CADENCES,
+  ONE_BRIEFING_CONTRACT_VERSION,
+  ONE_BRIEFING_REASON_SOURCE,
   isOneProactiveBriefing,
   type OneBriefingSnapshot,
 } from "../../shared/one-briefing";
@@ -294,10 +298,10 @@ export function projectMobileBridgeOneBriefing(
 ): MobileBridgeOneBriefingDto {
   const candidate = source.candidate;
   if (
-    source.contractVersion !== "1.0.0" ||
+    source.contractVersion !== ONE_BRIEFING_CONTRACT_VERSION ||
     !Number.isFinite(Date.parse(source.evaluatedAt)) ||
     !Number.isFinite(Date.parse(source.preferences.updatedAt)) ||
-    !["important_only", "daily", "weekdays", "weekly"].includes(source.preferences.cadence) ||
+    !ONE_BRIEFING_CADENCES.includes(source.preferences.cadence) ||
     typeof source.preferences.quietHours.enabled !== "boolean" ||
     !Number.isInteger(source.preferences.quietHours.startHour) ||
     !Number.isInteger(source.preferences.quietHours.endHour) ||
@@ -308,13 +312,8 @@ export function projectMobileBridgeOneBriefing(
     (candidate !== null && (
       !isOneProactiveBriefing(candidate) ||
       candidate.source.refId !== candidate.preparedAction.targetId ||
-      (candidate.source.kind === "project_folder" && candidate.preparedAction.kind !== "open_project") ||
-      (candidate.source.kind === "automation_run" && candidate.preparedAction.kind !== "open_automation") ||
-      (candidate.source.kind === "canonical_task" && candidate.preparedAction.kind !== "open_task") ||
-      (candidate.reasonCode.startsWith("project_folder_") && candidate.source.kind !== "project_folder") ||
-      (candidate.reasonCode === "project_deadline_conflict" && candidate.source.kind !== "project_folder") ||
-      (candidate.reasonCode.startsWith("automation_") && candidate.source.kind !== "automation_run") ||
-      (candidate.reasonCode.startsWith("task_") && candidate.source.kind !== "canonical_task")
+      ONE_BRIEFING_ACTION_SOURCE[candidate.preparedAction.kind] !== candidate.source.kind ||
+      ONE_BRIEFING_REASON_SOURCE[candidate.reasonCode] !== candidate.source.kind
     ))
   ) {
     throw new TypeError("Invalid One Briefing snapshot");
