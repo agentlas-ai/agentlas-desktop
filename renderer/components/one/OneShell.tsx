@@ -5854,6 +5854,10 @@ export function OneShell() {
               locale={appLocale}
               addRequest={agentPickerRequest}
               onAdd={addOneOrg}
+              onAddExistingComplete={() => {
+                setCreateAgentOpen(false);
+                setCreateAgentSeed(null);
+              }}
               onCreateAgent={() => openCreateAgentDialog()}
               onMaterializeSource={materializeOneOrgSource}
               onRename={renameOneOrg}
@@ -7527,8 +7531,9 @@ export function OneShell() {
           await refreshAll();
         }}
         onAddExisting={() => {
-          setCreateAgentOpen(false);
-          setCreateAgentSeed(null);
+          // Keep New Agent mounted behind the picker. It owns the draft and
+          // becomes inert while OneOrgChart's child sheet owns focus. Only a
+          // successful explicit "Add this agent" confirmation closes it.
           setAgentPickerRequest((current) => ({
             token: (current?.token ?? 0) + 1,
             source: "my",

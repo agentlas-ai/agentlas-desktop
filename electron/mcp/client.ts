@@ -2515,6 +2515,9 @@ ${effectiveUserPrompt}`;
         toolMode: req.toolMode,
         hubMode: req.hubMode,
         signal,
+        ...(req.requiredToolCatalogIds?.length
+          ? { requiredToolCatalogIds: req.requiredToolCatalogIds }
+          : {}),
         // 같은 채팅의 후속 턴이면 지난 선택과 접속 확인을 재사용한다(auto-select 메모).
         conversationId: req.chatId,
         ...(oneMemberToolPolicy ? oneMemberToolPolicy : {}),
@@ -2653,6 +2656,9 @@ ${effectiveUserPrompt}`;
           ...hubBridgedServerIds,
           ...(req.requiredToolCatalogIds ?? []),
         ])],
+        ...(req.requiredToolCatalogIds?.length
+          ? { requiredToolCatalogIds: req.requiredToolCatalogIds }
+          : {}),
         /*
          * ★도구 관문을 이 실행에 붙인다 — 어느 런타임이든.
          *
@@ -2708,9 +2714,9 @@ ${effectiveUserPrompt}`;
    */
   if (req.toolBrokerScope) {
     const declaredCatalogIds = req.requiredToolCatalogIds ?? [];
-    const declaredToolNames = mcpIncludedServers
+    const declaredToolNames = [...new Set(mcpIncludedServers
       .filter((server) => !!server.catalogId && declaredCatalogIds.includes(server.catalogId))
-      .map((server) => `mcp__${server.configKey}`);
+      .map((server) => `mcp__${server.configKey}`))];
     toolBroker = materializeToolBroker({
       runId: req.toolBrokerScope.runId,
       nodeId: req.toolBrokerScope.nodeId,

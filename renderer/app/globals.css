@@ -2075,7 +2075,9 @@ button[data-dashboard-import="true"]:disabled {
   display: flex;
   flex-direction: column;
   gap: 0;
-  overflow: hidden;
+  /* ModelPicker owns its own clipped listbox. Let that listbox escape the row
+     without clipping the identity or the action controls. */
+  overflow: visible;
   border: 1px solid var(--dash-line);
   border-top: 0;
   border-radius: 0 0 9px 9px;
@@ -2186,6 +2188,190 @@ button[data-dashboard-import="true"]:disabled {
   margin: 0;
   padding: 0;
   border: 0;
+}
+
+.dashboard-runtime-pool-identity-field {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.dashboard-runtime-identity {
+  min-height: 34px;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 1px solid var(--dash-line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--dash-line) 9%, #ffffff);
+  color: var(--dash-ink);
+}
+
+.dashboard-runtime-identity-mark,
+.dashboard-runtime-model-picker-option-mark {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--dash-teal-2) 12%, #ffffff);
+  color: var(--dash-teal-2);
+  font-family: var(--rd-f-mono);
+  font-size: 10px;
+  font-weight: 760;
+}
+
+.dashboard-runtime-identity-mark img,
+.dashboard-runtime-model-picker-option-mark img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.dashboard-runtime-identity-copy,
+.dashboard-runtime-model-picker-option-copy {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.dashboard-runtime-identity-copy strong,
+.dashboard-runtime-model-picker-option-copy strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.dashboard-runtime-identity-copy small,
+.dashboard-runtime-model-picker-option-copy small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dash-muted);
+  font-size: 10px;
+}
+
+.dashboard-runtime-model-picker {
+  position: relative;
+  min-width: 0;
+}
+
+.dashboard-runtime-model-picker-trigger {
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 9px;
+  border: 1px solid var(--dash-line);
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--dash-ink);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dashboard-runtime-model-picker-trigger:hover:not(:disabled),
+.dashboard-runtime-model-picker-trigger:focus-visible {
+  border-color: var(--dash-teal-2);
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--dash-teal-2) 18%, transparent);
+}
+
+.dashboard-runtime-model-picker-trigger:disabled {
+  opacity: 0.56;
+  cursor: default;
+}
+
+.dashboard-runtime-model-picker-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dashboard-runtime-model-picker-chevron {
+  flex: none;
+  color: var(--dash-muted);
+  font-size: 15px;
+  line-height: 1;
+}
+
+.dashboard-runtime-model-picker-popover {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 6px);
+  left: 0;
+  width: max(100%, 250px);
+  max-width: min(340px, calc(100vw - 48px));
+  padding: 6px;
+  border: 1px solid var(--dash-line);
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: 0 14px 34px rgba(18, 49, 43, 0.16);
+}
+
+.dashboard-runtime-model-picker-hint {
+  padding: 5px 7px 7px;
+  color: var(--dash-muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.dashboard-runtime-model-picker-list {
+  max-height: 280px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.dashboard-runtime-model-picker-option {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 7px;
+  border-radius: 7px;
+  color: var(--dash-ink);
+  cursor: pointer;
+  outline: none;
+}
+
+.dashboard-runtime-model-picker-option:hover,
+.dashboard-runtime-model-picker-option:focus-visible,
+.dashboard-runtime-model-picker-option[aria-selected="true"] {
+  background: color-mix(in srgb, var(--dash-teal-2) 10%, #ffffff);
+}
+
+.dashboard-runtime-model-picker-option[data-unavailable="true"] {
+  color: var(--dash-muted);
+  cursor: default;
+  opacity: 0.68;
+}
+
+.dashboard-runtime-model-picker-option-copy em {
+  color: var(--dash-teal-2);
+  font-size: 9px;
+  font-style: normal;
+}
+
+.dashboard-runtime-model-picker-check {
+  color: var(--dash-teal-2);
+  font-size: 14px;
+  font-weight: 800;
 }
 
 /* 이 행이 실제로 쓰이는 행인지가 한눈에 읽혀야 한다. 예전에는 셋 다 같은 굵기의

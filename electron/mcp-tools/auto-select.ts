@@ -13,6 +13,7 @@ import { resolveAutomationToolMode } from "../../shared/automation-tool-policy";
 import { buildToolAccessNotice } from "../../shared/tool-access-notice";
 import { listPendingHubPluginApprovals } from "./hub-plugin-bridge";
 import { judgedComputerUse } from "../system-agents/judged-tool-mode";
+import { isKeylessPlaywrightMcpDuplicate } from "./mcp-config";
 import type {
   AutomationHubMode,
   AutomationToolMode,
@@ -354,6 +355,8 @@ export async function autoSelectMcpTools(input: {
   autoSelectTools?: boolean;
   /** Installed MCP ids declared by the bound One Team member when auto mode is off. */
   fixedServerIds?: string[];
+  /** Graph-declared tool ids; canonical browser declarations suppress duplicate probing. */
+  requiredToolCatalogIds?: string[];
 }, injectedDeps: Partial<AutoSelectMcpDependencies> = {}): Promise<AutoSelectedMcpContext> {
   const deps: AutoSelectMcpDependencies = { ...DEFAULT_AUTO_SELECT_DEPS, ...injectedDeps };
   // The task as written, not lowercased and not tokenized — the resident judge reads it.
@@ -700,8 +703,17 @@ export async function autoSelectMcpTools(input: {
   } catch {
     latestInstalledServers = [];
   }
+  // Agentlas Browser is the authenticated host binding. A keyless custom
+  // Playwright row is a structurally equivalent empty-profile launcher; even
+  // probing it for inventory would start a second Chrome before mcp-config
+  // gets a chance to collapse its declaration to the canonical server. Keep
+  // explicit profiles/env and runs without this host binding untouched.
+  const canonicalBrowserSelected =
+    (effectiveToolMode === "browser" && pinnedReasons.has("agentlas-browser"))
+    || input.requiredToolCatalogIds?.includes("agentlas-browser") === true;
   for (const server of latestInstalledServers) {
     if (server.catalogId) continue;
+    if (canonicalBrowserSelected && isKeylessPlaywrightMcpDuplicate(server)) continue;
     if (result.some((tool) => tool.id === server.id)) continue;
     const missingEnv: string[] = [];
     for (const key of server.envKeys) {

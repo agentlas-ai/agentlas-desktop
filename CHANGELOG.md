@@ -20,11 +20,25 @@ page stays the authority.
 - Agent growth cards now label approval-waiting proposals separately from
   low-risk changes that were already applied automatically. Both states show
   the rollback safety, and the latter uses an explicit “Undo this change” action.
+- Live Work and One previews now keep a ready cross-origin loopback surface
+  live: native/stream status remains authoritative, while the fallback liveness
+  probe runs only same-origin so CORP cannot masquerade as server failure.
 - The stable macOS installer now distinguishes the GUI main from Electron-as-Node
   MCP and daemon helpers, ignoring only an exact `ELECTRON_RUN_AS_NODE=1` token
   while keeping unverified processes as install blockers.
 - Public package scripts no longer advertise unshipped private-test or smoke
   commands whose required files are not shipped.
+- Dashboard runtime rows now show provider and engine as read-only identity,
+  with model and effort as the only controls while preserving ordering,
+  fallback, and multimodal role behavior.
+- Automation headers expose a direct “모델 변경” action and distinguish role
+  defaults (pool priority and fallback) from exact automation pins, which stop
+  rather than silently switching providers.
+- One’s existing-agent picker now stays nested over the New Agent draft: a row
+  only selects a candidate, and an explicit confirmation performs the add.
+- Canonical Agentlas Browser binding now collapses keyless Playwright duplicates
+  before health probing, while explicit custom profiles and environment remain
+  independent.
 
 ## 1.0.52 — 2026-08-29
 

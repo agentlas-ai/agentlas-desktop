@@ -42,6 +42,7 @@ import {
 } from "./proxy-channel";
 import { mcpProxyApprovalPort } from "./proxy-server";
 import { userDataPath } from "../runtime-paths";
+import { BROWSER_CDP_LAUNCHER_BASENAME } from "./browser-cdp-launcher";
 
 function expandHome(arg: string): string {
   if (arg === "~") return os.homedir();
@@ -97,6 +98,8 @@ export interface McpConfigBuildOptions {
   browserProfileKey?: string;
   /** When present, serialize only these selected catalog ids for the current run. */
   catalogIds?: string[];
+  /** Graph-declared ids before the selected-tool union; used for safe canonical aliases. */
+  requiredToolCatalogIds?: string[];
   /** Main-authoritative exact server allowlist. Prefer this for consented Build plans. */
   serverIds?: string[];
   /** Build plans must never seed defaults as a side effect of config serialization. */
@@ -372,6 +375,46 @@ function argsWithCdpEndpoint(args: string[], endpoint: string): string[] {
 }
 
 /**
+ * A user-installed, keyless Playwright MCP can look like a harmless extra
+ * tool while actually starting its own empty Chromium profile. That is not a
+ * reason to grant it the authenticated CDP: only the canonical Agentlas
+ * Browser resolver owns that channel.
+ *
+ * Keep this deliberately narrow. Explicit credentials, an explicit profile,
+ * another executable, or a non-Playwright server remain untouched.
+ */
+export function isKeylessPlaywrightMcpDuplicate(server: InstalledMcpServer): boolean {
+  // The built-in `playwright` catalog row is the same materialized launcher as
+  // `agentlas-browser`; only the latter carries the authenticated approval
+  // channel. Recognize that row only when its persisted launch is still the
+  // host-owned resolver output, so a malformed/stale row is not silently
+  // treated as canonical.
+  if (
+    server.catalogId === "playwright" &&
+    server.transport === "stdio" &&
+    server.command === process.execPath &&
+    server.envKeys.length === 0 &&
+    server.configurationValid !== false &&
+    server.args.length === 1 &&
+    expandHome(server.args[0]) === path.join(os.homedir(), ".agentlas", BROWSER_CDP_LAUNCHER_BASENAME)
+  ) return true;
+  if (
+    server.transport !== "stdio" ||
+    !server.command ||
+    server.envKeys.length > 0 ||
+    server.configurationValid === false
+  ) return false;
+  const command = path.basename(expandHome(server.command)).toLowerCase();
+  if (command !== "npx" && command !== "npx.cmd" && command !== "node" && command !== "node.exe") return false;
+  const args = server.args.map(expandHome);
+  if (args.some((arg) => arg === "--user-data-dir" || arg.startsWith("--user-data-dir="))) return false;
+  const packageToken = /^@playwright\/mcp(?:@[^\s]+)?$/i;
+  const directPackage = args.some((arg) => packageToken.test(arg.trim()));
+  const nodePackagePath = args.some((arg) => /(?:^|[\\/])@playwright[\\/]mcp(?:[\\/]|$)/i.test(arg));
+  return command === "npx" || command === "npx.cmd" ? directPackage : nodePackagePath;
+}
+
+/**
  * ★자격증명 서랍은 하나다 — 실행 키마다 프로필을 새로 파지 않는다.
  *
  * 예전에는 `browserProfileKey` 마다 `<userData>/mcp/browser-profiles/<key>` 를 만들어 줬다.
@@ -429,7 +472,8 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   ensurePrivateDir(dir);
   const scopedCatalogIds = opts?.catalogIds ? new Set(opts.catalogIds.filter(Boolean)) : null;
   const scopedServerIds = opts?.serverIds ? new Set(opts.serverIds.filter(Boolean)) : null;
-  const servers = listInstalledServers().filter((s) => {
+  const installedServers = listInstalledServers();
+  const servers = installedServers.filter((s) => {
     if (!s.enabled) return false;
     // 평문 credential URL(레거시 행)은 어떤 런타임 설정에도 싣지 않는다. vault://
     // sentinel 서버는 아래 직렬화에서 실제 URL을 keychain에서 읽어 불투명 alias
@@ -439,7 +483,24 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     if (!scopedCatalogIds) return true;
     return Boolean((s.catalogId && scopedCatalogIds.has(s.catalogId)) || scopedCatalogIds.has(s.id));
   });
-  if (servers.length === 0) {
+  const requiredToolCatalogIds = new Set(opts?.requiredToolCatalogIds?.filter(Boolean) ?? []);
+  const canonicalBrowserRun = Boolean(
+    opts?.browserProfileKey?.startsWith("automation-") &&
+    !scopedServerIds &&
+    scopedCatalogIds?.has("agentlas-browser") &&
+    servers.some((server) => server.catalogId === "agentlas-browser"),
+  );
+  const browserAliases = new Map<string, InstalledMcpServer>();
+  const serializedServers = servers.filter((server) => {
+    if (!canonicalBrowserRun || !isKeylessPlaywrightMcpDuplicate(server)) return true;
+    // Graph declarations have historically used either the installed row id
+    // (custom servers) or the catalog id (official rows). Preserve both
+    // identities below without ever serializing/spawning the duplicate.
+    browserAliases.set(server.id, server);
+    if (server.catalogId) browserAliases.set(server.catalogId, server);
+    return false;
+  });
+  if (serializedServers.length === 0) {
     // 구버전이 0644 JSON에 남긴 vault 평문을 선택 결과가 0개인 실행에서도 방치하지 않는다.
     fs.rmSync(configPath, { force: true });
     return null;
@@ -453,7 +514,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   const includedServers: NonNullable<McpConfigResult["includedServers"]> = [];
   let mcpChildWrapper: string | null = null;
 
-  for (const s of servers) {
+  for (const s of serializedServers) {
     if (s.catalogId === "agentlas-time" && !isCanonicalSystemTimeMcpServer(s)) {
       // Official built-ins never fall through to generic stdio/remote paths.
       continue;
@@ -696,6 +757,19 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     includedServerIds.push(s.id);
     includedServers.push({ serverId: s.id, catalogId: s.catalogId, configKey: key });
     allowedTools.push(`mcp__${key}`, `mcp__${key}__*`);
+  }
+
+  // A graph may have declared a legacy custom key or the official Playwright
+  // catalog id for the same browser capability. Keep each declaration
+  // addressable, but point it at the one canonical config key above. The
+  // duplicate process is never serialized or spawned, and aliases are emitted
+  // only for explicit graph declarations.
+  const canonicalEntry = includedServers.find((server) => server.catalogId === "agentlas-browser");
+  if (canonicalEntry) {
+    for (const [declaredId, server] of browserAliases) {
+      if (!requiredToolCatalogIds.has(declaredId)) continue;
+      includedServers.push({ serverId: server.id, catalogId: declaredId, configKey: canonicalEntry.configKey });
+    }
   }
 
   if (Object.keys(mcpServers).length === 0) return null;

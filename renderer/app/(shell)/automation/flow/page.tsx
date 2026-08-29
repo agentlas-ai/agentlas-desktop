@@ -39,8 +39,16 @@ import { AutomationSessionPanel } from "@/components/automation/AutomationSessio
 import { IconBolt } from "@/components/Icon";
 import { ConnectionsDialog } from "@/components/automation/ConnectionsDialog";
 
-function runtimeSelectionLabel(selection: RuntimeSelection | null | undefined, locale: string): string {
-  if (!selection) return locale === "en" ? "follows active runtime" : "활성 런타임 따라가기";
+function runtimeSelectionPresentation(selection: RuntimeSelection | null | undefined, locale: string): {
+  label: string;
+  detail: string;
+} {
+  if (!selection) {
+    return {
+      label: locale === "en" ? "Role default" : "역할 기본값 사용",
+      detail: locale === "en" ? "Worker pool priority + fallback" : "Worker 풀 우선순위 · fallback",
+    };
+  }
   const kindLabels: Record<string, string> = {
     "claude-code": "Claude Code",
     codex: "Codex",
@@ -57,7 +65,10 @@ function runtimeSelectionLabel(selection: RuntimeSelection | null | undefined, l
   };
   const kind = kindLabels[selection.kind] ?? selection.kind;
   const model = selection.model?.trim();
-  return model ? `${kind} · ${model}` : kind;
+  return {
+    label: locale === "en" ? "Automation pin · overrides role default" : "자동화별 고정 · 역할 기본보다 우선",
+    detail: `${model ? `${kind} · ${model}` : kind} · ${locale === "en" ? "fails closed; no cross-provider fallback" : "사용할 수 없으면 중단 · 다른 공급자로 바꾸지 않음"}`,
+  };
 }
 
 function exactAutomationProjection(value: unknown, automationId: string): Automation | null {
@@ -1509,6 +1520,8 @@ function AutomationFlowPage() {
               </div>
   );
 
+  const runtimePresentation = runtimeSelectionPresentation(automation.runtimeSelection, locale);
+
   const inspectorContent = (
     <>
           <div className="automation-inspector-bar">
@@ -1591,7 +1604,8 @@ return (
               data-testid="automation-runtime-chip"
               style={{
                 display: "inline-flex",
-                alignItems: "center",
+                flexDirection: "column",
+                alignItems: "flex-start",
                 marginLeft: 8,
                 padding: "2px 7px",
                 borderRadius: 999,
@@ -1601,7 +1615,8 @@ return (
                 fontWeight: 600,
               }}
             >
-              {locale === "en" ? "Runs on" : "실행 모델"} {runtimeSelectionLabel(automation.runtimeSelection, locale)}
+              <strong>{runtimePresentation.label}</strong>
+              <small>{runtimePresentation.detail}</small>
             </span>
           </div>
         </div>
@@ -1631,6 +1646,15 @@ return (
           <>
             <button onClick={() => router.push(`/automation/new?id=${encodeURIComponent(automation.id)}`)} className="titlebar-nodrag" style={pillBtn(false)}>
               {t("auto.flow.edit_meta")}
+            </button>
+            <button
+              data-testid="change-automation-model"
+              onClick={() => router.push(`/automation/new?id=${encodeURIComponent(automation.id)}#execution-ai`)}
+              className="titlebar-nodrag"
+              style={{ ...pillBtn(Boolean(automation.runtimeSelection)), borderColor: "var(--accent-soft)" }}
+              title={locale === "en" ? "Change the model used by this automation" : "이 자동화가 사용할 모델을 변경합니다"}
+            >
+              {locale === "en" ? "Change model" : "모델 변경"}
             </button>
             <button onClick={() => setEditing(true)} className="titlebar-nodrag" style={pillBtn(false)}>
               {t("auto.flow.edit")}

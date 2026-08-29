@@ -9,7 +9,11 @@ import type {
   RuntimeSelection,
   RuntimeStatus,
 } from "@/lib/types";
-import { cliModelTagLabel } from "@shared/models";
+import {
+  RuntimeBrandIdentity,
+  RuntimeModelPicker,
+  type RuntimeModelPickerOption,
+} from "./RuntimeModelPicker";
 
 type ModelRow = { id: string; label: string; tag?: string };
 
@@ -144,6 +148,10 @@ function runtimeLabel(runtime: RuntimeStatus): string {
   }
   // kind "acp" carries the agent's own name (RuntimeStatus.label).
   return runtime.label ?? RUNTIME_LABEL[runtime.kind] ?? runtime.kind;
+}
+
+function modelOptionKey(runtime: RuntimeStatus, model: string | undefined): string {
+  return `${runtimeKey(runtime)}\u0000${model ?? ""}`;
 }
 
 function runtimeWithSelection(
@@ -315,6 +323,66 @@ export function RuntimeControl() {
     }));
   }
 
+  function modelOptionsForRole(
+    role: RuntimeRole,
+    currentSelection: RuntimeSelection,
+  ): RuntimeModelPickerOption[] {
+    const options: RuntimeModelPickerOption[] = [];
+    for (const runtime of runtimesForRole(role)) {
+      const models = modelsByRuntime[runtimeKey(runtime)] ?? (runtime.availableModels ?? []).map((id) => ({ id, label: id }));
+      if (runtime.kind !== "byok" && !LOCAL_MODEL_KINDS.has(runtime.kind)) {
+        options.push({
+          key: modelOptionKey(runtime, undefined),
+          label: "",
+          runtime,
+          isDefault: true,
+        });
+      }
+      for (const model of models) {
+        options.push({
+          key: modelOptionKey(runtime, model.id),
+          model: model.id,
+          label: model.label,
+          tag: model.tag,
+          runtime,
+        });
+      }
+      // A stale runtime projection may expose only its current model. Keep it
+      // selectable until the live model inventory catches up, rather than
+      // silently turning a persisted selection into a different provider.
+      if (models.length === 0 && runtime.model) {
+        options.push({
+          key: modelOptionKey(runtime, runtime.model),
+          model: runtime.model,
+          label: runtime.model,
+          runtime,
+        });
+      }
+    }
+
+    const currentRuntime = runtimeForSelection(currentSelection);
+    const currentKey = currentRuntime
+      ? modelOptionKey(currentRuntime, currentSelection.model)
+      : `unavailable\u0000${selectionKey(currentSelection)}`;
+    if (!options.some((option) => option.key === currentKey)) {
+      const unavailableRuntime: RuntimeStatus = currentRuntime ?? {
+        kind: currentSelection.kind,
+        backend: currentSelection.backend ?? "custom",
+        source: currentSelection.source ?? "unavailable",
+        version: null,
+        active: false,
+      };
+      options.unshift({
+        key: currentKey,
+        model: currentSelection.model,
+        label: currentSelection.model ?? (ko ? "저장된 모델" : "Stored model"),
+        runtime: unavailableRuntime,
+        unavailable: true,
+      });
+    }
+    return options;
+  }
+
   async function writePool(
     role: RuntimeRole,
     selections: RuntimeSelection[],
@@ -346,27 +414,7 @@ export function RuntimeControl() {
 
   function runtimeForSelection(selection: RuntimeSelection): RuntimeStatus | null {
     const roleRuntimes = runtimesForRole(selection.role ?? "orchestrator");
-    return (
-      roleRuntimes.find((runtime) => runtimeMatchesSelection(runtime, selection)) ??
-      roleRuntimes.find(
-        (runtime) =>
-          runtime.kind === selection.kind &&
-          (!selection.backend || runtime.backend === selection.backend),
-      ) ??
-      null
-    );
-  }
-
-  function runtimeIndexForSelection(selection: RuntimeSelection): number {
-    const runtime = runtimeForSelection(selection);
-    return runtime ? runtimesForRole(selection.role ?? "orchestrator").indexOf(runtime) : -1;
-  }
-
-  function modelRowsForSelection(selection: RuntimeSelection): ModelRow[] {
-    const runtime = runtimeForSelection(selection);
-    const rows = runtime ? modelsByRuntime[runtimeKey(runtime)] ?? [] : [];
-    if (!selection.model || rows.some((row) => row.id === selection.model)) return rows;
-    return [{ id: selection.model, label: selection.model }, ...rows];
+    return roleRuntimes.find((runtime) => runtimeMatchesSelection(runtime, selection)) ?? null;
   }
 
   function selectionFromRuntime(
@@ -403,25 +451,15 @@ export function RuntimeControl() {
     await writePool(role, next);
   }
 
-  async function updateMemberRuntime(
+  async function updateMemberModelSelection(
     role: RuntimeRole,
     index: number,
-    runtimeIndex: number,
-  ) {
-    const runtime = runtimesForRole(role)[runtimeIndex];
-    if (!runtime) return;
-    await updateMember(role, index, selectionFromRuntime(runtime, role));
-  }
-
-  async function updateMemberModel(
-    role: RuntimeRole,
-    index: number,
-    model: string,
+    option: RuntimeModelPickerOption,
   ) {
     const current = poolSelections(role)[index];
     if (!current) return;
-    const runtime = runtimeForSelection(current);
-    const nextModel = model || undefined;
+    const runtime = option.runtime;
+    const nextModel = option.model || undefined;
     const nextEfforts = effortsFor(runtime, nextModel);
     // An explicit effort belongs to the selected model. Keeping `max` while
     // switching to Spark made the row advertise an impossible pair and left a
@@ -432,9 +470,12 @@ export function RuntimeControl() {
       ? current.effort
       : undefined;
     await updateMember(role, index, {
-      ...current,
+      ...selectionFromRuntime(runtime, role),
       model: nextModel,
       effort: nextEffort,
+      longContext: runtime.kind === "byok"
+        ? current.longContext ?? runtime.longContextEnabled ?? false
+        : undefined,
     });
   }
 
@@ -607,8 +648,8 @@ export function RuntimeControl() {
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           document
-            .querySelector<HTMLSelectElement>(
-              `[data-role="${role}"] [data-pool-position="${selections.length + 1}"] select`,
+            .querySelector<HTMLButtonElement>(
+              `[data-role="${role}"] [data-pool-position="${selections.length + 1}"] [data-testid="runtime-model-picker"]`,
             )
             ?.focus();
         });
@@ -666,7 +707,7 @@ export function RuntimeControl() {
           <>
             <div className="dashboard-runtime-pool-columns" aria-hidden="true">
               <span>{ko ? "순위" : "Priority"}</span>
-              <span>{ko ? "엔진" : "Engine"}</span>
+              <span>{ko ? "공급자 · 엔진" : "Provider · engine"}</span>
               <span>{ko ? "모델" : "Model"}</span>
               <span>{ko ? "작업량" : "Effort"}</span>
               <span>{ko ? "선택" : "Selection"}</span>
@@ -676,9 +717,11 @@ export function RuntimeControl() {
               {members.map((member, index) => {
               const badge = memberBadge(role, member.position);
               const selection = member.selection;
-              const runtimeIndex = runtimeIndexForSelection(selection);
               const runtime = runtimeForSelection(selection);
-              const models = modelRowsForSelection(selection);
+              const modelOptions = modelOptionsForRole(role, selection);
+              const modelValue = runtime
+                ? modelOptionKey(runtime, selection.model)
+                : `unavailable\u0000${selectionKey(selection)}`;
               const efforts = effortsFor(runtime, selection.model);
               const effortValue = effortIsSupported(runtime, selection.model, selection.effort)
                 ? selection.effort ?? ""
@@ -769,67 +812,20 @@ export function RuntimeControl() {
                   </button>
                   <fieldset className="dashboard-runtime-pool-fields">
                     <legend className="sr-only">{rowLabel}</legend>
-                    <label>
-                      <span>{ko ? "엔진" : "Engine"}</span>
-                      <select
-                        aria-label={`${rowLabel} ${ko ? "엔진" : "engine"}`}
-                        value={String(runtimeIndex)}
-                        onChange={(event) =>
-                          void updateMemberRuntime(
-                            role,
-                            index,
-                            Number(event.target.value),
-                          )
-                        }
-                        disabled={busy}
-                      >
-                        {runtimeIndex < 0 && (
-                          <option value="-1" disabled>
-                            {RUNTIME_LABEL[selection.kind] ?? selection.kind}
-                            {ko ? " · 연결 안 됨" : " · unavailable"}
-                          </option>
-                        )}
-                        {runtimeOptions.map(({ runtime: option, index: optionIndex, label }) => (
-                          <option
-                            key={runtimeKey(option)}
-                            value={optionIndex}
-                          >
-                            {label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
+                    <div className="dashboard-runtime-pool-identity-field">
+                      <span>{ko ? "공급자 · 엔진" : "Provider · engine"}</span>
+                      <RuntimeBrandIdentity runtime={runtime} selection={selection} locale={locale} />
+                    </div>
                     <label>
                       <span>{ko ? "모델" : "Model"}</span>
-                      <select
-                        aria-label={`${rowLabel} ${ko ? "모델" : "model"}`}
-                        value={selection.model ?? ""}
-                        onChange={(event) =>
-                          void updateMemberModel(role, index, event.target.value)
-                        }
-                        disabled={
-                          busy ||
-                          (!runtime && models.length === 0) ||
-                          (models.length === 0 &&
-                            (selection.kind === "byok" ||
-                              LOCAL_MODEL_KINDS.has(selection.kind)))
-                        }
-                      >
-                        {selection.kind !== "byok" &&
-                          !LOCAL_MODEL_KINDS.has(selection.kind) && (
-                            <option value="">
-                              {ko ? "구독 기본" : "Subscription default"}
-                            </option>
-                          )}
-                        {models.map((model) => (
-                          <option key={model.id} value={model.id}>
-                            {model.label}
-                            {model.tag
-                              ? ` · ${cliModelTagLabel(model.tag, locale)}`
-                              : ""}
-                          </option>
-                        ))}
-                      </select>
+                      <RuntimeModelPicker
+                        ariaLabel={`${rowLabel} ${ko ? "모델" : "model"}`}
+                        value={modelValue}
+                        options={modelOptions}
+                        locale={locale}
+                        disabled={busy}
+                        onSelect={(option) => void updateMemberModelSelection(role, index, option)}
+                      />
                     </label>
                     <label>
                       <span>{ko ? "작업량" : "Effort"}</span>

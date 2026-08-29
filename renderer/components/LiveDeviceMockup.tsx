@@ -51,8 +51,10 @@ export function LiveDeviceMockup({ url, title, runtimeLabel, viewId, locale = "k
   // see for ordinary app rendering.
   const [device, setDevice] = useState<"desktop" | "phone">("desktop");
   // "LIVE"는 관측된 사실일 때만 단다 (U-D-1 범위 밖 3종 ③): 네이티브 뷰의
-  // 실제 상태 + 루프백 서버 도달성 프로브(OneActivityTimeline과 같은 계약 —
-  // 보이는 동안만 6초 주기, 죽음/부활 매 주기 재평가).
+  // 실제 상태 + (같은 오리진일 때만) 루프백 서버 도달성 프로브.
+  // 앱마다 다른 포트를 쓰는 managed preview의 CORP: same-origin 응답은
+  // 바깥 렌더러의 cross-origin HEAD를 올바르게 막으므로, 그 실패를 앱의
+  // 생존 실패로 해석하지 않는다. 그런 경우에는 native view 상태가 권위다.
   const [viewState, setViewState] = useState<WorkLiveViewState>("opening");
   const [serverGone, setServerGone] = useState(false);
   const localOrigin = useMemo(() => {
@@ -64,7 +66,9 @@ export function LiveDeviceMockup({ url, title, runtimeLabel, viewId, locale = "k
     }
   }, [url]);
   useEffect(() => {
-    if (!localOrigin || poweredOff) {
+    // The native WebContentsView owns the status for a cross-origin app. A
+    // renderer HEAD probe cannot distinguish CORP from a dead loopback server.
+    if (!localOrigin || poweredOff || localOrigin !== window.location.origin) {
       setServerGone(false);
       return;
     }

@@ -30,6 +30,25 @@ import { OneSuggestionReviewHandoffBanner, type OneReviewSeedApplyResult } from 
 
 type TargetType = "agent" | "firm" | "hub";
 
+const AUTOMATION_RUNTIME_PROVIDER_LABEL: Record<string, string> = {
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+  google: "Google",
+  ollama: "Ollama",
+  lmstudio: "LM Studio",
+  mlx: "MLX",
+  agentlas: "Agentlas",
+};
+
+function automationRuntimeKey(runtime: RuntimeStatus): string {
+  return `${runtime.kind}:${runtime.backend}:${runtime.source}`;
+}
+
+function automationRuntimeLabel(runtime: RuntimeStatus): string {
+  const provider = AUTOMATION_RUNTIME_PROVIDER_LABEL[runtime.backend] ?? runtime.backend;
+  return `${runtime.kind} · ${provider}`;
+}
+
 export default function NewAutomationWrapper() {
   return (
     <Suspense fallback={null}>
@@ -61,8 +80,10 @@ function NewAutomationPage() {
   const [toolMode, setToolMode] = useState<AutomationToolMode>("auto");
   // 빈 문자열 = "활성 런타임 따라가기"(runtimeSelection null). 그 외에는 kind:backend:source 키.
   const [runtimeKey, setRuntimeKey] = useState("");
+  const [runtimeModel, setRuntimeModel] = useState("");
   const [runtimeTouched, setRuntimeTouched] = useState(false);
   const [runtimeOptions, setRuntimeOptions] = useState<RuntimeStatus[]>([]);
+  const [runtimeModels, setRuntimeModels] = useState<Record<string, Array<{ id: string; label: string; tag?: string }>>>({});
   const [toolModeTouched, setToolModeTouched] = useState(false);
   const [hubMode, setHubMode] = useState<AutomationHubMode>("hub-allowed");
   const [fsPath, setFsPath] = useState("");
@@ -71,6 +92,7 @@ function NewAutomationPage() {
   const [allAutomations, setAllAutomations] = useState<Automation[]>([]);
   const [loaded, setLoaded] = useState(!editId);
   const reviewUntouchedRef = useRef(true);
+  const executionAiRef = useRef<HTMLDivElement>(null);
 
   const applyOneReviewSeed = useCallback((seed: OneSuggestionReviewSeed): OneReviewSeedApplyResult => {
     if (seed.kind !== "automation" || seed.targetSurface !== "automation") return "blocked";
@@ -136,6 +158,7 @@ function NewAutomationPage() {
           setToolMode(existing.toolMode ?? "auto");
           const sel = existing.runtimeSelection;
           setRuntimeKey(sel ? `${sel.kind}:${sel.backend}:${sel.source}` : "");
+          setRuntimeModel(sel?.model ?? "");
           setToolModeTouched(true);
           setHubMode(existing.hubMode ?? "hub-allowed");
           setInitialSpec(existing.scheduleSpec ?? null);
@@ -151,6 +174,33 @@ function NewAutomationPage() {
       }
     })();
   }, [editId]);
+
+  useEffect(() => {
+    if (!loaded || typeof window === "undefined" || window.location.hash !== "#execution-ai") return;
+    const frame = window.requestAnimationFrame(() => {
+      executionAiRef.current?.scrollIntoView({ behavior: "auto", block: "center" });
+      executionAiRef.current?.querySelector<HTMLElement>("[data-automation-runtime-select]")?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [loaded]);
+
+  useEffect(() => {
+    const api = ipc();
+    if (!api?.runtime || runtimeOptions.length === 0) return;
+    let alive = true;
+    void Promise.all(runtimeOptions.map(async (runtime) => {
+      const fallback = (runtime.availableModels ?? []).map((id) => ({ id, label: id }));
+      const rows = await api.runtime.listModels({
+        kind: runtime.kind,
+        backend: runtime.backend,
+        availableModels: runtime.availableModels,
+      }).catch(() => []);
+      return [automationRuntimeKey(runtime), rows.length > 0 ? rows : fallback] as const;
+    })).then((entries) => {
+      if (alive) setRuntimeModels(Object.fromEntries(entries));
+    });
+    return () => { alive = false; };
+  }, [runtimeOptions]);
 
   // NOTE: this form no longer flips the tool mode while the user types. It used to run a
   // keyword test over the name/prompt and silently switch to Computer Use — which fired on
@@ -228,13 +278,19 @@ function NewAutomationPage() {
       const pickedRuntime = runtimeKey
         ? runtimeOptions.find((r) => `${r.kind}:${r.backend}:${r.source}` === runtimeKey)
         : undefined;
+      const pickedModel = runtimeModel.trim() || undefined;
       if (editId) {
         await api.automations.update(editId, {
           ...commonPatch,
           ...(runtimeTouched
             ? {
                 runtimeSelection: pickedRuntime
-                  ? { kind: pickedRuntime.kind, backend: pickedRuntime.backend, source: pickedRuntime.source }
+                  ? {
+                      kind: pickedRuntime.kind,
+                      backend: pickedRuntime.backend,
+                      source: pickedRuntime.source,
+                      ...(pickedModel ? { model: pickedModel } : {}),
+                    }
                   : null,
               }
             : {}),
@@ -250,6 +306,7 @@ function NewAutomationPage() {
                 kind: pickedRuntime.kind,
                 backend: pickedRuntime.backend,
                 source: pickedRuntime.source,
+                ...(pickedModel ? { model: pickedModel } : {}),
               },
             }
           : {}),
@@ -266,6 +323,14 @@ function NewAutomationPage() {
     }
   }
 
+  const selectedRuntime = runtimeOptions.find((runtime) => automationRuntimeKey(runtime) === runtimeKey);
+  const selectedRuntimeModels = selectedRuntime ? runtimeModels[runtimeKey] ?? [] : [];
+  const modelRows = selectedRuntime?.model && !selectedRuntimeModels.some((model) => model.id === selectedRuntime.model)
+    ? [{ id: selectedRuntime.model, label: selectedRuntime.model }, ...selectedRuntimeModels]
+    : selectedRuntimeModels;
+  const defaultModelAllowed = selectedRuntime
+    ? selectedRuntime.kind !== "byok" && !["ollama", "lmstudio", "mlx", "agentlas"].includes(selectedRuntime.kind)
+    : false;
   const canSubmit = !!name.trim() && !!targetId && !!projectContextChoice && !busy;
 
   return (
@@ -438,27 +503,58 @@ function NewAutomationPage() {
         {/* ★어떤 AI가 이 자동화를 돌리는지. 값은 예전부터 자동화마다 저장되고 있었는데(runtime_selection_json)
             자동화 화면 어디에도 보이지도 바꾸지도 못했다 — 사용자가 대시보드나 채팅에서 런타임을 바꿔도
             자동화는 자기 것을 계속 썼고, 그 사실이 화면에 없어 "바꿨는데 왜 그대로냐"가 됐다(오너 실측). */}
-        <Field label={locale === "ko" ? "실행 AI" : "Run with"}>
-          <select
-            value={runtimeKey}
-            onChange={(e) => {
-              setRuntimeTouched(true);
-              setRuntimeKey(e.target.value);
-            }}
-            style={inputStyle}
-          >
-            <option value="">
-              {locale === "ko" ? "지금 활성 런타임 따라가기" : "Follow the active runtime"}
-            </option>
-            {runtimeOptions.map((r) => (
-              <option key={`${r.kind}:${r.backend}:${r.source}`} value={`${r.kind}:${r.backend}:${r.source}`}>
-                {r.kind}
-                {r.version ? ` (${r.version})` : ""}
-                {r.active ? (locale === "ko" ? " · 현재 활성" : " · active now") : ""}
+        <div ref={executionAiRef} id="execution-ai" data-testid="execution-ai-field" style={{ scrollMarginBlock: 24 }}>
+          <Field label={locale === "ko" ? "실행 AI" : "Run with"}>
+            <select
+              data-automation-runtime-select
+              value={runtimeKey}
+              onChange={(e) => {
+                setRuntimeTouched(true);
+                const nextKey = e.target.value;
+                const nextRuntime = runtimeOptions.find((runtime) => automationRuntimeKey(runtime) === nextKey);
+                setRuntimeKey(nextKey);
+                setRuntimeModel(nextRuntime?.model ?? "");
+              }}
+              style={inputStyle}
+            >
+              <option value="">
+                {locale === "ko" ? "역할 기본값 사용 · Worker 풀 우선순위·fallback" : "Role default · Worker pool priority + fallback"}
               </option>
-            ))}
-          </select>
-        </Field>
+              {runtimeOptions.map((r) => (
+                <option key={automationRuntimeKey(r)} value={automationRuntimeKey(r)}>
+                  {automationRuntimeLabel(r)}
+                  {r.version ? ` (${r.version})` : ""}
+                  {r.active ? (locale === "ko" ? " · 현재 활성" : " · active now") : ""}
+                </option>
+              ))}
+            </select>
+            {runtimeKey && selectedRuntime && (modelRows.length > 0 || runtimeModel) && (
+              <label style={{ display: "grid", gap: 6, marginTop: 10 }}>
+                <span style={{ fontSize: 12, fontWeight: 600, color: "var(--ink-soft)" }}>{locale === "ko" ? "모델" : "Model"}</span>
+                <select
+                  data-automation-model-select
+                  value={runtimeModel}
+                  onChange={(event) => { setRuntimeTouched(true); setRuntimeModel(event.target.value); }}
+                  style={inputStyle}
+                  disabled={modelRows.length === 0}
+                >
+                  {defaultModelAllowed && <option value="">{locale === "ko" ? "공급자 기본 모델" : "Provider default"}</option>}
+                  {modelRows.map((model) => <option key={model.id} value={model.id}>{model.label}{model.tag ? ` · ${model.tag}` : ""}</option>)}
+                  {runtimeModel && !modelRows.some((model) => model.id === runtimeModel) && <option value={runtimeModel}>{runtimeModel} · {locale === "ko" ? "저장된 모델" : "stored"}</option>}
+                </select>
+              </label>
+            )}
+            <p data-testid="automation-runtime-semantics" style={{ margin: "7px 0 0", color: "var(--muted-deep)", fontSize: 11, lineHeight: 1.5 }}>
+              {runtimeKey
+                ? (locale === "ko"
+                  ? "자동화별 고정 · 역할 기본보다 우선합니다. 사용할 수 없으면 실행을 중단하며 다른 공급자로 바꾸지 않습니다."
+                  : "Automation pin · overrides the role default. If unavailable, the run stops; it does not switch providers.")
+                : (locale === "ko"
+                  ? "역할 기본값 사용: Worker 풀의 우선순위와 fallback을 따릅니다."
+                  : "Role default: follows the Worker pool priority and fallback.")}
+            </p>
+          </Field>
+        </div>
 
         <Field label={locale === "ko" ? "실행 도구" : "Run tool"}>
           <div style={choiceGridStyle}>

@@ -796,7 +796,9 @@ function OneBrowserLiveView({ active, locale, preferredUrl, previewScopeId }: { 
     if (pointerFrameRef.current != null) window.cancelAnimationFrame(pointerFrameRef.current);
   }, []);
 
-  // 도달성은 루프백 주소에만 묻는다 — 외부 사이트는 이 생명주기의 대상이 아니다.
+  // 도달성은 루프백 주소에만 묻되, 렌더러와 같은 오리진일 때만 묻는다.
+  // managed preview/브라우저 target은 다른 포트를 쓰고 CORP: same-origin을
+  // 보낼 수 있으므로, cross-origin HEAD 실패는 정리된 서버의 증거가 아니다.
   const localOrigin = useMemo(() => {
     if (!effectiveUrl) return null;
     try {
@@ -808,7 +810,7 @@ function OneBrowserLiveView({ active, locale, preferredUrl, previewScopeId }: { 
   }, [effectiveUrl]);
 
   useEffect(() => {
-    if (!active || !localOrigin) {
+    if (!active || !localOrigin || localOrigin !== window.location.origin) {
       setLocalPreviewGone(false);
       return;
     }

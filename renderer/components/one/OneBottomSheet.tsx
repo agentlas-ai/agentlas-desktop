@@ -30,6 +30,23 @@ type OneBottomSheetProps = {
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
+function isTopmostModal(dialog: HTMLElement): boolean {
+  const layer = dialog.closest<HTMLElement>('[data-one-modal-layer="true"]');
+  if (!layer) return true;
+  const layers = Array.from(document.querySelectorAll<HTMLElement>('[data-one-modal-layer="true"]'));
+  let topmost: HTMLElement | null = null;
+  let topmostZ = Number.NEGATIVE_INFINITY;
+  for (const candidate of layers) {
+    const z = Number.parseInt(window.getComputedStyle(candidate).zIndex, 10);
+    const resolvedZ = Number.isFinite(z) ? z : 0;
+    if (topmost === null || resolvedZ >= topmostZ) {
+      topmost = candidate;
+      topmostZ = resolvedZ;
+    }
+  }
+  return topmost === layer;
+}
+
 /*
  * inert/aria-hidden 원장 — 시트별 스냅샷 복원 금지.
  *
@@ -41,6 +58,23 @@ const FOCUSABLE_SELECTOR =
  */
 type InertLedgerRecord = { count: number; ariaHidden: string | null; inert: string | null };
 const inertLedger = new WeakMap<HTMLElement, InertLedgerRecord>();
+let nextModalZIndex = 120;
+let bodyOverflowLockCount = 0;
+let bodyOverflowBeforeLock: string | null = null;
+
+function acquireBodyOverflowLock() {
+  if (bodyOverflowLockCount === 0) bodyOverflowBeforeLock = document.body.style.overflow;
+  bodyOverflowLockCount += 1;
+  document.body.style.overflow = "hidden";
+}
+
+function releaseBodyOverflowLock() {
+  if (bodyOverflowLockCount <= 0) return;
+  bodyOverflowLockCount -= 1;
+  if (bodyOverflowLockCount > 0) return;
+  document.body.style.overflow = bodyOverflowBeforeLock ?? "";
+  bodyOverflowBeforeLock = null;
+}
 
 function acquireInert(element: HTMLElement) {
   const record = inertLedger.get(element);
@@ -119,10 +153,18 @@ export function OneBottomSheet({
     if (!dialog) return;
 
     const priorFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const priorBodyOverflow = document.body.style.overflow;
     const hiddenSiblings: HTMLElement[] = [];
+    const layer = dialog.parentElement;
 
-    document.body.style.overflow = "hidden";
+    // Portals are emitted in component-tree order, not open order. A child
+    // picker can therefore be inserted before its already-open parent and be
+    // painted underneath it when both layers share the same z-index. Assign a
+    // monotonic stack slot as each open layer mounts so the newest dialog is
+    // always the visible/focus-owning layer.
+    const layerZIndex = layer ? ++nextModalZIndex : null;
+    if (layer && layerZIndex !== null) layer.style.zIndex = String(layerZIndex);
+
+    acquireBodyOverflowLock();
 
     // Move focus into the dialog BEFORE hiding the background — order is the
     // whole fix. The trigger that opened this sheet still holds focus and lives
@@ -158,6 +200,12 @@ export function OneBottomSheet({
       if (!dialog.contains(document.activeElement)) dialog.focus();
     }, 0);
     const onKeyDown = (event: KeyboardEvent) => {
+      // Nested One flows keep the parent dialog mounted behind the child picker.
+      // Every sheet installs a window listener, so only the visually topmost
+      // layer may consume Escape or trap Tab; otherwise Escape closes both
+      // dialogs in registration order and destroys the preserved draft context.
+      if (!isTopmostModal(dialog)) return;
+
       if (event.key === "Escape") {
         if (!closeOnEscape) return;
         event.preventDefault();
@@ -190,8 +238,9 @@ export function OneBottomSheet({
     return () => {
       window.clearTimeout(focusTimer);
       window.removeEventListener("keydown", onKeyDown);
-      document.body.style.overflow = priorBodyOverflow;
+      releaseBodyOverflowLock();
       for (const element of hiddenSiblings) releaseInert(element);
+      if (layer && layerZIndex !== null) layer.style.zIndex = "";
       if (priorFocus && document.contains(priorFocus)) priorFocus.focus();
     };
   }, [closeOnEscape, open]);
@@ -199,7 +248,7 @@ export function OneBottomSheet({
   if (!open) return null;
 
   return createPortal(
-    <div className={styles.layer} role="presentation">
+    <div className={styles.layer} data-one-modal-layer="true" role="presentation">
       <button
         className={styles.scrim}
         type="button"

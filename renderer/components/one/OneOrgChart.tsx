@@ -88,6 +88,7 @@ export function OneOrgChart({
   accountSignedIn = null,
   locale,
   onAdd,
+  onAddExistingComplete,
   onCreateAgent,
   addRequest,
   onMaterializeSource,
@@ -129,6 +130,8 @@ export function OneOrgChart({
   accountSignedIn?: boolean | null;
   locale: string;
   onAdd: (installedAgentId: string, displayName?: string, leaseExpiresAt?: string | null, characterId?: string) => Promise<void>;
+  /** Close the preserved New Agent context only after an explicit picker confirmation succeeds. */
+  onAddExistingComplete?: () => void;
   onCreateAgent?: () => void;
   addRequest?: { token: number; source: "my" | "cloud" | "hub" };
   onMaterializeSource: (source: "cloud" | "hub", listing: MarketplaceListing) => Promise<InstalledAgent>;
@@ -291,7 +294,7 @@ export function OneOrgChart({
     lease: "대여 기간", permanent: "상주 · 만료 없음",
     modelAuto: "모델 · 자동 배정", modelPreferred: (backend: string) => `에이전트 권장 엔진 ${backend}을 우선 사용합니다.`, modelDefault: "One이 작업과 사용 가능한 런타임에 맞춰 고릅니다.",
     identityNote: "원본의 이름과 캐릭터 그대로 앉습니다. 바꾸려면 앉힌 뒤 조직도에서 편집하세요.",
-    team: "팀", single: "단일", add: "추가", cancel: "취소",
+    team: "팀", single: "단일", add: "이 에이전트 추가", cancel: "취소 / 뒤로",
     localNote: "이 Mac에 설치된 에이전트입니다. 상주 직원으로 추가되며 대여 기간이 없습니다.",
     cloudNote: "내 Agent Cloud에 저장된 에이전트가 바로 표시됩니다. 상주 직원으로 추가되며 대여 기간이 없습니다.",
     hubNote: "Hub에서 북마크한 에이전트만 표시됩니다. 상주 좌석에 붙일 때만 대여 기간을 정합니다.",
@@ -306,7 +309,7 @@ export function OneOrgChart({
     lease: "Lease", permanent: "Standing · No expiry",
     modelAuto: "Model · Automatic", modelPreferred: (backend: string) => `Prefers the agent's recommended ${backend} runtime.`, modelDefault: "One chooses for each task from the available runtimes.",
     identityNote: "Joins with the name and character it already has. To change them, edit it in the organisation chart after it joins.",
-    team: "Team", single: "Single", add: "Add", cancel: "Cancel",
+    team: "Team", single: "Single", add: "Add this agent", cancel: "Cancel / Back",
     localNote: "These agents are installed on this Mac. They join as standing staff with no lease term.",
     cloudNote: "Agents saved in your Agent Cloud appear immediately. They join as standing staff with no lease term.",
     hubNote: "Only agents you bookmarked in Hub appear here. Choose a lease only when attaching one to a standing seat.",
@@ -396,6 +399,7 @@ export function OneOrgChart({
        */
       await onAdd(installed.id, undefined, leaseExpiresAt, undefined);
       setSelectedAgent(""); setLeaseDays("0"); setAddSearch(""); setRoleFilter(null); setAddOpen(false);
+      onAddExistingComplete?.();
     } catch (cause) {
       setAddError(cause instanceof Error ? cause.message : String(cause));
     } finally { setBusy(false); }
