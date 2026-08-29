@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.53 — 2026-08-29
+
+This release binds Agentlas OS v1.2.37 at
+2b169ba44742735d1ce7f550fefee071b70324fc. Its public runtime asset
+`hephaestus-runtime-v1.2.37.tar.gz` is pinned at SHA-256
+`50caf78a9c028fcf088039dd862753c25fbb9bed19df9fa248502b442dc306a6`.
+Source readiness does not prove a public installer or update feed; the Releases
+page stays the authority.
+
+- The dashboard now reads, writes, and reloads the durable multimodal role.
+  Its image-generation picker contains only executable Codex and Antigravity
+  adapters; video and API providers remain in Settings > Multimodal.
+- Existing role databases are widened transactionally without losing rows, and
+  an empty multimodal slot no longer inherits an unrelated chat runtime.
+- Agent growth cards now label approval-waiting proposals separately from
+  low-risk changes that were already applied automatically. Both states show
+  the rollback safety, and the latter uses an explicit “Undo this change” action.
+
 ## 1.0.52 — 2026-08-29
 
 This release binds Agentlas OS v1.2.37 at

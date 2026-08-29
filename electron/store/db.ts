@@ -18,7 +18,7 @@ import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-p
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 105;
+const SCHEMA_VERSION = 106;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -3934,7 +3934,7 @@ export function initStore(options: StoreInitOptions = {}): void {
   if (!tableExists(_db, "model_roles")) {
     _db.exec(`
       CREATE TABLE model_roles (
-        role TEXT PRIMARY KEY CHECK(role IN ('orchestrator','worker')),
+        role TEXT PRIMARY KEY CHECK(role IN ('orchestrator','worker','multimodal')),
         kind TEXT NOT NULL,
         backend TEXT,
         source TEXT,
@@ -4017,7 +4017,7 @@ export function initStore(options: StoreInitOptions = {}): void {
   if (!tableExists(_db, "model_role_members")) {
     _db.exec(`
       CREATE TABLE model_role_members (
-        role TEXT NOT NULL CHECK(role IN ('orchestrator','worker')),
+        role TEXT NOT NULL CHECK(role IN ('orchestrator','worker','multimodal')),
         position INTEGER NOT NULL CHECK(position >= 1),
         kind TEXT NOT NULL,
         backend TEXT,
@@ -4068,6 +4068,81 @@ export function initStore(options: StoreInitOptions = {}): void {
           seededAt,
         );
       }
+    }
+  }
+
+  // v106: the Desktop added the non-conversational multimodal role after the
+  // v79/v80 tables had shipped. The TypeScript role union accepted it, but both
+  // durable tables still rejected it with their original two-role CHECK.
+  // Rebuild only when the stored CREATE SQL proves the constraint is stale.
+  if (userVersion < 106) {
+    const modelRolesSql = (_db.prepare(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'model_roles'",
+    ).get() as { sql?: string } | undefined)?.sql ?? "";
+    const modelRoleMembersSql = (_db.prepare(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'model_role_members'",
+    ).get() as { sql?: string } | undefined)?.sql ?? "";
+    const needsRoleRebuild = !modelRolesSql.includes("'multimodal'");
+    const needsMemberRebuild = !modelRoleMembersSql.includes("'multimodal'");
+    if (needsRoleRebuild || needsMemberRebuild) {
+      const roleCount = (_db.prepare("SELECT COUNT(*) AS n FROM model_roles").get() as { n: number }).n;
+      const memberCount = (_db.prepare("SELECT COUNT(*) AS n FROM model_role_members").get() as { n: number }).n;
+      const widenRuntimeRoles = _db.transaction(() => {
+        if (needsRoleRebuild) {
+          _db!.exec(`
+            DROP TABLE IF EXISTS model_roles_v106;
+            CREATE TABLE model_roles_v106 (
+              role TEXT PRIMARY KEY CHECK(role IN ('orchestrator','worker','multimodal')),
+              kind TEXT NOT NULL,
+              backend TEXT,
+              source TEXT,
+              model TEXT,
+              effort TEXT,
+              long_context INTEGER NOT NULL DEFAULT 0 CHECK(long_context IN (0,1)),
+              inherit INTEGER NOT NULL DEFAULT 0 CHECK(inherit IN (0,1)),
+              updated_at TEXT NOT NULL,
+              CHECK(role = 'worker' OR inherit = 0)
+            );
+            INSERT INTO model_roles_v106
+              (role, kind, backend, source, model, effort, long_context, inherit, updated_at)
+              SELECT role, kind, backend, source, model, effort, long_context, inherit, updated_at
+              FROM model_roles;
+            DROP TABLE model_roles;
+            ALTER TABLE model_roles_v106 RENAME TO model_roles;
+          `);
+        }
+        if (needsMemberRebuild) {
+          _db!.exec(`
+            DROP TABLE IF EXISTS model_role_members_v106;
+            CREATE TABLE model_role_members_v106 (
+              role TEXT NOT NULL CHECK(role IN ('orchestrator','worker','multimodal')),
+              position INTEGER NOT NULL CHECK(position >= 1),
+              kind TEXT NOT NULL,
+              backend TEXT,
+              source TEXT,
+              model TEXT,
+              effort TEXT,
+              long_context INTEGER NOT NULL DEFAULT 0 CHECK(long_context IN (0,1)),
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY(role, position)
+            );
+            INSERT INTO model_role_members_v106
+              (role, position, kind, backend, source, model, effort, long_context, updated_at)
+              SELECT role, position, kind, backend, source, model, effort, long_context, updated_at
+              FROM model_role_members;
+            DROP TABLE model_role_members;
+            ALTER TABLE model_role_members_v106 RENAME TO model_role_members;
+          `);
+        }
+        const nextRoleCount = (_db!.prepare("SELECT COUNT(*) AS n FROM model_roles").get() as { n: number }).n;
+        const nextMemberCount = (_db!.prepare("SELECT COUNT(*) AS n FROM model_role_members").get() as { n: number }).n;
+        if (nextRoleCount !== roleCount || nextMemberCount !== memberCount) {
+          throw new Error(
+            `v106 runtime-role widening changed row counts: roles ${roleCount}->${nextRoleCount}, members ${memberCount}->${nextMemberCount}`,
+          );
+        }
+      });
+      widenRuntimeRoles();
     }
   }
 

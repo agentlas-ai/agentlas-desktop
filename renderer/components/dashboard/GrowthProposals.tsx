@@ -21,8 +21,9 @@ function cardCopy(proposal: AgentEvolutionProposalUi): GrowthProposalCardCopy | 
   }
   const learned = card.learned.replace(/\s+/g, " ").trim();
   const change = card.change.replace(/\s+/g, " ").trim();
-  if (!learned || !change || learned.length > 120 || change.length > 160) return null;
-  return { learned, change, reversible: card.reversible };
+  const reversible = card.reversible.replace(/\s+/g, " ").trim();
+  if (!learned || !change || !reversible || learned.length > 120 || change.length > 160 || reversible.length > 180) return null;
+  return { learned, change, reversible };
 }
 
 export function GrowthProposals() {
@@ -127,8 +128,14 @@ export function GrowthProposals() {
             return (
               <div key={proposal.id} className="dashboard-module-row" style={{ display: "grid", gap: 8 }}>
                 <div className="dashboard-row-copy" style={{ display: "grid", gap: 3 }}>
+                  <span style={{ opacity: 0.68, fontSize: 12 }}>
+                    {ko ? "승인 전 제안" : "Proposal awaiting approval"}
+                  </span>
                   <strong>{card!.learned}</strong>
                   {card?.change && <div style={{ opacity: 0.78, fontSize: 13 }}>{card.change}</div>}
+                  <div style={{ opacity: 0.68, fontSize: 12 }}>
+                    {ko ? "안전장치" : "Safety"} · {card!.reversible}
+                  </div>
                 </div>
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                   <button
@@ -169,8 +176,14 @@ export function GrowthProposals() {
             return (
               <div key={proposal.id} className="dashboard-module-row" style={{ alignItems: "start" }}>
                 <div className="dashboard-row-copy" style={{ display: "grid", gap: 3 }}>
+                  <span style={{ opacity: 0.68, fontSize: 12 }}>
+                    {ko ? "이미 자동 반영됨" : "Already applied automatically"}
+                  </span>
                   <strong>{card!.learned}</strong>
                   {card?.change && <div style={{ opacity: 0.78, fontSize: 13 }}>{card.change}</div>}
+                  <div style={{ opacity: 0.68, fontSize: 12 }}>
+                    {ko ? "안전장치" : "Safety"} · {card!.reversible}
+                  </div>
                 </div>
                 {canUndo && (
                   <button
@@ -180,7 +193,7 @@ export function GrowthProposals() {
                     className="titlebar-nodrag"
                     data-dashboard-action="true"
                   >
-                    {ko ? "되돌리기" : "Undo"}
+                    {ko ? "이 변경 되돌리기" : "Undo this change"}
                   </button>
                 )}
               </div>

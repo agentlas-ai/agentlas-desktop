@@ -27,9 +27,10 @@ import {
 } from "./runtime/detect";
 import {
   listModelRoleMembers,
+  pickModelRoleFromPool,
   setModelRoleMembers as setModelRoleMembersStore,
 } from "./store/model-roles";
-import type { RuntimeRole } from "../shared/types";
+import type { RuntimeRole, RuntimeRolePoolState } from "../shared/types";
 import { requiredExecutionPermission } from "../shared/graph-node-protocol";
 import { runtimeVersionsWithAutoUpdate } from "./runtime/auto-update";
 import { agentRunCwd } from "./runtime/exec";
@@ -1411,6 +1412,24 @@ const browserLiveCleanupOwners = new Set<number>();
 const fsWatchCleanupOwners = new Set<number>();
 const workLiveCleanupOwners = new Set<number>();
 
+async function desktopRuntimeRolePoolState(): Promise<RuntimeRolePoolState> {
+  const picks = await resolveRolePoolPicks();
+  // Multimodal is intentionally not quota-auto-picked, but the Desktop still
+  // needs the exact head selection so it can label the configured generator.
+  const multimodal = pickModelRoleFromPool("multimodal");
+  return {
+    members: {
+      orchestrator: listModelRoleMembers("orchestrator"),
+      worker: listModelRoleMembers("worker"),
+      multimodal: listModelRoleMembers("multimodal"),
+    },
+    picks: {
+      ...picks,
+      ...(multimodal ? { multimodal } : {}),
+    },
+  };
+}
+
 export function registerIpcHandlers(): void {
   let oneProjectionHostRef: string | null = null;
   subscribePluginBuilderProgress((event) => {
@@ -2681,26 +2700,14 @@ export function registerIpcHandlers(): void {
     setActiveRuntime(selection),
   );
   // 역할 풀: 순서 있는 후보 목록 + 현재 선택/스킵 사유. set은 전체 교체(순서=우선순위).
-  ipcMain.handle("runtime:listRoleMembers", async () => ({
-    members: {
-      orchestrator: listModelRoleMembers("orchestrator"),
-      worker: listModelRoleMembers("worker"),
-    },
-    picks: await resolveRolePoolPicks(),
-  }));
+  ipcMain.handle("runtime:listRoleMembers", () => desktopRuntimeRolePoolState());
   ipcMain.handle(
     "runtime:setRoleMembers",
     async (_e, role: RuntimeRole, selections: RuntimeSelection[]) => {
       setModelRoleMembersStore(role, selections);
       clearDetectCache();
       await detectRuntimes();
-      return {
-        members: {
-          orchestrator: listModelRoleMembers("orchestrator"),
-          worker: listModelRoleMembers("worker"),
-        },
-        picks: await resolveRolePoolPicks(),
-      };
+      return desktopRuntimeRolePoolState();
     },
   );
   ipcMain.handle("runtime:installCli", (_e, kind: InstallableCli) => installCli(kind));

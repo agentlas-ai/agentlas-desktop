@@ -206,6 +206,14 @@ export function RuntimeControl() {
     over: number;
   } | null>(null);
   const pointerDragRef = useRef<{ role: RuntimeRole; from: number; startX: number; startY: number } | null>(null);
+  const multimodalRuntimes = useMemo(
+    // The local generate_image tool has executable adapters only for these
+    // two CLIs. Input-vision support on a chat model is not image generation.
+    () => runtimes.filter(
+      (runtime) => runtime.kind === "codex" || runtime.kind === "antigravity",
+    ),
+    [runtimes],
+  );
 
   const loadPool = useCallback(async () => {
     const api = ipc();
@@ -232,9 +240,9 @@ export function RuntimeControl() {
       worker: roleView(runtimes, "worker"),
       // 멀티모달은 대화 역할이 아니다 — 이미지·영상을 실제로 그리는 CLI 를 앉히는 자리다.
       // orchestrator 가 프롬프트를 쓰고, 이 슬롯의 런타임이 헤드리스로 그린다.
-      multimodal: roleView(runtimes, "multimodal"),
+      multimodal: roleView(multimodalRuntimes, "multimodal"),
     }),
-    [runtimes],
+    [multimodalRuntimes, runtimes],
   );
 
   const load = useCallback(async () => {
@@ -295,15 +303,17 @@ export function RuntimeControl() {
     };
   }, [runtimes]);
 
-  const runtimeOptions = useMemo(
-    () =>
-      runtimes.map((runtime, index) => ({
-        runtime,
-        index,
-        label: runtimeLabel(runtime),
-      })),
-    [runtimes],
-  );
+  function runtimesForRole(role: RuntimeRole): RuntimeStatus[] {
+    return role === "multimodal" ? multimodalRuntimes : runtimes;
+  }
+
+  function runtimeOptionsForRole(role: RuntimeRole) {
+    return runtimesForRole(role).map((runtime, index) => ({
+      runtime,
+      index,
+      label: runtimeLabel(runtime),
+    }));
+  }
 
   async function writePool(
     role: RuntimeRole,
@@ -335,9 +345,10 @@ export function RuntimeControl() {
   }
 
   function runtimeForSelection(selection: RuntimeSelection): RuntimeStatus | null {
+    const roleRuntimes = runtimesForRole(selection.role ?? "orchestrator");
     return (
-      runtimes.find((runtime) => runtimeMatchesSelection(runtime, selection)) ??
-      runtimes.find(
+      roleRuntimes.find((runtime) => runtimeMatchesSelection(runtime, selection)) ??
+      roleRuntimes.find(
         (runtime) =>
           runtime.kind === selection.kind &&
           (!selection.backend || runtime.backend === selection.backend),
@@ -348,7 +359,7 @@ export function RuntimeControl() {
 
   function runtimeIndexForSelection(selection: RuntimeSelection): number {
     const runtime = runtimeForSelection(selection);
-    return runtime ? runtimes.indexOf(runtime) : -1;
+    return runtime ? runtimesForRole(selection.role ?? "orchestrator").indexOf(runtime) : -1;
   }
 
   function modelRowsForSelection(selection: RuntimeSelection): ModelRow[] {
@@ -397,7 +408,7 @@ export function RuntimeControl() {
     index: number,
     runtimeIndex: number,
   ) {
-    const runtime = runtimes[runtimeIndex];
+    const runtime = runtimesForRole(role)[runtimeIndex];
     if (!runtime) return;
     await updateMember(role, index, selectionFromRuntime(runtime, role));
   }
@@ -557,16 +568,17 @@ export function RuntimeControl() {
   }
 
   async function addMember(role: RuntimeRole) {
-    if (runtimes.length === 0) return;
+    const roleRuntimes = runtimesForRole(role);
+    if (roleRuntimes.length === 0) return;
     const selections = poolSelections(role);
     const used = new Set(selections.map(selectionKey));
-    const firstUnusedRuntime = runtimes.find(
+    const firstUnusedRuntime = roleRuntimes.find(
       (runtime) =>
         !selections.some((selection) =>
           runtimeMatchesSelection(runtime, selection),
         ),
     );
-    const available = runtimes.flatMap((runtime) => {
+    const available = roleRuntimes.flatMap((runtime) => {
       const base = selectionFromRuntime(runtime, role);
       const modelRows = modelsByRuntime[runtimeKey(runtime)] ?? [];
       const candidates = [base];
@@ -633,6 +645,7 @@ export function RuntimeControl() {
 
   function renderPool(role: RuntimeRole) {
     const members = pool?.members[role] ?? [];
+    const runtimeOptions = runtimeOptionsForRole(role);
     return (
       <div className="dashboard-runtime-pool">
         {members.length === 0 ? (
@@ -641,6 +654,10 @@ export function RuntimeControl() {
               ? ko
                 ? "비어 있음 — 오케스트레이터 풀을 따릅니다."
                 : "Empty — follows the orchestrator pool."
+              : role === "multimodal" && runtimeOptions.length === 0
+                ? ko
+                  ? "연결된 이미지 생성 CLI가 없습니다 — Codex 또는 Antigravity를 연결하세요."
+                  : "No image-generation CLI is connected — connect Codex or Antigravity."
               : ko
                 ? "비어 있음 — 후보 행을 추가하세요."
                 : "Empty — add a candidate row."}
@@ -673,7 +690,9 @@ export function RuntimeControl() {
                 ).length > 1;
               const roleLabel = role === "orchestrator"
                 ? ko ? "오케스트레이터" : "Orchestrator"
-                : ko ? "워커" : "Worker";
+                : role === "multimodal"
+                  ? ko ? "이미지 생성" : "Image generation"
+                  : ko ? "워커" : "Worker";
               const rowLabel = `${roleLabel} ${ko ? "후보" : "candidate"} ${index + 1}`;
               return (
                 <li
@@ -881,7 +900,7 @@ export function RuntimeControl() {
           type="button"
           className="dashboard-runtime-pool-add"
           onClick={() => void addMember(role)}
-          disabled={busy || runtimes.length === 0}
+          disabled={busy || runtimeOptions.length === 0}
         >
           {ko ? "+ 후보 행 추가" : "+ Add candidate row"}
         </button>
@@ -897,8 +916,8 @@ export function RuntimeControl() {
         ? "Orchestrator"
         : role === "multimodal"
           ? ko
-            ? "멀티모달 (이미지·영상)"
-            : "Multimodal (image · video)"
+            ? "멀티모달 생성 (이미지)"
+            : "Multimodal generation (image)"
           : "Worker";
     return (
       <section
@@ -917,6 +936,10 @@ export function RuntimeControl() {
                 ? ko
                   ? "1개 컨트롤러가 의사결정 · 위임 · 결과 통합 — 행은 모델 예비 순서"
                   : "One controller decides, delegates, and synthesizes — rows are model fallbacks"
+                : role === "multimodal"
+                  ? ko
+                    ? "이미지 생성 CLI 우선순위 — 영상·API 공급자는 설정 > 멀티모달에서 관리"
+                    : "Image-generation CLI priority — manage video and API providers in Settings > Multimodal"
                 : ko
                   ? "N개 Worker 실행이 공유하는 모델 우선순위 — 행 수는 Worker 수가 아님"
                   : "Shared model priority for N worker executions — rows are not worker count"}

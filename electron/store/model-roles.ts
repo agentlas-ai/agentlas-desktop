@@ -184,6 +184,10 @@ export function getResolvedModelRole(role: RuntimeRole): ResolvedModelRole | nul
       updatedAt: row.updated_at,
     };
   }
+  // Only workers inherit the orchestrator. A missing multimodal assignment is
+  // genuinely empty; inheriting a chat runtime here silently exposed an image
+  // tool the user never configured (and returned role="worker" to callers).
+  if (role !== "worker") return null;
   const orchestratorRow = getStoredRow("orchestrator");
   const orchestrator = orchestratorRow
     ? {
