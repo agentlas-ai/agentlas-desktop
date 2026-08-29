@@ -19,7 +19,11 @@ const mobileOutput = path.resolve(
 const check = process.argv.includes("--check") || process.argv.includes("--check-all");
 const requireMobile = process.argv.includes("--check-all");
 
-const raw = fs.readFileSync(schemaPath, "utf8");
+// Git may check this repository out with CRLF on Windows. The contract digest
+// and generated files are release artifacts, so platform line endings must not
+// change their bytes or make an otherwise identical checkout look stale.
+const readNormalizedUtf8 = (file) => fs.readFileSync(file, "utf8").replace(/\r\n?/g, "\n");
+const raw = readNormalizedUtf8(schemaPath);
 const schema = JSON.parse(raw);
 const digest = crypto.createHash("sha256").update(raw).digest("hex");
 
@@ -127,7 +131,7 @@ function syncFile(target, expected, required) {
     return;
   }
   if (check) {
-    const current = fs.existsSync(target) ? fs.readFileSync(target, "utf8") : "";
+    const current = fs.existsSync(target) ? readNormalizedUtf8(target) : "";
     if (current !== expected) throw new Error(`Generated One Briefing contract drift: ${target}`);
     return;
   }
