@@ -57,6 +57,9 @@ files:
 
 asar: true
 asarUnpack:
+  # materializeBuiltinPlugins() must inspect real modes/symlinks rather than
+  # Electron's synthetic ASAR fs.Stats (DEP0180).
+  - "dist/plugins/**/*"
   - "**/node_modules/better-sqlite3/**/*"
   - "**/node_modules/keytar/**/*"
   # node-pty loads its native addon and spawn-helper at runtime. electron-builder currently

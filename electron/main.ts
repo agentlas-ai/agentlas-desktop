@@ -524,13 +524,19 @@ function resolveRendererFile(url: string): string {
 
   const resolved = candidates.find((candidate) => {
     const relative = path.relative(rendererRoot, candidate);
-    return (
-      Boolean(relative) &&
-      !relative.startsWith("..") &&
-      !path.isAbsolute(relative) &&
-      fs.existsSync(candidate) &&
-      fs.statSync(candidate).isFile()
-    );
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return false;
+    try {
+      // The packaged renderer lives in app.asar. Electron implements statSync
+      // there by constructing a synthetic fs.Stats, which emits DEP0180 on
+      // every launch. ASAR-backed Dirent values carry the file type without
+      // that deprecated constructor; real development files behave the same.
+      const parent = path.dirname(candidate);
+      const basename = path.basename(candidate);
+      return fs.readdirSync(parent, { withFileTypes: true })
+        .some((entry) => entry.name === basename && entry.isFile());
+    } catch {
+      return false;
+    }
   });
 
   if (resolved) return resolved;

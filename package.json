@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "1.0.51",
+  "version": "1.0.52",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Antigravity 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -71,7 +71,7 @@
     "e2e:smoke": "node scripts/e2e-smoke.mjs",
     "package:mac": "npm run ensure:engine && bash scripts/package-mac.sh",
     "install:mac:stable": "bash scripts/install-stable-mac.sh",
-    "dist:mac:unsigned": "bash scripts/package-mac.sh --clean-local-output && npm run ensure:engine && npm run build && npm run fetch:python && electron-builder --mac --dir --publish never --config electron-builder.mac-local.yml && node scripts/verify-local-mac-candidate.mjs",
+    "dist:mac:unsigned": "bash scripts/package-mac.sh --clean-local-output && npm run ensure:engine && npm run build && npm run fetch:python && npm run fetch:node && electron-builder --mac --dir --publish never --config electron-builder.mac-local.yml && node scripts/verify-local-mac-candidate.mjs",
     "dist:win": "npm run ensure:engine && npm run build && npm run fetch:python && npm run fetch:node && electron-builder --win",
     "dist:linux": "npm run ensure:engine && npm run build && npm run fetch:python && electron-builder --linux",
     "release:mac:verify": "node scripts/verify-mac-release.mjs --write-env",

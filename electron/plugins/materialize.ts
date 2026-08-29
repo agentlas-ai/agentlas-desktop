@@ -10,7 +10,17 @@ import Database from "better-sqlite3";
 import { app } from "electron";
 
 function bundledPluginsRoot(): string {
-  return path.join(app.getAppPath(), "dist", "plugins");
+  const appPath = app.getAppPath();
+  // Electron's ASAR shim synthesizes fs.Stats for lstat/stat calls. Apart from
+  // emitting DEP0180 on every packaged launch, those virtual stats are the
+  // wrong trust boundary for materialization: this module deliberately checks
+  // real file modes and rejects symlinks before hashing/copying a release.
+  // electron-builder keeps unpacked entries beside app.asar, so derive the
+  // real path from the packaged app root without changing the development path.
+  if (path.basename(appPath).toLowerCase() === "app.asar") {
+    return path.join(`${appPath}.unpacked`, "dist", "plugins");
+  }
+  return path.join(appPath, "dist", "plugins");
 }
 
 function installedPluginsRoot(): string {

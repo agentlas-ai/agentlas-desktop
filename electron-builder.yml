@@ -57,6 +57,10 @@ files:
 
 asar: true
 asarUnpack:
+  # Plugin materialization hashes real modes and rejects symlinks. Reading the
+  # source tree through Electron's ASAR fs shim fabricates fs.Stats (DEP0180),
+  # so keep the exact release bytes on the real filesystem.
+  - "dist/plugins/**/*"
   - "**/node_modules/better-sqlite3/**/*"
   - "**/node_modules/keytar/**/*"
   # node-pty loads its native addon and spawn-helper at runtime. Keep the

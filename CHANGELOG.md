@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.0.52 — 2026-08-29
+
+This release binds Agentlas OS v1.2.37 at
+2b169ba44742735d1ce7f550fefee071b70324fc. Its public runtime asset
+`hephaestus-runtime-v1.2.37.tar.gz` is pinned at SHA-256
+`50caf78a9c028fcf088039dd862753c25fbb9bed19df9fa248502b442dc306a6`.
+Source readiness does not prove a public installer or update feed; the Releases
+page stays the authority.
+
+- Packaged startup no longer asks Electron's ASAR shim to synthesize deprecated
+  `fs.Stats` objects. Built-in plugin releases are materialized from their real
+  unpacked files so mode, digest, and symlink checks remain exact, while renderer
+  routing uses ASAR-native directory entries.
+- The isolated macOS candidate command now fetches the pinned private Node
+  runtime before packaging, so a stale runtime from another architecture cannot
+  make an otherwise valid local candidate fail nondeterministically.
+
 ## 1.0.51 — 2026-08-29
 
 This release binds Agentlas OS v1.2.37 at
