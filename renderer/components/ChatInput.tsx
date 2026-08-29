@@ -1798,7 +1798,7 @@ function ChatInputComponent({
 
             {/* 모델·작업량은 권한 바로 뒤에 둔다. 둘 다 이 작업의 실행 범위를 정하는 설정이다. */}
             {runtime &&
-              ((modelOptions?.length ?? 0) > 0 || (runtime.efforts?.length ?? 0) > 0) && (
+              ((modelOptions?.length ?? 0) > 0 || effortOptionsForModel(runtime).length > 0) && (
                 <button
                   className="chat-input-chip chat-input-model-chip"
                   data-popover-trigger="model"
@@ -2860,7 +2860,7 @@ function PermissionMenu({
 
 // ── 모델·작업량 메뉴 ──────────────────────────────────────
 // Image #2의 Claude Code 모델 메뉴를 입력창 안에 재현: 모델 목록 + 작업량.
-// 목록은 실시간(runtime.listModels / runtime.efforts)이라 CLI가 업데이트되면 자동 반영.
+// 목록은 실시간(runtime.listModels / 모델별 effort 프로필)이라 CLI가 업데이트되면 자동 반영.
 function ModelMenu({
   runtime,
   options,
