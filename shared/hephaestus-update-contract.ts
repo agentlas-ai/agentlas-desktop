@@ -76,10 +76,19 @@ export function classifyHephaestusUpdateJournal(
     || hasPendingSuffix
     || pendingHosts.length > 0,
   );
+  // Core can skip a repeated install while the just-applied release is still
+  // inside its cooldown window. Its canonical marker re-reads the active
+  // runtime, so an exact current/latest match is positive current-state proof;
+  // the skip reason describes the action, not an unknown runtime. Keep every
+  // other `skipped` result unknown (for example `uncomparable_release`).
+  const recentlyAppliedCurrent = baseStatus === "skipped"
+    && journal.reason === "already_applied_recently"
+    && Boolean(journal.current)
+    && journal.current === journal.latest;
 
   const state = baseStatus && APPLIED_STATUSES.has(baseStatus)
     ? "applied"
-    : baseStatus && CURRENT_STATUSES.has(baseStatus)
+    : (baseStatus && CURRENT_STATUSES.has(baseStatus)) || recentlyAppliedCurrent
       ? "current"
       : status
         ? "unknown"
