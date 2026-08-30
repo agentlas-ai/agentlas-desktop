@@ -162,6 +162,15 @@ export function RuntimeModelPicker({
     [options, value],
   );
   const selected = selectedIndex >= 0 ? options[selectedIndex] : null;
+  const selectedProvider = selected ? runtimeProviderLabel(selected.runtime) : "";
+  const selectedEngine = selected ? runtimeEngineLabel(selected.runtime) : "";
+  const selectedLogo = selected
+    ? llmLogoSrc({
+        model: selected.model,
+        backend: selected.runtime.backend,
+        kind: selected.runtime.kind,
+      })
+    : null;
 
   useEffect(() => {
     if (!open) return;
@@ -254,18 +263,27 @@ export function RuntimeModelPicker({
         }}
         onKeyDown={onTriggerKeyDown}
       >
-        <span className="dashboard-runtime-model-picker-value">
-          {selected
-            ? optionModelLabel(selected, locale)
-            : placeholder ?? (locale === "ko" ? "사용 가능한 모델 없음" : "No models available")}
-        </span>
+        {selected ? (
+          <>
+            <span className="dashboard-runtime-model-picker-trigger-mark" aria-hidden="true">
+              {selectedLogo
+                ? <img src={selectedLogo} alt="" />
+                : <span>{selectedProvider.slice(0, 1).toUpperCase()}</span>}
+            </span>
+            <span className="dashboard-runtime-model-picker-value">
+              <strong>{optionModelLabel(selected, locale)}</strong>
+              <small>{selectedEngine}</small>
+            </span>
+          </>
+        ) : (
+          <span className="dashboard-runtime-model-picker-value">
+            {placeholder ?? (locale === "ko" ? "사용 가능한 모델 없음" : "No models available")}
+          </span>
+        )}
         <span className="dashboard-runtime-model-picker-chevron" aria-hidden="true">⌄</span>
       </button>
       {open && (
         <div className="dashboard-runtime-model-picker-popover">
-          <div className="dashboard-runtime-model-picker-hint">
-            {locale === "ko" ? "모델을 고르면 공급자와 실행 엔진도 함께 바뀝니다." : "Choosing a model also chooses its provider and runtime."}
-          </div>
           <div id={listId} role="listbox" aria-label={ariaLabel} className="dashboard-runtime-model-picker-list">
             {options.map((option, index) => {
               const provider = runtimeProviderLabel(option.runtime);
@@ -290,7 +308,7 @@ export function RuntimeModelPicker({
                   </span>
                   <span className="dashboard-runtime-model-picker-option-copy">
                     <strong>{optionModelLabel(option, locale)}</strong>
-                    <small>{provider} · {engine}</small>
+                    <small>{engine}</small>
                     {option.tag && <em>{cliModelTagLabel(option.tag, locale)}</em>}
                   </span>
                   {option.key === value && <span className="dashboard-runtime-model-picker-check" aria-hidden="true">✓</span>}

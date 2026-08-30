@@ -10,7 +10,6 @@ import type {
   RuntimeStatus,
 } from "@/lib/types";
 import {
-  RuntimeBrandIdentity,
   RuntimeModelPicker,
   type RuntimeModelPickerOption,
 } from "./RuntimeModelPicker";
@@ -707,8 +706,7 @@ export function RuntimeControl() {
           <>
             <div className="dashboard-runtime-pool-columns" aria-hidden="true">
               <span>{ko ? "순위" : "Priority"}</span>
-              <span>{ko ? "공급자 · 엔진" : "Provider · engine"}</span>
-              <span>{ko ? "모델" : "Model"}</span>
+              <span>{ko ? "모델 · 공급자" : "Model · provider"}</span>
               <span>{ko ? "작업량" : "Effort"}</span>
               <span>{ko ? "선택" : "Selection"}</span>
               <span>{ko ? "관리" : "Manage"}</span>
@@ -812,12 +810,8 @@ export function RuntimeControl() {
                   </button>
                   <fieldset className="dashboard-runtime-pool-fields">
                     <legend className="sr-only">{rowLabel}</legend>
-                    <div className="dashboard-runtime-pool-identity-field">
-                      <span>{ko ? "공급자 · 엔진" : "Provider · engine"}</span>
-                      <RuntimeBrandIdentity runtime={runtime} selection={selection} locale={locale} />
-                    </div>
                     <label>
-                      <span>{ko ? "모델" : "Model"}</span>
+                      <span>{ko ? "모델 · 공급자" : "Model · provider"}</span>
                       <RuntimeModelPicker
                         ariaLabel={`${rowLabel} ${ko ? "모델" : "model"}`}
                         value={modelValue}

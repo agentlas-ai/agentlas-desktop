@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.0.55 — 2026-08-30
+
+This release binds Agentlas OS v1.2.37 at
+2b169ba44742735d1ce7f550fefee071b70324fc. Its public runtime asset
+`hephaestus-runtime-v1.2.37.tar.gz` is pinned at SHA-256
+`50caf78a9c028fcf088039dd862753c25fbb9bed19df9fa248502b442dc306a6`.
+Source readiness does not prove a public installer or update feed; the Releases
+page stays the authority.
+
+- Dashboard role defaults now combine provider identity and model selection in
+  one logo-backed picker. Model, provider, and fallback priority stay readable
+  in a compact row, while effort remains the only separate control.
+- The open model menu follows the same one-line logo, model, and provider
+  hierarchy as the shared model catalog, with keyboard selection, long-name
+  truncation, and narrow-window reflow preserved.
+
 ## 1.0.54 — 2026-08-30
 
 This release binds Agentlas OS v1.2.37 at

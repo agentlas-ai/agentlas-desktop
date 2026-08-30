@@ -2086,14 +2086,13 @@ button[data-dashboard-import="true"]:disabled {
 .dashboard-runtime-pool-columns,
 .dashboard-runtime-pool-list li {
   display: grid;
-  /* Keep the control columns usable while letting Selection give up space
-     before it can push Manage outside a narrow card. */
+  /* The model picker owns provider identity. Keeping it in one wide column
+     avoids the old provider-card/model-select baseline mismatch. */
   grid-template-columns:
     52px
-    minmax(0, 0.95fr)
-    minmax(0, 1.2fr)
-    minmax(0, 0.82fr)
-    minmax(0, 0.76fr)
+    minmax(180px, 1.65fr)
+    minmax(80px, 0.7fr)
+    minmax(90px, 0.9fr)
     42px;
   align-items: center;
   gap: 9px;
@@ -2190,12 +2189,6 @@ button[data-dashboard-import="true"]:disabled {
   border: 0;
 }
 
-.dashboard-runtime-pool-identity-field {
-  min-width: 0;
-  display: grid;
-  gap: 5px;
-}
-
 .dashboard-runtime-identity {
   min-height: 34px;
   min-width: 0;
@@ -2271,7 +2264,7 @@ button[data-dashboard-import="true"]:disabled {
   min-height: 34px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 8px;
   padding: 0 9px;
   border: 1px solid var(--dash-line);
@@ -2298,13 +2291,60 @@ button[data-dashboard-import="true"]:disabled {
 
 .dashboard-runtime-model-picker-value {
   min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex: 1;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.dashboard-runtime-model-picker-value strong,
+.dashboard-runtime-model-picker-value small {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.dashboard-runtime-model-picker-value strong {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.dashboard-runtime-model-picker-value small {
+  flex: 0 1 auto;
+  max-width: 42%;
+  color: var(--dash-muted);
+  font-size: 9.5px;
+}
+
+.dashboard-runtime-model-picker-trigger-mark {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--dash-teal-2) 12%, #ffffff);
+  color: var(--dash-teal-2);
+  font-family: var(--rd-f-mono);
+  font-size: 9px;
+  font-weight: 760;
+}
+
+.dashboard-runtime-model-picker-trigger-mark img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
 .dashboard-runtime-model-picker-chevron {
   flex: none;
+  margin-left: auto;
   color: var(--dash-muted);
   font-size: 15px;
   line-height: 1;
@@ -2322,13 +2362,6 @@ button[data-dashboard-import="true"]:disabled {
   border-radius: 10px;
   background: #ffffff;
   box-shadow: 0 14px 34px rgba(18, 49, 43, 0.16);
-}
-
-.dashboard-runtime-model-picker-hint {
-  padding: 5px 7px 7px;
-  color: var(--dash-muted);
-  font-size: 10px;
-  line-height: 1.35;
 }
 
 .dashboard-runtime-model-picker-list {
@@ -2360,6 +2393,17 @@ button[data-dashboard-import="true"]:disabled {
   color: var(--dash-muted);
   cursor: default;
   opacity: 0.68;
+}
+
+.dashboard-runtime-model-picker-option-copy {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.dashboard-runtime-model-picker-option-copy small {
+  flex: 0 1 auto;
+  max-width: 42%;
 }
 
 .dashboard-runtime-model-picker-option-copy em {
