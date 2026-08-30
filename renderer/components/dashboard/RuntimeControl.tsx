@@ -429,6 +429,31 @@ export function RuntimeControl() {
     };
   }
 
+  function selectionCandidatesForRuntime(
+    runtime: RuntimeStatus,
+    role: RuntimeRole,
+  ): RuntimeSelection[] {
+    const base = selectionFromRuntime(runtime, role);
+    const modelRows = modelsByRuntime[runtimeKey(runtime)]
+      ?? (runtime.availableModels ?? []).map((id) => ({ id, label: id }));
+    const candidates: RuntimeSelection[] = [];
+    const append = (model: string | undefined) => {
+      const effort = model && base.effort && effortsFor(runtime, model).some((entry) => entry.id === base.effort)
+        ? base.effort
+        : model
+          ? undefined
+          : base.effort;
+      const candidate = { ...base, model, effort };
+      if (!candidates.some((existing) => selectionKey(existing) === selectionKey(candidate))) {
+        candidates.push(candidate);
+      }
+    };
+    if (runtimeUsesEngineModelSetting(runtime.kind)) append(undefined);
+    if (runtime.model?.trim()) append(runtime.model.trim());
+    for (const model of modelRows) append(model.id);
+    return candidates;
+  }
+
   async function updateMember(
     role: RuntimeRole,
     index: number,
@@ -505,7 +530,7 @@ export function RuntimeControl() {
       const key = runtimeKey(runtime);
       if (seen.has(key)) return [];
       seen.add(key);
-      return [selectionFromRuntime(runtime, role)];
+      return selectionCandidatesForRuntime(runtime, role).slice(0, 1);
     });
   }
 
@@ -613,21 +638,13 @@ export function RuntimeControl() {
         ),
     );
     const available = roleRuntimes.flatMap((runtime) => {
-      const base = selectionFromRuntime(runtime, role);
-      const modelRows = modelsByRuntime[runtimeKey(runtime)] ?? [];
-      const candidates = [base];
-      for (const model of modelRows) {
-        candidates.push({ ...base, model: model.id });
-      }
-      if (runtimeUsesEngineModelSetting(runtime.kind)) {
-        candidates.unshift({ ...base, model: undefined });
-      }
-      return candidates;
+      return selectionCandidatesForRuntime(runtime, role);
     });
+    const firstUnusedCandidate = firstUnusedRuntime
+      ? available.find((selection) => runtimeMatchesSelection(firstUnusedRuntime, selection))
+      : null;
     const candidate =
-      (firstUnusedRuntime
-        ? selectionFromRuntime(firstUnusedRuntime, role)
-        : available.find((selection) => !used.has(selectionKey(selection)))) ??
+      (firstUnusedCandidate ?? available.find((selection) => !used.has(selectionKey(selection)))) ??
       (selections.length > 0
         ? { ...selections[selections.length - 1], role, inherit: false }
         : available[0]);

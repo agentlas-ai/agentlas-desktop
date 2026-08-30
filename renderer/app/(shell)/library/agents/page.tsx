@@ -14,7 +14,8 @@ import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { AgentMemorySaveQueue, parseMemoryMarkdown, type ParsedMemory } from "@/lib/agent-memory";
-import { cliModelTagLabel } from "@shared/models";
+import { cliModelTagLabel, runtimeUsesEngineModelSetting } from "@shared/models";
+import { runtimeModelFallbackLabel } from "@/components/dashboard/RuntimeModelPicker";
 import {
   projectPoolMemberKey,
   projectPoolMemberReferences,
@@ -3228,7 +3229,8 @@ function runtimeDisplayName(runtime: Pick<RuntimeStatus, "kind" | "backend" | "m
 function selectionSummary(selection?: RuntimeSelection | null, locale: Locale = "ko"): string {
   if (!selection) return locale === "ko" ? "역할별 기본값" : "Role defaults";
   const base = selection.kind === "byok" ? `BYOK · ${selection.backend ?? "provider"}` : selection.kind;
-  return [base, selection.model, selection.effort ? `effort ${selection.effort}` : ""].filter(Boolean).join(" · ");
+  const model = selection.model ?? runtimeModelFallbackLabel(selection.kind, locale);
+  return [base, model, selection.effort ? `effort ${selection.effort}` : ""].filter(Boolean).join(" · ");
 }
 
 function effortLabel(id: string): string {
@@ -3332,6 +3334,9 @@ function RuntimeAssignmentPanel({
   }, [selectedOverride, runtimeStatuses]);
 
   const selectedRuntime = runtimeStatuses.find((runtime) => runtimeStatusKey(runtime) === runtimeKey) ?? null;
+  const allowsEngineModelSetting = selectedRuntime
+    ? runtimeUsesEngineModelSetting(selectedRuntime.kind)
+    : false;
   useEffect(() => {
     let cancelled = false;
     const api = ipc();
@@ -3346,7 +3351,14 @@ function RuntimeAssignmentPanel({
         availableModels: selectedRuntime.availableModels,
       })
       .then((items) => {
-        if (!cancelled) setModelOptions(items);
+        if (cancelled) return;
+        setModelOptions(items);
+        if (!runtimeUsesEngineModelSetting(selectedRuntime.kind)) {
+          setSelectedModel((current) => {
+            if (current) return current;
+            return selectedRuntime.model ?? items[0]?.id ?? "";
+          });
+        }
       })
       .catch(() => {
         if (!cancelled) setModelOptions([]);
@@ -3357,6 +3369,10 @@ function RuntimeAssignmentPanel({
   }, [selectedRuntime]);
 
   const effortOptions = effortsForModel(selectedRuntime, selectedModel);
+  const visibleModelOptions = selectedModel && !modelOptions.some((model) => model.id === selectedModel)
+    ? [{ id: selectedModel, label: selectedModel }, ...modelOptions]
+    : modelOptions;
+  const missingRequiredModel = Boolean(selectedRuntime && !allowsEngineModelSetting && !selectedModel);
 
   async function refreshOverrides() {
     const api = ipc();
@@ -3367,6 +3383,10 @@ function RuntimeAssignmentPanel({
   async function saveOverride() {
     const api = ipc();
     if (!api || !selectedTarget || !selectedRuntime) return;
+    if (!runtimeUsesEngineModelSetting(selectedRuntime.kind) && !selectedModel) {
+      showToast(locale === "ko" ? "실제로 사용할 모델을 먼저 선택해 주세요." : "Choose the model that will actually run first.");
+      return;
+    }
     setSaving(true);
     try {
       const selection: RuntimeSelection = {
@@ -3445,7 +3465,18 @@ function RuntimeAssignmentPanel({
         </label>
         <label style={{ display: "flex", flexDirection: "column", gap: 5, fontSize: 11, color: "var(--muted-deep)", fontWeight: 600 }}>
           CLI / Runtime
-          <select value={runtimeKey} onChange={(e) => setRuntimeKey(e.target.value)} style={runtimeSelectStyle}>
+          <select
+            value={runtimeKey}
+            onChange={(e) => {
+              const nextKey = e.target.value;
+              const nextRuntime = runtimeStatuses.find((runtime) => runtimeStatusKey(runtime) === nextKey) ?? null;
+              const nextModel = nextRuntime?.model ?? "";
+              setRuntimeKey(nextKey);
+              setSelectedModel(nextModel);
+              setSelectedEffort(effortsForModel(nextRuntime, nextModel).some((option) => option.id === selectedEffort) ? selectedEffort : "");
+            }}
+            style={runtimeSelectStyle}
+          >
             {runtimeStatuses.map((runtime) => (
               <option key={runtimeStatusKey(runtime)} value={runtimeStatusKey(runtime)}>
                 {runtimeDisplayName(runtime)}
@@ -3469,8 +3500,13 @@ function RuntimeAssignmentPanel({
             }}
             style={runtimeSelectStyle}
           >
-            <option value="">{locale === "ko" ? "구독/역할 기본" : "Subscription / role default"}</option>
-            {modelOptions.map((model) => (
+            {allowsEngineModelSetting && selectedRuntime && (
+              <option value="">{runtimeModelFallbackLabel(selectedRuntime.kind, locale)}</option>
+            )}
+            {missingRequiredModel && (
+              <option value="" disabled>{locale === "ko" ? "모델 선택 필요" : "Model required"}</option>
+            )}
+            {visibleModelOptions.map((model) => (
               <option key={model.id} value={model.id}>
                 {model.label}{model.tag ? ` · ${cliModelTagLabel(model.tag, locale)}` : ""}
               </option>
@@ -3481,7 +3517,7 @@ function RuntimeAssignmentPanel({
           <label style={{ display: "flex", flexDirection: "column", gap: 5, fontSize: 11, color: "var(--muted-deep)", fontWeight: 600 }}>
             {locale === "ko" ? "작업량" : "Effort"}
             <select value={selectedEffort} onChange={(e) => setSelectedEffort(e.target.value)} style={runtimeSelectStyle}>
-              <option value="">{locale === "ko" ? "기본" : "Default"}</option>
+              <option value="">{locale === "ko" ? "기본 작업량" : "Default effort"}</option>
               {effortOptions.map((effort) => (
                 <option key={effort.id} value={effort.id}>{effort.label}</option>
               ))}
@@ -3506,7 +3542,7 @@ function RuntimeAssignmentPanel({
         <button onClick={clearOverride} disabled={saving || !selectedOverride} style={{ ...runtimeButtonStyle, opacity: selectedOverride ? 1 : 0.45 }}>
           {locale === "ko" ? "역할 기본 사용" : "Use role defaults"}
         </button>
-        <button onClick={saveOverride} disabled={saving || !selectedRuntime} style={{ ...runtimeButtonStyle, background: "var(--accent)", color: "#fff", border: "1px solid var(--accent)" }}>
+        <button onClick={saveOverride} disabled={saving || !selectedRuntime || missingRequiredModel} style={{ ...runtimeButtonStyle, background: "var(--accent)", color: "#fff", border: "1px solid var(--accent)" }}>
           {saving ? (locale === "ko" ? "저장 중..." : "Saving...") : (locale === "ko" ? "저장" : "Save")}
         </button>
       </div>

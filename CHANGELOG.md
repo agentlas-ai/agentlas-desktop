@@ -13,7 +13,7 @@ page stays the authority.
   own that decision. Reasoning effort has its own `Default effort` label instead
   of borrowing model or subscription copy.
 - BYOK, local runtimes, and Agentlas serving never offer an invented subscription
-  or provider default. They require a real model such as Agentlas Lite, while a
+  or provider default. They require a real model such as Agentlas Light, while a
   malformed legacy selection is shown honestly as `Model not specified`.
 - The same contract now covers Dashboard role pools, One composer and settings,
   New Agent creation, automation pins, and recorded run history.
