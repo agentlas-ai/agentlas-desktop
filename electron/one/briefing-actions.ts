@@ -187,7 +187,7 @@ function isMainContext(value: unknown): value is MainOnlyBriefingContext {
   return [
     "project_folder_missing", "project_folder_unreadable", "project_folder_not_directory",
     "project_deadline_conflict",
-    "automation_error", "automation_blocked", "automation_needs_input", "automation_partial",
+    "automation_error", "automation_blocked", "automation_needs_input", "automation_partial", "automation_rejected",
   ].includes(String(item.reasonCode))
     && ["project_folder", "automation_run"].includes(String(item.sourceKind))
     && typeof item.sourceRefId === "string" && SAFE_ID_RE.test(item.sourceRefId)

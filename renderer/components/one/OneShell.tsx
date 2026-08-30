@@ -823,8 +823,13 @@ function statusLabel(
   return tFor(locale, labelKeys[status]);
 }
 
-function briefingSignature(briefing: ReturnType<typeof chooseOneBriefing>): string {
-  return [briefing.kind, briefing.taskId ?? "none", briefing.evidence.join("|")].join(":");
+function briefingSignature(briefing: DisplayBriefing): string {
+  return [
+    briefing.kind,
+    briefing.taskId ?? "none",
+    briefing.proactive?.candidateId ?? "no-proactive-candidate",
+    briefing.evidence.join("|"),
+  ].join(":");
 }
 
 function oneMemoryUseOnceTargetKey(target: OneMemoryUseOnceTarget): string {
@@ -857,6 +862,29 @@ function briefingSourceName(raw: string, locale: "ko" | "en"): string {
     .trim();
   if (!cleaned) return locale === "ko" ? "현재 작업" : "Current work";
   return cleaned.length > 44 ? `${cleaned.slice(0, 43).trimEnd()}…` : cleaned;
+}
+
+/**
+ * A deterministic detector may invite a review, but its raw diagnosis stays
+ * Main-only until the read-only One run authors a customer-facing result.
+ * This generic card makes the existing prepare/confirm/start path reachable
+ * without leaking project paths, automation names, or receipt details.
+ */
+function proactiveReviewInvitation(candidate: OneProactiveBriefing, locale: "ko" | "en"): DisplayBriefing {
+  return {
+    kind: "decision",
+    eyebrow: tFor(locale, "one.shell.briefing.review_safely"),
+    title: tFor(locale, "one.shell.briefing.confirm_title"),
+    body: tFor(locale, "one.shell.briefing.confirm_body"),
+    prepared: tFor(locale, "one.shell.briefing.packet_prepared"),
+    evidence: [],
+    primaryLabel: candidate.preparedAction.kind === "open_project"
+      ? tFor(locale, "one.shell.proactive.action.open_project")
+      : candidate.preparedAction.kind === "open_automation"
+        ? tFor(locale, "one.shell.proactive.action.open_automation")
+        : tFor(locale, "one.shell.proactive.action.open_task"),
+    proactive: candidate,
+  };
 }
 
 function safeBriefingSnapshot(value: OneBriefingSnapshot | null): OneBriefingSnapshot | null {
@@ -5140,9 +5168,16 @@ export function OneShell() {
   // row. A generic floating "View progress" card duplicates that state and
   // makes One look task/project based, so home only surfaces outcomes,
   // failures, decisions, and authored proactive briefings.
-  const rawBriefing: DisplayBriefing = reactiveBriefing.kind === "working"
-    ? chooseOneBriefing([], [], appLocale)
-    : reactiveBriefing;
+  const rawBriefing: DisplayBriefing = useMemo(() => {
+    const visibleReactive = reactiveBriefing.kind === "working"
+      ? chooseOneBriefing([], [], appLocale)
+      : reactiveBriefing;
+    // A live decision, failure, or completed outcome remains the foreground
+    // briefing. Only the otherwise-quiet home uses the private candidate to
+    // offer a generic, explicit, read-only review.
+    if (visibleReactive.kind !== "quiet" || !briefingSnapshot?.candidate) return visibleReactive;
+    return proactiveReviewInvitation(briefingSnapshot.candidate, appLocale);
+  }, [appLocale, briefingSnapshot?.candidate, reactiveBriefing]);
   const rawBriefingSignature = useMemo(() => briefingSignature(rawBriefing), [rawBriefing]);
   useEffect(() => {
     const expiresAt = readBriefingDismissal(rawBriefingSignature);
@@ -5641,6 +5676,18 @@ export function OneShell() {
    * 실행은 `permission: "read"` 로 고정돼 있어 살펴보기만 하고 아무것도 바꾸지 않는다.
    */
   const [pendingBriefingAction, setPendingBriefingAction] = useState<OneBriefingActionPacket | null>(null);
+  const pendingBriefingActionVisible = Boolean(
+    pendingBriefingAction
+    && briefing.proactive
+    && pendingBriefingAction.candidateId === briefing.proactive.candidateId,
+  );
+  useEffect(() => {
+    if (pendingBriefingAction && pendingBriefingAction.candidateId !== briefing.proactive?.candidateId) {
+      // A prepared packet belongs to one exact detector receipt. Never leave
+      // its confirmation attached to a newer or different home briefing.
+      setPendingBriefingAction(null);
+    }
+  }, [briefing.proactive?.candidateId, pendingBriefingAction]);
   const reviewPreparedFinding = useCallback(async (candidate: OneProactiveBriefing) => {
     const api = ipc();
     if (!api) {
@@ -6182,9 +6229,9 @@ export function OneShell() {
                         <p>{appLocale === "ko" ? "상주 스태프와 필요한 전문가를 조율하고, 끝난 일과 확인이 필요한 것만 이 대화에 브리핑할게요." : "I’ll coordinate the standing staff and specialists, then brief you here on finished work and anything that needs your attention."}</p>
                       </> : <>
                         <small>{briefing.eyebrow}</small>
-                        <strong id="one-home-message-title">{briefing.title}</strong>
-                        <p>{briefing.body}</p>
-                        <div className={styles.homeMessageActions}>
+                        <strong id="one-home-message-title">{pendingBriefingActionVisible ? briefing.prepared : briefing.title}</strong>
+                        {!pendingBriefingActionVisible && <p>{briefing.body}</p>}
+                        {!pendingBriefingActionVisible && <div className={styles.homeMessageActions}>
                           {briefing.proactive
                             ? briefing.proactive.preparedAction.kind === "open_task"
                               ? <button type="button" className={styles.primaryButton} disabled={briefingActionBusy} onClick={() => void openProactiveTask(briefing.proactive!)}>{briefingActionBusy ? tFor(appLocale, "one.shell.common.checking") : briefing.primaryLabel}</button>
@@ -6196,9 +6243,9 @@ export function OneShell() {
                           {briefing.proactive
                             ? <button type="button" className={styles.ghostButton} onClick={() => void applyProactiveFeedback(briefing.proactive!, "later")}>{tFor(appLocale, "one.shell.common.later")}</button>
                             : <button type="button" className={styles.ghostButton} onClick={() => { const signature = briefingSignature(briefing); setDismissedBriefing({ signature, expiresAt: writeBriefingDismissal(signature) }); }}>{tFor(appLocale, "one.shell.common.later")}</button>}
-                        </div>
+                        </div>}
                       </>}
-                      {pendingBriefingAction && (
+                      {pendingBriefingActionVisible && (
                         <div className={styles.briefingConfirm} role="group" aria-label={tFor(appLocale, "one.shell.briefing.confirm_title")}>
                           <p className={styles.briefingConfirmTitle}>{tFor(appLocale, "one.shell.briefing.confirm_title")}</p>
                           <p className={styles.briefingConfirmBody}>{tFor(appLocale, "one.shell.briefing.confirm_body")}</p>

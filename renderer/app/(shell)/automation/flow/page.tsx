@@ -36,6 +36,11 @@ import { NodePalette, type PaletteNodeSeed } from "@/components/automation/NodeP
 import { NodeConfigPanel } from "@/components/automation/NodeConfigPanel";
 import { RunHistoryPanel } from "@/components/automation/RunHistoryPanel";
 import { AutomationSessionPanel } from "@/components/automation/AutomationSessionPanel";
+import {
+  runtimeBackendForSelection,
+  runtimeEngineLabel,
+  runtimeProviderLabel,
+} from "@/components/dashboard/RuntimeModelPicker";
 import { IconBolt } from "@/components/Icon";
 import { ConnectionsDialog } from "@/components/automation/ConnectionsDialog";
 
@@ -46,28 +51,21 @@ function runtimeSelectionPresentation(selection: RuntimeSelection | null | undef
   if (!selection) {
     return {
       label: locale === "en" ? "Role default" : "역할 기본값 사용",
-      detail: locale === "en" ? "Worker pool priority + fallback" : "Worker 풀 우선순위 · fallback",
+      detail: locale === "en" ? "Worker pool priority + fallback at run time" : "실행 시 Worker 풀 우선순위 · fallback",
     };
   }
-  const kindLabels: Record<string, string> = {
-    "claude-code": "Claude Code",
-    codex: "Codex",
-    antigravity: "Antigravity",
-    kimi: "Kimi",
-    grok: "Grok",
-    cursor: "Cursor",
-    byok: "BYOK",
-    ollama: "Ollama",
-    lmstudio: "LM Studio",
-    mlx: "MLX",
-    acp: "ACP",
-    agentlas: "Agentlas",
-  };
-  const kind = kindLabels[selection.kind] ?? selection.kind;
+  const runtimeIdentity = {
+    kind: selection.kind,
+    backend: runtimeBackendForSelection(selection),
+    label: undefined,
+  } as const;
+  const provider = runtimeProviderLabel(runtimeIdentity);
+  const engine = runtimeEngineLabel(runtimeIdentity);
   const model = selection.model?.trim();
+  const effort = selection.effort?.trim() || (locale === "en" ? "Default" : "기본");
   return {
     label: locale === "en" ? "Automation pin · overrides role default" : "자동화별 고정 · 역할 기본보다 우선",
-    detail: `${model ? `${kind} · ${model}` : kind} · ${locale === "en" ? "fails closed; no cross-provider fallback" : "사용할 수 없으면 중단 · 다른 공급자로 바꾸지 않음"}`,
+    detail: `${provider} · ${engine} · ${model ?? (locale === "en" ? "Provider default" : "공급자 기본 모델")} · ${locale === "en" ? "effort" : "작업량"} ${effort} · ${locale === "en" ? "fails closed; no cross-provider fallback" : "사용할 수 없으면 중단 · 다른 공급자로 바꾸지 않음"}`,
   };
 }
 
@@ -1602,6 +1600,7 @@ return (
             {humanSchedule(automation.scheduleHuman, locale)}
             <span
               data-testid="automation-runtime-chip"
+              title={`${runtimePresentation.label} · ${runtimePresentation.detail}`}
               style={{
                 display: "inline-flex",
                 flexDirection: "column",

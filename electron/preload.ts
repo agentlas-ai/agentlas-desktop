@@ -502,6 +502,7 @@ const api: AgentlasIpc = {
     autoConnect: (input) => ipcRenderer.invoke("telegram:autoConnect", input),
     start: (input) => ipcRenderer.invoke("telegram:start", input),
     clone: (input) => ipcRenderer.invoke("telegram:clone", input),
+    importTerminal: (id: string) => ipcRenderer.invoke("telegram:importTerminal", id),
     resume: (id: string) => ipcRenderer.invoke("telegram:resume", id),
     stop: (id: string) => ipcRenderer.invoke("telegram:stop", id),
     remove: (id: string, deleteBot?: boolean) => ipcRenderer.invoke("telegram:remove", id, deleteBot),

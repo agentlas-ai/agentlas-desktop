@@ -53,7 +53,9 @@ function patternMatches(pattern: string | null, detail: string | undefined): boo
   if (pattern === null || pattern === "") return true;
   if (!detail) return false;
   if (pattern.endsWith("*")) {
-    return detail.startsWith(pattern.slice(0, -1).trimEnd());
+    // The space before `*` is part of the command boundary. Trimming it turns
+    // `git push *` into `git push*`, which also authorizes `git pushx ...`.
+    return detail.startsWith(pattern.slice(0, -1));
   }
   return detail === pattern;
 }

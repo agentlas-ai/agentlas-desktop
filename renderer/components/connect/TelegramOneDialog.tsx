@@ -210,10 +210,11 @@ export default function TelegramOneDialog() {
   }, [appendLog, busy, deleteBots, legacyBindings.length, refresh, t]);
 
   const runBindingAction = useCallback(
-    async (action: "open" | "test" | "settings" | "remove", oneBinding: TelegramConnectBinding) => {
+    async (action: "open" | "test" | "settings" | "import_terminal" | "remove", oneBinding: TelegramConnectBinding) => {
       const api = ipc();
       if (!api || !oneBinding || busy) return;
       if (action === "remove" && !window.confirm(t("tgone.disconnect.confirm"))) return;
+      if (action === "import_terminal" && !window.confirm(t("tgone.terminal_import.confirm"))) return;
       setError("");
       setTelegramOneBusy(action);
       try {
@@ -226,6 +227,9 @@ export default function TelegramOneDialog() {
         } else if (action === "settings") {
           const result = await api.telegram.configureBotSettings(oneBinding.id);
           appendLog(result.message, result.ok ? "success" : "error");
+        } else if (action === "import_terminal") {
+          const result = await api.telegram.importTerminal(oneBinding.id);
+          appendLog(result.message, "success");
         } else {
           // 봇은 남긴다 — 다시 연결할 때 재사용할 수 있고, 봇 삭제는 되돌릴 수 없다.
           await api.telegram.remove(oneBinding.id, false);
@@ -335,6 +339,16 @@ export default function TelegramOneDialog() {
                   >
                     {t("tgone.action.group_settings")}
                   </button>
+                  {oneBinding.terminalImportAvailable ? (
+                    <button
+                      type="button"
+                      onClick={() => void runBindingAction("import_terminal", oneBinding)}
+                      disabled={Boolean(busy)}
+                      title={t("tgone.action.import_terminal.hint")}
+                    >
+                      {t("tgone.action.import_terminal")}
+                    </button>
+                  ) : null}
                   <button
                     type="button"
                     className={styles.danger}

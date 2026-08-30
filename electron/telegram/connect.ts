@@ -2,9 +2,11 @@ import { stripAgentControlBlocks } from "../../shared/agent-control-blocks";
 import { flattenAskFences } from "../../shared/ask-fence-flatten";
 import { isPrimarilyKorean, preferredLocaleFromText } from "../../shared/detect-language";
 import { createHash, randomUUID } from "node:crypto";
-import fs from "node:fs/promises";
+import { constants as fsConstants, lstatSync } from "node:fs";
+import fs, { type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { BrowserWindow, session as electronSession, shell } from "electron";
+import { userDataDir } from "../runtime-paths";
 import { currentUiLocale } from "../ui-locale";
 import {
   resolveTelegramAutomationReportIntent,
@@ -180,6 +182,8 @@ const TELEGRAM_LONG_POLL_GRACE_MS = readPositiveTimeoutMs(
   10_000,
 );
 const TELEGRAM_ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
+const TELEGRAM_TOKEN_MAX_BYTES = 1024;
+const TELEGRAM_BINDING_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const TOKEN_RE = /\b\d{8,12}:[A-Za-z0-9_-]{30,}\b/g;
 
 interface TelegramWebState {
@@ -212,6 +216,8 @@ const TELEGRAM_COPY = {
     "settings.manual_disable": "BotFather 설정 창을 열어두었습니다. 화면에 보이는 Disable 버튼을 누르면 그룹 전체 메시지 받기가 켜집니다.",
     "test.message": "Agentlas 연결 테스트입니다. 이 메시지에 답장하거나 봇을 불러 작업을 맡겨보세요.",
     "test.sent": "테스트 메시지를 보냈습니다.",
+    "terminal_import.done": "Terminal에서 만든 Telegram 연결을 안전 저장소로 가져왔습니다.",
+    "terminal_import.done_file_kept": "연결은 가져왔지만 Terminal 토큰 파일은 안전하게 지우지 못해 그대로 두었습니다.",
     "pair.connected": "Agentlas에 연결되었습니다. 이제 메시지로 실행할 수 있어요.",
     "pair.room_taken": "이 방에는 이미 다른 Agentlas 봇이 연결되어 있어요. 한 방에는 봇 하나만 붙습니다 — 다른 방(또는 이 봇과의 1:1 대화)에서 다시 시작해 주세요.",
     "run.started": "시작했어요. 웹/파일 제작은 몇 분 걸릴 수 있습니다. 끝나면 이 방에 결과 경로와 여는 방법을 보냅니다.",
@@ -246,6 +252,12 @@ const TELEGRAM_COPY = {
     "error.chat_not_paired": "Telegram 방이 아직 연결되지 않았습니다.",
     "error.message_box_missing": "Telegram 입력창을 찾지 못했습니다.",
     "error.missing_keychain": "Telegram 봇 비밀문자가 로컬 비밀 저장소에 없습니다.",
+    "error.terminal_import_busy": "이 Telegram 연결이 이미 실행 중입니다. Terminal 연결 명령과 Desktop 실행이 모두 끝난 뒤 다시 시도해주세요.",
+    "error.terminal_import_conflict": "안전 저장소에 다른 Telegram 비밀문자가 있어 덮어쓰지 않았습니다.",
+    "error.terminal_import_fingerprint": "Terminal 토큰 파일이 이 Telegram 연결과 일치하지 않습니다.",
+    "error.terminal_import_missing": "가져올 Terminal 토큰 파일을 찾지 못했습니다.",
+    "error.terminal_import_store": "Telegram 비밀문자를 안전 저장소로 옮기지 못했습니다. 잠시 후 다시 시도해주세요.",
+    "error.terminal_import_unsafe": "Terminal 토큰 파일의 경로, 권한 또는 형식이 안전하지 않아 가져오지 않았습니다.",
     "error.no_reply": "Agentlas가 보낼 답을 만들지 못했습니다.",
     "error.open_chat_failed": "Telegram 봇 채팅을 열지 못했습니다.",
     "error.run_failed": "Agentlas 실행 실패: {message}",
@@ -317,6 +329,8 @@ const TELEGRAM_COPY = {
     "settings.manual_disable": "BotFather settings are open. Press the visible Disable button to let the bot receive group-wide messages.",
     "test.message": "Agentlas connection test. Reply to this message or mention the bot to assign work.",
     "test.sent": "Test message sent.",
+    "terminal_import.done": "Imported the Telegram connection created by Terminal into the secure store.",
+    "terminal_import.done_file_kept": "The connection was imported, but the Terminal token file could not be removed safely and was left in place.",
     "pair.connected": "Connected to Agentlas. You can now run it by messaging here.",
     "pair.room_taken": "Another Agentlas bot is already connected in this chat. Only one bot can live in a chat — start again in a different chat (or in this bot's direct message).",
     "run.started": "Started. Website/file creation can take a few minutes. I will send the result path and how to open it here when it finishes.",
@@ -351,6 +365,12 @@ const TELEGRAM_COPY = {
     "error.chat_not_paired": "Telegram chat is not paired yet.",
     "error.message_box_missing": "Could not find the Telegram message box.",
     "error.missing_keychain": "Telegram bot secret is missing from the local secret store.",
+    "error.terminal_import_busy": "This Telegram connection is already running. Finish the Terminal connect command and stop the Desktop run before trying again.",
+    "error.terminal_import_conflict": "The secure store already contains a different Telegram secret, so Agentlas did not overwrite it.",
+    "error.terminal_import_fingerprint": "The Terminal token file does not match this Telegram connection.",
+    "error.terminal_import_missing": "No Terminal token file is available to import.",
+    "error.terminal_import_store": "Could not move the Telegram secret into the secure store. Try again in a moment.",
+    "error.terminal_import_unsafe": "The Terminal token file path, permissions, or format is unsafe, so it was not imported.",
     "error.no_reply": "Agentlas did not produce a reply.",
     "error.open_chat_failed": "Could not open the Telegram bot chat.",
     "error.run_failed": "Agentlas run failed: {message}",
@@ -518,6 +538,114 @@ function tokenKey(token: string): string {
   return createHash("sha256").update(token).digest("hex").slice(0, 24);
 }
 
+interface TerminalTelegramTokenFile {
+  filePath: string;
+  token: string;
+  dev: number;
+  ino: number;
+  size: number;
+}
+
+function assertTelegramBindingId(id: string): string {
+  const value = String(id ?? "");
+  if (!TELEGRAM_BINDING_ID_RE.test(value)) throw new Error(tg("error.terminal_import_unsafe"));
+  return value;
+}
+
+function hasTerminalTelegramTokenCandidate(id: string): boolean {
+  try {
+    const bindingId = assertTelegramBindingId(id);
+    lstatSync(path.join(userDataDir(), "telegram", `${bindingId}.token`));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Read the Terminal-owned token once without following links. The returned path and
+ * identity are used only to remove the exact file after Keychain + DB commit.
+ */
+export async function readTerminalTelegramTokenFile(
+  id: string,
+  userDataPath = userDataDir(),
+): Promise<TerminalTelegramTokenFile> {
+  const bindingId = assertTelegramBindingId(id);
+  const directory = path.join(userDataPath, "telegram");
+  const filePath = path.join(directory, `${bindingId}.token`);
+  let handle: FileHandle | null = null;
+  try {
+    const dirStat = await fs.lstat(directory);
+    if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) {
+      throw new Error(tg("error.terminal_import_unsafe"));
+    }
+    const before = await fs.lstat(filePath);
+    if (
+      !before.isFile() ||
+      before.isSymbolicLink() ||
+      before.nlink !== 1 ||
+      before.size <= 0 ||
+      before.size > TELEGRAM_TOKEN_MAX_BYTES ||
+      (process.platform !== "win32" && (before.mode & 0o777) !== 0o600)
+    ) {
+      throw new Error(tg("error.terminal_import_unsafe"));
+    }
+    handle = await fs.open(filePath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0));
+    const opened = await handle.stat();
+    if (
+      !opened.isFile() ||
+      opened.dev !== before.dev ||
+      opened.ino !== before.ino ||
+      opened.size !== before.size
+    ) {
+      throw new Error(tg("error.terminal_import_unsafe"));
+    }
+    const token = (await handle.readFile({ encoding: "utf8" })).trim();
+    if (
+      !token ||
+      Buffer.byteLength(token, "utf8") > TELEGRAM_TOKEN_MAX_BYTES ||
+      !/^\d{8,12}:[A-Za-z0-9_-]{30,}$/.test(token)
+    ) {
+      throw new Error(tg("error.terminal_import_unsafe"));
+    }
+    return {
+      filePath,
+      token,
+      dev: before.dev,
+      ino: before.ino,
+      size: before.size,
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      throw new Error(tg("error.terminal_import_missing"));
+    }
+    if (error instanceof Error && error.message === tg("error.terminal_import_unsafe")) throw error;
+    throw new Error(tg("error.terminal_import_unsafe"));
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function removeImportedTerminalTokenFile(file: TerminalTelegramTokenFile): Promise<boolean> {
+  try {
+    const current = await fs.lstat(file.filePath);
+    if (
+      !current.isFile() ||
+      current.isSymbolicLink() ||
+      current.nlink !== 1 ||
+      current.dev !== file.dev ||
+      current.ino !== file.ino ||
+      current.size !== file.size
+    ) {
+      return false;
+    }
+    await fs.unlink(file.filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function markTokenAvailable(id: string, token: string): void {
   getDb()
     .prepare("UPDATE telegram_bindings SET token_saved = 1, token_fingerprint = ?, updated_at = ? WHERE id = ?")
@@ -569,6 +697,7 @@ function bindingFromRow(row: TelegramBindingRow, hasToken: boolean, tokenPreview
     sessionRunning: isBindingSessionRunning(row.id),
     automationReportEnabled: row.automation_report_enabled === 1,
     hasToken,
+    terminalImportAvailable: hasTerminalTelegramTokenCandidate(row.id),
     tokenPreview,
     botUserId: row.bot_user_id ?? null,
     botUsername: row.bot_username ?? null,
@@ -985,6 +1114,71 @@ export async function resumeTelegramConnection(id: string): Promise<TelegramConn
   });
   await reconcileTelegramWorkers();
   return toBinding(getBindingRow(id) as TelegramBindingRow);
+}
+
+/**
+ * Explicit one-time ownership transfer from Terminal's private 0600 file to the
+ * Desktop Keychain. This is never called by startup/reconcile: the user must first
+ * finish Terminal's bounded polling command, then request the import in the UI.
+ */
+export async function importTerminalTelegramConnection(id: string): Promise<TelegramConnectActionResult> {
+  const bindingId = assertTelegramBindingId(id);
+  const row = getBindingRow(bindingId);
+  if (!row) throw new Error(`Telegram binding not found: ${bindingId}`);
+  if (isBindingSessionRunning(bindingId)) throw new Error(tg("error.terminal_import_busy"));
+
+  const file = await readTerminalTelegramTokenFile(bindingId);
+  if (!row.token_fingerprint || tokenKey(file.token) !== row.token_fingerprint) {
+    throw new Error(tg("error.terminal_import_fingerprint"));
+  }
+
+  const key = secretKey(bindingId);
+  const existing = await readSecret(key).catch(() => {
+    throw new Error(tg("error.terminal_import_store"));
+  });
+  if (existing && existing !== file.token) throw new Error(tg("error.terminal_import_conflict"));
+
+  let wroteSecret = false;
+  try {
+    if (!existing) {
+      await setSecret(key, file.token).catch(() => {
+        throw new Error(tg("error.terminal_import_store"));
+      });
+      wroteSecret = true;
+    }
+    const readBack = await readSecret(key).catch(() => {
+      throw new Error(tg("error.terminal_import_store"));
+    });
+    if (readBack !== file.token) throw new Error(tg("error.terminal_import_conflict"));
+
+    const current = getBindingRow(bindingId);
+    if (!current || current.token_fingerprint !== row.token_fingerprint) {
+      throw new Error(tg("error.terminal_import_fingerprint"));
+    }
+    const nextStatus: TelegramConnectStatus = current.enabled === 0
+      ? "disabled"
+      : current.telegram_chat_id
+        ? "chat_paired"
+        : "waiting_for_chat";
+    const restored = getDb()
+      .prepare(
+        `UPDATE telegram_bindings
+         SET token_saved = 1, status = ?, last_error = NULL, updated_at = ?
+         WHERE id = ? AND token_fingerprint = ?`,
+      )
+      .run(nextStatus, nowIso(), bindingId, row.token_fingerprint);
+    if (restored.changes !== 1) throw new Error(tg("error.terminal_import_fingerprint"));
+  } catch (error) {
+    if (wroteSecret) await deleteSecret(key).catch(() => undefined);
+    throw error;
+  }
+
+  const removed = await removeImportedTerminalTokenFile(file);
+  await reconcileTelegramWorkers();
+  return {
+    binding: toBinding(getBindingRow(bindingId) as TelegramBindingRow),
+    message: tg(removed ? "terminal_import.done" : "terminal_import.done_file_kept"),
+  };
 }
 
 function hasOtherActiveBindingForToken(bindingId: string, token: string): boolean {

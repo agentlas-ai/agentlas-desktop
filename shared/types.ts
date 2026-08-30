@@ -1858,6 +1858,8 @@ export interface TelegramConnectBinding {
   sessionRunning: boolean;
   automationReportEnabled: boolean;
   hasToken: boolean;
+  /** Exact Terminal-owned token path exists; import still performs full safety validation. */
+  terminalImportAvailable: boolean;
   tokenPreview: string | null;
   botUserId: number | null;
   botUsername: string | null;
@@ -7019,6 +7021,8 @@ export interface AgentlasIpc {
     autoConnect: (input: TelegramConnectAutoInput) => Promise<TelegramConnectActionResult>;
     start: (input: TelegramConnectStartInput) => Promise<TelegramConnectActionResult>;
     clone: (input: TelegramConnectCloneInput) => Promise<TelegramConnectActionResult>;
+    /** Explicit one-time transfer from Terminal's private token file into Desktop Keychain. */
+    importTerminal: (id: string) => Promise<TelegramConnectActionResult>;
     resume: (id: string) => Promise<TelegramConnectBinding>;
     stop: (id: string) => Promise<TelegramConnectBinding>;
     remove: (id: string, deleteBot?: boolean) => Promise<{ botDeleted: boolean }>;

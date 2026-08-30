@@ -1,6 +1,6 @@
 "use client";
 import { Suspense, useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
-import { useSearchParams } from "next/navigation";
+import { notFound, useSearchParams } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import type { AgentlasSurfaceAction, AgentlasSurfaceManifest, JsonObject } from "@/lib/types";
 import type { OneTaskProjection } from "@/lib/one-task-adapter";
@@ -329,6 +329,12 @@ function SurfacePreviewInner() {
 }
 
 export default function SurfacePreviewPage() {
+  // This route is a renderer QA harness, not a customer surface. Development keeps
+  // it convenient; production QA must opt in at build time so the shipped app cannot
+  // expose the raw manifest editor through a manually entered URL.
+  if (process.env.NODE_ENV === "production" && process.env.NEXT_PUBLIC_AGENTLAS_QA_SURFACES !== "1") {
+    notFound();
+  }
   return (
     <Suspense fallback={null}>
       <SurfacePreviewInner />

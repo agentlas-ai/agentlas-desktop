@@ -19,6 +19,7 @@ import type {
   MarketplaceListing,
   OneSuggestionReviewSeed,
   Project,
+  RuntimeSelection,
   RuntimeStatus,
   ScheduleSpec,
   Trigger,
@@ -26,27 +27,60 @@ import type {
 } from "@/lib/types";
 import { ScheduleBuilder, type ScheduleBuilderValue } from "@/components/automation/ScheduleBuilder";
 import { IconBuilding, IconSparkles } from "@/components/Icon";
+import {
+  RuntimeBrandIdentity,
+  RuntimeModelPicker,
+  runtimeBackendForSelection,
+  type RuntimeModelPickerOption,
+} from "@/components/dashboard/RuntimeModelPicker";
 import { OneSuggestionReviewHandoffBanner, type OneReviewSeedApplyResult } from "@/components/one/OneSuggestionReviewHandoff";
 
 type TargetType = "agent" | "firm" | "hub";
 
-const AUTOMATION_RUNTIME_PROVIDER_LABEL: Record<string, string> = {
-  anthropic: "Anthropic",
-  openai: "OpenAI",
-  google: "Google",
-  ollama: "Ollama",
-  lmstudio: "LM Studio",
-  mlx: "MLX",
-  agentlas: "Agentlas",
-};
-
-function automationRuntimeKey(runtime: RuntimeStatus): string {
+function automationRuntimeKey(runtime: Pick<RuntimeStatus, "kind" | "backend" | "source">): string {
   return `${runtime.kind}:${runtime.backend}:${runtime.source}`;
 }
 
-function automationRuntimeLabel(runtime: RuntimeStatus): string {
-  const provider = AUTOMATION_RUNTIME_PROVIDER_LABEL[runtime.backend] ?? runtime.backend;
-  return `${runtime.kind} · ${provider}`;
+function automationRuntimeKeyForSelection(selection: RuntimeSelection): string {
+  return `${selection.kind}:${runtimeBackendForSelection(selection)}:${selection.source ?? ""}`;
+}
+
+function automationModelOptionKey(runtime: RuntimeStatus, model: string | undefined): string {
+  return `${automationRuntimeKey(runtime)}\u0000${model ?? ""}`;
+}
+
+function automationSelectionKey(selection: RuntimeSelection): string {
+  return [
+    selection.kind,
+    selection.backend ?? "",
+    selection.source ?? "",
+    selection.model ?? "",
+  ].join("\u0000");
+}
+
+function automationEffortsFor(
+  runtime: RuntimeStatus | null | undefined,
+  modelId: string | undefined,
+): Array<{ id: string; label: string }> {
+  const perModel = modelId ? runtime?.allocationModelProfiles?.[modelId]?.efforts : undefined;
+  if (perModel && perModel.length > 0) {
+    return perModel.map((id) => ({ id, label: automationEffortLabel(id) }));
+  }
+  return runtime?.efforts ?? [];
+}
+
+function automationEffortLabel(id: string): string {
+  const known: Record<string, string> = {
+    none: "None",
+    minimal: "Minimal",
+    low: "Low",
+    medium: "Medium",
+    high: "High",
+    xhigh: "XHigh",
+    max: "Max",
+    ultra: "Ultra",
+  };
+  return known[id] ?? id.charAt(0).toUpperCase() + id.slice(1);
 }
 
 export default function NewAutomationWrapper() {
@@ -80,7 +114,7 @@ function NewAutomationPage() {
   const [toolMode, setToolMode] = useState<AutomationToolMode>("auto");
   // 빈 문자열 = "활성 런타임 따라가기"(runtimeSelection null). 그 외에는 kind:backend:source 키.
   const [runtimeKey, setRuntimeKey] = useState("");
-  const [runtimeModel, setRuntimeModel] = useState("");
+  const [runtimeSelectionDraft, setRuntimeSelectionDraft] = useState<RuntimeSelection | null>(null);
   const [runtimeTouched, setRuntimeTouched] = useState(false);
   const [runtimeOptions, setRuntimeOptions] = useState<RuntimeStatus[]>([]);
   const [runtimeModels, setRuntimeModels] = useState<Record<string, Array<{ id: string; label: string; tag?: string }>>>({});
@@ -157,8 +191,8 @@ function NewAutomationPage() {
           setTriggerType(existing.triggerType ?? "schedule");
           setToolMode(existing.toolMode ?? "auto");
           const sel = existing.runtimeSelection;
-          setRuntimeKey(sel ? `${sel.kind}:${sel.backend}:${sel.source}` : "");
-          setRuntimeModel(sel?.model ?? "");
+          setRuntimeKey(sel ? automationRuntimeKeyForSelection(sel) : "");
+          setRuntimeSelectionDraft(sel ?? null);
           setToolModeTouched(true);
           setHubMode(existing.hubMode ?? "hub-allowed");
           setInitialSpec(existing.scheduleSpec ?? null);
@@ -179,7 +213,9 @@ function NewAutomationPage() {
     if (!loaded || typeof window === "undefined" || window.location.hash !== "#execution-ai") return;
     const frame = window.requestAnimationFrame(() => {
       executionAiRef.current?.scrollIntoView({ behavior: "auto", block: "center" });
-      executionAiRef.current?.querySelector<HTMLElement>("[data-automation-runtime-select]")?.focus({ preventScroll: true });
+      executionAiRef.current
+        ?.querySelector<HTMLElement>("[data-testid='runtime-model-picker'], [data-automation-role-default]")
+        ?.focus({ preventScroll: true });
     });
     return () => window.cancelAnimationFrame(frame);
   }, [loaded]);
@@ -277,21 +313,32 @@ function NewAutomationPage() {
       // 따라가는 것이 기본) 값이 있을 때만 싣고, 편집은 null 로 "따라가기"로 되돌릴 수 있다.
       const pickedRuntime = runtimeKey
         ? runtimeOptions.find((r) => `${r.kind}:${r.backend}:${r.source}` === runtimeKey)
+          ?? (runtimeSelectionDraft
+            ? runtimeOptions.find((runtime) => (
+                runtime.kind === runtimeSelectionDraft.kind
+                && runtime.backend === runtimeBackendForSelection(runtimeSelectionDraft)
+                && (!runtimeSelectionDraft.source || runtime.source === runtimeSelectionDraft.source)
+              ))
+            : undefined)
         : undefined;
-      const pickedModel = runtimeModel.trim() || undefined;
+      const pickedSelection = runtimeSelectionDraft;
+      const runtimeSelection = runtimeKey
+        ? pickedRuntime
+          ? {
+              kind: pickedRuntime.kind,
+              backend: pickedRuntime.backend,
+              source: pickedRuntime.source,
+              ...(pickedSelection?.model?.trim() ? { model: pickedSelection.model.trim() } : {}),
+              ...(pickedSelection?.effort?.trim() ? { effort: pickedSelection.effort.trim() } : {}),
+            }
+          : pickedSelection
+        : null;
       if (editId) {
         await api.automations.update(editId, {
           ...commonPatch,
           ...(runtimeTouched
             ? {
-                runtimeSelection: pickedRuntime
-                  ? {
-                      kind: pickedRuntime.kind,
-                      backend: pickedRuntime.backend,
-                      source: pickedRuntime.source,
-                      ...(pickedModel ? { model: pickedModel } : {}),
-                    }
-                  : null,
+                runtimeSelection,
               }
             : {}),
         });
@@ -300,14 +347,9 @@ function NewAutomationPage() {
       }
       const created = await api.automations.create({
         ...commonPatch,
-        ...(runtimeTouched && pickedRuntime
+        ...(runtimeTouched && runtimeSelection
           ? {
-              runtimeSelection: {
-                kind: pickedRuntime.kind,
-                backend: pickedRuntime.backend,
-                source: pickedRuntime.source,
-                ...(pickedModel ? { model: pickedModel } : {}),
-              },
+              runtimeSelection,
             }
           : {}),
       });
@@ -323,14 +365,118 @@ function NewAutomationPage() {
     }
   }
 
-  const selectedRuntime = runtimeOptions.find((runtime) => automationRuntimeKey(runtime) === runtimeKey);
-  const selectedRuntimeModels = selectedRuntime ? runtimeModels[runtimeKey] ?? [] : [];
-  const modelRows = selectedRuntime?.model && !selectedRuntimeModels.some((model) => model.id === selectedRuntime.model)
-    ? [{ id: selectedRuntime.model, label: selectedRuntime.model }, ...selectedRuntimeModels]
-    : selectedRuntimeModels;
-  const defaultModelAllowed = selectedRuntime
-    ? selectedRuntime.kind !== "byok" && !["ollama", "lmstudio", "mlx", "agentlas"].includes(selectedRuntime.kind)
-    : false;
+  const selectedSelection = runtimeSelectionDraft;
+  const selectedRuntime = runtimeKey
+    ? runtimeOptions.find((runtime) => automationRuntimeKey(runtime) === runtimeKey)
+      ?? (selectedSelection
+        ? runtimeOptions.find((runtime) => (
+            runtime.kind === selectedSelection.kind
+            && runtime.backend === runtimeBackendForSelection(selectedSelection)
+            && (!selectedSelection.source || runtime.source === selectedSelection.source)
+          ))
+        : undefined)
+    : undefined;
+  const modelOptions = useMemo<RuntimeModelPickerOption[]>(() => {
+    const options: RuntimeModelPickerOption[] = [];
+    for (const runtime of runtimeOptions) {
+      const key = automationRuntimeKey(runtime);
+      const models = runtimeModels[key] ?? (runtime.availableModels ?? []).map((id) => ({ id, label: id }));
+      if (runtime.kind !== "byok" && !["ollama", "lmstudio", "mlx", "agentlas"].includes(runtime.kind)) {
+        options.push({
+          key: automationModelOptionKey(runtime, undefined),
+          label: "",
+          runtime,
+          isDefault: true,
+        });
+      }
+      for (const model of models) {
+        options.push({
+          key: automationModelOptionKey(runtime, model.id),
+          model: model.id,
+          label: model.label,
+          tag: model.tag,
+          runtime,
+        });
+      }
+      if (models.length === 0 && runtime.model) {
+        options.push({
+          key: automationModelOptionKey(runtime, runtime.model),
+          model: runtime.model,
+          label: runtime.model,
+          runtime,
+        });
+      }
+    }
+
+    if (selectedSelection) {
+      const currentRuntime = runtimeOptions.find((runtime) => (
+        runtime.kind === selectedSelection.kind
+        && runtime.backend === runtimeBackendForSelection(selectedSelection)
+        && (!selectedSelection.source || runtime.source === selectedSelection.source)
+      ));
+      const currentKey = currentRuntime
+        ? automationModelOptionKey(currentRuntime, selectedSelection.model)
+        : `unavailable\u0000${automationSelectionKey(selectedSelection)}`;
+      if (!options.some((option) => option.key === currentKey)) {
+        options.unshift({
+          key: currentKey,
+          model: selectedSelection.model,
+          label: selectedSelection.model ?? (locale === "ko" ? "저장된 모델" : "Stored model"),
+          runtime: currentRuntime ?? {
+            kind: selectedSelection.kind,
+            backend: runtimeBackendForSelection(selectedSelection),
+            source: selectedSelection.source ?? "unavailable",
+            version: null,
+            active: false,
+          },
+          unavailable: true,
+        });
+      }
+    }
+    return options;
+  }, [locale, runtimeModels, runtimeOptions, selectedSelection]);
+  const selectedModelValue = selectedSelection && selectedRuntime
+    ? automationModelOptionKey(selectedRuntime, selectedSelection.model)
+    : selectedSelection
+      ? `unavailable\u0000${automationSelectionKey(selectedSelection)}`
+      : "";
+  const selectedEfforts = automationEffortsFor(selectedRuntime, selectedSelection?.model);
+  const selectedEffort = selectedSelection?.effort && (
+    selectedEfforts.length === 0 || selectedEfforts.some((effort) => effort.id === selectedSelection.effort)
+  )
+    ? selectedSelection.effort
+    : "";
+
+  function selectAutomationModel(option: RuntimeModelPickerOption) {
+    setRuntimeTouched(true);
+    const currentEffort = runtimeSelectionDraft?.effort;
+    const nextEfforts = automationEffortsFor(option.runtime, option.model);
+    const nextEffort = option.model && currentEffort && nextEfforts.some((effort) => effort.id === currentEffort)
+      ? currentEffort
+      : undefined;
+    setRuntimeKey(automationRuntimeKey(option.runtime));
+    setRuntimeSelectionDraft({
+      kind: option.runtime.kind,
+      backend: option.runtime.backend,
+      source: option.runtime.source,
+      ...(option.model ? { model: option.model } : {}),
+      ...(nextEffort ? { effort: nextEffort } : {}),
+    });
+  }
+
+  function useAutomationRoleDefault() {
+    setRuntimeTouched(true);
+    setRuntimeKey("");
+    setRuntimeSelectionDraft(null);
+  }
+
+  function changeAutomationEffort(effort: string) {
+    setRuntimeTouched(true);
+    setRuntimeSelectionDraft((current) => current
+      ? { ...current, ...(effort ? { effort } : { effort: undefined }) }
+      : current);
+  }
+
   const canSubmit = !!name.trim() && !!targetId && !!projectContextChoice && !busy;
 
   return (
@@ -500,58 +646,94 @@ function NewAutomationPage() {
           )}
         </Field>
 
-        {/* ★어떤 AI가 이 자동화를 돌리는지. 값은 예전부터 자동화마다 저장되고 있었는데(runtime_selection_json)
-            자동화 화면 어디에도 보이지도 바꾸지도 못했다 — 사용자가 대시보드나 채팅에서 런타임을 바꿔도
-            자동화는 자기 것을 계속 썼고, 그 사실이 화면에 없어 "바꿨는데 왜 그대로냐"가 됐다(오너 실측). */}
+        {/* 자동화의 exact pin은 역할 풀과 별개로 실행된다. 모델 picker만 런타임을
+            결정하고, provider/engine은 같은 선택의 읽기 전용 identity로 보여 준다. */}
         <div ref={executionAiRef} id="execution-ai" data-testid="execution-ai-field" style={{ scrollMarginBlock: 24 }}>
           <Field label={locale === "ko" ? "실행 AI" : "Run with"}>
-            <select
-              data-automation-runtime-select
-              value={runtimeKey}
-              onChange={(e) => {
-                setRuntimeTouched(true);
-                const nextKey = e.target.value;
-                const nextRuntime = runtimeOptions.find((runtime) => automationRuntimeKey(runtime) === nextKey);
-                setRuntimeKey(nextKey);
-                setRuntimeModel(nextRuntime?.model ?? "");
-              }}
-              style={inputStyle}
+            <div
+              data-testid="automation-runtime-mode"
+              role="group"
+              aria-label={locale === "ko" ? "자동화 실행 AI 선택 방식" : "Automation execution AI mode"}
+              style={{ display: "grid", gap: 8 }}
             >
-              <option value="">
-                {locale === "ko" ? "역할 기본값 사용 · Worker 풀 우선순위·fallback" : "Role default · Worker pool priority + fallback"}
-              </option>
-              {runtimeOptions.map((r) => (
-                <option key={automationRuntimeKey(r)} value={automationRuntimeKey(r)}>
-                  {automationRuntimeLabel(r)}
-                  {r.version ? ` (${r.version})` : ""}
-                  {r.active ? (locale === "ko" ? " · 현재 활성" : " · active now") : ""}
-                </option>
-              ))}
-            </select>
-            {runtimeKey && selectedRuntime && (modelRows.length > 0 || runtimeModel) && (
-              <label style={{ display: "grid", gap: 6, marginTop: 10 }}>
-                <span style={{ fontSize: 12, fontWeight: 600, color: "var(--ink-soft)" }}>{locale === "ko" ? "모델" : "Model"}</span>
-                <select
-                  data-automation-model-select
-                  value={runtimeModel}
-                  onChange={(event) => { setRuntimeTouched(true); setRuntimeModel(event.target.value); }}
-                  style={inputStyle}
-                  disabled={modelRows.length === 0}
+              <ChoiceBtn
+                active={!runtimeKey}
+                onClick={useAutomationRoleDefault}
+                label={locale === "ko" ? "역할 기본값 사용" : "Use role default"}
+                detail={locale === "ko" ? "Worker 풀 우선순위와 fallback을 따릅니다." : "Follows Worker pool priority and fallback."}
+              />
+              {runtimeKey && (
+                <div
+                  data-testid="automation-runtime-identity"
+                  style={{
+                    display: "grid",
+                    gap: 5,
+                    padding: "10px 12px",
+                    border: "1px solid var(--accent-soft)",
+                    borderRadius: "var(--radius-md)",
+                    background: "var(--fill-1)",
+                  }}
                 >
-                  {defaultModelAllowed && <option value="">{locale === "ko" ? "공급자 기본 모델" : "Provider default"}</option>}
-                  {modelRows.map((model) => <option key={model.id} value={model.id}>{model.label}{model.tag ? ` · ${model.tag}` : ""}</option>)}
-                  {runtimeModel && !modelRows.some((model) => model.id === runtimeModel) && <option value={runtimeModel}>{runtimeModel} · {locale === "ko" ? "저장된 모델" : "stored"}</option>}
-                </select>
+                  <span style={{ fontSize: 11, color: "var(--muted-deep)" }}>{locale === "ko" ? "자동화별 고정 · 역할 기본보다 우선" : "Automation pin · overrides the role default"}</span>
+                  {selectedSelection && <RuntimeBrandIdentity runtime={selectedRuntime ?? null} selection={selectedSelection} locale={locale} />}
+                  <button
+                    type="button"
+                    onClick={useAutomationRoleDefault}
+                    style={{ ...secondaryBtn, justifySelf: "start", padding: "6px 10px", fontSize: 11 }}
+                  >
+                    {locale === "ko" ? "역할 기본값으로 돌아가기" : "Use role default instead"}
+                  </button>
+                </div>
+              )}
+            </div>
+            <label style={{ display: "grid", gap: 6, marginTop: 10 }}>
+              <span style={{ fontSize: 12, fontWeight: 600, color: "var(--ink-soft)" }}>{locale === "ko" ? "모델" : "Model"}</span>
+              <div data-automation-model-picker>
+                <RuntimeModelPicker
+                  ariaLabel={locale === "ko" ? "자동화 모델" : "Automation model"}
+                  placeholder={locale === "ko" ? "모델을 선택해 자동화별로 고정" : "Choose a model to pin this automation"}
+                  value={selectedModelValue}
+                  options={modelOptions}
+                  locale={locale}
+                  onSelect={selectAutomationModel}
+                />
+              </div>
+            </label>
+            {runtimeKey && selectedSelection && (
+              <label style={{ display: "grid", gap: 6, marginTop: 10 }}>
+                <span style={{ fontSize: 12, fontWeight: 600, color: "var(--ink-soft)" }}>{locale === "ko" ? "작업량" : "Effort"}</span>
+                {selectedEfforts.length > 0 || selectedSelection.effort ? (
+                  <select
+                    data-automation-effort-select
+                    aria-label={locale === "ko" ? "자동화 작업량" : "Automation effort"}
+                    value={selectedEffort}
+                    aria-invalid={selectedSelection.effort && selectedEffort === "" ? "true" : undefined}
+                    onChange={(event) => changeAutomationEffort(event.target.value)}
+                    style={inputStyle}
+                  >
+                    <option value="">{locale === "ko" ? "기본" : "Default"}</option>
+                    {selectedEfforts.map((effort) => <option key={effort.id} value={effort.id}>{effort.label}</option>)}
+                  </select>
+                ) : (
+                  <span data-testid="automation-effort-default" style={{ ...inputStyle, color: "var(--muted-deep)" }}>
+                    {locale === "ko" ? "기본" : "Default"}
+                  </span>
+                )}
               </label>
+            )}
+            {!runtimeKey && (
+              <p data-testid="automation-runtime-default-semantics" style={{ margin: "7px 0 0", color: "var(--muted-deep)", fontSize: 11, lineHeight: 1.5 }}>
+                {locale === "ko"
+                  ? "역할 기본값 사용: Worker 풀의 우선순위와 fallback을 따릅니다. 모델을 고르면 자동화별 고정으로 전환됩니다."
+                  : "Role default follows the Worker pool priority and fallback. Choosing a model switches this automation to an exact pin."}
+              </p>
             )}
             <p data-testid="automation-runtime-semantics" style={{ margin: "7px 0 0", color: "var(--muted-deep)", fontSize: 11, lineHeight: 1.5 }}>
               {runtimeKey
                 ? (locale === "ko"
                   ? "자동화별 고정 · 역할 기본보다 우선합니다. 사용할 수 없으면 실행을 중단하며 다른 공급자로 바꾸지 않습니다."
                   : "Automation pin · overrides the role default. If unavailable, the run stops; it does not switch providers.")
-                : (locale === "ko"
-                  ? "역할 기본값 사용: Worker 풀의 우선순위와 fallback을 따릅니다."
-                  : "Role default: follows the Worker pool priority and fallback.")}
+                : null}
             </p>
           </Field>
         </div>

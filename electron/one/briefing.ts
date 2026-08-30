@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { automationRunNeedsAttention } from "../../shared/automation-attention";
 import { app } from "electron";
 import { listAutomations, listRunHistory } from "../store/automations";
 import { chatOriginSurface } from "../store/chats";
@@ -282,30 +283,43 @@ function projectDeadlineCandidate(
   };
 }
 
-function automationSeverity(status: AutomationRunRecord["status"]): 1 | 2 | 3 | 4 {
+type AutomationAttentionReason = "error" | "blocked" | "needs_input" | "partial" | "rejected";
+
+function automationAttentionReason(run: AutomationRunRecord): AutomationAttentionReason | null {
+  if (!automationRunNeedsAttention(run)) return null;
+  if (["error", "blocked", "needs_input", "partial"].includes(run.status)) {
+    return run.status as Exclude<AutomationAttentionReason, "rejected">;
+  }
+  if (run.outcome === "blocked" || run.outcome === "needs_input") return run.outcome;
+  return run.outcome === "rejected" ? "rejected" : null;
+}
+
+function automationSeverity(status: AutomationAttentionReason): 1 | 2 | 3 | 4 {
   if (status === "error" || status === "blocked") return 4;
-  if (status === "needs_input") return 3;
+  if (status === "needs_input" || status === "rejected") return 3;
   return status === "partial" ? 2 : 1;
 }
 
 function automationCandidate(automation: Automation, run: AutomationRunRecord, now: Date): OneProactiveBriefing | null {
-  if (!automation.enabled || run.status === "ok" || run.status === "skipped") return null;
+  if (!automation.enabled) return null;
+  const status = automationAttentionReason(run);
+  if (!status) return null;
   const observedAt = Number.isFinite(Date.parse(run.ranAt)) ? run.ranAt : null;
   if (!observedAt || now.getTime() - Date.parse(observedAt) > CANDIDATE_TTL_MS) return null;
   const name = safeLabel(automation.name, "Automation");
-  const statusLabel: Record<Exclude<AutomationRunRecord["status"], "ok" | "skipped">, string> = {
+  const statusLabel: Record<AutomationAttentionReason, string> = {
     error: "failed",
     blocked: "was blocked before completion",
     needs_input: "is waiting for input",
     partial: "finished only part of the work",
+    rejected: "finished, but its result did not meet the acceptance criteria",
   };
-  const status = run.status as Exclude<AutomationRunRecord["status"], "ok" | "skipped">;
   const severity = automationSeverity(status);
   return {
     contractVersion: ONE_BRIEFING_CONTRACT_VERSION,
     candidateId: candidateId("automation", automation.id, run.id),
     dedupeKey: `automation-run:${stableToken(automation.id, run.id)}`,
-    kind: status === "needs_input" ? "decision" : status === "partial" ? "anomaly" : "risk",
+    kind: status === "needs_input" ? "decision" : ["partial", "rejected"].includes(status) ? "anomaly" : "risk",
     reasonCode: `automation_${status}`,
     severity,
     source: { kind: "automation_run", refId: automation.id, label: name },
@@ -313,7 +327,7 @@ function automationCandidate(automation: Automation, run: AutomationRunRecord, n
     expiresAt: iso(new Date(Date.parse(observedAt) + CANDIDATE_TTL_MS)),
     confidence: {
       level: "high",
-      basis: "The status comes from the durable scheduler run receipt; One does not infer external completion.",
+      basis: "The execution status and result outcome come from the durable scheduler run receipt; One does not infer external completion.",
     },
     discovery: `${name} ${statusLabel[status]}.`,
     impact: automation.nextRunAt
@@ -327,7 +341,8 @@ function automationCandidate(automation: Automation, run: AutomationRunRecord, n
     },
     evidence: [
       { label: "Automation", value: name, observedAt, freshness: freshness(observedAt, now) },
-      { label: "Last run", value: status.replace("_", " "), observedAt, freshness: freshness(observedAt, now) },
+      { label: "Execution status", value: run.status.replace("_", " "), observedAt, freshness: freshness(observedAt, now) },
+      ...(run.outcome ? [{ label: "Result outcome", value: run.outcome.replace("_", " "), observedAt, freshness: freshness(observedAt, now) } as const] : []),
       ...(automation.nextRunAt && Number.isFinite(Date.parse(automation.nextRunAt))
         ? [{ label: "Next scheduled run", value: automation.nextRunAt, observedAt, freshness: freshness(observedAt, now) } as const]
         : []),

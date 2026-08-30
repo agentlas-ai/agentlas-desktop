@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.0.54 — 2026-08-30
+
+This release binds Agentlas OS v1.2.37 at
+2b169ba44742735d1ce7f550fefee071b70324fc. Its public runtime asset
+`hephaestus-runtime-v1.2.37.tar.gz` is pinned at SHA-256
+`50caf78a9c028fcf088039dd862753c25fbb9bed19df9fa248502b442dc306a6`.
+Source readiness does not prove a public installer or update feed; the Releases
+page stays the authority.
+
+- Dashboard and automation runtime controls now show provider and engine as a
+  read-only identity, while model and effort are the deliberate choices. Exact
+  automation pins are visible in the flow and run history, and do not mutate the
+  Worker role pool.
+- One keeps the New Agent draft behind a nested existing-agent picker until an
+  explicit confirmation. Canonical Browser binding collapses keyless Playwright
+  duplicates without granting custom servers the authenticated CDP, Telegram
+  transfer stays bounded, and growth proposal/completed/undo states are clear.
+- Graph exports now recursively template named secrets, block opaque nested
+  credentials, bind both graph and manifest digests, and preserve every MCP
+  node's ordered `requiredBy` set.
+- The production Surface renderer remains unavailable outside explicit QA, while
+  installer process matching and capability prefix matching stay fail-safe. Public
+  package commands no longer advertise private-only targets.
+
 ## 1.0.53 — 2026-08-29
 
 This release binds Agentlas OS v1.2.37 at
@@ -34,11 +58,29 @@ page stays the authority.
 - Automation headers expose a direct “모델 변경” action and distinguish role
   defaults (pool priority and fallback) from exact automation pins, which stop
   rather than silently switching providers.
+- Automation model editing now keeps provider and engine as read-only identity,
+  changes only the pinned model and effort, and shows the recorded model and
+  default effort in run history without changing the role pool.
 - One’s existing-agent picker now stays nested over the New Agent draft: a row
   only selects a candidate, and an explicit confirmation performs the add.
 - Canonical Agentlas Browser binding now collapses keyless Playwright duplicates
   before health probing, while explicit custom profiles and environment remain
   independent.
+- Antigravity runs now remove only stale Agentlas-owned keyless Playwright
+  proxies when the authenticated Browser is requested, so an old empty-profile
+  Chromium cannot survive in the global MCP registry across Desktop restarts.
+- Telegram Connect can explicitly import a Terminal-created binding into the
+  Desktop Keychain after polling has stopped. It accepts only the exact private
+  token file and matching fingerprint, never overwrites a different secret,
+  and removes the file only after Keychain readback and database recovery.
+- The raw Surface renderer remains available to explicit QA builds, but normal
+  production builds now return Not Found for its direct URL instead of exposing
+  the manifest editor to signed-in customers.
+- The dashboard organization tree now marks disconnected local sources and does
+  not report an already-absent source folder as a failed removal.
+- One now offers a generic read-only review for fresh automation/project alerts,
+  honors rejected or acknowledged run outcomes, and keeps each prepared
+  confirmation bound to the exact detector receipt without exposing private facts.
 
 ## 1.0.52 — 2026-08-29
 

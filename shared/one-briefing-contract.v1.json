@@ -39,6 +39,7 @@
     { "wire": "automation_blocked", "dart": "automationBlocked", "source": "automation_run" },
     { "wire": "automation_needs_input", "dart": "automationNeedsInput", "source": "automation_run" },
     { "wire": "automation_partial", "dart": "automationPartial", "source": "automation_run" },
+    { "wire": "automation_rejected", "dart": "automationRejected", "source": "automation_run" },
     { "wire": "task_waiting_decision_stale", "dart": "taskWaitingDecisionStale", "source": "canonical_task" },
     { "wire": "task_running_without_active_run", "dart": "taskRunningWithoutActiveRun", "source": "canonical_task" },
     { "wire": "task_failed_repeated", "dart": "taskFailedRepeated", "source": "canonical_task" },

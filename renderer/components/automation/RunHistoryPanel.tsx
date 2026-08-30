@@ -8,6 +8,11 @@ import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { askAutomationSession } from "@/components/automation/AutomationSessionPanel";
+import {
+  runtimeBackendForSelection,
+  runtimeEngineLabel,
+  runtimeProviderLabel,
+} from "@/components/dashboard/RuntimeModelPicker";
 import type {
   Automation,
   AutomationFixOption,
@@ -1127,24 +1132,17 @@ function formatDateTime(iso: string | null | undefined, ko: boolean): string {
 }
 
 function runtimeFactLabel(fact: WorkflowRunRuntimeFact, ko: boolean): string {
-  const kindLabels: Record<string, string> = {
-    "claude-code": "Claude Code",
-    codex: "Codex",
-    antigravity: "Antigravity",
-    kimi: "Kimi",
-    grok: "Grok",
-    cursor: "Cursor",
-    byok: "BYOK",
-    ollama: "Ollama",
-    lmstudio: "LM Studio",
-    mlx: "MLX",
-    acp: "ACP",
-    agentlas: "Agentlas",
-  };
   const selection = fact.selection;
-  const kind = kindLabels[selection.kind] ?? selection.kind;
+  const runtimeIdentity = {
+    kind: selection.kind,
+    backend: runtimeBackendForSelection(selection),
+    label: undefined,
+  } as const;
+  const provider = runtimeProviderLabel(runtimeIdentity);
+  const engine = runtimeEngineLabel(runtimeIdentity);
   const model = selection.model?.trim();
-  const runtime = model ? `${kind} · ${model}` : kind;
+  const effort = selection.effort?.trim() || (ko ? "기본" : "Default");
+  const runtime = `${provider} · ${engine} · ${model ?? (ko ? "공급자 기본 모델" : "Provider default")} · ${ko ? "작업량" : "effort"} ${effort}`;
   if (!fact.role) return runtime;
   const roleLabels: Record<string, string> = {
     worker: ko ? "워커" : "worker",

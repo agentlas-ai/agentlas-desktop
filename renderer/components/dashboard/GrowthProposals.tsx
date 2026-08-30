@@ -123,6 +123,26 @@ export function GrowthProposals() {
         <div className="dashboard-module-empty">{ko ? "불러오는 중…" : "Loading…"}</div>
       ) : (
         <>
+          {autoApplied.length > 0 && (
+            <div
+              role="note"
+              style={{
+                padding: "10px 14px",
+                borderBottom: "1px solid var(--border, rgba(120,120,120,0.2))",
+                fontSize: 12,
+                lineHeight: 1.5,
+                opacity: 0.72,
+              }}
+            >
+              {pending.length > 0
+                ? (ko
+                    ? "위 제안은 아직 선택 전이고, 아래 내역은 이미 학습이 반영된 성장입니다. 되돌리기는 성장 자체가 아니라 변경별 안전장치예요."
+                    : "The proposals above still need a choice. The items below are completed growth; undo is a per-change safety control, not the growth action itself.")
+                : (ko
+                    ? "새 승인이 필요한 제안은 없어요. 아래는 이미 학습이 반영된 성장 내역이며, 되돌리기는 변경별 안전장치예요."
+                    : "No proposals are awaiting approval. The items below are completed growth; undo is a per-change safety control.")}
+            </div>
+          )}
           {pending.map((proposal) => {
             const card = cardCopy(proposal);
             return (
@@ -177,7 +197,7 @@ export function GrowthProposals() {
               <div key={proposal.id} className="dashboard-module-row" style={{ alignItems: "start" }}>
                 <div className="dashboard-row-copy" style={{ display: "grid", gap: 3 }}>
                   <span style={{ opacity: 0.68, fontSize: 12 }}>
-                    {ko ? "이미 자동 반영됨" : "Already applied automatically"}
+                    {ko ? "성장 반영 완료 · 자동 적용" : "Growth completed · applied automatically"}
                   </span>
                   <strong>{card!.learned}</strong>
                   {card?.change && <div style={{ opacity: 0.78, fontSize: 13 }}>{card.change}</div>}
@@ -193,7 +213,7 @@ export function GrowthProposals() {
                     className="titlebar-nodrag"
                     data-dashboard-action="true"
                   >
-                    {ko ? "이 변경 되돌리기" : "Undo this change"}
+                    {ko ? "이 성장 변경만 되돌리기" : "Undo only this growth change"}
                   </button>
                 )}
               </div>

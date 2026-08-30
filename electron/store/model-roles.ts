@@ -291,12 +291,17 @@ export function setModelRoleMembers(
   replace();
   if (selections.length > 0) {
     setModelRole({ ...selections[0], role, inherit: false });
-  } else {
+  } else if (role === "worker") {
     // 빈 worker 풀 → v79 상속 행으로 미러(의미 동일: 오케스트레이터를 따른다).
     const orchestratorHead = listModelRoleMembers("orchestrator")[0];
     if (orchestratorHead) {
       setModelRole({ ...orchestratorHead.selection, role: "worker", inherit: true });
     }
+  } else {
+    // 멀티모달은 대화 역할처럼 오케스트레이터를 상속하지 않는다. 마지막 후보를
+    // 제거했는데 v79 단일 행을 남기면 Dashboard에는 빈 풀로 보이면서도
+    // generate_image는 이전 엔진을 계속 노출한다. 풀과 단일 정본을 함께 비운다.
+    db.prepare("DELETE FROM model_roles WHERE role = ?").run(role);
   }
   return listModelRoleMembers(role);
 }

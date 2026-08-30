@@ -34,6 +34,7 @@ function agentLibraryRoute(input: { agentId?: string; nodeId?: string; firmId?: 
 export function OrgTree() {
   const { locale, t } = useT();
   const ko = locale === "ko";
+  const missingSourceLabel = ko ? "원본 경로 연결 끊김" : "Source path disconnected";
   const [mode, setMode] = useState<Mode>("multi");
   const [query, setQuery] = useState("");
   const [agents, setAgents] = useState<InstalledAgent[]>(() => (
@@ -188,8 +189,10 @@ export function OrgTree() {
   // 경로 유무만으로 local로 분류하지 않는다. CEO가 visible 필터에서 빠져 map에 없을 수 있으므로
   // 로컬 임포트 firm(slug: firm-local-*) 이거나 조직도의 어떤 에이전트라도 로컬이면 로컬로 본다.
   const firmSource = (f: InstalledFirm): Source => {
+    const ceo = agentById.get(f.ceoAgentId);
+    if (ceo) return agentSource(ceo);
+    if (f.slug?.startsWith("firm-local-")) return "local";
     const sources = [
-      agentById.get(f.ceoAgentId),
       ...f.orgChart.map((node) => agentById.get(node.agentId)),
     ].filter(Boolean).map((agent) => agentSource(agent!));
     if (sources.includes("hub")) return "hub";
@@ -197,6 +200,17 @@ export function OrgTree() {
     if (sources.includes("local") || f.slug?.startsWith("firm-local-")) return "local";
     return "cloud";
   };
+
+  const firmSourceAgents = (firm: InstalledFirm): InstalledAgent[] =>
+    [firm.ceoAgentId, ...firm.orgChart.map((node) => node.agentId)]
+      .map((id) => agentById.get(id))
+      .filter((agent): agent is InstalledAgent => Boolean(agent));
+  const firmHasMissingSource = (firm: InstalledFirm): boolean =>
+    firmSourceAgents(firm).some((agent) => Boolean(agent.sourceMissingSince));
+  const firmHasExistingLocalSource = (firm: InstalledFirm): boolean =>
+    firmSourceAgents(firm).some((agent) =>
+      agentSource(agent) === "local" && Boolean(agent.localPath) && !agent.sourceMissingSince,
+    );
 
   const matches = (name: string) =>
     !query.trim() || name.toLowerCase().includes(query.trim().toLowerCase());
@@ -240,7 +254,7 @@ export function OrgTree() {
     if (source === "cloud") await api.marketplace.deleteMine(agent.slug);
     if (source === "hub") await api.marketplace.bookmarkRemove(agent.slug, agent.kind === "team" ? "team" : "agent");
     const result = await api.team.uninstall(agent.id, { removeSource: source === "local" });
-    if (source === "local" && !result.sourceMovedToTrash && agent.localPath) {
+    if (source === "local" && !result.sourceMovedToTrash && agent.localPath && !agent.sourceMissingSince) {
       throw new Error(ko ? "레지스트리는 제거됐지만 원본 폴더를 휴지통으로 옮기지 못했습니다." : "The registry was removed, but the original folder could not be moved to Trash.");
     }
   }
@@ -254,7 +268,7 @@ export function OrgTree() {
       removeMembers: true,
       removeSource: source === "local",
     });
-    if (source === "local" && !result.sourceMovedToTrash && controller?.localPath) {
+    if (source === "local" && !result.sourceMovedToTrash && firmHasExistingLocalSource(firm)) {
       throw new Error(ko ? "팀은 제거됐지만 원본 팀 폴더를 휴지통으로 옮기지 못했습니다." : "The team was removed, but its source folder could not be moved to Trash.");
     }
     if (result.retainedAgentIds?.length) {
@@ -457,7 +471,9 @@ export function OrgTree() {
               )}
 
               {open &&
-                cf.filter((f) => matches(dn(f))).map((f) => (
+                cf.filter((f) => matches(dn(f))).map((f) => {
+                  const sourceMissing = firmHasMissingSource(f);
+                  return (
                   <div key={f.id}>
                     <div className="dashboard-org-rowwrap">
                       <button
@@ -470,6 +486,7 @@ export function OrgTree() {
                           {dn(f)}
                         </span>
                         <span className="dashboard-org-count">{t("org.kind.multi")}</span>
+                        {sourceMissing && <SourceMissingBadge label={missingSourceLabel} />}
                       </button>
                       <button
                         type="button"
@@ -481,9 +498,10 @@ export function OrgTree() {
                         ×
                       </button>
                     </div>
-                    {openFirms[f.id] && <FirmBody org={orgs[f.id]} firmId={f.id} t={t} />}
+                    {openFirms[f.id] && <FirmBody org={orgs[f.id]} firmId={f.id} t={t} agentById={agentById} missingSourceLabel={missingSourceLabel} />}
                   </div>
-                ))}
+                  );
+                })}
 
               {open &&
                 ca.filter((a) => matches(dn(a))).map((a) => {
@@ -497,6 +515,7 @@ export function OrgTree() {
                         <Dot />
                         <span className="dashboard-org-label">{dn(a)}</span>
                         <span className="dashboard-org-count">{entityClassShortLabel(entityClass, locale)}</span>
+                        {a.sourceMissingSince && <SourceMissingBadge label={missingSourceLabel} />}
                       </button>
                     <button
                         type="button"
@@ -657,6 +676,19 @@ function Chevron({ open, small }: { open: boolean; small?: boolean }) {
   );
 }
 
+function SourceMissingBadge({ label }: { label: string }) {
+  return (
+    <span
+      className="dashboard-org-count"
+      data-source-missing="true"
+      style={{ color: "var(--rd-err)", fontWeight: 700 }}
+      title={label}
+    >
+      {label}
+    </span>
+  );
+}
+
 function Dot() {
   return <span className="dashboard-org-dot" />;
 }
@@ -665,7 +697,19 @@ function Dot() {
 //   · 시스템/인프라 노드(오케스트레이터·PM 소울·큐레이터·폴리시게이트·Eval QA 등)는 제거.
 //   · 본부(division)에 하위 에이전트(specialists)가 있을 때만 "HQ"로 표시하고 그 아래 에이전트를 분해.
 //   · 하위가 없는 노드는 HQ가 아니라 회사 직속 "에이전트"로 표시(HQ 태그 없음).
-function FirmBody({ org, firmId, t }: { org: ResolvedOrg | null | undefined; firmId: string; t: OrgTreeTranslate }) {
+function FirmBody({
+  org,
+  firmId,
+  t,
+  agentById,
+  missingSourceLabel,
+}: {
+  org: ResolvedOrg | null | undefined;
+  firmId: string;
+  t: OrgTreeTranslate;
+  agentById: Map<string, InstalledAgent>;
+  missingSourceLabel: string;
+}) {
   if (org === undefined) {
     return (
       <div className="dashboard-org-empty dashboard-org-deep">
@@ -699,28 +743,36 @@ function FirmBody({ org, firmId, t }: { org: ResolvedOrg | null | undefined; fir
             <span>{hq.name}</span>
             <span>HQ</span>
           </div>
-          {hq.agents.map((a) => (
-            <button
-              key={a.id}
-              onClick={() => navigate(agentLibraryRoute({ agentId: a.agentId, nodeId: a.id, firmId }))}
-              className="dashboard-org-row dashboard-org-agent dashboard-org-agent-deep"
-            >
-              <Dot />
-              <span className="dashboard-org-label">{a.name}</span>
-            </button>
-          ))}
+          {hq.agents.map((a) => {
+            const sourceMissing = Boolean(a.agentId && agentById.get(a.agentId)?.sourceMissingSince);
+            return (
+              <button
+                key={a.id}
+                onClick={() => navigate(agentLibraryRoute({ agentId: a.agentId, nodeId: a.id, firmId }))}
+                className="dashboard-org-row dashboard-org-agent dashboard-org-agent-deep"
+              >
+                <Dot />
+                <span className="dashboard-org-label">{a.name}</span>
+                {sourceMissing && <SourceMissingBadge label={missingSourceLabel} />}
+              </button>
+            );
+          })}
         </div>
       ))}
-      {direct.map((a) => (
-        <button
-          key={a.id}
-          onClick={() => navigate(agentLibraryRoute({ agentId: a.agentId, nodeId: a.id, firmId }))}
-          className="dashboard-org-row dashboard-org-agent dashboard-org-agent-mid"
-        >
-          <Dot />
-          <span className="dashboard-org-label">{a.name}</span>
-        </button>
-      ))}
+      {direct.map((a) => {
+        const sourceMissing = Boolean(a.agentId && agentById.get(a.agentId)?.sourceMissingSince);
+        return (
+          <button
+            key={a.id}
+            onClick={() => navigate(agentLibraryRoute({ agentId: a.agentId, nodeId: a.id, firmId }))}
+            className="dashboard-org-row dashboard-org-agent dashboard-org-agent-mid"
+          >
+            <Dot />
+            <span className="dashboard-org-label">{a.name}</span>
+            {sourceMissing && <SourceMissingBadge label={missingSourceLabel} />}
+          </button>
+        );
+      })}
     </>
   );
 }

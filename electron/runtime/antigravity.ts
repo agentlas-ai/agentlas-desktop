@@ -22,6 +22,12 @@ import { parseAgyModels, unsupportedDiscovery, type DiscoveryOutcome } from "../
 import { settleDiscovery } from "./model-discovery-store";
 import { getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions";
 import { createHash } from "node:crypto";
+import {
+  MCP_PROXY_CONTROL_FILE_ENV,
+  MCP_PROXY_SERVER_KEY_ENV,
+  MCP_PROXY_SESSION_ENV,
+  MCP_PROXY_TARGET_ENV,
+} from "../mcp-tools/proxy-channel";
 
 /**
  * 중지 사유를 그대로 전한다. 중지는 사람이 누른 것 외에도 무활동 워치독·단계 시간 초과·
@@ -465,6 +471,73 @@ interface AgyMcpServerEntry {
 }
 
 /**
+ * A previous Desktop process can leave its Agentlas-owned entry in agy's
+ * process-wide config after the run itself has settled. In particular, the old
+ * keyless Playwright duplicate then keeps an empty-profile Chromium alive even
+ * though the next Graph run selected the authenticated Agentlas Browser.
+ *
+ * Only recognise the exact Agentlas proxy envelope and inspect its value-free
+ * launch shape. A user-owned Playwright entry, a server with credentials, or an
+ * explicit profile is never classified as ours and is never pruned.
+ */
+export function isStaleAgentlasPlaywrightProxyEntry(entry: AgyMcpServerEntry): boolean {
+  if (!entry.command || path.resolve(entry.command) !== path.resolve(process.execPath)) return false;
+  if (!Array.isArray(entry.args) || entry.args.length !== 1 || path.basename(entry.args[0] ?? "") !== "proxy-child.cjs") {
+    return false;
+  }
+  const env = entry.env;
+  if (!env || env.ELECTRON_RUN_AS_NODE !== "1") return false;
+  if (
+    typeof env[MCP_PROXY_CONTROL_FILE_ENV] !== "string" ||
+    typeof env[MCP_PROXY_SERVER_KEY_ENV] !== "string" ||
+    typeof env[MCP_PROXY_SESSION_ENV] !== "string" ||
+    typeof env[MCP_PROXY_TARGET_ENV] !== "string"
+  ) return false;
+
+  let target: { command?: unknown; args?: unknown; env?: unknown };
+  try {
+    target = JSON.parse(env[MCP_PROXY_TARGET_ENV]);
+  } catch {
+    return false;
+  }
+  if (typeof target.command !== "string" || !Array.isArray(target.args)) return false;
+  let command = path.basename(target.command).toLowerCase();
+  let args = target.args.filter((arg): arg is string => typeof arg === "string");
+  if (args.length !== target.args.length) return false;
+  let targetEnv = target.env;
+  // mcp-config runs external stdio servers through the least-privilege child
+  // wrapper before the approval proxy. Unwrap only that exact value-free
+  // envelope; a non-empty vault mapping means the server has credentials and
+  // therefore is not the disposable duplicate handled here.
+  if (
+    path.resolve(target.command) === path.resolve(process.execPath) &&
+    args.length >= 5 &&
+    path.basename(args[0] ?? "") === "mcp-child-env-wrapper.cjs"
+  ) {
+    let mapping: unknown;
+    try {
+      mapping = JSON.parse(args[2] ?? "");
+    } catch {
+      return false;
+    }
+    if (!mapping || typeof mapping !== "object" || Array.isArray(mapping) || Object.keys(mapping).length > 0) return false;
+    if (!targetEnv || typeof targetEnv !== "object" || Array.isArray(targetEnv)) return false;
+    if (Object.keys(targetEnv).some((key) => key !== "ELECTRON_RUN_AS_NODE")) return false;
+    if ((targetEnv as Record<string, unknown>).ELECTRON_RUN_AS_NODE !== "1") return false;
+    command = path.basename(args[3] ?? "").toLowerCase();
+    args = args.slice(4);
+    targetEnv = {};
+  }
+  if (targetEnv && (typeof targetEnv !== "object" || Array.isArray(targetEnv) || Object.keys(targetEnv).length > 0)) return false;
+  if (command !== "npx" && command !== "npx.cmd" && command !== "node" && command !== "node.exe") return false;
+  if (args.some((arg) => arg === "--user-data-dir" || arg.startsWith("--user-data-dir="))) return false;
+  const packageToken = /^@playwright\/mcp(?:@[^\s]+)?$/i;
+  return command === "npx" || command === "npx.cmd"
+    ? args.some((arg) => packageToken.test(arg.trim()))
+    : args.some((arg) => /(?:^|[\\/])@playwright[\\/]mcp(?:[\\/]|$)/i.test(arg));
+}
+
+/**
  * 이 실행이 승인받은 MCP 서버들을 agy 전역 설정에 **더하고**, 실행이 끝나면 우리가
  * 더한 키만 되돌린다 — grok 러너의 `grok mcp add/remove` 리컨실과 같은 계약이다.
  *
@@ -513,6 +586,18 @@ async function reconcileAgyMcpServers(
     await fs.rename(tmp, globalPath);
   };
 
+  const requestedKeys = new Set(entries.map(([key]) => key));
+  const canonicalBrowserRequested = requestedKeys.has("agentlas-browser");
+  let globalDirty = false;
+  if (canonicalBrowserRequested) {
+    for (const [key, server] of Object.entries(parsed.mcpServers)) {
+      if (requestedKeys.has(key) || AGY_MCP_REFCOUNT.has(key)) continue;
+      if (!isStaleAgentlasPlaywrightProxyEntry(server)) continue;
+      delete parsed.mcpServers[key];
+      globalDirty = true;
+    }
+  }
+
   const added: string[] = [];
   for (const [key, server] of entries) {
     if (parsed.mcpServers[key]) {
@@ -550,13 +635,14 @@ async function reconcileAgyMcpServers(
     added.push(key);
     AGY_MCP_REFCOUNT.set(key, (AGY_MCP_REFCOUNT.get(key) ?? 0) + 1);
   }
-  if (added.length === 0) return noop;
+  if (added.length === 0 && !globalDirty) return noop;
   try {
     await writeGlobal(parsed);
   } catch (error) {
     onStatus(`antigravity: could not stage MCP servers (${error instanceof Error ? error.message : String(error)}) — running without MCP tools`);
     return noop;
   }
+  if (added.length === 0) return noop;
   return {
     cleanup: async () => {
       try {

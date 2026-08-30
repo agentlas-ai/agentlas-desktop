@@ -614,6 +614,7 @@ import {
   cloneTelegramConnection,
   configureTelegramBotSettings,
   connectTelegramToOne,
+  importTerminalTelegramConnection,
   listTelegramBindings,
   openTelegramBot,
   pruneOrphanedTelegramBindings,
@@ -3462,6 +3463,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("telegram:autoConnect", (_e, input) => autoConnectTelegram(input));
   ipcMain.handle("telegram:start", (_e, input) => startTelegramConnection(input));
   ipcMain.handle("telegram:clone", (_e, input) => cloneTelegramConnection(input));
+  ipcMain.handle("telegram:importTerminal", (_e, id: string) => importTerminalTelegramConnection(id));
   ipcMain.handle("telegram:resume", (_e, id: string) => resumeTelegramConnection(id));
   ipcMain.handle("telegram:stop", (_e, id: string) => stopTelegramConnection(id));
   ipcMain.handle("telegram:remove", (_e, id: string, deleteBot?: boolean) => removeTelegramConnection(id, deleteBot === true));

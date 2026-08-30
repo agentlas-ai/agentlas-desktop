@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "1.0.53",
+  "version": "1.0.54",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Antigravity 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -117,7 +117,7 @@
     "graph:map": "node scripts/gen-graph-map.cjs",
     "test:approval-never-blocks": "npm run build:electron && electron scripts/approval-never-blocks-contract.mjs",
     "test:right-panel-artifacts": "npm run build:electron && node scripts/right-panel-artifacts-contract.mjs",
-    "qa:live-renderers": "npm run build:electron && npm run build:renderer && electron scripts/qa-live-renderers-electron.cjs",
+    "qa:live-renderers": "npm run build:electron && cross-env NEXT_PUBLIC_AGENTLAS_QA_SURFACES=1 npm run build:renderer && electron scripts/qa-live-renderers-electron.cjs",
     "test:store-isolation": "node scripts/store-isolation-contract.mjs",
     "build:model-catalog-snapshot": "node scripts/build-model-catalog-snapshot.cjs",
     "test:effort-per-model": "node scripts/effort-per-model-contract.mjs",

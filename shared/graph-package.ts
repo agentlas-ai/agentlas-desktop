@@ -2,8 +2,8 @@ import { nodeDeclaresOutwardEffect } from "./graph-node-protocol";
 /**
  * `.agentgraph` 패키징 — 그래프를 **남에게 줄 수 있는 형태**로 만든다.
  *
- * 계약 두 줄(터미널 `engine/graph/package.cjs`와 글자 단위로 같은 규칙이며,
- * `scripts/test-graph-package-parity.cjs`가 두 벌이 같은 판단을 하는지 대조한다):
+ * 계약 두 줄(터미널 `engine/graph/package.cjs`도 이 규칙을 따라야 하며,
+ * 두 구현의 parity를 유지하는 경계):
  *  1) 지울 수 없는 비밀이 하나라도 남으면 **내보내지 않는다**. 몰래 지우고 통과시키면
  *     사용자는 자기 키가 빠진 줄 알고 공유하게 된다.
  *  2) 모델 고정은 유통될 수 없다. 받는 사람의 기본 모델로 돌아야 하므로 등급 힌트로 바꾼다.
@@ -56,12 +56,73 @@ export interface GraphVaultEntry {
   sourceField: string;
 }
 
-function vaultKeyFor(key: string): string {
-  return String(key).replace(/[^A-Za-z0-9]+/g, "_").toUpperCase();
+function vaultKeyFor(fieldPath: string): string {
+  return String(fieldPath).replace(/[^A-Za-z0-9]+/g, "_").toUpperCase();
 }
 
 function looksSecretValue(value: unknown): boolean {
   return typeof value === "string" && SECRET_VALUE_PATTERNS.some((re) => re.test(value));
+}
+
+interface ScrubState {
+  findings: GraphScrubFinding[];
+  vaultTemplate: GraphVaultEntry[];
+  blockers: GraphPackageBlocker[];
+}
+
+function scrubNestedConfigValue(nodeId: string, fieldPath: string, value: unknown, state: ScrubState): unknown {
+  if (looksSecretValue(value)) {
+    state.blockers.push({
+      nodeId,
+      field: fieldPath,
+      reason: `"${fieldPath}" 값이 자격증명처럼 보입니다. 어떤 키인지 알 수 없어 자동으로 빈칸 처리할 수 없습니다.`,
+      nextAction: `이 값을 금고 변수로 바꾼 뒤(예: \${vault.MY_TOKEN}) 다시 내보내세요.`,
+    });
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item, index) => scrubNestedConfigValue(nodeId, `${fieldPath}[${index}]`, item, state));
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+
+  const out: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value)) {
+    const childPath = fieldPath ? `${fieldPath}.${key}` : key;
+    // Secret key names are authoritative at every JSON nesting level. This keeps
+    // an object such as { options: { token: "..." } } from crossing the package
+    // boundary as raw credential material.
+    if (SECRET_KEY_RE.test(key)) {
+      const vaultKey = vaultKeyFor(childPath);
+      out[key] = `\${vault.${vaultKey}}`;
+      state.vaultTemplate.push({ key: vaultKey, kind: "secret", requiredBy: [nodeId], sourceField: childPath });
+      state.findings.push({ rule: "secret-field", nodeId, field: childPath, action: `templated:${vaultKey}` });
+      continue;
+    }
+    if (looksSecretValue(child)) {
+      state.blockers.push({
+        nodeId,
+        field: childPath,
+        reason: `"${childPath}" 값이 자격증명처럼 보입니다. 어떤 키인지 알 수 없어 자동으로 빈칸 처리할 수 없습니다.`,
+        nextAction: `이 값을 금고 변수로 바꾼 뒤(예: \${vault.MY_TOKEN}) 다시 내보내세요.`,
+      });
+      out[key] = child;
+      continue;
+    }
+    if (typeof child === "string") {
+      PERSONAL_PATH_RE.lastIndex = 0;
+      if (PERSONAL_PATH_RE.test(child)) {
+        PERSONAL_PATH_RE.lastIndex = 0;
+        out[key] = child.replace(PERSONAL_PATH_RE, "<사용자 폴더>");
+        PERSONAL_PATH_RE.lastIndex = 0;
+        state.findings.push({ rule: "personal-path", nodeId, field: childPath, action: "removed" });
+        continue;
+      }
+    }
+    out[key] = scrubNestedConfigValue(nodeId, childPath, child, state);
+  }
+  return out;
 }
 
 export function scrubNodeConfig(nodeId: string, config: Record<string, unknown> | undefined): {
@@ -108,7 +169,7 @@ export function scrubNodeConfig(nodeId: string, config: Record<string, unknown> 
       PERSONAL_PATH_RE.lastIndex = 0;
       continue;
     }
-    out[key] = value;
+    out[key] = scrubNestedConfigValue(nodeId, key, value, { findings, vaultTemplate, blockers });
   }
   return { config: out, findings, vaultTemplate, blockers };
 }
@@ -197,8 +258,13 @@ export function buildGraphPackage(input: {
       }
     }
     const server = cfg?.mcpServer;
-    if (typeof server === "string" && server && !dependencies.mcp.some((m) => m.serverSlug === server)) {
-      dependencies.mcp.push({ serverSlug: server, requiredBy: [node.id] });
+    if (typeof server === "string" && server) {
+      const existingMcp = dependencies.mcp.find((m) => m.serverSlug === server);
+      if (existingMcp) {
+        if (!existingMcp.requiredBy.includes(node.id)) existingMcp.requiredBy.push(node.id);
+      } else {
+        dependencies.mcp.push({ serverSlug: server, requiredBy: [node.id] });
+      }
     }
   }
 
@@ -283,10 +349,19 @@ export function verifyGraphPackage(pkg: unknown): string[] {
   if (!graph || !Array.isArray(graph.nodes) || graph.nodes.length === 0) {
     problems.push("그래프에 단계가 없습니다.");
   }
-  if (manifest?.integrity?.graphDigest && graph) {
-    if (graphDigestOf(graph) !== manifest.integrity.graphDigest) {
+  const integrity = manifest?.integrity;
+  if (integrity && typeof integrity.graphDigest === "string" && graph) {
+    if (graphDigestOf(graph) !== integrity.graphDigest) {
       problems.push("그래프 내용이 매니페스트 지문과 다릅니다(전송 중 변형되었을 수 있습니다).");
     }
+  }
+  if (!integrity || typeof integrity.graphDigest !== "string" || typeof integrity.manifestDigest !== "string") {
+    problems.push("매니페스트 무결성 지문이 없습니다.");
+  } else if (graphDigestOf({
+    ...manifest,
+    integrity: { graphDigest: integrity.graphDigest, manifestDigest: null },
+  }) !== integrity.manifestDigest) {
+    problems.push("매니페스트 내용이 자체 지문과 다릅니다(전송 중 변형되었을 수 있습니다).");
   }
   return problems;
 }

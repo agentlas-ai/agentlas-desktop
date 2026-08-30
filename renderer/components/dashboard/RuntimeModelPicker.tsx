@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import type { RuntimeSelection, RuntimeStatus } from "@/lib/types";
+import type { RuntimeBackend, RuntimeKind, RuntimeSelection, RuntimeStatus } from "@/lib/types";
 import { cliModelTagLabel } from "@shared/models";
 import { llmLogoSrc } from "@/lib/llm-logo";
 
@@ -49,6 +49,32 @@ const BACKEND_LABEL: Record<string, string> = {
   agentlas: "Agentlas",
 };
 
+/**
+ * Older saved selections may omit `backend`. Keep their provider identity
+ * honest by deriving the stable built-in provider from the runtime kind; only
+ * runtimes whose provider is genuinely user/configuration-defined stay custom.
+ */
+const DEFAULT_BACKEND_BY_KIND: Record<RuntimeKind, RuntimeBackend> = {
+  "claude-code": "anthropic",
+  codex: "openai",
+  antigravity: "google",
+  kimi: "kimi",
+  grok: "custom",
+  cursor: "cursor",
+  byok: "custom",
+  ollama: "ollama",
+  lmstudio: "lmstudio",
+  mlx: "mlx",
+  acp: "custom",
+  agentlas: "agentlas",
+};
+
+export function runtimeBackendForSelection(
+  selection: Pick<RuntimeSelection, "kind" | "backend">,
+): RuntimeBackend {
+  return selection.backend ?? DEFAULT_BACKEND_BY_KIND[selection.kind];
+}
+
 export function runtimeProviderLabel(runtime: Pick<RuntimeStatus, "backend">): string {
   return BACKEND_LABEL[runtime.backend] ?? runtime.backend;
 }
@@ -77,16 +103,17 @@ export function RuntimeBrandIdentity({
   selection: RuntimeSelection;
   locale: "ko" | "en";
 }) {
+  const backend = runtime?.backend ?? runtimeBackendForSelection(selection);
   const provider = runtime
     ? runtimeProviderLabel(runtime)
-    : BACKEND_LABEL[selection.backend ?? "custom"] ?? selection.backend ?? (locale === "ko" ? "알 수 없음" : "Unknown provider");
+    : runtimeProviderLabel({ backend }) || (locale === "ko" ? "알 수 없음" : "Unknown provider");
   const engine = runtime
     ? runtimeEngineLabel(runtime)
     : RUNTIME_LABEL[selection.kind] ?? selection.kind;
   const source = runtime?.source ?? selection.source;
   const logo = llmLogoSrc({
     model: selection.model,
-    backend: runtime?.backend ?? selection.backend,
+    backend,
     kind: runtime?.kind ?? selection.kind,
   });
   const label = `${provider} · ${engine}${source ? ` · ${source}` : ""}`;
@@ -112,6 +139,7 @@ export function RuntimeModelPicker({
   locale,
   disabled = false,
   ariaLabel,
+  placeholder,
   onSelect,
 }: {
   options: RuntimeModelPickerOption[];
@@ -119,6 +147,7 @@ export function RuntimeModelPicker({
   locale: "ko" | "en";
   disabled?: boolean;
   ariaLabel: string;
+  placeholder?: string;
   onSelect: (option: RuntimeModelPickerOption) => void;
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
@@ -132,7 +161,7 @@ export function RuntimeModelPicker({
     () => options.findIndex((option) => option.key === value),
     [options, value],
   );
-  const selected = selectedIndex >= 0 ? options[selectedIndex] : options[0] ?? null;
+  const selected = selectedIndex >= 0 ? options[selectedIndex] : null;
 
   useEffect(() => {
     if (!open) return;
@@ -226,7 +255,9 @@ export function RuntimeModelPicker({
         onKeyDown={onTriggerKeyDown}
       >
         <span className="dashboard-runtime-model-picker-value">
-          {selected ? optionModelLabel(selected, locale) : (locale === "ko" ? "사용 가능한 모델 없음" : "No models available")}
+          {selected
+            ? optionModelLabel(selected, locale)
+            : placeholder ?? (locale === "ko" ? "사용 가능한 모델 없음" : "No models available")}
         </span>
         <span className="dashboard-runtime-model-picker-chevron" aria-hidden="true">⌄</span>
       </button>
