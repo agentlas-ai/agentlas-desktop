@@ -2321,18 +2321,18 @@ button[data-dashboard-import="true"]:disabled {
 }
 
 .dashboard-runtime-model-picker-trigger-mark {
-  width: 20px;
-  height: 20px;
+  width: 22px;
+  height: 22px;
   flex: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  border-radius: 5px;
+  border-radius: 6px;
   background: color-mix(in srgb, var(--dash-teal-2) 12%, #ffffff);
   color: var(--dash-teal-2);
   font-family: var(--rd-f-mono);
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 760;
 }
 
@@ -2371,6 +2371,7 @@ button[data-dashboard-import="true"]:disabled {
 }
 
 .dashboard-runtime-model-picker-option {
+  min-height: 42px;
   min-width: 0;
   display: grid;
   grid-template-columns: 22px minmax(0, 1fr) auto;

@@ -84,6 +84,15 @@ export function runtimeEngineLabel(runtime: Pick<RuntimeStatus, "kind" | "backen
   return runtime.label ?? RUNTIME_LABEL[runtime.kind] ?? runtime.kind;
 }
 
+function runtimeProviderEngineLabel(runtime: Pick<RuntimeStatus, "kind" | "backend" | "label">): string {
+  const provider = runtimeProviderLabel(runtime);
+  const engine = runtimeEngineLabel(runtime);
+  const providerKey = provider.trim().toLocaleLowerCase();
+  const engineKey = engine.trim().toLocaleLowerCase();
+  if (providerKey === engineKey || engineKey.startsWith(`${providerKey} `)) return engine;
+  return `${provider} · ${engine}`;
+}
+
 function optionId(prefix: string, index: number): string {
   return `${prefix}-option-${index}`;
 }
@@ -163,7 +172,7 @@ export function RuntimeModelPicker({
   );
   const selected = selectedIndex >= 0 ? options[selectedIndex] : null;
   const selectedProvider = selected ? runtimeProviderLabel(selected.runtime) : "";
-  const selectedEngine = selected ? runtimeEngineLabel(selected.runtime) : "";
+  const selectedIdentity = selected ? runtimeProviderEngineLabel(selected.runtime) : "";
   const selectedLogo = selected
     ? llmLogoSrc({
         model: selected.model,
@@ -272,7 +281,7 @@ export function RuntimeModelPicker({
             </span>
             <span className="dashboard-runtime-model-picker-value">
               <strong>{optionModelLabel(selected, locale)}</strong>
-              <small>{selectedEngine}</small>
+              <small>{selectedIdentity}</small>
             </span>
           </>
         ) : (
@@ -287,7 +296,7 @@ export function RuntimeModelPicker({
           <div id={listId} role="listbox" aria-label={ariaLabel} className="dashboard-runtime-model-picker-list">
             {options.map((option, index) => {
               const provider = runtimeProviderLabel(option.runtime);
-              const engine = runtimeEngineLabel(option.runtime);
+              const identity = runtimeProviderEngineLabel(option.runtime);
               const logo = llmLogoSrc({ model: option.model, backend: option.runtime.backend, kind: option.runtime.kind });
               return (
                 <div
@@ -308,7 +317,7 @@ export function RuntimeModelPicker({
                   </span>
                   <span className="dashboard-runtime-model-picker-option-copy">
                     <strong>{optionModelLabel(option, locale)}</strong>
-                    <small>{engine}</small>
+                    <small>{identity}</small>
                     {option.tag && <em>{cliModelTagLabel(option.tag, locale)}</em>}
                   </span>
                   {option.key === value && <span className="dashboard-runtime-model-picker-check" aria-hidden="true">✓</span>}
