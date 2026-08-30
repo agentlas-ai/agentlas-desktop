@@ -14,6 +14,8 @@ import { ipc } from "@/lib/ipc";
 import { ONE_CHARACTER_OPTIONS, type OneCharacterId } from "@/lib/one-characters";
 import type { CreateOneTeamAgentResult, OneOrgCollaborationStyle } from "@shared/one-org";
 import type { RuntimeSelection, RuntimeStatus } from "@shared/types";
+import { runtimeUsesEngineModelSetting } from "@shared/models";
+import { runtimeModelFallbackLabel } from "@/components/dashboard/RuntimeModelPicker";
 import { OneBottomSheet } from "./OneBottomSheet";
 import styles from "./OneCreateAgentDialog.module.css";
 
@@ -415,7 +417,11 @@ export function OneCreateAgentDialog({
         const provider = runtime.label || runtime.backend || runtime.kind;
         const selections = models.length > 0
           ? models.map((model) => ({ model: model.id, label: model.label, tag: model.tag }))
-          : [{ model: runtime.model ?? undefined, label: runtime.model || (ko ? "기본 모델" : "Default model"), tag: undefined }];
+          : runtime.model
+            ? [{ model: runtime.model, label: runtime.model, tag: undefined }]
+            : runtimeUsesEngineModelSetting(runtime.kind)
+              ? [{ model: undefined, label: runtimeModelFallbackLabel(runtime.kind, ko ? "ko" : "en"), tag: undefined }]
+              : [];
         return selections.map((model) => {
           const selection: RuntimeSelection = {
             kind: runtime.kind,

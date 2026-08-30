@@ -3090,7 +3090,7 @@ function ChatPage() {
   );
 
   // 이 채팅의 모델/작업량만 변경한다. 역할 기본값과 다른 채팅은 건드리지 않는다.
-  // model === "" 이면 모델 미지정(구독 기본).
+  // model === "" 은 해당 런타임이 모델 결정을 소유할 때만 엔진 설정을 사용한다.
   async function applySelection(patch: { model?: string; effort?: string }) {
     const api = ipc();
     if (!api || !activeRuntime || !chat) return;

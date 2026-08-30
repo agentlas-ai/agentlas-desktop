@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.56 — 2026-08-30
+
+This release binds Agentlas OS v1.2.37 at
+2b169ba44742735d1ce7f550fefee071b70324fc. Its public runtime asset
+`hephaestus-runtime-v1.2.37.tar.gz` is pinned at SHA-256
+`50caf78a9c028fcf088039dd862753c25fbb9bed19df9fa248502b442dc306a6`.
+Source readiness does not prove a public installer or update feed; the Releases
+page stays the authority.
+
+- Model omission now says `Use engine setting` only for runtimes that actually
+  own that decision. Reasoning effort has its own `Default effort` label instead
+  of borrowing model or subscription copy.
+- BYOK, local runtimes, and Agentlas serving never offer an invented subscription
+  or provider default. They require a real model such as Agentlas Lite, while a
+  malformed legacy selection is shown honestly as `Model not specified`.
+- The same contract now covers Dashboard role pools, One composer and settings,
+  New Agent creation, automation pins, and recorded run history.
+
 ## 1.0.55 — 2026-08-30
 
 This release binds Agentlas OS v1.2.37 at

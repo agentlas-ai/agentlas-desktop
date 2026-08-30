@@ -855,7 +855,7 @@ function rolePoolGates(list: RuntimeStatus[]): {
      * 하드코딩 폴백 카탈로그로는 판정하지 않는다 — 계정이 새 모델을 받으면
      * 폴백이 곧바로 낡아 유효 모델을 차단하게 된다(실측: claude-code 폴백에
      * 없는 `fable`이 실제로는 정상 실행됨). 증명 못 하면 통과시키고 실패는
-     * 호출 지점에서 정직하게 드러낸다. 모델 미지정(구독 기본)도 항상 통과.
+     * 호출 지점에서 정직하게 드러낸다. 모델 미지정(엔진 설정 사용)도 항상 통과.
      */
     isModelUnavailable: (selection) => {
       const model = selection.model?.trim();

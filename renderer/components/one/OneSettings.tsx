@@ -38,6 +38,8 @@ import type {
 import type { ComputerHistoryState } from "@shared/computer-history";
 import type { OneBriefingCadence, OneBriefingPreferences } from "@shared/one-briefing";
 import type { OneComposerModelOption, OnePermissionMode } from "./OneComposerControls";
+import { runtimeModelFallbackLabel } from "@/components/dashboard/RuntimeModelPicker";
+import { runtimeUsesEngineModelSetting } from "@shared/models";
 import { OneBottomSheet, type OneBottomSheetSize } from "./OneBottomSheet";
 import { MediaDisplaySettings } from "../MediaDisplaySettings";
 import styles from "./OneSettings.module.css";
@@ -200,7 +202,7 @@ function ModelSettings({ locale, runtime, models, onSelect }: { locale: string; 
   return <>
     <div className={styles.policyNote}><IconSparkles size={16} /><div><strong>{locale === "ko" ? "직원 모델은 자동 배정" : "Worker models stay automatic"}</strong><span>{locale === "ko" ? "직원을 추가할 때 모델을 강제하지 않습니다. 에이전트 패키지의 선호 백엔드와 작업 조건을 One이 조합합니다. 여기서는 CEO 오케스트레이터 모델만 지정합니다." : "Hiring does not force a model. One combines the package's preferred backend with task requirements. This setting controls the CEO orchestrator only."}</span></div></div>
     {!runtime ? <div className={styles.emptyState}>{locale === "ko" ? "사용 가능한 런타임을 확인하는 중입니다." : "Checking available runtimes."}</div> : <div className={styles.choiceList}>
-      <button type="button" data-active={!runtime.model ? "true" : "false"} disabled={busyKey !== null} onClick={() => void choose(runtime, "")}><span><strong>{locale === "ko" ? "현재 런타임 기본" : "Current runtime default"}</strong><small>{runtime.label || runtime.kind} · {runtime.backend}</small></span>{!runtime.model && <IconCheck size={15} />}</button>
+      {runtimeUsesEngineModelSetting(runtime.kind) && <button type="button" data-active={!runtime.model ? "true" : "false"} disabled={busyKey !== null} onClick={() => void choose(runtime, "")}><span><strong>{runtimeModelFallbackLabel(runtime.kind, locale === "ko" ? "ko" : "en")}</strong><small>{runtime.label || runtime.kind} · {runtime.backend}</small></span>{!runtime.model && <IconCheck size={15} />}</button>}
       {options.map((item) => {
         const active = runtime.kind === item.runtime.kind && runtime.backend === item.runtime.backend && runtime.model === item.id;
         return <button type="button" key={`${item.runtime.kind}:${item.runtime.backend}:${item.id}`} data-active={active ? "true" : "false"} disabled={busyKey !== null} onClick={() => void choose(item.runtime, item.id)}><span><strong>{item.label}</strong><small>{item.tag || `${item.runtime.kind} · ${item.runtime.backend}`}</small></span>{active && <IconCheck size={15} />}</button>;

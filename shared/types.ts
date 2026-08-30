@@ -797,7 +797,7 @@ export interface RuntimeStatus {
    * How `availableModels` was obtained (PRD 2026-08-15 D-3). `failed` means the
    * probe ran and yielded nothing usable — the picker may show a stale last-good
    * list (`stale: true`), and the UI must say so instead of showing an empty
-   * menu that looks like "subscription default". `unsupported` is honest
+   * menu that falsely implies an engine-level model fallback. `unsupported` is honest
    * absence (no list concept, e.g. claude-code) — not an error.
    */
   modelDiscovery?: import("./model-discovery").ModelDiscoverySummary;

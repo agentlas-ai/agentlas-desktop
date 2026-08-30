@@ -11,6 +11,7 @@ import { askAutomationSession } from "@/components/automation/AutomationSessionP
 import {
   runtimeBackendForSelection,
   runtimeEngineLabel,
+  runtimeModelFallbackLabel,
   runtimeProviderLabel,
 } from "@/components/dashboard/RuntimeModelPicker";
 import type {
@@ -1141,8 +1142,8 @@ function runtimeFactLabel(fact: WorkflowRunRuntimeFact, ko: boolean): string {
   const provider = runtimeProviderLabel(runtimeIdentity);
   const engine = runtimeEngineLabel(runtimeIdentity);
   const model = selection.model?.trim();
-  const effort = selection.effort?.trim() || (ko ? "기본" : "Default");
-  const runtime = `${provider} · ${engine} · ${model ?? (ko ? "공급자 기본 모델" : "Provider default")} · ${ko ? "작업량" : "effort"} ${effort}`;
+  const effort = selection.effort?.trim() || (ko ? "기본 작업량" : "Default effort");
+  const runtime = `${provider} · ${engine} · ${model ?? runtimeModelFallbackLabel(selection.kind, ko ? "ko" : "en")} · ${ko ? "작업량" : "effort"} ${effort}`;
   if (!fact.role) return runtime;
   const roleLabels: Record<string, string> = {
     worker: ko ? "워커" : "worker",

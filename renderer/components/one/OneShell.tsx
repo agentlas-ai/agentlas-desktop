@@ -16,6 +16,7 @@ import { flushSync } from "react-dom";
 import { Markdown, StreamingMarkdown, type LinkedFileArtifact } from "@/components/Markdown";
 import { AskCard, type AskCardOption } from "@/components/AskCard";
 import { OneDocumentCard } from "@/components/one/OneDocumentCard";
+import { runtimeModelFallbackLabel } from "@/components/dashboard/RuntimeModelPicker";
 import { readOneDocumentMark } from "@/lib/one-document-mark";
 import { OneSplitPane } from "@/components/one/OneSplitPane";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
@@ -7091,12 +7092,12 @@ export function OneShell() {
                       aria-haspopup="dialog"
                       aria-controls={composerMenu === "model" ? "one-composer-popover" : undefined}
                       aria-label={appLocale === "ko"
-                        ? `모델: ${oneModelOptions.find((model) => model.runtime.kind === oneRuntime?.kind && model.runtime.backend === oneRuntime?.backend && model.id === oneRuntime?.model)?.label ?? oneRuntime?.model ?? "기본 모델"}`
-                        : `Model: ${oneModelOptions.find((model) => model.runtime.kind === oneRuntime?.kind && model.runtime.backend === oneRuntime?.backend && model.id === oneRuntime?.model)?.label ?? oneRuntime?.model ?? "Default model"}`}
+                        ? `모델: ${oneModelOptions.find((model) => model.runtime.kind === oneRuntime?.kind && model.runtime.backend === oneRuntime?.backend && model.id === oneRuntime?.model)?.label ?? oneRuntime?.model ?? runtimeModelFallbackLabel(oneRuntime?.kind ?? "agentlas", "ko")}`
+                        : `Model: ${oneModelOptions.find((model) => model.runtime.kind === oneRuntime?.kind && model.runtime.backend === oneRuntime?.backend && model.id === oneRuntime?.model)?.label ?? oneRuntime?.model ?? runtimeModelFallbackLabel(oneRuntime?.kind ?? "agentlas", "en")}`}
                       onClick={() => setComposerMenu((current) => current === "model" ? null : "model")}
                     >
                       <IconSparkles size={15} />
-                      <span>{oneModelOptions.find((model) => model.runtime.kind === oneRuntime?.kind && model.runtime.backend === oneRuntime?.backend && model.id === oneRuntime?.model)?.label ?? oneRuntime?.model ?? (appLocale === "ko" ? "기본 모델" : "Default model")}</span>
+                      <span>{oneModelOptions.find((model) => model.runtime.kind === oneRuntime?.kind && model.runtime.backend === oneRuntime?.backend && model.id === oneRuntime?.model)?.label ?? oneRuntime?.model ?? runtimeModelFallbackLabel(oneRuntime?.kind ?? "agentlas", appLocale)}</span>
                       <IconChevronDown size={12} />
                     </button>
                   )}

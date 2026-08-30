@@ -18,7 +18,7 @@ import type {
   RuntimeStatus,
 } from "@/lib/types";
 import { useRouter } from "next/navigation";
-import { CONTEXT_MANAGED_BY } from "@shared/models";
+import { CONTEXT_MANAGED_BY, runtimeUsesEngineModelSetting } from "@shared/models";
 import type { OrchestrationTarget, Recommendation, RecExecChoice, RecRouterAgent } from "@shared/types";
 import { buildAppRoutePrompt, parseAppSlashRoute, type AgentlasAppDefinition } from "@/lib/apps";
 import { callableHubBookmarks } from "@/lib/hub-bookmark-events";
@@ -336,7 +336,7 @@ function ChatInputComponent({
   runtime?: RuntimeStatus | null;
   /** 실시간 조회된 모델 목록 (runtime.listModels). */
   modelOptions?: ModelOption[];
-  /** 모델 선택 — "" 이면 구독 기본(--model 미전달). */
+  /** 모델 선택 — "" 이면 런타임 자체 설정 사용(--model 미전달). */
   onSelectModel?: (id: string) => void;
   /** 작업량 선택 — "" 이면 기본. claude-code 전용. */
   onSelectEffort?: (id: string) => void;
@@ -2878,12 +2878,8 @@ function ModelMenu({
   const currentEffort = efforts.some((effort) => effort.id === runtime.effort)
     ? runtime.effort
     : null;
-  // CLI(claude-code/codex/antigravity)는 "구독 기본" 선택 가능. BYOK/로컬(ollama/lmstudio/mlx)은 항상 구체 모델.
-  // Agentlas 서빙도 마찬가지다 — 고를 것이 세기뿐이라 "구독 기본"이라 부를 것이 없고,
-  // 그렇게 부르면 사용자는 자기 구독 CLI 가 도는 줄로 읽는다.
-  const allowDefaultModel = runtime.kind !== "byok"
-    && runtime.kind !== "agentlas"
-    && !LOCAL_RUNTIME_LABEL[runtime.kind];
+  // CLI/ACP에서 모델을 생략하면 엔진 설정을 사용한다. BYOK·로컬·Agentlas는 실제 모델이 필수다.
+  const allowDefaultModel = runtimeUsesEngineModelSetting(runtime.kind);
   const managedByRuntime = CONTEXT_MANAGED_BY[runtime.kind] === "runtime";
   const check = <span style={{ color: "var(--accent)", fontWeight: 700 }}>•</span>;
   const modelIcon = <IconSparkles size={13} style={{ color: "var(--accent)" }} />;
@@ -2895,7 +2891,7 @@ function ModelMenu({
         <Row
           onClick={() => onSelectModel("")}
           icon={modelIcon}
-          title={t("chat.model.cli_default")}
+          title={t("chat.model.engine_setting")}
           right={!runtime.model ? check : undefined}
         />
       )}
@@ -2916,7 +2912,7 @@ function ModelMenu({
           <Row
           onClick={() => onSelectEffort("")}
           icon={effortIcon}
-          title={t("chat.model.cli_default")}
+          title={t("chat.effort.default")}
           right={!currentEffort ? check : undefined}
         />
           {efforts.map((e) => (

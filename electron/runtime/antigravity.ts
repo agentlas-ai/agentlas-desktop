@@ -131,7 +131,7 @@ async function probeAgyModels(binary: string): Promise<DiscoveryOutcome> {
       killCliTree(child, 250);
       // agy 1.1.x prints the complete catalog but can keep its non-interactive
       // pipe alive. Preserve the validated stdout instead of turning a healthy
-      // catalog into an empty "subscription default" picker.
+      // catalog into an empty engine-setting picker.
       finish({ timedOut: parseAgyModels(stdout).length === 0 });
     }, 5_000);
     timer.unref?.();

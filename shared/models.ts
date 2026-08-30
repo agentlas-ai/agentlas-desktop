@@ -214,10 +214,26 @@ export const CONTEXT_MANAGED_BY: Record<RuntimeKind, "runtime" | "agentlas"> = {
   agentlas: "agentlas",
 };
 
+/**
+ * 모델을 생략해도 되는 런타임은 자체 설정으로 모델을 결정한다.
+ * BYOK·로컬·Agentlas 서빙은 그런 기본값 계약이 없으므로 실제 모델을 반드시 고른다.
+ */
+const EXPLICIT_MODEL_RUNTIME_KINDS = new Set<RuntimeKind>([
+  "byok",
+  "ollama",
+  "lmstudio",
+  "mlx",
+  "agentlas",
+]);
+
+export function runtimeUsesEngineModelSetting(kind: RuntimeKind): boolean {
+  return !EXPLICIT_MODEL_RUNTIME_KINDS.has(kind);
+}
+
 // ── CLI 런타임 모델 선택 ──────────────────────────────────
 // CLI 도구는 컨텍스트·압축을 자체 관리하지만(CONTEXT_MANAGED_BY === "runtime"),
 // 모델은 `--model`로 고를 수 있다. 컨텍스트 관리와 모델 선택은 독립.
-// 빈 model(undefined)은 "구독 기본 모델" — --model을 전달하지 않는다.
+// 빈 model(undefined)은 런타임 자체 설정 사용 — --model을 전달하지 않는다.
 //
 // 헤드리스(-p) 한계: Claude Code의 인터랙티브 메뉴에 있는 "빠른 모드"와 `model[1m]`(1M) 변형은
 // CLI 플래그가 없어 옮길 수 없다. 대신 claude는 `--effort`(작업량)를 지원한다.

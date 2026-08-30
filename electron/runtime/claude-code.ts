@@ -591,7 +591,7 @@ const runClaudeTurn = async (
         ? ["--permission-mode", "acceptEdits"]
         : ["--disallowed-tools", ...READ_ONLY_DENIED_TOOLS];
 
-  // 모델 선택 — opus/sonnet/haiku 별칭(또는 풀 ID). 미지정이면 구독 기본 모델.
+  // 모델 선택 — opus/sonnet/haiku 별칭(또는 풀 ID). 미지정이면 Claude Code 설정 사용.
   const modelArgs = req.model && req.model.trim() ? ["--model", req.model.trim()] : [];
   // 작업량(reasoning effort) — installed CLI가 노출한 값을 그대로 전달. 미지정이면 CLI 기본.
   const effortArgs = req.effort && req.effort.trim() ? ["--effort", req.effort.trim()] : [];

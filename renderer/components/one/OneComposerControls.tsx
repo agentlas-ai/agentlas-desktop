@@ -16,6 +16,8 @@ import {
   IconTarget,
 } from "@/components/Icon";
 import { PluginLogo, usePluginBrandMap } from "@/components/PluginLogo";
+import { runtimeModelFallbackLabel } from "@/components/dashboard/RuntimeModelPicker";
+import { runtimeUsesEngineModelSetting } from "@shared/models";
 import type { RuntimeStatus } from "@shared/types";
 import styles from "./OneShell.module.css";
 
@@ -274,8 +276,8 @@ export function OneComposerControls({
             ))}
             {activeMenu === "model" && (
               <>
-                {runtime && runtime.kind !== "byok" && runtime.kind !== "agentlas" && (
-                  <ComposerRow icon={<IconSparkles size={15} />} title={locale === "ko" ? "구독 기본" : "Subscription default"} checked={!runtime.model} onClick={() => onSelectModel(runtime, "")} />
+                {runtime && runtimeUsesEngineModelSetting(runtime.kind) && (
+                  <ComposerRow icon={<IconSparkles size={15} />} title={runtimeModelFallbackLabel(runtime.kind, locale)} checked={!runtime.model} onClick={() => onSelectModel(runtime, "")} />
                 )}
                 {filteredModels.map((item) => (
                   <ComposerRow key={`${item.runtime.kind}:${item.runtime.backend}:${item.id}`} icon={item.logo

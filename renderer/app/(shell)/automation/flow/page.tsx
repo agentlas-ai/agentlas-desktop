@@ -39,6 +39,7 @@ import { AutomationSessionPanel } from "@/components/automation/AutomationSessio
 import {
   runtimeBackendForSelection,
   runtimeEngineLabel,
+  runtimeModelFallbackLabel,
   runtimeProviderLabel,
 } from "@/components/dashboard/RuntimeModelPicker";
 import { IconBolt } from "@/components/Icon";
@@ -62,10 +63,10 @@ function runtimeSelectionPresentation(selection: RuntimeSelection | null | undef
   const provider = runtimeProviderLabel(runtimeIdentity);
   const engine = runtimeEngineLabel(runtimeIdentity);
   const model = selection.model?.trim();
-  const effort = selection.effort?.trim() || (locale === "en" ? "Default" : "기본");
+  const effort = selection.effort?.trim() || (locale === "en" ? "Default effort" : "기본 작업량");
   return {
     label: locale === "en" ? "Automation pin · overrides role default" : "자동화별 고정 · 역할 기본보다 우선",
-    detail: `${provider} · ${engine} · ${model ?? (locale === "en" ? "Provider default" : "공급자 기본 모델")} · ${locale === "en" ? "effort" : "작업량"} ${effort} · ${locale === "en" ? "fails closed; no cross-provider fallback" : "사용할 수 없으면 중단 · 다른 공급자로 바꾸지 않음"}`,
+    detail: `${provider} · ${engine} · ${model ?? runtimeModelFallbackLabel(selection.kind, locale === "en" ? "en" : "ko")} · ${locale === "en" ? "effort" : "작업량"} ${effort} · ${locale === "en" ? "fails closed; no cross-provider fallback" : "사용할 수 없으면 중단 · 다른 공급자로 바꾸지 않음"}`,
   };
 }
 

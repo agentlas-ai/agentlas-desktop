@@ -11,8 +11,10 @@ import type {
 } from "@/lib/types";
 import {
   RuntimeModelPicker,
+  runtimeModelFallbackLabel,
   type RuntimeModelPickerOption,
 } from "./RuntimeModelPicker";
+import { runtimeUsesEngineModelSetting } from "@shared/models";
 
 type ModelRow = { id: string; label: string; tag?: string };
 
@@ -107,14 +109,6 @@ const BACKEND_LABEL: Record<string, string> = {
   cursor: "Cursor",
   agentlas: "Agentlas",
 };
-
-/**
- * 모델을 반드시 골라야 하는 런타임 — "구독 기본"이라는 선택지가 없다.
- *
- * 로컬 OpenAI 호환 런타임은 구독이라는 것이 없고, Agentlas 서빙은 고를 것이 세기뿐이라
- * 기본이라 부를 것이 없다. 그런데도 "구독 기본"을 띄우면 사용자는 자기 구독으로 도는 줄 안다.
- */
-const LOCAL_MODEL_KINDS = new Set(["ollama", "lmstudio", "mlx", "agentlas"]);
 
 function runtimeKey(runtime: Pick<RuntimeStatus, "kind" | "backend" | "source">): string {
   return `${runtime.kind}\u0000${runtime.backend}\u0000${runtime.source}`;
@@ -329,7 +323,7 @@ export function RuntimeControl() {
     const options: RuntimeModelPickerOption[] = [];
     for (const runtime of runtimesForRole(role)) {
       const models = modelsByRuntime[runtimeKey(runtime)] ?? (runtime.availableModels ?? []).map((id) => ({ id, label: id }));
-      if (runtime.kind !== "byok" && !LOCAL_MODEL_KINDS.has(runtime.kind)) {
+      if (runtimeUsesEngineModelSetting(runtime.kind)) {
         options.push({
           key: modelOptionKey(runtime, undefined),
           label: "",
@@ -374,7 +368,7 @@ export function RuntimeControl() {
       options.unshift({
         key: currentKey,
         model: currentSelection.model,
-        label: currentSelection.model ?? (ko ? "저장된 모델" : "Stored model"),
+        label: currentSelection.model ?? runtimeModelFallbackLabel(currentSelection.kind, locale),
         runtime: unavailableRuntime,
         unavailable: true,
       });
@@ -625,7 +619,7 @@ export function RuntimeControl() {
       for (const model of modelRows) {
         candidates.push({ ...base, model: model.id });
       }
-      if (runtime.kind !== "byok" && !LOCAL_MODEL_KINDS.has(runtime.kind)) {
+      if (runtimeUsesEngineModelSetting(runtime.kind)) {
         candidates.unshift({ ...base, model: undefined });
       }
       return candidates;

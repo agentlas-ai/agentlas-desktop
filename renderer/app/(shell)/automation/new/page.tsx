@@ -31,8 +31,10 @@ import {
   RuntimeBrandIdentity,
   RuntimeModelPicker,
   runtimeBackendForSelection,
+  runtimeModelFallbackLabel,
   type RuntimeModelPickerOption,
 } from "@/components/dashboard/RuntimeModelPicker";
+import { runtimeUsesEngineModelSetting } from "@shared/models";
 import { OneSuggestionReviewHandoffBanner, type OneReviewSeedApplyResult } from "@/components/one/OneSuggestionReviewHandoff";
 
 type TargetType = "agent" | "firm" | "hub";
@@ -381,7 +383,7 @@ function NewAutomationPage() {
     for (const runtime of runtimeOptions) {
       const key = automationRuntimeKey(runtime);
       const models = runtimeModels[key] ?? (runtime.availableModels ?? []).map((id) => ({ id, label: id }));
-      if (runtime.kind !== "byok" && !["ollama", "lmstudio", "mlx", "agentlas"].includes(runtime.kind)) {
+      if (runtimeUsesEngineModelSetting(runtime.kind)) {
         options.push({
           key: automationModelOptionKey(runtime, undefined),
           label: "",
@@ -421,7 +423,7 @@ function NewAutomationPage() {
         options.unshift({
           key: currentKey,
           model: selectedSelection.model,
-          label: selectedSelection.model ?? (locale === "ko" ? "저장된 모델" : "Stored model"),
+          label: selectedSelection.model ?? runtimeModelFallbackLabel(selectedSelection.kind, locale),
           runtime: currentRuntime ?? {
             kind: selectedSelection.kind,
             backend: runtimeBackendForSelection(selectedSelection),

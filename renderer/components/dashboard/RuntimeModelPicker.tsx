@@ -2,7 +2,7 @@
 
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { RuntimeBackend, RuntimeKind, RuntimeSelection, RuntimeStatus } from "@/lib/types";
-import { cliModelTagLabel } from "@shared/models";
+import { cliModelTagLabel, runtimeUsesEngineModelSetting } from "@shared/models";
 import { llmLogoSrc } from "@/lib/llm-logo";
 
 export type RuntimeModelPickerOption = {
@@ -98,9 +98,16 @@ function optionId(prefix: string, index: number): string {
 }
 
 function optionModelLabel(option: RuntimeModelPickerOption, locale: "ko" | "en"): string {
-  if (option.isDefault) return locale === "ko" ? "공급자 기본 모델" : "Provider default";
+  if (option.isDefault) return runtimeModelFallbackLabel(option.runtime.kind, locale);
   if (option.unavailable) return `${option.label} · ${locale === "ko" ? "연결 안 됨" : "unavailable"}`;
   return option.label;
+}
+
+export function runtimeModelFallbackLabel(kind: RuntimeKind, locale: "ko" | "en"): string {
+  if (runtimeUsesEngineModelSetting(kind)) {
+    return locale === "ko" ? "엔진 설정 사용" : "Use engine setting";
+  }
+  return locale === "ko" ? "모델 미지정" : "Model not specified";
 }
 
 export function RuntimeBrandIdentity({
