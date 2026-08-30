@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.0.57 — 2026-08-30
+
+This release binds Agentlas OS v1.2.38 at
+fc310b5898b44f5a84034fb25f724321de450509. Its public runtime asset
+`hephaestus-runtime-v1.2.38.tar.gz` is pinned at SHA-256
+`a8819cfae2c7aaa7791763545414dc477b6df3aec87488ac3dea9cca9865e570`.
+Source readiness does not prove a public installer or update feed; the Releases
+page stays the authority.
+
+- Missing imported agent source folders now remain visible as recoverable state,
+  while agent-file actions preserve the exact source boundary and failure cause.
+- One carries approval, cancellation, and tool-failure causes through live rows
+  and replay, and team preflight keeps expiry and stale acknowledgements bounded.
+- Startup navigation and release packaging retain typed outcomes and verify the
+  exact embedded runtime and host-hook manifests.
+
 ## 1.0.56 — 2026-08-30
 
 This release binds Agentlas OS v1.2.37 at

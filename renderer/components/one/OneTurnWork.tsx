@@ -16,6 +16,7 @@ import {
   type OneWorkPresentation,
 } from "@/lib/one-turn-work";
 import styles from "./OneTurnWork.module.css";
+import { toolFailureCopy } from "@shared/tool-failure";
 
 /**
  * One assistant turn's process, drawn the way Codex draws it:
@@ -100,6 +101,12 @@ function ExpandableRow({
 }
 
 function statusSuffix(cell: OneWorkCell, locale: "ko" | "en"): ReactNode {
+  if (cell.kind === "call" && cell.failureCode) {
+    const copy = toolFailureCopy(cell.failureCode, locale);
+    if (copy) {
+      return <span className={cell.failureCode === "tool_failed" ? styles.failed : styles.attention} data-failure-code={cell.failureCode}>{copy}</span>;
+    }
+  }
   if (cell.status === "failed") return <span className={styles.failed}>{locale === "ko" ? "실패" : "failed"}</span>;
   if (cell.status === "cancelled") return <span className={styles.muted}>{locale === "ko" ? "취소됨" : "cancelled"}</span>;
   return null;

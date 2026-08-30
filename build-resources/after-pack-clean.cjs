@@ -528,7 +528,11 @@ async function verifyEmbeddedAgentlasOs(context) {
   const resourcesDir = context.electronPlatformName === "darwin"
     ? path.join(context.appOutDir, `${productFilename}.app`, "Contents", "Resources")
     : path.join(context.appOutDir, "resources");
-  const pinnedSourceRoot = path.join(projectDir, "Hephaestus");
+  // Keep afterPack on the exact source selected by beforePack/ensure-engine.
+  // Local candidates and release-preflight may intentionally point at an
+  // isolated, verified checkout; comparing that staged tree with the default
+  // ignored checkout would certify the wrong runtime (or reject a valid one).
+  const pinnedSourceRoot = path.resolve(process.env.HEPHAESTUS_DIR || path.join(projectDir, "Hephaestus"));
   const preparedRoot = path.join(projectDir, embeddedCoreContract.EMBEDDED_CORE_STAGE_RELATIVE);
   const sourceManifestPath = path.join(preparedRoot, "manifest.json");
   const packagePath = path.join(projectDir, "package.json");
@@ -566,8 +570,13 @@ async function verifyEmbeddedAgentlasOs(context) {
     );
   }
   if (process.env.HEPHAESTUS_REF) {
-    const refMatch = process.env.HEPHAESTUS_REF.trim().match(/^v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/);
-    if (!refMatch || refMatch[1] !== sourceManifest.version) {
+    const requestedRef = process.env.HEPHAESTUS_REF.trim();
+    const refMatch = requestedRef.match(/^v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/);
+    const commitMatch = /^[0-9a-f]{40}$/i.test(requestedRef);
+    const refMatchesVersion = refMatch && refMatch[1] === sourceManifest.version;
+    const refMatchesCommit = commitMatch
+      && String(preparationReceipt.sourceCommit || "").toLowerCase() === requestedRef.toLowerCase();
+    if (!refMatchesVersion && !refMatchesCommit) {
       throw new Error(
         `[afterPack] HEPHAESTUS_REF mismatch: expected v${sourceManifest.version}, got ${process.env.HEPHAESTUS_REF}`,
       );

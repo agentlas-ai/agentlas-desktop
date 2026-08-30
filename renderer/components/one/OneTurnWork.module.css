@@ -226,6 +226,7 @@
 .removed { color: #b3473c; margin-left: 4px; }
 
 .failed { color: var(--work-fail); font-size: 12px; }
+.attention { color: #8a6a2b; font-size: 12px; }
 .muted { color: var(--work-faint); font-size: 12px; }
 
 .output {

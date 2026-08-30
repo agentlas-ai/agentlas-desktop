@@ -162,6 +162,7 @@ import type {
   OneImprovementProofRecord,
   OneImprovementProofReadState,
 } from "./one-improvement-proof";
+import type { ToolFailureCode } from "./tool-failure";
 import type {
   OneExperienceReuseRecord,
   OneExperienceReuseState,
@@ -4501,6 +4502,8 @@ export interface McpInvocationEvent {
     result?: string;
     id?: string;
     isError?: boolean;
+    /** Closed cause shared by live Activity, durable failure rows, and replay. */
+    failureCode?: ToolFailureCode;
     /** Verified public URLs observed in this tool's own input or result. */
     sourceUrls?: string[];
   };
@@ -4599,6 +4602,8 @@ export interface DirListing {
   path: string;
   exists: boolean;
   entries: WorkspaceNode[];
+  /** Main-owned agent source disappeared; the installed agent row remains valid. */
+  reason?: "source-missing";
 }
 
 export interface TextFilePreview {
@@ -5951,6 +5956,8 @@ export interface FailureEventUi {
   nodeId?: string;
   agentId?: string;
   errorCode?: string;
+  /** Closed tool cause shared by the failure ledger, replay, and One UI. */
+  failureCode?: ToolFailureCode;
   errorMessage: string;
   payload: Record<string, unknown>;
 }

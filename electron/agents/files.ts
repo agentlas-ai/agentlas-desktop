@@ -20,6 +20,7 @@ import {
   type DirListing,
   type TextFilePreview,
 } from "../fs/workspace";
+import { FsAccessDeniedError } from "../fs/access";
 import { userDataPath } from "../runtime-paths";
 
 interface AgentRow {
@@ -667,8 +668,20 @@ export async function listAgentFiles(agentId: string): Promise<DirListing> {
   const row = getRow(agentId);
   if (!row) return { path: "", exists: false, entries: [] };
   const { dir, isLocal } = resolveDir(agentId, row.slug);
+  if (isLocal && !fs.existsSync(dir)) {
+    return { path: dir, exists: false, entries: [], reason: "source-missing" };
+  }
   if (!isLocal) materializeAgentFiles(agentId);
-  return listDirectoryFromMainRoot(dir, dir, false);
+  try {
+    return await listDirectoryFromMainRoot(dir, dir, false);
+  } catch (error) {
+    // A local import can be moved between the existence check and the guarded
+    // realpath lookup. Keep that race visible as a recoverable missing source.
+    if (isLocal && error instanceof FsAccessDeniedError && !fs.existsSync(dir)) {
+      return { path: dir, exists: false, entries: [], reason: "source-missing" };
+    }
+    throw error;
+  }
 }
 
 export async function readAgentFile(agentId: string, absPath: string): Promise<TextFilePreview> {

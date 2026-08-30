@@ -26,6 +26,7 @@ import type {
 } from "../../shared/types";
 import {
   ONE_TEAM_PREFLIGHT_CONTRACT_VERSION,
+  ONE_TEAM_PREFLIGHT_EXPIRABLE_STATUSES,
   isOneTeamPreflightProposal,
   type AcknowledgeOneTeamPreflightInput,
   type AcknowledgeOneTeamPreflightResult,
@@ -857,7 +858,7 @@ function currentRecord(proposalId: string): InternalOneTeamPreflight | null {
 }
 
 function expireIfNeeded(record: InternalOneTeamPreflight, deps: OneTeamPreflightDependencies): InternalOneTeamPreflight {
-  if (!["proposed", "blocked", "deferred"].includes(record.proposal.status)) return record;
+  if (!(ONE_TEAM_PREFLIGHT_EXPIRABLE_STATUSES as readonly string[]).includes(record.proposal.status)) return record;
   const now = nowFor(deps);
   if (Date.parse(record.proposal.expiresAt) > now.getTime()) return record;
   const db = getDb();
@@ -866,7 +867,7 @@ function expireIfNeeded(record: InternalOneTeamPreflight, deps: OneTeamPreflight
     const index = state.proposals.findIndex((item) => item.proposal.proposalId === record.proposal.proposalId);
     if (index < 0) return record;
     const live = state.proposals[index];
-    if (!["proposed", "blocked", "deferred"].includes(live.proposal.status)) return live;
+    if (!(ONE_TEAM_PREFLIGHT_EXPIRABLE_STATUSES as readonly string[]).includes(live.proposal.status)) return live;
     const next = { ...live, proposal: mutateProposal(live.proposal, "expired", now), reservation: null };
     PROCESS_PROMPTS.delete(live.proposal.proposalId);
     state.version += 1;

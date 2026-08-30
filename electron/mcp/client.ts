@@ -145,6 +145,7 @@ import {
 } from "../../shared/one-friendly-followups";
 import { buildOneSurfaceFromMarkdown, chooseOneSurfaceForDisplay, resolveOneMarkdownSurfaceIntent } from "../one/markdown-surface";
 import { bindOneRuntimeToolArtifacts } from "../one/artifact-preview";
+import { classifyToolFailure, toolFailureCopy } from "../../shared/tool-failure";
 import { createAutomation, findAutomationByGoalId, listAutomations, toggleAutomation, updateAutomation, updateAutomationGraph } from "../store/automations";
 import { previousTurnObservation, projectContextKey, recordContextSourceMarker, tryRecordRunEvent } from "../store/run-events";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
@@ -464,13 +465,21 @@ function invocationFailure(
 ): { code: string; message: string } {
   if (req.agentAppMode) return untrustedRuntimeFailurePayload();
   const raw = error instanceof Error ? error.message : String(error);
+  const toolFailureCode = classifyToolFailure({ result: raw });
+  if (toolFailureCode !== "tool_failed") {
+    const locale = pickLocale(req);
+    return {
+      code: toolFailureCode,
+      message: `${toolFailureCopy(toolFailureCode, locale) ?? raw} (${raw})`,
+    };
+  }
   const quota = /\bquota\b|hit your weekly limit|usage limit/i.test(raw)
     ? raw.match(/^([a-z0-9-]+) runtime quota:/i)?.[1] ?? null
     : undefined;
   if (quota !== undefined) {
     const who = quota ?? (pickLocale(req) === "ko" ? "이 모델" : "this model");
     return {
-      code: fallbackCode,
+      code: "runtime_quota",
       message: pickLocale(req) === "ko"
         ? `${who} 사용 한도가 찼습니다. 다른 모델로 바꾸거나 한도가 풀린 뒤 다시 보내세요. 이미 도착한 팀원 답변은 위에 그대로 있습니다. (${raw})`
         : `${who} has hit its usage limit. Switch models or send again after it resets. Any teammate replies that already arrived are still above. (${raw})`,
@@ -4275,7 +4284,15 @@ ${effectiveUserPrompt}`;
           : undefined;
         sink({
           kind: "tool-use",
-          tool: { name, args, result, id, isError, ...(sourceUrls?.length ? { sourceUrls } : {}) },
+          tool: {
+            name,
+            args,
+            result,
+            id,
+            isError,
+            ...(isError ? { failureCode: classifyToolFailure({ result }) } : {}),
+            ...(sourceUrls?.length ? { sourceUrls } : {}),
+          },
           ...(oneArtifacts?.length ? { oneArtifacts } : {}),
         });
       },

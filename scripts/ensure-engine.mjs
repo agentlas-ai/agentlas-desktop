@@ -173,12 +173,42 @@ function verifyNoIgnoredPackagingMaterial() {
   }
 }
 
+function verifyHookManifestSchema() {
+  // Codex/Claude consume these manifests directly. Keep this check in the
+  // Desktop packager as well as the Agentlas OS repository gate: an older
+  // runtime checkout must never silently put a host-invalid hook file in a
+  // newly signed app bundle.
+  const manifests = [
+    path.join(dir, "hooks", "claude", "hooks.json"),
+    path.join(dir, "hooks", "codex", "hooks.json"),
+    path.join(dir, "claude", "plugins", "agentlas-core-engine-meta-agent", "hooks", "hooks.json"),
+    path.join(dir, "codex", "plugins", "agentlas-core-engine-meta-agent", "hooks", "hooks.json"),
+  ];
+  for (const manifestPath of manifests) {
+    let payload;
+    try {
+      payload = JSON.parse(readFileSync(manifestPath, "utf8"));
+    } catch (error) {
+      fail(`could not parse required hook manifest ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const unknown = Object.keys(payload ?? {}).filter((key) => !["description", "hooks"].includes(key));
+    if (unknown.length > 0) fail(`hook manifest has unsupported top-level field(s): ${manifestPath}: ${unknown.join(", ")}`);
+    if (typeof payload?.description !== "string" || !payload.description.trim()) {
+      fail(`hook manifest description is missing: ${manifestPath}`);
+    }
+    if (!payload?.hooks || typeof payload.hooks !== "object" || Array.isArray(payload.hooks)) {
+      fail(`hook manifest hooks must be an object: ${manifestPath}`);
+    }
+  }
+}
+
 function verifyReady() {
   if (!existsSync(sentinel)) fail(`runtime entrypoint not found after preparation: ${sentinel}`);
   const dirty = capture("git", ["-C", dir, "status", "--porcelain", "--untracked-files=normal"]);
   if (dirty) fail(`embedded Agentlas OS checkout is dirty after preparation: ${dir}`);
   verifyNoIgnoredPackagingMaterial();
   verifyPinnedVersion();
+  verifyHookManifestSchema();
   verifyPinnedCommit();
 }
 

@@ -1,6 +1,7 @@
 import type { OneActivityItem, OneActivityState } from "./one-activity";
 import { normalizeToolCall, mcpServerName, stripCwdPrefix, type ToolCallDetail } from "@shared/tool-call-detail";
 import { parseShellCommand, stripShellWrapper } from "@shared/exploratory-shell";
+import type { ToolFailureCode } from "@shared/tool-failure";
 
 /**
  * One turn's work, in the shape Codex draws it.
@@ -53,7 +54,7 @@ export type OneWorkCell =
   | (CellBase & { kind: "edit"; files: OneWorkEditFile[]; diff?: string })
   | (CellBase & { kind: "web_search"; query: string })
   | (CellBase & { kind: "fetch"; url: string; statusCode?: number })
-  | (CellBase & { kind: "call"; label: string; detail?: string; args?: string; result?: string })
+  | (CellBase & { kind: "call"; label: string; detail?: string; args?: string; result?: string; failureCode?: ToolFailureCode })
   | (CellBase & { kind: "agent"; name: string; role?: string; phase?: OneActivityItem["phase"] })
   | (CellBase & { kind: "notice"; level: "info" | "success" | "warning" | "error"; message: string; details?: string })
   /** Only when a turn had no thought and no tool: the one thing that happened was writing the answer. */
@@ -453,6 +454,7 @@ export function buildOneWorkPresentation(
               ...(classified.detail ? { detail: classified.detail } : {}),
               ...(item.tool.args ? { args: item.tool.args } : {}),
               ...(item.tool.result ? { result: item.tool.result } : {}),
+              ...(item.tool.failureCode ? { failureCode: item.tool.failureCode } : {}),
               ...(agent ? { agent } : {}),
             });
             break;

@@ -42,6 +42,7 @@ import type {
 import { buildToolCallDisplay, normalizeToolCall } from "@shared/tool-call-detail";
 import { parseMcpResult } from "@shared/mcp-result-rendering";
 import { isCommandTool, isComputerUseTool } from "@shared/tool-taxonomy";
+import { toolFailureCopy } from "@shared/tool-failure";
 import type { OnePermissionMode } from "./OneComposerControls";
 import { OneComputerHistory } from "./OneComputerHistory";
 import { McpResultPreview } from "../McpResultPreview";
@@ -311,7 +312,8 @@ function ActivityRow({
   const toolOwner = item.kind === "tool"
     ? [safeAgentName, safeRole].filter(Boolean).join(" · ")
     : "";
-  const secondary = [toolSummary, toolOwner].filter(Boolean).join(" · ")
+  const toolFailure = item.kind === "tool" ? toolFailureCopy(item.tool?.failureCode, locale) : null;
+  const secondary = [toolFailure ?? toolFailureCopy(item.failureCode, locale) ?? toolSummary, toolOwner].filter(Boolean).join(" · ")
     || (item.kind === "agent" ? [safeRole, agentStateLabel(item, locale)].filter(Boolean).join(" · ") : "")
     || (item.kind === "reasoning" && item.durationMs != null ? elapsedLabel(item.durationMs) : "")
     || (item.kind === "run" && item.durationMs != null ? elapsedLabel(item.durationMs) : "")
@@ -337,10 +339,10 @@ function ActivityRow({
   );
 
   if (!detail) {
-    return <div className={styles.row} data-kind={item.kind} data-status={item.status}>{content}</div>;
+    return <div className={styles.row} data-kind={item.kind} data-status={item.status} data-failure-code={item.tool?.failureCode}>{content}</div>;
   }
   return (
-    <details className={styles.rowDetails} data-kind={item.kind} data-status={item.status}>
+    <details className={styles.rowDetails} data-kind={item.kind} data-status={item.status} data-failure-code={item.tool?.failureCode}>
       <summary className={styles.row}>{content}<IconChevronDown size={12} /></summary>
       <pre>{detail}</pre>
     </details>

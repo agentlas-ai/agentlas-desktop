@@ -109,6 +109,7 @@ import {
 } from "./mobile-bridge/runtime";
 import { userDataDir } from "./runtime-paths";
 import { runHostShutdownHooks } from "./host-lifecycle";
+import { classifyStartupNavigationFailure } from "./startup-navigation";
 
 export { currentUiLocale } from "./ui-locale";
 
@@ -300,6 +301,10 @@ const STARTUP_PLACEHOLDER_HTML = `<!doctype html>
 const STARTUP_PLACEHOLDER_URL = `data:text/html;charset=utf-8,${encodeURIComponent(STARTUP_PLACEHOLDER_HTML)}`;
 
 let mainWindow: BrowserWindow | null = null;
+let lastStartupNavigationFailure: {
+  kind: ReturnType<typeof classifyStartupNavigationFailure>;
+  target: string;
+} | null = null;
 let shellReadyForWindows = false;
 let oneBriefingLaunchTimer: NodeJS.Timeout | null = null;
 let oneBriefingInterval: NodeJS.Timeout | null = null;
@@ -604,7 +609,7 @@ async function loadMainRendererIntoWindow(): Promise<void> {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   const startUrl = process.env.ELECTRON_START_URL;
   if (isDev && startUrl) {
-    await mainWindow.loadURL(startUrl);
+    await loadMainUrl(startUrl);
     // Keep normal local QA launches to one visible Agentlas window. Detached
     // DevTools are opt-in so restarting the renderer does not accumulate extra
     // Electron windows beside the product under test.
@@ -612,7 +617,36 @@ async function loadMainRendererIntoWindow(): Promise<void> {
       mainWindow.webContents.openDevTools({ mode: "detach" });
     }
   } else {
-    await mainWindow.loadURL("agentlas://app/index.html");
+    await loadMainUrl("agentlas://app/index.html");
+  }
+}
+
+function navigationErrorDescription(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error ?? "");
+}
+
+async function loadMainUrl(target: string): Promise<void> {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  lastStartupNavigationFailure = null;
+  try {
+    await mainWindow.loadURL(target);
+  } catch (error) {
+    const description = navigationErrorDescription(error);
+    const kind = classifyStartupNavigationFailure({
+      url: target,
+      errorCode: description,
+      errorDescription: description,
+      isPackaged: app.isPackaged,
+      devStartUrl: process.env.ELECTRON_START_URL,
+    });
+    lastStartupNavigationFailure = { kind, target };
+    if (kind !== "unexpected") {
+      // Expected transition failures are still observable, but belong to a
+      // startup/dev channel rather than the production incident stream.
+      console.info(`[startup][navigation:${kind}] renderer load did not complete`);
+    }
+    throw error;
   }
 }
 
@@ -699,6 +733,19 @@ async function createWindow(options: { startupPlaceholder?: boolean } = {}): Pro
     if (url.startsWith("http://") || url.startsWith("https://")) void shell.openExternal(url);
   });
 
+  mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (!isMainFrame) return;
+    const kind = classifyStartupNavigationFailure({
+      url: validatedURL || mainWindow?.webContents.getURL() || "",
+      errorCode,
+      errorDescription,
+      isPackaged: app.isPackaged,
+      devStartUrl: process.env.ELECTRON_START_URL,
+    });
+    if (kind !== "unexpected") return;
+    console.error(`[main][renderer-navigation] code=${errorCode} description=${errorDescription} url=${validatedURL || "unknown"}`);
+  });
+
   // [회복] 렌더러 크래시(OOM 등) 시 자동 reload — 60초 롤링 윈도우에서 최대 3회로 reload→crash 루프 차단.
   const rendererReloadTimes: number[] = [];
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
@@ -717,7 +764,7 @@ async function createWindow(options: { startupPlaceholder?: boolean } = {}): Pro
     }
   });
 
-  if (options.startupPlaceholder) await mainWindow.loadURL(STARTUP_PLACEHOLDER_URL);
+  if (options.startupPlaceholder) await loadMainUrl(STARTUP_PLACEHOLDER_URL);
   else await loadMainRendererIntoWindow();
 }
 
@@ -1409,6 +1456,11 @@ app.whenReady().then(async () => {
     console.error("[updater] native recovery fallback failed", recoveryError);
   }
   if (handled) return;
+  if (lastStartupNavigationFailure && lastStartupNavigationFailure.kind !== "unexpected") {
+    console.warn(`[startup][${lastStartupNavigationFailure.kind}] renderer startup boundary stopped`);
+    app.exit(1);
+    return;
+  }
   console.error("[main] startup failed", error);
   if (startupStage === "store-opening") {
     const recoveryStarted = await recoverDesktopStartup({

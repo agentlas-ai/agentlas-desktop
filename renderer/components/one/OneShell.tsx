@@ -108,12 +108,18 @@ import { stripAgentControlBlocks, stripAgentIdentityBadges } from "@shared/agent
 import { classifyOneRequestIntent } from "@shared/one-request-intent";
 import { runtimeSelectionReceiptMatches } from "@shared/runtime-selection-receipt";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
+import { toolFailureCopy } from "@shared/tool-failure";
 import { useJudgedOneDecision } from "@/lib/one-decision-judged";
 import { visibleDecisionReceipt } from "@/lib/one-decision-receipt";
 import { alwaysApprovedChatIds, grantAlwaysApproval, subscribeAlwaysApproved } from "@/lib/always-approved-chats";
 import type { OneRecurrenceSelectionV1 } from "@shared/one-recurrence";
 import { seatEventLine } from "@shared/one-seat-events";
 import { shouldPresentOneWeeklyReflection } from "@shared/one-weekly-reflection";
+import {
+  isOneTeamPreflightExpired,
+  isOneTeamPreflightPendingStatus,
+  isOneTeamPreflightTerminalStatus,
+} from "@shared/one-team-preflight";
 import {
   ONE_ATTACHMENT_LIMITS,
   type OneAttachmentPrepareItem,
@@ -199,6 +205,12 @@ function keepPrevIfDeepEqual<T>(next: T): (prev: T | null | undefined) => T {
       return next;
     }
   };
+}
+
+function oneTeamPreflightErrorCode(cause: unknown): string | undefined {
+  if (!cause || typeof cause !== "object") return undefined;
+  const code = (cause as { code?: unknown }).code;
+  return typeof code === "string" ? code : undefined;
 }
 
 const ONE_PERMISSION_STORAGE_KEY = "agentlas.one.permission-mode.v1";
@@ -3330,7 +3342,7 @@ export function OneShell() {
                 }
               : null
         ));
-        if (proposal && ["proposed", "blocked", "deferred", "team_reserved", "solo_reserved"].includes(proposal.status)) {
+        if (proposal && isOneTeamPreflightPendingStatus(proposal.status)) {
           const visiblePrompt = activeThreadPromptFallback || proposal.goalSummary;
           setMessages((current) => current.length > 0
             ? current
@@ -4049,9 +4061,8 @@ export function OneShell() {
     // PRD §4.14 — 제안 카드가 떠 있는 동안 사용자가 평상어로 답하면 **조용히 버려졌다.**
     // 버리지 않는다: 만료된 제안이면 그 사실을 말하고 이번 입력을 그대로 진행시키고,
     // 아직 살아 있는 제안이면 왜 지금 못 받는지 한 줄로 답한다.
-    if (teamPreflight && ["proposed", "blocked", "team_reserved", "workforce_reserved", "solo_reserved", "deferred"].includes(teamPreflight.status)) {
-      const expiresAt = Date.parse(teamPreflight.expiresAt ?? "");
-      const expired = Number.isFinite(expiresAt) && expiresAt <= Date.now();
+    if (teamPreflight && isOneTeamPreflightPendingStatus(teamPreflight.status)) {
+      const expired = isOneTeamPreflightExpired(teamPreflight);
       if (!expired) {
         setError(appLocale === "ko"
           ? "위 제안에 먼저 답해 주세요. 진행하거나 취소하면 이 메시지를 이어서 보낼 수 있어요."
@@ -4882,8 +4893,8 @@ export function OneShell() {
       return;
     }
     const prompt = appLocale === "ko"
-      ? `실패 원장을 읽고 원인을 해결한 뒤 재시도해줘. runId=${failureFocus.runId ?? "없음"}, 오류=${failureFocus.errorCode ?? "실행 오류"}`
-      : `Read the failure receipt, fix the cause, and retry. runId=${failureFocus.runId ?? "none"}, error=${failureFocus.errorCode ?? "runtime failure"}`;
+      ? `실패 원장을 읽고 원인을 해결한 뒤 재시도해줘. runId=${failureFocus.runId ?? "없음"}, 오류=${failureFocus.failureCode ?? failureFocus.errorCode ?? "실행 오류"}`
+      : `Read the failure receipt, fix the cause, and retry. runId=${failureFocus.runId ?? "none"}, error=${failureFocus.failureCode ?? failureFocus.errorCode ?? "runtime failure"}`;
     void startRun(chatId, null, null, prompt, "conversation", {
       displayUserMessage: false,
       promptOrigin: "system",
@@ -5497,15 +5508,11 @@ export function OneShell() {
   );
   // PRD §4.14 — 만료 판정이 **읽을 때만** 일어나서, 화면의 카드는 만료 뒤에도 눌렸다.
   // 화면도 시각으로 판단한다(제안 수명은 30분이다).
-  const teamPreflightExpired = Boolean(
-    teamPreflight
-    && Number.isFinite(Date.parse(teamPreflight.expiresAt ?? ""))
-    && Date.parse(teamPreflight.expiresAt) <= nowTick,
-  );
+  const teamPreflightExpired = Boolean(teamPreflight && isOneTeamPreflightExpired(teamPreflight, nowTick));
   const teamDecisionPending = Boolean(
     teamPreflight
     && !teamPreflightExpired
-    && ["proposed", "blocked", "team_reserved", "workforce_reserved", "solo_reserved", "deferred"].includes(teamPreflight.status),
+    && isOneTeamPreflightPendingStatus(teamPreflight.status),
   );
   // A just-created home run briefly enters preflight before its chat binding
   // arrives. Keep next-turn settings interactive throughout that phase and an
@@ -6278,8 +6285,8 @@ export function OneShell() {
                 <section className={styles.messages} aria-label={selected ? tFor(appLocale, "one.shell.thread.work_conversation_aria") : tFor(appLocale, "one.shell.thread.general_conversation_aria")} aria-live="polite">
                   {failureFocus && (!failureFocus.chatId || failureFocus.chatId === (selected?.chatId ?? conversation?.id)) && (
                     <section className={styles.failureCard} role="alert" aria-label={appLocale === "ko" ? "실패 복구" : "Failure recovery"}>
-                      <div className={styles.failureCardHeader}><strong>{appLocale === "ko" ? "실패" : "Failed"}</strong><span>{failureFocus.errorCode || (appLocale === "ko" ? "실행 오류" : "Runtime error")}</span></div>
-                      <p>{failureFocus.errorMessage}</p>
+                      <div className={styles.failureCardHeader}><strong>{appLocale === "ko" ? "실패" : "Failed"}</strong><span>{(failureFocus.failureCode ?? failureFocus.errorCode) || (appLocale === "ko" ? "실행 오류" : "Runtime error")}</span></div>
+                      <p>{toolFailureCopy(failureFocus.failureCode ?? failureFocus.errorCode, appLocale) ?? failureFocus.errorMessage}</p>
                       <div className={styles.failureCardActions}>
                         <button type="button" disabled={!failureFocus.chatId || busy} onClick={retryFocusedFailure}>{appLocale === "ko" ? "다시 시도" : "Retry"}</button>
                         <button type="button" className={styles.primaryButton} disabled={busy} onClick={sendFocusedFailureToOne}>{appLocale === "ko" ? "One에게 맡기기" : "Ask One"}</button>
@@ -6520,17 +6527,57 @@ export function OneShell() {
                     <div className={styles.teamPreflightConsentActions}>
                       <button type="button" onClick={() => {
                         const api = ipc();
-                        if (!api || !teamPreflight) return;
+                        const proposal = teamPreflight;
+                        if (!api || !proposal) return;
                         setTeamPreflightBusy(true);
-                        void api.oneTeamPreflight.acknowledge({
-                          proposalId: teamPreflight.proposalId,
-                          expectedProposalVersion: teamPreflight.version,
-                          confirmedByUser: true,
-                        }).then(() => {
-                          setTeamPreflight(null);
-                        }).catch((cause) => {
-                          requestOneOperationalRecovery("one-team-preflight-acknowledge", cause);
-                        }).finally(() => setTeamPreflightBusy(false));
+                        void (async () => {
+                          try {
+                            // The card can outlive a reservation/start transition. Re-read
+                            // Main's state before acknowledging so a stale card cannot call
+                            // acknowledge against a non-terminal proposal.
+                            const latest = await api.oneTeamPreflight.getForChat(proposal.binding.chatId);
+                            if (
+                              !latest
+                              || latest.proposalId !== proposal.proposalId
+                              || latest.version !== proposal.version
+                              || !isOneTeamPreflightTerminalStatus(latest.status)
+                            ) {
+                              setTeamPreflight(latest);
+                              setPendingTeamPrompt((current) => (
+                                latest
+                                  && isOneTeamPreflightPendingStatus(latest.status)
+                                  && current?.proposalId === latest.proposalId
+                                  ? current
+                                  : null
+                              ));
+                              return;
+                            }
+                            await api.oneTeamPreflight.acknowledge({
+                              proposalId: latest.proposalId,
+                              expectedProposalVersion: latest.version,
+                              confirmedByUser: true,
+                            });
+                            setTeamPreflight(null);
+                            setPendingTeamPrompt(null);
+                          } catch (cause) {
+                            const code = oneTeamPreflightErrorCode(cause);
+                            if (code === "already_resolved" || code === "stale_binding") {
+                              const latest = await api.oneTeamPreflight.getForChat(proposal.binding.chatId).catch(() => null);
+                              setTeamPreflight(latest);
+                              setPendingTeamPrompt((current) => (
+                                latest
+                                  && isOneTeamPreflightPendingStatus(latest.status)
+                                  && current?.proposalId === latest.proposalId
+                                  ? current
+                                  : null
+                              ));
+                              return;
+                            }
+                            requestOneOperationalRecovery("one-team-preflight-acknowledge", cause);
+                          } finally {
+                            setTeamPreflightBusy(false);
+                          }
+                        })();
                       }}>
                         {appLocale === "ko" ? "확인" : "Got it"}
                       </button>

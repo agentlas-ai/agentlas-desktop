@@ -1,5 +1,6 @@
 import type { AgentMessageDirection, McpInvocationEvent, RunEventUi } from "@shared/types";
 import type { OneArtifactBindingRequestV1 } from "@shared/one-artifacts";
+import { classifyToolFailure, isToolFailureCode, type ToolFailureCode } from "@shared/tool-failure";
 
 export type OneActivityStatus = "running" | "cancelling" | "completed" | "failed" | "cancelled" | "info";
 export type OneActivityKind = "run" | "reasoning" | "tool" | "agent" | "notice" | "result" | "terminal";
@@ -47,6 +48,7 @@ export interface OneActivityTool {
   result?: string;
   id?: string;
   isError?: boolean;
+  failureCode?: ToolFailureCode;
 }
 
 export interface OneActivityItem {
@@ -60,6 +62,7 @@ export interface OneActivityItem {
   role?: string;
   phase?: "plan" | "delegate" | "synthesize";
   message?: string;
+  failureCode?: ToolFailureCode;
   detail?: string;
   noticeLevel?: "info" | "success" | "warning" | "error";
   /** A durable notice carries both product locales so a mirrored screen does not inherit the sender's language. */
@@ -302,13 +305,16 @@ function mergeHandoffs(
     if (matchingMessage && !messages.some((candidate) => candidate.id === matchingMessage.id)) {
       messages.push(matchingMessage);
     }
-    const nextStatus: OneHandoffStatus = event.tool?.isError
-      ? "failed"
-      : isDelegate
-        ? "running"
-        : event.done === true
-          ? "completed"
-          : existing?.status ?? "running";
+    const hasDeliveredWorkerMessage = messages.some((candidate) => candidate.direction === "worker-to-orchestrator");
+    const nextStatus: OneHandoffStatus = hasDeliveredWorkerMessage || existing?.status === "completed"
+      ? "completed"
+      : event.tool?.isError
+        ? "failed"
+        : isDelegate
+          ? "running"
+          : event.done === true
+            ? "completed"
+            : existing?.status ?? "running";
     const nextHandoff: OneActivityHandoff = {
       id,
       fromAgentId: existing?.fromAgentId ?? sourceId,
@@ -560,6 +566,13 @@ export function reduceOneActivity(
       : event.tool.result !== undefined
         ? "completed"
         : "running";
+    const failureCode = event.tool.isError
+      ? classifyToolFailure({
+          explicitCode: event.tool.failureCode,
+          result: event.tool.result,
+          status: event.status,
+        })
+      : undefined;
     items = upsertItem(items, {
       id,
       kind: "tool",
@@ -575,6 +588,7 @@ export function reduceOneActivity(
       tool: {
         ...existing?.tool,
         ...Object.fromEntries(Object.entries(event.tool).filter(([, value]) => value !== undefined)),
+        ...(failureCode ? { failureCode } : {}),
       } as OneActivityTool,
     });
   } else if (event.kind === "tool-use" && event.activity) {
@@ -682,13 +696,19 @@ export function reduceOneActivity(
     const cancelled = /^(?:cancelled|canceled|user_cancelled|user-cancelled|aborted_by_user)$/i.test(event.error?.code ?? "")
       || items.some((item) => item.status === "cancelling");
     const status = cancelled ? "cancelled" : "failed";
+    const failureCode = !cancelled
+      ? classifyToolFailure({ explicitCode: event.error?.code, result: event.error?.message })
+      : "cancelled" as const;
+    const meaningfulFailureCode = failureCode === "tool_failed" ? undefined : failureCode;
     items = closeRunning(items, observedAt, status);
     activeReasoningId = undefined;
     // Keep the reason on the run row so the turn block can say why it failed
     // (Codex shows the runtime's error inline; a bare "failed" is not enough).
     if (!cancelled && event.error?.message?.trim()) {
       const reason = event.error.message.trim();
-      items = items.map((item) => item.kind === "run" && item.status === "failed" && !item.message ? { ...item, message: reason } : item);
+      items = items.map((item) => item.kind === "run" && item.status === "failed" && !item.message
+        ? { ...item, message: reason, ...(meaningfulFailureCode ? { failureCode: meaningfulFailureCode } : {}) }
+        : item);
     }
     if (!items.some((item) => item.kind === "run")) {
       items = upsertItem(items, {
@@ -698,6 +718,7 @@ export function reduceOneActivity(
         observedAt,
         completedAt: observedAt,
         message: event.error?.message,
+        ...(meaningfulFailureCode ? { failureCode: meaningfulFailureCode } : {}),
       });
     }
     terminalStatus = status;
@@ -728,6 +749,11 @@ export function reduceOneActivity(
 function ledgerString(payload: Record<string, unknown>, key: string): string | undefined {
   const value = payload[key];
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function ledgerToolFailureCode(payload: Record<string, unknown>): ToolFailureCode | undefined {
+  const value = ledgerString(payload, "toolFailureCode");
+  return isToolFailureCode(value) ? value : undefined;
 }
 
 function ledgerBoolean(payload: Record<string, unknown>, key: string): boolean | undefined {
@@ -898,6 +924,13 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
         const rawResultPreview = payload.toolResultPreview;
         const hasResultPreview = typeof rawResultPreview === "string";
         const isCompletion = toolIsError || hasResultPreview || Boolean(toolId && observedToolIds.has(toolId));
+        const toolFailureCode = toolIsError
+          ? classifyToolFailure({
+              explicitCode: ledgerToolFailureCode(payload),
+              result: rawResultPreview,
+              status: payload.status,
+            })
+          : undefined;
         if (toolId) observedToolIds.add(toolId);
         const agentName = ledgerString(payload, "agentName");
         const role = ledgerString(payload, "role");
@@ -909,6 +942,7 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
             ...(toolArgs ? { args: toolArgs } : {}),
             ...(isCompletion ? { result: hasResultPreview ? (rawResultPreview as string) : "" } : {}),
             ...(toolIsError ? { isError: true } : {}),
+            ...(toolFailureCode ? { failureCode: toolFailureCode } : {}),
             ...(toolSourceUrls ? { sourceUrls: toolSourceUrls } : {}),
           },
           ...(row.agentId ? { agentId: row.agentId } : {}),

@@ -12,6 +12,7 @@ import type {
 import { parseDurableOneSurfaceJson } from "../../shared/one-surface-durable";
 import { parseOneDomainEventJson } from "../../shared/one-domain-events";
 import { isOneRecurrenceSelectionV1 } from "../../shared/one-recurrence";
+import { classifyToolFailure } from "../../shared/tool-failure";
 import { emitDesktopStoreChange } from "./change-bus";
 import { projectObservedTaskParticipantInDb } from "./task-participant-projection";
 
@@ -196,6 +197,17 @@ function runRowToUi(row: RunEventRow): RunEventUi {
 }
 
 function failureRowToUi(row: FailureEventRow): FailureEventUi {
+  const payload = parsePayload(row.payload_json);
+  // Older rows used the undifferentiated `tool_error` code. Reclassify those
+  // rows from their retained result/status so reopening a chat does not turn a
+  // user's approval refusal into an infrastructure failure.
+  const failureCode = row.source === "tool"
+    ? classifyToolFailure({
+        explicitCode: payload.toolFailureCode ?? row.error_code,
+        result: payload.toolResultPreview ?? row.error_message,
+        status: payload.status,
+      })
+    : undefined;
   return {
     id: row.id,
     runId: row.run_id ?? undefined,
@@ -205,9 +217,10 @@ function failureRowToUi(row: FailureEventRow): FailureEventUi {
     automationId: row.automation_id ?? undefined,
     nodeId: row.node_id ?? undefined,
     agentId: row.agent_id ?? undefined,
-    errorCode: row.error_code ?? undefined,
+    errorCode: failureCode ?? row.error_code ?? undefined,
+    ...(failureCode ? { failureCode } : {}),
     errorMessage: row.error_message,
-    payload: parsePayload(row.payload_json),
+    payload,
   };
 }
 
@@ -363,6 +376,13 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
       },
     });
   }
+  const toolFailureCode = ev.tool?.isError
+    ? classifyToolFailure({
+        explicitCode: ev.tool.failureCode,
+        result: ev.tool.result,
+        status: ev.status,
+      })
+    : undefined;
   const payload = {
     eventKind: ev.kind,
     status: ev.status,
@@ -390,6 +410,7 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     toolName: ev.tool?.name,
     toolId: ev.tool?.id,
     toolIsError: ev.tool?.isError,
+    toolFailureCode,
     // 재방문 시에도 "무엇을 어디에" 했는지 남는다 — 이름만 남기면 과거 턴의 행이
     // "Bash"·"Read"로만 보인다(2026-08-15 실측). 상한·마스킹은 safePayload가 건다.
     toolArgs: ev.tool?.args,
@@ -473,8 +494,8 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
       automationId: req.automationId ?? null,
       nodeId: ev.nodeId,
       agentId: ev.runtimeAgentId ?? ev.agentId,
-      errorCode: "tool_error",
-      errorMessage: ev.status || `${ev.tool.name} returned an error`,
+      errorCode: toolFailureCode ?? "tool_failed",
+      errorMessage: ev.status || ev.tool.result || `${ev.tool.name} returned an error`,
       payload,
     });
   } else if (ev.nodeState === "failed") {

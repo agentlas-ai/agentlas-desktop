@@ -55,10 +55,10 @@ jobs:
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.59,v0.8.60"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.2.37
-      HEPHAESTUS_COMMIT: 2b169ba44742735d1ce7f550fefee071b70324fc
-      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.37.tar.gz
-      HEPHAESTUS_ASSET_SHA256: 50caf78a9c028fcf088039dd862753c25fbb9bed19df9fa248502b442dc306a6
+      HEPHAESTUS_REF: v1.2.38
+      HEPHAESTUS_COMMIT: fc310b5898b44f5a84034fb25f724321de450509
+      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.38.tar.gz
+      HEPHAESTUS_ASSET_SHA256: a8819cfae2c7aaa7791763545414dc477b6df3aec87488ac3dea9cca9865e570
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -266,10 +266,10 @@ jobs:
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.59,v0.8.60"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.2.37
-      HEPHAESTUS_COMMIT: 2b169ba44742735d1ce7f550fefee071b70324fc
-      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.37.tar.gz
-      HEPHAESTUS_ASSET_SHA256: 50caf78a9c028fcf088039dd862753c25fbb9bed19df9fa248502b442dc306a6
+      HEPHAESTUS_REF: v1.2.38
+      HEPHAESTUS_COMMIT: fc310b5898b44f5a84034fb25f724321de450509
+      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.38.tar.gz
+      HEPHAESTUS_ASSET_SHA256: a8819cfae2c7aaa7791763545414dc477b6df3aec87488ac3dea9cca9865e570
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -432,10 +432,10 @@ jobs:
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.59,v0.8.60"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.2.37
-      HEPHAESTUS_COMMIT: 2b169ba44742735d1ce7f550fefee071b70324fc
-      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.37.tar.gz
-      HEPHAESTUS_ASSET_SHA256: 50caf78a9c028fcf088039dd862753c25fbb9bed19df9fa248502b442dc306a6
+      HEPHAESTUS_REF: v1.2.38
+      HEPHAESTUS_COMMIT: fc310b5898b44f5a84034fb25f724321de450509
+      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.38.tar.gz
+      HEPHAESTUS_ASSET_SHA256: a8819cfae2c7aaa7791763545414dc477b6df3aec87488ac3dea9cca9865e570
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

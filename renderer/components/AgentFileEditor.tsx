@@ -26,7 +26,7 @@ type FileEntry = { name: string; path: string; size?: number };
  * 소스를 주입한다.
  */
 export interface EditorSource {
-  list: () => Promise<{ root: string; entries: FileEntry[]; notice?: string }>;
+  list: () => Promise<{ root: string; entries: FileEntry[]; notice?: string; sourceMissing?: boolean }>;
   read: (key: string) => Promise<string>;
   write: (key: string, content: string) => Promise<void>;
 }
@@ -75,6 +75,7 @@ export function AgentFileEditor({ agentId, locale, source, title, subtitle }: {
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [rootPath, setRootPath] = useState<string>("");
   const [listError, setListError] = useState("");
+  const [sourceMissing, setSourceMissing] = useState(false);
   const [activePath, setActivePath] = useState<string | null>(null);
   const [loaded, setLoaded] = useState<string>("");   // 디스크에서 읽은 원본
   const [draft, setDraft] = useState<string>("");     // 편집 중인 내용
@@ -93,12 +94,14 @@ export function AgentFileEditor({ agentId, locale, source, title, subtitle }: {
     if (!api) return;
     if (!source && !agentId) return;
     setListError("");
+    setSourceMissing(false);
     const load = source
       ? source.list()
-      : api.agentFiles.list(agentId as string).then((l: { path?: string; entries?: FileEntry[] } | null) => ({
+      : api.agentFiles.list(agentId as string).then((l: { path?: string; entries?: FileEntry[]; exists?: boolean; reason?: string } | null) => ({
           root: String(l?.path ?? ""),
           entries: Array.isArray(l?.entries) ? l.entries : [],
           notice: undefined as string | undefined,
+          sourceMissing: l?.exists === false && l?.reason === "source-missing",
         }));
     void load
       .then((listing) => {
@@ -106,6 +109,8 @@ export function AgentFileEditor({ agentId, locale, source, title, subtitle }: {
         setRootPath(listing.root);
         setEntries(listing.entries);
         setNotice(listing.notice ?? "");
+        setSourceMissing(listing.sourceMissing === true);
+        if (listing.sourceMissing) setActivePath(null);
       })
       .catch((e: unknown) => {
         if (!cancelled) setListError(e instanceof Error ? e.message : String(e));
@@ -209,6 +214,12 @@ export function AgentFileEditor({ agentId, locale, source, title, subtitle }: {
         </p>
       )}
 
+      {sourceMissing && (
+        <p role="status" style={{ margin: "0 0 10px", padding: "8px 10px", borderRadius: 8, background: "var(--amber-soft, rgba(180,120,0,0.08))", color: "var(--amber-deep, #8a5a00)", fontSize: 11.5, lineHeight: 1.5 }}>
+          {ko ? "에이전트 원본 폴더를 찾지 못했습니다. 에이전트는 목록에 남아 있습니다. 원본을 다시 연결한 뒤 새로고침하세요." : "The agent source folder is missing. The installed agent remains listed; reconnect the source and refresh."}
+      </p>
+      )}
+
       {rootPath && (
         <p style={{ margin: "0 0 10px", fontSize: 11, color: "var(--muted-deep)", wordBreak: "break-all" }}>{rootPath}</p>
       )}
@@ -217,7 +228,9 @@ export function AgentFileEditor({ agentId, locale, source, title, subtitle }: {
         <div style={{ border: "1px solid var(--paper-edge)", borderRadius: 10, overflow: "auto", maxHeight: 420 }}>
           {entries.length === 0 && (
             <p style={{ margin: 0, padding: 12, fontSize: 11.5, color: "var(--muted-deep)" }}>
-              {ko ? "이 에이전트 폴더에서 파일을 찾지 못했습니다." : "No files found in this agent's folder."}
+              {sourceMissing
+                ? (ko ? "원본 폴더가 없어 파일을 표시할 수 없습니다." : "The source folder is missing, so its files cannot be shown.")
+                : (ko ? "이 에이전트 폴더에서 파일을 찾지 못했습니다." : "No files found in this agent's folder.")}
             </p>
           )}
           {entries.map((entry) => {

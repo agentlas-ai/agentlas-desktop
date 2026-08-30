@@ -44,6 +44,8 @@ export interface DirListing {
   /** 부모가 존재하지 않거나 디렉터리가 아니면 null */
   exists: boolean;
   entries: WorkspaceNode[];
+  /** A main-owned source disappeared; this is a recoverable inventory state, not an IPC error. */
+  reason?: "source-missing";
 }
 
 export interface TextFilePreview {

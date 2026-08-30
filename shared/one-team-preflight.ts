@@ -17,6 +17,46 @@ export type OneTeamPreflightStatus =
   | "expired"
   | "recovery_required";
 
+/** States that still own the user's team decision and block a new message. */
+export const ONE_TEAM_PREFLIGHT_PENDING_STATUSES = [
+  "proposed",
+  "blocked",
+  "team_reserved",
+  "workforce_reserved",
+  "solo_reserved",
+  "deferred",
+] as const satisfies readonly OneTeamPreflightStatus[];
+
+/** Only these states may be expired by the proposal TTL. Reserved/started work is not stale UI. */
+export const ONE_TEAM_PREFLIGHT_EXPIRABLE_STATUSES = [
+  "proposed",
+  "blocked",
+  "deferred",
+] as const satisfies readonly OneTeamPreflightStatus[];
+
+export const ONE_TEAM_PREFLIGHT_TERMINAL_STATUSES = ["expired", "cancelled"] as const;
+
+export type OneTeamPreflightPendingStatus = typeof ONE_TEAM_PREFLIGHT_PENDING_STATUSES[number];
+export type OneTeamPreflightExpirableStatus = typeof ONE_TEAM_PREFLIGHT_EXPIRABLE_STATUSES[number];
+export type OneTeamPreflightTerminalStatus = typeof ONE_TEAM_PREFLIGHT_TERMINAL_STATUSES[number];
+
+export function isOneTeamPreflightPendingStatus(value: unknown): value is OneTeamPreflightPendingStatus {
+  return typeof value === "string" && (ONE_TEAM_PREFLIGHT_PENDING_STATUSES as readonly string[]).includes(value);
+}
+
+export function isOneTeamPreflightTerminalStatus(value: unknown): value is OneTeamPreflightTerminalStatus {
+  return typeof value === "string" && (ONE_TEAM_PREFLIGHT_TERMINAL_STATUSES as readonly string[]).includes(value);
+}
+
+export function isOneTeamPreflightExpired(
+  proposal: Pick<OneTeamPreflightProposal, "status" | "expiresAt">,
+  nowMs = Date.now(),
+): boolean {
+  if (!(ONE_TEAM_PREFLIGHT_EXPIRABLE_STATUSES as readonly string[]).includes(proposal.status)) return false;
+  const expiresAt = Date.parse(proposal.expiresAt ?? "");
+  return Number.isFinite(expiresAt) && expiresAt <= nowMs;
+}
+
 export type OneTeamPreflightComplexityReason =
   | "explicit_team_request"
   | "parallel_work_requested"

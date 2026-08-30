@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
-import type { TextFilePreview, WorkspaceNode } from "@/lib/types";
+import type { DirListing, TextFilePreview, WorkspaceNode } from "@/lib/types";
 import { IconCheck, IconClose, IconRefresh } from "@/components/Icon";
 
 export function AgentFilesPanel({
@@ -30,22 +30,37 @@ export function AgentFilesPanel({
   const [saving, setSaving] = useState(false);
   const [savedTick, setSavedTick] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [sourceMissing, setSourceMissing] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const loadFiles = useCallback(async () => {
     const api = ipc();
     if (!api || !agentId) {
       setFiles([]);
+      setSourceMissing(false);
+      setLoadError(null);
       return;
     }
     setLoading(true);
+    setSourceMissing(false);
+    setLoadError(null);
     try {
-      const listing = await api.agentFiles.list(agentId);
+      const listing: DirListing = await api.agentFiles.list(agentId);
       const fileEntries = listing.entries.filter((e) => e.kind === "file");
       setFiles(fileEntries);
+      const missing = listing.exists === false && listing.reason === "source-missing";
+      setSourceMissing(missing);
       // 기본으로 system-prompt.md 또는 첫 파일을 연다.
       const preferred =
         fileEntries.find((e) => e.name === "system-prompt.md") ?? fileEntries[0] ?? null;
-      setActivePath(preferred?.path ?? null);
+      setActivePath(missing ? null : preferred?.path ?? null);
+      if (missing) {
+        setPreview(null);
+        setDraft("");
+        setDirty(false);
+      }
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : String(error));
     } finally {
       setLoading(false);
     }
@@ -57,6 +72,8 @@ export function AgentFilesPanel({
     setPreview(null);
     setDraft("");
     setDirty(false);
+    setSourceMissing(false);
+    setLoadError(null);
   }, [agentId]);
 
   useEffect(() => {
@@ -201,6 +218,14 @@ export function AgentFilesPanel({
           >
             {loading && files.length === 0 ? (
               <span style={{ fontSize: 12, color: "var(--muted)" }}>{t("import.loading")}</span>
+            ) : sourceMissing ? (
+              <span role="status" style={{ fontSize: 12, color: "var(--amber-deep, #8a5a00)" }}>
+                {t("agentfiles.source_missing")}
+              </span>
+            ) : loadError ? (
+              <span role="alert" style={{ fontSize: 12, color: "var(--danger, #b42318)" }}>
+                {t("agentfiles.load_error")}: {loadError}
+              </span>
             ) : files.length === 0 ? (
               <span style={{ fontSize: 12, color: "var(--muted)" }}>{t("workspace.empty.folder")}</span>
             ) : (

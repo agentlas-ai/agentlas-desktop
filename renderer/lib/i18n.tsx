@@ -890,6 +890,9 @@ const dict = {
     "agentfiles.pick_file": "파일을 선택하세요.",
     "agentfiles.saving": "저장 중…",
     "agentfiles.prompt_hint": "이 파일은 에이전트의 동작 프롬프트 원문입니다. 저장하면 다음 메시지부터 바로 적용됩니다.",
+    "agentfiles.load_error": "파일 목록을 불러오지 못했습니다",
+    "agentfiles.source_missing": "에이전트 원본 폴더를 찾지 못했습니다. 에이전트는 목록에 남아 있습니다. 원본을 다시 연결한 뒤 새로고침하세요.",
+    "agentfiles.source_missing_short": "원본 폴더가 없어 파일을 표시할 수 없습니다.",
 
     // Agentlas.cloud 계정 동기화 (Library > Agents)
     "agents.cloud.title": "agentlas.cloud 계정 동기화",
@@ -3085,6 +3088,9 @@ const dict = {
     "agentfiles.pick_file": "Select a file.",
     "agentfiles.saving": "Saving…",
     "agentfiles.prompt_hint": "This file is the agent's raw behavior prompt. Saving applies it from the next message on.",
+    "agentfiles.load_error": "Could not load the file list",
+    "agentfiles.source_missing": "The agent source folder is missing. The installed agent remains listed; reconnect the source and refresh.",
+    "agentfiles.source_missing_short": "The source folder is missing, so its files cannot be shown.",
 
     // Agentlas.cloud account sync (Library > Agents)
     "agents.cloud.title": "agentlas.cloud account sync",
