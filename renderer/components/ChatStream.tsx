@@ -611,6 +611,30 @@ export function ChatStream({
             bottom: 10px;
             max-width: calc(100% - 32px);
           }
+          .agentlas-working-thinking-row {
+            display: grid !important;
+            grid-template-columns: 14px minmax(0, 1fr);
+            align-items: start !important;
+          }
+          .agentlas-working-thinking-copy,
+          .agentlas-working-thinking-owner {
+            grid-column: 2;
+          }
+          .agentlas-working-thinking-copy { grid-row: 1; }
+          .agentlas-working-thinking-owner { grid-row: 2; }
+          .agentlas-working-thinking-owner,
+          .agentlas-working-tool-owner {
+            max-width: 100%;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+          }
+          .agentlas-working-tool-button {
+            flex-wrap: wrap;
+          }
+          .agentlas-working-tool-owner {
+            flex: 1 0 100% !important;
+          }
         }
         @media (prefers-reduced-motion: reduce) {
           .agentlas-chat-streaming-cursor {
@@ -2189,7 +2213,6 @@ function WorkingPanel({
   });
   const workspaceRootForRun = useContext(WorkspaceRootContext);
   const toolSteps = allRows.filter((s) => s.tool);
-  const thinkingSteps = allRows.filter((s) => !s.tool);
 
   // 연속 도구 호출 한 줄 요약. 파일은 집합으로 세어 같은 파일 반복 편집을 부풀리지 않는다.
   const summary = formatToolRunSummary(
@@ -2197,181 +2220,167 @@ function WorkingPanel({
     locale,
   );
 
-  // 실행 중에는 실시간 로그를 바로 보여주고, 완료 뒤에는 요약만 남긴다.
-  // Keep novice-facing Work concise. Detailed raw runtime payloads are
-  // diagnostics, while this surface should explain what the team is doing.
-  const expanded = override ?? false;
-  const activitySummary =
-    toolSteps.length > 0
-      ? summary
-      : locale === "ko"
-        ? `진행 상황 ${thinkingSteps.length}단계`
-        : `${thinkingSteps.length} progress update${thinkingSteps.length > 1 ? "s" : ""}`;
+  // Codex grammar: the live turn is open; a settled turn is one quiet
+  // "Worked for" disclosure. No status dashboard or per-tool color cards.
+  const expanded = override ?? !done;
+  const liveHeadline = latestTextStep?.text.trim()
+    || (fallback && !isInternalRuntimeStatus(fallback) ? fallback.trim() : "")
+    || liveState.message;
+  const elapsedLabel = formatElapsed(elapsed, locale);
+  const headerLabel = done
+    ? (locale === "ko" ? `${elapsedLabel} 동안 작업` : `Worked for ${elapsedLabel}`)
+    : liveHeadline;
+  const tokenLabel = tokens != null && tokens > 0 ? `${formatTokens(tokens)} tokens` : "";
 
   return (
     <div
       data-testid="thinking-text-stream"
       style={{
         color: "var(--muted-deep)",
-        padding: "1px 0 4px",
+        padding: "2px 0 6px",
         display: "flex",
         flexDirection: "column",
-        gap: 7,
+        gap: 3,
+        maxWidth: 820,
       }}
     >
-      {/* 메트릭 줄 — 실행 상태 + "2분 58초 · 94.5k tokens" */}
       <div
         style={{
           display: "flex",
           alignItems: "center",
-          justifyContent: "space-between",
-          gap: 8,
-          fontSize: 12,
-          fontWeight: 500,
-          flexWrap: "wrap",
-          color: "var(--muted-deep)",
-          // 실행 중과 완료가 **같은 높이**를 쓴다 — 턴이 끝날 때 줄이 튀지 않는다.
-          minHeight: 20,
+          gap: 10,
+          minHeight: 28,
+          minWidth: 0,
         }}
       >
-        <span style={statusBadge(done)}>
-          {!done && <PulsingDot />}
-          {done && <span aria-hidden style={doneDot} />}
-          <span>{done ? t("chatstream.done") : liveState.label}</span>
-        </span>
-        <span
+        <button
+          type="button"
+          onClick={() => allRows.length > 0 && setOverride(!expanded)}
+          aria-expanded={allRows.length > 0 ? expanded : undefined}
+          disabled={allRows.length === 0}
           style={{
-            color: "var(--muted-deep)",
-            // 초·토큰이 1초마다 바뀌어도 폭이 떨리지 않는다.
-            fontVariantNumeric: "tabular-nums",
+            minWidth: 0,
+            flex: 1,
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            border: "none",
+            background: "transparent",
+            padding: 0,
+            color: done ? "var(--muted-deep)" : "var(--ink-soft)",
+            font: "inherit",
+            fontSize: done ? 13 : 13.5,
+            fontWeight: done ? 500 : 560,
+            textAlign: "left",
+            cursor: allRows.length > 0 ? "pointer" : "default",
           }}
         >
-          {done
-            ? t("chatstream.took", { sec: formatElapsed(elapsed, locale) })
-            : t("chatstream.working_for", { sec: formatElapsed(elapsed, locale) })}
-          {tokens != null && tokens > 0 && ` · ${formatTokens(tokens)} tokens`}
-        </span>
-      </div>
-
-      {!done && (
-        <div
-          style={liveStateStyle(liveState.tone)}
-          role="status"
-        >
-          <span aria-hidden style={liveStateDotStyle(liveState.tone)} />
-          <div style={{ minWidth: 0, flex: 1, lineHeight: 1.5 }}>
-            <span style={{ fontWeight: 650, color: "var(--ink-soft)" }}>{liveState.message}</span>
-            {liveState.detail && (
-              <span style={{ color: "var(--muted-deep)", marginLeft: 5 }}>
-                {stopRequested
-                  ? locale === "ko"
-                    ? "중지 요청을 보냈습니다. 실행을 정리하는 중입니다."
-                    : "Stop requested. Cleaning up the run."
-                  : liveState.detail}
-              </span>
-            )}
-          </div>
-          {onStop && (
-            <button
-              type="button"
-              data-chat-stop-button="true"
-              onPointerDown={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                if (!stopRequested) onStop?.();
-              }}
-              onClick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                if (!stopRequested) onStop?.();
-              }}
-              disabled={stopRequested}
-              style={{
-                flexShrink: 0,
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 6,
-                border: "1px solid color-mix(in srgb, #b42318 30%, var(--paper-edge))",
-                borderRadius: 999,
-                background: stopRequested ? "var(--paper-2)" : "#fff",
-                color: stopRequested ? "var(--muted-deep)" : "#b42318",
-                padding: "4px 10px",
-                fontSize: 11.5,
-                fontWeight: 760,
-                cursor: stopRequested ? "default" : "pointer",
-              }}
-            >
-              <span
-                aria-hidden
-                style={{ width: 8, height: 8, borderRadius: 2, background: "currentColor", flexShrink: 0 }}
-              />
-              {stopRequested ? (locale === "ko" ? "중지 요청됨" : "Stopping") : t("chat.stop")}
-            </button>
-          )}
-        </div>
-      )}
-
-      {/* 작업 로그 — 접기/펴기 요약 + 목록 (Claude Code/FleetView 형식) */}
-      {allRows.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          <button
-            onClick={() => setOverride(!expanded)}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 6,
-              width: "100%",
-              textAlign: "left",
-              background: "transparent",
-              border: "none",
-              padding: 0,
-              cursor: "pointer",
-              fontSize: 12.5,
-              fontWeight: 600,
-              color: "var(--ink-soft)",
-            }}
-          >
-            <span style={{ minWidth: 0, flex: 1 }}>{activitySummary}</span>
+          <span aria-hidden style={{ width: 18, height: 18, display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0, color: done ? "var(--muted)" : "var(--accent)" }}>
+            {done ? <ThinkingGlyph /> : <GlyphSpinner active />}
+          </span>
+          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{headerLabel}</span>
+          {allRows.length > 0 && (
             <span
               aria-hidden
               style={{
+                display: "inline-flex",
+                flexShrink: 0,
                 color: "var(--muted)",
                 transform: expanded ? "rotate(180deg)" : "none",
                 transition: "transform .12s",
-                display: "inline-flex",
-                flexShrink: 0,
               }}
             >
               <ChevronDown />
             </span>
+          )}
+        </button>
+        <span
+          style={{
+            flexShrink: 0,
+            color: "var(--muted)",
+            fontSize: 11.5,
+            fontVariantNumeric: "tabular-nums",
+          }}
+        >
+          {!done ? [elapsedLabel, tokenLabel].filter(Boolean).join(" · ") : tokenLabel}
+        </span>
+        {onStop && !done && (
+          <button
+            type="button"
+            data-chat-stop-button="true"
+            onPointerDown={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              if (!stopRequested) onStop?.();
+            }}
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              if (!stopRequested) onStop?.();
+            }}
+            disabled={stopRequested}
+            aria-label={stopRequested ? (locale === "ko" ? "중지 요청됨" : "Stopping") : t("chat.stop")}
+            title={stopRequested ? (locale === "ko" ? "중지 요청됨" : "Stopping") : t("chat.stop")}
+            style={{
+              width: 24,
+              height: 24,
+              flexShrink: 0,
+              display: "inline-grid",
+              placeItems: "center",
+              border: "none",
+              borderRadius: 6,
+              background: "transparent",
+              color: stopRequested ? "var(--muted)" : "var(--muted-deep)",
+              cursor: stopRequested ? "default" : "pointer",
+            }}
+          >
+            <span aria-hidden style={{ width: 8, height: 8, borderRadius: 2, background: "currentColor" }} />
           </button>
-          {expanded && (
+        )}
+      </div>
+
+      {!done && liveState.tone !== "active" && (
+        <div
+          role="status"
+          style={{
+            marginLeft: 26,
+            color: liveState.tone === "stale" ? "#b42318" : "var(--amber-deep)",
+            fontSize: 11.5,
+            lineHeight: 1.45,
+          }}
+        >
+          {stopRequested
+            ? (locale === "ko" ? "중지 요청을 보냈습니다. 실행을 정리하는 중입니다." : "Stop requested. Cleaning up the run.")
+            : [liveState.message, liveState.detail].filter(Boolean).join(" ")}
+        </div>
+      )}
+
+      {expanded && allRows.length > 0 && (
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            padding: "3px 0 2px 25px",
+            minWidth: 0,
+            maxHeight: "min(52vh, 560px)",
+            overflowY: "auto",
+          }}
+        >
+          {allRows.map((s, idx) => (
             <div
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                paddingLeft: 14,
-                borderLeft: "1px solid color-mix(in srgb, var(--muted) 28%, transparent)",
-                marginLeft: 3,
-                minWidth: 0,
-              }}
+              key={s.id}
+              // ★간격은 이웃 쌍이 정한다: 도구가 연달아 나오면 붙여서 한 블록으로 읽힌다.
+              style={{ marginTop: activityRowGap(allRows[idx - 1], s) }}
             >
-              {allRows.map((s, idx) => (
-                <div
-                  key={s.id}
-                  // ★간격은 이웃 쌍이 정한다: 도구가 연달아 나오면 붙여서 **한 블록**으로
-                  // 읽히고, 생각↔도구 경계에서만 벌어진다. 균일 gap이면 도구 20개가
-                  // 20개의 독립 카드로 떠서 화면이 성게처럼 된다.
-                  style={{ marginTop: activityRowGap(allRows[idx - 1], s) }}
-                >
-                  <ActivityRow
-                    step={s}
-                    current={!done && idx === allRows.length - 1}
-                    done={done}
-                  />
-                </div>
-              ))}
+              <ActivityRow
+                step={s}
+                current={!done && idx === allRows.length - 1}
+                done={done}
+              />
             </div>
+          ))}
+          {toolSteps.length > 1 && (
+            <span style={{ marginTop: 5, color: "var(--muted)", fontSize: 11.5 }}>{summary}</span>
           )}
         </div>
       )}
@@ -2540,10 +2549,12 @@ function ToolActivityCard({
 function ThinkingRow({ step, current }: { step: StreamStep; current?: boolean }) {
   return (
     <div
+      className="agentlas-working-thinking-row"
       style={{
         display: "flex",
-        alignItems: "flex-start",
+        alignItems: "center",
         gap: 7,
+        minHeight: 26,
         minWidth: 0,
         fontSize: 12.5,
         color: "var(--ink-soft)",
@@ -2553,7 +2564,6 @@ function ThinkingRow({ step, current }: { step: StreamStep; current?: boolean })
         aria-hidden
         style={{
           flexShrink: 0,
-          marginTop: 2,
           color: current ? "var(--accent)" : "var(--muted-deep)",
           display: "inline-flex",
         }}
@@ -2561,15 +2571,22 @@ function ThinkingRow({ step, current }: { step: StreamStep; current?: boolean })
         <ThinkingGlyph />
       </span>
       <span
+        className="agentlas-working-thinking-copy"
         style={{
+          flex: 1,
           minWidth: 0,
           overflowWrap: "anywhere",
           lineHeight: 1.45,
-          fontWeight: current ? 600 : 400,
+          fontWeight: current ? 560 : 400,
         }}
       >
         {step.text}
       </span>
+      {step.agentName && (
+        <span className="agentlas-working-thinking-owner" style={{ flexShrink: 0, color: "var(--muted)", fontSize: 11.5 }}>
+          {step.role ? `${step.agentName} · ${step.role}` : step.agentName}
+        </span>
+      )}
     </div>
   );
 }
@@ -2588,11 +2605,16 @@ function ToolRow({ step, current }: { step: StreamStep; current?: boolean }) {
     <div
       style={{
         minWidth: 0,
+        minHeight: 26,
         padding: "2px 0",
+        display: "flex",
+        flexDirection: "column",
+        justifyContent: "center",
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
       <button
+        className="agentlas-working-tool-button"
         onClick={() => {
           if (!hasDisclosure) return;
           if (hasResult) setResultOpen((v) => !v);
@@ -2618,19 +2640,20 @@ function ToolRow({ step, current }: { step: StreamStep; current?: boolean }) {
           style={{
             flexShrink: 0,
             fontSize: 11,
-            color: tone.accent,
+            color: current ? "var(--accent)" : "var(--muted-deep)",
             padding: 0,
-            fontWeight: current ? 700 : 500,
+            fontWeight: current ? 650 : 500,
           }}
         >
           {view.verb}
         </span>
         <span
           style={{
+            flex: 1,
             fontFamily: "var(--font-mono)",
             fontSize: 12,
             color: current ? "var(--ink)" : "var(--ink-soft)",
-            fontWeight: current ? 600 : 400,
+            fontWeight: current ? 560 : 400,
             minWidth: 0,
             overflow: "hidden",
             textOverflow: "ellipsis",
@@ -2639,6 +2662,11 @@ function ToolRow({ step, current }: { step: StreamStep; current?: boolean }) {
         >
           {view.label || step.tool}
         </span>
+        {step.agentName && (
+          <span className="agentlas-working-tool-owner" style={{ color: "var(--muted)", fontSize: 11.5, flexShrink: 0 }}>
+            {step.role ? `${step.agentName} · ${step.role}` : step.agentName}
+          </span>
+        )}
         {hasResult && (
           <span
             style={{
@@ -2794,48 +2822,6 @@ function compactStatusText(value?: string): string {
   const trimmed = (value ?? "").replace(/\s+/g, " ").trim();
   if (!trimmed) return "";
   return trimmed.length > 96 ? `${trimmed.slice(0, 95)}…` : trimmed;
-}
-
-const doneDot: CSSProperties = {
-  width: 7,
-  height: 7,
-  borderRadius: "50%",
-  background: "#16a34a",
-  flexShrink: 0,
-};
-
-function statusBadge(done: boolean): CSSProperties {
-  return {
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 6,
-    color: done ? "#15803d" : "var(--muted-deep)",
-    fontWeight: 700,
-  };
-}
-
-function liveStateStyle(tone: LiveStateTone): CSSProperties {
-  const color = tone === "stale" ? "#b42318" : tone === "quiet" ? "var(--amber-deep)" : "var(--green-deep)";
-  return {
-    display: "flex",
-    alignItems: "flex-start",
-    gap: 8,
-    color,
-    padding: "1px 0",
-    fontSize: 12,
-  };
-}
-
-function liveStateDotStyle(tone: LiveStateTone): CSSProperties {
-  const color = tone === "stale" ? "#d92d20" : tone === "quiet" ? "var(--amber-deep)" : "var(--green-deep)";
-  return {
-    width: 8,
-    height: 8,
-    marginTop: 4,
-    borderRadius: "50%",
-    flexShrink: 0,
-    background: color,
-  };
 }
 
 const toolMiniButton: CSSProperties = {
@@ -3243,22 +3229,6 @@ function ThinkingGlyph() {
     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <path d="M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z" />
     </svg>
-  );
-}
-
-function PulsingDot() {
-  return (
-    <span
-      aria-hidden
-      style={{
-        width: 7,
-        height: 7,
-        borderRadius: "50%",
-        background: "var(--accent)",
-        boxShadow: "0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent)",
-        flexShrink: 0,
-      }}
-    />
   );
 }
 
