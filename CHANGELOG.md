@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.0.58 — 2026-09-01
+
+This release binds Agentlas OS v1.2.38 at
+fc310b5898b44f5a84034fb25f724321de450509. Its public runtime asset
+`hephaestus-runtime-v1.2.38.tar.gz` is pinned at SHA-256
+`a8819cfae2c7aaa7791763545414dc477b6df3aec87488ac3dea9cca9865e570`.
+Source readiness does not prove a public installer or update feed; the Releases
+page stays the authority.
+
+- Sessions are a single newest-first list without Today/Yesterday buckets.
+- One and organisation-agent clicks open the newest conversation owned by that
+  identity, while group-chat selection clears the One-selected treatment.
+- Other conversations can raise a small red attention dot on the Sessions tab
+  without replacing or interrupting the active conversation.
+- Thinking, shell, and tool activity use compact Codex-style rows, and completed
+  work collapses behind a concise `Worked for` summary.
+
 ## 1.0.57 — 2026-08-30
 
 This release binds Agentlas OS v1.2.38 at
