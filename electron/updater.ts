@@ -46,6 +46,12 @@ if (process.platform === "linux") {
       return;
     }
     process.env.APPIMAGE = destination;
+    // The verifier may have launched the baseline from an extracted APPDIR,
+    // and a real AppImage runtime can likewise leave a mount/extraction
+    // directory in the inherited environment. Once the payload is renamed,
+    // that directory belongs to the old image. Remove it before the detached
+    // target spawn so the new AppImage resolves its own APPDIR.
+    delete process.env.APPDIR;
   });
 }
 
