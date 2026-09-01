@@ -171,6 +171,13 @@ jobs:
       - name: Reverify pinned standalone Python at package boundary
         run: npm run fetch:python
 
+      # electron-builder's afterPack gate requires the same checksum-pinned
+      # Chrome for Testing tree that ships in the app. Materialize it at the
+      # final package boundary on each native runner so Windows/Linux cannot
+      # reach packaging with only the repository .gitkeep placeholder.
+      - name: Materialize pinned browser runtime for package boundary
+        run: npm run fetch:browser
+
       # 맥도 받아야 한다. 예전에는 이 단계가 `runner.os == 'Windows'` 였고, 그래서 맥
       # 배포판에는 앱이 들고 다닐 Node 가 아예 실리지 않았다 — Node 가 없는 맥 사용자에게
       # CLI 설치 버튼이 "npm 을 찾을 수 없습니다"로 끝나던 원인이다.
