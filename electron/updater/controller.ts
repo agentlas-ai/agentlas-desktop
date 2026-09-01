@@ -2008,6 +2008,19 @@ export class DesktopUpdaterController {
           }
           return { accepted: false, state: this.state };
         }
+        // AppImageUpdater unlinks the old image and moves the verified target
+        // into its final path synchronously before this call returns. There is
+        // no asynchronous installer verdict to wait for (unlike NSIS/ShipIt),
+        // so the originating process can durably acknowledge that atomic
+        // replacement before it quits. This also avoids depending on an
+        // AppImage wrapper process reaching Electron merely to delete a marker.
+        if (this.deps.platform === "linux") {
+          if (!this.clearJournal()) {
+            this.logger.warn("[updater] AppImage replacement completed but its install journal could not be cleared");
+          } else {
+            this.logger.log(`[updater] AppImage replacement for ${version} completed; install journal cleared`);
+          }
+        }
         installHandedOff = true;
         this.armNativeInstallWatchdog(journal);
         return { accepted: true, state: this.state };
