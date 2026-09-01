@@ -48,6 +48,7 @@ import {
   disposeAutoUpdater,
   getUpdaterState,
   handleUpdaterBootstrapFailure,
+  hasUpdaterInstallRecoveryState,
   initAutoUpdater,
   noteHealthyStartup,
   onUpdaterStateChange,
@@ -565,7 +566,12 @@ function stopOneBriefingScheduler(): void {
 }
 
 const allowMultiInstance = process.env.AGENTLAS_ALLOW_MULTI_INSTANCE === "1";
-const isPackagedUpdateRelaunch = app.isPackaged && process.argv.includes("--updated");
+// AppImageUpdater relaunches the replacement with no `--updated` argument.
+// Use our durable install state as the cross-platform authority, otherwise the
+// replacement mistakes itself for an ordinary second launch, exits before
+// reconciliation, and leaves only the AppImage wrapper plus a permanent journal.
+const isPackagedUpdateRelaunch = app.isPackaged
+  && (process.argv.includes("--updated") || hasUpdaterInstallRecoveryState());
 const UPDATE_RELAUNCH_LOCK_RETRY_MS = 250;
 const UPDATE_RELAUNCH_LOCK_TIMEOUT_MS = 60_000;
 traceUpdaterStartup("before-single-instance-lock");

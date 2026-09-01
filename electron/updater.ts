@@ -172,6 +172,23 @@ function installJournalPath(userDataPath: string): string {
   return path.join(userDataPath, "updater", "install-journal.v1.json");
 }
 
+/**
+ * Native updaters do not agree on a relaunch argument. NSIS can append one,
+ * while AppImageUpdater launches the replacement with an empty argument list.
+ * The durable updater state is therefore the cross-platform authority for a
+ * relaunch that may need to wait for the old process to release its instance
+ * lock. A corrupt marker counts too: that launch must reach the fail-closed
+ * recovery UI instead of being mistaken for an ordinary second instance.
+ */
+export function hasUpdaterInstallRecoveryState(userDataPath = userDataDir()): boolean {
+  if (process.env.NODE_ENV === "development" || process.env.AGENTLAS_QA_USER_DATA_DIR?.trim()) {
+    return false;
+  }
+  const updaterDir = path.dirname(installJournalPath(userDataPath));
+  return fs.existsSync(installJournalPath(userDataPath))
+    || fs.existsSync(path.join(updaterDir, "install-journal-corrupt.v1.json"));
+}
+
 function persistCorruptJournalHold(userDataPath: string): void {
   const journal = installJournalPath(userDataPath);
   if (!fs.existsSync(journal)) return;
