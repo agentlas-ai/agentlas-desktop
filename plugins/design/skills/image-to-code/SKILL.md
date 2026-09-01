@@ -36,6 +36,10 @@ Translates the pinned visual target design (`assets/target-design.png`) into a f
 - Local preview runtime and `design-qa.md` verification report.
 
 # Verification
+- Confirm the built prototype clears the accessibility floors in `$hig-checklist` (contrast, hit targets, text scaling, focus order) even when the pinned target ignores them —
+  a faithful copy of an inaccessible mock is still inaccessible. Report any place where
+  fidelity to the target and the floors disagree instead of silently choosing one.
+
 - Confirm that `design-qa.md` exists in the project root with `final result: passed`.
 - Verify that all visual elements, fonts, colors, and layouts match `assets/target-design.png` 1:1.
 - Verify that the local development server is running without console errors.

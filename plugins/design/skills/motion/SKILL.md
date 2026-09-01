@@ -34,6 +34,10 @@ Elevates static prototypes into living, responsive interfaces by designing and i
 - Responsive, tactile micro-interactions and smooth transitions in the running prototype.
 
 # Verification
+- Confirm motion is optional and cancellable per the `motion` guideline: reduced-motion is
+  honoured with a still fallback, nothing essential is communicated by animation alone, and
+  frequent UI transitions stay brief. Route via `$hig-lookup` when a claim needs its citation.
+
 - Verify that all animations run smoothly at 60fps without causing layout shifts or jank.
 - Confirm that micro-interaction durations stay under `180ms` and surface transitions under `300ms`.
 - Test that `@media (prefers-reduced-motion: reduce)` properly disables motion when activated.

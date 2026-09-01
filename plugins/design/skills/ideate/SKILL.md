@@ -37,6 +37,10 @@ Explores product concepts by generating 3 distinct, production-quality visual de
 - Seamless handoff to `$image-to-code`.
 
 # Verification
+- Confirm each concept is buildable against the platform conventions and accessibility floors
+  in `$hig-checklist` — a concept that can only exist by breaking them is a concept that dies
+  in implementation. Note the tension explicitly rather than dropping the concept silently.
+
 - Confirm that exactly 3 distinct images were generated and successfully rendered.
 - Verify that each concept demonstrates meaningful architectural and layout variation.
 - Ensure the user's selected design is saved as `assets/target-design.png` before build begins.

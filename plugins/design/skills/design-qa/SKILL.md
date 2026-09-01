@@ -38,6 +38,10 @@ Acts as the mandatory quality gate before prototype delivery by conducting a 1:1
 - Side-by-side comparison visual evidence.
 
 # Verification
+- Run the accessibility floors from `$hig-checklist` as part of the gate — contrast, hit
+  target size, text scaling, and both appearances. A pixel-faithful match that fails a floor
+  is recorded as a P1 finding, not passed through on fidelity grounds.
+
 - Confirm that `design-qa.md` concludes with an explicit verdict of `final result: passed`.
 - Verify that every P0, P1, and P2 visual discrepancy identified during iteration has been resolved.
 - Ensure the rendered prototype matches `assets/target-design.png` with pixel-faithful fidelity.

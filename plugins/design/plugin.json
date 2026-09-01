@@ -2,7 +2,7 @@
   "schema": "agentlas.plugin/v2",
   "slug": "design",
   "name": "Agentlas Design",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "builtin": true,
   "publisher": {
     "name": "Agentlas",
@@ -11,16 +11,17 @@
   "surface": {
     "displayName": "Agentlas Design",
     "displayNameKo": "Agentlas 디자인",
-    "tagline": "Visual-first design ideation, target pinning, and faithful prototyping",
-    "taglineKo": "시각적 시안 탐색, 타겟 시안 고정 및 1:1 프로토타입 구현 플러그인",
-    "description": "Close the gap between product ideas and working software with rapid 3-concept visual ideation, target pinning, faithful side-by-side prototyping, UI motion engineering, and UX audits.",
-    "descriptionKo": "시각적 3종 시안 생성, 타겟 시안 고정, 시안 기반 1:1 대조 프로토타입 구현, UI 모션 엔지니어링 및 UX 흐름 감사를 제공합니다.",
+    "tagline": "Visual-first design ideation, faithful prototyping, and Apple HIG-grounded design review",
+    "taglineKo": "시각적 시안 탐색, 1:1 프로토타입 구현, 그리고 Apple 휴먼 인터페이스 가이드라인 기반 디자인 리뷰",
+    "description": "Close the gap between product ideas and working software with rapid 3-concept visual ideation, target pinning, faithful side-by-side prototyping, UI motion engineering, and design reviews graded against Apple's Human Interface Guidelines.",
+    "descriptionKo": "시각적 3종 시안 생성, 타겟 시안 고정, 시안 기반 1:1 대조 프로토타입 구현, UI 모션 엔지니어링, 그리고 Apple 휴먼 인터페이스 가이드라인 171개 문서를 근거로 한 디자인 리뷰·접근성 감사를 제공합니다.",
     "category": "design",
     "brandColor": "#FF66AD",
     "icon": "assets/icon.svg",
     "defaultPrompts": [
       "Generate 3 distinct visual design concepts for this idea",
-      "Audit the core UX flow and accessibility of this website",
+      "Review this screen against Apple's Human Interface Guidelines",
+      "Audit the accessibility of this app and grade what you find",
       "Recreate this screen into an interactive web prototype",
       "Add smooth spring physics and micro-interactions to this component"
     ]
@@ -38,6 +39,7 @@
         "user-context",
         "ideate",
         "audit",
+        "hig-review",
         "image-to-code",
         "motion",
         "url-to-code",
@@ -80,6 +82,11 @@
     "algo": "sha256",
     "files": [
       {
+        "path": "README.md",
+        "sha256": "a4debadc4499ad0187625a5f7d87abbd03c10a039f992b4b1dc83111198b12e8",
+        "bytes": 4122
+      },
+      {
         "path": "assets/doctor-report.schema.json",
         "sha256": "f2cf80dd873f636ac5e0814cbcecb7e6f0d4279fe97ab4fde72856dface50e5f",
         "bytes": 11704
@@ -95,9 +102,34 @@
         "bytes": 12793
       },
       {
-        "path": "README.md",
-        "sha256": "ce0d5a3d022e7249f22c6d7f89985fdd10cc110616532cb10b4d616760db4d01",
-        "bytes": 2448
+        "path": "references/apple-hig/hig-checklist.md",
+        "sha256": "f5c8eab70d8f3a07523d0ff67f4233be3dce68d4adc81db91fd885310fdcf635",
+        "bytes": 7700
+      },
+      {
+        "path": "references/apple-hig/hig-lookup.md",
+        "sha256": "203b2ffe66e09d688c2c2acc6f9bde1820492e4e28419a1e86c58562c3874aa8",
+        "bytes": 30841
+      },
+      {
+        "path": "references/apple-hig/hig-platform-translation.md",
+        "sha256": "cc40acbbd0481c50e1e35da16c8271b8a4a5cd6f5698f52e546ba8c186e46c3d",
+        "bytes": 3484
+      },
+      {
+        "path": "references/apple-hig/hig-review-protocol.md",
+        "sha256": "90b43e054d55525757041dc358ad5c6ebe0f0270431f6d1b1cd2b0d19ae5250e",
+        "bytes": 3804
+      },
+      {
+        "path": "references/apple-hig/hig-sources.md",
+        "sha256": "66cb70114e7f638de7980135a219115b9b7d3ad19192b0b43e34600b2e9fd8c7",
+        "bytes": 1946
+      },
+      {
+        "path": "references/apple-hig/liquid-glass.md",
+        "sha256": "d7fcc6cb29cbb5cc9b4d685f84e5ab631fa152b6f7828767e18f305051f5d087",
+        "bytes": 4450
       },
       {
         "path": "references/board-runtime.md",
@@ -140,11 +172,6 @@
         "bytes": 205
       },
       {
-        "path": "references/doctor.md",
-        "sha256": "db34014b8c597577c42945465839ecff64a40697552b32d3b4da0d0a94603502",
-        "bytes": 18459
-      },
-      {
         "path": "references/doctor-lynx.md",
         "sha256": "e5536928064c98ab6d0863e0e742349d590cfc6b772be1f95cc08fecdfb29ea5",
         "bytes": 3010
@@ -153,6 +180,11 @@
         "path": "references/doctor-react.md",
         "sha256": "661c1beaa701423990f35736e0812fc4f1148e103aed553398f6e1eec9e828b7",
         "bytes": 2807
+      },
+      {
+        "path": "references/doctor.md",
+        "sha256": "db34014b8c597577c42945465839ecff64a40697552b32d3b4da0d0a94603502",
+        "bytes": 18459
       },
       {
         "path": "references/foundation-contract.md",
@@ -271,13 +303,13 @@
       },
       {
         "path": "skills/audit/SKILL.md",
-        "sha256": "ad30b628c7875f4521180c40f4a9783b005bf3f5427ecd499322a855ddb95660",
-        "bytes": 2141
+        "sha256": "5572cc10a1f03e0de884f0146555216dab478b6f195f66d0ad99207ad00f18f3",
+        "bytes": 2520
       },
       {
         "path": "skills/design-qa/SKILL.md",
-        "sha256": "b1ab0088fb4dbd6510cb08da44ac15690cd2c345d2ffa79c0bc64da560b9fa5e",
-        "bytes": 2952
+        "sha256": "13e4c63ff7d99a6fef7305bf8bb7f27477c708fa53b90b9b09c193d5b9e9935f",
+        "bytes": 3208
       },
       {
         "path": "skills/get-context/SKILL.md",
@@ -285,29 +317,39 @@
         "bytes": 1627
       },
       {
+        "path": "skills/hig-review/SKILL.md",
+        "sha256": "04a9b7daeee2524444d21e78ecb0340242a3872bbd97fe692074f495768eb1b3",
+        "bytes": 4293
+      },
+      {
         "path": "skills/ideate/SKILL.md",
-        "sha256": "0aa8663d13e69aab81bf96198ff586d418d1a68669dbe9a72c705f8f933b707e",
-        "bytes": 2910
+        "sha256": "6a0667456e33ce21cfd5187a0d32dc826d8e33b61059b5aa8d6ea705e05882ba",
+        "bytes": 3193
       },
       {
         "path": "skills/image-to-code/SKILL.md",
-        "sha256": "223bebe70f9c93a35469dea4e3fbdfd45e4effde3e77e3e85afe5c19a4cd16bc",
-        "bytes": 3065
+        "sha256": "de9ef61be6f835bd2f4f64ce2a2ee24c4d8acabee7a96c41a1fdc23664a8597d",
+        "bytes": 3415
       },
       {
         "path": "skills/index/SKILL.md",
-        "sha256": "12c38e14339c0e539c1e1164f93d6effd4a991141ecf5871080637b54dc6782c",
-        "bytes": 2399
+        "sha256": "082039f41ce4210a18a273a0a806b54f45e67c0ce40ff1f34cac508342b2a179",
+        "bytes": 2670
       },
       {
         "path": "skills/motion/SKILL.md",
-        "sha256": "d55df491b7f6eeb9e21f9742bc027b816c719ec7bd2100d4965b2c982da65733",
-        "bytes": 2553
+        "sha256": "4603c36ec9811b17ad83fecab63c0a40a947c9d1a105fb9672b0f605df188f22",
+        "bytes": 2832
       },
       {
         "path": "skills/research/SKILL.md",
         "sha256": "ac186b80dc021f9f83b3affa3aada44eb37dc0825720aba8ba9e38f3805c3906",
         "bytes": 1860
+      },
+      {
+        "path": "skills/seed-design/SKILL.md",
+        "sha256": "20a4962b2a461dbdf770903e79058d7eef7a5f08d66cb77346a188a59dc9fad0",
+        "bytes": 1747
       },
       {
         "path": "skills/seed-design/references/component-guidelines.md",
@@ -358,11 +400,6 @@
         "path": "skills/seed-design/references/snippet-generation.md",
         "sha256": "917e0f1255e379f596366b5af28f4c86d4c8aa6a23ffaf262d52d742380dd9a8",
         "bytes": 1866
-      },
-      {
-        "path": "skills/seed-design/SKILL.md",
-        "sha256": "20a4962b2a461dbdf770903e79058d7eef7a5f08d66cb77346a188a59dc9fad0",
-        "bytes": 1747
       },
       {
         "path": "skills/share/SKILL.md",

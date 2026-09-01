@@ -1,6 +1,6 @@
 ---
 name: index
-description: "Routes design requests to the appropriate workflow skill for visual ideation (3-option generation), target design pinning, side-by-side prototype building, UI motion/animations, URL/image cloning, UX flow audits, and design QA."
+description: "Routes design requests to the appropriate workflow skill for visual ideation (3-option generation), target design pinning, side-by-side prototype building, UI motion/animations, URL/image cloning, UX flow audits, guideline-grounded design review, and design QA."
 ---
 
 # Skill Purpose
@@ -15,6 +15,7 @@ The Design plugin bridges product ideas and working software through a streamlin
 - New app/prototype/UI concept without visual targets → `$get-context` → `$ideate`
 - Visual concept exploration and 3-option ideation → `$ideate`
 - Product flow, journey, funnel, onboarding, or accessibility audits → `$audit`
+- Design review, UI critique, HIG compliance, accessibility grading, dark mode or Liquid Glass review, app icon review → `$hig-review`
 - Recreating/cloning a live URL into an interactive prototype → `$url-to-code`
 - Translating a pinned visual mock/image into working code (1:1 side-by-side) → `$image-to-code`
 - UI motion, spring physics, tactile micro-interactions, and animations → `$motion`
@@ -37,3 +38,4 @@ If a required tool is not available in the environment, report the blocker clear
 - Follow `$critical-overrides`.
 - Follow `$communication-protocol` for concise, effective communication.
 - Follow `$motion-system` for interaction design and UI physics.
+- Ground design judgment in `$hig-checklist`; route to the backing guideline through `$hig-lookup`.

@@ -10,6 +10,9 @@ Evaluates existing product interfaces and flows through direct step-by-step brow
 - The target product URL or interface and the specific user journey (e.g., onboarding, checkout, signup, settings) must be identified.
 - Browser capture capability (such as `@agentlas-browser` or `@playwright`) must be available.
 - Adhere to `$critical-overrides` and `$design-audit-framework`.
+- Judge what the captures show against `$hig-checklist`; when a finding needs a citation,
+  route to the backing guideline with `$hig-lookup`. For a full guideline-graded review of a
+  surface rather than a journey, hand off to `$hig-review`.
 
 # Steps
 1. **Initialize & Navigate**: Open the target flow and wait until the initial screen is fully loaded and visually stable.
@@ -17,7 +20,7 @@ Evaluates existing product interfaces and flows through direct step-by-step brow
    - Advance through the user journey one action at a time.
    - Capture a clean screenshot at each state and save it sequentially (e.g., `01-start.png`, `02-form-filled.png`).
    - Observe visual hierarchy, validation behaviors, loading states, empty states, keyboard focus, and contrast.
-3. **Analyze Findings**: For each step, note observed strengths, UX friction points, accessibility risks, and limits of screenshot-only inspection.
+3. **Analyze Findings**: For each step, note observed strengths, UX friction points, accessibility risks, and limits of screenshot-only inspection. Grade findings by consequence using the severity scale in `$hig-review-protocol`, and state the guideline behind any rule-shaped claim.
 4. **Compose Inline Report**:
    - Assemble an inline markdown report pairing numbered steps directly with their corresponding screenshots.
    - Include an executive summary, step-by-step breakdown, top-priority recommendations, and clear evidence limits.

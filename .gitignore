@@ -309,3 +309,7 @@ scripts/demo/
 
 # Generated from the pinned File Viewer dependency graph before renderer dev/build.
 /renderer/public/file-viewer/
+
+# Apple HIG page text is Apple's copyright and this repo is public — the design
+# plugin keeps it as a local cache only (refill: node scripts/fetch-apple-hig.mjs).
+plugins/design/references/apple-hig/.cache/
