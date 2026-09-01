@@ -4,6 +4,14 @@ appId: com.agentlas.desktop
 productName: Agentlas
 copyright: © 2026 Agentlas
 
+# Pin the modern native packaging toolsets. The static AppImage runtime keeps
+# the hosted Linux updater gate independent of FUSE 2, while the unified NSIS
+# bundle carries the current Windows installer/runtime helpers. Both versions
+# are checksum-pinned by the installed electron-builder release.
+toolsets:
+  appimage: 1.0.3
+  nsis: 1.2.1
+
 # agentlas:// URL 스킴 — 허브 웹의 "설치" 버튼이 여는 주소(agentlas://plugin/<family>/<slug>).
 # 번들이 이 선언을 갖고 있어야 macOS 가 링크를 이 앱으로 넘긴다. 런타임 등록은
 # electron/main.ts 의 registerAgentlasProtocolClient() 가 함께 한다 — 둘 다 필요하다.
