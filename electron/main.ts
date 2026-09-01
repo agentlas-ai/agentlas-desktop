@@ -1062,7 +1062,7 @@ electronAutoUpdater.on("before-quit-for-update", () => {
   // process has fully exited. Hand over the lock only after the native updater
   // has committed to quitting, so the replacement can enter startup and clear
   // the durable journal instead of waiting behind a dying process.
-  if (!allowMultiInstance) app.releaseSingleInstanceLock();
+  if (!allowMultiInstance && app.hasSingleInstanceLock()) app.releaseSingleInstanceLock();
 });
 app.on("will-quit", (event) => {
   // electron-updater's raw auto-install-on-quit path is intentionally disabled:

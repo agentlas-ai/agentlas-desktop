@@ -476,6 +476,10 @@ export async function initAutoUpdater(options: AutoUpdaterInitOptions = {}): Pro
       }),
     initialSessionRestore: options.initialAuthRestore,
     refreshSessionForRecovery: bootAuthFromKeychain,
+    releaseInstanceLockForInstall: () => {
+      if (app.hasSingleInstanceLock()) app.releaseSingleInstanceLock();
+    },
+    reacquireInstanceLockAfterInstallFailure: () => app.requestSingleInstanceLock(),
     broadcast,
     revealPath: (filePath) => shell.showItemInFolder(filePath),
     schedule: hasUpdateConfig,
@@ -500,6 +504,7 @@ export function disposeAutoUpdater(): void {
   controller = null;
 }
 
+/** Subscribe to the native updater instance that actually performs installs. */
 /** Manual and scheduled checks share one in-flight promise and return main-authoritative state. */
 export async function checkSafely(): Promise<UpdaterState> {
   if (!controller) {
