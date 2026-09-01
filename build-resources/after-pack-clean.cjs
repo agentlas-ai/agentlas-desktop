@@ -1,4 +1,4 @@
-const { access, chmod, lstat, readFile, readdir, readlink, realpath, rm } = require("node:fs/promises");
+const { access, chmod, lstat, readFile, readdir, readlink, realpath, rm, writeFile } = require("node:fs/promises");
 const { createHash } = require("node:crypto");
 const path = require("node:path");
 const { execFile } = require("node:child_process");
@@ -672,6 +672,37 @@ async function verifyMacComputerUseDriver(context) {
   console.log(`[afterPack] verified Agentlas Computer Use driver ${sourceDigest} (${architectures.join("+")})`);
 }
 
+/**
+ * AppImageUpdater starts the replacement image with a copy of the old
+ * process environment. The AppImage runtime normally refreshes APPDIR before
+ * it calls AppRun, but an inherited directory can win in extract-and-run
+ * mode. That makes the new image execute the old extracted payload forever:
+ * the replacement file is present, yet the target app never reaches its own
+ * JavaScript bootstrap. The current AppRun path is authoritative, so clear
+ * the inherited value before electron-builder's generated path discovery.
+ */
+async function repairLinuxAppImageEntrypoint(context) {
+  if (context.electronPlatformName !== "linux") return;
+  const appRun = path.join(context.appOutDir, "AppRun");
+  const marker = "# Agentlas: recompute APPDIR for an inherited AppImage relaunch";
+  const content = await readFile(appRun, "utf8");
+  if (content.includes(marker)) {
+    console.log(`[afterPack] verified Linux AppImage entrypoint guard ${appRun}`);
+    return;
+  }
+  const needle = 'args=("$@")\nNUMBER_OF_ARGS="$#"\n';
+  if (!content.includes(needle)) {
+    throw new Error(`[afterPack] generated Linux AppRun has an unexpected shape: ${appRun}`);
+  }
+  const replacement = `${needle}\n${marker}\n# Native updater relaunches may inherit the previous image's extraction root.\nif [ -n "\${APPIMAGE:-}" ]; then\n  unset APPDIR\nfi\n`;
+  await writeFile(appRun, content.replace(needle, replacement), "utf8");
+  const stat = await lstat(appRun);
+  if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o111) === 0) {
+    throw new Error(`[afterPack] Linux AppImage entrypoint guard made AppRun invalid: ${appRun}`);
+  }
+  console.log(`[afterPack] repaired Linux AppImage entrypoint guard ${appRun}`);
+}
+
 async function prepareSquirrelInstallableTree(root) {
   // Squirrel.Mac recursively clears quarantine xattrs before it takes ownership
   // of the candidate bundle. Every entry therefore needs owner-write permission
@@ -799,6 +830,7 @@ exports.default = async function afterPackClean(context) {
     }
   }
 
+  await repairLinuxAppImageEntrypoint(context);
   await verifyEmbeddedAgentlasOs(context);
   await verifyMacComputerUseDriver(context);
   verifyBundledProductExtensionSigningPolicy(context);
