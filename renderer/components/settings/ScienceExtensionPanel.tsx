@@ -5,7 +5,7 @@ import type { ProductExtensionStatus } from "@shared/product-extension";
 import { IconBrain, IconCheck, IconPower, IconTrash } from "@/components/Icon";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
-import { requestScienceInstall } from "@/lib/science-install-entry";
+import { requestScienceInstall, SCIENCE_INSTALL_DISCOVERY_ENABLED } from "@/lib/science-install-entry";
 import styles from "./ScienceExtensionPanel.module.css";
 
 const SCIENCE_ID = "agentlas-science";
@@ -90,6 +90,8 @@ export function ScienceExtensionPanel() {
   };
 
   const tone = status?.phase === "installed" ? "ready" : status?.phase === "repair-required" ? "error" : "neutral";
+  if (!SCIENCE_INSTALL_DISCOVERY_ENABLED && !status?.installed) return null;
+
   return (
     <section className={styles.section} aria-labelledby="science-extension-title">
       <h2 id="science-extension-title" className={styles.heading}>Agentlas Science</h2>
