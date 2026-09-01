@@ -52,8 +52,8 @@ function assertDownloadUrl(spec: SciencePackageArchiveSpec): URL {
     || parsed.search
     || parsed.hash
     || parsed.hostname !== "github.com"
-    || parsed.pathname !== `/agentlas-ai/agentlas-desktop-releases/releases/download/science-v0.1.0/${path.basename(parsed.pathname)}`
-    || !parsed.pathname.endsWith(".zip")
+    || !/^\/agentlas-ai\/agentlas-desktop-releases\/releases\/download\/science-v\d+\.\d+\.\d+\/[^/]+\.zip$/u.test(parsed.pathname)
+    || decodeURIComponent(path.basename(parsed.pathname)) !== path.basename(decodeURIComponent(parsed.pathname))
   ) {
     throw new Error("science-download-url-invalid");
   }

@@ -14,6 +14,7 @@ import type {
 } from "../../shared/product-extension";
 import { ProductExtensionInstaller } from "./installer";
 import { downloadAndInstallSciencePackage, type SciencePackageArchiveSpec } from "./downloader";
+import { fetchScienceReleaseCatalog } from "./science-catalog";
 import { ScienceRendererRegistry } from "../science/renderer-registry";
 import type { ScienceRendererBinding, ScienceRendererExecutorBinding } from "../../shared/science-renderer-runtime";
 
@@ -57,6 +58,49 @@ const SCIENCE_SUITE_SPECS: ReadonlyArray<SciencePackageArchiveSpec & {
 ] as const;
 
 let cachedInstaller: ProductExtensionInstaller | null = null;
+
+function remoteCatalogInstallEnabled(): boolean {
+  return app.isPackaged || (!app.isPackaged && process.env.AGENTLAS_SCIENCE_REMOTE_INSTALL_QA === "1");
+}
+
+async function catalogSuiteSpecs(): Promise<typeof SCIENCE_SUITE_SPECS> {
+  const catalog = await fetchScienceReleaseCatalog(app.isPackaged);
+  return SCIENCE_SUITE_SPECS.map((fallback) => {
+    const component = catalog.components.find((candidate) => candidate.id === fallback.id);
+    if (!component) throw new Error("science-catalog-component-missing");
+    return {
+      ...component,
+      sourceEnv: fallback.sourceEnv,
+    };
+  });
+}
+
+function catalogFailure(error: unknown, suite: boolean): ProductExtensionInstallReceipt | ScienceSuiteInstallReceipt {
+  const code = error instanceof Error && error.message.startsWith("science-catalog-")
+    ? error.message
+    : "science-catalog-invalid";
+  const message = code === "science-catalog-network-failed"
+    ? "Agentlas Science could not reach its signed package catalog."
+    : "The signed Agentlas Science package catalog is unavailable or invalid.";
+  if (suite) {
+    return {
+      ok: false,
+      id: "agentlas-science-suite",
+      action: "failed",
+      components: [],
+      code,
+      message,
+    };
+  }
+  return {
+    ok: false,
+    id: SCIENCE_EXTENSION_ID,
+    action: "failed",
+    version: null,
+    code,
+    message,
+  };
+}
 
 function policyCandidates(): string[] {
   return app.isPackaged
@@ -182,9 +226,17 @@ export function resolveExactVerifiedScienceRendererExecutorBinding(
 }
 
 export async function installScienceExtension(): Promise<ProductExtensionInstallReceipt> {
-  const spec = SCIENCE_SUITE_SPECS[0];
-  const source = !app.isPackaged ? process.env.AGENTLAS_SCIENCE_EXTENSION_SOURCE_DIR?.trim() : "";
-  if (!app.isPackaged && (!source || !path.isAbsolute(source))) {
+  const remoteInstall = remoteCatalogInstallEnabled();
+  let spec = SCIENCE_SUITE_SPECS[0];
+  if (remoteInstall) {
+    try {
+      spec = (await catalogSuiteSpecs())[0];
+    } catch (error) {
+      return catalogFailure(error, false) as ProductExtensionInstallReceipt;
+    }
+  }
+  const source = !remoteInstall ? process.env.AGENTLAS_SCIENCE_EXTENSION_SOURCE_DIR?.trim() : "";
+  if (!remoteInstall && (!source || !path.isAbsolute(source))) {
     return {
       ok: false,
       id: SCIENCE_EXTENSION_ID,
@@ -216,7 +268,9 @@ export async function installScienceExtension(): Promise<ProductExtensionInstall
 export async function installScienceSuite(
   onProgress?: (progress: ScienceSuiteInstallProgress) => void,
 ): Promise<ScienceSuiteInstallReceipt> {
-  const totalBytes = SCIENCE_SUITE_SPECS.reduce((sum, spec) => sum + spec.archiveBytes, 0);
+  const remoteInstall = remoteCatalogInstallEnabled();
+  let specs = SCIENCE_SUITE_SPECS;
+  let totalBytes = specs.reduce((sum, spec) => sum + spec.archiveBytes, 0);
   const progress = (
     phase: ScienceSuiteInstallProgress["phase"],
     componentId: ScienceSuiteComponentId | null,
@@ -228,7 +282,7 @@ export async function installScienceSuite(
     phase,
     componentId,
     componentIndex,
-    componentCount: SCIENCE_SUITE_SPECS.length,
+    componentCount: specs.length,
     completedBytes,
     totalBytes,
     percent: totalBytes > 0 ? Math.max(0, Math.min(100, Math.round((completedBytes / totalBytes) * 100))) : 0,
@@ -236,11 +290,21 @@ export async function installScienceSuite(
   });
 
   progress("checking", null, 0, 0, "Checking the signed Science package");
-  const sources = SCIENCE_SUITE_SPECS.map((spec) => ({
+  if (remoteInstall) {
+    try {
+      specs = await catalogSuiteSpecs();
+      totalBytes = specs.reduce((sum, spec) => sum + spec.archiveBytes, 0);
+    } catch (error) {
+      const receipt = catalogFailure(error, true) as ScienceSuiteInstallReceipt;
+      progress("failed", null, 0, 0, receipt.message ?? receipt.code ?? "Installation failed");
+      return receipt;
+    }
+  }
+  const sources = specs.map((spec) => ({
     spec,
-    source: !app.isPackaged ? process.env[spec.sourceEnv]?.trim() ?? "" : "",
+    source: !remoteInstall ? process.env[spec.sourceEnv]?.trim() ?? "" : "",
   }));
-  const unavailable = !app.isPackaged
+  const unavailable = !remoteInstall
     ? sources.find(({ source }) => !source || !path.isAbsolute(source))
     : undefined;
   if (unavailable) {
