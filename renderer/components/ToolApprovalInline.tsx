@@ -1,17 +1,15 @@
 "use client";
 
 /*
- * 도구 승인 인라인 카드 — 실행이 붙어 있는 대화 안에서, 묻는 순간에만 뜬다.
+ * 도구 승인 팝업 — 실행이 붙어 있는 대화 안에서, 묻는 순간에만 뜬다.
  *
- * ★오너 결정(2026-08-15): 승인은 모달이 아니라 대화의 한 줄이다. 런타임이 실행 전에
- * 물어본 요청(live)만 여기 온다. 이미 거부되고 지나간 것(post-denial)은 러너가 남긴
- * 알림 한 줄이 전부이며 카드가 되지 않는다.
+ * 전체 화면을 가리는 설정 모달이나 미리 연결하는 메뉴가 아니라, 실제 경계를 넘는
+ * 순간 입력창 위에 짧게 뜨는 확인창이다. 런타임이 실행 전에 물어본 요청(live)만
+ * 여기 온다. 이미 거부되고 지나간 것(post-denial)은 러너가 남긴 알림 한 줄이 전부다.
  *
- * Graph 칩은 네 답([이번만 허용] [이 작업에서 계속 허용] [항상 허용] [거부])을
- * 보여 준다. One의 기존 compact AskCard는 세 답을 유지한다.
- *
- * 승인 자체는 대화를 멈추는 경계지만, 화면을 차지하는 질문 시트가 아니다. Graph 칩은
- * 제목·런타임·네 선택지를 한 줄로 보여 주고, One은 기존 질문 카드를 그대로 쓴다.
+ * One과 Graph의 compact 표면은 네 답([이번만 허용] [이 작업에서 계속 허용]
+ * [항상 허용] [거부])을 보여 준다. 승인 자체는 대화를 멈추는 경계지만, 화면을
+ * 차지하는 질문 시트가 아니다. 제목·실행 주체·네 선택지를 입력창 가까이에 둔다.
  */
 import { useEffect } from "react";
 import { AskCard, type AskCardOption } from "@/components/AskCard";
@@ -44,7 +42,7 @@ export function ToolApprovalCard({
 }: {
   request: ToolApprovalRequestEvent;
   compact?: boolean;
-  /** The compact Graph surface is opt-in; One keeps its existing AskCard. */
+  /** Opt into the compact contextual popup used by One and Graph. */
   chip?: boolean;
 }) {
   const { locale } = useT();
@@ -54,6 +52,13 @@ export function ToolApprovalCard({
   const locked = action?.phase === "submitting" || action?.phase === "unknown" || action?.phase === "terminal";
   const runtimeName = RUNTIME_LABEL[request.runtime] ?? request.runtime;
   const imageTool = /(?:image|dall|flux|midjourney|imagen)/i.test(request.tool);
+  const folderAccess = request.tool === "folder-access";
+  const folderWrite = folderAccess && request.capability === "edit";
+  const folderParts = String(request.detail ?? "")
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .split(/[\\/]+/)
+    .filter(Boolean);
+  const folderLabel = folderParts.slice(-2).join("/") || (ko ? "요청한 폴더" : "the requested folder");
   /*
    * 권한 승격 요청(오너 결정 2026-08-25) — "읽기 전용이라 실행 불가"는 거절이 아니라
    * 이 칩으로 전체 액세스 승격을 묻는다. 채널은 일반 도구 승인과 같은 한 벌이고,
@@ -68,6 +73,10 @@ export function ToolApprovalCard({
    */
   const askTitle = escalation
     ? (ko ? "전체 액세스로 진행할까요?" : "Continue with full access?")
+    : folderAccess
+      ? folderWrite
+        ? (ko ? `“${folderLabel}”에 파일을 만들고 수정할까요?` : `Allow creating and editing files in “${folderLabel}”?`)
+        : (ko ? `“${folderLabel}” 폴더를 읽을까요?` : `Allow reading the “${folderLabel}” folder?`)
     : imageTool
       ? (ko ? "이미지 생성을 허용할까요?" : "Allow image generation?")
       : (ko ? `${request.tool} 사용을 허용할까요?` : `Allow ${request.tool}?`);
@@ -77,6 +86,10 @@ export function ToolApprovalCard({
       title: ko ? "이번만 허용" : "Allow once",
       note: escalation
         ? (ko ? "이번 이어가기 실행에만 전체 액세스를 줍니다." : "Full access for this resumed run only.")
+        : folderAccess
+          ? folderWrite
+            ? (ko ? "이번 실행에서만 파일 생성과 수정을 허용합니다." : "Allow file creation and edits for this run only.")
+            : (ko ? "이번 실행에서만 이 폴더를 읽습니다." : "Read this folder for this run only.")
         : (ko ? `${runtimeName} 가 지금 이 호출에만 씁니다.` : `${runtimeName} uses it for this call only.`),
       active: true,
       disabled: locked,
@@ -86,6 +99,10 @@ export function ToolApprovalCard({
       title: ko ? "이 작업에서 계속 허용" : "Allow for this task",
       note: escalation
         ? (ko ? "이 대화에서는 승격을 다시 묻지 않습니다." : "No more escalation questions in this conversation.")
+        : folderAccess
+          ? folderWrite
+            ? (ko ? "이 대화에서는 이 폴더의 파일 수정을 다시 묻지 않습니다." : "Do not ask again about editing files here in this conversation.")
+            : (ko ? "이 대화에서는 이 폴더 읽기를 다시 묻지 않습니다." : "Do not ask again about reading this folder in this conversation.")
         : (ko ? "이 작업이 끝날 때까지 다시 묻지 않습니다." : "No more questions until this task ends."),
       disabled: locked,
     },
@@ -94,6 +111,10 @@ export function ToolApprovalCard({
       title: ko ? "항상 허용" : "Always allow",
       note: escalation
         ? (ko ? "권한이 모자랄 때 항상 전체 액세스로 진행합니다." : "Always continue with full access when permission falls short.")
+        : folderAccess
+          ? folderWrite
+            ? (ko ? "이 폴더의 파일 생성과 수정을 앞으로 다시 묻지 않습니다." : "Do not ask again about creating or editing files here.")
+            : (ko ? "이 폴더 읽기를 앞으로 다시 묻지 않습니다." : "Do not ask again about reading this folder.")
         : (ko ? "이 도구의 같은 작업 패턴을 다시 묻지 않습니다." : "Do not ask again for this tool's matching action pattern."),
       disabled: locked,
     }]),
@@ -102,6 +123,8 @@ export function ToolApprovalCard({
       title: ko ? "거부" : "Deny",
       note: escalation
         ? (ko ? "읽기 전용을 유지합니다 — 요청된 변경은 실행되지 않습니다." : "Stay read-only — the requested change is not executed.")
+        : folderAccess
+          ? (ko ? "이 폴더를 사용하지 않고 안전한 기본 위치에서 계속합니다." : "Continue in the safe default location without this folder.")
         : (ko ? "이 호출만 거부되고 나머지는 그대로 진행됩니다." : "Only this call is refused; the rest of the run continues."),
       disabled: locked,
     },

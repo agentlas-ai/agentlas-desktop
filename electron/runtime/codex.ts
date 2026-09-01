@@ -54,8 +54,58 @@ import {
 import { residencyDisabledFor } from "./claude-session";
 import { isResidencyExemptAgent, resolveAgentResidencySource } from "./agent-residency";
 import type { AcpSessionLease } from "./acp-session-pool";
+import { generateImage } from "../multimodal/image";
+import { multimodalImageSlot, multimodalImageSlotDiagnosis } from "../multimodal/slot";
+import {
+  defaultRuntimeToolPermission,
+  getRuntimeToolPermissionArbiter,
+  type RuntimeToolPermissionAsk,
+} from "./tool-approval";
 
 const KIND = "codex";
+const CODEX_IMAGE_TOOL_NAME = "generate_image";
+const CODEX_IMAGE_TOOL_VERSION = "agentlas.generate-image.v1";
+
+const CODEX_IMAGE_DYNAMIC_TOOL = {
+  type: "function",
+  name: CODEX_IMAGE_TOOL_NAME,
+  description: "Generate the image the user asked for with Agentlas's configured multimodal slot. You MUST call this tool for image-generation requests. Never claim that an image was generated or displayed unless this tool returns success=true and an inputImage result.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      prompt: {
+        type: "string",
+        minLength: 1,
+        maxLength: 1200,
+        description: "Concrete visual prompt describing subject, composition, palette, aspect ratio, and style.",
+      },
+    },
+    required: ["prompt"],
+    additionalProperties: false,
+  },
+} as const;
+
+function codexImageToolCapability(req: RunnerRequest): string {
+  if (req.untrustedNoTools || req.restrictedReadBoundary || req.judgmentOnly) return "disabled";
+  const slot = multimodalImageSlot();
+  return slot ? `${CODEX_IMAGE_TOOL_VERSION}:${slot.runtimeKind}:${slot.model}` : "unavailable";
+}
+
+function codexImageToolInstructions(enabled: boolean): string {
+  return enabled
+    ? [
+        "## Agentlas image output contract",
+        `For any request to create or edit an image, call the host tool \`${CODEX_IMAGE_TOOL_NAME}\`.`,
+        "Do not inspect image skill files, spawn another image workflow yourself, or claim success from prose.",
+        "You may say an image was generated or displayed only after the tool returns success=true with inputImage content.",
+        "If the tool returns success=false, say generation failed and preserve its reason; never say the image is above or attached.",
+      ].join("\n")
+    : [
+        "## Agentlas image output contract",
+        "No host image-generation tool is attached to this thread.",
+        "Never claim that an image was generated, attached, shown above, or displayed. Report that generation is unavailable instead.",
+      ].join("\n");
+}
 
 const CANDIDATES = [
   // Windows: `.cmd`/`.exe`를 bare `codex`보다 먼저(bare는 PATHEXT 해석 시 `.ps1`을 잡아
@@ -149,6 +199,12 @@ function buildResidentInitialTurnPrompt(req: RunnerRequest): string {
   return parts.join("\n");
 }
 
+const CODEX_WORKSPACE_WRITE_CONFIG_ARGS = [
+  "-c", "sandbox_workspace_write.network_access=true",
+  "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+  "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
+] as const;
+
 function permissionArgs(permission?: RunnerRequest["permission"]): string[] {
   if (permission === "full") {
     return ["--dangerously-bypass-approvals-and-sandbox"];
@@ -161,7 +217,7 @@ function permissionArgs(permission?: RunnerRequest["permission"]): string[] {
     // confirmed: workspace-write curl to CDP exits 7, adding network_access=true
     // reaches Chrome. Keep the filesystem sandbox; open network. The user drives
     // their own machine — a network-blind agent is a dead automation, not safety.
-    return ["--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"];
+    return ["--sandbox", "workspace-write", ...CODEX_WORKSPACE_WRITE_CONFIG_ARGS];
   }
   // `codex exec`는 비대화형이라 approval loop가 없다 — 승인 플래그를 받지 않는다.
   // (`--ask-for-approval`은 대화형 `codex` 전용. exec에 넘기면 0.133+에서
@@ -177,7 +233,7 @@ function resumePermissionArgs(permission?: RunnerRequest["permission"]): string[
   // config override. Reassert the boundary — and, for write, keep network open so
   // a resumed automation can still reach the local browser and HTTP.
   if (permission === "write") {
-    return ["-c", `sandbox_mode="workspace-write"`, "-c", "sandbox_workspace_write.network_access=true"];
+    return ["-c", `sandbox_mode="workspace-write"`, ...CODEX_WORKSPACE_WRITE_CONFIG_ARGS];
   }
   return ["-c", `sandbox_mode="read-only"`];
 }
@@ -205,10 +261,12 @@ function systemFingerprint(req: RunnerRequest): string {
   if (req.sessionFingerprintSeed) {
     return crypto
       .createHash("sha256")
-      .update("seed.v3\0")
+      .update("seed.v4\0")
       .update(req.sessionFingerprintSeed)
       .update("\0model\0")
       .update(req.model ?? "")
+      .update("\0image-tool\0")
+      .update(codexImageToolCapability(req))
       .digest("hex");
   }
   return crypto
@@ -224,6 +282,8 @@ function systemFingerprint(req: RunnerRequest): string {
     .update(req.model ?? "")
     .update("\0")
     .update(req.effort ?? "")
+    .update("\0")
+    .update(codexImageToolCapability(req))
     .update("\0")
     .update(req.isolatedMcpConfig ? "isolated-mcp" : "provider-defaults")
     .update("\0")
@@ -805,10 +865,12 @@ export function codexThreadPolicy(
         type: "workspaceWrite",
         writableRoots: [writableRoot],
         networkAccess: true,
-        // Taskforce staging folders can legitimately live below TMPDIR on
-        // macOS. The exact cwd is still the only added writable root.
-        excludeTmpdirEnvVar: false,
-        excludeSlashTmp: false,
+        // A selected project may itself live below TMPDIR, but Codex's default
+        // temp grants must stay disabled. `writableRoots` re-adds only this
+        // exact project; leaving either temp grant enabled lets a worker write
+        // siblings/parents outside the assigned project root.
+        excludeTmpdirEnvVar: true,
+        excludeSlashTmp: true,
       },
     };
   }
@@ -830,17 +892,63 @@ export function codexToolEventFromItem(item: any, completed: boolean): {
     if (typeof value === "string") return cut(value);
     try { return cut(JSON.stringify(value)); } catch { return cut(String(value)); }
   };
+  const commandArtifactPaths = (): string[] => {
+    if (!completed || item.status === "failed" || item.status === "declined") return [];
+    if (typeof item.exitCode === "number" && item.exitCode !== 0) return [];
+    const cwd = typeof item.cwd === "string" && path.isAbsolute(item.cwd) ? item.cwd : null;
+    const command = typeof item.command === "string" ? item.command : "";
+    const output = typeof item.aggregatedOutput === "string" ? item.aggregatedOutput.slice(0, 64_000) : "";
+    if (!cwd || !command) return [];
+    const paths = new Set<string>();
+    if (output) {
+      for (const line of output.split(/\r?\n/u)) {
+        const match = line.match(/^(.+?\.(?:png|jpe?g|gif|webp|avif|svg)):\s*(?:PNG|JPEG|GIF|WebP|AVIF|SVG)\b.*(?:image|data)/iu);
+        const raw = match?.[1]?.trim().replace(/^['"]|['"]$/g, "");
+        if (!raw || !command.includes(raw)) continue;
+        const candidate = path.isAbsolute(raw) ? path.normalize(raw) : path.resolve(cwd, raw);
+        paths.add(candidate);
+        if (paths.size >= 8) break;
+      }
+    }
+    // A dedicated successful copy/move/redirection is structured command
+    // input, unlike a path mentioned in model prose or arbitrary stdout. Main
+    // still re-opens every candidate under the invocation folder or an exact
+    // user-requested standard output folder before One can display it.
+    const collectDestination = (value: string | undefined): void => {
+      if (!value || paths.size >= 8) return;
+      const raw = value.trim().replace(/^['"]|['"]$/g, "");
+      if (!path.isAbsolute(raw) || raw.startsWith("/dev/") || raw.startsWith("/proc/")) return;
+      if (!/\.[A-Za-z0-9]{1,10}$/u.test(raw)) return;
+      paths.add(path.normalize(raw));
+    };
+    for (const match of command.matchAll(/>{1,2}\s*("[^"]+"|'[^']+'|\S+)/gu)) collectDestination(match[1]);
+    for (const match of command.matchAll(/\btee\s+(?:-a\s+)?("[^"]+"|'[^']+'|\S+)/gu)) collectDestination(match[1]);
+    for (const match of command.matchAll(/\b(?:cp|mv)\s+(?:-\S+\s+)*(?:"[^"]+"|'[^']+'|\S+)\s+("[^"]+"|'[^']+'|\S+)/gu)) {
+      collectDestination(match[1]);
+    }
+    for (const match of command.matchAll(/--filename(?:=|\s+)("[^"]+"|'[^']+'|\S+)/gu)) {
+      const raw = match[1]?.trim().replace(/^["']|["']$/g, "");
+      if (!raw) continue;
+      collectDestination(path.isAbsolute(raw) ? raw : path.resolve(cwd, raw));
+    }
+    return [...paths];
+  };
   switch (item.type) {
     case "commandExecution": {
       const failed = item.status === "failed" || item.status === "declined"
         || (typeof item.exitCode === "number" && item.exitCode !== 0);
+      const artifactPaths = failed ? [] : commandArtifactPaths();
+      const browserUrl = typeof item.command === "string"
+        ? item.command.match(/(?:playwright_cli\.sh|\$PWCLI|\$\{PWCLI\})[^\n]*?\bopen\s+(https?:\/\/[^\s'";]+)/iu)?.[1]
+        : undefined;
       return {
-        name: "bash",
-        args: asText({ command: item.command, cwd: item.cwd }),
+        name: browserUrl ? "browser_navigate" : "bash",
+        args: browserUrl ? asText({ url: browserUrl }) : asText({ command: item.command, cwd: item.cwd }),
         result: completed
           ? (asText(item.aggregatedOutput) ?? (typeof item.exitCode === "number" ? `exit ${item.exitCode}` : String(item.status ?? "completed")))
           : undefined,
         isError: completed && failed,
+        ...(artifactPaths.length > 0 ? { artifactPaths } : {}),
       };
     }
     case "fileChange": {
@@ -863,12 +971,24 @@ export function codexToolEventFromItem(item: any, completed: boolean): {
         isError: completed && (item.status === "failed" || item.error != null),
       };
     case "dynamicToolCall":
+      {
+        const contentItems = Array.isArray(item.contentItems) ? item.contentItems : [];
+        const summary = contentItems.map((content: any) => {
+          if (content?.type === "inputText") return { type: "inputText", text: asText(content.text) ?? "" };
+          if (content?.type === "inputImage") return { type: "inputImage", imageAvailable: typeof content.imageUrl === "string" };
+          if (content?.type === "inputAudio") return { type: "inputAudio", audioAvailable: typeof content.audioUrl === "string" };
+          return { type: "unknown" };
+        });
       return {
         name: String(item.tool ?? "tool"),
         args: asText(item.arguments),
-        result: completed ? (asText(item.contentItems) ?? String(item.status ?? "completed")) : undefined,
+        // Never put a base64 media URL in the event ledger. Main binds the
+        // verified artifact path separately and the renderer receives only an
+        // opaque preview capability.
+        result: completed ? (asText(summary) ?? String(item.status ?? "completed")) : undefined,
         isError: completed && (item.status === "failed" || item.success === false),
       };
+      }
     case "webSearch":
       return {
         name: "web_search",
@@ -908,10 +1028,16 @@ async function runCodexResidentTurn(input: {
   appliedEffort: string | null;
 }): Promise<ResidentTurnOutcome> {
   const { bin, req, events, chatId, fingerprint, resumeThreadId, gapContext, mcpArgs, appliedEffort } = input;
+  const runtimeSessionOwnerId = req.runtimeSessionOwnerId ?? req.agentId;
+  const isolateRuntimeSessionOwner = req.runtimeSessionOwnerId != null;
   const cwd = req.cwd ?? agentRunCwd();
   const env = req.env ?? process.env;
   const policy = codexThreadPolicy(req.permission, cwd);
   const approvalsReviewer = req.approvalsReviewer ?? "user";
+  const imageDiagnosis = req.untrustedNoTools || req.restrictedReadBoundary || req.judgmentOnly
+    ? null
+    : await multimodalImageSlotDiagnosis();
+  const imageToolSlot = imageDiagnosis?.state === "ready" ? imageDiagnosis.slot : null;
   /*
    * 스폰 형상 — `-c` 는 app-server 하위 명령의 옵션이다(실측 `codex app-server --help`).
    * reasoning summary 를 켜는 것은 exec 경로와 같은 이유다(끄면 요약 아이템이 비어 온다).
@@ -962,6 +1088,7 @@ async function runCodexResidentTurn(input: {
   const messageOrder: string[] = [];
   const messages = new Map<string, string>();
   const startedTools = new Set<string>();
+  const dynamicToolArtifactPaths = new Map<string, string[]>();
   let thinkingOpen = false;
   let thinkingStartedAt = 0;
   let estChars = 0;
@@ -1061,14 +1188,19 @@ async function runCodexResidentTurn(input: {
         if (tool) {
           closeThinking();
           if (bodyText()) emitPartial(true);
+          const itemId = String(item.id ?? "");
+          const artifactPaths = item?.type === "dynamicToolCall"
+            ? dynamicToolArtifactPaths.get(itemId)
+            : tool.artifactPaths;
           events.onTool?.(
             tool.name,
             tool.args,
             tool.result,
-            String(item.id ?? ""),
+            itemId,
             tool.isError,
-            tool.artifactPaths,
+            artifactPaths,
           );
+          if (item?.type === "dynamicToolCall") dynamicToolArtifactPaths.delete(itemId);
         }
         break;
       }
@@ -1132,6 +1264,61 @@ async function runCodexResidentTurn(input: {
   const sink: CodexTurnSink = {
     onNotification,
     onServerRequest: async (method, params) => {
+      if (method === "item/tool/call") {
+        const callId = typeof params?.callId === "string" ? params.callId : "";
+        const tool = typeof params?.tool === "string" ? params.tool : "";
+        const namespace = params?.namespace == null ? null : String(params.namespace);
+        const argsRecord = params?.arguments && typeof params.arguments === "object" && !Array.isArray(params.arguments)
+          ? params.arguments as Record<string, unknown>
+          : null;
+        const prompt = typeof argsRecord?.prompt === "string" ? argsRecord.prompt.trim().slice(0, 1200) : "";
+        if (!imageToolSlot || tool !== CODEX_IMAGE_TOOL_NAME || namespace !== null || !callId || !prompt) {
+          return {
+            success: false,
+            contentItems: [{ type: "inputText", text: "Image generation failed: the host image tool is unavailable or the prompt is invalid. Do not claim an image was generated or displayed." }],
+          };
+        }
+        const ask: RuntimeToolPermissionAsk = {
+          runtime: KIND,
+          sessionKey: `${KIND}:${req.sessionFingerprintSeed ?? chatId}`,
+          tool: CODEX_IMAGE_TOOL_NAME,
+          kind: "other",
+          cwd,
+          permission: req.permission,
+          mutating: true,
+          chatId: req.approvalChatId ?? chatId,
+          ...(req.agentId ? { agentId: req.agentId } : {}),
+          ...(req.unattended ? { unattended: true as const } : {}),
+        };
+        const arbiter = getRuntimeToolPermissionArbiter();
+        let decision = defaultRuntimeToolPermission(ask);
+        if (arbiter) {
+          try { decision = await arbiter(ask); } catch { decision = "deny"; }
+        }
+        if (decision === "deny") {
+          events.onStatus(`[tool-approval] runtime=${KIND} capability=other tool=${CODEX_IMAGE_TOOL_NAME} decision=deny`);
+          return {
+            success: false,
+            contentItems: [{ type: "inputText", text: "Image generation was not approved. Do not claim an image was generated or displayed." }],
+          };
+        }
+        events.onStatus(`[tool-approval] runtime=${KIND} capability=other tool=${CODEX_IMAGE_TOOL_NAME} decision=${decision}`);
+        const generated = await generateImage(imageToolSlot.model, prompt);
+        if (!generated.ok || !generated.src || !generated.artifactPath) {
+          return {
+            success: false,
+            contentItems: [{ type: "inputText", text: `Image generation failed: ${generated.reason ?? "no image was produced"}. Do not claim an image was generated or displayed.` }],
+          };
+        }
+        dynamicToolArtifactPaths.set(callId, [generated.artifactPath]);
+        return {
+          success: true,
+          contentItems: [
+            { type: "inputText", text: `Image generation succeeded with ${generated.engine ?? imageToolSlot.runtimeKind}. The image is attached to this tool result.` },
+            { type: "inputImage", imageUrl: generated.src },
+          ],
+        };
+      }
       /*
        * ★실행 **전** 승인 — codex 가 처음으로 승인 칩에 참여하는 자리.
        * 계약은 ACP `answerPermission` 과 같다: 중재자가 없으면 보수적 기본값,
@@ -1184,8 +1371,9 @@ async function runCodexResidentTurn(input: {
         approvalPolicy: policy.approvalPolicy,
         approvalsReviewer,
         sandbox: policy.sandbox,
-        developerInstructions: buildDeveloperInstructions(req),
+        developerInstructions: `${buildDeveloperInstructions(req)}\n\n${codexImageToolInstructions(Boolean(imageToolSlot))}`,
         ...(req.model ? { model: req.model } : {}),
+        ...(imageToolSlot ? { dynamicTools: [CODEX_IMAGE_DYNAMIC_TOOL] } : {}),
       };
       let resumed = false;
       if (resumeThreadId) {
@@ -1205,7 +1393,7 @@ async function runCodexResidentTurn(input: {
             broken = true;
             throw new Error(`Automation runtime session resume failed for ${KIND}; refusing to create a fresh CLI session.`);
           }
-          clearRuntimeSession(chatId, KIND, req.agentId);
+          clearRuntimeSession(chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner });
         }
       }
       if (!resumed) {
@@ -1256,7 +1444,7 @@ async function runCodexResidentTurn(input: {
 
     if (req.signal?.aborted) {
       // 취소여도 스레드가 생겼으면 저장 → 이어지는 steering 메시지가 문맥을 유지한다.
-      saveRuntimeSession(chatId, KIND, session.threadId, fingerprint, { agentId: req.agentId,
+      saveRuntimeSession(chatId, KIND, session.threadId, fingerprint, { agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner,
         ...(usage.total ? {
           reportedOutputTokens: usage.total.outputTokens,
           reportedInputTokens: usage.total.inputTokens,
@@ -1305,7 +1493,7 @@ async function runCodexResidentTurn(input: {
       const refusal = detectRuntimeRefusal(text);
       if (refusal) failure = { kind: refusal.kind, message: refusal.message, runtime: KIND, source: "heuristic" };
     }
-    if (!saveRuntimeSession(chatId, KIND, session.threadId, fingerprint, { agentId: req.agentId,
+    if (!saveRuntimeSession(chatId, KIND, session.threadId, fingerprint, { agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner,
       ...(usage.total ? {
         reportedOutputTokens: usage.total.outputTokens,
         reportedInputTokens: usage.total.inputTokens,
@@ -1412,6 +1600,8 @@ export const runCodex: Runner = async (
 
   const stagedImages = await stageCliImageAttachments(req);
   const runReq = stagedImages.images.length > 0 ? { ...req, userPrompt: stagedImages.userPrompt } : req;
+  const runtimeSessionOwnerId = runReq.runtimeSessionOwnerId ?? runReq.agentId;
+  const isolateRuntimeSessionOwner = runReq.runtimeSessionOwnerId != null;
 
   if (stagedImages.images.length > 0) {
     events.onStatus(
@@ -1435,6 +1625,19 @@ export const runCodex: Runner = async (
   // app-server has no equivalent flag, so isolated turns intentionally bypass
   // residency and use the exact Main-authored `-c mcp_servers.*` overrides.
   const isolatedConfigArgs = runReq.isolatedMcpConfig ? ["--ignore-user-config"] : [];
+  // Browser-only turns must not expose Codex's shell/code/native browser tools.
+  // The exact Main-authored MCP overrides below remain available, so the model
+  // can operate the shared Agentlas session without a permission prompt or a
+  // second Playwright/Chrome process.
+  const browserOnlyConfigArgs = runReq.browserOnly
+    ? [
+        "-c", "features.shell_tool=false",
+        "-c", "features.code_mode=false",
+        "-c", "features.browser_use=false",
+        "-c", "features.computer_use=false",
+        "-c", "features.in_app_browser=false",
+      ]
+    : [];
   // 모델/effort를 CLI에 명시 전달 — 예전엔 세션 지문에만 쓰고 인자로는 안 넘겨서, 앱이
   // 뭘 선택했든 기기의 ~/.codex/config.toml(또는 codex 업데이트가 바꾼 내장 기본값)이
   // 이겼다(2026-07-08: 다른 기기에서 지정한 적 없는 Spark 모델로 조용히 실행된 사고).
@@ -1470,7 +1673,9 @@ export const runCodex: Runner = async (
 
   // 세션 resume 가능 여부 — chatId 저장 세션 또는 Build 같은 호출자가 직접 넘긴 세션 id.
   const fingerprint = runReq.chatId ? systemFingerprint(runReq) : null;
-  const existing = runReq.chatId ? getRuntimeSession(runReq.chatId, KIND, runReq.agentId) : null;
+  const existing = runReq.chatId
+    ? getRuntimeSession(runReq.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner })
+    : null;
   const storedSessionId =
     existing && fingerprint && existing.fingerprint === fingerprint
       ? existing.sessionId
@@ -1565,6 +1770,7 @@ export const runCodex: Runner = async (
       "exec",
       "resume",
       ...isolatedConfigArgs,
+      ...browserOnlyConfigArgs,
       "--json",
       "--skip-git-repo-check",
       ...resumePerm,
@@ -1595,13 +1801,13 @@ export const runCodex: Runner = async (
     if (runReq.signal?.aborted) {
       // 취소여도 스레드가 생겼으면 저장 → steering 메시지가 이 세션을 resume해 문맥 유지.
       if (runReq.chatId && fingerprint && r.threadId) {
-        saveRuntimeSession(runReq.chatId, KIND, r.threadId, fingerprint, { ...codexUsageCounters(r), agentId: runReq.agentId });
+        saveRuntimeSession(runReq.chatId, KIND, r.threadId, fingerprint, { ...codexUsageCounters(r), agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner });
       }
       throw abortReasonError(runReq);
     }
     if (r.code === 0) {
       if (runReq.chatId && fingerprint && r.threadId) {
-        if (!saveRuntimeSession(runReq.chatId, KIND, r.threadId, fingerprint, { ...codexUsageCounters(r), agentId: runReq.agentId })) {
+        if (!saveRuntimeSession(runReq.chatId, KIND, r.threadId, fingerprint, { ...codexUsageCounters(r), agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner })) {
           events.onStatus(`[runtime-session] store_failed kind=${KIND}`);
         }
       }
@@ -1630,13 +1836,14 @@ export const runCodex: Runner = async (
       throw new Error(`Automation runtime session resume failed for ${KIND}; refusing to create a fresh CLI session.`);
     }
     // Interactive chat may recover with the full durable history after an explicit receipt.
-    if (runReq.chatId) clearRuntimeSession(runReq.chatId, KIND, runReq.agentId);
+    if (runReq.chatId) clearRuntimeSession(runReq.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner });
   }
 
   // CREATE: 시스템 프롬프트 + 히스토리 + user를 stdin으로 보내 새 세션을 시드한다.
   const createArgs = [
     "exec",
     ...isolatedConfigArgs,
+    ...browserOnlyConfigArgs,
     "--json",
     "--skip-git-repo-check",
     ...permArgs,
@@ -1648,13 +1855,13 @@ export const runCodex: Runner = async (
   const created = await runCodexProcess(bin, createArgs, buildPrompt(runReq), runReq, events, { output: 0, input: 0, cachedInput: 0 });
   if (runReq.signal?.aborted) {
     if (runReq.chatId && fingerprint && created.threadId) {
-      saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint, { ...codexUsageCounters(created), agentId: runReq.agentId });
+      saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint, { ...codexUsageCounters(created), agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner });
     }
     throw abortReasonError(runReq);
   }
   if (created.code === 0) {
     if (runReq.chatId && fingerprint && created.threadId) {
-      if (!saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint, { ...codexUsageCounters(created), agentId: runReq.agentId })) {
+      if (!saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint, { ...codexUsageCounters(created), agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner })) {
         events.onStatus(`[runtime-session] store_failed kind=${KIND}`);
       }
     }

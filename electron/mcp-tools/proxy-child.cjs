@@ -108,9 +108,11 @@ function askApproval(toolName) {
       sessionKey: session.sessionKey,
       runtime: session.runtime,
       permission: session.permission,
+      simulation: session.simulation === true,
       cwd: session.cwd,
       chatId: session.chatId,
       unattended: session.unattended === true,
+      catalogId: typeof session.catalogId === "string" ? session.catalogId : null,
     });
     const req = http.request(
       {

@@ -8,7 +8,8 @@
 // 쿠키 개수·"로그인됨"·"연동됨" 같은 메타 배지는 렌더하지 않는다 — 그 숫자로 줄을 세우면
 // 광고·분석 도메인이 1등이 되고(googleadservices 23개 실측), 사용자에게도 아무 의미가 없다.
 // 한 줄은 호스트가 아니라 사이트(등록 가능 도메인)이고, 고르면 그 사이트 쿠키가 전부 복사된다.
-// 쿠키 값은 이 화면도, 메인 프로세스도 복호화하지 않는다. 비밀번호·결제수단 저장소는 아예 읽지 않는다.
+// 쿠키 값은 화면/로그/응답에 노출하지 않는다. macOS 메인 프로세스는 고른 쿠키만 메모리에서
+// 전용 Chromium 키로 재암호화하고 즉시 폐기한다. 비밀번호·결제수단 저장소는 아예 읽지 않는다.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ipc } from "@/lib/ipc";
@@ -38,6 +39,7 @@ export function CredentialImportDialog({
   const [relaxed, setRelaxed] = useState(false);
   const [importingNow, setImportingNow] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loginRequired, setLoginRequired] = useState<string[]>([]);
 
   // 1단계: 어떤 브라우저 프로필이 있는지.
   useEffect(() => {
@@ -107,6 +109,7 @@ export function CredentialImportDialog({
     if (!api || !profileId || checked.size === 0) return;
     setImportingNow(true);
     setError(null);
+    setLoginRequired([]);
     const res = await api.browser.importCredentials(profileId, [...checked]);
     setImportingNow(false);
     if (!res.ok) {
@@ -116,6 +119,16 @@ export function CredentialImportDialog({
     // 부분 실패를 성공으로 뭉개지 않는다 — 건너뛴 도메인이 있으면 개수를 함께 말한다.
     const linked = res.linkedSites.length;
     const skipped = res.skipped.length;
+    const protectedSites = res.requiresLoginSites ?? [];
+    if (protectedSites.length > 0) {
+      // Windows Chrome can bind modern cookies to Chrome's own executable.
+      // That is a normal protected-session path, not an import error: keep the
+      // dialog open and transition the selected site to the dedicated login UI.
+      setChecked(new Set());
+      setLoginRequired(protectedSites);
+      void loadDomains(profileId);
+      return;
+    }
     const msg = ko
       ? `${linked}개 연동됨${skipped > 0 ? ` · ${skipped}개 건너뜀` : ""}`
       : `Linked ${linked}${skipped > 0 ? ` · skipped ${skipped}` : ""}`;
@@ -222,6 +235,41 @@ export function CredentialImportDialog({
         </div>
 
         {error && <div className="cid-error">{error}</div>}
+
+        {loginRequired.length > 0 && (
+          <div className="cid-login-required">
+            <strong>{ko ? "보호된 Windows 로그인" : "Protected Windows sign-in"}</strong>
+            <span>
+              {ko
+                ? "Chrome이 이 세션을 Chrome 앱 자체에 묶어 보호하고 있어 복사본을 만들지 않았습니다. 아래에서 Agentlas 전용 로그인 창을 한 번 열면 이후 자동화가 그 세션을 계속 재사용합니다."
+                : "Chrome bound this session to the Chrome app, so Agentlas did not create a broken copy. Open the dedicated sign-in once; later automations will keep reusing that session."}
+            </span>
+            <div className="cid-login-sites">
+              {loginRequired.map((site, index) => (
+                <button
+                  key={site}
+                  type="button"
+                  onClick={async () => {
+                    const result = await api?.browser.openLogin(site);
+                    if (!result?.ok) {
+                      setError(result?.error ?? (ko ? "로그인 창을 열지 못했습니다." : "Could not open the sign-in window."));
+                      return;
+                    }
+                    onDone(
+                      ko
+                        ? `${site} 전용 로그인 창을 열었습니다${loginRequired.length > 1 ? ` · 나머지 ${loginRequired.length - 1}개는 Connect 목록에서 이어서 로그인하세요` : ""}`
+                        : `Opened the dedicated sign-in for ${site}${loginRequired.length > 1 ? ` · continue the remaining ${loginRequired.length - 1} from Connect` : ""}`,
+                    );
+                  }}
+                >
+                  {index === 0
+                    ? (ko ? `${site} 로그인 열기` : `Open ${site} sign-in`)
+                    : (ko ? `${site}는 목록에 추가됨` : `${site} added to Connect`)}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         <footer className="cid-foot">
           <span className="cid-count">
@@ -369,6 +417,25 @@ export function CredentialImportDialog({
           font-size: 12px;
           line-height: 1.5;
           color: var(--danger, #c0392b);
+        }
+        .cid-login-required {
+          display: flex;
+          flex-direction: column;
+          gap: 7px;
+          padding: 11px 12px;
+          border: 1px solid var(--paper-edge);
+          border-radius: 10px;
+          font-size: 12px;
+          line-height: 1.5;
+        }
+        .cid-login-required span { opacity: 0.76; }
+        .cid-login-sites { display: flex; flex-wrap: wrap; gap: 6px; }
+        .cid-login-sites button {
+          border: 1px solid var(--paper-edge);
+          border-radius: 8px;
+          background: transparent;
+          padding: 6px 9px;
+          cursor: pointer;
         }
         .cid-foot {
           display: flex;

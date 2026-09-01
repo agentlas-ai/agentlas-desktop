@@ -943,6 +943,93 @@ export function getAutomationLiveRunId(id: string): string | null {
   return terminal?.id ?? null;
 }
 
+type SupersededAutomationRunRow = {
+  id: string;
+  node_states_json: string | null;
+  node_failures_json: string | null;
+};
+
+function supersededAutomationRunPayload(row: SupersededAutomationRunRow): {
+  nodeStatesJson: string | null;
+  nodeFailuresJson: string | null;
+} {
+  let states: Record<string, WorkflowNodeRunState> = {};
+  try {
+    const parsed = row.node_states_json ? JSON.parse(row.node_states_json) : {};
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      states = parsed as Record<string, WorkflowNodeRunState>;
+    }
+  } catch {
+    states = {};
+  }
+
+  let failures: Record<string, { code: string; reason: string; nextAction: string }> = {};
+  try {
+    const parsed = row.node_failures_json ? JSON.parse(row.node_failures_json) : {};
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      failures = parsed as typeof failures;
+    }
+  } catch {
+    failures = {};
+  }
+
+  for (const [nodeId, state] of Object.entries(states)) {
+    if (state !== "running") continue;
+    states[nodeId] = "failed";
+    failures[nodeId] = {
+      code: "AUTOMATION_RUN_SUPERSEDED",
+      reason: "같은 자동화의 새 실행이 시작되어, 끝나지 않은 이전 실행을 중단된 실행으로 정리했습니다. / A newer occurrence started before this run finished.",
+      nextAction: "새 실행 결과를 확인하고, 필요한 경우 이 실행의 체크포인트에서 명시적으로 재개하세요. / Review the newer run and resume this checkpoint explicitly only if needed.",
+    };
+  }
+
+  return {
+    nodeStatesJson: row.node_states_json == null && Object.keys(states).length === 0
+      ? null
+      : JSON.stringify(states),
+    nodeFailuresJson: row.node_failures_json == null && Object.keys(failures).length === 0
+      ? null
+      : JSON.stringify(failures),
+  };
+}
+
+/**
+ * One automation owns at most one live occurrence. The scheduler lease lives on
+ * the parent automation row, so a later occurrence would otherwise make an
+ * interrupted older row look live until the multi-hour stale ceiling expires.
+ * Seal older nonterminal rows inside the same transaction that publishes the
+ * successor snapshot; a failed successor insert rolls this reconciliation back.
+ */
+function terminalizeSupersededAutomationRuns(
+  db: ReturnType<typeof getDb>,
+  automationId: string,
+  successorRunId: string,
+  at: string,
+): void {
+  const rows = db.prepare(
+    `SELECT id, node_states_json, node_failures_json
+     FROM automation_runs
+     WHERE automation_id = ? AND status = 'running' AND id <> ?`,
+  ).all(automationId, successorRunId) as SupersededAutomationRunRow[];
+  if (rows.length === 0) return;
+
+  const update = db.prepare(
+    `UPDATE automation_runs
+     SET status = 'error', node_states_json = ?, node_failures_json = ?, last_activity_at = ?
+     WHERE id = ? AND automation_id = ? AND status = 'running'`,
+  );
+  for (const row of rows) {
+    const sealed = supersededAutomationRunPayload(row);
+    update.run(
+      sealed.nodeStatesJson,
+      sealed.nodeFailuresJson,
+      at,
+      row.id,
+      automationId,
+    );
+  }
+}
+
 /** 그래프 실행 시작 시 automation_runs 행 생성(상태 running). node_states는 초기 pending 맵. */
 export function startGraphRun(input: {
   runId: string;
@@ -962,8 +1049,10 @@ export function startGraphRun(input: {
   if (checkpointJson && Buffer.byteLength(checkpointJson, "utf8") > MAX_AUTOMATION_CHECKPOINT_BYTES) {
     throw new Error("Automation checkpoint exceeds the local durability limit.");
   }
-  const inserted = getDb()
-    .prepare(
+  const db = getDb();
+  const start = db.transaction(() => {
+    terminalizeSupersededAutomationRuns(db, input.automationId, input.runId, startedAt);
+    const inserted = db.prepare(
       `INSERT INTO automation_runs
          (id, automation_id, started_at, last_activity_at, status, node_states_json,
           occurrence_id, graph_digest, checkpoint_json, resume_of_run_id)
@@ -982,7 +1071,9 @@ export function startGraphRun(input: {
       input.resumeOfRunId ?? null,
       input.automationId,
     );
-  if (inserted.changes !== 1) throw new AutomationRunParentMissingError(input.automationId);
+    if (inserted.changes !== 1) throw new AutomationRunParentMissingError(input.automationId);
+  });
+  start.immediate();
   emitDesktopStoreChange({ entity: "automation", id: input.automationId });
 }
 

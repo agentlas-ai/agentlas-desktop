@@ -251,10 +251,6 @@ export interface UpdaterControllerDependencies {
   waitForRecoveryRetry?: (delayMs: number) => Promise<void>;
   initialSessionRestore?: RecoverySessionRefreshResult;
   refreshSessionForRecovery?: () => Promise<void | RecoverySessionRefreshResult>;
-  /** Release the app's single-instance lock immediately before native spawn. */
-  releaseInstanceLockForInstall?: () => void;
-  /** Restore the lock if native spawn fails and this process remains alive. */
-  reacquireInstanceLockAfterInstallFailure?: () => boolean;
   nativeInstallWatchdogMs?: number;
   nativeInstallRetryBaseDelayMs?: number;
   transientRetryBaseDelayMs?: number;
@@ -737,7 +733,6 @@ export class DesktopUpdaterController {
   private resumeWritersAfterInstallAttempt: (() => void) | null = null;
   private nativeInstallWatchdog: NodeJS.Timeout | null = null;
   private nativeInstallReconcileTimer: NodeJS.Timeout | null = null;
-  private nativeInstanceLockReleased = false;
   private readonly listeners: Array<{ event: UpdaterEvent; listener: (...args: any[]) => void }> = [];
 
   constructor(private readonly deps: UpdaterControllerDependencies) {
@@ -1284,16 +1279,6 @@ export class DesktopUpdaterController {
     // The native handoff has terminally failed; cleanup below may run (the
     // pre-delete launchd bootout keeps a lingering ShipIt job from crash-looping).
     this.nativeInstallHandedOff = false;
-    if (this.nativeInstanceLockReleased) {
-      this.nativeInstanceLockReleased = false;
-      try {
-        if (this.deps.reacquireInstanceLockAfterInstallFailure?.() === false) {
-          this.logger.warn("[updater] native install failed and the single-instance lock could not be restored");
-        }
-      } catch {
-        this.logger.warn("[updater] native install failed and restoring the single-instance lock threw");
-      }
-    }
     const diagnostic = redactNativeUpdaterDiagnostic(error);
     this.logger.warn(`[updater] native install start failed (${diagnostic.category})`);
     this.resumeInstallWriters();
@@ -1994,32 +1979,10 @@ export class DesktopUpdaterController {
       try {
         // Windows updates must reuse the existing installation without opening
         // the NSIS setup wizard. The second flag relaunches Agentlas afterward.
-        // Release immediately before native spawn. Waiting for the later
-        // before-quit event races the replacement: NSIS/AppImageUpdater can
-        // launch it while this process still owns Electron's instance lock.
-        this.deps.releaseInstanceLockForInstall?.();
-        this.nativeInstanceLockReleased = Boolean(this.deps.releaseInstanceLockForInstall);
         this.nativeInstallHandedOff = true;
         this.deps.updater.quitAndInstall(true, true);
         if (this.state.status !== "installing") {
-          if (this.nativeInstanceLockReleased) {
-            this.nativeInstanceLockReleased = false;
-            this.deps.reacquireInstanceLockAfterInstallFailure?.();
-          }
           return { accepted: false, state: this.state };
-        }
-        // AppImageUpdater unlinks the old image and moves the verified target
-        // into its final path synchronously before this call returns. There is
-        // no asynchronous installer verdict to wait for (unlike NSIS/ShipIt),
-        // so the originating process can durably acknowledge that atomic
-        // replacement before it quits. This also avoids depending on an
-        // AppImage wrapper process reaching Electron merely to delete a marker.
-        if (this.deps.platform === "linux") {
-          if (!this.clearJournal()) {
-            this.logger.warn("[updater] AppImage replacement completed but its install journal could not be cleared");
-          } else {
-            this.logger.log(`[updater] AppImage replacement for ${version} completed; install journal cleared`);
-          }
         }
         installHandedOff = true;
         this.armNativeInstallWatchdog(journal);

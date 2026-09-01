@@ -3185,6 +3185,40 @@
   .body[data-task-active="true"][data-rail-collapsed="true"][data-context-rail="true"] {
     grid-template-columns: 0 minmax(0, 1fr) min(var(--one-rail-width, 210px), calc(100% - 320px));
   }
+
+  /* Browser zoom makes the task column narrow before the phone layout takes
+     over. Keep every composer control visible in that in-between width: the
+     selected values may ellipsize, but a later chip must never be pushed under
+     the fixed voice/send actions (the permission label used to show only
+     `Fu`). */
+  .body[data-task-active="true"] .composerTools {
+    overflow-x: hidden;
+  }
+
+  .body[data-task-active="true"] .composerChip {
+    min-width: 0;
+    flex: 0 1 auto;
+    gap: 4px;
+    padding-inline: 4px;
+  }
+
+  .body[data-task-active="true"] .composerChip > span {
+    min-width: 0;
+    max-width: none;
+  }
+
+  .body[data-task-active="true"] .composerChip > svg:last-child {
+    display: none;
+  }
+
+  .body[data-task-active="true"] .composerChip[data-one-composer-trigger="model"] {
+    flex: 1 1 96px;
+  }
+
+  .body[data-task-active="true"] .composerQuickMode {
+    width: 30px;
+    flex: 0 0 30px;
+  }
 }
 
 /* Phone widths keep the Outputs panel as an overlay sheet — there is no room

@@ -107,6 +107,7 @@ import {
   releaseOneAttachmentRun,
   teamProposalRequiresOneAttachments,
 } from "../one/attachments";
+import { redactMcpInvocationEventSecrets } from "./event-secret-redaction";
 import { normalizeOneRecurrenceSelectionV1 } from "../../shared/one-recurrence";
 import { classifyOneRequestIntent } from "../../shared/one-request-intent";
 import { oneVersionPinRosterIds } from "../../shared/one-team-preflight";
@@ -850,6 +851,7 @@ export class InvocationService {
         runId: preparedOneTeamPreflight.ref.reservedRunId,
         chatId: preparedOneTeamPreflight.chatId,
         userPrompt: preparedOneTeamPreflight.userPrompt,
+        oneUserAuthoredPrompt: preparedOneTeamPreflight.userAuthoredPrompt,
         taskIntent: "task",
         oneMode: true,
         permissions: workspaceBinding
@@ -1376,7 +1378,7 @@ export class InvocationService {
     void runMcpInvocation(
       runReq,
       (rawEvent) => {
-        rawEvent = redactOneAttachmentEvent(runReq, rawEvent);
+        rawEvent = redactMcpInvocationEventSecrets(redactOneAttachmentEvent(runReq, rawEvent));
         // Agent App remains a separately isolated browser surface. A paired
         // Mobile client is a Desktop remote, so its live partial stream follows
         // the same chat behavior as the Desktop renderer.
@@ -1619,13 +1621,26 @@ export class InvocationService {
           sequence: observableStepSequence,
           observedAt: new Date().toISOString(),
         };
+        const durableTextForVerification = event.durableTextForVerification;
+        // This is a Main-only persistence receipt, not renderer-visible model
+        // output. Remove it before the event enters the observable ledger or
+        // any IPC/mobile projection.
+        if (durableTextForVerification !== undefined) {
+          event = { ...event, durableTextForVerification: undefined };
+        }
         if (
           event.kind === "final"
           && !runReq.agentAppMode
           && !runWorkspaceBinding
           && typeof event.text === "string"
           && event.text.trim()
-          && !hasDurableAssistantMessage(runReq.chatId, stripPermissionEscalationMarker(event.text), startedAt)
+          && !hasDurableAssistantMessage(
+            runReq.chatId,
+            typeof durableTextForVerification === "string" && durableTextForVerification.trim()
+              ? durableTextForVerification
+              : stripPermissionEscalationMarker(event.text),
+            startedAt,
+          )
         ) {
           // A native/IO failure can occur between model completion and the
           // transcript write. Never publish or ledger a successful completion

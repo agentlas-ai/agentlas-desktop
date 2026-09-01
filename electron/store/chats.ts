@@ -2,6 +2,7 @@
 // 사이드바 "최근 채팅" 섹션은 listRecent로 채운다.
 // 프로젝트 페이지는 listByProject로, 회사 페이지는 listByFirm으로 채운다.
 import { createHash, randomUUID } from "node:crypto";
+import path from "node:path";
 import { RUNTIME_KINDS } from "../../shared/runtime-kinds";
 import { RUNTIME_BACKENDS } from "../../shared/runtime-backends";
 import { getDb } from "./db";
@@ -876,17 +877,36 @@ export function appendChatMessage(
   chatId: string,
   role: "user" | "assistant" | "system",
   text: string,
-  options?: { images?: readonly ImageAttachment[] },
+  options?: {
+    images?: readonly ImageAttachment[];
+    /** Exact source path for each assistant image, used only to replace that
+     * transient markdown reference with its new durable attachment URL. */
+    imageSourcePaths?: readonly string[];
+  },
 ): ChatHistoryEntry {
   const id = randomUUID();
   const now = new Date().toISOString();
   const db = getDb();
+  let persistedText = text;
+  let persistedImageUrls: string[] | undefined;
   const write = db.transaction(() => {
     db.prepare(
       "INSERT INTO chat_messages (id, chat_id, role, text, created_at) VALUES (?, ?, ?, ?, ?)",
     ).run(id, chatId, role, text, now);
-    if (role === "user" && options?.images?.length) {
-      persistChatMessageImages({ messageId: id, chatId, images: options.images, createdAt: now });
+    if (options?.images?.length) {
+      const persisted = persistChatMessageImages({ messageId: id, chatId, images: options.images, createdAt: now });
+      persistedImageUrls = persisted.map((item) => item.url);
+      if (role === "assistant" && options.imageSourcePaths?.length) {
+        for (let index = 0; index < Math.min(options.imageSourcePaths.length, persisted.length); index += 1) {
+          const sourcePath = options.imageSourcePaths[index];
+          if (typeof sourcePath === "string" && path.isAbsolute(sourcePath) && persisted[index]) {
+            persistedText = persistedText.split(sourcePath).join(persisted[index].url);
+          }
+        }
+        if (persistedText !== text) {
+          db.prepare("UPDATE chat_messages SET text = ? WHERE id = ? AND chat_id = ?").run(persistedText, id, chatId);
+        }
+      }
     }
     db.prepare("UPDATE chats SET updated_at = ?, used_at = COALESCE(used_at, ?) WHERE id = ?").run(now, now, chatId);
   });
@@ -897,10 +917,10 @@ export function appendChatMessage(
   return {
     id,
     role,
-    text,
+    text: persistedText,
     createdAt: now,
-    ...(role === "user" && options?.images?.length
-      ? { imageDataUrls: listChatMessageImageUrls([id]).get(id) }
+    ...(persistedImageUrls?.length
+      ? { imageDataUrls: persistedImageUrls }
       : {}),
   };
 }

@@ -768,7 +768,7 @@ function MediaBlock({
     <div className={styles.mediaLayout}>
       <div className={styles.primaryMedia} aria-busy={preview.state.status === "loading"}>
         {preview.state.status === "loading" && <div className={styles.mediaSkeleton} role="status" aria-label={tFor(locale, "one.res.media.loading")}><LoadingEstimate locale={locale} operationKey="one-artifact-media-preview" expectedSeconds={[1, 20]} /></div>}
-        {capabilityUrl && <LiveOutputViewer source={capabilityUrl} name={displayValue(block.caption ?? block.title)} kind={block.mediaType} mimeType={preview.state.status === "ready" ? preview.state.capability.mimeType : undefined} size={preview.state.status === "ready" ? preview.state.capability.sizeBytes : undefined} locale={locale} fill={inOutputRail} placement={inOutputRail ? "sidebar" : "chat"} />}
+        {capabilityUrl && <LiveOutputViewer source={capabilityUrl} name={displayValue(block.caption ?? block.title)} kind={block.mediaType} mimeType={preview.state.status === "ready" ? preview.state.capability.mimeType : undefined} size={preview.state.status === "ready" ? preview.state.capability.sizeBytes : undefined} locale={locale} fill={inOutputRail} placement={inOutputRail ? "sidebar" : "chat"} imageActions={block.mediaType === "image"} />}
         {unavailable && (
           <div className={styles.mediaUnavailable} role="status">
             <span>{tFor(locale, "one.res.media.source_preserved")}</span>

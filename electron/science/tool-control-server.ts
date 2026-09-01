@@ -43,6 +43,8 @@ import type {
 import type { ScienceClaimLedgerManifest } from "../../shared/science-claim-ledger";
 import type { ScienceEvidenceGraphConditioningContext, ScienceEvidenceGraphEdgeKind } from "../../shared/science-evidence-graph";
 import { SCIENCE_EVIDENCE_GRAPH_EDGE_KINDS } from "../../shared/science-evidence-graph";
+import { scienceResearchIntentCatalog } from "../../shared/science-research-intent";
+import { scienceLabDecisionProjectionsForProject } from "./lab-decision-projection-service";
 
 const MAX_REQUEST_BYTES = 8 * 1024 * 1024;
 const MAX_AI_VISUAL_BYTES = 8 * 1024 * 1024;
@@ -417,6 +419,20 @@ const PLATFORM_TOOLS: McpTool[] = [
       properties: {
         tool_call_id: { type: "string", minLength: 1, maxLength: 160 },
         limit: { type: "integer", minimum: 1, maximum: 200, default: 100 },
+      },
+      required: ["tool_call_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "list_lab_research_intents",
+    route: "/v1/platform/lab-intents/list",
+    description: "Read the machine-readable research intent contract for every granted Lab or an exact subset. Use this before selecting an analysis or renderer: each contract states when the Lab is needed, the live scientific decision, blocking questions, what the artifact must show, valid human and AI interactions, claim boundaries, and decision-linked next actions.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 },
+        lab_ids: { type: "array", minItems: 1, maxItems: 64, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 80 } },
       },
       required: ["tool_call_id"],
       additionalProperties: false,
@@ -1938,6 +1954,19 @@ async function platformResult(route: string, body: Record<string, unknown>, gran
       exactText(body.to_node_id, 80, "science-evidence-graph-path-node-invalid"),
     ) };
   }
+  if (route === "/v1/platform/lab-intents/list") {
+    const grantedLabIds = grant.catalog.labs.map((lab) => lab.id);
+    const requestedLabIds = body.lab_ids === undefined
+      ? grantedLabIds
+      : Array.isArray(body.lab_ids) && body.lab_ids.length > 0
+        ? body.lab_ids.map((labId) => exactText(labId, 80, "science-research-intent-lab-invalid"))
+        : (() => { throw new Error("science-research-intent-lab-invalid"); })();
+    if (new Set(requestedLabIds).size !== requestedLabIds.length
+      || requestedLabIds.some((labId) => !grantedLabIds.includes(labId))) {
+      throw new Error("science-research-intent-lab-invalid");
+    }
+    return { ok: true, ...scienceResearchIntentCatalog(requestedLabIds) };
+  }
   if (route === "/v1/platform/research-workspace/inspect") {
     const requestedLimit = body.limit === undefined ? 100 : positiveInteger(body.limit, "science-research-workspace-limit-invalid");
     if (requestedLimit > 200) throw new Error("science-research-workspace-limit-invalid");
@@ -2006,16 +2035,18 @@ async function platformResult(route: string, body: Record<string, unknown>, gran
         updatedAt: artifact.updatedAt,
       };
     });
+    const activeLoopSession = store.getActiveLoopSession(project.id);
+    const activeEpisodes = activeLoopSession ? store.listResearchEpisodes(project.id, activeLoopSession.id) : [];
+    const labDecisionProjections = scienceLabDecisionProjectionsForProject(store, project.id, grant.catalog);
     return {
       ok: true,
       schema: "agentlas.science.research-workspace/v1",
       project,
       lifecycle,
       researchContract: store.latestResearchContract(project.id),
-      researchLoop: (() => {
-        const session = store.getActiveLoopSession(project.id);
-        return session ? { session, episodes: store.listResearchEpisodes(project.id, session.id) } : null;
-      })(),
+      researchLoop: activeLoopSession ? { session: activeLoopSession, episodes: activeEpisodes } : null,
+      researchIntents: scienceResearchIntentCatalog(grant.catalog.labs.map((lab) => lab.id)),
+      labDecisionProjections,
       labs: store.listLabs(project.id),
       sources,
       runs,

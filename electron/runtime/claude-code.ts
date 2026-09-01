@@ -65,6 +65,15 @@ export function claudeArtifactPathsFromToolUse(name: string, input: unknown): st
     const paths = candidates.filter((value): value is string => typeof value === "string" && path.isAbsolute(value));
     return [...new Set(paths)];
   }
+  // A successful Read of an image is host evidence that the exact file exists
+  // and was actually inspected. Preserve it as a durable One output instead of
+  // relying on a model-authored Markdown path that can disappear on reload.
+  if (/^Read$/iu.test(name)) {
+    const candidate = typeof record.file_path === "string" ? record.file_path : record.path;
+    if (typeof candidate === "string" && path.isAbsolute(candidate) && /\.(?:png|jpe?g|gif|webp|avif|svg)$/iu.test(candidate)) {
+      return [candidate];
+    }
+  }
   // Bash가 만든 파일도 산출물이다 — 리다이렉트/tee/cp/mv의 목적지가 절대
   // 경로이고 확장자를 가진 경우만 보수적으로 등재한다(장치 파일·옵션 제외).
   // 이것 없이는 셸로 쓴 index.html이 결과 탭에 영영 안 올랐다
@@ -89,6 +98,31 @@ export function claudeArtifactPathsFromToolUse(name: string, input: unknown): st
 }
 
 /**
+ * Claude returns standard MCP rich content in the tool_result block. Computer
+ * Use capture results include a Main-authored JSON metadata text block next to
+ * the inline image; `savedPath` is the exact private capture that Main wrote.
+ * Read only that typed host result for the two canonical capture tools. Model
+ * prose and arbitrary MCP text never enter this boundary.
+ */
+export function claudeArtifactPathsFromToolResult(name: string, content: unknown): string[] {
+  if (!/^mcp__cua-driver__(?:get_screen|get_app_state)$/u.test(name) || !Array.isArray(content)) return [];
+  const paths = new Set<string>();
+  for (const item of content.slice(0, 16)) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const block = item as { type?: unknown; text?: unknown };
+    if (block.type !== "text" || typeof block.text !== "string" || block.text.length > 32_000) continue;
+    try {
+      const metadata = JSON.parse(block.text) as { savedPath?: unknown };
+      const savedPath = typeof metadata?.savedPath === "string" ? metadata.savedPath : "";
+      if (path.isAbsolute(savedPath) && /\.(?:png|jpe?g)$/iu.test(savedPath)) paths.add(path.resolve(savedPath));
+    } catch {
+      // A malformed metadata block is not host evidence.
+    }
+  }
+  return [...paths].slice(0, 4);
+}
+
+/**
  * 중지 사유를 그대로 전한다. 중지는 사람이 누른 것 외에도 무활동 워치독·단계 시간 초과·
  * 예산 소진으로 일어난다. 예전엔 전부 "사용자가 정지 버튼으로"라고 단정해,
  * 누른 적 없는 사람이 거짓 사유를 받았다(실사용 실측).
@@ -96,6 +130,72 @@ export function claudeArtifactPathsFromToolUse(name: string, input: unknown): st
 
 const KIND = "claude-code";
 const AGENT_APP_MCP_SECRET_ALIAS_RE = /^AGENTLAS_MCP_SECRET_[A-F0-9]{32}$/;
+
+const CLAUDE_WORKSPACE_SANDBOX_SETTINGS = {
+  sandbox: {
+    enabled: true,
+    failIfUnavailable: true,
+    autoAllowBashIfSandboxed: true,
+    allowUnsandboxedCommands: false,
+    network: {
+      // Preserve the pre-existing write-mode network surface while keeping
+      // filesystem writes inside the assigned cwd. Explicit loopback entries
+      // plus local binding are required for Vite/browser QA on macOS.
+      allowedDomains: ["*", "127.0.0.1", "localhost", "[::1]"],
+      strictAllowlist: true,
+      allowLocalBinding: true,
+    },
+  },
+} as const;
+
+/**
+ * Claude merges sandbox paths from every settings source. A project or user
+ * setting can therefore silently widen a task worker beyond its assigned cwd.
+ * Write turns load no ambient settings and receive one Main-authored settings
+ * object containing both the strict OS sandbox and, when present, the exact
+ * PreToolUse hook. Passing two --settings flags is unsafe because Claude keeps
+ * only the latter object.
+ */
+async function claudeExecutionSettings(req: RunnerRequest): Promise<string | null> {
+  if (req.permission !== "write") return req.toolBrokerSettingsPath ?? null;
+
+  let hooks: unknown;
+  if (req.toolBrokerSettingsPath) {
+    if (!path.isAbsolute(req.toolBrokerSettingsPath)) {
+      throw new Error("claude_tool_broker_settings_invalid");
+    }
+    const before = await fs.lstat(req.toolBrokerSettingsPath);
+    if (!before.isFile() || before.isSymbolicLink() || before.size > 32_768) {
+      throw new Error("claude_tool_broker_settings_invalid");
+    }
+    const raw = await fs.readFile(req.toolBrokerSettingsPath, "utf8");
+    const after = await fs.lstat(req.toolBrokerSettingsPath);
+    if (
+      before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size ||
+      before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs
+    ) {
+      throw new Error("claude_tool_broker_settings_changed");
+    }
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (
+      !parsed || typeof parsed !== "object" || Array.isArray(parsed) ||
+      JSON.stringify(Object.keys(parsed)) !== JSON.stringify(["hooks"]) ||
+      !parsed.hooks || typeof parsed.hooks !== "object" || Array.isArray(parsed.hooks)
+    ) {
+      throw new Error("claude_tool_broker_settings_invalid");
+    }
+    hooks = parsed.hooks;
+  }
+
+  const encoded = JSON.stringify({
+    ...CLAUDE_WORKSPACE_SANDBOX_SETTINGS,
+    ...(hooks ? { hooks } : {}),
+  });
+  if (Buffer.byteLength(encoded, "utf8") > 40_960) {
+    throw new Error("claude_execution_settings_too_large");
+  }
+  return encoded;
+}
 
 function isCanonicalAgentAppInlineMcpConfig(value: string | undefined): boolean {
   if (!value || !value.startsWith('{"mcpServers":') || /[\r\n\0]/.test(value) ||
@@ -459,6 +559,8 @@ const runClaudeTurn = async (
 
   const stagedImages = await stageCliImageAttachments(req);
   const runReq = stagedImages.images.length > 0 ? { ...req, userPrompt: stagedImages.userPrompt } : req;
+  const runtimeSessionOwnerId = runReq.runtimeSessionOwnerId ?? runReq.agentId;
+  const isolateRuntimeSessionOwner = runReq.runtimeSessionOwnerId != null;
 
   // Establish the exact one-run MCP authority before writing the system
   // prompt. A malformed config must not leave the model believing a tool is
@@ -507,14 +609,16 @@ const runClaudeTurn = async (
     runReq.workforceRuntimeToolGrant,
   );
   const fingerprint = !runReq.untrustedNoTools && runReq.chatId ? systemFingerprint(runReq) : null;
-  const savedSession = !runReq.untrustedNoTools && runReq.chatId ? getRuntimeSession(runReq.chatId, KIND, runReq.agentId) : null;
+  const savedSession = !runReq.untrustedNoTools && runReq.chatId
+    ? getRuntimeSession(runReq.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner })
+    : null;
   const storedSessionId =
     savedSession && fingerprint && savedSession.fingerprint === fingerprint
       ? savedSession.sessionId
       : null;
   if (runReq.chatId && savedSession && fingerprint && savedSession.fingerprint !== fingerprint) {
     events.onStatus(`[runtime-session] fingerprint_changed kind=${KIND}`);
-    clearRuntimeSession(runReq.chatId, KIND, runReq.agentId);
+    clearRuntimeSession(runReq.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner });
   }
   const resumeSessionId = runReq.untrustedNoTools ? null : (runReq.runtimeSessionId ?? storedSessionId);
   // gap-replay — 이 세션이 마지막으로 본 이후 다른 경로(스웜/다른 러너)로 진행된 턴을 메운다.
@@ -583,7 +687,9 @@ const runClaudeTurn = async (
   //   그리고 이건 벤더 CLI 플래그라 이름도 그 벤더의 것이어야 한다.
   /** write 모드에서 acceptEdits 가 여전히 묻는 내장 도구 — 헤드리스는 답할 수 없으니 미리 허용. */
   const WRITE_MODE_PRE_ALLOWED_TOOLS = ["Bash", "BashOutput", "KillShell", "WebFetch", "WebSearch"];
-  const permArgs = runReq.untrustedNoTools
+  const permArgs = runReq.browserOnly
+    ? []
+    : runReq.untrustedNoTools
     ? []
     : req.permission === "full"
       ? ["--permission-mode", "bypassPermissions"]
@@ -622,7 +728,7 @@ const runClaudeTurn = async (
   // Claude's user-level plugins can otherwise reintroduce generic Playwright
   // beside Main's approval-gated CDP host and silently execute browser_evaluate
   // without the native sheet. Isolate this turn to the exact Main config.
-  const isolatedMcpArgs = runReq.isolatedMcpConfig
+  const isolatedMcpArgs = runReq.isolatedMcpConfig || req.permission === "write"
     ? ["--setting-sources", "", "--strict-mcp-config"]
     : [];
   /*
@@ -650,15 +756,14 @@ const runClaudeTurn = async (
    * 브로커 PreToolUse 훅이 계속 맡는다 — 허용 깃발은 켜기만 하고 거절은 훅만 한다.
    */
   const builtinPreAllowed =
-    !runReq.untrustedNoTools && req.permission === "write" ? WRITE_MODE_PRE_ALLOWED_TOOLS : [];
+    !runReq.browserOnly && !runReq.untrustedNoTools && req.permission === "write" ? WRITE_MODE_PRE_ALLOWED_TOOLS : [];
   const preAllowedTools = [...builtinPreAllowed, ...mcpPreAllowed];
   const allowedToolArgs = preAllowedTools.length > 0 ? ["--allowedTools", preAllowedTools.join(",")] : [];
   // ★C38 — 도구 호출 직전 관문. 실측(2026-08-04, claude 2.1.220): PreToolUse deny가
   // `--permission-mode bypassPermissions`를 이기고 Bash 호출을 실제로 막았다. 허용 깃발
   // (`--allowedTools`)은 켜기만 하므로, 선언되지 않은 호출을 거절하는 곳은 여기뿐이다.
-  const toolBrokerArgs = runReq.toolBrokerSettingsPath
-    ? ["--settings", runReq.toolBrokerSettingsPath]
-    : [];
+  const executionSettings = await claudeExecutionSettings(runReq);
+  const toolBrokerArgs = executionSettings ? ["--settings", executionSettings] : [];
   const noToolsArgs = runReq.untrustedNoTools
     ? [
         // Claude's safe-mode disables even an explicit --mcp-config. Keep it
@@ -672,6 +777,16 @@ const runClaudeTurn = async (
         "--strict-mcp-config",
         "--tools",
         "",
+      ]
+    : [];
+  const browserOnlyArgs = runReq.browserOnly
+    ? [
+        "--setting-sources", "",
+        "--disable-slash-commands",
+        "--no-chrome",
+        "--no-session-persistence",
+        "--strict-mcp-config",
+        "--tools", "",
       ]
     : [];
 
@@ -742,6 +857,7 @@ const runClaudeTurn = async (
           ...schemaArgs,
           ...permArgs,
           ...noToolsArgs,
+          ...browserOnlyArgs,
           ...isolatedMcpArgs,
           ...mcpArgs,
           ...allowedToolArgs,
@@ -760,6 +876,7 @@ const runClaudeTurn = async (
           ...schemaArgs,
           ...permArgs,
           ...noToolsArgs,
+          ...browserOnlyArgs,
           ...isolatedMcpArgs,
           ...mcpArgs,
           ...allowedToolArgs,
@@ -1045,7 +1162,44 @@ const runClaudeTurn = async (
           && (item as { type: string }).type !== "text"
         ));
         if (hasRichContent) {
-          try { return JSON.stringify(payload); } catch { return String(payload); }
+          // Never place raw base64 media bytes in the live UI or run ledger.
+          // Main binds a verified file artifact separately; the readable text
+          // metadata remains available for status/debugging.
+          const summary = payload.map((item) => {
+            if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+            const block = item as Record<string, unknown>;
+            const type = typeof block.type === "string" ? block.type : "unknown";
+            if (type === "text") return { type, text: typeof block.text === "string" ? block.text : "" };
+            if (type === "image" || type === "audio") {
+              const mimeType = typeof block.mimeType === "string"
+                ? block.mimeType
+                : typeof block.mime_type === "string"
+                  ? block.mime_type
+                  : undefined;
+              return { type, ...(mimeType ? { mimeType } : {}), mediaAvailable: true };
+            }
+            if (type === "resource") {
+              const resource = block.resource && typeof block.resource === "object" && !Array.isArray(block.resource)
+                ? block.resource as Record<string, unknown>
+                : null;
+              return {
+                type,
+                ...(typeof resource?.uri === "string" ? { uri: resource.uri } : {}),
+                ...(typeof resource?.mimeType === "string" ? { mimeType: resource.mimeType } : {}),
+                mediaAvailable: Boolean(resource?.blob),
+              };
+            }
+            if (type === "resource_link") {
+              return {
+                type,
+                ...(typeof block.uri === "string" ? { uri: block.uri } : {}),
+                ...(typeof block.name === "string" ? { name: block.name } : {}),
+                ...(typeof block.mimeType === "string" ? { mimeType: block.mimeType } : {}),
+              };
+            }
+            return { type };
+          });
+          try { return JSON.stringify(summary); } catch { return "Rich MCP result"; }
         }
         const text = payload
           .map((item) => {
@@ -1254,7 +1408,10 @@ const runClaudeTurn = async (
             const result = truncateUi(stringifyToolPayload(block.content));
             if (block.is_error === true) announceApprovalBlock(result, toolId);
             const artifactPaths = toolId && block.is_error !== true
-              ? claudeArtifactPathsFromToolUse(toolName, toolInputById.get(toolId))
+              ? [
+                  ...claudeArtifactPathsFromToolUse(toolName, toolInputById.get(toolId)),
+                  ...claudeArtifactPathsFromToolResult(toolName, block.content),
+                ]
               : [];
             events.onTool?.(toolName, undefined, result, toolId, block.is_error === true, artifactPaths);
             if (toolId) toolInputById.delete(toolId);
@@ -1268,7 +1425,10 @@ const runClaudeTurn = async (
           const result = truncateUi(stringifyToolPayload(block.content));
           if (block.is_error === true) announceApprovalBlock(result, toolId);
           const artifactPaths = toolId && block.is_error !== true
-            ? claudeArtifactPathsFromToolUse(toolName, toolInputById.get(toolId))
+            ? [
+                ...claudeArtifactPathsFromToolUse(toolName, toolInputById.get(toolId)),
+                ...claudeArtifactPathsFromToolResult(toolName, block.content),
+              ]
             : [];
           events.onTool?.(toolName, undefined, result, toolId, block.is_error === true, artifactPaths);
           if (toolId) toolInputById.delete(toolId);
@@ -1360,7 +1520,7 @@ const runClaudeTurn = async (
         // 취소여도 CLI가 이미 세션을 디스크에 남겼으면 저장한다 → 사용자가 이어서 보내는
         // steering 메시지가 이 세션을 resume해 "실행 중 방향 전환"처럼 문맥을 유지한다.
         if (req.chatId && fingerprint && sessionId) {
-          saveRuntimeSession(req.chatId, KIND, sessionId, fingerprint, { agentId: req.agentId });
+          saveRuntimeSession(req.chatId, KIND, sessionId, fingerprint, { agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner });
         }
         rejectRuntime(abortReasonError(req));
         return;
@@ -1412,7 +1572,7 @@ const runClaudeTurn = async (
         const display = streamed || finalText;
         if (display) events.onPartial(display);
         if (req.chatId && fingerprint && sessionId) {
-          if (!saveRuntimeSession(req.chatId, KIND, sessionId, fingerprint, { agentId: req.agentId })) {
+          if (!saveRuntimeSession(req.chatId, KIND, sessionId, fingerprint, { agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner })) {
             events.onStatus(`[runtime-session] store_failed kind=${KIND}`);
           }
         }
@@ -1491,7 +1651,7 @@ const runClaudeTurn = async (
           reject(new Error(`claude CLI exit ${code}${stderr ? `\n${stderr.slice(0, 500)}` : ""}`));
           return;
         }
-        if (resumeSessionId && req.chatId) clearRuntimeSession(req.chatId, KIND, req.agentId);
+        if (resumeSessionId && req.chatId) clearRuntimeSession(req.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner });
         if (resumeSessionId) {
           events.onStatus(`[runtime-session] resume_failed kind=${KIND} exit=${code}`);
           if (req.unattended) {

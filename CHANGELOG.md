@@ -21,6 +21,20 @@ page stays the authority.
 - The release package raises the Desktop store migration target to schema 107
   and pins the embedded Agentlas OS runtime to the exact v1.2.40 commit and
   published asset above.
+- One now turns generated images, documents, video, audio, data, and other
+  durable work products into Main-owned result records. Small media can render
+  in the conversation, while long or multi-item output opens in the right-side
+  result tabs instead of flooding the chat or pointing at an expired temp path.
+- Natural-language intent can select installed plugin workflows, including
+  Design, without asking people to memorize a plugin, MCP server, or tool name.
+  The always-on plugin router stays bounded as the installed catalog grows.
+- One and Work keep compact activity rows, explicit session attention, free-text
+  question answers, contextual folder access, cancellable group execution, and
+  durable runtime sessions across the supported Sol, Luna, Opus, and Sonnet paths.
+- `agentlasd` is now an app-scoped internal host rather than an independent
+  background product. It is bound to the exact Desktop parent PID, hands one
+  Mobile Bridge listener to the live app, removes legacy login/headless jobs,
+  and shuts down its local children when Desktop quits or crashes.
 
 ## 1.0.58 — 2026-09-01
 
@@ -38,6 +52,10 @@ page stays the authority.
   without replacing or interrupting the active conversation.
 - Thinking, shell, and tool activity use compact Codex-style rows, and completed
   work collapses behind a concise `Worked for` summary.
+- Settings now keeps the engine files editor collapsed by default and loads the
+  skills, host hooks, and adapter manifests only after the user expands it.
+- The toggle exposes its expanded state and controlled panel to assistive
+  technology while retaining the existing editor and save behavior.
 
 ## 1.0.57 — 2026-08-30
 

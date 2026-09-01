@@ -894,8 +894,7 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 .labWorkGrid { width: calc(100% - 16px); min-height: 0; flex: 1 1 auto; display: grid; grid-template-columns: minmax(0, 1fr); align-items: stretch; gap: 14px; margin: 0 auto; padding: 0 0 12px; }
 .artifactWorkspace.historyOpen .labWorkGrid { grid-template-columns: minmax(0, 1fr) 248px; }
 .figureColumn { min-width: 0; min-height: 0; width: 100%; height: 100%; margin: 0; padding: 0; }
-.artifactCanvasFrame { height: 100%; min-height: 0; border: 1px solid var(--line); border-radius: 12px; background: #fff; overflow: hidden; }
-.artifactCanvasFrame:has(.citationNetworkToolbar) { display: flex; flex-direction: column; }
+.artifactCanvasFrame { height: 100%; min-height: 0; display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 12px; background: #fff; overflow: hidden; }
 .rendererStatus { position: absolute !important; width: 1px !important; height: 1px !important; min-height: 0 !important; margin: -1px !important; overflow: hidden !important; clip: rect(0 0 0 0) !important; white-space: nowrap !important; }
 .rendererStatus em { color: #716d68; font-style: normal; }
 .rendererStatus[data-visual-capture="verified"]::after { content: "capture verified"; color: #27724b; }
@@ -921,12 +920,12 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 .vegaViewNotice { display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--line); background: var(--surface-subtle); padding: 10px 12px; }
 .vegaViewNotice strong { font-size: 10px; }
 .vegaViewNotice span { color: var(--muted); font-size: 9px; line-height: 1.45; }
-.artifactCanvas { min-height: 350px; display: grid; place-items: center; overflow: auto; padding: 16px; }
+.artifactCanvas { min-height: 0; height: auto; flex: 1 1 auto; display: grid; place-items: center; overflow: auto; padding: 16px; }
 .artifactCanvasExternal { min-height: 0; height: 100%; overflow: hidden; padding: 0; background: #fff; }
 .artifactCanvasExternal:has(.statisticsRasterPreview) { display: grid; place-items: center; overflow: auto; padding: 16px; }
 .statisticsRasterPreview { display: block; width: auto; height: auto; max-width: 100%; max-height: 100%; object-fit: contain; background: #fff; box-shadow: 0 8px 24px rgba(24, 24, 22, .08); }
-.numericSurfaceCanvas { min-height: 440px; height: 100%; overflow: hidden; padding: 0; background: #fff; }
-.numericSurface3d { position: relative; width: 100%; height: 100%; min-height: 440px; display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: minmax(0, 1fr) auto; overflow: hidden; background: #fff; }
+.numericSurfaceCanvas { min-height: 0; height: auto; overflow: hidden; padding: 0; background: #fff; }
+.numericSurface3d { position: relative; width: 100%; height: 100%; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: minmax(0, 1fr) auto; overflow: hidden; background: #fff; }
 .numericSurfaceViewport { position: relative; min-width: 0; min-height: 0; grid-column: 1 / -1; overflow: hidden; background: #fff; }
 .numericSurfaceViewport canvas { width: 100%; height: 100%; cursor: grab; touch-action: none; }
 .numericSurfaceViewport canvas:active { cursor: grabbing; }
@@ -944,8 +943,8 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 .numericSurfaceColorbar.palette-grayscale i { background: linear-gradient(to top, rgb(38,38,38), rgb(112,112,112), rgb(188,188,188), rgb(246,246,246)); }
 .numericSurface3d > button { align-self: center; min-height: 30px; margin: 7px 12px 7px 0; border: 1px solid var(--line-strong); border-radius: 8px; background: #fff; padding: 0 10px; color: var(--ink); font-size: 9px; }
 .numericSurface3d > button:disabled { opacity: .45; }
-.dataTableCanvas { min-height: 500px; height: 100%; display: block; overflow: hidden; padding: 0; background: #fff; }
-.dataTableSurface { width: 100%; height: 100%; min-height: 500px; display: flex; flex-direction: column; overflow: hidden; background: #fff; }
+.dataTableCanvas { min-height: 0; height: auto; display: block; overflow: hidden; padding: 0; background: #fff; }
+.dataTableSurface { width: 100%; height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: #fff; }
 .dataTableSummary { min-height: 62px; flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--line); background: var(--surface-subtle); padding: 10px 14px; }
 .dataTableSummary > div:first-child span { display: block; color: var(--muted); font-size: 8px; font-weight: 760; letter-spacing: .08em; }
 .dataTableSummary strong { display: block; margin-top: 4px; font-size: 13px; }
@@ -965,7 +964,7 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 .dataTableSurface > footer > div { display: flex; align-items: center; gap: 7px; }
 .dataTableSurface > footer button { min-width: 52px; min-height: 30px; border: 1px solid var(--line-strong); border-radius: 7px; background: #fff; color: var(--ink); font-size: 9px; }
 .dataTableSurface > footer button:disabled { cursor: default; opacity: .4; }
-.statisticsAnalysisSurface { width: 100%; height: 100%; min-height: 500px; display: flex; flex-direction: column; overflow: hidden; background: #fff; }
+.statisticsAnalysisSurface { width: 100%; height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: #fff; }
 .statisticsAnalysisHeader { min-height: 70px; flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 18px; border-bottom: 1px solid var(--line); background: var(--surface-subtle); padding: 10px 14px; }
 .statisticsAnalysisHeader > div { min-width: 190px; }
 .statisticsAnalysisHeader > div > span { display: block; color: var(--muted); font-size: 8px; font-weight: 760; letter-spacing: .08em; }
@@ -1111,7 +1110,7 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 .citationNodeDetail strong { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: ui-serif, Georgia, serif; font-size: 15px; }
 .citationNodeDetail span { margin-top: 5px; color: var(--muted); font-size: 11px; line-height: 1.4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .citationNodeDetail[data-selected="true"] strong { color: #245e62; }
-.citationNetworkCanvas { min-height: 510px; height: auto; flex: 1 1 auto; display: block; overflow: hidden; padding: 0; background: var(--surface-subtle); }
+.citationNetworkCanvas { min-height: 0; height: auto; flex: 1 1 auto; display: block; overflow: hidden; padding: 0; background: var(--surface-subtle); }
 .skyCatalogToolbar { min-height: 94px; display: grid; grid-template-columns: minmax(260px, .9fr) minmax(300px, 1.1fr); gap: 14px; align-items: center; border-bottom: 1px solid var(--line); background: var(--surface-subtle); padding: 10px 12px; }
 .skyCatalogToolbar > div:first-child { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
 .skyCatalogToolbar button { min-height: 31px; border: 1px solid var(--line-strong); border-radius: 7px; background: #fff; color: var(--ink); padding: 0 10px; font-size: 9px; font-weight: 680; }
@@ -1122,8 +1121,8 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 .skyObjectDetail strong { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: ui-serif, Georgia, serif; font-size: 12px; }
 .skyObjectDetail span { margin-top: 3px; color: var(--muted); font-size: 8px; line-height: 1.25; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .skyObjectDetail[data-selected="true"] strong { color: #315f73; }
-.skyCatalogCanvas { min-height: 440px; overflow: hidden; padding: 0; background: #fff; }
-.skyCatalogPlot { width: 100%; height: auto; min-height: 420px; background: #fff; }
+.skyCatalogCanvas { min-height: 0; overflow: hidden; padding: 0; background: #fff; }
+.skyCatalogPlot { width: 100%; height: 100%; min-height: 0; background: #fff; }
 .skyPlotBackground { fill: #f8fafb; stroke: #dce4e7; }
 .skyRadiusRing { fill: none; stroke: #c8d5da; stroke-width: 1; stroke-dasharray: 3 4; }
 .skyAxisLine { stroke: #d7e0e3; stroke-width: 1; }
@@ -1136,8 +1135,8 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 .genomicsToolbar span { color: var(--muted); font-size: 8px; font-weight: 760; letter-spacing: .08em; }
 .genomicsToolbar strong { overflow: hidden; color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .genomicsToolbar p { margin: 0; color: var(--muted-deep); font-size: 9px; line-height: 1.45; text-align: right; }
-.jbrowseGenomeCanvas { min-height: 520px; display: block; overflow: hidden; padding: 0; background: #fff; }
-.jbrowseCaptureSurface, .jbrowseMountTarget { width: 100%; min-width: 0; min-height: 520px; }
+.jbrowseGenomeCanvas { min-height: 0; display: block; overflow: hidden; padding: 0; background: #fff; }
+.jbrowseCaptureSurface, .jbrowseMountTarget { width: 100%; height: 100%; min-width: 0; min-height: 0; }
 .jbrowseCaptureSurface { overflow: hidden; background: #fff; padding: 10px; }
 .jbrowseMountTarget { overflow: auto; color: #252422; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
 .jbrowseMountTarget > div { min-width: 0; }
@@ -1186,6 +1185,64 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
 .versionBadges em[data-kind="origin"] { border-color: #d8d8d4; background: var(--surface-muted); color: #5c5c58; }
 .versionRailState { padding: 20px 12px; color: var(--muted); font-size: 10px; line-height: 1.55; text-align: center; }
 .versionRail > footer { border-top: 1px solid var(--line); padding: 10px 12px; color: var(--muted); font-size: 9px; line-height: 1.45; }
+
+.labDecisionEmptyShell { width: 100%; height: 100%; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; background: var(--surface-subtle); }
+.labDecisionEmptyShell .emptyView { min-height: 420px; flex: 1 0 420px; }
+.labDecisionPanel { flex: 0 0 auto; width: calc(100% - 20px); margin: 10px auto 8px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface); overflow: hidden; }
+.labDecisionPanel > header { min-height: 50px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 9px 13px; border-bottom: 1px solid var(--line); }
+.labDecisionPanel > header > div:first-child { min-width: 0; }
+.labDecisionPanel > header > div:first-child > span, .labDecisionBody section > span { display: block; color: var(--muted); font-size: 8px; font-weight: 780; letter-spacing: .06em; text-transform: uppercase; }
+.labDecisionPanel > header strong { display: block; margin-top: 4px; font-size: 11px; font-weight: 680; line-height: 1.35; }
+.labDecisionHeaderActions { flex: 0 0 auto; display: flex; align-items: center; gap: 7px; }
+.labDecisionHeaderActions > button { min-height: 26px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--muted-deep); padding: 0 8px; font-size: 8px; font-weight: 700; white-space: nowrap; }
+.labDecisionHeaderActions > button:hover { border-color: var(--line-strong); background: var(--surface-muted); color: var(--ink); }
+.labDecisionStatus { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+.labDecisionStatus em, .labDecisionStatus span { min-height: 24px; display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 999px; padding: 0 8px; color: var(--muted-deep); font-size: 8px; font-style: normal; font-weight: 700; white-space: nowrap; }
+.labDecisionPanel[data-lab-decision-state="human-decision-needed"] .labDecisionStatus em, .labDecisionPanel[data-lab-decision-freshness="stale"] .labDecisionStatus span, .labDecisionPanel[data-lab-decision-freshness="superseded"] .labDecisionStatus span { border-color: #e7c8a3; background: #fff8ed; color: #7a4c17; }
+.labDecisionBody { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1.25fr) minmax(0, 1fr); }
+.labDecisionPanel[data-expanded="false"] .labDecisionBody { display: none; }
+.labDecisionBody section { min-width: 0; padding: 10px 13px; }
+.labDecisionBody section + section { border-left: 1px solid var(--line); }
+.labDecisionBody p, .labDecisionBody ol { margin: 6px 0 0; color: var(--ink); font-size: 10px; line-height: 1.45; }
+.labDecisionBody p { overflow-wrap: anywhere; }
+.labDecisionBody ol { padding-left: 16px; }
+.labDecisionBody li + li { margin-top: 3px; }
+.labDecisionBody .labDecisionSubquestion { margin-top: 10px; }
+.labDecisionBoundary p { color: var(--muted-deep); }
+.labDecisionPanel > footer { min-height: 42px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--line); padding: 6px 9px 6px 13px; }
+.labDecisionPanel > footer > span { min-width: 0; color: var(--muted); font-size: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.labDecisionPanel > footer code { color: var(--muted-deep); font-size: 8px; }
+.labDecisionPanel > footer button { min-height: 31px; flex: 0 0 auto; border: 1px solid var(--ink); border-radius: 8px; background: var(--ink); color: #fff; padding: 0 11px; font-size: 9px; font-weight: 720; }
+.labDecisionPanel > footer button:hover { background: #353532; }
+.labDecisionPanel > footer button:disabled { cursor: wait; opacity: .52; }
+.labDecisionActionHint { color: var(--muted-deep) !important; font-weight: 650; }
+.labDecisionError { margin: 0; border-top: 1px solid #eed6d2; background: #fff7f6; color: var(--danger); padding: 7px 13px; font-size: 9px; line-height: 1.4; }
+
+.analysisPlanView { width: min(960px, calc(100% - 40px)); margin: 28px auto 48px; }
+.analysisPlanView > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; padding-bottom: 20px; border-bottom: 1px solid var(--line-strong); }
+.analysisPlanView > header > div:first-child { min-width: 0; }
+.analysisPlanView > header span { color: var(--muted); font-size: 9px; font-weight: 760; letter-spacing: .07em; }
+.analysisPlanView h1 { margin: 8px 0 0; font-family: ui-serif, Georgia, serif; font-size: 26px; font-weight: 560; }
+.analysisPlanView > header p { max-width: 680px; margin: 10px 0 0; color: var(--muted-deep); font-size: 12px; line-height: 1.6; }
+.analysisPlanIdentity { flex: 0 0 auto; display: grid; justify-items: end; gap: 5px; }
+.analysisPlanIdentity em { border: 1px solid var(--line-strong); border-radius: 999px; padding: 4px 8px; color: var(--muted-deep); font-size: 8px; font-style: normal; font-weight: 700; }
+.analysisPlanIdentity strong { font-size: 12px; }
+.analysisPlanIdentity code { color: var(--muted); font-size: 8px; }
+.analysisPlanGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-bottom: 1px solid var(--line); }
+.analysisPlanGrid > section { min-width: 0; padding: 20px 18px 22px 0; }
+.analysisPlanGrid > section:nth-child(even) { border-left: 1px solid var(--line); padding-right: 0; padding-left: 18px; }
+.analysisPlanGrid > section:nth-child(n+3) { border-top: 1px solid var(--line); }
+.analysisPlanGrid > section > span, .analysisPlanView > footer span { display: block; color: var(--muted); font-size: 9px; font-weight: 760; letter-spacing: .05em; text-transform: uppercase; }
+.analysisPlanGrid dl { margin: 10px 0 0; }
+.analysisPlanGrid dl > div { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 10px; padding: 5px 0; }
+.analysisPlanGrid dt { color: var(--muted); font-size: 9px; }
+.analysisPlanGrid dd { min-width: 0; margin: 0; font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
+.analysisPlanGrid p { margin: 10px 0 0; color: var(--muted-deep); font-size: 10px; line-height: 1.5; }
+.analysisPlanGrid code { font-size: 9px; }
+.analysisPlanView > footer { display: grid; grid-template-columns: 150px minmax(0, 1fr) 190px; gap: 18px; padding: 16px 0; }
+.analysisPlanView > footer strong { display: block; margin-top: 5px; font-size: 10px; line-height: 1.45; }
+.analysisPlanEmpty > div { margin-top: 24px; display: grid; gap: 6px; }
+.analysisPlanEmpty > div span { color: var(--muted); font-size: 11px; }
 
 .experimentLoop { min-height: 72px; flex: 0 0 72px; display: grid; grid-template-columns: 145px minmax(150px, 1fr) minmax(190px, 1.2fr) auto; align-items: center; gap: 16px; margin: 12px 10px 16px; border: 1px solid var(--line); border-radius: 11px; background: #fff; padding: 10px 16px; box-shadow: 0 5px 16px rgba(32,32,28,.035); }
 .experimentLoop > div { min-width: 0; }
@@ -1379,6 +1436,19 @@ button.manuscriptBinding:hover { border-color: var(--line-strong); background: v
   .citationNetworkCanvas { min-height: 420px; height: 420px; }
   .statisticsLaunchGrid { grid-template-columns: minmax(0, 1fr); }
   .statisticsLineage { padding-left: 14px; padding-right: 14px; }
+  .labDecisionPanel > header { align-items: flex-start; flex-direction: column; }
+  .labDecisionHeaderActions { width: 100%; justify-content: space-between; }
+  .labDecisionBody { grid-template-columns: minmax(0, 1fr); }
+  .labDecisionBody section + section { border-top: 1px solid var(--line); border-left: 0; }
+  .labDecisionPanel > footer { align-items: flex-start; flex-direction: column; }
+  .labDecisionPanel > footer button { width: 100%; }
+  .analysisPlanView { width: calc(100% - 28px); margin-top: 20px; }
+  .analysisPlanView > header { flex-direction: column; }
+  .analysisPlanIdentity { justify-items: start; }
+  .analysisPlanGrid { grid-template-columns: minmax(0, 1fr); }
+  .analysisPlanGrid > section:nth-child(even) { border-left: 0; padding-right: 0; padding-left: 0; }
+  .analysisPlanGrid > section + section { border-top: 1px solid var(--line); }
+  .analysisPlanView > footer { grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (max-width: 850px) {

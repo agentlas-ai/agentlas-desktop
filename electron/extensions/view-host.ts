@@ -9,6 +9,7 @@ import {
   SCIENCE_RENDERER_REQUEST_SCHEMA,
   SCIENCE_RENDERER_STATUS_SCHEMA,
   isScienceRendererGuestReport,
+  scienceRendererBindingsEqual,
   type MountScienceRendererInput,
   type ScienceRendererBinding,
   type ScienceRendererBounds,
@@ -58,6 +59,7 @@ export interface ScienceRendererCapturedFrame {
 
 interface ActiveScienceView {
   ownerId: number;
+  leaseId: string;
   window: BrowserWindow;
   view: WebContentsView;
   releaseDir: string;
@@ -141,11 +143,12 @@ function closeActive(active: ActiveScienceView, notify = true): void {
   closeRenderer(active);
   try { active.window.contentView.removeChildView(active.view); } catch {}
   try { active.view.webContents.close(); } catch {}
-  if (notify) active.send({ id: SCIENCE_EXTENSION_ID, state: "closed" });
+  if (notify) active.send({ id: SCIENCE_EXTENSION_ID, leaseId: active.leaseId, state: "closed" });
 }
 
-export function closeScienceExtensionView(ownerId: number): { ok: true } {
+export function closeScienceExtensionView(ownerId: number, leaseId?: string): { ok: true } {
   const active = activeViews.get(ownerId);
+  if (active && leaseId !== undefined && active.leaseId !== leaseId) return { ok: true };
   if (active) closeActive(active);
   return { ok: true };
 }
@@ -308,6 +311,22 @@ export async function mountScienceRendererView(senderId: number, launch: Science
     if (bytes < 1 || bytes > 4 * 1024 * 1024) throw new Error("science-renderer-request-invalid");
   }
   if (!insideRelease(launch.releaseDir, pathToFileURL(launch.entryPath).toString())) throw new Error("science-renderer-entry-outside-release");
+  const mounted = active.renderer;
+  if (mounted
+    && !mounted.view.webContents.isDestroyed()
+    && mounted.projectId === launch.projectId
+    && mounted.releaseDir === launch.releaseDir
+    && mounted.entryPath === launch.entryPath
+    && mounted.request.artifactId === launch.request.artifactId
+    && mounted.request.artifactVersion === launch.request.artifactVersion
+    && mounted.request.artifactKind === launch.request.artifactKind
+    && mounted.request.artifactContentSha256 === launch.request.artifactContentSha256
+    && scienceRendererBindingsEqual(mounted.request.binding, launch.request.binding)) {
+    mounted.relativeBounds = launch.bounds;
+    mounted.view.setBounds(safeRendererBounds(launch.bounds, active));
+    mounted.view.setVisible(true);
+    return rendererStatus(mounted);
+  }
   closeRenderer(active);
 
   const rendererView = new WebContentsView({
@@ -579,9 +598,9 @@ export function failScienceRendererCapture(instanceId: string, code: string, sum
   throw new Error("science-renderer-not-mounted");
 }
 
-export function setScienceExtensionViewBounds(ownerId: number, bounds: ProductExtensionViewBounds): { ok: boolean } {
+export function setScienceExtensionViewBounds(ownerId: number, leaseId: string, bounds: ProductExtensionViewBounds): { ok: boolean } {
   const active = activeViews.get(ownerId);
-  if (!active || active.window.isDestroyed() || active.view.webContents.isDestroyed()) return { ok: false };
+  if (!active || active.leaseId !== leaseId || active.window.isDestroyed() || active.view.webContents.isDestroyed()) return { ok: false };
   active.view.setBounds(safeBounds(bounds, active.window));
   if (active.renderer && !active.renderer.view.webContents.isDestroyed()) {
     active.renderer.view.setBounds(safeRendererBounds(active.renderer.relativeBounds, active));
@@ -592,12 +611,13 @@ export function setScienceExtensionViewBounds(ownerId: number, bounds: ProductEx
 
 export async function openScienceExtensionView(input: {
   ownerId: number;
+  leaseId: string;
   window: BrowserWindow;
   bounds: ProductExtensionViewBounds;
   send: (status: ProductExtensionViewStatus) => void;
 }): Promise<ProductExtensionViewStatus> {
   const release = activeScienceExtension();
-  if (!release) return { id: SCIENCE_EXTENSION_ID, state: "error", errorCode: "science-extension-not-active", errorMessage: "Agentlas Science is not installed and enabled." };
+  if (!release) return { id: SCIENCE_EXTENSION_ID, leaseId: input.leaseId, state: "error", errorCode: "science-extension-not-active", errorMessage: "Agentlas Science is not installed and enabled." };
   closeScienceExtensionView(input.ownerId);
   const view = new WebContentsView({
     webPreferences: {
@@ -615,6 +635,7 @@ export async function openScienceExtensionView(input: {
   });
   const active: ActiveScienceView = {
     ownerId: input.ownerId,
+    leaseId: input.leaseId,
     window: input.window,
     view,
     releaseDir: release.releaseDir,
@@ -646,25 +667,31 @@ export async function openScienceExtensionView(input: {
   });
   view.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   view.webContents.on("render-process-gone", (_event, details) => {
-    active.send({ id: SCIENCE_EXTENSION_ID, state: "error", errorCode: "science-renderer-stopped", errorMessage: details.reason });
+    active.send({ id: SCIENCE_EXTENSION_ID, leaseId: active.leaseId, state: "error", errorCode: "science-renderer-stopped", errorMessage: details.reason });
   });
   view.webContents.on("unresponsive", () => {
-    active.send({ id: SCIENCE_EXTENSION_ID, state: "error", errorCode: "science-renderer-unresponsive", errorMessage: "The Science interface is not responding." });
+    active.send({ id: SCIENCE_EXTENSION_ID, leaseId: active.leaseId, state: "error", errorCode: "science-renderer-unresponsive", errorMessage: "The Science interface is not responding." });
+  });
+  view.webContents.once("destroyed", () => {
+    if (activeViews.get(active.ownerId) === active) activeViews.delete(active.ownerId);
+    if (active.renderer) closeRenderer(active, "failed", "science-extension-view-destroyed", "The Science interface was closed.");
   });
   input.window.contentView.addChildView(view);
   view.setBounds(safeBounds(input.bounds, input.window));
   view.setVisible(true);
   input.window.once("closed", () => closeActive(active, false));
-  const opening: ProductExtensionViewStatus = { id: SCIENCE_EXTENSION_ID, state: "opening" };
+  const opening: ProductExtensionViewStatus = { id: SCIENCE_EXTENSION_ID, leaseId: active.leaseId, state: "opening" };
   active.send(opening);
   try {
     await view.webContents.loadURL(pathToFileURL(release.entryPath).toString());
-    const ready: ProductExtensionViewStatus = { id: SCIENCE_EXTENSION_ID, state: "ready", title: view.webContents.getTitle() || "Agentlas Science" };
+    const ready: ProductExtensionViewStatus = { id: SCIENCE_EXTENSION_ID, leaseId: active.leaseId, state: "ready", title: view.webContents.getTitle() || "Agentlas Science" };
     active.send(ready);
     return ready;
   } catch (error) {
+    closeActive(active, false);
     const failed: ProductExtensionViewStatus = {
       id: SCIENCE_EXTENSION_ID,
+      leaseId: active.leaseId,
       state: "error",
       errorCode: "science-entry-load-failed",
       errorMessage: error instanceof Error ? error.message : String(error),

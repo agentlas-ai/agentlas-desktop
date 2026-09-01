@@ -671,6 +671,8 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       unattended: req.unattended === true,
     });
     const sessionKind = acpSessionKind(spec.id);
+    const runtimeSessionOwnerId = req.runtimeSessionOwnerId ?? req.agentId;
+    const isolateRuntimeSessionOwner = req.runtimeSessionOwnerId != null;
     // 세션 정체성 — 모델/시스템 프롬프트가 바뀌면 이어갈 세션도 달라진다(형제 러너와 동일 규칙).
     const fingerprint = req.chatId
       ? createHash("sha256")
@@ -686,7 +688,9 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         .update(req.permission ?? "")
         .digest("hex")
       : null;
-    const savedSession = req.chatId ? getRuntimeSession(req.chatId, sessionKind, req.agentId) : null;
+    const savedSession = req.chatId
+      ? getRuntimeSession(req.chatId, sessionKind, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner })
+      : null;
     const storedSessionId = savedSession && fingerprint && savedSession.fingerprint === fingerprint ? savedSession.sessionId : null;
     const resumeSessionId = req.runtimeSessionId ?? storedSessionId;
 
@@ -915,7 +919,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       );
       client.finish();
       // 세션은 이제 실재한다 — 거절/빈 답이어도 다음 턴이 이어갈 수 있게 먼저 저장한다.
-      if (req.chatId && fingerprint && !saveRuntimeSession(req.chatId, sessionKind, sessionId, fingerprint, { agentId: req.agentId })) {
+      if (req.chatId && fingerprint && !saveRuntimeSession(req.chatId, sessionKind, sessionId, fingerprint, { agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner })) {
         events.onStatus(`[runtime-session] store_failed kind=${sessionKind}`);
       }
       if (req.signal?.aborted) throw abortReasonError(req);

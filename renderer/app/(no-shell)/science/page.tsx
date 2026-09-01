@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ProductExtensionStatus, ProductExtensionViewBounds, ProductExtensionViewStatus } from "@shared/product-extension";
 import { ProductModeMenu } from "@/components/one/ProductModeMenu";
 import { ipc, ipcEvents } from "@/lib/ipc";
@@ -23,56 +23,64 @@ export default function ScienceHostPage() {
   const ko = locale !== "en";
   const surfaceRef = useRef<HTMLDivElement>(null);
   const openedRef = useRef(false);
+  const mountEpochRef = useRef(0);
   const [extension, setExtension] = useState<ProductExtensionStatus | null>(null);
   const [view, setView] = useState<ProductExtensionViewStatus | null>(null);
 
-  const open = useCallback(async () => {
-    const api = ipc();
-    const surface = surfaceRef.current;
-    if (!api?.productExtensions || !surface) return;
-    const status = await api.productExtensions.scienceStatus().catch(() => null);
-    setExtension(status);
-    if (!status || status.phase !== "installed" || !status.enabled) return;
-    openedRef.current = true;
-    setView(await api.productExtensions.openScienceView(elementBounds(surface)).catch((): ProductExtensionViewStatus => ({
-      id: "agentlas-science",
-      state: "error",
-      errorCode: "science-host-open-failed",
-      errorMessage: "The Science interface could not be opened.",
-    })));
-  }, []);
-
   useEffect(() => {
-    void open();
     const surface = surfaceRef.current;
     const api = ipc();
     if (!surface || !api?.productExtensions) return;
+    const epoch = ++mountEpochRef.current;
+    const leaseId = crypto.randomUUID();
+    let disposed = false;
+    const isCurrent = () => !disposed && mountEpochRef.current === epoch;
+    const open = async () => {
+      const status = await api.productExtensions.scienceStatus().catch(() => null);
+      if (!isCurrent()) return;
+      setExtension(status);
+      if (!status || status.phase !== "installed" || !status.enabled) return;
+      openedRef.current = true;
+      const nextView = await api.productExtensions.openScienceView(elementBounds(surface), leaseId).catch((): ProductExtensionViewStatus => ({
+        id: "agentlas-science",
+        leaseId,
+        state: "error",
+        errorCode: "science-host-open-failed",
+        errorMessage: "The Science interface could not be opened.",
+      }));
+      if (isCurrent()) setView(nextView);
+    };
+    void open();
     let frame = 0;
     const resize = new ResizeObserver(() => {
       window.cancelAnimationFrame(frame);
       frame = window.requestAnimationFrame(() => {
-        if (openedRef.current) void api.productExtensions.setScienceViewBounds(elementBounds(surface));
+        if (openedRef.current) void api.productExtensions.setScienceViewBounds(elementBounds(surface), leaseId);
       });
     });
     resize.observe(surface);
-    const offView = ipcEvents()?.onProductExtensionViewStatus?.(setView);
+    const offView = ipcEvents()?.onProductExtensionViewStatus?.((status) => {
+      if (status.leaseId === leaseId) setView(status);
+    });
     const offExtension = ipcEvents()?.onProductExtensionChanged?.((status) => {
       if (status.id !== "agentlas-science") return;
       setExtension(status);
       if (status.phase !== "installed" || !status.enabled) {
         openedRef.current = false;
-        void api.productExtensions.closeScienceView();
+        void api.productExtensions.closeScienceView(leaseId);
       }
     });
     return () => {
+      disposed = true;
+      if (mountEpochRef.current === epoch) mountEpochRef.current += 1;
       window.cancelAnimationFrame(frame);
       resize.disconnect();
       offView?.();
       offExtension?.();
       openedRef.current = false;
-      void api.productExtensions.closeScienceView();
+      void api.productExtensions.closeScienceView(leaseId);
     };
-  }, [open]);
+  }, []);
 
   const unavailable = extension !== null && (extension.phase !== "installed" || !extension.enabled);
   const failed = view?.state === "error";

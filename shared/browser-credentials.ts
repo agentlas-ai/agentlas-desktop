@@ -98,10 +98,16 @@ export interface BrowserCredentialImportRequest {
 
 export interface BrowserCredentialImportResult {
   ok: boolean;
-  /** 전용 프로필로 새로 들어간 쿠키 행 수. 이미 있던 행은 건드리지 않는다(merge). */
+  /** 전용 프로필에 추가되거나 더 최신/읽을 수 있는 암호문으로 교체된 쿠키 행 수. */
   cookiesAdded: number;
   /** Connect 목록에 등록된 사이트. */
   linkedSites: string[];
+  /**
+   * 원본 브라우저가 앱 경로에 묶어 암호화해 직접 이전할 수 없는 사이트.
+   * 실패가 아니다. 사이트는 전용 프로필에 등록되며, 사용자는 해당 사이트의 실제
+   * 로그인 화면에서 한 번만 로그인하면 이후 모든 Agentlas 실행이 그 세션을 재사용한다.
+   */
+  requiresLoginSites?: string[];
   /** 가져오지 못한 도메인과 이유 — 조용히 성공으로 위장하지 않는다. */
   skipped: Array<{ domain: string; reason: string }>;
   error?: string;

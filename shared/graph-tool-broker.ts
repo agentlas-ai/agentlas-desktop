@@ -93,6 +93,14 @@ export const MUTATING_BUILTIN_TOOLS = [
   "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "KillShell",
 ] as const;
 
+/** Built-ins that can bypass the Agentlas Browser session or expose its cookies. */
+export const BROWSER_BYPASS_BUILTIN_TOOLS = [
+  "Bash", "BashOutput", "Write", "Edit", "MultiEdit", "NotebookEdit", "KillShell",
+  "run_command", "command_status", "send_command_input",
+  "view_file", "read_file", "write_to_file", "replace_file_content", "multi_replace_file_content",
+  "open_browser_url", "read_browser_page", "execute_browser_javascript", "browser_subagent",
+] as const;
+
 export interface ToolBrokerInput {
   /** 이 노드에 화면에서 이어 붙인 도구들의 catalog id (C06). 빈 배열이면 선언이 없다. */
   declaredToolCatalogIds: string[];
@@ -125,7 +133,11 @@ export interface ToolBrokerPlan {
 export function planToolBrokerage(input: ToolBrokerInput): ToolBrokerPlan {
   const chokepoint = input.runtimeKind ? RUNTIME_CHOKEPOINTS[input.runtimeKind] : undefined;
   const denyUndeclaredMcp = input.declaredToolNames.length > 0;
-  const denyExact = input.dryRun ? [...MUTATING_BUILTIN_TOOLS] : [];
+  const browserOnly = input.declaredToolCatalogIds.length > 0
+    && input.declaredToolCatalogIds.every((id) => id === "agentlas-browser");
+  const denyExact = browserOnly
+    ? [...BROWSER_BYPASS_BUILTIN_TOOLS]
+    : input.dryRun ? [...MUTATING_BUILTIN_TOOLS] : [];
   const nothingToBroker = !denyUndeclaredMcp && denyExact.length === 0;
 
   if (nothingToBroker) {

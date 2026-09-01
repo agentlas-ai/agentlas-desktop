@@ -7,7 +7,7 @@ import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import { OneBrandMark } from "./OneBrand";
 import { IconBrain } from "@/components/Icon";
 import { ipc, ipcEvents } from "@/lib/ipc";
-import { requestScienceInstall, SCIENCE_INSTALL_DISCOVERY_ENABLED } from "@/lib/science-install-entry";
+import { requestScienceInstall } from "@/lib/science-install-entry";
 import styles from "./ProductModeMenu.module.css";
 
 const ONE_RETURN_ROUTE_KEY = "agentlas.one.return-route.v1";
@@ -130,7 +130,7 @@ export function ProductModeMenu({
             </span>
             {current === "work" && <span className={styles.check} aria-label={tFor(activeLocale, "one.mode.current_aria")}>✓</span>}
           </button>
-          {(scienceAvailable || current === "science" || SCIENCE_INSTALL_DISCOVERY_ENABLED) && <button className={styles.option} type="button" role="menuitem" onClick={openScience} onKeyDown={(event) => {
+          <button className={styles.option} type="button" role="menuitem" onClick={openScience} onKeyDown={(event) => {
             if (event.key !== "Enter" && event.key !== " ") return;
             event.preventDefault();
             openScience();
@@ -142,7 +142,7 @@ export function ProductModeMenu({
                 : activeLocale === "ko" ? "다운로드 필요" : "Download required"}</small>
             </span>
             {current === "science" && <span className={styles.check} aria-label={tFor(activeLocale, "one.mode.current_aria")}>✓</span>}
-          </button>}
+          </button>
         </div>
       )}
     </div>

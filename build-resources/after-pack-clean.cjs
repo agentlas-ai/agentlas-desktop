@@ -347,6 +347,36 @@ async function nodeRuntimeTreeSha256(root) {
   return digest.digest("hex");
 }
 
+async function browserRuntimeTreeSha256(root) {
+  const records = [];
+  const walk = async (relative) => {
+    const absolute = path.join(root, ...relative.split("/").filter(Boolean));
+    const entries = await readdir(absolute, { withFileTypes: true });
+    for (const entry of entries.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)) {
+      const childRelative = relative ? `${relative}/${entry.name}` : entry.name;
+      if (childRelative === ".gitkeep" || childRelative === "agentlas-browser-runtime.json") continue;
+      const childAbsolute = path.join(root, ...childRelative.split("/"));
+      const stat = await lstat(childAbsolute);
+      if (stat.isDirectory()) await walk(childRelative);
+      else if (stat.isSymbolicLink()) records.push({ kind: "L", relative: childRelative, target: await readlink(childAbsolute) });
+      else if (stat.isFile()) records.push({ kind: "F", relative: childRelative, size: stat.size, absolute: childAbsolute });
+      else throw new Error(`[afterPack] unsupported browser runtime entry: ${childRelative}`);
+    }
+  };
+  await walk("");
+  const digest = createHash("sha256");
+  for (const record of records.sort((left, right) => left.relative < right.relative ? -1 : left.relative > right.relative ? 1 : 0)) {
+    if (record.kind === "L") {
+      digest.update("L\0").update(record.relative).update("\0").update(record.target).update("\n");
+    } else {
+      const contentSha256 = createHash("sha256").update(await readFile(record.absolute)).digest("hex");
+      digest.update("F\0").update(record.relative).update("\0")
+        .update(String(record.size)).update("\0").update(contentSha256).update("\n");
+    }
+  }
+  return digest.digest("hex");
+}
+
 async function verifyBundledPython(projectDir, resourcesDir, platform, builderArch) {
   const sourceRoot = path.join(projectDir, "build-resources", "python-runtime");
   const packagedRoot = path.join(resourcesDir, "python-runtime");
@@ -525,6 +555,75 @@ async function verifyBundledNode(projectDir, resourcesDir, platform, builderArch
   return manifest;
 }
 
+async function verifyBundledBrowser(projectDir, resourcesDir, platform, builderArch) {
+  const sourceRoot = path.join(projectDir, "build-resources", "browser-runtime");
+  const packagedRoot = path.join(resourcesDir, "browser-runtime");
+  const manifestName = "agentlas-browser-runtime.json";
+  const [sourceText, packagedText] = await Promise.all([
+    readFile(path.join(sourceRoot, manifestName), "utf8"),
+    readFile(path.join(packagedRoot, manifestName), "utf8"),
+  ]);
+  if (sourceText !== packagedText) throw new Error("[afterPack] packaged browser runtime manifest drift");
+  let manifest;
+  try { manifest = JSON.parse(sourceText); }
+  catch (error) { throw new Error("[afterPack] browser runtime manifest is invalid JSON", { cause: error }); }
+  const expectedKeys = [
+    "schemaVersion", "runtime", "playwrightVersion", "browserRevision", "browserVersion",
+    "platform", "arch", "executableRelativePath", "executableSha256", "runtimeTreeSha256",
+    ...(platform === "darwin" ? ["macBundleId"] : []),
+  ].sort();
+  const normalizedArch = builderArch === 3 || String(builderArch).toLowerCase() === "arm64"
+    ? "arm64"
+    : builderArch === 1 || String(builderArch).toLowerCase() === "x64" ? "x64" : null;
+  if (
+    !manifest || typeof manifest !== "object" || Array.isArray(manifest)
+    || Object.keys(manifest).sort().join("\0") !== expectedKeys.join("\0")
+    || manifest.schemaVersion !== "agentlas.browser-runtime.v1"
+    || manifest.runtime !== "playwright-chrome-for-testing"
+    || manifest.platform !== platform
+    || manifest.arch !== normalizedArch
+    || !/^[0-9a-f]{64}$/.test(String(manifest.executableSha256 || ""))
+    || !/^[0-9a-f]{64}$/.test(String(manifest.runtimeTreeSha256 || ""))
+    || (platform === "darwin" && manifest.macBundleId !== "com.google.chrome.for.testing")
+  ) throw new Error("[afterPack] browser runtime manifest shape or target is invalid");
+
+  const sourceExecutable = path.resolve(sourceRoot, ...String(manifest.executableRelativePath).split("/"));
+  const packagedExecutable = path.resolve(packagedRoot, ...String(manifest.executableRelativePath).split("/"));
+  const [sourceRootReal, packagedRootReal, sourceReal, packagedReal, sourceStat, packagedStat] = await Promise.all([
+    realpath(sourceRoot), realpath(packagedRoot), realpath(sourceExecutable), realpath(packagedExecutable),
+    lstat(sourceExecutable), lstat(packagedExecutable),
+  ]);
+  if (
+    !sourceStat.isFile() || sourceStat.isSymbolicLink() || !packagedStat.isFile() || packagedStat.isSymbolicLink()
+    || !isPathInside(sourceRootReal, sourceReal) || !isPathInside(packagedRootReal, packagedReal)
+  ) throw new Error("[afterPack] browser executable is missing, linked, or escapes its runtime root");
+  const [sourceDigest, packagedDigest, sourceTree, packagedTree] = await Promise.all([
+    readFile(sourceExecutable).then((bytes) => createHash("sha256").update(bytes).digest("hex")),
+    readFile(packagedExecutable).then((bytes) => createHash("sha256").update(bytes).digest("hex")),
+    browserRuntimeTreeSha256(sourceRoot), browserRuntimeTreeSha256(packagedRoot),
+  ]);
+  if (sourceDigest !== manifest.executableSha256 || packagedDigest !== manifest.executableSha256) {
+    throw new Error("[afterPack] packaged browser executable checksum mismatch");
+  }
+  if (sourceTree !== manifest.runtimeTreeSha256 || packagedTree !== manifest.runtimeTreeSha256) {
+    throw new Error("[afterPack] packaged browser runtime tree checksum mismatch");
+  }
+  if (platform === "darwin") {
+    const marker = `${path.sep}Contents${path.sep}MacOS${path.sep}`;
+    const appRoot = packagedExecutable.slice(0, packagedExecutable.lastIndexOf(marker));
+    const plist = await readFile(path.join(appRoot, "Contents", "Info.plist"), "utf8");
+    if (!/<key>CFBundleIdentifier<\/key>\s*<string>com\.google\.chrome\.for\.testing<\/string>/.test(plist)) {
+      throw new Error("[afterPack] packaged browser has the wrong macOS bundle identity");
+    }
+    const { stdout } = await execFileAsync("/usr/bin/lipo", ["-archs", packagedExecutable]);
+    const expected = normalizedArch === "arm64" ? "arm64" : "x86_64";
+    if (!String(stdout).trim().split(/\s+/).includes(expected)) {
+      throw new Error(`[afterPack] packaged browser architecture mismatch: expected ${expected}`);
+    }
+  }
+  return manifest;
+}
+
 async function verifyEmbeddedAgentlasOs(context) {
   const projectDir = context.packager?.projectDir || process.cwd();
   const productFilename = context.packager?.appInfo?.productFilename || "Agentlas";
@@ -622,13 +721,20 @@ async function verifyEmbeddedAgentlasOs(context) {
     context.electronPlatformName,
     context.arch,
   );
+  const browserRuntime = await verifyBundledBrowser(
+    projectDir,
+    resourcesDir,
+    context.electronPlatformName,
+    context.arch,
+  );
   console.log(
     `[afterPack] verified embedded Agentlas OS v${packagedManifest.version} `
       + `from ${preparationReceipt.sourceCommit.slice(0, 12)} with retirement transform `
       + `${preparationReceipt.transformId}, `
       + `with Model2Vec ${packagedModel.contentSha256} and Python ${pythonRuntime.pythonVersion} `
       + `(${pythonRuntime.triple})`
-      + (nodeRuntime ? ` and private Node ${nodeRuntime.nodeVersion} (${nodeRuntime.arch})` : ""),
+      + (nodeRuntime ? ` and private Node ${nodeRuntime.nodeVersion} (${nodeRuntime.arch})` : "")
+      + ` and Chrome for Testing ${browserRuntime.browserVersion} (${browserRuntime.arch})`,
   );
 }
 

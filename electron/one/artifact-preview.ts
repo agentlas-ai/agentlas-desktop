@@ -12,13 +12,14 @@ import {
 import { isDurableOneSurfaceManifestV1 } from "../../shared/one-surface-durable";
 import type { OneSurfaceBlock, OneSurfaceManifestV1 } from "../../shared/one-surface";
 import type { AgentlasSurfaceDataSet, AgentlasSurfaceManifest, JsonObject } from "../../shared/types";
-import { resolveFsReadPath } from "../fs/access";
+import { resolveFsReadPath, resolveMainOwnedReadPath } from "../fs/access";
 import { listOneDomainEvents } from "./domain-events";
 import { getOneValueClosureState } from "./value-closure";
 import { getDb } from "../store/db";
 import { getDurableOneSurfaceResult } from "../store/one-surface-results";
 import { getInvocationRunReceipt } from "../store/run-events";
 import { getCanonicalTask } from "../store/tasks";
+import { userDataPath } from "../runtime-paths";
 
 export const ONE_ARTIFACT_PREVIEW_TTL_MS = 5 * 60 * 1_000;
 export const ONE_ARTIFACT_MAX_BINDINGS_PER_SURFACE = 24;
@@ -48,6 +49,15 @@ interface ArtifactSpec {
   mimeType: string;
   maxBytes: number;
 }
+
+const IMAGE_SPEC_BY_MIME: Readonly<Record<string, ArtifactSpec & { extension: string }>> = Object.freeze({
+  "image/png": { kind: "image", mimeType: "image/png", maxBytes: MAX_IMAGE_BYTES, extension: ".png" },
+  "image/jpeg": { kind: "image", mimeType: "image/jpeg", maxBytes: MAX_IMAGE_BYTES, extension: ".jpg" },
+  "image/gif": { kind: "image", mimeType: "image/gif", maxBytes: MAX_IMAGE_BYTES, extension: ".gif" },
+  "image/webp": { kind: "image", mimeType: "image/webp", maxBytes: MAX_IMAGE_BYTES, extension: ".webp" },
+  "image/avif": { kind: "image", mimeType: "image/avif", maxBytes: MAX_IMAGE_BYTES, extension: ".avif" },
+  "image/bmp": { kind: "image", mimeType: "image/bmp", maxBytes: MAX_IMAGE_BYTES, extension: ".bmp" },
+});
 
 const ARTIFACT_BY_EXTENSION: Readonly<Record<string, ArtifactSpec>> = Object.freeze({
   ".png": { kind: "image", mimeType: "image/png", maxBytes: MAX_IMAGE_BYTES },
@@ -155,6 +165,12 @@ interface TokenRecord {
 interface VerifiedFile {
   fd: number;
   row: BindingRow;
+}
+
+interface DirectoryAnchor {
+  path: string;
+  dev: string;
+  ino: string;
 }
 
 export interface OneVerifiedBoundArtifactSet {
@@ -291,6 +307,80 @@ function digestFd(fd: number, size: number): string {
   return hash.digest("hex");
 }
 
+function actualImageSpec(fd: number): (ArtifactSpec & { extension: string }) | null {
+  const head = Buffer.alloc(64);
+  const read = fs.readSync(fd, head, 0, head.byteLength, 0);
+  const bytes = head.subarray(0, read);
+  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return IMAGE_SPEC_BY_MIME["image/png"]!;
+  }
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return IMAGE_SPEC_BY_MIME["image/jpeg"]!;
+  }
+  const gif = bytes.subarray(0, 6).toString("latin1");
+  if (gif === "GIF87a" || gif === "GIF89a") return IMAGE_SPEC_BY_MIME["image/gif"]!;
+  if (
+    bytes.length >= 12
+    && bytes.subarray(0, 4).toString("latin1") === "RIFF"
+    && bytes.subarray(8, 12).toString("latin1") === "WEBP"
+  ) return IMAGE_SPEC_BY_MIME["image/webp"]!;
+  if (bytes.length >= 2 && bytes.subarray(0, 2).toString("latin1") === "BM") {
+    return IMAGE_SPEC_BY_MIME["image/bmp"]!;
+  }
+  if (bytes.length >= 16 && bytes.subarray(4, 8).toString("latin1") === "ftyp") {
+    const brands = bytes.subarray(8).toString("latin1");
+    if (/(?:avif|avis)/.test(brands)) return IMAGE_SPEC_BY_MIME["image/avif"]!;
+  }
+  return null;
+}
+
+function verifiedArtifactSpec(fd: number, declared: ArtifactSpec): ArtifactSpec & { extension: string } {
+  if (declared.kind !== "image") {
+    const extension = Object.entries(ARTIFACT_BY_EXTENSION)
+      .find(([, spec]) => spec.kind === declared.kind && spec.mimeType === declared.mimeType)?.[0] ?? "";
+    return { ...declared, extension };
+  }
+  const detected = actualImageSpec(fd);
+  if (!detected) throw new Error("One artifact image bytes are not a supported image format");
+  return detected;
+}
+
+function ensurePrivateDirectory(directory: string, parent?: DirectoryAnchor): DirectoryAnchor {
+  if (parent) assertDirectoryAnchor(parent);
+  const requested = path.resolve(directory);
+  if (!fs.existsSync(requested)) fs.mkdirSync(requested, { mode: 0o700 });
+  const lstat = fs.lstatSync(requested, { bigint: true });
+  if (lstat.isSymbolicLink() || !lstat.isDirectory() || lstat.nlink < 1n) {
+    throw new Error("One artifact storage directory is not a private directory");
+  }
+  const canonical = fs.realpathSync.native(requested);
+  const stat = fs.lstatSync(canonical, { bigint: true });
+  if (stat.isSymbolicLink() || !stat.isDirectory() || stat.nlink < 1n) {
+    throw new Error("One artifact storage directory changed unexpectedly");
+  }
+  if (process.platform !== "win32") fs.chmodSync(canonical, 0o700);
+  const anchor = { path: canonical, dev: String(stat.dev), ino: String(stat.ino) };
+  if (parent) {
+    assertDirectoryAnchor(parent);
+    const relative = path.relative(parent.path, canonical);
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+      throw new Error("One artifact storage escaped its private parent");
+    }
+  }
+  return anchor;
+}
+
+function assertDirectoryAnchor(anchor: DirectoryAnchor): void {
+  const lstat = fs.lstatSync(anchor.path, { bigint: true });
+  if (
+    lstat.isSymbolicLink()
+    || !lstat.isDirectory()
+    || String(lstat.dev) !== anchor.dev
+    || String(lstat.ino) !== anchor.ino
+    || fs.realpathSync.native(anchor.path) !== anchor.path
+  ) throw new Error("One artifact storage directory changed unexpectedly");
+}
+
 function safeOpen(candidate: string, spec: ArtifactSpec): {
   fd: number;
   size: number;
@@ -305,7 +395,7 @@ function safeOpen(candidate: string, spec: ArtifactSpec): {
   const fd = fs.openSync(candidate, flags);
   try {
     const stat = fs.fstatSync(fd, { bigint: true });
-    if (!stat.isFile() || stat.size <= 0n || stat.size > BigInt(spec.maxBytes)) throw new Error("One artifact file is not a supported bounded regular file");
+    if (!stat.isFile() || stat.nlink !== 1n || stat.size <= 0n || stat.size > BigInt(spec.maxBytes)) throw new Error("One artifact file is not a supported bounded regular file");
     const size = Number(stat.size);
     return {
       fd,
@@ -323,6 +413,118 @@ function safeOpen(candidate: string, spec: ArtifactSpec): {
   }
 }
 
+function copyFdExact(sourceFd: number, targetFd: number, size: number): void {
+  const buffer = Buffer.allocUnsafe(Math.min(1_024 * 1_024, Math.max(1, size)));
+  let offset = 0;
+  while (offset < size) {
+    const length = Math.min(buffer.byteLength, size - offset);
+    const read = fs.readSync(sourceFd, buffer, 0, length, offset);
+    if (read <= 0) throw new Error("One artifact source ended while it was being sealed");
+    let written = 0;
+    while (written < read) {
+      written += fs.writeSync(targetFd, buffer, written, read - written, offset + written);
+    }
+    offset += read;
+  }
+}
+
+/**
+ * Seal a verified runtime output into app-owned storage before publishing its
+ * binding. Runtime workspaces and temp folders are execution state; a chat
+ * result must remain available after those folders are moved or cleaned.
+ */
+function sealDurableArtifact(input: {
+  sourceFd: number;
+  size: number;
+  sha256: string;
+  spec: ArtifactSpec;
+  chatId: string;
+  extension: string;
+}): ReturnType<typeof safeOpen> & { path: string } {
+  const root = ensurePrivateDirectory(userDataPath("one-artifacts-v1"));
+  const chatKey = createHash("sha256").update(input.chatId, "utf8").digest("hex");
+  const chatRoot = ensurePrivateDirectory(path.join(root.path, chatKey), root);
+  const target = path.join(chatRoot.path, `${input.sha256}${input.extension}`);
+  assertDirectoryAnchor(root);
+  assertDirectoryAnchor(chatRoot);
+
+  if (!fs.existsSync(target)) {
+    const temporary = path.join(chatRoot.path, `.${input.sha256}.${randomUUID()}.tmp`);
+    // O_RDWR is intentional: after the copy we re-read the same inode through
+    // its still-open descriptor and bind the published file to that digest.
+    const flags = fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0);
+    let temporaryFd: number | null = null;
+    let temporaryIdentity: { dev: string; ino: string } | null = null;
+    try {
+      temporaryFd = fs.openSync(temporary, flags, 0o600);
+      if (process.platform !== "win32") fs.fchmodSync(temporaryFd, 0o600);
+      const before = fs.fstatSync(temporaryFd, { bigint: true });
+      if (!before.isFile() || before.nlink !== 1n || before.size !== 0n) {
+        throw new Error("One artifact temporary file is not private");
+      }
+      temporaryIdentity = { dev: String(before.dev), ino: String(before.ino) };
+      copyFdExact(input.sourceFd, temporaryFd, input.size);
+      fs.fsyncSync(temporaryFd);
+      const after = fs.fstatSync(temporaryFd, { bigint: true });
+      if (
+        !after.isFile()
+        || after.nlink !== 1n
+        || after.size !== BigInt(input.size)
+        || String(after.dev) !== temporaryIdentity.dev
+        || String(after.ino) !== temporaryIdentity.ino
+        || digestFd(temporaryFd, input.size) !== input.sha256
+      ) throw new Error("One artifact changed while it was being sealed");
+      fs.closeSync(temporaryFd);
+      temporaryFd = null;
+      assertDirectoryAnchor(root);
+      assertDirectoryAnchor(chatRoot);
+      try {
+        // link + unlink publishes without replacing a successor created after
+        // our existence check. rename() would silently overwrite it.
+        fs.linkSync(temporary, target);
+      } catch (error) {
+        const code = error && typeof error === "object" ? (error as NodeJS.ErrnoException).code : undefined;
+        if (code !== "EEXIST") throw error;
+      }
+      assertDirectoryAnchor(root);
+      assertDirectoryAnchor(chatRoot);
+      const tempStat = fs.lstatSync(temporary, { bigint: true });
+      if (
+        !temporaryIdentity
+        || tempStat.isSymbolicLink()
+        || !tempStat.isFile()
+        || String(tempStat.dev) !== temporaryIdentity.dev
+        || String(tempStat.ino) !== temporaryIdentity.ino
+      ) throw new Error("One artifact temporary file changed before cleanup");
+      fs.unlinkSync(temporary);
+    } catch (error) {
+      if (temporaryFd !== null) fs.closeSync(temporaryFd);
+      try {
+        const stat = fs.lstatSync(temporary, { bigint: true });
+        if (
+          temporaryIdentity
+          && !stat.isSymbolicLink()
+          && stat.isFile()
+          && String(stat.dev) === temporaryIdentity.dev
+          && String(stat.ino) === temporaryIdentity.ino
+        ) fs.unlinkSync(temporary);
+      } catch {
+        // Never delete a path whose identity we can no longer prove.
+      }
+      throw error;
+    }
+  }
+
+  assertDirectoryAnchor(root);
+  assertDirectoryAnchor(chatRoot);
+  const opened = safeOpen(target, input.spec);
+  if (opened.size !== input.size || opened.sha256 !== input.sha256) {
+    fs.closeSync(opened.fd);
+    throw new Error("One artifact durable copy does not match its source");
+  }
+  return { ...opened, path: target };
+}
+
 function bindCandidate(input: {
   taskId: string;
   taskVersion: number;
@@ -335,20 +537,53 @@ function bindCandidate(input: {
   createdAt: string;
   /** Main records this before runtime invocation; model prose cannot supply it. */
   runStartedAtMs?: number | null;
+  /** Main-owned invocation root for host-structured runtime tool artifacts. */
+  mainRoot?: string | null;
+  /** Re-reading immutable bytes in the same conversation must not publish a second result card. */
+  dedupeSameChatContent?: boolean;
+  /** The durable bytes were restored, but an existing same-chat binding remains the sole card. */
+  onRestoredExisting?: (artifact: {
+    taskId: string;
+    taskVersion: number;
+    chatId: string;
+    runId: string;
+    manifestId: string;
+    artifactRef: string;
+    kind: ArtifactKind;
+    mimeType: string;
+    sizeBytes: number;
+    sourcePath: string;
+    sha256: string;
+  }) => void;
 }): number | null {
   if (pathIsArchived(input.candidate)) return null;
-  const spec = ARTIFACT_BY_EXTENSION[path.extname(input.candidate).toLowerCase()];
-  if (!spec || spec.kind !== input.expectedKind) return null;
+  const declaredSpec = ARTIFACT_BY_EXTENSION[path.extname(input.candidate).toLowerCase()];
+  if (!declaredSpec || declaredSpec.kind !== input.expectedKind) return null;
   let resolved: string;
   try {
-    resolved = resolveFsReadPath(input.candidate, { kind: "chat-assets", chatId: input.chatId });
+    resolved = input.mainRoot
+      ? resolveMainOwnedReadPath(input.candidate, input.mainRoot)
+      : resolveFsReadPath(input.candidate, { kind: "chat-assets", chatId: input.chatId });
   } catch {
     return null;
   }
-  // Requiring the lexical path to equal the canonical target also rejects an
-  // ancestor symlink, even when it happens to land back inside an allowed root.
-  if (path.resolve(input.candidate) !== resolved || pathIsArchived(resolved)) return null;
-  const opened = safeOpen(resolved, spec);
+  // Renderer/chat paths keep the stricter lexical-canonical equality. Runtime
+  // paths already pass resolveMainOwnedReadPath against the exact invocation
+  // root; allow the host's canonical `/tmp` -> `/private/tmp` alias there while
+  // still rejecting direct symlinks and every escape from that Main-owned root.
+  if ((!input.mainRoot && path.resolve(input.candidate) !== resolved) || pathIsArchived(resolved)) return null;
+  const opened = safeOpen(resolved, declaredSpec);
+  let spec: ArtifactSpec & { extension: string };
+  try {
+    spec = verifiedArtifactSpec(opened.fd, declaredSpec);
+  } catch {
+    fs.closeSync(opened.fd);
+    return null;
+  }
+  if (spec.kind !== input.expectedKind) {
+    fs.closeSync(opened.fd);
+    return null;
+  }
   if (
     input.runStartedAtMs != null
     && opened.mtimeMs + ONE_ARTIFACT_OUTPUT_TIME_SKEW_MS < input.runStartedAtMs
@@ -356,7 +591,22 @@ function bindCandidate(input: {
     fs.closeSync(opened.fd);
     return null;
   }
+  let durable: ReturnType<typeof sealDurableArtifact>;
+  try {
+    durable = sealDurableArtifact({
+      sourceFd: opened.fd,
+      size: opened.size,
+      sha256: opened.sha256,
+      spec,
+      chatId: input.chatId,
+      extension: spec.extension || path.extname(resolved).toLowerCase(),
+    });
+  } catch {
+    fs.closeSync(opened.fd);
+    return null;
+  }
   fs.closeSync(opened.fd);
+  fs.closeSync(durable.fd);
   ensureBindingTable();
   const db = getDb();
   const existing = db.prepare(
@@ -365,17 +615,71 @@ function bindCandidate(input: {
      LIMIT 1`,
   ).get(input.taskId, input.chatId, input.runId, input.manifestId, input.artifactRef) as BindingRow | undefined;
   if (existing) {
-    return existing.source_path === resolved
+    return existing.source_path === durable.path
       && existing.kind === spec.kind
       && existing.mime_type === spec.mimeType
-      && existing.size_bytes === opened.size
-      && existing.file_dev === opened.dev
-      && existing.file_ino === opened.ino
-      && existing.file_mtime_ns === opened.mtimeNs
-      && existing.file_ctime_ns === opened.ctimeNs
-      && existing.sha256 === opened.sha256
-      ? opened.size
+      && existing.size_bytes === durable.size
+      && existing.file_dev === durable.dev
+      && existing.file_ino === durable.ino
+      && existing.file_mtime_ns === durable.mtimeNs
+      && existing.file_ctime_ns === durable.ctimeNs
+      && existing.sha256 === durable.sha256
+      ? durable.size
       : null;
+  }
+  if (input.dedupeSameChatContent) {
+    const duplicate = db.prepare(
+      `SELECT * FROM one_artifact_bindings
+       WHERE chat_id = ? AND source_path = ? AND kind = ? AND mime_type = ?
+         AND size_bytes = ? AND sha256 = ?
+       LIMIT 1`,
+    ).get(
+      input.chatId,
+      durable.path,
+      spec.kind,
+      spec.mimeType,
+      durable.size,
+      durable.sha256,
+    ) as BindingRow | undefined;
+    if (duplicate) {
+      const refreshed = db.prepare(
+        `UPDATE one_artifact_bindings
+         SET file_dev = ?, file_ino = ?, file_mtime_ns = ?, file_ctime_ns = ?
+         WHERE id = ? AND source_path = ? AND kind = ? AND mime_type = ?
+           AND size_bytes = ? AND sha256 = ?
+           AND file_dev = ? AND file_ino = ? AND file_mtime_ns = ? AND file_ctime_ns = ?`,
+      ).run(
+        durable.dev,
+        durable.ino,
+        durable.mtimeNs,
+        durable.ctimeNs,
+        duplicate.id,
+        duplicate.source_path,
+        duplicate.kind,
+        duplicate.mime_type,
+        duplicate.size_bytes,
+        duplicate.sha256,
+        duplicate.file_dev,
+        duplicate.file_ino,
+        duplicate.file_mtime_ns,
+        duplicate.file_ctime_ns,
+      );
+      if (refreshed.changes !== 1) return null;
+      input.onRestoredExisting?.({
+        taskId: duplicate.task_id,
+        taskVersion: duplicate.bound_task_version,
+        chatId: duplicate.chat_id,
+        runId: duplicate.run_id,
+        manifestId: duplicate.manifest_id,
+        artifactRef: duplicate.artifact_ref,
+        kind: spec.kind,
+        mimeType: spec.mimeType,
+        sizeBytes: durable.size,
+        sourcePath: durable.path,
+        sha256: durable.sha256,
+      });
+      return null;
+    }
   }
   db.prepare(
     `INSERT INTO one_artifact_bindings (
@@ -385,10 +689,10 @@ function bindCandidate(input: {
      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     randomUUID(), input.taskId, input.taskVersion, input.taskVersion, input.chatId, input.runId,
-    input.manifestId, input.artifactRef, resolved, spec.kind, spec.mimeType, opened.size,
-    opened.dev, opened.ino, opened.mtimeNs, opened.ctimeNs, opened.sha256, input.createdAt,
+    input.manifestId, input.artifactRef, durable.path, spec.kind, spec.mimeType, durable.size,
+    durable.dev, durable.ino, durable.mtimeNs, durable.ctimeNs, durable.sha256, input.createdAt,
   );
-  return opened.size;
+  return durable.size;
 }
 
 function markBoundArtifactVerified(surface: OneSurfaceManifestV1, artifactRef: string, sizeBytes: number): void {
@@ -554,8 +858,32 @@ export function bindOneRuntimeToolArtifacts(input: {
   runId: string;
   toolId: string;
   paths: readonly string[];
+  /** Main derives this exact root from the invocation; model prose cannot set it. */
+  resultFolder: string;
+  /** Optional Main-owned root for a canonical host tool's structured output. */
+  trustedSourceRoot?: string;
+  /** Main-owned invocation start; final-answer recovery may bind only new output. */
+  runStartedAtMs?: number | null;
+  /** Existing same-chat content was re-sealed without publishing a duplicate card. */
+  onRestoredExisting?: (artifact: {
+    taskId: string;
+    taskVersion: number;
+    chatId: string;
+    runId: string;
+    manifestId: string;
+    artifactRef: string;
+    kind: ArtifactKind;
+    mimeType: string;
+    sizeBytes: number;
+    sourcePath: string;
+    sha256: string;
+  }) => void;
   createdAt?: string;
 }): Array<{
+  taskId: string;
+  taskVersion: number;
+  chatId: string;
+  runId: string;
   manifestId: string;
   artifactRef: string;
   label: string;
@@ -569,6 +897,10 @@ export function bindOneRuntimeToolArtifacts(input: {
     .filter((candidate): candidate is string => typeof candidate === "string" && path.isAbsolute(candidate))
     .map((candidate) => path.resolve(candidate)))].slice(0, ONE_ARTIFACT_MAX_BINDINGS_PER_SURFACE);
   const bound: Array<{
+    taskId: string;
+    taskVersion: number;
+    chatId: string;
+    runId: string;
     manifestId: string;
     artifactRef: string;
     label: string;
@@ -590,9 +922,36 @@ export function bindOneRuntimeToolArtifacts(input: {
         candidate,
         expectedKind: spec.kind,
         createdAt: input.createdAt ?? new Date().toISOString(),
+        mainRoot: input.trustedSourceRoot ?? input.resultFolder,
+        runStartedAtMs: input.runStartedAtMs,
+        dedupeSameChatContent: true,
+        onRestoredExisting: (artifact) => {
+          input.onRestoredExisting?.(artifact);
+          bound.push({
+            taskId: artifact.taskId,
+            taskVersion: artifact.taskVersion,
+            chatId: artifact.chatId,
+            runId: artifact.runId,
+            manifestId: artifact.manifestId,
+            artifactRef: artifact.artifactRef,
+            label: path.basename(candidate),
+            type: artifact.kind,
+            sizeBytes: artifact.sizeBytes,
+          });
+        },
       });
       if (sizeBytes != null) {
-        bound.push({ manifestId, artifactRef, label: path.basename(candidate), type: spec.kind, sizeBytes });
+        bound.push({
+          taskId: input.taskId,
+          taskVersion: input.taskVersion,
+          chatId: input.chatId,
+          runId: input.runId,
+          manifestId,
+          artifactRef,
+          label: path.basename(candidate),
+          type: spec.kind,
+          sizeBytes,
+        });
       }
     } catch {
       // A missing, symlinked, unreadable, or out-of-scope file is not output.
@@ -738,6 +1097,19 @@ function verifiedFile(input: unknown): VerifiedFile | null {
   if (resolved !== row.source_path || pathIsArchived(resolved)) return null;
   try {
     const opened = safeOpen(resolved, spec);
+    let verifiedRow = row;
+    if (row.kind === "image") {
+      const actual = verifiedArtifactSpec(opened.fd, spec);
+      if (actual.kind !== row.kind) {
+        fs.closeSync(opened.fd);
+        return null;
+      }
+      // Older bindings may have trusted a misleading filename extension.
+      // Keep the immutable binding identity, but project the byte-verified MIME
+      // whenever the artifact is reopened so history never advertises the
+      // wrong media type or gives image actions a stale download extension.
+      if (actual.mimeType !== row.mime_type) verifiedRow = { ...row, mime_type: actual.mimeType };
+    }
     const same = opened.size === row.size_bytes
       && opened.dev === row.file_dev
       && opened.ino === row.file_ino
@@ -748,7 +1120,7 @@ function verifiedFile(input: unknown): VerifiedFile | null {
       fs.closeSync(opened.fd);
       return null;
     }
-    return { fd: opened.fd, row };
+    return { fd: opened.fd, row: verifiedRow };
   } catch {
     return null;
   }

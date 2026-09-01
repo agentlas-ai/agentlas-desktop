@@ -6,6 +6,7 @@ import { pickActive, selectExactRuntime } from "../runtime/selection";
 import { selectAutoRoutedAgent, selectAutoRoutedAgentJudged } from "../agents/auto-router";
 import { getAgentById, listInstalledAgents } from "../mcp/registry";
 import { getDb } from "../store/db";
+import { listFirms } from "../store/firms";
 import { getChat, retitleAutoTitledChatForTask } from "../store/chats";
 import {
   ensureCanonicalTaskForChat,
@@ -105,6 +106,7 @@ export interface OneTeamPreflightDependencies {
   getChat?: typeof getChat;
   getAgentById?: typeof getAgentById;
   listInstalledAgents?: typeof listInstalledAgents;
+  listFirms?: typeof listFirms;
   findTaskForChat?: typeof findCanonicalTaskForChat;
   ensureTaskForChat?: typeof ensureCanonicalTaskForChat;
   getTask?: typeof getCanonicalTask;
@@ -124,6 +126,7 @@ export interface PreparedOneTeamPreflightClaim {
   taskVersion: number;
   mode: "team" | "workforce" | "solo";
   userPrompt: string;
+  userAuthoredPrompt: string;
   permission: "read" | "write";
   runtime: OneTeamRuntimeBinding;
   taskForceTargets: OrchestrationTarget[];
@@ -203,22 +206,22 @@ export function oneTeamRuntimeBinding(runtime: RuntimeStatus): OneTeamRuntimeBin
   return { ...binding, digest: sha256(binding) };
 }
 
-export function oneTeamRuntimeBindingMatches(
+export function resolveOneTeamRuntimeBinding(
   binding: OneTeamRuntimeBinding,
   runtimes: RuntimeStatus[],
-): boolean {
+): RuntimeStatus | null {
   // A One team proposal is bound to the runtime explicitly selected in the
   // composer, not to whichever runtime happens to be globally active later.
   // Revalidation therefore succeeds while that exact immutable runtime is
   // still present in the live inventory, even if another model is active.
-  return runtimes.some((runtime) => {
+  for (const runtime of runtimes) {
     const live = oneTeamRuntimeBinding(runtime);
     if (
       live.kind !== binding.kind
       || live.backend !== binding.backend
       || live.sourceDigest !== binding.sourceDigest
       || live.version !== binding.version
-    ) return false;
+    ) continue;
 
     const model = binding.model;
     if (model) {
@@ -228,14 +231,29 @@ export function oneTeamRuntimeBindingMatches(
         ...(runtime.allocationModels ?? []),
         ...Object.keys(runtime.allocationModelProfiles ?? {}),
       ].filter((value): value is string => typeof value === "string" && value.length > 0));
-      if (!advertised.has(model)) return false;
+      if (!advertised.has(model)) continue;
       const supportedEfforts = runtime.allocationModelProfiles?.[model]?.efforts;
-      if (binding.effort && supportedEfforts && !supportedEfforts.includes(binding.effort)) return false;
+      if (binding.effort && supportedEfforts && !supportedEfforts.includes(binding.effort)) continue;
     } else if (live.model !== null) {
-      return false;
+      continue;
     }
-    return true;
-  });
+    const resolved: RuntimeStatus = {
+      ...runtime,
+      active: true,
+      model: binding.model,
+      effort: binding.effort,
+      longContextEnabled: binding.longContextEnabled,
+    };
+    if (oneTeamRuntimeBinding(resolved).digest === binding.digest) return resolved;
+  }
+  return null;
+}
+
+export function oneTeamRuntimeBindingMatches(
+  binding: OneTeamRuntimeBinding,
+  runtimes: RuntimeStatus[],
+): boolean {
+  return resolveOneTeamRuntimeBinding(binding, runtimes) !== null;
 }
 
 function goalSummary(reasons: OneTeamPreflightComplexityReason[]): string {
@@ -357,6 +375,19 @@ function roleFromCandidate(
   permission: OneTeamPreflightPermission,
   rationaleBasis = "existing-session-roster",
 ): OneTeamPreflightRole {
+  const specialistScope = agent.taglineEn || agent.tagline || "the installed specialist's declared scope";
+  const specialistSuffix = "; return it to the coordinator for synthesis.";
+  const specialistPrefix = "One bounded contribution within ";
+  // Hub copy is product content, not a closed-contract field. A perfectly
+  // valid marketplace tagline can be longer than the preflight contract's
+  // 360-character expectedOutput bound (real repro: simple-model-shot was 387
+  // characters after this wrapper). Bound and de-control the description here
+  // so installing a verbose agent cannot strand the Task in preparation.
+  const boundedSpecialistScope = specialistScope
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 360 - specialistPrefix.length - specialistSuffix.length);
   return {
     roleId: shortRef(coordinator ? "role-coordinator" : "role-specialist", candidate.candidateRef),
     label: agent.localDisplayName || agent.nameEn || agent.name || agent.slug,
@@ -376,7 +407,7 @@ function roleFromCandidate(
     permissionScopes: permissionScopes(permission, candidate.source === "hub-borrow"),
     expectedOutput: coordinator
       ? "One integrated result with each specialist contribution and unresolved items identified."
-      : `One bounded contribution within ${agent.taglineEn || agent.tagline || "the installed specialist's declared scope"}; return it to the coordinator for synthesis.`,
+      : `${specialistPrefix}${boundedSpecialistScope || "the installed specialist's declared scope"}${specialistSuffix}`,
     rationaleRef: shortRef("rationale", [candidate.candidateRef, rationaleBasis]),
   };
 }
@@ -466,6 +497,7 @@ function exactInstalledRoster(
 } {
   const byId = deps.getAgentById ?? getAgentById;
   const all = deps.listInstalledAgents ?? listInstalledAgents;
+  const firms = deps.listFirms ?? listFirms;
   const coordinator = byId(chat.agentId);
   if (!coordinator) throw new OneTeamPreflightError("candidate_changed", "The One coordinator is no longer installed");
   const candidates: CandidateSnapshot[] = [candidateSnapshot(coordinator, "installed")];
@@ -496,6 +528,24 @@ function exactInstalledRoster(
       unresolvedExternal = true;
       continue;
     }
+    let resolvedFirmId: string | null = null;
+    if (installed.kind === "team" && !isCallOnlyHubAgent(installed)) {
+      const firmMatches = firms().filter((firm) => (
+        firm.id === installed.id
+        || firm.slug === installed.slug
+        || firm.ceoAgentId === installed.id
+      ));
+      if (firmMatches.length !== 1) {
+        unresolved.push({
+          agentId,
+          displayName: installed.name,
+          reason: "ineligible",
+        });
+        unresolvedExternal = true;
+        continue;
+      }
+      resolvedFirmId = firmMatches[0].id;
+    }
     seen.add(installed.id);
     // call-only Hub 좌석은 로컬 지시문이 비어 있다 — 로컬 대상으로 실으면 빈
     // 지시문 실행이 되어 항상 오답이다. 실행 경로는 Hub borrow 다.
@@ -510,7 +560,7 @@ function exactInstalledRoster(
     targets.push(hubBorrow
       ? { source: "hub", entityKind: installed.kind === "team" ? "team" : "agent", slug: installed.slug }
       : installed.kind === "team"
-        ? { source: "local", entityKind: "team", firmId: installed.id }
+        ? { source: "local", entityKind: "team", firmId: resolvedFirmId! }
         : { source: "local", entityKind: "agent", agentId: installed.id });
   }
   if (
@@ -1003,60 +1053,8 @@ export async function prepareOneTeamPreflight(
   const task = existingTask ?? ensureTask(chat.id);
   if (!task) throw new OneTeamPreflightError("stale_binding", "One could not materialize the canonical Task");
   const taskWasCreated = existingTask === null;
-  const setTask = deps.setTaskStatus ?? setCanonicalTaskStatus;
-  const waitingTask = task.status === "waiting-decision" ? task : setTask(task.id, "waiting-decision");
   const now = nowFor(deps);
-  const proposal: OneTeamPreflightProposal = {
-    contractVersion: ONE_TEAM_PREFLIGHT_CONTRACT_VERSION,
-    proposalId: `team-proposal:${randomUUID()}`,
-    version: 1,
-    status: canConfirmTeam ? "proposed" : "blocked",
-    goalSummary: goalSummary(reasons),
-    unavailableMembers: roster.unresolvedMembers as OneTeamPreflightProposal["unavailableMembers"],
-    binding: {
-      chatId: chat.id,
-      taskId: waitingTask.id,
-      taskVersion: waitingTask.version,
-      promptDigest,
-      runtimeDigest: runtime.digest,
-      permission,
-    },
-    complexityReasons: reasons,
-    roles: canConfirmTeam ? roster.roles : roster.roles.slice(0, 1),
-    cost: {
-      hubBorrowing: canConfirmTeam && !rosterBorrowsFromHub ? "none" : "unknown",
-      runtimeUsage: "unknown",
-      currency: null,
-      authoritativeQuoteRef: null,
-    },
-    selectionBoundary: canConfirmTeam
-      ? "existing_exact_installed_roster_only"
-      : "external_selection_requires_work_review",
-    limitation: canConfirmTeam ? "none" : "external_candidates_not_prepared_before_execution",
-    canConfirmTeam,
-    canConfirmWorkforce,
-    reservedRun: null,
-    startedRun: null,
-    createdAt: now.toISOString(),
-    updatedAt: now.toISOString(),
-    expiresAt: new Date(now.getTime() + PROPOSAL_TTL_MS).toISOString(),
-  };
-  if (!isOneTeamPreflightProposal(proposal)) throw new Error("One team preflight proposal violated the closed contract");
-  const record: InternalOneTeamPreflight = {
-    proposal,
-    main: {
-      preparedInstanceId: PROCESS_INSTANCE_ID,
-      runtime,
-      rosterDigest: sha256({
-        candidates: roster.candidates,
-        targets: roster.targets,
-        unresolvedExternal: roster.unresolvedExternal,
-      }),
-      candidates: roster.candidates,
-      taskForceTargets: canConfirmTeam ? roster.targets : [],
-    },
-    reservation: null,
-  };
+  const setTask = deps.setTaskStatus ?? setCanonicalTaskStatus;
   const db = getDb();
   const persist = db.transaction(() => {
     const { state, raw } = readStore(db);
@@ -1065,7 +1063,64 @@ export async function prepareOneTeamPreflight(
       && item.proposal.binding.promptDigest === promptDigest
       && ["proposed", "blocked", "deferred", "team_reserved", "workforce_reserved", "solo_reserved"].includes(item.proposal.status),
     );
-    if (duplicate) return duplicate.proposal;
+    if (duplicate) return { proposal: duplicate.proposal, waitingTask: task, created: false as const };
+    // The waiting Task and the proposal are one visible decision. Previously
+    // the Task was committed first; if role normalization or proposal storage
+    // then failed, One showed "Preparing" forever with no card and no run.
+    // Keep both writes in one SQLite transaction so every rejected proposal
+    // leaves the prior Task state intact.
+    const waitingTask = task.status === "waiting-decision" ? task : setTask(task.id, "waiting-decision");
+    const proposal: OneTeamPreflightProposal = {
+      contractVersion: ONE_TEAM_PREFLIGHT_CONTRACT_VERSION,
+      proposalId: `team-proposal:${randomUUID()}`,
+      version: 1,
+      status: canConfirmTeam ? "proposed" : "blocked",
+      goalSummary: goalSummary(reasons),
+      unavailableMembers: roster.unresolvedMembers as OneTeamPreflightProposal["unavailableMembers"],
+      binding: {
+        chatId: chat.id,
+        taskId: waitingTask.id,
+        taskVersion: waitingTask.version,
+        promptDigest,
+        runtimeDigest: runtime.digest,
+        permission,
+      },
+      complexityReasons: reasons,
+      roles: canConfirmTeam ? roster.roles : roster.roles.slice(0, 1),
+      cost: {
+        hubBorrowing: canConfirmTeam && !rosterBorrowsFromHub ? "none" : "unknown",
+        runtimeUsage: "unknown",
+        currency: null,
+        authoritativeQuoteRef: null,
+      },
+      selectionBoundary: canConfirmTeam
+        ? "existing_exact_installed_roster_only"
+        : "external_selection_requires_work_review",
+      limitation: canConfirmTeam ? "none" : "external_candidates_not_prepared_before_execution",
+      canConfirmTeam,
+      canConfirmWorkforce,
+      reservedRun: null,
+      startedRun: null,
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + PROPOSAL_TTL_MS).toISOString(),
+    };
+    if (!isOneTeamPreflightProposal(proposal)) throw new Error("One team preflight proposal violated the closed contract");
+    const record: InternalOneTeamPreflight = {
+      proposal,
+      main: {
+        preparedInstanceId: PROCESS_INSTANCE_ID,
+        runtime,
+        rosterDigest: sha256({
+          candidates: roster.candidates,
+          targets: roster.targets,
+          unresolvedExternal: roster.unresolvedExternal,
+        }),
+        candidates: roster.candidates,
+        taskForceTargets: canConfirmTeam ? roster.targets : [],
+      },
+      reservation: null,
+    };
     state.version += 1;
     // PRD §4.31 — 예전에는 들어온 순서로만 잘라내서, **예약이 잡혀 실행 중인 제안**도
     // 새 제안에 밀려 사라질 수 있었다. 그러면 그 예약은 청구도 해제도 못 한다.
@@ -1089,10 +1144,11 @@ export async function prepareOneTeamPreflight(
       state.proposals = appended;
     }
     persistStore(state, raw, db);
-    return proposal;
+    return { proposal, waitingTask, created: true as const };
   });
   const persisted = persist.immediate();
-  if (persisted.proposalId !== proposal.proposalId) return { kind: "proposal", proposal: persisted };
+  const { proposal, waitingTask } = persisted;
+  if (!persisted.created) return { kind: "proposal", proposal };
   const standingStaffGuidance = oneOrgExecutionGuidance(requestedAgentIds);
   PROCESS_PROMPTS.set(proposal.proposalId, {
     original: input.userPrompt,
@@ -1556,6 +1612,7 @@ export function prepareOneTeamPreflightClaim(
     // The exact user text is process-bound and digest-verified above. Execution
     // mode travels separately in the closed ref; prompt text never carries it.
     userPrompt: prompt.execution,
+    userAuthoredPrompt: prompt.original,
     permission: record.proposal.binding.permission,
     runtime: record.main.runtime,
     taskForceTargets: ref.mode === "team" ? record.main.taskForceTargets.map((target) => ({ ...target })) : [],

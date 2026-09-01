@@ -62,13 +62,14 @@ export const CODEX_CLIENT_REQUESTS = [
   "turn/start",
 ] as const;
 
-/** 서버가 우리에게 보내는 요청 — 전부 승인 중재자를 지난다. */
+/** 서버가 우리에게 보내는 요청 — 승인 요청과 Main-owned dynamic tool call. */
 export const CODEX_SERVER_REQUESTS = [
   "applyPatchApproval",
   "execCommandApproval",
   "item/commandExecution/requestApproval",
   "item/fileChange/requestApproval",
   "item/permissions/requestApproval",
+  "item/tool/call",
   "item/tool/requestUserInput",
 ] as const;
 
@@ -177,8 +178,10 @@ export async function openCodexResidentSession(opts: {
       "initialize",
       {
         clientInfo: { name: "agentlas-desktop", version: "1.0" },
-        // experimentalApi 는 켜지 않는다 — 우리가 쓰는 메서드는 전부 안정 표면이다.
-        capabilities: {},
+        // Dynamic tools are currently behind app-server's negotiated
+        // experimental API. The method list above pins the exact surface we
+        // consume; unknown server requests still fail closed.
+        capabilities: { experimentalApi: true, requestAttestation: false },
       },
       { timeoutMs },
     );

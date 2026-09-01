@@ -24,6 +24,9 @@ import type {
 
 export interface AutoSelectedMcpTool {
   id: string;
+  /** Internal capability identity when a user-added server supplies a
+   * canonical host function under its persisted row id. */
+  capabilityId?: "playwright";
   name: string;
   reason: string;
   installed: boolean;
@@ -550,6 +553,24 @@ export async function autoSelectMcpTools(input: {
     timeoutMs: 15_000,
   });
   const neededIds = new Set(needs.needed);
+  // The resident judge reasons about capabilities, but it may name a weaker
+  // catalog peer even when the live host exposes the same capability through a
+  // strictly stronger channel. Normalise the decision itself before deriving
+  // the host mode. Filtering the weaker row later is not enough: that used to
+  // leave effectiveToolMode="auto", so Codex inherited its user-global
+  // Playwright config even though the visible receipt said Playwright had been
+  // superseded by Agentlas Browser.
+  for (const toolId of [...neededIds]) {
+    const peer = supersededByLivePeer({
+      toolId,
+      pinned: false,
+      liveServerIds,
+    });
+    if (!peer) continue;
+    neededIds.delete(toolId);
+    neededIds.add(peer);
+    console.log(`[auto-select] promoted ${toolId} to ${peer} (host channel)`);
+  }
   if (automaticHostDecision) {
     const choseBrowser = neededIds.has("agentlas-browser");
     const choseComputerUse = neededIds.has("cua-driver");
@@ -611,7 +632,7 @@ export async function autoSelectMcpTools(input: {
     .sort((a, b) => pickRank(a.id) - pickRank(b.id))
     .slice(0, 10);
 
-  const resolved = await Promise.allSettled(picked.map(async (entry): Promise<AutoSelectedMcpTool> => {
+  const resolvePickedEntry = async (entry: McpToolCatalogEntry): Promise<AutoSelectedMcpTool> => {
     // `required` is a host binding, never a selection outcome — so it follows the mode the
     // **user** chose, not the mode this run's judgment landed on.
     //
@@ -664,7 +685,8 @@ export async function autoSelectMcpTools(input: {
     }
     if (probeKey) memoSet(probeMemo, probeKey, Date.now());
     return { ...base, installed: true, missingEnv: [], state: "ready" };
-  }));
+  };
+  const resolved = await Promise.allSettled(picked.map(resolvePickedEntry));
   const result: AutoSelectedMcpTool[] = resolved.map((item, index) => {
     if (item.status === "fulfilled") return item.value;
     const entry = picked[index];
@@ -678,6 +700,24 @@ export async function autoSelectMcpTools(input: {
       state: "host-failure",
     };
   });
+
+  // Automatic judgment prefers the authenticated Agentlas Browser whenever it
+  // is usable, but an enabled catalog row is not proof that its host channel is
+  // currently connected. The resident judge may have selected Playwright and
+  // the manifest peer normalizer may have promoted it to Agentlas Browser only
+  // for the later connection probe to fail. In that automatic-only case,
+  // recover the judge's original browser capability inside the same isolated
+  // browser mode. An explicit user Browser binding remains strict and never
+  // falls back to a different host.
+  const browserWasPromotedFromPlaywright =
+    automaticHostDecision &&
+    needs.needed.includes("playwright") &&
+    neededIds.has("agentlas-browser");
+  const authenticatedBrowserReady = result.some(
+    (tool) => tool.id === "agentlas-browser" && tool.state === "ready",
+  );
+  const isolatedPlaywrightFallbackAllowed =
+    browserWasPromotedFromPlaywright && !authenticatedBrowserReady;
 
   // ── THE INVARIANT ────────────────────────────────────────────────────────────
   // A credential prompt may exist ONLY for a tool the resident judge named, or one the user
@@ -713,7 +753,21 @@ export async function autoSelectMcpTools(input: {
     || input.requiredToolCatalogIds?.includes("agentlas-browser") === true;
   for (const server of latestInstalledServers) {
     if (server.catalogId) continue;
-    if (canonicalBrowserSelected && isKeylessPlaywrightMcpDuplicate(server)) continue;
+    const suppliesIsolatedPlaywright = isKeylessPlaywrightMcpDuplicate(server);
+    // The official `playwright` catalog row is another materialization of the
+    // authenticated Browser launcher, so it cannot recover a disconnected host.
+    // A user-added keyless @playwright/mcp row is the real isolated fallback.
+    // Suppress it when Browser is usable or explicitly required, but retain and
+    // probe it for an automatic Playwright -> Browser promotion that failed its
+    // live host probe.
+    const strictAuthenticatedBrowserBinding =
+      input.toolMode === "browser"
+      || input.requiredToolCatalogIds?.includes("agentlas-browser") === true;
+    if (
+      suppliesIsolatedPlaywright
+      && canonicalBrowserSelected
+      && (strictAuthenticatedBrowserBinding || !isolatedPlaywrightFallbackAllowed)
+    ) continue;
     if (result.some((tool) => tool.id === server.id)) continue;
     const missingEnv: string[] = [];
     for (const key of server.envKeys) {
@@ -740,13 +794,23 @@ export async function autoSelectMcpTools(input: {
     if (state === "missing-key" && !neededIds.has(server.id)) continue;
     result.push({
       id: server.id,
+      ...(suppliesIsolatedPlaywright ? { capabilityId: "playwright" as const } : {}),
       name: server.nameEn || server.name,
-      reason: "user-added custom MCP (always available)",
+      reason:
+        suppliesIsolatedPlaywright && isolatedPlaywrightFallbackAllowed
+          ? "Agentlas Browser host unavailable; isolated Playwright fallback selected for this run"
+          : "user-added custom MCP (always available)",
       installed: state === "ready",
       missingEnv,
       required: false,
       state,
     });
+  }
+  if (
+    isolatedPlaywrightFallbackAllowed
+    && result.some((tool) => tool.capabilityId === "playwright" && tool.state === "ready")
+  ) {
+    console.log("[auto-select] agentlas-browser unavailable; using isolated playwright fallback");
   }
 
   // Hub candidates are the plugins the resident judge named — never a word-scored guess.
@@ -817,11 +881,18 @@ export function buildMcpAutoSelectionPrompt(
   const blocked = selected.tools.filter((tool) => !tool.installed && tool.missingEnv.length > 0);
   const unavailable = selected.tools.filter((tool) => tool.state !== "ready");
   const browserReady = installed.some((tool) => tool.id === "agentlas-browser");
+  const playwrightReady = installed.some(
+    (tool) => tool.id === "playwright" || tool.capabilityId === "playwright",
+  );
   const computerUseSelected = selected.tools.some((tool) => tool.id === "cua-driver");
   const computerUseReady = installed.some((tool) => tool.id === "cua-driver");
   const modeLine =
     opts?.toolMode === "browser"
-      ? "This automation is bound to Agentlas Browser (real-login CDP). Use only that browser host for web work; never create a fresh Playwright profile."
+      ? browserReady
+        ? "This automation is bound to Agentlas Browser (real-login CDP). Use only that browser host for web work; never create a fresh Playwright profile."
+        : playwrightReady
+          ? "The authenticated Agentlas Browser host is unavailable, so this automatic run is bound to an isolated Playwright browser. Use only that attached browser host for web work."
+          : "This run needs a browser host, but no connected browser capability is available."
       : opts?.toolMode === "computer-use"
         ? "This automation explicitly selected Computer Use mode; use desktop/screen tools for UI work."
         : "";

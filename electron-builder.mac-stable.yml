@@ -96,6 +96,11 @@ extraResources:
   # from CI/environment policy; packaging fails closed when the policy is absent.
   - from: dist/product-extension-signing-policy.json
     to: product-extension-signing-policy.json
+  # Automation must ship its own browser identity. Omitting this from the
+  # standalone stable config silently forced installed builds back to the
+  # user's system Chrome even though the base config was correct.
+  - from: build-resources/browser-runtime
+    to: browser-runtime
   - from: dist/embedded-core
     to: Hephaestus
     filter:

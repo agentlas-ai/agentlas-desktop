@@ -41,9 +41,58 @@ interface ProxyApprovalRequest {
   sessionKey?: string;
   runtime?: string;
   permission?: RuntimeToolPermissionAsk["permission"];
+  simulation?: boolean;
   cwd?: string;
   chatId?: string;
   unattended?: boolean;
+  /** Registry identity resolved by Main for this exact stdio server. */
+  catalogId?: string | null;
+}
+
+/*
+ * Read permission must still be able to inspect the web.  MCP itself has no
+ * standard mutation annotation, so the safe answer is an exact allowlist for
+ * the one browser runtime Main owns.  Everything else remains mutating by
+ * default.  In particular click/type/evaluate/replay are deliberately absent:
+ * a simulation may load and inspect X without being able to like, post, upload,
+ * or run page JavaScript.
+ */
+const AGENTLAS_BROWSER_READ_TOOLS = new Set([
+  "browser_console_messages",
+  "browser_find",
+  "browser_hover",
+  "browser_navigate",
+  "browser_navigate_back",
+  "browser_network_request",
+  "browser_network_requests",
+  "browser_snapshot",
+  "browser_take_screenshot",
+  "browser_wait_for",
+  "browser_skill_list",
+]);
+
+export function mcpToolIsMutating(input: {
+  catalogId?: string | null;
+  toolName: string;
+}): boolean {
+  return !(
+    input.catalogId === "agentlas-browser"
+    && AGENTLAS_BROWSER_READ_TOOLS.has(input.toolName)
+  );
+}
+
+/**
+ * A simulation is already an explicit promise that external state will not be
+ * changed. Asking the user to approve a mutating call at this point both breaks
+ * that promise and leaves unattended graphs waiting forever. Deny it locally;
+ * read-only browser inspection continues through the normal arbiter.
+ */
+export function mcpToolDeniedBySimulation(input: {
+  simulation?: boolean;
+  catalogId?: string | null;
+  toolName: string;
+}): boolean {
+  return input.simulation === true && mcpToolIsMutating(input);
 }
 
 /**
@@ -53,6 +102,11 @@ interface ProxyApprovalRequest {
 async function decide(parsed: ProxyApprovalRequest): Promise<"allow" | "deny"> {
   const toolName = parsed.toolName?.trim();
   if (!toolName) return "deny";
+  if (mcpToolDeniedBySimulation({
+    simulation: parsed.simulation,
+    catalogId: parsed.catalogId,
+    toolName,
+  })) return "deny";
   const serverKey = parsed.serverKey?.trim() || "mcp";
   const ask: RuntimeToolPermissionAsk = {
     runtime: parsed.runtime?.trim() || "mcp-proxy",
@@ -60,11 +114,12 @@ async function decide(parsed: ProxyApprovalRequest): Promise<"allow" | "deny"> {
     // 사용자에게는 런타임이 부르는 이름 그대로 보여야 한다 — 승인 카드와 도구 목록의
     // 이름이 다르면 무엇을 허용하는지 알 수 없다.
     tool: `mcp__${serverKey}__${toolName}`,
-    // MCP 도구 정의에는 종류 칸이 없다. 지어내지 않고 other 로 두고, 변이로 본다.
+    // MCP 도구 정의에는 표준 mutation 칸이 없다. Main이 소유한 정확한 브라우저
+    // catalog만 위의 보수적 읽기 목록을 쓰고, 나머지는 전부 변이로 본다.
     kind: "other",
     cwd: parsed.cwd,
     permission: parsed.permission,
-    mutating: true,
+    mutating: mcpToolIsMutating({ catalogId: parsed.catalogId, toolName }),
     ...(parsed.chatId ? { chatId: parsed.chatId } : {}),
     ...(parsed.unattended ? { unattended: true as const } : {}),
   };

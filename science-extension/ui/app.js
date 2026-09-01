@@ -12,17 +12,17 @@ import * as THREE from "../vendor/three.module.min.js";
   };
   const state = {
     locale: "en",
-    projects: [], selectedId: null, lifecycle: null, conversations: [], selectedConversationId: null, messages: [], sources: [], artifacts: [], labs: [], workspaceLabBindings: [], labCatalog: [], rendererPacks: [], manuscripts: [], claimLedger: null, journalProfiles: [], submissionExports: [], analysisSpecs: [], decisions: [],
-    artifactContextsByMessage: new Map(), labContextsById: new Map(), artifactHistoryById: new Map(), selectedLabId: null, selectedArtifactOriginVersion: null, inspectedArtifactVersion: null, inspectedArtifactContext: null, artifactComparison: null, draftHistoryGuard: null, labsExpanded: true, expandedLabGroups: new Set(["chemistry"]), projectMenuOpen: false, historyOpen: false, railCollapsed: readRailCollapsed(),
+    projects: [], selectedId: null, lifecycle: null, conversations: [], selectedConversationId: null, messages: [], sources: [], artifacts: [], labs: [], workspaceLabBindings: [], labCatalog: [], labDecisionProjections: [], rendererPacks: [], manuscripts: [], claimLedger: null, journalProfiles: [], submissionExports: [], analysisSpecs: [], decisions: [],
+    artifactContextsByMessage: new Map(), labContextsById: new Map(), artifactHistoryById: new Map(), selectedLabId: null, selectedArtifactOriginVersion: null, inspectedArtifactVersion: null, inspectedArtifactContext: null, artifactComparison: null, draftHistoryGuard: null, labsExpanded: true, expandedLabGroups: new Set(["chemistry"]), expandedLabDecisions: new Set(), projectMenuOpen: false, historyOpen: false, railCollapsed: readRailCollapsed(),
     blocksByMessage: new Map(), citationsByMessage: new Map(), evidenceById: new Map(), selectedSourceId: null, selectedArtifactId: null,
     evidenceGraph: null, evidenceGraphReviews: [], evidenceGraphLoading: false, evidenceGraphError: "", selectedEvidenceGraphNodeId: null, selectedEvidenceGraphCandidateId: null, evidenceGraphReviewSheet: false, evidenceGraphReviewDecision: "accepted", evidenceGraphReviewBusy: false, evidenceGraphReviewError: "", evidenceGraphPathAnchorId: null, evidenceGraphPath: null,
     mode: "session", drawer: null, modal: false, manuscriptModal: false, saving: false, loadingProject: false, projectError: "", activeVegaView: null, activeCytoscape: null, activeNumericSurface: null, activeJBrowseTarget: null, scrollByMode: { session: 0, lab: 0, manuscript: 0 }, returnMessageId: null,
     workspaceTabs: [{ id: "research", kind: "research", dirty: false }], activeWorkspaceTabId: "research", currentDestination: "overview", workspaceSyncError: "",
     activeTurn: null, composerSending: false, composerDraft: "", composerError: "", composerEventDispose: null, lifecycleChangeDispose: null,
     vegaDraft: null, vegaSaving: false, vegaSaveError: "", pendingDraftNavigation: null,
-    selectedManuscriptId: null, manuscriptDraft: null, manuscriptSaving: false, manuscriptSaveError: "", manuscriptView: "write", manuscriptInspectorOpen: false, selectedJournalProfileId: null, journalValidation: null, journalSheet: false, submissionSheet: false, submissionDraft: null, journalActionBusy: false, journalActionError: "",
+    selectedManuscriptId: null, selectedAnalysisPlanId: null, manuscriptDraft: null, manuscriptSaving: false, manuscriptSaveError: "", manuscriptView: "write", manuscriptInspectorOpen: false, selectedJournalProfileId: null, journalValidation: null, journalSheet: false, submissionSheet: false, submissionDraft: null, journalActionBusy: false, journalActionError: "",
     artifactBindingBusy: false, artifactBindingError: "", pendingManuscriptBinding: null,
-    decisionBusy: false, decisionError: "",
+    decisionBusy: false, decisionError: "", labDecisionActionBusy: false, labDecisionActionError: "",
     researchContract: null, researchContractSheet: false, researchContractBusy: false, researchContractError: "", researchContractDismissedKey: null,
     datasetImportBusy: false, datasetImportError: "", tablePageByArtifact: new Map(), statisticsViewByArtifact: new Map(),
     statisticsLaunchSourceArtifactId: null, statisticsLaunchTimeColumn: "", statisticsLaunchEventColumn: "", statisticsLaunchBusy: false, statisticsLaunchError: "",
@@ -42,6 +42,7 @@ import * as THREE from "../vendor/three.module.min.js";
   const labLabels = { chemistry: "Ketcher", "molecular-structure": "Mol* Structure Viewer", "literature-network": "Citation Network", "data-visualization": "Figure Lab", "data-table": "Data Table", "statistics-analysis": "Statistical Analysis", "economic-indicators": "Economic Indicators", "physics-data": "Physics Measurements", "materials-structures": "OQMD Structures", imaging: "Imaging", "astronomy-sky": "Sky Catalog", "biodiversity-map": "Biodiversity Map", "earthquake-observations": "Earthquake Observations", "genomics-variants": "JBrowse Variants" };
   const labLabel = (labId) => labLabels[labId] || String(labId || "Lab").split(/[._-]/).map((part) => part ? part[0].toUpperCase() + part.slice(1) : "").join(" ");
   const labCapabilityLabel = (labId) => state.labCatalog.find((lab) => lab.id === labId)?.label || `${labLabel(labId)} Lab`;
+  const labDecisionProjection = (labId = state.selectedLabId) => state.labDecisionProjections.find((projection) => projection?.labId === labId) || null;
   const labGroups = [
     { id: "chemistry", label: "Chemistry", icon: "beaker", labIds: ["chemistry"] },
     { id: "molecular-structure", label: "Molecular Structure", icon: "cube", labIds: ["molecular-structure"] },
@@ -130,10 +131,61 @@ import * as THREE from "../vendor/three.module.min.js";
   const lifecycleCompactLabel = () => state.lifecycle
     ? `${lifecyclePhaseLabels[state.lifecycle.phase] || state.lifecycle.phase} · r${state.lifecycle.revision}`
     : "Lifecycle";
+  const labDecisionStateLabels = {
+    "input-needed": "입력 확인 필요",
+    "human-decision-needed": "연구자 결정 필요",
+    ready: "실행 준비됨",
+    "review-needed": "결과 검토 필요",
+  };
+  const labDecisionFreshnessLabels = { current: "현재 근거", stale: "근거 변경됨", superseded: "새 실험으로 대체됨" };
+  const labDecisionActionLabels = {
+    "open-required-input": "필요 입력 준비",
+    "answer-human-decision": "연구 방향 결정",
+    "inspect-approved-plan": "승인된 계획 열기",
+    "review-result": "정확한 결과 검토",
+    "follow-intent-next-action": "다음 연구 동작",
+    "refresh-stale-projection": "현재 근거 다시 확인",
+    "open-superseding-context": "최신 실험 열기",
+  };
+
+  function labDecisionPanelMarkup(projection = labDecisionProjection(), { showAction = true } = {}) {
+    if (!projection) return "";
+    const mustSee = Array.isArray(projection.mustSee) ? projection.mustSee.slice(0, 3) : [];
+    const actionEnabled = projection.action?.enabled === true && !state.labDecisionActionBusy;
+    const expanded = state.expandedLabDecisions.has(projection.labId);
+    return `<section class="labDecisionPanel" data-lab-decision-projection="${escapeHtml(projection.projectionSha256)}" data-lab-decision-state="${escapeHtml(projection.state)}" data-lab-decision-freshness="${escapeHtml(projection.freshness?.status)}" data-expanded="${expanded}"><header><div><span>WHY THIS LAB NOW</span><strong>${escapeHtml(projection.currentDecision)}</strong></div><div class="labDecisionHeaderActions"><div class="labDecisionStatus"><em>${escapeHtml(labDecisionStateLabels[projection.state] || projection.state)}</em><span>${escapeHtml(labDecisionFreshnessLabels[projection.freshness?.status] || projection.freshness?.status)}</span></div><button type="button" data-action="toggle-lab-decision-details" data-lab-id="${escapeHtml(projection.labId)}" aria-expanded="${expanded}">${expanded ? "판단 기준 접기" : "판단 기준 보기"}</button></div></header><div class="labDecisionBody"><section><span>이 분석이 필요한 때</span><p>${escapeHtml(projection.researchIntent?.neededWhen || projection.action?.reason || "현재 프로젝트 결정을 위해 이 Lab의 근거가 필요합니다.")}</p><span class="labDecisionSubquestion">연구자가 이걸로 하려는 일</span><p>${escapeHtml(projection.researchIntent?.userGoal || projection.currentDecision)}</p></section><section><span>반드시 확인할 것</span><ol>${mustSee.map((item) => `<li>${escapeHtml(item.requirement)}</li>`).join("")}</ol></section><section class="labDecisionBoundary"><span>이 분석을 쓰면 안 되는 때</span><p>${escapeHtml(projection.researchIntent?.notWhen || projection.boundary)}</p><span class="labDecisionSubquestion">이 화면만으로 말할 수 없는 것</span><p>${escapeHtml(projection.boundary)}</p></section></div><footer><span>${escapeHtml(projection.action?.reason || "")} · Project v${escapeHtml(projection.basis?.project?.version || "-")} · <code title="${escapeHtml(projection.basis?.basisSha256 || "")}">${escapeHtml(String(projection.basis?.basisSha256 || "").slice(0, 12))}…</code></span>${showAction ? `<button type="button" data-action="lab-decision-primary" data-lab-decision-sha256="${escapeHtml(projection.projectionSha256)}" ${actionEnabled ? "" : "disabled"}>${escapeHtml(state.labDecisionActionBusy ? "현재 근거 확인 중…" : labDecisionActionLabels[projection.action?.kind] || projection.action?.action || "다음 동작")}</button>` : `<span class="labDecisionActionHint">아래의 한 동작으로 이어집니다.</span>`}</footer>${state.labDecisionActionError ? `<p class="labDecisionError" role="alert">${escapeHtml(state.labDecisionActionError)}</p>` : ""}</section>`;
+  }
+  const labDecisionEmptyMarkup = (content) => `<div class="labDecisionEmptyShell">${labDecisionPanelMarkup(labDecisionProjection(), { showAction: false })}${content}</div>`;
   const lifecycleBindsExport = (submissionExport) => Boolean(submissionExport && state.lifecycle?.phase === "ready_to_submit"
     && state.lifecycle?.status === "complete"
     && state.lifecycle?.submissionExport?.submissionExportId === submissionExport.id
     && state.lifecycle?.submissionExport?.packageSha256 === submissionExport.packageSha256);
+  const submissionExportBindsResearchState = (submissionExport, manuscript, claimLedger = state.claimLedger) => Boolean(
+    submissionExport?.status === "ready" && manuscript && claimLedger && lifecycleBindsExport(submissionExport)
+    && submissionExport.projectId === state.selectedId
+    && submissionExport.manuscriptId === manuscript.id
+    && submissionExport.manuscriptVersion === manuscript.currentVersion
+    && submissionExport.manuscriptContentSha256 === manuscript.version?.contentSha256
+    && submissionExport.claimLedgerId === claimLedger.manifest?.ledgerId
+    && submissionExport.claimLedgerRevision === claimLedger.manifest?.revision
+    && submissionExport.claimLedgerManifestSha256 === claimLedger.manifest?.manifestSha256
+    && submissionExport.claimGateReportSha256 === claimLedger.gate?.reportSha256
+  );
+  const submissionExportBindsJournalProfile = (submissionExport, journalProfile) => Boolean(
+    submissionExport && journalProfile?.status === "verified"
+    && submissionExport.journalProfileId === journalProfile.id
+    && submissionExport.journalProfileVersion === journalProfile.currentVersion
+    && submissionExport.journalProfileContentSha256 === journalProfile.version?.contentSha256
+  );
+  const restoreSubmissionExportState = (manuscript, claimLedger, exports, { preferBoundProfile = true } = {}) => {
+    state.submissionExports = Array.isArray(exports) ? exports : [];
+    const lifecycleBoundExport = state.submissionExports.find((item) => submissionExportBindsResearchState(item, manuscript, claimLedger)) || null;
+    if (preferBoundProfile && lifecycleBoundExport) {
+      const lifecycleBoundProfile = state.journalProfiles.find((profile) => submissionExportBindsJournalProfile(lifecycleBoundExport, profile));
+      if (lifecycleBoundProfile) state.selectedJournalProfileId = lifecycleBoundProfile.id;
+    }
+    return lifecycleBoundExport;
+  };
   const claimLedgerIsCurrent = (manuscript, draft = state.manuscriptDraft) => Boolean(
     manuscript && draft && !draft.dirty && state.claimLedger?.gate?.ready === true
     && state.claimLedger?.manifest?.manuscript?.manuscriptId === manuscript.id
@@ -428,18 +480,19 @@ import * as THREE from "../vendor/three.module.min.js";
     if (!conversation || projectId !== state.selectedId) return;
     const messages = await science.conversations.messages(projectId, conversation.id);
     const safeMessages = Array.isArray(messages) ? messages : [];
-    const [messageEvidence, messageArtifactRows, attached, manuscripts, journalProfiles, analysisSpecs, decisions, lifecycle, project, researchContract, graphSnapshot] = await Promise.all([
+    const [messageEvidence, messageArtifactRows, attached, manuscripts, journalProfiles, analysisSpecs, decisions, lifecycle, project, researchContract, graphSnapshot, labDecisionProjections] = await Promise.all([
       loadMessageEvidence(projectId, safeMessages),
       Promise.all(safeMessages.map(async (message) => [message.id, await science.artifacts.forMessage(projectId, message.conversationId, message.id)])),
       science.composer.attach({ projectId, conversationId: conversation.id }),
       science.manuscripts.list(projectId),
       science.journals.list(projectId),
       science.analysisSpecs.list(projectId),
-      science.decisions.list(projectId, undefined, ["presented"]),
+      science.decisions.list(projectId, undefined, ["queued", "presented", "deferred"]),
       science.researchLifecycle.get(projectId),
       science.projects.get(projectId),
       science.researchContracts.get(projectId),
       science.evidenceGraph.get(projectId).catch((error) => ({ graph: null, reviews: [], error: error instanceof Error ? error.message : String(error) })),
+      science.labs.decisionProjections(projectId),
     ]);
     if (projectId !== state.selectedId || conversation.id !== selectedConversation()?.id) return;
     state.messages = safeMessages;
@@ -452,6 +505,7 @@ import * as THREE from "../vendor/three.module.min.js";
     state.journalProfiles = Array.isArray(journalProfiles) ? journalProfiles : state.journalProfiles;
     state.analysisSpecs = Array.isArray(analysisSpecs) ? analysisSpecs : state.analysisSpecs;
     state.decisions = Array.isArray(decisions) ? decisions : state.decisions;
+    state.labDecisionProjections = Array.isArray(labDecisionProjections) ? labDecisionProjections : [];
     state.lifecycle = lifecycle;
     state.evidenceGraph = graphSnapshot?.graph || null;
     state.evidenceGraphReviews = Array.isArray(graphSnapshot?.reviews) ? graphSnapshot.reviews : [];
@@ -511,6 +565,7 @@ import * as THREE from "../vendor/three.module.min.js";
     state.artifacts = [];
     state.labs = [];
     state.workspaceLabBindings = [];
+    state.labDecisionProjections = [];
     state.manuscripts = [];
     state.claimLedger = null;
     state.journalProfiles = [];
@@ -555,6 +610,7 @@ import * as THREE from "../vendor/three.module.min.js";
     state.composerSending = false;
     state.composerError = "";
     state.selectedManuscriptId = null;
+    state.selectedAnalysisPlanId = null;
     state.manuscriptDraft = null;
     state.manuscriptSaving = false;
     state.manuscriptSaveError = "";
@@ -569,6 +625,8 @@ import * as THREE from "../vendor/three.module.min.js";
     state.journalActionError = "";
     state.decisionBusy = false;
     state.decisionError = "";
+    state.labDecisionActionBusy = false;
+    state.labDecisionActionError = "";
     state.researchContract = null;
     state.researchContractSheet = false;
     state.researchContractBusy = false;
@@ -577,8 +635,8 @@ import * as THREE from "../vendor/three.module.min.js";
     state.loadingProject = true;
     if (!preservedWorkspace) render();
     try {
-      const [workspaceState, conversations, sources, artifacts, labs, capabilityCatalog, rendererPacks, manuscripts, journalProfiles, analysisSpecs, decisions, lifecycle, project, researchContract, graphSnapshot] = await Promise.all([
-        science.workspace.get(projectId), science.conversations.list(projectId), science.sources.list(projectId), science.artifacts.list(projectId), science.labs.list(projectId), science.labs.catalog(), science.rendererPacks.list(), science.manuscripts.list(projectId), science.journals.list(projectId), science.analysisSpecs.list(projectId), science.decisions.list(projectId, undefined, ["presented"]), science.researchLifecycle.get(projectId), science.projects.get(projectId), science.researchContracts.get(projectId), science.evidenceGraph.get(projectId).catch((error) => ({ graph: null, reviews: [], error: error instanceof Error ? error.message : String(error) })),
+      const [workspaceState, conversations, sources, artifacts, labs, capabilityCatalog, labDecisionProjections, rendererPacks, manuscripts, journalProfiles, analysisSpecs, decisions, lifecycle, project, researchContract, graphSnapshot] = await Promise.all([
+        science.workspace.get(projectId), science.conversations.list(projectId), science.sources.list(projectId), science.artifacts.list(projectId), science.labs.list(projectId), science.labs.catalog(), science.labs.decisionProjections(projectId), science.rendererPacks.list(), science.manuscripts.list(projectId), science.journals.list(projectId), science.analysisSpecs.list(projectId), science.decisions.list(projectId, undefined, ["queued", "presented", "deferred"]), science.researchLifecycle.get(projectId), science.projects.get(projectId), science.researchContracts.get(projectId), science.evidenceGraph.get(projectId).catch((error) => ({ graph: null, reviews: [], error: error instanceof Error ? error.message : String(error) })),
       ]);
       if (epoch !== selectionEpoch) return;
       const safeConversations = Array.isArray(conversations) ? conversations : [];
@@ -616,6 +674,7 @@ import * as THREE from "../vendor/three.module.min.js";
       applyResearchContractSnapshot(project, researchContract);
       state.selectedJournalProfileId = safeJournalProfiles.some((profile) => profile.id === preservedWorkspace?.selectedJournalProfileId) ? preservedWorkspace.selectedJournalProfileId : safeJournalProfiles[0]?.id || null;
       state.labCatalog = Array.isArray(capabilityCatalog?.labs) ? capabilityCatalog.labs : [];
+      state.labDecisionProjections = Array.isArray(labDecisionProjections) ? labDecisionProjections : [];
       state.artifactContextsByMessage = new Map(messageArtifactRows.map(([messageId, contexts]) => [messageId, Array.isArray(contexts) ? contexts : []]));
       state.labContextsById = new Map(labRows.map(([labId, contexts]) => [labId, Array.isArray(contexts) ? contexts : []]));
       state.selectedLabId = safeLabs[0]?.labId || null;
@@ -681,8 +740,14 @@ import * as THREE from "../vendor/three.module.min.js";
         restoreWorkspaceState(workspaceState);
       }
       if (state.mode === "manuscript" && state.selectedManuscriptId) {
-        state.claimLedger = await science.claimLedgers.getForManuscript(projectId, state.selectedManuscriptId);
+        const manuscript = manuscriptById(state.selectedManuscriptId);
+        const [claimLedger, submissionExports] = await Promise.all([
+          science.claimLedgers.getForManuscript(projectId, state.selectedManuscriptId),
+          science.submissions.list(projectId, state.selectedManuscriptId),
+        ]);
         if (epoch !== selectionEpoch) return;
+        state.claimLedger = claimLedger;
+        restoreSubmissionExportState(manuscript, claimLedger, submissionExports, { preferBoundProfile: !preservedWorkspace });
       }
       if (state.mode === "lab" && state.selectedArtifactId && !state.artifactHistoryById.has(state.selectedArtifactId)) {
         const history = await science.artifacts.history(projectId, state.selectedArtifactId);
@@ -830,10 +895,22 @@ import * as THREE from "../vendor/three.module.min.js";
     </section>`;
   }
 
+  function analysisPlanView(project) {
+    const plan = analysisSpecById(state.selectedAnalysisPlanId) || state.analysisSpecs[0] || null;
+    if (!plan) return `<section class="analysisPlanView analysisPlanEmpty"><header><span>Plan & Protocols</span><h1>${escapeHtml(project.title)}</h1><p>아직 project-bound 분석계획이 없습니다. 연구 질문, estimand, 의존구조와 입력 데이터가 확정되기 전에는 분석을 실행하지 않습니다.</p></header><div><strong>다음에 필요한 것</strong><span>오른쪽 연구 채팅에서 분석 목적과 데이터 구조를 함께 정의하세요.</span></div></section>`;
+    const document = plan.version?.document || {};
+    const estimand = document.estimand;
+    const model = document.model;
+    const decisions = state.decisions.filter((decision) => decision.analysisSpecId === plan.id && ["queued", "presented", "deferred"].includes(decision.status));
+    const values = (items, empty = "정의되지 않음") => Array.isArray(items) && items.length ? items.join(", ") : empty;
+    return `<section class="analysisPlanView" data-analysis-plan-id="${escapeHtml(plan.id)}" data-analysis-plan-version="${escapeHtml(plan.currentVersion)}" data-analysis-plan-sha256="${escapeHtml(plan.currentDocumentSha256)}"><header><div><span>PLAN & PROTOCOLS · EXACT VERSION</span><h1>${escapeHtml(plan.title)}</h1><p>${escapeHtml(document.researchQuestion || project.question)}</p></div><div class="analysisPlanIdentity"><em data-status="${escapeHtml(plan.status)}">${escapeHtml(plan.status)}</em><strong>v${escapeHtml(plan.currentVersion)}</strong><code title="${escapeHtml(plan.currentDocumentSha256)}">${escapeHtml(plan.currentDocumentSha256.slice(0, 12))}…</code></div></header><div class="analysisPlanGrid"><section><span>Estimand</span>${estimand ? `<dl><div><dt>Population</dt><dd>${escapeHtml(estimand.population)}</dd></div><div><dt>Exposure</dt><dd>${escapeHtml(estimand.treatmentOrExposure)}</dd></div><div><dt>Comparator</dt><dd>${escapeHtml(estimand.comparator || "없음")}</dd></div><div><dt>Outcome</dt><dd>${escapeHtml(estimand.outcome)}</dd></div><div><dt>Measure</dt><dd>${escapeHtml(estimand.summaryMeasure)}</dd></div></dl>` : `<p>연구자가 estimand를 아직 확정하지 않았습니다.</p>`}</section><section><span>Design & dependence</span><dl><div><dt>Study</dt><dd>${escapeHtml(document.design?.studyType || "미정")}</dd></div><div><dt>Observation unit</dt><dd>${escapeHtml(document.design?.observationUnit || "미정")}</dd></div><div><dt>Dependence</dt><dd>${escapeHtml(document.design?.dependence?.kind || "unresolved")}</dd></div><div><dt>Inputs</dt><dd>${escapeHtml(document.data?.inputs?.length || 0)} exact artifact version(s)</dd></div></dl></section><section><span>Model</span>${model ? `<dl><div><dt>Family</dt><dd>${escapeHtml(model.family)}</dd></div><div><dt>Formula</dt><dd><code>${escapeHtml(model.formula)}</code></dd></div><div><dt>Distribution / link</dt><dd>${escapeHtml(`${model.distribution || "—"} / ${model.link || "—"}`)}</dd></div><div><dt>Rationale</dt><dd>${escapeHtml(model.rationale)}</dd></div></dl>` : `<p>모델이 아직 확정되지 않았습니다.</p>`}</section><section><span>Validity checks</span><dl><div><dt>Diagnostics</dt><dd>${escapeHtml(values(document.requiredDiagnostics))}</dd></div><div><dt>Sensitivity</dt><dd>${escapeHtml(values(document.sensitivityAnalyses))}</dd></div><div><dt>Missing data</dt><dd>${escapeHtml(document.missingData?.strategy || "unresolved")}</dd></div><div><dt>Multiplicity</dt><dd>${escapeHtml(document.multiplicity?.strategy || "unresolved")}</dd></div></dl></section></div><footer><div><span>Human decisions</span><strong>${escapeHtml(decisions.length ? `${decisions.length}개 미해결` : "미해결 결정 없음")}</strong></div><div><span>Expected outputs</span><strong>${escapeHtml(values(document.expectedArtifacts?.map((item) => item.title), "등록 없음"))}</strong></div><div><span>Runtime boundary</span><strong>${escapeHtml(`${document.runtimePolicy?.network || "deny"} network · ${document.runtimePolicy?.maxWallTimeMinutes || "-"} min`)}</strong></div></footer></section>`;
+  }
+
   function researchView(project) {
     if (state.loadingProject) return `<div class="loadingState" aria-live="polite">프로젝트 기록을 불러오는 중…</div>`;
     if (state.projectError) return errorState();
     if (state.currentDestination === "interpretation") return evidenceGraphView(project);
+    if (state.currentDestination === "plan-protocols") return analysisPlanView(project);
     const messages = state.messages.filter((message) => message.role !== "user").map(messageMarkup).join("");
     const assistantCount = state.messages.filter((message) => message.role === "assistant").length;
     const contractNotice = state.researchContract?.status === "draft"
@@ -874,8 +951,7 @@ import * as THREE from "../vendor/three.module.min.js";
       if (state.manuscriptDraft?.manuscriptId !== manuscript.id || !state.manuscriptDraft.dirty) state.manuscriptDraft = manuscriptDraftFrom(manuscript);
       state.selectedManuscriptId = manuscript.id;
       state.claimLedger = claimLedger;
-      state.submissionExports = await science.submissions.list(state.selectedId, manuscript.id);
-      if (!Array.isArray(state.submissionExports)) state.submissionExports = [];
+      restoreSubmissionExportState(manuscript, claimLedger, await science.submissions.list(state.selectedId, manuscript.id));
       state.journalValidation = null;
       state.manuscriptSaveError = "";
       state.mode = "manuscript";
@@ -1026,11 +1102,9 @@ import * as THREE from "../vendor/three.module.min.js";
     const bindings = draft.bindings.map(manuscriptBindingMarkup).join("") || `<div class="manuscriptNoBindings"><strong>연결된 근거가 없습니다.</strong><span>AI가 주장·인용·그림을 프로젝트의 정확한 citation 또는 검증 캡처에 연결해야 합니다.</span></div>`;
     const profileOptions = state.journalProfiles.map((profile) => `<option value="${escapeHtml(profile.id)}" ${profile.id === state.selectedJournalProfileId ? "selected" : ""}>${escapeHtml(profile.journalName)} · ${escapeHtml(profile.articleType)} · v${escapeHtml(profile.currentVersion)}</option>`).join("");
     const validationRows = state.journalValidation?.findings?.slice(0, 8).map((finding) => `<div class="journalFinding" data-status="${escapeHtml(finding.status)}" data-severity="${escapeHtml(finding.severity)}"><span>${finding.status === "pass" ? "✓" : finding.status === "manual" ? "?" : "!"}</span><div><strong>${escapeHtml(finding.requirement)}</strong><em>${escapeHtml(finding.observed)}</em></div></div>`).join("") || "";
-    const latestExport = state.submissionExports.find((item) => item.status === "ready" && lifecycleBindsExport(item) && item.journalProfileId === journalProfile?.id
-      && item.manuscriptVersion === manuscript.currentVersion && claimReady
-      && item.claimLedgerId === state.claimLedger.manifest.ledgerId && item.claimLedgerRevision === state.claimLedger.manifest.revision
-      && item.claimLedgerManifestSha256 === state.claimLedger.manifest.manifestSha256
-      && item.claimGateReportSha256 === state.claimLedger.gate.reportSha256) || null;
+    const latestExport = claimReady
+      ? state.submissionExports.find((item) => submissionExportBindsResearchState(item, manuscript) && submissionExportBindsJournalProfile(item, journalProfile)) || null
+      : null;
     const claimHistory = state.claimLedger?.manifest?.claims?.slice(-5).map((claim) => `<div class="journalFinding" data-status="${claim.status === "supported" || claim.status === "not-applicable" ? "pass" : "fail"}"><span>${claim.status === "supported" || claim.status === "not-applicable" ? "✓" : "!"}</span><div><strong>${escapeHtml(claim.claimClass)} · ${escapeHtml(claim.status)}</strong><em>${escapeHtml(claim.exactText)}</em></div></div>`).join("") || `<div class="manuscriptNoBindings"><strong>Claim ledger 없음</strong><span>AI가 현재 원고의 각 문장을 분류하고 정확한 근거 snapshot에 연결해야 합니다.</span></div>`;
     const claimBindingState = claimLedgerBindingState(manuscript);
     const claimSummary = state.claimLedger
@@ -1175,6 +1249,7 @@ import * as THREE from "../vendor/three.module.min.js";
 
   async function openLab(labId, artifactId, originVersion = null, returnMessageId = null, exactVersion = null) {
     rememberScroll();
+    state.labDecisionActionError = "";
     const owningGroup = labGroups.find((group) => group.labIds.includes(labId));
     if (owningGroup) state.expandedLabGroups = new Set([owningGroup.id]);
     const fallbackArtifactId = (state.labContextsById.get(labId) || [])[0]?.artifact?.id || null;
@@ -1213,6 +1288,130 @@ import * as THREE from "../vendor/three.module.min.js";
     } catch (error) {
       state.artifactHistoryById.set(nextArtifactId, { error: error instanceof Error ? error.message : String(error), entries: [] });
       if (state.mode === "lab" && state.selectedArtifactId === nextArtifactId) render();
+    }
+  }
+
+  async function runLabDecisionPrimary(projectionSha256) {
+    if (!state.selectedId || state.labDecisionActionBusy) return;
+    const clicked = state.labDecisionProjections.find((projection) => projection?.projectionSha256 === projectionSha256);
+    if (!clicked || clicked.labId !== state.selectedLabId) {
+      state.labDecisionActionError = "현재 Lab 결정 근거가 바뀌었습니다. 최신 상태를 다시 불러와 주세요.";
+      render();
+      return;
+    }
+    state.labDecisionActionBusy = true;
+    state.labDecisionActionError = "";
+    render();
+    try {
+      const rows = await science.labs.decisionProjections(state.selectedId);
+      const latest = Array.isArray(rows) ? rows.find((projection) => projection?.labId === clicked.labId) : null;
+      if (!latest) throw new Error("현재 프로젝트의 Lab 결정 근거를 찾지 못했습니다.");
+      state.labDecisionProjections = rows;
+      if (latest.projectionSha256 !== clicked.projectionSha256
+        || latest.basis?.basisSha256 !== clicked.basis?.basisSha256
+        || latest.action?.basisSha256 !== clicked.action?.basisSha256) {
+        throw new Error("프로젝트·계획·결과 중 하나가 변경되었습니다. 갱신된 질문과 다음 동작을 확인해 주세요.");
+      }
+      if (latest.action?.enabled !== true) throw new Error("현재 근거에서는 이 동작을 실행할 수 없습니다.");
+      const destination = latest.action.destination;
+      if (latest.action.kind === "refresh-stale-projection") {
+        state.composerDraft = `현재 ${labCapabilityLabel(latest.labId)}의 입력 아티팩트 버전이 변경되었습니다. 변경된 exact version을 기준으로 같은 분석을 다시 실행하고 새 결과를 저장해 주세요.`;
+        renderChatDock();
+        requestAnimationFrame(() => document.querySelector(".dockedComposer textarea")?.focus());
+        return;
+      }
+      if (latest.action.kind === "open-superseding-context") {
+        await selectProject(state.selectedId, { preserveWorkspace: true });
+        await openLab(latest.labId, null, null, null);
+        return;
+      }
+      if (destination?.kind === "artifact") {
+        if (!destination.id || !Number.isSafeInteger(destination.exactVersion) || !destination.exactContentSha256) {
+          throw new Error("정확한 결과 버전이 없어 아티팩트를 열지 않았습니다.");
+        }
+        const context = await science.artifacts.context(state.selectedId, destination.id, destination.exactVersion);
+        if (!context || context.projectId !== state.selectedId
+          || context.selectedVersion?.version !== destination.exactVersion
+          || context.selectedVersion?.contentSha256 !== destination.exactContentSha256) {
+          throw new Error("결과 아티팩트의 exact version 또는 content hash가 변경되었습니다.");
+        }
+        if (state.selectedArtifactId === destination.id && state.mode === "lab") {
+          state.drawer = { kind: "artifact", id: destination.id };
+          render();
+        } else {
+          await openLab(context.linkage.labId, destination.id, null, null, destination.exactVersion);
+        }
+        return;
+      }
+      if (destination?.kind === "human-decision") {
+        if (!destination.id || !destination.exactContentSha256) throw new Error("정확한 연구 결정 바인딩이 없습니다.");
+        let decision = await science.decisions.get(state.selectedId, destination.id);
+        if (!decision || decision.proposalSha256 !== destination.exactContentSha256) {
+          throw new Error("연구 결정 질문의 content hash가 변경되었습니다.");
+        }
+        if (["queued", "deferred"].includes(decision.status)) {
+          const result = await science.decisions.present({
+            requestId: crypto.randomUUID(), projectId: state.selectedId, decisionId: decision.id, expectedLockVersion: decision.lockVersion,
+          });
+          decision = result?.decision;
+        }
+        if (!decision || decision.status !== "presented") throw new Error("현재 상태에서는 이 연구 결정을 열 수 없습니다.");
+        state.decisions = [decision, ...state.decisions.filter((item) => item.id !== decision.id)];
+        state.lifecycle = await science.researchLifecycle.get(state.selectedId);
+        render();
+        requestAnimationFrame(() => document.getElementById("research-decision-form")?.focus());
+        return;
+      }
+      if (destination?.kind === "analysis-plan") {
+        const plan = destination.id ? await science.analysisSpecs.get(state.selectedId, destination.id) : null;
+        if (!plan || plan.currentVersion !== destination.exactVersion || plan.currentDocumentSha256 !== destination.exactContentSha256) {
+          throw new Error("승인된 분석계획의 exact version 또는 content hash가 변경되었습니다.");
+        }
+        state.analysisSpecs = [plan, ...state.analysisSpecs.filter((item) => item.id !== plan.id)];
+        state.selectedAnalysisPlanId = plan.id;
+        state.currentDestination = "plan-protocols";
+        state.activeWorkspaceTabId = RESEARCH_TAB_ID;
+        state.mode = "session";
+        render();
+        void queueWorkspacePersistence();
+        return;
+      }
+      if (destination?.kind === "manuscript") {
+        const manuscript = destination.id ? manuscriptById(destination.id) : null;
+        if (!manuscript) throw new Error("정확히 연결된 원고가 없습니다.");
+        await openManuscript(manuscript.id);
+        return;
+      }
+      if (destination?.kind === "lab") {
+        if (latest.action.kind === "open-required-input") {
+          if (latest.labId === "data-table") {
+            await importCsvDataset();
+            return;
+          }
+          if (latest.labId === "statistics-analysis") {
+            const source = state.artifacts.find((artifact) => artifact.kind === "dataset.table" && artifact.version?.rendererId === "agentlas.table");
+            if (!source) {
+              await openLab("data-table", null, null, null);
+              return;
+            }
+            render();
+            requestAnimationFrame(() => document.querySelector("[data-statistics-source-artifact]")?.focus());
+            return;
+          }
+          state.composerDraft = `현재 연구 질문 “${latest.currentDecision}”에 답하려면 ${labCapabilityLabel(latest.labId)}에 어떤 exact 입력이 필요한지 확인하고, 부족한 입력만 질문해 주세요.`;
+          renderChatDock();
+          requestAnimationFrame(() => document.querySelector(".dockedComposer textarea")?.focus());
+          return;
+        }
+        await openLab(destination.id || latest.labId, null, null, null);
+        return;
+      }
+      throw new Error("이 결정의 다음 목적지가 아직 제품 화면에 연결되지 않았습니다.");
+    } catch (error) {
+      state.labDecisionActionError = error instanceof Error ? error.message : String(error);
+    } finally {
+      state.labDecisionActionBusy = false;
+      render();
     }
   }
 
@@ -2155,10 +2354,10 @@ import * as THREE from "../vendor/three.module.min.js";
     const labContexts = state.labContextsById.get(state.selectedLabId) || [];
     const labArtifacts = labContexts.map((context) => context.artifact);
     if (!labArtifacts.length) {
-      if (state.selectedLabId === "data-table") return `<section class="emptyView labStartView" data-empty-source="science.sqlite"><div class="labStartCard"><span class="researchKicker">Data & Statistics · ${escapeHtml(lifecycleLabel())}</span><strong>분석할 CSV를 검증된 Data Table로 가져오세요.</strong><p>원본 파일은 Main 프로세스에서만 읽고, 경로는 UI나 연구 에이전트에 노출하지 않습니다. 전체 파일을 파싱해 SourceVersion · CAS · ResearchRun · immutable source binding을 만든 뒤 표를 엽니다.</p><dl><div><dt>제한</dt><dd>8 MiB · 5,000 rows · 무음 truncation 없음</dd></div><div><dt>보존</dt><dd>typed cells · null · formula-looking text</dd></div><div><dt>출판</dt><dd>exact source/run/table SHA closure</dd></div></dl><button class="primaryButton importDatasetButton" data-action="import-csv-dataset" ${state.datasetImportBusy ? "disabled" : ""}>${state.datasetImportBusy ? "검증하며 가져오는 중…" : "CSV 데이터셋 가져오기"}</button>${state.datasetImportError ? `<p class="labStartError" role="alert">${escapeHtml(state.datasetImportError)}</p>` : ""}</div></section>`;
-      if (state.selectedLabId === "statistics-analysis") return statisticsLaunchCard();
-      if (state.selectedLabId === "economic-indicators") return `<section class="emptyView labStartView" data-empty-source="science.sqlite"><div class="labStartCard"><span class="researchKicker">Economics & Finance · ${escapeHtml(lifecycleLabel())}</span><strong>공식 World Bank 경제지표를 가져오세요.</strong><p>Economic Indicators는 World Bank의 국가·지표·연도 범위를 지정해 exact provider response, SourceVersion, ResearchRun과 Vega artifact lineage를 보존합니다. 주가·시세·거래 데이터 API는 제공하지 않습니다.</p><dl><div><dt>Economics</dt><dd>공식 World Bank indicator series</dd></div><div><dt>Finance</dt><dd>사용자 CSV → Data Table → Statistical Analysis / Vega</dd></div><div><dt>보존</dt><dd>source · run · artifact hash lineage</dd></div></dl><button class="secondaryButton" data-action="suggest-empty-lab-run">World Bank 지표를 연구 에이전트에게 요청</button></div></section>`;
-      return `<section class="emptyView labStartView" data-empty-source="science.sqlite"><div class="labStartCard"><span class="researchKicker">${escapeHtml(labCapabilityLabel(state.selectedLabId))} · ${escapeHtml(lifecycleLabel())}</span><strong>아직 저장된 아티팩트가 없습니다.</strong><p>오른쪽 연구 채팅에서 이 Lab을 사용하도록 요청하면, 실제 실행 결과가 immutable version과 출처·run lineage를 가진 아티팩트로 이 보관소에 연결됩니다.</p><button class="secondaryButton" data-action="suggest-empty-lab-run">연구 에이전트에게 이 Lab 사용 요청</button></div></section>`;
+      if (state.selectedLabId === "data-table") return labDecisionEmptyMarkup(`<section class="emptyView labStartView" data-empty-source="science.sqlite"><div class="labStartCard"><span class="researchKicker">Data & Statistics · ${escapeHtml(lifecycleLabel())}</span><strong>분석할 CSV를 검증된 Data Table로 가져오세요.</strong><p>원본 파일은 Main 프로세스에서만 읽고, 경로는 UI나 연구 에이전트에 노출하지 않습니다. 전체 파일을 파싱해 SourceVersion · CAS · ResearchRun · immutable source binding을 만든 뒤 표를 엽니다.</p><dl><div><dt>제한</dt><dd>8 MiB · 5,000 rows · 무음 truncation 없음</dd></div><div><dt>보존</dt><dd>typed cells · null · formula-looking text</dd></div><div><dt>출판</dt><dd>exact source/run/table SHA closure</dd></div></dl><button class="primaryButton importDatasetButton" data-action="import-csv-dataset" ${state.datasetImportBusy ? "disabled" : ""}>${state.datasetImportBusy ? "검증하며 가져오는 중…" : "CSV 데이터셋 가져오기"}</button>${state.datasetImportError ? `<p class="labStartError" role="alert">${escapeHtml(state.datasetImportError)}</p>` : ""}</div></section>`);
+      if (state.selectedLabId === "statistics-analysis") return labDecisionEmptyMarkup(statisticsLaunchCard());
+      if (state.selectedLabId === "economic-indicators") return labDecisionEmptyMarkup(`<section class="emptyView labStartView" data-empty-source="science.sqlite"><div class="labStartCard"><span class="researchKicker">Economics & Finance · ${escapeHtml(lifecycleLabel())}</span><strong>공식 World Bank 경제지표를 가져오세요.</strong><p>Economic Indicators는 World Bank의 국가·지표·연도 범위를 지정해 exact provider response, SourceVersion, ResearchRun과 Vega artifact lineage를 보존합니다. 주가·시세·거래 데이터 API는 제공하지 않습니다.</p><dl><div><dt>Economics</dt><dd>공식 World Bank indicator series</dd></div><div><dt>Finance</dt><dd>사용자 CSV → Data Table → Statistical Analysis / Vega</dd></div><div><dt>보존</dt><dd>source · run · artifact hash lineage</dd></div></dl><button class="secondaryButton" data-action="suggest-empty-lab-run">World Bank 지표를 연구 에이전트에게 요청</button></div></section>`);
+      return labDecisionEmptyMarkup(`<section class="emptyView labStartView" data-empty-source="science.sqlite"><div class="labStartCard"><span class="researchKicker">${escapeHtml(labCapabilityLabel(state.selectedLabId))} · ${escapeHtml(lifecycleLabel())}</span><strong>아직 저장된 아티팩트가 없습니다.</strong><p>오른쪽 연구 채팅에서 이 Lab을 사용하도록 요청하면, 실제 실행 결과가 immutable version과 출처·run lineage를 가진 아티팩트로 이 보관소에 연결됩니다.</p><button class="secondaryButton" data-action="suggest-empty-lab-run">연구 에이전트에게 이 Lab 사용 요청</button></div></section>`);
     }
     const artifact = labArtifacts.find((item) => item.id === state.selectedArtifactId) || labArtifacts[0];
     const originVersion = artifact.id === state.selectedArtifactId ? state.selectedArtifactOriginVersion : null;
@@ -2248,11 +2447,11 @@ import * as THREE from "../vendor/three.module.min.js";
       : `<div class="artifactCanvasFrame"><div class="rendererStatus"><span>${escapeHtml(artifact.kind)}</span><span>${escapeHtml(artifact.version.rendererId)} · ${escapeHtml(artifact.version.rendererVersion)} <em data-runtime-status></em></span></div>${artifact.version.rendererId === "agentlas.vega" ? statisticsFigureToolbar || vegaEditorMarkup(artifact, vegaDraft) : numericSurfaceToolbar || numericSurfaceRasterToolbar || statisticsRasterToolbar || citationToolbar || skyToolbar || genomicsToolbar}<div class="${canvasClass}" data-artifact-host="${escapeHtml(artifact.id)}" data-artifact-version="${escapeHtml(artifact.version.version)}" data-content-sha256="${escapeHtml(artifact.version.contentSha256)}" aria-label="${escapeHtml(artifact.title)}"></div><div class="renderError" data-render-error role="alert"></div></div>`;
     const loopObservation = semanticObservations[0] || null;
     const loopEvidence = loopObservation ? `${loopObservation.label}: ${loopObservation.value}${loopObservation.unit ? ` ${loopObservation.unit}` : ""}` : (activeVersion?.semantic?.summary || "현재 아티팩트의 다음 검증 단계를 연구 채팅에서 함께 결정합니다.");
-    return `<section class="artifactWorkspace ${state.historyOpen ? "historyOpen" : ""} ${state.artifactComparison ? "compareOpen" : ""}"><header class="labWorkspaceHeader visuallyHidden"><span>${escapeHtml(labCapabilityLabel(state.selectedLabId))}</span><strong>아티팩트 보관소 · 작업공간</strong><span class="originVersion">${capability}</span><button data-action="back-session">${state.returnMessageId ? "대화의 아티팩트로" : "세션으로 돌아가기"}</button></header>${tabs ? `<nav class="artifactTabs" data-count="${escapeHtml(labArtifacts.length)}" aria-label="Lab 아티팩트">${tabs}</nav>` : ""}${originStrip}${statisticsLineage}<div class="labWorkGrid"><div class="figureColumn">
+    return `<section class="artifactWorkspace ${state.historyOpen ? "historyOpen" : ""} ${state.artifactComparison ? "compareOpen" : ""}"><header class="labWorkspaceHeader visuallyHidden"><span>${escapeHtml(labCapabilityLabel(state.selectedLabId))}</span><strong>아티팩트 보관소 · 작업공간</strong><span class="originVersion">${capability}</span><button data-action="back-session">${state.returnMessageId ? "대화의 아티팩트로" : "세션으로 돌아가기"}</button></header>${tabs ? `<nav class="artifactTabs" data-count="${escapeHtml(labArtifacts.length)}" aria-label="Lab 아티팩트">${tabs}</nav>` : ""}${originStrip}${statisticsLineage}${labDecisionPanelMarkup()}<div class="labWorkGrid"><div class="figureColumn">
       ${canvas}
       <section class="artifactInterpretation"><div><div class="researchKicker">${inspectingHistory ? "과거 버전 의미 기록" : "Semantic layer"}</div><h2>${escapeHtml(activeVersion?.semantic?.title || (inspectingHistory ? `v${state.inspectedArtifactVersion} 기록을 불러오는 중…` : artifact.title))}</h2><p>${escapeHtml(activeVersion?.semantic?.summary || (inspectingHistory ? "현재 버전 정보로 대체하지 않고, 선택한 과거 버전의 검증이 끝날 때까지 기다립니다." : ""))}</p></div>${observations ? `<dl class="observationGrid">${observations}</dl>` : ""}</section>
       <div data-artifact-compare-host>${artifactCompareMarkup(artifact, history)}</div>
-    </div><aside class="versionRail" data-version-timeline aria-label="아티팩트 버전 기록"><header><span>버전 기록</span><div><strong>${escapeHtml(artifact.currentVersion)}개</strong><button data-action="open-compare" ${historyEntries.length < 2 ? "disabled" : ""}>비교</button></div></header><div class="versionRows">${timeline}</div><footer>저장된 버전만 기록됩니다. 과거 버전은 읽기 전용입니다.</footer></aside></div><footer class="experimentLoop"><div><span>연구 생애주기</span><strong>${escapeHtml(lifecycleLabel())}</strong></div><div><span>가설 / 해석</span><strong>${escapeHtml(activeVersion?.semantic?.title || artifact.title)}</strong></div><div><span>최근 관찰</span><strong>${escapeHtml(state.artifactBindingError || state.figureActionNotice || loopEvidence)}</strong></div><div class="experimentActions"><button class="secondaryExperimentAction" data-action="bind-artifact-manuscript" ${inspectingHistory || state.artifactBindingBusy ? "disabled" : ""}>${state.artifactBindingBusy ? "검증 중…" : numericSurfaceRasterPayload ? `${escapeHtml(numericSurfaceRasterPayload.export.dpi)}dpi 3D PNG 원고 연결` : statisticsRasterPayload ? `${escapeHtml(statisticsRasterPayload.export.dpi)}dpi 아티팩트 원고 연결` : numericSurfacePayload || statisticsFigurePayload ? "PNG export 후 원고 연결" : "원고에 연결"}</button><button data-action="suggest-next-experiment">다음 실험 제안</button></div></footer></section>`;
+    </div><aside class="versionRail" data-version-timeline aria-label="아티팩트 버전 기록"><header><span>버전 기록</span><div><strong>${escapeHtml(artifact.currentVersion)}개</strong><button data-action="open-compare" ${historyEntries.length < 2 ? "disabled" : ""}>비교</button></div></header><div class="versionRows">${timeline}</div><footer>저장된 버전만 기록됩니다. 과거 버전은 읽기 전용입니다.</footer></aside></div></section>`;
   }
 
   function errorState() {
@@ -2537,7 +2736,17 @@ import * as THREE from "../vendor/three.module.min.js";
   }
 
   function render() {
-    teardownArtifactRenderer();
+    const selectedRendererIdentity = (() => {
+      if (state.mode !== "lab" || state.inspectedArtifactVersion) return null;
+      const artifacts = (state.labContextsById.get(state.selectedLabId) || []).map((context) => context.artifact);
+      const artifact = artifacts.find((item) => item.id === state.selectedArtifactId) || artifacts[0];
+      return artifact ? `${artifact.id}:${artifact.version.version}:${artifact.version.contentSha256}` : null;
+    })();
+    const preserveNativeRenderer = Boolean(state.activeRendererIdentity
+      && state.activeRendererIdentity === selectedRendererIdentity
+      && !state.modal
+      && !(state.drawer && innerWidth < 1100));
+    teardownArtifactRenderer(preserveNativeRenderer);
     root.innerHTML = workspace();
     i18n.localizeTree(root);
     root.setAttribute("aria-busy", "false");
@@ -2577,7 +2786,7 @@ import * as THREE from "../vendor/three.module.min.js";
     else document.querySelector('.railCollapseButton')?.focus();
   }
 
-  function teardownArtifactRenderer() {
+  function teardownArtifactRenderer(preserveNativeRenderer = false) {
     for (const view of state.inlineVegaViews) { try { view.finalize(); } catch {} }
     state.inlineVegaViews = [];
     for (const url of state.inlinePreviewUrls) { try { URL.revokeObjectURL(url); } catch {} }
@@ -2592,7 +2801,7 @@ import * as THREE from "../vendor/three.module.min.js";
     }
     if (state.rendererObserver) { try { state.rendererObserver.disconnect(); } catch {} state.rendererObserver = null; }
     if (state.rendererAbort) { state.rendererAbort.abort(); state.rendererAbort = null; }
-    if (state.activeRendererIdentity) {
+    if (state.activeRendererIdentity && !preserveNativeRenderer) {
       state.activeRendererIdentity = null;
       state.activeRendererInstance = null;
       state.activeRendererPhase = null;
@@ -3996,9 +4205,11 @@ import * as THREE from "../vendor/three.module.min.js";
         document.querySelector(".contentPane")?.addEventListener("scroll", syncBounds, { passive: true, signal: state.rendererAbort.signal });
         window.addEventListener("resize", syncBounds, { passive: true, signal: state.rendererAbort.signal });
       } catch (error) {
-        state.activeRendererIdentity = null;
-        state.activeRendererInstance = null;
-        state.activeRendererVisible = null;
+        if (state.activeRendererIdentity === identity) {
+          state.activeRendererIdentity = null;
+          state.activeRendererInstance = null;
+          state.activeRendererVisible = null;
+        }
         if (errorNode) errorNode.textContent = error instanceof Error ? error.message : String(error);
       }
       return;
@@ -4473,6 +4684,16 @@ import * as THREE from "../vendor/three.module.min.js";
       return;
     }
     if (target.dataset.action === "bind-artifact-manuscript") { void connectActiveArtifactToManuscript(); return; }
+    if (target.dataset.action === "lab-decision-primary") { void runLabDecisionPrimary(target.dataset.labDecisionSha256 || ""); return; }
+    if (target.dataset.action === "toggle-lab-decision-details") {
+      const labId = target.dataset.labId;
+      if (!labId) return;
+      if (state.expandedLabDecisions.has(labId)) state.expandedLabDecisions.delete(labId);
+      else state.expandedLabDecisions.add(labId);
+      render();
+      requestAnimationFrame(() => document.querySelector(`[data-action="toggle-lab-decision-details"][data-lab-id="${CSS.escape(labId)}"]`)?.focus());
+      return;
+    }
     if (target.dataset.action === "suggest-next-experiment") {
       const artifact = artifactForLab(state.selectedLabId, state.selectedArtifactId);
       state.composerDraft = i18n.prompt("nextExperiment", { title: artifact?.title || labLabel(state.selectedLabId) });
@@ -5048,24 +5269,22 @@ import * as THREE from "../vendor/three.module.min.js";
       const projectId = state.selectedId;
       void Promise.all([
         science.researchLifecycle.get(projectId),
-        science.decisions.list(projectId, undefined, ["presented"]),
-      ]).then(([lifecycle, decisions]) => {
+        science.decisions.list(projectId, undefined, ["queued", "presented", "deferred"]),
+        science.labs.decisionProjections(projectId),
+      ]).then(([lifecycle, decisions, labDecisionProjections]) => {
         if (projectId !== state.selectedId || lifecycle?.projectId !== projectId) return;
         if (lifecycle.studyId !== change.studyId || lifecycle.revision !== change.revision || lifecycle.stateSha256 !== change.stateSha256) {
           throw new Error("science-research-lifecycle-event-integrity-failed");
         }
         state.lifecycle = lifecycle;
         state.decisions = Array.isArray(decisions) ? decisions : [];
+        state.labDecisionProjections = Array.isArray(labDecisionProjections) ? labDecisionProjections : [];
         const manuscript = manuscriptById(state.selectedManuscriptId);
         const draft = state.manuscriptDraft;
         const claimReady = manuscript && draft ? claimLedgerIsCurrent(manuscript, draft) : false;
+        const journalProfile = journalProfileById(state.selectedJournalProfileId);
         const lifecycleBoundExport = manuscript && claimReady
-          ? state.submissionExports.find((item) => item.status === "ready" && lifecycleBindsExport(item)
-            && item.manuscriptId === manuscript.id && item.manuscriptVersion === manuscript.currentVersion
-            && item.claimLedgerId === state.claimLedger.manifest.ledgerId
-            && item.claimLedgerRevision === state.claimLedger.manifest.revision
-            && item.claimLedgerManifestSha256 === state.claimLedger.manifest.manifestSha256
-            && item.claimGateReportSha256 === state.claimLedger.gate.reportSha256)
+          ? state.submissionExports.find((item) => submissionExportBindsResearchState(item, manuscript) && submissionExportBindsJournalProfile(item, journalProfile))
           : null;
         if (state.journalValidation?.status === "ready" && lifecycleBoundExport) {
           state.submissionSheet = false;

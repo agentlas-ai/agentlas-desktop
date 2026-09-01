@@ -323,8 +323,8 @@
       },
       {
         "path": "skills/ideate/SKILL.md",
-        "sha256": "6a0667456e33ce21cfd5187a0d32dc826d8e33b61059b5aa8d6ea705e05882ba",
-        "bytes": 3193
+        "sha256": "b23f4bc206e87eb4e45b8ca117c7021d7ecca34432b51bc7d34307a7610c811c",
+        "bytes": 3984
       },
       {
         "path": "skills/image-to-code/SKILL.md",
@@ -333,8 +333,8 @@
       },
       {
         "path": "skills/index/SKILL.md",
-        "sha256": "082039f41ce4210a18a273a0a806b54f45e67c0ce40ff1f34cac508342b2a179",
-        "bytes": 2670
+        "sha256": "ac26b5920186f3a61c8d539b4d117d28412479a288ff88ad200f68f17250cedb",
+        "bytes": 2844
       },
       {
         "path": "skills/motion/SKILL.md",

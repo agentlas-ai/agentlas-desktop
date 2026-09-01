@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   IconArrowLeft,
   IconCheck,
@@ -31,7 +31,6 @@ import { designOutputSurfaceProps, designSurfaceKindForOutput } from "@/lib/desi
 import { isOneArtifactOpenRequest, ONE_ARTIFACT_OPEN_EVENT, requestOneArtifactOpen, type OneArtifactOpenRequest } from "@/lib/one-artifact-open";
 import type { BrowserLiveDispatchResult, BrowserLiveFrame, BrowserLiveInput } from "@/lib/types";
 import type { OneArtifactPreviewCapabilityV1 } from "@shared/one-artifacts";
-import type { ComputerHistoryEntry, ComputerHistoryState } from "@shared/computer-history";
 import type {
   OneActivityCode,
   OneActivityArtifact,
@@ -39,24 +38,109 @@ import type {
   OneActivitySource,
   OneActivityState,
 } from "@/lib/one-activity";
-import { buildToolCallDisplay, normalizeToolCall } from "@shared/tool-call-detail";
+import { buildToolCallDisplay, mcpServerName, normalizeToolCall } from "@shared/tool-call-detail";
 import { parseMcpResult } from "@shared/mcp-result-rendering";
 import { isCommandTool, isComputerUseTool } from "@shared/tool-taxonomy";
 import { toolFailureCopy } from "@shared/tool-failure";
 import type { OnePermissionMode } from "./OneComposerControls";
-import { OneComputerHistory } from "./OneComputerHistory";
 import { McpResultPreview } from "../McpResultPreview";
 import styles from "./OneActivityTimeline.module.css";
 
 const ONE_OUTPUT_SECTIONS_STORAGE_KEY = "agentlas.one.output-sections.v1";
-const ONE_OUTPUT_HISTORY_HEIGHT_STORAGE_KEY = "agentlas.one.output-history-height.v1";
 /** 미리보기 ↔ 아래 섹션 분할선의 높이. 없으면 "미리보기가 남는 높이를 전부" 가 기본. */
 const ONE_OUTPUT_PREVIEW_HEIGHT_STORAGE_KEY = "agentlas.one.output-preview-height.v1";
 const ONE_OUTPUT_PREVIEW_HEIGHT_MIN = 160;
 /** 아래 섹션이 최소한 한 줄은 보이도록 남겨 두는 높이. */
 const ONE_OUTPUT_BELOW_MIN = 120;
+/**
+ * Every verified work product is a first-class tab. The tab strip already
+ * scrolls horizontally and each tab can be closed, so silently dropping older
+ * results after an arbitrary count is worse than allowing the user to manage
+ * the complete working set. Repeated versions of the same label collapse to
+ * the latest binding below; distinct files/results never disappear.
+ */
 type OutputSectionKey = "files" | "mcp" | "agents" | "processes" | "computer" | "sources";
 type OutputRailView = "result" | "activity" | "terminal" | "browser" | "app";
+type OutputArtifactTab = `artifact:${string}`;
+type OutputMcpTab = `mcp:${string}`;
+type OutputRailTab = OutputRailView | OutputArtifactTab | OutputMcpTab;
+
+interface ScopedOutputRailState {
+  openTabs: OutputRailTab[];
+  railView: OutputRailTab | null;
+}
+
+// OneShell may remount the output rail when the active conversation changes.
+// Keep a small renderer-session cache above the component so that remounting a
+// thread does not erase the person's open tabs and active view. This is not a
+// durable product preference and intentionally dies with the BrowserWindow.
+const scopedOutputRailState = new Map<string, ScopedOutputRailState>();
+const MAX_SCOPED_OUTPUT_RAIL_STATES = 80;
+const ONE_OUTPUT_RAIL_SESSION_STORAGE_KEY = "agentlas.one.outputRail.session.v1";
+
+function validOutputRailTab(value: unknown): value is OutputRailTab {
+  return typeof value === "string"
+    && (/^(?:result|activity|terminal|browser|app)$/u.test(value) || /^(?:artifact|mcp):[^\u0000-\u001f]{1,512}$/u.test(value));
+}
+
+function hydrateScopedOutputRailState(): void {
+  if (typeof window === "undefined" || scopedOutputRailState.size > 0) return;
+  try {
+    const parsed = JSON.parse(window.sessionStorage.getItem(ONE_OUTPUT_RAIL_SESSION_STORAGE_KEY) ?? "{}") as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+    for (const [scope, value] of Object.entries(parsed as Record<string, unknown>).slice(-MAX_SCOPED_OUTPUT_RAIL_STATES)) {
+      if (!scope || scope === "unscoped" || scope.length > 512 || !value || typeof value !== "object" || Array.isArray(value)) continue;
+      const record = value as Record<string, unknown>;
+      const openTabs = Array.isArray(record.openTabs) ? record.openTabs.filter(validOutputRailTab) : [];
+      const railView = record.railView === null || validOutputRailTab(record.railView) ? record.railView : null;
+      scopedOutputRailState.set(scope, { openTabs, railView });
+    }
+  } catch {
+    // A disabled/corrupt session store falls back to in-memory continuity.
+  }
+}
+
+function persistScopedOutputRailState(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(
+      ONE_OUTPUT_RAIL_SESSION_STORAGE_KEY,
+      JSON.stringify(Object.fromEntries(scopedOutputRailState)),
+    );
+  } catch {
+    // Session continuity is best effort; the output itself remains durable.
+  }
+}
+
+function rememberScopedOutputRailState(scope: string, update: Partial<ScopedOutputRailState>): void {
+  const previous = scopedOutputRailState.get(scope) ?? { openTabs: [], railView: null };
+  scopedOutputRailState.delete(scope);
+  scopedOutputRailState.set(scope, { ...previous, ...update });
+  while (scopedOutputRailState.size > MAX_SCOPED_OUTPUT_RAIL_STATES) {
+    const oldest = scopedOutputRailState.keys().next().value;
+    if (typeof oldest !== "string") break;
+    scopedOutputRailState.delete(oldest);
+  }
+  persistScopedOutputRailState();
+}
+
+hydrateScopedOutputRailState();
+
+function artifactTabId(item: OneActivityArtifact): OutputArtifactTab {
+  return `artifact:${item.id}`;
+}
+
+function artifactIdFromTab(tab: OutputRailTab | null): string | null {
+  return tab?.startsWith("artifact:") ? tab.slice("artifact:".length) : null;
+}
+
+function mcpTabId(item: OneActivityItem): OutputMcpTab {
+  return `mcp:${item.id}`;
+}
+
+function mcpIdFromTab(tab: OutputRailTab | null): string | null {
+  return tab?.startsWith("mcp:") ? tab.slice("mcp:".length) : null;
+}
 
 /** 탭마다 제 아이콘 — 글자만 있으면 어느 탭인지 눈으로 못 고른다. */
 function RailTabIcon({ view }: { view: OutputRailView }) {
@@ -88,12 +172,6 @@ function readCollapsedOutputSections(): Set<OutputSectionKey> {
   } catch {
     return new Set();
   }
-}
-
-function readOutputHistoryHeight(): number {
-  if (typeof window === "undefined") return 250;
-  const value = Number(window.localStorage.getItem(ONE_OUTPUT_HISTORY_HEIGHT_STORAGE_KEY));
-  return Number.isFinite(value) ? Math.min(480, Math.max(150, Math.round(value))) : 250;
 }
 
 /** null = 아직 사용자가 정한 적 없음 → 미리보기가 남는 높이를 전부 먹는다(기본). */
@@ -478,7 +556,7 @@ function liveKindForCapability(capability: OneArtifactPreviewCapabilityV1): Live
   return capability.kind;
 }
 
-function ArtifactPreviewCard({ item, locale, wide = false }: { item: OneActivityArtifact; locale: "ko" | "en"; wide?: boolean }) {
+export function ArtifactPreviewCard({ item, locale, wide = false }: { item: OneActivityArtifact; locale: "ko" | "en"; wide?: boolean }) {
   const [preview, setPreview] = useState<OneArtifactPreviewCapabilityV1 | null>(null);
   const [settled, setSettled] = useState(false);
   useEffect(() => {
@@ -506,13 +584,25 @@ function ArtifactPreviewCard({ item, locale, wide = false }: { item: OneActivity
       disposed = true;
       if (issued) void bridge.oneArtifacts.revokePreview({ ...item.binding, capabilityUrl: issued.capabilityUrl }).catch(() => ({ revoked: false }));
     };
-  }, [item.binding, item.id]);
+  // Main capability scope is defined by these scalar binding fields. Depending
+  // on the projected binding object's identity revoked and re-issued an
+  // otherwise identical capability whenever live Activity rebuilt its rows.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    item.id,
+    item.binding.taskId,
+    item.binding.taskVersion,
+    item.binding.chatId,
+    item.binding.runId,
+    item.binding.manifestId,
+    item.binding.artifactRef,
+  ]);
 
   return <article className={styles.artifactPreviewCard} data-preview-kind={preview?.kind ?? "file"}>
     {preview && <div className={`${styles.artifactVisual} ${preview.kind === "audio" ? styles.artifactAudio : ""}`}>
       {preview.kind === "data" && isCodeArtifactName(item.label)
         ? <CodeIdeViewer source={preview.capabilityUrl} name={item.label} locale={locale} compact={!wide} />
-        : <LiveOutputViewer source={preview.capabilityUrl} name={item.label} kind={liveKindForCapability(preview)} mimeType={preview.mimeType} size={preview.sizeBytes} locale={locale} compact={!wide} placement="sidebar" />}
+        : <LiveOutputViewer source={preview.capabilityUrl} name={item.label} kind={liveKindForCapability(preview)} mimeType={preview.mimeType} size={preview.sizeBytes} locale={locale} compact={!wide} placement="sidebar" imageActions={preview.kind === "image"} />}
     </div>}
     {!preview && <div className={styles.artifactFileFallback} data-loading={!settled ? "true" : "false"}><IconFileUp size={18} /></div>}
     <div className={styles.artifactPreviewCopy}>
@@ -522,6 +612,55 @@ function ArtifactPreviewCard({ item, locale, wide = false }: { item: OneActivity
       <button type="button" onClick={() => void openArtifact(item)}>{locale === "ko" ? "열기" : "Open"}</button>
     </div>
   </article>;
+}
+
+/**
+ * Durable outputs belong in the conversation that produced them as well as in
+ * the optional Outputs rail. Keeping this projection next to the turn prevents
+ * a completed image from being hidden behind a closed right-hand panel.
+ */
+export function OneInlineArtifactResults({ items, locale }: { items: OneActivityArtifact[]; locale: "ko" | "en" }) {
+  if (items.length === 0) return null;
+  const single = items.length === 1 ? items[0] : null;
+  const inlineMedia = single && (single.kind === "image" || /\.(?:mp4|webm|mov|m4v)$/iu.test(single.label));
+  if (single && inlineMedia) {
+    return (
+      <section
+        className={styles.inlineArtifacts}
+        aria-label={locale === "ko" ? "이 대화의 결과" : "Results in this conversation"}
+        data-one-inline-artifacts="true"
+        data-inline-media="true"
+      >
+        <ArtifactPreviewCard item={single} locale={locale} wide />
+      </section>
+    );
+  }
+  return (
+    <section
+      className={styles.inlineArtifacts}
+      aria-label={locale === "ko" ? "이 대화의 결과" : "Results in this conversation"}
+      data-one-inline-artifacts="true"
+    >
+      <span className={styles.inlineArtifactSummary}>
+        <IconCheck size={13} />
+        {locale === "ko" ? `결과물 ${items.length}개` : `${items.length} outputs`}
+      </span>
+      <div className={styles.inlineArtifactLinks}>
+        {items.slice(-4).map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            title={item.label}
+            onClick={() => requestOneArtifactOpen({ binding: item.binding, label: item.label })}
+          >
+            <IconFileUp size={12} />
+            <span>{item.label}</span>
+          </button>
+        ))}
+        {items.length > 4 && <span className={styles.inlineArtifactMore}>+{items.length - 4}</span>}
+      </div>
+    </section>
+  );
 }
 
 function ArtifactOpenViewer({ target, locale, wide }: { target: OneArtifactOpenRequest; locale: "ko" | "en"; wide: boolean }) {
@@ -587,7 +726,7 @@ function ArtifactOpenViewer({ target, locale, wide }: { target: OneArtifactOpenR
   if (failed || !capability) return <div className={styles.artifactFileFallback} role="alert"><span>{locale === "ko" ? "아티팩트를 인앱에서 열지 못했습니다." : "This artifact could not be opened in the app."}</span><button type="button" onClick={issue}>{locale === "ko" ? "다시 시도" : "Retry"}</button></div>;
   return capability.kind === "data" && isCodeArtifactName(target.label)
     ? <CodeIdeViewer source={capability.capabilityUrl} name={target.label} locale={locale} fill={wide} />
-    : <LiveOutputViewer source={capability.capabilityUrl} name={target.label} kind={liveKindForCapability(capability)} mimeType={capability.mimeType} size={capability.sizeBytes} locale={locale} fill placement="sidebar" />;
+    : <LiveOutputViewer source={capability.capabilityUrl} name={target.label} kind={liveKindForCapability(capability)} mimeType={capability.mimeType} size={capability.sizeBytes} locale={locale} fill placement="sidebar" imageActions={capability.kind === "image"} />;
 }
 
 export function taskBrowserUrl(items: OneActivityItem[]): string | undefined {
@@ -1287,11 +1426,6 @@ export function OneActivityArtifactRail({
   minWidth = 200,
   maxWidth = 720,
   defaultWidth = 324,
-  computerHistory,
-  onHistoryConsent,
-  onHistoryClear,
-  onHistoryAsk,
-  onHistoryReviewRecommendation,
   browserScopeKey,
   browserHistoryUrl,
   onBrowserObserved,
@@ -1313,11 +1447,6 @@ export function OneActivityArtifactRail({
   minWidth?: number;
   maxWidth?: number;
   defaultWidth?: number;
-  computerHistory?: ComputerHistoryState | null;
-  onHistoryConsent?: (enabled: boolean) => Promise<void>;
-  onHistoryClear?: () => void;
-  onHistoryAsk?: () => void;
-  onHistoryReviewRecommendation?: (entry: ComputerHistoryEntry) => void;
   /** Stable Taskforce/thread identity used to retain only its own browser URL across turns. */
   browserScopeKey?: string;
   /** Latest proven Browser navigation from this thread's durable run history. */
@@ -1334,60 +1463,144 @@ export function OneActivityArtifactRail({
   appPreview?: OneLiveAppPreview | null;
 }) {
   const [collapsedSections, setCollapsedSections] = useState<Set<OutputSectionKey>>(readCollapsedOutputSections);
+  const artifactScopeKey = browserScopeKey ?? "unscoped";
+  const dismissedOutputTabsRef = useRef<Record<string, Set<OutputRailTab>>>({});
+  const restoreOutputTab = useCallback((view: OutputRailTab) => {
+    dismissedOutputTabsRef.current[artifactScopeKey]?.delete(view);
+  }, [artifactScopeKey]);
   /*
    * 탭은 고정 목록이 아니다(오너 지시 2026-08-24). 무언가 결과가 나오면 그
    * 탭이 하나 생기고, 나머지는 + 로 사람이 직접 연다. 아무것도 안 한 대화에서
    * "결과 / Activity / Terminal / Browser" 네 개가 늘 떠 있을 이유가 없다.
    */
-  const [openTabs, setOpenTabs] = useState<OutputRailView[]>([]);
+  // Output tabs and their selection belong to a conversation. A single global
+  // array/state caused switching away and back to reopen the generic Result
+  // view instead of the file, MCP, Browser, or Activity tab the person had
+  // selected in that thread.
+  const [openTabsByScope, setOpenTabsByScope] = useState<Record<string, OutputRailTab[]>>(() => Object.fromEntries(
+    [...scopedOutputRailState].map(([scope, state]) => [scope, state.openTabs]),
+  ));
+  const openTabs = openTabsByScope[artifactScopeKey] ?? [];
+  const setOpenTabs = useCallback((update: React.SetStateAction<OutputRailTab[]>) => {
+    setOpenTabsByScope((current) => {
+      const previous = current[artifactScopeKey] ?? [];
+      const next = typeof update === "function" ? update(previous) : update;
+      if (next === previous) return current;
+      if (next.length === previous.length && next.every((tab, index) => tab === previous[index])) return current;
+      if (artifactScopeKey !== "unscoped") rememberScopedOutputRailState(artifactScopeKey, { openTabs: next });
+      return { ...current, [artifactScopeKey]: next };
+    });
+  }, [artifactScopeKey]);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
-  const [railView, setRailView] = useState<OutputRailView | null>(null);
+  const [railViewsByScope, setRailViewsByScope] = useState<Record<string, OutputRailTab | null>>(() => Object.fromEntries(
+    [...scopedOutputRailState].map(([scope, state]) => [scope, state.railView]),
+  ));
+  const restoringOutputRailScopeRef = useRef<string | null>(null);
+  const restoreGuardTimerRef = useRef<number | null>(null);
+  const railView = railViewsByScope[artifactScopeKey] ?? null;
+  const setRailView = useCallback((update: React.SetStateAction<OutputRailTab | null>) => {
+    setRailViewsByScope((current) => {
+      const previous = current[artifactScopeKey] ?? null;
+      const next = typeof update === "function" ? update(previous) : update;
+      if (next === previous) return current;
+      if (artifactScopeKey !== "unscoped") rememberScopedOutputRailState(artifactScopeKey, { railView: next });
+      return { ...current, [artifactScopeKey]: next };
+    });
+  }, [artifactScopeKey]);
+  useLayoutEffect(() => {
+    if (artifactScopeKey === "unscoped") return;
+    const restored = scopedOutputRailState.get(artifactScopeKey);
+    if (!restored) return;
+    restoringOutputRailScopeRef.current = artifactScopeKey;
+    if (restoreGuardTimerRef.current !== null) window.clearTimeout(restoreGuardTimerRef.current);
+    restoreGuardTimerRef.current = window.setTimeout(() => {
+      if (restoringOutputRailScopeRef.current === artifactScopeKey) restoringOutputRailScopeRef.current = null;
+      restoreGuardTimerRef.current = null;
+    }, 200);
+    // Route hydration can momentarily render the new conversation with the
+    // previous conversation's local state. Restore the exact scoped selection
+    // before passive auto-presentation effects run, otherwise Activity wins
+    // the race and immediately overwrites the person's saved file/MCP tab.
+    setOpenTabsByScope((current) => {
+      const present = current[artifactScopeKey];
+      if (present?.length === restored.openTabs.length && present.every((tab, index) => tab === restored.openTabs[index])) return current;
+      return { ...current, [artifactScopeKey]: restored.openTabs };
+    });
+    setRailViewsByScope((current) => current[artifactScopeKey] === restored.railView
+      ? current
+      : { ...current, [artifactScopeKey]: restored.railView });
+    return () => {
+      if (restoreGuardTimerRef.current !== null) window.clearTimeout(restoreGuardTimerRef.current);
+      restoreGuardTimerRef.current = null;
+    };
+  }, [artifactScopeKey]);
   /*
    * 브라우저와 앱은 좁은 칸에서 아무것도 못 읽는다(실측 324px 에서 페이지가
    * 찌그러졌다). 그 탭을 실제로 보기 시작할 때만 읽을 수 있는 폭을 확보한다 —
    * 결과가 생길 때마다 저 혼자 벌어지던 예전 동작과는 다르다.
-   */
-  const selectRailView = useCallback((view: OutputRailView) => {
+  */
+  const selectRailView = useCallback((view: OutputRailTab) => {
     setRailView(view);
     if (view !== "browser" && view !== "app") return;
     const readable = Math.min(maxWidth, 560);
     onResize?.(Math.max(width ?? defaultWidth, readable));
-  }, [defaultWidth, maxWidth, onResize, width]);
-  const openRailTab = useCallback((view: OutputRailView) => {
+  }, [defaultWidth, maxWidth, onResize, setRailView, width]);
+  const openRailTab = useCallback((view: OutputRailTab) => {
+    restoreOutputTab(view);
     setOpenTabs((tabs) => (tabs.includes(view) ? tabs : [...tabs, view]));
     selectRailView(view);
-  }, [selectRailView]);
-  const closeRailTab = useCallback((view: OutputRailView) => {
+  }, [restoreOutputTab, selectRailView]);
+  const closeRailTab = useCallback((view: OutputRailTab) => {
+    if (view.startsWith("artifact:") || view.startsWith("mcp:")) {
+      const dismissed = dismissedOutputTabsRef.current[artifactScopeKey] ?? new Set<OutputRailTab>();
+      dismissed.add(view);
+      dismissedOutputTabsRef.current[artifactScopeKey] = dismissed;
+    }
     setOpenTabs((tabs) => {
       const next = tabs.filter((tab) => tab !== view);
       setRailView((current) => (current === view ? next[next.length - 1] ?? null : current));
       return next;
     });
-  }, []);
+  }, [artifactScopeKey, setOpenTabs, setRailView]);
   const resizeRef = useRef<{ pointerId: number; startX: number; startWidth: number; rawWidth: number } | null>(null);
-  const historyResizeRef = useRef<{ pointerId: number; startY: number; startHeight: number } | null>(null);
   const [resizing, setResizing] = useState(false);
   const [collapseReady, setCollapseReady] = useState(false);
-  const [historyResizing, setHistoryResizing] = useState(false);
-  const [historyHeight, setHistoryHeight] = useState(readOutputHistoryHeight);
   const [browserUrlsByScope, setBrowserUrlsByScope] = useState<Record<string, string>>({});
-  const [openedArtifact, setOpenedArtifact] = useState<OneArtifactOpenRequest | null>(null);
-  const presentedBrowserTargetRef = useRef<string | null>(null);
-  const presentedAppTargetRef = useRef<string | null>(null);
-  const presentedResultKeyRef = useRef<string | null>(null);
-  const presentedArtifactIdRef = useRef<string | null>(null);
-  const presentedMcpResultIdRef = useRef<string | null>(null);
+  /*
+   * An opened artifact belongs to the conversation that issued its Main-owned
+   * binding. Keeping a single value here leaked the previous conversation's
+   * image into a newly selected chat with zero artifact bindings. Preserve the
+   * user's per-thread selection without ever projecting it into another
+   * thread's Result tab.
+   */
+  const [openedArtifactsByScope, setOpenedArtifactsByScope] = useState<Record<string, OneArtifactOpenRequest>>({});
+  const openedArtifact = openedArtifactsByScope[artifactScopeKey] ?? null;
+  const setOpenedArtifact = useCallback((next: OneArtifactOpenRequest | null) => {
+    setOpenedArtifactsByScope((current) => {
+      if (!next) {
+        if (!(artifactScopeKey in current)) return current;
+        const copy = { ...current };
+        delete copy[artifactScopeKey];
+        return copy;
+      }
+      return current[artifactScopeKey] === next ? current : { ...current, [artifactScopeKey]: next };
+    });
+  }, [artifactScopeKey]);
+  const restoredOutputRailScopesRef = useRef(new Set(scopedOutputRailState.keys()));
+  // Automatic presentation is also scoped. A global "last shown" marker
+  // changes every time a person switches conversations, so returning to a
+  // thread incorrectly counts its old Result/artifact as newly arrived and
+  // overwrites the tab selection we just restored.
+  const presentedBrowserTargetRef = useRef<Record<string, string | null>>({});
+  const presentedAppTargetRef = useRef<Record<string, string | null>>({});
+  const presentedResultKeyRef = useRef<Record<string, string | null>>({});
+  const presentedArtifactIdRef = useRef<Record<string, string | null>>({});
+  const presentedMcpResultIdRef = useRef<Record<string, string | null>>({});
+  const activeTabRef = useRef<HTMLSpanElement | null>(null);
   const clampWidth = (value: number) => Math.min(maxWidth, Math.max(minWidth, Math.round(value)));
   const collapseThreshold = Math.max(120, Math.min(220, minWidth - 48));
-  const clampHistoryHeight = (value: number) => Math.min(480, Math.max(150, Math.round(value)));
-  const commitHistoryHeight = (value: number) => {
-    const next = clampHistoryHeight(value);
-    setHistoryHeight(next);
-    try { window.localStorage.setItem(ONE_OUTPUT_HISTORY_HEIGHT_STORAGE_KEY, String(next)); } catch { /* persistence is best effort */ }
-  };
   /**
    * 미리보기 ↔ 아래 섹션 분할선 (오너 요구 2026-08-25).
-   * 어포던스·키보드·저장 계약은 위 기록 패널 높이 드래그와 동형이다. 차이는 하나 —
    * 여기서는 "정한 적 없음"(null) 이 유효한 상태이고, 그때 미리보기가 남는 높이를
    * 전부 먹는다. 두 번 클릭하면 그 기본으로 되돌아간다.
    */
@@ -1469,10 +1682,31 @@ export function OneActivityArtifactRail({
     () => (activity?.items ?? []).filter((item) => (
       item.kind === "tool"
       && typeof item.tool?.result === "string"
-      && parseMcpResult(item.tool.result, item.tool.name).blocks.length > 0
-    )).slice(-8),
+      && (() => {
+        const presentation = parseMcpResult(item.tool.result, item.tool.name);
+        const detail = normalizeToolCall({
+          name: item.tool.name,
+          args: item.tool.args,
+          result: item.tool.result,
+        });
+        // Runtime discovery helpers such as Claude's ToolSearch return small
+        // provider-control JSON objects (`tool_reference`). Generic JSON alone
+        // is not a user result and previously appeared as a fake "MCP result"
+        // card in One. Native Read/Bash/Edit results may also be wrapped in the
+        // same provider envelope; those are Activity evidence, not standalone
+        // connected-tool outputs. Keep an envelope only when the normalized
+        // action is unknown (the provider hid the concrete MCP name), or when
+        // the tool name itself proves an MCP server.
+        const isMcpResult = Boolean(mcpServerName(item.tool.name))
+          || (presentation.isMcpEnvelope && detail.type === "unknown");
+        return isMcpResult && presentation.blocks.some((block) => block.kind !== "data");
+      })()
+    )),
     [activity?.items],
   );
+  const mcpResultById = useMemo(() => new Map(mcpResults.map((item) => [item.id, item])), [mcpResults]);
+  const activeMcpId = mcpIdFromTab(railView);
+  const activeMcpResult = activeMcpId ? mcpResultById.get(activeMcpId) ?? null : null;
   /*
    * 분류는 도구 이름의 단어가 아니라 그 도구가 한 일로 한다 — shared/tool-taxonomy.ts.
    * 단어 매칭은 claude 의 `Bash` 하나만 잡고 codex `bash`(소문자 통과), grok `write`,
@@ -1481,8 +1715,41 @@ export function OneActivityArtifactRail({
    */
   const processes = activity?.items.filter((item) => item.kind === "tool" && isCommandTool(item.tool?.name)) ?? [];
   const computerUse = activity?.items.filter((item) => item.kind === "tool" && isComputerUseTool(item.tool?.name)) ?? [];
+  const terminalFeedItems = useMemo(
+    () => (activity?.items ?? [])
+      .filter((item) => item.kind === "tool" && (
+        isCommandTool(item.tool?.name)
+        || isComputerUseTool(item.tool?.name)
+      ))
+      .slice(-80),
+    [activity?.items],
+  );
+  useEffect(() => {
+    if (artifactScopeKey === "unscoped") return;
+    if (restoringOutputRailScopeRef.current === artifactScopeKey) return;
+    const hasActivity = Boolean(activity?.items.length);
+    const hasTerminal = processes.length > 0;
+    setOpenTabs((tabs) => {
+      let next = tabs.filter((tab) => (tab !== "activity" || hasActivity) && (tab !== "terminal" || hasTerminal));
+      if (hasActivity && !next.includes("activity")) next = [...next, "activity"];
+      if (hasTerminal && !next.includes("terminal")) next = [...next, "terminal"];
+      // Opening the first Work/Terminal tab without selecting it leaves the
+      // panel body blank even though the tab is visibly present. Preserve a
+      // person's valid selection, but make the first automatically-created
+      // evidence view the active view for this conversation.
+      setRailView((current) => {
+        if (current && next.includes(current)) return current;
+        if (hasActivity && next.includes("activity")) return "activity";
+        if (hasTerminal && next.includes("terminal")) return "terminal";
+        return next.at(-1) ?? null;
+      });
+      return next;
+    });
+  }, [activity?.items.length, artifactScopeKey, processes.length]);
   const currentBrowserUrl = useMemo(() => taskBrowserUrl(activity?.items ?? []), [activity?.items]);
   useEffect(() => {
+    if (artifactScopeKey === "unscoped") return;
+    if (restoringOutputRailScopeRef.current === artifactScopeKey) return;
     if (!browserScopeKey || !currentBrowserUrl) return;
     setBrowserUrlsByScope((current) => current[browserScopeKey] === currentBrowserUrl
       ? current
@@ -1492,11 +1759,17 @@ export function OneActivityArtifactRail({
     ?? browserHistoryUrl
     ?? (browserScopeKey ? browserUrlsByScope[browserScopeKey] : undefined);
   const latestArtifactId = items.at(-1)?.id ?? null;
+  const artifactById = useMemo(() => new Map(items.map((item) => [item.id, item])), [items]);
+  const activeArtifactId = artifactIdFromTab(railView);
+  const activeArtifact = activeArtifactId ? artifactById.get(activeArtifactId) ?? null : null;
   const openedArtifactKind = openedArtifact ? outputPresentationKindForName(openedArtifact.label) : "standard";
+  const activeTabArtifactKind = outputPresentationKindForName(activeArtifact?.label);
   const latestArtifactKind = outputPresentationKindForName(items.at(-1)?.label);
-  const activeOutputKind: OutputPresentationKind = appPreview
-    ? "web"
-    : openedArtifactKind !== "standard"
+  const activeOutputKind: OutputPresentationKind = activeTabArtifactKind !== "standard"
+    ? activeTabArtifactKind
+    : appPreview
+      ? "web"
+      : openedArtifactKind !== "standard"
       ? openedArtifactKind
       : resultKind !== "standard"
         ? resultKind
@@ -1505,8 +1778,10 @@ export function OneActivityArtifactRail({
           : openedArtifact
             ? "document"
             : latestArtifactKind;
-  const outputIdentity = openedArtifact
-    ? `artifact:${openedArtifact.binding.runId}:${openedArtifact.binding.artifactRef}`
+  const outputIdentity = activeArtifact
+    ? `artifact:${activeArtifact.binding.runId}:${activeArtifact.binding.artifactRef}`
+    : openedArtifact
+      ? `artifact:${openedArtifact.binding.runId}:${openedArtifact.binding.artifactRef}`
     : appPreview
       ? `app:${appPreview.appId}:${appPreview.url}`
     : preferredBrowserUrl
@@ -1522,12 +1797,25 @@ export function OneActivityArtifactRail({
     const handleOpen = (event: Event) => {
       const detail = (event as CustomEvent<unknown>).detail;
       if (!isOneArtifactOpenRequest(detail)) return;
-      setOpenedArtifact(detail);
+      const matched = items.find((item) => (
+        item.binding.runId === detail.binding.runId
+        && item.binding.artifactRef === detail.binding.artifactRef
+      ));
+      if (matched) {
+        const tab = artifactTabId(matched);
+        restoreOutputTab(tab);
+        setOpenTabs((tabs) => (tabs.includes(tab) ? tabs : [...tabs, tab]));
+        setRailView(tab);
+        return;
+      }
+      const scope = detail.binding.chatId || artifactScopeKey;
+      setOpenedArtifactsByScope((current) => current[scope] === detail ? current : { ...current, [scope]: detail });
+      setOpenTabs((tabs) => (tabs.includes("result") ? tabs : [...tabs, "result"]));
       setRailView("result");
     };
     window.addEventListener(ONE_ARTIFACT_OPEN_EVENT, handleOpen);
     return () => window.removeEventListener(ONE_ARTIFACT_OPEN_EVENT, handleOpen);
-  }, []);
+  }, [artifactScopeKey, items, restoreOutputTab]);
   useEffect(() => {
     const handleInAppLink = (event: Event) => {
       const detail = (event as CustomEvent<unknown>).detail;
@@ -1547,26 +1835,88 @@ export function OneActivityArtifactRail({
     return () => window.removeEventListener("agentlas:in-app-linked-file", handleInAppLink);
   }, [browserScopeKey]);
   useEffect(() => {
-    if (result || !latestArtifactId || presentedArtifactIdRef.current === latestArtifactId) return;
-    presentedArtifactIdRef.current = latestArtifactId;
-    // 자동 표시는 Browser 를 빼앗지 않는다 — 브라우저 작업 자체가 산출물이고, 새 아티팩트가
-    // 도착할 때마다 Activity 로 튕기면 사람이 보던 화면이 사라진다(P0: 재열람 시 Browser 유지).
-    setRailView((current) => (current === "browser" ? current : "activity"));
-  }, [latestArtifactId, result]);
+    if (artifactScopeKey === "unscoped") return;
+    if (restoringOutputRailScopeRef.current === artifactScopeKey) return;
+    // Ledger projection arrives after the route shell. Do not interpret that
+    // transient empty frame as deletion of a restored file tab; doing so made
+    // the Activity effect win before the exact bindings finished loading.
+    if (
+      items.length === 0
+      && restoredOutputRailScopesRef.current.has(artifactScopeKey)
+      && scopedOutputRailState.get(artifactScopeKey)?.openTabs.some((tab) => tab.startsWith("artifact:"))
+    ) return;
+    const available = new Set(items.map((item) => artifactTabId(item)));
+    const labels = new Set<string>();
+    const automatic: OutputArtifactTab[] = [];
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      const item = items[index];
+      const labelKey = item.label.trim().toLocaleLowerCase();
+      if (labels.has(labelKey)) continue;
+      labels.add(labelKey);
+      automatic.unshift(artifactTabId(item));
+    }
+    const automaticSet = new Set(automatic);
+    const dismissed = dismissedOutputTabsRef.current[artifactScopeKey] ?? new Set<OutputRailTab>();
+    for (const tab of [...dismissed]) {
+      if (tab.startsWith("artifact:") && !available.has(tab as OutputArtifactTab)) dismissed.delete(tab);
+    }
+    setOpenTabs((tabs) => {
+      const retained = tabs.filter((tab) => !tab.startsWith("artifact:") || (available.has(tab as OutputArtifactTab) && automaticSet.has(tab as OutputArtifactTab)));
+      const next = [...retained];
+      for (const tab of automatic) if (!dismissed.has(tab) && !next.includes(tab)) next.push(tab);
+      return next;
+    });
+    if (!latestArtifactId || presentedArtifactIdRef.current[artifactScopeKey] === latestArtifactId) return;
+    if (presentedArtifactIdRef.current[artifactScopeKey] === undefined && restoredOutputRailScopesRef.current.has(artifactScopeKey)) {
+      presentedArtifactIdRef.current[artifactScopeKey] = latestArtifactId;
+      return;
+    }
+    presentedArtifactIdRef.current[artifactScopeKey] = latestArtifactId;
+    const nextTab: OutputArtifactTab = `artifact:${latestArtifactId}`;
+    // Browser/App 작업을 보고 있는 사람의 화면은 빼앗지 않는다. 그 밖에는 새 결과물
+    // 자체가 새 탭이 되어 바로 보인다 — Activity 안의 세로 카드로 되돌리지 않는다.
+    setRailView((current) => (current === "browser" || current === "app" ? current : nextTab));
+  }, [artifactScopeKey, items, latestArtifactId, setOpenTabs, setRailView]);
   useEffect(() => {
+    if (artifactScopeKey === "unscoped") return;
+    if (restoringOutputRailScopeRef.current === artifactScopeKey) return;
+    if (
+      mcpResults.length === 0
+      && restoredOutputRailScopesRef.current.has(artifactScopeKey)
+      && scopedOutputRailState.get(artifactScopeKey)?.openTabs.some((tab) => tab.startsWith("mcp:"))
+    ) return;
+    const available = new Set(mcpResults.map((item) => mcpTabId(item)));
+    const dismissed = dismissedOutputTabsRef.current[artifactScopeKey] ?? new Set<OutputRailTab>();
+    for (const tab of [...dismissed]) {
+      if (tab.startsWith("mcp:") && !available.has(tab as OutputMcpTab)) dismissed.delete(tab);
+    }
+    setOpenTabs((tabs) => {
+      const retained = tabs.filter((tab) => !tab.startsWith("mcp:") || available.has(tab as OutputMcpTab));
+      const next = [...retained];
+      for (const tab of available) if (!dismissed.has(tab) && !next.includes(tab)) next.push(tab);
+      return next;
+    });
     const latest = mcpResults.at(-1)?.id ?? null;
-    if (!latest || presentedMcpResultIdRef.current === latest) return;
-    presentedMcpResultIdRef.current = latest;
-    setOpenTabs((tabs) => (tabs.includes("activity") ? tabs : [...tabs, "activity"]));
-    // Keep a user-selected Result/Browser/App view stable; otherwise expose
-    // the new MCP result in the activity tab as soon as the rail is opened.
-    setRailView((current) => current ?? "activity");
-  }, [mcpResults]);
+    if (!latest || presentedMcpResultIdRef.current[artifactScopeKey] === latest) return;
+    if (presentedMcpResultIdRef.current[artifactScopeKey] === undefined && restoredOutputRailScopesRef.current.has(artifactScopeKey)) {
+      presentedMcpResultIdRef.current[artifactScopeKey] = latest;
+      return;
+    }
+    presentedMcpResultIdRef.current[artifactScopeKey] = latest;
+    const nextTab: OutputMcpTab = `mcp:${latest}`;
+    // A real MCP presentation is itself an output. Keep Browser/App and a
+    // person-selected file stable; otherwise make the new result visible.
+    setRailView((current) => current === "browser" || current === "app" || current?.startsWith("artifact:") ? current : nextTab);
+  }, [artifactScopeKey, mcpResults]);
   useEffect(() => {
-    if (!preferredBrowserUrl) return;
+    if (artifactScopeKey === "unscoped" || restoringOutputRailScopeRef.current === artifactScopeKey || !preferredBrowserUrl) return;
     const targetKey = `${browserScopeKey ?? "unscoped"}\u0000${preferredBrowserUrl}`;
-    if (presentedBrowserTargetRef.current === targetKey) return;
-    presentedBrowserTargetRef.current = targetKey;
+    if (presentedBrowserTargetRef.current[artifactScopeKey] === targetKey) return;
+    if (presentedBrowserTargetRef.current[artifactScopeKey] === undefined && restoredOutputRailScopesRef.current.has(artifactScopeKey)) {
+      presentedBrowserTargetRef.current[artifactScopeKey] = targetKey;
+      return;
+    }
+    presentedBrowserTargetRef.current[artifactScopeKey] = targetKey;
     // Browser work is itself the output. A person should not have to discover
     // a hidden tab after the agent opens a page, and the external Chrome window
     // is never the One presentation surface.
@@ -1576,28 +1926,51 @@ export function OneActivityArtifactRail({
     onBrowserObserved?.(preferredBrowserUrl);
   }, [browserScopeKey, onBrowserObserved, preferredBrowserUrl]);
   useEffect(() => {
+    if (artifactScopeKey === "unscoped") return;
+    if (restoringOutputRailScopeRef.current === artifactScopeKey) return;
     if (!appPreview?.url) {
-      presentedAppTargetRef.current = null;
+      presentedAppTargetRef.current[artifactScopeKey] = null;
       setOpenTabs((tabs) => tabs.filter((tab) => tab !== "app"));
       if (railView === "app") setRailView(null);
       return;
     }
     const targetKey = `${appPreview.appId}\u0000${appPreview.url}`;
-    if (presentedAppTargetRef.current === targetKey) return;
-    presentedAppTargetRef.current = targetKey;
+    if (presentedAppTargetRef.current[artifactScopeKey] === targetKey) return;
+    if (presentedAppTargetRef.current[artifactScopeKey] === undefined && restoredOutputRailScopesRef.current.has(artifactScopeKey)) {
+      presentedAppTargetRef.current[artifactScopeKey] = targetKey;
+      return;
+    }
+    presentedAppTargetRef.current[artifactScopeKey] = targetKey;
     // The app itself is the primary output. Open it once when the verified
     // preview becomes reachable, but do not fight a user's later tab choice.
     setOpenTabs((tabs) => (tabs.includes("app") ? tabs : [...tabs, "app"]));
     setRailView("app");
-  }, [appPreview?.appId, appPreview?.url, railView]);
+  }, [appPreview?.appId, appPreview?.url, artifactScopeKey, railView]);
   useEffect(() => {
-    if (!result || !resultKey || presentedResultKeyRef.current === resultKey) return;
-    presentedResultKeyRef.current = resultKey;
+    if (artifactScopeKey === "unscoped" || restoringOutputRailScopeRef.current === artifactScopeKey || !result || !resultKey || presentedResultKeyRef.current[artifactScopeKey] === resultKey) return;
+    if (presentedResultKeyRef.current[artifactScopeKey] === undefined && restoredOutputRailScopesRef.current.has(artifactScopeKey)) {
+      presentedResultKeyRef.current[artifactScopeKey] = resultKey;
+      return;
+    }
+    presentedResultKeyRef.current[artifactScopeKey] = resultKey;
     // 결과가 나오면 그 탭이 하나 생긴다. 다만 확인된 Browser/App 표면 위로는
     // 올라오지 않는다 — 탭만 만들고 보고 있던 것을 빼앗지 않는다.
     setOpenTabs((tabs) => (tabs.includes("result") ? tabs : [...tabs, "result"]));
     setRailView((current) => (current === "browser" || current === "app" ? current : "result"));
-  }, [result, resultKey]);
+  }, [artifactScopeKey, result, resultKey]);
+  useEffect(() => {
+    if (artifactScopeKey === "unscoped") return;
+    if (restoringOutputRailScopeRef.current === artifactScopeKey) return;
+    if (railView !== "result" || openedArtifact || result) return;
+    // The selected thread has no Result payload. Do not leave behind an empty
+    // Result tab merely because the previous thread had one; a late durable
+    // receipt or artifact will add it again through the effects above.
+    setOpenTabs((tabs) => tabs.filter((tab) => tab !== "result"));
+    setRailView(null);
+  }, [artifactScopeKey, openedArtifact, railView, result]);
+  useEffect(() => {
+    activeTabRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [openTabs, railView]);
   /*
    * 폭을 저 혼자 넓히던 자리(제거, 오너 지시 2026-08-24 "디폴트로 접히고
    * 켜져도 지금의 반만"). 넓은 산출물이 뜰 때마다 화면의 43% 로 벌어지고
@@ -1674,12 +2047,12 @@ export function OneActivityArtifactRail({
     };
   }, [resizing]);
   /**
-   * 가로 손잡이 둘(미리보기 ↔ 아래 칸 분할선, 기록 패널 높이)도 같은 계약을 쓴다.
+   * 미리보기 ↔ 아래 칸 분할선도 같은 계약을 쓴다.
    * 끄는 동안 모션을 끄고 커서를 row-resize 로 잡아, 포인터가 손잡이 밖으로
    * 나가도 화면이 흔들리지 않는다. 세로 드래그와 동시에 일어날 수 없으므로
    * 표식은 하나로 충분하다.
    */
-  const rowResizing = previewResizing || historyResizing;
+  const rowResizing = previewResizing;
   useEffect(() => {
     if (!rowResizing) return;
     const root = document.documentElement;
@@ -1779,27 +2152,38 @@ export function OneActivityArtifactRail({
       )}
       <nav className={styles.artifactTabs} aria-label={locale === "ko" ? "출력 보기" : "Output views"} role="tablist">
         <div className={styles.artifactTabList}>
-          {openTabs.map((view) => (
-            <span key={view} className={styles.artifactTab} data-active={railView === view ? "true" : "false"}>
+          {openTabs.map((view) => {
+            const tabArtifactId = artifactIdFromTab(view);
+            const tabArtifact = tabArtifactId ? artifactById.get(tabArtifactId) : null;
+            const tabMcpId = mcpIdFromTab(view);
+            const tabMcp = tabMcpId ? mcpResultById.get(tabMcpId) : null;
+            const tabMcpPresentation = tabMcp ? toolPresentation(tabMcp, locale, null) : null;
+            const label = tabArtifact?.label
+              ?? (tabMcp ? activityToolPrimary(tabMcp, tabMcpPresentation, locale) : null)
+              ?? (tabMcp ? (locale === "ko" ? "연결된 결과" : "Connected result") : null)
+              ?? railTabLabel(view as OutputRailView, locale);
+            return (
+            <span ref={railView === view ? activeTabRef : undefined} key={view} className={styles.artifactTab} data-active={railView === view ? "true" : "false"} data-artifact-tab={tabArtifact ? "true" : undefined} data-mcp-tab={tabMcp ? "true" : undefined}>
               <button
                 type="button"
                 role="tab"
                 aria-selected={railView === view}
+                title={label}
                 onClick={() => selectRailView(view)}
               >
-                <RailTabIcon view={view} />
-                {railTabLabel(view, locale)}
+                {tabArtifact ? <IconFileUp size={12} /> : tabMcp ? <IconSparkles size={12} /> : <RailTabIcon view={view as OutputRailView} />}
+                <span>{label}</span>
               </button>
               <button
                 type="button"
                 className={styles.artifactTabClose}
-                aria-label={locale === "ko" ? `${railTabLabel(view, locale)} 닫기` : `Close ${railTabLabel(view, locale)}`}
+                aria-label={locale === "ko" ? `${label} 닫기` : `Close ${label}`}
                 onClick={() => closeRailTab(view)}
               >
                 <IconClose size={11} />
               </button>
             </span>
-          ))}
+          )})}
           <span className={styles.artifactAddWrap}>
             <button
               type="button"
@@ -1869,22 +2253,36 @@ export function OneActivityArtifactRail({
           </>}
           {!openedArtifact && result}
         </div>}
+        {activeArtifact && <div className={styles.resultView} data-artifact-view="true">
+          <ArtifactOpenViewer
+            target={{ binding: activeArtifact.binding, label: activeArtifact.label }}
+            locale={locale}
+            wide={isWideOutputKind(activeOutputKind) || (width ?? defaultWidth) >= 560}
+          />
+        </div>}
+        {activeMcpResult && <div className={styles.resultView} data-mcp-view="true">
+          <McpResultPreview
+            result={activeMcpResult.tool?.result}
+            toolName={activeMcpResult.tool?.name}
+            locale={locale}
+            placement="sidebar"
+          />
+        </div>}
         {railView === "activity" && <>
           <OutputDisclosure section="files" label={locale === "ko" ? "결과물" : "Artifacts"} count={items.length} expanded={sectionExpanded("files")} onToggle={toggleSection}>
             {items.length === 0 && <p className={styles.artifactEmpty}>{locale === "ko" ? "만든 파일 또는 사이트가 여기에 표시됩니다" : "Files or sites you create appear here"}</p>}
-            {items.map((item) => <ArtifactPreviewCard key={item.id} item={item} locale={locale} wide={(width ?? defaultWidth) >= 560} />)}
+            {items.map((item) => <button key={item.id} type="button" className={styles.artifactCompactRow} onClick={() => openRailTab(artifactTabId(item))}>
+              <IconFileUp size={13} />
+              <span>{item.label}</span>
+              <small>{item.agentName || (locale === "ko" ? "탭에서 열기" : "Open tab")}</small>
+            </button>)}
           </OutputDisclosure>
           {mcpResults.length > 0 && <OutputDisclosure section="mcp" label={locale === "ko" ? "MCP 결과" : "MCP results"} count={mcpResults.length} expanded={sectionExpanded("mcp")} onToggle={toggleSection}>
-            {mcpResults.map((item) => (
-              <McpResultPreview
-                key={`mcp-rail-preview:${item.id}`}
-                result={item.tool?.result}
-                toolName={item.tool?.name}
-                locale={locale}
-                compact
-                placement="sidebar"
-              />
-            ))}
+            {mcpResults.map((item) => <button key={item.id} type="button" className={styles.artifactCompactRow} onClick={() => openRailTab(mcpTabId(item))}>
+              <IconSparkles size={13} />
+              <span>{item.tool?.name || (locale === "ko" ? "연결된 도구 결과" : "Connected tool result")}</span>
+              <small>{locale === "ko" ? "탭에서 열기" : "Open tab"}</small>
+            </button>)}
           </OutputDisclosure>}
           <OutputDisclosure section="agents" label={locale === "ko" ? "하위 에이전트" : "Subagents"} count={agents.length} expanded={sectionExpanded("agents")} onToggle={toggleSection}>
             {agents.length === 0
@@ -1892,20 +2290,29 @@ export function OneActivityArtifactRail({
               : agents.slice(-5).map((item) => <div key={item.id} className={styles.artifactRuntimeRow}><IconSparkles size={13} /><span>{item.agentName || (locale === "ko" ? "에이전트" : "Agent")}</span><small>{item.status === "completed" ? <IconCheck size={12} /> : null}</small></div>)}
           </OutputDisclosure>
         </>}
-        {railView === "terminal" && <>
-          {/* A completed shell tool is evidence of a command, not proof that a
-              persistent background process exists. */}
-          <OutputDisclosure section="processes" label={locale === "ko" ? "명령" : "Commands"} count={processes.length} expanded={sectionExpanded("processes")} onToggle={toggleSection}>
-            {processes.length === 0
-              ? <p className={styles.artifactEmpty}>{locale === "ko" ? "실행된 명령 없음" : "No commands run"}</p>
-              : processes.slice(-3).map((item) => <div key={item.id} className={styles.artifactRuntimeRow}><IconCode size={13} /><span>{item.tool?.name || (locale === "ko" ? "명령" : "Command")}</span><small>{item.status === "completed" ? <IconCheck size={12} /> : null}</small></div>)}
-          </OutputDisclosure>
-          <OutputDisclosure section="computer" label={locale === "ko" ? "컴퓨터 사용" : "Computer use"} count={computerUse.length} expanded={sectionExpanded("computer")} onToggle={toggleSection}>
-            {computerUse.length === 0
-              ? <p className={styles.artifactEmpty}>{locale === "ko" ? "사용 기록 없음" : "No computer activity"}</p>
-              : computerUse.slice(-3).map((item) => <div key={item.id} className={styles.artifactRuntimeRow}><IconPanelRight size={13} /><span>{item.tool?.name || (locale === "ko" ? "컴퓨터 작업" : "Computer task")}</span><small>{item.status === "completed" ? <IconCheck size={12} /> : null}</small></div>)}
-          </OutputDisclosure>
-        </>}
+        {railView === "terminal" && <section className={styles.terminalFeed} aria-label={locale === "ko" ? "실행 기록" : "Execution log"}>
+          <header className={styles.terminalFeedHeader}>
+            <span>
+              <strong>{locale === "ko" ? "실행 기록" : "Execution log"}</strong>
+              <small>{terminalFeedItems.length.toLocaleString()} / {(processes.length + computerUse.length).toLocaleString()}</small>
+            </span>
+            <small>{locale === "ko" ? "명령과 컴퓨터 작업" : "Commands and computer actions"}</small>
+          </header>
+          {terminalFeedItems.length === 0
+            ? <p className={styles.artifactEmpty}>{locale === "ko" ? "실행 기록 없음" : "No execution activity"}</p>
+            : <div className={styles.terminalFeedRows}>
+                {(processes.length + computerUse.length) > terminalFeedItems.length && (
+                  <p className={styles.terminalFeedLimit}>
+                    {locale === "ko"
+                      ? `가장 최근 ${terminalFeedItems.length.toLocaleString()}개를 표시합니다.`
+                      : `Showing the latest ${terminalFeedItems.length.toLocaleString()} entries.`}
+                  </p>
+                )}
+                {terminalFeedItems.map((item) => (
+                  <ActivityRow key={item.id} item={item} locale={locale} workspacePath={activity?.cwd ?? null} />
+                ))}
+              </div>}
+        </section>}
         {railView === "browser" && <>
           <div className={styles.livePane} ref={livePaneRef}>
             <OneBrowserLiveView active={railView === "browser"} locale={locale} preferredUrl={preferredBrowserUrl} previewScopeId={browserScopeKey} />
@@ -1934,60 +2341,6 @@ export function OneActivityArtifactRail({
           </div>
         )}
       </div>
-      {(railView === "activity" || railView === "terminal") && <><div
-        className={styles.artifactHistoryResizeHandle}
-        role="separator"
-        aria-orientation="horizontal"
-        aria-label={locale === "ko" ? "기록 패널 높이 조절" : "Resize history panel"}
-        aria-valuemin={150}
-        aria-valuemax={480}
-        aria-valuenow={historyHeight}
-        tabIndex={0}
-        data-resizing={historyResizing ? "true" : "false"}
-        onPointerDown={(event) => {
-          if (event.button !== 0) return;
-          historyResizeRef.current = { pointerId: event.pointerId, startY: event.clientY, startHeight: historyHeight };
-          event.currentTarget.setPointerCapture(event.pointerId);
-          setHistoryResizing(true);
-          event.preventDefault();
-        }}
-        onPointerMove={(event) => {
-          const drag = historyResizeRef.current;
-          if (!drag || drag.pointerId !== event.pointerId) return;
-          setHistoryHeight(clampHistoryHeight(drag.startHeight + (drag.startY - event.clientY)));
-        }}
-        onPointerUp={(event) => {
-          if (historyResizeRef.current?.pointerId !== event.pointerId) return;
-          historyResizeRef.current = null;
-          setHistoryResizing(false);
-          commitHistoryHeight(historyHeight);
-        }}
-        onPointerCancel={() => {
-          historyResizeRef.current = null;
-          setHistoryResizing(false);
-        }}
-        onDoubleClick={() => commitHistoryHeight(250)}
-        onKeyDown={(event) => {
-          if (event.key === "ArrowUp") commitHistoryHeight(historyHeight + 16);
-          else if (event.key === "ArrowDown") commitHistoryHeight(historyHeight - 16);
-          else if (event.key === "Home") commitHistoryHeight(480);
-          else if (event.key === "End") commitHistoryHeight(150);
-          else return;
-          event.preventDefault();
-        }}
-      />
-      <div className={styles.artifactHistoryPane} style={{ height: historyHeight }} aria-label={locale === "ko" ? "기록과 추천" : "History and recommendations"}>
-        <OneComputerHistory
-          compact
-          state={computerHistory ?? null}
-          locale={locale}
-          onConsent={onHistoryConsent ?? (async () => {})}
-          onClear={onHistoryClear ?? (() => {})}
-          onAsk={onHistoryAsk ?? (() => {})}
-          onReviewRecommendation={onHistoryReviewRecommendation}
-        />
-      </div>
-      </>}
       </div>
     </aside>
   );

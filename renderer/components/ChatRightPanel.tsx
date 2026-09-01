@@ -164,10 +164,17 @@ export function ChatRightPanel({
   }, [artifact?.id, surface?.id]);
 
   useEffect(() => {
-    if (!externalFilePreview) return;
-    setFilePreview(externalFilePreview);
-    setViewerSource("file");
-  }, [externalFilePreview?.path, externalFilePreview?.fileUrl]);
+    if (externalFilePreview) {
+      setFilePreview(externalFilePreview);
+      setViewerSource("file");
+      return;
+    }
+    // The parent owns the active result slot. When a new turn clears that
+    // slot, clear this panel's hydrated copy too; otherwise the previous
+    // image remains visible throughout the next run and looks like its result.
+    setFilePreview(null);
+    if (!artifact && !surface) setViewerSource("workbench");
+  }, [artifact, externalFilePreview, surface]);
 
   useEffect(() => {
     if (!onResizeWidth || activeTab !== "panel" || !isWideOutputKind(outputKind)) return;
@@ -884,6 +891,7 @@ function FileViewer({ file }: { file: WorkspaceFilePreview }) {
   const ko = locale === "ko";
   const codePreview = isCodeFilePreview(file);
   const typeLabel = viewerKindLabel(file.viewerKind, ko);
+  const sizeLabel = file.size > 0 ? formatBytes(file.size) : ko ? "로컬 파일" : "Local file";
   return (
     <section style={fileViewerStyle}>
       {!codePreview && (
@@ -891,7 +899,7 @@ function FileViewer({ file }: { file: WorkspaceFilePreview }) {
           <span style={fileViewerIconStyle}>{iconForViewerKind(file.viewerKind)}</span>
           <div style={{ flex: 1, minWidth: 0 }}>
             <strong style={fileViewerTitleStyle} title={file.path}>{file.name}</strong>
-            <span style={fileViewerMetaStyle}>{typeLabel} · {formatBytes(file.size)}{file.live ? <b style={{ marginLeft: 6, color: "#23724d", fontSize: 9, letterSpacing: ".04em" }}>● LIVE</b> : null}</span>
+            <span style={fileViewerMetaStyle}>{typeLabel} · {sizeLabel}{file.live ? <b style={{ marginLeft: 6, color: "#23724d", fontSize: 9, letterSpacing: ".04em" }}>● LIVE</b> : null}</span>
           </div>
         </header>
       )}
@@ -911,6 +919,7 @@ function FileViewer({ file }: { file: WorkspaceFilePreview }) {
             locale={ko ? "ko" : "en"}
             fill
             placement="sidebar"
+            imageActions={file.viewerKind === "image"}
           />
         ) : isTextualViewerKind(file.viewerKind) && !file.content ? (
           /* ★내용이 없으면 **백지 대신 이유를 말한다.** 헤더만 뜨고 본문이 비어 있는
@@ -1023,6 +1032,7 @@ function FileContextMenu({
     fn();
     onClose();
   };
+  const isImage = file.viewerKind === "image";
   return (
     <div
       ref={menuRef}
@@ -1040,6 +1050,26 @@ function FileContextMenu({
         boxShadow: "0 14px 34px rgba(15, 23, 42, 0.18)",
       }}
     >
+      {isImage ? (
+        <>
+          <button
+            type="button"
+            role="menuitem"
+            style={contextMenuItemStyle}
+            onClick={() => run(() => { void window.agentlas.media.copyImage({ src: file.fileUrl, suggestedName: file.name }); })}
+          >
+            {ko ? "이미지 복사" : "Copy image"}
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            style={contextMenuItemStyle}
+            onClick={() => run(() => { void window.agentlas.media.saveImage({ src: file.fileUrl, suggestedName: file.name }); })}
+          >
+            {ko ? "다운로드" : "Download"}
+          </button>
+        </>
+      ) : null}
       <button
         type="button"
         role="menuitem"

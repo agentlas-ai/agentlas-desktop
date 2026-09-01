@@ -54,6 +54,14 @@ export interface RunnerRequest {
   runPriority?: import("./run-priority").RunPriority;
   /** 도구 사용 권한 — read(읽기) / write(편집) / full(셸·외부). 런타임 권한 모드로 매핑. */
   permission?: "read" | "write" | "full";
+  /** Main-authored graph dry-run marker. Runners may use a stricter isolated tool mode. */
+  simulation?: true;
+  /**
+   * Main-authored browser-only execution boundary. The model may use only the
+   * Agentlas-owned browser MCP; shell, arbitrary Playwright, filesystem and
+   * provider-native browser tools must be denied before execution.
+   */
+  browserOnly?: true;
   /**
    * Main이 Mobile 또는 무인 read 자동화에만 부여하는 격리 표식.
    * renderer/wire 입력에서 받지 않는다. 이 표식이 있으면 로컬 CLI·MCP·파일 도구를
@@ -158,6 +166,14 @@ export interface RunnerRequest {
    * 에이전트 스코프 능력 규칙(capability_grants)의 대상이 된다.
    */
   agentId?: string;
+  /**
+   * Internal session-slot identity when several runtime conversations belong
+   * to one visible chat and one agent (for example Taskforce planner, worker,
+   * verifier, and synthesis turns). This changes only the runtime-session
+   * storage key; capability, approval, and UI attribution continue to use
+   * `agentId`.
+   */
+  runtimeSessionOwnerId?: string;
   /** Firm/resolved-org node identity used only to map runtime lifecycle events back to the UI tree. */
   orchestrationAgentId?: string;
   /**
@@ -304,7 +320,7 @@ export interface RunnerEvents {
    * command/prose output. Main still opens and verifies every candidate before
    * it can reach One's Outputs rail.
    */
-  onTool?: (name: string, args?: string, result?: string, id?: string, isError?: boolean, artifactPaths?: readonly string[]) => void;
+  onTool?: (name: string, args?: string, result?: string, id?: string, isError?: boolean, artifactPaths?: readonly string[], imageDataUrl?: string) => void;
   /** 라이브 누적 출력 토큰 — 스트리밍 중 "N tokens" 실시간 표시용. 단조 증가 값(usage 실측 + 추정). 선택. */
   onUsage?: (tokens: number) => void;
   /**

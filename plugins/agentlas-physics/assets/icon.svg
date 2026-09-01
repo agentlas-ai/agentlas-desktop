@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Physics">
+  <rect width="128" height="128" rx="28" fill="#455A8E"/>
+  <circle cx="64" cy="64" r="8" fill="#F8FAFF"/>
+  <ellipse cx="64" cy="64" rx="42" ry="17" fill="none" stroke="#F8FAFF" stroke-width="6" transform="rotate(24 64 64)"/>
+  <ellipse cx="64" cy="64" rx="42" ry="17" fill="none" stroke="#F8FAFF" stroke-width="6" transform="rotate(96 64 64)"/>
+  <ellipse cx="64" cy="64" rx="42" ry="17" fill="none" stroke="#F8FAFF" stroke-width="6" transform="rotate(156 64 64)"/>
+</svg>

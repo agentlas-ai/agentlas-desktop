@@ -1,0 +1,62 @@
+{
+  "schema": "agentlas.economic-data.capabilities/v1",
+  "plugin": "agentlas-economic-data",
+  "provider": {
+    "id": "world-bank",
+    "name": "World Bank",
+    "product": "Indicators API",
+    "apiVersion": "v2",
+    "baseUrl": "https://api.worldbank.org/v2",
+    "documentationUrl": "https://datahelpdesk.worldbank.org/knowledgebase/articles/889392-about-the-indicators-api-documentation"
+  },
+  "authentication": {
+    "type": "none",
+    "apiKey": false,
+    "credentialsAccepted": false
+  },
+  "networkPolicy": {
+    "scheme": "https",
+    "host": "api.worldbank.org",
+    "port": 443,
+    "pathPrefix": "/v2/country/",
+    "redirects": "deny"
+  },
+  "requestPolicy": {
+    "method": "GET",
+    "format": "json",
+    "oneCountry": true,
+    "oneIndicator": true,
+    "page": { "minimum": 1, "maximum": 10000, "default": 1 },
+    "per_page": { "minimum": 1, "maximum": 1000, "default": 1000 },
+    "year": { "minimum": 1800, "maximum": 2200 },
+    "timeoutMs": { "minimum": 100, "maximum": 30000, "default": 10000 },
+    "retries": { "minimum": 0, "maximum": 3, "default": 2 },
+    "retryDelayMs": { "minimum": 0, "maximum": 10000, "default": 250 },
+    "rateIntervalMs": { "minimum": 0, "maximum": 60000, "default": 250 },
+    "responseBytes": { "minimum": 256, "maximum": 10485760, "default": 2097152 }
+  },
+  "countryCodes": {
+    "accepted": ["ISO-3166-alpha-2", "ISO-3166-alpha-3", "approved-World-Bank-aggregate"],
+    "approvedAggregates": [
+      "ARB", "CEB", "CSS", "EAP", "EAR", "EAS", "ECA", "ECS", "EMU", "EUU",
+      "FCS", "HIC", "HPC", "IBD", "IBT", "IDA", "IDB", "IDX", "LAC", "LCN",
+      "LDC", "LIC", "LMC", "LTE", "MEA", "MIC", "MNA", "NAC", "OED", "OSS",
+      "PRE", "PST", "SAS", "SSA", "SSF", "SST", "TEA", "TEC", "TLA", "TMN",
+      "TSA", "TSS", "UMC", "WLD"
+    ]
+  },
+  "normalization": {
+    "schema": "agentlas.economic-data.world-bank-indicator.v1",
+    "nullValuesPreserved": true,
+    "unknownProviderFieldsIgnored": true,
+    "duplicateDatesRejected": true,
+    "mixedSeriesRejected": true,
+    "observationOrder": "date-descending",
+    "rawBytesSha256": true,
+    "metadata": ["provider", "sourceId", "lastUpdated", "pagination", "unit", "decimals"]
+  },
+  "tools": [
+    "fetch_world_bank_indicator",
+    "describe_economic_data_capabilities"
+  ]
+}

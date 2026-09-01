@@ -56,7 +56,12 @@ const MAX_WALK_DEPTH = 6;
 
 type JsonRecord = Record<string, unknown>;
 
-const MEDIA_KEY_RE = /(?:^|[_-])(image|video|audio|media|thumbnail|poster|preview)(?:$|[_-])/iu;
+const MEDIA_KEY_RE = /(?:^|[_-])(image|video|audio|media|thumbnail|poster|preview|src)(?:$|[_-])/iu;
+// `preview_url` and `src` are also widely used for ordinary webpages. Treating
+// either word as proof of image bytes made generic Browser/Sites previews open
+// as broken image tabs. Only explicit media nouns may infer a kind without a
+// MIME type or a media filename extension; data: URLs remain byte-typed above.
+const EXPLICIT_MEDIA_KEY_RE = /(?:^|[_-])(image|video|audio|thumbnail|poster)(?:$|[_-])/iu;
 const FILE_KEY_RE = /(?:^|[_-])(?:file|document|spreadsheet|presentation|download|export)(?:$|[_-])/iu;
 const LINK_KEY_RE = /(?:^|[_-])(?:url|uri|href|link|edit|share|preview)(?:$|[_-])/iu;
 const JOB_KEY_RE = /(?:^|[_-])(?:job|task|request|operation)(?:[_-]?id)?$/iu;
@@ -97,7 +102,7 @@ function mediaKind(mime: string | undefined, url: string | undefined, hint: stri
   if (/\.(?:png|jpe?g|webp|gif|avif|svg)$/iu.test(lowerUrl)) return "image";
   if (/\.(?:mp4|webm|mov|m4v|mkv)$/iu.test(lowerUrl)) return "video";
   if (/\.(?:mp3|wav|ogg|m4a|aac|flac)$/iu.test(lowerUrl)) return "audio";
-  if (MEDIA_KEY_RE.test(hint)) {
+  if (EXPLICIT_MEDIA_KEY_RE.test(hint)) {
     if (/video|movie/iu.test(hint)) return "video";
     if (/audio|sound/iu.test(hint)) return "audio";
     return "image";
@@ -117,6 +122,17 @@ function dataUrl(mime: string | undefined, value: unknown): string | null {
   if (!mime || mime.includes("*") || (!mime.startsWith("image/") && !mime.startsWith("video/") && !mime.startsWith("audio/"))) return null;
   const encoded = canonicalBase64(nonEmptyString(value) ?? "");
   return encoded ? `data:${mime};base64,${encoded}` : null;
+}
+
+function safeInlineMediaUrl(value: unknown): { src: string; mime: string } | null {
+  const text = nonEmptyString(value);
+  if (!text || text.length > MAX_INLINE_DATA_URL_CHARS) return null;
+  const match = /^data:([a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+);base64,([A-Za-z0-9+/_=-]+)$/iu.exec(text);
+  if (!match) return null;
+  const mime = safeMime(match[1]);
+  if (!mime || (!mime.startsWith("image/") && !mime.startsWith("video/") && !mime.startsWith("audio/"))) return null;
+  const encoded = canonicalBase64(match[2]);
+  return encoded ? { src: `data:${mime};base64,${encoded}`, mime } : null;
 }
 
 function parseJsonCandidate(value: unknown): unknown {
@@ -165,6 +181,18 @@ function providerLooksLikeMcpTool(toolName: string | undefined): boolean {
   return /(?:^|[_:. -])mcp(?:$|[_:. -])/iu.test(name) || /^mcp__?/iu.test(name);
 }
 
+function isDisplayableMcpContentItem(value: unknown): boolean {
+  const type = nonEmptyString(record(value)?.type)?.toLowerCase();
+  return type === "text"
+    || type === "image"
+    || type === "inputimage"
+    || type === "video"
+    || type === "audio"
+    || type === "inputaudio"
+    || type === "resource"
+    || type === "resource_link";
+}
+
 /**
  * Parse the bounded string carried by `McpInvocationEvent.tool.result`.
  * Standard MCP content is preferred; structured provider payloads are only
@@ -209,6 +237,15 @@ export function parseMcpResult(raw: string | undefined | null, toolName?: string
   };
 
   const addUrl = (value: unknown, mime: string | undefined, label: string, hint: string, id: string) => {
+    const inline = safeInlineMediaUrl(value);
+    if (inline) {
+      const kind = mediaKind(inline.mime, undefined, hint);
+      if (kind) {
+        push({ id, kind, label, mimeType: inline.mime, source: "inline", src: inline.src }, `media:${inline.src.slice(0, 120)}`);
+        sawStructuredSignal = true;
+      }
+      return;
+    }
     const href = safeUrl(value);
     if (!href) {
       if (nonEmptyString(value)) warnings.push(`${label}: unsafe or unsupported URL omitted`);
@@ -229,6 +266,7 @@ export function parseMcpResult(raw: string | undefined | null, toolName?: string
     const item = record(value);
     if (!item || depth > MAX_WALK_DEPTH) return;
     const type = nonEmptyString(item.type)?.toLowerCase();
+    const mediaType = type === "inputimage" ? "image" : type === "inputaudio" ? "audio" : type;
     const mime = safeMime(item.mimeType ?? item.mime_type ?? item.mediaType ?? item.media_type ?? item.contentType ?? item.content_type);
     const label = displayLabel(item.name ?? item.filename ?? item.fileName ?? item.title, type === "image" ? "Image" : type === "video" ? "Video" : type === "audio" ? "Audio" : "MCP result");
     if (type === "text") {
@@ -240,10 +278,10 @@ export function parseMcpResult(raw: string | undefined | null, toolName?: string
       }
       return;
     }
-    if (type === "image" || type === "video" || type === "audio") {
-      const src = safeUrl(item.url ?? item.uri ?? item.href);
-      if (src) addUrl(src, mime ?? `${type}/*`, label, type, `media:${path}`);
-      else addInline(mime ?? `${type}/*`, item.data ?? item.blob ?? item.base64, label, type, `media:${path}`);
+    if (mediaType === "image" || mediaType === "video" || mediaType === "audio") {
+      const source = item.imageUrl ?? item.audioUrl ?? item.url ?? item.uri ?? item.href;
+      if (nonEmptyString(source)) addUrl(source, mime ?? `${mediaType}/*`, label, mediaType, `media:${path}`);
+      else addInline(mime ?? `${mediaType}/*`, item.data ?? item.blob ?? item.base64, label, mediaType, `media:${path}`);
       return;
     }
     if (type === "resource_link") {
@@ -288,7 +326,7 @@ export function parseMcpResult(raw: string | undefined | null, toolName?: string
     if (depth > MAX_WALK_DEPTH) return;
     if (Array.isArray(value)) {
       value.slice(0, MAX_BLOCKS).forEach((item, index) => {
-        if (record(item)?.type) visitContent(item, `${path}.${index}`, depth + 1);
+        if (isDisplayableMcpContentItem(item)) visitContent(item, `${path}.${index}`, depth + 1);
         else visitStructured(item, `${path}.${index}`, depth + 1);
       });
       return;
@@ -337,10 +375,22 @@ export function parseMcpResult(raw: string | undefined | null, toolName?: string
   }
 
   const parsed = parseJsonCandidate(raw ?? "");
+  // Claude's ToolSearch is provider control-plane discovery, not a tool
+  // result for the person. Its `tool_reference` objects used to be rendered as
+  // fake MCP result cards in every per-turn work row. Reject only this exact
+  // discovery envelope; ordinary structured MCP data remains displayable.
+  const providerDiscoveryItems = Array.isArray(parsed) ? parsed : [parsed];
+  if (
+    /^tool[_. -]*search$/iu.test(toolName?.trim() ?? "")
+    && providerDiscoveryItems.length > 0
+    && providerDiscoveryItems.every((item) => nonEmptyString(record(item)?.type)?.toLowerCase() === "tool_reference")
+  ) {
+    return { blocks: [], isMcpEnvelope: false, warnings: [] };
+  }
   const root = record(parsed);
   const standardContent = Array.isArray(root?.content)
     ? root.content
-    : Array.isArray(parsed) && parsed.some((item) => record(item)?.type)
+    : Array.isArray(parsed) && parsed.some(isDisplayableMcpContentItem)
       ? parsed
       : null;
   if (standardContent) {

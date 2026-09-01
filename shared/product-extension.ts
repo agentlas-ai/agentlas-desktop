@@ -131,6 +131,7 @@ export interface ProductExtensionViewBounds {
 
 export interface ProductExtensionViewStatus {
   id: string;
+  leaseId: string;
   state: "opening" | "ready" | "error" | "closed";
   title?: string;
   errorCode?: string;

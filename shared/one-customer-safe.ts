@@ -41,8 +41,13 @@ function redactLocalPaths(text: string, locale: OneSafeLocale): string {
   // 정본 사고): 이 치환이 이미지 src를 "[local path]" 로 바꿔 One 채팅의 캡처가
   // 항상 빈 박스로 렌더됐다. src는 텍스트로 보이는 경로가 아니라 <img> 로만
   // 쓰이므로, 경로 삭제는 이미지 밖 텍스트에만 적용한다.
+  // A model may use the equivalent link form `[name](/abs/image.png)` after
+  // opening an existing image. Preserve that local image target too: the
+  // renderer turns it into an opaque agentlas://localfile request and never
+  // exposes the path as customer copy. Non-image Markdown links and visible
+  // prose still go through absolute-path redaction.
   return text
-    .split(/(!\[[^\]\n]*\]\([^)\n]*\))/)
+    .split(/(!?\[[^\]\n]*\]\((?:file:\/\/|\/|[A-Za-z]:\\)[^)\n]*\.(?:png|jpe?g|gif|webp|avif|svg)(?:\s+"[^"]*")?\))/i)
     .map((segment, index) =>
       index % 2 === 1
         ? segment

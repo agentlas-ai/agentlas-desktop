@@ -15,6 +15,11 @@ import { isOneRecurrenceSelectionV1 } from "../../shared/one-recurrence";
 import { classifyToolFailure } from "../../shared/tool-failure";
 import { emitDesktopStoreChange } from "./change-bus";
 import { projectObservedTaskParticipantInDb } from "./task-participant-projection";
+import { redactOperationalSecrets } from "../invocation/event-secret-redaction";
+import type {
+  MobileBridgeOneArtifactDto,
+  MobileBridgeOneArtifactsPageDto,
+} from "../../shared/mobile-bridge";
 
 interface RunEventRow {
   id: string;
@@ -103,8 +108,6 @@ export interface RecordFailureEventInput {
   errorMessage: string;
   payload?: Record<string, unknown>;
 }
-
-const SECRET_RE = /(sk-[A-Za-z0-9_-]{12,}|api[_-]?key\s*[:=]\s*\S+|secret\s*[:=]\s*\S+|password\s*[:=]\s*\S+|token\s*[:=]\s*\S+|BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY)/gi;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -244,8 +247,33 @@ export function markScienceRuntimeOutboxDelivered(deliveryId: string): void {
 }
 
 function truncate(value: string, limit = 800): string {
-  const text = value.replace(SECRET_RE, "[redacted]");
+  const text = redactOperationalSecrets(value);
   return text.length > limit ? `${text.slice(0, limit)}...[truncated]` : text;
+}
+
+/** Redact structured browser/session credentials before a tool trace is durable. */
+export function sanitizeRunEventToolArgs(value: string): string {
+  const redactToolText = (text: string): string => redactOperationalSecrets(text)
+    .replaceAll("[redacted-secret]", "[redacted]")
+    .replace(/((?:["']?name["']?\s*:\s*["'][^"']{1,160}["'][\s\S]{0,160}?["']?value["']?\s*:\s*["']))[^"']*(["'])/gi, "$1[redacted]$2")
+    .replace(/((?:auth_token|ct0|access_token|refresh_token|session(?:id|_id|token)?|cookie|authorization)\s*[:=]\s*["']?)[^"'\s,;}]+/gi, "$1[redacted]");
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    const walk = (input: unknown): unknown => {
+      if (typeof input === "string") return redactToolText(input);
+      if (Array.isArray(input)) return input.map(walk);
+      if (!input || typeof input !== "object") return input;
+      return Object.fromEntries(Object.entries(input as Record<string, unknown>).map(([key, child]) => [
+        key,
+        /^(?:value|encrypted_value|authorization|cookie|set-cookie|access_token|refresh_token|auth_token|ct0)$/i.test(key)
+          ? "[redacted]"
+          : walk(child),
+      ]));
+    };
+    return redactToolText(JSON.stringify(walk(parsed)));
+  } catch {
+    return redactToolText(value);
+  }
 }
 
 function safePayload(input: Record<string, unknown> | undefined): Record<string, unknown> {
@@ -283,7 +311,7 @@ function safePayload(input: Record<string, unknown> | undefined): Record<string,
       continue;
     }
     if (key === "toolArgs" && typeof value === "string") {
-      out[key] = truncate(value, 2_000);
+      out[key] = truncate(sanitizeRunEventToolArgs(value), 2_000);
       continue;
     }
     if (key === "toolResultPreview" && typeof value === "string") {
@@ -312,15 +340,265 @@ function safePayload(input: Record<string, unknown> | undefined): Record<string,
   return out;
 }
 
+const OPERATIONAL_SECRET_FIELD_RE =
+  /^(?:authorization|proxyAuthorization|cookie|cookies|setCookie|session|sessionId|sessionToken)$/i;
+
+function redactPayloadValue(value: unknown, fieldName?: string): unknown {
+  if (fieldName && OPERATIONAL_SECRET_FIELD_RE.test(fieldName)) return "[redacted-secret]";
+  if (typeof value === "string") return redactOperationalSecrets(value);
+  if (Array.isArray(value)) return value.map((nested) => redactPayloadValue(nested));
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .map(([key, nested]) => [key, redactPayloadValue(nested, key)]),
+  );
+}
+
 function parsePayload(json: string): Record<string, unknown> {
   try {
     const parsed = JSON.parse(json);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? redactPayloadValue(parsed) as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Older run rows predate the renderer-safe content identity field. Recover it
+ * from the exact opaque binding so replay can collapse a repeated Read of the
+ * same immutable bytes without exposing a filesystem path.
+ */
+function enrichOneArtifactContentIdentity(payload: Record<string, unknown>): void {
+  if (!Array.isArray(payload.oneArtifacts)) return;
+  try {
+    const lookup = getDb().prepare(
+      `SELECT sha256 FROM one_artifact_bindings
+       WHERE task_id = ? AND chat_id = ? AND run_id = ? AND manifest_id = ? AND artifact_ref = ?
+       LIMIT 1`,
+    );
+    payload.oneArtifacts = payload.oneArtifacts.map((value) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+      const artifact = value as Record<string, unknown>;
+      const keys = ["taskId", "chatId", "runId", "manifestId", "artifactRef"] as const;
+      if (keys.some((key) => typeof artifact[key] !== "string" || !artifact[key])) return value;
+      const row = lookup.get(
+        artifact.taskId,
+        artifact.chatId,
+        artifact.runId,
+        artifact.manifestId,
+        artifact.artifactRef,
+      ) as { sha256?: string } | undefined;
+      return typeof row?.sha256 === "string" && /^[a-f0-9]{64}$/u.test(row.sha256)
+        ? { ...artifact, contentSha256: row.sha256 }
+        : value;
+    });
+  } catch {
+    // Stores from before the binding table existed keep their original rows.
+  }
+}
+
+const MOBILE_ONE_ARTIFACT_TYPES = new Set<MobileBridgeOneArtifactDto["type"]>([
+  "document", "spreadsheet", "image", "video", "audio", "archive", "data", "other",
+]);
+const MOBILE_ONE_ARTIFACT_CURSOR_RE = /^[A-Za-z0-9_-]{1,512}$/;
+
+interface MobileOneArtifactCursor {
+  rowId: number;
+  itemIndex: number;
+}
+
+interface MobileOneArtifactEventRow {
+  event_rowid: number;
+  payload_json: string;
+}
+
+/**
+ * Artifact binding identifiers are opaque authority keys, not display text.
+ * Running the generic event redactor over them can rewrite a legitimate id
+ * containing a token-shaped substring (for example `task-*` contains `sk-`),
+ * which makes the subsequent exact binding lookup fail. Parse this one narrow
+ * payload raw, then project only exact-bound identifiers and separately redact
+ * the human-facing label below.
+ */
+function parseMobileOneArtifactPayload(json: string): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(json);
     return parsed && typeof parsed === "object" && !Array.isArray(parsed)
       ? parsed as Record<string, unknown>
       : {};
   } catch {
     return {};
   }
+}
+
+function mobileOneArtifactCursorChatDigest(chatId: string): string {
+  return createHash("sha256").update(chatId, "utf8").digest("hex").slice(0, 24);
+}
+
+function encodeMobileOneArtifactCursor(chatId: string, cursor: MobileOneArtifactCursor): string {
+  return Buffer.from(JSON.stringify({
+    v: 1,
+    h: mobileOneArtifactCursorChatDigest(chatId),
+    r: cursor.rowId,
+    i: cursor.itemIndex,
+  }), "utf8").toString("base64url");
+}
+
+function decodeMobileOneArtifactCursor(chatId: string, value: string | null | undefined): MobileOneArtifactCursor {
+  if (value == null) return { rowId: 0, itemIndex: 0 };
+  if (!MOBILE_ONE_ARTIFACT_CURSOR_RE.test(value)) throw new TypeError("Invalid recent One artifact cursor");
+  try {
+    const json = Buffer.from(value, "base64url").toString("utf8");
+    const parsed: unknown = JSON.parse(json);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new TypeError("Invalid recent One artifact cursor");
+    }
+    const record = parsed as Record<string, unknown>;
+    if (
+      Object.keys(record).length !== 4
+      || record.v !== 1
+      || record.h !== mobileOneArtifactCursorChatDigest(chatId)
+      || !Number.isSafeInteger(record.r)
+      || Number(record.r) < 1
+      || !Number.isSafeInteger(record.i)
+      || Number(record.i) < 0
+      || Number(record.i) > 10_000
+    ) throw new TypeError("Invalid recent One artifact cursor");
+    const cursor = { rowId: Number(record.r), itemIndex: Number(record.i) };
+    if (encodeMobileOneArtifactCursor(chatId, cursor) !== value) {
+      throw new TypeError("Invalid recent One artifact cursor");
+    }
+    return cursor;
+  } catch (error) {
+    if (error instanceof TypeError && error.message === "Invalid recent One artifact cursor") throw error;
+    throw new TypeError("Invalid recent One artifact cursor");
+  }
+}
+
+/**
+ * Conversation-wide, cursor-paged artifact identities for Mobile reconnect.
+ * Each row is re-authorized against the exact Main binding table before it is
+ * projected; no filesystem path or preview capability is returned here.
+ */
+export function listRecentOneArtifactsForMobile(input: {
+  chatId: string;
+  limit?: number;
+  cursor?: string | null;
+}): MobileBridgeOneArtifactsPageDto {
+  if (
+    typeof input.chatId !== "string"
+    || input.chatId.length < 1
+    || input.chatId.length > 256
+    || /[\u0000-\u001f]/.test(input.chatId)
+  ) throw new TypeError("Invalid chat id");
+  const limit = Math.max(1, Math.min(100, Math.floor(Number(input.limit ?? 100))));
+  const start = decodeMobileOneArtifactCursor(input.chatId, input.cursor);
+  const eventRows = getDb().prepare(
+    `SELECT rowid AS event_rowid, payload_json
+       FROM run_events
+      WHERE chat_id = ? AND rowid >= ? AND instr(payload_json, '"oneArtifacts"') > 0
+      ORDER BY rowid ASC
+      LIMIT ?`,
+  );
+  const bindingLookup = getDb().prepare(
+    `SELECT bound_task_version, kind, size_bytes, sha256
+       FROM one_artifact_bindings
+      WHERE task_id = ? AND chat_id = ? AND run_id = ? AND manifest_id = ? AND artifact_ref = ?
+      LIMIT 1`,
+  );
+  const candidates: Array<{
+    artifact: MobileBridgeOneArtifactDto;
+    cursor: MobileOneArtifactCursor;
+  }> = [];
+  const seen = new Set<string>();
+  let scanRowId = Math.max(1, start.rowId);
+  let firstItemIndex = start.itemIndex;
+  const batchSize = 256;
+  for (let batch = 0; batch < 512 && candidates.length <= limit; batch += 1) {
+    const rows = eventRows.all(input.chatId, scanRowId, batchSize) as MobileOneArtifactEventRow[];
+    if (rows.length === 0) break;
+    for (const row of rows) {
+      const payload = parseMobileOneArtifactPayload(row.payload_json);
+      const artifacts = Array.isArray(payload.oneArtifacts) ? payload.oneArtifacts : [];
+      const itemStart = row.event_rowid === start.rowId ? firstItemIndex : 0;
+      for (let itemIndex = itemStart; itemIndex < artifacts.length; itemIndex += 1) {
+        const value = artifacts[itemIndex];
+        if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+        const artifact = value as Record<string, unknown>;
+        const identifier = (key: string): string | null => {
+          const candidate = artifact[key];
+          return typeof candidate === "string"
+            && candidate.length >= 1
+            && candidate.length <= 256
+            && !/[\u0000-\u001f]/.test(candidate)
+            ? candidate
+            : null;
+        };
+        const taskId = identifier("taskId");
+        const chatId = identifier("chatId");
+        const runId = identifier("runId");
+        const manifestId = identifier("manifestId");
+        const artifactRef = identifier("artifactRef");
+        const label = typeof artifact.label === "string"
+          ? truncate(redactOperationalSecrets(artifact.label), 512)
+          : "";
+        const type = artifact.type;
+        if (
+          !taskId || chatId !== input.chatId || !runId || !manifestId || !artifactRef
+          || !Number.isSafeInteger(artifact.taskVersion) || Number(artifact.taskVersion) < 1
+          || !label || /[\u0000-\u001f]/.test(label)
+          || typeof type !== "string" || !MOBILE_ONE_ARTIFACT_TYPES.has(type as MobileBridgeOneArtifactDto["type"])
+          || (artifact.sizeBytes !== undefined && (!Number.isSafeInteger(artifact.sizeBytes) || Number(artifact.sizeBytes) < 0))
+        ) continue;
+        const binding = bindingLookup.get(taskId, chatId, runId, manifestId, artifactRef) as {
+          bound_task_version?: number;
+          kind?: string;
+          size_bytes?: number;
+          sha256?: string;
+        } | undefined;
+        if (
+          !binding
+          || binding.bound_task_version !== artifact.taskVersion
+          || binding.kind !== type
+          || !Number.isSafeInteger(binding.size_bytes)
+          || Number(binding.size_bytes) < 0
+          || (artifact.sizeBytes !== undefined && binding.size_bytes !== artifact.sizeBytes)
+          || typeof binding.sha256 !== "string"
+          || !/^[a-f0-9]{64}$/.test(binding.sha256)
+        ) continue;
+        const bindingKey = `${runId}\u0000${artifactRef}`;
+        if (!seen.add(bindingKey)) continue;
+        candidates.push({
+          artifact: {
+            taskId,
+            taskVersion: Number(artifact.taskVersion),
+            chatId,
+            runId,
+            manifestId,
+            artifactRef,
+            label,
+            type: type as MobileBridgeOneArtifactDto["type"],
+            sizeBytes: Number(binding.size_bytes),
+            contentSha256: binding.sha256,
+          },
+          cursor: { rowId: row.event_rowid, itemIndex },
+        });
+        if (candidates.length > limit) break;
+      }
+      if (candidates.length > limit) break;
+    }
+    if (candidates.length > limit || rows.length < batchSize) break;
+    scanRowId = rows[rows.length - 1].event_rowid + 1;
+    firstItemIndex = 0;
+  }
+  const next = candidates.length > limit ? candidates[limit] : null;
+  return {
+    schemaVersion: 1,
+    items: candidates.slice(0, limit).map((candidate) => candidate.artifact),
+    nextCursor: next ? encodeMobileOneArtifactCursor(input.chatId, next.cursor) : null,
+  };
 }
 
 function nextSeq(runId: string): number {
@@ -343,6 +621,7 @@ function runRowToUi(row: RunEventRow): RunEventUi {
   // API, never through runLedger.events.
   if (row.kind === ONE_SURFACE_SNAPSHOT_EVENT_KIND) delete payload.oneSurfaceJson;
   if (row.kind === ONE_DOMAIN_EVENT_KIND) delete payload.oneDomainEventJson;
+  enrichOneArtifactContentIdentity(payload);
   return {
     id: row.id,
     runId: row.run_id,
@@ -380,7 +659,9 @@ function failureRowToUi(row: FailureEventRow): FailureEventUi {
     agentId: row.agent_id ?? undefined,
     errorCode: failureCode ?? row.error_code ?? undefined,
     ...(failureCode ? { failureCode } : {}),
-    errorMessage: row.error_message,
+    // Legacy rows can predate the current write-side sanitizer. Never project
+    // their raw diagnostic message back into a renderer or bridge.
+    errorMessage: redactOperationalSecrets(row.error_message),
     payload,
   };
 }
@@ -1088,6 +1369,12 @@ export function getInvocationRunReceipt(runId: string): InvocationRunReceipt | n
   const failure = getDb()
     .prepare("SELECT * FROM failure_events WHERE run_id = ? ORDER BY datetime(ts) DESC, rowid DESC LIMIT 1")
     .get(runId) as FailureEventRow | undefined;
+  // Tool/runtime attempts may fail and recover inside a successful run. Keep
+  // those rows in failure_events for diagnostics and learning, but never
+  // project the most recent non-terminal attempt as the completed run's
+  // terminal error. A receipt carries failure copy only when the run itself
+  // did not complete.
+  const terminalFailure = status === "completed" ? undefined : failure;
 
   // 표시=실행 (계약 7-C-8 / C-D-1): 이 실행이 실제로 돈 모델은 원장의
   // final/invoke_result 행에만 있다. 설정의 "현재 기본값"은 과거 실행의
@@ -1107,6 +1394,26 @@ export function getInvocationRunReceipt(runId: string): InvocationRunReceipt | n
     }
   }
 
+  // `hasImages` started as an invocation-input hint, but a completed One run
+  // can create an image without receiving one. The Main-owned artifact ledger
+  // is the authoritative output proof; projecting only the start payload made
+  // completed image-generation runs claim `hasImages:false` even while their
+  // sealed image was visible in chat and the Result rail.
+  let hasBoundImage = false;
+  try {
+    hasBoundImage = Boolean(getDb()
+      .prepare(
+        `SELECT 1
+           FROM one_artifact_bindings
+          WHERE run_id = ? AND kind = 'image'
+          LIMIT 1`,
+      )
+      .get(runId));
+  } catch {
+    // Stores predating the artifact table retain the invocation-input value.
+  }
+  const hasImages = startPayload.hasImages === true || hasBoundImage;
+
   return {
     runId,
     chatId: start.chat_id ?? stringPayload(startPayload, "chatId") ?? "",
@@ -1116,7 +1423,7 @@ export function getInvocationRunReceipt(runId: string): InvocationRunReceipt | n
     ...(terminal ? { finishedAt: terminal.ts } : {}),
     eventCount: rows.length,
     ...(settledPayload ? { resultFolder: stringPayload(settledPayload, "resultFolder") } : {}),
-    ...(typeof startPayload.hasImages === "boolean" ? { hasImages: startPayload.hasImages } : {}),
+    ...(typeof startPayload.hasImages === "boolean" || hasBoundImage ? { hasImages } : {}),
     ...(stringArrayPayload(startPayload, "borrowAgents")
       ? { borrowAgents: stringArrayPayload(startPayload, "borrowAgents") }
       : {}),
@@ -1127,10 +1434,10 @@ export function getInvocationRunReceipt(runId: string): InvocationRunReceipt | n
       ? { executionPermission: executionPermissionPayload(startPayload) }
       : {}),
     ...(executedModel ? { model: executedModel } : {}),
-    ...(failure?.error_code ? { errorCode: failure.error_code } : {}),
-    ...(failure?.error_message
-      ? { errorMessage: failure.error_message }
-      : stringPayload(terminalPayload, "errorMessage")
+    ...(terminalFailure?.error_code ? { errorCode: terminalFailure.error_code } : {}),
+    ...(terminalFailure?.error_message
+      ? { errorMessage: terminalFailure.error_message }
+      : status !== "completed" && stringPayload(terminalPayload, "errorMessage")
         ? { errorMessage: stringPayload(terminalPayload, "errorMessage") }
         : {}),
   };

@@ -101,6 +101,27 @@ export function ChatQuestionSheet({
     setActive(active + 1);
   };
 
+  const submitFreeText = (freeText: string) => {
+    const answer = freeText.trim();
+    if (!answer) {
+      skip();
+      return;
+    }
+    // Do not wait for setNotes() before submitting the last question: React
+    // state updates are batched, so the old hasAnyAnswer value would make an
+    // Enter press silently look like a skipped/empty answer.
+    if (isLast && !busy) {
+      const nextNotes = { ...notes, [q.id]: answer };
+      const nextSelected = !q.multiSelect ? { ...selected, [q.id]: [] } : selected;
+      const nextComposed = composeQuestionReply(questions, nextSelected, nextNotes, ko);
+      if (nextComposed.reply.trim()) onConfirm(nextComposed.reply, nextComposed.perQuestion);
+      return;
+    }
+    setNotes((prev) => ({ ...prev, [q.id]: answer }));
+    if (!q.multiSelect) setSelected((prev) => ({ ...prev, [q.id]: [] }));
+    next();
+  };
+
   const pick = (label: string) => {
     if (!q.multiSelect) {
       setNotes((prev) => ({ ...prev, [q.id]: "" }));
@@ -168,13 +189,7 @@ export function ChatQuestionSheet({
             ? (ko ? "실행이 정리되면 전송" : "Sends when settled")
             : (ko ? "건너뛰기" : "Skip"),
           onSkip: (freeText) => {
-            if (freeText) {
-              setNotes((prev) => ({ ...prev, [q.id]: freeText }));
-              if (!q.multiSelect) setSelected((prev) => ({ ...prev, [q.id]: [] }));
-              next();
-              return;
-            }
-            skip();
+            submitFreeText(freeText);
           },
         }}
       />

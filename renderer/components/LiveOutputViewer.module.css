@@ -100,3 +100,38 @@
   font-size: 11px;
   text-align: center;
 }
+
+.imageActionShell { min-width: 0; position: relative; display: grid; gap: 7px; }
+.imageActionShell[data-fill="true"] { width: 100%; }
+.imageActionBar { min-width: 0; min-height: 28px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.imageActionBar button {
+  min-height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--design-line);
+  border-radius: 999px;
+  background: var(--design-bg);
+  color: var(--design-ink);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+.imageActionBar button:hover, .imageActionBar button:focus-visible { border-color: var(--design-accent); outline: none; }
+.imageActionBar button:disabled { cursor: wait; opacity: .58; }
+.imageActionBar span { color: var(--design-muted); font-size: 10px; }
+.imageActionBar span[data-error="true"] { color: var(--design-danger); }
+.imageContextMenu {
+  position: fixed;
+  z-index: 180;
+  width: min(164px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow: auto;
+  display: grid;
+  gap: 2px;
+  padding: 6px;
+  border: 1px solid var(--design-line);
+  border-radius: 8px;
+  background: var(--design-bg);
+  box-shadow: 0 14px 34px rgba(15, 23, 42, .18);
+}
+.imageContextMenu button { min-height: 32px; padding: 0 9px; border: 0; border-radius: 6px; background: transparent; color: var(--design-ink); font: inherit; font-size: 11px; text-align: left; cursor: pointer; }
+.imageContextMenu button:hover, .imageContextMenu button:focus-visible { background: var(--design-panel-muted); outline: none; }

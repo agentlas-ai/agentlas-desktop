@@ -336,6 +336,13 @@ function runKimiProcess(
 export const runKimi: Runner = async (req, events): Promise<RunnerResult> => {
   // Kimi prompt mode exposes built-in file/shell tools and currently has no
   // verified zero-tool switch. Do not widen browser or restricted-read authority.
+  if (req.browserOnly) {
+    throw new Error(
+      req.locale === "ko"
+        ? "Kimi Code는 Agentlas Browser 전용 실행 경계를 강제할 수 없어, 다른 런타임으로 안전하게 다시 선택해야 합니다."
+        : "Kimi Code cannot enforce the Agentlas Browser-only boundary; select another runtime safely.",
+    );
+  }
   if (req.untrustedNoTools || req.restrictedReadBoundary) {
     // 표식을 단다 — 판정이 전멸했을 때 "기다리면 풀리는 사유"와 구분되어야 한다.
     throw new RuntimeJudgmentRefusal("kimi", req.locale === "ko"
@@ -350,10 +357,14 @@ export const runKimi: Runner = async (req, events): Promise<RunnerResult> => {
 
   const staged = await stageCliImageAttachments(req);
   const runReq = { ...req, userPrompt: staged.userPrompt };
+  const runtimeSessionOwnerId = runReq.runtimeSessionOwnerId ?? runReq.agentId;
+  const isolateRuntimeSessionOwner = runReq.runtimeSessionOwnerId != null;
   const fingerprint = runReq.chatId ? systemFingerprint(runReq) : null;
-  const saved = runReq.chatId ? getRuntimeSession(runReq.chatId, KIND, runReq.agentId) : null;
+  const saved = runReq.chatId
+    ? getRuntimeSession(runReq.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner })
+    : null;
   if (saved && fingerprint && saved.fingerprint !== fingerprint && runReq.chatId) {
-    clearRuntimeSession(runReq.chatId, KIND, runReq.agentId);
+    clearRuntimeSession(runReq.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner });
   }
   const storedSessionId = saved && fingerprint && saved.fingerprint === fingerprint ? saved.sessionId : null;
   const resumeSessionId = runReq.runtimeSessionId ?? storedSessionId;
@@ -403,7 +414,7 @@ export const runKimi: Runner = async (req, events): Promise<RunnerResult> => {
   if (result.code === 0) {
     const nextSessionId = result.sessionId ?? resumeSessionId ?? undefined;
     if (runReq.chatId && fingerprint && nextSessionId) {
-      if (!saveRuntimeSession(runReq.chatId, KIND, nextSessionId, fingerprint, { agentId: runReq.agentId })) {
+      if (!saveRuntimeSession(runReq.chatId, KIND, nextSessionId, fingerprint, { agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner })) {
         events.onStatus(`[runtime-session] store_failed kind=${KIND}`);
       }
     }
@@ -417,7 +428,7 @@ export const runKimi: Runner = async (req, events): Promise<RunnerResult> => {
   if (resumeSessionId && runReq.chatId) {
     // Interactive recovery preserves the same Agentlas chat and seeds a fresh
     // provider session from its complete durable history.
-    clearRuntimeSession(runReq.chatId, KIND, runReq.agentId);
+    clearRuntimeSession(runReq.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner });
     events.onStatus(runReq.locale === "ko" ? "대화 기록을 그대로 유지해 다시 연결하는 중..." : "Reconnecting while preserving this conversation...");
     return runKimi({ ...runReq, runtimeSessionId: undefined }, events);
   }

@@ -1,18 +1,7 @@
-// `agentlasd` — Electron 없이 도는 Agentlas 호스트 프로세스.
-//
-// ★무엇을 위한 것인가 (docs/DAEMON-ARCHITECTURE-DESIGN §6 Phase 1).
-// 지금은 데스크탑 앱이 켜져 있어야만 실행·자동화·모바일 브리지가 산다. 앱을 닫으면
-// 예약된 자동화도, 폰에서 보낸 요청도 갈 곳이 없다. 그 상태를 끝내려면 store 와
-// 러너를 **GUI 없는 프로세스**가 소유해야 한다.
-//
-// 이 파일은 그 프로세스의 진입점이고, 지금 단계에서 하는 일은 **경계를 증명하는 것**이다:
-//   1. Electron 없이 사용자 데이터 경로를 정한다(runtime-paths 주입).
-//   2. store 를 연다 — 여기까지 오면 "데몬이 DB 를 열 수 있다" 가 실증된다.
-//   3. 종료 신호를 호스트 정리 계약에 연결한다(host-lifecycle).
-//
-// 아직 하지 않는 것: 제어 서버(Phase 2), 터미널 클라이언트(Phase 3), 자동 시작(Phase 4).
-// 그것들은 이 세 가지가 실제로 도는 것을 확인한 뒤에 얹는다 — 순서를 바꾸면
-// "데몬이 떴다" 는 로그만 있고 DB 는 못 여는 상태를 발견하지 못한다.
+// `agentlasd` — Agentlas Desktop이 켜져 있는 동안만 함께 도는 내부 호스트 헬퍼.
+// 이름은 기존 제어면 호환을 위해 유지하지만 독립 제품이나 OS 서비스가 아니다.
+// Desktop 부모 PID를 필수로 받고, 정상 종료·크래시 어느 쪽이든 부모가 끝나면
+// 제어 소켓, 모바일 브리지, 로컬 자식 프로세스를 정리한 뒤 함께 종료한다.
 //
 // ★실행 방법 — **Electron 의 node 로 돈다**(GUI 없음):
 //     ELECTRON_RUN_AS_NODE=1 electron dist/electron/daemon/main.js
@@ -86,6 +75,8 @@ function daemonVersion(): string {
 }
 
 let controlSocket: ControlSocketHandle | null = null;
+let desktopParentPid: number | null = null;
+let desktopParentWatch: NodeJS.Timeout | null = null;
 
 /*
  * ★웜 프로세스 풀 (Phase 5). 데몬이 CLI 프로세스를 붙들었다가 다음 턴에 재사용하는
@@ -100,6 +91,65 @@ let controlSocket: ControlSocketHandle | null = null;
  */
 const processPool = new WarmProcessPool();
 
+/*
+ * Exactly one app-scoped process may own the physical Mobile Bridge listener
+ * for a user-data directory. Desktop claims a pid-bound lease so its Settings
+ * IPC and bridge state events stay authoritative. A dead Desktop parent causes
+ * the entire helper to shut down; it never restores service after app exit.
+ */
+let mobileBridgeLeaseOwnerPid: number | null = null;
+let mobileBridgeLeaseWatch: NodeJS.Timeout | null = null;
+let mobileBridgeStartPromise: Promise<void> | null = null;
+let mobileBridgeRecoveryFailureLogged = false;
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code !== "ESRCH";
+  }
+}
+
+function startDaemonMobileBridge(): Promise<void> {
+  if (mobileBridgeLeaseOwnerPid !== null) return Promise.resolve();
+  if (mobileBridgeStartPromise) return mobileBridgeStartPromise;
+  mobileBridgeStartPromise = (async () => {
+    const { mobileBridgeRuntimeStatus, startAgentlasMobileBridge } =
+      await import("../mobile-bridge/runtime");
+    // The owner can change while the dynamic import is resolving. Never race a
+    // late daemon start against a Desktop that already received the lease.
+    if (mobileBridgeLeaseOwnerPid !== null || mobileBridgeRuntimeStatus().running) return;
+    await startAgentlasMobileBridge({ userDataPath: userDataDir(), appVersion: daemonVersion() });
+    mobileBridgeRecoveryFailureLogged = false;
+  })().finally(() => {
+    mobileBridgeStartPromise = null;
+  });
+  return mobileBridgeStartPromise;
+}
+
+function ensureMobileBridgeLeaseWatch(): void {
+  if (mobileBridgeLeaseWatch) return;
+  mobileBridgeLeaseWatch = setInterval(() => {
+    const ownerPid = mobileBridgeLeaseOwnerPid;
+    if (ownerPid !== null && processIsAlive(ownerPid)) return;
+    if (ownerPid !== null) {
+      mobileBridgeLeaseOwnerPid = null;
+      console.warn(`[agentlasd] Desktop Mobile Bridge owner ${ownerPid} exited; restoring daemon listener`);
+    }
+    // Also repairs a failed graceful release/start. A one-shot restart left the
+    // daemon as nominal owner with no listener forever; the bounded interval
+    // keeps retrying while coalescing overlapping starts.
+    void startDaemonMobileBridge().catch((error) => {
+      if (!mobileBridgeRecoveryFailureLogged) {
+        mobileBridgeRecoveryFailureLogged = true;
+        console.error("[agentlasd] Mobile Bridge recovery failed; retrying:", error);
+      }
+    });
+  }, 1_000);
+  mobileBridgeLeaseWatch.unref?.();
+}
+
 /**
  * 제어 소켓의 메서드 처리. **터미널이 실제로 필요로 하는 것부터** 연다 —
  * 쓰이지 않을 메서드를 미리 만드는 것은 배선이 아니라 선언이다.
@@ -107,10 +157,13 @@ const processPool = new WarmProcessPool();
 async function handleControlMethod(method: string, params: unknown): Promise<unknown> {
   if (method === "daemon.ping") {
     const { openedStorePath } = await import("../store/db");
+    const { mobileBridgeRuntimeStatus } = await import("../mobile-bridge/runtime");
+    const mobileBridge = mobileBridgeRuntimeStatus();
     return {
       ok: true,
       version: daemonVersion(),
       pid: process.pid,
+      parentPid: desktopParentPid,
       // ★어느 DB 를 열었는지 말한다. 터미널은 `AGENTLAS_STORE_PATH` 로 사본을 열 수 있는데
       //   그 값은 이 프로세스까지 오지 않는다 — 서로 다른 DB 를 보면서 일을 주고받으면
       //   한쪽은 사본에, 다른 쪽은 라이브에 쓰는 상태가 조용히 성립한다. 넘기기 전에
@@ -121,7 +174,56 @@ async function handleControlMethod(method: string, params: unknown): Promise<unk
       warmIdle: processPool.idleCount(),
       // 상주 관측 — 이 프로세스가 들고 있는 에이전트 수(자세한 목록은 agents.residency).
       residentAgents: agentResidencySnapshot().holding,
+      mobileBridge: {
+        owner: mobileBridgeLeaseOwnerPid === null ? "daemon" : "desktop",
+        ownerPid: mobileBridgeLeaseOwnerPid ?? process.pid,
+        running: mobileBridge.running,
+        endpoint: mobileBridge.endpoint,
+      },
     };
+  }
+  if (method === "mobileBridge.claim") {
+    const ownerPid = Number((params as { ownerPid?: unknown } | null)?.ownerPid);
+    if (!Number.isSafeInteger(ownerPid) || ownerPid <= 1 || !processIsAlive(ownerPid)) {
+      throw new Error("mobileBridge.claim requires a live owner pid");
+    }
+    const existingOwner = mobileBridgeLeaseOwnerPid;
+    if (existingOwner !== null && existingOwner !== ownerPid && processIsAlive(existingOwner)) {
+      throw new Error(`Mobile Bridge is already leased to Desktop pid ${existingOwner}`);
+    }
+    mobileBridgeLeaseOwnerPid = ownerPid;
+    ensureMobileBridgeLeaseWatch();
+    const { mobileBridgeRuntimeStatus, stopAgentlasMobileBridge } =
+      await import("../mobile-bridge/runtime");
+    try {
+      await stopAgentlasMobileBridge();
+    } catch (error) {
+      // A failed claim must not strand ownership on a live Desktop that never
+      // received the lease. Roll back first; the watcher provides further
+      // retries if immediate daemon restoration also fails.
+      if (mobileBridgeLeaseOwnerPid === ownerPid) mobileBridgeLeaseOwnerPid = null;
+      await startDaemonMobileBridge().catch((restoreError) => {
+        console.error("[agentlasd] Mobile Bridge claim rollback failed; retrying:", restoreError);
+      });
+      throw error;
+    }
+    return {
+      ok: true,
+      ownerPid,
+      daemonBridgeRunning: mobileBridgeRuntimeStatus().running,
+    };
+  }
+  if (method === "mobileBridge.release") {
+    const ownerPid = Number((params as { ownerPid?: unknown } | null)?.ownerPid);
+    if (!Number.isSafeInteger(ownerPid) || ownerPid <= 1) {
+      throw new Error("mobileBridge.release requires an owner pid");
+    }
+    if (mobileBridgeLeaseOwnerPid !== ownerPid) {
+      throw new Error("Mobile Bridge lease owner does not match");
+    }
+    mobileBridgeLeaseOwnerPid = null;
+    await startDaemonMobileBridge();
+    return { ok: true, ownerPid: null };
   }
   if (method === "agents.residency") {
     /*
@@ -138,10 +240,8 @@ async function handleControlMethod(method: string, params: unknown): Promise<unk
     /*
      * ★상주는 "앱이 켜져 있는 동안"이다 — 오너 규칙(2026-08-20).
      *
-     * 데몬은 앱보다 오래 산다(그게 존재 이유다). 하지만 데몬이 붙들고 있는 상주 CLI 는
-     * 앱이 나가는 순간 함께 놓는다: 남겨서 얻는 것(다음 앱 실행의 첫 턴이 조금 빠른 것)
-     * 보다 사용자 머신에 살아 있는 LLM 프로세스가 쌓이는 위험이 크다는 판단이다.
-     * 데몬 자신은 죽지 않는다 — 예약 자동화는 계속 돌아야 하므로 세션만 놓는다.
+     * 헬퍼와 상주 CLI 모두 Desktop 앱 수명에 묶인다. 이 메서드는 앱 종료 전 정리나
+     * 업데이트 교체 중 상주 세션만 먼저 놓아야 할 때 쓰는 멱등 경계다.
      * 연속성은 손실되지 않는다: 다음 턴은 지금처럼 세션 id + 히스토리로 이어진다.
      */
     const { agentResidencySnapshot: snapshot, disposeAgentResidency } =
@@ -159,6 +259,10 @@ async function handleControlMethod(method: string, params: unknown): Promise<unk
      * 종료 경로(shutdown hooks → 풀 dispose → exit)를 그대로 돈다. 응답을 먼저 쓰고
      * 다음 틱에 죽는다 — 그래야 요청자가 "부탁이 접수됐다"를 안다.
      */
+    const requestedParentPid = Number((params as { parentPid?: unknown } | null)?.parentPid);
+    if (desktopParentPid !== null && requestedParentPid !== desktopParentPid) {
+      throw new Error("daemon.shutdown owner mismatch");
+    }
     setTimeout(() => performShutdown("daemon.shutdown rpc"), 50).unref?.();
     return { ok: true, pid: process.pid, version: daemonVersion() };
   }
@@ -229,6 +333,14 @@ function performShutdown(reason: string): void {
     clearInterval(keepAlive);
     keepAlive = null;
   }
+  if (mobileBridgeLeaseWatch) {
+    clearInterval(mobileBridgeLeaseWatch);
+    mobileBridgeLeaseWatch = null;
+  }
+  if (desktopParentWatch) {
+    clearInterval(desktopParentWatch);
+    desktopParentWatch = null;
+  }
   // 정리가 끝난 뒤에만 나간다. 여기서 즉시 exit 하면 자식 트리 킬이 잘린다.
   process.exit(0);
 }
@@ -244,8 +356,22 @@ export async function startDaemon(): Promise<void> {
   const dir = resolveDaemonUserDataDir();
   fs.mkdirSync(dir, { recursive: true });
   setUserDataDir(dir);
+  const rawParentPid = Number(process.env.AGENTLAS_DESKTOP_PARENT_PID);
+  if (!Number.isSafeInteger(rawParentPid) || rawParentPid <= 1) {
+    throw new Error("agentlasd requires a live Desktop parent pid");
+  }
+  desktopParentPid = rawParentPid;
+  if (!processIsAlive(desktopParentPid)) {
+    throw new Error("Desktop parent exited before agentlasd startup");
+  }
   installSignalHandlers();
   console.log(`[agentlasd] user data: ${userDataDir()}`);
+  desktopParentWatch = setInterval(() => {
+    const ownerPid = desktopParentPid;
+    if (ownerPid !== null && !processIsAlive(ownerPid)) {
+      performShutdown("Desktop parent exited");
+    }
+  }, 500);
 
   // store 를 여는 것이 이 단계의 증명이다 — 열리면 Electron 없이 DB 를 소유할 수 있다.
   // 마이그레이션 권위는 Phase 0 에서 이미 하나로 정리했고, 스키마가 낮으면 이 경로는
@@ -256,17 +382,14 @@ export async function startDaemon(): Promise<void> {
   console.log("[agentlasd] store ready");
 
   /*
-   * ★모바일 브리지 — Phase 2 의 첫 조각이자, 데몬이 존재하는 이유 그 자체.
-   *
-   * 지금은 데스크탑 앱이 켜져 있어야만 폰에서 보낸 요청이 도착한다. 앱을 닫으면
-   * 브리지도 함께 죽는다. 이 서버가 데몬 안에서 돌면 창 없이도 폰이 붙는다.
+   * ★모바일 브리지 — Desktop 앱 수명 안에서만 내부 헬퍼와 GUI가 단일 리스너를
+   * 교대 소유한다. 앱이 완전히 종료되면 브리지도 함께 종료된다.
    *
    * 새 프로토콜을 만들지 않는다 — 이미 60개 메서드 계약(invoke/chats/projects/
    * automations/runtime/build)이 모바일용으로 살아 있고, 기획서가 데몬 제어면으로
    * 그걸 재사용하기로 정했다. 페어링·TLS·리플레이 방지가 이미 그 안에 있다.
    *
-   * 실패해도 데몬은 산다: 브리지가 못 떠도 store 는 열려 있고 자동화는 돈다.
-   * 여기서 죽으면 폰이 안 붙는 것보다 나쁜 일이 된다.
+   * 브리지 시작 실패는 다른 Desktop 기능을 막지 않는다.
    */
   /*
    * ★로컬 제어 소켓 — 같은 머신의 터미널·데스크탑이 데몬에 일을 시키는 문(Phase 3).
@@ -279,6 +402,7 @@ export async function startDaemon(): Promise<void> {
    * 같은 사용자의 CLI 한 줄에 그 절차를 요구하면 아무도 안 쓰고, 그러면 벤더 사본이
    * 영원히 남는다. 경계는 파일 권한이 맡는다(control-socket.ts 주석 참조).
    */
+  ensureMobileBridgeLeaseWatch();
   try {
     const socket = await startControlSocket(dir, { handle: handleControlMethod });
     controlSocket = socket;
@@ -289,15 +413,14 @@ export async function startDaemon(): Promise<void> {
   }
 
   try {
-    const { startAgentlasMobileBridge } = await import("../mobile-bridge/runtime");
-    await startAgentlasMobileBridge({ userDataPath: userDataDir(), appVersion: daemonVersion() });
+    await startDaemonMobileBridge();
     console.log("[agentlasd] mobile bridge ready");
   } catch (error) {
     console.error("[agentlasd] mobile bridge failed to start:", error);
   }
 
   /*
-   * ★살아 있어야 데몬이다 — 그리고 살아 있는 동안 **치운다**.
+   * ★Desktop 부모가 살아 있는 동안만 헬퍼 이벤트 루프를 유지하고 정리한다.
    *
    * 실측 2026-08-19: keepAlive 인터벌이 없을 때 데몬은 store 를 열고 "ready" 를 찍은 뒤
    * 스스로 종료했다(이벤트 루프에 붙잡을 것이 없으면 Node 는 그냥 나간다). 이 인터벌은

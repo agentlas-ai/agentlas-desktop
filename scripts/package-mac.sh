@@ -4,6 +4,8 @@ set -euo pipefail
 project_dir="$(pwd)"
 signing_dir="${AGENTLAS_SIGNING_DIR:-signing}"
 local_release="${TMPDIR:-/tmp}/agentlas-desktop-release-$$"
+source_package_snapshot="${TMPDIR:-/tmp}/agentlas-desktop-package-$$.json"
+source_package_snapshot_ready=0
 cleaner_pid=""
 dmg_signing_keychain=""
 dmg_signing_identity=""
@@ -78,6 +80,53 @@ remove_sealed_tree() {
   rm -rf -- "$target"
 }
 
+restore_source_package_metadata_if_builder_transform() {
+  [[ "$source_package_snapshot_ready" == "1" && -f "$source_package_snapshot" ]] || return 0
+  if cmp -s "$source_package_snapshot" "$project_dir/package.json"; then
+    return 0
+  fi
+
+  # electron-builder serializes a production-only package.json by removing
+  # development fields and applying extraMetadata. A failed/aborted packaging
+  # pass must not leave that transformed file in the source checkout. Restore
+  # only when the current JSON is exactly that known transformation; any other
+  # edit may belong to a concurrent developer and must remain untouched.
+  if ! node - "$source_package_snapshot" "$project_dir/package.json" <<'NODE'
+const fs = require("node:fs");
+const [snapshotPath, currentPath] = process.argv.slice(2);
+const expected = JSON.parse(fs.readFileSync(snapshotPath, "utf8"));
+const current = JSON.parse(fs.readFileSync(currentPath, "utf8"));
+for (const key of Object.keys(expected)) {
+  if (key.startsWith("_") || [
+    "dist", "gitHead", "build", "jspm", "ava", "xo", "nyc",
+    "eslintConfig", "contributors", "bundleDependencies", "tags",
+    "scripts", "keywords", "devDependencies",
+  ].includes(key)) delete expected[key];
+}
+expected.agentlasInstallIdentity = {
+  schemaVersion: 1,
+  channel: "official",
+  appId: "com.agentlas.desktop",
+  appName: "Agentlas",
+  userDataNamespace: "Agentlas",
+  keychainService: "com.agentlas.desktop",
+  updateFeed: "official",
+};
+process.exit(JSON.stringify(expected) === JSON.stringify(current) ? 0 : 1);
+NODE
+  then
+    echo "Source package.json changed during packaging and is not the exact electron-builder transform; refusing to overwrite it." >&2
+    return 1
+  fi
+
+  cp -p "$source_package_snapshot" "$project_dir/package.json"
+  cmp -s "$source_package_snapshot" "$project_dir/package.json" || {
+    echo "Could not restore source package.json after electron-builder transformed it." >&2
+    return 1
+  }
+  echo "[package-mac] restored source package.json after electron-builder production transform"
+}
+
 if [[ "${1:-}" == "--clean-local-output" ]]; then
   local_candidate_output="$project_dir/release-local"
   [[ "$local_candidate_output" == "$project_dir/release-local" ]] || {
@@ -99,9 +148,14 @@ cleanup() {
   if (( ${#original_keychains[@]} > 0 )); then
     security list-keychains -d user -s "${original_keychains[@]}" >/dev/null 2>&1 || true
   fi
+  restore_source_package_metadata_if_builder_transform || true
+  rm -f -- "$source_package_snapshot"
   remove_sealed_tree "$local_release"
 }
 trap cleanup EXIT
+
+cp -p "$project_dir/package.json" "$source_package_snapshot"
+source_package_snapshot_ready=1
 
 read_keychains() {
   security list-keychains -d user | sed -E 's/^ *"?([^"]+)"?$/\1/'
@@ -402,6 +456,7 @@ build_mac_arch() {
     --mac "--${arch}"
     --config electron-builder.mac-stable.yml
   )
+  restore_source_package_metadata_if_builder_transform
   cleanup_appledouble "$project_dir/dist" "$project_dir/release" "$local_release"
   # A public updater ZIP must contain the same stapled app as its DMG. Local
   # candidates stay explicitly unnotarized and can never enter this channel.
@@ -416,10 +471,12 @@ build_mac_arch() {
   # Node 가 없는 맥 사용자에게 CLI 설치 버튼이 막다른 길이 되고, afterPack 이 그 사실을
   # 잡아 빌드를 세운다(2026-08-24 이전에는 검사조차 하지 않아 조용히 빠져 나갔다).
   NODE_RUNTIME_ARCH="$arch" npm run fetch:node
+  AGENTLAS_BROWSER_TARGET_PLATFORM=darwin AGENTLAS_BROWSER_TARGET_ARCH="$arch" npm run fetch:browser
   COPYFILE_DISABLE=1 electron-builder \
     "${builder_args[@]}" \
     --publish never \
     --config.directories.output="$local_release"
+  restore_source_package_metadata_if_builder_transform
 
   # 1.0.32 는 app.asar 에 dist/plugins 가 통째로 빠진 채 나가 launch 즉시 죽었다.
   # 설정 검사만으로는 설정이 하나 더 생기면 뚫리므로, 만들어진 .app 자체를 잰다.
@@ -449,6 +506,7 @@ cleaner_pid=$!
 
 build_mac_arch arm64
 build_mac_arch x64
+restore_source_package_metadata_if_builder_transform
 
 remove_sealed_tree "$project_dir/release"
 mkdir -p "$project_dir/release"
@@ -488,3 +546,9 @@ case "$(uname -m)" in
     ;;
 esac
 npx electron-rebuild --force --arch="$host_arch"
+# The x64 package is built last for deterministic dual-architecture output and
+# also leaves build-resources/browser-runtime pointing at x64. Restore the
+# developer host's Chrome for Testing bytes and manifest as well: otherwise the
+# materialized shared launcher keeps a now-missing arm64 path and every local
+# Graph/One/Work browser call fails until another full build happens.
+AGENTLAS_BROWSER_TARGET_PLATFORM=darwin AGENTLAS_BROWSER_TARGET_ARCH="$host_arch" npm run fetch:browser

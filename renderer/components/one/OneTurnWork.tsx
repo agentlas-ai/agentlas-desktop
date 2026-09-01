@@ -14,7 +14,6 @@ import {
 } from "@/components/Icon";
 import { extractAutomationRegistrations, type OneActivityState } from "@/lib/one-activity";
 import { OneAutomationRegistrationCard } from "./OneAdaptiveResult";
-import { McpResultPreview } from "../McpResultPreview";
 import {
   CONNECTED_TOOL_LABEL,
   buildOneWorkPresentation,
@@ -150,6 +149,24 @@ function normalizeLiveLabel(value: string): string {
   return value.replace(/\s+/g, " ").trim().toLocaleLowerCase();
 }
 
+function compactCommandLabel(command: string): string {
+  const oneLine = command.replace(/\s+/gu, " ").trim();
+  if (oneLine.length <= 118) return oneLine;
+  return `${oneLine.slice(0, 115).trimEnd()}…`;
+}
+
+function compactExploreTarget(value: string): string {
+  const oneLine = value.replace(/\s+/gu, " ").trim();
+  const inPath = oneLine.match(/^(.*?\bin\s+)(\/.*)$/iu);
+  const prefix = inPath?.[1] ?? "";
+  const pathish = inPath?.[2] ?? oneLine;
+  if (!pathish.startsWith("/") && oneLine.length <= 86) return oneLine;
+  const segments = pathish.split("/").filter(Boolean);
+  const compactPath = segments.length > 2 ? `…/${segments.slice(-2).join("/")}` : pathish;
+  const combined = `${prefix}${compactPath}`;
+  return combined.length <= 94 ? combined : `${combined.slice(0, 91).trimEnd()}…`;
+}
+
 function liveThoughtLabel(cell: OneWorkCell, locale: "ko" | "en"): string {
   if (cell.kind !== "thought") return "";
   return cell.headline ?? (cell.status === "running" ? cellVerb(cell, locale) : "");
@@ -186,33 +203,13 @@ function WorkRow({ cell, locale }: { cell: OneWorkCell; locale: "ko" | "en" }) {
         </ExpandableRow>
       );
     }
-    case "explore":
-      // Codex: "Explored" then its Read/List/Search lines, always visible.
-      return (
-        <ExpandableRow
-          cell={cell}
-          locale={locale}
-          head={(
-            <span className={styles.exploreHead}>
-              <span>
-                <strong>{verb}</strong>
-                {statusSuffix(cell, locale)}
-              </span>
-              <span className={styles.exploreList}>
-                {cell.entries.map((entry, index) => (
-                  <span key={`${entry.op}:${index}`} className={styles.exploreLine}>
-                    <span className={styles.exploreOp}>
-                      {entry.op === "read" ? (ko ? "읽음" : "Read") : entry.op === "list" ? (ko ? "목록" : "List") : (ko ? "검색" : "Search")}
-                    </span>
-                    <span className={styles.exploreTarget}>{entry.label}</span>
-                  </span>
-                ))}
-              </span>
-            </span>
-          )}
-        />
-      );
-    case "run":
+    case "explore": {
+      const compactEntries = cell.entries.map((entry) => ({ ...entry, label: compactExploreTarget(entry.label) }));
+      const first = compactEntries[0];
+      const summary = first
+        ? `${first.op === "read" ? (ko ? "읽음" : "Read") : first.op === "list" ? (ko ? "목록" : "List") : (ko ? "검색" : "Search")} ${first.label}`
+        : verb;
+      const remainder = compactEntries.length - 1;
       return (
         <ExpandableRow
           cell={cell}
@@ -220,7 +217,35 @@ function WorkRow({ cell, locale }: { cell: OneWorkCell; locale: "ko" | "en" }) {
           head={(
             <>
               <strong>{verb}</strong>
-              <code className={styles.command}>{cell.command}</code>
+              <span className={styles.exploreSummary}>{summary}</span>
+              {remainder > 0 && <span className={styles.muted}>{ko ? `외 ${remainder}개` : `+${remainder}`}</span>}
+              {statusSuffix(cell, locale)}
+            </>
+          )}
+        >
+          {compactEntries.length > 1 ? <div className={styles.exploreList}>
+            {compactEntries.map((entry, index) => (
+              <span key={`${entry.op}:${index}`} className={styles.exploreLine}>
+                <span className={styles.exploreOp}>
+                  {entry.op === "read" ? (ko ? "읽음" : "Read") : entry.op === "list" ? (ko ? "목록" : "List") : (ko ? "검색" : "Search")}
+                </span>
+                <span className={styles.exploreTarget}>{entry.label}</span>
+              </span>
+            ))}
+          </div> : undefined}
+        </ExpandableRow>
+      );
+    }
+    case "run": {
+      const compactCommand = compactCommandLabel(cell.command);
+      return (
+        <ExpandableRow
+          cell={cell}
+          locale={locale}
+          head={(
+            <>
+              <strong>{verb}</strong>
+              <code className={styles.command} title={cell.command}>{compactCommand}</code>
               {cell.exitCode != null && cell.exitCode !== 0 && <span className={styles.failed}>exit {cell.exitCode}</span>}
               {cell.exitCode == null && statusSuffix(cell, locale)}
             </>
@@ -241,6 +266,7 @@ function WorkRow({ cell, locale }: { cell: OneWorkCell; locale: "ko" | "en" }) {
           ) : undefined}
         </ExpandableRow>
       );
+    }
     case "edit":
       return (
         <ExpandableRow
@@ -294,16 +320,13 @@ function WorkRow({ cell, locale }: { cell: OneWorkCell; locale: "ko" | "en" }) {
         ? (ko ? "연결된 도구 사용" : "Use connected tool")
         : cell.label;
       return (
-        <div>
-          <ExpandableRow
-            cell={cell}
-            locale={locale}
-            head={<><strong>{verb}</strong><span className={styles.object}>{label}</span>{statusSuffix(cell, locale)}</>}
-          >
-            {body ? <pre className={styles.output}>{body}</pre> : undefined}
-          </ExpandableRow>
-          <McpResultPreview result={cell.result} toolName={cell.label} locale={locale} compact />
-        </div>
+        <ExpandableRow
+          cell={cell}
+          locale={locale}
+          head={<><strong>{verb}</strong><span className={styles.object}>{label}</span>{statusSuffix(cell, locale)}</>}
+        >
+          {body ? <pre className={styles.output}>{body}</pre> : undefined}
+        </ExpandableRow>
       );
     }
     case "agent":
@@ -405,11 +428,16 @@ export function OneTurnWork({
   const presentation = useMemo(() => buildOneWorkPresentation(state, locale, workspacePath), [state, locale, workspacePath]);
   const automationRegistrations = useMemo(() => extractAutomationRegistrations(state), [state]);
   const active = busy || preparing;
-  const [expanded, setExpanded] = useState(active);
+  // Codex-style live work stays a single readable headline until the person
+  // asks for detail. A real taskforce can emit hundreds of tool rows; opening
+  // those by default turns the conversation into a terminal transcript and
+  // pushes the answer several screens away.
+  const [expanded, setExpanded] = useState(false);
   useEffect(() => {
-    // A settled block collapses to its "Worked for" line the moment the run
-    // ends; a new run of the same block opens it again.
-    setExpanded(active);
+    // Start and settlement are both new presentation states. Collapse once at
+    // each transition, then preserve an explicit user expansion while the run
+    // continues and new ledger rows arrive.
+    setExpanded(false);
   }, [active]);
   const liveElapsedMs = useElapsed(startedAt, active);
   // 답 없이 끊긴 실행. 종료 이벤트가 아니라 원장 판정을 근거로 삼는다 — 앱이 죽으면

@@ -1,5 +1,5 @@
 // 대시보드 "엔진 사용량" 카드 — 모든 엔진을 카탈로그로 보여준다.
-//   · 구독형(Claude·Codex): 연결 시 usage.snapshot()의 5시간/주간/일일 바.
+//   · CLI 연결(Claude·Codex 등): 연결 시 usage.snapshot()의 5시간/주간/일일 바.
 //   · Antigravity: agy 연결 상태와 런타임이 제공한 모델 목록을 기준으로 표시한다.
 //   · API키형(DeepSeek·GLM·Pi): 연결 시 "키 과금", 미연결 시 키 입력 팝업.
 //   · Grok CLI: 실제 402가 확인되면 소진 상태와 공식 Usage 이동 버튼.
@@ -564,7 +564,10 @@ export function EngineUsage() {
       : [];
     const statusLine = (connected
       ? statusText(e, u)
-      : e.auth === "cli" ? (ko ? "구독 · 미연결" : "subscription · not connected")
+      // CLI는 접근 통로일 뿐 결제 계약이 아니다. 사용자가 API 키, 무료 계정,
+      // 공급자 요금제 중 무엇으로 로그인했는지 Desktop이 증명할 수 없으므로
+      // 연결 전 카드에서 임의로 "구독"이라고 부르지 않는다.
+      : e.auth === "cli" ? (ko ? "CLI · 미연결" : "CLI · not connected")
       : e.auth === "apikey" ? (ko ? "API 키 · 미연결" : "API key · not connected")
       : ko ? "미설치" : "not installed")
       + (connected && runtimeVersionLabel ? ` · ${runtimeVersionLabel}` : "");
@@ -662,9 +665,9 @@ export function EngineUsage() {
   };
 
   const engineGroups = [
-    { key: "cli", label: ko ? "구독형 · CLI" : "Subscription · CLI", engines: ENGINES.filter((e) => e.auth === "cli") },
-    { key: "apikey", label: ko ? "API 키" : "API key", engines: ENGINES.filter((e) => e.auth === "apikey") },
-    { key: "local", label: ko ? "로컬" : "Local", engines: ENGINES.filter((e) => e.auth === "local") },
+    { key: "cli", label: ko ? "CLI 연결" : "CLI connections", engines: ENGINES.filter((e) => e.auth === "cli") },
+    { key: "apikey", label: ko ? "API 키 · BYOK" : "API keys · BYOK", engines: ENGINES.filter((e) => e.auth === "apikey") },
+    { key: "local", label: ko ? "로컬 모델" : "Local models", engines: ENGINES.filter((e) => e.auth === "local") },
   ].filter((g) => g.engines.length > 0);
 
   return (

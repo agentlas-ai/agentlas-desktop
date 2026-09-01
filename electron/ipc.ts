@@ -1,6 +1,7 @@
 // IPC 핸들러 일괄 등록. main.ts 앱 ready 직후 호출.
 // 각 도메인 모듈(runtime, secrets, team, marketplace, projects, chats, automations, invoke)을 thin wrapping.
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { copyImageSource, saveImageSource } from "./media/image-actions";
 import { checkComputerUsePermissions } from "./mac-permissions";
 import type { IpcMainInvokeEvent } from "electron";
 import { randomUUID } from "node:crypto";
@@ -1358,12 +1359,14 @@ function rendererInvocationRequest(req: McpInvocationRequest): McpInvocationRequ
     agentAppRuntimeToolGrant: _agentAppRuntimeToolGrant,
     oneBriefingActionRef: _oneBriefingActionRef,
     oneProfileContext: _oneProfileContext,
+    oneUserAuthoredPrompt: _oneUserAuthoredPrompt,
     oneTeamExecutionPolicy: _oneTeamExecutionPolicy,
     oneTeamRuntimeBinding: _oneTeamRuntimeBinding,
     oneAttachmentContext: _oneAttachmentContext,
     oneAttachmentRedactions: _oneAttachmentRedactions,
     ...rendererFields
   } = req as McpInvocationRequest & {
+    oneUserAuthoredPrompt?: unknown;
     oneTeamExecutionPolicy?: unknown;
     oneTeamRuntimeBinding?: unknown;
     oneAttachmentContext?: unknown;
@@ -1467,6 +1470,14 @@ export function registerIpcHandlers(): void {
   // macOS "시스템 설정 > 언어 및 지역"의 1순위 언어. Electron이 BCP47 형태로 반환.
   // ex) "ko-KR", "en-US", "ja-JP". 첫 실행 시 i18n 자동 감지에 사용.
   ipcMain.handle("app:getLocale", () => app.getLocale());
+  ipcMain.handle("media:copyImage", (event, payload: { src?: unknown; suggestedName?: unknown }) => {
+    assertTrustedSitePublishIpcSender(event);
+    return copyImageSource(String(payload?.src || ""), typeof payload?.suggestedName === "string" ? payload.suggestedName : undefined);
+  });
+  ipcMain.handle("media:saveImage", (event, payload: { src?: unknown; suggestedName?: unknown }) => {
+    const win = assertTrustedSitePublishIpcSender(event);
+    return saveImageSource(win, String(payload?.src || ""), typeof payload?.suggestedName === "string" ? payload.suggestedName : undefined);
+  });
 
   // ── Renderer judgment bridge — style/format inference only ─────────────────
   // Narrow, kind-allowlisted surface: Main owns the question/guidance per kind;
@@ -3655,8 +3666,12 @@ export function registerIpcHandlers(): void {
     if (ruled === "deny") return "deny";
     if (ruled === "allow") return "allow_session";
     if (ask.permission === "full") return "allow_session";
-    if (!ask.mutating) return "allow_once";
-    if (ask.permission === "write") return "allow_session";
+    const folderAccess = ask.tool === "folder-access";
+    // A restricted One turn may name an existing folder, but selecting read or
+    // write mode is not consent for an arbitrary new directory. Ask at the
+    // moment that boundary is crossed. Full access above remains automatic.
+    if (!folderAccess && !ask.mutating) return "allow_once";
+    if (!folderAccess && ask.permission === "write") return "allow_session";
     const deniedAt = recentUserDenials.get(denialKey(ask));
     if (deniedAt && Date.now() - deniedAt < USER_DENIAL_TTL_MS) return "deny";
     /*

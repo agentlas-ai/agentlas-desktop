@@ -40,6 +40,7 @@ const GENERATED_ROOT_NAMES = [
   "generated-tools",
   "multimodal-images",
   "multimodal-video",
+  "one-artifacts-v1",
 ] as const;
 const LOCAL_MEDIA_EXTS = new Set([
   ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".avif", ".bmp",

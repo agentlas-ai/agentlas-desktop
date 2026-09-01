@@ -1,7 +1,7 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import FileViewer, { type ViewerOptions } from "@file-viewer/react";
+import { useCallback, useMemo, useState } from "react";
+import FileViewer, { type ViewerOptions, type ViewerState } from "@file-viewer/react";
 import officePreset from "@file-viewer/preset-office";
 import litePreset from "@file-viewer/preset-lite";
 import { archiveRenderer } from "@file-viewer/renderer-archive";
@@ -57,6 +57,14 @@ export function UniversalFileViewerEngine({
   fill?: boolean;
 }) {
   const [error, setError] = useState<string | null>(null);
+  // @file-viewer/react treats a changed callback as changed viewer options.
+  // Its controller then reloads the current source, whose state notification
+  // re-renders this component. Keep the callback stable so a settled document
+  // does not enter an abort/refetch loop while its tab remains open.
+  const handleStateChange = useCallback((state: ViewerState) => {
+    if (state.error) setError(state.error instanceof Error ? state.error.message : String(state.error));
+    else if (state.ready) setError(null);
+  }, []);
   const options = useMemo<ViewerOptions>(() => {
     const assetRoot = resolveFileViewerAssetRoot();
     return ({
@@ -150,10 +158,7 @@ export function UniversalFileViewerEngine({
         size={size}
         options={options}
         className={styles.documentEngineRoot}
-        onStateChange={(state) => {
-          if (state.error) setError(state.error instanceof Error ? state.error.message : String(state.error));
-          else if (state.ready) setError(null);
-        }}
+        onStateChange={handleStateChange}
       />
       {error && <div className={styles.documentError} role="alert"><strong>{locale === "ko" ? "문서를 렌더링하지 못했습니다" : "Could not render this document"}</strong><small>{error}</small></div>}
     </div>

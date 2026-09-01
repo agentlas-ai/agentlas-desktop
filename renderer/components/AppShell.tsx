@@ -9,7 +9,7 @@ import { ProjectSidebar } from "./ProjectSidebar";
 import { MenuBridge } from "./MenuBridge";
 import { ImportAgentsModal } from "./ImportAgentsModal";
 import TelegramOneDialog from "./connect/TelegramOneDialog";
-import { ipc, ipcEvents } from "@/lib/ipc";
+import { ipc, ipcEvents, updaterEvents } from "@/lib/ipc";
 import { SideNav } from "./SideNav";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { usePathname } from "next/navigation";
@@ -23,6 +23,7 @@ import { AskUserSheet } from "./AskUserSheet";
 import { ToolApprovalSheet } from "./ToolApprovalSheet";
 import FloatingComputerUsePanel from "./browser/FloatingComputerUsePanel";
 import { WorkFirstRunOnboarding } from "./WorkFirstRunOnboarding";
+import { ScienceInstallExperience } from "./ScienceInstallExperience";
 import { announceHubBookmarkChange } from "@/lib/hub-bookmark-events";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import {
@@ -58,8 +59,16 @@ function sameJobList(prev: MultimodalJob[], next: MultimodalJob[]): boolean {
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [importOpen, setImportOpen] = useState(false);
   const [pendingConfirmations, setPendingConfirmations] = useState(0);
+  const [activeChatCount, setActiveChatCount] = useState<number | null>(null);
   const [multimodalJobs, setMultimodalJobs] = useState<MultimodalJob[]>([]);
-  const [workFirstRunVisible, setWorkFirstRunVisible] = useState(false);
+  const [appUpdateBusy, setAppUpdateBusy] = useState(true);
+  // `null` means the dashboard onboarding has not inspected its durable
+  // first-run marker yet. Treat that as a blocking surface: otherwise the
+  // Science offer can open during the child's first effect, immediately
+  // underneath the onboarding overlay, and its visible controls become
+  // impossible to click.
+  const [workFirstRunVisible, setWorkFirstRunVisible] = useState<boolean | null>(null);
+  const [sciencePromoVisible, setSciencePromoVisible] = useState(false);
   const router = useRouter();
   const pathname = usePathname() ?? "/";
   const { locale } = useT();
@@ -157,6 +166,30 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     };
   }, [syncAttention]);
 
+  // Feature news must never cover live work. Seed from main-owned authority,
+  // then follow the same active-chat broadcast used by the Work sidebar. A
+  // null seed is deliberately ineligible so launch cannot flash the intro
+  // before the authoritative run state arrives.
+  useEffect(() => {
+    let cancelled = false;
+    const apply = (chatIds: string[]) => {
+      if (!cancelled) setActiveChatCount(new Set(chatIds).size);
+    };
+    const api = ipc();
+    if (api?.invoke?.activeChats) {
+      void api.invoke.activeChats().then(apply).catch(() => {
+        // Unknown authority remains fail-closed for this optional modal.
+      });
+    } else {
+      setActiveChatCount(0);
+    }
+    const unsubscribe = ipcEvents()?.onActiveChats(apply);
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+    };
+  }, []);
+
   // 온보딩을 마쳤는데 로컬 에이전트가 0개면 "내 에이전트 가져오기" 팝업을 한 번 띄운다.
   useEffect(() => {
     const api = ipc();
@@ -205,8 +238,53 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
+  // A release/update safety surface has higher priority than optional feature
+  // news. Start fail-closed until the current updater state is known, then keep
+  // the flag synchronized with the same main-owned broadcast as UpdateBanner.
+  useEffect(() => {
+    let cancelled = false;
+    const sync = (status: string) => {
+      if (cancelled) return;
+      setAppUpdateBusy([
+        "available",
+        "downloading",
+        "downloaded",
+        "installing",
+        "manual-required",
+        "incompatible",
+      ].includes(status));
+    };
+    const api = ipc();
+    if (api?.updater?.getState) {
+      void api.updater.getState().then((state) => sync(state.status)).catch(() => sync("idle"));
+    } else {
+      sync("idle");
+    }
+    const off = updaterEvents()?.onState((state) => sync(state.status));
+    return () => {
+      cancelled = true;
+      off?.();
+    };
+  }, []);
+
   const showWorkspaceSidebar = pathname.startsWith("/workspace") || pathname.startsWith("/project");
-  const pageTourAutoOpenSuspended = workFirstRunVisible;
+  const sciencePromoPath = pathname.replace(/\.html$/, "");
+  const sciencePromoRouteEligible =
+    sciencePromoPath === "/"
+    || sciencePromoPath === "/dashboard"
+    || sciencePromoPath.startsWith("/library");
+  // Product promotion never covers setup, approvals, an app update, or live work.
+  // The sidebar entry remains available while the automatic offer is deferred.
+  const sciencePromoEligible = sciencePromoRouteEligible
+    && workFirstRunVisible === false
+    && pendingConfirmations === 0
+    && activeChatCount === 0
+    && !appUpdateBusy
+    && !multimodalJobs.some(isMultimodalJobActive)
+    && !importOpen;
+  // Science is now the only automatic product announcement on these routes.
+  // Page tours remain available from the help control but do not race this offer.
+  const pageTourAutoOpenSuspended = sciencePromoRouteEligible || workFirstRunVisible || sciencePromoVisible;
 
   return (
     <div
@@ -244,6 +322,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       {pathname.startsWith("/dashboard") && (
         <WorkFirstRunOnboarding onVisibilityChange={setWorkFirstRunVisible} />
       )}
+      <ScienceInstallExperience
+        eligible={sciencePromoEligible}
+        locale={locale === "ko" ? "ko" : "en"}
+        onVisibilityChange={setSciencePromoVisible}
+      />
       <BuildDoneToast />
       <BrowserActionApprovalSheet />
       <AskUserSheet />

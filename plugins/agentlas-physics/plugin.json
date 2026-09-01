@@ -1,0 +1,73 @@
+{
+  "schema": "agentlas.plugin/v2",
+  "slug": "agentlas-physics",
+  "name": "Agentlas Physics",
+  "version": "0.2.0",
+  "builtin": false,
+  "publisher": { "name": "Agentlas", "url": "https://agentlas.ai" },
+  "surface": {
+    "displayName": "Physics",
+    "displayNameKo": "물리학",
+    "tagline": "INSPIRE, HEPData, and user measurements with exact lineage",
+    "taglineKo": "정확한 계보를 보존하는 INSPIRE·HEPData·사용자 측정 데이터",
+    "description": "Searches INSPIRE, retrieves version-pinned HEPData tables, and performs hash-bound diagonal chi-square analysis with explicit uncertainty declarations, publication tables, and Vega payloads.",
+    "descriptionKo": "INSPIRE 검색과 버전 고정 HEPData 표를 제공하고 명시적 오차 선언에 따라 해시 결합된 대각 카이제곱 분석·출판 표·Vega 페이로드를 생성합니다.",
+    "category": "data",
+    "brandColor": "#455A8E",
+    "icon": "assets/icon.svg",
+    "defaultPrompts": [
+      "이 고에너지물리 주제의 INSPIRE 논문을 찾고 실험 데이터 연결점을 정리해줘",
+      "이 HEPData 표의 축·단위·오차를 보존해 분석 가능한 아티팩트로 만들어줘"
+      ,"이 HEPData 측정값과 예측을 명시한 오차 성분으로 카이제곱 검정하고 잔차 그림과 출판 표를 만들어줘"
+    ]
+  },
+  "invocation": { "mention": "@agentlas-physics", "implicit": "router", "standalone": true },
+  "provides": {
+    "skills": { "router": "skills/index/SKILL.md", "workflows": ["search-inspire", "hepdata", "hepdata-chi-square", "physics-dataset"] },
+    "tools": [
+      {
+        "id": "agentlas-physics",
+        "capability": "data",
+        "kind": "stdio",
+        "command": "${node}",
+        "args": ["${pluginDir}/runtime/mcp-server.cjs"],
+        "envKeys": [],
+        "timeoutMs": 25000,
+        "surface": {
+          "name": "Agentlas 물리학 데이터",
+          "nameEn": "Agentlas Physics Data",
+          "description": "INSPIRE·HEPData 측정표를 정규화하고 명시적 오차 모델로 카이제곱·잔차·출판 표를 계산",
+          "descriptionEn": "Normalize INSPIRE and HEPData measurements and compute declared-error chi-square, residual, and publication tables",
+          "category": "data",
+          "brandColor": "#455A8E",
+          "mark": "PH",
+          "docsUrl": "https://github.com/inspirehep/rest-api-doc"
+        }
+      }
+    ]
+  },
+  "requires": { "prereq": [{ "id": "node", "provided-by": "app" }], "os": ["darwin", "win32", "linux"] },
+  "permissions": { "fileWrite": "none", "network": "allow", "shell": "deny" },
+  "state": { "files": [], "assets": false },
+  "integrity": {
+    "algo": "sha256",
+    "files": [
+      { "path": "README.md", "sha256": "665a86fe9de196c534c6ad96de28f1a020ae6a27e8c9291063003b1f7f4ef795", "bytes": 1931 },
+      { "path": "assets/icon.svg", "sha256": "0cc415032ec239d684615214160797c8a495a292400fb3f56a434e2a0a2fd786", "bytes": 570 },
+      { "path": "capabilities.json", "sha256": "3f442790d0da822ad82a307494c0328b5ec08f6ca05358dc171cfe094993d307", "bytes": 3931 },
+      { "path": "runtime/mcp-server.cjs", "sha256": "82ec5715152fcc7e6e7c5b981e202000d65ce281840cc93fcc52dab1df816699", "bytes": 2940 },
+      { "path": "runtime/physics.cjs", "sha256": "683fa61113ea74179a79da19b3c1f66d9aa4b1b2955a865d264aed84d4b84ce9", "bytes": 54368 },
+      { "path": "schemas/tools.json", "sha256": "06306865a2a2c0a3f55a55dd7b239366ecdaf6d66102cd94d577a4d08ec26bb3", "bytes": 5831 },
+      { "path": "skills/hepdata-chi-square/SKILL.md", "sha256": "f40924e4f6836fcd181ea067c635746ff8c23c270e4cf9102c0c6af67445edfe", "bytes": 1221 },
+      { "path": "skills/hepdata/SKILL.md", "sha256": "122ad868699894c1f31c37193d7d18b7edabc9335a164407d5b212051ff6b77e", "bytes": 1847 },
+      { "path": "skills/index/SKILL.md", "sha256": "ddd8f6ec276ba82870b90ce53a159998e699ea7820bdb192302c55b1231ffce1", "bytes": 776 },
+      { "path": "skills/physics-dataset/SKILL.md", "sha256": "f6314e6809d94fce7ea99d0b2559f4e5309b950e95a737453371d52614a0233f", "bytes": 803 },
+      { "path": "skills/search-inspire/SKILL.md", "sha256": "9b0cbed3f0a8ce586faff9c294668968e8e8138a0c9da0e5ee1a8e057772aa02", "bytes": 1022 },
+      { "path": "tests/contract.cjs", "sha256": "05f93c613de8a6af0fafaa6e0b8e4d81586422d290097acc533dbad6462046b8", "bytes": 15989 },
+      { "path": "tests/fixtures/hepdata-inclusive-table.json", "sha256": "6abdb110a3acadb24b22fd709089bd9bb57b41eb0ac856501ea3575fb3c8063d", "bytes": 658 },
+      { "path": "tests/fixtures/hepdata-record.json", "sha256": "6b1692ff1e02c5fd55701ab3a5136b5507342ebd1fe85bb015b50c7ab806c4c1", "bytes": 946 },
+      { "path": "tests/fixtures/hepdata-table.json", "sha256": "8d4c16bee1f99a70af9590b6d6f83cc03af1a321ab389b87124f2b6790151a6e", "bytes": 590 },
+      { "path": "tests/fixtures/inspire-search.json", "sha256": "0e1b21bc56e2587be1ef5c1565ee7edd13f33ccbf8aede952821d92389464518", "bytes": 982 }
+    ]
+  }
+}

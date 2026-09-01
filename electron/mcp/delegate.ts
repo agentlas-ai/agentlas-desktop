@@ -33,6 +33,7 @@ export interface ParsedDelegation {
 export function buildDelegateProtocol(
   reports: Array<{ role: string; name?: string }>,
   runtimes: RuntimeStatus[],
+  options: { allowFollowup?: boolean } = {},
 ): string {
   const list = reports
     .map((r) => `  - ${r.role}${r.name && r.name !== r.role ? ` (${r.name})` : ""}`)
@@ -43,9 +44,15 @@ export function buildDelegateProtocol(
     "You lead a team. For THIS task, engage ONLY the direct reports actually needed —",
     "never all of them. Give each a focused brief (goal + specifics). If none are needed,",
     "do the work yourself and emit no Delegate block.",
-    "This is the only delegation planning round. Include every role required to finish the request now,",
-    "including downstream independent QA or verification roles. State dependencies in their briefs;",
-    "the host will delay verification until production results exist. Never defer a needed role to synthesis.",
+    options.allowFollowup
+      ? "This is a bounded follow-up decision after team results. If a failed check or missing result requires repair, delegate only the smallest required revision/re-verification step; otherwise emit no Delegate block and return the final answer."
+      : "This is the only initial delegation planning round. Include every role required to finish the request now,",
+    options.allowFollowup
+      ? "Never use a runtime's built-in sub-agent, Agent, Task, SendMessage, or collaboration tool. The host executes only the typed Delegate block below, so an invisible runtime child can never bypass the room ledger or leave stale failure state behind."
+      : "including downstream independent QA or verification roles. State dependencies in their briefs;",
+    options.allowFollowup
+      ? "When revising, name the exact failed acceptance item and pass the latest relevant evidence in the brief."
+      : "the host will delay verification until production results exist. Never defer a needed role to synthesis.",
     "",
     "Your direct reports:",
     list,
@@ -60,7 +67,9 @@ export function buildDelegateProtocol(
     `{ "delegations": [ { "target": "<report role or name above>", "brief": "<what they should do>", "allocation": ${workloadAllocationPromptExample("delegate")} } ], "synthesis": ${workloadAllocationPromptExample("synthesize")} }`,
     "```",
     "",
-    "After delegating, STOP — their results come back to you to synthesize. Synthesis is final and cannot start new work.",
+    options.allowFollowup
+      ? "After emitting a follow-up Delegate block, STOP. The host runs that one bounded follow-up and returns the updated result for synthesis."
+      : "After delegating, STOP — their results come back to you to synthesize.",
   ].join("\n");
 }
 

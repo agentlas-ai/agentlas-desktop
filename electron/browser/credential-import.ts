@@ -4,15 +4,16 @@
 // 전용 창에서 다시 로그인해야 했다. 평소 브라우저에는 이미 그 로그인이 다 있다.
 //
 // 경계 (이 파일이 지키는 것):
-//  1) **값을 복호화하지 않는다.** 쿠키는 암호화된 바이트 그대로 옮긴다. 복호화 키는 OS 저장소
-//     (macOS Keychain / Windows DPAPI)에 있고 우리는 꺼내지 않는다.
+//  1) **값을 노출하지 않는다.** Windows/Linux는 OS가 감싼 프로필 키를 이어받는다. macOS는
+//     원본과 번들 런타임의 실제 제품 ID에 맞는 Safe Storage 항목을 선택하고, 서로 다를 때만
+//     사용자가 고른 사이트 쿠키를 메모리에서 변환한다. 평문은 파일/로그/응답에 쓰지 않고 키
+//     버퍼도 변환 직후 지운다.
 //  2) **비밀번호와 결제수단은 만지지 않는다.** `Login Data`·`Web Data`는 읽지도 복사하지도 않는다.
 //     이유는 보안 위생이 아니라 손익이다: (a) 로그인 성공률에 거의 기여하지 않는다(로그인은
 //     쿠키 + `Local State` 암호화 키로 된다) (b) `Login Data`+`Local State` 동시 접근은
 //     인포스틸러 시그니처라 백신·EDR 에 걸려 배포가 막힐 수 있다 (c) 마켓플레이스 플러그인이
 //     그 폴더를 읽으면 피해가 "세션 탈취"에서 "전부"로 커진다.
-//     Agentlas-OS 레일의 seedProfile(agentlas_cloud/research/adapters/agentlas_browser_launcher.mjs)
-//     도 같은 기준이다 — 두 레일 모두 `Local State`·쿠키·`Preferences` 까지만 옮긴다.
+//     Agentlas-OS 레일도 같은 원칙을 따라야 한다 — 비밀번호/결제 저장소는 가져오지 않는다.
 //  3) **원본 DB에 연결하지 않는다.** 실행 중인 브라우저가 mmap 한 SQLite에 외부 연결을 붙이면
 //     그 브라우저가 SIGBUS 로 죽을 수 있다(2026-08-19 Agentlas 앱에서 2회 실측). 그래서
 //     파일을 먼저 복사하고 **사본만** 연다. 사본은 무결성 검사를 통과해야 쓰인다 — 깨졌으면
@@ -20,9 +21,12 @@
 //  4) **덮어쓰지 않는다(merge).** 전용 프로필에 이미 있는 쿠키 행은 건드리지 않고, 없는 것만 넣는다.
 //     에이전트가 전용 창에서 새로 만든 세션을 평소 브라우저 상태가 지우면 안 된다.
 import Database from "better-sqlite3";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { createCipheriv, createDecipheriv, createHash, pbkdf2Sync, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { chromium } from "playwright";
 
 import type {
   BrowserCredentialImportResult,
@@ -32,46 +36,62 @@ import type {
 } from "../../shared/browser-credentials";
 import { registrableDomain } from "../../shared/registrable-domain";
 import {
-  browserCdpOwnerIsLive,
+  browserCdpPort,
+  browserCdpPortReady,
   browserCdpProfilePath,
+  clearBrowserCdpOwner,
   ensureBrowserCdpProfilePrivate,
+  inspectBrowserCdpOwnership,
+  resetBrowserCdpSessionRestoreArtifacts,
+  withBrowserCdpMaintenance,
+  writeBrowserCdpOwner,
 } from "../mcp-tools/browser-cdp-launcher";
-import { listBrowserSites, normalizeSite, upsertBrowserSite } from "../store/browser-vault";
+import { resolveAgentlasBrowserRuntime } from "./runtime";
+import { listBrowserSites, normalizeSite, setBrowserSession, upsertBrowserSite } from "../store/browser-vault";
 
-interface BrowserFamilyRoot {
+export interface BrowserFamilyRoot {
   browser: string;
   userDataDir: string;
 }
 
+/** Chrome-family user-data candidates for the target OS (pure for matrix tests). */
+export function browserFamilyRootsForPlatform(
+  platform: NodeJS.Platform,
+  home: string,
+  env: Partial<Pick<NodeJS.ProcessEnv, "LOCALAPPDATA" | "XDG_CONFIG_HOME">> = process.env,
+): BrowserFamilyRoot[] {
+  const targetPath = platform === "win32" ? path.win32 : path.posix;
+  if (platform === "darwin") {
+    const base = targetPath.join(home, "Library", "Application Support");
+    return [
+      { browser: "Google Chrome", userDataDir: targetPath.join(base, "Google", "Chrome") },
+      { browser: "Microsoft Edge", userDataDir: targetPath.join(base, "Microsoft Edge") },
+      { browser: "Brave", userDataDir: targetPath.join(base, "BraveSoftware", "Brave-Browser") },
+      { browser: "Chromium", userDataDir: targetPath.join(base, "Chromium") },
+    ];
+  }
+  if (platform === "win32") {
+    // Chrome 계열은 전부 LOCALAPPDATA 밑 "<vendor>/<product>/User Data".
+    const local = env.LOCALAPPDATA || targetPath.join(home, "AppData", "Local");
+    return [
+      { browser: "Google Chrome", userDataDir: targetPath.join(local, "Google", "Chrome", "User Data") },
+      { browser: "Microsoft Edge", userDataDir: targetPath.join(local, "Microsoft", "Edge", "User Data") },
+      { browser: "Brave", userDataDir: targetPath.join(local, "BraveSoftware", "Brave-Browser", "User Data") },
+      { browser: "Chromium", userDataDir: targetPath.join(local, "Chromium", "User Data") },
+    ];
+  }
+  const config = env.XDG_CONFIG_HOME || targetPath.join(home, ".config");
+  return [
+    { browser: "Google Chrome", userDataDir: targetPath.join(config, "google-chrome") },
+    { browser: "Microsoft Edge", userDataDir: targetPath.join(config, "microsoft-edge") },
+    { browser: "Brave", userDataDir: targetPath.join(config, "BraveSoftware", "Brave-Browser") },
+    { browser: "Chromium", userDataDir: targetPath.join(config, "chromium") },
+  ];
+}
+
 /** Chrome 계열 user-data 디렉터리 후보 — 플랫폼별 표준 위치. */
 function browserFamilyRoots(): BrowserFamilyRoot[] {
-  const home = os.homedir();
-  if (process.platform === "darwin") {
-    const base = path.join(home, "Library", "Application Support");
-    return [
-      { browser: "Google Chrome", userDataDir: path.join(base, "Google", "Chrome") },
-      { browser: "Microsoft Edge", userDataDir: path.join(base, "Microsoft Edge") },
-      { browser: "Brave", userDataDir: path.join(base, "BraveSoftware", "Brave-Browser") },
-      { browser: "Chromium", userDataDir: path.join(base, "Chromium") },
-    ];
-  }
-  if (process.platform === "win32") {
-    // Chrome 계열은 전부 LOCALAPPDATA 밑 "<vendor>/<product>/User Data".
-    const local = process.env.LOCALAPPDATA || path.join(home, "AppData", "Local");
-    return [
-      { browser: "Google Chrome", userDataDir: path.join(local, "Google", "Chrome", "User Data") },
-      { browser: "Microsoft Edge", userDataDir: path.join(local, "Microsoft", "Edge", "User Data") },
-      { browser: "Brave", userDataDir: path.join(local, "BraveSoftware", "Brave-Browser", "User Data") },
-      { browser: "Chromium", userDataDir: path.join(local, "Chromium", "User Data") },
-    ];
-  }
-  const config = process.env.XDG_CONFIG_HOME || path.join(home, ".config");
-  return [
-    { browser: "Google Chrome", userDataDir: path.join(config, "google-chrome") },
-    { browser: "Microsoft Edge", userDataDir: path.join(config, "microsoft-edge") },
-    { browser: "Brave", userDataDir: path.join(config, "BraveSoftware", "Brave-Browser") },
-    { browser: "Chromium", userDataDir: path.join(config, "chromium") },
-  ];
+  return browserFamilyRootsForPlatform(process.platform, os.homedir(), process.env);
 }
 
 /** 프로필 디렉터리 안에서 쿠키 저장소의 실경로. 신형 Chrome 은 Network/ 밑으로 옮겼다. */
@@ -375,7 +395,7 @@ function destinationCookieStore(sourceStore: string): string {
 /**
  * Windows·Linux 는 쿠키 복호화 키가 `Local State` 안에 (OS 로 한 번 더 감싸져) 들어 있다.
  * 전용 프로필이 아직 자기 쿠키를 갖기 전이라면 그 키를 그대로 물려받아야 옮긴 쿠키가 읽힌다.
- * macOS 는 키가 Keychain 의 앱 단위 항목이라 경로가 달라도 같은 키가 쓰인다 — 손대지 않는다.
+ * macOS 는 제품별 Keychain 항목이 달라 아래의 선택적 재암호화 경로를 사용한다.
  */
 function inheritEncryptionKeyIfNeeded(
   sourceProfileDir: string,
@@ -427,6 +447,396 @@ function inheritEncryptionKeyIfNeeded(
     return { ok: false, reason: "전용 프로필의 Local State 에 쓰지 못했습니다." };
   }
   return { ok: true };
+}
+
+const WINDOWS_APP_BOUND_COOKIE_PREFIX = "v20";
+
+/**
+ * Chrome's Windows App-Bound Encryption tags cookie ciphertext with `v20`.
+ * Those values are deliberately bound to the source browser application path;
+ * copying their DB row or Local State key into the Agentlas runtime cannot make
+ * them readable. Keep this pure so every release target can test the Windows
+ * decision without pretending a macOS build is Windows hardware.
+ */
+export function cookieUsesWindowsAppBoundEncryption(
+  encryptedValue: unknown,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return platform === "win32"
+    && Buffer.isBuffer(encryptedValue)
+    && encryptedValue.length >= WINDOWS_APP_BOUND_COOKIE_PREFIX.length
+    && encryptedValue.subarray(0, WINDOWS_APP_BOUND_COOKIE_PREFIX.length).toString("ascii")
+      === WINDOWS_APP_BOUND_COOKIE_PREFIX;
+}
+
+const MAC_SAFE_STORAGE_SERVICE: Record<string, string> = {
+  "Google Chrome": "Chrome Safe Storage",
+  "Microsoft Edge": "Microsoft Edge Safe Storage",
+  Brave: "Brave Safe Storage",
+  Chromium: "Chromium Safe Storage",
+};
+
+/**
+ * Playwright's Chrome for Testing bundle uses Chromium's OSCrypt Keychain
+ * identity on macOS. Select it from the attested runtime identity, never from a
+ * user's installed browser. A runtime-written cookie is covered by live QA so a
+ * packaging rename cannot silently change this contract.
+ */
+export function macSafeStorageServiceForRuntime(input: {
+  macBundleId?: string | null;
+  executable?: string | null;
+}): string | null {
+  const bundleId = input.macBundleId?.trim().toLowerCase() ?? "";
+  const executable = input.executable ?? "";
+  if (
+    bundleId === "com.google.chrome.for.testing"
+    || /(?:^|[\\/])Google Chrome for Testing\.app[\\/]/u.test(executable)
+  ) return "Chromium Safe Storage";
+  if (/(?:^|[\\/])Chromium\.app[\\/]/u.test(executable)) return "Chromium Safe Storage";
+  return null;
+}
+
+function agentlasMacSafeStorageService(): string | null {
+  const runtime = resolveAgentlasBrowserRuntime();
+  if (!runtime) return null;
+  return macSafeStorageServiceForRuntime({
+    macBundleId: runtime.manifest?.macBundleId ?? null,
+    executable: runtime.executable,
+  });
+}
+
+function readMacSafeStorageKey(service: string): Buffer | null {
+  let password: Buffer | null = null;
+  try {
+    password = execFileSync(
+      "/usr/bin/security",
+      ["find-generic-password", "-w", "-s", service],
+      { encoding: "buffer", stdio: ["ignore", "pipe", "ignore"], timeout: 5_000 },
+    );
+    let length = password.length;
+    while (length > 0 && (password[length - 1] === 0x0a || password[length - 1] === 0x0d)) length -= 1;
+    if (length === 0) return null;
+    return pbkdf2Sync(password.subarray(0, length), "saltysalt", 1_003, 16, "sha1");
+  } catch {
+    return null;
+  } finally {
+    password?.fill(0);
+  }
+}
+
+export function reencryptMacChromiumCookie(
+  encryptedValue: Buffer,
+  hostKey: string,
+  sourceKey: Buffer,
+  destinationKey: Buffer,
+  schemaVersion: number,
+): Buffer {
+  const plaintext = decryptMacChromiumCookie(encryptedValue, hostKey, sourceKey, schemaVersion);
+  try {
+    const prefix = encryptedValue.subarray(0, 3);
+    const cipher = createCipheriv("aes-128-cbc", destinationKey, Buffer.alloc(16, 0x20));
+    return Buffer.concat([prefix, cipher.update(plaintext), cipher.final()]);
+  } finally {
+    plaintext.fill(0);
+  }
+}
+
+function decryptMacChromiumCookie(
+  encryptedValue: Buffer,
+  hostKey: string,
+  key: Buffer,
+  schemaVersion: number,
+): Buffer {
+  const prefix = encryptedValue.subarray(0, 3).toString("ascii");
+  if (prefix !== "v10" && prefix !== "v11") {
+    throw new Error("지원하지 않는 macOS 쿠키 암호문 형식입니다.");
+  }
+  const iv = Buffer.alloc(16, 0x20);
+  const decipher = createDecipheriv("aes-128-cbc", key, iv);
+  const plaintext = Buffer.concat([decipher.update(encryptedValue.subarray(3)), decipher.final()]);
+  if (schemaVersion >= 24) {
+    const expectedHostHash = createHash("sha256").update(hostKey).digest();
+    if (plaintext.length < expectedHostHash.length
+      || !timingSafeEqual(plaintext.subarray(0, expectedHostHash.length), expectedHostHash)) {
+      plaintext.fill(0);
+      throw new Error("macOS 쿠키의 사이트 무결성 검증에 실패했습니다.");
+    }
+  }
+  return plaintext;
+}
+
+function macCookieReencryptor(
+  browser: string,
+  schemaVersion: number,
+): {
+  transform: (row: Record<string, unknown>) => Record<string, unknown>;
+  destinationCanRead: (row: Record<string, unknown>) => boolean;
+  dispose: () => void;
+} | null {
+  if (process.platform !== "darwin") return null;
+  const sourceService = MAC_SAFE_STORAGE_SERVICE[browser];
+  if (!sourceService) throw new Error(`${browser}의 macOS 쿠키 암호화 방식을 지원하지 않습니다.`);
+  const destinationService = agentlasMacSafeStorageService();
+  if (!destinationService) {
+    throw new Error("Agentlas 전용 브라우저의 macOS 쿠키 암호화 대상을 확인하지 못했습니다.");
+  }
+  const destinationKey = readMacSafeStorageKey(destinationService);
+  if (!destinationKey) {
+    throw new Error(
+      "macOS 키체인에서 Agentlas 브라우저의 로그인 변환 키를 읽지 못했습니다. 키체인 접근을 허용한 뒤 다시 시도해 주세요.",
+    );
+  }
+  const destinationCanRead = (row: Record<string, unknown>): boolean => {
+    const encrypted = row.encrypted_value;
+    if (!Buffer.isBuffer(encrypted) || encrypted.length === 0) return true;
+    try {
+      const plaintext = decryptMacChromiumCookie(
+        encrypted,
+        String(row.host_key ?? ""),
+        destinationKey,
+        schemaVersion,
+      );
+      plaintext.fill(0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  // Chrome -> Chrome for Testing is the same Keychain identity. Still return a
+  // validator: older Agentlas builds wrote these rows with Chromium Safe
+  // Storage, and `INSERT OR IGNORE` would otherwise preserve that unreadable
+  // ciphertext forever while the UI continued to say "logged in".
+  if (sourceService === destinationService) {
+    return {
+      transform(row) {
+        return row;
+      },
+      destinationCanRead,
+      dispose() {
+        destinationKey.fill(0);
+      },
+    };
+  }
+
+  const sourceKey = readMacSafeStorageKey(sourceService);
+  if (!sourceKey) {
+    destinationKey.fill(0);
+    throw new Error(
+      "macOS 키체인에서 브라우저 로그인 변환 키를 읽지 못했습니다. 키체인 접근을 허용한 뒤 다시 시도해 주세요.",
+    );
+  }
+  return {
+    transform(row) {
+      const encrypted = row.encrypted_value;
+      if (!Buffer.isBuffer(encrypted) || encrypted.length === 0) return row;
+      return {
+        ...row,
+        encrypted_value: reencryptMacChromiumCookie(
+          encrypted,
+          String(row.host_key ?? ""),
+          sourceKey,
+          destinationKey,
+          schemaVersion,
+        ),
+      };
+    },
+    destinationCanRead,
+    dispose() {
+      sourceKey.fill(0);
+      destinationKey.fill(0);
+    },
+  };
+}
+
+interface MacCdpCookieImportResult {
+  accepted: number;
+  domains: string[];
+}
+
+function processIsLive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (processIsLive(pid) && Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+  }
+  return !processIsLive(pid);
+}
+
+async function stopMacCookieImportBrowser(child: ChildProcess): Promise<void> {
+  const pid = child.pid;
+  if (!pid || !processIsLive(pid)) return;
+  try { child.kill("SIGTERM"); } catch { /* already gone */ }
+  if (await waitForProcessExit(pid, 3_000)) return;
+  try { child.kill("SIGKILL"); } catch { /* already gone */ }
+  if (!(await waitForProcessExit(pid, 3_000))) {
+    throw new Error(`Agentlas 로그인 가져오기 브라우저 정리에 실패했습니다 (${pid}).`);
+  }
+}
+
+/**
+ * macOS Chromium does not reliably adopt cookie rows written into a closed DB:
+ * it can accept the SQLite schema and ciphertext, then discard authentication
+ * rows during OSCrypt/store initialization. Feed the selected plaintext only to
+ * the loopback CDP of one attested Agentlas runtime instead. The runtime writes
+ * its own durable encrypted row, values never enter logs/files, and the exact
+ * browser root is reaped before the maintenance window is released.
+ */
+async function importMacCookiesThroughDedicatedRuntime(
+  browser: string,
+  schemaVersion: number,
+  jobs: Array<{ domain: string; rows: Record<string, unknown>[] }>,
+): Promise<MacCdpCookieImportResult> {
+  if (jobs.length === 0) return { accepted: 0, domains: [] };
+  const sourceService = MAC_SAFE_STORAGE_SERVICE[browser];
+  if (!sourceService) throw new Error(`${browser}의 macOS 쿠키 암호화 방식을 지원하지 않습니다.`);
+  const sourceKey = readMacSafeStorageKey(sourceService);
+  if (!sourceKey) {
+    throw new Error("macOS 키체인에서 원본 브라우저의 로그인 키를 읽지 못했습니다.");
+  }
+
+  const plaintexts: Buffer[] = [];
+  const cookies: Array<{
+    name: string;
+    value: string;
+    domain: string;
+    path: string;
+    expires?: number;
+    httpOnly: boolean;
+    secure: boolean;
+    sameSite?: "Strict" | "Lax" | "None";
+  }> = [];
+  const cookieDomain = new Map<string, string>();
+  try {
+    for (const job of jobs) {
+      for (const row of job.rows) {
+        // Partitioned third-party cookies are not login identity and cannot be
+        // represented by Playwright's portable cookie shape without a top-level
+        // site. Keep the import first-party and deterministic.
+        if (String(row.top_frame_site_key ?? "")) continue;
+        const hostKey = String(row.host_key ?? "");
+        const name = String(row.name ?? "");
+        const cookiePath = String(row.path ?? "/") || "/";
+        if (!hostKey || !name) continue;
+        let value = typeof row.value === "string" ? row.value : "";
+        const encrypted = row.encrypted_value;
+        if (Buffer.isBuffer(encrypted) && encrypted.length > 0) {
+          let plaintext: Buffer;
+          try {
+            plaintext = decryptMacChromiumCookie(encrypted, hostKey, sourceKey, schemaVersion);
+          } catch {
+            continue;
+          }
+          plaintexts.push(plaintext);
+          const offset = schemaVersion >= 24 ? 32 : 0;
+          value = plaintext.subarray(offset).toString("utf8");
+        }
+        const expires = Number(row.expires_utc ?? 0) / 1_000_000 - 11_644_473_600;
+        if (Number(row.has_expires ?? 0) !== 0 && Number.isFinite(expires) && expires <= Date.now() / 1000) {
+          continue;
+        }
+        const cookie: (typeof cookies)[number] = {
+          name,
+          value,
+          domain: hostKey,
+          path: cookiePath,
+          httpOnly: Boolean(row.is_httponly),
+          secure: Boolean(row.is_secure),
+        };
+        if (Number(row.has_expires ?? 0) !== 0 && Number.isFinite(expires) && expires > 0) cookie.expires = expires;
+        if (Number(row.samesite) === 0) cookie.sameSite = "None";
+        else if (Number(row.samesite) === 1) cookie.sameSite = "Lax";
+        else if (Number(row.samesite) === 2) cookie.sameSite = "Strict";
+        cookies.push(cookie);
+        cookieDomain.set(`${hostKey}\u0000${name}\u0000${cookiePath}`, job.domain);
+      }
+    }
+  } finally {
+    sourceKey.fill(0);
+  }
+  if (cookies.length === 0) {
+    for (const plaintext of plaintexts) plaintext.fill(0);
+    return { accepted: 0, domains: [] };
+  }
+
+  const runtime = resolveAgentlasBrowserRuntime();
+  if (!runtime?.executable || !fs.existsSync(runtime.executable)) {
+    for (const plaintext of plaintexts) plaintext.fill(0);
+    throw new Error("Agentlas 전용 브라우저 런타임이 없어 로그인을 가져올 수 없습니다.");
+  }
+  if (await browserCdpPortReady()) {
+    for (const plaintext of plaintexts) plaintext.fill(0);
+    throw new Error(`Agentlas 브라우저 포트 ${browserCdpPort()}가 이미 사용 중입니다.`);
+  }
+
+  let child: ChildProcess | null = null;
+  let connection: Awaited<ReturnType<typeof chromium.connectOverCDP>> | null = null;
+  try {
+    child = spawn(runtime.executable, [
+      `--user-data-dir=${browserCdpProfilePath()}`,
+      `--remote-debugging-port=${browserCdpPort()}`,
+      "--remote-debugging-address=127.0.0.1",
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--disable-session-crashed-bubble",
+      "--disable-features=Translate",
+      "--disable-component-update",
+      "--disable-background-networking",
+      "--headless=new",
+      // Do not seed an about:blank target during credential maintenance.
+      "chrome://version/",
+    ], { detached: false, stdio: "ignore" });
+    if (!child.pid) throw new Error("Agentlas 로그인 가져오기 브라우저를 시작하지 못했습니다.");
+    let launchError: Error | null = null;
+    child.once("error", (error) => { launchError = error; });
+    const deadline = Date.now() + 20_000;
+    while (!(await browserCdpPortReady()) && Date.now() < deadline && !launchError) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 200));
+    }
+    if (launchError) throw launchError;
+    if (!(await browserCdpPortReady())) throw new Error("Agentlas 로그인 가져오기 브라우저가 준비되지 않았습니다.");
+    writeBrowserCdpOwner(child.pid);
+    const ownership = await inspectBrowserCdpOwnership();
+    if (ownership.state !== "owned" || ownership.pid !== child.pid) {
+      throw new Error(`Agentlas 로그인 가져오기 브라우저 소유권 확인 실패 (${ownership.state}:${ownership.reason}).`);
+    }
+
+    connection = await chromium.connectOverCDP(`http://127.0.0.1:${browserCdpPort()}`);
+    const context = connection.contexts()[0];
+    if (!context) throw new Error("Agentlas 로그인 가져오기 브라우저 컨텍스트가 없습니다.");
+    for (const page of context.pages()) await page.close().catch(() => undefined);
+    await context.addCookies(cookies);
+    const observed = await context.cookies(jobs.map((job) => `https://${job.domain}/`));
+    const acceptedDomains = new Set<string>();
+    let accepted = 0;
+    for (const cookie of observed) {
+      const domain = cookieDomain.get(`${cookie.domain}\u0000${cookie.name}\u0000${cookie.path}`);
+      if (!domain) continue;
+      accepted += 1;
+      acceptedDomains.add(domain);
+    }
+    return { accepted, domains: [...acceptedDomains] };
+  } finally {
+    for (const plaintext of plaintexts) plaintext.fill(0);
+    if (connection) await connection.close().catch(() => undefined);
+    if (child) {
+      const pid = child.pid;
+      try {
+        await stopMacCookieImportBrowser(child);
+      } finally {
+        if (pid) clearBrowserCdpOwner(pid);
+      }
+    }
+    resetBrowserCdpSessionRestoreArtifacts();
+  }
 }
 
 const COOKIE_TABLE_DDL = `CREATE TABLE cookies(
@@ -487,19 +897,10 @@ export async function importBrowserCredentials(
       };
     }
 
-    // 전용 Chrome 이 떠 있으면 그 프로세스가 이 쿠키 DB 를 mmap 하고 있다. 거기에 밖에서 쓰면
-    // (a) 그 Chrome 이 SIGBUS 로 죽을 수 있고 (b) 살아남더라도 자기 메모리 상태로 우리 행을
-    // 덮어써 "가져왔는데 로그인이 안 됨"이 된다. 조용히 실패하느니 이유를 말하고 멈춘다.
-    if (await browserCdpOwnerIsLive()) {
-      return {
-        ok: false,
-        cookiesAdded: 0,
-        linkedSites: [],
-        skipped,
-        error: "Agentlas 전용 브라우저 창이 열려 있습니다. 그 창을 닫고 다시 가져오기를 눌러 주세요.",
-      };
-    }
-
+    // 사용자가 보지 못하는 전용 창/헤드리스 작업도 모두 자동화 소유다. 가져오기 전체를
+    // 유지보수 잠금 안에서 수행해 Agentlas가 정확한 전용 프로필 프로세스를 자동 종료하고,
+    // 쿠키 DB 쓰기가 끝날 때까지 다른 자동화가 다시 브라우저를 띄우지 못하게 한다.
+    return await withBrowserCdpMaintenance(async () => {
     const destPath = destinationCookieStore(sourceStore);
     const destExisted = fs.existsSync(destPath);
     let destHadCookies = false;
@@ -554,6 +955,18 @@ export async function importBrowserCredentials(
       };
     }
 
+    const schemaVersion = Number(
+      (src.prepare("SELECT value FROM meta WHERE key = 'version'").get() as { value?: unknown } | undefined)?.value ?? 0,
+    );
+    let reencryptor: ReturnType<typeof macCookieReencryptor> = null;
+    try {
+      reencryptor = macCookieReencryptor(profile.browser, schemaVersion);
+    } catch (error) {
+      src.close();
+      dest.close();
+      throw error;
+    }
+
     const quoted = shared.map((c) => `"${c}"`).join(", ");
     const placeholders = shared.map(() => "?").join(", ");
     // merge: 이미 있는 (host_key, name, path) 는 건드리지 않는다.
@@ -567,7 +980,7 @@ export async function importBrowserCredentials(
      *   갱신해야 옮긴 것이 된다.
      */
     const existingStmt = dest.prepare(
-      "SELECT expires_utc AS expiresUtc, last_update_utc AS updatedUtc FROM cookies WHERE host_key = ? AND name = ? AND path = ? LIMIT 1",
+      "SELECT expires_utc AS expiresUtc, last_update_utc AS updatedUtc, encrypted_value AS encryptedValue, value AS plainValue FROM cookies WHERE host_key = ? AND name = ? AND path = ? LIMIT 1",
     );
     const deleteStmt = dest.prepare("DELETE FROM cookies WHERE host_key = ? AND name = ? AND path = ?");
     const freshnessOf = (record: Record<string, unknown>): number => {
@@ -591,54 +1004,104 @@ export async function importBrowserCredentials(
           const name = String(row.name ?? "");
           const cookiePath = String(row.path ?? "/");
           const already = existingStmt.get(hostKey, name, cookiePath) as
-            { expiresUtc?: number; updatedUtc?: number } | undefined;
+            { expiresUtc?: number; updatedUtc?: number; encryptedValue?: Buffer; plainValue?: string } | undefined;
           if (already) {
             // 신선도를 비교할 칸이 아예 없는 저장소 형식이면 예전처럼 건드리지 않는다.
-            if (!destColumns.has("expires_utc") && !destColumns.has("last_update_utc")) continue;
-            if (freshnessOf(row) <= freshnessOf(already as Record<string, unknown>)) continue;
+            const destinationReadable = !reencryptor || reencryptor.destinationCanRead({
+              host_key: hostKey,
+              encrypted_value: already.encryptedValue,
+              value: already.plainValue,
+            });
+            if (destinationReadable) {
+              if (!destColumns.has("expires_utc") && !destColumns.has("last_update_utc")) continue;
+              if (freshnessOf(row) <= freshnessOf(already as Record<string, unknown>)) continue;
+            }
             deleteStmt.run(hostKey, name, cookiePath);
-            insert.run(shared.map((c) => (row as Record<string, unknown>)[c] ?? null));
+            const prepared = reencryptor?.transform(row) ?? row;
+            insert.run(shared.map((c) => prepared[c] ?? null));
             refreshed += 1;
             continue;
           }
-          insert.run(shared.map((c) => (row as Record<string, unknown>)[c] ?? null));
+          const prepared = reencryptor?.transform(row) ?? row;
+          insert.run(shared.map((c) => prepared[c] ?? null));
           added += 1;
         }
       }
     });
 
     const jobs: Array<{ domain: string; rows: Record<string, unknown>[] }> = [];
+    const interactiveDomains: string[] = [];
     for (const domain of wanted) {
       const rows = selectRows.all(domain, `.${domain}`, `%.${domain}`) as Record<string, unknown>[];
       if (rows.length === 0) {
         skipped.push({ domain, reason: "이 프로필에서 그 도메인의 쿠키를 찾지 못했습니다." });
         continue;
       }
+      // Modern Windows Chrome binds v20 cookie ciphertext to Chrome's own
+      // installed application path. A partial copy (legacy rows copied, v20
+      // auth rows unreadable) looks successful but opens a logged-out page.
+      // Register the site for one-time login in the dedicated runtime instead;
+      // never weaken App-Bound Encryption or fall back to automating ordinary
+      // Chrome. Once signed in, that dedicated profile persists normally.
+      if (rows.some((row) => cookieUsesWindowsAppBoundEncryption(row.encrypted_value))) {
+        interactiveDomains.push(domain);
+        continue;
+      }
       jobs.push({ domain, rows });
     }
-    runAll(jobs);
-    src.close();
-    dest.close();
+    try {
+      runAll(jobs);
+    } finally {
+      reencryptor?.dispose();
+      src.close();
+      dest.close();
+    }
 
-    for (const job of jobs) {
-      const site = normalizeSite(`https://${job.domain}`);
+    let runtimeImported: MacCdpCookieImportResult | null = null;
+    if (process.platform === "darwin" && jobs.length > 0) {
+      runtimeImported = await importMacCookiesThroughDedicatedRuntime(profile.browser, schemaVersion, jobs);
+      const acceptedDomains = new Set(runtimeImported.domains);
+      for (const job of jobs) {
+        if (!acceptedDomains.has(job.domain)) {
+          skipped.push({
+            domain: job.domain,
+            reason: "전용 브라우저가 이 사이트의 로그인 쿠키를 받아들이지 않았습니다.",
+          });
+        }
+      }
+    }
+
+    const importedSites: string[] = [];
+    const requiresLoginSites: string[] = [];
+    const acceptedJobDomains = runtimeImported
+      ? jobs.map((job) => job.domain).filter((domain) => runtimeImported!.domains.includes(domain))
+      : jobs.map((job) => job.domain);
+    for (const domain of [...acceptedJobDomains, ...interactiveDomains]) {
+      const site = normalizeSite(`https://${domain}`);
       if (!site) {
-        skipped.push({ domain: job.domain, reason: "사이트 주소로 바꿀 수 없는 도메인입니다." });
+        skipped.push({ domain, reason: "사이트 주소로 바꿀 수 없는 도메인입니다." });
         continue;
       }
       // eslint-disable-next-line no-await-in-loop -- 사이트 수는 사용자가 고른 만큼이라 작다.
-      await upsertBrowserSite({ site, label: job.domain });
+      await upsertBrowserSite({ site, label: domain });
       linkedSites.push(site);
+      if (interactiveDomains.includes(domain)) {
+        setBrowserSession(site, "none");
+        requiresLoginSites.push(site);
+      } else {
+        importedSites.push(site);
+      }
     }
 
     /*
-     * ★ 아무것도 옮기지 않았으면 옮겼다고 말하지 않는다 (오너 신고 2026-08-24).
-     *   예전에는 `cookiesAdded: 0` 이어도 `ok: true` 를 돌려줬다. 화면은 "가져왔다" 로
-     *   읽고 사이트를 목록에 올리는데 로그인은 되지 않는다 — 사용자는 무엇이 잘못됐는지
-     *   알 길이 없다. 옮긴 것이 없으면 그 사실과 다음에 할 일을 말한다.
+     * `moved === 0` alone is not a failure. It normally means every selected
+     * row is already present, readable with the destination key, and at least
+     * as fresh. Treating that healthy steady state as failure made the 3-day
+     * refresh retry on every launch and showed an error after a successful
+     * earlier import. Only fail when no importable or interactive site exists.
      */
-    const moved = added + refreshed;
-    if (moved === 0) {
+    const moved = runtimeImported?.accepted ?? (added + refreshed);
+    if (moved === 0 && importedSites.length === 0 && requiresLoginSites.length === 0) {
       return {
         ok: false,
         cookiesAdded: 0,
@@ -649,7 +1112,20 @@ export async function importBrowserCredentials(
           : "옮길 로그인 정보를 찾지 못했습니다. 그 브라우저에서 해당 사이트에 로그인되어 있는지 확인해 주세요.",
       };
     }
-    return { ok: true, cookiesAdded: moved, linkedSites, skipped };
+    // The source list contains only domains with secure HttpOnly login-cookie
+    // evidence, and a successful result means those rows were newly added or
+    // refreshed into the dedicated profile. Reflect that completed import in
+    // Connect immediately instead of leaving the contradictory "Not signed in"
+    // badge until a separate manual login-window confirmation.
+    for (const site of importedSites) setBrowserSession(site, "valid");
+    return {
+      ok: true,
+      cookiesAdded: moved,
+      linkedSites,
+      skipped,
+      ...(requiresLoginSites.length > 0 ? { requiresLoginSites } : {}),
+    };
+    });
   } catch (error) {
     return {
       ok: false,

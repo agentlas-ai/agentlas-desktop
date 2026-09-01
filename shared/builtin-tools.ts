@@ -60,7 +60,17 @@ export interface BuiltinToolContext {
     /** 실제로 그린 엔진. 지어낸 값이 아니라 실행 결과다. */
     engine?: string;
     message?: string;
+    /** Main-only source path. It is never serialized into tool text. */
+    artifactPath?: string;
   }>;
+}
+
+export interface BuiltinToolRunResult {
+  content: string;
+  /** Host-structured evidence; model prose and JSON output cannot populate it. */
+  artifactPaths?: readonly string[];
+  /** Optional visual feedback for the model's next tool-loop turn. */
+  imageDataUrl?: string;
 }
 
 export interface BuiltinTool {
@@ -68,7 +78,7 @@ export interface BuiltinTool {
   minPerm: ToolPermission;
   description: string;
   parameters: Record<string, unknown>;
-  run(args: Record<string, unknown>, ctx: BuiltinToolContext): Promise<string> | string;
+  run(args: Record<string, unknown>, ctx: BuiltinToolContext): Promise<string | BuiltinToolRunResult> | string | BuiltinToolRunResult;
 }
 
 function pathDenied(reason: string): never {
@@ -431,7 +441,11 @@ export const BUILTIN_TOOLS: readonly BuiltinTool[] = [
       const r = await ctx.generateImage({ prompt });
       // 실패는 실패라고 말한다 — 모델이 "그렸다"고 쓰지 않도록 결과 문장이 분명해야 한다.
       if (!r.ok || !r.src) return `Image generation failed: ${r.message || "no image was produced"}`;
-      return JSON.stringify({ ok: true, engine: r.engine ?? "unknown", src: r.src });
+      return {
+        content: JSON.stringify({ ok: true, engine: r.engine ?? "unknown", src: r.src }),
+        ...(r.artifactPath ? { artifactPaths: [r.artifactPath] } : {}),
+        imageDataUrl: r.src,
+      };
     },
   },
   {
@@ -564,7 +578,7 @@ export async function runBuiltinTool(
   name: string,
   args: Record<string, unknown>,
   ctx: BuiltinToolContext,
-): Promise<{ ok: boolean; content: string }> {
+): Promise<{ ok: boolean; content: string; artifactPaths?: readonly string[]; imageDataUrl?: string }> {
   const tool = BY_NAME.get(name);
   if (!tool) return { ok: false, content: `unknown tool: ${name}` };
   if (PERM_RANK[tool.minPerm] > (PERM_RANK[ctx.permission] ?? 0)) {
@@ -574,7 +588,16 @@ export async function runBuiltinTool(
     };
   }
   try {
-    return { ok: true, content: String(await tool.run(args ?? {}, ctx)) };
+    const value = await tool.run(args ?? {}, ctx);
+    if (value && typeof value === "object" && typeof value.content === "string") {
+      return {
+        ok: true,
+        content: value.content,
+        ...(value.artifactPaths?.length ? { artifactPaths: [...value.artifactPaths] } : {}),
+        ...(value.imageDataUrl ? { imageDataUrl: value.imageDataUrl } : {}),
+      };
+    }
+    return { ok: true, content: String(value) };
   } catch (error) {
     return { ok: false, content: `${name} error: ${error instanceof Error ? error.message : String(error)}` };
   }

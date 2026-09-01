@@ -300,14 +300,30 @@ export async function runOneToolCall(
           }
         : {}),
     });
-    events.onTool?.(call.function.name, call.function.arguments, outcome.content, call.id, !outcome.ok);
+    events.onTool?.(
+      call.function.name,
+      call.function.arguments,
+      outcome.content,
+      call.id,
+      !outcome.ok,
+      outcome.artifactPaths,
+      outcome.imageDataUrl,
+    );
     return {
       toolMessage: {
         role: "tool",
         tool_call_id: call.id,
         content: (outcome.ok ? outcome.content : `Error: ${outcome.content}`).slice(0, MAX_TOOL_RESULT_CHARS),
       },
-      visionMessage: null,
+      visionMessage: outcome.ok && outcome.imageDataUrl
+        ? {
+            role: "user",
+            content: [
+              { type: "text", text: "The preceding host tool produced this verified image." },
+              { type: "image_url", image_url: { url: outcome.imageDataUrl } },
+            ],
+          }
+        : null,
     };
   }
   try {
@@ -464,6 +480,8 @@ export async function runLocalOpenAiChat(
   messages: ChatMessage[],
 ): Promise<RunnerResult> {
   const { req, events, runtimeKind, host, model } = opts;
+  const runtimeSessionOwnerId = req.runtimeSessionOwnerId ?? req.agentId;
+  const isolateRuntimeSessionOwner = req.runtimeSessionOwnerId != null;
   const sessionFingerprint = req.chatId
     ? createHash("sha256")
         .update("local-chat-session-v1\0")
@@ -474,13 +492,15 @@ export async function runLocalOpenAiChat(
         .update(req.sessionFingerprintSeed ?? req.systemPrompt ?? "")
         .digest("hex")
     : null;
-  const previousSession = req.chatId ? getRuntimeSession(req.chatId, runtimeKind, req.agentId) : null;
+  const previousSession = req.chatId
+    ? getRuntimeSession(req.chatId, runtimeKind, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner })
+    : null;
   if (req.chatId && sessionFingerprint) {
     // OpenAI-compatible local servers have no provider conversation ID. The
     // durable Agentlas chat history is the source of truth, while this
     // logical session record makes continuity visible and detects model/host
     // changes without pretending the server supports native resume.
-    saveRuntimeSession(req.chatId, runtimeKind, req.chatId, sessionFingerprint, { agentId: req.agentId });
+    saveRuntimeSession(req.chatId, runtimeKind, req.chatId, sessionFingerprint, { agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner });
     if (previousSession && previousSession.fingerprint === sessionFingerprint) {
       events.onStatus(req.locale === "ko" ? "로컬 모델 대화 기록 이어가는 중..." : "Continuing local model conversation history...");
     }

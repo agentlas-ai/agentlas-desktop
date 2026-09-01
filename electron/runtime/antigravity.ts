@@ -1,6 +1,7 @@
 // Antigravity CLI (agy) — 감지 + 실호출.
 // Google 계정의 Antigravity 구독 런타임만 지원한다.
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { StringDecoder } from "node:string_decoder";
 import os from "node:os";
 import fs from "node:fs/promises";
@@ -203,10 +204,81 @@ function buildPrompt(req: RunnerRequest): string {
  * 파일 작업은 되고 셸은 묶인다. full만 샌드박스를 푼다.
  * read는 플래그를 주지 않는다(도구 없이 텍스트만 = 기존 격리 계약 유지).
  */
-export function antigravityPermissionArgs(permission?: "read" | "write" | "full"): string[] {
+export function antigravityPermissionArgs(
+  permission?: "read" | "write" | "full",
+  browserOnly = false,
+): string[] {
+  // Browser-only runs are approved by a dedicated Antigravity project policy.
+  // Do not use the global bypass flag here: it would also approve run_command
+  // and lets a model launch an unmanaged Playwright with cookie values in argv.
+  if (browserOnly) return ["--sandbox"];
   if (permission === "full") return ["--dangerously-skip-permissions"];
   if (permission === "write") return ["--dangerously-skip-permissions", "--sandbox"];
   return [];
+}
+
+const AGY_BROWSER_PROJECT_ID = "agentlas-browser-automation-v1";
+const AGY_BROWSER_POLICY_MARKER = "agentlas.desktop.browser-policy.v1";
+
+export interface AntigravityBrowserProjectPolicy {
+  projectId: string;
+  workspace: string;
+  configPath: string;
+}
+
+/**
+ * Create the Agentlas-owned Antigravity project used by browser-only runs.
+ * It is intentionally outside every user project and allows only the canonical
+ * Agentlas Browser MCP. Headless Antigravity therefore needs no approval prompt,
+ * while shell/file/provider-native browser fallbacks are denied by the runtime
+ * before they can expose cookies or create unmanaged browser processes.
+ */
+export async function ensureAntigravityBrowserProjectPolicy(
+  home = os.homedir(),
+): Promise<AntigravityBrowserProjectPolicy> {
+  const workspace = path.join(home, ".agentlas", "runtime-homes", "antigravity-browser-v1");
+  const configDir = path.join(home, ".gemini", "config", "projects");
+  const configPath = path.join(configDir, `${AGY_BROWSER_PROJECT_ID}.json`);
+  await fs.mkdir(workspace, { recursive: true, mode: 0o700 });
+  await fs.mkdir(configDir, { recursive: true, mode: 0o700 });
+
+  if (await fs.stat(configPath).then(() => true, () => false)) {
+    try {
+      const current = JSON.parse(await fs.readFile(configPath, "utf8")) as { agentlasOwner?: string };
+      if (current.agentlasOwner !== AGY_BROWSER_POLICY_MARKER) {
+        throw new Error("Antigravity browser policy id is already owned by another project");
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("already owned")) throw error;
+      throw new Error("Existing Antigravity browser policy is unreadable; refusing to overwrite it");
+    }
+  }
+
+  const policy = {
+    id: AGY_BROWSER_PROJECT_ID,
+    name: "Agentlas Browser Automation",
+    agentlasOwner: AGY_BROWSER_POLICY_MARKER,
+    projectResources: {
+      resources: [{ folderUri: pathToFileURL(workspace).href }],
+    },
+    permissionGrants: {
+      permissionGrants: {
+        allow: ["mcp(agentlas-browser/*)"],
+        deny: ["command(*)", "read_file(*)", "write_file(*)", "read_url(*)"],
+      },
+    },
+    settings: {
+      fileAccessPolicy: "AGENT_SETTING_POLICY_DENY",
+      internetPolicy: "AGENT_SETTING_POLICY_DENY",
+      autoExecutionPolicy: "CASCADE_COMMANDS_AUTO_EXECUTION_OFF",
+      artifactReviewMode: "ARTIFACT_REVIEW_MODE_NEVER",
+    },
+    updatedAt: new Date().toISOString(),
+  };
+  const tempPath = `${configPath}.${process.pid}.${randomUUID()}.tmp`;
+  await fs.writeFile(tempPath, JSON.stringify(policy, null, 2), { encoding: "utf8", mode: 0o600 });
+  await fs.rename(tempPath, configPath);
+  return { projectId: AGY_BROWSER_PROJECT_ID, workspace, configPath };
 }
 
 /** Antigravity의 헤드리스 실행 인자. 세션/stdin 계약은 사용하지 않는다. */
@@ -222,6 +294,7 @@ export function buildAntigravitySpawnArgs(
    * `--conversation <id>` 로 되돌린 턴이 이전 턴의 코드워드를 기억했다.
    */
   resumeConversationId?: string,
+  browserProjectId?: string,
 ): string[] {
   const modelArgs = model && model.trim() ? ["--model", model.trim()] : [];
   const directoryArgs = [...new Set(addDirectories.filter((value) => value.trim()))]
@@ -237,7 +310,8 @@ export function buildAntigravitySpawnArgs(
    */
   return [
     ...modelArgs, ...directoryArgs,
-    ...antigravityPermissionArgs(permission),
+    ...(browserProjectId ? ["--project", browserProjectId] : []),
+    ...antigravityPermissionArgs(permission, Boolean(browserProjectId)),
     "--output-format", "stream-json",
     "--print-timeout", "30m",
     ...(outputSchema ? ["--json-schema", JSON.stringify(outputSchema)] : []),
@@ -680,6 +754,8 @@ async function runPreparedAntigravity(
   // 매 호출 full prompt를 Antigravity에 전달한다. 대화 연속성은 Agentlas가
   // history/turnContext를 prompt에 넣어 관리하고, agy 세션 ID에는 의존하지 않는다.
   const runReq = req;
+  const runtimeSessionOwnerId = runReq.runtimeSessionOwnerId ?? runReq.agentId;
+  const isolateRuntimeSessionOwner = runReq.runtimeSessionOwnerId != null;
   events.onStatus(tStatus(runReq.locale, "callingBackend", { backend: runReq.backendLabel }));
   /*
    * ★세션 재개 — agy 는 `--conversation <id>` 를 갖고 있었는데 우리가 안 썼다.
@@ -697,7 +773,9 @@ async function runPreparedAntigravity(
         .update(runReq.model ?? "")
         .digest("hex")
     : null;
-  const agySaved = runReq.chatId ? getRuntimeSession(runReq.chatId, ANTIGRAVITY_KIND, runReq.agentId) : null;
+  const agySaved = runReq.chatId
+    ? getRuntimeSession(runReq.chatId, ANTIGRAVITY_KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner })
+    : null;
   const agyResumeId =
     agySaved && agyFingerprint && agySaved.fingerprint === agyFingerprint ? agySaved.sessionId : null;
   const prompt = agyResumeId
@@ -710,7 +788,12 @@ async function runPreparedAntigravity(
    * 할 수 있는지 모르게 된다. 무도구 격리 실행은 러너 진입에서 이미 거부되므로
    * (untrustedNoTools·restrictedReadBoundary), 여기서는 권한 칩만 보면 된다.
    */
-  const agyToolsAllowed = runReq.permission === "write" || runReq.permission === "full";
+  const agyToolsAllowed = runReq.browserOnly
+    || runReq.permission === "write"
+    || runReq.permission === "full";
+  const browserProject = runReq.browserOnly
+    ? await ensureAntigravityBrowserProjectPolicy()
+    : null;
 
   // agy에는 stdin/prompt-file 입력이 없다. 전체 시스템·히스토리를 argv에 넣으면 로컬
   // process listing에 노출되고 Windows 길이 제한도 넘는다. 0600 파일에는 본문을,
@@ -736,7 +819,7 @@ async function runPreparedAntigravity(
    * (~/.gemini/antigravity-cli/scratch)로 돌렸다. 모델은 "만들었다"고 답하고 사용자가
    * 연 폴더는 비어 있다. 실행 중 프로세스의 인자와 cwd 를 직접 떠서 확인했다.
    */
-  const agyWorkDir = runReq.cwd ?? agentRunCwd();
+  const agyWorkDir = browserProject?.workspace ?? runReq.cwd ?? agentRunCwd();
   let agyReadDirs = [agyWorkDir, ...agyAdditionalDirs];
   /*
    * ★agy 프롬프트는 **argv 한계에 걸릴 때만** 파일로 우회한다.
@@ -768,19 +851,26 @@ async function runPreparedAntigravity(
    */
   spawnPrompt = [
     "Non-interactive session rules:",
-    ...(agyToolsAllowed
+    ...(runReq.browserOnly
       ? [
-        "- Tools ARE available and pre-approved. Use them to do the work for real.",
-        "- NEVER run a long-lived process in the foreground (dev servers, watchers, `npm run dev`,",
-        "  `vite`, `next dev`, `tail -f`, anything that does not exit on its own). This session waits",
-        "  for the command to finish, so a foreground dev server hangs the whole run until timeout.",
-        "  Start it detached instead (for example `npm run dev >/tmp/dev.log 2>&1 &`), then poll the",
-        "  URL until it answers, and report that URL. If a task only needs the site reachable, a",
-        "  server that is already listening is done — do not restart it in the foreground.",
-        "- Apply changes to the actual files in the workspace: create, edit, and run what the",
-        "  request needs. Printing code in your reply is NOT doing the work.",
-        "- Your final text is a report of what you actually changed, not a substitute for it.",
-      ]
+          "- Only the Agentlas Browser MCP is available and pre-approved. Use it directly.",
+          "- Never use run_command, file tools, provider-native browser tools, or another Playwright runtime.",
+          "- Never print, serialize, or pass cookies, auth headers, or session tokens in arguments or output.",
+          "- Complete browser work through the declared Agentlas Browser tools and report only observed results.",
+        ]
+      : agyToolsAllowed
+      ? [
+          "- Tools ARE available and pre-approved. Use them to do the work for real.",
+          "- NEVER run a long-lived process in the foreground (dev servers, watchers, `npm run dev`,",
+          "  `vite`, `next dev`, `tail -f`, anything that does not exit on its own). This session waits",
+          "  for the command to finish, so a foreground dev server hangs the whole run until timeout.",
+          "  Start it detached instead (for example `npm run dev >/tmp/dev.log 2>&1 &`), then poll the",
+          "  URL until it answers, and report that URL. If a task only needs the site reachable, a",
+          "  server that is already listening is done — do not restart it in the foreground.",
+          "- Apply changes to the actual files in the workspace: create, edit, and run what the",
+          "  request needs. Printing code in your reply is NOT doing the work.",
+          "- Your final text is a report of what you actually changed, not a substitute for it.",
+        ]
       : [
         "- Tool calls cannot be approved here — do not attempt them.",
         "- Do NOT save your work to a file. Your final text response IS the deliverable;",
@@ -790,6 +880,9 @@ async function runPreparedAntigravity(
     "",
     spawnPrompt,
   ].join("\n");
+  if (runReq.browserOnly && spawnPrompt.length > AGY_ARGV_PROMPT_LIMIT) {
+    throw new Error("Browser-only Antigravity request exceeds the verified private argv boundary");
+  }
   if (spawnPrompt.length <= AGY_ARGV_PROMPT_LIMIT) {
     // 직접 전달 — 부트스트랩 없음.
   } else {
@@ -861,6 +954,7 @@ async function runPreparedAntigravity(
           agyToolsAllowed ? req.permission : undefined,
           req.outputSchema?.schema,
           agyResumeId ?? undefined,
+          browserProject?.projectId,
         ),
         {
           stdio: ["ignore", "pipe", "pipe"],
@@ -1043,7 +1137,7 @@ async function runPreparedAntigravity(
          * 문맥으로 물려받는다.
          */
         if (runReq.chatId && agyFingerprint && agyState.conversationId && !failure) {
-          saveRuntimeSession(runReq.chatId, ANTIGRAVITY_KIND, agyState.conversationId, agyFingerprint, { agentId: runReq.agentId });
+          saveRuntimeSession(runReq.chatId, ANTIGRAVITY_KIND, agyState.conversationId, agyFingerprint, { agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner });
         }
         resolve({
           text: trimmed,

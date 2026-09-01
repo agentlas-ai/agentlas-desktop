@@ -1,7 +1,13 @@
 import http from "node:http";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { browserCdpPort } from "../mcp-tools/browser-cdp-launcher";
+import {
+  acquireBrowserCdpLease,
+  browserCdpPort,
+  releaseBrowserCdpLease,
+  scheduleBrowserCdpIdleShutdown,
+} from "../mcp-tools/browser-cdp-launcher";
+import { onHostShutdown } from "../host-lifecycle";
 import { getBrowserStatus } from "./connect";
 import type {
   BrowserLiveFrame,
@@ -32,9 +38,15 @@ type BrowserLiveFrameSink = (frame: BrowserLiveStreamFrame) => void;
 interface LiveSessionRecord {
   ownerId: number;
   stream: CdpLiveStream;
+  releaseLease: (scheduleShutdown?: boolean) => void;
 }
 
 const liveSessions = new Map<string, LiveSessionRecord>();
+onHostShutdown(() => {
+  for (const record of liveSessions.values()) record.releaseLease(false);
+  liveSessions.clear();
+  scheduleBrowserCdpIdleShutdown();
+});
 // Agent MCP processes are intentionally ephemeral and close the pages they
 // created when a worker finishes. The output rail therefore owns one durable
 // CDP target per observed task URL instead of borrowing the worker's tab.
@@ -784,19 +796,21 @@ export async function captureBrowserLiveFrame(
   preferredUrl?: string,
   viewportMode: BrowserLiveViewport = "desktop",
 ): Promise<BrowserLiveFrame> {
-  const port = browserCdpPort();
-  const targets = await fetchTargets(port);
-  if (targets.length === 0) return unavailable("browser-offline", viewportMode);
-  const pages = targets.map((target) => verifiedTarget(target, port)).filter((target) => target !== null);
   const preferred = matchUrl(preferredUrl);
   // Capture is always scoped by the calling Taskforce/thread. An unscoped
   // request must never turn into "show the most recently open browser tab".
   if (!preferred) return unavailable("no-page", viewportMode);
-  const target = pages.find((page) => matchUrl(page.url) === preferred);
-  // A task-scoped request must fail empty instead of silently showing an
-  // unrelated tab left over from another task.
-  if (!target) return unavailable("no-page", viewportMode);
+  const lease = await acquireBrowserCdpLease("capture").catch(() => null);
+  if (!lease) return unavailable("browser-offline", viewportMode);
   try {
+    const port = browserCdpPort();
+    const targets = await fetchTargets(port);
+    if (targets.length === 0) return unavailable("browser-offline", viewportMode);
+    const pages = targets.map((target) => verifiedTarget(target, port)).filter((target) => target !== null);
+    const target = pages.find((page) => matchUrl(page.url) === preferred);
+    // A task-scoped request must fail empty instead of silently showing an
+    // unrelated tab left over from another task.
+    if (!target) return unavailable("no-page", viewportMode);
     const screenshot = await captureTarget(target.socketUrl, viewportMode);
     return {
       available: true,
@@ -812,6 +826,8 @@ export async function captureBrowserLiveFrame(
     };
   } catch {
     return unavailable("capture-failed", viewportMode);
+  } finally {
+    releaseBrowserCdpLease(lease);
   }
 }
 
@@ -853,20 +869,38 @@ export async function startBrowserLiveSession(
   viewportMode: BrowserLiveViewport,
   sink: BrowserLiveFrameSink,
 ): Promise<BrowserLiveSessionResult> {
-  await stopBrowserLiveSessionsForOwner(ownerId);
   const port = browserCdpPort();
   const preferred = matchUrl(preferredUrl);
   if (!preferred) return { sessionId: null, interactive: false, frame: unavailable("no-page", viewportMode) };
-  const target = await ensureRailTarget(port, preferred);
-  if (!target) return { sessionId: null, interactive: false, frame: unavailable("no-page", viewportMode) };
+  const lease = await acquireBrowserCdpLease("live-view").catch(() => null);
+  if (!lease) return { sessionId: null, interactive: false, frame: unavailable("browser-offline", viewportMode) };
+  let leaseReleased = false;
+  const releaseLease = (scheduleShutdown = true) => {
+    if (leaseReleased) return;
+    leaseReleased = true;
+    releaseBrowserCdpLease(lease, { scheduleShutdown });
+  };
+  let target: VerifiedCdpTarget | null = null;
+  try {
+    await stopBrowserLiveSessionsForOwner(ownerId);
+    target = await ensureRailTarget(port, preferred);
+  } catch {
+    releaseLease();
+    return { sessionId: null, interactive: false, frame: unavailable("capture-failed", viewportMode) };
+  }
+  if (!target) {
+    releaseLease();
+    return { sessionId: null, interactive: false, frame: unavailable("no-page", viewportMode) };
+  }
 
   const sessionId = randomUUID();
   let stream!: CdpLiveStream;
   stream = new CdpLiveStream(sessionId, target, viewportMode, sink, () => {
     const current = liveSessions.get(sessionId);
     if (current?.stream === stream) liveSessions.delete(sessionId);
+    releaseLease();
   });
-  liveSessions.set(sessionId, { ownerId, stream });
+  liveSessions.set(sessionId, { ownerId, stream, releaseLease });
   try {
     const frame = await stream.start();
     return { sessionId, interactive: true, frame };
@@ -914,18 +948,22 @@ export async function dispatchBrowserLiveInput(
 }
 
 export async function focusBrowserLiveTarget(targetId?: string): Promise<{ ok: boolean }> {
-  const port = browserCdpPort();
-  const targets = await fetchTargets(port);
-  const pages = targets.map((target) => verifiedTarget(target, port)).filter((target) => target !== null);
-  const target = pages.find((page) => page.id === targetId)
-    ?? pages.find((page) => page.url !== "about:blank")
-    ?? pages[0];
-  if (!target) return { ok: false };
+  const lease = await acquireBrowserCdpLease("focus").catch(() => null);
+  if (!lease) return { ok: false };
   try {
+    const port = browserCdpPort();
+    const targets = await fetchTargets(port);
+    const pages = targets.map((target) => verifiedTarget(target, port)).filter((target) => target !== null);
+    const target = pages.find((page) => page.id === targetId)
+      ?? pages.find((page) => page.url !== "about:blank")
+      ?? pages[0];
+    if (!target) return { ok: false };
     await bringTargetToFront(target.socketUrl);
     await activateBrowserApplication();
     return { ok: true };
   } catch {
     return { ok: false };
+  } finally {
+    releaseBrowserCdpLease(lease);
   }
 }

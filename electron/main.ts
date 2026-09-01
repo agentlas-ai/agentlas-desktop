@@ -48,7 +48,6 @@ import {
   disposeAutoUpdater,
   getUpdaterState,
   handleUpdaterBootstrapFailure,
-  hasUpdaterInstallRecoveryState,
   initAutoUpdater,
   noteHealthyStartup,
   onUpdaterStateChange,
@@ -99,6 +98,7 @@ import { reconcileOneHubDerivativeDraftStorage } from "./one/hub-derivative";
 import { recoverDesktopStartup, type StartupRecoveryPresentation } from "./one/startup-recovery";
 import { initFileLogging, mainLogFilePath } from "./logging";
 import { currentUiLocale, setCurrentUiLocale } from "./ui-locale";
+import { copyImageSource, saveImageSource } from "./media/image-actions";
 import { prepareMacRuntimeResourcesForExecution } from "./runtime/mac-resource-seal";
 import {
   issueMobileBridgePairing,
@@ -114,6 +114,11 @@ import {
 import { userDataDir } from "./runtime-paths";
 import { runHostShutdownHooks } from "./host-lifecycle";
 import { classifyStartupNavigationFailure } from "./startup-navigation";
+import {
+  recoverAgentlasBrowserRuntimeAtStartup,
+  sweepAgentlasBrowserOrphans,
+  withBrowserCdpMaintenance,
+} from "./mcp-tools/browser-cdp-launcher";
 import {
   installScienceExtension,
   installScienceSuite,
@@ -166,6 +171,7 @@ import type {
 } from "../shared/science-evidence-graph";
 import { ScienceDatasetIngestionService } from "./science/dataset-ingestion";
 import { SCIENCE_SCHEMA_VERSION } from "./science/store";
+import { scienceLabDecisionProjectionsForProject } from "./science/lab-decision-projection-service";
 import { commitScienceVegaEdit, parseScienceVegaEditInput } from "./science/vega-editor";
 import {
   renderScienceStatisticsFigurePdf,
@@ -441,6 +447,16 @@ let lastStartupNavigationFailure: {
   target: string;
 } | null = null;
 let shellReadyForWindows = false;
+let mobileBridgeOwnershipSettled = false;
+let resolveMobileBridgeOwnershipReady!: (ready: boolean) => void;
+const mobileBridgeOwnershipReady = new Promise<boolean>((resolve) => {
+  resolveMobileBridgeOwnershipReady = resolve;
+});
+function settleMobileBridgeOwnership(ready: boolean): void {
+  if (mobileBridgeOwnershipSettled) return;
+  mobileBridgeOwnershipSettled = true;
+  resolveMobileBridgeOwnershipReady(ready);
+}
 let oneBriefingLaunchTimer: NodeJS.Timeout | null = null;
 let oneBriefingInterval: NodeJS.Timeout | null = null;
 
@@ -566,12 +582,7 @@ function stopOneBriefingScheduler(): void {
 }
 
 const allowMultiInstance = process.env.AGENTLAS_ALLOW_MULTI_INSTANCE === "1";
-// AppImageUpdater relaunches the replacement with no `--updated` argument.
-// Use our durable install state as the cross-platform authority, otherwise the
-// replacement mistakes itself for an ordinary second launch, exits before
-// reconciliation, and leaves only the AppImage wrapper plus a permanent journal.
-const isPackagedUpdateRelaunch = app.isPackaged
-  && (process.argv.includes("--updated") || hasUpdaterInstallRecoveryState());
+const isPackagedUpdateRelaunch = app.isPackaged && process.argv.includes("--updated");
 const UPDATE_RELAUNCH_LOCK_RETRY_MS = 250;
 const UPDATE_RELAUNCH_LOCK_TIMEOUT_MS = 60_000;
 traceUpdaterStartup("before-single-instance-lock");
@@ -860,6 +871,29 @@ async function createWindow(options: { startupPlaceholder?: boolean } = {}): Pro
   mainWindow.webContents.on("context-menu", (_event, params) => {
     const { editFlags, isEditable, selectionText } = params;
     const items: Electron.MenuItemConstructorOptions[] = [];
+    if (params.mediaType === "image" && params.hasImageContents && params.srcURL) {
+      const isKo = currentUiLocale() === "ko";
+      const suggestedImageName = params.suggestedFilename || params.altText || params.titleText || undefined;
+      items.push(
+        {
+          label: isKo ? "이미지 복사" : "Copy Image",
+          click: () => {
+            void copyImageSource(params.srcURL, suggestedImageName).then((result) => {
+              if (!result.ok && mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.copyImageAt(params.x, params.y);
+              }
+            });
+          },
+        },
+        {
+          label: isKo ? "이미지를 다른 이름으로 저장…" : "Save Image As…",
+          click: () => {
+            if (mainWindow && !mainWindow.isDestroyed()) void saveImageSource(mainWindow, params.srcURL, suggestedImageName);
+          },
+        },
+      );
+      if (isEditable || (selectionText && selectionText.trim().length > 0)) items.push({ type: "separator" });
+    }
     if (isEditable) {
       items.push(
         { role: "undo", enabled: editFlags.canUndo },
@@ -963,12 +997,37 @@ let quitCleanupPromise: Promise<void> | null = null;
 let quitServicesStopPromise: Promise<void> | null = null;
 let systemShutdownInProgress = false;
 let systemShutdownResetTimer: NodeJS.Timeout | null = null;
+let browserOrphanSweepTimer: NodeJS.Timeout | null = null;
+let browserOrphanSweepRunning = false;
+
+function startBrowserOrphanSweep(): void {
+  if (browserOrphanSweepTimer) return;
+  browserOrphanSweepTimer = setInterval(() => {
+    if (browserOrphanSweepRunning || quitCleanupPromise) return;
+    browserOrphanSweepRunning = true;
+    void sweepAgentlasBrowserOrphans()
+      .then((result) => {
+        if (result.action === "cleaned") {
+          console.warn("[agentlas-browser] cleaned lease-less automation browser", result);
+        }
+      })
+      .catch((error) => console.error("[agentlas-browser] orphan sweep failed", error))
+      .finally(() => { browserOrphanSweepRunning = false; });
+  }, 30_000);
+  browserOrphanSweepTimer.unref?.();
+}
+
+function stopBrowserOrphanSweep(): void {
+  if (browserOrphanSweepTimer) clearInterval(browserOrphanSweepTimer);
+  browserOrphanSweepTimer = null;
+}
 
 function stopQuitServices(): Promise<void> {
   if (quitServicesStopPromise) return quitServicesStopPromise;
   shellReadyForWindows = false;
   try { stopAutomationScheduler(); } catch {}
   try { stopOneBriefingScheduler(); } catch {}
+  try { stopBrowserOrphanSweep(); } catch {}
   try { stopBrowserApprovalServer(); } catch {}
   try { stopMcpProxyApprovalServer(); } catch {}
   try { stopComputerUseControlServer(); } catch {}
@@ -987,20 +1046,12 @@ function stopQuitServices(): Promise<void> {
     stopAgentlasMobileBridge().catch((error) => {
       console.error("[mobile-bridge] shutdown failed", error);
     }),
-    /*
-     * ★상주는 "앱이 켜져 있는 동안"이다(오너 규칙 2026-08-20). 이 프로세스가 붙든
-     * 상주 CLI 는 아래 finishQuitCleanup 의 host-lifecycle 훅이 죽인다. 데몬이 붙든
-     * 것은 다른 프로세스라 훅이 닿지 않으므로, 소켓으로 놓아 달라고 부탁한다
-     * (데몬 자신은 계속 산다 — 예약 자동화는 앱과 무관하게 돌아야 한다).
-     */
     import("./daemon/app-launcher")
-      .then((module) => module.releaseDaemonAgentResidency(userDataDir()))
-      .then((released) => {
-        if (released && released.released > 0) {
-          console.log(`[daemon] released ${released.released} resident agent session(s) on app quit`);
-        }
+      .then((module) => module.shutdownDaemon(userDataDir(), process.pid))
+      .then((result) => {
+        if (!result.stopped) console.error(`[daemon] helper pid ${result.pid ?? "?"} did not stop`);
       })
-      .catch(() => {}),
+      .catch((error) => console.error("[daemon] helper shutdown failed", error)),
   ]).then(() => undefined);
   return quitServicesStopPromise;
 }
@@ -1032,6 +1083,9 @@ function finishQuitCleanup(): Promise<void> {
     try { runHostShutdownHooks(); } catch {}
     try { stopCliRuntimeAutoUpdate(); } catch {}
     await stopQuitServices().catch(() => {});
+    await withBrowserCdpMaintenance(() => undefined).catch((error) => {
+      console.error("[agentlas-browser] quit cleanup failed", error);
+    });
     // Child termination resolves through the invocation lifecycle. Do not
     // close SQLite underneath a terminal receipt that is still settling.
     const settleDeadline = Date.now() + 15_000;
@@ -1058,11 +1112,6 @@ const automaticQuitInstaller = createAutomaticQuitInstaller({
 });
 electronAutoUpdater.on("before-quit-for-update", () => {
   automaticQuitInstaller.authorizeNativeQuit();
-  // The replacement can be launched by NSIS/AppImageUpdater before this
-  // process has fully exited. Hand over the lock only after the native updater
-  // has committed to quitting, so the replacement can enter startup and clear
-  // the durable journal instead of waiting behind a dying process.
-  if (!allowMultiInstance && app.hasSingleInstanceLock()) app.releaseSingleInstanceLock();
 });
 app.on("will-quit", (event) => {
   // electron-updater's raw auto-install-on-quit path is intentionally disabled:
@@ -1166,10 +1215,9 @@ app.whenReady().then(async () => {
   } catch {
     console.error("[opencrab] legacy generated MCP config scrub failed");
   }
-  // ── 헤드리스 자동화 러너 진입점(설계 §2.6) ─────────────────────
-  // launchd LaunchAgent가 `--headless-automations` 플래그로 이 바이너리를 coarse 인터벌마다
-  // poke한다. 창을 만들지 않고 due 자동화를 1회 실행한 뒤 종료한다. 러너는 이미 렌더러를
-  // 안 건드리므로(sink no-op) 엔진 전체를 그대로 재사용한다. (full launchd 설치는 P1.)
+  // Older releases could be launched by a persisted LaunchAgent. Local work is
+  // app-scoped now, so this legacy entry may clean up the launcher but may not
+  // open the store, claim work, or execute an automation.
   // ── 그래프 표면(커넥터 C47·C48) ───────────────────────────────
   // 코드(SDK)와 다른 에이전트(MCP)가 그래프를 부르는 입구. **stdio 전용**이라
   // 이 프로세스를 직접 띄운 쪽에만 닿고, 네트워크에서 도달할 방법이 없다.
@@ -1187,30 +1235,12 @@ app.whenReady().then(async () => {
   }
 
   if (process.argv.includes("--headless-automations")) {
-    if (updatePreflight.pendingInstall) {
-      // The GUI launch owns post-migration continuity review. Never let a
-      // background runner mutate a just-updated store first.
-      app.quit();
-      return;
-    }
     try {
-      initStore();
-      materializeBuiltinPlugins();
-      ensureDefaultMcpPluginsInstalled();
-      await startHephaestusRuntimeAutoUpdate();
-      const openCrabScrub = scrubLegacyOpenCrabCredentialUrls();
-      if (openCrabScrub.scrubbed > 0) {
-        console.warn(`[opencrab] disabled and scrubbed ${openCrabScrub.scrubbed} legacy credential URL row(s)`);
-      }
-      const { runDueAutomationsNow, runAutomationFromTrigger } = await import("./automation-scheduler");
-      await runDueAutomationsNow();
-      // Events accepted by a previous GUI session live in the SQLite outbox.
-      // A headless wake drains a bounded batch too; atomic event + automation
-      // leases make this safe if the GUI is concurrently active.
-      const { drainTriggerOutboxOnce } = await import("./triggers/outbox");
-      await drainTriggerOutboxOnce((id, ctx, hooks) => runAutomationFromTrigger(id, ctx, hooks));
+      const { disableLaunchd } = await import("./launchd/agent");
+      const status = disableLaunchd();
+      if (status.error) console.error("[headless-automations] legacy launcher cleanup failed:", status.error);
     } catch (err) {
-      console.error("[headless-automations] failed:", err);
+      console.error("[headless-automations] legacy launcher cleanup failed:", err);
     } finally {
       app.quit();
     }
@@ -1336,7 +1366,12 @@ app.whenReady().then(async () => {
   ipcMain.handle("mobileBridge:status", () => mobileBridgeRuntimeStatus());
   ipcMain.handle("mobileBridge:issuePairing", () => issueMobileBridgePairing());
   ipcMain.handle("mobileBridge:listDevices", () => listMobileBridgeDevices());
-  ipcMain.handle("mobileBridge:retry", () => retryAgentlasMobileBridge());
+  ipcMain.handle("mobileBridge:retry", async () => {
+    if (!await mobileBridgeOwnershipReady) {
+      throw new Error("Agentlas Mobile Bridge ownership is unavailable");
+    }
+    return retryAgentlasMobileBridge();
+  });
   ipcMain.handle("mobileBridge:revokeDevice", (_event, deviceId: unknown) => {
     if (typeof deviceId !== "string" || !/^device_[a-f0-9]{32}$/.test(deviceId)) {
       return { ok: false };
@@ -1388,11 +1423,17 @@ app.whenReady().then(async () => {
     broadcastScienceExtension();
     return receipt;
   });
-  ipcMain.handle("productExtensions:openScienceView", async (event, bounds) => {
+  const scienceViewLeaseId = (value: unknown): string => {
+    if (typeof value !== "string" || !/^[a-zA-Z0-9._:-]{16,128}$/.test(value)) throw new Error("science-view-lease-invalid");
+    return value;
+  };
+  ipcMain.handle("productExtensions:openScienceView", async (event, bounds, rawLeaseId) => {
+    const leaseId = scienceViewLeaseId(rawLeaseId);
     const window = BrowserWindow.fromWebContents(event.sender);
-    if (!window || window.isDestroyed()) return { id: "agentlas-science", state: "error", errorCode: "owner-window-missing", errorMessage: "The Desktop window is unavailable." };
+    if (!window || window.isDestroyed()) return { id: "agentlas-science", leaseId, state: "error", errorCode: "owner-window-missing", errorMessage: "The Desktop window is unavailable." };
     return openScienceExtensionView({
       ownerId: event.sender.id,
+      leaseId,
       window,
       bounds,
       send: (status) => {
@@ -1400,8 +1441,8 @@ app.whenReady().then(async () => {
       },
     });
   });
-  ipcMain.handle("productExtensions:setScienceViewBounds", (event, bounds) => setScienceExtensionViewBounds(event.sender.id, bounds));
-  ipcMain.handle("productExtensions:closeScienceView", (event) => closeScienceExtensionView(event.sender.id));
+  ipcMain.handle("productExtensions:setScienceViewBounds", (event, bounds, rawLeaseId) => setScienceExtensionViewBounds(event.sender.id, scienceViewLeaseId(rawLeaseId), bounds));
+  ipcMain.handle("productExtensions:closeScienceView", (event, rawLeaseId) => closeScienceExtensionView(event.sender.id, scienceViewLeaseId(rawLeaseId)));
   const assertScienceSender = (event: Electron.IpcMainInvokeEvent, input: unknown, permission: ProductExtensionPermission = "science:projects") => {
     const extensionId = input && typeof input === "object" && "extensionId" in input ? String((input as { extensionId?: unknown }).extensionId ?? "") : "";
     if (extensionId !== "agentlas-science" || !isScienceExtensionViewSender(event.sender.id)) throw new Error("science-extension-sender-not-authorized");
@@ -2118,6 +2159,15 @@ app.whenReady().then(async () => {
     const { activeScienceLabCapabilityCatalog } = await import("./science/tool-control-server");
     return activeScienceLabCapabilityCatalog();
   });
+  ipcMain.handle("science:labs:decisionProjections", async (event, input: unknown) => {
+    assertScienceSender(event, input, "science:artifacts");
+    const projectId = input && typeof input === "object" && "projectId" in input
+      ? String((input as { projectId?: unknown }).projectId ?? "")
+      : "";
+    const { activeScienceLabCapabilityCatalog } = await import("./science/tool-control-server");
+    const catalog = await activeScienceLabCapabilityCatalog();
+    return scienceLabDecisionProjectionsForProject(scienceStore(), projectId, catalog);
+  });
   ipcMain.handle("science:labs:upsertBinding", async (event, envelope: unknown) => {
     assertScienceSender(event, envelope, "science:artifacts");
     const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
@@ -2627,6 +2677,15 @@ app.whenReady().then(async () => {
       console.error("[experience] legacy learning reconciliation failed:", err);
     }
   };
+  try {
+    const browserRecovery = await recoverAgentlasBrowserRuntimeAtStartup();
+    if (browserRecovery.rootsClosed > 0 || browserRecovery.staleLocksRemoved > 0) {
+      console.warn("[agentlas-browser] recovered stale automation browser at startup", browserRecovery);
+    }
+  } catch (error) {
+    console.error("[agentlas-browser] startup recovery failed", error);
+  }
+  startBrowserOrphanSweep();
   materializeBuiltinPlugins();
   ensureDefaultMcpPluginsInstalled();
   // 승인된 브라우저 로그인은 앱이 뜰 때 한 번 스스로 최신이 된다(주기 미도래면 즉시 반환).
@@ -2651,11 +2710,64 @@ app.whenReady().then(async () => {
   setTimeout(runDeferredLegacyLearningReconciliation, 3_000);
   startOneBriefingScheduler();
   startOneTeamNotificationBridge();
+  /*
+   * agentlasd is an app-scoped internal host. Establish it before choosing the
+   * one physical Mobile Bridge listener, then lease that listener to Desktop.
+   * This prevents the old two-authority race where both processes rewrote the
+   * same endpoint manifest and phones attached to whichever process won last.
+   */
+  const daemonStartupPromise = import("./daemon/app-launcher")
+    .then(async (module) => {
+      const outcome = await module.ensureDaemonRunning({
+        userDataDir: userDataDir(),
+        appVersion: app.getVersion(),
+        parentPid: process.pid,
+      });
+      if (outcome.status === "failed") console.error("[daemon] ensure failed:", outcome.reason);
+      else console.info(`[daemon] ${outcome.status}`);
+      try {
+        const { setDaemonAutostartEnabled } = await import("./store/daemon-autostart");
+        setDaemonAutostartEnabled(false);
+        const reconciled = module.reconcileDaemonAutostart(false, {
+          executable: process.execPath,
+          entry: path.join(__dirname, "daemon", "main.js"),
+        });
+        if (reconciled.changed) console.info("[daemon] removed legacy autostart");
+        const { disableLaunchd } = await import("./launchd/agent");
+        const legacyAutomationLauncher = disableLaunchd();
+        if (legacyAutomationLauncher.error) {
+          console.error("[automation] legacy background launcher cleanup failed:", legacyAutomationLauncher.error);
+        }
+      } catch (err) {
+        console.error("[daemon] autostart reconcile failed:", err);
+      }
+      let bridgeClaimed = false;
+      if (outcome.status !== "disabled" && outcome.status !== "failed") {
+        bridgeClaimed = await module.claimDaemonMobileBridge(userDataDir(), process.pid);
+        if (!bridgeClaimed) console.error("[daemon] Mobile Bridge lease was not granted");
+      }
+      settleMobileBridgeOwnership(outcome.status === "disabled" || bridgeClaimed);
+      return { module, outcome, bridgeClaimed };
+    })
+    .catch((error) => {
+      settleMobileBridgeOwnership(false);
+      console.error("[daemon] launcher wiring failed:", error);
+      return null;
+    });
   // Start only after update continuity and store bootstrap have passed. A
   // bridge failure must not make Desktop unusable; Settings exposes the exact
   // failure and can retry on the next launch.
   const startMobileBridgeAfterAuth = async () => {
+    const daemon = await daemonStartupPromise;
     try {
+      if (!shellReadyForWindows) return;
+      if (!daemon) throw new Error("Agentlas helper startup state is unavailable");
+      if (daemon.outcome.status === "failed") {
+        throw new Error(`Agentlas helper failed to start: ${daemon.outcome.reason}`);
+      }
+      if (daemon.outcome.status !== "disabled" && !daemon.bridgeClaimed) {
+        throw new Error("Agentlas helper did not grant Mobile Bridge ownership");
+      }
       await startAgentlasMobileBridge({
         userDataPath: userDataDir(),
         appVersion: app.getVersion(),
@@ -2723,39 +2835,6 @@ app.whenReady().then(async () => {
     console.error("[science-runtime] recovery failed", error);
   }
   startAutomationScheduler(); // 자동화 스케줄러 — 60초마다 due 자동화를 백그라운드로 실행
-  /*
-   * ★데몬 자동 기동 (설계 §6 Phase 2 — "앱이 켜지면 데몬을 찾고, 없으면 자기가 띄운다").
-   *
-   * 순서가 계약이다: 이 지점은 initStore()(마이그레이션 사다리)가 이미 끝난 뒤라,
-   * 데몬은 follower 로 떠서 절대 두 번째 마이그레이션 주인이 되지 않는다(store/db.ts
-   * 의 STORE_MIGRATION_AUTHORITY). 스폰은 detached+unref — 앱을 꺼도 데몬은 산다.
-   * 버전 스큐(업데이트 직후의 옛 데몬)는 launcher 가 정중히 내려보내고 재스폰한다.
-   * 실패해도 앱은 그대로다: 데몬 없는 앱 = 기존 동작. AGENTLAS_DISABLE_DAEMON=1 로 끈다.
-   */
-  void import("./daemon/app-launcher")
-    .then(async ({ ensureDaemonRunning, reconcileDaemonAutostart }) => {
-      const outcome = await ensureDaemonRunning({
-        userDataDir: userDataDir(),
-        appVersion: app.getVersion(),
-      });
-      if (outcome.status === "failed") console.error("[daemon] ensure failed:", outcome.reason);
-      else console.info(`[daemon] ${outcome.status}`);
-      // 자동 시작(로그인 기동)은 기본 off — store 의 daemon_autostart 가 켜져 있을 때만
-      // 설치하고, 꺼져 있으면 남은 파일을 걷는다(설정 UI 는 아직 없음, store 함수가 자리).
-      try {
-        const { getDaemonAutostartEnabled } = await import("./store/daemon-autostart");
-        const reconciled = reconcileDaemonAutostart(getDaemonAutostartEnabled(), {
-          executable: process.execPath,
-          entry: path.join(__dirname, "daemon", "main.js"),
-        });
-        if (reconciled.changed) {
-          console.info(`[daemon] autostart ${reconciled.installed ? "installed" : "removed"}`);
-        }
-      } catch (err) {
-        console.error("[daemon] autostart reconcile failed:", err);
-      }
-    })
-    .catch((err) => console.error("[daemon] launcher wiring failed:", err));
   void import("./telegram/connect")
     .then(({ reconcileTelegramWorkers }) => {
       if (!shellReadyForWindows) return;

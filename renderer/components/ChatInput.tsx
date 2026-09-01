@@ -14,6 +14,7 @@ import type {
   AppFactoryAppRecord,
   InstalledAgent,
   InstalledFirm,
+  InstalledMcpServer,
   Project,
   RuntimeStatus,
 } from "@/lib/types";
@@ -126,6 +127,8 @@ interface MentionContext {
   apps: AgentlasAppDefinition[];
   generatedApps?: AppFactoryAppRecord[];
   envKeys: string[]; // 등록된 env 키 (Library > Environment에서 add한)
+  /** Globally installed MCP servers are available even when no agent declares one. */
+  plugins?: InstalledMcpServer[];
 }
 
 interface SendOptions {
@@ -1028,12 +1031,17 @@ function ChatInputComponent({
     return () => window.removeEventListener("pointerdown", onPointerDown);
   }, [trigger]);
 
-  // ── 플러그인 목록 (설치된 에이전트의 MCP 서버 dedupe) ─────
+  // ── 플러그인 목록 (전역 설치 + 에이전트 선언 MCP 서버 dedupe) ─────
   const plugins = useMemo(() => {
     const set = new Set<string>();
+    for (const server of context?.plugins ?? []) {
+      if (!server.enabled) continue;
+      const label = (locale === "ko" ? server.name : server.nameEn) || server.name || server.id;
+      if (label.trim()) set.add(label.trim());
+    }
     for (const a of context?.agents ?? []) for (const m of a.mcpServers) set.add(m);
     return [...set];
-  }, [context?.agents]);
+  }, [context?.agents, context?.plugins, locale]);
 
   return (
     <footer
@@ -1579,8 +1587,13 @@ function ChatInputComponent({
           {turnCalls.map((call) => <button type="button" key={call.key} onClick={() => setTurnCalls((current) => current.filter((item) => item.key !== call.key))}>@{call.label}<span>×</span></button>)}
         </div> : null}
 
-        {/* 텍스트 영역 */}
+        {/* 텍스트 영역. macOS Accessibility can retain the previous native
+            placeholder when React updates only that attribute. Remount at the
+            execution boundary so VoiceOver and UI automation observe the same
+            idle / steering state that is visibly painted. The controlled draft
+            value survives the remount. */}
         <textarea
+          key={busy ? "active-run" : "idle-run"}
           ref={textareaRef}
           data-chat-input="true"
           aria-label={locale === "ko" ? "채팅 입력" : "Chat message"}

@@ -74,7 +74,9 @@ export const MOBILE_BRIDGE_METHODS = [
   "terminal.release",
   "terminal.dispatch",
   "terminal.cancel",
+  "one.artifacts.recent",
   "one.artifact.imagePreview",
+  "chat.attachment.imagePreview",
   "tasks.acceptResult",
   "one.suggestions.act",
   "workspace.setProject",
@@ -588,6 +590,25 @@ export interface MobileBridgeInvocationToolDto {
   display?: MobileBridgeToolCallDisplayDto;
 }
 
+export interface MobileBridgeOneArtifactDto {
+  taskId: string;
+  taskVersion: number;
+  chatId: string;
+  runId: string;
+  manifestId: string;
+  artifactRef: string;
+  label: string;
+  type: "document" | "spreadsheet" | "image" | "video" | "audio" | "archive" | "data" | "other";
+  sizeBytes?: number;
+  contentSha256?: string;
+}
+
+export interface MobileBridgeOneArtifactsPageDto {
+  schemaVersion: 1;
+  items: MobileBridgeOneArtifactDto[];
+  nextCursor: string | null;
+}
+
 export interface MobileBridgeInvocationEventDto {
   kind: "thinking" | "tool-use" | "partial" | "final" | "error" | "surface" | "usage" | "reasoning" | "notice";
   status?: string;
@@ -626,6 +647,8 @@ export interface MobileBridgeInvocationEventDto {
   reasoning?: { phase: "start" | "end"; durationMs?: number; /** end only — the span's bounded, redacted summary text. */ text?: string };
   /** Main-sanitized, non-executable semantic result shared with Flutter. */
   surface?: OneSurfaceManifestV1;
+  /** Exact Main-bound artifact identities only; paths and capabilities never cross the bridge. */
+  oneArtifacts?: MobileBridgeOneArtifactDto[];
 }
 
 export interface MobileBridgeHostDto {
@@ -2455,6 +2478,18 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
             requiredString(params, "requestId", 160),
           )
         : "terminal.cancel accepts only terminalId, ownerEpoch, and requestId";
+    case "one.artifacts.recent":
+      return hasOnlyKeys(params, ["chatId", "limit", "cursor"])
+        ? firstError(
+            requiredString(params, "chatId"),
+            optionalInteger(params, "limit", 1, 100),
+            params.cursor === undefined
+              ? null
+              : typeof params.cursor === "string" && /^[A-Za-z0-9_-]{1,512}$/.test(params.cursor)
+                ? null
+                : "cursor must be an opaque Mobile Bridge cursor",
+          )
+        : "one.artifacts.recent accepts only chatId, limit, and cursor";
     case "one.artifact.imagePreview":
       return hasOnlyKeys(params, ["taskId", "taskVersion", "chatId", "runId", "manifestId", "artifactRef"])
         ? firstError(
@@ -2468,6 +2503,14 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
             requiredString(params, "artifactRef"),
           )
         : "one.artifact.imagePreview accepts only exact artifact binding fields";
+    case "chat.attachment.imagePreview":
+      return hasOnlyKeys(params, ["chatId", "messageId", "attachmentId"])
+        ? firstError(
+            requiredString(params, "chatId"),
+            requiredString(params, "messageId"),
+            requiredString(params, "attachmentId"),
+          )
+        : "chat.attachment.imagePreview accepts only chatId, messageId, and attachmentId";
     case "one.suggestions.act": {
       if (!hasOnlyKeys(params, [
         "schemaVersion", "action", "expectedStoreVersion", "suggestionId", "expectedSuggestionVersion",

@@ -452,9 +452,9 @@ export async function runApprovedBuiltinTool(
   toolName: string,
   args: Record<string, unknown>,
   ctx: BuiltinApprovalContext,
-  events: { onTool?: (name: string, args?: string, result?: string, id?: string, isError?: boolean) => void },
+  events: { onTool?: (name: string, args?: string, result?: string, id?: string, isError?: boolean, artifactPaths?: readonly string[]) => void },
   callId: string,
-): Promise<{ ok: boolean; content: string }> {
+): Promise<{ ok: boolean; content: string; artifactPaths?: readonly string[]; imageDataUrl?: string }> {
   const builtin = builtinToolByName(toolName);
   const kind = builtin
     ? builtin.minPerm === "read"
@@ -500,6 +500,6 @@ export async function runApprovedBuiltinTool(
         { unattended: ctx.unattended, ...(ctx.signal ? { signal: ctx.signal } : {}) },
       ),
   });
-  events.onTool?.(toolName, JSON.stringify(args), outcome.content, callId, !outcome.ok);
+  events.onTool?.(toolName, JSON.stringify(args), outcome.content, callId, !outcome.ok, outcome.artifactPaths);
   return outcome;
 }

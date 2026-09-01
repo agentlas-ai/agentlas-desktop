@@ -93,7 +93,10 @@
 .header {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 4px;
+  max-width: 100%;
+  min-width: 0;
   min-height: 24px;
   padding: 0;
   border: 0;
@@ -102,7 +105,10 @@
   font: inherit;
   font-size: 13px;
   cursor: pointer;
+  overflow-wrap: anywhere;
 }
+
+.header > * { min-width: 0; max-width: 100%; }
 
 .header:hover { color: var(--work-ink); }
 .header:focus-visible { outline: 2px solid rgba(96, 122, 54, 0.35); outline-offset: 3px; border-radius: 4px; }
@@ -147,6 +153,25 @@
   cursor: default;
 }
 
+.rowContent {
+  min-width: 0;
+  max-width: 100%;
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 7px;
+  row-gap: 2px;
+}
+
+.rowAgent {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  color: var(--work-faint);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .rowHead:not(:disabled) { cursor: pointer; }
 .rowHead:not(:disabled):hover .rowText { color: var(--work-ink); }
 .rowHead:focus-visible { outline: 2px solid rgba(96, 122, 54, 0.35); outline-offset: 2px; border-radius: 4px; }
@@ -163,6 +188,7 @@
 .rowMark[data-status="running"] { color: var(--work-muted); }
 
 .rowText {
+  flex: 1 1 12rem;
   min-width: 0;
   display: inline-flex;
   flex-wrap: wrap;
@@ -209,6 +235,31 @@
   background: #f4f5f6;
   border-radius: 4px;
   padding: 1px 5px;
+  overflow-wrap: anywhere;
+}
+
+.command {
+  display: inline-block;
+  max-width: min(100%, 660px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+.commandDetails { display: grid; gap: 6px; }
+.commandFull {
+  max-height: 150px;
+  overflow: auto;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #f6f7f8;
+  color: #4a4f54;
+  font-family: var(--work-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
@@ -287,6 +338,16 @@
 }
 
 .exploreHead { display: grid; gap: 2px; min-width: 0; }
+.exploreSummary {
+  min-width: 0;
+  max-width: min(100%, 560px);
+  overflow: hidden;
+  color: var(--work-muted);
+  font-family: var(--work-mono);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .exploreList {
   display: grid;
   gap: 1px;

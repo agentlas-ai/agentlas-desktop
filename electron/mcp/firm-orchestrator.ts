@@ -4,6 +4,8 @@
 //   본부 1개면 CEO=본부로 보고 tier-2 skip. 각 노드는 자기 agentId로 메모리를 쓰고 읽는다.
 //   모든 이벤트는 agentId/role/tier/phase로 태깅 → 렌더러 네트워크 패널 실시간 텔레메트리.
 import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
+import path from "node:path";
 import type {
   AgentMessageDirection,
   ChatHistoryEntry,
@@ -64,6 +66,18 @@ import {
   revalidateInvocationWorkspaceBinding,
   type InvocationWorkspaceBinding,
 } from "../invocation/workspace-binding";
+import { withProjectWriteLease } from "./project-write-lease";
+import { createInactivityGuard } from "./inactivity-guard";
+import {
+  FirmExecutionEvidenceCollector,
+  evaluateFirmVerificationEvidence,
+  firmEvidencePromptSummary,
+  firmExecutionBoundaryOk,
+  mergeFirmExecutionEvidence,
+  updateFirmPartialCheckpoint,
+  withFirmEvidenceIssues,
+  type FirmExecutionEvidence,
+} from "./firm-execution-evidence";
 
 type EventSink = (ev: McpInvocationEvent) => void;
 
@@ -167,6 +181,13 @@ export interface FirmRunResult {
   text: string;
 }
 
+interface FirmStageResult {
+  node: ResolvedNode;
+  result: string;
+  ok: boolean;
+  evidence: FirmExecutionEvidence;
+}
+
 function restrictedFirmText(
   p: FirmRunParams,
   text: string,
@@ -224,6 +245,14 @@ export function firmNodePermission(
   return turn.phase === "delegate" ? "write" : "read";
 }
 
+export function firmDivisionRequiresDirectExecution(
+  _stageKind: "production" | "integration" | "verification",
+  matchedSpecialistCount: number,
+  runtimeToolsDisabled: boolean,
+): boolean {
+  return matchedSpecialistCount === 0 && !runtimeToolsDisabled;
+}
+
 function firmMemoryTurnId(p: FirmRunParams, nodeId: string, phase: NodeTurn["phase"]): string {
   return `firm:run:${p.req.runId ?? "direct"}:chat:${p.chat.id}:node:${nodeId}:phase:${phase}`;
 }
@@ -274,7 +303,7 @@ function isIntegrationWork(item: MatchedWork, siblingProductionCount: number): b
     .replace(/[_-]+/g, " ");
   const brief = item.brief.toLowerCase();
   if (/\bdesign\b/.test(label)) return false;
-  return /\b(?:web|frontend|integration|integrator|release)\b/.test(label)
+  return /\b(?:web|frontend|integration|integrator|release|report|writer|synthesis)\b/.test(label)
     || /\b(?:integrat(?:e|ion)|wire|combine|merge)\b/.test(brief)
     || /\bafter\b[\s\S]{0,80}\b(?:game|design|production|upstream|implementation)\b/.test(brief)
     || /\b(?:once|when)\b[\s\S]{0,80}\b(?:complete|ready|finish)/.test(brief);
@@ -291,10 +320,54 @@ function stageMatched(targets: MatchedWork[]) {
   };
 }
 
-function resultStatusContext(results: Array<{ node: ResolvedNode; result: string; ok: boolean }>): string {
-  return results.length > 0
-    ? results.map((result) => `- ${result.node.name}: ${result.ok ? "completed" : "failed"}`).join("\n")
-    : "- No upstream production slot was selected; inspect the current folder honestly.";
+function resultStatusContext(results: FirmStageResult[]): string {
+  if (results.length === 0) {
+    return "- No upstream production slot was selected; inspect the current folder honestly.";
+  }
+  // Verification often reviews an inline research/data handoff, not a file.
+  // Status-only context made the verifier search .agentlas logs and stale
+  // memory for evidence that the host already had in the worker results. Pass
+  // the bounded, actual upstream deliverables directly so QA can verify the
+  // same facts the CEO will synthesize. The cap prevents a large worker reply
+  // from turning the verification prompt into an unbounded transcript.
+  let remaining = 24_000;
+  return results.map((result) => {
+    const raw = result.result.trim();
+    const allowed = Math.max(0, Math.min(8_000, remaining));
+    const bounded = raw.length > allowed
+      ? `${raw.slice(0, Math.max(0, allowed - 1))}…`
+      : raw;
+    remaining -= Math.min(raw.length, allowed);
+    return [
+      `## ${result.node.name}`,
+      `status: ${result.ok ? "completed" : "failed"}`,
+      firmEvidencePromptSummary(result.evidence),
+      bounded || "(no deliverable returned)",
+    ].join("\n");
+  }).join("\n\n");
+}
+
+function requestsInlineConversationResult(value: string): boolean {
+  const text = value.toLowerCase();
+  /*
+   * This switch removes project tools from non-production stages, so it must
+   * express a request about *this turn's answer*, not merely notice the words
+   * "in chat".  Real product briefs describe layout policy such as "only one
+   * immediate media item may be shown in chat; long documents belong in the
+   * sidebar".  The old word-presence test treated that sentence as an inline
+   * answer request and silently stripped Research, Copy and Dev of every
+   * filesystem/browser tool.
+   *
+   * Keep the supported shortcut, but require both an answer/deliverable noun
+   * and an explicit display verb near the conversation destination.  A media
+   * placement rule no longer changes execution authority.
+   */
+  const koreanInlineResult = /(?:결과|답변|보고서|산출물|문서|내용).{0,32}(?:이\s*대화|이\s*채팅|대화에|채팅에|여기에|이\s*화면).{0,20}(?:보여|표시|써|작성|정리|남겨)/u.test(value)
+    || /(?:이\s*대화|이\s*채팅|대화에|채팅에|여기에|이\s*화면).{0,32}(?:결과|답변|보고서|산출물|문서|내용).{0,20}(?:보여|표시|써|작성|정리|남겨)/u.test(value);
+  const englishInlineResult = /\b(?:show|display|write|put|return|render|leave)\b.{0,48}\b(?:answer|result|report|deliverable|document|output|response)\b.{0,48}\b(?:in\s+(?:this\s+)?(?:chat|conversation)|here|inline)\b/.test(text)
+    || /\b(?:in\s+(?:this\s+)?(?:chat|conversation)|here|inline)\b.{0,48}\b(?:show|display|write|put|return|render|leave)\b.{0,48}\b(?:answer|result|report|deliverable|document|output|response)\b/.test(text)
+    || /\binline\s+(?:answer|result|report|deliverable|document|output|response)\b/.test(text);
+  return koreanInlineResult || englishInlineResult;
 }
 
 function verificationResultOk(text: string, sessionOk: boolean): boolean {
@@ -464,7 +537,7 @@ function emitDelegationMessages(
   return true;
 }
 
-function latestTeamResultsAllOk(results: Array<{ node: ResolvedNode; result: string; ok: boolean }>): boolean {
+function latestTeamResultsAllOk(results: FirmStageResult[]): boolean {
   const latest = new Map<string, boolean>();
   for (const result of results) latest.set(result.node.id, result.ok);
   return [...latest.values()].every(Boolean);
@@ -485,6 +558,63 @@ function linkAbort(parent?: AbortSignal) {
   };
 }
 
+function firmTurnProjectWriteKey(p: FirmRunParams, turn: NodeTurn): string | null {
+  if (p.req.agentAppMode || turn.phase !== "delegate") return null;
+  const permission = firmNodePermission(p, turn);
+  if (permission !== "write" && permission !== "full") return null;
+  const workingFolder = firmWorkingFolder(p);
+  if (!workingFolder) return null;
+  const resolved = path.resolve(workingFolder);
+  try {
+    return realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+function firmWorkingFolder(p: FirmRunParams): string | null {
+  if (p.req.agentAppMode) return null;
+  return p.workspaceBinding
+    ? revalidateInvocationWorkspaceBinding(p.workspaceBinding)
+    : p.workingFolder ?? getChatWorkingFolder(p.chat.id);
+}
+
+function firmFailureCheckpoint(
+  base: string,
+  partial: string,
+  evidence: FirmExecutionEvidence,
+): string {
+  const cleaned = stripAllMemoryEventBlocks(partial).cleanedText.trim();
+  const hasEvidence = evidence.completedToolCount > 0
+    || evidence.artifactPaths.length > 0
+    || evidence.deletedArtifactPaths.length > 0
+    || evidence.executedTestPaths.length > 0
+    || evidence.invalidEvidenceCodes.length > 0;
+  if (!cleaned && !hasEvidence) return base;
+  return [
+    base,
+    "[Partial execution checkpoint — this is recovery evidence, not a completed deliverable]",
+    firmEvidencePromptSummary(evidence),
+    cleaned || "(no bounded model text was available)",
+  ].join("\n\n");
+}
+
+function emitProjectWriteWait(p: FirmRunParams, turn: NodeTurn): void {
+  p.sink({
+    kind: "tool-use",
+    status: p.locale === "ko"
+      ? `${turn.node.name}이(가) 같은 프로젝트의 이전 쓰기 작업 완료를 기다립니다.`
+      : `${turn.node.name} is waiting for the prior write turn on this project.`,
+    agentId: turn.node.id,
+    runtimeAgentId: turn.node.agentId ?? turn.node.id,
+    nodeId: turn.node.id,
+    agentName: turn.node.name,
+    role: turn.node.role,
+    tier: turn.tier,
+    phase: turn.phase,
+  });
+}
+
 /** runNodeTurn을 노드별 타임아웃 + 실패 격리로 감싼다.
  *  - 노드 타임아웃/에러 → ok:false + 에러 노트(비치명적, 오케스트레이션 계속)
  *  - 사용자 취소(부모 signal abort) → throw 전파(전체 중단) */
@@ -495,18 +625,55 @@ async function runNodeTurnSafe(
   text: string;
   delegations: Delegation[];
   synthesisAllocation: WorkloadAllocation | null;
+  evidence: FirmExecutionEvidence;
   ok: boolean;
 }> {
   const link = linkAbort(p.signal);
   let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    link.abort();
-  }, NODE_TIMEOUT_MS);
+  let partialCheckpoint = "";
+  let evidenceCollector = new FirmExecutionEvidenceCollector(null);
+  const inactivityGuard: { current: ReturnType<typeof createInactivityGuard> | null } = { current: null };
   try {
-    const r = await runNodeTurn(p, { ...turn, signal: link.signal });
-    return { ...r, ok: true };
+    evidenceCollector = new FirmExecutionEvidenceCollector(firmWorkingFolder(p));
+    const projectWriteKey = firmTurnProjectWriteKey(p, turn);
+    const r = await withProjectWriteLease(
+      projectWriteKey,
+      {
+        signal: link.signal,
+        onWait: () => emitProjectWriteWait(p, turn),
+      },
+      async () => {
+        // Time spent behind a sibling's project write does not consume this
+        // worker's execution budget. The timeout starts only after the turn
+        // owns the project write lease.
+        inactivityGuard.current = createInactivityGuard({
+          timeoutMs: NODE_TIMEOUT_MS,
+          onTimeout: () => {
+            timedOut = true;
+            link.abort();
+          },
+        });
+        const scopedParams: FirmRunParams = {
+          ...p,
+          sink: (event) => {
+            inactivityGuard.current?.record(event);
+            p.sink(event);
+          },
+        };
+        return runNodeTurn(scopedParams, {
+          ...turn,
+          signal: link.signal,
+          executionEvidence: evidenceCollector,
+          onPartialCheckpoint: (text) => {
+            partialCheckpoint = updateFirmPartialCheckpoint(partialCheckpoint, text);
+          },
+        });
+      },
+    );
+    if (timedOut) throw new Error("firm_node_inactivity_timeout");
+    return { ...r, ok: firmExecutionBoundaryOk(r.evidence) };
   } catch (err) {
+    const evidence = evidenceCollector.finalize();
     try {
       recordTerminalMemoryTurn({
         turnId: firmMemoryTurnId(p, turn.node.id, turn.phase),
@@ -537,29 +704,39 @@ async function runNodeTurnSafe(
         text: UNTRUSTED_RUNTIME_FAILURE_MESSAGE,
         delegations: [],
         synthesisAllocation: null,
+        evidence,
         ok: false,
       };
     }
     if (timedOut) {
       return {
-        text:
+        text: firmFailureCheckpoint(
           p.locale === "ko"
             ? `(${turn.node.name} 응답 실패: ${Math.round(NODE_TIMEOUT_MS / 1000)}초 동안 응답이 없어 자동 중단했습니다.)`
             : `(${turn.node.name} failed: no response for ${Math.round(NODE_TIMEOUT_MS / 1000)}s, auto-aborted.)`,
+          partialCheckpoint,
+          evidence,
+        ),
         delegations: [],
         synthesisAllocation: null,
+        evidence,
         ok: false,
       };
     }
     const msg = err instanceof Error ? err.message : String(err);
     return {
-      text: p.locale === "ko" ? `(${turn.node.name} 응답 실패: ${msg})` : `(${turn.node.name} failed: ${msg})`,
+      text: firmFailureCheckpoint(
+        p.locale === "ko" ? `(${turn.node.name} 응답 실패: ${msg})` : `(${turn.node.name} failed: ${msg})`,
+        partialCheckpoint,
+        evidence,
+      ),
       delegations: [],
       synthesisAllocation: null,
+      evidence,
       ok: false,
     };
   } finally {
-    clearTimeout(timer);
+    inactivityGuard.current?.dispose();
     link.dispose();
   }
 }
@@ -606,6 +783,18 @@ interface NodeTurn {
   divisionId?: string;
   /** Present only when a higher-level AI assigned this child/synthesis turn. */
   allocation?: WorkloadAllocation | null;
+  /**
+   * Inline integration/review receives the complete bounded upstream answer in
+   * the prompt.  It must not inspect ambient project state just because the
+   * runtime exposes file/shell tools.  This is enforced at the runner boundary,
+   * not left as a prose suggestion that a model can ignore.
+   */
+  runtimeToolsDisabled?: boolean;
+  /** Main-only mutable receipt shared with runNodeTurnSafe so an aborted turn
+   * can return bounded tool/artifact evidence instead of a one-line failure. */
+  executionEvidence?: FirmExecutionEvidenceCollector;
+  /** Main-only partial checkpoint sink. It never enters the renderer DTO. */
+  onPartialCheckpoint?: (text: string) => void;
 }
 
 /** 노드 1턴 실행 — 프롬프트 조립(노드 프롬프트 + per-agent 메모리 + 위임/메모리 프로토콜),
@@ -614,8 +803,15 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   text: string;
   delegations: Delegation[];
   synthesisAllocation: WorkloadAllocation | null;
+  evidence: FirmExecutionEvidence;
 }> {
   const { node, tier, phase } = turn;
+  const hasReports = Boolean(turn.reports?.length);
+  // Planning-with-a-roster and every synthesis turn are control-plane work.
+  // They receive the bounded roster/results in the prompt and must not regain
+  // ambient project, MCP, memory, or resident-session authority merely because
+  // the selected runtime exposes built-in shell/file tools.
+  const controlPlaneTurn = phase === "synthesize" || (phase === "plan" && hasReports);
   const runtimeRole: "orchestrator" | "worker" = tier === 1 ? "orchestrator" : "worker";
   // One's visible model is the controller's first attempt for an in-One team
   // run. It is a preference with a typed fallback, not a replacement for the
@@ -652,8 +848,9 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
     : p.workspaceBinding
       ? revalidateInvocationWorkspaceBinding(p.workspaceBinding)
       : p.workingFolder ?? getChatWorkingFolder(p.chat.id);
+  const executionEvidence = turn.executionEvidence ?? new FirmExecutionEvidenceCollector(workingFolder);
   let activePath: string | null = null;
-  if (!p.req.agentAppMode && workingFolder) {
+  if (!p.req.agentAppMode && !controlPlaneTurn && workingFolder) {
     if (nodePermission === "write" || nodePermission === "full") {
       try {
         const v = await recordFolderVisit(workingFolder, undefined, {
@@ -683,14 +880,19 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   let systemPrompt = node.agentId
     ? buildEffectiveAgentSystemPrompt(node.agentId, firmRolePrompt)
     : firmRolePrompt;
-  const approvedOneContext = !p.workspaceBinding && !p.req.agentAppMode
+  if (!controlPlaneTurn && !p.req.agentAppMode) {
+    systemPrompt += nodePermission === "read"
+      ? "\n\n## Execution authority\nCurrent host permission mode: read-only. Inspect and report only; do not write or claim that write access was granted."
+      : "\n\n## Execution authority\nCurrent host permission mode: read-write. The host has already granted bounded write authority inside the assigned working folder. When the packet asks for implementation, authored files, fixes, tests, or build work, perform that work directly within the assigned folder; do not describe this turn as read-only and do not ask the user to grant access again.";
+  }
+  const approvedOneContext = !turn.runtimeToolsDisabled && !controlPlaneTurn && !p.workspaceBinding && !p.req.agentAppMode
     ? mainOneProfileContext(p.req)
     : "";
   if (approvedOneContext) systemPrompt += `\n\n${approvedOneContext}`;
   if (node.agentId && node.prompt?.trim() && !systemPrompt.includes(node.prompt.trim())) {
     systemPrompt += `\n\n## Firm role context\n${node.prompt.trim()}`;
   }
-  if (!p.req.agentAppMode) {
+  if (!p.req.agentAppMode && !turn.runtimeToolsDisabled && !controlPlaneTurn) {
     try {
       const mem = buildMemoryContext(memoryReadPath, memoryOwnerId, {
         materializeCodeMap: Boolean(activePath),
@@ -746,6 +948,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
     systemPrompt += `\n\n${buildDelegateProtocol(
       turn.reports.map((r) => ({ role: r.role, name: r.name })),
       candidateRuntimes,
+      { allowFollowup: phase === "synthesize" },
     )}`;
     if (phase === "plan") {
       systemPrompt += [
@@ -757,7 +960,16 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       ].join("\n");
     }
   }
-  if (!p.req.agentAppMode && !firmProjectReadOnly(p, nodePermission)) {
+  if (phase === "synthesize") {
+    systemPrompt += [
+      "",
+      "## Synthesis boundary",
+      "This turn may use only the bounded worker results supplied in this prompt.",
+      "Do not inspect files, call tools, read ambient skills or memory, spawn sub-agents, implement, edit, test, or browse.",
+      "Synthesize the supplied results, or return only a Delegate block for a genuinely missing listed report, then stop.",
+    ].join("\n");
+  }
+  if (!p.req.agentAppMode && !turn.runtimeToolsDisabled && !controlPlaneTurn && !firmProjectReadOnly(p, nodePermission)) {
     systemPrompt += `\n\n${memoryEmitterPromptFor(turn.userPrompt)}`;
   }
 
@@ -786,7 +998,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       });
     }
   }
-  if (!p.req.agentAppMode && node.agentId) {
+  if (!p.req.agentAppMode && !turn.runtimeToolsDisabled && !controlPlaneTurn && node.agentId) {
     try {
       const installedAgent = getAgentById(node.agentId);
       const ontology = installedAgent ? await buildAgentRuntimeOntologyContext({
@@ -839,37 +1051,62 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
           longContext: runtime.longContextEnabled ?? false,
           effort: runtime.effort ?? undefined,
           signal: turn.signal ?? p.signal,
-          permission: p.req.agentAppMode || (phase === "plan" && Boolean(turn.reports?.length))
+          permission: p.req.agentAppMode || turn.runtimeToolsDisabled || controlPlaneTurn
             ? "read"
             : nodePermission,
+          approvalChatId: phase === "delegate" ? p.chat.id : undefined,
+          approvalsReviewer:
+            // A delegated worker is non-interactive. Requiring the allocation
+            // planner to have guessed `toolRequired` leaves an ordinary user
+            // request such as "open the app and verify it in a browser" on the
+            // `user` reviewer, where nobody can answer and Codex reports the
+            // phantom refusal as "user rejected MCP tool call". The owner has
+            // already granted this stage bounded write authority; let the
+            // resident reviewer evaluate its concrete calls. Plan/synthesis
+            // turns remain read-only and never reach this branch.
+            phase === "delegate" && nodePermission !== "read"
+              ? "auto_review"
+              : "user",
           restrictedReadBoundary: p.restrictedReadBoundary,
-          cwd: p.req.agentAppMode ? undefined : workingFolder ?? undefined,
+          cwd: p.req.agentAppMode || turn.runtimeToolsDisabled || controlPlaneTurn ? undefined : workingFolder ?? undefined,
           chatId: p.req.agentAppMode
             ? `site-agent-app:${p.req.runId ?? "run"}:${node.id}:${phase}:${randomUUID()}`
-            : phase === "plan" && Boolean(turn.reports?.length)
+            : controlPlaneTurn
               ? undefined
               : turn.chatId ?? undefined,
           // 러너의 agentId 는 능력 규칙 대상·런타임 세션 키·상주 판정에 쓰인다(기억이 아니다).
           // 값이 바뀌면 세션이 갈리므로 실제로 돈 신원을 그대로 넘긴다.
           agentId: nodeRuntimeId,
           orchestrationAgentId: node.id,
-          mcpConfigPath: phase === "plan" && Boolean(turn.reports?.length)
+          mcpConfigPath: turn.runtimeToolsDisabled || controlPlaneTurn
             ? undefined
             : p.req.agentAppMode
               ? (agentAppAllowedTools ? p.mcpConfigPath : undefined)
               : p.mcpConfigPath,
-          mcpAllowedTools: phase === "plan" && Boolean(turn.reports?.length)
+          mcpAllowedTools: turn.runtimeToolsDisabled || controlPlaneTurn
             ? undefined
             : p.req.agentAppMode
               ? agentAppAllowedTools
               : p.mcpAllowedTools,
-          mcpCodexConfigArgs: p.req.agentAppMode || (phase === "plan" && Boolean(turn.reports?.length))
+          mcpCodexConfigArgs: p.req.agentAppMode || turn.runtimeToolsDisabled || controlPlaneTurn
             ? undefined
             : p.mcpCodexConfigArgs,
           env: p.req.agentAppMode
             ? buildAgentAppRunnerEnv(p.runnerEnv ?? process.env, p.agentAppMcpRuntimeEnv)
             : p.runnerEnv,
-          untrustedNoTools: p.req.agentAppMode === true,
+          // Planning-with-a-roster and synthesis are control-plane turns. The
+          // prompt already says not to inspect or execute, but prompt text is
+          // not an authority boundary: a real nested firm run showed a Codex
+          // planner issuing hundreds of file/shell/MCP calls, then stalling in
+          // read-only build and hidden approval failures instead of returning
+          // its Delegate block. Require the runtime's measured zero-tool mode
+          // here. Runtimes that cannot prove it fail closed and the role pool
+          // may select a capable fallback; implementation delegates retain the
+          // bounded project/tool grant below this control plane.
+          untrustedNoTools:
+            p.req.agentAppMode === true ||
+            turn.runtimeToolsDisabled === true ||
+            controlPlaneTurn,
           untrustedAllowedMcpTools: agentAppAllowedTools,
           onAgentAppMcpRuntimeUnavailable: p.req.agentAppMode
             ? p.onAgentAppMcpRuntimeUnavailable
@@ -877,17 +1114,19 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
           locale: p.locale,
         },
         {
-          onStatus: (status) => {
-            emit({ kind: "tool-use", status });
-            if (turn.toMainBubble) p.sink({ kind: "tool-use", status });
+          onStatus: (status, activity) => {
+            emit({ kind: "tool-use", status, ...(activity ? { activity } : {}) });
+            if (turn.toMainBubble) p.sink({ kind: "tool-use", status, ...(activity ? { activity } : {}) });
           },
           onPartial: (text) => {
+            turn.onPartialCheckpoint?.(text);
             if (!p.req.agentAppMode && !firmProjectReadOnly(p, nodePermission)) {
               emit({ kind: "partial", text });
               if (turn.toMainBubble) p.sink({ kind: "partial", text });
             }
           },
-          onTool: (name, args, result, id, isError) => {
+          onTool: (name, args, result, id, isError, artifactPaths) => {
+            executionEvidence.recordTool(name, args, result, id, isError, artifactPaths);
             const tool = { name, args, result, id, isError };
             emit({ kind: "tool-use", tool });
             if (turn.toMainBubble) p.sink({ kind: "tool-use", tool });
@@ -1028,7 +1267,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   // 단, plan 턴은 곧 delegate/synthesize가 이어지므로 완료로 보지 않는다 — orchestrator/본부 행이
   // 위임 단계 내내 ▶(실행)으로 유지되어 "끝난 듯 보였다 되돌아오는" 플리커를 막는다.
   if (phase !== "plan") emit({ kind: "tool-use", done: true });
-  return { text: display, delegations, synthesisAllocation };
+  return { text: display, delegations, synthesisAllocation, evidence: executionEvidence.finalize() };
 }
 
 /** 종합 노드(본부·CEO)에게 주는 상충/실패 처리 규칙. borrowed-task-force의 종합 계약과 같은 문장을
@@ -1054,7 +1293,9 @@ async function runDivision(
   division: ResolvedDivision,
   brief: string,
   allocation: WorkloadAllocation,
-): Promise<{ node: ResolvedNode; result: string; ok: boolean }> {
+  stageKind: "production" | "integration" | "verification",
+  runtimeToolsDisabled = false,
+): Promise<FirmStageResult> {
   const fkAgentId = division.agentId || p.ceoAgent.id; // FK-safe (실 agent 없으면 CEO id)
   const divChatId = p.req.agentAppMode
     ? `site-agent-app:${p.req.runId ?? "run"}:division:${division.id}`
@@ -1063,6 +1304,47 @@ async function runDivision(
   if (!p.req.agentAppMode) appendChatMessage(divChatId, "user", brief);
 
   const specialists = division.specialists;
+  const runDirectDivision = async () => {
+    p.sink({
+      kind: "tool-use",
+      status: p.locale === "ko"
+        ? `${division.name} · 직접 작업으로 전환`
+        : `${division.name} · continuing as direct execution`,
+      agentId: division.id,
+      agentName: division.name,
+      role: division.role,
+      tier: 2,
+      phase: "delegate",
+    });
+    return runNodeTurnSafe(p, {
+      node: division,
+      tier: 2,
+      phase: "delegate",
+      userPrompt: [
+        brief,
+        "",
+        "[Direct division execution]",
+        "No specialist was assigned to this division slot. You now own the assigned work directly.",
+        "Carry out the requested assigned-stage work in the project folder, then verify the result before returning.",
+      ].join("\n"),
+      history: p.req.agentAppMode ? [] : listChatMessages(divChatId, 80),
+      chatId: divChatId,
+      divisionId: division.id,
+      allocation,
+      runtimeToolsDisabled: false,
+    });
+  };
+
+  // A division with no specialists has nobody to plan a handoff to. Running a
+  // read-only manager plan first used to spend minutes inspecting the project,
+  // request denied shell commands, and only then discover the empty roster.
+  // Enter the assigned execution stage immediately, matching the existing
+  // single-division path.
+  if (specialists.length === 0 && firmDivisionRequiresDirectExecution(stageKind, 0, runtimeToolsDisabled)) {
+    const direct = await runDirectDivision();
+    if (!p.req.agentAppMode) appendChatMessage(divChatId, "assistant", direct.text);
+    return { node: division, result: direct.text, ok: direct.ok, evidence: direct.evidence };
+  }
   const plan = await runNodeTurnSafe(p, {
     node: division,
     tier: 2,
@@ -1073,9 +1355,11 @@ async function runDivision(
     chatId: divChatId,
     divisionId: division.id,
     allocation,
+    runtimeToolsDisabled,
   });
 
   let result = plan.text;
+  let evidence = plan.evidence;
   // 위임이 없으면 본부 자기 턴(plan)이 곧 산출물이므로 그 성공 여부가 본부의 성공 여부다.
   let divisionOk = plan.ok;
   const matched = specialists.length > 0 ? matchTargets(plan.delegations, specialists) : [];
@@ -1091,7 +1375,12 @@ async function runDivision(
       delegateTo: matched.map((m) => m.node.id),
     });
     if (!emitDelegationMessages(p, division, 2, matched)) {
-      return { node: division, result: handoffBlockedText(p, p.handoffGuard?.blocked?.reason ?? "permission"), ok: false };
+      return {
+        node: division,
+        result: handoffBlockedText(p, p.handoffGuard?.blocked?.reason ?? "permission"),
+        ok: false,
+        evidence: plan.evidence,
+      };
     }
     const specResults = await parallelCap(matched, getAgentConcurrency(), async (m) => {
       const r = await runNodeTurnSafe(p, {
@@ -1103,12 +1392,18 @@ async function runDivision(
         chatId: null, // ephemeral — 메모리는 node.id로 저장됨
         divisionId: division.id,
         allocation: m.allocation,
+        runtimeToolsDisabled,
       });
       emitAgentMessage(p, m.node, division, "worker-to-orchestrator", 3, r.text);
-      return { name: m.node.name, role: m.node.role, text: r.text, ok: r.ok };
+      return { name: m.node.name, role: m.node.role, text: r.text, ok: r.ok, evidence: r.evidence };
     });
     if (p.handoffGuard?.blocked) {
-      return { node: division, result: handoffBlockedText(p, p.handoffGuard.blocked.reason), ok: false };
+      return {
+        node: division,
+        result: handoffBlockedText(p, p.handoffGuard.blocked.reason),
+        ok: false,
+        evidence: mergeFirmExecutionEvidence([plan.evidence, ...specResults.map((specialist) => specialist.evidence)]),
+      };
     }
     // 실패한 전문가의 텍스트는 "(이름 응답 실패: …)" 같은 오류 문자열이다. status 없이 넘기면
     // 본부가 그걸 정상 산출물로 읽고 종합한다. borrowed-task-force의 기존 패턴과 동일하게 표기.
@@ -1127,13 +1422,34 @@ async function runDivision(
       chatId: divChatId,
       divisionId: division.id,
       allocation: plan.synthesisAllocation ?? defaultWorkloadAllocation("synthesize"),
+      runtimeToolsDisabled,
     });
     result = synth.text;
     divisionOk = synth.ok && specResults.every((s) => s.ok);
+    evidence = mergeFirmExecutionEvidence([
+      plan.evidence,
+      ...specResults.map((specialist) => specialist.evidence),
+      synth.evidence,
+    ]);
+  } else if (firmDivisionRequiresDirectExecution(stageKind, matched.length, runtimeToolsDisabled)) {
+    // A division manager's roster-bearing plan turn is intentionally read-only.
+    // Previously, when the manager selected no specialist (including divisions
+    // with no specialist rows), that read-only plan text was accepted as the
+    // assigned result.  Real implementation requests therefore ended with
+    // "the folder is read-only" even though One had granted the installed firm
+    // bounded project-write authority; verification slots could not even run
+    // their checks. The manager owns the unassigned slot:
+    // execute it as an ordinary delegated worker turn, which receives `write`
+    // through firmNodePermission while read/pre-approval/control-plane turns
+    // remain unchanged.
+    const direct = await runDirectDivision();
+    result = direct.text;
+    divisionOk = direct.ok;
+    evidence = mergeFirmExecutionEvidence([plan.evidence, direct.evidence]);
   }
 
   if (!p.req.agentAppMode) appendChatMessage(divChatId, "assistant", result);
-  return { node: division, result, ok: divisionOk };
+  return { node: division, result, ok: divisionOk, evidence };
 }
 
 /** firm 채팅 진입점 — runMcpInvocation에서 firmId+divisions가 있으면 호출. */
@@ -1267,11 +1583,15 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
     targets: typeof matched,
     stageContext: string,
     stageKind: "production" | "integration" | "verification",
-  ): Promise<Array<{ node: ResolvedNode; result: string; ok: boolean }>> => {
+  ): Promise<FirmStageResult[]> => {
+    const runtimeToolsDisabled = stageKind !== "production" && requestsInlineConversationResult(req.userPrompt);
+    const projectRoot = p.workspaceBinding
+      ? revalidateInvocationWorkspaceBinding(p.workspaceBinding)
+      : p.workingFolder ?? getChatWorkingFolder(p.chat.id);
     const stagedPrompt = (brief: string) => stageKind === "verification"
-      ? `${brief}\n\n[Independent verification stage]\nAll upstream production and integration WorkOrders have finished. Inspect and exercise the current project folder as it exists now. Do not rely on an earlier empty-workspace observation.\n${stageContext}\n\nEnd the response with exactly <verification_verdict>PASS</verification_verdict> only when every requested acceptance condition passes after fixes. Otherwise end with <verification_verdict>FAIL</verification_verdict> and identify the remaining blocker.`
+      ? `${brief}\n\n[Independent verification stage]\nAll upstream production and integration WorkOrders have finished. Verify the bounded upstream deliverables below directly. Inspect the current project folder only for claims about files or runnable artifacts; do not search hidden Agentlas state, memory, contact ledgers, or prior-run logs for an inline result. Do not rely on an earlier empty-workspace observation.\n${stageContext}\n\nEnd the response with exactly <verification_verdict>PASS</verification_verdict> only when every requested acceptance condition passes after fixes. Otherwise end with <verification_verdict>FAIL</verification_verdict> and identify the remaining blocker.`
       : stageKind === "integration"
-        ? `${brief}\n\n[Integration stage]\nThe upstream production WorkOrders have finished. Inspect their actual files in the current project, integrate every relevant implementation and design deliverable into the runnable product, then verify the integrated launch surface before returning. Do not report a missing or late upstream package without re-reading the current folder.\n${stageContext}`
+        ? `${brief}\n\n[Integration stage]\nThe upstream production WorkOrders have finished. Use the bounded upstream deliverables below directly. Inspect the current project folder only when the requested deliverable is a file or runnable artifact; for an inline report, do not call file-search tools or inspect hidden Agentlas state, memory, contact ledgers, or prior-run logs. Integrate every relevant upstream result into the requested final deliverable, then verify it before returning.\n${stageContext}`
         : brief;
     if (singleDivision) {
       // tier-2 skip: matched는 전문가 — ephemeral 병렬
@@ -1286,34 +1606,70 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
           chatId: null,
           divisionId: divisions[0]?.id,
           allocation: m.allocation,
+          runtimeToolsDisabled,
         });
         emitAgentMessage(p, m.node, org.ceo, "worker-to-orchestrator", 3, r.text);
+        const verificationEvidence = stageKind === "verification"
+          ? evaluateFirmVerificationEvidence({
+              evidence: r.evidence,
+              prompt: userPrompt,
+              projectRoot,
+              inlineOnly: runtimeToolsDisabled,
+            })
+          : null;
+        const finalEvidence = verificationEvidence
+          ? withFirmEvidenceIssues(r.evidence, verificationEvidence.issues)
+          : r.evidence;
         return {
           node: m.node,
           result: stripVerificationVerdict(r.text),
-          ok: stageKind === "verification" ? verificationResultOk(r.text, r.ok) : r.ok,
+          ok: stageKind === "verification"
+            ? verificationResultOk(r.text, r.ok) && Boolean(verificationEvidence?.ok)
+            : r.ok,
+          evidence: finalEvidence,
         };
       });
     }
     // 본부들 — 지속 세션 병렬, 각자 전문가에게 재위임
     return parallelCap(targets, getAgentConcurrency(), async (m) => {
       const brief = stagedPrompt(m.brief);
-      const result = await runDivision(p, m.node as ResolvedDivision, brief, m.allocation);
+      const result = await runDivision(
+        p,
+        m.node as ResolvedDivision,
+        brief,
+        m.allocation,
+        stageKind,
+        runtimeToolsDisabled,
+      );
       emitAgentMessage(p, result.node, org.ceo, "worker-to-orchestrator", 2, result.result);
+      const verificationEvidence = stageKind === "verification"
+        ? evaluateFirmVerificationEvidence({
+            evidence: result.evidence,
+            prompt: brief,
+            projectRoot,
+            inlineOnly: runtimeToolsDisabled,
+          })
+        : null;
+      const finalEvidence = verificationEvidence
+        ? withFirmEvidenceIssues(result.evidence, verificationEvidence.issues)
+        : result.evidence;
       return {
         ...result,
         result: stripVerificationVerdict(result.result),
-        ok: stageKind === "verification" ? verificationResultOk(result.result, result.ok) : result.ok,
+        ok: stageKind === "verification"
+          ? verificationResultOk(result.result, result.ok) && Boolean(verificationEvidence?.ok)
+          : result.ok,
+        evidence: finalEvidence,
       };
     });
   };
   const productionResults = await runMatched(initialStages.production, "", "production");
-  let integrationResults: Array<{ node: ResolvedNode; result: string; ok: boolean }> = [];
+  let integrationResults: FirmStageResult[] = [];
   if (initialStages.integration.length > 0) {
     mainStatus(ko ? "제작 결과 준비 완료 — 통합 중…" : "Production ready — integration running…");
     integrationResults = await runMatched(initialStages.integration, resultStatusContext(productionResults), "integration");
   }
-  let verificationResults: Array<{ node: ResolvedNode; result: string; ok: boolean }> = [];
+  let verificationResults: FirmStageResult[] = [];
   if (initialStages.verification.length > 0) {
     const upstream = [...productionResults, ...integrationResults];
     mainStatus(ko ? "제작 결과 준비 완료 — 독립 검증 중…" : "Production ready — independent verification running…");
@@ -1334,18 +1690,56 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
     `${req.userPrompt}\n\n[Results from your team — synthesize into one final answer for the user]\n` +
     `${CONFLICT_SYNTHESIS_GUIDANCE}\n\n` +
     teamResults
-      .map((r) => `## ${r.node.name} (${r.node.role})\nstatus: ${r.ok ? "ok" : "failed"}\n${r.result}`)
+      .map((r) => `## ${r.node.name} (${r.node.role})\nstatus: ${r.ok ? "ok" : "failed"}\n${firmEvidencePromptSummary(r.evidence)}\n${r.result}`)
       .join("\n\n");
-  let finalTurn = await runNodeTurnSafe(p, {
-    node: org.ceo,
-    tier: 1,
-    phase: "synthesize",
-    userPrompt: synthPrompt,
-    history,
-    chatId: chat.id,
-    toMainBubble: true,
-    allocation: plan.synthesisAllocation ?? defaultWorkloadAllocation("synthesize"),
-  });
+  // The team has already paid for and completed its production and verification
+  // turns.  A controller-only synthesis failure must not make the parent task
+  // force run the whole firm from scratch.  Retry only this bounded synthesis
+  // step against the exact same team results, then return an honest failure if
+  // the controller is still unavailable.
+  const runCeoSynthesis = async (
+    userPrompt: string,
+    allocation: WorkloadAllocation,
+  ) => {
+    let turn = await runNodeTurnSafe(p, {
+      node: org.ceo,
+      tier: 1,
+      phase: "synthesize",
+      userPrompt,
+      history,
+      chatId: chat.id,
+      reports: ceoReports,
+      toMainBubble: true,
+      allocation,
+    });
+    if (!turn.ok && !p.signal?.aborted) {
+      mainStatus(
+        ko
+          ? "완료된 팀 결과를 보존한 채 종합 단계만 다시 진행하는 중…"
+          : "Preserving completed team results and retrying synthesis only…",
+      );
+      turn = await runNodeTurnSafe(p, {
+        node: org.ceo,
+        tier: 1,
+        phase: "synthesize",
+        userPrompt:
+          `${userPrompt}\n\n[Controller-only recovery]\n` +
+          "The prior synthesis turn failed. Reuse the completed team results above exactly. " +
+          "Do not delegate or rerun any worker. Produce the best honest final answer now, " +
+          "clearly preserving any failed or missing acceptance condition.",
+        history,
+        chatId: chat.id,
+        reports: ceoReports,
+        toMainBubble: true,
+        allocation,
+      });
+    }
+    return turn;
+  };
+  let finalTurn = await runCeoSynthesis(
+    synthPrompt,
+    plan.synthesisAllocation ?? defaultWorkloadAllocation("synthesize"),
+  );
   if (!finalTurn.ok) {
     sink({ kind: "error", error: firmFailure(req.agentAppMode, "ceo-failed", finalTurn.text) });
     return { ok: false, text: finalTurn.text };
@@ -1355,9 +1749,9 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
   // after reading upstream results. Execute bounded, previously-unused
   // follow-up delegations instead of rendering "starting QA" prose and ending
   // the run without a corresponding WorkOrder or receipt.
-  for (let round = 0; round < divisions.length; round += 1) {
+  for (let round = 0; round < ceoReports.length; round += 1) {
     const hasFailedResult = !latestTeamResultsAllOk(teamResults);
-    const followupMatched = matchTargets(finalTurn.delegations, divisions)
+    const followupMatched = matchTargets(finalTurn.delegations, ceoReports)
       .filter((item) => !usedDivisionIds.has(item.node.id) || (hasFailedResult && (divisionAttempts.get(item.node.id) ?? 0) < 2));
     if (followupMatched.length === 0) break;
     for (const item of followupMatched) {
@@ -1370,36 +1764,76 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
       : `Running ${followupMatched.length} newly required work slot(s)…`);
     const followupStages = stageMatched(followupMatched);
     const followupProductionResults = await runMatched(followupStages.production, "", "production");
-    let followupIntegrationResults: Array<{ node: ResolvedNode; result: string; ok: boolean }> = [];
+    let followupIntegrationResults: FirmStageResult[] = [];
     if (followupStages.integration.length > 0) {
       const upstream = [...teamResults, ...followupProductionResults];
       mainStatus(ko ? "제작 결과 준비 완료 — 통합 중…" : "Production ready — integration running…");
       followupIntegrationResults = await runMatched(followupStages.integration, resultStatusContext(upstream), "integration");
     }
-    let followupVerificationResults: Array<{ node: ResolvedNode; result: string; ok: boolean }> = [];
+    let followupVerificationResults: FirmStageResult[] = [];
     if (followupStages.verification.length > 0) {
       const upstream = [...teamResults, ...followupProductionResults, ...followupIntegrationResults];
       mainStatus(ko ? "제작 결과 준비 완료 — 독립 검증 중…" : "Production ready — independent verification running…");
       followupVerificationResults = await runMatched(followupStages.verification, resultStatusContext(upstream), "verification");
     }
-    teamResults.push(...followupProductionResults, ...followupIntegrationResults, ...followupVerificationResults);
+    // A verifier-directed correction is the new result for that exact role,
+    // not a second independent answer beside the corrected one. Replace the
+    // prior result whether it was marked failed or not: the verifier can flag a
+    // defect in an otherwise successful writer result, and keeping both makes
+    // the next QA pass compare stale and corrected copies together.
+    for (const followupResult of [
+      ...followupProductionResults,
+      ...followupIntegrationResults,
+      ...followupVerificationResults,
+    ]) {
+      const supersededIndex = teamResults.findIndex((result) => (
+        result.node.id === followupResult.node.id
+      ));
+      if (supersededIndex >= 0) teamResults[supersededIndex] = followupResult;
+      else teamResults.push(followupResult);
+    }
+    // When a failed verifier requested a correction from another role, that
+    // verifier result is evidence about the old draft. Re-run only the same
+    // verifier once against the corrected bounded upstream deliverables. If we
+    // leave the old FAIL in teamResults, the parent sees the installed team as
+    // failed and restarts the whole CEO/worker graph even though the requested
+    // one-role correction already succeeded.
+    const correctedNonVerification = followupProductionResults.length > 0 || followupIntegrationResults.length > 0;
+    if (correctedNonVerification && followupVerificationResults.length === 0) {
+      const failedVerifierIds = new Set(
+        teamResults.filter((result) => !result.ok && isVerificationNode(result.node)).map((result) => result.node.id),
+      );
+      const verifierRechecks = matched.filter((item) => (
+        failedVerifierIds.has(item.node.id) && (divisionAttempts.get(item.node.id) ?? 0) < 2
+      ));
+      if (verifierRechecks.length > 0) {
+        for (const item of verifierRechecks) {
+          usedDivisionIds.add(item.node.id);
+          divisionAttempts.set(item.node.id, (divisionAttempts.get(item.node.id) ?? 0) + 1);
+        }
+        if (!emitDelegationMessages(p, org.ceo, 1, verifierRechecks)) return handoffFailure(p);
+        mainStatus(ko ? "수정된 결과만 독립 재검수 중…" : "Rechecking only the corrected result…");
+        const upstream = teamResults.filter((result) => !isVerificationNode(result.node));
+        const rechecked = await runMatched(verifierRechecks, resultStatusContext(upstream), "verification");
+        for (const verification of rechecked) {
+          const index = teamResults.findIndex((result) => result.node.id === verification.node.id);
+          if (index >= 0) teamResults[index] = verification;
+          else teamResults.push(verification);
+        }
+      }
+    }
     if (p.handoffGuard?.blocked) return handoffFailure(p);
     mainStatus(ko ? "추가 작업 결과를 종합하는 중…" : "Synthesizing the additional results…");
-    finalTurn = await runNodeTurnSafe(p, {
-      node: org.ceo,
-      tier: 1,
-      phase: "synthesize",
-      userPrompt:
+    finalTurn = await runCeoSynthesis(
+      (
         `${req.userPrompt}\n\n[Updated results from your team — continue orchestration only if a still-unused required role is missing; otherwise return the final user result.]\n` +
         `${CONFLICT_SYNTHESIS_GUIDANCE}\n\n` +
         teamResults
-          .map((result) => `## ${result.node.name} (${result.node.role})\nstatus: ${result.ok ? "ok" : "failed"}\n${result.result}`)
-          .join("\n\n"),
-      history,
-      chatId: chat.id,
-      toMainBubble: true,
-      allocation: finalTurn.synthesisAllocation ?? plan.synthesisAllocation ?? defaultWorkloadAllocation("synthesize"),
-    });
+          .map((result) => `## ${result.node.name} (${result.node.role})\nstatus: ${result.ok ? "ok" : "failed"}\n${firmEvidencePromptSummary(result.evidence)}\n${result.result}`)
+          .join("\n\n")
+      ),
+      finalTurn.synthesisAllocation ?? plan.synthesisAllocation ?? defaultWorkloadAllocation("synthesize"),
+    );
     if (!finalTurn.ok) {
       sink({ kind: "error", error: firmFailure(req.agentAppMode, "ceo-failed", finalTurn.text) });
       return { ok: false, text: finalTurn.text };
@@ -1407,9 +1841,25 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
   }
 
   if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", finalTurn.text);
-  if (p.emitFinal !== false) sink({ kind: "final", text: finalTurn.text });
   // CEO 종합 턴의 성공은 팀의 성공이 아니다. 본부/전문가가 전멸해도 CEO가 문장을 만들어내면
-  // 예전엔 ok:true로 완전 성공 보고됐다(실패 텍스트를 산출물로 오해한 종합문 + 성공 표시).
-  // 자식 결과를 집계해 부분 완료가 성공으로 둔갑하지 않게 한다.
-  return { ok: latestTeamResultsAllOk(teamResults), text: finalTurn.text };
+  // 예전엔 return.ok 만 false 로 바꿨지만 direct Firm 호출부는 그 반환값을 소비하지 않고
+  // 스트림의 `final` 이벤트로 실행을 정산한다. 그 결과 실패한 Worker의 복구 체크포인트가
+  // 있어도 One 화면과 원장은 성공 terminal 로 뒤집혔다. 실패 종합문은 대화에 보존하되
+  // user-visible terminal 은 error 로 닫고, nested Firm은 부모가 같은 ok=false를 정산한다.
+  const teamOk = latestTeamResultsAllOk(teamResults);
+  if (!teamOk) {
+    if (p.emitFinal !== false) {
+      sink({
+        kind: "error",
+        error: firmFailure(
+          req.agentAppMode,
+          "firm-incomplete",
+          finalTurn.text || (ko ? "팀 작업이 완료되지 않았습니다." : "The team did not complete the task."),
+        ),
+      });
+    }
+    return { ok: false, text: finalTurn.text };
+  }
+  if (p.emitFinal !== false) sink({ kind: "final", text: finalTurn.text });
+  return { ok: true, text: finalTurn.text };
 }

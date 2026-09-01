@@ -16,8 +16,16 @@ import type {
   ScienceJournalValidationReport,
   ScienceJournalHumanAttestationReceipt,
   ScienceManuscript,
+  ScienceManuscriptBinding,
   ScienceSubmissionMetadata,
 } from "../../shared/science-contract";
+import { SCIENCE_TABLE_SCHEMA, validateScienceTablePayload } from "../../shared/science-table";
+import {
+  buildSciencePublicationEditableTable,
+  sciencePublicationTableSha256,
+  type SciencePublicationEditableTableExport,
+  verifySciencePublicationEditableTable,
+} from "../../shared/science-publication-table";
 import {
   SCIENCE_STATISTICS_FIGURE_VECTOR_ARTIFACT_SCHEMA,
   validateScienceStatisticsFigureRasterArtifactPayload,
@@ -332,6 +340,45 @@ function texText(manuscript: ScienceManuscript, metadata: ScienceSubmissionMetad
 
 function slug(value: string): string { return value.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60) || "journal"; }
 
+function editableTableForBinding(store: ScienceStore, manuscript: ScienceManuscript, binding: ScienceManuscriptBinding): SciencePublicationEditableTableExport {
+  if (binding.role !== "table" || binding.target.kind !== "artifact") throw new Error("science-submission-editable-table-binding-invalid");
+  const context = store.getArtifactContextForProject(manuscript.projectId, binding.target.artifactId, binding.target.artifactVersion);
+  if (!context || context.artifact.kind !== "table" || context.selectedVersion.payload.schema !== SCIENCE_TABLE_SCHEMA) {
+    throw new Error("science-submission-editable-table-artifact-invalid");
+  }
+  const table = validateScienceTablePayload(context.selectedVersion.payload);
+  const sourceRunId = context.artifact.sourceRunId;
+  const run = sourceRunId ? store.getResearchRunForProject(manuscript.projectId, sourceRunId) : null;
+  const runArtifactBinding = sourceRunId ? store.getRunArtifactBinding(manuscript.projectId, sourceRunId) : null;
+  if (!run || !runArtifactBinding) throw new Error("science-submission-editable-table-lineage-missing");
+  return verifySciencePublicationEditableTable(buildSciencePublicationEditableTable({
+    context,
+    run,
+    runArtifactBinding,
+    selection: {
+      title: context.artifact.title,
+      caption: binding.locator,
+      columns: table.columns.map((column) => column.name),
+      rowIndices: Array.from({ length: table.rows.length }, (_value, index) => index),
+    },
+  }));
+}
+
+function editableTableManifestEvidence(value: SciencePublicationEditableTableExport, packageBase: string): Record<string, unknown> {
+  const assets = {
+    docx: { packagePath: `${packageBase}.docx`, fileName: value.assets.docx.fileName, mimeType: value.assets.docx.mimeType, byteSize: value.assets.docx.byteSize, sha256: value.assets.docx.sha256 },
+    tex: { packagePath: `${packageBase}.tex`, fileName: value.assets.tex.fileName, mimeType: value.assets.tex.mimeType, byteSize: value.assets.tex.byteSize, sha256: value.assets.tex.sha256 },
+    json: { packagePath: `${packageBase}.json`, fileName: value.assets.json.fileName, mimeType: value.assets.json.mimeType, byteSize: value.assets.json.byteSize, sha256: value.assets.json.sha256 },
+  };
+  return {
+    schema: "agentlas.science.publication-editable-table-manifest-evidence/v1",
+    bindingSha256: value.binding.bindingSha256,
+    documentSha256: sciencePublicationTableSha256(value.document),
+    assets,
+    manifestSha256: value.manifestSha256,
+  };
+}
+
 export class ScienceJournalPublicationService {
   constructor(
     private readonly store: ScienceStore,
@@ -421,6 +468,25 @@ export class ScienceJournalPublicationService {
         })()
         : binding.target.kind === "source-figure" ? Boolean(this.store.sourceFigureBytesForProject(manuscript.projectId, binding.target.sourceFigureId)) : true;
       findings.push({ ruleId: `agentlas.submission.asset.${binding.ordinal}`, severity: "error", status: available ? "pass" : "fail", requirement: `Bound ${binding.role} asset must remain hash-verifiable at export.`, observed: available ? "verified asset available" : "bound asset missing", sourceUrl: "agentlas://submission/core", evidenceQuote: "Every exported visual must resolve to the exact bound version and content hash." });
+      if (binding.role === "table") {
+        let editable = false;
+        let observed = "exact editable table available";
+        try {
+          editableTableForBinding(this.store, manuscript, binding);
+          editable = true;
+        } catch (error) {
+          observed = `editable table unavailable: ${error instanceof Error ? error.message : "science-submission-editable-table-invalid"}`;
+        }
+        findings.push({
+          ruleId: `agentlas.submission.table-editable.${binding.ordinal}`,
+          severity: "error",
+          status: editable ? "pass" : "fail",
+          requirement: "Bound table must resolve to an exact editable table export with immutable artifact, dataset, run, and selected-cell lineage.",
+          observed,
+          sourceUrl: "agentlas://submission/editable-table",
+          evidenceQuote: "Every exported table must remain both visually reviewable and editable without losing exact scientific lineage.",
+        });
+      }
     }
     const fail = findings.filter((item) => item.status === "fail").length;
     const manual = findings.filter((item) => item.status === "manual").length;
@@ -493,6 +559,15 @@ export class ScienceJournalPublicationService {
       for (const binding of manuscript.version.bindings) {
         if (binding.target.kind === "artifact" && (binding.role === "figure" || binding.role === "table")) {
           const context = this.store.getArtifactContextForProject(input.projectId, binding.target.artifactId, binding.target.artifactVersion);
+          if (binding.role === "table") {
+            const editable = editableTableForBinding(this.store, manuscript, binding);
+            const packageBase = `tables/${String(binding.ordinal).padStart(3, "0")}-table`;
+            files[`${packageBase}.docx`] = editable.assets.docx.bytes;
+            files[`${packageBase}.tex`] = strToU8(editable.assets.tex.text);
+            files[`${packageBase}.json`] = strToU8(editable.assets.json.text);
+            files[`${packageBase}.binding.json`] = strToU8(`${JSON.stringify(editable.binding, null, 2)}\n`);
+            files[`${packageBase}.manifest.json`] = strToU8(`${JSON.stringify(editableTableManifestEvidence(editable, packageBase), null, 2)}\n`);
+          }
           if (binding.role === "figure" && context?.selectedVersion.payload.schema === SCIENCE_STATISTICS_FIGURE_VECTOR_ARTIFACT_SCHEMA) {
             const vector = this.store.statisticsFigureSvgAssetForBinding(input.projectId, binding.target.artifactId, binding.target.artifactVersion);
             if (vector) files[`figures/${String(binding.ordinal).padStart(3, "0")}-${binding.role}.svg`] = vector.bytes;

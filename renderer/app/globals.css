@@ -2701,8 +2701,9 @@ button[data-dashboard-import="true"]:disabled {
   margin-top: 6px;
 }
 
-/* Live tool permission is an inline approval chip, never a full-width ask sheet.
-   The title stays readable while the four decisions remain explicit and easy to hit. */
+/* Live permission is a short contextual popup above the composer, never a
+   hidden setup step or full-screen sheet. The title names the operation while
+   the four durable scopes remain explicit. */
 .tool-approval-chip {
   width: fit-content;
   max-width: 100%;
@@ -2816,8 +2817,12 @@ button[data-dashboard-import="true"]:disabled {
 
   .tool-approval-chip-actions {
     width: 100%;
-    overflow-x: auto;
+    flex-wrap: wrap;
     padding-bottom: 1px;
+  }
+
+  .tool-approval-chip-action {
+    flex: 1 1 calc(50% - 5px);
   }
 }
 .automation-session-stream small { color: var(--rd-ink-3); font-size: 9px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }

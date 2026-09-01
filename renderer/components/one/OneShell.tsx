@@ -153,7 +153,7 @@ import { OneMemoryCandidateCard } from "./OneMemoryCandidateCard";
 import { OneProfileSheet } from "./OneProfileSheet";
 import { OneSuggestionCard } from "./OneSuggestionCard";
 import { OneGrowthCard } from "./OneGrowthCard";
-import { OneActivityArtifactRail, taskBrowserUrl, type OneLiveAppPreview } from "./OneActivityTimeline";
+import { OneActivityArtifactRail, OneInlineArtifactResults, taskBrowserUrl, type OneLiveAppPreview } from "./OneActivityTimeline";
 import { OneOrgChart, type OneOrgSearchItem } from "./OneOrgChart";
 import { OneAgentPortrait } from "./OneAgentPortrait";
 import { llmLogoSrc } from "@/lib/llm-logo";
@@ -529,6 +529,20 @@ type OneAttachmentDraft = {
   previewUrl: string | null;
 };
 
+type PendingOneSubmission = {
+  cancelled: boolean;
+  /** Main invocation accepted from this preparation. Stop must use this id
+   * even if a route/projection refresh has not reattached the live run yet. */
+  startedRunId: string | null;
+  preflightId: string;
+  teamProposalId: string | null;
+  prompt: string;
+  attachments: OneAttachmentDraft[];
+  overrides: OneTurnOverrides;
+  turnAgentIds: string[];
+  preparedAttachments: PreparedOneAttachments | null;
+};
+
 const UPDATE_BLOCKING_STATES = new Set<UpdaterState["status"]>([
   "available",
   "downloading",
@@ -800,7 +814,14 @@ function visibleOneMessageText(message: UiMessage): string {
   const completion = /\b\d+\s*\/\s*\d+\s+is\s+complete\b/i.exec(banded);
   const customerAnswer = stripGenericResultReadyCopy(completion && /^I(?:’|'| a)m using (?:the )?.*\bskill\b/i.test(banded)
     ? banded.slice(completion.index)
-    : banded);
+    : banded)
+    // Local filesystem links are never a valid chat navigation surface. Main
+    // seals verified output bytes into the result rail; the thread keeps only
+    // the readable label and the compact result buttons below the work block.
+    .replace(/^\s*[-*]\s+\[[^\]\n]+\]\((?:file:\/\/)?\/[^)\n]+\)\s*$/gmu, "")
+    .replace(/\[([^\]\n]+)\]\((?:file:\/\/)?\/[^)\n]+\)/gu, "$1")
+    .replace(/\n{3,}/gu, "\n\n")
+    .trim();
   const readableJson = readableOneJson(customerAnswer);
   if (readableJson) {
     return toCustomerSafeText(readableJson, detectOneTextLocale(readableJson) === "ko" ? "ko" : "en");
@@ -1525,6 +1546,7 @@ export function OneShell() {
   const liveWorkAnchorMessageId = workBusy && liveResponseMounted ? "one-live-response" : null;
   const liveWorkBlock = workBusy
     ? (
+      <>
       <OneTurnWork
         key={`work:live:${activeActivityRunId ?? "pending"}`}
         state={renderedActivity}
@@ -1533,6 +1555,8 @@ export function OneShell() {
         locale={appLocale}
         workspacePath={workspacePath}
       />
+      <OneInlineArtifactResults items={renderedActivity.artifacts} locale={appLocale} />
+      </>
     )
     : null;
   // Settled blocks for every past run of this conversation. Between a run's
@@ -1559,6 +1583,63 @@ export function OneShell() {
       excludeRunId: workBusy ? activeActivityRunId : null,
     });
   }, [activeActivityRunId, activity, activityStateRunId, visibleMessages, runStartedAt, threadRuns, workBusy]);
+  /*
+   * The output rail belongs to the conversation, not only to its newest run.
+   *
+   * The chat transcript already projects every durable run through
+   * `threadRuns`, but the rail used to receive only `activity` (the latest
+   * run). Sending a follow-up therefore removed every PDF/image/document and
+   * MCP tab produced by the previous turn. Keep the per-turn work blocks as
+   * they are, while projecting a stable conversation-wide output index into
+   * the rail. Prefix run-local item ids because every runtime starts its
+   * sequence at one; durable artifact bindings remain the authority for files.
+   */
+  const threadRailActivity = useMemo<OneActivityState>(() => {
+    const runs = new Map<string, OneActivityState>();
+    for (const run of threadRuns) runs.set(run.runId, run.state);
+
+    const visibleActivityRunId = activeActivityRunId ?? activityStateRunId;
+    if (visibleActivityRunId && (workBusy || !runs.has(visibleActivityRunId))) {
+      runs.set(visibleActivityRunId, renderedActivity);
+    }
+
+    const items: OneActivityState["items"] = [];
+    const artifacts: OneActivityState["artifacts"] = [];
+    const sources: OneActivityState["sources"] = [];
+    const handoffs: OneActivityState["handoffs"] = [];
+    const artifactKeys = new Set<string>();
+    const sourceKeys = new Set<string>();
+
+    for (const [runId, state] of runs) {
+      items.push(...state.items.map((item) => ({ ...item, id: `${runId}:${item.id}` })));
+      for (const artifact of state.artifacts) {
+        const key = `${artifact.binding.runId}\u0000${artifact.binding.artifactRef}`;
+        if (artifactKeys.has(key)) continue;
+        artifactKeys.add(key);
+        artifacts.push(artifact);
+      }
+      for (const source of state.sources) {
+        const key = `${source.url}\u0000${source.toolName}`;
+        if (sourceKeys.has(key)) continue;
+        sourceKeys.add(key);
+        sources.push({ ...source, id: `${runId}:${source.id}` });
+      }
+      handoffs.push(...state.handoffs.map((handoff) => ({ ...handoff, id: `${runId}:${handoff.id}` })));
+    }
+
+    return {
+      items,
+      artifacts,
+      sources,
+      handoffs,
+      lastSequence: items.length,
+      ...(renderedActivity.effectivePermission ? { effectivePermission: renderedActivity.effectivePermission } : {}),
+      ...(renderedActivity.selectedPermissionMode ? { selectedPermissionMode: renderedActivity.selectedPermissionMode } : {}),
+      ...(renderedActivity.terminalStatus ? { terminalStatus: renderedActivity.terminalStatus } : {}),
+      ...(renderedActivity.cwd ? { cwd: renderedActivity.cwd } : {}),
+      ...(renderedActivity.model ? { model: renderedActivity.model } : {}),
+    };
+  }, [activeActivityRunId, activityStateRunId, renderedActivity, threadRuns, workBusy]);
   const durableThreadBrowserUrl = useMemo(() => {
     for (let index = threadRuns.length - 1; index >= 0; index -= 1) {
       const url = taskBrowserUrl(threadRuns[index].state.items);
@@ -1588,11 +1669,13 @@ export function OneShell() {
   const runIdRef = useRef<string | null>(null);
   const runTaskIdRef = useRef<string | null>(null);
   const runChatIdRef = useRef<string | null>(null);
+  const pendingSubmissionRef = useRef<PendingOneSubmission | null>(null);
+  const cancelPendingRunIdsRef = useRef(new Set<string>());
   /** One handoff has no separate cancel authority; interrupt uses the same
    * Main-owned invocation cancel path as the composer Stop action. */
-  const cancelActiveRun = useCallback((reason: string) => {
+  const cancelActiveRun = useCallback((reason: string, explicitRunId?: string) => {
     const api = ipc();
-    const runId = runIdRef.current;
+    const runId = explicitRunId ?? runIdRef.current;
     if (!runId) return;
     if (!api) {
       requestOneOperationalRecovery(reason, new Error("Desktop bridge unavailable"));
@@ -1601,27 +1684,61 @@ export function OneShell() {
         : "The work could not be stopped because Desktop is unavailable. The run is still active.");
       return;
     }
-    void api.invoke.cancel(runId).then((receipt) => {
-      if (
-        receipt?.runId !== runId
-        || (receipt.status !== "requested" && receipt.status !== "already-requested")
-      ) {
-        throw new Error("invoke_cancel_receipt_mismatch");
+    if (cancelPendingRunIdsRef.current.has(runId)) return;
+    cancelPendingRunIdsRef.current.add(runId);
+    setActionNotice(appLocale === "ko" ? "중단 요청을 전달하는 중입니다…" : "Sending the stop request…");
+    void (async () => {
+      // The renderer makes the Stop control visible before the async invoke IPC
+      // has necessarily registered the run in Main. A human can click during
+      // that small honest race. Treat only `not-found` for the same still-live
+      // run as transient and retry within a bounded window; every other receipt
+      // remains fail-closed. One click must be enough, and parallel clicks must
+      // never create parallel cancellation loops.
+      const retryDelaysMs = [0, 80, 160, 320, 640] as const;
+      for (const [attempt, delayMs] of retryDelaysMs.entries()) {
+        if (delayMs > 0) await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+        const receipt = await api.invoke.cancel(runId);
+        if (receipt?.runId !== runId) throw new Error("invoke_cancel_receipt_mismatch");
+        if (receipt.status === "requested" || receipt.status === "already-requested") {
+          // Main accepted the terminal action. The run remains visibly busy
+          // until its terminal event arrives, but directions Main just
+          // discarded must disappear from the local queue now.
+          pendingSteersRef.current = [];
+          setQueuedSteers([]);
+          setActionNotice(appLocale === "ko" ? "중단 요청을 전달했습니다. 종료 결과를 기다리는 중입니다…" : "Stop requested. Waiting for the terminal result…");
+          return;
+        }
+        const sameRunStillVisible = activeActivityRunId === runId
+          || runIdRef.current === runId
+          || pendingSubmissionRef.current?.startedRunId === runId;
+        if (receipt.status !== "not-found" || !sameRunStillVisible || attempt === retryDelaysMs.length - 1) {
+          throw new Error("invoke_cancel_receipt_mismatch");
+        }
       }
-      // Main accepted the terminal action. The run remains visibly busy until
-      // its terminal event arrives, but directions Main just discarded must
-      // disappear from the local queue now.
-      pendingSteersRef.current = [];
-      setQueuedSteers([]);
-      setActionNotice(appLocale === "ko" ? "중단 요청을 전달했습니다. 종료 결과를 기다리는 중입니다…" : "Stop requested. Waiting for the terminal result…");
-    }).catch(() => {
+    })().catch(() => {
       // Rejection means nothing was cancelled; preserve the active run and its
       // queued directions instead of leaving a false stopped/pending screen.
       setActionNotice(appLocale === "ko"
         ? "작업 중단 요청이 거절되었습니다. 실행과 대기 중 지시는 그대로입니다. 다시 시도해 주세요."
         : "The stop request was rejected. The run and queued directions are unchanged; try again.");
+    }).finally(() => {
+      cancelPendingRunIdsRef.current.delete(runId);
     });
-  }, [appLocale]);
+  }, [activeActivityRunId, appLocale]);
+  // A successful cancel request is only an interim notice. Once Main has
+  // delivered the terminal event (`busy === false`), keeping "waiting" above
+  // an idle composer contradicts the durable stopped state and makes the user
+  // think the run is still alive. Preserve unrelated notices and rejected-stop
+  // errors; clear only the two localized accepted-stop messages.
+  useEffect(() => {
+    if (busy) return;
+    setActionNotice((current) => (
+      current === "중단 요청을 전달했습니다. 종료 결과를 기다리는 중입니다…"
+      || current === "Stop requested. Waiting for the terminal result…"
+        ? null
+        : current
+    ));
+  }, [busy]);
   /*
    * ★화면에 지금 떠 있는 메시지가 **어느 대화의 것인가**.
    *
@@ -2177,6 +2294,17 @@ export function OneShell() {
         }).catch(() => undefined);
       } else if (change.entity === "one-taskforce") {
         void refreshAll({ includeOrg: false });
+      } else if (change.entity === "task") {
+        /*
+         * Main publishes the provider's terminal event before it writes the
+         * canonical Task's terminal status. The fast-path terminal handler can
+         * therefore refresh while the Task still says `running`, briefly
+         * turning the completed thread into a read-only conversation. The
+         * durable Task change is the authoritative settlement boundary; read
+         * it as soon as Main emits it instead of waiting for the five-second
+         * polling safety net (or an app restart).
+         */
+        void refreshAll({ includeOrg: false });
       }
     });
   }, [refreshAll]);
@@ -2446,13 +2574,21 @@ export function OneShell() {
       && runChatIdRef.current
       && (runChatIdRef.current === activeThreadChatId || promotionHandoff || activeThreadUnknown),
     );
+    const liveRunHasDurableTerminal = Boolean(
+      selected?.latestReceipt
+      && selected.latestReceipt.runId === runIdRef.current
+      && selected.latestReceipt.status !== "running",
+    );
     if (!promotionHandoff) activityChatIdRef.current = activeThreadChatId;
 
     // Task projections are refreshed throughout an active run. Those refreshes
     // update latestReceipt/status and re-enter this effect, but they must not
-    // tear down the only live event subscription. Preserve the run and merely
-    // advance its Task association through a Conversation -> Task promotion.
-    if (liveRunOwnsActiveThread) {
+    // tear down the only live event subscription while the durable receipt is
+    // still running. Once Main has committed a terminal receipt, however, that
+    // receipt must win even if the renderer missed the final IPC event. Keeping
+    // this early return for a failed/completed/cancelled receipt left Stop and
+    // the disabled composer alive forever after an otherwise settled run.
+    if (liveRunOwnsActiveThread && !liveRunHasDurableTerminal) {
       runTaskIdRef.current = selected?.taskId ?? runTaskIdRef.current;
       setReceipt(selected?.latestReceipt ?? null);
       return () => { cancelled = true; };
@@ -2656,15 +2792,61 @@ export function OneShell() {
       return;
     }
     const match = projections.find((item) => item.taskId === selectedTaskId);
-    if (match) setSelected(match);
-  }, [projections, selectedTaskId]);
+    if (match) {
+      setSelected(match);
+      return;
+    }
+    // A deep link can arrive before the bounded projection list refreshes. Do
+    // not bounce it through `?chat=`: refreshAll immediately promotes that same
+    // conversation back to `?task=`, creating an endless route/remount loop
+    // that makes the composer and live approvals impossible to use. Hydrate the
+    // exact canonical projection in place; only a truly missing/non-One Task
+    // returns home.
+    let cancelled = false;
+    const api = ipc();
+    if (!api?.tasks?.getProjection) return () => { cancelled = true; };
+    void getOneTaskProjection(
+      api,
+      selectedTaskId,
+      activeChatIds,
+      confirmations,
+      oneProfile,
+      appLocale,
+    ).then((detail) => {
+      if (cancelled) return;
+      if (!detail?.chatId || !detail.chat) {
+        selectedTaskIdRef.current = null;
+        setSelected(null);
+        setConversation(null);
+        setReceipt(null);
+        router.replace("/one");
+        return;
+      }
+      setSelected(detail);
+      setConversation(null);
+      setReceipt(detail.latestReceipt ?? null);
+      rememberLastOneConversation(detail.chatId);
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [activeChatIds, appLocale, confirmations, oneProfile, projections, router, selectedTaskId]);
 
   const activeThreadChatId = selected?.chatId ?? conversation?.id ?? null;
   const activeThreadChatIdRef = useRef(activeThreadChatId);
+  const actionNoticeThreadRef = useRef(activeThreadChatId);
   // Keep the guard synchronous with render. An effect leaves one commit where
   // a picker started in chat A can settle after navigation and paint A's path
   // into chat B.
   activeThreadChatIdRef.current = activeThreadChatId;
+  useEffect(() => {
+    if (actionNoticeThreadRef.current !== activeThreadChatId) {
+      // Notices explain an action in one exact conversation. Letting a stop,
+      // model-save, or automation notice follow the user into another thread
+      // makes that other session look modified even though nothing happened
+      // there. Promotions keep the same chat id, so their local notice stays.
+      setActionNotice(null);
+      actionNoticeThreadRef.current = activeThreadChatId;
+    }
+  }, [activeThreadChatId]);
   useEffect(() => {
     onePaneCommitWaiterRef.current.observe(selectedConversationId, activeThreadChatId);
   }, [activeThreadChatId, selectedConversationId]);
@@ -3145,19 +3327,51 @@ export function OneShell() {
     // Restoring that chat's (empty) draft erased what they typed (measured
     // 2026-08-16: text sent during "준비하는 중" vanished without a trace).
     // Carry in-progress text over instead of replacing it with nothing.
-    const inProgress = composerInputRef.current?.value ?? "";
+    // The DOM value is the freshest source while the user is typing. If the
+    // route promotion already replaced that input, fall back to the draft
+    // written under the route we are leaving instead of treating it as empty.
+    const currentDomValue = composerInputRef.current?.value ?? "";
+    const previousDraftValue = readOneComposerDraft(previousKey).composer;
+    const inProgress = currentDomValue.trim() ? currentDomValue : previousDraftValue;
     const pendingCarry = pendingNewChatDraftCarryRef.current;
     const freshSubmitLanding = previousKey === "new"
       && Boolean(pendingCarry)
       && composerDraftKey === `chat:${pendingCarry?.chatId}`
       && pendingCarry?.navigationEpoch === navigationEpochRef.current;
+    // A One conversation is promoted to a Task as soon as execution becomes
+    // durable. That changes only the route key (`chat:*` -> `task:*`), not the
+    // conversation the composer belongs to. Typing the next instruction during
+    // that promotion used to be restored from the new task's empty draft and
+    // disappear. Carry it only when both route keys still resolve to this exact
+    // live chat, so a real cross-conversation navigation never borrows text.
+    // Task projection briefly clears both `selected` and `conversation`; the
+    // Main-owned run ref remains the only stable chat identity in that handoff.
+    const promotionChatId = activeThreadChatId ?? runChatIdRef.current;
+    const sameThreadTaskPromotion = previousKey === `chat:${promotionChatId}`
+      && composerDraftKey.startsWith("task:")
+      && Boolean(promotionChatId);
     if (previousKey === "new") pendingNewChatDraftCarryRef.current = null;
+    if (sameThreadTaskPromotion) {
+      // Keep the controlled input mounted on its current React state. Calling
+      // setComposerState here, even with an equivalent string, can replace the
+      // native text field exactly while an IME/automation accessibility action
+      // is committing a keystroke. Only migrate storage ownership; subsequent
+      // input events already write through composerDraftKeyRef to the task key.
+      if (inProgress.trim() !== "") {
+        writeOneComposerDraft(composerDraftKey, { composer: inProgress });
+        writeOneComposerDraft(previousKey, { composer: "", stagedSteer: null });
+      } else if (restored.composer.trim() !== "") {
+        setComposerState(restored.composer);
+      }
+      setStagedSteerState(null);
+      return;
+    }
     if (freshSubmitLanding && restored.composer.trim() === "" && inProgress.trim() !== "") {
       writeOneComposerDraft(composerDraftKey, { composer: inProgress });
-      // The in-progress text now belongs to the exact chat that was just
-      // created. Leaving the same text under `new` makes the next explicit New
-      // action resurrect it as an unrelated draft.
-      writeOneComposerDraft("new", { composer: "", stagedSteer: null });
+      // The in-progress text now belongs to the route which owns this exact
+      // chat. Leaving it under the route we just left can resurrect the same
+      // text when that stale route is opened later.
+      writeOneComposerDraft(previousKey, { composer: "", stagedSteer: null });
       setComposerState(inProgress);
     } else {
       setComposerState(restored.composer);
@@ -3526,6 +3740,9 @@ export function OneShell() {
         })();
     const runId = options?.runId ?? uid();
     runIdRef.current = runId;
+    if (pendingSubmissionRef.current) {
+      pendingSubmissionRef.current.startedRunId = runId;
+    }
     activityRunIdRef.current = runId;
     // Do not mark the optimistic row as an observed runtime event. Until this
     // run delivers its own lifecycle event, the view must keep rendering the
@@ -3663,6 +3880,26 @@ export function OneShell() {
       }
       await refreshAll();
     } catch (cause) {
+      /*
+       * `invoke:run` crosses two authorities: Main durably records and starts
+       * the run, then Electron returns the IPC acknowledgement.  A renderer
+       * reload/transport failure can lose only that acknowledgement after Main
+       * has already accepted the exact runId.  Treating that ambiguity as a
+       * rejected start erased the live Activity and showed "Run did not
+       * start" while the Hub workers were visibly still producing files.
+       *
+       * Re-read Main's exact receipt before undoing anything.  Any receipt for
+       * this caller-minted runId proves that the durable start boundary was
+       * crossed; the existing event subscription/settlement path remains its
+       * owner.  Only a truly absent receipt may run the rejected-start cleanup
+       * below (including failing an unused team reservation).
+       */
+      const acceptedReceipt = await api.invoke.receipt(runId).catch(() => null);
+      if (acceptedReceipt?.runId === runId) {
+        setReceipt(acceptedReceipt);
+        await refreshAll();
+        return;
+      }
       if (options?.teamRef) {
         const failed = await api.oneTeamPreflight.failStart(options.teamRef).catch(() => null);
         if (failed) setTeamPreflight(failed);
@@ -3670,6 +3907,9 @@ export function OneShell() {
       unsubscribeRunRef.current?.();
       unsubscribeRunRef.current = null;
       runIdRef.current = null;
+      if (pendingSubmissionRef.current?.startedRunId === runId) {
+        pendingSubmissionRef.current.startedRunId = null;
+      }
       setLiveRunPrompt((current) => current?.runId === runId ? null : current);
       setDispatchRunPrompt((current) => current?.runId === runId ? null : current);
       if (dispatchRunPromptRef.current?.runId === runId) dispatchRunPromptRef.current = null;
@@ -3709,8 +3949,10 @@ export function OneShell() {
     proposal: OneTeamPreflightProposal,
     prompt: PendingTeamPrompt,
     userAlreadyShown: boolean,
+    shouldCancel?: () => boolean,
   ) => {
     const api = ipc();
+    if (shouldCancel?.()) return;
     if (autoResolvingProposalRef.current === proposal.proposalId || runIdRef.current) return;
     if (!api) {
       requestOneOperationalRecovery("one-team-preflight-start", new Error("Desktop bridge unavailable"));
@@ -3727,6 +3969,19 @@ export function OneShell() {
         expectedProposalVersion: proposal.version,
         requestedRunId: uid(),
       });
+      // Stop can be clicked while Main is reserving the team run. Reservation
+      // is not execution authority: fail the unused reservation and return
+      // before startRun gets a chance to publish an invocation. Once startRun
+      // is entered it sets runIdRef synchronously, so a later Stop follows the
+      // ordinary active-run cancellation path instead.
+      if (shouldCancel?.()) {
+        if (result.kind === "reserved") {
+          await api.oneTeamPreflight.failStart(result.ref).catch(() => null);
+        }
+        setPendingTeamPrompt((current) => current?.proposalId === proposal.proposalId ? null : current);
+        setTeamPreflight((current) => current?.proposalId === proposal.proposalId ? null : current);
+        return;
+      }
       setTeamPreflight(result.proposal);
       if (result.kind !== "reserved") {
         throw new Error("One could not reserve the work safely");
@@ -3970,6 +4225,22 @@ export function OneShell() {
       requestOneOperationalRecovery("one-submit-connection", "Desktop bridge unavailable");
       return;
     }
+    const preflightId = `one-preflight:${uid()}`;
+    const preflightStartedAt = Date.now();
+    const pendingSubmission: PendingOneSubmission = {
+      cancelled: false,
+      startedRunId: null,
+      preflightId,
+      teamProposalId: null,
+      prompt: value,
+      attachments: attachmentSnapshot,
+      overrides: overrideSnapshot,
+      turnAgentIds: [...turnAgentIds],
+      preparedAttachments: null,
+    };
+    const submissionWasCancelled = () => (
+      pendingSubmission.cancelled || pendingSubmissionRef.current !== pendingSubmission
+    );
     if (graphRequest !== null) {
       try {
         let targetChat = selected?.chatId ? await api.chats.get(selected.chatId) : conversation;
@@ -4067,6 +4338,7 @@ export function OneShell() {
       taskVersion: number | null,
       taskIntent: "task" | "conversation",
     ) => {
+      if (submissionWasCancelled()) return;
       setSubmissionBusy(true);
       setError(null);
       let preparedAttachments: PreparedOneAttachments | null = null;
@@ -4085,8 +4357,15 @@ export function OneShell() {
             claimedSize: item.size,
           }));
           preparedAttachments = await api.oneAttachments.prepare({ chatId, userPrompt: value, attachments });
+          pendingSubmission.preparedAttachments = preparedAttachments;
+          if (submissionWasCancelled()) {
+            await api.oneAttachments.discard({ ref: preparedAttachments.ref }).catch(() => ({ discarded: false }));
+            pendingSubmission.preparedAttachments = null;
+            return;
+          }
         }
         const mainIntent = await requestIntentPromise;
+        if (submissionWasCancelled()) return;
         const resolvedIntent = preparedAttachments
           || taskIntent === "task"
           || recurrenceSnapshot
@@ -4117,6 +4396,7 @@ export function OneShell() {
         // quick answers appear under Work even when the authoritative intent
         // verdict was `conversation`.
         if (resolvedIntent === "conversation" && !explicitTeamRequest) {
+          if (submissionWasCancelled()) return;
           await startRun(
             chatId,
             taskId,
@@ -4160,7 +4440,9 @@ export function OneShell() {
           })()),
           ...(overrideSnapshot.sessionRouting ? { dynamicTeamRequested: true } : {}),
         });
+        if (submissionWasCancelled()) return;
         if (prepared.kind === "not_required") {
+          if (submissionWasCancelled()) return;
           await startRun(
             chatId,
             taskId,
@@ -4184,7 +4466,15 @@ export function OneShell() {
             proposalId: prepared.proposal.proposalId,
             chatId,
           });
+          pendingSubmission.preparedAttachments = preparedAttachments;
+          if (submissionWasCancelled()) {
+            await api.oneAttachments.discard({ ref: preparedAttachments.ref }).catch(() => ({ discarded: false }));
+            pendingSubmission.preparedAttachments = null;
+            return;
+          }
         }
+        pendingSubmission.teamProposalId = prepared.proposal.proposalId;
+        if (submissionWasCancelled()) return;
         setTeamPreflight(prepared.proposal);
         const pendingPrompt: PendingTeamPrompt = {
           proposalId: prepared.proposal.proposalId,
@@ -4201,14 +4491,21 @@ export function OneShell() {
         ]);
         setPreflightPrompt(null);
         scrollToLatest();
-        await autoStartTeamPreflight(prepared.proposal, pendingPrompt, true);
+        await autoStartTeamPreflight(prepared.proposal, pendingPrompt, true, submissionWasCancelled);
       } catch (cause) {
         if (preparedAttachments) {
           await api.oneAttachments.discard({ ref: preparedAttachments.ref }).catch(() => ({ discarded: false }));
         }
-        throw cause;
+        if (!submissionWasCancelled()) throw cause;
       } finally {
-        setSubmissionBusy(false);
+        // A cancelled preparation can settle after the user has already sent
+        // a newer request in the same chat. Only the preparation that still
+        // owns this ref may clear the shared busy projection; otherwise the
+        // older promise would hide the newer request's visible Stop control.
+        if (pendingSubmissionRef.current === pendingSubmission) {
+          pendingSubmissionRef.current = null;
+          setSubmissionBusy(false);
+        }
         // Preparation ended without a run (refused, failed, or waiting on a
         // team decision): instructions queued behind it go back to the composer
         // instead of lingering as a "next" that has nothing to follow.
@@ -4230,8 +4527,6 @@ export function OneShell() {
     // Commit the request before any attachment, intent, team, or runtime work
     // begins. The user now sees a truthful "Preparing execution" phase rather
     // than the prior answer's stale, falsely-live Activity.
-    const preflightId = `one-preflight:${uid()}`;
-    const preflightStartedAt = Date.now();
     flushSync(() => {
       setPreflightPrompt({ id: preflightId, text: value, startedAt: preflightStartedAt });
       setActivityStateRunId(null);
@@ -4255,6 +4550,7 @@ export function OneShell() {
       ]);
       setSubmissionBusy(true);
     });
+    pendingSubmissionRef.current = pendingSubmission;
     scrollToLatest();
     let freshCreatedChatId: string | null = null;
     const recoverFreshCreatedChatDraft = (notice: string) => {
@@ -4285,6 +4581,7 @@ export function OneShell() {
       }
       if (conversation && !homeTransitionPendingRef.current && selectedConversationIdRef.current === conversation.id) {
         await resolveActivationConcern(conversation.id);
+        if (submissionWasCancelled()) return;
         await prepareOrRun(conversation.id, null, null, "conversation");
         return;
       }
@@ -4293,6 +4590,7 @@ export function OneShell() {
         taskMode: "conversation",
         originSurface: "one",
       });
+      if (submissionWasCancelled()) return;
       if (!chat?.id || chat.originSurface !== "one") {
         throw new Error("fresh_chat_receipt_mismatch");
       }
@@ -4312,7 +4610,9 @@ export function OneShell() {
       }
       if (workspaceGrant) {
         await api.workspace.set(chat.id, workspaceGrant);
+        if (submissionWasCancelled()) return;
         const persistedPath = await api.workspace.get(chat.id);
+        if (submissionWasCancelled()) return;
         if (persistedPath !== workspaceGrant.path) {
           throw new Error("fresh_chat_workspace_receipt_mismatch");
         }
@@ -4320,6 +4620,7 @@ export function OneShell() {
       if (submissionRuntimeSelection) {
         try {
           const pinned = await api.chats.setRuntimeSelection(chat.id, submissionRuntimeSelection);
+          if (submissionWasCancelled()) return;
           const receipt = pinned?.runtimeSelection;
           if (
             !pinned
@@ -4354,8 +4655,10 @@ export function OneShell() {
         }
       }
       await resolveActivationConcern(chat.id);
+      if (submissionWasCancelled()) return;
       await prepareOrRun(chat.id, null, null, "conversation");
     } catch (cause) {
+      if (submissionWasCancelled()) return;
       setSubmissionBusy(false);
       setPreflightPrompt(null);
       if (freshCreatedChatId && !runIdRef.current) {
@@ -4382,13 +4685,54 @@ export function OneShell() {
     }
   }, [activeTaskforceAgentIds, autoStartTeamPreflight, busy, clearAttachmentDrafts, conversation, appLocale, normalizedLocale, onePermission, oneRuntimeInventory, oneRuntimeSelection, orchestrationTargetForAgentId, resolveActivationConcern, router, scrollToLatest, selected, startRun, teamPreflight, teamPreflightBusy, turnAgentIds, turnOverrides, workspaceGrant]);
 
+  const stopPendingSubmission = useCallback(() => {
+    const pending = pendingSubmissionRef.current;
+    if (!pending) return false;
+    pending.cancelled = true;
+    pendingSubmissionRef.current = null;
+    setTeamPreflightBusy(false);
+    setPreflightPrompt(null);
+    if (pending.teamProposalId) {
+      setPendingTeamPrompt((current) => current?.proposalId === pending.teamProposalId ? null : current);
+      setTeamPreflight((current) => current?.proposalId === pending.teamProposalId ? null : current);
+    }
+    setMessages((current) => current.filter((item) => item.id !== pending.preflightId));
+    setComposer((current) => {
+      if (!current.trim()) return pending.prompt;
+      if (current === pending.prompt) return current;
+      return `${pending.prompt}\n${current}`;
+    });
+    setTurnOverrides(pending.overrides);
+    setTurnAgentIds(pending.turnAgentIds);
+    if (pending.attachments.length > 0) {
+      const restored = pending.attachments.map((item) => ({ ...item, previewUrl: null }));
+      attachmentDraftsRef.current = restored;
+      setAttachmentDrafts(restored);
+    }
+    setActionNotice(appLocale === "ko"
+      ? "실행 준비를 중단했습니다. 모델 실행은 시작되지 않았고 입력을 복원했습니다."
+      : "Preparation stopped. No model run started, and your input was restored.");
+    return true;
+  }, [appLocale]);
+
   const stopRun = useCallback(() => {
     // Stop is terminal for the visible work item: Main drops the directions
     // queued behind it (InvocationService.cancel), so the strip must not keep
     // showing them as "next". Handoff interruption intentionally shares this
     // exact authority rather than inventing a second cancellation path.
-    cancelActiveRun("one-run-stop");
-  }, [cancelActiveRun]);
+    // The render projection owns the visible Stop button. Prefer its exact run
+    // over mutable refs that a concurrent history refresh can briefly replace
+    // with the previous attachment while the new run is already live in Main.
+    const activeRunId = activeActivityRunId
+      ?? pendingSubmissionRef.current?.startedRunId
+      ?? runIdRef.current
+      ?? null;
+    if (activeRunId) {
+      cancelActiveRun("one-run-stop", activeRunId);
+      return;
+    }
+    stopPendingSubmission();
+  }, [activeActivityRunId, cancelActiveRun, stopPendingSubmission]);
 
   // Pull a queued direction back before its run starts. Main removes it by
   // position + exact text; if it already started (or the queue was already
@@ -4615,26 +4959,67 @@ export function OneShell() {
       setCommittedAnswers(await api.confirm.committedAnswers(confirmation.chatId).catch(() => []));
       setConfirmations((items) => items.filter((item) => item.sourceMessageId !== confirmation.sourceMessageId));
       if (shouldStart) {
-        if (projectedTask) {
-          await startRun(
-            confirmation.chatId,
-            projectedTask.taskId,
-            projectedTask.canonicalVersion,
-            label,
-            "task",
-            { permissionMode: continuationPermission },
-          );
-        } else {
-          const task = await api.tasks.findForChat(confirmation.chatId);
-          await startRun(
-            confirmation.chatId,
-            task?.id ?? null,
-            task?.version ?? null,
-            label,
-            task ? "task" : "conversation",
-            { permissionMode: continuationPermission },
-          );
+        const task = projectedTask
+          ? { id: projectedTask.taskId, version: projectedTask.canonicalVersion }
+          : await api.tasks.findForChat(confirmation.chatId);
+        const taskforce = taskforces.find((item) => item.chatId === confirmation.chatId) ?? null;
+        const memberByAgentId = new Map(
+          (oneOrgState?.members ?? []).map((member) => [member.installedAgentId, member]),
+        );
+        const eligibleTaskforceAgentIds = (taskforce?.memberAgentIds ?? []).filter((agentId) => {
+          const member = memberByAgentId.get(agentId);
+          return member && !member.archivedAt
+            && member.statusKind !== "locked" && member.statusKind !== "failed";
+        });
+        if (eligibleTaskforceAgentIds.length > 0) {
+          // Decision continuations must cross the same Main-owned team
+          // reservation boundary as a normal Taskforce turn. Calling
+          // startRun directly preserves the chat but skips the reservation,
+          // so the approved work silently falls back to One alone.
+          const targets = eligibleTaskforceAgentIds.map(orchestrationTargetForAgentId);
+          const prepared = await api.oneTeamPreflight.prepare({
+            chatId: confirmation.chatId,
+            userPrompt: label,
+            expectedTaskId: task?.id ?? null,
+            expectedTaskVersion: task?.version ?? null,
+            permission: continuationPermission === "read" ? "read" : "write",
+            requestedAgentIds: eligibleTaskforceAgentIds,
+            ...(oneRuntimeSelection ? { runtimeSelection: oneRuntimeSelection } : {}),
+          });
+          if (prepared.kind !== "not_required") {
+            const reserved = await api.oneTeamPreflight.autoResolve({
+              proposalId: prepared.proposal.proposalId,
+              expectedProposalVersion: prepared.proposal.version,
+              requestedRunId: uid(),
+            });
+            if (reserved.kind !== "reserved") {
+              throw new Error("One could not reserve the approved Taskforce work safely");
+            }
+            await startRun(
+              confirmation.chatId,
+              prepared.proposal.binding.taskId,
+              prepared.proposal.binding.taskVersion,
+              label,
+              "task",
+              {
+                runId: reserved.ref.reservedRunId,
+                teamRef: reserved.ref,
+                taskForceTargets: targets,
+                permissionMode: continuationPermission,
+                ...(oneRuntimeSelection ? { runtimeSelection: oneRuntimeSelection } : {}),
+              },
+            );
+            return;
+          }
         }
+        await startRun(
+          confirmation.chatId,
+          task?.id ?? null,
+          task?.version ?? null,
+          label,
+          task ? "task" : "conversation",
+          { permissionMode: continuationPermission },
+        );
       }
     } catch (cause) {
       // The question can be replaced between render and click. Re-read Main's
@@ -4656,7 +5041,17 @@ export function OneShell() {
       requestOneOperationalRecovery("one-decision-answer", cause);
       setError(null);
     }
-  }, [busy, conversation?.id, conversation?.originSurface, projections, startRun]);
+  }, [
+    busy,
+    conversation?.id,
+    conversation?.originSurface,
+    oneOrgState?.members,
+    oneRuntimeSelection,
+    orchestrationTargetForAgentId,
+    projections,
+    startRun,
+    taskforces,
+  ]);
 
   /*
    * "항상 승인"은 그 대화 안에서만 산다.
@@ -5327,6 +5722,15 @@ export function OneShell() {
     setContextRailOpen(true);
     setContextRailWidth((current) => Math.max(current, preferredContextResultWidth()));
   }, [setContextRailOpen, setContextRailWidth]);
+  useEffect(() => {
+    // Re-entering a conversation with a durable result must reveal its output
+    // surface. The collapsed default is appropriate for empty/browser-only
+    // chats, but hiding a persisted document/image/MCP result makes it appear
+    // lost until the user guesses the panel toggle.
+    if ((!selected && !conversation && !surface && threadRailActivity.artifacts.length === 0) || contextRailOpen) return;
+    if (!surface && threadRailActivity.artifacts.length === 0) return;
+    presentRichOutputRail();
+  }, [contextRailOpen, conversation, presentRichOutputRail, selected, surface, threadRailActivity.artifacts.length]);
   const focusOneOutput = useCallback(() => {
     presentRichOutputRail();
     window.requestAnimationFrame(() => {
@@ -6269,6 +6673,7 @@ export function OneShell() {
                         locale={appLocale}
                         workspacePath={workspacePath}
                       />
+                      <OneInlineArtifactResults items={block.state.artifacts} locale={appLocale} />
                       {activeTaskforce && <OneTaskforceConversation state={block.state} org={oneOrgState} locale={appLocale} />}
                     </Fragment>
                   ))}
@@ -6353,12 +6758,12 @@ export function OneShell() {
                                 * 아직 한 줄인 글을 문서 카드로 세우면 빈 액자가 된다.
                                 */}
                               {visibleText && (message.streaming
-                                ? <StreamingMarkdown text={visibleText} messageId={message.id} onOpenLinkedFile={openOneLinkedFile} />
+                                ? <StreamingMarkdown text={visibleText} messageId={message.id} onOpenLinkedFile={openOneLinkedFile} allowLocalMedia={false} />
                                 : (() => {
                                   const documentMark = readOneDocumentMark(visibleText);
                                   return documentMark
                                     ? <OneDocumentCard doc={documentMark} locale={appLocale} messageId={message.id} />
-                                    : <Markdown text={visibleText} messageId={message.id} onOpenLinkedFile={openOneLinkedFile} />;
+                                    : <Markdown text={visibleText} messageId={message.id} onOpenLinkedFile={openOneLinkedFile} allowMedia={message.role === "assistant"} allowLocalMedia={false} />;
                                 })())}
                             </div>
                           </article>
@@ -6389,6 +6794,7 @@ export function OneShell() {
                                 ? { onRetry: () => retryUnansweredTurn(message.text), retryDisabled: busy }
                                 : {})}
                             />
+                            <OneInlineArtifactResults items={block.state.artifacts} locale={appLocale} />
                             {activeTaskforce && <OneTaskforceConversation state={block.state} org={oneOrgState} locale={appLocale} />}
                           </Fragment>
                         ))}
@@ -6417,7 +6823,7 @@ export function OneShell() {
                     <>
                       {busy && activeRunPrompt && !livePromptMounted && (
                         <article className={styles.message} data-role="user">
-                          <div className={styles.messageBody}><Markdown text={activeRunPrompt.text} messageId={`one-live-prompt:${activeRunPrompt.runId}`} onOpenLinkedFile={openOneLinkedFile} /></div>
+                          <div className={styles.messageBody}><Markdown text={activeRunPrompt.text} messageId={`one-live-prompt:${activeRunPrompt.runId}`} onOpenLinkedFile={openOneLinkedFile} allowMedia={false} /></div>
                         </article>
                       )}
                       {activeTaskforce && <OneTaskforceConversation state={renderedActivity} org={oneOrgState} locale={appLocale} />}
@@ -6686,7 +7092,7 @@ export function OneShell() {
                 onDismiss={() => setDismissedDecisionId(visibleSelectedConfirmation.sourceMessageId)}
               />
             )}
-            <ToolApprovalInline chatId={activeThreadChatId} compact />
+            <ToolApprovalInline chatId={activeThreadChatId} compact chip />
             {armedOneMemoryUseOnce && (
               <div className={styles.oneMemoryUseOnceChip} role="status">
                 <span>{tFor(appLocale, "one.shell.composer.memory_once")}</span>
@@ -6750,78 +7156,10 @@ export function OneShell() {
                 plugins={onePluginOptions}
                 permission={onePermission}
                 turnOptions={turnOverrides}
-                localFilesConnected={Boolean(workspacePath)}
                 onMenuChange={setComposerMenu}
                 onAttach={() => {
                   setComposerMenu(null);
                   attachmentInputRef.current?.click();
-                }}
-                onAddFolder={() => {
-                  const api = ipc();
-                  setComposerMenu(null);
-                  if (!api) {
-                    setActionNotice(appLocale === "ko"
-                      ? "Desktop에 연결되지 않아 폴더를 연결하지 못했습니다."
-                      : "The folder was not connected because Desktop is unavailable.");
-                    return;
-                  }
-                  void (async () => {
-                    try {
-                      const grant = await api.fs.pickDirectory();
-                      if (!grant?.path) return;
-                      const targetChatId = activeThreadChatId;
-                      if (targetChatId) {
-                        await api.workspace.set(targetChatId, grant);
-                        const persistedPath = await api.workspace.get(targetChatId);
-                        if (persistedPath !== grant.path) {
-                          throw new Error("workspace_path_receipt_mismatch");
-                        }
-                        // A slow picker/save must never overwrite the workspace shown
-                        // for a conversation the user opened in the meantime.
-                        if (activeThreadChatIdRef.current !== targetChatId) return;
-                      }
-                      setWorkspaceGrant(grant);
-                      setWorkspacePath(grant.path);
-                      setActionNotice(null);
-                      window.setTimeout(() => composerInputRef.current?.focus(), 0);
-                    } catch {
-                      setActionNotice(appLocale === "ko"
-                        ? "폴더 연결 요청의 최종 상태를 확인하지 못했습니다. 화면은 바꾸지 않았습니다. 반복 적용하지 말고 이 대화를 다시 열어 확인해 주세요."
-                        : "The final folder state could not be verified. This screen was not changed. Do not repeat the action; reopen this conversation to check it.");
-                    }
-                  })();
-                }}
-                onClearFolder={() => {
-                  const api = ipc();
-                  setComposerMenu(null);
-                  const targetChatId = activeThreadChatId;
-                  if (!targetChatId) {
-                    setWorkspaceGrant(null);
-                    setWorkspacePath(null);
-                    setActionNotice(null);
-                    return;
-                  }
-                  if (!api) {
-                    setActionNotice(appLocale === "ko"
-                      ? "Desktop에 연결되지 않아 폴더 연결을 해제하지 못했습니다. 기존 폴더를 유지합니다."
-                      : "The folder was not disconnected because Desktop is unavailable. The current folder remains connected.");
-                    return;
-                  }
-                  void (async () => {
-                    try {
-                      await api.workspace.set(targetChatId, null);
-                      const persistedPath = await api.workspace.get(targetChatId);
-                      if (persistedPath !== null) throw new Error("workspace_clear_receipt_mismatch");
-                      if (activeThreadChatIdRef.current !== targetChatId) return;
-                      setWorkspaceGrant(null);
-                      setWorkspacePath(null);
-                      setActionNotice(null);
-                    } catch {
-                      setActionNotice(appLocale === "ko"
-                        ? "폴더 연결 해제 요청의 최종 상태를 확인하지 못했습니다. 화면은 바꾸지 않았습니다. 반복 적용하지 말고 이 대화를 다시 열어 확인해 주세요."
-                        : "The final folder state after disconnecting could not be verified. This screen was not changed. Do not repeat the action; reopen this conversation to check it.");
-                    }
-                  })();
                 }}
                 onOpenPlugins={() => {
                   setComposerMenu(null);
@@ -6988,8 +7326,12 @@ export function OneShell() {
               event.preventDefault();
               if (activeSeatDissolved) return;
               const submittedValue = composerInputRef.current?.value ?? composer;
-              if (busy && !submittedValue.trim()) stopRun();
-              else void submit(submittedValue);
+              // An empty Enter while work is running is not a stop command.
+              // Cancellation stays behind the explicit visible Stop control;
+              // otherwise focusing the composer and pressing Enter can
+              // silently terminate the active run.
+              if (workBusy && !submittedValue.trim()) return;
+              void submit(submittedValue);
             }}>
               <input
                 ref={attachmentInputRef}
@@ -7022,7 +7364,7 @@ export function OneShell() {
                   const submittedValue = event.currentTarget.value;
                   handleComposerKey(
                     event,
-                    busy && !submittedValue.trim() ? stopRun : () => void submit(submittedValue),
+                    workBusy && !submittedValue.trim() ? () => undefined : () => void submit(submittedValue),
                     composerComposingRef.current,
                   );
                 }}
@@ -7170,24 +7512,40 @@ export function OneShell() {
                     composerRef={composerInputRef}
                     disabled={composerSettingsBlocked}
                   />
-                  {(busy || composer.trim() || attachmentDrafts.length > 0) && (
-                    <button
-                      type="submit"
-                      className={styles.sendButton}
-                      data-one-steering-send={busy && composer.trim() ? "true" : undefined}
-                      disabled={!busy && ((!composer.trim() && attachmentDrafts.length === 0) || composerInteractionBlocked)}
-                      aria-label={busy
-                        ? composer.trim()
-                          ? (appLocale === "ko" ? "모델 중단 없이 제출" : "Submit without stopping the model")
-                          : tFor(appLocale, "one.shell.composer.stop_run_aria")
-                        : tFor(appLocale, "one.shell.composer.send_aria")}
-                      title={busy && composer.trim()
-                        ? (appLocale === "ko" ? "현재 작업을 중단하지 않고 다음 지시를 보냅니다" : "Sends the next instruction without stopping the model")
-                        : undefined}
-                    >
-                      {busy && !composer.trim() ? <span className={styles.stopGlyph} aria-hidden="true" /> : <IconArrowUp size={20} strokeWidth={2} aria-hidden="true" />}
-                    </button>
-                  )}
+                  {(() => {
+                    const hasComposerAction = workBusy || Boolean(composer.trim()) || attachmentDrafts.length > 0;
+                    return (
+                      <button
+                        type="submit"
+                        className={styles.sendButton}
+                        data-one-composer-action-slot="true"
+                        data-one-steering-send={busy && composer.trim() ? "true" : undefined}
+                        disabled={!hasComposerAction || (!workBusy && ((!composer.trim() && attachmentDrafts.length === 0) || composerInteractionBlocked))}
+                        aria-hidden={!hasComposerAction ? true : undefined}
+                        tabIndex={!hasComposerAction ? -1 : undefined}
+                        aria-label={hasComposerAction
+                          ? workBusy
+                            ? composer.trim()
+                              ? (appLocale === "ko" ? "모델 중단 없이 제출" : "Submit without stopping the model")
+                              : tFor(appLocale, "one.shell.composer.stop_run_aria")
+                            : tFor(appLocale, "one.shell.composer.send_aria")
+                          : undefined}
+                        onClick={(event) => {
+                          const submittedValue = composerInputRef.current?.value ?? composer;
+                          if (workBusy && !submittedValue.trim()) {
+                            event.preventDefault();
+                            stopRun();
+                          }
+                        }}
+                        title={busy && composer.trim()
+                          ? (appLocale === "ko" ? "현재 작업을 중단하지 않고 다음 지시를 보냅니다" : "Sends the next instruction without stopping the model")
+                          : undefined}
+                        style={!hasComposerAction ? { visibility: "hidden", pointerEvents: "none" } : undefined}
+                      >
+                        {workBusy && !composer.trim() ? <span className={styles.stopGlyph} aria-hidden="true" /> : <IconArrowUp size={20} strokeWidth={2} aria-hidden="true" />}
+                      </button>
+                    );
+                  })()}
                 </div>
               </div>
             </form>
@@ -7362,10 +7720,10 @@ export function OneShell() {
           </aside>
         )}
         <OneActivityArtifactRail
-          items={runtimeArtifacts}
-          activity={activity}
+          items={threadRailActivity.artifacts}
+          activity={threadRailActivity}
           locale={appLocale}
-          visible={Boolean((selected || conversation) && contextRailOpen)}
+          visible={Boolean((selected || conversation || surface || threadRailActivity.artifacts.length > 0) && contextRailOpen)}
           onAdd={() => attachmentInputRef.current?.click()}
           onClose={() => setContextRailOpen(false)}
           width={contextRailWidth}
@@ -7400,27 +7758,6 @@ export function OneShell() {
               : null}
           resultKind={oneOutputKind}
           appPreview={oneLiveAppPreview}
-          computerHistory={computerHistory}
-          onHistoryConsent={enableComputerHistory}
-          onHistoryClear={() => setHistoryClearConfirmOpen(true)}
-          onHistoryAsk={() => {
-            startNewConversation();
-            setComposer(appLocale === "ko"
-              ? "최근 컴퓨터 기록을 바탕으로 반복 작업과 에이전트 빌드 후보를 설명해줘."
-              : "Use my recent computer history to explain repeated work and agent-build candidates.");
-          }}
-          onHistoryReviewRecommendation={(entry) => {
-            startNewConversation();
-            const api = ipc();
-            const recommendationId = entry.recommendation?.id;
-            if (!api || !recommendationId) {
-              requestOneOperationalRecovery("computer-history-draft", new Error("Computer History evidence unavailable"));
-              return;
-            }
-            void api.computerHistory.prepareDraft(recommendationId, appLocale)
-              .then((draft) => setComposer(draft.prompt))
-              .catch((cause) => requestOneOperationalRecovery("computer-history-draft", cause));
-              }}
           browserScopeKey={activeThreadChatId ?? selected?.taskId ?? conversation?.id}
           browserHistoryUrl={durableThreadBrowserUrl}
           onBrowserObserved={presentBrowserOutput}

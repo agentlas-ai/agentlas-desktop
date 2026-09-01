@@ -281,10 +281,15 @@ function workspacePreviewFromLocalFile(path: string): WorkspaceFilePreview {
 function workspacePreviewFromLinkedFile(file: LinkedFileArtifact): WorkspaceFilePreview {
   const path = file.path || file.paths?.[0] || file.href;
   const isRemoteUrl = /^https?:\/\//i.test(path);
-  const viewerKind = isRemoteUrl ? "browser" : viewerKindFromName(file.name || path);
+  const isDurableChatImage = /^agentlas:\/\/chat-attachment\/[0-9a-f-]+/iu.test(path);
+  const viewerKind = isRemoteUrl
+    ? "browser"
+    : isDurableChatImage
+      ? "image"
+      : viewerKindFromName(file.name || path);
   return {
     path,
-    name: file.name || basename(path),
+    name: isDurableChatImage ? "chat-image" : (file.name || basename(path)),
     size: 0,
     viewerKind,
     fileUrl: isAbsoluteLocalPath(path) ? fileUrlForToolPath(path) : file.fileUrl,
@@ -800,7 +805,27 @@ function reconcileTranscriptSnapshot(
   optimisticIds: ReadonlySet<string> = new Set<string>(),
 ): StreamMessage[] {
   if (current.some((message) => message.busy || message.streaming)) return current;
-  const signature = (message: StreamMessage) => `${message.role}\u0000${message.text.trim()}`;
+  const reconciliationText = (text: string) => {
+    let normalized = text.replace(
+      /agentlas:\/\/chat-attachment\/[0-9a-f-]+/giu,
+      "<durable-chat-image>",
+    );
+    // A live completion still carries its trusted source path so the current
+    // turn can present the image immediately. The durable history row replaces
+    // that same path with an attachment URL. Treat only image references as
+    // equivalent here; otherwise reconciliation appends the live placeholder
+    // after the durable row and paints the same answer twice.
+    for (const file of linkedFileArtifactsInText(text)) {
+      if (!/\.(?:png|jpe?g|gif|webp|avif)$/iu.test(file.name)) continue;
+      for (const ref of [file.path, file.href, file.fileUrl]) {
+        if (ref && normalized.includes(ref)) {
+          normalized = normalized.split(ref).join("<durable-chat-image>");
+        }
+      }
+    }
+    return normalized.trim();
+  };
+  const signature = (message: StreamMessage) => `${message.role}\u0000${reconciliationText(message.text)}`;
   // History rows intentionally store only the assistant text. Preserve the
   // rich tool steps that arrived live when a terminal reconciliation races
   // the history read; otherwise the MCP card flashes and disappears as soon
@@ -2669,13 +2694,15 @@ function ChatPage() {
     let stopped = false;
     const reconcile = async () => {
       if (stopped) return;
-      // 탭 숨김 시 이 tick만 skip(타이머·escalation 유지) — 백그라운드 폴링 폭주 방지.
-      if (typeof document !== "undefined" && document.hidden) return;
       try {
         const ids = await api.invoke.activeChats();
-        if (stopped || !runIdRef.current || ids.includes(chatId)) return;
+        if (stopped || ids.includes(chatId)) return;
         // main은 이 실행을 끝냈는데 UI는 여전히 진행중 → final/activeChats를 놓친 것. 화해.
-        const endedRunId = runIdRef.current;
+        // `busy`와 runId ref는 서로 다른 React/imperative 저장소다. terminal
+        // event와 늦게 도착한 attach Promise가 교차하면 ref만 먼저 비워지고
+        // state가 다시 true가 될 수 있다. Main이 이 chat을 active로 보지 않는
+        // 사실이 권위이므로 ref 유무와 상관없이 종료 상태로 화해한다.
+        const endedRunId = runIdRef.current ?? lastRunIdRef.current;
         runIdRef.current = null;
         lastRunIdRef.current = null;
         subRef.current?.();
@@ -2877,6 +2904,12 @@ function ChatPage() {
         if (!duplicate) effectiveTaskForceTargets.push(target);
       }
       transcriptRevisionRef.current += 1;
+      // A newly submitted turn owns the visible output slot. Keeping the prior
+      // conversation's file open while the new run is working makes unrelated
+      // media look like the current answer until a replacement arrives.
+      setArtifact(null);
+      setSurface(null);
+      setMediaPreview(null);
       setMessages((m) => [
         ...m,
         { id: uid(), role: "user" as const, text: visiblePrompt, imageDataUrls },
@@ -3908,7 +3941,8 @@ function ChatPage() {
     apps: INSTALLED_APPS,
     generatedApps: allGeneratedApps,
     envKeys: allEnvKeys,
-  }), [allEnvKeys, allFirms, allGeneratedApps, allProjects, displayAgents, hubBookmarks]);
+    plugins: installedPlugins,
+  }), [allEnvKeys, allFirms, allGeneratedApps, allProjects, displayAgents, hubBookmarks, installedPlugins]);
   const composerTokenBaselineRef = useRef(currentTokens);
   if (!busy) composerTokenBaselineRef.current = currentTokens;
   const composerTokenCount = busy ? composerTokenBaselineRef.current : currentTokens;

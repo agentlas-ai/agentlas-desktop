@@ -90,6 +90,7 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
   const [connecting, setConnecting] = useState(false);
   const [connected, setConnected] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [visibilityResolved, setVisibilityResolved] = useState(false);
 
   // ── 7단계: 브라우저에 이미 있는 로그인 ─────────────────────────────────────
   //
@@ -144,13 +145,22 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
       seen = window.localStorage.getItem(STORAGE_KEY) === "1";
       saved = window.localStorage.getItem(PHASE_KEY);
     } catch { /* private mode */ }
-    if (seen) return;
-    if (saved === "credentials") setStep(7);
-    else if (saved === "plugins") setStep(8);
-    setOpen(true);
-  }, []);
+    if (!seen) {
+      if (saved === "credentials") setStep(7);
+      else if (saved === "plugins") setStep(8);
+      setOpen(true);
+    }
+    // Resolve the parent's promotion gate in the same effect that reads the
+    // durable onboarding marker. Reporting the initial `open=false` render
+    // first created a one-frame window where two modal overlays mounted.
+    onVisibilityChange?.(!seen);
+    setVisibilityResolved(true);
+  }, [onVisibilityChange]);
 
-  useEffect(() => onVisibilityChange?.(open), [onVisibilityChange, open]);
+  useEffect(() => {
+    if (!visibilityResolved) return;
+    onVisibilityChange?.(open);
+  }, [onVisibilityChange, open, visibilityResolved]);
 
   /** 세팅 단계에 도달한 사실을 남긴다 — 여기서 앱을 닫아도 설명을 다시 보지 않는다. */
   useEffect(() => {

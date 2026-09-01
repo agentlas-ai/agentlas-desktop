@@ -9,14 +9,21 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { BrowserWindow } from "electron";
 import {
+  acquireBrowserCdpLease,
   browserCdpProfilePath,
   browserCdpPort,
   browserCdpPortReady,
   ensureBrowserCdpProfilePrivate,
   reconcileBrowserCdpOwnerWithRetry,
+  releaseBrowserCdpLease,
   resolveChromeExe,
+  scheduleBrowserCdpGuardian,
+  scheduleBrowserCdpIdleShutdown,
+  withBrowserCdpMaintenance,
+  type BrowserCdpLease,
   type BrowserCdpOwnership,
 } from "../mcp-tools/browser-cdp-launcher";
+import { onHostShutdown } from "../host-lifecycle";
 import {
   listBrowserSites,
   purgeLegacyBrowserPasswords,
@@ -122,7 +129,36 @@ export async function browserDeleteSite(site: string): Promise<{ ok: true }> {
 const openLoginChildren = new Map<string, ReturnType<typeof spawn>>();
 type BrowserOpenLoginResult = { ok: boolean; error?: string };
 const openLoginFlights = new Map<string, Promise<BrowserOpenLoginResult>>();
+const openLoginLeases = new Map<string, { lease: BrowserCdpLease; timer: NodeJS.Timeout }>();
 let openLoginQueue: Promise<void> = Promise.resolve();
+
+function releaseBrowserLoginLease(site: string): void {
+  const active = openLoginLeases.get(site);
+  if (!active) return;
+  openLoginLeases.delete(site);
+  clearTimeout(active.timer);
+  releaseBrowserCdpLease(active.lease);
+}
+
+function holdBrowserLoginLease(site: string, lease: BrowserCdpLease): void {
+  releaseBrowserLoginLease(site);
+  const configured = Number(process.env.AGENTLAS_BROWSER_LOGIN_LEASE_MS);
+  const timeoutMs = Number.isFinite(configured)
+    ? Math.max(30_000, Math.min(30 * 60_000, Math.trunc(configured)))
+    : 15 * 60_000;
+  const timer = setTimeout(() => releaseBrowserLoginLease(site), timeoutMs);
+  timer.unref();
+  openLoginLeases.set(site, { lease, timer });
+}
+
+onHostShutdown(() => {
+  for (const active of openLoginLeases.values()) {
+    clearTimeout(active.timer);
+    releaseBrowserCdpLease(active.lease, { scheduleShutdown: false });
+  }
+  openLoginLeases.clear();
+  scheduleBrowserCdpIdleShutdown();
+});
 
 function ownershipReasonCode(reason: string): string {
   const known = new Set([
@@ -157,7 +193,6 @@ export function browserLoginArgs(profile: string, url: string): string[] {
     "--remote-debugging-address=127.0.0.1",
     "--no-first-run",
     "--no-default-browser-check",
-    "--restore-last-session=false",
     "--disable-session-crashed-bubble",
     // Same stability flags as the CDP launcher so a login window opened on the
     // shared dedicated profile does not later crash the automation's browser.
@@ -196,11 +231,14 @@ export function browserOpenLogin(site: string): Promise<BrowserOpenLoginResult> 
 async function browserOpenLoginOnce(site: string): Promise<BrowserOpenLoginResult> {
   const norm = normalizeSite(site);
   const exe = resolveChromeExe();
-  if (!exe) return { ok: false, error: "Chrome or Edge executable could not be found." };
-  const url = norm ? `https://${norm}` : "about:blank";
+  if (!exe) return { ok: false, error: "Agentlas 전용 브라우저 런타임이 없습니다. Agentlas를 다시 설치해 주세요." };
+  let browserLease: BrowserCdpLease | null = null;
+  let leaseRetained = false;
+  const url = `https://${norm}`;
   const profile = ensureBrowserCdpProfilePrivate();
   let observedOwnership: BrowserCdpOwnership | null = null;
   try {
+    await withBrowserCdpMaintenance(async () => {
     const portInUse = await browserCdpPortReady();
     const existingOwnership = portInUse ? await reconcileBrowserCdpOwnerWithRetry() : null;
     observedOwnership = existingOwnership;
@@ -217,12 +255,9 @@ async function browserOpenLoginOnce(site: string): Promise<BrowserOpenLoginResul
           port: browserCdpPort(),
         },
       });
-      return {
-        ok: false,
-        error: existingOwnership.state === "foreign"
-          ? `CDP port ${browserCdpPort()} is occupied by a browser outside the Agentlas dedicated profile (${existingOwnership.reason}).`
-          : `Agentlas could not verify the dedicated browser on CDP port ${browserCdpPort()} yet (${existingOwnership.reason}). Please try again.`,
-      };
+      throw new Error(existingOwnership.state === "foreign"
+        ? `CDP port ${browserCdpPort()} is occupied by a browser outside the Agentlas dedicated profile (${existingOwnership.reason}).`
+        : `Agentlas could not verify the dedicated browser on CDP port ${browserCdpPort()} yet (${existingOwnership.reason}). Please try again.`);
     }
     const child = spawn(
       exe,
@@ -235,6 +270,7 @@ async function browserOpenLoginOnce(site: string): Promise<BrowserOpenLoginResul
     child.on("error", (error) => {
       spawnError = error;
       openLoginChildren.delete(norm);
+      releaseBrowserLoginLease(norm);
     });
     child.on("exit", (code, signal) => {
       // Chrome can hand the URL to an already-running shared-profile process
@@ -274,32 +310,48 @@ async function browserOpenLoginOnce(site: string): Promise<BrowserOpenLoginResul
         throw new Error(`Chrome CDP listener ownership could not be verified (${lastOwnershipReason}).`);
       }
     }
+    });
+    const ownershipAfterOpen = observedOwnership as BrowserCdpOwnership | null;
+    if (ownershipAfterOpen?.state === "owned" && ownershipAfterOpen.pid) {
+      scheduleBrowserCdpGuardian(ownershipAfterOpen.pid);
+    }
+    browserLease = await acquireBrowserCdpLease("login").catch(() => null);
+    if (!browserLease) {
+      return { ok: false, error: "Agentlas could not reserve the dedicated browser." };
+    }
     logBrowserAction({ site: norm, action: "session.login_window", target: url, result: "opened" });
+    holdBrowserLoginLease(norm, browserLease);
+    leaseRetained = true;
     return { ok: true };
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
+    const ownershipForLog = observedOwnership as BrowserCdpOwnership | null;
     logBrowserAction({
       site: norm,
       action: "session.login_window_failed",
       target: url,
       result: "blocked",
       meta: {
-        state: observedOwnership?.state ?? "spawn-error",
-        reasonCode: observedOwnership
-          ? ownershipReasonCode(observedOwnership.reason)
+        state: ownershipForLog?.state ?? "spawn-error",
+        reasonCode: ownershipForLog
+          ? ownershipReasonCode(ownershipForLog.reason)
           : "spawn-error",
-        pid: observedOwnership?.pid ?? null,
+        pid: ownershipForLog?.pid ?? null,
         port: browserCdpPort(),
       },
     });
     return { ok: false, error };
+  } finally {
+    if (!leaseRetained) releaseBrowserCdpLease(browserLease);
   }
 }
 
 /** 사용자가 UI에서 "로그인 완료"를 누르면 즉시 세션을 valid 로 확정(창 닫힘 이벤트 대기 없이). */
 export function browserMarkSession(site: string, status: "valid" | "expired" | "none"): { ok: true } {
-  setBrowserSession(site, status);
-  logBrowserAction({ site, action: "session.mark", result: status });
+  const norm = normalizeSite(site);
+  setBrowserSession(norm, status);
+  logBrowserAction({ site: norm, action: "session.mark", result: status });
+  releaseBrowserLoginLease(norm);
   return { ok: true };
 }
 

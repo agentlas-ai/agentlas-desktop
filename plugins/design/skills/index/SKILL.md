@@ -1,6 +1,6 @@
 ---
 name: index
-description: "Routes design requests to the appropriate workflow skill for visual ideation (3-option generation), target design pinning, side-by-side prototype building, UI motion/animations, URL/image cloning, UX flow audits, guideline-grounded design review, and design QA."
+description: "Routes campaign packs, infographic sets, branded multi-asset visuals, app/UI concepts, prototypes, motion, cloning, UX audits, guideline reviews, and design QA to the matching Agentlas Design workflow."
 ---
 
 # Skill Purpose
@@ -14,6 +14,7 @@ The Design plugin bridges product ideas and working software through a streamlin
 - Setup, onboarding, or context recall requests → `$user-context`
 - New app/prototype/UI concept without visual targets → `$get-context` → `$ideate`
 - Visual concept exploration and 3-option ideation → `$ideate`
+- Campaign kits, infographic sets, posters, or branded multi-format deliverables → `$get-context` → `$app-context`; use the router alongside document, audio, or video capabilities instead of replacing it with a generic image tool
 - Product flow, journey, funnel, onboarding, or accessibility audits → `$audit`
 - Design review, UI critique, HIG compliance, accessibility grading, dark mode or Liquid Glass review, app icon review → `$hig-review`
 - Recreating/cloning a live URL into an interactive prototype → `$url-to-code`

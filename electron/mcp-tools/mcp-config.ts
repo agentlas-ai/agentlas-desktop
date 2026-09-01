@@ -118,6 +118,8 @@ export interface McpConfigBuildOptions {
     runtime: string;
     sessionKey: string;
     permission?: "read" | "write" | "full";
+    /** Graph dry-run: mutating MCP calls are denied locally without opening a user approval sheet. */
+    simulation?: true;
     cwd?: string;
     chatId?: string;
     unattended?: boolean;
@@ -135,6 +137,7 @@ function mcpProxySpec(
   serverKey: string,
   actual: { command: string; args: string[]; env: Record<string, string> },
   opts: McpConfigBuildOptions | undefined,
+  catalogId: string | null,
 ): { command: string; args: string[]; env: Record<string, string> } | null {
   const gate = opts?.toolGate;
   if (!gate) return null;
@@ -149,7 +152,7 @@ function mcpProxySpec(
       [MCP_PROXY_CONTROL_FILE_ENV]: mcpProxyControlInfoPath(),
       [MCP_PROXY_TARGET_ENV]: JSON.stringify(actual),
       [MCP_PROXY_SERVER_KEY_ENV]: serverKey,
-      [MCP_PROXY_SESSION_ENV]: JSON.stringify(gate),
+      [MCP_PROXY_SESSION_ENV]: JSON.stringify({ ...gate, catalogId }),
       ...(gate.planPath ? { [MCP_PROXY_PLAN_ENV]: gate.planPath } : {}),
       // 실제 서버가 쓰는 alias 참조는 프록시가 그대로 물려줘야 한다 — 프록시는
       // 자기 env 를 자식에게 펼쳐 준다(proxy-child.cjs).
@@ -210,7 +213,7 @@ const OPERATIONAL_KEYS = [
   "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "NPM_CONFIG_PREFIX",
   "NPM_CONFIG_CACHE", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
   "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "NO_COLOR",
-  "AGENTLAS_BROWSER_APPROVAL_FILE", "AGENTLAS_CDP_HEADLESS",
+  "AGENTLAS_BROWSER_APPROVAL_FILE", "AGENTLAS_CDP_AUTO_STOP", "AGENTLAS_CDP_HEADLESS",
   "AGENTLAS_COMPUTER_USE_CONTROL_FILE"
 ];
 const PROXY_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
@@ -364,16 +367,6 @@ function ensureMcpChildEnvWrapper(dir: string): string {
   return wrapperPath;
 }
 
-function argsWithCdpEndpoint(args: string[], endpoint: string): string[] {
-  const next = args.filter((arg, i, all) =>
-    arg !== "--user-data-dir" && !arg.startsWith("--user-data-dir=") && all[i - 1] !== "--user-data-dir");
-  const flagIndex = next.findIndex((arg) => arg === "--cdp-endpoint" || arg.startsWith("--cdp-endpoint="));
-  if (flagIndex < 0) return [...next, "--cdp-endpoint", endpoint];
-  if (next[flagIndex] === "--cdp-endpoint") next[flagIndex + 1] = endpoint;
-  else next[flagIndex] = `--cdp-endpoint=${endpoint}`;
-  return next;
-}
-
 /**
  * A user-installed, keyless Playwright MCP can look like a harmless extra
  * tool while actually starting its own empty Chromium profile. That is not a
@@ -436,24 +429,10 @@ function argsWithBrowserProfile(_key: string, args: string[], _opts?: McpConfigB
  * Playwright가 설치돼 있어도 config/allowedTools에 싣지 않아 브라우저 우회를 막는다.
  */
 export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<McpConfigResult | null> {
-  // ★자동화의 브라우저는 자격증명 있는 창을 잡아야 한다. browserProfileKey가
-  // automation-* 이면 지금까지는 실행마다 빈 전용 프로필을 만들어 줬다 — 실측
-  // 2026-08-19: X 자동화의 playwright가 --user-data-dir .../automation-<id> 로
-  // 떠서 로그인 0개짜리 창(가입 페이지)을 조작했고, 같은 순간 자격증명이 실린
-  // Agentlas CDP Chrome(9222, 소유 표식 검증)은 옆에서 놀고 있었다. 소유가
-  // 확인된 CDP 브라우저가 살아 있으면 거기 붙고, 없을 때만 전용 프로필로
-  // 폴백한다(그 프로필은 사용자가 한 번 로그인하면 유지된다).
-  let automationCdpEndpoint: string | null = null;
-  if (opts?.browserProfileKey?.startsWith("automation-")) {
-    try {
-      const { browserCdpOwnerIsLive, browserCdpPort } = await import("./browser-cdp-launcher");
-      if (await browserCdpOwnerIsLive()) {
-        automationCdpEndpoint = `http://127.0.0.1:${browserCdpPort()}`;
-      }
-    } catch {
-      automationCdpEndpoint = null;
-    }
-  }
+  // Automation must start the canonical Agentlas Browser wrapper itself. A
+  // generic Playwright process attached directly to 9222 has no lease,
+  // guardian, page cap or idle cleanup and can therefore orphan the browser.
+  const automationBrowserRun = Boolean(opts?.browserProfileKey?.startsWith("automation-"));
   if (!opts?.skipDefaultSeed) ensureDefaultMcpPluginsInstalled();
   // ★승인된 자격증명은 실행 직전에 스스로 최신이 된다. 이 함수는 모든 런타임 실행이 지나는
   //   길목이라(모든 채널·그래프 노드 포함), 여기 한 번 걸면 어디서 브라우저를 쓰든 로그인이 있다.
@@ -473,21 +452,43 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   const scopedCatalogIds = opts?.catalogIds ? new Set(opts.catalogIds.filter(Boolean)) : null;
   const scopedServerIds = opts?.serverIds ? new Set(opts.serverIds.filter(Boolean)) : null;
   const installedServers = listInstalledServers();
+  const allEnabledServersSelected = !scopedCatalogIds && !scopedServerIds;
+  const selectedKeylessPlaywright = installedServers.some((server) =>
+    server.enabled
+    && isKeylessPlaywrightMcpDuplicate(server)
+    && Boolean(
+      allEnabledServersSelected
+      ||
+      scopedCatalogIds?.has(server.catalogId ?? server.id)
+      || scopedCatalogIds?.has(server.id)
+      || scopedServerIds?.has(server.id),
+    ));
+  const selectedCanonicalBrowser = installedServers.some((server) =>
+    server.enabled
+    && server.catalogId === "agentlas-browser"
+    && Boolean(
+      allEnabledServersSelected
+      || scopedCatalogIds?.has("agentlas-browser")
+      || scopedServerIds?.has(server.id),
+    ));
+  const canonicalizeBrowser = automationBrowserRun
+    && (selectedCanonicalBrowser || selectedKeylessPlaywright);
+  if (canonicalizeBrowser && scopedCatalogIds) scopedCatalogIds.add("agentlas-browser");
   const servers = installedServers.filter((s) => {
     if (!s.enabled) return false;
     // 평문 credential URL(레거시 행)은 어떤 런타임 설정에도 싣지 않는다. vault://
     // sentinel 서버는 아래 직렬화에서 실제 URL을 keychain에서 읽어 불투명 alias
     // 참조(`${ALIAS}`)로만 기록하므로 Keychain 경계를 지킨 채 세션에 노출된다.
     if (!isVaultBackedRemoteUrl(s.url) && isOpenCrabCredentialUrl(s.url)) return false;
-    if (scopedServerIds) return scopedServerIds.has(s.id);
+    if (scopedServerIds) {
+      return scopedServerIds.has(s.id) || (canonicalizeBrowser && s.catalogId === "agentlas-browser");
+    }
     if (!scopedCatalogIds) return true;
     return Boolean((s.catalogId && scopedCatalogIds.has(s.catalogId)) || scopedCatalogIds.has(s.id));
   });
   const requiredToolCatalogIds = new Set(opts?.requiredToolCatalogIds?.filter(Boolean) ?? []);
   const canonicalBrowserRun = Boolean(
-    opts?.browserProfileKey?.startsWith("automation-") &&
-    !scopedServerIds &&
-    scopedCatalogIds?.has("agentlas-browser") &&
+    canonicalizeBrowser &&
     servers.some((server) => server.catalogId === "agentlas-browser"),
   );
   const browserAliases = new Map<string, InstalledMcpServer>();
@@ -554,9 +555,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     const key = mcpConfigKey(s);
     if (s.transport === "stdio" && s.command) {
       let command = resolveStdioCommand(s);
-      let args = key === "playwright" && automationCdpEndpoint
-        ? argsWithCdpEndpoint((s.args ?? []).map(expandHome), automationCdpEndpoint)
-        : argsWithBrowserProfile(key, (s.args ?? []).map(expandHome), opts);
+      let args = argsWithBrowserProfile(key, (s.args ?? []).map(expandHome), opts);
       let builtInEnv: Record<string, string> =
         s.catalogId === "agentlas-browser"
           ? {
@@ -565,6 +564,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
               // rail. Keep the automation host non-windowed; the explicit
               // Browser login action still uses browserOpenLogin's headful
               // dedicated-profile window when a person needs to authenticate.
+              AGENTLAS_CDP_AUTO_STOP: "1",
               AGENTLAS_CDP_HEADLESS: "1",
             }
           : s.catalogId === "cua-driver"
@@ -632,7 +632,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
           command: process.execPath,
           args: wrapperArgs,
           env: wrapperEnv,
-        }, opts);
+        }, opts, s.catalogId);
         mcpServers[key] = proxied ?? {
           command: process.execPath,
           args: wrapperArgs,

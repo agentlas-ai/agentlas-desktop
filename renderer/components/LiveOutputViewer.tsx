@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useMediaDisplayPreferences } from "@/lib/media-display-preferences";
 import styles from "./LiveOutputViewer.module.css";
 
@@ -25,6 +25,7 @@ export function LiveOutputViewer({
   compact = false,
   fill = false,
   placement = "chat",
+  imageActions = false,
 }: {
   source: string;
   name: string;
@@ -37,10 +38,68 @@ export function LiveOutputViewer({
   fill?: boolean;
   /** Sidebars respect the user's per-media visibility settings; chat does not. */
   placement?: "chat" | "sidebar";
+  /** Real image results expose the same copy/download contract in every chat surface. */
+  imageActions?: boolean;
 }) {
-  const [mediaState, setMediaState] = useState<"loading" | "ready" | "error">("loading");
+  const [observedMedia, setObservedMedia] = useState<{
+    source: string;
+    state: "loading" | "ready" | "error";
+  }>({ source, state: "loading" });
+  const mediaState = observedMedia.source === source ? observedMedia.state : "loading";
+  const settleMedia = (state: "ready" | "error") => setObservedMedia({ source, state });
+  const [imageActionState, setImageActionState] = useState<"idle" | "copying" | "copied" | "saving" | "saved" | "error">("idle");
+  const [imageMenu, setImageMenu] = useState<{ x: number; y: number } | null>(null);
+  const imageMenuRef = useRef<HTMLDivElement>(null);
   const { preferences } = useMediaDisplayPreferences();
-  useEffect(() => setMediaState("loading"), [source]);
+
+  useLayoutEffect(() => {
+    if (!imageMenu || !imageMenuRef.current) return;
+    const rect = imageMenuRef.current.getBoundingClientRect();
+    const nextX = Math.max(8, Math.min(imageMenu.x, window.innerWidth - rect.width - 8));
+    const nextY = Math.max(8, Math.min(imageMenu.y, window.innerHeight - rect.height - 8));
+    if (nextX !== imageMenu.x || nextY !== imageMenu.y) {
+      setImageMenu({ x: nextX, y: nextY });
+      return;
+    }
+    imageMenuRef.current.querySelector<HTMLButtonElement>("button")?.focus();
+  }, [imageMenu]);
+
+  useEffect(() => {
+    if (!imageMenu) return;
+    const dismiss = (event: Event) => {
+      if (event instanceof PointerEvent && imageMenuRef.current?.contains(event.target as Node)) return;
+      setImageMenu(null);
+    };
+    const dismissOnKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setImageMenu(null);
+    };
+    window.addEventListener("pointerdown", dismiss, true);
+    window.addEventListener("scroll", dismiss, true);
+    window.addEventListener("resize", dismiss);
+    window.addEventListener("blur", dismiss);
+    window.addEventListener("keydown", dismissOnKey, true);
+    return () => {
+      window.removeEventListener("pointerdown", dismiss, true);
+      window.removeEventListener("scroll", dismiss, true);
+      window.removeEventListener("resize", dismiss);
+      window.removeEventListener("blur", dismiss);
+      window.removeEventListener("keydown", dismissOnKey, true);
+    };
+  }, [imageMenu]);
+
+  const runImageAction = async (action: "copy" | "save") => {
+    setImageActionState(action === "copy" ? "copying" : "saving");
+    try {
+      const result = action === "copy"
+        ? await window.agentlas.media.copyImage({ src: source, suggestedName: name })
+        : await window.agentlas.media.saveImage({ src: source, suggestedName: name });
+      if (result.ok) setImageActionState(action === "copy" ? "copied" : "saved");
+      else if ("canceled" in result && result.canceled) setImageActionState("idle");
+      else setImageActionState("error");
+    } catch {
+      setImageActionState("error");
+    }
+  };
 
   const hiddenMedia = placement === "sidebar"
     && ((kind === "image" && !preferences.image)
@@ -54,23 +113,51 @@ export function LiveOutputViewer({
   }
 
   if (kind === "image") {
-    return <div className={styles.mediaStage} data-media-kind="image" data-compact={compact} data-fill={fill} data-state={mediaState}>
-      {/* Opaque Main capabilities and authorized local media URLs only. */}
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img src={source} alt={name} draggable={false} decoding="async" loading="eager" onLoad={() => setMediaState("ready")} onError={() => setMediaState("error")} />
-      <MediaStatus state={mediaState} locale={locale} />
+    const stage = <div className={styles.mediaStage} data-media-kind="image" data-compact={compact} data-fill={fill} data-state={mediaState}>
+        {/* Opaque Main capabilities and authorized local media URLs only. */}
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={source} alt={name} draggable={false} decoding="async" loading="eager" onLoad={() => settleMedia("ready")} onError={() => settleMedia("error")} />
+        <MediaStatus state={mediaState} locale={locale} />
+      </div>;
+    if (!imageActions) return stage;
+    const ko = locale === "ko";
+    return <div
+      className={styles.imageActionShell}
+      data-fill={fill}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setImageMenu({ x: event.clientX, y: event.clientY });
+      }}
+    >
+      {stage}
+      <div className={styles.imageActionBar}>
+        <button type="button" onClick={() => void runImageAction("copy")} disabled={imageActionState === "copying" || imageActionState === "saving"}>
+          {imageActionState === "copying" ? (ko ? "복사 중…" : "Copying…") : (ko ? "이미지 복사" : "Copy image")}
+        </button>
+        <button type="button" onClick={() => void runImageAction("save")} disabled={imageActionState === "copying" || imageActionState === "saving"}>
+          {imageActionState === "saving" ? (ko ? "준비 중…" : "Preparing…") : (ko ? "다운로드" : "Download")}
+        </button>
+        {imageActionState === "copied" || imageActionState === "saved" || imageActionState === "error" ? <span role="status" data-error={imageActionState === "error"}>
+          {imageActionState === "copied" ? (ko ? "복사됨" : "Copied") : imageActionState === "saved" ? (ko ? "저장됨" : "Saved") : (ko ? "처리하지 못했습니다" : "Action failed")}
+        </span> : null}
+      </div>
+      {imageMenu ? <div ref={imageMenuRef} className={styles.imageContextMenu} role="menu" style={{ left: imageMenu.x, top: imageMenu.y }}>
+        <button type="button" role="menuitem" onClick={() => { setImageMenu(null); void runImageAction("copy"); }}>{ko ? "이미지 복사" : "Copy image"}</button>
+        <button type="button" role="menuitem" onClick={() => { setImageMenu(null); void runImageAction("save"); }}>{ko ? "다운로드" : "Download"}</button>
+      </div> : null}
     </div>;
   }
   if (kind === "video") {
     return <div className={styles.mediaStage} data-media-kind="video" data-compact={compact} data-fill={fill} data-state={mediaState}>
-      <video src={source} aria-label={name} controls playsInline preload="auto" disablePictureInPicture={false} onCanPlay={() => setMediaState("ready")} onError={() => setMediaState("error")} />
+      <video src={source} aria-label={name} controls playsInline preload="auto" disablePictureInPicture={false} onCanPlay={() => settleMedia("ready")} onError={() => settleMedia("error")} />
       <MediaStatus state={mediaState} locale={locale} />
     </div>;
   }
   if (kind === "audio") {
     return <div className={`${styles.mediaStage} ${styles.audioStage}`} data-media-kind="audio" data-compact={compact} data-fill={fill} data-state={mediaState}>
       <div className={styles.audioPulse} aria-hidden="true"><i /><i /><i /><i /><i /></div>
-      <audio src={source} aria-label={name} controls preload="auto" onCanPlay={() => setMediaState("ready")} onError={() => setMediaState("error")} />
+      <audio src={source} aria-label={name} controls preload="auto" onCanPlay={() => settleMedia("ready")} onError={() => settleMedia("error")} />
       <MediaStatus state={mediaState} locale={locale} />
     </div>;
   }

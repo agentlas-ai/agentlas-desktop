@@ -1,0 +1,25 @@
+{
+  "name": "@agentlas/agentlas-economic-data",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Keyless, bounded World Bank Indicators API plugin for Agentlas Science.",
+  "exports": {
+    ".": {
+      "import": "./runtime/world-bank-client.mjs",
+      "require": "./runtime/economic-data.cjs"
+    },
+    "./economic-data.cjs": "./runtime/economic-data.cjs"
+  },
+  "bin": {
+    "agentlas-economic-data-mcp": "./bin/world-bank-mcp.mjs"
+  },
+  "scripts": {
+    "test": "node --test tests/contract.test.mjs",
+    "mcp": "node bin/world-bank-mcp.mjs"
+  },
+  "engines": {
+    "node": ">=20.19"
+  },
+  "license": "Apache-2.0"
+}

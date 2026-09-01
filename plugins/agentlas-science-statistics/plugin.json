@@ -88,5 +88,23 @@
   "state": {
     "files": [],
     "assets": false
+  },
+  "integrity": {
+    "algo": "sha256",
+    "files": [
+      { "path": "bin/statistics-server.cjs", "sha256": "0f88cb669e1e01d441a5e24178b5de0f8f5a264864798950621780659d05068c", "bytes": 3274 },
+      { "path": "coverage-manifest.json", "sha256": "939d3a32371ba8d6aa5d3b6f1e1507fe0c80de2d894c69f53e61875e9834e5c4", "bytes": 45884 },
+      { "path": "figure-catalog.json", "sha256": "79bb155a128676de54cd524bcab6020318ce0bf955bfa8e334e775c67e2ecdd4", "bytes": 91621 },
+      { "path": "matlab-parity-manifest.json", "sha256": "1c4dea204dfe135effffd4e80c179fcadb247c359f04f6a7d7e50c454bc8d031", "bytes": 31059 },
+      { "path": "runtime/analysis-worker.cjs", "sha256": "f777b49cb63de9334410d79ac58db7ee1d41fa55b3b624fd71642b8d48b4f578", "bytes": 391 },
+      { "path": "runtime/contracts.cjs", "sha256": "1d6fea6f0fb61b5d633b6a150b25e744e7e769b064efd94e598dd4bd016b69b4", "bytes": 14876 },
+      { "path": "runtime/coverage.cjs", "sha256": "f0c4681844c8f9dd307673647fc5bdca047e9c46c4add489d9eaa01029e2714f", "bytes": 25214 },
+      { "path": "runtime/decision-linkage.cjs", "sha256": "311ec90ddc73f8440e86eb51f429793d7f305ebd79b62e80230558b7993b8d92", "bytes": 36274 },
+      { "path": "runtime/engine.cjs", "sha256": "c4943d4842480a20a103cc14137d25e8c4d61cad46f7c5fcc83a0f7cb05466ac", "bytes": 317537 },
+      { "path": "runtime/figure-catalog.cjs", "sha256": "bb5b60c13ba962aa1d0f3e2fbcb539415a65a0cf6106afa035f9d309bf3e72b2", "bytes": 13319 },
+      { "path": "runtime/worker-runner.cjs", "sha256": "eda2884a60ebe1cbde5cb8fca020fae7efec4a3a35c20cf4774c38323d29ff7c", "bytes": 1866 },
+      { "path": "skills/analyze/SKILL.md", "sha256": "50fd730b193c0c704bec2dd9ff62036c6619ae4d0f1044d9b9b2b69af0ab20c4", "bytes": 7187 },
+      { "path": "skills/index/SKILL.md", "sha256": "324e035664b3bcc513536eab78e518c4c45825beb8093ecba6cf514136399514", "bytes": 1257 }
+    ]
   }
 }

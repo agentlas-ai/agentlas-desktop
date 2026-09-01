@@ -25,7 +25,7 @@ export interface OneThreadRunBlock {
 export function projectThreadRuns(
   timeline: Array<{ receipt: InvocationRunReceipt; events: RunEventUi[] }>,
 ): OneThreadRunBlock[] {
-  return timeline
+  const runs = timeline
     .filter((entry) => entry.receipt && entry.receipt.runId)
     .map((entry) => ({
       runId: entry.receipt.runId,
@@ -35,6 +35,23 @@ export function projectThreadRuns(
       state: projectOneActivityFromLedger(entry.events),
     }))
     .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+  // A later verification/read of the same immutable output is evidence for
+  // that later run, but not a second user-visible result. Keep the card at the
+  // turn that first produced it. Different bytes (even under the same name)
+  // retain separate cards.
+  const seenContent = new Set<string>();
+  return runs.map((run) => {
+    const artifacts = run.state.artifacts.filter((artifact) => {
+      const digest = artifact.contentSha256;
+      if (!digest) return true;
+      if (seenContent.has(digest)) return false;
+      seenContent.add(digest);
+      return true;
+    });
+    return artifacts.length === run.state.artifacts.length
+      ? run
+      : { ...run, state: { ...run.state, artifacts } };
+  });
 }
 
 export interface OneThreadPlanMessage {

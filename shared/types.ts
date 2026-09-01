@@ -4161,6 +4161,8 @@ export interface McpInvocationRequest {
   /** 새 모델: chatId 기반. 에이전트는 chat에서 lookup */
   chatId: string;
   userPrompt: string;
+  /** Main-only exact person-authored text before One appends standing-staff context. */
+  oneUserAuthoredPrompt?: string;
   /**
    * Who authored `userPrompt`. "system" marks a prompt the product sent on the
    * user's behalf (continue an unfinished run, resume after runtime recovery).
@@ -4460,6 +4462,14 @@ export interface McpInvocationEvent {
     code: "runtime_wait" | "queue_wait" | "recovery_retry" | "session_resume";
   };
   text?: string;
+  /**
+   * Main-internal exact assistant body returned by the durable transcript
+   * write. Runtime adapters may rewrite transient media paths to attachment
+   * URLs while preserving the user-facing live text. InvocationService uses
+   * this value only for the completion durability gate and strips it before
+   * publishing or recording the observable event.
+   */
+  durableTextForVerification?: string;
   /** partial 델타 스트리밍(무-agentId 메인 스트림 한정) — text(누적 전문) 대신 직전 partial
    *  이후 추가분만 담는다. IPC 페이로드를 O(전체)→O(증분)으로 줄인다. 리플레이/폴백 이벤트는
    *  여전히 text를 쓴다. */
@@ -6319,6 +6329,15 @@ export interface AgentlasIpc {
     /** package.json의 version — 사이드바 푸터 표기/디버그 용 */
     getVersion: () => Promise<string>;
   };
+  /** Rendered chat images — Main owns trusted loading, clipboard, and native save dialogs. */
+  media: {
+    copyImage: (payload: { src: string; suggestedName?: string }) => Promise<{
+      ok: boolean; error?: string;
+    }>;
+    saveImage: (payload: { src: string; suggestedName?: string }) => Promise<{
+      ok: boolean; path?: string; canceled?: boolean; error?: string;
+    }>;
+  };
   /** DESKTOP_MOBILE_BRIDGE: pairing UI only; tokens never cross renderer IPC. */
   mobileBridge: {
     status: () => Promise<MobileBridgeRuntimeStatus>;
@@ -6337,9 +6356,9 @@ export interface AgentlasIpc {
     installScienceSuite: () => Promise<ScienceSuiteInstallReceipt>;
     setScienceEnabled: (enabled: boolean) => Promise<ProductExtensionStatus>;
     uninstallScience: () => Promise<ProductExtensionUninstallReceipt>;
-    openScienceView: (bounds: ProductExtensionViewBounds) => Promise<ProductExtensionViewStatus>;
-    setScienceViewBounds: (bounds: ProductExtensionViewBounds) => Promise<{ ok: boolean }>;
-    closeScienceView: () => Promise<{ ok: true }>;
+    openScienceView: (bounds: ProductExtensionViewBounds, leaseId: string) => Promise<ProductExtensionViewStatus>;
+    setScienceViewBounds: (bounds: ProductExtensionViewBounds, leaseId: string) => Promise<{ ok: boolean }>;
+    closeScienceView: (leaseId: string) => Promise<{ ok: true }>;
   };
   /**
    * Resident judgment bridge for renderer style/format inference. Narrow and

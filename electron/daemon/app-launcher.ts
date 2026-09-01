@@ -1,10 +1,10 @@
-// 앱 → 데몬 자동 기동 (Phase 2 의 "앱이 켜지면 데몬을 찾고, 없으면 자기가 띄운다").
+// 앱 → 내부 호스트 기동. 이름은 기존 제어면 호환을 위해 agentlasd를 유지하지만,
+// 수명은 Desktop 프로세스에 종속된다.
 //
 // ★수명 계약:
-//  - 앱이 뜨면 제어 소켓에 daemon.ping 을 시도한다. 응답이 없으면 데몬을
-//    **detached 자식**으로 스폰하고 unref 한다 — 앱이 꺼져도 데몬은 산다
-//    (그게 데몬의 존재 이유다). exec.ts 의 trackRunChild/host-lifecycle 에는
-//    절대 등록하지 않는다 — 등록하는 순간 앱 종료가 데몬을 죽인다.
+//  - 앱이 뜨면 제어 소켓에 daemon.ping 을 시도한다. 응답이 없으면 내부 호스트를
+//    띄우고 Desktop 부모 PID를 넘긴다. 앱이 정상 종료하면 RPC로 내리고, 앱이
+//    크래시하면 내부 호스트의 부모 감시기가 스스로 종료한다.
 //  - 버전 스큐: 핑이 응답했는데 버전이 앱과 다르면(업데이트 직후의 옛 바이너리)
 //    daemon.shutdown 을 부탁해 정중히 내려보내고 새 바이너리로 재스폰한다.
 //  - 마이그레이션 권위: 이 함수는 **앱이 initStore() 로 사다리를 다 돌린 뒤**에만
@@ -24,7 +24,6 @@ import {
   defaultControlSocketPath,
 } from "./control-socket";
 import {
-  installAutostart,
   isAutostartInstalled,
   planAutostart,
   removeAutostart,
@@ -41,6 +40,8 @@ export interface EnsureDaemonOptions {
   /** 데몬을 띄울 실행 파일. 기본: process.execPath (Electron 바이너리). */
   execPath?: string;
   log?: (line: string) => void;
+  /** Desktop owner. The helper exits when this process is no longer alive. */
+  parentPid?: number;
 }
 
 export type EnsureDaemonStatus =
@@ -55,6 +56,12 @@ interface DaemonPing {
   version?: string;
   pid?: number;
   storePath?: string;
+  parentPid?: number | null;
+}
+
+interface MobileBridgeLeaseReply {
+  ok?: boolean;
+  ownerPid?: number | null;
 }
 
 function defaultDaemonEntry(): string {
@@ -73,13 +80,81 @@ async function pingDaemon(socketPath: string, timeoutMs = 2_000): Promise<Daemon
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-function spawnDaemonDetached(opts: EnsureDaemonOptions): number | null {
+/**
+ * Disposable Electron QA profiles must not create helper processes. Their
+ * user-data directory is deleted when the harness closes, so the helper cannot
+ * be reused and would only create noisy listeners during visual verification.
+ * Dedicated daemon/mobile-bridge contracts execute daemon/main.js directly.
+ */
+function daemonLaunchDisabled(): boolean {
+  return process.env.AGENTLAS_DISABLE_DAEMON === "1"
+    || process.env.AGENTLAS_E2E === "1"
+    || Boolean(process.env.AGENTLAS_QA_USER_DATA_DIR);
+}
+
+/**
+ * Hands the single Mobile Bridge listener from agentlasd to the live Desktop
+ * process. A newly spawned daemon exposes its control socket before every
+ * optional service is ready, so this bounded retry is also the startup handoff
+ * barrier: Desktop never opens a second endpoint merely because the daemon
+ * needed another few hundred milliseconds to boot.
+ */
+export async function claimDaemonMobileBridge(
+  userDataDir: string,
+  ownerPid: number,
+  timeoutMs = 30_000,
+): Promise<boolean> {
+  if (daemonLaunchDisabled()) return false;
+  if (!Number.isSafeInteger(ownerPid) || ownerPid <= 1) {
+    throw new Error("Mobile Bridge lease owner pid is invalid");
+  }
+  const socketPath = defaultControlSocketPath(userDataDir);
+  const deadline = Date.now() + Math.max(1_000, timeoutMs);
+  do {
+    try {
+      const result = (await callControlSocket(
+        socketPath,
+        "mobileBridge.claim",
+        { ownerPid },
+        Math.min(3_000, Math.max(1_000, deadline - Date.now())),
+      )) as MobileBridgeLeaseReply | null;
+      return result?.ok === true && result.ownerPid === ownerPid;
+    } catch {
+      if (Date.now() >= deadline) return false;
+      await sleep(250);
+    }
+  } while (Date.now() < deadline);
+  return false;
+}
+
+/** Returns Mobile Bridge ownership during an in-app handoff or startup rollback.
+ * Full app shutdown calls shutdownDaemon instead; no listener survives exit. */
+export async function releaseDaemonMobileBridge(
+  userDataDir: string,
+  ownerPid: number,
+  timeoutMs = 10_000,
+): Promise<boolean> {
+  if (daemonLaunchDisabled()) return false;
+  try {
+    const result = (await callControlSocket(
+      defaultControlSocketPath(userDataDir),
+      "mobileBridge.release",
+      { ownerPid },
+      timeoutMs,
+    )) as MobileBridgeLeaseReply | null;
+    return result?.ok === true && result.ownerPid === null;
+  } catch {
+    return false;
+  }
+}
+
+function spawnDaemonForDesktop(opts: EnsureDaemonOptions): number | null {
   const entry = opts.daemonEntry ?? defaultDaemonEntry();
   if (!fs.existsSync(entry)) {
     throw new Error(`daemon entry not found: ${entry}`);
   }
   const child = spawn(opts.execPath ?? process.execPath, [entry], {
-    detached: true,
+    detached: false,
     stdio: "ignore",
     env: {
       ...process.env,
@@ -87,9 +162,11 @@ function spawnDaemonDetached(opts: EnsureDaemonOptions): number | null {
       AGENTLAS_USER_DATA: opts.userDataDir,
       // 사다리는 앱이 이미 돌렸다. 데몬은 절대 두 번째 마이그레이션 주인이 되지 않는다.
       AGENTLAS_STORE_MIGRATION_ROLE: "follower",
+      AGENTLAS_DESKTOP_PARENT_PID: String(opts.parentPid ?? process.pid),
     },
   });
-  // 앱의 이벤트 루프/종료와 완전히 분리한다 — 앱이 꺼져도 데몬은 남는다.
+  // The control socket is the graceful owner channel. unref keeps startup from
+  // blocking, while the helper's parent watchdog enforces the crash path.
   child.unref();
   return child.pid ?? null;
 }
@@ -101,14 +178,15 @@ function spawnDaemonDetached(opts: EnsureDaemonOptions): number | null {
  */
 export async function ensureDaemonRunning(opts: EnsureDaemonOptions): Promise<EnsureDaemonStatus> {
   const log = opts.log ?? ((line: string) => console.log(line));
-  if (process.env.AGENTLAS_DISABLE_DAEMON === "1") return { status: "disabled" };
+  if (daemonLaunchDisabled()) return { status: "disabled" };
   const socketPath = defaultControlSocketPath(opts.userDataDir);
 
   try {
     const ping = await pingDaemon(socketPath);
     if (ping?.ok) {
       const daemonVersion = ping.version ?? "0.0.0";
-      if (daemonVersion === opts.appVersion) {
+      const expectedParentPid = opts.parentPid ?? process.pid;
+      if (daemonVersion === opts.appVersion && ping.parentPid === expectedParentPid) {
         return { status: "already-running", pid: ping.pid ?? -1, version: daemonVersion };
       }
       // 버전 스큐 — 옛 데몬을 정중히 내려보내고 재스폰한다. 강제 kill 은 마지막 수단도
@@ -116,7 +194,7 @@ export async function ensureDaemonRunning(opts: EnsureDaemonOptions): Promise<En
       // (다음 앱 실행이 다시 시도한다. 옛 데몬이 계속 돌더라도 스키마는 follower 라 안전).
       log(`[daemon] version skew (daemon ${daemonVersion} vs app ${opts.appVersion}) — asking it to shut down`);
       try {
-        await callControlSocket(socketPath, "daemon.shutdown", undefined, 3_000);
+        await callControlSocket(socketPath, "daemon.shutdown", { parentPid: expectedParentPid }, 3_000);
       } catch {
         /* 응답 전에 소켓이 닫히는 것도 정상 종료의 모양이다 */
       }
@@ -130,12 +208,12 @@ export async function ensureDaemonRunning(opts: EnsureDaemonOptions): Promise<En
       if (!gone) {
         return { status: "failed", reason: `old daemon (v${daemonVersion}) did not shut down` };
       }
-      const pid = spawnDaemonDetached(opts);
+      const pid = spawnDaemonForDesktop(opts);
       log(`[daemon] respawned v${opts.appVersion} (pid ${pid ?? "?"})`);
       return { status: "respawned", pid, previousVersion: daemonVersion };
     }
 
-    const pid = spawnDaemonDetached(opts);
+    const pid = spawnDaemonForDesktop(opts);
     log(`[daemon] spawned v${opts.appVersion} (pid ${pid ?? "?"})`);
     return { status: "spawned", pid, version: opts.appVersion };
   } catch (error) {
@@ -144,16 +222,14 @@ export async function ensureDaemonRunning(opts: EnsureDaemonOptions): Promise<En
 }
 
 /**
- * 앱이 나갈 때 **데몬이 붙든 상주 CLI 를 놓게** 한다(오너 규칙 2026-08-20:
- * "상주는 앱이 켜져 있는 동안"). 데몬 자신은 죽이지 않는다 — 예약 자동화는 계속
- * 돌아야 한다. 데몬이 없거나 옛 바이너리라 이 메서드를 모르면 조용히 지나간다:
- * 상주가 없는 상태가 예전과 똑같은 정상 동작이므로 앱 종료를 막을 이유가 없다.
+ * 앱이 나가거나 업데이트 교체를 시작할 때 헬퍼의 상주 CLI를 먼저 놓게 한다.
+ * 최종 종료는 shutdownDaemon이 담당하며 헬퍼 자체도 Desktop과 함께 끝난다.
  */
 export async function releaseDaemonAgentResidency(
   userDataDir: string,
   timeoutMs = 3_000,
 ): Promise<{ released: number } | null> {
-  if (process.env.AGENTLAS_DISABLE_DAEMON === "1") return null;
+  if (daemonLaunchDisabled()) return null;
   try {
     const result = (await callControlSocket(
       defaultControlSocketPath(userDataDir),
@@ -167,6 +243,34 @@ export async function releaseDaemonAgentResidency(
   }
 }
 
+/** Stop the exact helper bound to this Desktop instance. */
+export async function shutdownDaemon(
+  userDataDir: string,
+  expectedParentPid: number,
+  timeoutMs = 10_000,
+): Promise<{ stopped: boolean; pid: number | null }> {
+  if (daemonLaunchDisabled()) return { stopped: true, pid: null };
+  const socketPath = defaultControlSocketPath(userDataDir);
+  const ping = await pingDaemon(socketPath, Math.min(timeoutMs, 2_000));
+  if (!ping?.ok) return { stopped: true, pid: null };
+  if (ping.parentPid !== expectedParentPid) {
+    throw new Error(`daemon_owner_mismatch:${ping.parentPid ?? "none"}`);
+  }
+  const pid = Number.isSafeInteger(ping.pid) && Number(ping.pid) > 1 ? Number(ping.pid) : null;
+  try {
+    await callControlSocket(socketPath, "daemon.shutdown", { parentPid: expectedParentPid }, 3_000);
+  } catch {
+    // Closing the socket before the reply is a valid graceful-shutdown shape.
+  }
+  const deadline = Date.now() + Math.max(1_000, timeoutMs);
+  while (Date.now() < deadline) {
+    const current = await pingDaemon(socketPath, 500);
+    if (!current?.ok) return { stopped: true, pid };
+    await sleep(100);
+  }
+  return { stopped: false, pid };
+}
+
 /**
  * 자동 시작(로그인 시 데몬 기동) 설정을 파일시스템과 정합시킨다.
  *
@@ -176,16 +280,14 @@ export async function releaseDaemonAgentResidency(
  * 남는 것이 최악이다). 설정 UI 토글은 아직 없다 — store 함수가 그 자리다.
  */
 export function reconcileDaemonAutostart(
-  enabled: boolean,
+  _enabled: boolean,
   command: AutostartCommand,
+  runtime?: { platform?: NodeJS.Platform; home?: string },
 ): { installed: boolean; changed: boolean } {
-  const plan = planAutostart(command);
+  const plan = planAutostart(command, runtime?.platform, runtime?.home);
   const already = isAutostartInstalled(plan);
-  if (enabled) {
-    // 멱등 덮어쓰기 — 앱 경로가 바뀌었을 수 있다(업데이트/이동).
-    installAutostart(plan);
-    return { installed: true, changed: !already };
-  }
+  // Desktop local work is deliberately app-scoped. Remove legacy login items
+  // even if an older build stored the preference as enabled.
   if (already) {
     removeAutostart(plan);
     return { installed: false, changed: true };

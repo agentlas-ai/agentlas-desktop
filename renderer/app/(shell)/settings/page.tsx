@@ -22,7 +22,7 @@ import {
 } from "@shared/models";
 import { AUTO_PROVIDER } from "@shared/multimodal";
 import { navigate } from "@/lib/navigation";
-import { IconCheck, IconFilm, IconImage, IconKey, IconLock, IconRefresh, IconWand } from "@/components/Icon";
+import { IconCheck, IconChevronDown, IconFilm, IconImage, IconKey, IconLock, IconRefresh, IconWand } from "@/components/Icon";
 import { AgentFileEditor, runtimeEditorSource } from "@/components/AgentFileEditor";
 import { MigrationPanel } from "@/components/MigrationPanel";
 import { MediaDisplaySettings } from "@/components/MediaDisplaySettings";
@@ -127,6 +127,7 @@ export default function SettingsPage() {
   const { t, pref, setPref, locale } = useT();
   // 소스 객체를 매 렌더마다 새로 만들면 편집기가 목록을 끝없이 다시 불러온다.
   const runtimeSource = useMemo(() => runtimeEditorSource(locale === "ko"), [locale]);
+  const [engineFilesOpen, setEngineFilesOpen] = useState(false);
   const { pref: themePref, setPref: setThemePref } = useTheme();
   const [statuses, setStatuses] = useState<RuntimeStatus[]>([]);
   const [draftKey, setDraftKey] = useState<Record<ByokBackend, string>>({
@@ -531,17 +532,69 @@ export default function SettingsPage() {
         {/* 엔진 파일 — 스킬·호스트 훅·어댑터 매니페스트를 앱 안에서 직접 고친다.
             지금까지 스킬은 읽기만 됐고 훅은 표면 자체가 없어, 고치려면 앱 밖에서
             런타임 폴더를 찾아야 했다. */}
-        <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "24px 0 12px" }}>
-          {locale === "ko" ? "엔진 파일 (스킬 · 훅 · 어댑터)" : "Engine files (skills · hooks · adapters)"}
-        </h2>
-        <AgentFileEditor
-          locale={locale}
-          source={runtimeSource}
-          title={locale === "ko" ? "엔진 파일 편집" : "Edit engine files"}
-          subtitle={locale === "ko"
-            ? "설치된 엔진의 스킬, 호스트 훅, 어댑터 매니페스트를 여기서 고칩니다. 저장하면 파일에 그대로 씁니다."
-            : "Edit the installed engine's skills, host hooks and adapter manifests here. Saving writes straight to the file."}
-        />
+        <section
+          data-testid="engine-files-section"
+          data-collapsed={engineFilesOpen ? "false" : "true"}
+          style={{ margin: "24px 0 0" }}
+        >
+          <button
+            type="button"
+            data-testid="engine-files-toggle"
+            aria-expanded={engineFilesOpen}
+            aria-controls="settings-engine-files-editor"
+            onClick={() => setEngineFilesOpen((open) => !open)}
+            style={{
+              width: "100%",
+              minHeight: 44,
+              padding: "10px 12px",
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              border: "1px solid var(--paper-edge)",
+              borderRadius: "var(--radius-md)",
+              background: "var(--paper)",
+              color: "var(--ink)",
+              cursor: "pointer",
+              textAlign: "left",
+              boxShadow: "var(--neu-raised)",
+            }}
+          >
+            <span style={{ flex: 1, minWidth: 0, fontFamily: "var(--font-head)", fontSize: 15, fontWeight: 650 }}>
+              {locale === "ko" ? "엔진 파일 (스킬 · 훅 · 어댑터)" : "Engine files (skills · hooks · adapters)"}
+            </span>
+            <span style={{ color: "var(--muted-deep)", fontSize: 11.5, fontWeight: 600 }}>
+              {engineFilesOpen
+                ? (locale === "ko" ? "접기" : "Collapse")
+                : (locale === "ko" ? "펼치기" : "Expand")}
+            </span>
+            <IconChevronDown
+              size={14}
+              aria-hidden
+              style={{
+                flexShrink: 0,
+                color: "var(--muted-deep)",
+                transition: "transform 140ms ease",
+                transform: engineFilesOpen ? "rotate(180deg)" : "rotate(0deg)",
+              }}
+            />
+          </button>
+          <div
+            id="settings-engine-files-editor"
+            hidden={!engineFilesOpen}
+            style={{ paddingTop: engineFilesOpen ? 12 : 0 }}
+          >
+            {engineFilesOpen && (
+              <AgentFileEditor
+                locale={locale}
+                source={runtimeSource}
+                title={locale === "ko" ? "엔진 파일 편집" : "Edit engine files"}
+                subtitle={locale === "ko"
+                  ? "설치된 엔진의 스킬, 호스트 훅, 어댑터 매니페스트를 여기서 고칩니다. 저장하면 파일에 그대로 씁니다."
+                  : "Edit the installed engine's skills, host hooks and adapter manifests here. Saving writes straight to the file."}
+              />
+            )}
+          </div>
+        </section>
 
         {/* 화면 테마 (라이트/다크/시스템) */}
         {/*

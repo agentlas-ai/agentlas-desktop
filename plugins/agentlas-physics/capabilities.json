@@ -1,0 +1,92 @@
+{
+  "schema": "agentlas.science-domain-capability/v1",
+  "domain": "physics",
+  "implementedSources": [
+    {
+      "id": "inspire-literature",
+      "provider": "INSPIRE",
+      "endpoint": "https://inspirehep.net/api/literature",
+      "authentication": "none",
+      "status": "implemented"
+    },
+    {
+      "id": "hepdata-record",
+      "provider": "HEPData",
+      "endpoint": "https://www.hepdata.net/record/{ins-id}?format=json",
+      "authentication": "none-for-public-records",
+      "status": "implemented"
+    },
+    {
+      "id": "hepdata-table-json",
+      "provider": "HEPData",
+      "endpoint": "https://www.hepdata.net/download/table/{ins-id}/{table}/{version}/json",
+      "authentication": "none-for-public-tables",
+      "status": "implemented-provider-access-may-refuse"
+    },
+    {
+      "id": "user-numeric-dataset",
+      "provider": "user",
+      "authentication": "not-applicable",
+      "status": "implemented"
+    }
+  ],
+  "artifacts": [
+    {
+      "kind": "physics.literature-catalog",
+      "canonicalSchema": "agentlas.physics.inspire-literature/v1",
+      "rendererContracts": [],
+      "pagination": "bounded-page-with-provider-total-and-next-receipt"
+    },
+    {
+      "kind": "physics.hepdata-table",
+      "canonicalSchema": "agentlas.physics.hepdata-table/v1",
+      "rendererContracts": [
+        { "rendererId": "agentlas.vega", "status": "host-required", "input": "normalized numeric series" }
+      ],
+      "rendererProjectionSchema": "agentlas.physics.hepdata-renderer-series/v1",
+      "uncertaintyPolicy": "labeled-components-remain-separate-without-covariance"
+    },
+    {
+      "kind": "physics.hepdata-chi-square-analysis",
+      "canonicalSchema": "agentlas.physics.hepdata-chi-square-analysis/v1",
+      "rendererContracts": [
+        { "rendererId": "agentlas.vega", "status": "host-required", "input": "inline Vega-Lite v6 measurement and pull specifications" }
+      ],
+      "publicationTableSchema": "agentlas.science-table/v1",
+      "uncertaintyPolicy": "caller-selected-labeled-components-as-independent-diagonal-quadrature",
+      "asymmetricPolicy": "direction-toward-prediction",
+      "statistics": ["residual", "propagated standard uncertainty", "pull", "chi-square", "degrees of freedom", "reduced chi-square", "chi-square survival p-value"],
+      "lineage": "normalized-table-sha256-plus-analysis-sha256"
+    },
+    {
+      "kind": "physics.user-dataset",
+      "canonicalSchema": "agentlas.physics.user-dataset/v1",
+      "rendererContracts": [
+        { "rendererId": "agentlas.vega", "status": "host-required", "input": "agentlas.science-table/v1" },
+        { "rendererId": "agentlas.vtk", "status": "unsupported-in-this-version", "input": "VTK/VTU/mesh" }
+      ]
+    }
+  ],
+  "guards": {
+    "maxResponseBytes": 16777216,
+    "maxNormalizedDatasetBytes": 4194304,
+    "maxRows": 10000,
+    "maxColumns": 64,
+    "inspireMinimumIntervalMs": 350,
+    "hepdataMinimumIntervalMs": 1000,
+    "timeoutMs": 20000,
+    "retries": 2,
+    "retryableStatusCodes": [408, 429, 502, 503, 504],
+    "maxRetryAfterMs": 30000,
+    "redirects": "denied",
+    "responseRead": "content-length-precheck-and-streaming-byte-cap"
+  },
+  "notImplemented": [
+    "No CERN Open Data event-file or ROOT parser is included.",
+    "No detector simulation, Geant4, lattice solver, symbolic algebra engine, or numerical ODE/PDE solver is included.",
+    "No Vega or vtk.js renderer binary is bundled; the host must provide an exact renderer.",
+    "Official HEPData table downloads are attempted only through the documented JSON route; provider-side Cloudflare challenges or other access refusals are surfaced and never bypassed.",
+    "INSPIRE results are discovery metadata and do not establish experimental support."
+    ,"Chi-square analysis is diagonal only and does not infer covariance, correlations, nuisance parameters, parameter estimates, or prediction uncertainty."
+  ]
+}

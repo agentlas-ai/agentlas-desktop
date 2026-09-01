@@ -134,6 +134,7 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
   labs: Object.freeze({
     list: (projectId: string) => ipcRenderer.invoke("science:labs:list", { extensionId, projectId }),
     catalog: () => ipcRenderer.invoke("science:labs:catalog", { extensionId }),
+    decisionProjections: (projectId: string) => ipcRenderer.invoke("science:labs:decisionProjections", { extensionId, projectId }),
     upsertBinding: (input: unknown) => ipcRenderer.invoke("science:labs:upsertBinding", { extensionId, input }),
   }),
   validations: Object.freeze({

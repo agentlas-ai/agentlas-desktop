@@ -114,6 +114,11 @@ extraResources:
   # from CI/environment policy; packaging fails closed when the policy is absent.
   - from: dist/product-extension-signing-policy.json
     to: product-extension-signing-policy.json
+  # Playwright-pinned Chrome for Testing. This separate app identity prevents
+  # headless automation from becoming the user's Chrome instance in Dock or
+  # the Windows shell. Runtime code refuses to fall back to system browsers.
+  - from: build-resources/browser-runtime
+    to: browser-runtime
   - from: dist/embedded-core
     to: Hephaestus
     filter:

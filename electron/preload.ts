@@ -46,6 +46,10 @@ const api: AgentlasIpc = {
     getLocale: () => ipcRenderer.invoke("app:getLocale"),
     getVersion: () => ipcRenderer.invoke("app:getVersion"),
   },
+  media: {
+    copyImage: (payload) => ipcRenderer.invoke("media:copyImage", payload),
+    saveImage: (payload) => ipcRenderer.invoke("media:saveImage", payload),
+  },
   mobileBridge: {
     status: () => ipcRenderer.invoke("mobileBridge:status"),
     issuePairing: () => ipcRenderer.invoke("mobileBridge:issuePairing"),
@@ -61,9 +65,9 @@ const api: AgentlasIpc = {
     installScienceSuite: () => ipcRenderer.invoke("productExtensions:installScienceSuite"),
     setScienceEnabled: (enabled: boolean) => ipcRenderer.invoke("productExtensions:setScienceEnabled", enabled),
     uninstallScience: () => ipcRenderer.invoke("productExtensions:uninstallScience"),
-    openScienceView: (bounds) => ipcRenderer.invoke("productExtensions:openScienceView", bounds),
-    setScienceViewBounds: (bounds) => ipcRenderer.invoke("productExtensions:setScienceViewBounds", bounds),
-    closeScienceView: () => ipcRenderer.invoke("productExtensions:closeScienceView"),
+    openScienceView: (bounds, leaseId) => ipcRenderer.invoke("productExtensions:openScienceView", bounds, leaseId),
+    setScienceViewBounds: (bounds, leaseId) => ipcRenderer.invoke("productExtensions:setScienceViewBounds", bounds, leaseId),
+    closeScienceView: (leaseId) => ipcRenderer.invoke("productExtensions:closeScienceView", leaseId),
   },
   judgment: {
     judge: (spec: RendererJudgmentSpec) => ipcRenderer.invoke("judgment:judge", spec),

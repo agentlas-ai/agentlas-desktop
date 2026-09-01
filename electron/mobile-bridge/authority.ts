@@ -108,7 +108,8 @@ import {
 import { OwnerCloudActionError } from "../marketplace/mcp-source";
 import { resumeMobileOneAutoRecovery } from "../one/mobile-auto-recovery";
 import { autoResolveOneTeamPreflight, prepareOneTeamPreflight } from "../one/team-preflight";
-import { isOneInvocationChat } from "../store/run-events";
+import { isOneInvocationChat, listRecentOneArtifactsForMobile } from "../store/run-events";
+import { readChatMessageAttachmentForMobile } from "../store/chat-message-attachments";
 import {
   createDesktopMobileBridgeBuildActions,
   createDesktopMobileBridgeCloudAgentActions,
@@ -152,6 +153,7 @@ import {
   type MobileBridgeCloudUploadSaveDto,
   type MobileBridgeCloudUploadPreviewDto,
   type MobileBridgeInvocationEventDto,
+  type MobileBridgeOneArtifactDto,
   type MobileBridgeBrowserApprovalDto,
   type MobileBridgeInvokeSteerParams,
   type MobileBridgeJsonValue,
@@ -203,6 +205,8 @@ import type {
 const REQUEST_ID_RE = /^[^\u0000-\u001f]{1,128}$/;
 const IDENTIFIER_RE = /^[^\u0000-\u001f]{1,256}$/;
 const RUN_ID_RE = /^[^\u0000-\u001f]{1,160}$/;
+const UUID_RE = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+const MOBILE_ONE_ARTIFACT_CURSOR_RE = /^[A-Za-z0-9_-]{1,512}$/;
 /** 도구 승인 id — tool-approval 이 발급하는 `approval:<t>:<rand>` / `denied:<t>:<rand>`. */
 const TOOL_APPROVAL_ID_RE = /^(approval|denied):[a-z0-9]{1,16}:[a-z0-9]{1,16}$/;
 const TERMINAL_APPROVAL_ID_RE = /^approval:[a-z0-9]{1,16}:[a-z0-9]{1,16}$/;
@@ -1343,6 +1347,54 @@ function summarizeToolPayload(value: string | undefined): MobileBridgeToolPayloa
   return { shape: "json-scalar", size };
 }
 
+const MOBILE_ONE_ARTIFACT_TYPES = new Set<MobileBridgeOneArtifactDto["type"]>([
+  "document", "spreadsheet", "image", "video", "audio", "archive", "data", "other",
+]);
+
+function projectMobileBridgeOneArtifacts(
+  value: McpInvocationEvent["oneArtifacts"],
+): MobileBridgeOneArtifactDto[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const projected: MobileBridgeOneArtifactDto[] = [];
+  const seen = new Set<string>();
+  for (const artifact of value.slice(0, 32)) {
+    const identifier = (candidate: unknown): candidate is string =>
+      typeof candidate === "string"
+      && candidate.length >= 1
+      && candidate.length <= 256
+      && !/[\u0000-\u001f]/.test(candidate);
+    const label = typeof artifact.label === "string"
+      ? boundedRedactedText(artifact.label, 512)
+      : "";
+    if (
+      !identifier(artifact.taskId)
+      || !Number.isSafeInteger(artifact.taskVersion)
+      || artifact.taskVersion < 1
+      || !identifier(artifact.chatId)
+      || !identifier(artifact.runId)
+      || !identifier(artifact.manifestId)
+      || !identifier(artifact.artifactRef)
+      || !label
+      || !MOBILE_ONE_ARTIFACT_TYPES.has(artifact.type)
+      || (artifact.sizeBytes !== undefined && (!Number.isSafeInteger(artifact.sizeBytes) || artifact.sizeBytes < 0))
+    ) continue;
+    const bindingKey = `${artifact.runId}\u0000${artifact.artifactRef}`;
+    if (!seen.add(bindingKey)) continue;
+    projected.push({
+      taskId: artifact.taskId,
+      taskVersion: artifact.taskVersion,
+      chatId: artifact.chatId,
+      runId: artifact.runId,
+      manifestId: artifact.manifestId,
+      artifactRef: artifact.artifactRef,
+      label,
+      type: artifact.type,
+      ...(artifact.sizeBytes !== undefined ? { sizeBytes: artifact.sizeBytes } : {}),
+    });
+  }
+  return projected.length > 0 ? projected : undefined;
+}
+
 export function projectMobileBridgeInvocationEvent(
   event: McpInvocationEvent,
   context?: { taskId?: string | null; syncedAt?: string; cwd?: string | null },
@@ -1443,6 +1495,8 @@ export function projectMobileBridgeInvocationEvent(
   if (event.kind === "surface" && event.oneSurface && context?.taskId && event.oneSurface.taskId === context.taskId) {
     projected.surface = event.oneSurface;
   }
+  const oneArtifacts = projectMobileBridgeOneArtifacts(event.oneArtifacts);
+  if (oneArtifacts) projected.oneArtifacts = oneArtifacts;
   // DESKTOP_MOBILE_BRIDGE: raw surface manifest, provider/model/session
   // metadata, delegation graph, env, and local filesystem fields are omitted.
   // TypeScript owns the DTO shape; a final runtime assertion prevents future
@@ -2365,6 +2419,19 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         return this.terminalDispatch(guardedParams(request, ["terminalId", "ownerEpoch", "previewId", "approvalId"]), context, request);
       case "terminal.cancel":
         return this.terminalCancel(guardedParams(request, ["terminalId", "ownerEpoch", "requestId"]), context, request);
+      case "one.artifacts.recent": {
+        const params = guardedParams(request, ["chatId", "limit", "cursor"]);
+        const chatId = requiredIdentifier(params, "chatId");
+        requireChat(chatId);
+        const limit = optionalInteger(params, "limit", 1, 100) ?? 100;
+        const cursor = params.cursor === undefined
+          ? undefined
+          : requiredIdentifier(params, "cursor", MOBILE_ONE_ARTIFACT_CURSOR_RE);
+        return asJsonValue(
+          listRecentOneArtifactsForMobile({ chatId, limit, cursor }),
+          request.method,
+        );
+      }
       case "one.artifact.imagePreview": {
         const params = guardedParams(request, [
           "taskId", "taskVersion", "chatId", "runId", "manifestId", "artifactRef",
@@ -2380,6 +2447,19 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           artifactRef: requiredIdentifier(params, "artifactRef"),
         });
         return preview ? asJsonValue(preview, request.method) : null;
+      }
+      case "chat.attachment.imagePreview": {
+        const params = guardedParams(request, ["chatId", "messageId", "attachmentId"]);
+        const chatId = requiredIdentifier(params, "chatId");
+        requireChat(chatId);
+        const preview = readChatMessageAttachmentForMobile({
+          chatId,
+          messageId: requiredIdentifier(params, "messageId", UUID_RE),
+          attachmentId: requiredIdentifier(params, "attachmentId", UUID_RE),
+        });
+        return preview
+          ? asJsonValue({ mimeType: preview.mediaType, base64: preview.bytes.toString("base64") }, request.method)
+          : null;
       }
       case "one.suggestions.act": {
         const params = guardedParams(request, [
@@ -3665,19 +3745,32 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     // live 요청만 폰에 보낸다 — 사후 고지(post-denial)는 데스크탑에서도 카드가 아니다.
     const pendingToolApprovals = listPendingToolApprovals()
       .filter((approval) => approval.mode === "live")
-      .map((approval) => ({
-        id: approval.id,
-        runtime: approval.runtime,
-        tool: approval.tool,
-        ...(approval.detail ? { detail: approval.detail.slice(0, 2_000) } : {}),
-        ...(approval.cwd ? { cwd: approval.cwd } : {}),
-        mode: approval.mode,
-        ...(approval.deniedBy ? { deniedBy: approval.deniedBy } : {}),
-        requestedAt: approval.requestedAt,
-        ...(approval.chatId ? { chatId: approval.chatId } : {}),
-        ...(approval.capability ? { capability: approval.capability } : {}),
-        ...(approval.agentId ? { agentId: approval.agentId } : {}),
-      }));
+      .map((approval) => {
+        const folderAccess = approval.tool === "folder-access";
+        const detail = folderAccess
+          ? String(approval.detail ?? "")
+            .replace(/[\u0000-\u001f\u007f]/g, "")
+            .split(/[\\/]+/)
+            .filter(Boolean)
+            .slice(-2)
+            .join("/")
+          : approval.detail?.slice(0, 2_000);
+        return {
+          id: approval.id,
+          runtime: approval.runtime,
+          tool: approval.tool,
+          ...(detail ? { detail } : {}),
+          // Desktop owns the local filesystem boundary. The phone needs the
+          // short display label and opaque approval id, never the host path.
+          ...(!folderAccess && approval.cwd ? { cwd: approval.cwd } : {}),
+          mode: approval.mode,
+          ...(approval.deniedBy ? { deniedBy: approval.deniedBy } : {}),
+          requestedAt: approval.requestedAt,
+          ...(approval.chatId ? { chatId: approval.chatId } : {}),
+          ...(approval.capability ? { capability: approval.capability } : {}),
+          ...(approval.agentId ? { agentId: approval.agentId } : {}),
+        };
+      });
     const ontology = await this.projectOntology(this.ontologyRefreshRequested);
     return projectMobileBridgeSnapshot({
       hostIdentity: this.options.hostIdentity,

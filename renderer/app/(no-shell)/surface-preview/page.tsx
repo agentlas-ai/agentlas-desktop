@@ -1,6 +1,6 @@
 "use client";
 import { Suspense, useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
-import { notFound, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import type { AgentlasSurfaceAction, AgentlasSurfaceManifest, JsonObject } from "@/lib/types";
 import type { OneTaskProjection } from "@/lib/one-task-adapter";
@@ -329,12 +329,10 @@ function SurfacePreviewInner() {
 }
 
 export default function SurfacePreviewPage() {
-  // This route is a renderer QA harness, not a customer surface. Development keeps
-  // it convenient; production QA must opt in at build time so the shipped app cannot
-  // expose the raw manifest editor through a manually entered URL.
-  if (process.env.NODE_ENV === "production" && process.env.NEXT_PUBLIC_AGENTLAS_QA_SURFACES !== "1") {
-    notFound();
-  }
+  // This page is exported as a static file for the packaged Electron renderer.
+  // Query parameters (including file/image output sources) only exist in the
+  // browser at load time, so a server-side notFound() here would permanently
+  // replace the page before useSearchParams() can render the requested preview.
   return (
     <Suspense fallback={null}>
       <SurfacePreviewInner />

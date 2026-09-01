@@ -56,7 +56,12 @@ function toSession(row: SessionRow): RuntimeSession {
   };
 }
 
-export function getRuntimeSession(chatId: string, kind: string, agentId?: string | null): RuntimeSession | null {
+export function getRuntimeSession(
+  chatId: string,
+  kind: string,
+  agentId?: string | null,
+  options?: { isolateOwner?: boolean },
+): RuntimeSession | null {
   const agent = normalizeAgentId(agentId);
   const mem = memSessions.get(memKey(chatId, kind, agent)) ?? null;
   if (mem) return mem;
@@ -67,7 +72,7 @@ export function getRuntimeSession(chatId: string, kind: string, agentId?: string
     let row = select.get(chatId, kind, agent) as SessionRow | undefined;
     // v103 이전 행은 agent_id='' 로 이관돼 있다. 정확한 키에 행이 없으면 레거시 행을
     // 승계 후보로 읽는다 — 다른 봇의 세션이면 러너의 지문 검증이 스스로 버린다.
-    if (!row && agent !== "") {
+    if (!row && agent !== "" && options?.isolateOwner !== true) {
       row = select.get(chatId, kind, "") as SessionRow | undefined;
     }
     if (!row) return null;
@@ -92,6 +97,8 @@ export function saveRuntimeSession(
     reportedInputTokens?: number | null;
     reportedCachedInputTokens?: number | null;
     agentId?: string | null;
+    /** Internal task-stage slots never inherit or delete the visible chat's legacy session row. */
+    isolateOwner?: boolean;
   },
 ): boolean {
   const agent = normalizeAgentId(options?.agentId);
@@ -123,7 +130,7 @@ export function saveRuntimeSession(
       .run(chatId, kind, agent, sessionId, fingerprint, now, reportedOutputTokens, reportedInputTokens, reportedCachedInputTokens);
     // 레거시 행을 승계했다면 이제 새 키가 정본이다 — 같은 세션을 가리키는 '' 행을
     // 정리해 다음 점유자가 이 봇의 세션을 승계 후보로 오인하지 않게 한다.
-    if (agent !== "") {
+    if (agent !== "" && options?.isolateOwner !== true) {
       getDb()
         .prepare("DELETE FROM chat_runtime_sessions WHERE chat_id = ? AND kind = ? AND agent_id = '' AND session_id = ?")
         .run(chatId, kind, sessionId);
@@ -157,14 +164,25 @@ export function touchRuntimeSession(chatId: string, kind: string, agentId?: stri
   }
 }
 
-export function clearRuntimeSession(chatId: string, kind: string, agentId?: string | null): void {
+export function clearRuntimeSession(
+  chatId: string,
+  kind: string,
+  agentId?: string | null,
+  options?: { isolateOwner?: boolean },
+): void {
   const agent = normalizeAgentId(agentId);
   memSessions.delete(memKey(chatId, kind, agent));
   try {
     // 정확한 키와 레거시 '' 행을 함께 지운다 — "이 chat×kind 세션을 버려라"는 의도다.
-    getDb()
-      .prepare("DELETE FROM chat_runtime_sessions WHERE chat_id = ? AND kind = ? AND agent_id IN (?, '')")
-      .run(chatId, kind, agent);
+    if (options?.isolateOwner === true) {
+      getDb()
+        .prepare("DELETE FROM chat_runtime_sessions WHERE chat_id = ? AND kind = ? AND agent_id = ?")
+        .run(chatId, kind, agent);
+    } else {
+      getDb()
+        .prepare("DELETE FROM chat_runtime_sessions WHERE chat_id = ? AND kind = ? AND agent_id IN (?, '')")
+        .run(chatId, kind, agent);
+    }
   } catch {
     // 무시
   }

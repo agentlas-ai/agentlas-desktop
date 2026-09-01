@@ -17,6 +17,11 @@ export interface ImageResult {
   reason?: string;
   /** 실제 생성에 성공한 엔진(auto 페일오버 추적용). */
   engine?: "codex" | "gemini";
+  /**
+   * Main-only durable artifact source. It is attached as a non-enumerable
+   * property so IPC/JSON/tool text can never disclose a host-absolute path.
+   */
+  artifactPath?: string;
 }
 
 function resolveBin(name: string, extra: string[]): string | null {
@@ -267,7 +272,14 @@ export async function generateImage(model: ImageModel, prompt: string): Promise<
 
     const buf = fs.readFileSync(target);
     const mime = sniffImageMime(buf);
-    return { ok: true, src: `data:${mime};base64,${buf.toString("base64")}`, engine };
+    const result: ImageResult = { ok: true, src: `data:${mime};base64,${buf.toString("base64")}`, engine };
+    Object.defineProperty(result, "artifactPath", {
+      value: target,
+      enumerable: false,
+      configurable: false,
+      writable: false,
+    });
+    return result;
   } catch (e) {
     return { ok: false, reason: e instanceof Error ? e.message : String(e) };
   }

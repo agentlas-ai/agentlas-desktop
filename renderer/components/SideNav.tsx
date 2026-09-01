@@ -13,7 +13,7 @@ import { CreditBalanceWidget } from "./CreditBalanceWidget";
 import { UpdateBanner } from "./UpdateBanner";
 import { navigate } from "@/lib/navigation";
 import { ipc, ipcEvents } from "@/lib/ipc";
-import { requestScienceInstall, SCIENCE_INSTALL_DISCOVERY_ENABLED } from "@/lib/science-install-entry";
+import { requestScienceInstall } from "@/lib/science-install-entry";
 import { classifyHubEntity, entityClassShortLabel } from "@/lib/agent-entity-kind";
 import { pickLocalized, useT } from "@/lib/i18n";
 import {
@@ -509,7 +509,7 @@ export function SideNav({
 
         <div className="sidenav-divider" />
 
-        {(scienceReady || SCIENCE_INSTALL_DISCOVERY_ENABLED) && <button
+        <button
           type="button"
           className="sidenav-science-entry"
           data-ready={scienceReady ? "true" : "false"}
@@ -532,7 +532,7 @@ export function SideNav({
               {scienceReady ? (locale === "ko" ? "Science 열기" : "Open Science") : (locale === "ko" ? "Science 다운로드" : "Download Science")}
             </span>
           )}
-        </button>}
+        </button>
       </nav>
 
       {/* 하단: 설정 + 계정 */}

@@ -87,6 +87,8 @@ export interface OneActivityArtifact {
   kind: "file" | "image";
   label: string;
   agentName?: string;
+  /** Main-derived immutable content identity; never a local path. */
+  contentSha256?: string;
   // An artifact is actionable only with Main's opaque, version-pinned binding.
   // The renderer never receives or opens a filesystem path on its own.
   binding: OneArtifactBindingRequestV1;
@@ -369,11 +371,15 @@ function mergeVerifiedSurfaceArtifacts(
       artifactRef: artifact.artifactRef,
     };
     const kind: OneActivityArtifact["kind"] = artifact.type === "image" ? "image" : "file";
+    const rawContentSha256 = (artifact as unknown as Record<string, unknown>).contentSha256;
     const nextArtifact: OneActivityArtifact = {
       id: `bound:${artifact.runId}:${artifact.artifactRef}`,
       kind,
       label: artifact.label,
       binding,
+      ...(typeof rawContentSha256 === "string" && /^[a-f0-9]{64}$/u.test(rawContentSha256)
+        ? { contentSha256: rawContentSha256 }
+        : {}),
       ...(event.agentName?.trim() ? { agentName: event.agentName.trim() } : {}),
     };
     const normalizedLabel = nextArtifact.label.trim().toLocaleLowerCase();
@@ -429,6 +435,21 @@ export function reduceOneActivity(
     || (event.agentName?.trim() && (event.agentId || event.runtimeAgentId))
   ) {
     handoffs = mergeHandoffs(handoffs, event, observedAt);
+  }
+  if (event.agentMessage?.direction === "worker-to-orchestrator") {
+    const completedAgentIds = new Set(
+      [event.runtimeAgentId, event.agentId]
+        .map(nonEmptyAgentId)
+        .filter((value): value is string => Boolean(value)),
+    );
+    const completedPhase = event.phase || "work";
+    items = items.map((item) => (
+      item.kind === "agent"
+      && item.status === "running"
+      && [...completedAgentIds].some((agentId) => item.id === `agent:${agentId}:${completedPhase}`)
+        ? { ...item, status: "completed", completedAt: observedAt }
+        : item
+    ));
   }
 
   if (event.kind === "lifecycle" && event.lifecycle?.phase === "start") {
@@ -609,7 +630,10 @@ export function reduceOneActivity(
       status: event.notice.level === "error" ? "failed" : "info",
       observedAt,
       message: event.notice.message,
-      detail: event.notice.details,
+      // Runtime selection details are a machine receipt. The human-readable
+      // notice already names the connected runtime/model; exposing the JSON
+      // body in the thought stream is implementation leakage, not detail.
+      detail: event.notice.code === "runtime-selected" ? undefined : event.notice.details,
       noticeLevel: event.notice.level,
       ...(event.notice.display ? { noticeDisplay: event.notice.display } : {}),
       ...(event.notice.i18n?.ko?.trim() && event.notice.i18n?.en?.trim()
@@ -830,6 +854,9 @@ function ledgerOneArtifacts(payload: Record<string, unknown>): NonNullable<McpIn
       label: row.label,
       type: type as NonNullable<McpInvocationEvent["oneArtifacts"]>[number]["type"],
       ...(typeof row.sizeBytes === "number" && Number.isSafeInteger(row.sizeBytes) ? { sizeBytes: row.sizeBytes } : {}),
+      ...(typeof row.contentSha256 === "string" && /^[a-f0-9]{64}$/u.test(row.contentSha256)
+        ? { contentSha256: row.contentSha256 }
+        : {}),
     }];
   });
   return accepted.length ? accepted : undefined;
@@ -1004,13 +1031,14 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
       const agentName = ledgerString(payload, "agentName");
       const role = ledgerString(payload, "role");
       const delegateTo = ledgerStringArray(payload, "delegateTo");
+      const topologyAgentId = ledgerString(payload, "agentNodeId") || row.agentId;
       const rawPhase = ledgerString(payload, "phase");
       const phase = rawPhase === "plan" || rawPhase === "delegate" || rawPhase === "synthesize"
         ? rawPhase
         : undefined;
       apply({
         kind: "thinking",
-        ...(row.agentId ? { agentId: row.agentId } : {}),
+        ...(topologyAgentId ? { agentId: topologyAgentId } : {}),
         ...(agentName ? { agentName } : {}),
         ...(role ? { role } : {}),
         ...(phase ? { phase } : {}),
@@ -1051,6 +1079,7 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
       const tokenValue = Number(payload.tokens);
       const textLenValue = Number(payload.textLen);
       const executedModel = ledgerString(payload, "model");
+      const oneArtifacts = ledgerOneArtifacts(payload);
       apply({
         kind: "final",
         ...(Number.isFinite(tokenValue) ? { tokens: tokenValue } : {}),
@@ -1058,6 +1087,7 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
         // 실행 기록의 모델 표기(C-D-1): 원장에 남은 final의 model이 유일한
         // "실제 실행" 근거다 — 재방문/재기동 후에도 표시=실행이 유지된다.
         ...(executedModel ? { model: executedModel } : {}),
+        ...(oneArtifacts ? { oneArtifacts } : {}),
       }, row.ts);
       continue;
     }

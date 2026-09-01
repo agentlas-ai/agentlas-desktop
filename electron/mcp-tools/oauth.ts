@@ -28,9 +28,14 @@ import { AddressInfo } from "node:net";
 
 import { deleteSecret, readSecret, setSecret } from "../secrets/vault";
 import {
+  browserCdpPort,
+  browserCdpPortReady,
   browserCdpProfilePath,
   ensureBrowserCdpProfilePrivate,
+  reconcileBrowserCdpOwnerWithRetry,
   resolveChromeExe,
+  scheduleBrowserCdpGuardian,
+  withBrowserCdpMaintenance,
 } from "./browser-cdp-launcher";
 
 /** 발견·등록·토큰의 만료 없는 부분. 값(토큰)은 별도 시크릿에 둔다. */
@@ -273,18 +278,39 @@ function base64Url(input: Buffer): string {
  * Chrome을 못 찾으면 호출자가 URL을 사람에게 보여줄 수 있도록 false를 돌려준다 —
  * 조용히 다른 브라우저로 흘려보내지 않는다.
  */
-function openInAgentlasChrome(url: string): boolean {
+async function openInAgentlasChrome(url: string): Promise<boolean> {
   const exe = resolveChromeExe();
   if (!exe) return false;
   try {
-    ensureBrowserCdpProfilePrivate();
-    const child = spawn(exe, [
-      `--user-data-dir=${browserCdpProfilePath()}`,
-      "--no-first-run",
-      "--no-default-browser-check",
-      url,
-    ], { detached: true, stdio: "ignore" });
-    child.unref();
+    await withBrowserCdpMaintenance(async () => {
+      ensureBrowserCdpProfilePrivate();
+      const child = spawn(exe, [
+        `--user-data-dir=${browserCdpProfilePath()}`,
+        `--remote-debugging-port=${browserCdpPort()}`,
+        "--remote-debugging-address=127.0.0.1",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--restore-last-session=false",
+        "--disable-session-crashed-bubble",
+        "--new-window",
+        url,
+      ], { detached: true, stdio: "ignore" });
+      child.unref();
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        if (await browserCdpPortReady()) {
+          const ownership = await reconcileBrowserCdpOwnerWithRetry({ attempts: 2, delayMs: 50 });
+          if (ownership.state === "owned" && ownership.pid) {
+            scheduleBrowserCdpGuardian(ownership.pid);
+            return;
+          }
+          if (ownership.state === "foreign") {
+            throw new Error(`OAuth browser ownership verification failed (${ownership.reason}).`);
+          }
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, 250));
+      }
+      throw new Error("OAuth browser did not become ready.");
+    });
     return true;
   } catch {
     return false;
@@ -352,7 +378,7 @@ export async function authorizeMcpServer(input: {
     }
 
     const codePromise = waitForAuthorizationCode(server, state);
-    const opened = openInAgentlasChrome(authorizeUrl.toString());
+    const opened = await openInAgentlasChrome(authorizeUrl.toString());
     const code = await codePromise;
 
     const tokens = await exchangeAuthorizationCode({

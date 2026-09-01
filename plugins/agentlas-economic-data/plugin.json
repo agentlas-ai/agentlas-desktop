@@ -1,0 +1,168 @@
+{
+  "schema": "agentlas.plugin/v2",
+  "slug": "agentlas-economic-data",
+  "name": "Agentlas Economic Data",
+  "version": "1.0.0",
+  "builtin": false,
+  "publisher": {
+    "name": "Agentlas",
+    "url": "https://agentlas.ai"
+  },
+  "surface": {
+    "displayName": "Agentlas Economic Data",
+    "displayNameKo": "Agentlas 경제 데이터",
+    "tagline": "Reproducible official World Bank indicator series",
+    "taglineKo": "재현 가능한 공식 World Bank 지표 시계열",
+    "description": "Fetch one bounded World Bank indicator series with normalized missing values, provider metadata, pagination, and exact-response provenance.",
+    "descriptionKo": "단일 World Bank 지표 시계열을 제한된 범위로 조회하고 결측값, 제공자 메타데이터, 페이지네이션, 원본 응답 출처 정보를 정규화합니다.",
+    "category": "data",
+    "brandColor": "#1F6E5A",
+    "defaultPrompts": [
+      "한국의 최근 GDP 지표를 World Bank 공식 데이터로 조회해줘",
+      "이 국가의 World Bank 지표 시계열과 원본 응답 해시를 보여줘"
+    ]
+  },
+  "invocation": {
+    "mention": "@agentlas-economic-data",
+    "implicit": "router",
+    "standalone": true
+  },
+  "provides": {
+    "skills": {
+      "router": "skills/index/SKILL.md",
+      "workflows": [
+        "fetch-world-bank-indicator"
+      ]
+    },
+    "tools": [
+      {
+        "id": "agentlas-economic-data",
+        "capability": "data",
+        "kind": "stdio",
+        "command": "${node}",
+        "args": [
+          "${pluginDir}/bin/world-bank-mcp.mjs"
+        ],
+        "envKeys": [],
+        "timeoutMs": 30000,
+        "surface": {
+          "name": "경제 데이터",
+          "nameEn": "Economic Data",
+          "description": "공식 World Bank 지표를 키 없이 제한된 읽기 전용 요청으로 조회",
+          "descriptionEn": "Fetch official World Bank indicators through bounded, keyless, read-only requests",
+          "category": "data",
+          "brandColor": "#1F6E5A",
+          "mark": "ED",
+          "docsUrl": "https://datahelpdesk.worldbank.org/knowledgebase/articles/889392-about-the-indicators-api-documentation"
+        }
+      }
+    ]
+  },
+  "requires": {
+    "prereq": [
+      {
+        "id": "node",
+        "provided-by": "app"
+      }
+    ],
+    "os": [
+      "darwin",
+      "win32",
+      "linux"
+    ]
+  },
+  "permissions": {
+    "fileWrite": "none",
+    "network": "allow",
+    "shell": "deny"
+  },
+  "state": {
+    "files": [],
+    "assets": false
+  },
+  "integrity": {
+    "algo": "sha256",
+    "files": [
+      {
+        "path": "README.md",
+        "sha256": "61799b69a233ddba2a723454fab074eb7bcc9540d9198f161f6e819bf4ff7412",
+        "bytes": 2007
+      },
+      {
+        "path": "bin/world-bank-mcp.mjs",
+        "sha256": "420dc337513c96bfbd7f312416688ab1b3f96fb10421b178dc320b6a1545d177",
+        "bytes": 5602
+      },
+      {
+        "path": "capabilities.json",
+        "sha256": "0a45af3cad2564c94c30b44193835f091d0464b53f3a03e3cef875fecc2884fb",
+        "bytes": 2294
+      },
+      {
+        "path": "package.json",
+        "sha256": "d8c06799e4a412937acc0bd40bfb7aa11859d493fc9cb6cfc20f61c225672a88",
+        "bytes": 653
+      },
+      {
+        "path": "runtime/economic-data.cjs",
+        "sha256": "bc025aa9b0467d040e1fe819ec160a66292d039b97eafa4c009d2634d6012bca",
+        "bytes": 782
+      },
+      {
+        "path": "runtime/world-bank-client.mjs",
+        "sha256": "1df8fa4a315164fff2d4edf993c382f32375f33a35deea1ccb04e531f5f71102",
+        "bytes": 20036
+      },
+      {
+        "path": "schemas/tools.json",
+        "sha256": "ff688738d0dafa81d75c9f0fe9099cc5cc05a7c8e45609f58c3d470f3d904e05",
+        "bytes": 5084
+      },
+      {
+        "path": "skills/fetch-world-bank-indicator/SKILL.md",
+        "sha256": "d4d8554cfba3fe35d427dcfb5bcb383685a70a5cafd558dd254346d285e23443",
+        "bytes": 1257
+      },
+      {
+        "path": "skills/index/SKILL.md",
+        "sha256": "b2cee82f4bb639e2b3d5f7bef0368d0b185c529716f65b270d7e67b9f4e9dd6d",
+        "bytes": 923
+      },
+      {
+        "path": "tests/contract.test.mjs",
+        "sha256": "e3eceafbf46c58731adc7f6c06fcc53b65ca85425104f9acea530b43ad98e6ac",
+        "bytes": 12314
+      },
+      {
+        "path": "tests/fixtures/duplicate-date.json",
+        "sha256": "0f65d71b83d425b5b9a353f50cb689514795d3725a87349d5ab1347745386d6e",
+        "bytes": 721
+      },
+      {
+        "path": "tests/fixtures/malformed-row.json",
+        "sha256": "121a208731768629f3ad8054f013c506333336dc8ba7967ba0ff3c0bc0eb5c05",
+        "bytes": 443
+      },
+      {
+        "path": "tests/fixtures/world-bank-empty-unit.json",
+        "sha256": "ff53b41c0d04892e9f25ac1b3bab02af4b6f5e3df94f5efce0e8f853d090d7f9",
+        "bytes": 754
+      },
+      {
+        "path": "tests/fixtures/world-bank-page-1-replay.json",
+        "sha256": "a7e55803a6d4736a75a0af4ea935b7d1690003d9c3f891d129ffde1bed129db8",
+        "bytes": 925
+      },
+      {
+        "path": "tests/fixtures/world-bank-page-1.json",
+        "sha256": "b8d94401f7093a90a7aaaddd14b9188e248baea2d6195685fa8192e7402034e8",
+        "bytes": 959
+      },
+      {
+        "path": "tests/fixtures/world-bank-page-2.json",
+        "sha256": "805793eba314f4e1df0c16573036016427810042f552439714e6e9f3dcbf9cbc",
+        "bytes": 749
+      }
+    ]
+  }
+}

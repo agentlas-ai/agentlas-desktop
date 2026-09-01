@@ -1,19 +1,12 @@
-// 데몬 자동 시작 — Phase 4.
-//
-// ★왜 필요한가. 데몬이 있어도 **사람이 켜 줘야 도는** 상태면 "앱을 닫아도 자동화가
-// 돈다" 는 약속은 지켜지지 않는다. 컴퓨터를 껐다 켠 다음 폰에서 요청을 보냈을 때
-// 아무 일도 안 일어나면, 사용자에게는 기능이 없는 것과 같다.
-//
-// 플랫폼마다 방식이 다르고 **여기만 3벌**이다(기획서 §6 Phase 4). 각각은 작다:
+// Legacy daemon autostart planning/removal compatibility.
+// Desktop local execution is now app-scoped. The plan functions remain so a
+// current build can locate files older builds may have installed on each OS:
 //   · macOS  — launchd LaunchAgent plist (~/Library/LaunchAgents)
 //   · Windows — 시작프로그램 폴더의 .cmd
 //   · Linux  — systemd --user 유닛
 //
-// 규칙:
-//  - **쓰기 전에 무엇을 쓸지 만들어 보여 줄 수 있어야 한다**(plan). 자동 시작은 사용자
-//    머신의 부팅 동작을 바꾸는 일이라, 조용히 설치하면 안 된다.
-//  - 제거가 설치만큼 확실해야 한다. 끄는 길이 없는 자동 시작은 사용자가 되돌릴 수 없다.
-//  - 설치 여부 판정은 **파일 실재**로 한다. 우리 기억이 아니라.
+// New product code must not call installAutostart; app-launcher reconciliation
+// always removes these files.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
