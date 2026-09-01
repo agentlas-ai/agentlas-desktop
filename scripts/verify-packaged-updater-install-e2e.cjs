@@ -1014,7 +1014,18 @@ async function uninstallWindowsInstall(installDir) {
   ).catch((error) => logError(`cleanup warning: ${error.message}`));
 }
 
-function logWindowsInstallDiagnostics(initialInstallDir) {
+function logUserDataLogDiagnostics(userDataDir, label) {
+  if (!userDataDir) return;
+  const logDirectory = path.join(userDataDir, "logs");
+  const files = ["main.log", "main.previous.log"];
+  for (const fileName of files) {
+    const file = path.join(logDirectory, fileName);
+    const output = tail(file, 16_000);
+    if (output) logError(`${label} ${fileName} tail:\n${output}`);
+  }
+}
+
+function logWindowsInstallDiagnostics(initialInstallDir, userDataDir) {
   const registered = readWindowsInstallLocation();
   logError(`Windows diagnostic: initial InstallLocation=${initialInstallDir}; current InstallLocation=${registered || "<missing>"}`);
   const processScript = [
@@ -1047,6 +1058,7 @@ function logWindowsInstallDiagnostics(initialInstallDir) {
     }
   }
   logError(`Windows diagnostic packaged app.asar files:\n${asars.join("\n") || "<none>"}`);
+  logUserDataLogDiagnostics(userDataDir, "Windows target user-data");
 }
 
 function linuxRelevantProcesses(marker, targetAppImage = null) {
@@ -1062,6 +1074,9 @@ function linuxRelevantProcesses(marker, targetAppImage = null) {
       const appImageEntry = environment.find((value) => value.startsWith("APPIMAGE="));
       const appImage = appImageEntry ? appImageEntry.slice("APPIMAGE=".length) : null;
       const commandLine = fs.readFileSync(`/proc/${entry}/cmdline`, "utf8").split("\0").filter(Boolean);
+      const state = (fs.readFileSync(`/proc/${entry}/status`, "utf8").match(/^State:\s*(.+)$/m)?.[1] || "unknown").trim();
+      let executable = null;
+      try { executable = fs.readlinkSync(`/proc/${entry}/exe`); } catch {}
       const hasExactTargetIdentity = expectedTarget != null && (
         (appImage && path.resolve(appImage) === expectedTarget) ||
         commandLine.some((value) => path.resolve(value) === expectedTarget)
@@ -1070,8 +1085,10 @@ function linuxRelevantProcesses(marker, targetAppImage = null) {
       processes.push({
         appImage,
         commandLine,
+        executable,
         hasMarker,
         pid: Number(entry),
+        state,
       });
     } catch {
       // A process can exit between readdir and read; that is harmless cleanup.
@@ -1193,7 +1210,7 @@ async function runWindowsE2E({ baselineInstaller, feedUrl, feed, isolation, opti
     assertFeedAndPayloadRequested(feed);
     log(`Windows native install passed: ${options.baselineVersion} exited, ${options.targetVersion} replaced the install, and target relaunch cleared its journal`);
   } catch (error) {
-    logWindowsInstallDiagnostics(installDir);
+    logWindowsInstallDiagnostics(installDir, isolation.userDataDir);
     const output = tail(appLog);
     if (output) logError(`baseline app log tail:\n${output}`);
     throw error;
@@ -1270,6 +1287,7 @@ async function runLinuxE2E({ baselineAppImage, feedUrl, feed, isolation, options
     const processes = linuxRelevantProcesses(isolation.marker, targetAppImage);
     logError(`Linux relaunch diagnostic processes:\n${JSON.stringify(processes, null, 2)}`);
     logError(`Linux relaunch diagnostic: targetExists=${fs.existsSync(targetAppImage)} journalExists=${fs.existsSync(path.join(isolation.userDataDir, "updater", JOURNAL_NAME))}`);
+    logUserDataLogDiagnostics(isolation.userDataDir, "Linux target user-data");
     const output = tail(appLog);
     if (output) logError(`baseline app log tail:\n${output}`);
     throw error;
