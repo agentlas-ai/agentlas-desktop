@@ -1,0 +1,111 @@
+{
+  "tools": [
+    {
+      "name": "search_simbad_catalog",
+      "description": "Run a bounded anonymous cone query against the official SIMBAD TAP astronomical object database. Returns a fixed ten-column projection, stable object identities, preserved nulls, exact raw-byte provenance, and canonical request/normalized hashes. SIMBAD is not a general survey catalogue.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["center_ra_deg", "center_dec_deg", "radius_deg"],
+        "properties": {
+          "center_ra_deg": { "type": "number", "minimum": 0, "exclusiveMaximum": 360, "description": "ICRS right ascension in decimal degrees." },
+          "center_dec_deg": { "type": "number", "minimum": -90, "maximum": 90, "description": "ICRS declination in decimal degrees." },
+          "radius_deg": { "type": "number", "minimum": 0.001, "maximum": 10, "description": "Cone radius in decimal degrees." },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 100 },
+          "format": { "type": "string", "enum": ["json", "csv", "tsv"], "default": "json" }
+        }
+      }
+    },
+    {
+      "name": "analyze_astrometric_kinematics",
+      "description": "Deterministically derive total proper motion, naive inverse-parallax distance, and transverse velocity from a bounded measurement table. Preserves missing values, reconstructs proper-motion covariance from an optional SIMBAD-style error ellipse, propagates available uncertainties with a declared first-order delta method, and returns publication-table plus Vega-Lite FigureSpec payloads with content hashes. It performs no network or arbitrary code execution.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source_content_sha256", "measurements"],
+        "properties": {
+          "source_content_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$", "description": "SHA-256 of the exact source table or provider response from which these measurements were projected." },
+          "measurements": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 500,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["stable_object_id", "main_id", "parallax_mas", "parallax_error_mas", "proper_motion_ra_mas_yr", "proper_motion_dec_mas_yr", "proper_motion_error_ellipse"],
+              "properties": {
+                "stable_object_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+                "main_id": { "type": "string", "minLength": 1, "maxLength": 500 },
+                "parallax_mas": { "type": ["number", "null"], "minimum": -1000000, "maximum": 1000000 },
+                "parallax_error_mas": { "type": ["number", "null"], "exclusiveMinimum": 0, "maximum": 1000000 },
+                "proper_motion_ra_mas_yr": { "type": ["number", "null"], "minimum": -10000000, "maximum": 10000000 },
+                "proper_motion_dec_mas_yr": { "type": ["number", "null"], "minimum": -10000000, "maximum": 10000000 },
+                "proper_motion_error_ellipse": {
+                  "oneOf": [
+                    { "type": "null" },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["major_mas_yr", "minor_mas_yr", "angle_deg"],
+                      "properties": {
+                        "major_mas_yr": { "type": "number", "minimum": 0, "maximum": 1000000 },
+                        "minor_mas_yr": { "type": "number", "minimum": 0, "maximum": 1000000 },
+                        "angle_deg": { "type": "number", "minimum": 0, "exclusiveMaximum": 180 }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "max_fractional_parallax_error": { "type": "number", "minimum": 0.01, "maximum": 0.5, "default": 0.2 },
+          "max_fractional_proper_motion_error": { "type": "number", "minimum": 0.01, "maximum": 0.5, "default": 0.2 }
+        }
+      }
+    },
+    {
+      "name": "analyze_light_curve_periodicity",
+      "description": "Run a deterministic weighted floating-mean generalized Lomb-Scargle analysis over an explicitly bounded irregular light curve. Preserves every nullable observation, resolves the declared weighting policy without imputation, emits the full finite frequency grid, sampling-window power, local peaks, best-fit folded residuals, publication tables, and a Vega-Lite FigureSpec with exact content hashes. It performs no network or arbitrary code execution and does not claim a false-alarm probability or period confidence interval.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source_content_sha256", "target_id", "time_system", "time_offset_days", "value_kind", "value_unit", "weighting", "minimum_period_days", "maximum_period_days", "frequency_count", "measurements"],
+        "properties": {
+          "source_content_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$", "description": "SHA-256 of the exact source table or file from which the observations were projected." },
+          "target_id": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "time_system": { "type": "string", "enum": ["BJD_TDB", "BJD_UTC", "HJD_UTC", "JD_UTC", "MJD_UTC", "relative-day"], "description": "Explicit astronomical time system for the numeric time column." },
+          "time_offset_days": { "type": "number", "minimum": -1000000000, "maximum": 1000000000, "description": "Constant added to each non-null time only for exact publication metadata; the calculation uses time differences." },
+          "value_kind": { "type": "string", "enum": ["magnitude", "flux", "relative-flux", "generic"] },
+          "value_unit": { "type": ["string", "null"], "minLength": 1, "maxLength": 80 },
+          "weighting": { "type": "string", "enum": ["auto", "weighted", "unweighted"], "description": "weighted excludes otherwise complete rows lacking positive standard errors; auto uses inverse-variance weights only when every otherwise complete row supplies one." },
+          "minimum_period_days": { "type": "number", "exclusiveMinimum": 0, "maximum": 1000000000 },
+          "maximum_period_days": { "type": "number", "exclusiveMinimum": 0, "maximum": 1000000000 },
+          "frequency_count": { "type": "integer", "minimum": 32, "maximum": 5000, "description": "Number of inclusive linearly spaced frequencies between 1/maximum_period_days and 1/minimum_period_days." },
+          "maximum_peaks": { "type": "integer", "minimum": 1, "maximum": 20, "default": 5 },
+          "measurements": {
+            "type": "array",
+            "minItems": 5,
+            "maxItems": 2000,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["observation_id", "time", "value", "standard_error", "use"],
+              "properties": {
+                "observation_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+                "time": { "type": ["number", "null"], "minimum": -1000000000, "maximum": 1000000000 },
+                "value": { "type": ["number", "null"], "minimum": -1000000000000000, "maximum": 1000000000000000 },
+                "standard_error": { "oneOf": [{ "type": "null" }, { "type": "number", "exclusiveMinimum": 0, "maximum": 1000000000000000 }] },
+                "use": { "type": "boolean" }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "describe_astronomy_capabilities",
+      "description": "Return the exact SIMBAD provider allowlist, calculation contracts, bounded analysis guards, provenance hashes, and honest limitations for this plugin.",
+      "inputSchema": { "type": "object", "additionalProperties": false, "properties": {} }
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "1.0.57",
+  "version": "1.1.0",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Antigravity 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -15,15 +15,15 @@
     "minimumSourceAppVersion": "0.7.0",
     "minimumRuntimeVersion": "1.0.4",
     "minimumSchemaVersion": 35,
-    "targetSchemaVersion": 106,
-    "bundledRuntimeVersion": "1.2.38"
+    "targetSchemaVersion": 107,
+    "bundledRuntimeVersion": "1.2.40"
   },
   "agentlasBundledRuntimeSource": {
     "repository": "https://github.com/agentlas-ai/Agentlas-OS.git",
-    "ref": "v1.2.38",
-    "commit": "fc310b5898b44f5a84034fb25f724321de450509",
-    "assetName": "hephaestus-runtime-v1.2.38.tar.gz",
-    "assetSha256": "a8819cfae2c7aaa7791763545414dc477b6df3aec87488ac3dea9cca9865e570"
+    "ref": "v1.2.40",
+    "commit": "0c29abdb9505df32b61522861a17bbc537de5263",
+    "assetName": "hephaestus-runtime-v1.2.40.tar.gz",
+    "assetSha256": "f07527e45fa6be4538898a60e05e5113a72d2de2c61e2e021c1163954c5ba8c2"
   },
   "scripts": {
     "dev": "concurrently -k --success first -n NEXT,ELECTRON -c blue,magenta \"npm:dev:renderer\" \"npm:dev:electron\"",
@@ -165,8 +165,11 @@
     "better-sqlite3": "^12.11.1",
     "croner": "^9.1.0",
     "cross-spawn": "^7.0.6",
+    "cytoscape": "3.34.1",
+    "d3": "7.9.0",
     "dompurify": "^3.4.13",
     "electron-updater": "^6.3.9",
+    "fflate": "^0.8.2",
     "framer-motion": "12.42.2",
     "katex": "^0.18.4",
     "keytar": "^7.9.0",
@@ -181,6 +184,10 @@
   },
   "devDependencies": {
     "@electron/fuses": "^1.8.0",
+    "@emotion/react": "11.14.0",
+    "@emotion/styled": "11.14.1",
+    "@jbrowse/react-linear-genome-view2": "^4.3.0",
+    "@mui/material": "5.18.0",
     "@types/better-sqlite3": "^7.6.11",
     "@types/cross-spawn": "^6.0.6",
     "@types/node": "^22.7.4",
@@ -188,11 +195,17 @@
     "@types/react": "^18.3.11",
     "@types/react-dom": "^18.3.0",
     "@types/three": "0.173.0",
+    "@vitejs/plugin-react": "6.0.1",
     "concurrently": "^9.0.1",
     "cross-env": "^7.0.3",
     "electron": "^43.1.0",
     "electron-builder": "^26.15.6",
     "flint-chart": "0.5.1",
+    "indigo-ketcher": "^1.45.1",
+    "ketcher-core": "3.17.2",
+    "ketcher-react": "3.17.2",
+    "ketcher-standalone": "3.17.2",
+    "molstar": "5.11.0",
     "next": "^15.0.0",
     "playwright": "^1.60.0",
     "react": "^18.3.1",
@@ -201,6 +214,7 @@
     "vega": "6.4.0",
     "vega-interpreter": "2.3.2",
     "vega-lite": "6.4.3",
+    "vite": "8.2.2",
     "wait-on": "^8.0.1"
   },
   "engines": {

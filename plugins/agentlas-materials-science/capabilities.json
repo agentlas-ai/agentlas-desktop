@@ -1,0 +1,48 @@
+{
+  "schema": "agentlas.science-capabilities/v1",
+  "domain": "materials-science",
+  "providers": [
+    {
+      "id": "oqmd-optimade",
+      "baseUrl": "https://oqmd.org/optimade/v1",
+      "authentication": "none",
+      "license": "CC-BY-4.0",
+      "docsUrl": "https://www.oqmd.org/optimade/",
+      "operations": ["element-set structure search"],
+      "guards": { "timeoutMs": 30000, "minimumRequestIntervalMs": 1000, "maxResponseBytes": 8388608, "maxResults": 50, "maxOffset": 10000, "maxSitesPerStructure": 1000 }
+    },
+    {
+      "id": "cod",
+      "baseUrl": "https://www.crystallography.net/cod",
+      "authentication": "none",
+      "license": "CC0-1.0",
+      "docsUrl": "https://wiki.crystallography.net/RESTful_API/",
+      "operations": ["bounded ID/formula metadata search", "exact CIF fetch", "revision-pinned CIF fetch"],
+      "guards": { "timeoutMs": 20000, "minimumRequestIntervalMs": 1000, "maxSearchResponseBytes": 4194304, "maxCifBytes": 4194304, "maxMatches": 100, "maxNormalizedAtomSites": 5000, "countBeforeSearchFetch": true }
+    }
+  ],
+  "renderers": [
+    { "id": "agentlas.3dmol", "bundled": false, "hostRequired": true, "formats": ["cif", "vasp-poscar"], "evidence": "3Dmol parser documentation declares cif/mcif and vasp (CONTCAR/POSCAR) support." },
+    { "id": "agentlas.vega", "bundled": false, "hostRequired": true, "formats": ["agentlas.science-table/v1"] }
+  ],
+  "analysis": [
+    {
+      "id": "validated-lattice-metrics",
+      "contract": "agentlas.materials.lattice-metrics/v1",
+      "volumeMethods": ["triclinic-cell-parameters", "absolute-lattice-determinant"],
+      "declaredVolumeValidation": "caller-bounded-relative-tolerance-0-to-0.1",
+      "densityPolicy": "compute-only-with-explicit-composition-formula-units-Z-and-formula-weight",
+      "lineage": "normalized-source-sha256-and-raw-cif-sha256-when-applicable"
+    }
+  ],
+  "contracts": ["agentlas.materials.oqmd-optimade/v1", "agentlas.materials.cod-search/v1", "agentlas.materials.cod-crystal/v1", "agentlas.materials.lattice-metrics/v1", "agentlas.provenance-receipt/v1", "agentlas.science-table/v1"],
+  "limitations": [
+    "No renderer library is bundled; the Science Lab host must supply a declared compatible renderer.",
+    "Mol* compatibility is not claimed because this plugin has not verified a general crystal-CIF integration contract with the host Mol* surface.",
+    "POSCAR is emitted only when each OPTIMADE site maps to one fully occupied element; coordinates remain available otherwise.",
+    "The CIF adapter preserves the exact file but normalizes only selected scalar fields and deposited asymmetric-unit atom rows; it is not a complete CIF validator and does not expand symmetry.",
+    "COD formula search intentionally accepts only a constrained space-separated Hill-style subset. COD has no documented result limit, so result JSON is skipped when the count exceeds maxMatches.",
+    "OQMD OPTIMADE extension fields are provider-defined; null values are preserved as null and OQMD pagination links are neither trusted nor followed."
+    ,"Density is not inferred from formula text or site counts; it is withheld unless composition, formula-units Z, and formula weight are explicit in the normalized source."
+  ]
+}

@@ -105,6 +105,10 @@ for (const { name, doc } of standalone) {
       failures.push(`${name}: files 에 dist/${top}/** 이 없다 — 근거: ${why}`);
     }
   }
+  const policyResources = asStrings(doc.extraResources);
+  if (!policyResources.some((entry) => entry.includes("dist/product-extension-signing-policy.json"))) {
+    failures.push(`${name}: extraResources 에 product-extension-signing-policy.json 이 없다`);
+  }
 }
 
 // ② 복제본은 베이스의 상위집합이어야 한다
@@ -149,6 +153,10 @@ if (appFlag !== -1) {
   assert.ok(appPath, "--app 뒤에 .app 경로가 필요하다");
   const asarPath = path.join(appPath, "Contents", "Resources", "app.asar");
   assert.ok(existsSync(asarPath), `패키징된 앱에 app.asar 이 없다: ${asarPath}`);
+  const signingPolicyPath = path.join(appPath, "Contents", "Resources", "product-extension-signing-policy.json");
+  assert.ok(existsSync(signingPolicyPath), `패키징된 앱에 product-extension-signing-policy.json 이 없다: ${signingPolicyPath}`);
+  const { verifyProductExtensionSigningPolicyFile } = await import("../build-resources/product-extension-signing-policy.cjs");
+  verifyProductExtensionSigningPolicyFile(signingPolicyPath);
 
   const { default: asar } = await import("@electron/asar");
   const entries = asar.listPackage(asarPath);

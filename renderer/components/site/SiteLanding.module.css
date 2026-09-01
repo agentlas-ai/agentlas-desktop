@@ -73,7 +73,7 @@
 .selectedProject { max-width: 210px; overflow: hidden; color: #64716c; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .publishButton { height: 38px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 0 16px; border: 0; border-radius: 10px; background: var(--teal); color: #fff; cursor: pointer; font-size: 13px; font-weight: 680; box-shadow: 0 8px 18px rgb(15 123 101 / 0.18); }
 .publishButton:hover:not(:disabled) { background: var(--teal-dark); }
-.publishButton:disabled { background: #e5ebe8; color: #9ca7a2; cursor: not-allowed; box-shadow: none; }
+.publishButton:disabled { background: #e5ebe8; color: #59645f; cursor: not-allowed; box-shadow: none; }
 
 .hero {
   position: relative;
@@ -97,13 +97,13 @@
 .surfaceSwitch button[data-selected="true"] { border-color: #d9e7e1; background: #ecf7f3; color: var(--teal-dark); }
 .composer textarea { width: 100%; min-height: 92px; display: block; resize: none; padding: 18px 20px 12px; border: 0; outline: 0; background: transparent; color: var(--ink); font-size: 16px; line-height: 1.55; }
 .composer textarea:focus-visible { outline: none; }
-.composer textarea::placeholder { color: #9ba5a1; }
+.composer textarea::placeholder { color: #66716c; }
 .composerFooter { min-height: 62px; display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 8px 12px 12px 16px; }
 .composerContext { min-width: 0; }
-.keyboardHint { color: #909b96; font-size: 11px; }
+.keyboardHint { color: #66716c; font-size: 11px; }
 .sendButton { min-width: 112px; height: 42px; display: inline-flex; align-items: center; justify-content: center; gap: 9px; flex: 0 0 auto; padding: 0 13px 0 17px; border: 0; border-radius: 12px; background: #102d26; color: #fff; cursor: pointer; font-size: 12px; font-weight: 680; }
 .sendButton:hover:not(:disabled) { background: var(--teal-dark); }
-.sendButton:disabled { background: #e9eeeb; color: #a7b0ac; cursor: not-allowed; }
+.sendButton:disabled { background: #e9eeeb; color: #5f5c5a; cursor: not-allowed; }
 .targetChip { max-width: 480px; display: inline-flex; align-items: center; gap: 9px; padding: 4px 9px 4px 4px; border: 1px solid #dce7e2; border-radius: 10px; background: #f8fbf9; color: var(--ink); cursor: pointer; text-align: left; }
 .targetAvatar { width: 29px; height: 29px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 8px; background: #153e34; color: #c5f7e7; font-size: 11px; font-weight: 760; }
 .targetChip > span:nth-child(2) { min-width: 0; display: grid; gap: 1px; }
@@ -139,7 +139,7 @@
 .sectionHeading { min-height: 52px; display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 22px; }
 .sectionHeading > div { display: grid; gap: 7px; }
 .sectionHeading h2 { margin: 0; font-size: 26px; font-weight: 690; letter-spacing: -0.045em; }
-.sectionHeading > p { margin: 0 0 3px; color: #7c8883; font-size: 12px; }
+.sectionHeading > p { margin: 0 0 3px; color: #66716c; font-size: 12px; }
 .templateGrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
 .templateCard { position: relative; min-width: 0; overflow: hidden; padding: 0; border: 1px solid var(--line); border-radius: 17px; background: #fff; color: var(--ink); cursor: pointer; text-align: left; transition: border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease; }
 .templateCard:hover { transform: translateY(-2px); border-color: #b8d3c8; box-shadow: 0 15px 32px rgb(23 66 55 / 0.09); }
@@ -147,8 +147,8 @@
 .templatePreview { height: 188px; display: grid; place-items: center; overflow: hidden; border-bottom: 1px solid var(--line); background: linear-gradient(145deg, #f8fbf9, #eef6f2); }
 .templateCopy { min-height: 75px; display: grid; align-content: center; gap: 5px; padding: 14px 52px 14px 17px; }
 .templateCopy b { font-size: 14px; font-weight: 690; }
-.templateCopy small { overflow: hidden; color: #7a8580; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.templateArrow { position: absolute; right: 17px; bottom: 27px; color: #8a9691; font-size: 16px; }
+.templateCopy small { overflow: hidden; color: #66716c; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.templateArrow { position: absolute; right: 17px; bottom: 27px; color: #66716c; font-size: 16px; }
 
 .webArt { position: relative; width: 194px; height: 119px; overflow: hidden; border: 1px solid #c9dad3; border-radius: 9px; background: #fff; box-shadow: 0 13px 28px rgb(34 77 65 / 0.12); }
 .webChrome { height: 17px; display: flex; align-items: center; gap: 3px; padding: 0 7px; border-bottom: 1px solid #e2ebe7; background: #f8faf9; }
@@ -184,14 +184,14 @@
 
 .agentApps { padding: 70px 0 64px; border-top: 1px solid var(--line); }
 .galleryToolbar { min-height: 42px; display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: -5px 0 19px; }
-.resultCount { color: #7b8782; font-size: 11px; }
+.resultCount { color: #66716c; font-size: 11px; }
 .searchBox,
 .pickerSearch { height: 38px; display: flex; align-items: center; gap: 8px; padding: 0 11px; border: 1px solid #dfe8e4; border-radius: 10px; background: #fff; color: #84908b; }
 .searchBox { width: min(255px, 46vw); }
 .searchBox input,
 .pickerSearch input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--ink); font-size: 12px; }
 .searchBox input::placeholder,
-.pickerSearch input::placeholder { color: #9aa49f; }
+.pickerSearch input::placeholder { color: #66716c; }
 .agentAppGrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px 18px; }
 .agentAppCard { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 16px; background: #fff; transition: border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease; }
 .agentAppCard:hover { transform: translateY(-1px); border-color: #c6d9d1; box-shadow: 0 13px 30px rgb(29 70 59 / 0.07); }
@@ -233,7 +233,7 @@
 .emptyGallery { min-height: 270px; display: grid; place-content: center; justify-items: center; gap: 8px; padding: 30px; border: 1px dashed #cedbd5; border-radius: 17px; background: #fafcfb; text-align: center; }
 .emptyGlyph { width: 45px; height: 45px; display: grid; place-items: center; margin-bottom: 4px; border-radius: 13px; background: #e5f4ee; color: var(--teal); font-size: 17px; font-weight: 760; }
 .emptyGallery h3 { margin: 0; font-size: 14px; }
-.emptyGallery p { margin: 0; color: #818c87; font-size: 11px; }
+.emptyGallery p { margin: 0; color: #66716c; font-size: 11px; }
 .pagination { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 28px; }
 .pagination button { min-width: 74px; height: 32px; border: 1px solid #dce6e2; border-radius: 8px; background: #fff; color: #53605b; cursor: pointer; font-size: 10px; }
 .pagination button:disabled { color: #b1b9b5; cursor: not-allowed; }

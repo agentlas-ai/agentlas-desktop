@@ -5478,25 +5478,6 @@ export function OneShell() {
       { displayUserMessage: false },
     );
   }, [appLocale, busy, conversation?.id, focusOneOutput, openCreateAgentDialog, router, selected, startRun]);
-  const acceptSelectedResult = useCallback(async () => {
-    const api = ipc();
-    if (
-      !api
-      || !selected
-      || selected.canonicalStatus !== "partial"
-      || !selected.chatId
-      || !receipt
-      || receipt.status !== "completed"
-      || receipt.chatId !== selected.chatId
-    ) throw new Error("Result acceptance is no longer available");
-    await api.tasks.acceptResult({
-      taskId: selected.taskId,
-      expectedRunId: receipt.runId,
-      expectedVersion: selected.canonicalVersion,
-    });
-    window.dispatchEvent(new CustomEvent("agentlas:tasks-changed"));
-    await refreshAll();
-  }, [receipt, refreshAll, selected]);
   const selectedCanContinueInPlace = Boolean(
     selected?.chatId && ["partial", "completed", "failed"].includes(selected.canonicalStatus ?? ""),
   );
@@ -6598,7 +6579,6 @@ export function OneShell() {
                       onSemanticAction={handleOneSemanticAction}
                       onOpenAgentDraft={openCreateAgentDialog}
                       onRetryUnfinished={retryUnfinished}
-                      onAcceptResult={acceptSelectedResult}
                       autoRecovery={autoRecovery}
                       valueClosure={selectedValueClosure}
                       experienceReuse={selectedExperienceReuse}
@@ -7420,7 +7400,6 @@ export function OneShell() {
               onSemanticAction={handleOneSemanticAction}
               onOpenAgentDraft={openCreateAgentDialog}
               onRetryUnfinished={retryUnfinished}
-              onAcceptResult={acceptSelectedResult}
               autoRecovery={autoRecovery}
               valueClosure={selectedValueClosure}
               experienceReuse={selectedExperienceReuse}

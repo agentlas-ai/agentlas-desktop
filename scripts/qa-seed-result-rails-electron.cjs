@@ -110,7 +110,10 @@ app.whenReady().then(() => {
       agentId: chat.agentId,
       payload: { taskId: task.id, resultSummary: manifest.summary, oneArtifacts: boundRuntimeArtifacts },
     });
-    task = tasks.setCanonicalTaskStatus(task.id, "completed");
+    task = tasks.setCanonicalTaskStatus(
+      task.id,
+      input.oneSurface.taskStatus === "partial" ? "partial" : "completed",
+    );
   }
   process.stdout.write(`${JSON.stringify({ chat, surface, task, runId: oneRunId, artifactCount })}\n`);
   app.quit();

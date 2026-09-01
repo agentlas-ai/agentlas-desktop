@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentlas.science/protein-structure-input/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["structure", "representation"],
+  "properties": {
+    "structure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceId", "sourceVersionId", "contentSha256", "format"],
+      "properties": {
+        "sourceId": { "type": "string", "format": "uuid" },
+        "sourceVersionId": { "type": "string", "format": "uuid" },
+        "contentSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "format": { "enum": ["pdb", "mmcif"] }
+      }
+    },
+    "representation": { "enum": ["cartoon", "ball-and-stick", "surface"] },
+    "colorTheme": { "enum": ["chain-id", "element-symbol", "secondary-structure"] }
+  }
+}

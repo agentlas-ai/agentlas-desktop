@@ -145,6 +145,15 @@ import type {
   PluginProofReceipt,
 } from "./plugin-builder";
 import type {
+  ProductExtensionInstallReceipt,
+  ProductExtensionStatus,
+  ProductExtensionUninstallReceipt,
+  ProductExtensionViewBounds,
+  ProductExtensionViewStatus,
+  ScienceSuiteInstallReceipt,
+  ScienceSuiteStatus,
+} from "./product-extension";
+import type {
   GetOneHubDerivativeDraftInput,
   OneHubDerivativeDraft,
 } from "./one-hub-derivative";
@@ -410,6 +419,16 @@ export type {
   PluginInstallReceipt,
   PluginProofReceipt,
 } from "./plugin-builder";
+export type {
+  ProductExtensionInstallReceipt,
+  ProductExtensionStatus,
+  ProductExtensionUninstallReceipt,
+  ProductExtensionViewBounds,
+  ProductExtensionViewStatus,
+  ScienceSuiteInstallProgress,
+  ScienceSuiteInstallReceipt,
+  ScienceSuiteStatus,
+} from "./product-extension";
 export type {
   CreateOneValueClosureInput,
   OneOriginalPreservationStatus,
@@ -6309,6 +6328,18 @@ export interface AgentlasIpc {
     revokeDevice: (deviceId: string) => Promise<{ ok: boolean }>;
     /** Reveals the main-process log file. Log contents never cross IPC. */
     revealLog: () => Promise<{ ok: boolean }>;
+  };
+  /** First-party product extensions are signed, separately installed products. */
+  productExtensions: {
+    scienceStatus: () => Promise<ProductExtensionStatus>;
+    scienceSuiteStatus: () => Promise<ScienceSuiteStatus>;
+    installScience: () => Promise<ProductExtensionInstallReceipt>;
+    installScienceSuite: () => Promise<ScienceSuiteInstallReceipt>;
+    setScienceEnabled: (enabled: boolean) => Promise<ProductExtensionStatus>;
+    uninstallScience: () => Promise<ProductExtensionUninstallReceipt>;
+    openScienceView: (bounds: ProductExtensionViewBounds) => Promise<ProductExtensionViewStatus>;
+    setScienceViewBounds: (bounds: ProductExtensionViewBounds) => Promise<{ ok: boolean }>;
+    closeScienceView: () => Promise<{ ok: true }>;
   };
   /**
    * Resident judgment bridge for renderer style/format inference. Narrow and

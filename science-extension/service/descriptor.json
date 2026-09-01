@@ -1,0 +1,802 @@
+{
+  "schema": "agentlas.science-service/v2",
+  "protocolVersion": 2,
+  "labs": [
+    {
+      "id": "data-table",
+      "label": "Data Table Lab",
+      "artifactKinds": ["table"],
+      "rendererIds": ["agentlas.table"],
+      "supportedOperations": ["plan", "read", "observe", "validate", "compare", "cite"],
+      "aiCallableOperations": ["read", "observe", "compare"]
+    },
+    {
+      "id": "statistics-analysis",
+      "label": "Statistical Analysis Lab",
+      "artifactKinds": ["table"],
+      "rendererIds": ["agentlas.table"],
+      "supportedOperations": ["plan", "read", "execute", "observe", "validate", "compare", "cite"],
+      "aiCallableOperations": ["read", "execute", "observe", "compare"]
+    },
+    {
+      "id": "data-visualization",
+      "label": "Data Visualization Lab",
+      "artifactKinds": ["chart.vega", "chart.numeric-3d"],
+      "rendererIds": ["agentlas.vega", "agentlas.three-numeric"],
+      "supportedOperations": ["plan", "read", "execute", "observe", "validate", "save-version", "compare", "cite"],
+      "aiCallableOperations": ["read", "execute", "observe", "save-version", "compare"]
+    },
+    {
+      "id": "economic-indicators",
+      "label": "Economic Indicators Lab",
+      "artifactKinds": ["chart.vega"],
+      "rendererIds": ["agentlas.vega"],
+      "supportedOperations": ["plan", "read", "execute", "observe", "validate", "compare", "cite"],
+      "aiCallableOperations": ["read", "execute", "observe", "compare"]
+    },
+    {
+      "id": "literature-network",
+      "label": "Literature & Citation Network Lab",
+      "artifactKinds": ["literature.citation-network"],
+      "rendererIds": ["agentlas.cytoscape"],
+      "supportedOperations": ["plan", "read", "execute", "observe", "validate", "compare", "cite"],
+      "aiCallableOperations": ["read", "execute", "observe", "compare"]
+    },
+    {
+      "id": "astronomy-sky",
+      "label": "Astronomy Sky Catalog Lab",
+      "artifactKinds": ["astronomy.sky-catalog"],
+      "rendererIds": ["agentlas.d3-sky"],
+      "supportedOperations": ["plan", "read", "execute", "observe", "validate", "compare", "cite"],
+      "aiCallableOperations": ["read", "execute", "observe", "compare"]
+    },
+    {
+      "id": "biodiversity-map",
+      "label": "Earth & Ecology Biodiversity Lab",
+      "artifactKinds": ["chart.vega"],
+      "rendererIds": ["agentlas.vega"],
+      "supportedOperations": ["plan", "read", "execute", "observe", "validate", "compare", "cite"],
+      "aiCallableOperations": ["read", "execute", "observe", "compare"]
+    },
+    {
+      "id": "earthquake-observations",
+      "label": "Earthquake Observations Lab",
+      "artifactKinds": ["chart.vega"],
+      "rendererIds": ["agentlas.vega"],
+      "supportedOperations": ["plan", "read", "execute", "observe", "validate", "compare", "cite"],
+      "aiCallableOperations": ["read", "execute", "observe", "compare"]
+    },
+    {
+      "id": "physics-data",
+      "label": "Physics Measurement Data Lab",
+      "artifactKinds": ["table", "chart.vega"],
+      "rendererIds": ["agentlas.table", "agentlas.vega"],
+      "supportedOperations": ["plan", "read", "execute", "observe", "validate", "compare", "cite"],
+      "aiCallableOperations": ["read", "execute", "observe", "compare"]
+    },
+    {
+      "id": "materials-structures",
+      "label": "Materials Structure Lab",
+      "artifactKinds": ["table", "chart.vega"],
+      "rendererIds": ["agentlas.table", "agentlas.vega"],
+      "supportedOperations": ["plan", "read", "execute", "observe", "validate", "compare", "cite"],
+      "aiCallableOperations": ["read", "execute", "observe", "compare"]
+    },
+    {
+      "id": "genomics-variants",
+      "label": "Genomics Variant Lab",
+      "artifactKinds": ["genomics.variant-track"],
+      "rendererIds": ["agentlas.jbrowse"],
+      "supportedOperations": ["plan", "read", "execute", "observe", "validate", "compare", "cite"],
+      "aiCallableOperations": ["read", "execute", "observe", "compare"]
+    },
+    {
+      "id": "molecular-structure",
+      "label": "Molecular Structure Lab",
+      "artifactKinds": ["protein.structure"],
+      "rendererIds": ["agentlas.molstar"],
+      "supportedOperations": ["plan", "read", "execute", "observe", "validate", "save-version", "compare", "cite"],
+      "aiCallableOperations": ["read", "execute", "observe", "save-version", "compare"]
+    },
+    {
+      "id": "chemistry",
+      "label": "Chemistry Lab",
+      "artifactKinds": ["chemistry.document"],
+      "rendererIds": ["agentlas.ketcher"],
+      "supportedOperations": ["plan", "read", "execute", "observe", "validate", "save-version", "compare", "cite"],
+      "aiCallableOperations": ["read", "execute", "observe", "save-version", "compare"]
+    }
+  ],
+  "tools": [
+    {
+      "id": "agentlas.statistics-analysis",
+      "version": "1.9.0",
+      "runtime": "native-sidecar",
+      "capability": "science:compute",
+      "network": "deny",
+      "labId": "statistics-analysis",
+      "operation": "execute",
+      "primaryArtifact": { "ordinal": 1, "kind": "table", "rendererId": "agentlas.table", "labId": "statistics-analysis" },
+      "mcp": {
+        "name": "run_statistical_analysis",
+        "route": "/v1/labs/statistics-analysis/tools/run",
+        "description": "Run a bounded local statistical method with an explicit descriptive, exploratory, or confirmatory purpose. Inline requests carry request.data. Source-bound Kaplan-Meier, Welch one-way ANOVA, Friedman, ROC, two-factor quadratic response-surface, and Gaussian random-intercept LMM requests omit request.data and deterministically project one exact immutable Data Table through a method-discriminated source_table. Raw data and source_table are mutually exclusive. Confirmatory runs require an exact frozen AnalysisSpec version/hash, exact input artifact versions/hashes, a model hash, and an agentlas.statistics.method:<method> token frozen in requiredDiagnostics; the projection and binding are preserved in run input, provenance, artifact, and receipt.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tool_call_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "request": {
+              "type": "object",
+              "properties": {
+                "schema": { "const": "agentlas.science.statistics.request/v1" },
+                "method": { "type": "string", "enum": ["descriptive", "distribution_fit", "pearson_correlation", "spearman_correlation", "kendall_correlation", "independent_t_test", "welch_t_test", "paired_t_test", "one_way_anova", "welch_one_way_anova", "two_way_anova", "mann_whitney_u", "wilcoxon_signed_rank", "kruskal_wallis", "friedman_test", "linear_regression", "logistic_regression", "poisson_regression", "chi_square_test", "fisher_exact_test", "multiple_testing_correction", "confidence_interval", "kaplan_meier", "log_rank_test", "cox_proportional_hazards", "principal_component_analysis", "time_series_diagnostics", "roc_curve_analysis", "meta_analysis", "response_surface_regression", "gaussian_random_intercept_lmm"] },
+                "data": { "type": "object" },
+                "options": { "type": "object" },
+                "execution": {
+                  "type": "object",
+                  "properties": {
+                    "purpose": { "type": "string", "enum": ["descriptive", "exploratory", "confirmatory"] },
+                    "input_artifacts": {
+                      "type": "array", "maxItems": 100,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "artifact_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+                          "artifact_version": { "type": "integer", "minimum": 1 },
+                          "content_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+                        },
+                        "required": ["artifact_id", "artifact_version", "content_sha256"],
+                        "additionalProperties": false
+                      }
+                    },
+                    "analysis_spec": {
+                      "type": ["object", "null"],
+                      "properties": {
+                        "analysis_spec_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+                        "version": { "type": "integer", "minimum": 1 },
+                        "content_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+                        "status": { "const": "frozen" },
+                        "model_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+                      },
+                      "required": ["analysis_spec_id", "version", "content_sha256", "status", "model_sha256"],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": ["purpose", "input_artifacts", "analysis_spec"],
+                  "additionalProperties": false,
+                  "allOf": [
+                    {
+                      "if": { "properties": { "purpose": { "const": "confirmatory" } }, "required": ["purpose"] },
+                      "then": { "properties": { "input_artifacts": { "minItems": 1 }, "analysis_spec": { "type": "object" } } }
+                    },
+                    {
+                      "if": { "properties": { "purpose": { "enum": ["descriptive", "exploratory"] } }, "required": ["purpose"] },
+                      "then": { "properties": { "analysis_spec": { "type": "null" } } }
+                    }
+                  ]
+                }
+              },
+              "required": ["schema", "method", "execution"],
+              "additionalProperties": false
+            },
+            "source_table": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "artifact_id": { "type": "string", "format": "uuid" },
+                    "artifact_version": { "type": "integer", "minimum": 1 },
+                    "content_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+                    "time_column": { "type": "string", "minLength": 1, "maxLength": 240 },
+                    "event_column": { "type": "string", "minLength": 1, "maxLength": 240 },
+                    "label": { "type": "string", "minLength": 1, "maxLength": 128 }
+                  },
+                  "required": ["artifact_id", "artifact_version", "content_sha256", "time_column", "event_column"],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "artifact_id": { "type": "string", "format": "uuid" },
+                    "artifact_version": { "type": "integer", "minimum": 1 },
+                    "content_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+                    "method": { "const": "welch_one_way_anova" },
+                    "projection_kind": { "const": "welch-one-way-anova-long" },
+                    "group_column": { "type": "string", "minLength": 1, "maxLength": 240 },
+                    "value_column": { "type": "string", "minLength": 1, "maxLength": 240 }
+                  },
+                  "required": ["artifact_id", "artifact_version", "content_sha256", "method", "projection_kind", "group_column", "value_column"],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "artifact_id": { "type": "string", "format": "uuid" },
+                    "artifact_version": { "type": "integer", "minimum": 1 },
+                    "content_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+                    "method": { "const": "friedman_test" },
+                    "projection_kind": { "const": "friedman-long" },
+                    "block_column": { "type": "string", "minLength": 1, "maxLength": 240 },
+                    "condition_column": { "type": "string", "minLength": 1, "maxLength": 240 },
+                    "value_column": { "type": "string", "minLength": 1, "maxLength": 240 }
+                  },
+                  "required": ["artifact_id", "artifact_version", "content_sha256", "method", "projection_kind", "block_column", "condition_column", "value_column"],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "artifact_id": { "type": "string", "format": "uuid" },
+                    "artifact_version": { "type": "integer", "minimum": 1 },
+                    "content_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+                    "method": { "const": "roc_curve_analysis" },
+                    "projection_kind": { "const": "roc-curve-analysis" },
+                    "outcome_column": { "type": "string", "minLength": 1, "maxLength": 240 },
+                    "score_column": { "type": "string", "minLength": 1, "maxLength": 240 },
+                    "observation_label_column": { "type": ["string", "null"], "minLength": 1, "maxLength": 240 }
+                  },
+                  "required": ["artifact_id", "artifact_version", "content_sha256", "method", "projection_kind", "outcome_column", "score_column"],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "artifact_id": { "type": "string", "format": "uuid" },
+                    "artifact_version": { "type": "integer", "minimum": 1 },
+                    "content_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+                    "method": { "const": "response_surface_regression" },
+                    "projection_kind": { "const": "response-surface-regression" },
+                    "response_column": { "type": "string", "minLength": 1, "maxLength": 240 },
+                    "factor1_column": { "type": "string", "minLength": 1, "maxLength": 240 },
+                    "factor2_column": { "type": "string", "minLength": 1, "maxLength": 240 }
+                  },
+                  "required": ["artifact_id", "artifact_version", "content_sha256", "method", "projection_kind", "response_column", "factor1_column", "factor2_column"],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "artifact_id": { "type": "string", "format": "uuid" },
+                    "artifact_version": { "type": "integer", "minimum": 1 },
+                    "content_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+                    "method": { "const": "gaussian_random_intercept_lmm" },
+                    "projection_kind": { "const": "gaussian-random-intercept-lmm-long" },
+                    "outcome_column": { "type": "string", "minLength": 1, "maxLength": 128 },
+                    "group_column": { "type": "string", "minLength": 1, "maxLength": 128 },
+                    "observation_label_column": { "type": ["string", "null"], "minLength": 1, "maxLength": 128 },
+                    "fixed_effects": {
+                      "type": "array",
+                      "maxItems": 48,
+                      "items": {
+                        "oneOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "column": { "type": "string", "minLength": 1, "maxLength": 128 },
+                              "type": { "const": "numeric" }
+                            },
+                            "required": ["column", "type"],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "column": { "type": "string", "minLength": 1, "maxLength": 128 },
+                              "type": { "const": "categorical" },
+                              "levels": { "type": "array", "minItems": 2, "maxItems": 32, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 128 } },
+                              "reference": { "type": "string", "minLength": 1, "maxLength": 128 }
+                            },
+                            "required": ["column", "type", "levels", "reference"],
+                            "additionalProperties": false
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "required": ["artifact_id", "artifact_version", "content_sha256", "method", "projection_kind", "outcome_column", "group_column", "fixed_effects"],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "required": ["tool_call_id", "request"],
+          "oneOf": [
+            { "required": ["source_table"], "properties": { "request": { "properties": { "method": { "const": "kaplan_meier" } }, "not": { "required": ["data"] } }, "source_table": { "properties": { "time_column": { "type": "string" } }, "required": ["time_column", "event_column"] } } },
+            { "required": ["source_table"], "properties": { "request": { "properties": { "method": { "const": "welch_one_way_anova" } }, "not": { "required": ["data"] } }, "source_table": { "properties": { "method": { "const": "welch_one_way_anova" }, "projection_kind": { "const": "welch-one-way-anova-long" } }, "required": ["method", "projection_kind"] } } },
+            { "required": ["source_table"], "properties": { "request": { "properties": { "method": { "const": "friedman_test" } }, "not": { "required": ["data"] } }, "source_table": { "properties": { "method": { "const": "friedman_test" }, "projection_kind": { "const": "friedman-long" } }, "required": ["method", "projection_kind"] } } },
+            { "required": ["source_table"], "properties": { "request": { "properties": { "method": { "const": "roc_curve_analysis" } }, "not": { "required": ["data"] } }, "source_table": { "properties": { "method": { "const": "roc_curve_analysis" }, "projection_kind": { "const": "roc-curve-analysis" } }, "required": ["method", "projection_kind"] } } },
+            { "required": ["source_table"], "properties": { "request": { "properties": { "method": { "const": "response_surface_regression" } }, "not": { "required": ["data"] } }, "source_table": { "properties": { "method": { "const": "response_surface_regression" }, "projection_kind": { "const": "response-surface-regression" } }, "required": ["method", "projection_kind"] } } },
+            { "required": ["source_table"], "properties": { "request": { "properties": { "method": { "const": "gaussian_random_intercept_lmm" } }, "not": { "required": ["data"] } }, "source_table": { "properties": { "method": { "const": "gaussian_random_intercept_lmm" }, "projection_kind": { "const": "gaussian-random-intercept-lmm-long" } }, "required": ["method", "projection_kind"] } } },
+            {
+              "not": { "required": ["source_table"] },
+              "properties": { "request": { "required": ["data"] } }
+            }
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "id": "agentlas.table-to-vega",
+      "version": "1.0.0",
+      "runtime": "native-sidecar",
+      "capability": "science:compute",
+      "network": "deny",
+      "labId": "data-visualization",
+      "operation": "execute",
+      "primaryArtifact": { "ordinal": 1, "kind": "chart.vega", "rendererId": "agentlas.vega", "labId": "data-visualization" },
+      "mcp": {
+        "name": "render_table_as_vega",
+        "route": "/v1/labs/data-visualization/tools/table-to-vega",
+        "description": "Create a durable Agentlas Science Vega artifact from measured tabular rows. The exact run, artifact version, and Data Visualization Lab ownership are recorded in the current research turn.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tool_call_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "title": { "type": "string", "minLength": 1, "maxLength": 240 },
+            "x_field": { "type": "string", "minLength": 1, "maxLength": 80 },
+            "y_field": { "type": "string", "minLength": 1, "maxLength": 80 },
+            "rows": { "type": "array", "minItems": 1, "maxItems": 5000, "items": { "type": "object" } }
+          },
+          "required": ["tool_call_id", "title", "x_field", "y_field", "rows"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "id": "agentlas.academic-to-citation-network",
+      "version": "1.0.0",
+      "runtime": "native-sidecar",
+      "capability": "science:compute",
+      "network": "deny",
+      "labId": "literature-network",
+      "operation": "execute",
+      "primaryArtifact": { "ordinal": 1, "kind": "literature.citation-network", "rendererId": "agentlas.cytoscape", "labId": "literature-network" },
+      "mcp": {
+        "name": "build_literature_citation_network",
+        "route": "/v1/labs/literature-network/tools/academic-to-citation-network",
+        "description": "Build a durable interactive citation network from one exact successful academic-search run. OpenAlex citation and related-work links remain separately typed, isolated records are preserved, and no edges are invented.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tool_call_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "search_run_id": { "type": "string" },
+            "title": { "type": "string", "minLength": 1, "maxLength": 240 },
+            "max_records": { "type": "integer", "minimum": 2, "maximum": 200 }
+          },
+          "required": ["tool_call_id", "search_run_id", "title"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "id": "agentlas.astronomy-to-sky-map",
+      "version": "1.0.0",
+      "runtime": "native-sidecar",
+      "capability": "science:compute",
+      "network": "deny",
+      "labId": "astronomy-sky",
+      "operation": "execute",
+      "primaryArtifact": { "ordinal": 1, "kind": "astronomy.sky-catalog", "rendererId": "agentlas.d3-sky", "labId": "astronomy-sky" },
+      "mcp": {
+        "name": "build_astronomy_sky_map",
+        "route": "/v1/labs/astronomy-sky/tools/astronomy-to-sky-map",
+        "description": "Build a durable interactive sky-catalog artifact from one exact successful SIMBAD TAP cone-search run. The raw provider response, normalized catalog, coordinates, measured fields, and local D3 view remain hash-linked; missing measurements are never imputed.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tool_call_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "catalog_run_id": { "type": "string" },
+            "title": { "type": "string", "minLength": 1, "maxLength": 240 }
+          },
+          "required": ["tool_call_id", "catalog_run_id", "title"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "id": "agentlas.astronomy-light-curve-periodicity",
+      "version": "1.0.0",
+      "runtime": "native-sidecar",
+      "capability": "science:compute",
+      "network": "deny",
+      "labId": "data-visualization",
+      "operation": "execute",
+      "primaryArtifact": { "ordinal": 1, "kind": "chart.vega", "rendererId": "agentlas.vega", "labId": "data-visualization" },
+      "mcp": {
+        "name": "analyze_light_curve_periodicity",
+        "route": "/v1/labs/data-visualization/tools/astronomy-light-curve-periodicity",
+        "description": "Project one exact immutable Data Table into a bounded irregular astronomical light curve and run a deterministic weighted floating-mean generalized Lomb-Scargle analysis. Every nullable observation is preserved, no measurement is imputed, the source artifact version/hash and column mapping remain bound to the run, and the result materializes publication tables plus a durable Vega-Lite Figure. This tool does not claim a false-alarm probability or period confidence interval.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tool_call_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "title": { "type": "string", "minLength": 1, "maxLength": 240 },
+            "source_table": {
+              "type": "object",
+              "properties": {
+                "artifact_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+                "artifact_version": { "type": "integer", "minimum": 1 },
+                "content_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+              },
+              "required": ["artifact_id", "artifact_version", "content_sha256"],
+              "additionalProperties": false
+            },
+            "columns": {
+              "type": "object",
+              "properties": {
+                "observation_id_column": { "type": "string", "minLength": 1, "maxLength": 240 },
+                "time_column": { "type": "string", "minLength": 1, "maxLength": 240 },
+                "value_column": { "type": "string", "minLength": 1, "maxLength": 240 },
+                "standard_error_column": { "type": "string", "minLength": 1, "maxLength": 240 },
+                "use_column": { "type": "string", "minLength": 1, "maxLength": 240 }
+              },
+              "required": ["observation_id_column", "time_column", "value_column", "standard_error_column", "use_column"],
+              "additionalProperties": false
+            },
+            "target_id": { "type": "string", "minLength": 1, "maxLength": 500 },
+            "time_system": { "type": "string", "enum": ["BJD_TDB", "BJD_UTC", "HJD_UTC", "JD_UTC", "MJD_UTC", "relative-day"] },
+            "time_offset_days": { "type": "number", "minimum": -1000000000, "maximum": 1000000000 },
+            "value_kind": { "type": "string", "enum": ["magnitude", "flux", "relative-flux", "generic"] },
+            "value_unit": { "type": ["string", "null"], "minLength": 1, "maxLength": 80 },
+            "weighting": { "type": "string", "enum": ["auto", "weighted", "unweighted"] },
+            "minimum_period_days": { "type": "number", "exclusiveMinimum": 0, "maximum": 1000000000 },
+            "maximum_period_days": { "type": "number", "exclusiveMinimum": 0, "maximum": 1000000000 },
+            "frequency_count": { "type": "integer", "minimum": 32, "maximum": 5000 },
+            "maximum_peaks": { "type": "integer", "minimum": 1, "maximum": 20, "default": 5 }
+          },
+          "required": ["tool_call_id", "title", "source_table", "columns", "target_id", "time_system", "time_offset_days", "value_kind", "value_unit", "weighting", "minimum_period_days", "maximum_period_days", "frequency_count"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "id": "agentlas.biodiversity-to-map",
+      "version": "1.0.0",
+      "runtime": "native-sidecar",
+      "capability": "science:compute",
+      "network": "deny",
+      "labId": "biodiversity-map",
+      "operation": "execute",
+      "primaryArtifact": { "ordinal": 1, "kind": "chart.vega", "rendererId": "agentlas.vega", "labId": "biodiversity-map" },
+      "mcp": {
+        "name": "build_biodiversity_occurrence_map",
+        "route": "/v1/labs/biodiversity-map/tools/biodiversity-to-map",
+        "description": "Build a durable interactive Vega occurrence map from one exact successful GBIF catalog run. Raw provider JSON, immutable Source bytes, normalized coordinates, provider issue flags, and the local map remain hash-linked; no missing values are imputed.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tool_call_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "catalog_run_id": { "type": "string" },
+            "title": { "type": "string", "minLength": 1, "maxLength": 240 }
+          },
+          "required": ["tool_call_id", "catalog_run_id", "title"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "id": "agentlas.earthquake-to-map",
+      "version": "1.0.0",
+      "runtime": "native-sidecar",
+      "capability": "science:compute",
+      "network": "deny",
+      "labId": "earthquake-observations",
+      "operation": "execute",
+      "primaryArtifact": { "ordinal": 1, "kind": "chart.vega", "rendererId": "agentlas.vega", "labId": "earthquake-observations" },
+      "mcp": {
+        "name": "build_earthquake_observation_map",
+        "route": "/v1/labs/earthquake-observations/tools/earthquake-to-map",
+        "description": "Build a durable interactive Vega earthquake map from one exact successful USGS FDSN catalog run. Raw GeoJSON, immutable Source bytes, normalized event fields, missing values, and the local map remain hash-linked.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tool_call_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "catalog_run_id": { "type": "string" },
+            "title": { "type": "string", "minLength": 1, "maxLength": 240 }
+          },
+          "required": ["tool_call_id", "catalog_run_id", "title"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "id": "agentlas.earth-gutenberg-richter-analysis",
+      "version": "1.0.0",
+      "runtime": "electron-main",
+      "capability": "science:compute",
+      "network": "deny",
+      "labId": "earthquake-observations",
+      "operation": "execute",
+      "primaryArtifact": { "ordinal": 1, "kind": "chart.vega", "rendererId": "agentlas.vega", "labId": "earthquake-observations" },
+      "mcp": {
+        "name": "analyze_earthquake_gutenberg_richter",
+        "route": "/v1/labs/earthquake-observations/tools/gutenberg-richter",
+        "description": "Analyze one exact completed USGS catalog run with a researcher-supplied completeness magnitude, bin width, and single magnitude type. The trusted host persists the Aki MLE result, inclusion audit, source hashes, and a durable interactive magnitude-frequency Figure in the Earthquake Observations Lab; completeness estimation, magnitude conversion, declustering, and forecasting remain unsupported.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tool_call_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "catalog_run_id": { "type": "string", "format": "uuid" },
+            "completeness_magnitude": { "type": "number", "minimum": -2, "maximum": 10 },
+            "bin_width": { "type": "number", "minimum": 0.01, "maximum": 1, "default": 0.1 },
+            "magnitude_type": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,40}$" },
+            "confidence_level": { "type": "number", "enum": [0.9, 0.95, 0.99], "default": 0.95 },
+            "title": { "type": "string", "minLength": 1, "maxLength": 240 }
+          },
+          "required": ["tool_call_id", "catalog_run_id", "completeness_magnitude", "magnitude_type"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "id": "agentlas.physics-dataset",
+      "version": "1.0.0",
+      "runtime": "native-sidecar",
+      "capability": "science:compute",
+      "network": "deny",
+      "labId": "physics-data",
+      "operation": "execute",
+      "primaryArtifact": { "ordinal": 1, "kind": "table", "rendererId": "agentlas.table", "labId": "physics-data" },
+      "mcp": {
+        "name": "materialize_physics_measurement_dataset",
+        "route": "/v1/labs/physics-data/tools/materialize-dataset",
+        "description": "Normalize a bounded Physics measurement table with exact number/string types and optional units through the installed Agentlas Physics runtime, then persist its hash-bound rows in the Physics Data Lab without truncation or imputation.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tool_call_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "title": { "type": "string", "minLength": 1, "maxLength": 500 },
+            "columns": {
+              "type": "array", "minItems": 1, "maxItems": 64,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": { "type": "string", "minLength": 1, "maxLength": 160 },
+                  "type": { "type": "string", "enum": ["number", "string"] },
+                  "unit": { "type": ["string", "null"], "maxLength": 120 }
+                },
+                "required": ["name", "type"],
+                "additionalProperties": false
+              }
+            },
+            "rows": { "type": "array", "maxItems": 10000, "items": { "type": "array", "maxItems": 64, "items": { "type": ["number", "string", "null"] } } }
+          },
+          "required": ["tool_call_id", "title", "columns", "rows"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "id": "agentlas.physics-hepdata-chi-square-analysis",
+      "version": "1.0.0",
+      "runtime": "electron-main",
+      "capability": "science:compute",
+      "network": "deny",
+      "labId": "physics-data",
+      "operation": "execute",
+      "primaryArtifact": { "ordinal": 1, "kind": "chart.vega", "rendererId": "agentlas.vega", "labId": "physics-data" },
+      "mcp": {
+        "name": "analyze_hepdata_chi_square",
+        "route": "/v1/labs/physics-data/tools/hepdata-chi-square",
+        "description": "Compare an explicit prediction vector with one exact completed HEPData table run. The trusted host reconstructs and hash-checks the normalized provider table, applies only researcher-selected uncertainty labels as independent diagonal components, persists directional asymmetric pulls, chi-square, degrees of freedom, p-value, inclusion audit, and a durable measurement Figure. Covariance, correlation, and parameter fitting are never inferred.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tool_call_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "table_run_id": { "type": "string", "format": "uuid" },
+            "dependent_series_index": { "type": "integer", "minimum": 0 },
+            "prediction": {
+              "type": "object",
+              "properties": {
+                "label": { "type": "string", "minLength": 1, "maxLength": 300 },
+                "units": { "type": ["string", "null"], "maxLength": 160 },
+                "values": { "type": "array", "maxItems": 50000, "items": { "type": ["number", "null"] } }
+              },
+              "required": ["label", "units", "values"],
+              "additionalProperties": false
+            },
+            "uncertainty_labels": { "type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 300 } },
+            "fitted_parameter_count": { "type": "integer", "minimum": 0, "maximum": 1000, "default": 0 },
+            "title": { "type": "string", "minLength": 1, "maxLength": 240 }
+          },
+          "required": ["tool_call_id", "table_run_id", "dependent_series_index", "prediction", "uncertainty_labels"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "id": "agentlas.materials-lattice-metrics-analysis",
+      "version": "1.0.0",
+      "runtime": "electron-main",
+      "capability": "science:compute",
+      "network": "deny",
+      "labId": "materials-structures",
+      "operation": "execute",
+      "primaryArtifact": { "ordinal": 1, "kind": "chart.vega", "rendererId": "agentlas.vega", "labId": "materials-structures" },
+      "mcp": {
+        "name": "analyze_materials_lattice_metrics",
+        "route": "/v1/labs/materials-structures/tools/lattice-metrics",
+        "description": "Compute a crystal cell volume from the exact three-dimensional lattice vectors of one structure in a completed OQMD OPTIMADE catalog run. The trusted host persists the determinant method, validation receipt, publication table, source hashes, and a durable Figure; density remains explicitly not computed when composition, Z, or formula weight is absent.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tool_call_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "catalog_run_id": { "type": "string", "format": "uuid" },
+            "structure_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "declared_volume_tolerance_relative": { "type": "number", "minimum": 0, "maximum": 0.1, "default": 0.005 },
+            "title": { "type": "string", "minLength": 1, "maxLength": 240 }
+          },
+          "required": ["tool_call_id", "catalog_run_id", "structure_id"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "id": "agentlas.source-to-molstar",
+      "version": "1.0.0",
+      "runtime": "native-sidecar",
+      "capability": "science:compute",
+      "network": "deny",
+      "labId": "molecular-structure",
+      "operation": "execute",
+      "primaryArtifact": { "ordinal": 1, "kind": "protein.structure", "rendererId": "agentlas.molstar", "labId": "molecular-structure" },
+      "mcp": {
+        "name": "render_source_as_molecular_structure",
+        "route": "/v1/labs/molecular-structure/tools/source-to-molstar",
+        "description": "Create a durable source-bound Mol* artifact from an exact PDB or mmCIF source version in the current project. The result opens in Molecular Structure Lab for interactive inspection.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tool_call_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "source_id": { "type": "string" },
+            "source_version_id": { "type": "string" },
+            "title": { "type": "string", "minLength": 1, "maxLength": 240 },
+            "representation": { "type": "string", "enum": ["cartoon", "ball-and-stick", "surface"] },
+            "color_theme": { "type": "string", "enum": ["chain-id", "element-symbol", "secondary-structure"] }
+          },
+          "required": ["tool_call_id", "source_id", "source_version_id"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "id": "agentlas.smiles-to-ketcher",
+      "version": "1.0.0",
+      "runtime": "native-sidecar",
+      "capability": "science:compute",
+      "network": "deny",
+      "labId": "chemistry",
+      "operation": "execute",
+      "primaryArtifact": { "ordinal": 1, "kind": "chemistry.document", "rendererId": "agentlas.ketcher", "labId": "chemistry" },
+      "mcp": {
+        "name": "render_smiles_as_chemistry_document",
+        "route": "/v1/labs/chemistry/tools/smiles-to-ketcher",
+        "description": "Convert a SMILES structure with the signed Indigo executor into a durable validated Ketcher document owned by Chemistry Lab.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tool_call_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "title": { "type": "string", "minLength": 1, "maxLength": 240 },
+            "smiles": { "type": "string", "minLength": 1, "maxLength": 100000 }
+          },
+          "required": ["tool_call_id", "title", "smiles"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "id": "agentlas.source-to-ketcher",
+      "version": "1.0.0",
+      "runtime": "native-sidecar",
+      "capability": "science:compute",
+      "network": "deny",
+      "labId": "chemistry",
+      "operation": "execute",
+      "primaryArtifact": { "ordinal": 1, "kind": "chemistry.document", "rendererId": "agentlas.ketcher", "labId": "chemistry" },
+      "mcp": {
+        "name": "render_source_as_chemistry_document",
+        "route": "/v1/labs/chemistry/tools/source-to-ketcher",
+        "description": "Create a durable Ketcher document from the exact PubChem SDF SourceVersion produced by a successful scientific-data retrieval run. The retrieval receipts, immutable source bytes, signed Indigo conversion, artifact provenance, and Chemistry Lab ownership remain linked.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tool_call_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "retrieval_run_id": { "type": "string" },
+            "source_id": { "type": "string" },
+            "source_version_id": { "type": "string" },
+            "title": { "type": "string", "minLength": 1, "maxLength": 240 }
+          },
+          "required": ["tool_call_id", "retrieval_run_id", "source_id", "source_version_id"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "id": "agentlas.vega-edit",
+      "version": "1.0.0",
+      "runtime": "electron-main",
+      "capability": "science:compute",
+      "network": "deny",
+      "labId": "data-visualization",
+      "operation": "save-version",
+      "primaryArtifact": { "ordinal": 1, "kind": "chart.vega", "rendererId": "agentlas.vega", "labId": "data-visualization" },
+      "mcp": {
+        "name": "save_vega_artifact_version",
+        "route": "/v1/labs/data-visualization/tools/edit-vega",
+        "description": "Change the title, mark, and approved color of an existing Vega artifact and save a new immutable Lab version. Requires the exact current version and content hash.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tool_call_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "artifact_id": { "type": "string" },
+            "expected_artifact_version": { "type": "integer", "minimum": 1 },
+            "expected_content_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "title": { "type": "string", "minLength": 1, "maxLength": 240 },
+            "mark": { "type": "string", "enum": ["bar", "line", "point"] },
+            "color": { "type": "string", "enum": ["#3867d6", "#0b7285", "#7b61a8", "#c75d2c", "#2f7d4a"] }
+          },
+          "required": ["tool_call_id", "artifact_id", "expected_artifact_version", "expected_content_sha256", "title", "mark", "color"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "id": "agentlas.molstar-view-edit",
+      "version": "1.0.0",
+      "runtime": "electron-main",
+      "capability": "science:compute",
+      "network": "deny",
+      "labId": "molecular-structure",
+      "operation": "save-version",
+      "primaryArtifact": { "ordinal": 1, "kind": "protein.structure", "rendererId": "agentlas.molstar", "labId": "molecular-structure" },
+      "mcp": {
+        "name": "save_molecular_structure_view_version",
+        "route": "/v1/labs/molecular-structure/tools/edit-view",
+        "description": "Save a new immutable Mol* artifact version after validating the exact source bytes, representation, color theme, and optional residue selection. Requires the exact current version and content hash.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tool_call_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "artifact_id": { "type": "string" },
+            "expected_artifact_version": { "type": "integer", "minimum": 1 },
+            "expected_content_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "representation": { "type": "string", "enum": ["cartoon", "ball-and-stick", "surface"] },
+            "color_theme": { "type": "string", "enum": ["chain-id", "element-symbol", "secondary-structure"] },
+            "interaction": { "type": "object" }
+          },
+          "required": ["tool_call_id", "artifact_id", "expected_artifact_version", "expected_content_sha256", "representation", "color_theme"],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "id": "agentlas.chemistry-smiles-edit",
+      "version": "1.0.0",
+      "runtime": "native-sidecar",
+      "capability": "science:compute",
+      "network": "deny",
+      "labId": "chemistry",
+      "operation": "save-version",
+      "primaryArtifact": { "ordinal": 1, "kind": "chemistry.document", "rendererId": "agentlas.ketcher", "labId": "chemistry" },
+      "mcp": {
+        "name": "save_chemistry_smiles_version",
+        "route": "/v1/labs/chemistry/tools/edit-smiles",
+        "description": "Convert an AI-proposed SMILES with the exact signed Indigo executor, reject invalid chemistry, and save a new immutable Ketcher artifact version. Requires the exact current version and content hash.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tool_call_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "artifact_id": { "type": "string" },
+            "expected_artifact_version": { "type": "integer", "minimum": 1 },
+            "expected_content_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "title": { "type": "string", "minLength": 1, "maxLength": 240 },
+            "smiles": { "type": "string", "minLength": 1, "maxLength": 100000 }
+          },
+          "required": ["tool_call_id", "artifact_id", "expected_artifact_version", "expected_content_sha256", "title", "smiles"],
+          "additionalProperties": false
+        }
+      }
+    }
+  ]
+}

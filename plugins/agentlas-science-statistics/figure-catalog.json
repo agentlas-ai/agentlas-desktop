@@ -1,0 +1,1172 @@
+{
+  "schema": "agentlas.science.statistics.figure-catalog/v1",
+  "catalogVersion": "1.6.0",
+  "templates": [
+    {
+      "id": "distribution-histogram-density",
+      "family": "distribution",
+      "question": "What is the shape, location, spread, and possible multimodality of a continuous measurement?",
+      "requiredFields": [
+        { "role": "value", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "group", "type": "nominal", "cardinality": "optional-one", "constraints": ["consistent-length"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "histogram bin boundaries and kernel density estimate", "assumptions": ["Bin policy is declared before rendering.", "Density bandwidth and boundary handling are recorded."], "provenance": "raw-data-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "binning", "density-transform", "vector-export"] },
+      "marks": ["bar", "line", "area"],
+      "interactions": ["tooltip", "legend-filter", "zoom-pan"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-static"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "distribution-empirical-cdf",
+      "family": "distribution",
+      "question": "At each threshold, what proportion of observations lies at or below it?",
+      "requiredFields": [
+        { "role": "value", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "group", "type": "nominal", "cardinality": "optional-one", "constraints": ["consistent-length"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "empirical cumulative probability", "assumptions": ["Ties use a declared right-continuous step convention.", "Observation weights are absent or explicitly normalized."], "provenance": "raw-data-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "linked-selections", "vector-export"] },
+      "marks": ["line", "point", "rule"],
+      "interactions": ["tooltip", "legend-filter", "brush-select"],
+      "exportProfiles": ["journal-vector", "journal-raster-300dpi", "supplement-static"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "distribution-violin-box-points",
+      "family": "distribution",
+      "question": "How do complete group distributions differ while retaining medians, quartiles, and individual observations?",
+      "requiredFields": [
+        { "role": "value", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "group", "type": "nominal", "cardinality": "one", "constraints": ["consistent-length"], "provenance": "raw-observation" },
+        { "role": "observation-id", "type": "nominal", "cardinality": "optional-one", "constraints": ["unique-identifier", "consistent-length"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "group quartiles and kernel density", "assumptions": ["Group sample sizes are reported.", "Jitter is deterministic and does not encode a measured dimension."], "provenance": "raw-data-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "density-transform", "linked-selections", "vector-export"] },
+      "marks": ["violin", "boxplot", "point"],
+      "interactions": ["tooltip", "legend-filter", "linked-highlight"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-interactive-local"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "distribution-ridgeline-density",
+      "family": "distribution",
+      "question": "How does a continuous distribution shift across ordered conditions or repeated epochs?",
+      "requiredFields": [
+        { "role": "value", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "condition", "type": "ordinal", "cardinality": "one", "constraints": ["ordered", "consistent-length"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "condition-specific kernel densities", "assumptions": ["A common scale and declared bandwidth policy are used.", "Each condition has enough observations for density estimation."], "provenance": "raw-data-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "faceting", "density-transform", "vector-export"] },
+      "marks": ["area", "line", "rule"],
+      "interactions": ["tooltip", "zoom-pan"],
+      "exportProfiles": ["journal-vector", "journal-raster-300dpi", "supplement-static"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "distribution-quantile-reference",
+      "family": "distribution",
+      "question": "Where and how strongly does an observed distribution depart from a declared reference distribution?",
+      "requiredFields": [
+        { "role": "value", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "ordered sample and reference quantiles", "assumptions": ["The reference family and fitted parameters are declared.", "Pointwise or simultaneous envelopes are identified when present."], "provenance": "raw-data-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "quantile-transform", "error-bands", "vector-export"] },
+      "marks": ["point", "rule", "band"],
+      "interactions": ["tooltip", "zoom-pan"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-static"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "distribution-fit-qq",
+      "family": "distribution",
+      "question": "How do ordered observations depart from the quantiles of each explicitly fitted probability family?",
+      "requiredFields": [
+        { "role": "observed-quantile", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "theoretical-quantile", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length", "same-units"], "provenance": "model-output" },
+        { "role": "candidate-family", "type": "nominal", "cardinality": "one", "constraints": ["consistent-length"], "provenance": "model-output" }
+      ],
+      "requiredStatistics": [
+        { "name": "maximum-likelihood candidate quantiles", "assumptions": ["Every fitted family and parameterization is declared.", "Plotting positions and support restrictions are fixed before rendering."], "provenance": "model-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "faceting", "vector-export"] },
+      "marks": ["point", "line"],
+      "interactions": ["tooltip", "zoom-pan"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-static"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "distribution-fit-pp",
+      "family": "distribution",
+      "question": "Across the cumulative range, where does each explicitly fitted probability family diverge from the empirical distribution?",
+      "requiredFields": [
+        { "role": "observation", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "empirical-probability", "type": "quantitative", "cardinality": "one", "constraints": ["probability", "consistent-length"], "provenance": "derived-observation" },
+        { "role": "fitted-probability", "type": "quantitative", "cardinality": "one", "constraints": ["probability", "consistent-length"], "provenance": "model-output" },
+        { "role": "candidate-family", "type": "nominal", "cardinality": "one", "constraints": ["consistent-length"], "provenance": "model-output" }
+      ],
+      "requiredStatistics": [
+        { "name": "maximum-likelihood fitted cumulative probability", "assumptions": ["The empirical plotting-position convention is declared.", "Goodness-of-fit inference is not inferred from visual proximity alone."], "provenance": "model-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "faceting", "vector-export"] },
+      "marks": ["point", "line"],
+      "interactions": ["tooltip", "zoom-pan"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-static"],
+      "unsupportedWithoutRawData": true
+    },
+
+    {
+      "id": "estimation-forest-intervals",
+      "family": "estimation",
+      "question": "What are the study or subgroup effect estimates, their uncertainty, and their relative precision?",
+      "requiredFields": [
+        { "role": "estimate", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "summary-input" },
+        { "role": "lower-bound", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length", "same-units"], "provenance": "summary-input" },
+        { "role": "upper-bound", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length", "same-units"], "provenance": "summary-input" },
+        { "role": "label", "type": "nominal", "cardinality": "one", "constraints": ["unique-identifier", "consistent-length"], "provenance": "summary-input" }
+      ],
+      "requiredStatistics": [
+        { "name": "verified point estimates and confidence bounds", "assumptions": ["Every interval level and effect scale are identical or visibly stratified.", "Null value and transformation are declared."], "provenance": "summary-verified" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "faceting", "vector-export"] },
+      "marks": ["point", "errorbar", "rule", "text"],
+      "interactions": ["tooltip", "legend-filter"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-static"],
+      "unsupportedWithoutRawData": false
+    },
+    {
+      "id": "estimation-coefficient-dot-whisker",
+      "family": "estimation",
+      "question": "Which model coefficients are directionally and practically important after uncertainty is shown?",
+      "requiredFields": [
+        { "role": "coefficient", "type": "nominal", "cardinality": "one", "constraints": ["unique-identifier", "consistent-length"], "provenance": "model-output" },
+        { "role": "estimate", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "model-output" },
+        { "role": "lower-bound", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length", "same-units"], "provenance": "model-output" },
+        { "role": "upper-bound", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length", "same-units"], "provenance": "model-output" }
+      ],
+      "requiredStatistics": [
+        { "name": "model coefficient estimates and confidence intervals", "assumptions": ["Covariance estimator and interval level are recorded.", "Reference levels and coefficient scale are visible."], "provenance": "model-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "faceting", "vector-export"] },
+      "marks": ["point", "errorbar", "rule", "text"],
+      "interactions": ["tooltip", "legend-filter"],
+      "exportProfiles": ["journal-vector", "journal-raster-300dpi", "supplement-static"],
+      "unsupportedWithoutRawData": false
+    },
+    {
+      "id": "estimation-group-mean-intervals",
+      "family": "estimation",
+      "question": "How do group means or marginal means differ once uncertainty and sample support are visible?",
+      "requiredFields": [
+        { "role": "group", "type": "nominal", "cardinality": "one", "constraints": ["consistent-length"], "provenance": "model-output" },
+        { "role": "estimate", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "model-output" },
+        { "role": "lower-bound", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length", "same-units"], "provenance": "model-output" },
+        { "role": "upper-bound", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length", "same-units"], "provenance": "model-output" }
+      ],
+      "requiredStatistics": [
+        { "name": "group or marginal mean intervals", "assumptions": ["Adjustment set and estimand are declared.", "Intervals use the same covariance and multiplicity policy."], "provenance": "model-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "error-bands", "vector-export"] },
+      "marks": ["point", "errorbar", "line"],
+      "interactions": ["tooltip", "legend-filter"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-static"],
+      "unsupportedWithoutRawData": false
+    },
+    {
+      "id": "estimation-paired-rank-profile",
+      "family": "estimation",
+      "question": "How do condition mean ranks vary across the ordered repeated conditions in a complete blocked design?",
+      "requiredFields": [
+        { "role": "condition", "type": "ordinal", "cardinality": "one", "constraints": ["ordered", "consistent-length", "complete-cases"], "provenance": "model-output" },
+        { "role": "rank-sum", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "nonnegative", "consistent-length"], "provenance": "model-output" },
+        { "role": "mean-rank", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "positive", "consistent-length"], "provenance": "model-output" },
+        { "role": "block-count", "type": "quantitative", "cardinality": "one", "constraints": ["integer", "positive", "consistent-length"], "provenance": "model-output" }
+      ],
+      "requiredStatistics": [
+        { "name": "Friedman condition rank sums and mean ranks", "assumptions": ["Every included block has one complete observation for every ordered condition.", "Tied values use deterministic average ranks within each block and the omnibus test declares its tie correction."], "provenance": "model-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "linked-selections", "vector-export"] },
+      "marks": ["line", "point"],
+      "interactions": ["tooltip", "legend-filter", "linked-highlight"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-interactive-local"],
+      "unsupportedWithoutRawData": false
+    },
+    {
+      "id": "estimation-bootstrap-sampling-distribution",
+      "family": "estimation",
+      "question": "How stable is an estimator across the declared resampling procedure, and where does the observed estimate lie?",
+      "requiredFields": [
+        { "role": "bootstrap-estimate", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "replicate-aware", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "replicate-id", "type": "nominal", "cardinality": "one", "constraints": ["unique-identifier", "consistent-length"], "provenance": "derived-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "bootstrap interval and observed estimator", "assumptions": ["Resampling unit, replicate count, and random seed are recorded.", "Interval construction method is declared."], "provenance": "raw-data-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "binning", "density-transform", "vector-export"] },
+      "marks": ["bar", "area", "rule"],
+      "interactions": ["tooltip", "zoom-pan"],
+      "exportProfiles": ["journal-vector", "journal-raster-300dpi", "supplement-static"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "estimation-bland-altman-agreement",
+      "family": "estimation",
+      "question": "Do two measurement methods agree across their range, and are differences practically acceptable?",
+      "requiredFields": [
+        { "role": "method-a", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "same-units", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "method-b", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "same-units", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "pair-id", "type": "nominal", "cardinality": "one", "constraints": ["unique-identifier", "consistent-length"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "mean paired difference and limits of agreement", "assumptions": ["Pairs are correctly matched.", "Difference behavior and repeated-measure structure are reviewed."], "provenance": "raw-data-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "error-bands", "vector-export"] },
+      "marks": ["point", "rule", "band"],
+      "interactions": ["tooltip", "brush-select"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-static"],
+      "unsupportedWithoutRawData": true
+    },
+
+    {
+      "id": "regression-residuals-fitted",
+      "family": "regression-diagnostics",
+      "question": "Do residual location, spread, or nonlinear structure change across fitted values?",
+      "requiredFields": [
+        { "role": "observed", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "fitted", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "model-output" },
+        { "role": "residual", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "model-output" }
+      ],
+      "requiredStatistics": [
+        { "name": "residual smoother and zero reference", "assumptions": ["Residual definition matches the fitted model family.", "Smoother settings are fixed and recorded."], "provenance": "model-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "linked-selections", "vector-export"] },
+      "marks": ["point", "line", "rule"],
+      "interactions": ["tooltip", "brush-select", "linked-highlight"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-interactive-local"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "regression-residual-quantiles",
+      "family": "regression-diagnostics",
+      "question": "Are model residual tails and central quantiles compatible with the declared reference distribution?",
+      "requiredFields": [
+        { "role": "residual", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "observation-id", "type": "nominal", "cardinality": "optional-one", "constraints": ["unique-identifier", "consistent-length"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "residual and reference quantiles", "assumptions": ["Residual standardization and reference family are declared.", "Envelope type is labeled when present."], "provenance": "raw-data-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "quantile-transform", "error-bands", "vector-export"] },
+      "marks": ["point", "rule", "band"],
+      "interactions": ["tooltip", "linked-highlight"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-static"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "regression-scale-location",
+      "family": "regression-diagnostics",
+      "question": "Is residual variance approximately constant over the fitted response range?",
+      "requiredFields": [
+        { "role": "fitted", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "model-output" },
+        { "role": "standardized-residual", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "square-root absolute standardized residual and smoother", "assumptions": ["Standardization uses the declared model covariance.", "The smoother is descriptive rather than a formal variance test."], "provenance": "model-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "linked-selections", "vector-export"] },
+      "marks": ["point", "line"],
+      "interactions": ["tooltip", "brush-select"],
+      "exportProfiles": ["journal-vector", "journal-raster-300dpi", "supplement-static"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "regression-leverage-influence",
+      "family": "regression-diagnostics",
+      "question": "Which observations combine unusual predictor leverage with influential residual behavior?",
+      "requiredFields": [
+        { "role": "leverage", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "nonnegative", "consistent-length"], "provenance": "model-output" },
+        { "role": "standardized-residual", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "observation-id", "type": "nominal", "cardinality": "one", "constraints": ["unique-identifier", "consistent-length"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "Cook distance contours and leverage thresholds", "assumptions": ["Influence definition matches the fitted model.", "Thresholds are screening aids rather than automatic exclusions."], "provenance": "model-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "linked-selections", "vector-export"] },
+      "marks": ["point", "contour", "rule", "text"],
+      "interactions": ["tooltip", "brush-select", "linked-highlight"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-interactive-local"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "regression-observed-predicted",
+      "family": "regression-diagnostics",
+      "question": "How closely do fitted predictions track observed outcomes over the full response range?",
+      "requiredFields": [
+        { "role": "observed", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "predicted", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "model-output" },
+        { "role": "partition", "type": "nominal", "cardinality": "optional-one", "constraints": ["consistent-length"], "provenance": "derived-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "identity reference and prediction-error summary", "assumptions": ["Training and evaluation partitions are explicitly labeled.", "Prediction metrics use the same outcome scale as the plot."], "provenance": "model-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "faceting", "vector-export"] },
+      "marks": ["point", "rule", "line"],
+      "interactions": ["tooltip", "legend-filter", "brush-select"],
+      "exportProfiles": ["journal-vector", "journal-raster-300dpi", "supplement-static"],
+      "unsupportedWithoutRawData": true
+    },
+
+    {
+      "id": "classification-roc-curve",
+      "family": "classification",
+      "question": "How does sensitivity trade against false-positive rate across all decision thresholds?",
+      "requiredFields": [
+        { "role": "observed-class", "type": "binary", "cardinality": "one", "constraints": ["two-level", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "predicted-score", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "calibrated-score", "consistent-length"], "provenance": "model-output" }
+      ],
+      "requiredStatistics": [
+        { "name": "threshold-specific sensitivity, specificity, and area under curve", "assumptions": ["Positive class and score direction are declared.", "Evaluation observations are independent at the resampling unit."], "provenance": "model-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "linked-selections", "vector-export"] },
+      "marks": ["line", "point", "rule"],
+      "interactions": ["tooltip", "threshold-control"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-interactive-local"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "classification-precision-recall",
+      "family": "classification",
+      "question": "How does precision trade against recall under the observed class prevalence?",
+      "requiredFields": [
+        { "role": "observed-class", "type": "binary", "cardinality": "one", "constraints": ["two-level", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "predicted-score", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "calibrated-score", "consistent-length"], "provenance": "model-output" }
+      ],
+      "requiredStatistics": [
+        { "name": "threshold-specific precision, recall, and average precision", "assumptions": ["Positive class and prevalence are reported.", "Ties use a deterministic threshold convention."], "provenance": "model-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "linked-selections", "vector-export"] },
+      "marks": ["line", "point", "rule"],
+      "interactions": ["tooltip", "threshold-control"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-interactive-local"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "classification-confusion-matrix",
+      "family": "classification",
+      "question": "Which observed classes are confused with which predicted classes at a declared threshold or decision rule?",
+      "requiredFields": [
+        { "role": "observed-class", "type": "nominal", "cardinality": "one", "constraints": ["consistent-length"], "provenance": "raw-observation" },
+        { "role": "predicted-class", "type": "nominal", "cardinality": "one", "constraints": ["consistent-length"], "provenance": "model-output" }
+      ],
+      "requiredStatistics": [
+        { "name": "class-pair counts and declared normalization", "assumptions": ["Class order is fixed.", "Raw counts remain available when row or column proportions are shown."], "provenance": "model-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "heatmap", "vector-export"] },
+      "marks": ["heatmap", "text", "rect"],
+      "interactions": ["tooltip", "legend-filter"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-static"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "classification-calibration-curve",
+      "family": "classification",
+      "question": "Do predicted probabilities agree with observed event frequencies across the score range?",
+      "requiredFields": [
+        { "role": "observed-class", "type": "binary", "cardinality": "one", "constraints": ["two-level", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "predicted-probability", "type": "quantitative", "cardinality": "one", "constraints": ["probability", "calibrated-score", "consistent-length"], "provenance": "model-output" }
+      ],
+      "requiredStatistics": [
+        { "name": "binned or smoothed observed event rate with uncertainty", "assumptions": ["Binning or smoothing policy is declared.", "Evaluation data are distinct from model fitting or clearly labeled."], "provenance": "model-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "error-bands", "vector-export"] },
+      "marks": ["point", "line", "band", "rule"],
+      "interactions": ["tooltip", "brush-select"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-static"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "classification-threshold-metrics",
+      "family": "classification",
+      "question": "Which operating threshold balances the pre-specified error costs and performance metrics?",
+      "requiredFields": [
+        { "role": "observed-class", "type": "binary", "cardinality": "one", "constraints": ["two-level", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "predicted-score", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "calibrated-score", "consistent-length"], "provenance": "model-output" }
+      ],
+      "requiredStatistics": [
+        { "name": "threshold-indexed sensitivity, specificity, precision, and utility", "assumptions": ["Metric definitions and decision costs are pre-specified.", "Threshold selection and performance estimation use separated data when claimed confirmatory."], "provenance": "model-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "linked-selections", "vector-export"] },
+      "marks": ["line", "point", "rule"],
+      "interactions": ["tooltip", "legend-filter", "threshold-control"],
+      "exportProfiles": ["journal-vector", "journal-raster-300dpi", "supplement-interactive-local"],
+      "unsupportedWithoutRawData": true
+    },
+
+    {
+      "id": "survival-kaplan-meier",
+      "family": "survival",
+      "question": "How does event-free survival change over time within each group under right censoring?",
+      "requiredFields": [
+        { "role": "time", "type": "quantitative", "cardinality": "one", "constraints": ["nonnegative", "finite", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "event", "type": "binary", "cardinality": "one", "constraints": ["censoring-coded", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "group", "type": "nominal", "cardinality": "optional-one", "constraints": ["consistent-length"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "Kaplan-Meier survival estimate and pointwise interval", "assumptions": ["Censoring convention and time origin are declared.", "Independent censoring is a substantive assumption, not inferred from the curve."], "provenance": "raw-data-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "error-bands", "vector-export"] },
+      "marks": ["line", "tick", "band"],
+      "interactions": ["tooltip", "legend-filter", "zoom-pan"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-static"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "survival-cumulative-incidence",
+      "family": "survival",
+      "question": "What is the cumulative probability of each competing event type over time?",
+      "requiredFields": [
+        { "role": "time", "type": "quantitative", "cardinality": "one", "constraints": ["nonnegative", "finite", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "event-type", "type": "nominal", "cardinality": "one", "constraints": ["censoring-coded", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "group", "type": "nominal", "cardinality": "optional-one", "constraints": ["consistent-length"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "cause-specific cumulative incidence and interval", "assumptions": ["Competing outcomes and censoring codes are mutually exclusive and declared.", "The estimator does not treat competing events as ordinary censoring."], "provenance": "raw-data-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "error-bands", "vector-export"] },
+      "marks": ["line", "band", "tick"],
+      "interactions": ["tooltip", "legend-filter", "zoom-pan"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-static"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "survival-hazard-ratio-forest",
+      "family": "survival",
+      "question": "Which covariates or subgroups have materially different relative hazards after uncertainty is shown?",
+      "requiredFields": [
+        { "role": "term", "type": "nominal", "cardinality": "one", "constraints": ["unique-identifier", "consistent-length"], "provenance": "model-output" },
+        { "role": "hazard-ratio", "type": "quantitative", "cardinality": "one", "constraints": ["positive", "finite", "consistent-length"], "provenance": "model-output" },
+        { "role": "lower-bound", "type": "quantitative", "cardinality": "one", "constraints": ["positive", "finite", "consistent-length"], "provenance": "model-output" },
+        { "role": "upper-bound", "type": "quantitative", "cardinality": "one", "constraints": ["positive", "finite", "consistent-length"], "provenance": "model-output" }
+      ],
+      "requiredStatistics": [
+        { "name": "hazard ratios and confidence intervals", "assumptions": ["Model adjustment set, tie method, and interval covariance are declared.", "Proportional-hazards diagnostics are reported separately."], "provenance": "model-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "faceting", "vector-export"] },
+      "marks": ["point", "errorbar", "rule", "text"],
+      "interactions": ["tooltip", "legend-filter"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-static"],
+      "unsupportedWithoutRawData": false
+    },
+    {
+      "id": "survival-log-minus-log",
+      "family": "survival",
+      "question": "Are group survival curves approximately parallel on the complementary log-log scale?",
+      "requiredFields": [
+        { "role": "time", "type": "quantitative", "cardinality": "one", "constraints": ["positive", "finite", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "event", "type": "binary", "cardinality": "one", "constraints": ["censoring-coded", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "group", "type": "nominal", "cardinality": "one", "constraints": ["consistent-length"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "complementary log-log survival transform", "assumptions": ["Undefined terminal probabilities are excluded by a declared rule.", "Visual parallelism is a diagnostic screen, not a formal proof."], "provenance": "raw-data-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "vector-export"] },
+      "marks": ["line", "point"],
+      "interactions": ["tooltip", "legend-filter", "zoom-pan"],
+      "exportProfiles": ["journal-vector", "journal-raster-300dpi", "supplement-static"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "survival-risk-event-table",
+      "family": "survival",
+      "question": "How many participants remain at risk, experience events, or are censored at clinically meaningful times?",
+      "requiredFields": [
+        { "role": "time", "type": "quantitative", "cardinality": "one", "constraints": ["nonnegative", "finite", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "event", "type": "binary", "cardinality": "one", "constraints": ["censoring-coded", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "group", "type": "nominal", "cardinality": "optional-one", "constraints": ["consistent-length"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "at-risk, event, and censoring counts by landmark", "assumptions": ["Landmark times are fixed before tabulation.", "Entry and censoring conventions match the accompanying survival curve."], "provenance": "raw-data-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "faceting", "heatmap", "vector-export"] },
+      "marks": ["text", "rect", "rule"],
+      "interactions": ["tooltip", "legend-filter"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-static"],
+      "unsupportedWithoutRawData": true
+    },
+
+    {
+      "id": "multivariate-correlation-heatmap",
+      "family": "multivariate",
+      "question": "Which variable pairs have strong positive or negative association, and where are clusters of association visible?",
+      "requiredFields": [
+        { "role": "variables", "type": "quantitative", "cardinality": "two-or-more", "constraints": ["finite", "consistent-length", "complete-cases"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "pairwise association matrix and sample counts", "assumptions": ["Association measure and missing-data policy are declared.", "Multiplicity and dependence are not hidden by color saturation."], "provenance": "raw-data-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "heatmap", "linked-selections", "vector-export"] },
+      "marks": ["heatmap", "text", "rect"],
+      "interactions": ["tooltip", "brush-select", "linked-highlight"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-interactive-local"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "multivariate-pca-score-biplot",
+      "family": "multivariate",
+      "question": "How are observations separated in component space, and which variables drive that separation?",
+      "requiredFields": [
+        { "role": "variables", "type": "quantitative", "cardinality": "two-or-more", "constraints": ["finite", "consistent-length", "complete-cases"], "provenance": "raw-observation" },
+        { "role": "group", "type": "nominal", "cardinality": "optional-one", "constraints": ["consistent-length"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "component scores, loadings, and explained variance", "assumptions": ["Centering, scaling, retention, and deterministic sign conventions are recorded.", "Scores and loading arrows use a declared biplot scaling."], "provenance": "raw-data-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "linked-selections", "vector-export"] },
+      "marks": ["point", "vector", "text", "rule"],
+      "interactions": ["tooltip", "legend-filter", "brush-select", "linked-highlight"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-interactive-local"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "multivariate-clustered-heatmap",
+      "family": "multivariate",
+      "question": "Which observations and variables form stable blocks of similar multivariate profiles?",
+      "requiredFields": [
+        { "role": "value-matrix", "type": "quantitative", "cardinality": "matrix", "constraints": ["finite", "complete-cases", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "row-id", "type": "nominal", "cardinality": "one-or-more", "constraints": ["unique-identifier"], "provenance": "raw-observation" },
+        { "role": "column-id", "type": "nominal", "cardinality": "one-or-more", "constraints": ["unique-identifier"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "scaled matrix and hierarchical clustering order", "assumptions": ["Distance, linkage, scaling, and missing-data policies are declared.", "Clustering is descriptive unless stability has been separately quantified."], "provenance": "raw-data-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "heatmap", "linked-selections", "vector-export"] },
+      "marks": ["heatmap", "rect", "link"],
+      "interactions": ["tooltip", "zoom-pan", "linked-highlight"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-interactive-local"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "multivariate-parallel-coordinates",
+      "family": "multivariate",
+      "question": "Which multivariate profiles, tradeoffs, and outlying combinations recur across observations?",
+      "requiredFields": [
+        { "role": "variables", "type": "quantitative", "cardinality": "two-or-more", "constraints": ["finite", "consistent-length", "complete-cases"], "provenance": "raw-observation" },
+        { "role": "observation-id", "type": "nominal", "cardinality": "one", "constraints": ["unique-identifier", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "group", "type": "nominal", "cardinality": "optional-one", "constraints": ["consistent-length"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "declared per-axis normalization", "assumptions": ["Axis order and scaling are fixed and visible.", "Overplotting controls do not suppress observations."], "provenance": "raw-data-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "linked-selections", "vector-export"] },
+      "marks": ["line", "rule", "text"],
+      "interactions": ["tooltip", "brush-select", "legend-filter", "linked-highlight"],
+      "exportProfiles": ["journal-vector", "journal-raster-300dpi", "supplement-interactive-local"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "multivariate-pairwise-scatter-matrix",
+      "family": "multivariate",
+      "question": "Are pairwise relationships linear, nonlinear, grouped, or driven by a small number of observations?",
+      "requiredFields": [
+        { "role": "variables", "type": "quantitative", "cardinality": "two-or-more", "constraints": ["finite", "consistent-length", "complete-cases"], "provenance": "raw-observation" },
+        { "role": "group", "type": "nominal", "cardinality": "optional-one", "constraints": ["consistent-length"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "pairwise smoothers and marginal distributions", "assumptions": ["All panels use consistent missing-data and scaling policies.", "Smoothers are labeled descriptive unless specified by the analysis plan."], "provenance": "raw-data-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "faceting", "density-transform", "linked-selections", "vector-export"] },
+      "marks": ["point", "line", "area"],
+      "interactions": ["tooltip", "brush-select", "legend-filter", "linked-highlight"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-interactive-local"],
+      "unsupportedWithoutRawData": true
+    },
+
+    {
+      "id": "time-series-observed-interval",
+      "family": "time-series-signal",
+      "question": "How does a measured series evolve over time, including uncertainty, gaps, and interventions?",
+      "requiredFields": [
+        { "role": "time", "type": "temporal", "cardinality": "one", "constraints": ["ordered", "monotonic-time", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "value", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "series", "type": "nominal", "cardinality": "optional-one", "constraints": ["consistent-length"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "time-indexed estimate and uncertainty band", "assumptions": ["Sampling cadence, aggregation, and missing-time policies are declared.", "Uncertainty bands identify whether they represent measurement, sampling, or prediction uncertainty."], "provenance": "raw-data-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "error-bands", "linked-selections", "vector-export"] },
+      "marks": ["line", "point", "band", "rule"],
+      "interactions": ["tooltip", "zoom-pan", "legend-filter", "brush-select"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-interactive-local"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "time-series-acf-pacf",
+      "family": "time-series-signal",
+      "question": "At which lags does serial dependence remain after the declared transformation or model?",
+      "requiredFields": [
+        { "role": "time", "type": "temporal", "cardinality": "one", "constraints": ["ordered", "monotonic-time", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "value", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "sample autocorrelation, partial autocorrelation, and reference bounds", "assumptions": ["Regular spacing and differencing policy are declared.", "Reference bounds are labeled approximate and use the effective sample size."], "provenance": "raw-data-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "faceting", "layered-marks", "vector-export"] },
+      "marks": ["bar", "rule", "point"],
+      "interactions": ["tooltip", "zoom-pan"],
+      "exportProfiles": ["journal-vector", "journal-raster-300dpi", "supplement-static"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "time-series-spectral-density",
+      "family": "time-series-signal",
+      "question": "Which frequencies account for dominant periodic variation in the measured signal?",
+      "requiredFields": [
+        { "role": "time", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "monotonic-time", "regular-grid", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "value", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "windowed spectral density estimate", "assumptions": ["Sampling interval, detrending, window, overlap, and scaling are recorded.", "Aliasing and frequency resolution limits are reported."], "provenance": "raw-data-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "vector-export"] },
+      "marks": ["line", "area", "rule"],
+      "interactions": ["tooltip", "zoom-pan"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-static"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "time-series-scalogram",
+      "family": "time-series-signal",
+      "question": "When do transient frequency components emerge, disappear, or change amplitude?",
+      "requiredFields": [
+        { "role": "time", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "monotonic-time", "regular-grid", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "value", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "time-frequency power matrix", "assumptions": ["Transform family, scales, padding, and cone-of-influence treatment are recorded.", "Color scale represents power on a declared linear or logarithmic scale."], "provenance": "raw-data-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "heatmap", "linked-selections", "vector-export"] },
+      "marks": ["heatmap", "contour", "rect"],
+      "interactions": ["tooltip", "zoom-pan", "brush-select"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-interactive-local"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "time-series-event-aligned-average",
+      "family": "time-series-signal",
+      "question": "What is the average signal response before and after a repeated event, and how variable is that response?",
+      "requiredFields": [
+        { "role": "relative-time", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "event-aligned", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "value", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "event-id", "type": "nominal", "cardinality": "one", "constraints": ["replicate-aware", "consistent-length"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "event-aligned mean and uncertainty band", "assumptions": ["Alignment event, baseline correction, and within-event dependence are declared.", "Uncertainty respects the event or subject resampling unit."], "provenance": "raw-data-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "error-bands", "vector-export"] },
+      "marks": ["line", "band", "rule"],
+      "interactions": ["tooltip", "zoom-pan", "legend-filter"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-static"],
+      "unsupportedWithoutRawData": true
+    },
+
+    {
+      "id": "contingency-mosaic",
+      "family": "contingency",
+      "question": "Which combinations of categorical levels account for the largest departures from independence?",
+      "requiredFields": [
+        { "role": "row-category", "type": "nominal", "cardinality": "one", "constraints": ["consistent-length"], "provenance": "raw-observation" },
+        { "role": "column-category", "type": "nominal", "cardinality": "one", "constraints": ["consistent-length"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "cell counts, expected counts, and standardized residuals", "assumptions": ["Sampling design and structural zeros are declared.", "Area encodes observed frequency and color uses a symmetric residual scale."], "provenance": "raw-data-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "vector-export"] },
+      "marks": ["rect", "text"],
+      "interactions": ["tooltip", "legend-filter"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-static"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "contingency-correspondence-biplot",
+      "family": "contingency",
+      "question": "Which row and column categories share similar association profiles in a contingency table?",
+      "requiredFields": [
+        { "role": "count-matrix", "type": "quantitative", "cardinality": "matrix", "constraints": ["nonnegative", "integer", "no-empty-cells"], "provenance": "summary-input" },
+        { "role": "row-label", "type": "nominal", "cardinality": "one-or-more", "constraints": ["unique-identifier"], "provenance": "summary-input" },
+        { "role": "column-label", "type": "nominal", "cardinality": "one-or-more", "constraints": ["unique-identifier"], "provenance": "summary-input" }
+      ],
+      "requiredStatistics": [
+        { "name": "correspondence coordinates, masses, and explained inertia", "assumptions": ["Input counts and structural zeros are verified.", "Coordinate normalization and retained dimensions are declared."], "provenance": "summary-verified" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "vector-export"] },
+      "marks": ["point", "text", "rule"],
+      "interactions": ["tooltip", "legend-filter", "zoom-pan"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-static"],
+      "unsupportedWithoutRawData": false
+    },
+    {
+      "id": "contingency-odds-ratio-forest",
+      "family": "contingency",
+      "question": "How do binary associations vary across strata once uncertainty and sparse support are shown?",
+      "requiredFields": [
+        { "role": "stratum", "type": "nominal", "cardinality": "one", "constraints": ["unique-identifier", "consistent-length"], "provenance": "summary-input" },
+        { "role": "odds-ratio", "type": "quantitative", "cardinality": "one", "constraints": ["positive", "finite", "consistent-length"], "provenance": "summary-input" },
+        { "role": "lower-bound", "type": "quantitative", "cardinality": "one", "constraints": ["positive", "finite", "consistent-length"], "provenance": "summary-input" },
+        { "role": "upper-bound", "type": "quantitative", "cardinality": "one", "constraints": ["positive", "finite", "consistent-length"], "provenance": "summary-input" }
+      ],
+      "requiredStatistics": [
+        { "name": "verified odds ratios and confidence bounds", "assumptions": ["Continuity corrections and interval method are declared.", "Sparse or zero cells remain visible in support annotations."], "provenance": "summary-verified" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "faceting", "vector-export"] },
+      "marks": ["point", "errorbar", "rule", "text"],
+      "interactions": ["tooltip", "legend-filter"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-static"],
+      "unsupportedWithoutRawData": false
+    },
+    {
+      "id": "contingency-standardized-residual-heatmap",
+      "family": "contingency",
+      "question": "Which contingency-table cells contribute most strongly to the omnibus association?",
+      "requiredFields": [
+        { "role": "row-category", "type": "nominal", "cardinality": "one", "constraints": ["consistent-length"], "provenance": "raw-observation" },
+        { "role": "column-category", "type": "nominal", "cardinality": "one", "constraints": ["consistent-length"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "observed counts, expected counts, and standardized residuals", "assumptions": ["Expected-count adequacy and structural zeros are reviewed.", "Residual scale and multiplicity policy are stated."], "provenance": "raw-data-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "heatmap", "vector-export"] },
+      "marks": ["heatmap", "text", "rect"],
+      "interactions": ["tooltip", "legend-filter"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-static"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "contingency-alluvial-composition",
+      "family": "contingency",
+      "question": "How do categorical compositions flow across ordered stages without losing the underlying counts?",
+      "requiredFields": [
+        { "role": "stage", "type": "ordinal", "cardinality": "one", "constraints": ["ordered", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "category", "type": "nominal", "cardinality": "one", "constraints": ["consistent-length"], "provenance": "raw-observation" },
+        { "role": "unit-id", "type": "nominal", "cardinality": "one", "constraints": ["unique-identifier", "consistent-length"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "stage-to-stage transition counts and proportions", "assumptions": ["Stages have a fixed order and units are consistently linked.", "Ribbon widths preserve absolute or proportional counts under a declared policy."], "provenance": "raw-data-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "linked-selections", "vector-export"] },
+      "marks": ["link", "rect", "text"],
+      "interactions": ["tooltip", "legend-filter", "linked-highlight"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-interactive-local"],
+      "unsupportedWithoutRawData": true
+    },
+
+    {
+      "id": "numeric-3d-response-surface",
+      "family": "3d-numeric",
+      "question": "How does a fitted response change jointly over two quantitative predictors inside the exact observed support domain?",
+      "requiredFields": [
+        { "role": "x-grid", "type": "quantitative", "cardinality": "grid-3d", "constraints": ["finite", "regular-grid", "bounded-domain"], "provenance": "model-output" },
+        { "role": "y-grid", "type": "quantitative", "cardinality": "grid-3d", "constraints": ["finite", "regular-grid", "bounded-domain"], "provenance": "model-output" },
+        { "role": "fitted-response", "type": "quantitative", "cardinality": "grid-3d", "constraints": ["finite", "regular-grid"], "provenance": "model-output" }
+      ],
+      "requiredStatistics": [
+        { "name": "model prediction surface and observed-domain mask", "assumptions": ["The fitted model, fixed covariates, and prediction scale are declared.", "Extrapolated regions are masked rather than presented as observed support."], "provenance": "model-derived" }
+      ],
+      "renderer": { "id": "agentlas.three-numeric", "capabilities": ["surface-3d", "observed-points", "support-mask", "orbit-controls", "persisted-view-state", "raster-capture"] },
+      "marks": ["surface", "mesh", "point"],
+      "interactions": ["zoom-pan", "rotate-3d"],
+      "exportProfiles": ["journal-raster-600dpi", "supplement-interactive-local"],
+      "unsupportedWithoutRawData": false
+    },
+    {
+      "id": "numeric-3d-point-cloud",
+      "family": "3d-numeric",
+      "question": "What clusters, gradients, and outlying observations remain visible across orthogonal projections of three measured dimensions?",
+      "requiredFields": [
+        { "role": "x", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "three-dimensional", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "y", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "three-dimensional", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "z", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "three-dimensional", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "observation-id", "type": "nominal", "cardinality": "one", "constraints": ["unique-identifier", "consistent-length"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "axis ranges and robust coordinate summaries", "assumptions": ["Axis units and transformations are declared.", "Occlusion is mitigated without dropping observations."], "provenance": "raw-data-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "faceting", "linked-selections", "vector-export"] },
+      "marks": ["point"],
+      "interactions": ["tooltip", "brush-select", "zoom-pan", "linked-highlight"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-interactive-local"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "numeric-3d-volume-slices",
+      "family": "3d-numeric",
+      "question": "Where are high or low scalar values located across declared orthogonal slices of a three-dimensional sampled volume?",
+      "requiredFields": [
+        { "role": "scalar-volume", "type": "quantitative", "cardinality": "grid-3d", "constraints": ["finite", "three-dimensional", "regular-grid"], "provenance": "raw-observation" },
+        { "role": "x-coordinate", "type": "quantitative", "cardinality": "one-or-more", "constraints": ["finite", "ordered"], "provenance": "raw-observation" },
+        { "role": "y-coordinate", "type": "quantitative", "cardinality": "one-or-more", "constraints": ["finite", "ordered"], "provenance": "raw-observation" },
+        { "role": "z-coordinate", "type": "quantitative", "cardinality": "one-or-more", "constraints": ["finite", "ordered"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "volume intensity domain and slice coordinates", "assumptions": ["Voxel spacing, orientation, and units are recorded.", "Clipping and transfer-function limits remain visible."], "provenance": "raw-data-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "faceting", "heatmap", "contour-2d", "linked-selections", "vector-export"] },
+      "marks": ["heatmap", "contour"],
+      "interactions": ["tooltip", "brush-select", "zoom-pan", "linked-highlight"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-interactive-local"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "numeric-3d-vector-field",
+      "family": "3d-numeric",
+      "question": "How do vector direction and magnitude vary across orthogonal projections of a sampled three-dimensional domain?",
+      "requiredFields": [
+        { "role": "position", "type": "quantitative", "cardinality": "vector-3d", "constraints": ["finite", "three-dimensional", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "vector", "type": "quantitative", "cardinality": "vector-3d", "constraints": ["finite", "three-dimensional", "consistent-length", "same-units"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "vector magnitude and declared sampling mask", "assumptions": ["Coordinate frame, component units, and vector scaling are recorded.", "Subsampling is deterministic and preserves extrema."], "provenance": "raw-data-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "faceting", "layered-marks", "linked-selections", "vector-export"] },
+      "marks": ["rule", "point"],
+      "interactions": ["tooltip", "brush-select", "zoom-pan", "linked-highlight"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-interactive-local"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "numeric-3d-trajectory",
+      "family": "3d-numeric",
+      "question": "How does a measured object or state move through three-dimensional numeric space across synchronized orthogonal projections?",
+      "requiredFields": [
+        { "role": "time", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "ordered", "monotonic-time", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "position", "type": "quantitative", "cardinality": "vector-3d", "constraints": ["finite", "three-dimensional", "consistent-length", "same-units"], "provenance": "raw-observation" },
+        { "role": "trajectory-id", "type": "nominal", "cardinality": "optional-one", "constraints": ["consistent-length"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "ordered path length, displacement, and time encoding", "assumptions": ["Coordinate frame and temporal sampling are declared.", "Interpolation is disabled or explicitly identified."], "provenance": "raw-data-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "faceting", "layered-marks", "linked-selections", "vector-export"] },
+      "marks": ["line", "point"],
+      "interactions": ["tooltip", "brush-select", "zoom-pan", "legend-filter", "linked-highlight"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-interactive-local"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "estimation-meta-analysis-forest",
+      "family": "estimation",
+      "question": "How do individual study estimates, uncertainty intervals, inverse-variance weights, and fixed or random pooled effects compare on one declared scale?",
+      "requiredFields": [
+        { "role": "study", "type": "nominal", "cardinality": "one", "constraints": ["unique-identifier", "consistent-length"], "provenance": "summary-input" },
+        { "role": "effect", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length", "same-units"], "provenance": "summary-input" },
+        { "role": "lower-bound", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length", "same-units"], "provenance": "summary-input" },
+        { "role": "upper-bound", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length", "same-units"], "provenance": "summary-input" },
+        { "role": "weight", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "nonnegative", "consistent-length"], "provenance": "model-output" }
+      ],
+      "requiredStatistics": [
+        { "name": "verified study intervals and declared fixed or random inverse-variance pooled summaries", "assumptions": ["All effects use a common declared scale and direction.", "Within-study variances and the between-study variance estimator are recorded."], "provenance": "summary-verified" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "faceting", "vector-export"] },
+      "marks": ["point", "errorbar", "rule", "text"],
+      "interactions": ["tooltip", "legend-filter"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-static"],
+      "unsupportedWithoutRawData": false
+    },
+    {
+      "id": "estimation-meta-analysis-funnel",
+      "family": "estimation",
+      "question": "Is the relation between study effect and standard error visually asymmetric around the declared pooled estimate and normal pseudo-limits?",
+      "requiredFields": [
+        { "role": "study", "type": "nominal", "cardinality": "one", "constraints": ["unique-identifier", "consistent-length"], "provenance": "summary-input" },
+        { "role": "effect", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length", "same-units"], "provenance": "summary-input" },
+        { "role": "standard-error", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "positive", "consistent-length"], "provenance": "summary-input" }
+      ],
+      "requiredStatistics": [
+        { "name": "declared pooled center and normal pseudo-limits", "assumptions": ["The display is treated as an asymmetry screen rather than a publication-bias verdict.", "Effect-scale behavior and heterogeneity are reviewed before interpretation."], "provenance": "summary-verified" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "linked-selections", "vector-export"] },
+      "marks": ["point", "line", "rule"],
+      "interactions": ["tooltip", "linked-highlight"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-static"],
+      "unsupportedWithoutRawData": false
+    },
+    {
+      "id": "estimation-meta-analysis-influence",
+      "family": "estimation",
+      "question": "How much do the pooled effect and between-study variance change when each study is omitted exactly once?",
+      "requiredFields": [
+        { "role": "omitted-study", "type": "nominal", "cardinality": "one", "constraints": ["unique-identifier", "consistent-length"], "provenance": "model-output" },
+        { "role": "pooled-effect-change", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length", "same-units"], "provenance": "model-output" },
+        { "role": "tau-squared", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "nonnegative", "consistent-length"], "provenance": "model-output" }
+      ],
+      "requiredStatistics": [
+        { "name": "complete leave-one-out fixed and random-effects recomputation", "assumptions": ["Every row omits exactly one identified study from the same input set.", "Influence is interpreted as sensitivity and does not authorize exclusion."], "provenance": "model-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "linked-selections", "vector-export"] },
+      "marks": ["bar", "rule", "point"],
+      "interactions": ["tooltip", "linked-highlight"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-interactive-local"],
+      "unsupportedWithoutRawData": false
+    },
+    {
+      "id": "multivariate-bivariate-count-heatmap",
+      "family": "multivariate",
+      "question": "Where are paired observations concentrated across the declared two-dimensional numeric bin grid?",
+      "requiredFields": [
+        { "role": "x-bin-start", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "model-output" },
+        { "role": "x-bin-end", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length", "same-units"], "provenance": "model-output" },
+        { "role": "y-bin-start", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "model-output" },
+        { "role": "y-bin-end", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length", "same-units"], "provenance": "model-output" },
+        { "role": "count", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "nonnegative", "integer", "consistent-length"], "provenance": "model-output" }
+      ],
+      "requiredStatistics": [
+        { "name": "complete deterministic two-dimensional bin counts", "assumptions": ["The numeric x and y bin boundaries are declared and non-overlapping.", "The color scale encodes counts and is not interpreted as a correlation coefficient."], "provenance": "model-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "binning", "heatmap", "vector-export"] },
+      "marks": ["rect", "heatmap"],
+      "interactions": ["tooltip", "zoom-pan"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-static"],
+      "unsupportedWithoutRawData": false
+    },
+    {
+      "id": "estimation-factorial-interaction-means",
+      "family": "estimation",
+      "question": "Do balanced factorial cell means change non-additively across the levels of the two declared fixed factors?",
+      "requiredFields": [
+        { "role": "factor-a-level", "type": "nominal", "cardinality": "one", "constraints": ["consistent-length"], "provenance": "model-output" },
+        { "role": "factor-b-level", "type": "nominal", "cardinality": "one", "constraints": ["consistent-length"], "provenance": "model-output" },
+        { "role": "cell-mean", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "model-output" },
+        { "role": "standard-error", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "nonnegative", "consistent-length"], "provenance": "model-output" },
+        { "role": "cell-size", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "positive", "integer", "consistent-length"], "provenance": "model-output" }
+      ],
+      "requiredStatistics": [
+        { "name": "balanced complete-factorial cell means and standard errors", "assumptions": ["The displayed cells come from the same balanced fixed-effects ANOVA fit.", "Line crossing or separation is interpreted with the formal interaction test and design assumptions."], "provenance": "model-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "vector-export"] },
+      "marks": ["line", "point"],
+      "interactions": ["tooltip", "legend-filter"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-static"],
+      "unsupportedWithoutRawData": false
+    },
+    {
+      "id": "contingency-observed-count-heatmap",
+      "family": "contingency",
+      "question": "How are observed counts distributed across the exact row-by-column contingency table while expected counts remain inspectable?",
+      "requiredFields": [
+        { "role": "row-category", "type": "nominal", "cardinality": "one", "constraints": ["consistent-length"], "provenance": "model-output" },
+        { "role": "column-category", "type": "nominal", "cardinality": "one", "constraints": ["consistent-length"], "provenance": "model-output" },
+        { "role": "observed-count", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "nonnegative", "integer", "consistent-length"], "provenance": "model-output" },
+        { "role": "expected-count", "type": "quantitative", "cardinality": "optional-one", "constraints": ["finite", "nonnegative", "consistent-length"], "provenance": "model-output" },
+        { "role": "standardized-residual", "type": "quantitative", "cardinality": "optional-one", "constraints": ["finite", "consistent-length"], "provenance": "model-output" }
+      ],
+      "requiredStatistics": [
+        { "name": "complete observed contingency counts with optional expected counts and residuals", "assumptions": ["Every table cell is represented exactly once.", "Color encodes observed count and must not be described as standardized-residual intensity."], "provenance": "model-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "heatmap", "vector-export"] },
+      "marks": ["rect", "heatmap"],
+      "interactions": ["tooltip"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-static"],
+      "unsupportedWithoutRawData": false
+    },
+    {
+      "id": "estimation-multiplicity-raw-adjusted-p",
+      "family": "estimation",
+      "question": "How does each declared multiple-testing correction transform every raw p value on the common probability scale?",
+      "requiredFields": [
+        { "role": "hypothesis", "type": "nominal", "cardinality": "one", "constraints": ["consistent-length"], "provenance": "summary-input" },
+        { "role": "method", "type": "nominal", "cardinality": "one", "constraints": ["consistent-length"], "provenance": "model-output" },
+        { "role": "raw-p", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "probability", "consistent-length"], "provenance": "summary-input" },
+        { "role": "adjusted-p", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "probability", "consistent-length"], "provenance": "model-output" }
+      ],
+      "requiredStatistics": [
+        { "name": "exact declared-family multiple-testing correction", "assumptions": ["The hypothesis family and correction method are declared before interpretation.", "The display does not add a significance threshold or selection decision that is absent from the source."], "provenance": "summary-verified" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "linked-selections", "vector-export"] },
+      "marks": ["point"],
+      "interactions": ["tooltip", "legend-filter", "linked-highlight"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-interactive-local"],
+      "unsupportedWithoutRawData": false
+    },
+    {
+      "id": "multivariate-pca-scree-cumulative",
+      "family": "multivariate",
+      "question": "How much variance does each principal component explain, and how quickly does retained cumulative variance increase?",
+      "requiredFields": [
+        { "role": "component", "type": "ordinal", "cardinality": "one", "constraints": ["ordered", "consistent-length"], "provenance": "model-output" },
+        { "role": "eigenvalue", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "nonnegative", "consistent-length"], "provenance": "model-output" },
+        { "role": "explained-variance", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "nonnegative", "probability", "consistent-length"], "provenance": "model-output" },
+        { "role": "cumulative-variance", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "nonnegative", "probability", "ordered", "consistent-length"], "provenance": "model-output" },
+        { "role": "retained", "type": "binary", "cardinality": "one", "constraints": ["consistent-length"], "provenance": "model-output" }
+      ],
+      "requiredStatistics": [
+        { "name": "ordered eigendecomposition variance proportions", "assumptions": ["The covariance or correlation scaling choice is recorded.", "Component retention is displayed as a researcher decision rather than inferred from the chart."], "provenance": "model-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "vector-export"] },
+      "marks": ["bar", "line", "point"],
+      "interactions": ["tooltip"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-static"],
+      "unsupportedWithoutRawData": false
+    },
+    {
+      "id": "multivariate-pca-score-plot",
+      "family": "multivariate",
+      "question": "How are exact observation scores distributed across the first retained principal components without implying loading vectors?",
+      "requiredFields": [
+        { "role": "observation-label", "type": "nominal", "cardinality": "one", "constraints": ["unique-identifier", "consistent-length"], "provenance": "model-output" },
+        { "role": "component-one-score", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "model-output" },
+        { "role": "component-two-score", "type": "quantitative", "cardinality": "optional-one", "constraints": ["finite", "consistent-length"], "provenance": "model-output" }
+      ],
+      "requiredStatistics": [
+        { "name": "exact retained principal-component scores", "assumptions": ["Every input row is preserved without sampling or aggregation.", "Axes report explained-variance context and no loading-vector biplot is claimed."], "provenance": "model-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "linked-selections", "vector-export"] },
+      "marks": ["point"],
+      "interactions": ["tooltip", "brush-select", "linked-highlight"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-interactive-local"],
+      "unsupportedWithoutRawData": false
+    },
+    {
+      "id": "multivariate-pca-loading-heatmap",
+      "family": "multivariate",
+      "question": "Which variables contribute positively or negatively to each principal component on the declared loading scale?",
+      "requiredFields": [
+        { "role": "variable", "type": "nominal", "cardinality": "one", "constraints": ["consistent-length"], "provenance": "model-output" },
+        { "role": "component", "type": "ordinal", "cardinality": "one", "constraints": ["ordered", "consistent-length"], "provenance": "model-output" },
+        { "role": "loading", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "model-output" }
+      ],
+      "requiredStatistics": [
+        { "name": "signed principal-component loadings", "assumptions": ["The covariance or correlation scaling choice is recorded.", "A zero-centered diverging scale is used and deterministic eigenvector signs are disclosed."], "provenance": "model-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "heatmap", "vector-export"] },
+      "marks": ["rect", "heatmap"],
+      "interactions": ["tooltip"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-static"],
+      "unsupportedWithoutRawData": false
+    },
+    {
+      "id": "time-series-observed-trend",
+      "family": "time-series-signal",
+      "question": "How does the complete evenly spaced observed series evolve relative to its fitted deterministic linear trend?",
+      "requiredFields": [
+        { "role": "time", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "ordered", "monotonic-time", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "observed-value", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "fitted-trend", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length", "same-units"], "provenance": "model-output" }
+      ],
+      "requiredStatistics": [
+        { "name": "complete observation rows and deterministic linear trend", "assumptions": ["Sampling is evenly spaced and every analyzed row is preserved.", "The fitted trend is not presented as a forecast or stationarity model."], "provenance": "model-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "vector-export"] },
+      "marks": ["line", "point"],
+      "interactions": ["tooltip", "zoom-pan"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-interactive-local"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "time-series-acf-bounds",
+      "family": "time-series-signal",
+      "question": "At which lags does the sample autocorrelation exceed the declared approximate white-noise screening bounds?",
+      "requiredFields": [
+        { "role": "lag", "type": "ordinal", "cardinality": "one", "constraints": ["ordered", "nonnegative", "integer", "consistent-length"], "provenance": "model-output" },
+        { "role": "autocorrelation", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length", "bounded-domain"], "provenance": "model-output" },
+        { "role": "lower-bound", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length", "bounded-domain"], "provenance": "model-output" },
+        { "role": "upper-bound", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length", "bounded-domain"], "provenance": "model-output" }
+      ],
+      "requiredStatistics": [
+        { "name": "sample autocorrelation and approximate white-noise bounds", "assumptions": ["The analyzed transformation and maximum lag are declared.", "Bounds are treated as screening guides rather than a stationarity decision or fitted-model interval."], "provenance": "model-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "vector-export"] },
+      "marks": ["bar", "rule"],
+      "interactions": ["tooltip"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-static"],
+      "unsupportedWithoutRawData": false
+    },
+    {
+      "id": "estimation-lmm-marginal-mean-profile",
+      "family": "estimation",
+      "question": "How does the population-level fixed-effect prediction change across one declared numeric or categorical predictor while other fixed terms remain at declared reference values?",
+      "requiredFields": [
+        { "role": "profile-value", "type": "ordinal", "cardinality": "one", "constraints": ["ordered", "consistent-length", "bounded-domain"], "provenance": "model-output" },
+        { "role": "marginal-mean", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length", "same-units"], "provenance": "model-output" },
+        { "role": "lower-confidence-bound", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length", "same-units"], "provenance": "model-output" },
+        { "role": "upper-confidence-bound", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length", "same-units"], "provenance": "model-output" }
+      ],
+      "requiredStatistics": [
+        { "name": "fixed-effect marginal prediction and pointwise model-based confidence interval", "assumptions": ["The profiled predictor and every held fixed value are recorded in the analysis artifact.", "The profile stays inside observed predictor support and is not presented as subject-specific prediction."], "provenance": "model-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "error-bands", "vector-export"] },
+      "marks": ["area", "line", "point"],
+      "interactions": ["tooltip", "zoom-pan"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-static"],
+      "unsupportedWithoutRawData": false
+    },
+    {
+      "id": "estimation-lmm-subject-trajectories",
+      "family": "estimation",
+      "question": "How do exact within-group observations and conditional fitted values differ across the declared observation order without inventing an undeclared time axis?",
+      "requiredFields": [
+        { "role": "observation-id", "type": "nominal", "cardinality": "one", "constraints": ["unique-identifier", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "group", "type": "nominal", "cardinality": "one", "constraints": ["consistent-length"], "provenance": "raw-observation" },
+        { "role": "within-group-order", "type": "ordinal", "cardinality": "one", "constraints": ["ordered", "positive", "integer", "consistent-length"], "provenance": "derived-observation" },
+        { "role": "observed-value", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "raw-observation" },
+        { "role": "conditional-fitted", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length", "same-units"], "provenance": "model-output" }
+      ],
+      "requiredStatistics": [
+        { "name": "exact source-order observations and random-intercept conditional fitted values", "assumptions": ["Every included observation is preserved without sampling or aggregation.", "Within-group row order is labelled as order rather than time unless time is explicitly bound."], "provenance": "model-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "linked-selections", "vector-export"] },
+      "marks": ["line", "point"],
+      "interactions": ["tooltip", "linked-highlight", "zoom-pan"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-interactive-local"],
+      "unsupportedWithoutRawData": true
+    },
+    {
+      "id": "estimation-lmm-random-intercept-caterpillar",
+      "family": "estimation",
+      "question": "Which groups have positive or negative conditional random-intercept estimates after shrinkage, and how uncertain is each plug-in estimate?",
+      "requiredFields": [
+        { "role": "group", "type": "nominal", "cardinality": "one", "constraints": ["unique-identifier", "consistent-length"], "provenance": "model-output" },
+        { "role": "random-intercept-blup", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length", "same-units"], "provenance": "model-output" },
+        { "role": "lower-conditional-bound", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length", "same-units"], "provenance": "model-output" },
+        { "role": "upper-conditional-bound", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length", "same-units"], "provenance": "model-output" },
+        { "role": "group-size", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "positive", "integer", "consistent-length"], "provenance": "model-output" },
+        { "role": "shrinkage", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "probability", "consistent-length"], "provenance": "model-output" }
+      ],
+      "requiredStatistics": [
+        { "name": "empirical-Bayes random-intercept BLUP and plug-in conditional uncertainty", "assumptions": ["The intervals condition on fitted variance parameters and are not simultaneous group tests.", "Extreme estimates trigger source-data review and do not authorize automatic exclusion."], "provenance": "model-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "linked-selections", "vector-export"] },
+      "marks": ["point", "errorbar", "rule"],
+      "interactions": ["tooltip", "linked-highlight"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-interactive-local"],
+      "unsupportedWithoutRawData": false
+    },
+    {
+      "id": "regression-lmm-diagnostic-grid",
+      "family": "regression-diagnostics",
+      "question": "Do conditional residuals or random-intercept estimates show variance patterns or quantile departures that require model review before scientific interpretation?",
+      "requiredFields": [
+        { "role": "conditional-fitted", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "model-output" },
+        { "role": "standardized-conditional-residual", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "consistent-length"], "provenance": "model-output" },
+        { "role": "residual-expected-quantile", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "ordered", "consistent-length"], "provenance": "model-output" },
+        { "role": "random-intercept-expected-quantile", "type": "quantitative", "cardinality": "one", "constraints": ["finite", "ordered", "consistent-length"], "provenance": "model-output" },
+        { "role": "observation-id", "type": "nominal", "cardinality": "one", "constraints": ["unique-identifier", "consistent-length"], "provenance": "raw-observation" }
+      ],
+      "requiredStatistics": [
+        { "name": "conditional residual-versus-fitted screen and deterministic residual and random-intercept normal quantiles", "assumptions": ["Every diagnostic panel identifies whether rows or groups are being assessed.", "Q-Q alignment is a descriptive model check and does not validate Gaussian assumptions by itself."], "provenance": "model-derived" }
+      ],
+      "renderer": { "id": "agentlas.vega", "capabilities": ["cartesian-2d", "layered-marks", "faceting", "linked-selections", "vector-export"] },
+      "marks": ["point", "line", "rule"],
+      "interactions": ["tooltip", "linked-highlight", "zoom-pan"],
+      "exportProfiles": ["journal-vector", "journal-raster-600dpi", "supplement-interactive-local"],
+      "unsupportedWithoutRawData": true
+    }
+  ]
+}

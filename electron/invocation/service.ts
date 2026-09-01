@@ -31,6 +31,8 @@ import {
   hasInvocationRunReceipt,
   recordMcpInvocationEvent,
   recordRunEvent,
+  recordScienceRuntimeOutboxEvent,
+  type ScienceRuntimeOutboxEvent,
   USER_STEERING_EVENT_KIND,
   tryRecordFailureEvent,
   tryRecordRunEvent,
@@ -138,6 +140,8 @@ export interface InvocationEventEnvelope {
   runId: string;
   chatId: string;
   event: McpInvocationEvent;
+  /** Present only for Main-owned Science runs after the Desktop outbox commit. */
+  scienceDelivery?: ScienceRuntimeOutboxEvent;
 }
 
 export interface InvocationAttachResult {
@@ -188,6 +192,14 @@ interface RunRecord {
   goal: string;
   pendingQuestion: boolean;
   settlementPublished: boolean;
+  /** Main-owned monotonic sequence shared by provider and resident-process events. */
+  observableStepSequence: number;
+  executionSource?: InvocationExecutionContext["source"];
+}
+
+function nextObservableSequence(record: RunRecord): number {
+  record.observableStepSequence += 1;
+  return record.observableStepSequence;
 }
 
 interface QueuedSteer {
@@ -1014,6 +1026,8 @@ export class InvocationService {
       goal: invocationRequest.userPrompt.slice(0, 4_000),
       pendingQuestion: false,
       settlementPublished: false,
+      observableStepSequence: 0,
+      ...(executionContext?.source ? { executionSource: executionContext.source } : {}),
       ...(runWorkspaceBinding ? { workspaceBinding: runWorkspaceBinding } : {}),
     };
     let recoverablePartialPersisted = false;
@@ -1312,7 +1326,6 @@ export class InvocationService {
     let taskMaterialized = Boolean(canonicalTask);
     let taskRunStartedRecorded = false;
     let memoryCandidateProposed = false;
-    let observableStepSequence = 0;
     if (canonicalTask) {
       recordTaskRunStarted(canonicalTask, runId, requestedOneMode ? "one" : "system");
       taskRunStartedRecorded = true;
@@ -1330,7 +1343,7 @@ export class InvocationService {
     // first token. Some providers emit no reasoning/tool item for short turns;
     // without this event the Activity surface is blank even though the run is
     // genuinely active. This is a lifecycle fact, never inferred status copy.
-    observableStepSequence += 1;
+    const lifecycleStartSequence = nextObservableSequence(record);
     const lifecycleStartEvent: McpInvocationEvent = {
       kind: "lifecycle",
       lifecycle: {
@@ -1339,13 +1352,13 @@ export class InvocationService {
         ...(requestedOneMode && selectedOnePermissionMode ? { selectedPermissionMode: selectedOnePermissionMode } : {}),
         ...(record.resultFolder ? { cwd: record.resultFolder } : {}),
       },
-      sequence: observableStepSequence,
+      sequence: lifecycleStartSequence,
       observedAt: new Date().toISOString(),
     };
-    recordObservableRunStep(canonicalTask, runId, lifecycleStartEvent, observableStepSequence);
+    recordObservableRunStep(canonicalTask, runId, lifecycleStartEvent, lifecycleStartSequence);
     record.events.push(lifecycleStartEvent);
     recordMcpInvocationEvent(runId, runReq, lifecycleStartEvent);
-    this.publishEvent({ runId, chatId: runReq.chatId, event: lifecycleStartEvent });
+    this.publishRunEvent(record, { runId, chatId: runReq.chatId, event: lifecycleStartEvent });
 
     let terminalObserved = false;
     /*
@@ -1600,7 +1613,7 @@ export class InvocationService {
           };
         }
 
-        observableStepSequence += 1;
+        const observableStepSequence = nextObservableSequence(record);
         event = {
           ...event,
           sequence: observableStepSequence,
@@ -1699,7 +1712,7 @@ export class InvocationService {
           });
         }
         recordMcpInvocationEvent(runId, runReq, event);
-        this.publishEvent({ runId, chatId: runReq.chatId, event: wireEvent });
+        this.publishRunEvent(record, { runId, chatId: runReq.chatId, event: wireEvent });
 
         if (event.kind === "final" || event.kind === "error") {
           // A streamed answer is user-visible work even if the runtime later
@@ -1853,7 +1866,7 @@ export class InvocationService {
           );
           taskMaterialized = Boolean(canonicalTask);
           persistRecoverableAssistantPartial();
-          observableStepSequence += 1;
+          const observableStepSequence = nextObservableSequence(record);
           const event: McpInvocationEvent = {
             kind: "error",
             runtimeAgentId: record.actualAgentId,
@@ -1863,7 +1876,7 @@ export class InvocationService {
           };
           record.events.push(event);
           recordMcpInvocationEvent(runId, runReq, event);
-          this.publishEvent({ runId, chatId: runReq.chatId, event });
+          this.publishRunEvent(record, { runId, chatId: runReq.chatId, event });
           const terminalKind = controller.signal.aborted ? "invoke_cancelled" as const : "invoke_failed" as const;
           tryRecordRunEvent({
             runId,
@@ -1985,7 +1998,7 @@ export class InvocationService {
     const result = this.activeRuns.requestCancel(runId);
     if (result === "requested") {
       if (record) {
-        const sequence = record.events.reduce((max, event) => Math.max(max, event.sequence ?? 0), 0) + 1;
+        const sequence = nextObservableSequence(record);
         const cancelEvent: McpInvocationEvent = {
           kind: "lifecycle",
           lifecycle: { phase: "cancel_requested" },
@@ -1993,7 +2006,7 @@ export class InvocationService {
           observedAt: record.cancelRequestedAt ?? new Date().toISOString(),
         };
         record.events.push(cancelEvent);
-        this.publishEvent({ runId, chatId: record.chatId, event: cancelEvent });
+        this.publishRunEvent(record, { runId, chatId: record.chatId, event: cancelEvent });
       }
       tryRecordRunEvent({
         runId,
@@ -2187,7 +2200,7 @@ export class InvocationService {
           ? locale === "ko" ? "CLI 프로세스 대기 중" : "CLI process idle"
           : locale === "ko" ? "CLI 프로세스 닫힘" : "CLI process closed";
       const displayAgentId = change.nodeId ?? change.agentId;
-      const sequence = record.events.reduce((max, event) => Math.max(max, event.sequence ?? 0), 0) + 1;
+      const sequence = nextObservableSequence(record);
       const event: McpInvocationEvent = {
         kind: "tool-use",
         status,
@@ -2209,7 +2222,7 @@ export class InvocationService {
         record.events.splice(0, record.events.length - MAX_BUFFERED_EVENTS);
       }
       recordMcpInvocationEvent(runId, record.request, event);
-      this.publishEvent({ runId, chatId: record.chatId, event });
+      this.publishRunEvent(record, { runId, chatId: record.chatId, event });
     }
   }
 
@@ -2221,6 +2234,13 @@ export class InvocationService {
         // A renderer or phone disconnect must never break the host run.
       }
     }
+  }
+
+  private publishRunEvent(record: RunRecord, envelope: InvocationEventEnvelope): void {
+    const scienceDelivery = record.executionSource === "science"
+      ? recordScienceRuntimeOutboxEvent({ runId: envelope.runId, chatId: envelope.chatId, event: envelope.event })
+      : undefined;
+    this.publishEvent(scienceDelivery ? { ...envelope, scienceDelivery } : envelope);
   }
 
   private publishActiveChats(): void {

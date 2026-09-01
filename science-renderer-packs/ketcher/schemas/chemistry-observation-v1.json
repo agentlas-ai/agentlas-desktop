@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentlas.science/chemistry-observation/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "engineVersion", "validatorVersion", "editable", "documentSha256", "canonicalSmilesSha256", "atomCount", "bondCount", "canvasWidth", "canvasHeight"],
+  "properties": {
+    "kind": { "const": "chemistry-document" },
+    "engineVersion": { "const": "3.17.2" },
+    "validatorVersion": { "const": "1.45.1" },
+    "editable": { "const": true },
+    "documentSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "canonicalSmilesSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "atomCount": { "type": "integer", "minimum": 1 },
+    "bondCount": { "type": "integer", "minimum": 0 },
+    "canvasWidth": { "type": "integer", "minimum": 240 },
+    "canvasHeight": { "type": "integer", "minimum": 200 }
+  }
+}

@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.1.0 — 2026-09-02
+
+This release binds Agentlas OS v1.2.40 at
+0c29abdb9505df32b61522861a17bbc537de5263. Its public runtime asset
+`hephaestus-runtime-v1.2.40.tar.gz` is pinned at SHA-256
+`f07527e45fa6be4538898a60e05e5113a72d2de2c61e2e021c1163954c5ba8c2`.
+Source readiness does not prove a public installer or update feed; the Releases
+page stays the authority.
+
+- Science is now a first-class optional Desktop surface with a dedicated host,
+  durable project and evidence state, and explicit install status.
+- Desktop can download the signed Science 0.1.0 workspace and its Ketcher and
+  Molstar renderer packs from the product settings flow. Each archive is
+  restricted to the public release host, checked for its exact size and SHA-256,
+  verified with the release-owned Ed25519 key policy, and activated atomically.
+- Science runtime events enter a durable Main-owned outbox before the extension
+  sees them, so a restart replays an exact delivery identity instead of losing
+  or duplicating a Lab or tool event.
+- The release package raises the Desktop store migration target to schema 107
+  and pins the embedded Agentlas OS runtime to the exact v1.2.40 commit and
+  published asset above.
+
 ## 1.0.57 — 2026-08-30
 
 This release binds Agentlas OS v1.2.38 at

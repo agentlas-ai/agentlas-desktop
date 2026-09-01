@@ -53,6 +53,7 @@ interface ChatRow {
 const CHAT_RUNTIME_KINDS = new Set<RuntimeKind>(RUNTIME_KINDS);
 
 const CHAT_RUNTIME_BACKENDS = new Set<RuntimeBackend>(RUNTIME_BACKENDS);
+const CHAT_UUID_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 
 function boundedOptionalText(
   value: unknown,
@@ -351,6 +352,8 @@ function defaultRootAgentId(originSurface: "one" | "work"): string | undefined {
 }
 
 export function createChat(input: {
+  /** Main-only stable id for an external-surface binding. Never deserialize from renderer IPC. */
+  internalId?: string;
   agentId?: string;
   firmId?: string | null;
   projectId?: string | null;
@@ -400,7 +403,8 @@ export function createChat(input: {
     continuedWorkingFolder = getChatWorkingFolder(source.id);
   }
 
-  const id = randomUUID();
+  const id = input.internalId === undefined ? randomUUID() : input.internalId;
+  if (!CHAT_UUID_RE.test(id)) throw new Error("Invalid internal chat id");
   const now = new Date().toISOString();
   // 좌석 부여 — 새 세션은 태어날 때 좌석을 참조한다(SEAT-SESSION-PLAN-v2 §6-1,
   // 스펙 §3 ①-2′ "좌석 원장 동결" 해소). 하위 실행 세션(division)은 뿌리의 좌석을
@@ -454,6 +458,47 @@ export function createChat(input: {
   if (shouldCreateTask) ensureCanonicalTaskForChat(id);
   const chat = getChat(id) as Chat;
   emitDesktopStoreChange({ entity: "chat", id });
+  return chat;
+}
+
+function stableScienceRuntimeChatId(conversationId: string): string {
+  if (!CHAT_UUID_RE.test(conversationId)) throw new Error("Invalid Science conversation id");
+  const hex = createHash("sha256").update(`agentlas:science-runtime-chat:v1:${conversationId}`, "utf8").digest("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-8${hex.slice(13, 16)}-${((Number.parseInt(hex[16], 16) & 0x3) | 0x8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
+/**
+ * Main-only deterministic hidden chat for one Science conversation.
+ *
+ * The derived UUID closes the cross-database crash window: if Desktop creates
+ * the chat and exits before Science records its binding, the next attempt finds
+ * the exact same row rather than creating an orphaned second runtime session.
+ */
+export function ensureScienceRuntimeChat(input: {
+  conversationId: string;
+  title: string;
+}): Chat {
+  const chatId = stableScienceRuntimeChatId(input.conversationId);
+  const marker = `⟦science⟧${input.conversationId}`;
+  const existing = getChat(chatId);
+  if (existing) {
+    if (existing.kind !== "division" || existing.originSurface !== "work" || existing.title !== marker) {
+      throw new Error("Science runtime chat binding conflict");
+    }
+    return existing;
+  }
+  const chat = createChat({
+    internalId: chatId,
+    projectId: null,
+    firmId: null,
+    title: marker,
+    kind: "division",
+    taskMode: "conversation",
+    originSurface: "work",
+  });
+  if (chat.id !== chatId || chat.kind !== "division" || chat.title !== marker) {
+    throw new Error("Science runtime chat create receipt mismatch");
+  }
   return chat;
 }
 

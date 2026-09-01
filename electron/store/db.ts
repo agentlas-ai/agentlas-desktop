@@ -18,7 +18,7 @@ import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-p
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 106;
+const SCHEMA_VERSION = 107;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -5085,6 +5085,52 @@ export function initStore(options: StoreInitOptions = {}): void {
     );
     CREATE INDEX IF NOT EXISTS idx_prompt_chat_start_chat
       ON prompt_chat_start_intents(chat_id);
+  `);
+
+  // v107 — Science is a first-class projection of the durable Desktop
+  // invocation runtime. Every redacted Science runtime event enters this
+  // append-only delivery ledger before Main publishes it to the extension.
+  // Science acknowledges only after its own SQLite transaction commits, so a
+  // crash between the two databases replays the same delivery identity rather
+  // than losing or duplicating a Lab/tool event.
+  _db.exec(`
+    CREATE TABLE IF NOT EXISTS science_runtime_event_outbox (
+      delivery_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      chat_id TEXT NOT NULL,
+      source_run_event_id TEXT NOT NULL UNIQUE,
+      source_sequence INTEGER NOT NULL CHECK(source_sequence >= 1),
+      source_kind TEXT NOT NULL,
+      source_event_sha256 TEXT NOT NULL CHECK(length(source_event_sha256) = 64),
+      event_json TEXT NOT NULL CHECK(length(event_json) BETWEEN 2 AND 262144),
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','delivered')),
+      created_at TEXT NOT NULL,
+      delivered_at TEXT,
+      UNIQUE(run_id, source_sequence),
+      CHECK((status = 'pending' AND delivered_at IS NULL) OR (status = 'delivered' AND delivered_at IS NOT NULL))
+    );
+    CREATE INDEX IF NOT EXISTS idx_science_runtime_event_outbox_pending
+      ON science_runtime_event_outbox(status, created_at, delivery_id);
+    CREATE INDEX IF NOT EXISTS idx_science_runtime_event_outbox_run
+      ON science_runtime_event_outbox(run_id, source_sequence);
+
+    CREATE TRIGGER IF NOT EXISTS trg_science_runtime_event_outbox_identity_update
+    BEFORE UPDATE ON science_runtime_event_outbox
+    BEGIN
+      SELECT CASE WHEN NEW.delivery_id != OLD.delivery_id OR NEW.run_id != OLD.run_id OR NEW.chat_id != OLD.chat_id
+        OR NEW.source_run_event_id != OLD.source_run_event_id OR NEW.source_sequence != OLD.source_sequence
+        OR NEW.source_kind != OLD.source_kind OR NEW.source_event_sha256 != OLD.source_event_sha256
+        OR NEW.event_json != OLD.event_json OR NEW.created_at != OLD.created_at
+        THEN RAISE(ABORT, 'science-runtime-outbox-identity-immutable') END;
+      SELECT CASE WHEN NOT (NEW.status = OLD.status OR (OLD.status = 'pending' AND NEW.status = 'delivered'))
+        THEN RAISE(ABORT, 'science-runtime-outbox-state-invalid') END;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_science_runtime_event_outbox_delete
+    BEFORE DELETE ON science_runtime_event_outbox
+    BEGIN
+      SELECT RAISE(ABORT, 'science-runtime-outbox-append-only');
+    END;
   `);
 
   // PRD §5.25 — 산출물 바인딩 표가 마이그레이션 사다리 **밖에서**(첫 사용 시 지연 생성)

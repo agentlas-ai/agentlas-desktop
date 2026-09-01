@@ -2141,7 +2141,7 @@
   overflow-y: hidden;
 }
 
-.composer textarea::placeholder { color: #9a9fa3; }
+.composer textarea::placeholder { color: #666b70; }
 
 .sendButton {
   width: 34px;
@@ -2778,7 +2778,7 @@
 .railBottomMenu .connection {
   min-height: 25px;
   padding: 2px 9px 0;
-  color: #979b9e;
+  color: #666b70;
   font-size: 9px;
 }
 
@@ -2835,7 +2835,7 @@
 
 .homeChatHeader small {
   overflow: hidden;
-  color: #989da1;
+  color: #666b70;
   font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2883,7 +2883,7 @@
 
 .homeDate {
   justify-self: center;
-  color: #a0a4a7;
+  color: #666b70;
   font-size: 9px;
   font-weight: 590;
 }
@@ -3972,4 +3972,3 @@
   from { opacity: 0; transform: translateY(10px); }
   to { opacity: 1; transform: none; }
 }
-

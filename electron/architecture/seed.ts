@@ -15,6 +15,7 @@ import { compareSemVer, parseSemVer } from "../../shared/semver";
 import {
   ARCHITECTURE_VERSION,
   BUILTIN_AGENTS,
+  SCIENCE_RESEARCH_DIRECTOR_SLUG,
   builtinAgentId,
   type BuiltinAgentDef,
 } from "./manifest";
@@ -46,6 +47,13 @@ function upsertBuiltin(def: BuiltinAgentDef, now: string): void {
   const existing = db
     .prepare("SELECT id, installed_at FROM installed_agents WHERE id = ? OR slug = ?")
     .get(id, def.slug) as { id: string; installed_at: string } | undefined;
+
+  // Science binds every turn to this exact Main-owned id. A legacy or
+  // user-installed same-slug row must not be silently promoted and then run
+  // under a different identity.
+  if (def.slug === SCIENCE_RESEARCH_DIRECTOR_SLUG && existing && existing.id !== id) {
+    throw new Error("science-research-director-builtin-identity-conflict");
+  }
 
   if (existing) {
     // Re-sync the evolving fields; keep id + installed_at stable.

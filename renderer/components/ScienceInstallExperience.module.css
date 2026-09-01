@@ -1,0 +1,502 @@
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 420;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(20, 23, 27, 0.52);
+  backdrop-filter: blur(10px) saturate(0.82);
+  -webkit-backdrop-filter: blur(10px) saturate(0.82);
+  animation: backdropIn 160ms ease-out both;
+}
+
+.dialog {
+  position: relative;
+  width: min(560px, calc(100vw - 32px));
+  max-height: min(780px, calc(100dvh - 40px));
+  overflow: auto;
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.97);
+  color: #181b20;
+  box-shadow: 0 34px 100px rgba(10, 14, 21, 0.28), 0 4px 16px rgba(10, 14, 21, 0.11);
+  animation: dialogIn 210ms cubic-bezier(0.2, 0.75, 0.25, 1) both;
+}
+
+.dialog[data-surface="plan"],
+.dialog[data-surface="installing"],
+.dialog[data-surface="error"] {
+  width: min(600px, calc(100vw - 32px));
+}
+
+.close {
+  position: absolute;
+  z-index: 4;
+  top: 14px;
+  right: 14px;
+  width: 32px;
+  height: 32px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid rgba(24, 27, 32, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.76);
+  color: #1c2026;
+  cursor: pointer;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.close:hover,
+.close:focus-visible {
+  background: #ffffff;
+  border-color: rgba(24, 27, 32, 0.25);
+}
+
+.hero {
+  position: relative;
+  height: 246px;
+  overflow: hidden;
+  border-radius: 21px 21px 0 0;
+  border-bottom: 1px solid rgba(24, 27, 32, 0.08);
+  background: #eef1f2;
+}
+
+.hero > img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+  object-position: center 54%;
+}
+
+.heroBrand {
+  position: absolute;
+  left: 18px;
+  top: 18px;
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 36px;
+  padding: 6px 12px 6px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.78);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.7);
+  color: #14171b;
+  box-shadow: 0 8px 24px rgba(30, 39, 48, 0.1);
+  backdrop-filter: blur(16px) saturate(0.85);
+  -webkit-backdrop-filter: blur(16px) saturate(0.85);
+  font-size: 12px;
+  font-weight: 760;
+  letter-spacing: -0.015em;
+}
+
+.heroBrand img {
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
+}
+
+.promoBody,
+.installBody {
+  display: grid;
+  padding: 30px 34px 32px;
+}
+
+.promoBody {
+  gap: 13px;
+}
+
+.kicker {
+  color: #a93d32;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
+.promoBody h2,
+.heading h2 {
+  margin: 0;
+  color: #171a1f;
+  font-family: var(--font-head, inherit);
+  letter-spacing: -0.038em;
+}
+
+.promoBody h2 {
+  max-width: 470px;
+  font-size: 26px;
+  line-height: 1.22;
+}
+
+.promoBody > p,
+.heading p {
+  margin: 0;
+  color: #60656d;
+  font-size: 13.5px;
+  line-height: 1.62;
+  word-break: keep-all;
+}
+
+.promoPoints {
+  display: grid;
+  gap: 7px;
+  margin: 2px 0 5px;
+  padding: 0;
+  list-style: none;
+}
+
+.promoPoints li {
+  position: relative;
+  padding-left: 18px;
+  color: #3f444c;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.promoPoints li::before {
+  position: absolute;
+  left: 0;
+  top: 0.47em;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #cf5548;
+  content: "";
+}
+
+.actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(0, 0.75fr);
+  gap: 9px;
+  margin-top: 7px;
+}
+
+.actions button {
+  min-height: 46px;
+  padding: 0 17px;
+  border-radius: 12px;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 760;
+  cursor: pointer;
+}
+
+.primary {
+  border: 1px solid #17191d;
+  background: #17191d;
+  color: #ffffff;
+  box-shadow: 0 8px 22px rgba(15, 18, 22, 0.16);
+}
+
+.primary:hover,
+.primary:focus-visible {
+  background: #000000;
+}
+
+.secondary {
+  border: 1px solid rgba(24, 27, 32, 0.12);
+  background: #f4f5f5;
+  color: #4f555d;
+}
+
+.secondary:hover,
+.secondary:focus-visible {
+  background: #eceeed;
+  color: #1b1e23;
+}
+
+.close:focus-visible,
+.actions button:focus-visible {
+  outline: 2px solid #be4b3f;
+  outline-offset: 2px;
+}
+
+.installBody {
+  gap: 22px;
+  padding-top: 24px;
+}
+
+.brandHeader {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 54px;
+  padding: 0 48px;
+  color: #22262b;
+}
+
+.brandHeader span {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(162, 59, 50, 0.18);
+  border-radius: 10px;
+  background: rgba(225, 92, 77, 0.08);
+}
+
+.brandHeader img {
+  width: 20px;
+  height: 20px;
+  object-fit: contain;
+}
+
+.brandHeader strong {
+  font-size: 14px;
+  letter-spacing: -0.018em;
+}
+
+.heading {
+  display: grid;
+  justify-items: center;
+  gap: 7px;
+  text-align: center;
+}
+
+.heading h2 {
+  font-size: 24px;
+  line-height: 1.22;
+}
+
+.packageList {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid rgba(24, 27, 32, 0.1);
+  border-radius: 15px;
+  background: #ffffff;
+}
+
+.packageRow {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 74px;
+  padding: 12px 14px;
+}
+
+.packageRow + .packageRow {
+  border-top: 1px solid rgba(24, 27, 32, 0.08);
+}
+
+.packageMark,
+.progressIcon {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  border: 1px solid rgba(162, 59, 50, 0.15);
+  background: #fff6f3;
+  color: #26855c;
+}
+
+.packageMark {
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+}
+
+.packageMark img,
+.progressIcon img {
+  width: 23px;
+  height: 23px;
+  object-fit: contain;
+}
+
+.packageCopy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.packageCopy strong {
+  color: #23272d;
+  font-size: 12.5px;
+  line-height: 1.35;
+}
+
+.packageCopy small {
+  overflow: hidden;
+  color: #6c7179;
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.packageSize {
+  color: #51565e;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.totalRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: -8px;
+  color: #6b7078;
+  font-size: 12px;
+}
+
+.totalRow strong {
+  color: #292d33;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.installNote {
+  margin: -10px 0 0;
+  color: #777c84;
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.progressCard {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid rgba(24, 27, 32, 0.1);
+  border-radius: 17px;
+  background: #ffffff;
+  box-shadow: 0 14px 36px rgba(26, 31, 38, 0.08);
+}
+
+.progressHead {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.progressIcon {
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+}
+
+.progressCard[data-complete="true"] .progressIcon {
+  border-color: rgba(38, 133, 92, 0.18);
+  background: #effaf4;
+}
+
+.progressTitle {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.progressTitle strong {
+  color: #22262c;
+  font-size: 13px;
+}
+
+.progressTitle small {
+  overflow: hidden;
+  color: #6d727a;
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.percent {
+  color: #4e545c;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.progressTrack {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e7e9ea;
+}
+
+.progressTrack span {
+  display: block;
+  min-width: 3px;
+  height: 100%;
+  border-radius: inherit;
+  background: #e35b49;
+  transition: width 240ms ease;
+}
+
+.progressCard[data-complete="true"] .progressTrack span {
+  background: #27a069;
+}
+
+.progressMeta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  color: #777c83;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.errorCard {
+  display: grid;
+  gap: 7px;
+  padding: 14px 16px;
+  border: 1px solid rgba(185, 56, 45, 0.18);
+  border-radius: 13px;
+  background: #fff5f2;
+  color: #8f3028;
+}
+
+.errorCard strong {
+  font-size: 11px;
+}
+
+.errorCard code {
+  overflow-wrap: anywhere;
+  color: #6f2923;
+  font-size: 11px;
+}
+
+@keyframes backdropIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes dialogIn {
+  from { opacity: 0; transform: translateY(9px) scale(0.992); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@media (max-width: 620px) {
+  .backdrop { padding: 14px; }
+  .dialog,
+  .dialog[data-surface="plan"],
+  .dialog[data-surface="installing"],
+  .dialog[data-surface="error"] { width: calc(100vw - 28px); }
+  .hero { height: 200px; }
+  .promoBody,
+  .installBody { padding: 25px 22px 26px; }
+  .promoBody h2 { font-size: 23px; }
+  .actions { grid-template-columns: 1fr; }
+  .secondary { order: 2; }
+  .packageRow { grid-template-columns: 36px minmax(0, 1fr); }
+  .packageSize { grid-column: 2; }
+  .packageCopy small { white-space: normal; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .backdrop,
+  .dialog { animation: none; }
+  .progressTrack span { transition: none; }
+}
+
+@media (prefers-contrast: more), (forced-colors: active) {
+  .backdrop { backdrop-filter: none; }
+  .dialog { border: 2px solid CanvasText; }
+  .heroBrand { backdrop-filter: none; }
+}

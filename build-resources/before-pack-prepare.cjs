@@ -3,6 +3,9 @@
 const { execFileSync } = require("node:child_process");
 const { readFileSync } = require("node:fs");
 const path = require("node:path");
+const {
+  materializeProductExtensionSigningPolicy,
+} = require("./product-extension-signing-policy.cjs");
 
 function verifyPublicPackageMetadata(projectDir) {
   const packagePath = path.join(projectDir, "package.json");
@@ -30,6 +33,11 @@ function verifyPublicPackageMetadata(projectDir) {
 module.exports = async function beforePackPrepare(context) {
   const projectDir = context.packager.projectDir;
   verifyPublicPackageMetadata(projectDir);
+  const signingPolicy = materializeProductExtensionSigningPolicy(projectDir);
+  console.log(
+    `[beforePack] prepared product-extension signing policy ${signingPolicy.sha256} `
+      + `(${signingPolicy.keyIds.length} trusted key id(s))`,
+  );
   execFileSync(process.execPath, [path.join(projectDir, "scripts", "ensure-engine.mjs")], {
     cwd: projectDir,
     env: process.env,

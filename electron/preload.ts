@@ -54,6 +54,17 @@ const api: AgentlasIpc = {
     revokeDevice: (deviceId: string) => ipcRenderer.invoke("mobileBridge:revokeDevice", deviceId),
     revealLog: () => ipcRenderer.invoke("mobileBridge:revealLog"),
   },
+  productExtensions: {
+    scienceStatus: () => ipcRenderer.invoke("productExtensions:scienceStatus"),
+    scienceSuiteStatus: () => ipcRenderer.invoke("productExtensions:scienceSuiteStatus"),
+    installScience: () => ipcRenderer.invoke("productExtensions:installScience"),
+    installScienceSuite: () => ipcRenderer.invoke("productExtensions:installScienceSuite"),
+    setScienceEnabled: (enabled: boolean) => ipcRenderer.invoke("productExtensions:setScienceEnabled", enabled),
+    uninstallScience: () => ipcRenderer.invoke("productExtensions:uninstallScience"),
+    openScienceView: (bounds) => ipcRenderer.invoke("productExtensions:openScienceView", bounds),
+    setScienceViewBounds: (bounds) => ipcRenderer.invoke("productExtensions:setScienceViewBounds", bounds),
+    closeScienceView: () => ipcRenderer.invoke("productExtensions:closeScienceView"),
+  },
   judgment: {
     judge: (spec: RendererJudgmentSpec) => ipcRenderer.invoke("judgment:judge", spec),
     judgeSubset: (spec: RendererSubsetJudgmentSpec) => ipcRenderer.invoke("judgment:judgeSubset", spec),
@@ -1080,6 +1091,21 @@ contextBridge.exposeInMainWorld("agentlasEvents", {
     const wrapped = (_evt: Electron.IpcRendererEvent, event: { reason: string }) => handler(event);
     ipcRenderer.on("mobileBridge:changed", wrapped);
     return () => ipcRenderer.removeListener("mobileBridge:changed", wrapped);
+  },
+  onProductExtensionChanged: (handler: (status: import("../shared/product-extension").ProductExtensionStatus) => void) => {
+    const wrapped = (_evt: Electron.IpcRendererEvent, status: import("../shared/product-extension").ProductExtensionStatus) => handler(status);
+    ipcRenderer.on("productExtensions:changed", wrapped);
+    return () => ipcRenderer.removeListener("productExtensions:changed", wrapped);
+  },
+  onScienceSuiteProgress: (handler: (progress: import("../shared/product-extension").ScienceSuiteInstallProgress) => void) => {
+    const wrapped = (_evt: Electron.IpcRendererEvent, progress: import("../shared/product-extension").ScienceSuiteInstallProgress) => handler(progress);
+    ipcRenderer.on("productExtensions:scienceSuiteProgress", wrapped);
+    return () => ipcRenderer.removeListener("productExtensions:scienceSuiteProgress", wrapped);
+  },
+  onProductExtensionViewStatus: (handler: (status: import("../shared/product-extension").ProductExtensionViewStatus) => void) => {
+    const wrapped = (_evt: Electron.IpcRendererEvent, status: import("../shared/product-extension").ProductExtensionViewStatus) => handler(status);
+    ipcRenderer.on("productExtensions:viewStatus", wrapped);
+    return () => ipcRenderer.removeListener("productExtensions:viewStatus", wrapped);
   },
   // 도구 승인 — 런타임이 승인을 기다리거나(live) 이미 자동 거부한(post-denial) 사실.
   onToolApproval: (handler: (req: ToolApprovalRequestEvent) => void) => {

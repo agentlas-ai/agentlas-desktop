@@ -125,7 +125,6 @@ export function OneAdaptiveResult({
   receipt,
   locale,
   onRetryUnfinished,
-  onAcceptResult,
   onSemanticAction,
   onOpenAgentDraft,
   autoRecovery,
@@ -155,8 +154,6 @@ export function OneAdaptiveResult({
   onManageImprovementAsset?: (asset: OneImprovementReusedAssetV1) => void;
   /** 끝까지 완료되지 않은 실행을 한 번의 클릭으로 이어서 진행한다. */
   onRetryUnfinished?: () => void;
-  /** Main verifies the exact Task version and completed run receipt. */
-  onAcceptResult?: () => Promise<void>;
   /** Render rich media/document surfaces as a full-height in-app result. */
   inOutputRail?: boolean;
   /**
@@ -171,7 +168,6 @@ export function OneAdaptiveResult({
   const surface = useMemo(() => manifest && isOneSurfaceManifestV1(manifest) ? manifest : null, [manifest]);
   const renderDecision = useMemo(() => surface ? inspectSurfaceForDesktop(surface, projection.taskId) : null, [projection.taskId, surface]);
   const fallback = useMemo(() => readSafeFallback(manifest, projection.taskId), [manifest, projection.taskId]);
-  const hasManifest = Boolean(manifest && typeof manifest === "object");
   const dedicatedBlocks = useMemo(
     // ValueClosure·ImprovementProof 는 참조 한 줄만 들고 있고 진짜 카드는 기억 화면에
     // 산다. 결과 카드에서 일부러 빼는 것이지 빠뜨린 게 아니다.
@@ -202,13 +198,6 @@ export function OneAdaptiveResult({
     surface && !renderDecision?.native && oneSurfaceNeedsDedicatedResult(surface),
   );
   const hasDedicatedResult = hasNativeResult || hasFallbackResult;
-  const canAcceptResult = Boolean(
-    projection.canonicalStatus === "partial"
-    && receipt?.status === "completed"
-    && receipt.chatId === projection.chatId
-    && onAcceptResult,
-  );
-  const standaloneAcceptance = canAcceptResult && !hasManifest;
   const showNative = Boolean(surface && renderDecision?.native);
   const hasSourceListBlock = Boolean(surface?.blocks.some((block) => block.type === "SourceList"));
   const semanticActions = showNative && surface
@@ -306,50 +295,8 @@ export function OneAdaptiveResult({
           autoRecovery={autoRecovery}
         />
       )}
-      {canAcceptResult && onAcceptResult && (
-        <ResultAcceptance locale={locale} standalone={!hasDedicatedResult || standaloneAcceptance} onAccept={onAcceptResult} />
-      )}
       {/* Value/experience/proof records keep compounding internally. They are
           deliberately absent from the ordinary One conversation surface. */}
-    </section>
-  );
-}
-
-function ResultAcceptance({ locale, standalone, onAccept }: {
-  locale: "ko" | "en";
-  standalone: boolean;
-  onAccept: () => Promise<void>;
-}) {
-  const [acceptingResult, setAcceptingResult] = useState(false);
-  const [acceptanceFailed, setAcceptanceFailed] = useState(false);
-  return (
-    <section
-      className={styles.standaloneAcceptance}
-      data-standalone={standalone ? "true" : "false"}
-      aria-label={tFor(locale, "one.res.aria.confirm_result")}
-    >
-      {acceptanceFailed && (
-        <p className={styles.standaloneAcceptanceCopy} role="alert">
-          {tFor(locale, "one.res.acceptance_failed")}
-        </p>
-      )}
-      <button
-        type="button"
-        className={styles.acceptanceButton}
-        disabled={acceptingResult}
-        onClick={() => {
-          if (acceptingResult) return;
-          setAcceptingResult(true);
-          setAcceptanceFailed(false);
-          void onAccept()
-            .catch(() => setAcceptanceFailed(true))
-            .finally(() => setAcceptingResult(false));
-        }}
-      >
-        {acceptingResult
-          ? tFor(locale, "one.res.finishing")
-          : tFor(locale, "one.res.finish_here")}
-      </button>
     </section>
   );
 }

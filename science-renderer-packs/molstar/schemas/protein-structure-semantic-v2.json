@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentlas.science/protein-structure-semantic/v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "engineVersion", "webgl2", "modelCount", "chainCount", "residueCount", "atomCount", "representation", "colorTheme", "interactionSha256", "selectedResidueCount", "focusResolved", "canvasWidth", "canvasHeight"],
+  "properties": {
+    "kind": { "const": "protein-structure" },
+    "engineVersion": { "type": "string" },
+    "webgl2": { "const": true },
+    "modelCount": { "type": "integer", "minimum": 1 },
+    "chainCount": { "type": "integer", "minimum": 0 },
+    "residueCount": { "type": "integer", "minimum": 0 },
+    "atomCount": { "type": "integer", "minimum": 1 },
+    "representation": { "enum": ["cartoon", "ball-and-stick", "surface"] },
+    "colorTheme": { "enum": ["chain-id", "element-symbol", "secondary-structure"] },
+    "interactionSha256": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
+    "selectedResidueCount": { "type": "integer", "minimum": 0, "maximum": 512 },
+    "focusResolved": { "type": "boolean" },
+    "canvasWidth": { "type": "integer", "minimum": 1 },
+    "canvasHeight": { "type": "integer", "minimum": 1 }
+  }
+}

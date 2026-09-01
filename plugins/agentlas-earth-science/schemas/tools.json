@@ -1,0 +1,213 @@
+{
+  "schema": "agentlas.science-domain-tools/v1",
+  "tools": [
+    {
+      "name": "search_usgs_earthquakes",
+      "description": "Query the anonymous USGS FDSN Event service and return a bounded, provenance-hashed earthquake catalog plus canonical GeoJSON and table projections.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["startTime", "endTime"],
+        "properties": {
+          "startTime": { "type": "string", "format": "date-time", "description": "Inclusive UTC start with an explicit timezone." },
+          "endTime": { "type": "string", "format": "date-time", "description": "Inclusive UTC end with an explicit timezone; at most 366 days after start." },
+          "minMagnitude": { "type": "number", "minimum": -2, "maximum": 10, "default": 0 },
+          "maxMagnitude": { "type": ["number", "null"], "minimum": -2, "maximum": 10, "description": "Optional inclusive maximum preferred magnitude." },
+          "minDepthKm": { "type": "number", "minimum": -100, "maximum": 1000, "default": -100 },
+          "maxDepthKm": { "type": "number", "minimum": -100, "maximum": 1000, "default": 1000 },
+          "bounds": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["minLongitude", "minLatitude", "maxLongitude", "maxLatitude"],
+            "properties": {
+              "minLongitude": { "type": "number", "minimum": -180, "maximum": 180 },
+              "minLatitude": { "type": "number", "minimum": -90, "maximum": 90 },
+              "maxLongitude": { "type": "number", "minimum": -180, "maximum": 180 },
+              "maxLatitude": { "type": "number", "minimum": -90, "maximum": 90 }
+            }
+          },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 2000, "default": 500 },
+          "offset": { "type": "integer", "minimum": 1, "maximum": 1000000, "default": 1, "description": "USGS one-based result offset for bounded pagination." },
+          "orderBy": { "type": "string", "enum": ["time", "time-asc", "magnitude", "magnitude-asc"], "default": "time" }
+        }
+      }
+    },
+    {
+      "name": "analyze_usgs_gutenberg_richter",
+      "description": "Estimate a publication-auditable Gutenberg–Richter b-value from one complete, provenance-hashed USGS catalog using an explicit magnitude-completeness threshold, explicit magnitude type, deterministic bins, and the Aki maximum-likelihood estimator with discrete-bin correction.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["catalog", "completenessMagnitude", "magnitudeType"],
+        "properties": {
+          "catalog": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["schema", "contractRevision", "source", "sourceMetadata", "orderBy", "eventCount", "pagination", "qualityCoverage", "events", "observations", "geojson", "table", "rendererCompatibility", "warnings", "normalizedSha256", "query", "provenance"],
+            "properties": {
+              "schema": { "const": "agentlas.earth.usgs-earthquake-catalog/v1" },
+              "contractRevision": { "const": "quality-pagination-detail-compatible/v2" },
+              "source": { "type": "object" },
+              "sourceMetadata": { "type": "object" },
+              "orderBy": { "type": "string", "enum": ["time", "time-asc", "magnitude", "magnitude-asc"] },
+              "eventCount": { "type": "integer", "minimum": 1, "maximum": 2000 },
+              "pagination": { "type": "object" },
+              "qualityCoverage": { "type": "object" },
+              "events": { "type": "array", "minItems": 1, "maxItems": 2000 },
+              "observations": { "type": "array", "minItems": 1, "maxItems": 2000 },
+              "geojson": { "type": "object" },
+              "table": { "type": "object" },
+              "rendererCompatibility": { "type": "object" },
+              "warnings": { "type": "array", "maxItems": 20 },
+              "normalizedSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "query": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["startTime", "endTime", "minMagnitude", "maxMagnitude", "minDepthKm", "maxDepthKm", "bounds", "limit", "offset", "orderBy"],
+                "properties": {
+                  "startTime": { "type": "string", "format": "date-time" },
+                  "endTime": { "type": "string", "format": "date-time" },
+                  "minMagnitude": { "type": "number", "minimum": -2, "maximum": 10 },
+                  "maxMagnitude": { "type": ["number", "null"], "minimum": -2, "maximum": 10 },
+                  "minDepthKm": { "type": "number", "minimum": -100, "maximum": 1000 },
+                  "maxDepthKm": { "type": "number", "minimum": -100, "maximum": 1000 },
+                  "bounds": { "type": ["object", "null"] },
+                  "limit": { "type": "integer", "minimum": 1, "maximum": 2000 },
+                  "offset": { "const": 1 },
+                  "orderBy": { "type": "string", "enum": ["time", "time-asc", "magnitude", "magnitude-asc"] }
+                }
+              },
+              "provenance": { "type": "object" }
+            }
+          },
+          "completenessMagnitude": { "type": "number", "minimum": -2, "maximum": 10, "description": "Researcher-supplied Mc; this tool does not estimate completeness." },
+          "binWidth": { "type": "number", "minimum": 0.01, "maximum": 1, "default": 0.1, "description": "Magnitude discretization ΔM. Mc and included magnitudes must align to this grid." },
+          "magnitudeType": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,40}$", "description": "Exact single USGS preferred magnitude type, for example mw or ml; cross-scale conversion is denied." },
+          "confidenceLevel": { "type": "number", "enum": [0.9, 0.95, 0.99], "default": 0.95 }
+        }
+      }
+    },
+    {
+      "name": "analyze_usgs_omori_utsu",
+      "description": "Fit a bounded Omori–Utsu non-homogeneous Poisson aftershock-decay model to one complete provenance-hashed USGS catalog with explicit mainshock, observation, time-completeness, magnitude-completeness, magnitude-type, bin, and parameter boundaries; returns fit status, audit and publication tables, decay/residual Vega-Lite, and deterministic receipts.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["catalog", "mainshockTime", "observationStartTime", "observationEndTime", "completenessStartTime", "completenessMagnitude", "magnitudeType", "rateBinWidthSeconds", "parameterBounds"],
+        "properties": {
+          "catalog": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["schema", "contractRevision", "source", "sourceMetadata", "orderBy", "eventCount", "pagination", "qualityCoverage", "events", "observations", "geojson", "table", "rendererCompatibility", "warnings", "normalizedSha256", "query", "provenance"],
+            "properties": {
+              "schema": { "const": "agentlas.earth.usgs-earthquake-catalog/v1" },
+              "contractRevision": { "const": "quality-pagination-detail-compatible/v2" },
+              "source": { "type": "object" }, "sourceMetadata": { "type": "object" },
+              "orderBy": { "type": "string", "enum": ["time", "time-asc", "magnitude", "magnitude-asc"] },
+              "eventCount": { "type": "integer", "minimum": 1, "maximum": 2000 },
+              "pagination": { "type": "object" }, "qualityCoverage": { "type": "object" },
+              "events": { "type": "array", "minItems": 1, "maxItems": 2000 },
+              "observations": { "type": "array", "minItems": 1, "maxItems": 2000 },
+              "geojson": { "type": "object" }, "table": { "type": "object" }, "rendererCompatibility": { "type": "object" },
+              "warnings": { "type": "array", "maxItems": 20 },
+              "normalizedSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "query": { "type": "object" }, "provenance": { "type": "object" }
+            }
+          },
+          "mainshockTime": { "type": "string", "format": "date-time", "description": "Researcher-supplied mainshock origin instant; must precede the observation window." },
+          "observationStartTime": { "type": "string", "format": "date-time", "description": "Inclusive observation start contained in the catalog query." },
+          "observationEndTime": { "type": "string", "format": "date-time", "description": "Inclusive observation end contained in the catalog query." },
+          "completenessStartTime": { "type": "string", "format": "date-time", "description": "Researcher-supplied time after which the catalog is considered complete; fit starts here." },
+          "completenessMagnitude": { "type": "number", "minimum": -2, "maximum": 10, "description": "Researcher-supplied Mc; never estimated." },
+          "magnitudeType": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,40}$", "description": "One exact USGS preferred magnitude type; no scale conversion." },
+          "rateBinWidthSeconds": { "type": "integer", "minimum": 60, "maximum": 2678400, "description": "Fixed time-bin width; must produce 4–500 bins after the time-completeness boundary." },
+          "parameterBounds": {
+            "type": "object", "additionalProperties": false,
+            "required": ["pMin", "pMax", "cMinSeconds", "cMaxSeconds"],
+            "properties": {
+              "pMin": { "type": "number", "minimum": 0.1, "maximum": 5 },
+              "pMax": { "type": "number", "minimum": 0.1, "maximum": 5 },
+              "cMinSeconds": { "type": "number", "exclusiveMinimum": 0 },
+              "cMaxSeconds": { "type": "number", "exclusiveMinimum": 0 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "get_usgs_event_detail",
+      "description": "Fetch one USGS ComCat event by exact event id, including preferred-origin quality and uncertainty fields plus a bounded product inventory and renderer-ready projections.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["eventId"],
+        "properties": {
+          "eventId": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,120}$", "description": "Exact USGS/ComCat event identifier from a catalog result." }
+        }
+      }
+    },
+    {
+      "name": "fetch_noaa_coops_water_levels",
+      "description": "Fetch exact observed water levels from the official NOAA CO-OPS production API and return UTC-, datum-, unit-, and station-normalized table, GeoJSON, Vega-Lite, content, and network receipts.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["stationId", "startTime", "endTime", "datum"],
+        "properties": {
+          "stationId": { "type": "string", "pattern": "^[0-9]{7}$", "description": "Exact seven-digit NOAA CO-OPS station identifier." },
+          "startTime": { "type": "string", "format": "date-time", "description": "Inclusive instant with an explicit timezone and exact minute precision." },
+          "endTime": { "type": "string", "format": "date-time", "description": "Inclusive instant with an explicit timezone and exact minute precision; no more than 31 days after start." },
+          "datum": { "type": "string", "enum": ["CRD", "IGLD", "LWD", "MHHW", "MHW", "MTL", "MSL", "MLW", "MLLW", "NAVD", "STND"], "description": "Explicit NOAA vertical datum; never inferred." },
+          "units": { "type": "string", "enum": ["metric", "english"], "default": "metric" }
+        }
+      }
+    },
+    {
+      "name": "normalize_usgs_earthquake_geojson",
+      "description": "Normalize a user-supplied USGS GeoJSON FeatureCollection offline with the same scientific and size contract as a live query.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["geojson"],
+        "properties": {
+          "geojson": { "type": "object" },
+          "orderBy": { "type": "string", "enum": ["time", "time-asc", "magnitude", "magnitude-asc"], "default": "time" },
+          "offset": { "type": "integer", "minimum": 1, "maximum": 1000000, "default": 1 },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 2000, "default": 2000 }
+        }
+      }
+    },
+    {
+      "name": "normalize_usgs_event_detail_geojson",
+      "description": "Normalize a user-downloaded USGS event detail Feature offline, preserving preferred-origin uncertainty and a bounded product/content manifest without fetching linked files.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["geojson"],
+        "properties": { "geojson": { "type": "object" } }
+      }
+    },
+    {
+      "name": "normalize_noaa_coops_water_level_json",
+      "description": "Normalize a user-downloaded NOAA CO-OPS water-level JSON response offline with the same UTC, station, coordinate, datum, unit, row, and renderer contracts as a live request.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["response", "stationId", "startTime", "endTime", "datum"],
+        "properties": {
+          "response": { "type": "object" },
+          "stationId": { "type": "string", "pattern": "^[0-9]{7}$" },
+          "startTime": { "type": "string", "format": "date-time" },
+          "endTime": { "type": "string", "format": "date-time" },
+          "datum": { "type": "string", "enum": ["CRD", "IGLD", "LWD", "MHHW", "MHW", "MTL", "MSL", "MLW", "MLLW", "NAVD", "STND"] },
+          "units": { "type": "string", "enum": ["metric", "english"], "default": "metric" }
+        }
+      }
+    },
+    {
+      "name": "describe_earth_science_capabilities",
+      "description": "Return the exact implemented source, output, renderer, and unsupported-feature boundaries for this plugin.",
+      "inputSchema": { "type": "object", "additionalProperties": false, "properties": {} }
+    }
+  ]
+}

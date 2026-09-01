@@ -92,6 +92,10 @@ extraResources:
   #   시스템에 설치하지도, 시스템 PATH 에 올리지도 않는다 — 앱이 자기 자식에게만 쓴다.
   - from: build-resources/node-runtime
     to: node-runtime
+  # Release-owned public keys only. beforePack materializes this canonical file
+  # from CI/environment policy; packaging fails closed when the policy is absent.
+  - from: dist/product-extension-signing-policy.json
+    to: product-extension-signing-policy.json
   - from: dist/embedded-core
     to: Hephaestus
     filter:

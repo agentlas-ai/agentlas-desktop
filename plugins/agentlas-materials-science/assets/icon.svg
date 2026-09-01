@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Materials Science">
+  <rect width="64" height="64" rx="15" fill="#6657A8"/>
+  <g fill="none" stroke="#fff" stroke-width="3">
+    <path d="M17 19 32 11l15 8v17l-15 9-15-9Z"/>
+    <path d="m17 19 15 9 15-9M32 28v17"/>
+  </g>
+  <circle cx="32" cy="28" r="5" fill="#E6D7FF"/>
+  <circle cx="17" cy="19" r="3" fill="#fff"/><circle cx="47" cy="19" r="3" fill="#fff"/><circle cx="32" cy="45" r="3" fill="#fff"/>
+</svg>

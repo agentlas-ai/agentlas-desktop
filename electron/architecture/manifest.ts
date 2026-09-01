@@ -35,10 +35,15 @@
 // This module is intentionally DATA + tiny pure helpers only (no electron/node imports)
 // so it compiles into dist/electron/** (packaged).
 
-export const ARCHITECTURE_VERSION = "1.7.2";
+export const ARCHITECTURE_VERSION = "1.10.1";
 export const GLOBAL_ORCHESTRATOR_SLUG = "agentlas-orchestrator";
 export const APP_BUILDER_SLUG = "agentlas-app-builder";
 export const CORE_META_AGENT_SLUG = "agentlas-core-engine-meta-agent-builtin";
+export const SCIENCE_RESEARCH_DIRECTOR_SLUG = "agentlas-science-research-director";
+export const RESEARCH_DIRECTOR_PLUGIN_VERSION = "1.15.1";
+// Hash of the canonical prompt assembled from agent/agent.md and direct-study/SKILL.md.
+// The Science runtime refuses to dispatch when the installed package differs.
+export const RESEARCH_DIRECTOR_SYSTEM_PROMPT_SHA256 = "267d43a6b24c5099fd044b76b155ad313f4180a8768912affe3117bc21b9d9bd";
 
 // ── Memory contract ────────────────────────────────────────────────────────
 // Mirrors agent_memory_curator_agent/docs/integration-contract.md + memory-taxonomy.md.
@@ -516,6 +521,11 @@ durable 기억을 직접 쓰지 않는다. 관찰은 Memory Events 로 내고 �
 ## 경계
 허브·클라우드에 업로드되지 않는다. 오너의 원시 기억·자격증명·전사를 외부로 내보내지 않는다.`;
 
+const SCIENCE_RESEARCH_DIRECTOR_SEED_PROMPT = `# Agentlas Science Research Director
+
+This built-in identity is activated only by the Science runtime after it verifies the exact installed
+workflow package. If this placeholder reaches model execution, stop: the Science runtime binding is invalid.`;
+
 export const BUILTIN_AGENTS: readonly BuiltinAgentDef[] = [
   {
     slug: GLOBAL_ORCHESTRATOR_SLUG,
@@ -596,6 +606,17 @@ export const BUILTIN_AGENTS: readonly BuiltinAgentDef[] = [
     visibility: "background",
     tone: "green",
     systemPrompt: ONE_AGENT_PROMPT,
+  },
+  {
+    slug: SCIENCE_RESEARCH_DIRECTOR_SLUG,
+    name: "Agentlas Science 연구 디렉터",
+    nameEn: "Agentlas Science Research Director",
+    tagline: "질문부터 저널 제출 패키지까지 하나의 엄밀한 연구를 지휘",
+    taglineEn: "Directs one rigorous study from question to journal-ready package",
+    role: "orchestrator",
+    visibility: "background",
+    tone: "green",
+    systemPrompt: SCIENCE_RESEARCH_DIRECTOR_SEED_PROMPT,
   },
 ];
 

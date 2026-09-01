@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentlas.ai/schemas/science/evidence-ledger-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "studyId", "entries"],
+  "properties": {
+    "schema": { "const": "agentlas.science.evidence-ledger/v1" },
+    "studyId": { "type": "string", "format": "uuid" },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "claimId", "status", "evidenceKind", "sourceBindings", "runBindings", "artifactBindings", "summary", "limitations"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "claimId": { "type": "string", "format": "uuid" },
+          "status": { "enum": ["supported", "weakened", "contradicted", "unresolved", "not_tested"] },
+          "evidenceKind": { "enum": ["metadata_discovered", "content_verified", "computed", "human_observation", "absent"] },
+          "sourceBindings": { "type": "array", "items": { "type": "string" } },
+          "runBindings": { "type": "array", "items": { "type": "string" } },
+          "artifactBindings": { "type": "array", "items": { "type": "string" } },
+          "summary": { "type": "string" },
+          "limitations": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  }
+}

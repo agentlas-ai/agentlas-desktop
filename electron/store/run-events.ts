@@ -29,6 +29,34 @@ interface RunEventRow {
   payload_json: string;
 }
 
+interface ScienceRuntimeOutboxRow {
+  delivery_id: string;
+  run_id: string;
+  chat_id: string;
+  source_run_event_id: string;
+  source_sequence: number;
+  source_kind: string;
+  source_event_sha256: string;
+  event_json: string;
+  status: "pending" | "delivered";
+  created_at: string;
+  delivered_at: string | null;
+}
+
+export interface ScienceRuntimeOutboxEvent {
+  deliveryId: string;
+  runId: string;
+  chatId: string;
+  sourceRunEventId: string;
+  sourceSequence: number;
+  sourceKind: string;
+  sourceEventSha256: string;
+  event: McpInvocationEvent;
+  status: "pending" | "delivered";
+  createdAt: string;
+  deliveredAt: string | null;
+}
+
 interface FailureEventRow {
   id: string;
   run_id: string | null;
@@ -80,6 +108,139 @@ const SECRET_RE = /(sk-[A-Za-z0-9_-]{12,}|api[_-]?key\s*[:=]\s*\S+|secret\s*[:=]
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function stableUuid(value: string): string {
+  const hex = createHash("sha256").update(value, "utf8").digest("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-8${hex.slice(13, 16)}-${((Number.parseInt(hex[16], 16) & 0x3) | 0x8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
+function scienceRuntimeEventJson(event: McpInvocationEvent): string {
+  const common = {
+    kind: event.kind,
+    sequence: event.sequence,
+    observedAt: event.observedAt,
+  };
+  let redacted: Record<string, unknown>;
+  if (event.kind === "lifecycle") {
+    redacted = { ...common, lifecycle: { phase: event.lifecycle?.phase, permission: event.lifecycle?.permission } };
+  } else if (event.kind === "partial") {
+    redacted = { ...common, delta: event.delta, text: event.text, textLen: event.textLen };
+  } else if (event.kind === "tool-use") {
+    redacted = {
+      ...common,
+      tool: {
+        id: event.tool?.id,
+        name: event.tool?.name,
+        isError: event.tool?.isError === true,
+        sourceUrls: Array.from({ length: Math.min(500, event.tool?.sourceUrls?.length ?? 0) }, () => "redacted"),
+      },
+    };
+  } else if (event.kind === "error") {
+    redacted = {
+      ...common,
+      error: {
+        code: typeof event.error?.code === "string" ? truncate(event.error.code, 160) : undefined,
+        message: typeof event.error?.message === "string" ? truncate(event.error.message, 1_000) : undefined,
+      },
+    };
+  } else if (event.kind === "final") {
+    // The same exact answer is already durable in the local core transcript.
+    // Keeping it here lets a cross-DB replay reproduce the partial/final
+    // integrity check without ever retaining raw tool args or tool results.
+    redacted = { ...common, text: typeof event.text === "string" ? event.text.slice(0, 250_000) : undefined };
+  } else if (event.kind === "reasoning" || event.kind === "thinking") {
+    redacted = {
+      ...common,
+      textLen: event.reasoning?.text?.length ?? event.text?.length ?? event.textLen,
+      reasoning: { phase: event.reasoning?.phase, durationMs: event.reasoning?.durationMs },
+    };
+  } else {
+    redacted = {
+      ...common,
+      status: typeof event.status === "string" ? truncate(event.status, 500) : undefined,
+      textLen: event.textLen ?? event.text?.length,
+      tokens: event.tokens,
+      surfaceId: typeof event.surfaceId === "string" ? truncate(event.surfaceId, 200) : undefined,
+    };
+  }
+  const json = JSON.stringify(redacted);
+  if (Buffer.byteLength(json, "utf8") > 262_144) throw new Error("science-runtime-outbox-event-too-large");
+  return json;
+}
+
+function scienceRuntimeOutboxFromRow(row: ScienceRuntimeOutboxRow): ScienceRuntimeOutboxEvent {
+  const digest = createHash("sha256").update(row.event_json, "utf8").digest("hex");
+  if (digest !== row.source_event_sha256) throw new Error("science-runtime-outbox-integrity-failed");
+  const parsed = JSON.parse(row.event_json) as McpInvocationEvent;
+  if (!parsed || typeof parsed !== "object" || parsed.sequence !== row.source_sequence || parsed.kind !== row.source_kind) {
+    throw new Error("science-runtime-outbox-envelope-invalid");
+  }
+  return {
+    deliveryId: row.delivery_id,
+    runId: row.run_id,
+    chatId: row.chat_id,
+    sourceRunEventId: row.source_run_event_id,
+    sourceSequence: row.source_sequence,
+    sourceKind: row.source_kind,
+    sourceEventSha256: row.source_event_sha256,
+    event: parsed,
+    status: row.status,
+    createdAt: row.created_at,
+    deliveredAt: row.delivered_at,
+  };
+}
+
+export function recordScienceRuntimeOutboxEvent(input: {
+  runId: string;
+  chatId: string;
+  event: McpInvocationEvent;
+}): ScienceRuntimeOutboxEvent {
+  const sourceSequence = Number(input.event.sequence);
+  if (!input.runId || !input.chatId || !Number.isSafeInteger(sourceSequence) || sourceSequence < 1) {
+    throw new Error("science-runtime-outbox-source-invalid");
+  }
+  const eventJson = scienceRuntimeEventJson(input.event);
+  const sourceEventSha256 = createHash("sha256").update(eventJson, "utf8").digest("hex");
+  const sourceRunEventId = `science-runtime-event:v1:${input.runId}:${sourceSequence}:${sourceEventSha256}`;
+  const deliveryId = stableUuid(`science-runtime-delivery:v1:${sourceRunEventId}`);
+  const createdAt = nowIso();
+  return getDb().transaction(() => {
+    const existing = getDb().prepare("SELECT * FROM science_runtime_event_outbox WHERE run_id = ? AND source_sequence = ?")
+      .get(input.runId, sourceSequence) as ScienceRuntimeOutboxRow | undefined;
+    if (existing) {
+      if (existing.chat_id !== input.chatId || existing.source_event_sha256 !== sourceEventSha256 || existing.source_kind !== input.event.kind) {
+        throw new Error("science-runtime-outbox-source-sequence-conflict");
+      }
+      return scienceRuntimeOutboxFromRow(existing);
+    }
+    getDb().prepare(`INSERT INTO science_runtime_event_outbox
+      (delivery_id,run_id,chat_id,source_run_event_id,source_sequence,source_kind,source_event_sha256,event_json,status,created_at,delivered_at)
+      VALUES (?,?,?,?,?,?,?,?,'pending',?,NULL)`)
+      .run(deliveryId, input.runId, input.chatId, sourceRunEventId, sourceSequence, input.event.kind, sourceEventSha256, eventJson, createdAt);
+    const row = getDb().prepare("SELECT * FROM science_runtime_event_outbox WHERE delivery_id = ?").get(deliveryId) as ScienceRuntimeOutboxRow | undefined;
+    if (!row) throw new Error("science-runtime-outbox-create-failed");
+    return scienceRuntimeOutboxFromRow(row);
+  })();
+}
+
+export function listPendingScienceRuntimeOutboxEvents(limit = 5_000): ScienceRuntimeOutboxEvent[] {
+  const safeLimit = Math.max(1, Math.min(10_000, Math.floor(limit)));
+  const rows = getDb().prepare(`SELECT * FROM science_runtime_event_outbox
+    WHERE status = 'pending' ORDER BY created_at, run_id, source_sequence LIMIT ?`).all(safeLimit) as ScienceRuntimeOutboxRow[];
+  return rows.map(scienceRuntimeOutboxFromRow);
+}
+
+export function markScienceRuntimeOutboxDelivered(deliveryId: string): void {
+  const now = nowIso();
+  const result = getDb().prepare(`UPDATE science_runtime_event_outbox
+    SET status = 'delivered', delivered_at = ? WHERE delivery_id = ? AND status = 'pending'`).run(now, deliveryId);
+  if (result.changes === 1) return;
+  const existing = getDb().prepare("SELECT * FROM science_runtime_event_outbox WHERE delivery_id = ?")
+    .get(deliveryId) as ScienceRuntimeOutboxRow | undefined;
+  if (!existing) throw new Error("science-runtime-outbox-delivery-not-found");
+  const verified = scienceRuntimeOutboxFromRow(existing);
+  if (verified.status !== "delivered") throw new Error("science-runtime-outbox-delivery-conflict");
 }
 
 function truncate(value: string, limit = 800): string {

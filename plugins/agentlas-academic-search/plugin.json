@@ -1,0 +1,51 @@
+{
+  "schema": "agentlas.plugin/v2",
+  "slug": "agentlas-academic-search",
+  "name": "Academic Search",
+  "version": "1.1.0",
+  "builtin": true,
+  "publisher": {
+    "name": "Agentlas",
+    "url": "https://agentlas.ai"
+  },
+  "surface": {
+    "displayName": "Academic Search",
+    "displayNameKo": "학술 검색",
+    "tagline": "Find and preserve prior research with provenance",
+    "taglineKo": "선행연구를 찾고 출처 영수증과 함께 보존합니다",
+    "description": "Routes literature discovery through multiple public scholarly metadata providers, deduplicates records, and preserves each result as an Agentlas Science Source.",
+    "descriptionKo": "여러 공개 학술 메타데이터 공급자를 함께 검색하고 중복을 제거해 각 결과를 Agentlas Science 출처로 보존합니다.",
+    "category": "data",
+    "brandColor": "#2E6B5C",
+    "defaultPrompts": [
+      "이 주제의 선행연구를 찾아 핵심 논문과 연구 공백을 정리해줘",
+      "이 가설과 관련된 최신 논문과 반대 결과를 함께 찾아줘"
+    ]
+  },
+  "invocation": {
+    "mention": "@agentlas-academic-search",
+    "implicit": "always",
+    "standalone": false
+  },
+  "provides": {
+    "skills": {
+      "router": "skills/index/SKILL.md",
+      "workflows": ["search", "full-text"]
+    }
+  },
+  "requires": {
+    "prereq": [
+      { "id": "agentlas-science", "provided-by": "app" }
+    ],
+    "os": ["darwin", "win32", "linux"]
+  },
+  "permissions": {
+    "fileWrite": "none",
+    "network": "allow",
+    "shell": "deny"
+  },
+  "state": {
+    "files": [],
+    "assets": false
+  }
+}

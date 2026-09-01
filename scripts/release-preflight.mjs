@@ -322,7 +322,11 @@ function verifyReleaseSourceContract(runtimeRoot, manifestVersion) {
   }
   for (const configName of ["electron-builder.yml", "electron-builder.mac-stable.yml"]) {
     const config = readFileSync(join(root, configName), "utf8");
-    for (const required of ["from: dist/embedded-core", "from: build-resources/python-runtime"]) {
+    for (const required of [
+      "from: dist/embedded-core",
+      "from: build-resources/python-runtime",
+      "from: dist/product-extension-signing-policy.json",
+    ]) {
       if (!config.includes(required)) throw new Error(`${configName} is missing ${required}`);
     }
   }
@@ -337,6 +341,9 @@ function verifyReleaseSourceContract(runtimeRoot, manifestVersion) {
   const releaseWorkflow = readFileSync(join(root, ".github", "workflows", "release.yml"), "utf8");
   const signedWorkflow = readFileSync(join(root, ".github", "workflows", "release-signed-mac.yml"), "utf8");
   for (const [name, workflow] of [["release.yml", releaseWorkflow], ["release-signed-mac.yml", signedWorkflow]]) {
+    if (!workflow.includes("AGENTLAS_PRODUCT_EXTENSION_TRUSTED_KEYS_JSON")) {
+      throw new Error(`${name} does not provide the release-owned product-extension public-key policy`);
+    }
     const refs = [...workflow.matchAll(/HEPHAESTUS_REF:\s*([^\s]+)/g)].map((match) => match[1]);
     const commits = [...workflow.matchAll(/HEPHAESTUS_COMMIT:\s*([^\s]+)/g)].map((match) => match[1]);
     const assets = [...workflow.matchAll(/HEPHAESTUS_ASSET_NAME:\s*([^\s]+)/g)].map((match) => match[1]);

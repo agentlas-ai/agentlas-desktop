@@ -756,7 +756,7 @@ function CodeBlock({
         >
           {block.lang}
         </span>
-        <span style={{ fontSize: 10, color: "#8a968f" }}>· {label("chatstream.lines", { count: linesCount })}</span>
+        <span style={{ fontSize: 10, color: "#66706b" }}>· {label("chatstream.lines", { count: linesCount })}</span>
         <div style={{ flex: 1 }} />
         {onOpen && (
           <button
@@ -800,7 +800,7 @@ function CodeBlock({
             padding: "12px 12px 12px 14px",
             textAlign: "right",
             userSelect: "none",
-            color: "#9aa6a0",
+            color: "#66706b",
             fontFamily: "var(--font-mono)",
             fontSize: 12.5,
             lineHeight: 1.55,
@@ -1105,9 +1105,9 @@ function InlineChatImage({
           margin: "8px 0",
           padding: "10px 12px",
           borderRadius: "var(--radius-md)",
-          border: "1px dashed var(--paper-edge)",
-          background: "color-mix(in srgb, var(--paper) 88%, transparent)",
-          color: "var(--muted-deep)",
+          border: "1px dashed #c9c5c1",
+          background: "#f7f7f6",
+          color: "#5f5c5a",
           fontSize: 12,
           lineHeight: 1.45,
           maxWidth: "100%",
@@ -1115,7 +1115,7 @@ function InlineChatImage({
       >
         <span aria-hidden="true" style={{ fontSize: 15, flexShrink: 0 }}>⚠︎</span>
         <span style={{ minWidth: 0 }}>
-          <strong style={{ display: "block", color: "var(--ink)" }}>
+          <strong style={{ display: "block", color: "#242321" }}>
             {ko ? "이미지 파일을 찾을 수 없습니다" : "Image file is missing"}
           </strong>
           <span style={{ display: "block", overflowWrap: "anywhere" }}>

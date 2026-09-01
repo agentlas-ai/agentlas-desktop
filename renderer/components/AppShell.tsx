@@ -18,21 +18,12 @@ import { useT } from "@/lib/i18n";
 import { IconLayers, IconBug, IconCheck } from "./Icon";
 import { PageTour, replayCurrentPageTour } from "./PageTour";
 import { BuildDoneToast } from "./BuildDoneToast";
-import { BetaEconomyNotice } from "@/components/BetaEconomyNotice";
 import { BrowserActionApprovalSheet } from "./BrowserActionApprovalSheet";
 import { AskUserSheet } from "./AskUserSheet";
 import { ToolApprovalSheet } from "./ToolApprovalSheet";
 import FloatingComputerUsePanel from "./browser/FloatingComputerUsePanel";
-import { OntologyChipFeatureUpdateModal } from "./OntologyChipFeatureUpdateModal";
-import { OneFeatureIntro } from "./one/OneFeatureIntro";
 import { WorkFirstRunOnboarding } from "./WorkFirstRunOnboarding";
-import { ONE_INTRO_ACK_KEY } from "@/lib/one-task-adapter";
-import type {
-  OneFeatureIntroBlockingStateCategory,
-  OneFeatureIntroResolution,
-  OneFeatureIntroState,
-} from "@shared/one-feature-intro";
-import { resolveOneFeatureIntroBlocker } from "@shared/one-feature-intro";
+import { ScienceInstallExperience } from "./ScienceInstallExperience";
 import { announceHubBookmarkChange } from "@/lib/hub-bookmark-events";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import {
@@ -71,10 +62,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [activeChatCount, setActiveChatCount] = useState<number | null>(null);
   const [multimodalJobs, setMultimodalJobs] = useState<MultimodalJob[]>([]);
   const [appUpdateBusy, setAppUpdateBusy] = useState(true);
-  const [oneIntroState, setOneIntroState] = useState<OneFeatureIntroState | null>(null);
   const [workFirstRunVisible, setWorkFirstRunVisible] = useState(false);
-  const [betaNoticeVisible, setBetaNoticeVisible] = useState(false);
-  const introDeferralInFlightRef = useRef<string | null>(null);
+  const [sciencePromoVisible, setSciencePromoVisible] = useState(false);
   const router = useRouter();
   const pathname = usePathname() ?? "/";
   const { locale } = useT();
@@ -131,82 +120,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
-
-  // Main is the durable authority for feature-intro versions. A pre-migration
-  // renderer acknowledgement is consumed exactly once and converted to an
-  // explicit legacy_migrated receipt; it is never consulted as authority again.
-  useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      const api = ipc();
-      if (!api?.oneFeatureIntro) return;
-      try {
-        let state = await api.oneFeatureIntro.getState();
-        let legacyVersion = 0;
-        try {
-          legacyVersion = Number(window.localStorage.getItem(ONE_INTRO_ACK_KEY) ?? "0");
-        } catch {
-          // Main state remains authoritative when legacy renderer storage is unavailable.
-        }
-        if (
-          Number.isSafeInteger(legacyVersion)
-          && legacyVersion >= state.currentIntroVersion
-          && state.acknowledgedIntroVersion < state.currentIntroVersion
-        ) {
-          state = await api.oneFeatureIntro.acknowledge({
-            expectedStoreVersion: state.version,
-            introVersion: state.currentIntroVersion,
-            resolution: "legacy_migrated",
-            confirmedByUser: true,
-          });
-        }
-        try {
-          window.localStorage.removeItem(ONE_INTRO_ACK_KEY);
-        } catch {
-          // A stale legacy key is harmless because it is never read after this mount.
-        }
-        if (!cancelled) setOneIntroState(state);
-      } catch {
-        // Optional news stays hidden when Main authority cannot be verified.
-        if (!cancelled) setOneIntroState(null);
-      }
-    };
-    void load();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const acknowledgeOneIntro = useCallback(async (resolution: OneFeatureIntroResolution) => {
-    const api = ipc();
-    if (!api?.oneFeatureIntro || !oneIntroState) return;
-    let current = oneIntroState;
-    if (current.acknowledgedIntroVersion >= current.currentIntroVersion) return;
-    try {
-      const next = await api.oneFeatureIntro.acknowledge({
-        expectedStoreVersion: current.version,
-        introVersion: current.currentIntroVersion,
-        resolution,
-        confirmedByUser: true,
-      });
-      setOneIntroState(next);
-    } catch {
-      // One bounded CAS refresh handles another renderer or deferral winning
-      // the race without turning an acknowledgement into a blind overwrite.
-      current = await api.oneFeatureIntro.getState();
-      if (current.acknowledgedIntroVersion >= current.currentIntroVersion) {
-        setOneIntroState(current);
-        return;
-      }
-      const next = await api.oneFeatureIntro.acknowledge({
-        expectedStoreVersion: current.version,
-        introVersion: current.currentIntroVersion,
-        resolution,
-        confirmedByUser: true,
-      });
-      setOneIntroState(next);
-    }
-  }, [oneIntroState]);
 
   const syncAttention = useCallback(async () => {
     const api = ipc();
@@ -350,62 +263,23 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, []);
 
   const showWorkspaceSidebar = pathname.startsWith("/workspace") || pathname.startsWith("/project");
-  const featureUpdatePath = pathname.replace(/\.html$/, "");
-  const featureUpdateRouteEligible =
-    featureUpdatePath === "/"
-    || featureUpdatePath === "/dashboard"
-    || featureUpdatePath.startsWith("/library");
-  const oneIntroPending = Boolean(
-    oneIntroState
-    && oneIntroState.acknowledgedIntroVersion < oneIntroState.currentIntroVersion,
-  );
-  // 순서를 정하는 곳은 shared 의 한 함수다 — 소개·온톨로지 안내·페이지 투어가 각자
-  // 판단하면 첫 실행에 모달이 겹친다(2026-08-20 dev QA 실측). 세팅이 가장 세다.
-  const oneIntroBlockingCategory: OneFeatureIntroBlockingStateCategory | null =
-    resolveOneFeatureIntroBlocker({
-      introPending: oneIntroPending,
-      firstRunSetupVisible: workFirstRunVisible,
-      launchNoticeVisible: betaNoticeVisible,
-      pendingConfirmations,
-      activeChatCount,
-      appUpdateBusy,
-      backgroundWorkActive: multimodalJobs.some(isMultimodalJobActive),
-      importFlowOpen: importOpen,
-      routeEligible: featureUpdateRouteEligible,
-    });
-  const featureUpdateEligible = featureUpdateRouteEligible && oneIntroBlockingCategory === null;
-  // First-run surfaces are ordered, never stacked. Main-owned One feature news
-  // wins over the page tour; once it resolves (or is deferred by live work), the
-  // current page tour may open normally.
-  const pageTourAutoOpenSuspended = workFirstRunVisible || betaNoticeVisible || oneIntroState === null
-    || (oneIntroPending && oneIntroBlockingCategory === null);
-
-  useEffect(() => {
-    const api = ipc();
-    const category = oneIntroBlockingCategory;
-    const state = oneIntroState;
-    if (!api?.oneFeatureIntro || !state || !category || !oneIntroPending) return;
-    if (state.deferrals.some((item) =>
-      item.introVersion === state.currentIntroVersion
-      && item.blockingStateCategory === category)) return;
-    const requestKey = `${state.currentIntroVersion}:${category}`;
-    if (introDeferralInFlightRef.current === requestKey) return;
-    introDeferralInFlightRef.current = requestKey;
-    void api.oneFeatureIntro.defer({
-      expectedStoreVersion: state.version,
-      introVersion: state.currentIntroVersion,
-      blockingStateCategory: category,
-    }).then(setOneIntroState).catch(async () => {
-      // A concurrent acknowledgement or deferral may have advanced the CAS.
-      // Refreshing is safe; the Main runtime deduplicates exact deferrals.
-      const latest = await api.oneFeatureIntro.getState().catch(() => null);
-      if (latest) setOneIntroState(latest);
-    }).finally(() => {
-      if (introDeferralInFlightRef.current === requestKey) {
-        introDeferralInFlightRef.current = null;
-      }
-    });
-  }, [oneIntroBlockingCategory, oneIntroPending, oneIntroState]);
+  const sciencePromoPath = pathname.replace(/\.html$/, "");
+  const sciencePromoRouteEligible =
+    sciencePromoPath === "/"
+    || sciencePromoPath === "/dashboard"
+    || sciencePromoPath.startsWith("/library");
+  // Product promotion never covers setup, approvals, an app update, or live work.
+  // The sidebar entry remains available while the automatic offer is deferred.
+  const sciencePromoEligible = sciencePromoRouteEligible
+    && !workFirstRunVisible
+    && pendingConfirmations === 0
+    && activeChatCount === 0
+    && !appUpdateBusy
+    && !multimodalJobs.some(isMultimodalJobActive)
+    && !importOpen;
+  // Science is now the only automatic product announcement on these routes.
+  // Page tours remain available from the help control but do not race this offer.
+  const pageTourAutoOpenSuspended = sciencePromoRouteEligible || workFirstRunVisible || sciencePromoVisible;
 
   return (
     <div
@@ -443,34 +317,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       {pathname.startsWith("/dashboard") && (
         <WorkFirstRunOnboarding onVisibilityChange={setWorkFirstRunVisible} />
       )}
-      {/* Mounted on the shell so it is seen once on launch, whatever screen the
-          app opens on — the notice is about the account, not about a screen. */}
-      <BetaEconomyNotice suspended={workFirstRunVisible} onVisibilityChange={setBetaNoticeVisible} />
+      <ScienceInstallExperience
+        eligible={sciencePromoEligible}
+        locale={locale === "ko" ? "ko" : "en"}
+        onVisibilityChange={setSciencePromoVisible}
+      />
       <BuildDoneToast />
       <BrowserActionApprovalSheet />
       <AskUserSheet />
       <ToolApprovalSheet />
       {showWorkspaceSidebar && <FloatingComputerUsePanel />}
-      <OntologyChipFeatureUpdateModal
-        eligible={featureUpdateEligible && oneIntroState !== null && !oneIntroPending}
-        locale={locale}
-        onOpen={() => router.push("/library/agents?tab=ontology")}
-      />
-      {/*
-        첫 실행에 모달이 둘 겹치면 안 된다 — 실측(2026-08-20 dev QA)에서 대시보드에
-        들어가자 처음 실행 온보딩(8스텝)과 One 소개(1/4)가 **동시에** 떴다. 온보딩이
-        우선이고 소개는 그 뒤에 나온다. 그 판단은 위 first_run_setup 이 맡는다.
-      */}
-      <OneFeatureIntro
-        eligible={featureUpdateEligible && oneIntroPending}
-        needsAcknowledgement={oneIntroPending}
-        locale={locale === "ko" ? "ko" : "en"}
-        onResolve={acknowledgeOneIntro}
-        onOpenOne={() => {
-          router.push("/one");
-        }}
-        onKeepWork={() => undefined}
-      />
       <BackgroundWorkPill
         jobs={multimodalJobs}
         avoidComposer={pathname.startsWith("/workspace/task")}

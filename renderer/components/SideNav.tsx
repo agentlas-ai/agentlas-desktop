@@ -12,7 +12,8 @@ import { AccountChip } from "./AccountChip";
 import { CreditBalanceWidget } from "./CreditBalanceWidget";
 import { UpdateBanner } from "./UpdateBanner";
 import { navigate } from "@/lib/navigation";
-import { ipc } from "@/lib/ipc";
+import { ipc, ipcEvents } from "@/lib/ipc";
+import { requestScienceInstall } from "@/lib/science-install-entry";
 import { classifyHubEntity, entityClassShortLabel } from "@/lib/agent-entity-kind";
 import { pickLocalized, useT } from "@/lib/i18n";
 import {
@@ -82,6 +83,7 @@ export function SideNav({
   const [searchSuggestions, setSearchSuggestions] = useState<MarketplaceListing[]>([]);
   const [searchSuggestionQuery, setSearchSuggestionQuery] = useState("");
   const [searchActiveIndex, setSearchActiveIndex] = useState(0);
+  const [scienceReady, setScienceReady] = useState(false);
   const searchGenerationRef = useRef(0);
   // 텔레그램 항목은 이동이 아니라 팝업이라, 활성 표시가 pathname 이 아니라 팝업 상태를 따른다.
   const telegramOneDialogOpen = useSyncExternalStore(
@@ -96,6 +98,23 @@ export function SideNav({
     } catch {
       /* ignore */
     }
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    const sync = () => {
+      void ipc()?.productExtensions?.scienceSuiteStatus?.().then((status) => {
+        if (!disposed) setScienceReady(status.installed && status.enabled);
+      }).catch(() => {
+        if (!disposed) setScienceReady(false);
+      });
+    };
+    sync();
+    const off = ipcEvents()?.onProductExtensionChanged?.(() => sync());
+    return () => {
+      disposed = true;
+      off?.();
+    };
   }, []);
 
   // 글로벌 Hub 검색은 Enter 제출 전용이 아니다. 입력 중 실제 Hub 결과를 짧게
@@ -487,6 +506,33 @@ export function SideNav({
             );
           })}
         </div>
+
+        <div className="sidenav-divider" />
+
+        <button
+          type="button"
+          className="sidenav-science-entry"
+          data-ready={scienceReady ? "true" : "false"}
+          onClick={requestScienceInstall}
+          aria-label={scienceReady
+            ? (locale === "ko" ? "Agentlas Science 열기" : "Open Agentlas Science")
+            : (locale === "ko" ? "Agentlas Science 다운로드" : "Download Agentlas Science")}
+        >
+          <span className="sidenav-science-mark" aria-hidden="true">
+            <img src="/brand/agentlas-mark.png" alt="" />
+          </span>
+          {!collapsed && (
+            <span className="sidenav-science-copy" aria-hidden="true">
+              <strong>Agentlas Science</strong>
+              <span>{scienceReady ? (locale === "ko" ? "열기" : "Open") : "Download"}</span>
+            </span>
+          )}
+          {collapsed && (
+            <span className="sidenav-tooltip">
+              {scienceReady ? (locale === "ko" ? "Science 열기" : "Open Science") : (locale === "ko" ? "Science 다운로드" : "Download Science")}
+            </span>
+          )}
+        </button>
       </nav>
 
       {/* 하단: 설정 + 계정 */}

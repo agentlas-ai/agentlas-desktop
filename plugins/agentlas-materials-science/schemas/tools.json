@@ -1,0 +1,68 @@
+{
+  "tools": [
+    {
+      "name": "search_oqmd_optimade_structures",
+      "description": "Search the anonymous OQMD OPTIMADE v1 structures endpoint by an exact set of element symbols. Returns normalized lattice/site coordinates, ordered POSCAR when representable without losing occupancy, a Vega-compatible property table, and byte-level provenance.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["elements"],
+        "properties": {
+          "elements": { "type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": true, "items": { "type": "string", "pattern": "^[A-Z][a-z]?$", "maxLength": 2 } },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 20 },
+          "offset": { "type": "integer", "minimum": 0, "maximum": 10000, "default": 0 }
+        }
+      }
+    },
+    {
+      "name": "search_cod_crystals",
+      "description": "Bounded COD metadata search. Supply either 1-20 seven-digit COD IDs or one 1-8-element space-separated Hill-style formula. A count request runs first; JSON is not fetched when matches exceed maxMatches.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "oneOf": [
+          { "required": ["ids"], "not": { "required": ["formula"] } },
+          { "required": ["formula"], "not": { "required": ["ids"] } }
+        ],
+        "properties": {
+          "ids": { "type": "array", "minItems": 1, "maxItems": 20, "uniqueItems": true, "items": { "type": "string", "pattern": "^[0-9]{7}$" } },
+          "formula": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Z][A-Za-z0-9. ]*$" },
+          "maxMatches": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 }
+        }
+      }
+    },
+    {
+      "name": "fetch_cod_cif",
+      "description": "Fetch one exact COD CIF, optionally at a COD revision. Preserves the exact UTF-8 CIF and byte hash, plus conservative cell and deposited asymmetric-unit atom-site normalization for a host 3Dmol renderer.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["codId"],
+        "properties": {
+          "codId": { "type": "string", "pattern": "^[0-9]{7}$" },
+          "revision": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+        }
+      }
+    },
+    {
+      "name": "analyze_lattice_metrics",
+      "description": "Validate and compute lattice-cell volume from a hash-verified normalized COD CIF or OQMD OPTIMADE structure. CIF volume uses the triclinic cell formula; OPTIMADE volume uses the absolute lattice determinant. Density is computed only when explicit composition, formula-units Z, and formula weight are all present; none are inferred.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sourceKind", "normalized"],
+        "properties": {
+          "sourceKind": { "type": "string", "enum": ["cod-cif", "optimade"] },
+          "normalized": { "type": "object", "required": ["schema", "normalizedSha256"] },
+          "structureId": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "declaredVolumeToleranceRelative": { "type": "number", "minimum": 0, "maximum": 0.1, "default": 0.005 }
+        }
+      }
+    },
+    {
+      "name": "describe_materials_science_capabilities",
+      "description": "Return exact provider, guard, data-contract, renderer, and limitation declarations for this plugin.",
+      "inputSchema": { "type": "object", "additionalProperties": false, "properties": {} }
+    }
+  ]
+}

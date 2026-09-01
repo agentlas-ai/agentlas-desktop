@@ -30,6 +30,7 @@ import QRCode from "qrcode";
 import type { HephaestusUpdateJournal, MobileBridgeDeviceSummary, MobileBridgeRuntimeStatus } from "@shared/types";
 import type { MobileBridgePairingPayload } from "@shared/mobile-bridge";
 import { classifyHephaestusUpdateJournal, hephaestusPendingHostLabels } from "@shared/hephaestus-update-contract";
+import { ScienceExtensionPanel } from "@/components/settings/ScienceExtensionPanel";
 
 // BYOK 백엔드 목록은 shared/models.ts의 ByokBackend(단일 출처)를 그대로 쓴다.
 const BYOK_BACKENDS: ByokBackend[] = [
@@ -481,6 +482,7 @@ export default function SettingsPage() {
       >
         <Banner />
         <UpdatePanel />
+        <ScienceExtensionPanel />
         <MobileBridgePanel />
 
         {/* 언어 선택 */}

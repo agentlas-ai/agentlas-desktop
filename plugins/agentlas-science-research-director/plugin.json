@@ -1,0 +1,59 @@
+{
+  "schema": "agentlas.plugin/v2",
+  "slug": "agentlas-science-research-director",
+  "name": "Agentlas Science Research Director",
+  "version": "1.15.1",
+  "builtin": true,
+  "publisher": {
+    "name": "Agentlas",
+    "url": "https://agentlas.ai"
+  },
+  "surface": {
+    "displayName": "Research Director",
+    "displayNameKo": "연구 디렉터",
+    "tagline": "Direct one rigorous study to a journal-ready package",
+    "taglineKo": "하나의 연구를 엄밀한 저널 제출본까지 지휘합니다",
+    "description": "Coordinates literature, hypotheses, frozen analysis plans, laboratory tools, evidence lineage, conclusions, manuscript drafting, and journal-specific validation without inventing results.",
+    "descriptionKo": "선행연구, 가설, 동결 분석계획, 랩 도구, 증거 계보, 결론, 논문 작성과 저널별 검증을 결과 조작 없이 하나의 연구로 연결합니다.",
+    "category": "data",
+    "brandColor": "#375F55",
+    "defaultPrompts": [
+      "이 연구 질문을 선행연구부터 저널 제출본까지 하나의 연구로 진행해줘",
+      "현재 연구 상태와 증거 공백을 점검하고 다음으로 필요한 랩 작업을 지휘해줘"
+    ]
+  },
+  "invocation": {
+    "mention": "@agentlas-science-research-director",
+    "implicit": "router",
+    "standalone": true
+  },
+  "runtime": {
+    "kind": "builtin-agent",
+    "agentSlug": "agentlas-science-research-director",
+    "agentContract": "agent/agent.md",
+    "workflowContract": "skills/direct-study/SKILL.md",
+    "promptSha256": "267d43a6b24c5099fd044b76b155ad313f4180a8768912affe3117bc21b9d9bd",
+    "failClosed": true
+  },
+  "provides": {
+    "skills": {
+      "router": "skills/index/SKILL.md",
+      "workflows": ["direct-study"]
+    }
+  },
+  "requires": {
+    "prereq": [
+      { "id": "agentlas-science", "provided-by": "app" }
+    ],
+    "os": ["darwin", "win32", "linux"]
+  },
+  "permissions": {
+    "fileWrite": "project-only",
+    "network": "ask",
+    "shell": "deny"
+  },
+  "state": {
+    "files": ["research-director-state.json"],
+    "assets": false
+  }
+}

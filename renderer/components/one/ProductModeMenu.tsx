@@ -5,6 +5,9 @@ import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { tFor, useT } from "@/lib/i18n";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import { OneBrandMark } from "./OneBrand";
+import { IconBrain } from "@/components/Icon";
+import { ipc, ipcEvents } from "@/lib/ipc";
+import { requestScienceInstall } from "@/lib/science-install-entry";
 import styles from "./ProductModeMenu.module.css";
 
 const ONE_RETURN_ROUTE_KEY = "agentlas.one.return-route.v1";
@@ -20,7 +23,7 @@ export function ProductModeMenu({
   darkText = false,
   locale: localeOverride,
 }: {
-  current: "one" | "work";
+  current: "one" | "work" | "science";
   compact?: boolean;
   darkText?: boolean;
   locale?: "ko" | "en";
@@ -30,6 +33,7 @@ export function ProductModeMenu({
   const activeLocale = localeOverride ?? locale;
   const [open, setOpen] = useState(false);
   const [oneHref, setOneHref] = useState("/one");
+  const [scienceAvailable, setScienceAvailable] = useState(current === "science");
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   useDismissibleLayer({
@@ -47,6 +51,30 @@ export function ProductModeMenu({
     }
     setOneHref(safeOneReturnRoute(window.sessionStorage.getItem(ONE_RETURN_ROUTE_KEY)));
   }, [current]);
+  useEffect(() => {
+    let disposed = false;
+    const api = ipc();
+    if (api?.productExtensions) {
+      void api.productExtensions.scienceSuiteStatus().then((status) => {
+        if (!disposed) setScienceAvailable(status.installed && status.enabled && status.phase === "installed");
+      }).catch(() => {
+        if (!disposed && current !== "science") setScienceAvailable(false);
+      });
+    }
+    const off = ipcEvents()?.onProductExtensionChanged?.(() => {
+      void api?.productExtensions?.scienceSuiteStatus?.().then((status) => {
+        if (!disposed) setScienceAvailable(status.installed && status.enabled && status.phase === "installed");
+      }).catch(() => {
+        if (!disposed && current !== "science") setScienceAvailable(false);
+      });
+    });
+    return () => {
+      disposed = true;
+      off?.();
+    };
+  }, [current]);
+
+  const productName = current === "one" ? "Agentlas One" : current === "science" ? "Agentlas Science" : "Agentlas Work";
 
   const navigate = (href: string) => {
     setOpen(false);
@@ -57,6 +85,15 @@ export function ProductModeMenu({
     if (event.key !== "Enter" && event.key !== " ") return;
     event.preventDefault();
     navigate(href);
+  };
+
+  const openScience = () => {
+    setOpen(false);
+    if (scienceAvailable || current === "science") {
+      router.push("/science");
+      return;
+    }
+    requestScienceInstall();
   };
 
   return (
@@ -71,9 +108,9 @@ export function ProductModeMenu({
         onClick={() => setOpen((value) => !value)}
         title={tFor(activeLocale, "one.mode.switch_title")}
       >
-        {compact && (current === "one" ? <OneBrandMark size="medium" /> : <span className={styles.mark} aria-hidden="true">W</span>)}
+        {compact && (current === "one" ? <OneBrandMark size="medium" /> : current === "science" ? <span className={styles.mark} aria-hidden="true"><IconBrain size={16} /></span> : <span className={styles.mark} aria-hidden="true">W</span>)}
         <span className={styles.copy}>
-          <strong>{current === "one" ? "Agentlas One" : "Agentlas Work"}</strong>
+          <strong>{productName}</strong>
         </span>
         <span className={styles.chevron} aria-hidden="true">⌄</span>
       </button>
@@ -92,6 +129,19 @@ export function ProductModeMenu({
               <small>{tFor(activeLocale, "one.mode.work_sub")}</small>
             </span>
             {current === "work" && <span className={styles.check} aria-label={tFor(activeLocale, "one.mode.current_aria")}>✓</span>}
+          </button>
+          <button className={styles.option} type="button" role="menuitem" onClick={openScience} onKeyDown={(event) => {
+            if (event.key !== "Enter" && event.key !== " ") return;
+            event.preventDefault();
+            openScience();
+          }}>
+            <span className={styles.optionCopy}>
+              <strong>Science</strong>
+              <small>{scienceAvailable || current === "science"
+                ? tFor(activeLocale, "one.mode.science_sub")
+                : activeLocale === "ko" ? "다운로드 필요" : "Download required"}</small>
+            </span>
+            {current === "science" && <span className={styles.check} aria-label={tFor(activeLocale, "one.mode.current_aria")}>✓</span>}
           </button>
         </div>
       )}

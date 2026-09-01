@@ -1,0 +1,543 @@
+{
+  "schema": "agentlas.science.statistics-coverage/v1",
+  "engine": {
+    "id": "agentlas-science-statistics",
+    "version": "1.9.0",
+    "algorithmRevision": "gaussian-random-intercept-lmm-v9-js-2026-09-01"
+  },
+  "support": {
+    "scope": "bounded-method-subset",
+    "parity": "none",
+    "methodCount": 31
+  },
+  "methods": [
+    {
+      "method": "descriptive",
+      "implementedBoundary": "Finite univariate samples: n, sum, mean, sample variance and standard deviation, standard error, extrema, R-7 quartiles, median, skewness, excess kurtosis, and a mean confidence interval.",
+      "oracleCoverage": {
+        "level": "external-library-partial",
+        "evidence": ["contracts/core-scipy-crosscheck.py"],
+        "verifiedOutputs": ["mean", "sample variance and standard deviation", "R-7 quartiles and median", "bias-corrected skewness and excess kurtosis", "Student-t mean confidence interval"],
+        "excludedOutputs": ["Jarque-Bera p-value", "bootstrap or robust intervals", "weighted or missing-data summaries"]
+      },
+      "diagnosticCoverage": {
+        "level": "basic",
+        "emitted": ["Jarque-Bera normality statistic"],
+        "limitations": ["Normality diagnostic is asymptotic and does not assess sampling design, missingness, or influential observations."]
+      },
+      "knownGaps": ["No survey weights, robust summaries, missing-data model, bootstrap intervals, or independent cross-check of the Jarque-Bera diagnostic."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "distribution_fit",
+      "implementedBoundary": "Eight to one hundred thousand complete finite observations with one to three explicit candidates selected from normal, zero-location lognormal, and zero-location exponential families: maximum-likelihood parameters, log likelihood, AIC, BIC, descriptive fitted-parameter KS D, and exact faceted Q-Q and P-P renderer rows.",
+      "oracleCoverage": {
+        "level": "external-library-partial",
+        "evidence": ["contracts/distribution-fit-scipy-crosscheck.py"],
+        "verifiedOutputs": ["normal, zero-location lognormal, and zero-location exponential maximum-likelihood parameters", "log likelihood, AIC, and BIC for every explicit candidate", "descriptive one-sample Kolmogorov-Smirnov D statistic with fitted parameters", "exact Q-Q and P-P renderer rows for every observation and candidate"],
+        "excludedOutputs": ["calibrated goodness-of-fit p-values or accept-reject decisions after parameter estimation", "confidence intervals for fitted parameters or information-criterion differences", "shifted-location, censored, truncated, mixture, discrete, heavy-tail, or custom probability families"]
+      },
+      "diagnosticCoverage": {
+        "level": "method-specific-partial",
+        "emitted": ["support and non-degeneracy enforcement", "fitted-parameter KS D with explicit uncalibrated-p-value boundary", "AIC and BIC candidate-scope boundary", "exact observation, comparison, Q-Q, and P-P row hashes"],
+        "limitations": ["No calibrated Lilliefors or parametric-bootstrap p value is emitted, so KS D is descriptive and cannot support an accept-reject claim.", "Candidate ranking is limited to the explicitly supplied families and does not establish absolute fit, sampling validity, or scientific plausibility."]
+      },
+      "knownGaps": ["No parameter intervals, bootstrap or corrected goodness-of-fit inference, weights, censoring, truncation, shifted locations, mixtures, discrete families, generalized extreme values, gamma, Weibull, beta, t, stable laws, or custom likelihoods."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "pearson_correlation",
+      "implementedBoundary": "Two equal-length finite vectors: Pearson correlation, r-squared, t reference test, and Fisher-transformed confidence interval.",
+      "oracleCoverage": {
+        "level": "external-library-partial",
+        "evidence": ["contracts/core-scipy-crosscheck.py"],
+        "verifiedOutputs": ["Pearson coefficient", "two-sided t-reference p-value", "Fisher-transformed confidence interval"],
+        "excludedOutputs": ["Jarque-Bera diagnostics", "linearity or bivariate-normality assessment", "partial, weighted, clustered, or robust correlation"]
+      },
+      "diagnosticCoverage": {
+        "level": "basic",
+        "emitted": ["Jarque-Bera diagnostic for each variable", "linearity and bivariate-normality review flags"],
+        "limitations": ["No influence, leverage, heteroscedasticity, partial-correlation, or robust-correlation diagnostics."]
+      },
+      "knownGaps": ["No weighted, partial, repeated-measures, clustered, or robust correlation, and no independent cross-check of the emitted normality screens."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "spearman_correlation",
+      "implementedBoundary": "Two equal-length finite vectors: average-rank Spearman correlation, exact permutation p values when n is at most nine without ties, otherwise a declared t approximation, plus a transformed interval.",
+      "oracleCoverage": {
+        "level": "external-library-partial",
+        "evidence": ["contracts/advanced-scipy-crosscheck.py"],
+        "verifiedOutputs": ["Spearman coefficient", "exact no-tie permutation p-value"],
+        "excludedOutputs": ["confidence interval", "tied exact inference", "partial rank correlation"]
+      },
+      "diagnosticCoverage": {
+        "level": "basic",
+        "emitted": ["tie-block counts", "Jarque-Bera diagnostic for each raw variable", "monotonicity review flag"],
+        "limitations": ["Raw-variable normality is descriptive only; exact inference is limited to n at most nine without ties and no monotonicity test is provided."]
+      },
+      "knownGaps": ["No exact inference with ties, permutation interval, partial rank correlation, or clustered inference."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "kendall_correlation",
+      "implementedBoundary": "Two equal-length finite vectors: Kendall tau-b with tie-aware pair counts, exact permutation p values when n is at most nine without ties, otherwise a tie-corrected normal approximation.",
+      "oracleCoverage": {
+        "level": "external-library-partial",
+        "evidence": ["contracts/advanced-scipy-crosscheck.py"],
+        "verifiedOutputs": ["Kendall tau-b coefficient", "exact no-tie permutation p-value"],
+        "excludedOutputs": ["confidence interval", "large-sample tie-corrected p-value", "partial rank correlation"]
+      },
+      "diagnosticCoverage": {
+        "level": "method-specific-partial",
+        "emitted": ["concordant and discordant pair counts", "tie-block counts", "exact-eligibility declaration"],
+        "limitations": ["The coefficient interval is a clipped normal approximation and exact inference is unavailable with ties or n above nine."]
+      },
+      "knownGaps": ["No partial, weighted, clustered, censored, or permutation-interval Kendall analysis."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "independent_t_test",
+      "implementedBoundary": "Two independent finite groups: pooled-variance two-sided or directional t test, mean-difference interval, Cohen d, and Hedges g.",
+      "oracleCoverage": {
+        "level": "external-library-partial",
+        "evidence": ["contracts/core-scipy-crosscheck.py"],
+        "verifiedOutputs": ["pooled-variance t statistic", "degrees of freedom and two-sided p-value", "mean-difference confidence interval"],
+        "excludedOutputs": ["Cohen d and Hedges g", "Brown-Forsythe and normality diagnostics", "directional alternatives"]
+      },
+      "diagnosticCoverage": {
+        "level": "method-specific-partial",
+        "emitted": ["group Jarque-Bera diagnostics", "Brown-Forsythe variance-homogeneity diagnostic", "independence review flag"],
+        "limitations": ["No outlier influence, cluster dependence, missingness, or graphical residual diagnostic."]
+      },
+      "knownGaps": ["No covariate adjustment, weights, robust variance, permutation test, equivalence test, or independent cross-check of standardized effects."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "welch_t_test",
+      "implementedBoundary": "Two independent finite groups: Welch-Satterthwaite t test, mean-difference interval, standardized mean differences, and directional alternatives.",
+      "oracleCoverage": {
+        "level": "external-library-partial",
+        "evidence": ["contracts/core-scipy-crosscheck.py"],
+        "verifiedOutputs": ["Welch t statistic", "Satterthwaite degrees of freedom and two-sided p-value", "mean-difference confidence interval"],
+        "excludedOutputs": ["Cohen d and Hedges g", "Brown-Forsythe and normality diagnostics", "directional alternatives"]
+      },
+      "diagnosticCoverage": {
+        "level": "method-specific-partial",
+        "emitted": ["group Jarque-Bera diagnostics", "Brown-Forsythe variance-homogeneity diagnostic", "independence review flag"],
+        "limitations": ["Variance heterogeneity is accommodated but sampling dependence, outliers, and missingness are not modeled."]
+      },
+      "knownGaps": ["No trimmed-mean Welch test, cluster correction, permutation inference, equivalence testing, or independent cross-check of standardized effects."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "paired_t_test",
+      "implementedBoundary": "Two equal-length finite paired vectors: paired-difference t test, difference interval, Cohen dz, and Hedges-corrected standardized effect.",
+      "oracleCoverage": {
+        "level": "external-library-partial",
+        "evidence": ["contracts/core-scipy-crosscheck.py"],
+        "verifiedOutputs": ["paired-difference t statistic", "degrees of freedom and two-sided p-value", "paired mean-difference confidence interval"],
+        "excludedOutputs": ["Cohen dz and Hedges correction", "paired-difference normality diagnostic", "directional alternatives"]
+      },
+      "diagnosticCoverage": {
+        "level": "method-specific-partial",
+        "emitted": ["Jarque-Bera diagnostic on paired differences", "pairing and independence review flags"],
+        "limitations": ["No sequence, period, carryover, repeated-measures, or missing-pair diagnostics."]
+      },
+      "knownGaps": ["No repeated-measures extension, equivalence test, robust paired estimator, permutation inference, or independent cross-check of standardized effects."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "one_way_anova",
+      "implementedBoundary": "One categorical factor with independent finite groups: fixed-effect omnibus ANOVA, eta-squared, omega-squared, and optional pooled-error pairwise t contrasts with Holm-adjusted p values.",
+      "oracleCoverage": {
+        "level": "external-library-partial",
+        "evidence": ["contracts/advanced-scipy-crosscheck.py"],
+        "verifiedOutputs": ["omnibus F statistic", "omnibus p-value", "Holm-adjusted pairwise p-values"],
+        "excludedOutputs": ["Brown-Forsythe diagnostic", "effect-size sampling intervals", "simultaneous contrast intervals"]
+      },
+      "diagnosticCoverage": {
+        "level": "method-specific-partial",
+        "emitted": ["group Jarque-Bera diagnostics", "Brown-Forsythe variance-homogeneity diagnostic", "independence review flag"],
+        "limitations": ["No residual influence or simultaneous post-hoc confidence intervals; the optional contrasts use the omnibus pooled error term."]
+      },
+      "knownGaps": ["No Welch ANOVA, repeated measures, ANCOVA, Tukey family, random effects, or multiplicity-adjusted contrast intervals."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "welch_one_way_anova",
+      "implementedBoundary": "Three or more independent finite groups with positive sample variances: Welch heteroscedastic omnibus ANOVA, fractional Satterthwaite denominator degrees of freedom, a variance-weighted grand mean, and exact per-group summaries with pointwise mean intervals.",
+      "oracleCoverage": {
+        "level": "external-library-partial",
+        "evidence": ["contracts/robust-blocked-roc-scipy-crosscheck.py"],
+        "verifiedOutputs": ["Welch omnibus F statistic", "numerator and Satterthwaite denominator degrees of freedom", "omnibus p-value", "variance-weighted grand mean and per-group summaries"],
+        "excludedOutputs": ["Games-Howell or other post-hoc comparisons", "effect-size estimates", "simultaneous confidence intervals"]
+      },
+      "diagnosticCoverage": {
+        "level": "method-specific-partial",
+        "emitted": ["per-group sample size, mean, sample variance, standard error, and pointwise mean interval", "Welch omnibus-only boundary declaration", "exact group-summary renderer rows"],
+        "limitations": ["No Games-Howell contrasts, multiplicity-adjusted intervals, heteroscedastic effect-size estimator, robust trimming, cluster correction, or repeated-measures extension."]
+      },
+      "knownGaps": ["No post-hoc comparison family, effect-size estimate, simultaneous interval, robust or clustered variant, repeated measures, ANCOVA, or random/mixed effects."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "two_way_anova",
+      "implementedBoundary": "Balanced complete fixed-effects two-factor designs with at least two observations per cell: main effects, interaction, partial eta-squared, partial omega-squared, and optional Holm marginal contrasts.",
+      "oracleCoverage": {
+        "level": "independent-formula-partial",
+        "evidence": ["contracts/advanced-scipy-crosscheck.py"],
+        "verifiedOutputs": ["balanced main-effect F statistics", "balanced interaction F statistic", "F-reference p-values"],
+        "excludedOutputs": ["unbalanced sums of squares", "post-hoc contrast inference", "effect-size sampling intervals"]
+      },
+      "diagnosticCoverage": {
+        "level": "method-specific-partial",
+        "emitted": ["cell normality screens", "Brown-Forsythe cell-variance diagnostic", "balance and complete-cell enforcement", "interaction plot"],
+        "limitations": ["Marginal contrasts require substantive caution when interaction is present; normality screens are weak in small cells."]
+      },
+      "knownGaps": ["No unbalanced Type II or III sums of squares, repeated measures, random effects, mixed models, ANCOVA, or simple-effects family."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "mann_whitney_u",
+      "implementedBoundary": "Two independent finite groups: U and rank-biserial effect with an exact allocation distribution when there are no ties, total n is at most fifty, and n1 times n2 is at most four hundred; otherwise a tie-corrected normal approximation.",
+      "oracleCoverage": {
+        "level": "external-library-partial",
+        "evidence": ["contracts/advanced-scipy-crosscheck.py"],
+        "verifiedOutputs": ["U statistic", "exact no-tie two-sided p-value"],
+        "excludedOutputs": ["asymptotic tie-corrected p-value", "rank-biserial interval", "location-shift interval"]
+      },
+      "diagnosticCoverage": {
+        "level": "basic",
+        "emitted": ["tie-block count", "normal-approximation declaration", "independence review flag"],
+        "limitations": ["No distribution-shape comparability check; exact inference is unavailable outside the declared no-tie size boundary."]
+      },
+      "knownGaps": ["No exact inference with ties, location-shift interval, stratified test, or clustered ranks."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "wilcoxon_signed_rank",
+      "implementedBoundary": "Equal-length finite paired vectors: zero differences removed, signed ranks and matched-pairs effect with an exact sign-allocation distribution for at most thirty nonzero untied absolute differences, otherwise a corrected normal approximation.",
+      "oracleCoverage": {
+        "level": "external-library-partial",
+        "evidence": ["contracts/advanced-scipy-crosscheck.py"],
+        "verifiedOutputs": ["signed-rank statistic", "exact no-tie two-sided p-value"],
+        "excludedOutputs": ["asymptotic tied p-value", "effect-size interval", "Pratt zero handling"]
+      },
+      "diagnosticCoverage": {
+        "level": "basic",
+        "emitted": ["zero-difference count", "absolute-difference tie-block count", "symmetry review flag"],
+        "limitations": ["Symmetry is not formally tested and alternative zero-handling conventions are unavailable."]
+      },
+      "knownGaps": ["No exact inference with absolute-rank ties, Hodges-Lehmann interval, Pratt zero handling, or repeated measures."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "kruskal_wallis",
+      "implementedBoundary": "Three or more independent finite groups: average ranks, tie-corrected H statistic, chi-square approximation, and epsilon-squared effect.",
+      "oracleCoverage": {
+        "level": "external-library-partial",
+        "evidence": ["contracts/core-scipy-crosscheck.py"],
+        "verifiedOutputs": ["tie-corrected Kruskal-Wallis H statistic", "chi-square reference p-value"],
+        "excludedOutputs": ["epsilon-squared effect", "post-hoc comparisons", "exact or permutation inference"]
+      },
+      "diagnosticCoverage": {
+        "level": "basic",
+        "emitted": ["tie-block count", "chi-square-approximation declaration", "independence review flag"],
+        "limitations": ["No distribution-shape comparability, influential-rank, or pairwise-comparison diagnostic."]
+      },
+      "knownGaps": ["No exact/permutation inference, blocked design, Dunn post-hoc family, covariate adjustment, or independent cross-check of epsilon-squared."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "friedman_test",
+      "implementedBoundary": "Three or more paired conditions with an equal complete finite block-by-condition matrix: within-block average ranks, tie-corrected Friedman chi-square approximation, condition rank summaries, and Kendall W concordance.",
+      "oracleCoverage": {
+        "level": "external-library-partial",
+        "evidence": ["contracts/robust-blocked-roc-scipy-crosscheck.py"],
+        "verifiedOutputs": ["tie-corrected Friedman chi-square statistic", "chi-square reference p-value", "condition rank sums and mean ranks", "Kendall W concordance"],
+        "excludedOutputs": ["Iman-Davenport correction", "post-hoc comparisons", "incomplete-block inference"]
+      },
+      "diagnosticCoverage": {
+        "level": "method-specific-partial",
+        "emitted": ["within-block tie term and correction", "complete-matrix enforcement", "asymptotic omnibus-only boundary declaration", "exact condition-rank renderer rows"],
+        "limitations": ["No Iman-Davenport correction, exact or permutation reference, post-hoc family, incomplete blocks, missing-value model, covariate adjustment, or repeated-measures mixed model."]
+      },
+      "knownGaps": ["No incomplete-block design, post-hoc comparisons, multiplicity adjustment, exact/permutation inference, repeated-measures ANOVA, or mixed-effects model."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "linear_regression",
+      "implementedBoundary": "Ordinary least squares with numeric and treatment-coded categorical predictors, optional intercept, classical or HC0 through HC3 covariance, coefficient inference, omnibus fit statistics, and bounded residual and influence diagnostics.",
+      "oracleCoverage": {
+        "level": "independent-formula-partial",
+        "evidence": ["contracts/advanced-scipy-crosscheck.py"],
+        "verifiedOutputs": ["OLS coefficients with treatment coding", "HC3 coefficient standard errors"],
+        "excludedOutputs": ["HC0, HC1, and HC2 standard errors", "coefficient p-values and intervals", "diagnostic p-values"]
+      },
+      "diagnosticCoverage": {
+        "level": "method-specific-partial",
+        "emitted": ["residual Jarque-Bera statistic", "Durbin-Watson statistic", "Breusch-Pagan LM screen", "leverage and Cook-distance screen", "treatment-coding receipt"],
+        "limitations": ["Influence output is a top-row screen; no VIF, cluster covariance, weights, missing-data model, or small-sample robust correction beyond HC1."]
+      },
+      "knownGaps": ["No penalized, nonlinear, mixed, multilevel, weighted, clustered, imputed, spline, or interaction-term formula engine."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "logistic_regression",
+      "implementedBoundary": "Binary logistic IRLS with numeric and treatment-coded categorical predictors, optional intercept, classical or HC0 through HC3 covariance, Wald inference, likelihood-ratio fit when nested, odds ratios, discrimination, calibration, and influence screens.",
+      "oracleCoverage": {
+        "level": "independent-optimizer-partial",
+        "evidence": ["contracts/advanced-scipy-crosscheck.py"],
+        "verifiedOutputs": ["maximum-likelihood coefficients with treatment coding", "HC1 coefficient standard errors"],
+        "excludedOutputs": ["HC0, HC2, and HC3 standard errors", "Wald p-values and intervals", "calibration and influence diagnostics"]
+      },
+      "diagnosticCoverage": {
+        "level": "method-specific-partial",
+        "emitted": ["IRLS convergence", "likelihood-ratio fit", "Pearson fit screen", "AUC", "Brier score", "grouped calibration screen", "leverage and Cook-distance screen", "treatment-coding receipt"],
+        "limitations": ["Grouped calibration is a deterministic screen rather than a definitive tied-prediction Hosmer-Lemeshow implementation; no linearity-in-logit test or bootstrap validation."]
+      },
+      "knownGaps": ["No multinomial or ordinal model, Firth correction, penalization, random effects, clustered covariance, threshold optimization, or interaction-term formula engine."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "poisson_regression",
+      "implementedBoundary": "Log-link Poisson maximum likelihood with numeric and deterministic treatment-coded categorical predictors, optional intercept, either positive exposure or an explicit fixed-one log offset, classical or HC0 through HC3 covariance, coefficient and incidence-rate-ratio Wald inference, fitted means, likelihood, deviance, AIC, influence screens, and a declared Pearson overdispersion screen.",
+      "oracleCoverage": {
+        "level": "independent-optimizer-partial",
+        "evidence": ["contracts/poisson-scipy-crosscheck.py"],
+        "verifiedOutputs": ["maximum-likelihood coefficients with treatment coding and exposure offset", "fitted means", "log likelihood", "deviance", "AIC", "HC0 through HC3 coefficient standard errors", "scikit-learn PoissonRegressor alpha-zero coefficient agreement"],
+        "excludedOutputs": ["Wald p-values and intervals", "overdispersion decision limit", "influence diagnostics", "quasi-Poisson or negative-binomial equivalence"]
+      },
+      "diagnosticCoverage": {
+        "level": "method-specific-partial",
+        "emitted": ["Fisher-scoring convergence", "Pearson dispersion", "declared overdispersion decision limit", "leverage and Cook-distance screen", "offset mode", "treatment-coding receipt", "exact renderer-row hash and no-sampling contract"],
+        "limitations": ["The overdispersion flag is a screen only; HC covariance does not change the conditional mean, and no clustered, quasi-Poisson, negative-binomial, zero-inflated, random-effects, or weighted-count extension is implemented."]
+      },
+      "knownGaps": ["No quasi-Poisson, negative-binomial, hurdle, zero-inflated, clustered/GEE, mixed-effects, penalized, interaction-formula, frequency-weighted, or Bayesian count model."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "chi_square_test",
+      "implementedBoundary": "Nonnegative finite contingency counts: Pearson chi-square independence test, expected counts, and Cramer's V.",
+      "oracleCoverage": {
+        "level": "external-library-partial",
+        "evidence": ["contracts/core-scipy-crosscheck.py"],
+        "verifiedOutputs": ["Pearson chi-square statistic", "degrees of freedom and p-value", "expected cell frequencies"],
+        "excludedOutputs": ["standardized residuals", "Cramer's V", "small-expected-cell decision rule"]
+      },
+      "diagnosticCoverage": {
+        "level": "method-specific-partial",
+        "emitted": ["minimum expected count", "cells below five", "fraction of low expected cells", "independent-counts review flag"],
+        "limitations": ["No sparse-table simulation, structural-zero, survey-design, residual-cell, or clustering diagnostic."]
+      },
+      "knownGaps": ["No continuity correction, likelihood-ratio test, Monte Carlo exact test, stratified table, paired count test, or independent cross-check of Cramer's V."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "fisher_exact_test",
+      "implementedBoundary": "A nonnegative 2-by-2 integer table: exact conditional hypergeometric p value for declared alternatives, odds ratio, and finite log-Wald interval when all cells permit it.",
+      "oracleCoverage": {
+        "level": "external-library-partial",
+        "evidence": ["contracts/core-scipy-crosscheck.py"],
+        "verifiedOutputs": ["sample odds ratio", "two-sided conditional-hypergeometric p-value"],
+        "excludedOutputs": ["Wald log-odds confidence interval", "one-sided alternatives", "zero-cell interval boundaries"]
+      },
+      "diagnosticCoverage": {
+        "level": "method-specific-partial",
+        "emitted": ["conditional support bounds", "observed table probability", "zero-cell odds-ratio boundary"],
+        "limitations": ["The odds-ratio interval is not exact and is withheld at zero-cell boundaries."]
+      },
+      "knownGaps": ["No exact odds-ratio interval, mid-p option, larger-table exact test, unconditional test, or independent cross-check of the Wald interval."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "multiple_testing_correction",
+      "implementedBoundary": "Finite p-value families: Bonferroni, Holm, Benjamini-Hochberg, and Benjamini-Yekutieli adjusted p values with stable label ordering.",
+      "oracleCoverage": {
+        "level": "external-library-partial",
+        "evidence": ["contracts/core-scipy-crosscheck.py"],
+        "verifiedOutputs": ["Benjamini-Hochberg adjusted p-values", "Benjamini-Yekutieli adjusted p-values", "Bonferroni and Holm formula outputs"],
+        "excludedOutputs": ["weighted procedures", "adaptive false-discovery procedures", "simultaneous confidence intervals"]
+      },
+      "diagnosticCoverage": {
+        "level": "basic",
+        "emitted": ["applied-method list", "family-definition review flag", "Benjamini-Hochberg dependence assumption"],
+        "limitations": ["No data-driven family construction, hierarchical testing, alpha spending, or dependence estimation."]
+      },
+      "knownGaps": ["No Hochberg, Hommel, Storey q value, closed testing, gatekeeping, sequential design, or weighted/adaptive FDR procedure."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "confidence_interval",
+      "implementedBoundary": "A finite sample mean with Student t interval or a binomial proportion with Wilson score interval at the declared confidence level.",
+      "oracleCoverage": {
+        "level": "external-library-partial",
+        "evidence": ["contracts/core-scipy-crosscheck.py"],
+        "verifiedOutputs": ["sample mean", "Student-t mean confidence interval", "Wilson score proportion confidence interval"],
+        "excludedOutputs": ["bootstrap intervals", "exact binomial interval", "weighted, clustered, or finite-population intervals"]
+      },
+      "diagnosticCoverage": {
+        "level": "basic",
+        "emitted": ["Jarque-Bera statistic for mean intervals", "success and failure counts for proportion intervals", "design review flags"],
+        "limitations": ["No finite-population, cluster, paired, weighted, overdispersed, or missing-data adjustment."]
+      },
+      "knownGaps": ["No bootstrap, exact binomial, difference/ratio, quantile, prediction, simultaneous, weighted, or clustered interval."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "kaplan_meier",
+      "implementedBoundary": "Positive-duration right-censored observations without delayed entry: Kaplan-Meier product-limit curve, Greenwood variance, and pointwise complementary-log-log intervals with event-before-censor tie semantics.",
+      "oracleCoverage": {
+        "level": "external-library-partial",
+        "evidence": ["contracts/survival-scipy-crosscheck.py"],
+        "verifiedOutputs": ["survival probabilities", "pointwise log-log confidence intervals", "terminal survival boundary handling"],
+        "excludedOutputs": ["median-survival interval", "simultaneous confidence bands", "left-truncation behavior"]
+      },
+      "diagnosticCoverage": {
+        "level": "method-specific-partial",
+        "emitted": ["event and censor counts", "confidence-interval method declaration", "time-tie accounting", "right-censoring assumption"],
+        "limitations": ["No informative-censoring assessment, delayed entry, competing risk, weighted observations, or simultaneous bands."]
+      },
+      "knownGaps": ["No left or interval censoring, delayed entry, adjusted curves, competing risks, median interval, or simultaneous confidence bands."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "log_rank_test",
+      "implementedBoundary": "Exactly two positive-duration right-censored groups: unweighted log-rank O-minus-E statistic with hypergeometric variance at tied event times and a one-degree chi-square reference.",
+      "oracleCoverage": {
+        "level": "independent-formula-partial",
+        "evidence": ["contracts/survival-scipy-crosscheck.py"],
+        "verifiedOutputs": ["observed-minus-expected", "hypergeometric variance", "chi-square statistic", "chi-square p-value"],
+        "excludedOutputs": ["external survival-package implementation equivalence", "weighted log-rank variants", "stratified log-rank variants"]
+      },
+      "diagnosticCoverage": {
+        "level": "method-specific-partial",
+        "emitted": ["group event and censor accounting", "variance boundary", "effect-size interpretation boundary", "proportional-hazards review flag"],
+        "limitations": ["Cross-check is an independent formula plus SciPy chi-square tail, not a separate survival-package log-rank implementation."]
+      },
+      "knownGaps": ["No weighted, stratified, multi-group, covariate-adjusted, permutation, or pairwise log-rank family."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "cox_proportional_hazards",
+      "implementedBoundary": "Positive-duration right-censored observations with time-independent finite numeric covariates: Cox partial likelihood, declared Efron or Breslow ties, model likelihood-ratio test, coefficient and hazard-ratio Wald inference, and an approximate unscaled Schoenfeld-residual PH screen.",
+      "oracleCoverage": {
+        "level": "independent-optimizer-partial",
+        "evidence": ["contracts/survival-scipy-crosscheck.py"],
+        "verifiedOutputs": ["regression coefficients", "partial log-likelihood", "Efron and Breslow tie branches"],
+        "excludedOutputs": ["standard errors", "confidence intervals", "hazard ratios", "likelihood-ratio p-value", "proportional-hazards diagnostic"]
+      },
+      "diagnosticCoverage": {
+        "level": "method-specific-partial",
+        "emitted": ["partial-likelihood convergence", "internal predictor standardization", "approximate per-covariate PH screen", "PH diagnostic boundary declaration"],
+        "limitations": ["PH screen uses unscaled Schoenfeld-residual correlation and is neither a formal global test nor a cox.zph equivalent."]
+      },
+      "knownGaps": ["No strata, delayed entry, time-varying effects, robust or clustered variance, frailty, competing risks, recurrent events, penalization, or formal global PH test."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "principal_component_analysis",
+      "implementedBoundary": "Complete finite numeric matrices with 2 to 32 nonconstant variables and at most 10,000 rows: covariance- or correlation-matrix PCA, deterministic symmetric eigendecomposition, declared component retention, loadings, communalities, exact row scores, reconstruction error, Bartlett sphericity, and KMO adequacy screens.",
+      "oracleCoverage": {
+        "level": "external-library-partial",
+        "evidence": ["contracts/multivariate-timeseries-scipy-crosscheck.py"],
+        "verifiedOutputs": ["correlation and covariance eigenvalues", "explained-variance ratios", "deterministically signed eigenvector coefficients", "component loadings and exact scores", "Kaiser-Meyer-Olkin adequacy values", "Bartlett sphericity statistic and p-value"],
+        "excludedOutputs": ["component-retention uncertainty", "rotated, sparse, robust, probabilistic, or supervised PCA", "missing-data estimation"]
+      },
+      "diagnosticCoverage": {
+        "level": "method-specific-partial",
+        "emitted": ["Bartlett sphericity screen", "overall and per-variable KMO screens", "eigendecomposition convergence and repeated-eigenvalue ambiguity", "orthogonality residual", "exact renderer-row hash", "descriptive-inference boundary"],
+        "limitations": ["KMO and Bartlett are adequacy screens rather than automatic retention rules; no parallel analysis, bootstrap uncertainty, rotation, missing-data model, or out-of-sample validation is provided."]
+      },
+      "knownGaps": ["No categorical or mixed-data ordination, rotation, sparse or robust PCA, probabilistic PCA, factor analysis, PLS, CCA, clustering, MANOVA, or discriminant analysis."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "time_series_diagnostics",
+      "implementedBoundary": "Complete evenly spaced finite univariate series with 8 to 10,000 observations: optional first difference, centered-time linear trend with interval, sample ACF, Durbin-Levinson Yule-Walker PACF, white-noise bounds, final-lag Ljung-Box portmanteau test, and exact observation and renderer-row receipts.",
+      "oracleCoverage": {
+        "level": "external-library-partial",
+        "evidence": ["contracts/multivariate-timeseries-scipy-crosscheck.py"],
+        "verifiedOutputs": ["centered-time OLS trend coefficient and standard error", "trend t-test p-value", "sample autocorrelation function", "Yule-Walker partial autocorrelation function", "Ljung-Box statistic and p-value", "first-difference values"],
+        "excludedOutputs": ["unit-root and stationarity tests", "ARIMA, state-space, spectral, seasonal, change-point, or forecast models", "irregular-time or missing-time inference"]
+      },
+      "diagnosticCoverage": {
+        "level": "method-specific-partial",
+        "emitted": ["equal-spacing verification", "linear trend test and interval", "sample ACF and PACF", "final-lag Ljung-Box test", "white-noise confidence bound", "stationarity-test boundary", "exact renderer-row hash"],
+        "limitations": ["ACF bounds are approximate white-noise screens; the Ljung-Box reference does not subtract fitted ARMA degrees; no stationarity, seasonal, spectral, change-point, intervention, state-space, or forecast model is fit."]
+      },
+      "knownGaps": ["No ADF, KPSS, Phillips-Perron, seasonal unit-root, ARIMA or SARIMA, ETS, VAR, VECM, state-space, GARCH, spectral, wavelet, change-point, causal-impact, irregular-time, missing-time, or forecast-validation workflow."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "roc_curve_analysis",
+      "implementedBoundary": "Four to ten thousand finite binary-labelled observations containing both classes: stable descending score ordering, atomic tie-block thresholds, exact confusion metrics at every distinct threshold, tie-aware rank and trapezoidal ROC area, trapezoidal precision-recall area, and exact observation/table/renderer receipts.",
+      "oracleCoverage": {
+        "level": "independent-formula-partial",
+        "evidence": ["contracts/robust-blocked-roc-scipy-crosscheck.py"],
+        "verifiedOutputs": ["all distinct-threshold confusion counts and derived rates", "tie-aware rank and trapezoidal ROC area", "trapezoidal precision-recall area", "exact observation, threshold-table, ROC-curve, and precision-recall renderer rows"],
+        "excludedOutputs": ["DeLong, bootstrap, or other uncertainty intervals", "threshold optimization", "cross-validation or paired-model comparison"]
+      },
+      "diagnosticCoverage": {
+        "level": "method-specific-partial",
+        "emitted": ["score-tie and distinct-threshold accounting", "rank-versus-trapezoid AUC identity check", "exact observation and threshold-row hashes", "descriptive-evaluation-only boundary declaration"],
+        "limitations": ["No uncertainty interval, optimal-cutoff claim, calibration assessment, internal or external validation, cross-validation, paired-model comparison, prevalence transport, or decision-curve analysis."]
+      },
+      "knownGaps": ["No DeLong or bootstrap inference, threshold optimization, calibration, cross-validation, paired comparison, multiclass ROC, time-dependent ROC, clustered data, censoring, or decision-curve analysis."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "meta_analysis",
+      "implementedBoundary": "Two to one thousand independent study-level effects with exactly one positive standard error or variance each: fixed inverse-variance and random-effects pooling, DerSimonian-Laird and Paule-Mandel tau-squared, Cochran Q, I-squared, H-squared, normal prediction interval, leave-one-out summaries, and an eligible Egger intercept screen.",
+      "oracleCoverage": {
+        "level": "external-library-partial",
+        "evidence": ["contracts/meta-analysis-scipy-crosscheck.py"],
+        "verifiedOutputs": ["fixed inverse-variance pooled estimate, standard error, and confidence interval", "Cochran Q, chi-square p-value, I-squared, and H-squared", "DerSimonian-Laird and Paule-Mandel tau-squared estimates", "selected random-effects pooled estimate and normal prediction interval", "leave-one-out fixed and random-effects summaries", "Egger intercept regression when mathematically eligible", "exact forest, funnel, and influence renderer rows"],
+        "excludedOutputs": ["Hartung-Knapp, profile-likelihood, bootstrap, or Bayesian uncertainty", "risk-ratio, odds-ratio, standardized-mean-difference, proportion, or diagnostic-test effect-size transformations", "multilevel, multivariate, network, individual-participant-data, or meta-regression models", "trim-and-fill, selection models, p-curve, PET-PEESE, or publication-bias conclusions"]
+      },
+      "diagnosticCoverage": {
+        "level": "method-specific-partial",
+        "emitted": ["Cochran Q with chi-square reference", "I-squared and H-squared heterogeneity summaries", "both DerSimonian-Laird and Paule-Mandel tau-squared", "normal random-effects prediction interval", "complete leave-one-out summaries", "eligible Egger intercept with under-ten-study warning", "exact forest, funnel, and influence row hashes"],
+        "limitations": ["The prediction interval and pooled intervals use normal critical values; no small-sample Hartung-Knapp, profile-likelihood, bootstrap, or Bayesian correction is supplied.", "Egger regression and the funnel display are asymmetry screens, not publication-bias verdicts, and fewer than ten studies is explicitly underpowered."]
+      },
+      "knownGaps": ["No raw-outcome effect-size calculation, continuity correction, meta-regression, subgroup inference, multilevel or multivariate model, network meta-analysis, robust variance, dependent-effects correction, trim-and-fill, selection model, cumulative analysis, Hartung-Knapp interval, or influence statistic beyond leave-one-out pooled changes."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "response_surface_regression",
+      "implementedBoundary": "Nine to ten thousand complete finite observations with exactly two explicitly center-and-half-range coded quantitative factors: a full six-term quadratic OLS response surface, classical coefficient and overall-model inference, replicated pure-error lack-of-fit inference when eligible, stationary-point classification, exact raw-unit prediction grid, exact observed coordinates and residuals, and a deterministic convex-hull support mask.",
+      "oracleCoverage": {
+        "level": "external-library-partial",
+        "evidence": ["contracts/response-surface-contract.cjs", "contracts/response-surface-numpy-crosscheck.py"],
+        "verifiedOutputs": ["six-term two-factor quadratic OLS coefficients and classical covariance inference", "overall model F test and replicated pure-error lack-of-fit F test", "exact raw-unit prediction grid and source-order observed coordinates with residuals", "monotone-chain observed-domain convex hull and deterministic point support mask"],
+        "excludedOutputs": ["more than two factors, automatic term selection, transformations, ridge analysis, or desirability optimization", "robust, clustered, weighted, repeated-measures, mixed-effects, Bayesian, or missing-data inference", "surface uncertainty bands, simultaneous intervals, and extrapolation outside observed convex-hull support"]
+      },
+      "diagnosticCoverage": {
+        "level": "method-specific-partial",
+        "emitted": ["exact rank and bounded condition-number enforcement", "explicit center-half-range coding and declared-domain enforcement", "replicated pure-error lack-of-fit test when eligible", "Jarque-Bera and Breusch-Pagan residual screens", "stationary-point Hessian classification and domain status", "exact prediction-grid, observed-point, convex-hull, support-mask, and materialization-lineage receipts"],
+        "limitations": ["Classical OLS inference assumes independent homoscedastic errors; residual screens are descriptive and no robust, clustered, repeated-measures, weighted, or missing-data model is fit.", "The grid is a deterministic evaluation of the declared quadratic model, not evidence of support outside the observed convex hull; cells lacking four supported vertices must remain visually masked."]
+      },
+      "knownGaps": ["No third or higher factor, automatic coding, term selection, Box-Cox transformation, ridge analysis, desirability optimization, robust covariance, mixed model, repeated measures, Bayesian surface, simultaneous band, adaptive design, or extrapolation claim."],
+      "independentlyCrossChecked": true
+    },
+    {
+      "method": "gaussian_random_intercept_lmm",
+      "implementedBoundary": "Twelve to ten thousand complete finite continuous observations in at least five groups with at least two rows per group: one Gaussian random intercept, an intercept plus explicitly supplied numeric or treatment-coded categorical fixed main effects, deterministic ML or REML profiling, residual n-minus-p fixed-effect inference, plug-in BLUP uncertainty, ICC, and exact fitted, residual, table, and Figure rows.",
+      "oracleCoverage": {
+        "level": "independent-optimizer-partial",
+        "evidence": ["contracts/lmm-contract.cjs", "contracts/lmm-scipy-crosscheck.py", "contracts/lmm-scale-contract.cjs"],
+        "verifiedOutputs": ["ML and REML one-dimensional profile likelihood objectives for one Gaussian random intercept", "fixed-effect estimates, model-based standard errors, residual n-minus-p t statistics, p-values, and confidence intervals", "random-intercept and residual variance estimates, variance ratio, standard deviations, and ICC", "group BLUPs with plug-in conditional uncertainty, shrinkage, and exact conditional fitted and residual rows", "ten-thousand-row, five-hundred-group, thirty-two-fixed-predictor deterministic scale boundary with unsampled output rows"],
+        "excludedOutputs": ["executed MATLAB fitlme, R lme4, nlme, SAS, Stata, or another mixed-model package equivalence on this host", "Satterthwaite, Kenward-Roger, bootstrap, profile-likelihood, or boundary likelihood-ratio inference", "random slopes, multiple, nested, or crossed random effects, residual covariance structures, weights, GLMMs, nonlinear mixed effects, or missing-data estimation"]
+      },
+      "diagnosticCoverage": {
+        "level": "method-specific-partial",
+        "emitted": ["fixed-design rank and weighted-information condition enforcement", "deterministic variance-ratio optimizer receipt and zero-variance singular-fit boundary", "conditional-residual and random-intercept Q-Q renderer rows", "categorical reference-coding declaration", "exact fixed-effect, group-effect, profile, and observation row hashes"],
+        "limitations": ["Residual n-minus-p t inference is a declared approximation and is not Satterthwaite or Kenward-Roger inference.", "Q-Q and Jarque-Bera outputs are descriptive screens; no random slope, residual-correlation, heteroscedastic, influence-deletion, robust, bootstrap, or missing-data model is fit."]
+      },
+      "knownGaps": ["No random slopes, interactions generated by the engine, multiple, nested, or crossed grouping factors, residual covariance structures, weights, offsets, GLMM, nonlinear mixed effects, automatic row omission, multiple imputation, Satterthwaite or Kenward-Roger inference, boundary likelihood-ratio test, or executed MATLAB/R mixed-model package cross-check on this host."],
+      "independentlyCrossChecked": true
+    }
+  ],
+  "manifestSha256": "sha256:eebebb360f6d3c2f88f95b95bdc578517053a9a5010da4a7f5acd9b2349dfa17"
+}

@@ -1,5 +1,5 @@
 .rail { min-width: 0; display: grid; gap: 3px; margin: 0 0 7px; padding: 0 0 8px; border-bottom: 1px solid #e5e7e8; }
-.railHeader { min-height: 27px; display: flex; align-items: center; justify-content: space-between; padding: 0 5px 0 8px; color: #858a8e; font-size: 9px; font-weight: 720; letter-spacing: .08em; text-transform: uppercase; }
+.railHeader { min-height: 27px; display: flex; align-items: center; justify-content: space-between; padding: 0 5px 0 8px; color: #666b70; font-size: 9px; font-weight: 720; letter-spacing: .08em; text-transform: uppercase; }
 .railHeader button { width: 26px; height: 26px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 7px; background: transparent; color: #696f73; cursor: pointer; }
 .railHeader button:hover, .railHeader button:focus-visible { background: #e9ebec; outline: none; }
 .railList { min-width: 0; display: grid; grid-auto-flow: column; grid-auto-columns: 74px; justify-content: start; gap: 4px; padding: 0 4px; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; }

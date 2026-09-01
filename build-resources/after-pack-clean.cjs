@@ -4,6 +4,9 @@ const path = require("node:path");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const embeddedCoreContract = require("./embedded-core-contract.cjs");
+const {
+  verifyProductExtensionSigningPolicyFile,
+} = require("./product-extension-signing-policy.cjs");
 
 const execFileAsync = promisify(execFile);
 const MODEL2VEC_ASSET_PARTS = ["assets", "model2vec", "potion-multilingual-128M-int8"];
@@ -766,6 +769,22 @@ exports.prepareMacRuntimeResourcesForInstall = prepareMacRuntimeResourcesForInst
 // 쓰면 그 사본이 낡아 조용히 눈이 먼다.
 exports.verifyBundledNode = verifyBundledNode;
 
+function verifyBundledProductExtensionSigningPolicy(context) {
+  const resourcesDir = context.electronPlatformName === "darwin"
+    ? path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`, "Contents", "Resources")
+    : path.join(context.appOutDir, "resources");
+  const packagedPath = path.join(resourcesDir, "product-extension-signing-policy.json");
+  const preparedPath = path.join(context.packager.projectDir, "dist", "product-extension-signing-policy.json");
+  const verified = verifyProductExtensionSigningPolicyFile(packagedPath, preparedPath);
+  console.log(
+    `[afterPack] verified product-extension signing policy ${verified.sha256} `
+      + `(${verified.keyIds.length} trusted key id(s))`,
+  );
+  return verified;
+}
+
+exports.verifyBundledProductExtensionSigningPolicy = verifyBundledProductExtensionSigningPolicy;
+
 exports.default = async function afterPackClean(context) {
   if (process.platform === "darwin" && context.electronPlatformName === "darwin") {
     try {
@@ -782,6 +801,7 @@ exports.default = async function afterPackClean(context) {
 
   await verifyEmbeddedAgentlasOs(context);
   await verifyMacComputerUseDriver(context);
+  verifyBundledProductExtensionSigningPolicy(context);
   // electron-builder skips afterSign when identity=null. Normalize the
   // explicitly isolated local candidate here; the official app is normalized
   // only after its pinned signing identity has been verified by afterSign.

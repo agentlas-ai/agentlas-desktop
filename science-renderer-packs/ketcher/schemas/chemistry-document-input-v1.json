@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentlas.science/chemistry-document-input/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["document", "validation"],
+  "properties": {
+    "document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "ket", "ketSha256", "canonicalSmiles", "canonicalSmilesSha256"],
+      "properties": {
+        "format": { "const": "ket" },
+        "ket": { "type": "string", "minLength": 1, "maxLength": 2097152 },
+        "ketSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "canonicalSmiles": { "type": "string", "minLength": 1, "maxLength": 100000 },
+        "canonicalSmilesSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    },
+    "validation": { "$ref": "../schemas/chemistry-validation-v1.json" }
+  }
+}

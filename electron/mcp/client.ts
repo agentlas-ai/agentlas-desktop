@@ -1151,7 +1151,20 @@ export async function pickActiveRunner(): Promise<
  *  context 미지정(undefined)은 로컬 렌더러 대화형 경로다. 새 원격/헤드리스 통합은 반드시
  *  여기 source를 추가하고 넘겨라 — 안 넘기면 대화형으로 오인된다(fail-open). */
 export interface InvocationExecutionContext {
-  source: "automation" | "site-studio" | "telegram" | "trex" | "mobile";
+  source: "automation" | "site-studio" | "telegram" | "trex" | "mobile" | "science";
+  /** Main-owned Science turn authority. Never reconstruct this by parsing surfaceContext. */
+  science?: Readonly<{
+    projectId: string;
+    conversationId: string;
+    turnId: string;
+    originUserMessageId: string;
+    invocationRunId: string;
+    researchDirectorAgentId: string;
+    researchDirectorAgentSlug: string;
+    researchDirectorPackageVersion: string;
+    researchDirectorPackageDigest: string;
+    researchDirectorSystemPromptSha256: string;
+  }>;
   /**
    * 표면이 붙이는 안내(방 정보·언어 규칙·모드 지시). **userPrompt 에 섞으면 안 된다** —
    * userPrompt 는 "사람이 실제로 한 말"이고 goal 목표·수락 기준·대화 제목·기억이
@@ -2699,6 +2712,22 @@ ${effectiveUserPrompt}`;
     } catch (err) {
       console.error("[mcp] buildMcpConfigFile failed:", err);
     }
+  }
+
+  // Science computation is a Main-owned, turn-scoped capability. It is not a
+  // globally installed MCP row and is never selected from prompt text. The
+  // short-lived bridge carries only a loopback endpoint and an opaque grant;
+  // project/turn authority remains in Main and is revalidated by ScienceStore.
+  if (executionContext?.source === "science") {
+    if (!executionContext.science) throw new Error("science-execution-context-missing");
+    const { materializeScienceMcpGrant } = await import("../science/tool-control-server");
+    const scienceGrant = await materializeScienceMcpGrant(executionContext.science, mcpConfigPath);
+    mcpConfigPath = scienceGrant.configPath;
+    mcpAllowedTools = [...new Set([...(mcpAllowedTools ?? []), ...scienceGrant.allowedTools])];
+    mcpCodexConfigArgs = [...(mcpCodexConfigArgs ?? []), ...scienceGrant.codexConfigArgs];
+    mcpRuntimeEnv = { ...(mcpRuntimeEnv ?? {}), ...scienceGrant.runtimeEnv };
+    mcpIncludedServers = [...mcpIncludedServers, scienceGrant.includedServer];
+    mcpAutoSelectionPrompt = `${mcpAutoSelectionPrompt}\nAgentlas Science provides search_academic_literature. Before making claims about prior research, novelty, state of the art, citations, related papers, or a literature review, call it and ground the answer in its returned project Source ids and provider receipts. Treat metadata-only results as discovery evidence, not full-text verification; disclose partial provider failures and never invent a source. For an astronomical sky field, call search_astronomy_catalog with exact ICRS coordinates, then pass its runId to build_astronomy_sky_map so the user receives a durable interactive Lab artifact; never invent catalog rows or replace missing measurements. For irregular astronomical time-series data already stored as an exact immutable Data Table, call analyze_light_curve_periodicity with the exact artifact version/hash, explicit time system, column mapping, period grid, and weighting policy. Report its false-alarm-probability, period-uncertainty, single-sinusoid, cadence, and sampling-window warnings without upgrading a grid peak into a confirmed physical period; direct the user to the returned Figure Lab artifact for the publication tables and interactive Vega figure. Agentlas Science also provides render_table_as_vega. Use it when measured tabular data should become a durable interactive Lab artifact; never fabricate an artifact receipt. Respond as Agentlas Science without the One or Hope name/prefix.`.trim();
   }
 
   /*
@@ -5308,7 +5337,15 @@ ${effectiveUserPrompt}`;
      * (displayWithFloor 원문)를 받는 invocation service 가 맡는다. 히스토리 새로고침
      * 때 표식 줄이 되살아나지 않게 하는 것이 이 한 줄의 전부다.
      */
-    const persistedDisplay = stripPermissionEscalationMarker(displayWithFloor);
+    // Persist the same display-hygiene body that the universal sink publishes.
+    // Persisting the pre-hygiene body made the invocation durability gate reject
+    // a legitimate final whenever the backstop removed a renderer directive.
+    // The backstop is pure and idempotent, so the sink below will produce this
+    // exact text again while still emitting any extracted structured surfaces.
+    const persistedDisplay = stripPermissionEscalationMarker(applyFinalDisplayBackstop(displayWithFloor, {
+      locale: pickLocale(req),
+      allowSurfaceRender: !req.agentAppMode,
+    }).text);
     if (!req.agentAppMode) {
       /*
        * ★빈 답은 빈 말풍선으로 남기지 않는다 — 대화창 하단에 아무것도 안 적힌 잔해만

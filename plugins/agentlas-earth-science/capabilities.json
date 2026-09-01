@@ -1,0 +1,141 @@
+{
+  "schema": "agentlas.science-domain-capability/v1",
+  "domain": "earth-science",
+  "implementedSources": [
+    {
+      "id": "usgs-fdsn-event",
+      "provider": "USGS Earthquake Hazards Program",
+      "endpoint": "https://earthquake.usgs.gov/fdsnws/event/1/query",
+      "authentication": "none",
+      "output": "application/geo+json",
+      "status": "implemented",
+      "querySemantics": ["UTC interval", "rectangular bounds", "magnitude range", "depth range", "one-based offset pagination", "USGS orderby"]
+    },
+    {
+      "id": "usgs-comcat-event-detail",
+      "provider": "USGS Earthquake Hazards Program",
+      "endpoint": "https://earthquake.usgs.gov/fdsnws/event/1/query?eventid={eventId}&format=geojson",
+      "authentication": "none",
+      "output": "application/geo+json",
+      "status": "implemented",
+      "scientificFields": ["origin time and uncertainty", "hypocenter and location uncertainty", "magnitude and uncertainty", "station/phase counts", "azimuthal gap", "minimum station distance", "RMS residual", "error ellipsoid", "USGS product inventory"]
+    },
+    {
+      "id": "noaa-coops-water-level",
+      "provider": "NOAA Center for Operational Oceanographic Products and Services",
+      "endpoint": "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter",
+      "authentication": "none",
+      "output": "application/json",
+      "status": "implemented",
+      "querySemantics": ["exact seven-digit station", "inclusive UTC-minute interval", "explicit vertical datum", "metric or English units", "observed water level only"],
+      "scientificFields": ["station EPSG:4326 coordinates", "UTC observation time", "water-level value and unit", "vertical datum", "standard deviation", "NOAA verification state", "NOAA quality flags"]
+    }
+  ],
+  "artifacts": [
+    {
+      "kind": "earth.earthquake-catalog",
+      "canonicalSchema": "agentlas.earth.usgs-earthquake-catalog/v1",
+      "contractRevision": "quality-pagination-detail-compatible/v2",
+      "rendererContracts": [
+        { "rendererId": "agentlas.maplibre", "status": "host-required", "input": "application/geo+json" },
+        { "rendererId": "agentlas.cesium", "status": "host-required", "input": "application/geo+json" },
+        { "rendererId": "agentlas.vega", "status": "host-required", "input": "agentlas.science-table/v1" }
+      ]
+    },
+    {
+      "kind": "earth.earthquake-event-detail",
+      "canonicalSchema": "agentlas.earth.usgs-earthquake-event-detail/v1",
+      "rendererContracts": [
+        { "rendererId": "agentlas.maplibre", "status": "host-required", "input": "application/geo+json" },
+        { "rendererId": "agentlas.cesium", "status": "host-required", "input": "application/geo+json" },
+        { "rendererId": "agentlas.vega", "status": "host-required", "input": "agentlas.science-table/v1" }
+      ]
+    },
+    {
+      "kind": "earth.noaa-coops-water-level-series",
+      "canonicalSchema": "agentlas.earth.noaa-coops-water-level-series/v1",
+      "rendererContracts": [
+        { "rendererId": "agentlas.vega", "status": "host-required", "input": "application/vnd.vegalite.v5+json" },
+        { "rendererId": "agentlas.maplibre", "status": "host-required", "input": "application/geo+json" },
+        { "rendererId": "agentlas.cesium", "status": "host-required", "input": "application/geo+json" }
+      ]
+    },
+    {
+      "kind": "earth.gutenberg-richter-analysis",
+      "canonicalSchema": "agentlas.earth.gutenberg-richter-analysis/v1",
+      "methodRevision": "aki-mle-discrete-bin/v1",
+      "status": "implemented",
+      "scientificContract": {
+        "completenessThreshold": "researcher-supplied and explicit; never estimated",
+        "magnitudeType": "one exact USGS preferred magnitude type; no scale conversion",
+        "estimator": "b=log10(e)/(mean(M)-(Mc-ΔM/2))",
+        "uncertainty": "asymptotic Aki standard error b/sqrt(N)",
+        "minimumIncludedEvents": 50,
+        "minimumOccupiedBins": 3,
+        "sourceCatalog": "complete first page only with exact USGS raw-response and normalized-catalog SHA-256 receipts"
+      },
+      "outputs": [
+        "exact inclusion/exclusion audit retaining null magnitudes",
+        "publication magnitude-frequency table",
+        "tooltip-only Vega-Lite observed cumulative counts plus Aki MLE fit",
+        "content and analysis SHA-256 receipts"
+      ],
+      "rendererContracts": [
+        { "rendererId": "agentlas.vega", "status": "host-required", "input": "application/vnd.vegalite.v5+json", "interaction": "tooltip-only" }
+      ]
+    },
+    {
+      "kind": "earth.omori-utsu-aftershock-analysis",
+      "canonicalSchema": "agentlas.earth.omori-utsu-aftershock-analysis/v1",
+      "methodRevision": "bounded-profile-poisson-mle/v1",
+      "status": "implemented",
+      "scientificContract": {
+        "boundaries": "researcher-supplied mainshock, observation window, time-completeness boundary, Mc, exact magnitude type, time-bin width, and p/c bounds",
+        "estimator": "deterministic bounded profile-Poisson maximum likelihood for lambda(t)=K/(t+c)^p",
+        "minimumIncludedEvents": 20,
+        "minimumDistinctEventTimes": 5,
+        "minimumOccupiedTimeBins": 4,
+        "sourceCatalog": "complete first page only with exact USGS raw-response and normalized-catalog SHA-256 receipts",
+        "invalidState": "numerical failure or an optimum on any declared p/c bound"
+      },
+      "outputs": [
+        "exact observation/time-completeness/magnitude inclusion audit",
+        "zero-count-preserving publication decay table and Pearson diagnostic",
+        "tooltip-only Vega-Lite log-decay and residual figures",
+        "input/content and overall analysis SHA-256 receipts"
+      ],
+      "rendererContracts": [
+        { "rendererId": "agentlas.vega", "status": "host-required", "input": "application/vnd.vegalite.v5+json", "interaction": "tooltip-only" }
+      ]
+    }
+  ],
+  "guards": {
+    "maxResponseBytes": 8388608,
+    "maxEvents": 2000,
+    "maxOffset": 1000000,
+    "maxProducts": 1000,
+    "maxWaterLevelObservations": 7500,
+    "minGutenbergRichterEvents": 50,
+    "maxGutenbergRichterEvents": 2000,
+    "minOmoriUtsuEvents": 20,
+    "maxOmoriUtsuBins": 500,
+    "maxQuerySpanDays": 366,
+    "maxWaterLevelQuerySpanDays": 31,
+    "minimumIntervalMs": 1000,
+    "timeoutMs": 15000,
+    "retries": 2,
+    "allowedContentTypes": ["application/json", "application/geo+json", "application/vnd.geo+json"],
+    "redirectPolicy": "deny"
+  },
+  "notImplemented": [
+    "Magnitude completeness Mc is not estimated; the researcher must supply and justify it.",
+    "Declustering, spatial-homogeneity tests, time-varying b-values, magnitude-scale conversion, bootstrap uncertainty, and causal or forecast claims are not implemented.",
+    "Omori–Utsu mainshock/completeness inference, background-rate or secondary-triggering models, confidence intervals, forecast-skill validation, and causal claims are not implemented.",
+    "Gutenberg–Richter analysis rejects paginated or otherwise incomplete catalogs and catalogs with fewer than 50 included same-type events.",
+    "NOAA CO-OPS predictions, currents, meteorology, historical monthly means, and non-water-level products are not fetched by this version.",
+    "NOAA climate products outside CO-OPS observed water level and NASA Earthdata CMR discovery are not fetched by this version.",
+    "No MapLibre, Cesium, or Vega renderer binary is bundled; the host must provide an exact renderer.",
+    "Linked waveform, phase-data XML, ShakeMap grid, NetCDF, GRIB, GeoTIFF, and DEM contents are inventoried but never fetched or parsed by this version.",
+    "A catalog query is an observation source, not an earthquake forecast or causal model."
+  ]
+}

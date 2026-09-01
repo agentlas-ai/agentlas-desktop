@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentlas.ai/schemas/science/research-decision-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "decisionId", "title", "question", "whyMaterial", "affectedNodes", "evidenceRefs", "options", "recommendedOptionId", "rationale", "assumptions", "blocking"],
+  "properties": {
+    "schema": { "const": "agentlas.science.research-decision/v1" },
+    "decisionId": { "type": "string", "format": "uuid" },
+    "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "question": { "type": "string", "minLength": 1, "maxLength": 2000 },
+    "whyMaterial": { "type": "string", "minLength": 1, "maxLength": 4000 },
+    "affectedNodes": { "type": "array", "minItems": 1, "items": { "type": "string" }, "uniqueItems": true },
+    "evidenceRefs": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "options": {
+      "type": "array", "minItems": 2, "maxItems": 3,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "label", "tradeoff", "authorizedTransition"],
+        "properties": { "id": { "type": "string" }, "label": { "type": "string" }, "tradeoff": { "type": "string" }, "authorizedTransition": { "type": "string" } }
+      }
+    },
+    "recommendedOptionId": { "type": "string" },
+    "rationale": { "type": "string" },
+    "assumptions": { "type": "array", "items": { "type": "string" } },
+    "blocking": { "type": "boolean" }
+  }
+}

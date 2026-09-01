@@ -11,6 +11,7 @@ import type {
   FsPathGrant,
 } from "./types";
 import type { SiteActivityEvent } from "@shared/site-studio";
+import type { ProductExtensionStatus, ProductExtensionViewStatus, ScienceSuiteInstallProgress } from "@shared/product-extension";
 import {
   connectIpcCacheToStoreEvents,
   invalidateIpcCache,
@@ -50,6 +51,10 @@ interface AgentlasEvents {
   onActiveChats: (handler: (chatIds: string[]) => void) => () => void;
   /** Pairing/device lifecycle notification. Contains no nonce, token, or certificate. */
   onMobileBridgeChanged?: (handler: (event: { reason: string }) => void) => () => void;
+  /** Signed product extension lifecycle notification. */
+  onProductExtensionChanged?: (handler: (status: ProductExtensionStatus) => void) => () => void;
+  onScienceSuiteProgress?: (handler: (progress: ScienceSuiteInstallProgress) => void) => () => void;
+  onProductExtensionViewStatus?: (handler: (status: ProductExtensionViewStatus) => void) => () => void;
   /** Browser 승인 요청 구독 — 경량 바텀시트. unsubscribe 반환. */
   onBrowserApproval: (handler: (req: BrowserApprovalRequestEvent) => void) => () => void;
   /** 에이전트의 동기 질문 — 도구가 답을 기다린다(electron/confirm/ask-user.ts). */

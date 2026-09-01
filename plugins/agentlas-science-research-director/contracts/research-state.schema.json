@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentlas.ai/schemas/science/research-director-state-v1.json",
+  "title": "Agentlas Science Research Director State",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "studyId", "revision", "phase", "status", "question", "bindings", "evidenceGaps", "contradictions", "pendingDecisions", "blockers", "stop", "previousStateSha256", "stateSha256", "updatedAt"],
+  "properties": {
+    "schema": { "const": "agentlas.science.research-director-state/v1" },
+    "studyId": { "type": "string", "format": "uuid" },
+    "revision": { "type": "integer", "minimum": 1 },
+    "phase": {
+      "enum": ["intake", "literature", "hypothesis", "analysis_plan_draft", "analysis_plan_frozen", "execution", "evidence_reconciliation", "conclusions", "manuscript", "journal_profile", "submission_validation", "ready_to_submit", "blocked", "stopped", "failed"]
+    },
+    "status": { "enum": ["active", "waiting_for_decision", "blocked", "complete", "stopped", "failed"] },
+    "question": { "type": "string", "minLength": 1, "maxLength": 8000 },
+    "hypothesisIds": { "type": "array", "items": { "type": "string", "format": "uuid" }, "uniqueItems": true },
+    "frozenAnalysisPlan": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["analysisSpecId", "version", "contentSha256"],
+          "properties": {
+            "analysisSpecId": { "type": "string", "format": "uuid" },
+            "version": { "type": "integer", "minimum": 1 },
+            "contentSha256": { "$ref": "#/$defs/sha256" }
+          }
+        }
+      ]
+    },
+    "bindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sources", "runs", "artifacts", "manuscripts", "journalProfiles", "validationReceipts"],
+      "properties": {
+        "sources": { "type": "array", "items": { "$ref": "#/$defs/sourceBinding" } },
+        "runs": { "type": "array", "items": { "$ref": "#/$defs/runBinding" } },
+        "artifacts": { "type": "array", "items": { "$ref": "#/$defs/artifactBinding" } },
+        "manuscripts": { "type": "array", "items": { "$ref": "#/$defs/versionBinding" } },
+        "journalProfiles": { "type": "array", "items": { "$ref": "#/$defs/hashBinding" } },
+        "validationReceipts": { "type": "array", "items": { "$ref": "#/$defs/hashBinding" } }
+      }
+    },
+    "evidenceGaps": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "contradictions": { "type": "array", "items": { "type": "string", "format": "uuid" }, "uniqueItems": true },
+    "pendingDecisions": { "type": "array", "items": { "type": "string", "format": "uuid" }, "uniqueItems": true },
+    "blockers": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "stop": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "reason", "recoveryAction"],
+          "properties": {
+            "code": { "enum": ["question_not_falsifiable", "evidence_unavailable", "capability_unavailable", "integrity_failure", "plan_mismatch", "diagnostic_failure", "decision_required", "authority_withdrawn", "resource_limit", "user_stop"] },
+            "reason": { "type": "string", "minLength": 1 },
+            "recoveryAction": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
+    },
+    "previousStateSha256": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sha256" }] },
+    "stateSha256": { "$ref": "#/$defs/sha256" },
+    "updatedAt": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "sourceBinding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sourceId", "sourceVersionId", "contentSha256"],
+      "properties": { "sourceId": { "type": "string", "format": "uuid" }, "sourceVersionId": { "type": "string", "format": "uuid" }, "contentSha256": { "$ref": "#/$defs/sha256" } }
+    },
+    "runBinding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["runId", "inputManifestSha256", "environmentSha256", "outputManifestSha256", "status"],
+      "properties": { "runId": { "type": "string", "format": "uuid" }, "inputManifestSha256": { "$ref": "#/$defs/sha256" }, "environmentSha256": { "$ref": "#/$defs/sha256" }, "outputManifestSha256": { "$ref": "#/$defs/sha256" }, "status": { "enum": ["succeeded", "failed", "cancelled"] } }
+    },
+    "artifactBinding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["artifactId", "artifactVersion", "contentSha256", "sourceRunId"],
+      "properties": { "artifactId": { "type": "string", "format": "uuid" }, "artifactVersion": { "type": "integer", "minimum": 1 }, "contentSha256": { "$ref": "#/$defs/sha256" }, "sourceRunId": { "type": "string", "format": "uuid" } }
+    },
+    "versionBinding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "version", "contentSha256"],
+      "properties": { "id": { "type": "string", "format": "uuid" }, "version": { "type": "integer", "minimum": 1 }, "contentSha256": { "$ref": "#/$defs/sha256" } }
+    },
+    "hashBinding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "contentSha256"],
+      "properties": { "id": { "type": "string", "format": "uuid" }, "contentSha256": { "$ref": "#/$defs/sha256" } }
+    }
+  }
+}

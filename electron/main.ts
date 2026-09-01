@@ -12,6 +12,7 @@ import {
   app,
   autoUpdater as electronAutoUpdater,
   BrowserWindow,
+  dialog,
   ipcMain,
   Menu,
   nativeImage,
@@ -21,8 +22,10 @@ import {
   protocol,
   session,
   shell,
+  webContents,
 } from "electron";
 import fs from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
 import { installModelCatalogResolver, refreshRemoteCatalog } from "./runtime/model-catalog";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -110,6 +113,104 @@ import {
 import { userDataDir } from "./runtime-paths";
 import { runHostShutdownHooks } from "./host-lifecycle";
 import { classifyStartupNavigationFailure } from "./startup-navigation";
+import {
+  installScienceExtension,
+  installScienceSuite,
+  scienceExtensionStatus,
+  scienceSuiteStatus,
+  scienceRendererPackStatuses,
+  resolveVerifiedScienceRenderer,
+  setScienceExtensionEnabled,
+  uninstallScienceExtension,
+} from "./extensions/science";
+import {
+  closeAllScienceExtensionViews,
+  closeScienceExtensionView,
+  captureScienceExtensionViewRegion,
+  assertScienceExtensionViewPermission,
+  isScienceExtensionViewSender,
+  openScienceExtensionView,
+  setScienceExtensionViewBounds,
+  mountScienceRendererView,
+  updateScienceRendererViewBounds,
+  setScienceRendererViewVisibility,
+  disposeScienceRendererView,
+  scienceRendererHandshake,
+  scienceRendererReport,
+  markScienceRendererCaptured,
+  failScienceRendererCapture,
+  authorizeScienceChemistryCommit,
+  authorizeScienceMolstarCommit,
+  notifyScienceChemistryCommitted,
+  notifyScienceArtifactChanged,
+  sendScienceTurnEventToView,
+} from "./extensions/view-host";
+import {
+  closeScienceStore,
+  recoverScienceRuntimeAtStartup,
+  scienceArtifactPublicationValidator,
+  scienceChemistryValidator,
+  scienceConversationService,
+  scienceEvidenceGraphService,
+  scienceJournalPublicationService,
+  scienceStore,
+  scienceToolGateway,
+  shutdownScienceRuntimeForAppClose,
+} from "./science/runtime";
+import type {
+  MaterializeScienceEvidenceGraphInferenceInput,
+  ProposeScienceEvidenceGraphInferenceInput,
+  RefreshScienceEvidenceGraphInput,
+  ReviewScienceEvidenceGraphInferenceInput,
+} from "../shared/science-evidence-graph";
+import { ScienceDatasetIngestionService } from "./science/dataset-ingestion";
+import { SCIENCE_SCHEMA_VERSION } from "./science/store";
+import { commitScienceVegaEdit, parseScienceVegaEditInput } from "./science/vega-editor";
+import {
+  renderScienceStatisticsFigurePdf,
+  renderScienceStatisticsFigurePng,
+  renderScienceStatisticsFigureSvg,
+  renderScienceStatisticsFigureSvgPreviewPng,
+  renderScienceStatisticsFigureTiff,
+} from "./science/statistics-figure-export";
+import { validateScienceNumericSurfacePngBytes } from "./science/numeric-surface-export";
+import { validateScienceResidueInteraction } from "./science/protein-residue-validator";
+import type {
+  AppendScienceManuscriptVersionInput,
+  CaptureScienceArtifactInput,
+  CreateScienceManuscriptInput,
+  CreateScienceJournalProfileInput,
+  CreateScienceSubmissionExportInput,
+  ConfirmScienceJournalIdentityInput,
+  ConfirmScienceJournalHumanAttestationInput,
+  CreateScienceProjectInput,
+  ReplaceScienceProjectWorkspaceTabsInput,
+  UpdateScienceProjectNavigationInput,
+  UpdateScienceProjectRelatedDomainsInput,
+  UpsertScienceProjectLabBindingInput,
+  ApproveScienceResearchContractInput,
+  StartScienceLoopSessionInput,
+  TransitionScienceLoopSessionInput,
+  AnswerScienceDecisionInput,
+  DeferScienceDecisionInput,
+  PresentScienceDecisionInput,
+  ScienceDecisionRequest,
+} from "../shared/science-contract";
+import type { ProductExtensionPermission } from "../shared/product-extension";
+import type { ScienceComposerStartInput } from "./science/conversation-service";
+
+const activeScienceChemistryCommits = new Set<string>();
+import {
+  SCIENCE_RENDERER_REQUEST_SCHEMA,
+  SCIENCE_RESIDUE_INTERACTION_SCHEMA,
+  isScienceChemistryCommitInput,
+  isScienceMolstarCommitInput,
+  isMountScienceRendererInput,
+  scienceRendererBindingsEqual,
+  type MountScienceRendererInput,
+  type ScienceChemistryCommitInput,
+  type ScienceMolstarCommitInput,
+} from "../shared/science-renderer-runtime";
 
 export { currentUiLocale } from "./ui-locale";
 
@@ -850,6 +951,15 @@ async function prepareAutomaticUpdateQuit(): Promise<void> {
 function finishQuitCleanup(): Promise<void> {
   if (quitCleanupPromise) return quitCleanupPromise;
   quitCleanupPromise = (async () => {
+    try {
+      const scienceShutdown = await shutdownScienceRuntimeForAppClose();
+      if (scienceShutdown.pausedLoops || scienceShutdown.interruptedTurns || scienceShutdown.cancellationRequests
+        || scienceShutdown.interruptedToolRequests || scienceShutdown.timedOut) {
+        console.info(`[science-runtime] app-close pausedLoops=${scienceShutdown.pausedLoops} interruptedTurns=${scienceShutdown.interruptedTurns} cancellationRequests=${scienceShutdown.cancellationRequests} interruptedTools=${scienceShutdown.interruptedToolRequests} timedOut=${scienceShutdown.timedOut}`);
+      }
+    } catch (error) {
+      console.error("[science-runtime] app-close shutdown failed", error);
+    }
     // ★호스트 공통 정리 — 실행 중인 CLI 자식 트리 킬이 여기 등록돼 있다.
     //   데몬(agentlasd)은 같은 함수를 SIGTERM/SIGINT 에서 부른다(host-lifecycle.ts).
     try { runHostShutdownHooks(); } catch {}
@@ -861,6 +971,7 @@ function finishQuitCleanup(): Promise<void> {
     while (invocationService.activeChatIds().length > 0 && Date.now() < settleDeadline) {
       await new Promise<void>((resolve) => setTimeout(resolve, 25));
     }
+    try { closeScienceStore(); } catch (error) { console.error("[science-store] close failed", error); }
     try { closeStore(); } catch (error) { console.error("[store] close failed", error); }
     try { disposeAutoUpdater(); } catch {}
     quitCleanupDone = true;
@@ -1149,6 +1260,1152 @@ app.whenReady().then(async () => {
     shell.showItemInFolder(file);
     return { ok: true };
   });
+  const broadcastScienceExtension = () => {
+    const status = scienceExtensionStatus();
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (window.isDestroyed() || window.webContents.isDestroyed()) continue;
+      window.webContents.send("productExtensions:changed", status);
+    }
+    return status;
+  };
+  ipcMain.handle("productExtensions:scienceStatus", () => scienceExtensionStatus());
+  ipcMain.handle("productExtensions:scienceSuiteStatus", () => scienceSuiteStatus());
+  ipcMain.handle("productExtensions:installScience", async () => {
+    const receipt = await installScienceExtension();
+    if (receipt.ok && receipt.action !== "unchanged") closeAllScienceExtensionViews();
+    broadcastScienceExtension();
+    return receipt;
+  });
+  ipcMain.handle("productExtensions:installScienceSuite", async (event) => {
+    const receipt = await installScienceSuite((progress) => {
+      if (!event.sender.isDestroyed()) event.sender.send("productExtensions:scienceSuiteProgress", progress);
+    });
+    if (receipt.ok && receipt.action !== "unchanged") closeAllScienceExtensionViews();
+    broadcastScienceExtension();
+    return receipt;
+  });
+  ipcMain.handle("productExtensions:setScienceEnabled", (_event, enabled: unknown) => {
+    if (typeof enabled !== "boolean") return scienceExtensionStatus();
+    if (!enabled) closeAllScienceExtensionViews();
+    const status = setScienceExtensionEnabled(enabled);
+    broadcastScienceExtension();
+    return status;
+  });
+  ipcMain.handle("productExtensions:uninstallScience", () => {
+    closeAllScienceExtensionViews();
+    const receipt = uninstallScienceExtension();
+    broadcastScienceExtension();
+    return receipt;
+  });
+  ipcMain.handle("productExtensions:openScienceView", async (event, bounds) => {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!window || window.isDestroyed()) return { id: "agentlas-science", state: "error", errorCode: "owner-window-missing", errorMessage: "The Desktop window is unavailable." };
+    return openScienceExtensionView({
+      ownerId: event.sender.id,
+      window,
+      bounds,
+      send: (status) => {
+        if (!event.sender.isDestroyed()) event.sender.send("productExtensions:viewStatus", status);
+      },
+    });
+  });
+  ipcMain.handle("productExtensions:setScienceViewBounds", (event, bounds) => setScienceExtensionViewBounds(event.sender.id, bounds));
+  ipcMain.handle("productExtensions:closeScienceView", (event) => closeScienceExtensionView(event.sender.id));
+  const assertScienceSender = (event: Electron.IpcMainInvokeEvent, input: unknown, permission: ProductExtensionPermission = "science:projects") => {
+    const extensionId = input && typeof input === "object" && "extensionId" in input ? String((input as { extensionId?: unknown }).extensionId ?? "") : "";
+    if (extensionId !== "agentlas-science" || !isScienceExtensionViewSender(event.sender.id)) throw new Error("science-extension-sender-not-authorized");
+    const status = scienceExtensionStatus();
+    if (status.phase !== "installed") throw new Error("science-extension-not-active");
+    if (permission === "science:agent-runtime" && event.senderFrame !== event.sender.mainFrame) throw new Error("science-extension-subframe-denied");
+    assertScienceExtensionViewPermission(event.sender.id, permission);
+    return status;
+  };
+  const scienceTurnSubscribers = new Map<number, { projectId: string; conversationId: string }>();
+  const scienceLifecycleSubscribers = new Map<number, string>();
+  ipcMain.handle("science:shell:backToWork", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) throw new Error("science-owner-window-missing");
+    mainWindow.webContents.send("menu:navigate", "/dashboard");
+    mainWindow.show();
+    mainWindow.focus();
+    return { ok: true, route: "/dashboard" };
+  });
+  scienceStore().onResearchLifecycleChanged((change) => {
+    for (const [senderId, projectId] of scienceLifecycleSubscribers) {
+      if (projectId !== change.projectId) continue;
+      const sender = webContents.fromId(senderId);
+      if (!sender || sender.isDestroyed()) {
+        scienceLifecycleSubscribers.delete(senderId);
+        continue;
+      }
+      sender.send("science:researchLifecycleChanged", change);
+    }
+  });
+  let scienceTurnProjectionStarted = false;
+  const ensureScienceTurnProjection = () => {
+    if (scienceTurnProjectionStarted) return;
+    scienceTurnProjectionStarted = true;
+    scienceConversationService().onEvent((turnEvent) => {
+      for (const [senderId, subscription] of scienceTurnSubscribers) {
+        if (subscription.projectId !== turnEvent.projectId || subscription.conversationId !== turnEvent.conversationId) continue;
+        if (!sendScienceTurnEventToView(senderId, turnEvent)) scienceTurnSubscribers.delete(senderId);
+      }
+    });
+  };
+  ipcMain.handle("science:bootstrap", (event, input: unknown) => {
+    const status = assertScienceSender(event, input);
+    return {
+      extensionId: status.id,
+      extensionVersion: status.version ?? "0.0.0",
+      schemaVersion: SCIENCE_SCHEMA_VERSION,
+      locale: currentUiLocale(),
+      projects: scienceStore().listProjects(),
+      rendererPacks: scienceRendererPackStatuses(),
+    };
+  });
+  ipcMain.handle("science:rendererPacks:list", (event, input: unknown) => {
+    assertScienceSender(event, input, "science:artifacts");
+    return scienceRendererPackStatuses();
+  });
+  ipcMain.handle("science:projects:list", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    return scienceStore().listProjects();
+  });
+  ipcMain.handle("science:projects:create", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope);
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    return scienceStore().createProject(input as CreateScienceProjectInput);
+  });
+  ipcMain.handle("science:projects:get", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
+    return scienceStore().getProject(projectId);
+  });
+  ipcMain.handle("science:projects:updateRelatedDomains", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope);
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    return scienceStore().updateProjectRelatedDomains(input as UpdateScienceProjectRelatedDomainsInput);
+  });
+  ipcMain.handle("science:workspace:get", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
+    return scienceStore().getProjectWorkspaceState(projectId);
+  });
+  ipcMain.handle("science:workspace:updateNavigation", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope);
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    return scienceStore().updateProjectNavigation(input as UpdateScienceProjectNavigationInput);
+  });
+  ipcMain.handle("science:workspace:replaceTabs", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope);
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    return scienceStore().replaceProjectWorkspaceTabs(input as ReplaceScienceProjectWorkspaceTabsInput);
+  });
+  ipcMain.handle("science:researchLifecycle:get", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
+    const lifecycle = scienceStore().getResearchLifecycleForProject(projectId);
+    if (!lifecycle) throw new Error("science-research-lifecycle-canonical-missing");
+    scienceLifecycleSubscribers.set(event.sender.id, projectId);
+    return lifecycle;
+  });
+  ipcMain.handle("science:researchLifecycle:revisions", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
+    const studyId = input && typeof input === "object" && "studyId" in input ? String((input as { studyId?: unknown }).studyId ?? "") : "";
+    const lifecycle = scienceStore().getResearchLifecycleForProject(projectId);
+    if (!lifecycle || lifecycle.studyId !== studyId) throw new Error("science-research-lifecycle-noncanonical-study");
+    scienceLifecycleSubscribers.set(event.sender.id, projectId);
+    return scienceStore().listResearchLifecycleRevisions(projectId, studyId);
+  });
+  ipcMain.handle("science:researchContracts:get", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
+    return scienceStore().latestResearchContract(projectId);
+  });
+  ipcMain.handle("science:researchContracts:approve", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope);
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    return scienceStore().approveResearchContract(input as ApproveScienceResearchContractInput);
+  });
+  ipcMain.handle("science:researchLoops:inspect", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
+    const sessions = scienceStore().listLoopSessions(projectId);
+    const session = scienceStore().getActiveLoopSession(projectId) ?? sessions[0] ?? null;
+    return {
+      schema: "agentlas.science.research-loop-inspection/v1",
+      active: session !== null && ["queued", "running", "pausing", "paused"].includes(session.status),
+      session,
+      episodes: session ? scienceStore().listResearchEpisodes(projectId, session.id) : [],
+      events: session ? scienceStore().listLoopEvents(session.id, 0, 1_000) : [],
+    };
+  });
+  ipcMain.handle("science:researchLoops:start", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:agent-runtime");
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    return scienceStore().startLoopSession(input as StartScienceLoopSessionInput);
+  });
+  ipcMain.handle("science:researchLoops:transition", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:agent-runtime");
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    return scienceStore().transitionLoopSession(input as TransitionScienceLoopSessionInput);
+  });
+  ipcMain.handle("science:conversations:list", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
+    return scienceStore().listConversations(projectId);
+  });
+  ipcMain.handle("science:messages:list", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
+    const conversationId = input && typeof input === "object" && "conversationId" in input ? String((input as { conversationId?: unknown }).conversationId ?? "") : "";
+    return scienceStore().listMessagesForProject(projectId, conversationId);
+  });
+  ipcMain.handle("science:composer:start", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:agent-runtime");
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("science-composer-input-invalid");
+    const record = input as Record<string, unknown>;
+    const projectId = String(record.projectId ?? "");
+    const conversationId = String(record.conversationId ?? "");
+    ensureScienceTurnProjection();
+    scienceTurnSubscribers.set(event.sender.id, { projectId, conversationId });
+    return scienceConversationService().start(input as ScienceComposerStartInput);
+  });
+  ipcMain.handle("science:composer:cancel", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:agent-runtime");
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("science-composer-input-invalid");
+    const record = input as Record<string, unknown>;
+    return scienceConversationService().cancel({
+      projectId: String(record.projectId ?? ""),
+      conversationId: String(record.conversationId ?? ""),
+      turnId: String(record.turnId ?? ""),
+    });
+  });
+  ipcMain.handle("science:composer:attach", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:agent-runtime");
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("science-composer-input-invalid");
+    const record = input as Record<string, unknown>;
+    const projectId = String(record.projectId ?? "");
+    const conversationId = String(record.conversationId ?? "");
+    ensureScienceTurnProjection();
+    scienceTurnSubscribers.set(event.sender.id, { projectId, conversationId });
+    return scienceConversationService().attach({ projectId, conversationId });
+  });
+  ipcMain.handle("science:composer:receipt", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:agent-runtime");
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("science-composer-input-invalid");
+    const record = input as Record<string, unknown>;
+    return scienceConversationService().receipt({
+      projectId: String(record.projectId ?? ""),
+      conversationId: String(record.conversationId ?? ""),
+      turnId: String(record.turnId ?? ""),
+    });
+  });
+  ipcMain.handle("science:messageBlocks:list", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
+    const messageId = input && typeof input === "object" && "messageId" in input ? String((input as { messageId?: unknown }).messageId ?? "") : "";
+    return scienceStore().listMessageBlocksForProject(projectId, messageId);
+  });
+  ipcMain.handle("science:citations:listForMessage", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
+    const messageId = input && typeof input === "object" && "messageId" in input ? String((input as { messageId?: unknown }).messageId ?? "") : "";
+    return scienceStore().listCitationsForMessageForProject(projectId, messageId);
+  });
+  ipcMain.handle("science:evidence:get", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
+    const evidenceId = input && typeof input === "object" && "evidenceId" in input ? String((input as { evidenceId?: unknown }).evidenceId ?? "") : "";
+    return scienceStore().getEvidenceSpanForProject(projectId, evidenceId);
+  });
+  ipcMain.handle("science:evidenceGraph:get", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
+    return scienceEvidenceGraphService().get(projectId);
+  });
+  ipcMain.handle("science:evidenceGraph:refresh", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:agent-runtime");
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    return scienceEvidenceGraphService().refresh(input as RefreshScienceEvidenceGraphInput);
+  });
+  ipcMain.handle("science:evidenceGraph:bounded", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
+    const query = input && typeof input === "object" && "query" in input ? String((input as { query?: unknown }).query ?? "") : "";
+    const limit = input && typeof input === "object" && "limit" in input ? Number((input as { limit?: unknown }).limit ?? 40) : 40;
+    return scienceEvidenceGraphService().boundedContext(projectId, query, limit);
+  });
+  ipcMain.handle("science:evidenceGraph:propose", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:agent-runtime");
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    return scienceEvidenceGraphService().proposeInference(input as ProposeScienceEvidenceGraphInferenceInput);
+  });
+  ipcMain.handle("science:evidenceGraph:review", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:agent-runtime");
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    return scienceEvidenceGraphService().reviewInference(input as ReviewScienceEvidenceGraphInferenceInput);
+  });
+  ipcMain.handle("science:evidenceGraph:materialize", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:agent-runtime");
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    return scienceEvidenceGraphService().materializeInferenceAsHypothesis(input as MaterializeScienceEvidenceGraphInferenceInput);
+  });
+  ipcMain.handle("science:evidenceGraph:path", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
+    const fromNodeId = input && typeof input === "object" && "fromNodeId" in input ? String((input as { fromNodeId?: unknown }).fromNodeId ?? "") : "";
+    const toNodeId = input && typeof input === "object" && "toNodeId" in input ? String((input as { toNodeId?: unknown }).toNodeId ?? "") : "";
+    return scienceEvidenceGraphService().explainPath(projectId, fromNodeId, toNodeId);
+  });
+  ipcMain.handle("science:sources:list", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
+    return scienceStore().listSources(projectId);
+  });
+  ipcMain.handle("science:sources:get", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
+    const sourceId = input && typeof input === "object" && "sourceId" in input ? String((input as { sourceId?: unknown }).sourceId ?? "") : "";
+    return scienceStore().getSourceForProject(projectId, sourceId);
+  });
+  ipcMain.handle("science:datasets:importCsv", async (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:artifacts");
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("science-dataset-input-invalid");
+    const record = input as Record<string, unknown>;
+    const options: Electron.OpenDialogOptions = {
+      title: "Import CSV dataset",
+      properties: ["openFile"],
+      filters: [{ name: "CSV datasets", extensions: ["csv"] }],
+    };
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    const selected = owner ? await dialog.showOpenDialog(owner, options) : await dialog.showOpenDialog(options);
+    if (selected.canceled || selected.filePaths.length !== 1) return { canceled: true };
+    const store = scienceStore();
+    const imported = await new ScienceDatasetIngestionService(store).importFile(selected.filePaths[0], {
+      requestId: String(record.requestId ?? ""),
+      projectId: String(record.projectId ?? ""),
+      conversationId: String(record.conversationId ?? ""),
+      originMessageId: String(record.originMessageId ?? ""),
+      title: typeof record.title === "string" ? record.title : undefined,
+    });
+    const materialized = store.materializeDatasetTable({
+      requestId: String(record.artifactRequestId ?? ""),
+      projectId: String(record.projectId ?? ""),
+      runId: imported.run.id,
+      title: typeof record.title === "string" ? record.title : undefined,
+    });
+    return { ...imported, artifact: materialized.artifact, artifactReplayed: materialized.replayed };
+  });
+  ipcMain.handle("science:sourceFigures:list", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
+    return scienceStore().listSourceFigures(projectId);
+  });
+  ipcMain.handle("science:sourceFigures:get", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    return scienceStore().getSourceFigureForProject(String(record.projectId ?? ""), String(record.figureId ?? ""));
+  });
+  ipcMain.handle("science:runs:list", (event, input: unknown) => {
+    assertScienceSender(event, input, "science:artifacts");
+    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
+    return scienceStore().listResearchRuns(projectId);
+  });
+  ipcMain.handle("science:runs:get", (event, input: unknown) => {
+    assertScienceSender(event, input, "science:artifacts");
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    return scienceStore().getResearchRunForProject(String(record.projectId ?? ""), String(record.runId ?? ""));
+  });
+  ipcMain.handle("science:artifacts:list", (event, input: unknown) => {
+    assertScienceSender(event, input, "science:artifacts");
+    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
+    return scienceStore().listArtifacts(projectId);
+  });
+  ipcMain.handle("science:artifacts:listStatisticsFigures", (event, input: unknown) => {
+    assertScienceSender(event, input, "science:artifacts");
+    const record = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+    const allowed = new Set(["extensionId", "projectId", "statisticsArtifactId"]);
+    if (Object.keys(record).some((key) => !allowed.has(key))) throw new Error("science-statistics-figure-list-input-invalid");
+    return scienceStore().listStatisticsFigures(
+      String(record.projectId ?? ""),
+      record.statisticsArtifactId === undefined ? undefined : String(record.statisticsArtifactId),
+    );
+  });
+  ipcMain.handle("science:artifacts:materializeStatisticsFigure", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:artifacts");
+    if (event.senderFrame !== event.sender.mainFrame) throw new Error("science-statistics-figure-frame-denied");
+    const raw = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    const record = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
+    const allowed = new Set(["requestId", "projectId", "statisticsArtifactId", "statisticsArtifactVersion", "statisticsArtifactContentSha256", "visualizationIndex", "title"]);
+    if (!record || Object.keys(record).some((key) => !allowed.has(key))) throw new Error("science-statistics-figure-input-invalid");
+    const result = scienceStore().materializeStatisticsFigure(record as unknown as import("../shared/science-contract").MaterializeScienceStatisticsFigureInput);
+    notifyScienceArtifactChanged(String(record.projectId ?? ""), result.artifact);
+    return result;
+  });
+  ipcMain.handle("science:artifacts:materializeStatisticsNumericSurface", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:artifacts");
+    if (event.senderFrame !== event.sender.mainFrame) throw new Error("science-statistics-numeric-surface-frame-denied");
+    const raw = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    const record = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
+    const allowed = new Set(["requestId", "projectId", "statisticsArtifactId", "statisticsArtifactVersion", "statisticsArtifactContentSha256", "sourceArtifactIndex"]);
+    if (!record || Object.keys(record).some((key) => !allowed.has(key))) throw new Error("science-statistics-numeric-surface-input-invalid");
+    const result = scienceStore().materializeStatisticsNumericSurface(
+      record as unknown as import("../shared/science-contract").MaterializeScienceStatisticsNumericSurfaceInput,
+    );
+    notifyScienceArtifactChanged(String(record.projectId ?? ""), result.artifact);
+    return result;
+  });
+  ipcMain.handle("science:artifacts:getNumericSurfaceViewState", (event, input: unknown) => {
+    assertScienceSender(event, input, "science:artifacts");
+    if (event.senderFrame !== event.sender.mainFrame) throw new Error("science-numeric-surface-view-state-frame-denied");
+    const record = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : null;
+    const allowed = new Set(["extensionId", "projectId", "artifactId", "artifactVersion", "artifactContentSha256"]);
+    if (!record || Object.keys(record).some((key) => !allowed.has(key))
+      || !Number.isSafeInteger(record.artifactVersion) || Number(record.artifactVersion) < 1) {
+      throw new Error("science-numeric-surface-view-state-input-invalid");
+    }
+    return scienceStore().getNumericSurfaceViewState(
+      String(record.projectId ?? ""), String(record.artifactId ?? ""), Number(record.artifactVersion), String(record.artifactContentSha256 ?? ""),
+    );
+  });
+  ipcMain.handle("science:artifacts:persistNumericSurfaceViewState", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:artifacts");
+    if (event.senderFrame !== event.sender.mainFrame) throw new Error("science-numeric-surface-view-state-frame-denied");
+    const raw = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    const record = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
+    const allowed = new Set(["projectId", "artifactId", "artifactVersion", "artifactContentSha256", "viewState"]);
+    if (!record || Object.keys(record).some((key) => !allowed.has(key))
+      || !Number.isSafeInteger(record.artifactVersion) || Number(record.artifactVersion) < 1) {
+      throw new Error("science-numeric-surface-view-state-input-invalid");
+    }
+    return scienceStore().persistNumericSurfaceViewState(
+      record as unknown as import("../shared/science-numeric-3d").PersistScienceNumericSurfaceViewStateInput,
+    );
+  });
+  ipcMain.handle("science:artifacts:exportNumericSurfacePng", async (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:artifacts");
+    if (event.senderFrame !== event.sender.mainFrame) throw new Error("science-numeric-surface-raster-frame-denied");
+    const raw = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    const record = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
+    const allowed = new Set(["projectId", "artifactId", "artifactVersion", "contentSha256", "rendered", "png", "readbackRgba"]);
+    if (!record || Object.keys(record).some((key) => !allowed.has(key))
+      || !Number.isSafeInteger(record.artifactVersion) || Number(record.artifactVersion) < 1
+      || !(record.png instanceof Uint8Array) || !(record.readbackRgba instanceof Uint8Array)) {
+      throw new Error("science-numeric-surface-png-export-input-invalid");
+    }
+    const projectId = String(record.projectId ?? "");
+    const artifactId = String(record.artifactId ?? "");
+    const artifactVersion = Number(record.artifactVersion);
+    const contentSha256 = String(record.contentSha256 ?? "");
+    const store = scienceStore();
+    const artifact = store.getArtifactForProject(projectId, artifactId);
+    if (!artifact || artifact.kind !== "chart.numeric-3d" || artifact.version.rendererId !== "agentlas.three-numeric"
+      || artifact.currentVersion !== artifactVersion || artifact.version.contentSha256 !== contentSha256
+      || artifact.version.payload.schema !== "agentlas.science.numeric-surface-artifact/v2") {
+      throw new Error("science-numeric-surface-raster-parent-invalid");
+    }
+    const validated = await validateScienceNumericSurfacePngBytes(record.rendered, record.png, record.readbackRgba);
+    const current = store.getArtifactForProject(projectId, artifactId);
+    if (!current || current.currentVersion !== artifactVersion || current.version.contentSha256 !== contentSha256) {
+      throw new Error("science-artifact-version-conflict");
+    }
+    const requestSeed = JSON.stringify({
+      schema: "agentlas.science.numeric-surface-raster-ipc/v1",
+      projectId,
+      artifactId,
+      artifactVersion,
+      contentSha256,
+      viewStateReceiptSha256: validated.rendered.viewStateReceiptSha256,
+      dpi: validated.rendered.dpi,
+      width: validated.rendered.width,
+      height: validated.rendered.height,
+      rgbaSha256: validated.rendered.readback.rgbaSha256,
+      pngSha256: validated.rendered.sha256,
+    });
+    const digest = createHash("sha256").update(requestSeed, "utf8").digest("hex");
+    const requestId = `${digest.slice(0, 8)}-${digest.slice(8, 12)}-5${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+    const persisted = store.persistNumericSurfacePng({
+      requestId,
+      projectId,
+      artifactId,
+      artifactVersion,
+      contentSha256,
+      rendered: validated.rendered,
+      png: validated.png,
+    });
+    notifyScienceArtifactChanged(projectId, persisted.artifact);
+    return {
+      artifactId,
+      artifactVersion,
+      contentSha256,
+      ...validated.rendered,
+      exportArtifact: {
+        id: persisted.artifact.id,
+        version: persisted.artifact.currentVersion,
+        kind: persisted.artifact.kind,
+        contentSha256: persisted.artifact.version.contentSha256,
+        captureId: persisted.visualCapture.id,
+        captureSha256: persisted.visualCapture.sha256,
+        exportSha256: persisted.payload.export.sha256,
+        exportReceiptSha256: persisted.payload.exportSha256,
+      },
+      replayed: persisted.replayed,
+    };
+  });
+  ipcMain.handle("science:artifacts:exportStatisticsFigureSvg", async (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:artifacts");
+    if (event.senderFrame !== event.sender.mainFrame) throw new Error("science-statistics-figure-frame-denied");
+    const raw = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    const record = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
+    const allowed = new Set(["projectId", "artifactId", "artifactVersion", "contentSha256"]);
+    if (!record || Object.keys(record).some((key) => !allowed.has(key))
+      || !Number.isSafeInteger(record.artifactVersion) || Number(record.artifactVersion) < 1) {
+      throw new Error("science-statistics-figure-svg-export-input-invalid");
+    }
+    const projectId = String(record.projectId ?? "");
+    const artifactId = String(record.artifactId ?? "");
+    const artifact = scienceStore().getArtifactForProject(projectId, artifactId);
+    if (!artifact || artifact.kind !== "chart.vega" || artifact.version.rendererId !== "agentlas.vega") {
+      throw new Error("science-statistics-figure-not-found");
+    }
+    const artifactVersion = Number(record.artifactVersion);
+    const contentSha256 = String(record.contentSha256 ?? "");
+    if (artifact.currentVersion !== artifactVersion || artifact.version.contentSha256 !== contentSha256) {
+      throw new Error("science-artifact-version-conflict");
+    }
+    const rendered = await renderScienceStatisticsFigureSvg(artifact.version.payload);
+    const preview = await renderScienceStatisticsFigureSvgPreviewPng(rendered);
+    const requestSeed = JSON.stringify({
+      schema: "agentlas.science.statistics-figure-vector-ipc/v1",
+      projectId,
+      artifactId,
+      artifactVersion,
+      contentSha256,
+      exportSha256: rendered.sha256,
+      previewSha256: preview.sha256,
+    });
+    const digest = createHash("sha256").update(requestSeed, "utf8").digest("hex");
+    const requestId = `${digest.slice(0, 8)}-${digest.slice(8, 12)}-5${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+    const persisted = scienceStore().persistStatisticsFigureSvg({
+      requestId,
+      projectId,
+      artifactId,
+      artifactVersion,
+      contentSha256,
+      rendered,
+      svg: Buffer.from(rendered.svg, "utf8"),
+      preview,
+      previewPng: Buffer.from(preview.dataBase64, "base64"),
+    });
+    notifyScienceArtifactChanged(projectId, persisted.artifact);
+    return {
+      artifactId,
+      artifactVersion,
+      contentSha256,
+      ...rendered,
+      exportArtifact: {
+        id: persisted.artifact.id,
+        version: persisted.artifact.currentVersion,
+        kind: persisted.artifact.kind,
+        contentSha256: persisted.artifact.version.contentSha256,
+        captureId: persisted.visualCapture.id,
+        captureSha256: persisted.visualCapture.sha256,
+        exportSha256: persisted.payload.export.sha256,
+        exportReceiptSha256: persisted.payload.exportSha256,
+      },
+      replayed: persisted.replayed,
+    };
+  });
+  ipcMain.handle("science:artifacts:exportStatisticsFigurePng", async (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:artifacts");
+    if (event.senderFrame !== event.sender.mainFrame) throw new Error("science-statistics-figure-frame-denied");
+    const raw = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    const record = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
+    const allowed = new Set(["projectId", "artifactId", "artifactVersion", "contentSha256", "dpi", "widthMm"]);
+    if (!record || Object.keys(record).some((key) => !allowed.has(key))
+      || !Number.isSafeInteger(record.artifactVersion) || Number(record.artifactVersion) < 1
+      || ![300, 600].includes(Number(record.dpi))
+      || record.widthMm !== undefined && (!Number.isFinite(Number(record.widthMm)) || Number(record.widthMm) < 20 || Number(record.widthMm) > 200)) {
+      throw new Error("science-statistics-figure-png-export-input-invalid");
+    }
+    const projectId = String(record.projectId ?? "");
+    const artifactId = String(record.artifactId ?? "");
+    const store = scienceStore();
+    const artifact = store.getArtifactForProject(projectId, artifactId);
+    if (!artifact || artifact.kind !== "chart.vega" || artifact.version.rendererId !== "agentlas.vega") {
+      throw new Error("science-statistics-figure-not-found");
+    }
+    const artifactVersion = Number(record.artifactVersion);
+    const contentSha256 = String(record.contentSha256 ?? "");
+    if (artifact.currentVersion !== artifactVersion || artifact.version.contentSha256 !== contentSha256) {
+      throw new Error("science-artifact-version-conflict");
+    }
+    const rendered = await renderScienceStatisticsFigurePng(artifact.version.payload, {
+      dpi: Number(record.dpi) as 300 | 600,
+      ...(record.widthMm === undefined ? {} : { widthMm: Number(record.widthMm) }),
+    });
+    const requestSeed = JSON.stringify({
+      schema: "agentlas.science.statistics-figure-raster-ipc/v1",
+      projectId,
+      artifactId,
+      artifactVersion,
+      contentSha256,
+      dpi: rendered.dpi,
+      widthMm: rendered.widthMm,
+      exportSha256: rendered.sha256,
+    });
+    const digest = createHash("sha256").update(requestSeed, "utf8").digest("hex");
+    const requestId = `${digest.slice(0, 8)}-${digest.slice(8, 12)}-5${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+    const persisted = store.persistStatisticsFigurePng({
+      requestId,
+      projectId,
+      artifactId,
+      artifactVersion,
+      contentSha256,
+      rendered,
+      png: Buffer.from(rendered.dataBase64, "base64"),
+    });
+    notifyScienceArtifactChanged(projectId, persisted.artifact);
+    return {
+      artifactId,
+      artifactVersion,
+      contentSha256,
+      ...rendered,
+      exportArtifact: {
+        id: persisted.artifact.id,
+        version: persisted.artifact.currentVersion,
+        kind: persisted.artifact.kind,
+        contentSha256: persisted.artifact.version.contentSha256,
+        captureId: persisted.visualCapture.id,
+        captureSha256: persisted.visualCapture.sha256,
+        exportSha256: persisted.payload.export.sha256,
+        exportReceiptSha256: persisted.payload.exportSha256,
+      },
+      replayed: persisted.replayed,
+    };
+  });
+  const exportScienceStatisticsFigurePublicationBinary = async (
+    event: Electron.IpcMainInvokeEvent,
+    envelope: unknown,
+    format: "pdf" | "tiff",
+  ) => {
+    assertScienceSender(event, envelope, "science:artifacts");
+    if (event.senderFrame !== event.sender.mainFrame) throw new Error("science-statistics-figure-frame-denied");
+    const raw = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    const record = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
+    const allowed = new Set(["projectId", "artifactId", "artifactVersion", "contentSha256", "dpi", "widthMm", "colorSpace"]);
+    if (!record || Object.keys(record).some((key) => !allowed.has(key))
+      || !Number.isSafeInteger(record.artifactVersion) || Number(record.artifactVersion) < 1
+      || ![300, 600].includes(Number(record.dpi))
+      || record.widthMm !== undefined && (!Number.isFinite(Number(record.widthMm)) || Number(record.widthMm) < 20 || Number(record.widthMm) > 200)
+      || record.colorSpace !== undefined && record.colorSpace !== "srgb") {
+      throw new Error(`science-statistics-figure-${format}-export-input-invalid`);
+    }
+    const projectId = String(record.projectId ?? "");
+    const artifactId = String(record.artifactId ?? "");
+    const artifact = scienceStore().getArtifactForProject(projectId, artifactId);
+    if (!artifact || artifact.kind !== "chart.vega" || artifact.version.rendererId !== "agentlas.vega") {
+      throw new Error("science-statistics-figure-not-found");
+    }
+    const artifactVersion = Number(record.artifactVersion);
+    const contentSha256 = String(record.contentSha256 ?? "");
+    if (artifact.currentVersion !== artifactVersion || artifact.version.contentSha256 !== contentSha256) {
+      throw new Error("science-artifact-version-conflict");
+    }
+    const options = {
+      dpi: Number(record.dpi) as 300 | 600,
+      ...(record.widthMm === undefined ? {} : { widthMm: Number(record.widthMm) }),
+      ...(record.colorSpace === undefined ? {} : { colorSpace: "srgb" as const }),
+    };
+    const rendered = format === "pdf"
+      ? await renderScienceStatisticsFigurePdf(artifact.version.payload, options)
+      : await renderScienceStatisticsFigureTiff(artifact.version.payload, options);
+    return { artifactId, artifactVersion, contentSha256, ...rendered };
+  };
+  ipcMain.handle("science:artifacts:exportStatisticsFigurePdf", (event, envelope: unknown) => (
+    exportScienceStatisticsFigurePublicationBinary(event, envelope, "pdf")
+  ));
+  ipcMain.handle("science:artifacts:exportStatisticsFigureTiff", (event, envelope: unknown) => (
+    exportScienceStatisticsFigurePublicationBinary(event, envelope, "tiff")
+  ));
+  ipcMain.handle("science:artifacts:get", (event, input: unknown) => {
+    assertScienceSender(event, input, "science:artifacts");
+    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
+    const artifactId = input && typeof input === "object" && "artifactId" in input ? String((input as { artifactId?: unknown }).artifactId ?? "") : "";
+    return scienceStore().getArtifactForProject(projectId, artifactId);
+  });
+  ipcMain.handle("science:artifacts:context", (event, input: unknown) => {
+    assertScienceSender(event, input, "science:artifacts");
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    const artifactVersion = record.artifactVersion === undefined ? undefined : Number(record.artifactVersion);
+    return scienceStore().getArtifactContextForProject(String(record.projectId ?? ""), String(record.artifactId ?? ""), artifactVersion);
+  });
+  ipcMain.handle("science:artifacts:history", (event, input: unknown) => {
+    assertScienceSender(event, input, "science:artifacts");
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    return scienceStore().getArtifactVersionHistoryForProject(String(record.projectId ?? ""), String(record.artifactId ?? ""));
+  });
+  ipcMain.handle("science:artifacts:diff", (event, input: unknown) => {
+    assertScienceSender(event, input, "science:artifacts");
+    const record = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+    const allowed = new Set(["extensionId", "projectId", "artifactId", "fromVersion", "toVersion"]);
+    if (Object.keys(record).some((key) => !allowed.has(key)) || typeof record.fromVersion !== "number" || typeof record.toVersion !== "number") {
+      throw new Error("science-artifact-diff-input-invalid");
+    }
+    return scienceStore().getArtifactVersionDiffForProject(
+      String(record.projectId ?? ""), String(record.artifactId ?? ""), record.fromVersion, record.toVersion,
+    );
+  });
+  ipcMain.handle("science:artifacts:listForMessage", (event, input: unknown) => {
+    assertScienceSender(event, input, "science:artifacts");
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    return scienceStore().listArtifactContextsForMessage(
+      String(record.projectId ?? ""), String(record.conversationId ?? ""), String(record.messageId ?? ""),
+    );
+  });
+  ipcMain.handle("science:artifactEvents:listForMessage", (event, input: unknown) => {
+    assertScienceSender(event, input, "science:artifacts");
+    const record = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+    const allowed = new Set(["extensionId", "projectId", "conversationId", "messageId"]);
+    if (Object.keys(record).some((key) => !allowed.has(key))) throw new Error("science-conversation-artifact-event-input-invalid");
+    return scienceStore().listConversationArtifactEventsForMessage(
+      String(record.projectId ?? ""), String(record.conversationId ?? ""), String(record.messageId ?? ""),
+    );
+  });
+  ipcMain.handle("science:artifacts:resolveConversationRoute", (event, input: unknown) => {
+    assertScienceSender(event, input, "science:artifacts");
+    const record = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+    const allowed = new Set(["extensionId", "projectId", "conversationId", "messageId", "artifactId", "artifactVersion"]);
+    if (Object.keys(record).some((key) => !allowed.has(key))
+      || !Number.isSafeInteger(record.artifactVersion)
+      || Number(record.artifactVersion) < 1) {
+      throw new Error("science-conversation-artifact-route-input-invalid");
+    }
+    return scienceStore().resolveConversationArtifactRoute(
+      String(record.projectId ?? ""),
+      String(record.conversationId ?? ""),
+      String(record.messageId ?? ""),
+      String(record.artifactId ?? ""),
+      Number(record.artifactVersion),
+    );
+  });
+  ipcMain.handle("science:artifacts:listForLab", (event, input: unknown) => {
+    assertScienceSender(event, input, "science:artifacts");
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    return scienceStore().listArtifactContextsForLab(String(record.projectId ?? ""), String(record.labId ?? ""));
+  });
+  ipcMain.handle("science:artifacts:preview", (event, input: unknown) => {
+    assertScienceSender(event, input, "science:artifacts");
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    return scienceStore().artifactVisualPreviewForProject(
+      String(record.projectId ?? ""), String(record.artifactId ?? ""), Number(record.artifactVersion),
+    );
+  });
+  ipcMain.handle("science:artifacts:updateVega", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:artifacts");
+    if (event.senderFrame !== event.sender.mainFrame) throw new Error("science-vega-edit-frame-denied");
+    const raw = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    const input = parseScienceVegaEditInput(raw);
+    const result = commitScienceVegaEdit(scienceStore(), input);
+    notifyScienceArtifactChanged(input.projectId, result.artifact);
+    return result;
+  });
+  ipcMain.handle("science:labs:list", (event, input: unknown) => {
+    assertScienceSender(event, input, "science:artifacts");
+    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
+    return scienceStore().listLabs(projectId);
+  });
+  ipcMain.handle("science:labs:catalog", async (event, input: unknown) => {
+    assertScienceSender(event, input, "science:artifacts");
+    const { activeScienceLabCapabilityCatalog } = await import("./science/tool-control-server");
+    return activeScienceLabCapabilityCatalog();
+  });
+  ipcMain.handle("science:labs:upsertBinding", async (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:artifacts");
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    const record = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : null;
+    if (!record) throw new Error("science-project-lab-binding-input-invalid");
+    const { activeScienceLabCapabilityCatalog } = await import("./science/tool-control-server");
+    const catalog = await activeScienceLabCapabilityCatalog();
+    if (!catalog.labs.some((lab) => lab.id === String(record.labId ?? ""))) throw new Error("science-project-lab-definition-not-found");
+    return scienceStore().upsertProjectLabBinding(input as UpsertScienceProjectLabBindingInput);
+  });
+  ipcMain.handle("science:renderers:mount", async (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:artifacts");
+    const value = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    if (!isMountScienceRendererInput(value)) throw new Error("science-renderer-mount-input-invalid");
+    const input: MountScienceRendererInput = value;
+    const artifact = scienceStore().getArtifactForProject(input.projectId, input.artifactId);
+    if (!artifact || artifact.currentVersion !== input.artifactVersion || artifact.version.contentSha256 !== input.contentSha256) throw new Error("science-artifact-version-conflict");
+    const resolved = resolveVerifiedScienceRenderer(artifact.version.rendererId, artifact.kind);
+    if (!resolved || !artifact.version.rendererBinding || !scienceRendererBindingsEqual(resolved.binding, artifact.version.rendererBinding)) throw new Error("science-renderer-binding-unavailable");
+    const rendererInput = scienceStore().artifactRendererInputForProject(input.projectId, input.artifactId);
+    const payloadBytes = rendererInput.kind === "protein-structure"
+      ? rendererInput.bytes.byteLength
+      : Buffer.byteLength(rendererInput.ket, "utf8") + Buffer.byteLength(rendererInput.canonicalSmiles, "utf8");
+    if (payloadBytes < 1 || payloadBytes > resolved.renderer.maxPayloadBytes) throw new Error("science-renderer-payload-invalid");
+    const instanceId = randomUUID();
+    const renderRequestId = randomUUID();
+    return mountScienceRendererView(event.sender.id, {
+      projectId: input.projectId,
+      releaseDir: resolved.releaseDir,
+      entryPath: path.resolve(resolved.releaseDir, resolved.pack.entry),
+      bounds: input.bounds,
+      request: {
+        schema: SCIENCE_RENDERER_REQUEST_SCHEMA,
+        instanceId,
+        renderRequestId,
+        artifactId: artifact.id,
+        artifactVersion: artifact.currentVersion,
+        artifactKind: artifact.kind,
+        artifactContentSha256: artifact.version.contentSha256,
+        binding: resolved.binding,
+        input: rendererInput,
+      },
+    });
+  });
+  ipcMain.handle("science:renderers:bounds", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:artifacts");
+    const value = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    if (!isMountScienceRendererInput(value)) throw new Error("science-renderer-bounds-input-invalid");
+    return updateScienceRendererViewBounds(event.sender.id, value);
+  });
+  ipcMain.handle("science:renderers:visibility", (event, input: unknown) => {
+    assertScienceSender(event, input, "science:artifacts");
+    const record = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+    const allowed = new Set(["extensionId", "visible"]);
+    if (Object.keys(record).some((key) => !allowed.has(key)) || typeof record.visible !== "boolean") {
+      throw new Error("science-renderer-visibility-input-invalid");
+    }
+    return setScienceRendererViewVisibility(event.sender.id, record.visible);
+  });
+  ipcMain.handle("science:renderers:dispose", (event, input: unknown) => {
+    assertScienceSender(event, input, "science:artifacts");
+    return disposeScienceRendererView(event.sender.id);
+  });
+  ipcMain.handle("scienceRenderer:handshake", (event, input: unknown) => {
+    const instanceId = input && typeof input === "object" && "instanceId" in input ? String((input as { instanceId?: unknown }).instanceId ?? "") : "";
+    return scienceRendererHandshake(event.sender.id, instanceId);
+  });
+  ipcMain.handle("scienceRenderer:report", async (event, input: unknown) => {
+    const instanceId = input && typeof input === "object" && "instanceId" in input ? String((input as { instanceId?: unknown }).instanceId ?? "") : "";
+    const report = input && typeof input === "object" && "report" in input ? (input as { report?: unknown }).report : null;
+    const result = await scienceRendererReport(event.sender.id, instanceId, report);
+    if (!("png" in result)) return result;
+    try {
+      scienceStore().recordArtifactVisualCapture({
+        projectId: result.identity.projectId,
+        artifactId: result.identity.artifactId,
+        artifactVersion: result.identity.artifactVersion,
+        contentSha256: result.identity.contentSha256,
+        png: result.png,
+        renderContext: result.renderContext,
+        renderRequestId: result.renderRequestId,
+        rendererBinding: result.rendererBinding,
+        sceneRevision: result.sceneRevision,
+      });
+      try {
+        scienceArtifactPublicationValidator().validate({
+          projectId: result.identity.projectId,
+          artifactId: result.identity.artifactId,
+          artifactVersion: result.identity.artifactVersion,
+        });
+      } catch (error) {
+        // Rendering and immutable capture are useful even when an older or
+        // imported artifact cannot yet pass the stricter manuscript gate.
+        // The explicit validation API returns the same machine error later.
+        console.warn("[science-publication] capture not eligible", error instanceof Error ? error.message : String(error));
+      }
+      return markScienceRendererCaptured(instanceId);
+    } catch (error) {
+      const summary = error instanceof Error ? error.message : String(error);
+      return failScienceRendererCapture(instanceId, "science-renderer-capture-store-failed", summary);
+    }
+  });
+  ipcMain.handle("scienceRenderer:chemistryCommit", async (event, input: unknown) => {
+    if (!isScienceChemistryCommitInput(input)) throw new Error("science-chemistry-commit-input-invalid");
+    const commit: ScienceChemistryCommitInput = input;
+    const authorized = authorizeScienceChemistryCommit(event.sender.id, commit);
+    const commitKey = `${event.sender.id}:${authorized.artifactId}`;
+    if (activeScienceChemistryCommits.has(commitKey)) throw new Error("science-chemistry-commit-in-flight");
+    activeScienceChemistryCommits.add(commitKey);
+    try {
+    const artifactContext = scienceStore().getArtifactContextForProject(authorized.projectId, authorized.artifactId, authorized.artifactVersion);
+    if (!artifactContext || artifactContext.selectedVersion.rendererId !== "agentlas.ketcher" || artifactContext.artifact.kind !== "chemistry.document") throw new Error("science-chemistry-artifact-not-found");
+    const artifact = artifactContext.artifact;
+    const baseVersion = artifactContext.selectedVersion;
+    if (!baseVersion.rendererBinding || !scienceRendererBindingsEqual(baseVersion.rendererBinding, authorized.rendererBinding)) throw new Error("science-renderer-binding-conflict");
+    const authoritative = await scienceChemistryValidator().validateKet({
+      title: baseVersion.semantic.title,
+      ket: commit.document.ket,
+      binding: authorized.rendererBinding,
+    });
+    const document = authoritative.payload.document;
+    const validation = authoritative.payload.validation;
+    const renewed = authorizeScienceChemistryCommit(event.sender.id, commit);
+    if (renewed.projectId !== authorized.projectId || renewed.artifactId !== authorized.artifactId
+      || renewed.artifactVersion !== authorized.artifactVersion || renewed.contentSha256 !== authorized.contentSha256
+      || !scienceRendererBindingsEqual(renewed.rendererBinding, authorized.rendererBinding)) {
+      throw new Error("science-chemistry-commit-identity-conflict");
+    }
+    const priorWarnings = baseVersion.semantic.warnings.filter((warning) => !warning.startsWith("Indigo validation:"));
+    const result = scienceStore().appendArtifactVersion({
+      requestId: commit.requestId,
+      projectId: authorized.projectId,
+      artifactId: authorized.artifactId,
+      expectedArtifactVersion: authorized.artifactVersion,
+      expectedContentSha256: authorized.contentSha256,
+      payload: { document, validation },
+      semantic: {
+        ...baseVersion.semantic,
+        observations: [
+          ...baseVersion.semantic.observations.filter((observation) => !["Atoms", "Bonds", "Canonical SMILES"].includes(observation.label)),
+          { label: "Atoms", value: validation.atomCount, unit: null },
+          { label: "Bonds", value: validation.bondCount, unit: null },
+          { label: "Canonical SMILES", value: document.canonicalSmiles, unit: null },
+        ],
+        warnings: [...new Set([...priorWarnings, ...validation.warnings.map((warning) => `Indigo validation: ${warning}`)])],
+      },
+      provenance: baseVersion.provenance,
+    });
+    notifyScienceChemistryCommitted(commit.instanceId, authorized.projectId, result.artifact);
+    return result;
+    } finally {
+      activeScienceChemistryCommits.delete(commitKey);
+    }
+  });
+  ipcMain.handle("scienceRenderer:molstarCommit", async (event, input: unknown) => {
+    if (!isScienceMolstarCommitInput(input)) throw new Error("science-molstar-commit-input-invalid");
+    const commit: ScienceMolstarCommitInput = input;
+    const authorized = authorizeScienceMolstarCommit(event.sender.id, commit);
+    const artifact = scienceStore().getArtifactForProject(authorized.projectId, authorized.artifactId);
+    if (!artifact || artifact.version.rendererId !== "agentlas.molstar" || artifact.kind !== "protein.structure") throw new Error("science-molstar-artifact-not-found");
+    if (!artifact.version.rendererBinding || !scienceRendererBindingsEqual(artifact.version.rendererBinding, authorized.rendererBinding)) throw new Error("science-renderer-binding-conflict");
+    const rendererInput = scienceStore().artifactRendererInputForProject(authorized.projectId, authorized.artifactId);
+    if (rendererInput.kind !== "protein-structure") throw new Error("science-molstar-source-conflict");
+    const interactionInput = commit.viewState.interaction ?? {
+      schema: SCIENCE_RESIDUE_INTERACTION_SCHEMA,
+      granularity: "residue" as const,
+      residues: [],
+      focus: null,
+    };
+    const residue = await validateScienceResidueInteraction({
+      bytes: rendererInput.bytes,
+      format: rendererInput.format,
+      structureContentSha256: rendererInput.assetSha256,
+      interaction: interactionInput,
+    });
+    const priorObservations = artifact.version.semantic.observations.filter((observation) => !["Representation", "Color theme", "Pinned residues", "Focused residue"].includes(observation.label));
+    const result = scienceStore().appendArtifactVersion({
+      requestId: commit.requestId,
+      projectId: authorized.projectId,
+      artifactId: authorized.artifactId,
+      expectedArtifactVersion: authorized.artifactVersion,
+      expectedContentSha256: authorized.contentSha256,
+      payload: {
+        ...artifact.version.payload,
+        representation: commit.viewState.representation,
+        colorTheme: commit.viewState.colorTheme,
+        interaction: residue.interaction,
+        interactionValidation: residue.validation,
+      },
+      semantic: {
+        ...artifact.version.semantic,
+        observations: [
+          ...priorObservations,
+          { label: "Representation", value: commit.viewState.representation, unit: null },
+          { label: "Color theme", value: commit.viewState.colorTheme, unit: null },
+          { label: "Pinned residues", value: residue.interaction.residues.length, unit: "residues" },
+          { label: "Focused residue", value: residue.interaction.focus ? `${residue.interaction.focus.authAsymId}:${residue.interaction.focus.compId}${residue.interaction.focus.authSeqId}${residue.interaction.focus.insertionCode}` : "None", unit: null },
+        ],
+      },
+      provenance: artifact.version.provenance,
+    });
+    notifyScienceArtifactChanged(authorized.projectId, result.artifact);
+    return result;
+  });
+  ipcMain.handle("science:artifacts:capture", async (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:artifacts");
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    if (!input || typeof input !== "object") throw new Error("science-capture-input-invalid");
+    const capture = input as CaptureScienceArtifactInput;
+    const artifact = scienceStore().getArtifactForProject(String(capture.projectId ?? ""), String(capture.artifactId ?? ""));
+    if (!artifact) throw new Error("science-artifact-not-found");
+    if (artifact.currentVersion !== capture.artifactVersion || artifact.version.contentSha256 !== capture.contentSha256) throw new Error("science-artifact-version-conflict");
+    const captured = await captureScienceExtensionViewRegion(event.sender.id, {
+      artifactId: artifact.id,
+      artifactVersion: artifact.currentVersion,
+      contentSha256: artifact.version.contentSha256,
+    });
+    const observation = scienceStore().recordArtifactVisualCapture({ ...capture, png: captured.png, renderContext: captured.renderContext });
+    try {
+      const publicationValidation = scienceArtifactPublicationValidator().validate({
+        projectId: artifact.projectId,
+        artifactId: artifact.id,
+        artifactVersion: artifact.currentVersion,
+      });
+      return { ...observation, publicationValidation };
+    } catch (error) {
+      return { ...observation, publicationValidationError: error instanceof Error ? error.message : String(error) };
+    }
+  });
+  ipcMain.handle("science:artifacts:observation", (event, input: unknown) => {
+    assertScienceSender(event, input, "science:artifacts");
+    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
+    const artifactId = input && typeof input === "object" && "artifactId" in input ? String((input as { artifactId?: unknown }).artifactId ?? "") : "";
+    return scienceStore().artifactObservationBundleForProject(projectId, artifactId);
+  });
+  ipcMain.handle("science:artifactValidations:list", (event, input: unknown) => {
+    assertScienceSender(event, input, "science:artifacts");
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    const artifactVersion = record.artifactVersion === undefined ? undefined : Number(record.artifactVersion);
+    return scienceStore().listArtifactValidationReceipts(String(record.projectId ?? ""), String(record.artifactId ?? ""), artifactVersion);
+  });
+  ipcMain.handle("science:artifactValidations:validate", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:artifacts");
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    if (!input || typeof input !== "object") throw new Error("science-publication-validation-input-invalid");
+    const record = input as Record<string, unknown>;
+    return scienceArtifactPublicationValidator().validate({
+      requestId: record.requestId === undefined ? undefined : String(record.requestId),
+      projectId: String(record.projectId ?? ""),
+      artifactId: String(record.artifactId ?? ""),
+      artifactVersion: Number(record.artifactVersion),
+    });
+  });
+  ipcMain.handle("science:manuscripts:list", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
+    return scienceStore().listManuscripts(projectId);
+  });
+  ipcMain.handle("science:manuscripts:get", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    return scienceStore().getManuscriptForProject(String(record.projectId ?? ""), String(record.manuscriptId ?? ""));
+  });
+  ipcMain.handle("science:claimLedgers:getForManuscript", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    return scienceStore().getClaimLedgerForManuscript(String(record.projectId ?? ""), String(record.manuscriptId ?? ""));
+  });
+  ipcMain.handle("science:manuscripts:create", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope);
+    const input = envelope && typeof envelope === "object" && "input" in envelope
+      ? (envelope as { input?: unknown }).input
+      : null;
+    if (!input || typeof input !== "object") throw new Error("science-manuscript-input-invalid");
+    return scienceStore().createManuscript(input as CreateScienceManuscriptInput);
+  });
+  ipcMain.handle("science:manuscripts:appendVersion", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope);
+    const input = envelope && typeof envelope === "object" && "input" in envelope
+      ? (envelope as { input?: unknown }).input
+      : null;
+    if (!input || typeof input !== "object") throw new Error("science-manuscript-input-invalid");
+    return scienceStore().appendManuscriptVersion(input as AppendScienceManuscriptVersionInput);
+  });
+  ipcMain.handle("science:journals:list", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
+    return scienceJournalPublicationService().listJournalProfiles(projectId);
+  });
+  ipcMain.handle("science:journals:inspectOfficialGuidelines", async (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:network");
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    if (!input || typeof input !== "object") throw new Error("science-journal-guideline-input-invalid");
+    const record = input as Record<string, unknown>;
+    return scienceJournalPublicationService().inspectOfficialGuidelines({ projectId: String(record.projectId ?? ""), sourceUrl: String(record.sourceUrl ?? "") });
+  });
+  ipcMain.handle("science:journals:createProfile", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope);
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    if (!input || typeof input !== "object") throw new Error("science-journal-profile-input-invalid");
+    return scienceJournalPublicationService().createJournalProfile(input as CreateScienceJournalProfileInput);
+  });
+  ipcMain.handle("science:journals:confirmIdentity", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope);
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    if (!input || typeof input !== "object") throw new Error("science-journal-identity-input-invalid");
+    return scienceJournalPublicationService().confirmJournalIdentity(input as ConfirmScienceJournalIdentityInput);
+  });
+  ipcMain.handle("science:journals:confirmHumanAttestation", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope);
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    if (!input || typeof input !== "object") throw new Error("science-journal-attestation-input-invalid");
+    return scienceJournalPublicationService().confirmHumanAttestation(input as ConfirmScienceJournalHumanAttestationInput);
+  });
+  ipcMain.handle("science:journals:validate", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope);
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    if (!input || typeof input !== "object") throw new Error("science-journal-validation-input-invalid");
+    const record = input as Record<string, unknown>;
+    const manuscript = scienceStore().getManuscriptForProject(String(record.projectId ?? ""), String(record.manuscriptId ?? ""));
+    const profile = scienceStore().getJournalProfileForProject(String(record.projectId ?? ""), String(record.journalProfileId ?? ""));
+    if (!manuscript || !profile) throw new Error("science-journal-validation-target-not-found");
+    return scienceJournalPublicationService().validate(manuscript, profile, record.metadata as CreateScienceSubmissionExportInput["metadata"] | undefined,
+      Array.isArray(record.humanAttestationReceiptIds) ? record.humanAttestationReceiptIds.map(String) : []);
+  });
+  ipcMain.handle("science:submissions:createExport", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope);
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    if (!input || typeof input !== "object") throw new Error("science-submission-export-input-invalid");
+    return scienceJournalPublicationService().createSubmissionExport(input as CreateScienceSubmissionExportInput);
+  });
+  ipcMain.handle("science:submissions:list", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    return scienceStore().listSubmissionExports(String(record.projectId ?? ""), String(record.manuscriptId ?? ""));
+  });
+  ipcMain.handle("science:submissions:read", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    return scienceStore().submissionExportBytesForProject(String(record.projectId ?? ""), String(record.exportId ?? ""));
+  });
+  ipcMain.handle("science:analysisSpecs:list", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    return scienceStore().listAnalysisSpecs(String(record.projectId ?? ""));
+  });
+  ipcMain.handle("science:analysisSpecs:get", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    return scienceStore().getAnalysisSpecForProject(String(record.projectId ?? ""), String(record.analysisSpecId ?? ""));
+  });
+  ipcMain.handle("science:decisions:list", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    const statuses = Array.isArray(record.statuses) ? record.statuses.map(String) as ScienceDecisionRequest["status"][] : undefined;
+    const analysisSpecId = record.analysisSpecId === undefined || record.analysisSpecId === null || record.analysisSpecId === "" ? undefined : String(record.analysisSpecId);
+    return scienceStore().listDecisionRequests(String(record.projectId ?? ""), analysisSpecId, statuses);
+  });
+  ipcMain.handle("science:decisions:get", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    return scienceStore().getDecisionRequestForProject(String(record.projectId ?? ""), String(record.decisionId ?? ""));
+  });
+  ipcMain.handle("science:decisions:present", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:agent-runtime");
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    return scienceStore().presentDecision(input as PresentScienceDecisionInput);
+  });
+  ipcMain.handle("science:decisions:defer", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:agent-runtime");
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    return scienceStore().deferDecision(input as DeferScienceDecisionInput);
+  });
+  ipcMain.handle("science:decisions:answer", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope);
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    if (!input || typeof input !== "object") throw new Error("science-decision-answer-input-invalid");
+    return scienceStore().answerDecision(input as AnswerScienceDecisionInput);
+  });
   disposeMobileBridgeStateChange = onMobileBridgeStateChanged((reason) => {
     for (const window of BrowserWindow.getAllWindows()) {
       if (window.isDestroyed() || window.webContents.isDestroyed()) continue;
@@ -1355,6 +2612,24 @@ app.whenReady().then(async () => {
     if (recoveredSteers > 0) console.info(`[invocation] recovered ${recoveredSteers} queued steer(s)`);
   } catch (error) {
     console.error("[invocation] queued steer recovery failed", error);
+  }
+  try {
+    const scienceStatus = scienceExtensionStatus();
+    if (scienceStatus.phase === "installed" && scienceStatus.enabled) {
+      ensureScienceTurnProjection();
+      const recovered = await recoverScienceRuntimeAtStartup();
+      const recoveredTools = recovered.tools;
+      if (recoveredTools.interrupted || recoveredTools.finalized || recoveredTools.alreadyCommitted || recoveredTools.quarantined) {
+        console.info(`[science-tools] recovered interrupted=${recoveredTools.interrupted} finalized=${recoveredTools.finalized} committed=${recoveredTools.alreadyCommitted} quarantined=${recoveredTools.quarantined}`);
+      }
+      const recoveredScience = recovered.conversations;
+      if (recovered.pausedLoops > 0) console.info(`[science-runtime] paused ${recovered.pausedLoops} loop(s) for explicit crash recovery`);
+      if (recoveredScience.delivered || recoveredScience.dispatched || recoveredScience.settled || recoveredScience.interrupted) {
+        console.info(`[science-runtime] recovered delivered=${recoveredScience.delivered} dispatched=${recoveredScience.dispatched} settled=${recoveredScience.settled} interrupted=${recoveredScience.interrupted}`);
+      }
+    }
+  } catch (error) {
+    console.error("[science-runtime] recovery failed", error);
   }
   startAutomationScheduler(); // 자동화 스케줄러 — 60초마다 due 자동화를 백그라운드로 실행
   /*

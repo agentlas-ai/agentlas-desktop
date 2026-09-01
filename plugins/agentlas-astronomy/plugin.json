@@ -1,0 +1,77 @@
+{
+  "schema": "agentlas.plugin/v2",
+  "slug": "agentlas-astronomy",
+  "name": "Agentlas Astronomy",
+  "version": "1.2.0",
+  "builtin": false,
+  "publisher": { "name": "Agentlas", "url": "https://agentlas.ai" },
+  "surface": {
+    "displayName": "Astronomy",
+    "displayNameKo": "천문학",
+    "tagline": "Provenanced SIMBAD search, stellar kinematics, and irregular light-curve periodicity",
+    "taglineKo": "출처가 보존되는 SIMBAD 검색·항성 운동학·불규칙 광도곡선 주기 분석",
+    "description": "Queries the anonymous official SIMBAD TAP object database and deterministically derives uncertainty-aware stellar kinematics or bounded generalized Lomb-Scargle periodograms, publication tables, and Vega-Lite FigureSpecs without imputing missing measurements.",
+    "descriptionKo": "익명 공식 SIMBAD TAP 천체 데이터베이스를 조회하고 결측값을 보간하지 않으면서 불확실성 기반 항성 운동학 또는 제한된 generalized Lomb-Scargle 주기도, 출판용 표, Vega-Lite FigureSpec을 결정론적으로 계산합니다.",
+    "category": "data",
+    "brandColor": "#14213D",
+    "icon": "assets/icon.svg",
+    "defaultPrompts": [
+      "이 ICRS 좌표 주변 SIMBAD 천체를 찾고 분류와 측정값을 비교해줘",
+      "이 좁은 원뿔 영역의 SIMBAD 천체를 출처 해시와 함께 표로 정리해줘",
+      "이 시차·고유운동 측정표에서 거리와 접선속도를 오차 전파해 논문용 표와 그림으로 만들어줘",
+      "이 불규칙 광도곡선의 시간계와 오차를 보존해서 Lomb-Scargle 주기도와 위상 접힘 그림을 만들어줘"
+    ]
+  },
+  "invocation": { "mention": "@agentlas-astronomy", "implicit": "router", "standalone": true },
+  "provides": {
+    "skills": { "router": "skills/index/SKILL.md", "workflows": ["simbad-catalog", "astrometric-kinematics", "light-curve-periodicity"] },
+    "tools": [
+      {
+        "id": "agentlas-astronomy",
+        "capability": "data",
+        "kind": "stdio",
+        "command": "${node}",
+        "args": ["${pluginDir}/runtime/mcp-server.cjs"],
+        "envKeys": [],
+        "timeoutMs": 60000,
+        "surface": {
+          "name": "Agentlas 천문학 데이터",
+          "nameEn": "Agentlas Astronomy Data",
+          "description": "공식 SIMBAD 조회·오차 기반 항성 운동학·불규칙 광도곡선 주기 분석을 원문·계산 해시와 함께 정규화",
+          "descriptionEn": "Normalize official SIMBAD queries, uncertainty-aware stellar kinematics, and bounded irregular light-curve periodicity with exact source and calculation hashes",
+          "category": "data",
+          "brandColor": "#14213D",
+          "mark": "AS",
+          "docsUrl": "https://simbad.cds.unistra.fr/Pages/guide/sim-url.htx"
+        }
+      }
+    ]
+  },
+  "requires": { "prereq": [{ "id": "node", "provided-by": "app" }], "os": ["darwin", "win32", "linux"] },
+  "permissions": { "fileWrite": "none", "network": "allow", "shell": "deny" },
+  "state": { "files": [], "assets": false },
+  "integrity": {
+    "algo": "sha256",
+    "files": [
+      { "path": "README.md", "sha256": "91ff54e52fe63013c282fb55700772787223b945dfd680d18f017ebaaf850253", "bytes": 6084 },
+      { "path": "assets/icon.svg", "sha256": "954d6c1aea9ff0894f187339895f4438be024baf0fc69a5f3ac7716938e01e96", "bytes": 507 },
+      { "path": "capabilities.json", "sha256": "d472859991ce50e8bb0aa4cde851e3d03e22a87b70dc4e5ad0fc6ccb74a4a075", "bytes": 6359 },
+      { "path": "runtime/astronomy.cjs", "sha256": "79892e3f3609247b45ad2b015122fc22b04ee11ca27799abdfa85ca7e76fea7c", "bytes": 82392 },
+      { "path": "runtime/mcp-server.cjs", "sha256": "e0ea7ce56a596699f06ed4b0580d80cb9a542cb427d05ac1e163fd71148bdf6d", "bytes": 6681 },
+      { "path": "schemas/tools.json", "sha256": "bf246cb456721cb6eedc1aebc0582361d6dbca85791e9d78cfaf7ab9d7b9bd8c", "bytes": 8010 },
+      { "path": "skills/astrometric-kinematics/SKILL.md", "sha256": "da731e39ae17876ac17f57c027f73da61f8c44e61d1245399e9f3d347f38fb56", "bytes": 1652 },
+      { "path": "skills/index/SKILL.md", "sha256": "b4524b08cfe2be7cdd326dd61de802a6b5edc7705f1e403a3cd93b52c8e6a1d0", "bytes": 1529 },
+      { "path": "skills/light-curve-periodicity/SKILL.md", "sha256": "54dd9c5c2d83c43822708921b845211d79d5ac1818fbfa5bdc9f015cb9083c04", "bytes": 2331 },
+      { "path": "skills/simbad-catalog/SKILL.md", "sha256": "0a5bb4399c1e19ec620e58b5775e2c8e2745721f7d91339ec45ab73a100c5044", "bytes": 1492 },
+      { "path": "tests/contract.cjs", "sha256": "8bec7fcc091070cc2bf03d1440f0c27680b2239c492462f221e8ed1a4474443e", "bytes": 18664 },
+      { "path": "tests/fixtures/astrometry-kinematics.json", "sha256": "2d47169067feae1beb56ca4239e2c5f0d95f5854bd4f74548a0c38c67d4ca855", "bytes": 1619 },
+      { "path": "tests/fixtures/irregular-light-curve.json", "sha256": "295b3248e5e408a2386a04eb25c7e63f46158fca06c90a9c4ecbbe1ee718beeb", "bytes": 2476 },
+      { "path": "tests/fixtures/simbad-duplicate.json", "sha256": "a96aca1aa51dac18826993d1fcdf9fd7af3d4400539cb4f9e0cb219c749c0842", "bytes": 551 },
+      { "path": "tests/fixtures/simbad-response.csv", "sha256": "55b7955b662952b3e932ec203a36f7ff5a8bbba87a1db2ba88ccadce10504e96", "bytes": 233 },
+      { "path": "tests/fixtures/simbad-response.json", "sha256": "ad6ccee8413ba15990bbfe11ba403277619317f923e59b93ba5e982cd3d53aaf", "bytes": 1286 },
+      { "path": "tests/fixtures/simbad-response.tsv", "sha256": "767029ea628b53f88db346684c22923522b81c7909466bb49ade1ffdde221e04", "bytes": 233 },
+      { "path": "tests/kinematics-contract.cjs", "sha256": "a1bb2ef0b81b0a9c326261066690667eaff4a1a69ad3017f1c0fdf6024b15218", "bytes": 9209 },
+      { "path": "tests/periodogram-contract.cjs", "sha256": "09014b81f10e4171a07a04de1d969da5dd59feecd85f347ef4833b6d962d8553", "bytes": 9040 }
+    ]
+  }
+}

@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'none'; worker-src 'self' blob:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'" />
+    <title>Agentlas Mol* renderer</title>
+    <link rel="stylesheet" href="../vendor/molstar.css" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header id="editor" aria-label="Structure view editor">
+      <div class="editor-title">
+        <span>PROTEIN STRUCTURE</span>
+        <strong>Mol* view editor</strong>
+      </div>
+      <label>Representation
+        <select id="representation">
+          <option value="cartoon">Cartoon</option>
+          <option value="ball-and-stick">Ball &amp; stick</option>
+          <option value="surface">Molecular surface</option>
+        </select>
+      </label>
+      <label>Color
+        <select id="color-theme">
+          <option value="chain-id">By chain</option>
+          <option value="element-symbol">By element</option>
+          <option value="secondary-structure">By secondary structure</option>
+        </select>
+      </label>
+      <button id="selection-toggle" type="button" aria-expanded="false" aria-controls="selection-panel">Residues <strong id="selection-count">0</strong></button>
+      <button id="reset-view" type="button">Reset view</button>
+      <button id="save-version" type="button" disabled>Save new version</button>
+      <p id="editor-note">Representation, color, and pinned residues are versioned. Camera, zoom, hover, and exploratory selection stay in this session.</p>
+    </header>
+    <section id="selection-panel" hidden aria-labelledby="selection-heading">
+      <div class="selection-panel-heading">
+        <div><span>RESIDUE INTERACTION</span><strong id="selection-heading">Selection and focus</strong></div>
+        <button id="selection-close" type="button" aria-label="Close residue selection">Close</button>
+      </div>
+      <div class="selection-fields">
+        <label>Chain<select id="selection-chain"></select></label>
+        <label>From<input id="selection-from" type="number" inputmode="numeric" /></label>
+        <label>To<input id="selection-to" type="number" inputmode="numeric" /></label>
+        <button id="selection-preview" type="button">Select range</button>
+      </div>
+      <p id="selection-summary" aria-live="polite">No exploratory residues selected.</p>
+      <label class="focus-option"><input id="selection-restore-focus" type="checkbox" checked /> Focus this selection when the version opens</label>
+      <div class="selection-actions">
+        <button id="selection-clear" type="button">Clear selection</button>
+        <button id="selection-focus" type="button">Focus selected</button>
+        <button id="selection-pin" type="button">Use as saved highlight</button>
+      </div>
+    </section>
+    <main id="viewer" aria-label="Protein structure renderer"></main>
+    <div id="status" role="status">Initializing renderer…</div>
+    <script src="../vendor/molstar.js"></script>
+    <script src="adapter.js"></script>
+  </body>
+</html>

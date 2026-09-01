@@ -52,13 +52,16 @@ jobs:
       # Publish installers to the SEPARATE public releases repository.
       AGENTLAS_DESKTOP_GITHUB_REPO: agentlas-ai/agentlas-desktop-releases
       AGENTLAS_PUBLIC_RELEASE: "1"
+      # Public verification keys only. Private extension-signing keys never
+      # enter Desktop packaging; absent policy blocks the release before signing.
+      AGENTLAS_PRODUCT_EXTENSION_TRUSTED_KEYS_JSON: ${{ vars.AGENTLAS_PRODUCT_EXTENSION_TRUSTED_KEYS_JSON }}
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.59,v0.8.60"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.2.38
-      HEPHAESTUS_COMMIT: fc310b5898b44f5a84034fb25f724321de450509
-      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.38.tar.gz
-      HEPHAESTUS_ASSET_SHA256: a8819cfae2c7aaa7791763545414dc477b6df3aec87488ac3dea9cca9865e570
+      HEPHAESTUS_REF: v1.2.40
+      HEPHAESTUS_COMMIT: 0c29abdb9505df32b61522861a17bbc537de5263
+      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.40.tar.gz
+      HEPHAESTUS_ASSET_SHA256: f07527e45fa6be4538898a60e05e5113a72d2de2c61e2e021c1163954c5ba8c2
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -266,10 +269,10 @@ jobs:
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.59,v0.8.60"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.2.38
-      HEPHAESTUS_COMMIT: fc310b5898b44f5a84034fb25f724321de450509
-      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.38.tar.gz
-      HEPHAESTUS_ASSET_SHA256: a8819cfae2c7aaa7791763545414dc477b6df3aec87488ac3dea9cca9865e570
+      HEPHAESTUS_REF: v1.2.40
+      HEPHAESTUS_COMMIT: 0c29abdb9505df32b61522861a17bbc537de5263
+      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.40.tar.gz
+      HEPHAESTUS_ASSET_SHA256: f07527e45fa6be4538898a60e05e5113a72d2de2c61e2e021c1163954c5ba8c2
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -432,10 +435,10 @@ jobs:
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.59,v0.8.60"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.2.38
-      HEPHAESTUS_COMMIT: fc310b5898b44f5a84034fb25f724321de450509
-      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.38.tar.gz
-      HEPHAESTUS_ASSET_SHA256: a8819cfae2c7aaa7791763545414dc477b6df3aec87488ac3dea9cca9865e570
+      HEPHAESTUS_REF: v1.2.40
+      HEPHAESTUS_COMMIT: 0c29abdb9505df32b61522861a17bbc537de5263
+      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.40.tar.gz
+      HEPHAESTUS_ASSET_SHA256: f07527e45fa6be4538898a60e05e5113a72d2de2c61e2e021c1163954c5ba8c2
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

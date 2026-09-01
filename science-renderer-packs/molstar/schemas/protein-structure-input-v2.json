@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentlas.science/protein-structure-input/v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["structure", "representation"],
+  "dependentRequired": {
+    "interaction": ["interactionValidation"],
+    "interactionValidation": ["interaction"]
+  },
+  "$defs": {
+    "residueLocator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["modelNum", "operatorName", "labelAsymId", "authAsymId", "labelSeqId", "authSeqId", "insertionCode", "compId"],
+      "properties": {
+        "modelNum": { "type": "integer", "minimum": 1 },
+        "operatorName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "labelAsymId": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "authAsymId": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "labelSeqId": { "type": ["integer", "null"], "minimum": 1 },
+        "authSeqId": { "type": "integer" },
+        "insertionCode": { "type": "string", "maxLength": 80 },
+        "compId": { "type": "string", "minLength": 1, "maxLength": 80 }
+      }
+    }
+  },
+  "properties": {
+    "structure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceId", "sourceVersionId", "contentSha256", "format"],
+      "properties": {
+        "sourceId": { "type": "string", "format": "uuid" },
+        "sourceVersionId": { "type": "string", "format": "uuid" },
+        "contentSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "format": { "enum": ["pdb", "mmcif"] }
+      }
+    },
+    "representation": { "enum": ["cartoon", "ball-and-stick", "surface"] },
+    "colorTheme": { "enum": ["chain-id", "element-symbol", "secondary-structure"] },
+    "interaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "granularity", "residues", "focus"],
+      "properties": {
+        "schema": { "const": "agentlas.science-residue-interaction/v1" },
+        "granularity": { "const": "residue" },
+        "residues": { "type": "array", "maxItems": 512, "uniqueItems": true, "items": { "$ref": "#/$defs/residueLocator" } },
+        "focus": { "oneOf": [{ "$ref": "#/$defs/residueLocator" }, { "type": "null" }] }
+      }
+    },
+    "interactionValidation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "validator", "validatorVersion", "structureContentSha256", "interactionSha256", "resolvedResidueCount", "focusResolved", "code"],
+      "properties": {
+        "schema": { "const": "agentlas.science-residue-interaction-validation/v1" },
+        "validator": { "const": "Mol*" },
+        "validatorVersion": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "structureContentSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "interactionSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "resolvedResidueCount": { "type": "integer", "minimum": 0, "maximum": 512 },
+        "focusResolved": { "type": "boolean" },
+        "code": { "const": "residue-interaction-valid" }
+      }
+    }
+  }
+}

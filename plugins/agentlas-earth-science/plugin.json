@@ -1,0 +1,75 @@
+{
+  "schema": "agentlas.plugin/v2",
+  "slug": "agentlas-earth-science",
+  "name": "Agentlas Earth Science",
+  "version": "0.5.0",
+  "builtin": false,
+  "publisher": { "name": "Agentlas", "url": "https://agentlas.ai" },
+  "surface": {
+    "displayName": "Earth Science",
+    "displayNameKo": "지구과학",
+    "tagline": "USGS and NOAA observations with reproducible provenance",
+    "taglineKo": "USGS·NOAA 관측과 재현 가능한 출처",
+    "description": "Queries official USGS earthquake and NOAA CO-OPS observed water-level APIs and performs bounded Gutenberg–Richter and Omori–Utsu analyses while preserving exact network/raw/normalized receipts, units, selections, tables, and figure payloads.",
+    "descriptionKo": "공식 USGS 지진 및 NOAA CO-OPS 관측 수위 API를 조회하고 제한된 Gutenberg–Richter·Omori–Utsu 분석을 수행하며 정확한 네트워크·원문·정규화 영수증, 단위, 선택 내역, 표와 그림 페이로드를 보존합니다.",
+    "category": "data",
+    "brandColor": "#2E6F62",
+    "icon": "assets/icon.svg",
+    "defaultPrompts": [
+      "이 기간과 지역의 USGS 지진 관측을 불러와 지도와 분석용 표로 정리해줘",
+      "완전한 USGS 카탈로그와 내가 정한 Mc로 규모-빈도 b값, 포함 감사표, 출판용 그림을 만들어줘",
+      "이 여진 카탈로그에서 메인쇼크·관측창·완전성 경계를 명시해 Omori–Utsu p, c, K와 잔차 그림을 만들어줘",
+      "이 USGS 사건의 진원·규모 불확실성과 관측 품질을 상세 분석해줘",
+      "이 NOAA CO-OPS 관측소의 수위를 UTC·수직 기준면·단위와 함께 시계열로 정리해줘",
+      "이 USGS GeoJSON을 정규화하고 출처 영수증을 만들어줘"
+    ]
+  },
+  "invocation": { "mention": "@agentlas-earth-science", "implicit": "router", "standalone": true },
+  "provides": {
+    "skills": { "router": "skills/index/SKILL.md", "workflows": ["earthquake-catalog", "gutenberg-richter-analysis", "omori-utsu-analysis", "noaa-coops-water-level"] },
+    "tools": [
+      {
+        "id": "agentlas-earth-science",
+        "capability": "data",
+        "kind": "stdio",
+        "command": "${node}",
+        "args": ["${pluginDir}/runtime/mcp-server.cjs"],
+        "envKeys": [],
+        "timeoutMs": 20000,
+        "surface": {
+          "name": "Agentlas 지구과학 데이터",
+          "nameEn": "Agentlas Earth Science Data",
+          "description": "USGS 지진과 NOAA CO-OPS 관측 수위를 정규화하고, 명시적 경계 기반 Gutenberg–Richter·Omori–Utsu 분석·출판 표·그림·출처 영수증을 생성",
+          "descriptionEn": "Normalize official USGS earthquake and NOAA CO-OPS observations and produce explicit-boundary Gutenberg–Richter and Omori–Utsu analyses, publication tables, figures, and provenance receipts",
+          "category": "data",
+          "brandColor": "#2E6F62",
+          "mark": "ES",
+          "docsUrl": "https://api.tidesandcurrents.noaa.gov/api/prod/"
+        }
+      }
+    ]
+  },
+  "requires": { "prereq": [{ "id": "node", "provided-by": "app" }], "os": ["darwin", "win32", "linux"] },
+  "permissions": { "fileWrite": "none", "network": "allow", "shell": "deny" },
+  "state": { "files": [], "assets": false },
+  "integrity": {
+    "algo": "sha256",
+    "files": [
+      { "path": "README.md", "sha256": "d48060f9ed900bae019a5b30c2e82d61d9156976520831cebd162fde131e6976", "bytes": 4984 },
+      { "path": "assets/icon.svg", "sha256": "86e37d4c13c45e431fc0458aee5c3fb69978e4f5aa9180ccfa967a1401d0dd6d", "bytes": 387 },
+      { "path": "capabilities.json", "sha256": "f47ba924faa360649cc25df69afddb5c531612f64a96d391bd30b6beb59fc2f9", "bytes": 7728 },
+      { "path": "runtime/earth-science.cjs", "sha256": "18f3efebd4ad50859ff62a2d70564247cbe6b4b79ef1277469000c8d3b82a31a", "bytes": 98222 },
+      { "path": "runtime/mcp-server.cjs", "sha256": "18ca6d6a3c6a5faddfda200b2b49c6a54ef91c11f3e689397c42742a4c36ce56", "bytes": 4359 },
+      { "path": "schemas/tools.json", "sha256": "99a6a80e1eb27bbc925a741a05dab7a19ed0faba6f0470b90442644c9cb7773d", "bytes": 14153 },
+      { "path": "skills/earthquake-catalog/SKILL.md", "sha256": "655718462d67d66733af10abc508ab3b543a7c0a05dc81e86ecbb74eccfbf1c7", "bytes": 2262 },
+      { "path": "skills/gutenberg-richter-analysis/SKILL.md", "sha256": "d0fd2428e9ddc01a4711eb32d304820e0702c52e9bf04868a77457a0c6a943ea", "bytes": 1945 },
+      { "path": "skills/index/SKILL.md", "sha256": "bb194b7a27596889bc2470eacb92137504d79c6ef2bbad6da534b48e298c2482", "bytes": 1569 },
+      { "path": "skills/noaa-coops-water-level/SKILL.md", "sha256": "c0a258ab9261d662d45b832a7bc439a558373a0661bd5c304685e14999f5aed2", "bytes": 2312 },
+      { "path": "skills/omori-utsu-analysis/SKILL.md", "sha256": "3e9d478e6bb51227e890ec46d558340646909f196deab2d75f3be4151f82ff9a", "bytes": 1670 },
+      { "path": "tests/contract.cjs", "sha256": "f75503808ee577b5f4aa49c9e07102ff46db6a61a2eceaddf58f24863a35877d", "bytes": 24072 },
+      { "path": "tests/fixtures/noaa-coops-water-level.json", "sha256": "c65bb3952a9474e45e0cc97e0451fd799c98a5b7a5403694bda588013cfb654a", "bytes": 386 },
+      { "path": "tests/fixtures/usgs-earthquakes.json", "sha256": "a0f5b02380a1aeffecea3193e25ce6480892814557f0782794a23a0d2debed65", "bytes": 2046 },
+      { "path": "tests/fixtures/usgs-event-detail.json", "sha256": "f59ed25747f70acc75bdb0b769b26cb88d45e15a4a0334577ca33fadb806156d", "bytes": 3972 }
+    ]
+  }
+}

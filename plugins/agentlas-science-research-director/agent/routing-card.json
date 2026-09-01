@@ -1,0 +1,95 @@
+{
+  "schemaVersion": "routing-card/2.0",
+  "card_version": "1.0.0",
+  "id": "local/agentlas-science-research-director",
+  "canonical_id": "agentlas/science-research-director",
+  "type": "agent",
+  "name": "Scientific Research Director",
+  "name_ko": "과학 연구 디렉터",
+  "aliases": ["research lead", "scientific study director", "논문 연구 총괄", "연구 책임 에이전트"],
+  "summary": "Directs one scientific study from question to a journal-ready package while preserving exact source, run, artifact, decision, manuscript, and validation lineage; never invents missing evidence or tool results.",
+  "summary_ko": "하나의 과학 연구를 질문부터 저널 제출 패키지까지 지휘하고 출처·실행·아티팩트·결정·원고·검증 계보를 보존하며, 없는 증거나 도구 결과는 만들지 않습니다.",
+  "description": "Use when a researcher wants one study led across literature review, hypotheses, frozen analysis planning, interactive Labs, evidence reconciliation, manuscript drafting, and target-journal validation. Returns a machine-readable study state and journal-ready package with exact lineage. It does not submit externally and stops when evidence or tool receipts are missing.",
+  "capabilities": [
+    "direct_scientific_studies",
+    "coordinate_research_labs",
+    "freeze_analysis_plans",
+    "reconcile_evidence_ledgers",
+    "audit_research_lineage",
+    "draft_scientific_manuscripts",
+    "validate_journal_packages",
+    "manage_research_decisions"
+  ],
+  "domains": ["scientific-research", "research-methods", "statistics", "scholarly-publishing"],
+  "trigger_examples": [
+    { "locale": "ko", "text": "이 연구 질문을 선행연구부터 실험과 분석, 논문 제출본까지 끝까지 이끌어줘" },
+    { "locale": "ko", "text": "우리 연구의 현재 증거 공백과 다음 랩 작업을 점검하고 연구를 계속 진행해줘" },
+    { "locale": "ko", "text": "분석계획을 먼저 동결하고 결과를 근거 원장에 묶어서 저널 양식으로 논문을 만들어줘" },
+    { "locale": "en", "text": "Lead this study from literature review through a frozen analysis plan and journal-ready manuscript" },
+    { "locale": "en", "text": "Audit the current study state, evidence gaps, and exact run lineage, then direct the next lab work" },
+    { "locale": "en", "text": "Coordinate the analyses and figures and validate the final paper against this journal's current instructions" }
+  ],
+  "anti_triggers": [
+    { "locale": "ko", "text": "이 논문 제목만 한 문장으로 번역해줘" },
+    { "locale": "ko", "text": "이 CSV로 막대그래프 하나만 그려줘" },
+    { "locale": "en", "text": "Find one paper about CRISPR and give me its DOI" },
+    { "locale": "en", "text": "Submit this manuscript to the journal for me" }
+  ],
+  "required_inputs": [{ "name": "research_question", "type": "text" }],
+  "optional_inputs": [
+    { "name": "existing_study_state", "type": "json" },
+    { "name": "project_sources_and_artifacts", "type": "references" },
+    { "name": "target_journal", "type": "text" }
+  ],
+  "input_notes": [
+    "research_question: the scientific question or the project state from which it should be made testable.",
+    "existing_study_state: latest immutable research-director state revision when continuing prior work.",
+    "project_sources_and_artifacts: exact project-scoped IDs; prose summaries are not substitutes for receipts.",
+    "target_journal: optional until manuscript closeout; current official instructions are inspected when supplied."
+  ],
+  "required_plugins": [{ "id": "agentlas-academic-search", "min_permissions": ["network"] }],
+  "entrypoints": {
+    "canonical_command": "@agentlas-science-research-director",
+    "agent": "agent/agent.md",
+    "terminal": "agentlas run science-research-director"
+  },
+  "risk_profile": {
+    "tier": "medium",
+    "capabilities_at_risk": ["file_write", "external_tool", "private_data_export"]
+  },
+  "approval_requirements": ["private_data_export", "publish"],
+  "approval_scope": { "grant": "per_call", "ttl_seconds": null },
+  "memory_behavior": { "reads": "project", "writes": "project_with_approval", "exports_to_cloud": false },
+  "data_access": { "reads": ["project_files", "project_memory", "science_ledger"], "writes": ["science_ledger", "project_manuscript"], "exports": [] },
+  "cloud_delegation_policy": "ask",
+  "cost_hints": { "model_calls": "high", "paid_api": false },
+  "consumes": [
+    { "kind": "research_question", "required": true },
+    { "kind": "study_state", "required": false },
+    { "kind": "source_artifact_receipts", "required": false }
+  ],
+  "produces": [
+    { "kind": "study_state" },
+    { "kind": "evidence_ledger" },
+    { "kind": "frozen_analysis_plan" },
+    { "kind": "journal_submission_package" }
+  ],
+  "known_failure_cases": [
+    "When a required Science capability is unavailable, the study remains blocked with the missing capability named; no adjacent tool is presented as equivalent.",
+    "When a bound source, run, artifact, or hash fails integrity verification, downstream interpretation and manuscript advancement stop at that exact binding.",
+    "When a material design decision is unanswered, independent work may continue but the affected phase cannot pass.",
+    "When official journal instructions cannot be inspected live, the package remains a generic manuscript draft rather than a journal-validated submission."
+  ],
+  "benchmark_fixtures": "agent/routing-benchmarks.jsonl",
+  "locale_coverage": { "primary": "en", "ready": ["en", "ko"], "partial": [] },
+  "workforce": {
+    "communities": ["community:scientific-research", "community:scholarly-publishing", "community:data-science"],
+    "roles": ["role:research-director", "role:principal-investigator"],
+    "skills": ["skill:research-design", "skill:evidence-synthesis", "skill:statistical-analysis", "skill:scientific-writing", "skill:research-governance"],
+    "knowledge": ["knowledge:research-lifecycle", "knowledge:evidence-lineage", "knowledge:journal-validation"],
+    "languages": ["en", "ko"],
+    "modalities": ["text", "image"]
+  },
+  "routing_status": "active",
+  "routing_status_reason": "Every Science turn is bound by Desktop Main to the deterministic built-in Research Director identity after exact installed-package and prompt verification."
+}

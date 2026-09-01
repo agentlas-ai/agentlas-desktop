@@ -1,0 +1,92 @@
+{
+  "schema": "agentlas.plugin/v2",
+  "slug": "agentlas-science-statistics",
+  "name": "Agentlas Science Statistics",
+  "version": "1.9.0",
+  "builtin": false,
+  "publisher": {
+    "name": "Agentlas",
+    "url": "https://agentlas.ai"
+  },
+  "surface": {
+    "displayName": "Science Statistics",
+    "displayNameKo": "사이언스 통계",
+    "tagline": "Reproducible local statistics with publication artifacts",
+    "taglineKo": "출판용 산출물과 재현 가능한 로컬 통계 분석",
+    "description": "Runs 31 bounded local statistical methods, including explicit distribution fitting, regression, survival, PCA, time-series diagnostics, meta-analysis, a two-factor quadratic response surface, and a Gaussian one-group random-intercept LMM, returning typed estimates, publication tables, Vega-Lite or numeric-surface sources, and canonical receipts; see the machine-readable coverage manifest for exact limits.",
+    "descriptionKo": "명시적 확률분포 적합, 회귀, 생존, PCA, 시계열 진단, 메타분석, 2요인 이차 반응표면 및 단일 grouping factor Gaussian random-intercept LMM을 포함한 31개의 제한된 로컬 통계 메서드를 실행하고 추정치, 출판용 표, Vega-Lite 또는 수치 표면 소스와 정규 영수증을 반환합니다. 정확한 범위는 기계 판독 커버리지 매니페스트에 명시됩니다.",
+    "category": "data",
+    "brandColor": "#5A67D8",
+    "defaultPrompts": [
+      "이 데이터의 분석 계획에 맞는 통계 검정과 출판용 표를 만들어줘",
+      "회귀모형을 실행하고 가정 진단과 효과크기를 함께 검토해줘",
+      "생존 데이터로 Kaplan-Meier와 Cox 모형을 실행하고 검열·동률·PH 진단 경계를 함께 보여줘",
+      "다변량 데이터의 PCA와 시계열 ACF·PACF·Ljung-Box 진단을 정확한 행 영수증과 함께 만들어줘",
+      "명시한 확률분포 후보를 MLE로 적합하고 AIC·BIC, 보정 경계가 있는 KS D, Q-Q·P-P 그림을 만들어줘",
+      "연구별 효과와 표준오차로 고정·랜덤효과 메타분석, 이질성, 예측구간, leave-one-out, forest·funnel 그림을 만들어줘",
+      "명시적으로 코딩한 두 실험 요인의 이차 반응표면을 적합하고 관측 지지영역이 표시된 3D 표면 소스를 만들어줘",
+      "같은 연구 대상의 반복측정 자료에 단일 random-intercept Gaussian LMM을 적합하고 고정효과, ICC, BLUP, 진단 Figure를 연결해줘"
+    ]
+  },
+  "invocation": {
+    "mention": "@agentlas-science-statistics",
+    "implicit": "router",
+    "standalone": true
+  },
+  "provides": {
+    "skills": {
+      "router": "skills/index/SKILL.md",
+      "workflows": [
+        "analyze"
+      ]
+    },
+    "tools": [
+      {
+        "id": "run-statistical-analysis",
+        "capability": "data",
+        "kind": "stdio",
+        "command": "${node}",
+        "args": [
+          "${pluginDir}/bin/statistics-server.cjs"
+        ],
+        "envKeys": [],
+        "timeoutMs": 15000,
+        "surface": {
+          "name": "사이언스 통계 분석",
+          "nameEn": "Science Statistical Analysis",
+          "description": "엄격한 입력 계약으로 31개 제한 통계 메서드의 계산·진단·출판용 표·Vega-Lite 및 수치 표면 소스 생성",
+          "descriptionEn": "Run 31 bounded, contract-validated statistical methods with diagnostics, publication tables, and Vega-Lite or numeric-surface sources",
+          "category": "data",
+          "brandColor": "#5A67D8",
+          "mark": "ST"
+        }
+      }
+    ]
+  },
+  "requires": {
+    "prereq": [
+      {
+        "id": "node",
+        "provided-by": "app"
+      },
+      {
+        "id": "agentlas-science",
+        "provided-by": "app"
+      }
+    ],
+    "os": [
+      "darwin",
+      "win32",
+      "linux"
+    ]
+  },
+  "permissions": {
+    "fileWrite": "none",
+    "network": "none",
+    "shell": "deny"
+  },
+  "state": {
+    "files": [],
+    "assets": false
+  }
+}
