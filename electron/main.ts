@@ -222,6 +222,38 @@ let disposeOneTeamNotificationBridge: (() => void) | null = null;
 let deferredAuthRestorePromise: Promise<AuthRestoreResult> | null = null;
 const oneTeamNotificationKeys = new Set<string>();
 
+/**
+ * The native updater E2E launches the replacement process without a terminal,
+ * so a failure before `app.whenReady()` used to leave only a live PID and a
+ * stale journal. Keep a synchronous trace behind an E2E-only path supplied by
+ * the verifier; ordinary packaged launches never create this file.
+ */
+const UPDATER_E2E_TRACE_PATH_ENV = "AGENTLAS_UPDATER_E2E_TRACE_PATH";
+function traceUpdaterStartup(stage: string): void {
+  const tracePath = process.env[UPDATER_E2E_TRACE_PATH_ENV]?.trim();
+  if (!tracePath || !path.isAbsolute(tracePath)) return;
+  try {
+    fs.mkdirSync(path.dirname(tracePath), { recursive: true, mode: 0o700 });
+    fs.appendFileSync(
+      tracePath,
+      `${JSON.stringify({
+        at: new Date().toISOString(),
+        stage,
+        pid: process.pid,
+        platform: process.platform,
+        packaged: app.isPackaged,
+        updatedArg: process.argv.includes("--updated"),
+        appImage: Boolean(process.env.APPIMAGE),
+      })}\n`,
+      { encoding: "utf8", mode: 0o600 },
+    );
+  } catch {
+    // Diagnostics must never change the startup outcome.
+  }
+}
+
+traceUpdaterStartup("module-loaded");
+
 function broadcastAuthSession(sessionSnapshot: ReturnType<typeof getAuthSession>): void {
   for (const window of BrowserWindow.getAllWindows()) {
     if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
@@ -331,6 +363,7 @@ function initializeInstallIdentity(): InstallIdentity {
 }
 
 const installIdentity = initializeInstallIdentity();
+traceUpdaterStartup("install-identity-ready");
 
 /**
  * macOS dock 아이콘 — dev에서는 Electron 기본(원자 모양) 대신 우리 paw squircle.
@@ -532,6 +565,7 @@ function stopOneBriefingScheduler(): void {
 }
 
 const allowMultiInstance = process.env.AGENTLAS_ALLOW_MULTI_INSTANCE === "1";
+traceUpdaterStartup("before-single-instance-lock");
 const singleInstanceLock = allowMultiInstance || app.requestSingleInstanceLock();
 if (!singleInstanceLock) {
   // Exiting silently is right only when a live first instance takes over and
@@ -544,8 +578,10 @@ if (!singleInstanceLock) {
     "If no window appears, quit the running copy (or run with " +
     "AGENTLAS_ALLOW_MULTI_INSTANCE=1) and try again.";
   console.error(`[agentlas] ${notice}`);
+  traceUpdaterStartup("single-instance-lock-denied");
   app.exit(0);
 }
+if (singleInstanceLock) traceUpdaterStartup("single-instance-lock-acquired");
 
 /*
  * ── agentlas:// 딥링크 ────────────────────────────────────────────────────────
@@ -1006,10 +1042,12 @@ app.on("will-quit", (event) => {
 let startupStage = "before-ready";
 
 app.whenReady().then(async () => {
+  traceUpdaterStartup("ready-callback-entered");
   // Before any other stage: a packaged app discards console output, so start
   // mirroring it to the platform log directory first. Updater and mobile-bridge
   // diagnostics are worthless if the only copy dies with the process.
   initFileLogging();
+  traceUpdaterStartup("file-logging-initialized");
   const startupStartedAt = Date.now();
   const traceStartup = (stage: string): void => {
     console.info(`[startup] ${stage} +${Date.now() - startupStartedAt}ms`);
@@ -1068,6 +1106,7 @@ app.whenReady().then(async () => {
   const updatePreflight = installIdentity.updatesEnabled
     ? preflightUpdaterStartup()
     : { pendingInstall: false, recoveryBackupAvailable: false };
+  traceUpdaterStartup(`updater-preflight-complete:${updatePreflight.pendingInstall ? "pending" : "clean"}`);
   if (!installIdentity.updatesEnabled) {
     console.info(`[updater] ${installIdentity.channel} install identity has no update feed`);
   }
@@ -1157,9 +1196,11 @@ app.whenReady().then(async () => {
   // The application renderer and IPC surface still load only after migration,
   // continuity, authentication, and bootstrap gates have completed.
   await createWindow({ startupPlaceholder: true });
+  traceUpdaterStartup("startup-window-visible");
   traceStartup("startup-window-visible");
   startupStage = "store-opening";
   initStore({ deferPostContinuityRepairs: updatePreflight.pendingInstall });
+  traceUpdaterStartup("store-ready");
   repairPlaceholderTaskTitles();
   /*
    * ★부팅 시점의 running Task는 전부 고아다 — 실행 권위인 activeRuns 맵이 방금 비어서
@@ -1192,15 +1233,18 @@ app.whenReady().then(async () => {
   }
   // Restore/decrypt the account before the post-migration continuity check.
   const initialAuthRestore = await bootAuthFromKeychain();
+  traceUpdaterStartup(`auth-restore-complete:${initialAuthRestore.status}`);
   traceStartup(`auth-${initialAuthRestore.status}`);
   const initialAuthRestoreWasTemporary = initialAuthRestore.status === "temporarily-unavailable";
   // Stage 2 (post-migration, pre-bootstrap-writers): compare the live DB and
   // managed assets against the recovery copies before deferred repairs resume.
   if (installIdentity.updatesEnabled) {
+    traceUpdaterStartup("updater-init-started");
     await initAutoUpdater({
       initialAuthRestore,
       onDeferredAuthRestore: scheduleDeferredAuthRestore,
     });
+    traceUpdaterStartup("updater-init-complete");
   } else if (initialAuthRestoreWasTemporary) {
     scheduleDeferredAuthRestore();
   }
@@ -2723,7 +2767,9 @@ app.whenReady().then(async () => {
   // and must be re-armed. Without this the auto-repair would fire exactly once
   // in the app's lifetime and then stay disabled by its own leftover marker.
   noteHealthyStartup();
+  traceUpdaterStartup("healthy-startup");
 }).catch(async (error) => {
+  traceUpdaterStartup("startup-promise-rejected");
   let handled = false;
   try {
     handled = await handleUpdaterBootstrapFailure(error);

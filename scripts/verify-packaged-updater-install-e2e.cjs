@@ -681,9 +681,19 @@ function createRuntimeIsolation(platform, tempRoot) {
   const home = path.join(root, "home");
   const temp = path.join(root, "tmp");
   const marker = crypto.randomUUID();
+  const startupTracePath = path.join(root, "updater", "startup.trace.log");
   fs.mkdirSync(home, { recursive: true, mode: 0o700 });
   fs.mkdirSync(temp, { recursive: true, mode: 0o700 });
-  const env = { ...process.env, AGENTLAS_UPDATER_E2E_RUN_ID: marker, HOME: home, NODE_ENV: "production", TEMP: temp, TMP: temp, TMPDIR: temp };
+  const env = {
+    ...process.env,
+    AGENTLAS_UPDATER_E2E_RUN_ID: marker,
+    AGENTLAS_UPDATER_E2E_TRACE_PATH: startupTracePath,
+    HOME: home,
+    NODE_ENV: "production",
+    TEMP: temp,
+    TMP: temp,
+    TMPDIR: temp,
+  };
   delete env.AGENTLAS_QA_USER_DATA_DIR;
   delete env.ELECTRON_START_URL;
 
@@ -699,6 +709,7 @@ function createRuntimeIsolation(platform, tempRoot) {
       env,
       marker,
       root,
+      startupTracePath,
       updaterCacheDir: path.join(process.env.LOCALAPPDATA, APP_NAME),
       userDataDir: path.join(process.env.APPDATA, APP_NAME),
     };
@@ -713,7 +724,7 @@ function createRuntimeIsolation(platform, tempRoot) {
   env.XDG_CACHE_HOME = cache;
   // As above, Electron's default appData is XDG_CONFIG_HOME and the official
   // install identity is Agentlas. This survives AppImageUpdater's relaunch.
-  return { env, marker, root, userDataDir: path.join(config, APP_NAME) };
+  return { env, marker, root, startupTracePath, userDataDir: path.join(config, APP_NAME) };
 }
 
 function startApp(command, args, { cwd, env, logPath, label }) {
@@ -1031,7 +1042,12 @@ function logUserDataLogDiagnostics(userDataDir, label) {
   }
 }
 
-function logWindowsInstallDiagnostics(initialInstallDir, userDataDir) {
+function logStartupTraceDiagnostics(tracePath, label) {
+  const output = tail(tracePath, 16_000);
+  if (output) logError(`${label} startup trace:\n${output}`);
+}
+
+function logWindowsInstallDiagnostics(initialInstallDir, userDataDir, startupTracePath) {
   const registered = readWindowsInstallLocation();
   logError(`Windows diagnostic: initial InstallLocation=${initialInstallDir}; current InstallLocation=${registered || "<missing>"}`);
   const processScript = [
@@ -1064,6 +1080,7 @@ function logWindowsInstallDiagnostics(initialInstallDir, userDataDir) {
     }
   }
   logError(`Windows diagnostic packaged app.asar files:\n${asars.join("\n") || "<none>"}`);
+  logStartupTraceDiagnostics(startupTracePath, "Windows target");
   logUserDataLogDiagnostics(userDataDir, "Windows target user-data");
 }
 
@@ -1220,7 +1237,7 @@ async function runWindowsE2E({ baselineInstaller, feedUrl, feed, isolation, opti
     assertFeedAndPayloadRequested(feed);
     log(`Windows native install passed: ${options.baselineVersion} exited, ${options.targetVersion} replaced the install, and target relaunch cleared its journal`);
   } catch (error) {
-    logWindowsInstallDiagnostics(installDir, isolation.userDataDir);
+    logWindowsInstallDiagnostics(installDir, isolation.userDataDir, isolation.startupTracePath);
     const output = tail(appLog);
     if (output) logError(`baseline app log tail:\n${output}`);
     throw error;
@@ -1301,6 +1318,7 @@ async function runLinuxE2E({ baselineAppImage, feedUrl, feed, isolation, options
     const processes = linuxRelevantProcesses(isolation.marker, targetAppImage);
     logError(`Linux relaunch diagnostic processes:\n${JSON.stringify(processes, null, 2)}`);
     logError(`Linux relaunch diagnostic: targetExists=${fs.existsSync(targetAppImage)} journalExists=${fs.existsSync(path.join(isolation.userDataDir, "updater", JOURNAL_NAME))}`);
+    logStartupTraceDiagnostics(isolation.startupTracePath, "Linux target");
     logUserDataLogDiagnostics(isolation.userDataDir, "Linux target user-data");
     const output = tail(appLog);
     if (output) logError(`baseline app log tail:\n${output}`);

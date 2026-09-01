@@ -33,6 +33,22 @@ import { userDataDir, userDataPath } from "./runtime-paths";
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { autoUpdater } = require("electron-updater") as typeof import("electron-updater");
 
+// electron-updater launches a renamed AppImage using a copy of the current
+// environment. When the downloaded file has a versioned name, that copy can
+// retain the old APPIMAGE path even after the updater has moved the payload.
+// The AppImage runtime then waits on the stale executable instead of reaching
+// Agentlas' post-install journal reconciliation. Advance the inherited path at
+// the updater's filename-change boundary, before its detached spawn occurs.
+if (process.platform === "linux") {
+  autoUpdater.on("appimage-filename-updated", (destination: unknown) => {
+    if (typeof destination !== "string" || !path.isAbsolute(destination)) {
+      console.error("[updater] AppImage filename update returned an invalid launch path");
+      return;
+    }
+    process.env.APPIMAGE = destination;
+  });
+}
+
 let controller: DesktopUpdaterController | null = null;
 let fallbackState: UpdaterState = { status: "idle" };
 let startupRecovery: { targetVersion?: string; backupPath?: string } | null = null;
