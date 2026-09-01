@@ -9,7 +9,7 @@ copyright: © 2026 Agentlas
 # bundle carries the current Windows installer/runtime helpers. Both versions
 # are checksum-pinned by the installed electron-builder release.
 toolsets:
-  appimage: 1.1.0
+  appimage: "1.1.0"
   nsis: 1.2.1
 
 # agentlas:// URL 스킴 — 허브 웹의 "설치" 버튼이 여는 주소(agentlas://plugin/<family>/<slug>).
