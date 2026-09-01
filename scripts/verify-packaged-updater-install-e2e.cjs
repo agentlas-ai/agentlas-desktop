@@ -968,14 +968,13 @@ function linuxLauncher(appImage, electronArgs, isolation, logPath, extractedRoot
     launcher = path.join(extractedRoot, "AppRun");
     assertFile(launcher, "extracted public baseline AppRun");
     fs.chmodSync(launcher, 0o755);
-    appEnv.APPDIR = extractedRoot;
     appEnv.APPIMAGE = path.resolve(appImage);
     // The public baseline is deliberately launched from its inspected extract,
     // but AppImageUpdater later execs the downloaded target AppImage itself.
-    // GitHub's Ubuntu runner does not provide the FUSE 2 mount required by that
-    // native entrypoint. Keep the AppImage runtime's documented extraction mode
-    // in the inherited environment so the updater-spawned target really starts;
-    // this does not replace or simulate AppImageUpdater's move/exec lifecycle.
+    // AppRun can derive APPDIR from its own path for the extracted baseline;
+    // leave APPDIR unset so the target AppImage runtime cannot inherit the
+    // baseline extraction root. APPIMAGE_EXTRACT_AND_RUN keeps this native
+    // move/exec lifecycle usable on runners without FUSE 2.
     appEnv.APPIMAGE_EXTRACT_AND_RUN = "1";
     cwd = extractedRoot;
   } else {
