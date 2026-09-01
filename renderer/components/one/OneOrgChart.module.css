@@ -173,8 +173,17 @@
 }
 
 .oneRow {
-  background: #ecebed;
+  background: transparent;
 }
+
+.oneRow:hover,
+.oneRow:focus-visible,
+.oneRow[data-active="true"] {
+  border-color: transparent;
+  background: #efeff0;
+  outline: none;
+}
+.oneRow[data-active="true"]::before { position: absolute; top: 11px; bottom: 11px; left: -4px; width: 3px; border-radius: 999px; background: #353a37; content: ""; }
 
 .row:hover,
 .row:focus-visible,

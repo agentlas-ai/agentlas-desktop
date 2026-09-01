@@ -3273,6 +3273,21 @@
   box-shadow: 0 1px 2px rgba(25, 31, 36, .08);
 }
 
+.railTabLabel {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.railTabAlertDot {
+  width: 6px;
+  height: 6px;
+  margin-left: 5px;
+  border-radius: 50%;
+  background: #d83931;
+  box-shadow: 0 0 0 1.5px #fff;
+}
+
 /* 도는 중인 대화 표시 — 제목 아래 한 점. 상태를 문장으로 쓰면 줄이 길어진다. */
 .sessionRunningDot {
   display: inline-block;

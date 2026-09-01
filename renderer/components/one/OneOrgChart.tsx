@@ -105,6 +105,7 @@ export function OneOrgChart({
   onEditIdentity,
   sheetRequest,
   oneAvatarIcon,
+  activeOne = false,
   activeMemberId,
   activeTaskForceIds,
   onBrowseTools,
@@ -156,6 +157,7 @@ export function OneOrgChart({
   sheetRequest?: { token: number; kind: "tools" | "replace"; memberId: string };
   /** One 이 프로필에서 고른 캐릭터. 없으면 지금까지의 기본 얼굴. */
   oneAvatarIcon?: string;
+  activeOne?: boolean;
   activeMemberId?: string | null;
   activeTaskForceIds?: string[];
   onBrowseTools?: (member: OneOrgMember) => void;
@@ -439,6 +441,8 @@ export function OneOrgChart({
       </div>}
       <div
         className={styles.oneRow}
+        data-active={activeOne ? "true" : "false"}
+        aria-current={activeOne ? "page" : undefined}
         role={onOpenOne ? "button" : undefined}
         tabIndex={onOpenOne ? 0 : undefined}
         onClick={onOpenOne}

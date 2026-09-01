@@ -2,8 +2,16 @@
 
 import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
 import type { InvocationRunReceipt } from "@shared/types";
-import { IconChevronDown } from "@/components/Icon";
-import { LoadingEstimate } from "@/components/LoadingEstimate";
+import {
+  IconBrain,
+  IconCheck,
+  IconChevronDown,
+  IconCode,
+  IconEdit,
+  IconNetwork,
+  IconSearch,
+  IconSparkles,
+} from "@/components/Icon";
 import { extractAutomationRegistrations, type OneActivityState } from "@/lib/one-activity";
 import { OneAutomationRegistrationCard } from "./OneAdaptiveResult";
 import { McpResultPreview } from "../McpResultPreview";
@@ -89,15 +97,41 @@ function ExpandableRow({
         disabled={!expandable}
         title={expandable ? (locale === "ko" ? "자세히" : "Details") : undefined}
       >
-        <span className={styles.rowMark} data-status={cell.status} aria-hidden="true" />
-        {/* 단톡 실행에서는 이 행을 누가 했는지가 곧 내용이다 (G-4). */}
-        {cell.agent && <span className={styles.muted} data-cell-agent="true">{cell.agent} ·</span>}
-        <span className={running ? `${styles.rowText} ${styles.shimmer}` : styles.rowText}>{head}</span>
+        <span className={styles.rowMark} data-status={cell.status} aria-hidden="true">
+          <CellIcon cell={cell} />
+        </span>
+        <span className={running ? `${styles.rowText} ${styles.shimmer}` : styles.rowText}>
+          {/* 단톡 실행에서는 이 행을 누가 했는지가 곧 내용이다 (G-4). */}
+          {cell.agent && <span className={styles.muted} data-cell-agent="true">{cell.agent} ·</span>}
+          {head}
+        </span>
         {expandable && <span className={styles.rowChevron} aria-hidden="true"><IconChevronDown size={12} /></span>}
       </button>
       {expandable && open && <div className={styles.rowBody}>{children}</div>}
     </div>
   );
+}
+
+function CellIcon({ cell }: { cell: OneWorkCell }) {
+  const props = { size: 13, strokeWidth: 1.7 };
+  if (cell.status === "completed" && (cell.kind === "answer" || cell.kind === "notice")) return <IconCheck {...props} />;
+  switch (cell.kind) {
+    case "thought":
+      return <IconBrain {...props} />;
+    case "explore":
+    case "web_search":
+    case "fetch":
+      return <IconSearch {...props} />;
+    case "run":
+    case "call":
+      return <IconCode {...props} />;
+    case "edit":
+      return <IconEdit {...props} />;
+    case "agent":
+      return <IconNetwork {...props} />;
+    default:
+      return <IconSparkles {...props} />;
+  }
 }
 
 function statusSuffix(cell: OneWorkCell, locale: "ko" | "en"): ReactNode {
@@ -192,7 +226,19 @@ function WorkRow({ cell, locale }: { cell: OneWorkCell; locale: "ko" | "en" }) {
             </>
           )}
         >
-          {cell.output ? <pre className={styles.output}>{cell.output}</pre> : undefined}
+          {cell.output ? (
+            <div className={styles.commandPanel} data-status={cell.status}>
+              <div className={styles.commandPanelHeader}>
+                <span>Shell</span>
+              </div>
+              <pre className={styles.commandOutput}>{cell.output}</pre>
+              <div className={styles.commandPanelFooter}>
+                {cell.status === "failed" || (cell.exitCode != null && cell.exitCode !== 0)
+                  ? <span className={styles.failed}>{locale === "ko" ? "실패" : "Failed"}</span>
+                  : <span><IconCheck size={11} />{locale === "ko" ? "성공" : "Success"}</span>}
+              </div>
+            </div>
+          ) : undefined}
         </ExpandableRow>
       );
     case "edit":
@@ -425,7 +471,7 @@ export function OneTurnWork({
       {active ? (
         <div className={styles.liveBlock}>
           <div className={styles.live} role="status" aria-live="polite">
-            <span className={styles.liveMark} aria-hidden="true" />
+            <span className={styles.liveMark} aria-hidden="true"><IconSparkles size={13} /></span>
             <span className={`${styles.liveText} ${styles.shimmer}`}>{headline}</span>
             {hasRows && (
               <button
@@ -438,15 +484,6 @@ export function OneTurnWork({
                 <IconChevronDown size={12} />
               </button>
             )}
-          </div>
-          <div className={styles.liveEstimate}>
-            <LoadingEstimate
-              compact
-              locale={locale}
-              operationKey={preparing ? "one-turn-preparing" : "one-turn-running"}
-              startedAt={startedAt ?? undefined}
-              expectedSeconds={preparing ? [2, 45] : [30, 900]}
-            />
           </div>
         </div>
       ) : (

@@ -1004,25 +1004,10 @@ function seatLabelForChat(
   return "One";
 }
 
-/** 오늘 / 어제 / 지난 7일 / 그 이전. 날짜를 하나씩 쓰면 목록이 두 배가 된다. */
-function sessionBucket(iso: string, locale: "ko" | "en"): { key: string; label: string } {
-  const then = new Date(iso);
-  if (Number.isNaN(then.getTime())) return { key: "older", label: locale === "ko" ? "그 이전" : "Older" };
-  const startOfToday = new Date();
-  startOfToday.setHours(0, 0, 0, 0);
-  const days = Math.floor((startOfToday.getTime() - new Date(then).setHours(0, 0, 0, 0)) / 86_400_000);
-  if (days <= 0) return { key: "today", label: locale === "ko" ? "오늘" : "Today" };
-  if (days === 1) return { key: "yesterday", label: locale === "ko" ? "어제" : "Yesterday" };
-  if (days <= 7) return { key: "week", label: locale === "ko" ? "지난 7일" : "Previous 7 days" };
-  if (days <= 30) return { key: "month", label: locale === "ko" ? "지난 30일" : "Previous 30 days" };
-  return { key: "older", label: locale === "ko" ? "그 이전" : "Older" };
-}
-
-/** 30일 넘게 손대지 않은 대화. 사용자가 직접 정리하게 만들지 않고 접어서 제안한다. */
-function isDormantSession(iso: string): boolean {
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return false;
-  return Date.now() - then > 30 * 86_400_000;
+function isOneOwnedSession(chat: Chat, taskforces: OneTaskforce[]): boolean {
+  if (chat.seatKind === "group" || taskforces.some((taskforce) => taskforce.chatId === chat.id)) return false;
+  const agentId = chat.agentId?.trim() || "";
+  return chat.seatId === "seat_one" || agentId === "one" || agentId === "builtin-agentlas-one";
 }
 
 function rememberLastOneConversation(chatId: string | null): void {
@@ -2795,29 +2780,25 @@ export function OneShell() {
       rows.push({ kind: "task" as const, key: `task:${item.taskId}`, task: item, chat: null, sortAt: item.status.asOf });
     }
     rows.sort((a, b) => String(b.sortAt).localeCompare(String(a.sortAt)));
-    const fresh = rows.filter((row) => !(row.chat && isDormantSession(row.chat.updatedAt)));
-    /*
-     * 날짜 버킷(오늘/어제/지난 7일…) 복원 — f3d2be29 가 분할 보기 작업에 딸려
-     * 언급 없이 걷어낸 미기록 회귀(감사 2026-08-25 F-inv, 웹과 패리티).
-     * 합쳐진 단일 목록(작업 줄 없음, 오너 결정 2026-08-24)은 그대로 두고,
-     * 그 목록을 시간 덩어리로만 묶는다.
-     */
-    const order = ["today", "yesterday", "week", "month", "older"];
-    const buckets = new Map<string, { key: string; label: string; rows: OneSessionRow[] }>();
-    for (const row of fresh) {
-      const bucket = sessionBucket(String(row.sortAt), appLocale);
-      const existing = buckets.get(bucket.key);
-      if (existing) existing.rows.push(row);
-      else buckets.set(bucket.key, { ...bucket, rows: [row] });
-    }
-    return {
-      rows: fresh,
-      groups: order
-        .map((key) => buckets.get(key))
-        .filter((group): group is { key: string; label: string; rows: OneSessionRow[] } => Boolean(group)),
-      dormant: conversations.filter((chat) => isDormantSession(chat.updatedAt)),
-    };
-  }, [conversations, projections, appLocale]);
+    return { rows };
+  }, [conversations, projections]);
+  const hasOtherSessionAttention = useMemo(() => {
+    const pendingChatIds = new Set(
+      confirmations
+        .filter((item) => !isPendingConfirmationSnoozed(item))
+        .map((item) => item.chatId),
+    );
+    const orgMembers = oneOrgState?.members ?? [];
+    return sessionGroups.rows.some((row) => {
+      if (row.chat?.id === activeThreadChatId || row.task?.taskId === selectedTaskId) return false;
+      if (row.task && ["decision_required", "failed", "stopped"].includes(row.task.status.value)) return true;
+      if (!row.chat) return false;
+      if (pendingChatIds.has(row.chat.id)) return true;
+      if (orgMembers.some((member) => member.unreadCount > 0 && member.installedAgentId === row.chat?.agentId)) return true;
+      const taskforce = taskforces.find((item) => item.chatId === row.chat?.id);
+      return Boolean(taskforce?.memberAgentIds.some((agentId) => orgMembers.some((member) => member.unreadCount > 0 && member.installedAgentId === agentId)));
+    });
+  }, [activeThreadChatId, confirmations, oneOrgState, selectedTaskId, sessionGroups.rows, taskforces]);
   const activeThreadPromptFallback = selected?.display.title ?? conversation?.title ?? "";
   const activeTaskforce = useMemo(
     () => taskforces.find((taskforce) => taskforce.chatId === activeThreadChatId) ?? null,
@@ -2926,6 +2907,11 @@ export function OneShell() {
     if (!activeThreadChat || activeThreadChat.originSurface !== "one") return null;
     return oneOrgState?.members.find((member) => member.installedAgentId === activeThreadChat.agentId) ?? null;
   }, [activeThreadChat, oneOrgState?.members]);
+  const activeOneSelected = Boolean(
+    activeThreadChat
+      && activeThreadChat.originSurface === "one"
+      && isOneOwnedSession(activeThreadChat, taskforces),
+  );
 
   useEffect(() => {
     const api = ipc();
@@ -4946,10 +4932,29 @@ export function OneShell() {
     setSearchOpen(false);
     selectedTaskIdRef.current = null;
     selectedConversationIdRef.current = chatId;
+    const nextConversation = conversations.find((chat) => chat.id === chatId) ?? null;
+    if (nextConversation) {
+      setSelected(null);
+      setConversation(nextConversation);
+      setActiveThreadChat(nextConversation);
+      setMessages([]);
+      setReceipt(null);
+    }
     rememberLastOneConversation(chatId);
     router.replace(`/one?chat=${encodeURIComponent(chatId)}`);
     void refreshAll({ includeOrg: false });
-  }, [refreshAll, router]);
+  }, [conversations, refreshAll, router]);
+
+  const openLatestOneSession = useCallback(() => {
+    const latest = conversations
+      .filter((chat) => isOneOwnedSession(chat, taskforces))
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+    if (latest) {
+      openConversation(latest.id);
+      return;
+    }
+    startNewConversation();
+  }, [conversations, openConversation, startNewConversation, taskforces]);
 
 
   /*
@@ -4980,13 +4985,8 @@ export function OneShell() {
     })();
   }, [selectedConversationId, selectedTaskId, openConversation]);
   const openTaskforce = useCallback((taskforce: OneTaskforce) => {
-    setRailOpen(false);
-    setSearchOpen(false);
-    selectedTaskIdRef.current = null;
-    selectedConversationIdRef.current = taskforce.chatId;
-    router.replace(`/one?chat=${encodeURIComponent(taskforce.chatId)}`);
-    void refreshAll({ includeOrg: false });
-  }, [refreshAll, router]);
+    openConversation(taskforce.chatId);
+  }, [openConversation]);
 
   const createTaskforce = useCallback(async (input: { title: string; description: string; memberAgentIds: string[] }) => {
     const api = ipc();
@@ -5864,7 +5864,14 @@ export function OneShell() {
                 조직도로 차 있으므로 탭으로 나누되, 나가지 않고 한 화면 안에 남긴다. */}
             <div className={styles.railTabs} role="tablist" aria-label={appLocale === "ko" ? "레일 보기" : "Rail view"}>
               <button type="button" role="tab" aria-selected={railMode === "organisation"} data-active={railMode === "organisation" ? "true" : "false"} onClick={() => setRailMode("organisation")}>{appLocale === "ko" ? "조직" : "Team"}</button>
-              <button type="button" role="tab" aria-selected={railMode === "sessions"} data-active={railMode === "sessions" ? "true" : "false"} onClick={() => setRailMode("sessions")}>{appLocale === "ko" ? "세션" : "Sessions"}</button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={railMode === "sessions"}
+                aria-label={hasOtherSessionAttention ? (appLocale === "ko" ? "세션 · 다른 세션에 알림 있음" : "Sessions · another session needs attention") : undefined}
+                data-active={railMode === "sessions" ? "true" : "false"}
+                onClick={() => setRailMode("sessions")}
+              ><span className={styles.railTabLabel}>{appLocale === "ko" ? "세션" : "Sessions"}{hasOtherSessionAttention && <span className={styles.railTabAlertDot} aria-hidden="true" />}</span></button>
             </div>
             {railMode === "organisation" ? <>
             <OneTaskforceRail
@@ -5904,7 +5911,7 @@ export function OneShell() {
               onReorder={reorderOneOrg}
               onFailure={openOneFailure}
               onOpenMember={openOneMember}
-              onOpenOne={startNewConversation}
+              onOpenOne={openLatestOneSession}
               onEditOne={() => {
                 // One 도 팀원과 같은 창에서 고친다. "지킬 것" 목록만 기존 프로필 창에 남는다.
                 setMemoryOpen(false);
@@ -5933,6 +5940,7 @@ export function OneShell() {
                 setCreateAgentOpen(true);
               }}
               sheetRequest={orgSheetRequest ?? undefined}
+              activeOne={activeOneSelected}
               activeMemberId={activeOneMember?.installedAgentId ?? null}
               activeTaskForceIds={turnAgentIds}
               installedPlugins={installedPlugins}
@@ -5959,50 +5967,25 @@ export function OneShell() {
               <button type="button" className={styles.railPrimaryButton} onClick={startNewConversation}><span aria-hidden="true"><IconPlus size={13} /></span>{tFor(appLocale, "one.shell.rail.new_conversation")}</button>
               <button ref={searchTriggerRef} type="button" className={styles.railPrimaryButton} onClick={() => setSearchOpen(true)}><span aria-hidden="true"><IconSearch size={13} /></span>{tFor(appLocale, "one.shell.rail.search_all")}</button>
             </div>
-            {sessionGroups.rows.length === 0 && sessionGroups.dormant.length === 0 && (
+            {sessionGroups.rows.length === 0 && (
               <div className={styles.railEmpty}>{appLocale === "ko" ? "아직 대화가 없어요. 위에서 새 대화를 시작하세요." : "No conversations yet. Start one above."}</div>
             )}
-            {/* 합쳐진 한 목록(작업 줄 없음, 오너 결정 2026-08-24)을 시간 덩어리로 묶는다 —
-                날짜 버킷은 f3d2be29 가 언급 없이 걷어낸 미기록 회귀의 복원(웹 패리티). */}
-            {sessionGroups.groups.map((group) => (
-              <Fragment key={group.key}>
-                <div className={styles.railTop}><strong>{group.label}</strong></div>
-                <div className={styles.railList}>
-                  {group.rows.map((row) => (row.chat ? (
-                    <ConversationListButton
-                      key={row.key}
-                      item={row.chat}
-                      active={row.chat.id === selectedConversationId || (row.task ? row.task.taskId === selectedTaskId : false)}
-                      locale={appLocale}
-                      onOpen={openConversation}
-                      onRemove={removeConversation}
-                      seatLabel={seatLabelForChat(row.chat, taskforces, oneOrgState, appLocale)}
-                      running={activeChatIds.includes(row.chat.id)}
-                    />
-                  ) : row.task ? (
-                    <TaskListButton key={row.key} item={row.task} active={row.task.taskId === selectedTaskId} locale={appLocale} onOpen={openTask} />
-                  ) : null))}
-                </div>
-              </Fragment>
-            ))}
-            {sessionGroups.dormant.length > 0 && (
-              <details className={styles.railDormant}>
-                <summary>{appLocale === "ko" ? `30일 넘게 안 쓴 대화 ${sessionGroups.dormant.length}개` : `${sessionGroups.dormant.length} untouched for over 30 days`}</summary>
-                <div className={styles.railList}>
-                  {sessionGroups.dormant.map((item) => (
-                    <ConversationListButton
-                      key={item.id}
-                      item={item}
-                      active={item.id === selectedConversationId}
-                      locale={appLocale}
-                      onOpen={openConversation}
-                      onRemove={removeConversation}
-                      seatLabel={seatLabelForChat(item, taskforces, oneOrgState, appLocale)}
-                    />
-                  ))}
-                </div>
-              </details>
-            )}
+            <div className={styles.railList} data-one-session-list="latest-first">
+              {sessionGroups.rows.map((row) => (row.chat ? (
+                <ConversationListButton
+                  key={row.key}
+                  item={row.chat}
+                  active={row.chat.id === selectedConversationId || (row.task ? row.task.taskId === selectedTaskId : false)}
+                  locale={appLocale}
+                  onOpen={openConversation}
+                  onRemove={removeConversation}
+                  seatLabel={seatLabelForChat(row.chat, taskforces, oneOrgState, appLocale)}
+                  running={activeChatIds.includes(row.chat.id)}
+                />
+              ) : row.task ? (
+                <TaskListButton key={row.key} item={row.task} active={row.task.taskId === selectedTaskId} locale={appLocale} onOpen={openTask} />
+              ) : null))}
+            </div>
             </>}
             {selected && <nav className={`${styles.railUtilities} ${styles.railTaskActions}`} aria-label={tFor(appLocale, "one.shell.rail.manage_task_aria")}>
               <button type="button" disabled={archiveMutationTaskId === selected.taskId || Boolean(selected.chatId && activeChatIds.includes(selected.chatId))} onClick={() => void mutateTaskArchive(selected.taskId, selected.canonicalStatus === "archived" ? "restore" : "archive")}>{selected.canonicalStatus === "archived" ? tFor(appLocale, "one.shell.rail.restore_from_archive") : tFor(appLocale, "one.shell.rail.archive_this_work")}</button>
