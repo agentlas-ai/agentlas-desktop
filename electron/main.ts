@@ -565,9 +565,34 @@ function stopOneBriefingScheduler(): void {
 }
 
 const allowMultiInstance = process.env.AGENTLAS_ALLOW_MULTI_INSTANCE === "1";
+const isPackagedUpdateRelaunch = app.isPackaged && process.argv.includes("--updated");
+const UPDATE_RELAUNCH_LOCK_RETRY_MS = 250;
+const UPDATE_RELAUNCH_LOCK_TIMEOUT_MS = 60_000;
 traceUpdaterStartup("before-single-instance-lock");
-const singleInstanceLock = allowMultiInstance || app.requestSingleInstanceLock();
-if (!singleInstanceLock) {
+const initialSingleInstanceLock = allowMultiInstance || app.requestSingleInstanceLock();
+const singleInstanceLockPromise = initialSingleInstanceLock
+  ? Promise.resolve(true)
+  : !isPackagedUpdateRelaunch
+    ? Promise.resolve(false)
+    : new Promise<boolean>((resolve) => {
+      const deadline = Date.now() + UPDATE_RELAUNCH_LOCK_TIMEOUT_MS;
+      traceUpdaterStartup("single-instance-lock-waiting");
+      const retry = (): void => {
+        if (app.requestSingleInstanceLock()) {
+          traceUpdaterStartup("single-instance-lock-acquired-after-retry");
+          resolve(true);
+          return;
+        }
+        if (Date.now() >= deadline) {
+          traceUpdaterStartup("single-instance-lock-retry-exhausted");
+          resolve(false);
+          return;
+        }
+        setTimeout(retry, UPDATE_RELAUNCH_LOCK_RETRY_MS).unref();
+      };
+      setTimeout(retry, UPDATE_RELAUNCH_LOCK_RETRY_MS).unref();
+    });
+if (!initialSingleInstanceLock && !isPackagedUpdateRelaunch) {
   // Exiting silently is right only when a live first instance takes over and
   // raises its window. When the lock is held by a dead process or by a
   // different build of the app, nothing appears and nothing is written
@@ -581,7 +606,7 @@ if (!singleInstanceLock) {
   traceUpdaterStartup("single-instance-lock-denied");
   app.exit(0);
 }
-if (singleInstanceLock) traceUpdaterStartup("single-instance-lock-acquired");
+if (initialSingleInstanceLock) traceUpdaterStartup("single-instance-lock-acquired");
 
 /*
  * ── agentlas:// 딥링크 ────────────────────────────────────────────────────────
@@ -1042,6 +1067,17 @@ app.on("will-quit", (event) => {
 let startupStage = "before-ready";
 
 app.whenReady().then(async () => {
+  // Native installers can launch the replacement before the old process has
+  // released Electron's single-instance lock. Do not run migrations, updater
+  // reconciliation, or window startup until the replacement owns that lock.
+  // A failed handoff exits explicitly after the bounded retry instead of
+  // leaving a live target PID with an install journal that can never clear.
+  if (!await singleInstanceLockPromise) {
+    console.error("[agentlas] packaged update relaunch could not acquire the single-instance lock");
+    app.exit(0);
+    return;
+  }
+  if (!initialSingleInstanceLock) traceUpdaterStartup("single-instance-lock-ready");
   traceUpdaterStartup("ready-callback-entered");
   // Before any other stage: a packaged app discards console output, so start
   // mirroring it to the platform log directory first. Updater and mobile-bridge
