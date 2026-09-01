@@ -52,6 +52,12 @@ const DEFAULT_BASELINE_REF = "v0.8.32";
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MIN_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 240_000;
+// The native handoff timeout covers the target process starting and clearing
+// the durable journal, not just the installer returning. Large AppImages and
+// per-user NSIS installs can spend several minutes materializing the new
+// runtime before Electron reaches its first JavaScript log line. Keep that
+// allowance bounded and separate from the shorter HTTP/bridge waits.
+const NATIVE_RELAUNCH_TIMEOUT_MS = 10 * 60_000;
 const BASELINE_DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
 const JOURNAL_NAME = "install-journal.v1.json";
 const APP_NAME = "Agentlas";
@@ -1205,7 +1211,11 @@ async function runWindowsE2E({ baselineInstaller, feedUrl, feed, isolation, opti
     assertOfficialGithubUpdateConfig(installedAppUpdateYml);
     await waitUntil(
       () => !fs.existsSync(expectedJournal),
-      { intervalMs: 250, label: "target relaunch journal reconciliation", timeoutMs: options.timeoutMs },
+      {
+        intervalMs: 250,
+        label: "target relaunch journal reconciliation",
+        timeoutMs: Math.max(options.timeoutMs, NATIVE_RELAUNCH_TIMEOUT_MS),
+      },
     );
     assertFeedAndPayloadRequested(feed);
     log(`Windows native install passed: ${options.baselineVersion} exited, ${options.targetVersion} replaced the install, and target relaunch cleared its journal`);
@@ -1279,7 +1289,11 @@ async function runLinuxE2E({ baselineAppImage, feedUrl, feed, isolation, options
     assertOfficialGithubUpdateConfig(path.join(targetExtract, "resources", "app-update.yml"));
     await waitUntil(
       () => !fs.existsSync(expectedJournal),
-      { intervalMs: 250, label: "target relaunch journal reconciliation", timeoutMs: options.timeoutMs },
+      {
+        intervalMs: 250,
+        label: "target relaunch journal reconciliation",
+        timeoutMs: Math.max(options.timeoutMs, NATIVE_RELAUNCH_TIMEOUT_MS),
+      },
     );
     assertFeedAndPayloadRequested(feed);
     log(`Linux native install passed: ${options.baselineVersion} exited, ${options.targetVersion} replaced the AppImage, target PID ${relaunchedTarget.pid} started, and target relaunch cleared its journal`);
