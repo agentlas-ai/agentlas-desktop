@@ -1058,6 +1058,11 @@ const automaticQuitInstaller = createAutomaticQuitInstaller({
 });
 electronAutoUpdater.on("before-quit-for-update", () => {
   automaticQuitInstaller.authorizeNativeQuit();
+  // The replacement can be launched by NSIS/AppImageUpdater before this
+  // process has fully exited. Hand over the lock only after the native updater
+  // has committed to quitting, so the replacement can enter startup and clear
+  // the durable journal instead of waiting behind a dying process.
+  if (!allowMultiInstance) app.releaseSingleInstanceLock();
 });
 app.on("will-quit", (event) => {
   // electron-updater's raw auto-install-on-quit path is intentionally disabled:
