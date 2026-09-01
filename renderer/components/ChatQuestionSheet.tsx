@@ -130,10 +130,10 @@ export function ChatQuestionSheet({
         otherInputRef.current?.focus();
         return;
       }
-    }
-    if (e.key === "Enter") {
-      e.preventDefault();
-      if (currentAnswered || (isLast && hasAnyAnswer)) next();
+      if (e.key === "Enter") {
+        e.preventDefault();
+        if (currentAnswered || (isLast && hasAnyAnswer)) next();
+      }
     }
   };
 
