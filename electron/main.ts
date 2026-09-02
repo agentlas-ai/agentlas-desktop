@@ -259,6 +259,25 @@ function traceUpdaterStartup(stage: string): void {
   }
 }
 
+// AppImage's extract-and-run runtime can preserve the launching process's
+// APPIMAGE value while executing a renamed replacement. The replacement's
+// absolute AppImage argument is still authoritative; repair the environment
+// before updater initialization so future checks and installs address the live
+// payload instead of the deleted baseline file.
+function repairLinuxAppImageEnvironment(): void {
+  if (process.platform !== "linux" || !app.isPackaged) return;
+  const launchedAppImage = process.argv.find((value) => (
+    path.isAbsolute(value)
+    && /\.AppImage$/i.test(value)
+    && fs.existsSync(value)
+  ));
+  if (!launchedAppImage) return;
+  const resolved = path.resolve(launchedAppImage);
+  if (process.env.APPIMAGE !== resolved) process.env.APPIMAGE = resolved;
+}
+
+repairLinuxAppImageEnvironment();
+
 traceUpdaterStartup("module-loaded");
 
 function broadcastAuthSession(sessionSnapshot: ReturnType<typeof getAuthSession>): void {
