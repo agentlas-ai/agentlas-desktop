@@ -266,7 +266,13 @@ function traceUpdaterStartup(stage: string): void {
 // payload instead of the deleted baseline file.
 function repairLinuxAppImageEnvironment(): void {
   if (process.platform !== "linux" || !app.isPackaged) return;
-  const launchedAppImage = process.argv.find((value) => (
+  const candidates = [...process.argv];
+  try {
+    candidates.push(...fs.readFileSync("/proc/self/cmdline", "utf8").split("\0"));
+  } catch {
+    // Some Linux environments hide procfs; process.argv remains sufficient.
+  }
+  const launchedAppImage = candidates.find((value) => (
     path.isAbsolute(value)
     && /\.AppImage$/i.test(value)
     && fs.existsSync(value)
