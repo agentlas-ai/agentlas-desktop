@@ -611,9 +611,7 @@ traceUpdaterStartup("before-single-instance-lock");
 const initialSingleInstanceLock = allowMultiInstance || app.requestSingleInstanceLock();
 const singleInstanceLockPromise = initialSingleInstanceLock
   ? Promise.resolve(true)
-  : !isPackagedUpdateRelaunch
-    ? Promise.resolve(false)
-    : new Promise<boolean>((resolve) => {
+  : new Promise<boolean>((resolve) => {
       const deadline = Date.now() + UPDATE_RELAUNCH_LOCK_TIMEOUT_MS;
       traceUpdaterStartup("single-instance-lock-waiting");
       const retry = (): void => {
@@ -634,20 +632,6 @@ const singleInstanceLockPromise = initialSingleInstanceLock
       };
       setTimeout(retry, UPDATE_RELAUNCH_LOCK_RETRY_MS);
     });
-if (!initialSingleInstanceLock && !isPackagedUpdateRelaunch) {
-  // Exiting silently is right only when a live first instance takes over and
-  // raises its window. When the lock is held by a dead process or by a
-  // different build of the app, nothing appears and nothing is written
-  // anywhere: launching the app looks like it did nothing at all, and the
-  // exit code says success. Say why, on stderr and in the log.
-  const notice =
-    "Agentlas is already running; handing this launch to the existing window. " +
-    "If no window appears, quit the running copy (or run with " +
-    "AGENTLAS_ALLOW_MULTI_INSTANCE=1) and try again.";
-  console.error(`[agentlas] ${notice}`);
-  traceUpdaterStartup("single-instance-lock-denied");
-  app.exit(0);
-}
 if (initialSingleInstanceLock) traceUpdaterStartup("single-instance-lock-acquired");
 
 /*
