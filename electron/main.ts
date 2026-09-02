@@ -608,7 +608,12 @@ const isPackagedUpdateRelaunch = app.isPackaged && (
 const UPDATE_RELAUNCH_LOCK_RETRY_MS = 250;
 const UPDATE_RELAUNCH_LOCK_TIMEOUT_MS = 60_000;
 traceUpdaterStartup("before-single-instance-lock");
-const initialSingleInstanceLock = allowMultiInstance || app.requestSingleInstanceLock();
+// Electron documents a failed request as a terminal second-instance path: the
+// process should exit rather than call requestSingleInstanceLock repeatedly.
+// Native update installers already serialize replacement and launch the target
+// after the old executable has quit; asking for the old lock again here can
+// leave the replacement stranded forever with its journal in place.
+const initialSingleInstanceLock = allowMultiInstance || isPackagedUpdateRelaunch || app.requestSingleInstanceLock();
 const singleInstanceLockPromise = initialSingleInstanceLock
   ? Promise.resolve(true)
   : new Promise<boolean>((resolve) => {
