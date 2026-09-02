@@ -80,7 +80,10 @@ export function selectPreviousStableReleases(releases, candidateVersion, history
   for (const release of releases) {
     if (!release || release.isDraft === true || release.isPrerelease === true) continue;
     const parsed = parseStableVersion(release.tagName);
-    if (!parsed) fail("stable-release-version-invalid", "previous-release-history");
+    // The public releases repository also contains product-extension releases
+    // such as `science-v0.1.0`. They are intentionally outside Desktop's
+    // stable update lineage and must not invalidate an otherwise valid history.
+    if (!parsed) continue;
     const matches = stableByVersion.get(parsed.version) || [];
     matches.push({ tag: `v${parsed.version}`, version: parsed.version });
     stableByVersion.set(parsed.version, matches);
