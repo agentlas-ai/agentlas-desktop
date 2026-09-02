@@ -589,7 +589,11 @@ const allowMultiInstance = process.env.AGENTLAS_ALLOW_MULTI_INSTANCE === "1";
 // exits on the old instance's still-releasing lock, leaving the install journal
 // behind even though the replacement payload is present.
 const isPackagedUpdateRelaunch = app.isPackaged && (
-  process.argv.includes("--updated") || process.env.AGENTLAS_UPDATE_RELAUNCH === "1"
+  process.argv.includes("--updated")
+  || process.env.AGENTLAS_UPDATE_RELAUNCH === "1"
+  // AppImageUpdater always supplies this to the detached replacement, while
+  // its launcher does not preserve an argv update marker.
+  || process.env.APPIMAGE_SILENT_INSTALL === "true"
 );
 const UPDATE_RELAUNCH_LOCK_RETRY_MS = 250;
 const UPDATE_RELAUNCH_LOCK_TIMEOUT_MS = 60_000;
