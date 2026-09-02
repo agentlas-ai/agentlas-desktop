@@ -1340,6 +1340,16 @@ app.whenReady().then(async () => {
   }
   startupStage = "store-ready";
   traceStartup("store-ready");
+  // A native update target must reconcile its durable install journal before
+  // optional keychain/session restoration. On a locked or headless machine
+  // that restoration can be slow, while the update handoff is already
+  // complete and is waiting only for this cleanup. Ordinary launches keep
+  // the existing ordering and still restore auth before updater checks.
+  if (installIdentity.updatesEnabled && isPackagedUpdateRelaunch) {
+    traceUpdaterStartup("early-updater-reconcile-started");
+    await initAutoUpdater();
+    traceUpdaterStartup("early-updater-reconcile-complete");
+  }
   try {
     reconcileOneHubDerivativeDraftStorage();
   } catch (error) {
