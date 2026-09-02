@@ -1980,6 +1980,10 @@ export class DesktopUpdaterController {
         // Windows updates must reuse the existing installation without opening
         // the NSIS setup wizard. The second flag relaunches Agentlas afterward.
         this.nativeInstallHandedOff = true;
+        // AppImageUpdater launches the replacement with no argv marker. The
+        // inherited environment lets main.ts apply the same bounded lock retry
+        // used by NSIS, so a normal handoff race cannot strand the journal.
+        process.env.AGENTLAS_UPDATE_RELAUNCH = "1";
         this.deps.updater.quitAndInstall(true, true);
         if (this.state.status !== "installing") {
           return { accepted: false, state: this.state };

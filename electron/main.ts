@@ -582,7 +582,15 @@ function stopOneBriefingScheduler(): void {
 }
 
 const allowMultiInstance = process.env.AGENTLAS_ALLOW_MULTI_INSTANCE === "1";
-const isPackagedUpdateRelaunch = app.isPackaged && process.argv.includes("--updated");
+// electron-updater's AppImageUpdater relaunches the replacement without an
+// argv marker. Carry the handoff through the inherited environment so the
+// replacement also gets the bounded single-instance-lock retry. Without this,
+// Linux can start Chromium helper processes while the Electron main process
+// exits on the old instance's still-releasing lock, leaving the install journal
+// behind even though the replacement payload is present.
+const isPackagedUpdateRelaunch = app.isPackaged && (
+  process.argv.includes("--updated") || process.env.AGENTLAS_UPDATE_RELAUNCH === "1"
+);
 const UPDATE_RELAUNCH_LOCK_RETRY_MS = 250;
 const UPDATE_RELAUNCH_LOCK_TIMEOUT_MS = 60_000;
 traceUpdaterStartup("before-single-instance-lock");
