@@ -173,13 +173,13 @@ export function scienceSuiteStatus(): ScienceSuiteStatus {
     packageBytes: spec.archiveBytes,
     status: installer().status(spec.id),
   }));
-  const installed = components.every((component) => component.status.phase === "installed");
-  const enabled = components.every((component) => component.status.enabled);
-  const phase = installed
-    ? "installed"
-    : components.some((component) => component.status.phase === "repair-required")
-      ? "repair-required"
-      : components.some((component) => component.status.phase === "disabled")
+  const installed = components.every((component) => component.status.installed);
+  const enabled = installed && components.every((component) => component.status.enabled);
+  const phase = components.some((component) => component.status.phase === "repair-required")
+    ? "repair-required"
+    : installed && enabled
+      ? "installed"
+      : installed
         ? "disabled"
         : "not-installed";
   return {

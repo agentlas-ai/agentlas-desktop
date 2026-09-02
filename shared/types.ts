@@ -4669,6 +4669,8 @@ export type ExperiencePackCreateIpcInput = Omit<
 export interface AuthSession {
   /** 로그인되어 있으면 true */
   signedIn: boolean;
+  /** Renderer preference scoping only. Opaque digest; never a raw user id. */
+  accountFingerprint?: string;
   email?: string;
   name?: string;
   workspaceId?: string;

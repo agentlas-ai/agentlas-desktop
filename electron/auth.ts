@@ -19,6 +19,7 @@
 //   - 성공 redirect 형태: /account?auth=google (POST /api/auth/google 응답의 redirectTo)
 //   - 사용자 메타(email, name) 조회 endpoint: /api/account/me (없으면 cookie payload만 표시)
 import { app, BrowserWindow, safeStorage, session as electronSession, shell } from "electron";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
@@ -30,6 +31,15 @@ const AUTH_PARTITION = "persist:agentlas-auth";
 const USE_MEMORY_AUTH = process.env.AGENTLAS_E2E === "1" && process.env.AGENTLAS_E2E_KEYCHAIN !== "1";
 const USE_E2E_SESSION = USE_MEMORY_AUTH && process.env.AGENTLAS_E2E_AUTH === "1";
 let memoryAuthCookie: string | null = null;
+
+function rendererAccountFingerprint(userId: string | undefined): string | undefined {
+  if (!userId) return undefined;
+  return createHash("sha256")
+    .update("agentlas-renderer-account-v1\0")
+    .update(userId)
+    .digest("hex")
+    .slice(0, 24);
+}
 
 export function webBaseUrl(): string {
   const fromEnv = process.env.AGENTLAS_WEB_BASE_URL?.trim();
@@ -568,6 +578,7 @@ export function getAuthSession(): AuthSession {
   if (USE_E2E_SESSION && !_cache) {
     return {
       signedIn: true,
+      accountFingerprint: rendererAccountFingerprint("agentlas-e2e"),
       email: "e2e@agentlas.local",
       name: "Agentlas E2E",
       workspaceId: "e2e",
@@ -581,6 +592,7 @@ export function getAuthSession(): AuthSession {
   scheduleMetaRefresh();
   return {
     signedIn: true,
+    accountFingerprint: rendererAccountFingerprint(_cache.userId),
     email: _cache.email,
     name: _cache.name,
     workspaceId: _cache.workspaceId,

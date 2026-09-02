@@ -40,6 +40,7 @@ import {
   IconSidebar,
 } from "./Icon";
 import type { MarketplaceListing } from "@/lib/types";
+import type { ScienceSuiteStatus } from "@shared/product-extension";
 import type { ComponentType } from "react";
 
 type IconType = ComponentType<{ size?: number }>;
@@ -83,7 +84,8 @@ export function SideNav({
   const [searchSuggestions, setSearchSuggestions] = useState<MarketplaceListing[]>([]);
   const [searchSuggestionQuery, setSearchSuggestionQuery] = useState("");
   const [searchActiveIndex, setSearchActiveIndex] = useState(0);
-  const [scienceReady, setScienceReady] = useState(false);
+  const [scienceSuite, setScienceSuite] = useState<ScienceSuiteStatus | null>(null);
+  const scienceReady = Boolean(scienceSuite?.installed && scienceSuite.enabled);
   const searchGenerationRef = useRef(0);
   // 텔레그램 항목은 이동이 아니라 팝업이라, 활성 표시가 pathname 이 아니라 팝업 상태를 따른다.
   const telegramOneDialogOpen = useSyncExternalStore(
@@ -104,9 +106,9 @@ export function SideNav({
     let disposed = false;
     const sync = () => {
       void ipc()?.productExtensions?.scienceSuiteStatus?.().then((status) => {
-        if (!disposed) setScienceReady(status.installed && status.enabled);
+        if (!disposed) setScienceSuite(status);
       }).catch(() => {
-        if (!disposed) setScienceReady(false);
+        if (!disposed) setScienceSuite(null);
       });
     };
     sync();
@@ -509,14 +511,18 @@ export function SideNav({
 
         <div className="sidenav-divider" />
 
-        {(scienceReady || SCIENCE_INSTALL_DISCOVERY_ENABLED) && <button
+        {(scienceReady || (SCIENCE_INSTALL_DISCOVERY_ENABLED && scienceSuite !== null)) && <button
           type="button"
           className="sidenav-science-entry"
           data-ready={scienceReady ? "true" : "false"}
-          onClick={requestScienceInstall}
+          onClick={() => scienceReady ? navigate("/science") : requestScienceInstall()}
           aria-label={scienceReady
             ? (locale === "ko" ? "Agentlas Science 열기" : "Open Agentlas Science")
-            : (locale === "ko" ? "Agentlas Science 다운로드" : "Download Agentlas Science")}
+            : scienceSuite?.phase === "repair-required"
+              ? (locale === "ko" ? "Agentlas Science 복구" : "Repair Agentlas Science")
+              : scienceSuite?.installed
+                ? (locale === "ko" ? "Agentlas Science 켜기" : "Enable Agentlas Science")
+                : (locale === "ko" ? "Agentlas Science 다운로드" : "Download Agentlas Science")}
         >
           <span className="sidenav-science-mark" aria-hidden="true">
             <img src="/brand/agentlas-mark.png" alt="" />
@@ -524,12 +530,24 @@ export function SideNav({
           {!collapsed && (
             <span className="sidenav-science-copy" aria-hidden="true">
               <strong>Agentlas Science</strong>
-              <span>{scienceReady ? (locale === "ko" ? "열기" : "Open") : "Download"}</span>
+              <span>{scienceReady
+                ? (locale === "ko" ? "열기" : "Open")
+                : scienceSuite?.phase === "repair-required"
+                  ? (locale === "ko" ? "복구" : "Repair")
+                  : scienceSuite?.installed
+                    ? (locale === "ko" ? "켜기" : "Enable")
+                    : "Download"}</span>
             </span>
           )}
           {collapsed && (
             <span className="sidenav-tooltip">
-              {scienceReady ? (locale === "ko" ? "Science 열기" : "Open Science") : (locale === "ko" ? "Science 다운로드" : "Download Science")}
+              {scienceReady
+                ? (locale === "ko" ? "Science 열기" : "Open Science")
+                : scienceSuite?.phase === "repair-required"
+                  ? (locale === "ko" ? "Science 복구" : "Repair Science")
+                  : scienceSuite?.installed
+                    ? (locale === "ko" ? "Science 켜기" : "Enable Science")
+                    : (locale === "ko" ? "Science 다운로드" : "Download Science")}
             </span>
           )}
         </button>}

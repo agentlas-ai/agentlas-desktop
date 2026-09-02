@@ -34,6 +34,7 @@ export function ProductModeMenu({
   const [open, setOpen] = useState(false);
   const [oneHref, setOneHref] = useState("/one");
   const [scienceAvailable, setScienceAvailable] = useState(current === "science");
+  const [scienceInstalled, setScienceInstalled] = useState(current === "science");
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   useDismissibleLayer({
@@ -56,16 +57,28 @@ export function ProductModeMenu({
     const api = ipc();
     if (api?.productExtensions) {
       void api.productExtensions.scienceSuiteStatus().then((status) => {
-        if (!disposed) setScienceAvailable(status.installed && status.enabled && status.phase === "installed");
+        if (!disposed) {
+          setScienceInstalled(status.installed);
+          setScienceAvailable(status.installed && status.enabled && status.phase === "installed");
+        }
       }).catch(() => {
-        if (!disposed && current !== "science") setScienceAvailable(false);
+        if (!disposed && current !== "science") {
+          setScienceInstalled(false);
+          setScienceAvailable(false);
+        }
       });
     }
     const off = ipcEvents()?.onProductExtensionChanged?.(() => {
       void api?.productExtensions?.scienceSuiteStatus?.().then((status) => {
-        if (!disposed) setScienceAvailable(status.installed && status.enabled && status.phase === "installed");
+        if (!disposed) {
+          setScienceInstalled(status.installed);
+          setScienceAvailable(status.installed && status.enabled && status.phase === "installed");
+        }
       }).catch(() => {
-        if (!disposed && current !== "science") setScienceAvailable(false);
+        if (!disposed && current !== "science") {
+          setScienceInstalled(false);
+          setScienceAvailable(false);
+        }
       });
     });
     return () => {
@@ -139,7 +152,9 @@ export function ProductModeMenu({
               <strong>Science</strong>
               <small>{scienceAvailable || current === "science"
                 ? tFor(activeLocale, "one.mode.science_sub")
-                : activeLocale === "ko" ? "다운로드 필요" : "Download required"}</small>
+                : scienceInstalled
+                  ? (activeLocale === "ko" ? "켜기 필요" : "Enable required")
+                  : (activeLocale === "ko" ? "다운로드 필요" : "Download required")}</small>
             </span>
             {current === "science" && <span className={styles.check} aria-label={tFor(activeLocale, "one.mode.current_aria")}>✓</span>}
           </button>}
