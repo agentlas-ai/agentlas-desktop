@@ -1,10 +1,21 @@
 import { createHash } from "node:crypto";
-import sharp from "sharp";
 
 import {
   validateScienceNumericSurfacePngExport,
   type ScienceNumericSurfacePngExport,
 } from "../../shared/science-numeric-3d";
+
+type SharpModule = typeof import("sharp").default;
+let sharpModulePromise: Promise<SharpModule> | null = null;
+
+async function getSharp(): Promise<SharpModule> {
+  if (!sharpModulePromise) {
+    // This native dependency is needed only while validating a Science PNG;
+    // loading it during Electron startup can strand native updater relaunches.
+    sharpModulePromise = import("sharp").then((module) => module.default);
+  }
+  return sharpModulePromise;
+}
 
 function sha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
@@ -21,6 +32,7 @@ export async function validateScienceNumericSurfacePngBytes(
   pngValue: Uint8Array,
   readbackValue: Uint8Array,
 ): Promise<{ rendered: ScienceNumericSurfacePngExport; png: Buffer; readbackRgba: Buffer }> {
+  const sharp = await getSharp();
   const rendered = validateScienceNumericSurfacePngExport(value);
   const png = Buffer.from(pngValue);
   const readbackRgba = Buffer.from(readbackValue);

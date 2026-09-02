@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import { deflateSync } from "node:zlib";
-import sharp from "sharp";
 
 import {
   SCIENCE_STATISTICS_FIGURE_RENDERER_VERSION,
@@ -114,6 +113,20 @@ interface VegaModuleLike {
   View: new (runtime: unknown, options: { renderer: "none" }) => VegaViewLike;
 }
 
+type SharpModule = typeof import("sharp").default;
+let sharpModulePromise: Promise<SharpModule> | null = null;
+
+async function getSharp(): Promise<SharpModule> {
+  if (!sharpModulePromise) {
+    // sharp loads a platform-native image pipeline. Keep it out of the
+    // Electron entrypoint's synchronous import graph: figure export is an
+    // on-demand Science capability and must not hold a freshly relaunched
+    // updater before its install journal can be reconciled.
+    sharpModulePromise = import("sharp").then((module) => module.default);
+  }
+  return sharpModulePromise;
+}
+
 const dynamicImport = new Function("specifier", "return import(specifier)") as (specifier: string) => Promise<VegaModuleLike>;
 
 function safeDimension(value: unknown, label: string): number {
@@ -206,6 +219,7 @@ function publicationGeometry(svg: ScienceStatisticsFigureSvgExport, dpi: 300 | 6
 let srgbIccProfilePromise: Promise<Buffer> | null = null;
 
 async function exactSrgbIccProfile(): Promise<Buffer> {
+  const sharp = await getSharp();
   if (!srgbIccProfilePromise) {
     srgbIccProfilePromise = (async () => {
       const carrier = await sharp({ create: { width: 1, height: 1, channels: 3, background: "#ffffff" } })
@@ -316,6 +330,7 @@ export async function renderScienceStatisticsFigureSvgPreviewPng(
   }
   validateRenderedSvg(rendered.svg);
   try {
+    const sharp = await getSharp();
     const bytes = await sharp(Buffer.from(rendered.svg, "utf8"), { density: 96 })
       .flatten({ background: "#ffffff" })
       .resize({ width: rendered.width, height: rendered.height, fit: "fill", kernel: sharp.kernel.lanczos3 })
@@ -354,6 +369,7 @@ export async function renderScienceStatisticsFigurePng(
     throw new Error("science-statistics-figure-png-pixel-boundary-invalid");
   }
   try {
+    const sharp = await getSharp();
     const bytes = await sharp(Buffer.from(svg.svg, "utf8"), { density: dpi })
       .flatten({ background: "#ffffff" })
       .resize({ width, height, fit: "fill", kernel: sharp.kernel.lanczos3 })
@@ -397,6 +413,7 @@ export async function renderScienceStatisticsFigurePdf(
   const svg = await renderScienceStatisticsFigureSvg(value);
   const geometry = publicationGeometry(svg, dpi, requestedWidthMm, "pdf");
   try {
+    const sharp = await getSharp();
     const { data: rgb, info } = await sharp(Buffer.from(svg.svg, "utf8"), { density: dpi })
       .flatten({ background: "#ffffff" })
       .resize({ width: geometry.width, height: geometry.height, fit: "fill", kernel: sharp.kernel.lanczos3 })
@@ -462,6 +479,7 @@ export async function renderScienceStatisticsFigureTiff(
   const svg = await renderScienceStatisticsFigureSvg(value);
   const geometry = publicationGeometry(svg, dpi, requestedWidthMm, "tiff");
   try {
+    const sharp = await getSharp();
     const bytes = await sharp(Buffer.from(svg.svg, "utf8"), { density: dpi })
       .flatten({ background: "#ffffff" })
       .resize({ width: geometry.width, height: geometry.height, fit: "fill", kernel: sharp.kernel.lanczos3 })
