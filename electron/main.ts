@@ -617,9 +617,12 @@ const singleInstanceLockPromise = initialSingleInstanceLock
           resolve(false);
           return;
         }
-        setTimeout(retry, UPDATE_RELAUNCH_LOCK_RETRY_MS).unref();
+        // Keep the bounded retry alive. An unref'ed timer can leave the
+        // replacement suspended before app.whenReady() while the old native
+        // process releases its lock, so reconciliation never starts.
+        setTimeout(retry, UPDATE_RELAUNCH_LOCK_RETRY_MS);
       };
-      setTimeout(retry, UPDATE_RELAUNCH_LOCK_RETRY_MS).unref();
+      setTimeout(retry, UPDATE_RELAUNCH_LOCK_RETRY_MS);
     });
 if (!initialSingleInstanceLock && !isPackagedUpdateRelaunch) {
   // Exiting silently is right only when a live first instance takes over and
