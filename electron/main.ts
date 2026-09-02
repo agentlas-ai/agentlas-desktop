@@ -582,6 +582,13 @@ function stopOneBriefingScheduler(): void {
 }
 
 const allowMultiInstance = process.env.AGENTLAS_ALLOW_MULTI_INSTANCE === "1";
+function hasPendingUpdateJournal(): boolean {
+  try {
+    return fs.existsSync(path.join(app.getPath("userData"), "updater", "install-journal.v1.json"));
+  } catch {
+    return false;
+  }
+}
 // electron-updater's AppImageUpdater relaunches the replacement without an
 // argv marker. Carry the handoff through the inherited environment so the
 // replacement also gets the bounded single-instance-lock retry. Without this,
@@ -594,6 +601,9 @@ const isPackagedUpdateRelaunch = app.isPackaged && (
   // AppImageUpdater always supplies this to the detached replacement, while
   // its launcher does not preserve an argv update marker.
   || process.env.APPIMAGE_SILENT_INSTALL === "true"
+  // The durable journal is the last-resort marker when a native launcher
+  // strips both argv and custom environment variables.
+  || hasPendingUpdateJournal()
 );
 const UPDATE_RELAUNCH_LOCK_RETRY_MS = 250;
 const UPDATE_RELAUNCH_LOCK_TIMEOUT_MS = 60_000;
