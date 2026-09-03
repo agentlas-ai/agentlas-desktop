@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.1.1 — 2026-09-03
+
+This release keeps the Agentlas OS v1.2.40 runtime and its immutable source and
+asset pins from 1.1.0. It is a compatibility-focused Desktop update; Agentlas
+Science remains an independently downloaded, signed product extension.
+
+- macOS installation stages and verifies the new signed app before an atomic
+  swap, preserves the existing user-data directory, and can restore the prior
+  app if an interrupted install cannot be completed safely.
+- Existing Desktop stores retain dependent SQLite triggers during schema repair,
+  protecting saved sessions and automation state across the 1.1.0 to 1.1.1
+  upgrade.
+- Browser connections distinguish imported-cookie availability from a verified
+  target-site session, so an X connection cannot show a misleading ready state.
+- Graph controls stay within the usable viewport, automation attention and
+  permission failures appear in the right-side detail rail, and long chat input
+  grows with attachment support without breaking the compact composer layout.
+- One and Work activity rows use a lighter, roomier hierarchy, while actionable
+  graph controls remain visibly clickable and running failures stay attached to
+  their execution row.
+- Science installation state and discovery remain available through the signed
+  extension flow without folding the Science application into the Desktop
+  installer.
+- Patched transitive dependencies remove the known `fast-uri`, `@xmldom/xmldom`,
+  and `qs` audit findings present during release recovery.
+
 ## 1.1.0 — 2026-09-02
 
 This release binds Agentlas OS v1.2.40 at
