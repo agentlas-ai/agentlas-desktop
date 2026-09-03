@@ -8,6 +8,7 @@ import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { askAutomationSession } from "@/components/automation/AutomationSessionPanel";
+import { IconClose } from "@/components/Icon";
 import {
   runtimeBackendForSelection,
   runtimeEngineLabel,
@@ -99,7 +100,11 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
   const [fixPlan, setFixPlan] = useState<AutomationFixPlan | null>(null);
   const [fixBusy, setFixBusy] = useState<string | null>(null);
   const [fixMessage, setFixMessage] = useState("");
+  const [attentionDismissed, setAttentionDismissed] = useState(false);
+  const [dismissingAttention, setDismissingAttention] = useState(false);
   const reconciliationAttemptRef = useRef<string | null>(null);
+
+  useEffect(() => setAttentionDismissed(false), [automation.id, automation.attentionClearedAt]);
 
   /* ★"눌렀는데 아무 일도 안 일어남"을 구조적으로 금지한다.
      어떤 행동이든 (1) 실행하고 (2) 다시 읽는다. 조용히 그대로 두면 사용자는 같은
@@ -283,7 +288,7 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
   const blockingRunOpen = Boolean(blockingRun) && !(
     Number.isFinite(clearedAt) && blockingRun && Date.parse(blockingRun.ranAt) <= clearedAt
   );
-  const needsHelp = !canvasOwnsDecision && !liveRunning && (!latestKernelOk || latestOutcomeNeedsHelp)
+  const needsHelp = !attentionDismissed && !canvasOwnsDecision && !liveRunning && (!latestKernelOk || latestOutcomeNeedsHelp)
     && Boolean(reconciliation || regularAttentions.length > 0
       || (latest?.status === "error" && !latestAcknowledged) || blockingRunOpen);
   // 기록 원문(판정 코드 접두사 제거). 평이한 설명 아래 "자세히"로만 노출한다.
@@ -321,6 +326,25 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
 
   function setNodeOutput(nodeId: string, output: string) {
     setNodeDecisions((drafts) => ({ ...drafts, [nodeId]: { ...drafts[nodeId], output } }));
+  }
+
+  async function dismissCurrentAttention() {
+    const api = ipc();
+    if (!api || dismissingAttention) return;
+    setDismissingAttention(true);
+    setRecoveryError("");
+    try {
+      await api.automations.acknowledgeAttention(automation.id);
+      const persisted = await api.automations.get(automation.id);
+      if (!persisted?.attentionClearedAt) throw new Error("automation_attention_dismiss_readback_failed");
+      setAttentionDismissed(true);
+    } catch {
+      setRecoveryError(ko
+        ? "카드를 닫지 못했습니다. 기록은 바뀌지 않았습니다. 잠시 뒤 다시 시도해 주세요."
+        : "Could not dismiss the card. The record was not changed. Try again shortly.");
+    } finally {
+      setDismissingAttention(false);
+    }
   }
 
   /** 멈춘 사유를 그대로 세션 대화에 넘겨 이어서 해결하게 한다(같은 화면 왼쪽 패널).
@@ -568,9 +592,10 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
           바로 무엇을 할지 알 수 없는 문장을 카드 본문에 그대로 싣지 않는다. */}
       {needsHelp ? (
         <section className="automation-reconcile-card" role="status">
+          <button type="button" className="automation-alert-close" aria-label={ko ? "확인 요청 닫기" : "Dismiss attention request"} disabled={dismissingAttention} onClick={() => void dismissCurrentAttention()} data-testid="dismiss-automation-attention"><IconClose size={14} /></button>
           <div className="automation-reconcile-head">
             <div>
-              <span>{ko ? "확인이 필요해요" : "Needs attention"}</span>
+              <div className="automation-reconcile-eyebrow"><span>{ko ? "확인이 필요해요" : "Needs attention"}</span></div>
               <strong>{blockingRun ? plainRun(blockingRun, ko).title : plainOutcome("error", ko).title}</strong>
             </div>
           </div>
@@ -636,11 +661,12 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
       ) : null}
 
       {/* 외부 동작의 완료 여부가 불확실한 실행 — 사람이 직접 확정해야 재개된다. */}
-      {reconciliation ? (
+      {reconciliation && !attentionDismissed ? (
         <section className="automation-reconcile-card" aria-labelledby={`reconcile-${reconciliation.runId}`}>
+          <button type="button" className="automation-alert-close" aria-label={ko ? "확인 요청 닫기" : "Dismiss attention request"} disabled={dismissingAttention} onClick={() => void dismissCurrentAttention()}><IconClose size={14} /></button>
           <div className="automation-reconcile-head">
             <div>
-              <span>{ko ? "확인이 필요해요" : "Needs attention"}</span>
+              <div className="automation-reconcile-eyebrow"><span>{ko ? "확인이 필요해요" : "Needs attention"}</span></div>
               <strong id={`reconcile-${reconciliation.runId}`}>
                 {ko ? "이 단계가 실제로 실행됐는지 알려주세요" : "Tell us whether this step actually happened"}
               </strong>
@@ -729,13 +755,14 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
         </section>
       ) : null}
 
-      {regularAttentions.length > 0 ? (
+      {regularAttentions.length > 0 && !attentionDismissed ? (
         <section
           className="automation-event-attention-list"
           aria-label={ko ? "확인이 필요한 자동화 발생" : "Automation occurrences requiring review"}
         >
           {regularAttentions.map((attention) => (
             <article key={attention.id} className="automation-event-attention">
+              <button type="button" className="automation-alert-close" aria-label={ko ? "확인 요청 닫기" : "Dismiss attention request"} disabled={dismissingAttention} onClick={() => void dismissCurrentAttention()}><IconClose size={14} /></button>
               <div>
                 <strong>{ko ? "이 건이 실제로 처리됐는지 알려주세요" : "Tell us whether this one went through"}</strong>
                 <span>{formatDateTime(attention.updatedAt, ko)}</span>
@@ -819,6 +846,7 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
 
       {recoveryError ? (
         <div className="automation-run-message" role="alert">
+          <button type="button" className="automation-alert-close" aria-label={ko ? "오류 닫기" : "Dismiss error"} onClick={() => setRecoveryError("")}><IconClose size={14} /></button>
           {recoveryError}
           {/*
             ★거절에는 **푸는 길**이 함께 있어야 한다. 실측 2026-08-20 (캠페인 E3):

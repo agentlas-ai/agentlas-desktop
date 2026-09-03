@@ -6598,7 +6598,9 @@ export class ScienceStore {
         }
         if (found > 0 && found < 44) {
           const preservedArtifactVersionTriggers = this.db.prepare(`SELECT name, sql FROM sqlite_master
-            WHERE type = 'trigger' AND sql IS NOT NULL AND tbl_name = 'artifact_versions' ORDER BY name`)
+            WHERE type = 'trigger' AND sql IS NOT NULL
+              AND instr(lower(sql), 'artifact_versions') > 0
+            ORDER BY name`)
             .all() as Array<{ name: string; sql: string }>;
           for (const trigger of preservedArtifactVersionTriggers) {
             if (!/^[a-z0-9_]+$/i.test(trigger.name)) throw new Error("science-v44-trigger-name-invalid");

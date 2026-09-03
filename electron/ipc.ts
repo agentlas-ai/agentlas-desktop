@@ -3512,7 +3512,9 @@ export function registerIpcHandlers(): void {
       // linkedSites 는 정규화된 사이트 문자열이고 스킴이 없을 수 있다("x.com"). new URL 에
       // 그대로 넣으면 던져서 승인 도메인이 통째로 빈 배열이 됐다 — 그러면 승인은 기록되는데
       // 자동 갱신은 영영 아무것도 하지 않는 반쪽 배선이 된다(실측으로 잡음).
+      const loginRequired = new Set(result.requiresLoginSites ?? []);
       const granted = result.linkedSites
+        .filter((site) => !loginRequired.has(site))
         .map((s) => {
           const raw = String(s || "").trim();
           if (!raw) return "";

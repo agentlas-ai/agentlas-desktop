@@ -7,9 +7,12 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
-import { ipc, ipcEvents } from "@/lib/ipc";
+import { grantForDroppedFile, grantForPastedAttachment, grantForPastedImage, ipc, ipcEvents } from "@/lib/ipc";
 import { extractQuestions } from "@/lib/ask-question";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
+import { IconClose } from "@/components/Icon";
+import type { PreparedOneAttachments } from "@shared/one-attachments";
+import { isChatAlwaysApproved, waitForAlwaysApprovedChats } from "@/lib/always-approved-chats";
 import type {
   AutomationExecutionPermission,
   AutomationHubMode,
@@ -29,6 +32,23 @@ export interface AutomationSessionPromptDetail {
   send?: boolean;
   /** 패널이 실제로 받았는지 — 호출자가 폴백(플로우 화면으로 이동)을 결정하는 근거. */
   handled?: boolean;
+}
+
+export interface AutomationPermissionIntervention {
+  question: string;
+  nextAction: string;
+}
+
+function latestPermissionIntervention(messages: ChatHistoryEntry[]): AutomationPermissionIntervention | null {
+  const message = [...messages].reverse().find((item) =>
+    item.role === "assistant" && /(?:^|\n)\s*type:\s*permission-required\b/i.test(item.text));
+  if (!message) return null;
+  const question = message.text.match(/(?:^|\n)\s*question:\s*([^\n]+)/i)?.[1]?.trim();
+  const nextAction = message.text.match(/(?:^|\n)\s*(?:options|retry_after):\s*([^\n]+)/i)?.[1]?.trim();
+  return {
+    question: question || "Agentlas Browser permission is required for this automation.",
+    nextAction: nextAction || "Allow the browser for this automation, then run it again.",
+  };
 }
 
 function pendingKey(automationId: string): string {
@@ -93,7 +113,11 @@ interface AutomationSessionPanelProps {
    */
   embedded?: boolean;
   /** 바깥 공용 입력이 세션 전송을 부를 수 있는 손잡이. */
-  sendHandleRef?: React.MutableRefObject<((text: string) => void) | null>;
+  sendHandleRef?: React.MutableRefObject<((text: string, files?: File[], onAccepted?: () => void) => void) | null>;
+  /** 우측 상세가 이 세션의 실시간 승인 요청만 표시할 수 있게 chat id를 전달한다. */
+  onChatId?: (chatId: string | null) => void;
+  /** 만료된 실시간 승인도 우측에서 복구할 수 있도록 최신 구조화 개입을 전달한다. */
+  onPermissionIntervention?: (intervention: AutomationPermissionIntervention | null) => void;
 }
 
 /**
@@ -126,6 +150,8 @@ export function AutomationSessionPanel({
   onCollapse,
   embedded = false,
   sendHandleRef,
+  onChatId,
+  onPermissionIntervention,
 }: AutomationSessionPanelProps) {
   const ko = locale === "ko";
   const [messages, setMessages] = useState<ChatHistoryEntry[]>([]);
@@ -148,22 +174,31 @@ export function AutomationSessionPanel({
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const chatIdRef = useRef<string | null>(null);
   chatIdRef.current = chatId;
+  useEffect(() => {
+    onChatId?.(chatId);
+    return () => onChatId?.(null);
+  }, [chatId, onChatId]);
 
   const load = useCallback(async () => {
     const api = ipc();
     if (!api) return;
     try {
       const session = await api.automations.getSession(automationId);
-      setMessages(session.messages.filter((message) => (
+      const visibleMessages = session.messages.filter((message) => (
         message.role !== "system" || isVisibleAutomationSystemNotice(message)
-      )));
+      ));
+      setMessages(visibleMessages);
+      await waitForAlwaysApprovedChats();
+      onPermissionIntervention?.(isChatAlwaysApproved(session.chatId)
+        ? null
+        : latestPermissionIntervention(visibleMessages));
       setChatId(session.chatId ?? null);
       setRuntimeSelection(session.runtimeSelection ?? null);
       setUnavailable(false);
     } catch {
       setUnavailable(true);
     }
-  }, [automationId]);
+  }, [automationId, onPermissionIntervention]);
 
   useEffect(() => {
     void load();
@@ -242,10 +277,12 @@ export function AutomationSessionPanel({
   }, [chatId, ko, load]);
 
   const send = useCallback(
-    async (text: string) => {
+    async (text: string, files: File[] = [], onAccepted?: () => void) => {
       const api = ipc();
       const events = ipcEvents();
-      const prompt = text.trim();
+      const prompt = text.trim() || (files.length > 0
+        ? (ko ? `첨부 파일 ${files.length}개를 확인해 주세요.` : `Please review the ${files.length} attached file${files.length === 1 ? "" : "s"}.`)
+        : "");
       const targetChatId = chatIdRef.current;
       if (!api || !prompt) return;
       if (sendOutcomeUnknown) {
@@ -259,10 +296,44 @@ export function AutomationSessionPanel({
         return;
       }
       const alreadyRunning = busyRef.current;
+      if (alreadyRunning && files.length > 0) {
+        setError(ko
+          ? "실행 중에는 파일을 추가할 수 없습니다. 현재 실행이 끝난 뒤 다시 보내 주세요."
+          : "Files cannot be added while a run is active. Send them after the current run finishes.");
+        return;
+      }
       const activeRunId = alreadyRunning ? runIdRef.current : null;
       const previousReceipt = alreadyRunning
         ? await api.invoke.latestReceipt(targetChatId).catch(() => undefined)
         : undefined;
+      let preparedAttachments: PreparedOneAttachments | null = null;
+      if (files.length > 0) {
+        try {
+          const items = [];
+          for (const file of files) {
+            const grant = await grantForDroppedFile(file)
+              ?? await grantForPastedAttachment(file)
+              ?? (file.type.startsWith("image/") ? await grantForPastedImage(file) : null);
+            if (!grant || grant.kind !== "file") throw new Error(`attachment_grant_failed:${file.name}`);
+            items.push({
+              grant,
+              displayName: file.name || (ko ? "첨부 파일" : "Attachment"),
+              claimedMediaType: file.type,
+              claimedSize: file.size,
+            });
+          }
+          preparedAttachments = await api.oneAttachments.prepare({
+            chatId: targetChatId,
+            userPrompt: prompt,
+            attachments: items,
+          });
+        } catch {
+          setError(ko
+            ? "첨부 파일을 안전하게 준비하지 못했습니다. 파일을 다시 선택해 주세요."
+            : "The attachments could not be prepared safely. Select the files again.");
+          return;
+        }
+      }
       setError("");
       setDraft("");
       setBusy(true);
@@ -344,6 +415,7 @@ export function AutomationSessionPanel({
         // exact pin as the scheduled graph run so a manual follow-up cannot
         // silently select the global role pool (for example Claude).
         ...(runtimeSelection ? { runtimeSelection } : {}),
+        ...(preparedAttachments ? { oneAttachmentRef: preparedAttachments.ref } : {}),
       };
       try {
         if (alreadyRunning) {
@@ -374,10 +446,12 @@ export function AutomationSessionPanel({
             runIdRef.current = steered.runId;
             subscribeToRun(steered.runId);
           }
+          onAccepted?.();
           return;
         }
         const started = await api.invoke.run(request);
         if (started?.runId !== runId) throw new Error("invoke_run_receipt_mismatch");
+        onAccepted?.();
       } catch (err) {
         if (alreadyRunning) {
           try {
@@ -476,7 +550,7 @@ export function AutomationSessionPanel({
   // 임베드 모드 — 바깥의 공용 입력이 이 세션의 send를 그대로 쓴다(입력은 화면에 하나).
   useEffect(() => {
     if (!sendHandleRef) return;
-    sendHandleRef.current = (text: string) => void send(text);
+    sendHandleRef.current = (text: string, files?: File[], onAccepted?: () => void) => void send(text, files, onAccepted);
     return () => { sendHandleRef.current = null; };
   }, [send, sendHandleRef]);
 
@@ -645,6 +719,7 @@ export function AutomationSessionPanel({
 
       {error ? (
         <div className="automation-session-error" role="alert">
+          <button type="button" className="automation-alert-close" aria-label={ko ? "오류 닫기" : "Dismiss error"} onClick={() => setError("")}><IconClose size={14} /></button>
           {error}
         </div>
       ) : null}

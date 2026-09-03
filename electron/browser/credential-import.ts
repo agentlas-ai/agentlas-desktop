@@ -652,6 +652,8 @@ function macCookieReencryptor(
 interface MacCdpCookieImportResult {
   accepted: number;
   domains: string[];
+  /** 쿠키 저장이 아니라 공급자 화면에서 실제 로그인까지 확인된 도메인. */
+  verifiedDomains: string[];
 }
 
 function processIsLive(pid: number): boolean {
@@ -695,7 +697,7 @@ async function importMacCookiesThroughDedicatedRuntime(
   schemaVersion: number,
   jobs: Array<{ domain: string; rows: Record<string, unknown>[] }>,
 ): Promise<MacCdpCookieImportResult> {
-  if (jobs.length === 0) return { accepted: 0, domains: [] };
+  if (jobs.length === 0) return { accepted: 0, domains: [], verifiedDomains: [] };
   const sourceService = MAC_SAFE_STORAGE_SERVICE[browser];
   if (!sourceService) throw new Error(`${browser}의 macOS 쿠키 암호화 방식을 지원하지 않습니다.`);
   const sourceKey = readMacSafeStorageKey(sourceService);
@@ -764,7 +766,7 @@ async function importMacCookiesThroughDedicatedRuntime(
   }
   if (cookies.length === 0) {
     for (const plaintext of plaintexts) plaintext.fill(0);
-    return { accepted: 0, domains: [] };
+    return { accepted: 0, domains: [], verifiedDomains: [] };
   }
 
   const runtime = resolveAgentlasBrowserRuntime();
@@ -823,7 +825,21 @@ async function importMacCookiesThroughDedicatedRuntime(
       accepted += 1;
       acceptedDomains.add(domain);
     }
-    return { accepted, domains: [...acceptedDomains] };
+    const verifiedDomains: string[] = [];
+    if (acceptedDomains.has("x.com")) {
+      const page = await context.newPage();
+      try {
+        await page.goto("https://x.com/home", { waitUntil: "domcontentloaded", timeout: 20_000 });
+        const redirectedToLogin = /\/i\/flow\/login|\/login(?:[/?#]|$)/i.test(page.url());
+        const signedInUi = await page.locator('[data-testid="SideNav_AccountSwitcher_Button"], [data-testid="primaryColumn"] [aria-label="Home timeline"]').first().isVisible({ timeout: 8_000 }).catch(() => false);
+        if (!redirectedToLogin && signedInUi) verifiedDomains.push("x.com");
+      } catch {
+        // 네트워크 또는 공급자 오류는 로그인 확인으로 승격하지 않는다.
+      } finally {
+        await page.close().catch(() => undefined);
+      }
+    }
+    return { accepted, domains: [...acceptedDomains], verifiedDomains };
   } finally {
     for (const plaintext of plaintexts) plaintext.fill(0);
     if (connection) await connection.close().catch(() => undefined);
@@ -1085,7 +1101,10 @@ export async function importBrowserCredentials(
       // eslint-disable-next-line no-await-in-loop -- 사이트 수는 사용자가 고른 만큼이라 작다.
       await upsertBrowserSite({ site, label: domain });
       linkedSites.push(site);
-      if (interactiveDomains.includes(domain)) {
+      const providerVerificationFailed = domain === "x.com"
+        && runtimeImported !== null
+        && !runtimeImported.verifiedDomains.includes(domain);
+      if (interactiveDomains.includes(domain) || providerVerificationFailed) {
         setBrowserSession(site, "none");
         requiresLoginSites.push(site);
       } else {

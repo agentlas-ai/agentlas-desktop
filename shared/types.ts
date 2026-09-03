@@ -4679,6 +4679,8 @@ export type ExperiencePackCreateIpcInput = Omit<
 export interface AuthSession {
   /** 로그인되어 있으면 true */
   signedIn: boolean;
+  /** Renderer preference scoping only. Opaque digest; never a raw user id. */
+  accountFingerprint?: string;
   email?: string;
   name?: string;
   workspaceId?: string;
@@ -7095,7 +7097,7 @@ export interface AgentlasIpc {
     saveSite: (input: BrowserSiteInput) => Promise<BrowserSite>;
     deleteSite: (site: string) => Promise<{ ok: true }>;
     openLogin: (site: string) => Promise<{ ok: boolean; error?: string }>;
-    markSession: (site: string, status: BrowserSessionStatus) => Promise<{ ok: true }>;
+    markSession: (site: string, status: BrowserSessionStatus) => Promise<{ ok: boolean; error?: string }>;
     /** 평소 브라우저 프로필 목록과, profileId 를 주면 그 프로필에 로그인된 도메인 목록. */
     scanCredentials: (profileId?: string | null) => Promise<BrowserCredentialScanResult>;
     /** 고른 도메인의 세션만 전용 프로필로 가져오고 Connect 목록에 등록한다. */

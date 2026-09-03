@@ -8,6 +8,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { BrowserWindow } from "electron";
+import { chromium } from "playwright";
 import {
   acquireBrowserCdpLease,
   browserCdpProfilePath,
@@ -346,9 +347,41 @@ async function browserOpenLoginOnce(site: string): Promise<BrowserOpenLoginResul
   }
 }
 
-/** 사용자가 UI에서 "로그인 완료"를 누르면 즉시 세션을 valid 로 확정(창 닫힘 이벤트 대기 없이). */
-export function browserMarkSession(site: string, status: "valid" | "expired" | "none"): { ok: true } {
+async function verifyXSession(): Promise<boolean> {
+  if (!(await browserCdpPortReady())) return false;
+  const ownership = await reconcileBrowserCdpOwnerWithRetry();
+  if (ownership.state !== "owned") return false;
+  const connection = await chromium.connectOverCDP(`http://127.0.0.1:${browserCdpPort()}`);
+  try {
+    const context = connection.contexts()[0];
+    if (!context) return false;
+    const cookies = await context.cookies(["https://x.com/", "https://twitter.com/"]);
+    const names = new Set(cookies.map((cookie) => cookie.name));
+    if (!names.has("auth_token") || !names.has("ct0")) return false;
+    const page = await context.newPage();
+    try {
+      await page.goto("https://x.com/home", { waitUntil: "domcontentloaded", timeout: 20_000 });
+      if (/\/i\/flow\/login|\/login(?:[/?#]|$)/i.test(page.url())) return false;
+      return await page.locator('[data-testid="SideNav_AccountSwitcher_Button"], [data-testid="primaryColumn"] [aria-label="Home timeline"]').first().isVisible({ timeout: 8_000 }).catch(() => false);
+    } finally {
+      await page.close().catch(() => undefined);
+    }
+  } finally {
+    await connection.close().catch(() => undefined);
+  }
+}
+
+/** 저장 버튼도 X 전용 프로필의 실제 로그인 확인을 통과해야 초록 상태가 된다. */
+export async function browserMarkSession(site: string, status: "valid" | "expired" | "none"): Promise<{ ok: boolean; error?: string }> {
   const norm = normalizeSite(site);
+  if (status === "valid" && norm === "x.com") {
+    const verified = await verifyXSession().catch(() => false);
+    if (!verified) {
+      setBrowserSession(norm, "none");
+      logBrowserAction({ site: norm, action: "session.verify", result: "not-signed-in" });
+      return { ok: false, error: "X 로그인을 실제 전용 브라우저에서 확인하지 못했습니다. 열린 창에서 로그인한 뒤 다시 저장해 주세요." };
+    }
+  }
   setBrowserSession(norm, status);
   logBrowserAction({ site: norm, action: "session.mark", result: status });
   releaseBrowserLoginLease(norm);

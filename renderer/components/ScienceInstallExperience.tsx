@@ -9,30 +9,42 @@ import type {
   ScienceSuiteInstallProgress,
   ScienceSuiteStatus,
 } from "@shared/product-extension";
+import type { AuthSession } from "@/lib/types";
 import styles from "./ScienceInstallExperience.module.css";
 
-const PROMO_DISMISSED_KEY = "agentlas.science-promo.dismissed.v1";
+const PROMO_DISMISSED_KEY = "agentlas.science-promo.dismissed.v2";
 
 type Surface = "closed" | "promo" | "plan" | "installing" | "error";
+type CloseMode = "later" | "never";
+
+function accountPreferenceScope(session: AuthSession): string | null {
+  if (!session.signedIn) return "signed-out";
+  const fingerprint = session.accountFingerprint?.trim().toLowerCase();
+  return fingerprint && /^[a-f0-9]{24}$/.test(fingerprint) ? `account-${fingerprint}` : null;
+}
+
+function promoDismissedKey(accountScope: string): string {
+  return `${PROMO_DISMISSED_KEY}.${accountScope}`;
+}
 
 const FALLBACK_COMPONENTS = [
   {
     id: "agentlas-science",
     displayName: "Science Workspace",
     description: "Projects, literature, evidence graphs, statistics, and research writing",
-    packageBytes: 11_000_000,
+    packageBytes: 5_154_626,
   },
   {
     id: "agentlas-science-renderer-ketcher",
     displayName: "Chemistry Tools",
     description: "Ketcher structure editor and Indigo chemistry runtime",
-    packageBytes: 46_697_538,
+    packageBytes: 12_865_713,
   },
   {
     id: "agentlas-science-renderer-molstar",
     displayName: "Molecular Visualization",
     description: "Mol* protein and molecular structure viewer",
-    packageBytes: 5_144_268,
+    packageBytes: 1_533_924,
   },
 ] as const;
 
@@ -75,12 +87,14 @@ export function ScienceInstallExperience({
   const ko = locale === "ko";
   const [surface, setSurface] = useState<Surface>("closed");
   const [suite, setSuite] = useState<ScienceSuiteStatus | null>(null);
-  const [progress, setProgress] = useState<ScienceSuiteInstallProgress>(() => initialProgress(62_841_806));
+  const [accountScope, setAccountScope] = useState<string | null>(null);
+  const [progress, setProgress] = useState<ScienceSuiteInstallProgress>(() => initialProgress(19_554_263));
   const [errorCode, setErrorCode] = useState<string | null>(null);
+  const [preferenceError, setPreferenceError] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
   const primaryRef = useRef<HTMLButtonElement>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
-  const autoOfferCheckedRef = useRef(false);
+  const autoOfferScopeRef = useRef<string | null>(null);
   const visible = surface !== "closed";
 
   const components = suite?.components ?? FALLBACK_COMPONENTS.map((component) => ({
@@ -113,7 +127,29 @@ export function ScienceInstallExperience({
       router.push("/science");
       return;
     }
+    if (current?.phase === "repair-required") {
+      setErrorCode(null);
+      setSurface("plan");
+      return;
+    }
+    if (current?.installed) {
+      const api = ipc();
+      try {
+        await api?.productExtensions?.setScienceEnabled?.(true);
+        const enabled = await loadStatus();
+        if (enabled?.installed && enabled.enabled) {
+          router.push("/science");
+          return;
+        }
+      } catch {
+        // The error surface below keeps the failed state visible and retryable.
+      }
+      setErrorCode("science-suite-enable-failed");
+      setSurface("error");
+      return;
+    }
     setErrorCode(null);
+    setPreferenceError(false);
     setSurface("promo");
   }, [loadStatus, router, suite]);
 
@@ -126,17 +162,37 @@ export function ScienceInstallExperience({
   }, [loadStatus]);
 
   useEffect(() => {
+    const api = ipc();
+    if (!api?.auth) {
+      setAccountScope("signed-out");
+      return;
+    }
+    let disposed = false;
+    const apply = (session: AuthSession) => {
+      if (!disposed) setAccountScope(accountPreferenceScope(session));
+    };
+    void api.auth.getSession().then(apply).catch(() => {
+      if (!disposed) setAccountScope(null);
+    });
+    const off = api.auth.onSessionChanged?.(apply);
+    return () => {
+      disposed = true;
+      off?.();
+    };
+  }, []);
+
+  useEffect(() => {
     window.addEventListener(OPEN_SCIENCE_INSTALL_EVENT, openFromEntry);
     return () => window.removeEventListener(OPEN_SCIENCE_INSTALL_EVENT, openFromEntry);
   }, [openFromEntry]);
 
   useEffect(() => {
-    if (!eligible || suite === null || autoOfferCheckedRef.current) return;
-    autoOfferCheckedRef.current = true;
-    if (suite.installed && suite.enabled) return;
+    if (!eligible || suite === null || accountScope === null || autoOfferScopeRef.current === accountScope) return;
+    autoOfferScopeRef.current = accountScope;
+    if (suite.installed) return;
     let dismissed = false;
     try {
-      dismissed = window.localStorage.getItem(PROMO_DISMISSED_KEY) === "1";
+      dismissed = window.localStorage.getItem(promoDismissedKey(accountScope)) === "1";
     } catch {
       dismissed = false;
     }
@@ -144,24 +200,36 @@ export function ScienceInstallExperience({
       restoreFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       setSurface("promo");
     }
-  }, [eligible, suite]);
+  }, [accountScope, eligible, suite]);
+
+  useEffect(() => {
+    if (!suite?.installed || !suite.enabled || surface === "closed" || surface === "installing") return;
+    setSurface("closed");
+  }, [suite, surface]);
 
   useEffect(() => {
     onVisibilityChange?.(visible);
   }, [onVisibilityChange, visible]);
 
-  const close = useCallback((remember = false) => {
+  const close = useCallback((mode: CloseMode = "later") => {
     if (surface === "installing") return;
-    if (remember) {
+    if (mode === "never") {
+      if (!accountScope) {
+        setPreferenceError(true);
+        return;
+      }
       try {
-        window.localStorage.setItem(PROMO_DISMISSED_KEY, "1");
+        const key = promoDismissedKey(accountScope);
+        window.localStorage.setItem(key, "1");
+        if (window.localStorage.getItem(key) !== "1") throw new Error("science-promo-dismissal-readback-failed");
       } catch {
-        // The sidebar remains the durable entry when renderer storage is unavailable.
+        setPreferenceError(true);
+        return;
       }
     }
     setSurface("closed");
     window.setTimeout(() => restoreFocusRef.current?.focus(), 0);
-  }, [surface]);
+  }, [accountScope, surface]);
 
   useEffect(() => {
     if (!visible) return;
@@ -169,7 +237,7 @@ export function ScienceInstallExperience({
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape" && surface !== "installing") {
         event.preventDefault();
-        close(surface === "promo");
+        close("later");
         return;
       }
       if (event.key !== "Tab" || !dialogRef.current) return;
@@ -249,6 +317,8 @@ export function ScienceInstallExperience({
 
   const errorText = errorCode === "science-suite-package-unavailable"
     ? (ko ? "Science 배포 패키지가 아직 Desktop에 연결되지 않았습니다." : "The Science release package is not connected to this Desktop build yet.")
+    : errorCode === "science-suite-enable-failed"
+      ? (ko ? "설치된 Science를 켜지 못했습니다. 설정에서 설치 상태를 확인해 주세요." : "The installed Science package could not be enabled. Check its installation status in Settings.")
     : errorCode === "science-suite-health-check-failed"
       ? (ko ? "설치 파일 검증을 통과하지 못했습니다. 다시 다운로드해 주세요." : "The installed files did not pass verification. Download them again.")
       : (ko ? "설치를 완료하지 못했습니다. 네트워크를 확인한 뒤 다시 시도해 주세요." : "Installation could not be completed. Check your connection and try again.");
@@ -259,7 +329,7 @@ export function ScienceInstallExperience({
       role="presentation"
       data-testid="science-install-backdrop"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) close(surface === "promo");
+        if (event.target === event.currentTarget) close("later");
       }}
     >
       <div
@@ -276,7 +346,7 @@ export function ScienceInstallExperience({
             type="button"
             className={styles.close}
             aria-label={ko ? "닫기" : "Close"}
-            onClick={() => close(surface === "promo")}
+            onClick={() => close("later")}
           >
             <IconClose size={16} />
           </button>
@@ -306,14 +376,22 @@ export function ScienceInstallExperience({
                 <li>{ko ? "주장과 근거의 연결 상태를 확인" : "Review how claims connect to evidence"}</li>
                 <li>{ko ? "Ketcher와 Mol* 연구 도구 포함" : "Includes Ketcher and Mol* research tools"}</li>
               </ul>
-              <div className={styles.actions}>
+              <div className={`${styles.actions} ${styles.promoActions}`}>
                 <button ref={primaryRef} type="button" className={styles.primary} data-testid="science-promo-download" onClick={() => setSurface("plan")}>
                   {ko ? "Agentlas Science 다운로드" : "Download Agentlas Science"}
                 </button>
-                <button type="button" className={styles.secondary} onClick={() => close(true)}>
+                <button type="button" className={styles.secondary} data-testid="science-promo-later" onClick={() => close("later")}>
                   {ko ? "나중에" : "Not now"}
                 </button>
+                <button type="button" className={styles.never} data-testid="science-promo-never" onClick={() => close("never")}>
+                  {ko ? "다시 표시하지 않기" : "Don't show again"}
+                </button>
               </div>
+              {preferenceError && (
+                <p className={styles.preferenceError} role="alert">
+                  {ko ? "이 설정을 저장하지 못했습니다. ‘나중에’를 눌러 닫아 주세요." : "This preference could not be saved. Choose Not now to close the window."}
+                </p>
+              )}
             </div>
           </>
         )}
@@ -322,9 +400,13 @@ export function ScienceInstallExperience({
           <div className={styles.installBody}>
             <BrandHeader />
             <div className={styles.heading}>
-              <h2 id="science-install-title">{ko ? "Agentlas Science 다운로드" : "Download Agentlas Science"}</h2>
+              <h2 id="science-install-title">{suite?.phase === "repair-required"
+                ? (ko ? "Agentlas Science 복구" : "Repair Agentlas Science")
+                : (ko ? "Agentlas Science 다운로드" : "Download Agentlas Science")}</h2>
               <p id="science-install-description">
-                {ko ? "필요한 연구 도구를 한 번에 설치합니다." : "All required research tools are installed together."}
+                {suite?.phase === "repair-required"
+                  ? (ko ? "손상되거나 누락된 구성 요소를 다시 검증하고 설치합니다." : "Verify and reinstall damaged or missing components.")
+                  : (ko ? "필요한 연구 도구를 한 번에 설치합니다." : "All required research tools are installed together.")}
               </p>
             </div>
             <div className={styles.packageList}>
@@ -351,7 +433,7 @@ export function ScienceInstallExperience({
             </p>
             <div className={styles.actions}>
               <button ref={primaryRef} type="button" className={styles.primary} data-testid="science-plan-download" onClick={() => void runInstall()}>
-                {ko ? "다운로드" : "Download"}
+                {suite?.phase === "repair-required" ? (ko ? "복구" : "Repair") : (ko ? "다운로드" : "Download")}
               </button>
               <button type="button" className={styles.secondary} onClick={() => setSurface("promo")}>
                 {ko ? "뒤로" : "Back"}
@@ -400,7 +482,9 @@ export function ScienceInstallExperience({
           <div className={styles.installBody}>
             <BrandHeader />
             <div className={styles.heading}>
-              <h2 id="science-install-title">{ko ? "설치를 완료하지 못했습니다" : "Installation did not finish"}</h2>
+              <h2 id="science-install-title">{errorCode === "science-suite-enable-failed"
+                ? (ko ? "Science를 켜지 못했습니다" : "Science could not be enabled")
+                : (ko ? "설치를 완료하지 못했습니다" : "Installation did not finish")}</h2>
               <p id="science-install-description">{errorText}</p>
             </div>
             <div className={styles.errorCard}>
@@ -408,10 +492,10 @@ export function ScienceInstallExperience({
               <code>{errorCode ?? "science-suite-install-failed"}</code>
             </div>
             <div className={styles.actions}>
-              <button ref={primaryRef} type="button" className={styles.primary} onClick={() => void runInstall()}>
-                {ko ? "다시 시도" : "Try again"}
+              <button ref={primaryRef} type="button" className={styles.primary} onClick={() => errorCode === "science-suite-enable-failed" ? void openFromEntry() : void runInstall()}>
+                {errorCode === "science-suite-enable-failed" ? (ko ? "다시 켜기" : "Enable again") : (ko ? "다시 시도" : "Try again")}
               </button>
-              <button type="button" className={styles.secondary} onClick={() => close(false)}>
+              <button type="button" className={styles.secondary} onClick={() => close("later")}>
                 {ko ? "닫기" : "Close"}
               </button>
             </div>

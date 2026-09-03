@@ -24,6 +24,7 @@ import { ToolApprovalSheet } from "./ToolApprovalSheet";
 import FloatingComputerUsePanel from "./browser/FloatingComputerUsePanel";
 import { WorkFirstRunOnboarding } from "./WorkFirstRunOnboarding";
 import { ScienceInstallExperience } from "./ScienceInstallExperience";
+import { SCIENCE_INSTALL_DISCOVERY_ENABLED } from "@/lib/science-install-entry";
 import { announceHubBookmarkChange } from "@/lib/hub-bookmark-events";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import {
@@ -171,6 +172,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // null seed is deliberately ineligible so launch cannot flash the intro
   // before the authoritative run state arrives.
   useEffect(() => {
+    if (!SCIENCE_INSTALL_DISCOVERY_ENABLED) return;
     let cancelled = false;
     const apply = (chatIds: string[]) => {
       if (!cancelled) setActiveChatCount(new Set(chatIds).size);
@@ -242,6 +244,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // news. Start fail-closed until the current updater state is known, then keep
   // the flag synchronized with the same main-owned broadcast as UpdateBanner.
   useEffect(() => {
+    if (!SCIENCE_INSTALL_DISCOVERY_ENABLED) return;
     let cancelled = false;
     const sync = (status: string) => {
       if (cancelled) return;
@@ -275,7 +278,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     || sciencePromoPath.startsWith("/library");
   // Product promotion never covers setup, approvals, an app update, or live work.
   // The sidebar entry remains available while the automatic offer is deferred.
-  const sciencePromoEligible = sciencePromoRouteEligible
+  const sciencePromoEligible = SCIENCE_INSTALL_DISCOVERY_ENABLED
+    && sciencePromoRouteEligible
     && workFirstRunVisible === false
     && pendingConfirmations === 0
     && activeChatCount === 0
@@ -284,7 +288,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     && !importOpen;
   // Science is now the only automatic product announcement on these routes.
   // Page tours remain available from the help control but do not race this offer.
-  const pageTourAutoOpenSuspended = sciencePromoRouteEligible || workFirstRunVisible || sciencePromoVisible;
+  const pageTourAutoOpenSuspended = workFirstRunVisible === true
+    || sciencePromoVisible
+    || (SCIENCE_INSTALL_DISCOVERY_ENABLED && sciencePromoRouteEligible);
 
   return (
     <div
@@ -322,11 +328,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       {pathname.startsWith("/dashboard") && (
         <WorkFirstRunOnboarding onVisibilityChange={setWorkFirstRunVisible} />
       )}
-      <ScienceInstallExperience
-        eligible={sciencePromoEligible}
-        locale={locale === "ko" ? "ko" : "en"}
-        onVisibilityChange={setSciencePromoVisible}
-      />
+      {SCIENCE_INSTALL_DISCOVERY_ENABLED && (
+        <ScienceInstallExperience
+          eligible={sciencePromoEligible}
+          locale={locale === "ko" ? "ko" : "en"}
+          onVisibilityChange={setSciencePromoVisible}
+        />
+      )}
       <BuildDoneToast />
       <BrowserActionApprovalSheet />
       <AskUserSheet />

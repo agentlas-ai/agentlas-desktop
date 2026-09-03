@@ -246,8 +246,10 @@ export default function BrowserPage() {
                   }
                 }}
                 onCaptured={async () => {
-                  await api?.browser.markSession(s.site, "valid");
-                  flash(ko ? "로그인 세션을 저장했어요." : "Saved the login session.");
+                  const result = await api?.browser.markSession(s.site, "valid");
+                  flash(result?.ok
+                    ? (ko ? "로그인 세션을 확인하고 저장했어요." : "Verified and saved the login session.")
+                    : (result?.error ?? (ko ? "실제 로그인 상태를 확인하지 못했어요." : "The signed-in session could not be verified.")));
                   void refresh();
                 }}
                 onDelete={async () => {

@@ -2562,6 +2562,32 @@ button[data-dashboard-import="true"]:disabled {
   min-height: 0;
 }
 
+.automation-flow-header {
+  display: grid;
+  grid-template-columns: minmax(210px, max-content) minmax(0, 1fr);
+  align-items: center;
+  column-gap: 20mm;
+  overflow: visible;
+}
+.automation-flow-header-title { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.automation-flow-header-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-start; gap: 8px; min-width: 0; }
+.automation-flow-header-actions > button {
+  background: #fff !important;
+  color: var(--ink) !important;
+  border-color: #e2e4e5 !important;
+  box-shadow: 0 2px 7px rgba(25, 31, 36, .06) !important;
+}
+.automation-flow-header-actions > button:hover:not(:disabled),
+.automation-flow-header-actions > button:focus-visible:not(:disabled) { background: #f7f8f8 !important; border-color: #cfd3d5 !important; }
+.automation-flow-power {
+  width: 34px; height: 34px; flex: 0 0 34px; display: grid; place-items: center; padding: 0;
+  border: 0; border-radius: 10px; background: transparent; color: #a6abb0; cursor: pointer;
+}
+.automation-flow-power[data-enabled="true"] { color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.automation-flow-power:hover:not(:disabled), .automation-flow-power:focus-visible:not(:disabled) { background: color-mix(in srgb, var(--accent) 12%, transparent); outline: none; }
+.automation-flow-power:disabled { opacity: .46; cursor: default; }
+@media (max-width: 980px) { .automation-flow-header { column-gap: 24px; } }
+
 /* ── 하단 검증 로그 — VS Code 터미널 패널의 문법(위 모서리 그립으로 리사이즈) ── */
 .automation-issue-log {
   flex: none;
@@ -2571,7 +2597,77 @@ button[data-dashboard-import="true"]:disabled {
   border-top: 1px solid var(--paper-edge);
   background: var(--paper);
   position: relative;
+  max-height: calc(100% - 72px);
+  overflow: hidden;
+  box-sizing: border-box;
 }
+
+.automation-architect-composer { min-height: 0; max-height: 100%; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.automation-one-composer {
+  width: min(720px, 100%); min-height: 88px; display: grid;
+  grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: minmax(30px, auto) 32px;
+  grid-template-areas: "input input" "tools actions";
+  align-items: end; column-gap: 10px; row-gap: 8px;
+  margin: 0 auto; padding: 12px 12px 9px; box-sizing: border-box;
+  border: 1px solid #dedfe0; border-radius: 18px; background: #fff;
+  box-shadow: 0 3px 12px rgba(25, 31, 36, .035);
+}
+.automation-one-composer:focus-within { border-color: #d3d6d7; box-shadow: 0 15px 42px rgba(25,31,36,.095), 0 2px 7px rgba(25,31,36,.04); }
+.automation-one-composer > textarea {
+  grid-area: input; width: 100%; min-height: 24px; height: 24px; max-height: 210px; padding: 1px 2px; resize: none;
+  overflow-y: hidden; border: 0; background: transparent; color: #202326;
+  font: inherit; font-size: 13.5px; line-height: 1.5; outline: none; box-sizing: border-box;
+}
+.automation-one-composer > textarea::placeholder { color: #666b70; }
+.automation-one-composer-bar { display: contents; }
+.automation-one-composer-actions { grid-area: actions; align-self: end; display: flex; align-items: center; gap: 2px; }
+.automation-one-attach, .automation-one-send {
+  width: 34px; min-width: 34px; height: 34px; display: grid; place-items: center; padding: 0;
+  border: 0; border-radius: 50%; cursor: pointer;
+}
+.automation-one-attach { grid-area: tools; background: transparent; color: #5f666b; }
+.automation-one-attach:hover, .automation-one-attach:focus-visible { background: #f0f2f1; outline: 3px solid rgba(96,122,54,.13); }
+.automation-one-send { background: #17191b; color: #fff; }
+.automation-one-send:hover, .automation-one-send:focus-visible { background: #303438; outline: 3px solid rgba(23,25,27,.16); }
+.automation-one-attach:disabled { opacity: .42; cursor: default; }
+.automation-one-send:disabled { background: #d7dadd; color: #fff; cursor: default; }
+.automation-architect-secondary-actions { width: min(720px, 100%); margin: -2px auto 0; display: flex; justify-content: flex-end; }
+.automation-architect-input-row { display: flex; align-items: flex-end; gap: 8px; min-width: 0; }
+.automation-architect-input-row textarea {
+  flex: 1; min-width: 0; min-height: 38px; max-height: 132px; resize: none; overflow-y: auto;
+  padding: 9px 12px; border-radius: var(--radius-md); border: 1px solid var(--paper-edge);
+  background: var(--paper); color: var(--ink); font: inherit; font-size: 13px; line-height: 1.5;
+  outline: none; box-sizing: border-box;
+}
+.automation-architect-input-row textarea:focus { border-color: color-mix(in srgb, var(--accent) 48%, var(--paper-edge)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent); }
+.automation-architect-attach {
+  width: 38px; height: 38px; flex: 0 0 38px; display: grid; place-items: center;
+  border: 1px solid var(--paper-edge); border-radius: var(--radius-md); background: var(--paper);
+  color: var(--muted-deep); cursor: pointer;
+}
+.automation-architect-attach:hover { background: var(--paper-2); color: var(--ink); }
+.automation-architect-attach:disabled { opacity: .45; cursor: default; }
+.automation-architect-attachments { display: flex; flex-wrap: wrap; gap: 6px; }
+.automation-architect-attachments > span {
+  display: inline-flex; align-items: center; gap: 6px; max-width: min(260px, 100%);
+  padding: 5px 7px 5px 9px; border: 1px solid var(--paper-edge); border-radius: 999px;
+  background: var(--paper-2); color: var(--ink-soft); font-size: 11px;
+}
+.automation-architect-attachments b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.automation-architect-attachments button { display: grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--muted-deep); cursor: pointer; }
+.automation-architect-attachments button:hover { background: var(--paper-edge); color: var(--ink); }
+.automation-architect-attachment-error { color: var(--danger, #d64545); font-size: 11px; line-height: 1.45; }
+.automation-architect-loading {
+  position: absolute; top: 70px; left: 50%; z-index: 45; display: flex; align-items: center; gap: 11px;
+  min-width: 240px; max-width: calc(100% - 40px); padding: 11px 15px; transform: translateX(-50%);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--paper-edge)); border-radius: 14px;
+  background: color-mix(in srgb, var(--paper) 94%, transparent); box-shadow: 0 12px 34px rgba(30, 30, 38, .16), 0 2px 8px rgba(30, 30, 38, .08);
+  backdrop-filter: blur(14px); pointer-events: none;
+}
+.automation-architect-loading strong { display: block; margin-bottom: 2px; color: var(--ink); font-size: 12px; line-height: 1.35; }
+.automation-architect-loading-spinner { width: 17px; height: 17px; flex: 0 0 17px; border: 2px solid color-mix(in srgb, var(--accent) 22%, transparent); border-top-color: var(--accent); border-radius: 50%; animation: automation-architect-spin .8s linear infinite; }
+@keyframes automation-architect-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .automation-architect-loading-spinner { animation: none; border-top-color: color-mix(in srgb, var(--accent) 22%, transparent); background: var(--accent); } }
 
 .automation-issue-log-grip {
   position: absolute;
@@ -2829,7 +2925,7 @@ button[data-dashboard-import="true"]:disabled {
 .automation-session-stream p { margin: 5px 0 0; color: var(--rd-ink-2); font-size: 11px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
 .automation-session-stream article[data-live="true"] p { color: var(--rd-ink); }
 .automation-session-empty { min-height: 170px; display: grid; place-items: center; color: var(--rd-ink-3); font-size: 11px; line-height: 1.5; text-align: center; }
-.automation-session-error { margin: 0 12px 8px; padding: 8px 10px; border-radius: 8px; background: color-mix(in oklch, #d64545 10%, var(--rd-surface)); color: var(--rd-ink); font-size: 11px; line-height: 1.5; }
+.automation-session-error { position: relative; margin: 0 12px 8px; padding: 12px 50px 12px 14px; border: 1px solid #e8e8ea; border-radius: 14px; background: #fff; color: var(--rd-ink); font-size: 11px; line-height: 1.5; }
 .automation-session-composer { border-top: 1px solid var(--rd-hair); padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 8px; background: var(--rd-surface); }
 .automation-session-composer textarea { width: 100%; resize: none; padding: 9px 10px; border: 1px solid var(--rd-hair); border-radius: 10px; background: var(--rd-surface-2); color: var(--rd-ink); font: inherit; font-size: 11.5px; line-height: 1.5; }
 .automation-session-composer textarea:focus { outline: none; border-color: var(--rd-accent); }
@@ -3835,8 +3931,8 @@ button[data-toggle-state="off"] {
 }
 
 .automation-run-snapshot[data-status="error"] {
-  border-color: color-mix(in oklch, var(--red-deep, #c0392b) 28%, var(--paper-edge));
-  background: color-mix(in oklch, var(--red-deep, #c0392b) 6%, var(--paper));
+  border-color: #e8e8ea;
+  background: #fff;
 }
 
 .automation-node-state-list {
@@ -3946,22 +4042,33 @@ button[data-toggle-state="off"] {
 }
 
 .automation-run-message {
+  position: relative;
+  padding: 14px 52px 14px 16px;
+  border: 1px solid #e8e8ea;
+  border-radius: 14px;
+  background: #fff;
   color: var(--red-deep, #c0392b);
 }
 
+.automation-alert-close {
+  position: absolute; top: 12px; right: 12px; z-index: 1; width: 32px; height: 32px;
+  display: inline-grid; place-items: center; padding: 0; border: 0; border-radius: 9px;
+  background: transparent; color: #8a9095; cursor: pointer;
+}
+.automation-alert-close:hover, .automation-alert-close:focus-visible { background: #f2f3f4; color: #454b50; }
+.automation-alert-close:focus-visible { outline: 2px solid rgba(96, 122, 54, .3); outline-offset: 2px; }
+.automation-alert-close:disabled { opacity: .48; cursor: default; }
+
 .automation-reconcile-card,
 .automation-event-attention {
+  position: relative;
   display: grid;
   gap: 11px;
-  padding: 12px 12px 12px 14px;
-  /* ★"저렇게 나오면 아무도 모름"(실측 항목 16) — 옅은 베이지 카드가 다른 카드들
-     사이에 묻혔다. 왼쪽 두꺼운 주황 띠 + 진한 바탕 + 그림자로 위계를 만든다.
-     주황은 오너 팔레트 Orange #BF512C(바깥으로 나가는 것·주의 계열). */
-  border: 1px solid color-mix(in srgb, #BF512C 45%, var(--paper-edge));
-  border-left: 5px solid #BF512C;
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, #BF512C 9%, var(--paper));
-  box-shadow: 0 2px 10px color-mix(in srgb, #BF512C 18%, transparent);
+  padding: 22px 54px 22px 24px;
+  border: 1px solid #e8e8ea;
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 12px 30px rgba(20, 25, 30, .06);
   animation: attention-arrive 420ms ease;
 }
 
@@ -3987,7 +4094,8 @@ button[data-toggle-state="off"] {
   min-width: 0;
 }
 
-.automation-reconcile-head span,
+.automation-reconcile-eyebrow { display: flex; align-items: center; gap: 5px; color: #BF512C; }
+.automation-reconcile-eyebrow span,
 .automation-event-attention span {
   display: block;
   color: #BF512C;
@@ -3996,12 +4104,6 @@ button[data-toggle-state="off"] {
   font-weight: 800;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-}
-
-/* 눈썹 앞 경고 표식 — 글자보다 먼저 읽힌다. */
-.automation-reconcile-head span::before,
-.automation-event-attention span::before {
-  content: "⚠ ";
 }
 
 .automation-reconcile-head strong,

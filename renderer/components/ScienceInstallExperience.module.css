@@ -208,6 +208,36 @@
   color: #1b1e23;
 }
 
+.promoActions {
+  grid-template-columns: minmax(0, 1.45fr) minmax(0, 0.75fr);
+}
+
+.never {
+  grid-column: 1 / -1;
+  min-height: 30px !important;
+  padding: 0 8px !important;
+  border: 0;
+  background: transparent;
+  color: #72777e;
+  font-size: 11.5px !important;
+  font-weight: 650 !important;
+}
+
+.never:hover,
+.never:focus-visible {
+  color: #24282e;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.preferenceError {
+  margin: -4px 0 0;
+  color: #a2382f;
+  font-size: 11.5px;
+  line-height: 1.45;
+  text-align: center;
+}
+
 .close:focus-visible,
 .actions button:focus-visible {
   outline: 2px solid #be4b3f;

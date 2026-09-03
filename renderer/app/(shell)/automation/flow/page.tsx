@@ -6,7 +6,6 @@
 // React Flow는 client-only이고 이 앱은 Next.js static export(file://)이므로 "use client" 필수.
 "use client";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { humanSchedule } from "@shared/graph-blueprint";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   ReactFlow,
@@ -26,7 +25,7 @@ import {
 import "@xyflow/react/dist/style.css";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
-import type { Automation, RuntimeSelection, WorkflowGraph, WorkflowNode, WorkflowNodeRunState } from "@/lib/types";
+import type { Automation, WorkflowGraph, WorkflowNode, WorkflowNodeRunState } from "@/lib/types";
 import { layoutGraph, needsLayout } from "@shared/graph-layout";
 import { validateWorkflow, type WorkflowIssue } from "@/lib/workflow-validate";
 import { workflowNodeTypes, type NodeStrings, type WorkflowNodeData } from "@/components/automation/nodes";
@@ -35,40 +34,12 @@ import { NODE_ACCENT } from "@/components/automation/nodes/nodeShared";
 import { NodePalette, type PaletteNodeSeed } from "@/components/automation/NodePalette";
 import { NodeConfigPanel } from "@/components/automation/NodeConfigPanel";
 import { RunHistoryPanel } from "@/components/automation/RunHistoryPanel";
-import { AutomationSessionPanel } from "@/components/automation/AutomationSessionPanel";
-import {
-  runtimeBackendForSelection,
-  runtimeEngineLabel,
-  runtimeModelFallbackLabel,
-  runtimeProviderLabel,
-} from "@/components/dashboard/RuntimeModelPicker";
-import { IconBolt } from "@/components/Icon";
+import { AutomationSessionPanel, type AutomationPermissionIntervention } from "@/components/automation/AutomationSessionPanel";
+import { IconArrowUp, IconBolt, IconClose, IconPlus } from "@/components/Icon";
 import { ConnectionsDialog } from "@/components/automation/ConnectionsDialog";
-
-function runtimeSelectionPresentation(selection: RuntimeSelection | null | undefined, locale: string): {
-  label: string;
-  detail: string;
-} {
-  if (!selection) {
-    return {
-      label: locale === "en" ? "Role default" : "역할 기본값 사용",
-      detail: locale === "en" ? "Worker pool priority + fallback at run time" : "실행 시 Worker 풀 우선순위 · fallback",
-    };
-  }
-  const runtimeIdentity = {
-    kind: selection.kind,
-    backend: runtimeBackendForSelection(selection),
-    label: undefined,
-  } as const;
-  const provider = runtimeProviderLabel(runtimeIdentity);
-  const engine = runtimeEngineLabel(runtimeIdentity);
-  const model = selection.model?.trim();
-  const effort = selection.effort?.trim() || (locale === "en" ? "Default effort" : "기본 작업량");
-  return {
-    label: locale === "en" ? "Automation pin · overrides role default" : "자동화별 고정 · 역할 기본보다 우선",
-    detail: `${provider} · ${engine} · ${model ?? runtimeModelFallbackLabel(selection.kind, locale === "en" ? "en" : "ko")} · ${locale === "en" ? "effort" : "작업량"} ${effort} · ${locale === "en" ? "fails closed; no cross-provider fallback" : "사용할 수 없으면 중단 · 다른 공급자로 바꾸지 않음"}`,
-  };
-}
+import { ToolApprovalInline } from "@/components/ToolApprovalInline";
+import { useToolApprovals } from "@/lib/tool-approvals";
+import { grantAlwaysApproval } from "@/lib/always-approved-chats";
 
 function exactAutomationProjection(value: unknown, automationId: string): Automation | null {
   if (!value || typeof value !== "object") return null;
@@ -176,7 +147,10 @@ function AutomationFlowPage() {
   /** 저장 직후 하이드레이션 1회 스킵 — 캔버스 배치를 needsLayout이 덮어쓰지 못하게. */
   const skipNextHydrationRef = useRef(false);
   /** 하단 통합 패널의 공용 입력이 세션 대화 전송을 부르는 손잡이(임베드 세션이 채운다). */
-  const sessionSendRef = useRef<((text: string) => void) | null>(null);
+  const sessionSendRef = useRef<((text: string, files?: File[], onAccepted?: () => void) => void) | null>(null);
+  const [automationSessionChatId, setAutomationSessionChatId] = useState<string | null>(null);
+  const [permissionIntervention, setPermissionIntervention] = useState<AutomationPermissionIntervention | null>(null);
+  const [permissionGrantBusy, setPermissionGrantBusy] = useState(false);
   const [saving, setSaving] = useState(false);
   // 좌(세션 대화)·우(노드 검사 + 실행 기록) 패널 접기. 캔버스가 좁은 화면에서 가장 먼저
   // 희생되던 문제를 사용자가 직접 해소할 수 있게 한다. 선택은 로컬에 남는다.
@@ -254,6 +228,11 @@ function AutomationFlowPage() {
   // 자연어로 그래프를 고치는 제안 — 적용 전까지는 저장된 그래프를 건드리지 않는다.
   const [architectDraft, setArchitectDraft] = useState("");
   const [architectBusy, setArchitectBusy] = useState(false);
+  const [architectAction, setArchitectAction] = useState<"propose" | "apply" | null>(null);
+  const [architectAttachments, setArchitectAttachments] = useState<File[]>([]);
+  const [architectAttachmentError, setArchitectAttachmentError] = useState("");
+  const architectInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const architectFileInputRef = useRef<HTMLInputElement | null>(null);
   const [proposal, setProposal] = useState<{
     patch: { ops: unknown[]; rationale?: string };
     risks: string[];
@@ -280,13 +259,39 @@ function AutomationFlowPage() {
   const [bottomTab, setBottomTab] = useState<"session" | "log">("session");
   const [logOpen, setLogOpen] = useState(true);
   const [logHeight, setLogHeight] = useState(260);
+  const { queue: toolApprovalQueue } = useToolApprovals();
+  const automationApprovalCount = automationSessionChatId
+    ? toolApprovalQueue.filter((request) => request.chatId === automationSessionChatId).length
+    : 0;
+  useEffect(() => {
+    const input = architectInputRef.current;
+    if (!input) return;
+    input.style.height = "0px";
+    input.style.height = `${Math.min(132, Math.max(38, input.scrollHeight))}px`;
+  }, [architectDraft]);
+
+  const addArchitectFiles = useCallback((files: FileList | File[]) => {
+    const incoming = Array.from(files);
+    if (incoming.length === 0) return;
+    setArchitectAttachments((current) => {
+      const available = Math.max(0, 8 - current.length);
+      const accepted = incoming.slice(0, available);
+      setArchitectAttachmentError(incoming.length > available
+        ? (locale === "en" ? "You can attach up to 8 files." : "파일은 최대 8개까지 첨부할 수 있습니다.")
+        : "");
+      return [...current, ...accepted];
+    });
+    if (architectFileInputRef.current) architectFileInputRef.current.value = "";
+  }, [locale]);
   // 행동이 필요한 카드(시작 값·승인·판정 교정·의존성 수리)가 생기면 패널을 편다 —
   // 접힌 패널 뒤에서 조용히 기다리게 두지 않는다.
   /* 사람이 결정해야 끝나는 실패의 수 — 상세 탭이 이 숫자로 스스로 부른다.
      승인 대기를 사용자가 찾아 헤매지 않게 하는 유일한 신호다. */
   const decisionCount = Object.values(nodeFailures).filter((f) =>
     f.code === "EVAL_STUCK" || f.code === "CODE_DEPENDENCY_MISSING").length
-    + (inputPrompt !== null ? 1 : 0);
+    + (inputPrompt !== null ? 1 : 0)
+    + automationApprovalCount
+    + (permissionIntervention && automationApprovalCount === 0 ? 1 : 0);
   const hasActionCards = decisionCount > 0;
   useEffect(() => {
     // 결정이 필요해지면 패널을 열고 **그 탭으로 데려간다** — 어디를 눌러야 하는지
@@ -1146,6 +1151,7 @@ function AutomationFlowPage() {
     const api = ipc();
     if (!api || !automation) return;
     setArchitectBusy(true);
+    setArchitectAction("propose");
     setProposal(null);
     setMessage(locale === "en" ? "Working out what would change..." : "무엇이 바뀔지 알아보는 중입니다...");
     try {
@@ -1159,6 +1165,7 @@ function AutomationFlowPage() {
       setMessage(locale === "en" ? "The change could not be worked out." : "변경 내용을 만들지 못했습니다.");
     } finally {
       setArchitectBusy(false);
+      setArchitectAction(null);
     }
   }
 
@@ -1173,6 +1180,7 @@ function AutomationFlowPage() {
     const sentence = sentenceIn.trim();
     if (!sentence) return;
     setArchitectBusy(true);
+    setArchitectAction("propose");
     setProposal(null);
     setMessage(locale === "en" ? "Working out what would change..." : "무엇이 바뀔지 알아보는 중입니다...");
     try {
@@ -1190,6 +1198,7 @@ function AutomationFlowPage() {
       setMessage(locale === "en" ? "The change could not be worked out." : "변경 내용을 만들지 못했습니다.");
     } finally {
       setArchitectBusy(false);
+      setArchitectAction(null);
     }
   }
 
@@ -1198,6 +1207,7 @@ function AutomationFlowPage() {
     if (!api || !automation || !proposal) return;
     const previous = automation;
     setArchitectBusy(true);
+    setArchitectAction("apply");
     try {
       const result = await api.automations.applyGraphPatch(previous.id, proposal.patch);
       if (!result.ok) {
@@ -1233,6 +1243,7 @@ function AutomationFlowPage() {
       }
     } finally {
       setArchitectBusy(false);
+      setArchitectAction(null);
     }
   }
 
@@ -1370,6 +1381,42 @@ function AutomationFlowPage() {
                   overflowY: "auto",
                 }}
               >
+      <ToolApprovalInline chatId={automationSessionChatId} compact chip />
+      {permissionIntervention && automationApprovalCount === 0 ? (
+        <section className="automation-reconcile-card automation-permission-recovery" role="status" data-testid="automation-permission-recovery">
+          <button type="button" className="automation-alert-close" aria-label={locale === "en" ? "Dismiss permission notice" : "권한 알림 닫기"} onClick={() => setPermissionIntervention(null)}><IconClose size={14} /></button>
+          <div className="automation-reconcile-head">
+            <div>
+              <div className="automation-reconcile-eyebrow"><span>{locale === "en" ? "Permission needed" : "권한이 필요해요"}</span></div>
+              <strong>{permissionIntervention.question}</strong>
+            </div>
+          </div>
+          <p>{permissionIntervention.nextAction}</p>
+          <button
+            type="button"
+            className="titlebar-nodrag"
+            disabled={!automationSessionChatId || permissionGrantBusy}
+            onClick={() => {
+              if (!automationSessionChatId) return;
+              void (async () => {
+                setPermissionGrantBusy(true);
+                try {
+                  await grantAlwaysApproval(automationSessionChatId);
+                  setPermissionIntervention(null);
+                  setMessage(locale === "en"
+                    ? "Browser access is now always allowed for this automation session."
+                    : "이 자동화 세션에서 브라우저 사용을 항상 허용했습니다.");
+                } catch {
+                  setMessage(locale === "en" ? "The permission could not be saved." : "권한을 저장하지 못했습니다.");
+                } finally {
+                  setPermissionGrantBusy(false);
+                }
+              })();
+            }}
+            style={actionBtn}
+          >{permissionGrantBusy ? (locale === "en" ? "Saving…" : "저장 중…") : (locale === "en" ? "Always allow for this automation" : "이 자동화에서 항상 허용")}</button>
+        </section>
+      ) : null}
       {/* 시작 값을 받아야 하는 그래프. 값을 받고 나서 실행한다 —
           묻지 않고 시작하면 빈 값으로 도는 것을 사용자가 결과에서야 알게 된다. */}
       {inputPrompt ? (
@@ -1519,7 +1566,6 @@ function AutomationFlowPage() {
               </div>
   );
 
-  const runtimePresentation = runtimeSelectionPresentation(automation.runtimeSelection, locale);
 
   const inspectorContent = (
     <>
@@ -1568,59 +1614,41 @@ function AutomationFlowPage() {
   );
 
 return (
-    <div className="automation-flow-screen" style={{ flex: 1, display: "flex", flexDirection: "column", background: "var(--paper-2)", minHeight: 0 }}>
+    <div className="automation-flow-screen" style={{ flex: 1, display: "flex", flexDirection: "column", background: "var(--paper-2)", minHeight: 0, position: "relative" }}>
       <header
-        className="titlebar-drag"
+        className="automation-flow-header titlebar-drag"
         style={{
-          padding: "16px 32px",
+          padding: "14px 20px 14px 32px",
           minHeight: 56,
           borderBottom: "var(--hairline)",
           background: "var(--paper)",
-          display: "flex",
-          alignItems: "center",
-          gap: 12,
-          // 좁은 창에서 버튼이 7개까지 늘어난다. 넘칠 때 접거나 눌러 뭉개는 대신
-          // 가로로 흐르게 둔다 — 어느 버튼도 사라지지 않고 라벨도 온전하다.
-          overflowX: "auto",
-          overflowY: "hidden",
         }}
       >
-        <IconBolt size={18} style={{ color: automation.enabled ? "var(--accent)" : "var(--muted)", flexShrink: 0 }} />
+        <div className="automation-flow-header-title">
+        <button
+          type="button"
+          data-testid="toggle-enabled"
+          className="automation-flow-power titlebar-nodrag"
+          onClick={() => void toggleEnabled()}
+          disabled={toggling || (!automation.enabled && blockedByConnections)}
+          data-enabled={automation.enabled ? "true" : "false"}
+          aria-label={automation.enabled ? (locale === "en" ? "Turn off automation" : "자동화 끄기") : (locale === "en" ? "Turn on automation" : "자동화 켜기")}
+          title={!automation.enabled && blockedByConnections
+            ? (locale === "en" ? "Connect what it uses first." : "쓰는 것을 먼저 연결해야 켜집니다.")
+            : automation.enabled ? (locale === "en" ? "Turn off" : "끄기") : (locale === "en" ? "Turn on" : "켜기")}
+        ><IconBolt size={18} /></button>
         {/* 이름이 제목의 본체다. 0까지 줄어들면 "Ho/on/the/hour"처럼 한 글자씩
             무너지고, 바닥이 너무 낮으면(160px) 이번엔 "X AI Ag…"로 잘린다. 헤더가
             어차피 가로 스크롤되므로 여기서는 줄이지 않는다 — 이름은 온전히 보이고,
             모자란 폭은 스크롤이 흡수한다. */}
-        <div style={{ flex: "0 0 auto", minWidth: 0, maxWidth: 420, marginRight: 4 }}>
+        <div style={{ minWidth: 0, maxWidth: 420 }}>
           <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 17, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {automation.name}
           </h1>
-          {/* ★크론 원문(`0 9 * * 1`)을 그대로 보여주지 않는다 — humanSchedule이 이미
-              사람 말로 바꿀 줄 아는데 이 자리만 안 쓰고 있었다(실사용 실측).
-              nowrap이 없으면 "Hourly, on the / hour"로 접혀 헤더 높이가 흔들린다. */}
-          <div style={{ fontSize: 11, color: "var(--muted-deep)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-            {humanSchedule(automation.scheduleHuman, locale)}
-            <span
-              data-testid="automation-runtime-chip"
-              title={`${runtimePresentation.label} · ${runtimePresentation.detail}`}
-              style={{
-                display: "inline-flex",
-                flexDirection: "column",
-                alignItems: "flex-start",
-                marginLeft: 8,
-                padding: "2px 7px",
-                borderRadius: 999,
-                border: "1px solid var(--paper-edge)",
-                color: "var(--ink-soft)",
-                background: "var(--paper-2)",
-                fontWeight: 600,
-              }}
-            >
-              <strong>{runtimePresentation.label}</strong>
-              <small>{runtimePresentation.detail}</small>
-            </span>
-          </div>
+        </div>
         </div>
 
+        <div className="automation-flow-header-actions">
         {editing ? (
           <>
             <button onClick={() => setPaletteOpen((v) => !v)} className="titlebar-nodrag" style={pillBtn(paletteOpen)}>
@@ -1758,29 +1786,26 @@ return (
                   : (locale === "en" ? "Stop" : "중지")}
               </button>
             ) : null}
-            <button
-              data-testid="toggle-enabled"
-              onClick={() => void toggleEnabled()}
-              className="titlebar-nodrag"
-              disabled={toggling}
-              style={{ ...pillBtn(automation.enabled), ...(toggling ? { opacity: 0.6, cursor: "default" } : {}) }}
-              title={!automation.enabled && blockedByConnections
-                ? (locale === "en" ? "Connect what it uses first." : "쓰는 것을 먼저 연결해야 켜집니다.")
-                : undefined}
-            >
-              {toggling
-                ? <SpinnerLabel text={automation.enabled
-                  ? (locale === "en" ? "Turning off…" : "끄는 중…")
-                  : (locale === "en" ? "Turning on…" : "켜는 중…")} />
-                : automation.enabled
-                  ? t("auto.action.disable")
-                  : blockedByConnections
-                    ? (locale === "en" ? "Connect to turn on" : "연결해야 켜집니다")
-                    : t("auto.action.enable")}
-            </button>
           </>
         )}
+        </div>
       </header>
+      {architectBusy ? (
+        <div className="automation-architect-loading titlebar-nodrag" role="status" aria-live="polite">
+          <span className="automation-architect-loading-spinner" aria-hidden="true" />
+          <div>
+            <strong>{architectAction === "apply"
+              ? (locale === "en" ? "Applying the graph change" : "그래프 변경을 적용하는 중")
+              : (locale === "en" ? "Preparing a graph change" : "그래프 개선안을 만드는 중")}</strong>
+            <LoadingEstimate
+              locale={locale}
+              operationKey={architectAction === "apply" ? "automation-graph-apply" : "automation-graph-proposal"}
+              expectedSeconds={architectAction === "apply" ? [1, 12] : [3, 35]}
+              compact
+            />
+          </div>
+        </div>
+      ) : null}
 
       {/* ★상태 한 줄 — 화면에서 "지금 무슨 일이 일어났고 무엇을 누르면 되는가"의 유일한 답.
           편집 중에는 뜨지 않는다(그때의 관심사는 실행이 아니라 그래프다). */}
@@ -2141,31 +2166,63 @@ return (
                     executionPermission={automation.executionPermission}
                     embedded
                     sendHandleRef={sessionSendRef}
+                    onChatId={setAutomationSessionChatId}
+                    onPermissionIntervention={setPermissionIntervention}
                   />
                 </div>
               ) : null}
               {!editing ? (
-                <div style={{ marginTop: "auto", padding: "8px 10px", borderTop: "1px solid var(--paper-edge)", background: "var(--paper)", display: logOpen && bottomTab === "session" ? "grid" : "none", gap: 8, paddingRight: 64 }}>
-
-              {!editing ? (
-                <div
-                  className="titlebar-nodrag"
-                  style={{ display: "grid", gap: 8, order: 4 }}
-                >
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <input
+                <div className="automation-architect-composer" style={{ marginTop: "auto", padding: "10px 12px 16px", borderTop: "1px solid var(--paper-edge)", background: "var(--paper)", display: logOpen && bottomTab === "session" ? "grid" : "none", gap: 8 }}>
+                  <input
+                    ref={architectFileInputRef}
+                    type="file"
+                    multiple
+                    accept="*/*"
+                    tabIndex={-1}
+                    aria-hidden="true"
+                    style={{ display: "none" }}
+                    onChange={(event) => { if (event.target.files) addArchitectFiles(event.target.files); }}
+                  />
+                  {architectAttachments.length > 0 ? (
+                    <div className="automation-architect-attachments" aria-label={locale === "en" ? "Selected attachments" : "선택한 첨부 파일"}>
+                      {architectAttachments.map((file, index) => (
+                        <span key={`${file.name}-${file.size}-${index}`}>
+                          <b>{file.name}</b>
+                          <button
+                            type="button"
+                            aria-label={locale === "en" ? `Remove ${file.name}` : `${file.name} 제거`}
+                            onClick={() => setArchitectAttachments((current) => current.filter((_, i) => i !== index))}
+                          ><IconClose size={11} /></button>
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                  {architectAttachmentError ? <div className="automation-architect-attachment-error" role="alert">{architectAttachmentError}</div> : null}
+                  <div className="automation-one-composer titlebar-nodrag">
+                    <textarea
+                      ref={architectInputRef}
+                      rows={1}
                       value={architectDraft}
                       onChange={(e) => setArchitectDraft(e.target.value)}
+                      onPaste={(event) => {
+                        const files = Array.from(event.clipboardData.files ?? []);
+                        if (files.length > 0) {
+                          event.preventDefault();
+                          addArchitectFiles(files);
+                        }
+                      }}
                       onKeyDown={(e) => {
-                        if (e.key === "Enter" && !e.shiftKey) {
+                        if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                           e.preventDefault();
                           // ★Enter = 세션 대화로 보낸다(묻기·지시). 그래프 수정 제안은
                           //   옆의 [고칠 내용 보기] 버튼이 담당한다 — 입력은 하나, 행동은 둘.
                           const text = architectDraft.trim();
-                          if (!text) return;
+                          if (!text && architectAttachments.length === 0) return;
                           if (sessionSendRef.current) {
-                            sessionSendRef.current(text);
-                            setArchitectDraft("");
+                            sessionSendRef.current(text, architectAttachments, () => {
+                              setArchitectDraft("");
+                              setArchitectAttachments([]);
+                            });
                           } else {
                             void requestGraphChange();
                           }
@@ -2173,39 +2230,45 @@ return (
                       }}
                       placeholder={t("auto.flow.architect_placeholder")}
                       disabled={architectBusy}
-                      style={{
-                        flex: 1,
-                        padding: "8px 12px",
-                        borderRadius: "var(--radius-md)",
-                        border: "1px solid var(--paper-edge)",
-                        background: "var(--paper)",
-                        fontSize: 13,
-                        outline: "none",
-                      }}
                     />
+                  <div className="automation-one-composer-bar">
+                    <button
+                      type="button"
+                      className="automation-one-attach titlebar-nodrag"
+                      onClick={() => architectFileInputRef.current?.click()}
+                      disabled={architectBusy}
+                      aria-label={locale === "en" ? "Attach photos, videos, or files" : "사진, 영상 또는 파일 첨부"}
+                      title={locale === "en" ? "Attach files" : "파일 첨부"}
+                    ><IconPlus size={20} /></button>
+                    <div className="automation-one-composer-actions">
                     {/* ★기본 버튼은 입력창이 하는 일을 그대로 한다 — 보내기.
                         예전에는 이 자리에 [고칠 내용 보기]가 있어서, 채팅 입력 옆의
                         기본 버튼이 전혀 다른 동작(그래프 수정 제안)을 했다. 기대와의
                         일치성 위반(HE.md) — 입력창 옆 버튼은 Send 다. */}
                     <button
-                      className="titlebar-nodrag"
-                      disabled={architectBusy || !architectDraft.trim()}
+                      disabled={architectBusy || (!architectDraft.trim() && architectAttachments.length === 0)}
                       onClick={() => {
                         const text = architectDraft.trim();
-                        if (!text) return;
+                        if (!text && architectAttachments.length === 0) return;
                         if (sessionSendRef.current) {
-                          sessionSendRef.current(text);
-                          setArchitectDraft("");
+                          sessionSendRef.current(text, architectAttachments, () => {
+                            setArchitectDraft("");
+                            setArchitectAttachments([]);
+                          });
                           return;
                         }
                         void requestGraphChange();
                       }}
-                      style={actionBtn}
+                      className="automation-one-send titlebar-nodrag"
+                      aria-label={t("auto.flow.session_send")}
+                      title={t("auto.flow.session_send")}
                     >
-                      {t("auto.flow.session_send")}
+                      <IconArrowUp size={18} />
                     </button>
-                    {/* 그래프를 고치는 것은 보내기와 다른 일이므로 보조 자리에서
-                        자기 이름으로 선다. */}
+                    </div>
+                  </div>
+                  </div>
+                  <div className="automation-architect-secondary-actions">
                     <button
                       className="titlebar-nodrag"
                       disabled={architectBusy || !architectDraft.trim()}
@@ -2266,8 +2329,6 @@ return (
                       </div>
                     </div>
                   ) : null}
-                </div>
-              ) : null}
                 </div>
               ) : null}
             </div>
