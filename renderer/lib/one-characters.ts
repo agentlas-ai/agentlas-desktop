@@ -1,4 +1,5 @@
 export const ONE_CHARACTER_OPTIONS = [
+  { id: "orange-dino", label: "Dino", src: "/brand/one-characters/orange-dino.png", tone: "orange", style: "original" },
   { id: "blue-wave-2d", label: "Wave", src: "/brand/one-characters/blue-wave-2d.png", tone: "blue", style: "sketch" },
   { id: "green-cloud-2d", label: "Cloud", src: "/brand/one-characters/green-cloud-2d.png", tone: "green", style: "sketch" },
   { id: "purple-beacon-2d", label: "Beacon", src: "/brand/one-characters/purple-beacon-2d.png", tone: "purple", style: "sketch" },

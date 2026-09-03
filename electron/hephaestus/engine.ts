@@ -12,10 +12,10 @@ import crossSpawn from "cross-spawn";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { app } from "electron";
 import { spawnSync, type ChildProcess } from "node:child_process";
 import { detachedSpawnOpts, killCliTree, trackRunChild, withCliPath } from "../runtime/exec";
 import { withPythonCacheBoundary, withPythonRuntimeBoundary } from "../runtime/python-cache";
+import { optionalElectronAppPath } from "../runtime-paths";
 import { currentUiLocale } from "../ui-locale";
 import { hephaestusRoot, hephaestusRootDetail, readHephaestusVersion, resetHephaestusRootCache } from "./root";
 import type { HephaestusStatus, HephaestusUpdateJournal } from "../../shared/types";
@@ -75,12 +75,8 @@ function bundledPythonPaths(): string[] {
   const rel = process.platform === "win32" ? ["python.exe"] : ["bin", "python3"];
   const out: string[] = [];
   if (process.resourcesPath) out.push(path.join(process.resourcesPath, "python-runtime", ...rel));
-  try {
-    // dev: <repo>/build-resources/python-runtime/...
-    out.push(path.join(app.getAppPath(), "build-resources", "python-runtime", ...rel));
-  } catch {
-    /* app 미가용 */
-  }
+  const appPath = optionalElectronAppPath();
+  if (appPath) out.push(path.join(appPath, "build-resources", "python-runtime", ...rel));
   return out.filter((p) => {
     try {
       return fs.existsSync(p);

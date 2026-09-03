@@ -1,6 +1,6 @@
 // 자동화 스케줄러 — 앱이 켜져 있는 동안 60초마다 due 자동화를 점검해 실행한다.
 // 실행 = 타깃(firm/agent)의 백그라운드(division) chat을 만들어 runMcpInvocation로 promptTemplate을 돌린다.
-// (M1: 인프로세스 타이머. 앱이 꺼져 있으면 안 돎 — launchd persistent 데몬은 후속 작업.)
+// This is intentionally app-scoped: fully quitting Desktop stops local work.
 import { app, Notification } from "electron";
 import { randomUUID } from "node:crypto";
 import type { Automation, AutomationRunRecord, RuntimeSelection } from "../shared/types";
@@ -32,6 +32,7 @@ import {
   completeGoalLedgerGoal,
   GOAL_HARD_STOP_REASONS,
   goalProgressKeyForText,
+  goalLedgerShouldContinue,
   recordGoalLedgerCycle,
 } from "./mcp/goal-ledger";
 import { getOrCreateAutomationSession } from "./store/automation-sessions";
@@ -54,7 +55,7 @@ import {
   isJudgmentUnavailable,
   type AutomationResultStatus,
 } from "./automation-result";
-import { observedToolActivity } from "./store/run-events";
+import { hasInvocationRunReceipt, observedToolActivity } from "./store/run-events";
 import {
   recordMcpInvocationEvent,
   recordRunEvent,
@@ -96,8 +97,8 @@ let startupTimer: ReturnType<typeof setTimeout> | null = null;
 let installQuiescing = false;
 const running = new Set<string>();
 
-// 이 프로세스의 리스 소유자 식별자(설계 §2.6). headless launchd 러너 vs GUI를 구분해
-// claimed_at/lease_owner에 기록한다. 같은 due 행을 둘이 이중 실행하지 않게 한다.
+// 이 프로세스의 리스 소유자 식별자. 현재 제품 경로는 GUI만 실행하지만, 오래된
+// headless 표식이 원장에 남아 있어도 소유자를 정확히 구분할 수 있게 형식은 유지한다.
 const LEASE_OWNER = `${process.pid}:${process.argv.includes("--headless-automations") ? "headless" : "gui"}`;
 
 function boundedIntegerEnv(name: string, fallback: number, min: number, max: number): number {
@@ -553,6 +554,14 @@ async function runOne(
 ): Promise<TriggerDispatchResult> {
   if (installQuiescing) return { accepted: false };
   if (running.has(a.id)) return { accepted: false }; // 직전 실행이 아직 진행 중이면 건너뜀
+  if (a.goalId) {
+    const goalDecision = await goalLedgerShouldContinue(a.goalId);
+    if (goalDecision && !goalDecision.continue) {
+      // App-close/crash recovery is a durable pause. Merely starting the app,
+      // catching up a schedule, or receiving a trigger cannot resume it.
+      return { accepted: false };
+    }
+  }
   // 모든 실행 경로가 같은 크로스프로세스 리스를 사용한다. GUI의 Run now나 이벤트 트리거도
   // headless due 실행과 겹치면 외부 게시/결제 같은 부작용을 두 번 낼 수 있으므로 건너뛴다.
   if (
@@ -940,7 +949,12 @@ async function runOne(
       try {
         // flow/page.tsx의 synthesizeLegacyGraph 노드 id와 맞춰 단일 프롬프트 자동화도
         // 캔버스/상태 패널에서 즉시 보이게 한다.
-        startGraphRun({ runId, automationId: a.id, nodeIds: ["n0", "n1"] });
+        startGraphRun({
+          runId,
+          automationId: a.id,
+          nodeIds: ["n0", "n1"],
+          dryRun: opts?.dryRun === true,
+        });
         emitLegacyState("n0", "done");
         emitLegacyState("n1", "running");
       } catch (snapshotError) {
@@ -964,6 +978,20 @@ async function runOne(
         runtimeSelection: a.runtimeSelection ?? null,
         ...(a.targetType === "firm" ? { firmId: a.targetId } : a.targetType === "agent" ? { agentId: a.targetId } : {}),
       });
+      if (!hasInvocationRunReceipt(runId)) {
+        recordRunEvent({
+          runId,
+          kind: "invoke_started",
+          chatId: chat.chat.id,
+          automationId: a.id,
+          payload: {
+            invocationSource: "automation",
+            permissions: schedulerExecutionPermission(a),
+            toolMode: a.toolMode ?? "auto",
+            hubMode: a.targetType === "hub" ? "hub-first" : (a.hubMode ?? "hub-allowed"),
+          },
+        });
+      }
       try {
         let runnerError: string | null = null;
         const req = {
@@ -1103,6 +1131,8 @@ async function runOne(
               goalId: a.goalId,
               evidence: result.goalCompletionClaim.evidence
                 ?? `automation:${a.id} ${goalProgressKeyForText(output ?? "")}`,
+              outcomeText: output ?? "",
+              invocationRunId: runId,
             });
           }
           const goalDecision = a.goalId

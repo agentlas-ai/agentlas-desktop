@@ -13,7 +13,6 @@
 //  - 창이 없거나(플러그인·헤드리스) 무인 실행이면 **묻지 않고 즉시 강등**한다.
 //    기다릴 사람이 없는데 기다리는 것은 멈춤이지 질문이 아니다.
 import { randomUUID } from "node:crypto";
-import { BrowserWindow } from "electron";
 
 export interface AskUserOption {
   label: string;
@@ -50,7 +49,25 @@ const pending = new Map<string, PendingAsk>();
 const ASK_TIMEOUT_MS = 10 * 60_000;
 
 function emitToRenderer(payload: unknown): boolean {
-  const windows = BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed());
+  // The packaged daemon imports this module through the approval runtime but
+  // has no Electron module or renderer. Resolve Electron only when a visible
+  // question is actually attempted; headless hosts degrade to no-surface.
+  let windows: Array<{
+    isDestroyed: () => boolean;
+    webContents: { send: (channel: string, payload: unknown) => void };
+  }>;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const electron = require("electron") as {
+      BrowserWindow?: {
+        getAllWindows?: () => typeof windows;
+      };
+    };
+    windows = electron.BrowserWindow?.getAllWindows?.() ?? [];
+  } catch {
+    return false;
+  }
+  windows = windows.filter((window) => !window.isDestroyed());
   if (windows.length === 0) return false;
   for (const window of windows) {
     try {

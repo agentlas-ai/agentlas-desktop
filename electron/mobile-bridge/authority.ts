@@ -26,6 +26,7 @@ import {
   findCanonicalTaskForChat,
   getCanonicalTask,
   getCanonicalTaskForChat,
+  hasPassedTaskForceExecutionVerification,
 } from "../store/tasks";
 import {
   ACCEPTED_RESULT_CLOSURE_FACT_STATEMENTS,
@@ -39,6 +40,7 @@ import { sealOneMemoryCandidateProvenance } from "../one/memory-candidates";
 import { tryProduceAcceptedResultSuggestion } from "../one/completion-suggestion-producer";
 import { tryProduceOneImprovementProofForTask } from "../one/improvement-proof-producer";
 import { readOneArtifactImagePreview } from "../one/artifact-preview";
+import { readBoundChatMessageAttachment } from "../store/chat-message-attachments";
 import { performOneMobileSuggestionAction } from "../one/mobile-suggestions";
 import { invocationService } from "../invocation/service";
 import {
@@ -108,8 +110,7 @@ import {
 import { OwnerCloudActionError } from "../marketplace/mcp-source";
 import { resumeMobileOneAutoRecovery } from "../one/mobile-auto-recovery";
 import { autoResolveOneTeamPreflight, prepareOneTeamPreflight } from "../one/team-preflight";
-import { isOneInvocationChat, listRecentOneArtifactsForMobile } from "../store/run-events";
-import { readChatMessageAttachmentForMobile } from "../store/chat-message-attachments";
+import { isOneInvocationChat, iterateRecentChatOneArtifactEvents } from "../store/run-events";
 import {
   createDesktopMobileBridgeBuildActions,
   createDesktopMobileBridgeCloudAgentActions,
@@ -153,7 +154,7 @@ import {
   type MobileBridgeCloudUploadSaveDto,
   type MobileBridgeCloudUploadPreviewDto,
   type MobileBridgeInvocationEventDto,
-  type MobileBridgeOneArtifactDto,
+  type MobileBridgeInvocationArtifactDto,
   type MobileBridgeBrowserApprovalDto,
   type MobileBridgeInvokeSteerParams,
   type MobileBridgeJsonValue,
@@ -205,13 +206,13 @@ import type {
 const REQUEST_ID_RE = /^[^\u0000-\u001f]{1,128}$/;
 const IDENTIFIER_RE = /^[^\u0000-\u001f]{1,256}$/;
 const RUN_ID_RE = /^[^\u0000-\u001f]{1,160}$/;
-const UUID_RE = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
-const MOBILE_ONE_ARTIFACT_CURSOR_RE = /^[A-Za-z0-9_-]{1,512}$/;
 /** 도구 승인 id — tool-approval 이 발급하는 `approval:<t>:<rand>` / `denied:<t>:<rand>`. */
 const TOOL_APPROVAL_ID_RE = /^(approval|denied):[a-z0-9]{1,16}:[a-z0-9]{1,16}$/;
 const TERMINAL_APPROVAL_ID_RE = /^approval:[a-z0-9]{1,16}:[a-z0-9]{1,16}$/;
 const EVENT_TEXT_MAX_BYTES = 200_000;
 const EVENT_DELTA_MAX_BYTES = 64_000;
+const EVENT_ONE_ARTIFACT_LIMIT = 32;
+const RECENT_ONE_ARTIFACT_LIMIT = 10;
 const TOOL_COUNT_CAP = 1_000;
 const BUILD_EVENT_TEXT_MAX_BYTES = 16_000;
 const BUILD_SUMMARY_MAX_BYTES = 2_000;
@@ -1347,57 +1348,9 @@ function summarizeToolPayload(value: string | undefined): MobileBridgeToolPayloa
   return { shape: "json-scalar", size };
 }
 
-const MOBILE_ONE_ARTIFACT_TYPES = new Set<MobileBridgeOneArtifactDto["type"]>([
-  "document", "spreadsheet", "image", "video", "audio", "archive", "data", "other",
-]);
-
-function projectMobileBridgeOneArtifacts(
-  value: McpInvocationEvent["oneArtifacts"],
-): MobileBridgeOneArtifactDto[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const projected: MobileBridgeOneArtifactDto[] = [];
-  const seen = new Set<string>();
-  for (const artifact of value.slice(0, 32)) {
-    const identifier = (candidate: unknown): candidate is string =>
-      typeof candidate === "string"
-      && candidate.length >= 1
-      && candidate.length <= 256
-      && !/[\u0000-\u001f]/.test(candidate);
-    const label = typeof artifact.label === "string"
-      ? boundedRedactedText(artifact.label, 512)
-      : "";
-    if (
-      !identifier(artifact.taskId)
-      || !Number.isSafeInteger(artifact.taskVersion)
-      || artifact.taskVersion < 1
-      || !identifier(artifact.chatId)
-      || !identifier(artifact.runId)
-      || !identifier(artifact.manifestId)
-      || !identifier(artifact.artifactRef)
-      || !label
-      || !MOBILE_ONE_ARTIFACT_TYPES.has(artifact.type)
-      || (artifact.sizeBytes !== undefined && (!Number.isSafeInteger(artifact.sizeBytes) || artifact.sizeBytes < 0))
-    ) continue;
-    const bindingKey = `${artifact.runId}\u0000${artifact.artifactRef}`;
-    if (!seen.add(bindingKey)) continue;
-    projected.push({
-      taskId: artifact.taskId,
-      taskVersion: artifact.taskVersion,
-      chatId: artifact.chatId,
-      runId: artifact.runId,
-      manifestId: artifact.manifestId,
-      artifactRef: artifact.artifactRef,
-      label,
-      type: artifact.type,
-      ...(artifact.sizeBytes !== undefined ? { sizeBytes: artifact.sizeBytes } : {}),
-    });
-  }
-  return projected.length > 0 ? projected : undefined;
-}
-
 export function projectMobileBridgeInvocationEvent(
   event: McpInvocationEvent,
-  context?: { taskId?: string | null; syncedAt?: string; cwd?: string | null },
+  context?: { taskId?: string | null; chatId?: string | null; runId?: string | null; syncedAt?: string; cwd?: string | null },
 ): MobileBridgeInvocationEventDto {
   // "mcp-key-request" is a desktop-renderer-only elicitation signal — the
   // mobile client has no key sheet and its DTO union stays closed. Project it
@@ -1492,17 +1445,108 @@ export function projectMobileBridgeInvocationEvent(
       display: projectToolCallDisplay(event.tool, context?.cwd ?? undefined),
     };
   }
+  if (event.oneArtifacts?.length && context?.taskId && context.chatId) {
+    const artifacts = projectMobileBridgeOneArtifacts(event.oneArtifacts, {
+      taskId: context.taskId,
+      chatId: context.chatId,
+      runId: context.runId,
+      limit: EVENT_ONE_ARTIFACT_LIMIT,
+    });
+    if (artifacts.length > 0) projected.oneArtifacts = artifacts;
+  }
   if (event.kind === "surface" && event.oneSurface && context?.taskId && event.oneSurface.taskId === context.taskId) {
     projected.surface = event.oneSurface;
   }
-  const oneArtifacts = projectMobileBridgeOneArtifacts(event.oneArtifacts);
-  if (oneArtifacts) projected.oneArtifacts = oneArtifacts;
   // DESKTOP_MOBILE_BRIDGE: raw surface manifest, provider/model/session
   // metadata, delegation graph, env, and local filesystem fields are omitted.
   // TypeScript owns the DTO shape; a final runtime assertion prevents future
   // optional fields from becoming non-JSON without review.
   asJsonValue(projected, "invoke.event");
   return projected;
+}
+
+const MOBILE_ONE_ARTIFACT_TYPES = new Set([
+  "document", "spreadsheet", "image", "video", "audio", "archive", "data", "other",
+]);
+
+function projectMobileBridgeOneArtifacts(
+  value: unknown,
+  context: { taskId?: string | null; chatId: string; runId?: string | null; limit: number },
+): MobileBridgeInvocationArtifactDto[] {
+  if (!Array.isArray(value) || !IDENTIFIER_RE.test(context.chatId)) return [];
+  const seen = new Set<string>();
+  const artifacts: MobileBridgeInvocationArtifactDto[] = [];
+  for (const candidate of value) {
+    if (!isRecord(candidate)) continue;
+    const taskId = candidate.taskId;
+    const taskVersion = candidate.taskVersion;
+    const chatId = candidate.chatId;
+    const runId = candidate.runId;
+    const manifestId = candidate.manifestId;
+    const artifactRef = candidate.artifactRef;
+    const label = candidate.label;
+    const type = candidate.type;
+    if (
+      typeof taskId !== "string" || !IDENTIFIER_RE.test(taskId) ||
+      context.taskId && taskId !== context.taskId ||
+      !Number.isSafeInteger(taskVersion) || Number(taskVersion) < 1 ||
+      chatId !== context.chatId ||
+      typeof runId !== "string" || !IDENTIFIER_RE.test(runId) ||
+      context.runId && runId !== context.runId ||
+      typeof manifestId !== "string" || !IDENTIFIER_RE.test(manifestId) ||
+      typeof artifactRef !== "string" || !IDENTIFIER_RE.test(artifactRef) ||
+      typeof label !== "string" || !label.trim() ||
+      typeof type !== "string" || !MOBILE_ONE_ARTIFACT_TYPES.has(type)
+    ) continue;
+    const key = `${runId}\u0000${artifactRef}`;
+    if (!seen.add(key)) continue;
+    artifacts.push({
+      taskId,
+      taskVersion: Number(taskVersion),
+      chatId,
+      runId,
+      manifestId,
+      artifactRef,
+      label: boundedRedactedText(label, 512),
+      type: type as MobileBridgeInvocationArtifactDto["type"],
+      ...(Number.isSafeInteger(candidate.sizeBytes) && Number(candidate.sizeBytes) >= 0
+        ? { sizeBytes: Number(candidate.sizeBytes) }
+        : {}),
+      ...(typeof candidate.contentSha256 === "string" && /^[a-f0-9]{64}$/u.test(candidate.contentSha256)
+        ? { contentSha256: candidate.contentSha256 }
+        : {}),
+    });
+    if (artifacts.length >= context.limit) break;
+  }
+  return artifacts;
+}
+
+export function projectMobileBridgeRecentOneArtifacts(
+  chatId: string,
+  limit = RECENT_ONE_ARTIFACT_LIMIT,
+): MobileBridgeInvocationArtifactDto[] {
+  const boundedLimit = Math.max(1, Math.min(RECENT_ONE_ARTIFACT_LIMIT, Math.floor(limit)));
+  const newestFirst: MobileBridgeInvocationArtifactDto[] = [];
+  const seen = new Set<string>();
+  artifactEvents:
+  for (const event of iterateRecentChatOneArtifactEvents(chatId)) {
+    const projected = projectMobileBridgeOneArtifacts(event.payload.oneArtifacts, {
+      chatId,
+      runId: event.runId,
+      limit: EVENT_ONE_ARTIFACT_LIMIT,
+    });
+    // The ledger event preserves creation order. Scan it backwards while the
+    // outer iterator walks newest-to-oldest, then reverse the bounded answer so
+    // Mobile renders the recent index chronologically.
+    for (let index = projected.length - 1; index >= 0; index -= 1) {
+      const artifact = projected[index];
+      const key = `${artifact.runId}\u0000${artifact.artifactRef}`;
+      if (!seen.add(key)) continue;
+      newestFirst.push(artifact);
+      if (newestFirst.length >= boundedLimit) break artifactEvents;
+    }
+  }
+  return newestFirst.reverse();
 }
 
 /**
@@ -2379,7 +2423,12 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           return null;
         }
         const receipt = invocationService.latestReceipt(chatId);
-        if (!receipt || receipt.chatId !== chatId || receipt.status !== "completed") {
+        if (
+          !receipt ||
+          receipt.chatId !== chatId ||
+          receipt.status !== "completed" ||
+          !hasPassedTaskForceExecutionVerification(receipt.runId)
+        ) {
           return null;
         }
         const surface = invocationService.latestOneSurface({
@@ -2419,19 +2468,6 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         return this.terminalDispatch(guardedParams(request, ["terminalId", "ownerEpoch", "previewId", "approvalId"]), context, request);
       case "terminal.cancel":
         return this.terminalCancel(guardedParams(request, ["terminalId", "ownerEpoch", "requestId"]), context, request);
-      case "one.artifacts.recent": {
-        const params = guardedParams(request, ["chatId", "limit", "cursor"]);
-        const chatId = requiredIdentifier(params, "chatId");
-        requireChat(chatId);
-        const limit = optionalInteger(params, "limit", 1, 100) ?? 100;
-        const cursor = params.cursor === undefined
-          ? undefined
-          : requiredIdentifier(params, "cursor", MOBILE_ONE_ARTIFACT_CURSOR_RE);
-        return asJsonValue(
-          listRecentOneArtifactsForMobile({ chatId, limit, cursor }),
-          request.method,
-        );
-      }
       case "one.artifact.imagePreview": {
         const params = guardedParams(request, [
           "taskId", "taskVersion", "chatId", "runId", "manifestId", "artifactRef",
@@ -2448,17 +2484,22 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         });
         return preview ? asJsonValue(preview, request.method) : null;
       }
+      case "one.artifacts.recent": {
+        const params = guardedParams(request, ["chatId", "limit"]);
+        const chatId = requiredIdentifier(params, "chatId");
+        const limit = optionalInteger(params, "limit", 1, RECENT_ONE_ARTIFACT_LIMIT)
+          ?? RECENT_ONE_ARTIFACT_LIMIT;
+        return asJsonValue(projectMobileBridgeRecentOneArtifacts(chatId, limit), request.method);
+      }
       case "chat.attachment.imagePreview": {
         const params = guardedParams(request, ["chatId", "messageId", "attachmentId"]);
-        const chatId = requiredIdentifier(params, "chatId");
-        requireChat(chatId);
-        const preview = readChatMessageAttachmentForMobile({
-          chatId,
-          messageId: requiredIdentifier(params, "messageId", UUID_RE),
-          attachmentId: requiredIdentifier(params, "attachmentId", UUID_RE),
+        const attachment = readBoundChatMessageAttachment({
+          chatId: requiredIdentifier(params, "chatId"),
+          messageId: requiredIdentifier(params, "messageId"),
+          attachmentId: requiredIdentifier(params, "attachmentId"),
         });
-        return preview
-          ? asJsonValue({ mimeType: preview.mediaType, base64: preview.bytes.toString("base64") }, request.method)
+        return attachment
+          ? asJsonValue({ mimeType: attachment.mediaType, base64: attachment.bytes.toString("base64") }, request.method)
           : null;
       }
       case "one.suggestions.act": {
@@ -2684,7 +2725,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         return asJsonValue(
           {
             runId: attached.runId,
-            events: attached.events.map((event) => projectMobileBridgeInvocationEvent(event, { taskId, cwd })),
+            events: attached.events.map((event) => projectMobileBridgeInvocationEvent(event, { taskId, chatId, runId: attached.runId, cwd })),
           },
           request.method,
         );
@@ -3745,32 +3786,19 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     // live 요청만 폰에 보낸다 — 사후 고지(post-denial)는 데스크탑에서도 카드가 아니다.
     const pendingToolApprovals = listPendingToolApprovals()
       .filter((approval) => approval.mode === "live")
-      .map((approval) => {
-        const folderAccess = approval.tool === "folder-access";
-        const detail = folderAccess
-          ? String(approval.detail ?? "")
-            .replace(/[\u0000-\u001f\u007f]/g, "")
-            .split(/[\\/]+/)
-            .filter(Boolean)
-            .slice(-2)
-            .join("/")
-          : approval.detail?.slice(0, 2_000);
-        return {
-          id: approval.id,
-          runtime: approval.runtime,
-          tool: approval.tool,
-          ...(detail ? { detail } : {}),
-          // Desktop owns the local filesystem boundary. The phone needs the
-          // short display label and opaque approval id, never the host path.
-          ...(!folderAccess && approval.cwd ? { cwd: approval.cwd } : {}),
-          mode: approval.mode,
-          ...(approval.deniedBy ? { deniedBy: approval.deniedBy } : {}),
-          requestedAt: approval.requestedAt,
-          ...(approval.chatId ? { chatId: approval.chatId } : {}),
-          ...(approval.capability ? { capability: approval.capability } : {}),
-          ...(approval.agentId ? { agentId: approval.agentId } : {}),
-        };
-      });
+      .map((approval) => ({
+        id: approval.id,
+        runtime: approval.runtime,
+        tool: approval.tool,
+        ...(approval.detail ? { detail: approval.detail.slice(0, 2_000) } : {}),
+        ...(approval.cwd ? { cwd: approval.cwd } : {}),
+        mode: approval.mode,
+        ...(approval.deniedBy ? { deniedBy: approval.deniedBy } : {}),
+        requestedAt: approval.requestedAt,
+        ...(approval.chatId ? { chatId: approval.chatId } : {}),
+        ...(approval.capability ? { capability: approval.capability } : {}),
+        ...(approval.agentId ? { agentId: approval.agentId } : {}),
+      }));
     const ontology = await this.projectOntology(this.ontologyRefreshRequested);
     return projectMobileBridgeSnapshot({
       hostIdentity: this.options.hostIdentity,
@@ -3824,7 +3852,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         this.emit({
           event: "invoke.event",
           payload: asJsonValue(
-            { runId, chatId, event: projectMobileBridgeInvocationEvent(event, { taskId, cwd }) },
+            { runId, chatId, event: projectMobileBridgeInvocationEvent(event, { taskId, chatId, runId, cwd }) },
             "invoke.event envelope",
           ),
         });

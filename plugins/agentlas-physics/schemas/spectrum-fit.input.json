@@ -1,0 +1,57 @@
+{
+  "type": "object",
+  "properties": {
+    "x_column": { "type": "string", "minLength": 1, "maxLength": 160, "description": "Numeric column of the parent dataset used as the abscissa (energy, wavelength, channel)." },
+    "y_column": { "type": "string", "minLength": 1, "maxLength": 160, "description": "Numeric column with the measured counts or intensity." },
+    "sigma_column": { "type": "string", "minLength": 1, "maxLength": 160, "description": "Numeric column with the per-point standard uncertainty; only valid with uncertainty_model \"column\"." },
+    "uncertainty_model": { "type": "string", "enum": ["column", "poisson", "unit"], "description": "column: sigma_column; poisson: sqrt(max(y, 1)); unit: equal weights. Defaults to column when sigma_column is given, else poisson." },
+    "range": {
+      "type": "object",
+      "properties": { "min": { "type": "number" }, "max": { "type": "number" } },
+      "required": ["min", "max"],
+      "additionalProperties": false
+    },
+    "peaks": {
+      "type": "array", "minItems": 1, "maxItems": 16,
+      "items": {
+        "type": "object",
+        "properties": {
+          "label": { "type": "string", "minLength": 1, "maxLength": 80 },
+          "shape": { "type": "string", "enum": ["gaussian", "lorentzian", "pseudo_voigt", "voigt", "crystal_ball", "relativistic_breit_wigner"] },
+          "initial": {
+            "type": "object",
+            "description": "Starting values keyed by the shape's parameter names: gaussian {amplitude, center, sigma}; lorentzian {amplitude, center, gamma}; pseudo_voigt {amplitude, center, fwhm, eta}; voigt {area, center, sigma, gamma}; crystal_ball {amplitude, center, sigma, alpha, n>1}; relativistic_breit_wigner {area, mass, width}.",
+            "additionalProperties": { "type": "number" }
+          },
+          "fixed": { "type": "array", "maxItems": 5, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 64 } },
+          "bounds": { "type": "object", "additionalProperties": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number" } } }
+        },
+        "required": ["shape", "initial"],
+        "additionalProperties": false
+      }
+    },
+    "background": {
+      "type": "object",
+      "properties": {
+        "kind": { "type": "string", "enum": ["none", "polynomial", "exponential"] },
+        "degree": { "type": "integer", "minimum": 0, "maximum": 6, "description": "Polynomial degree (default 1); polynomial only." },
+        "initial": { "type": "array", "maxItems": 7, "items": { "type": "number" }, "description": "polynomial: c0..c_degree; exponential: [a, b] for a·exp(b·x)." },
+        "fixed": { "type": "array", "maxItems": 7, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 8 } }
+      },
+      "required": ["kind"],
+      "additionalProperties": false
+    },
+    "options": {
+      "type": "object",
+      "properties": {
+        "max_iterations": { "type": "integer", "minimum": 1, "maximum": 5000, "default": 400 },
+        "tolerance": { "type": "number", "minimum": 1e-15, "maximum": 0.01, "default": 1e-10 },
+        "jacobian": { "type": "string", "enum": ["analytic", "numeric"], "default": "analytic" },
+        "curve_points": { "type": "integer", "minimum": 50, "maximum": 2000, "default": 400 }
+      },
+      "additionalProperties": false
+    }
+  },
+  "required": ["x_column", "y_column", "peaks"],
+  "additionalProperties": false
+}

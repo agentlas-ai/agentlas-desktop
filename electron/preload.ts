@@ -629,6 +629,8 @@ const api: AgentlasIpc = {
     getGoalContext: (id: string) => ipcRenderer.invoke("chats:getGoalContext", id),
     defineGoal: (id: string, objective: string, locale?: "ko" | "en") =>
       ipcRenderer.invoke("chats:defineGoal", id, objective, locale),
+    resumeGoal: (id: string, expectedVersion: number) =>
+      ipcRenderer.invoke("chats:resumeGoal", id, expectedVersion),
     setSwarmMode: (id: string, enabled: boolean) =>
       ipcRenderer.invoke("chats:setSwarmMode", id, enabled),
     setRuntimeSelection: (id: string, selection: RuntimeSelection | null) =>

@@ -17,8 +17,8 @@ import { emitDesktopStoreChange } from "./change-bus";
 import { projectObservedTaskParticipantInDb } from "./task-participant-projection";
 import { redactOperationalSecrets } from "../invocation/event-secret-redaction";
 import type {
-  MobileBridgeOneArtifactDto,
   MobileBridgeOneArtifactsPageDto,
+  MobileBridgeInvocationArtifactDto,
 } from "../../shared/mobile-bridge";
 
 interface RunEventRow {
@@ -109,6 +109,10 @@ export interface RecordFailureEventInput {
   payload?: Record<string, unknown>;
 }
 
+const SECRET_RE = /(sk-[A-Za-z0-9_-]{12,}|api[_-]?key\s*[:=]\s*\S+|secret\s*[:=]\s*\S+|password\s*[:=]\s*\S+|token\s*[:=]\s*\S+|BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY)/gi;
+const COOKIE_OBJECT_VALUE_RE = /((?:["']?name["']?\s*:\s*["'][^"']{1,160}["'][\s\S]{0,160}?["']?value["']?\s*:\s*["']))[^"']*(["'])/gi;
+const SENSITIVE_NAMED_VALUE_RE = /((?:auth_token|ct0|access_token|refresh_token|session(?:id|_id|token)?|cookie|authorization)\s*[:=]\s*["']?)[^"'\s,;}]+/gi;
+const SENSITIVE_JSON_VALUE_RE = /(["'](?:encrypted_value|authorization|cookie|set-cookie|access_token|refresh_token|auth_token|ct0)["']\s*:\s*["'])[^"']*(["'])/gi;
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -247,20 +251,25 @@ export function markScienceRuntimeOutboxDelivered(deliveryId: string): void {
 }
 
 function truncate(value: string, limit = 800): string {
-  const text = redactOperationalSecrets(value);
+  const text = redactRunEventSensitiveText(value);
   return text.length > limit ? `${text.slice(0, limit)}...[truncated]` : text;
 }
 
-/** Redact structured browser/session credentials before a tool trace is durable. */
-export function sanitizeRunEventToolArgs(value: string): string {
-  const redactToolText = (text: string): string => redactOperationalSecrets(text)
+/** Defense-in-depth for model tool arguments and legacy ledgers. */
+export function redactRunEventSensitiveText(value: string): string {
+  return redactOperationalSecrets(value)
     .replaceAll("[redacted-secret]", "[redacted]")
-    .replace(/((?:["']?name["']?\s*:\s*["'][^"']{1,160}["'][\s\S]{0,160}?["']?value["']?\s*:\s*["']))[^"']*(["'])/gi, "$1[redacted]$2")
-    .replace(/((?:auth_token|ct0|access_token|refresh_token|session(?:id|_id|token)?|cookie|authorization)\s*[:=]\s*["']?)[^"'\s,;}]+/gi, "$1[redacted]");
+    .replace(SECRET_RE, "[redacted]")
+    .replace(COOKIE_OBJECT_VALUE_RE, "$1[redacted]$2")
+    .replace(SENSITIVE_JSON_VALUE_RE, "$1[redacted]$2")
+    .replace(SENSITIVE_NAMED_VALUE_RE, "$1[redacted]");
+}
+
+export function sanitizeRunEventToolArgs(value: string): string {
   try {
     const parsed = JSON.parse(value) as unknown;
     const walk = (input: unknown): unknown => {
-      if (typeof input === "string") return redactToolText(input);
+      if (typeof input === "string") return redactRunEventSensitiveText(input);
       if (Array.isArray(input)) return input.map(walk);
       if (!input || typeof input !== "object") return input;
       return Object.fromEntries(Object.entries(input as Record<string, unknown>).map(([key, child]) => [
@@ -270,9 +279,9 @@ export function sanitizeRunEventToolArgs(value: string): string {
           : walk(child),
       ]));
     };
-    return redactToolText(JSON.stringify(walk(parsed)));
+    return redactRunEventSensitiveText(JSON.stringify(walk(parsed)));
   } catch {
-    return redactToolText(value);
+    return redactRunEventSensitiveText(value);
   }
 }
 
@@ -340,6 +349,45 @@ function safePayload(input: Record<string, unknown> | undefined): Record<string,
   return out;
 }
 
+/**
+ * Older Desktop builds persisted shell tool arguments verbatim. Scrub only
+ * rows carrying cookie/token markers, in place, without changing run identity
+ * or sequence. This is intentionally idempotent and runs at startup.
+ */
+export function scrubLegacyRunEventSecrets(): number {
+  const db = getDb();
+  const markers = ["%auth_token%", "%ct0%", "%access_token%", "%refresh_token%", "%authorization%", "%cookie%"];
+  const where = markers.map(() => "LOWER(payload_json) LIKE ?").join(" OR ");
+  let changed = 0;
+  const scrubTable = (table: "run_events" | "failure_events") => {
+    const rows = db.prepare(`SELECT id, payload_json FROM ${table} WHERE ${where}`)
+      .all(...markers) as Array<{ id: string; payload_json: string }>;
+    const update = db.prepare(`UPDATE ${table} SET payload_json = ? WHERE id = ?`);
+    for (const row of rows) {
+      let next = redactRunEventSensitiveText(row.payload_json);
+      try {
+        const parsed = JSON.parse(row.payload_json) as Record<string, unknown>;
+        if (typeof parsed.toolArgs === "string") parsed.toolArgs = sanitizeRunEventToolArgs(parsed.toolArgs);
+        if (typeof parsed.toolResultPreview === "string") {
+          parsed.toolResultPreview = redactRunEventSensitiveText(parsed.toolResultPreview);
+        }
+        next = redactRunEventSensitiveText(JSON.stringify(parsed));
+      } catch {
+        // Keep the row parseable state unchanged while removing recognized values.
+      }
+      if (next !== row.payload_json) {
+        update.run(next, row.id);
+        changed += 1;
+      }
+    }
+  };
+  db.transaction(() => {
+    scrubTable("run_events");
+    scrubTable("failure_events");
+  })();
+  return changed;
+}
+
 const OPERATIONAL_SECRET_FIELD_RE =
   /^(?:authorization|proxyAuthorization|cookie|cookies|setCookie|session|sessionId|sessionToken)$/i;
 
@@ -399,7 +447,7 @@ function enrichOneArtifactContentIdentity(payload: Record<string, unknown>): voi
   }
 }
 
-const MOBILE_ONE_ARTIFACT_TYPES = new Set<MobileBridgeOneArtifactDto["type"]>([
+const MOBILE_ONE_ARTIFACT_TYPES = new Set<MobileBridgeInvocationArtifactDto["type"]>([
   "document", "spreadsheet", "image", "video", "audio", "archive", "data", "other",
 ]);
 const MOBILE_ONE_ARTIFACT_CURSOR_RE = /^[A-Za-z0-9_-]{1,512}$/;
@@ -509,7 +557,7 @@ export function listRecentOneArtifactsForMobile(input: {
       LIMIT 1`,
   );
   const candidates: Array<{
-    artifact: MobileBridgeOneArtifactDto;
+    artifact: MobileBridgeInvocationArtifactDto;
     cursor: MobileOneArtifactCursor;
   }> = [];
   const seen = new Set<string>();
@@ -549,7 +597,7 @@ export function listRecentOneArtifactsForMobile(input: {
           !taskId || chatId !== input.chatId || !runId || !manifestId || !artifactRef
           || !Number.isSafeInteger(artifact.taskVersion) || Number(artifact.taskVersion) < 1
           || !label || /[\u0000-\u001f]/.test(label)
-          || typeof type !== "string" || !MOBILE_ONE_ARTIFACT_TYPES.has(type as MobileBridgeOneArtifactDto["type"])
+          || typeof type !== "string" || !MOBILE_ONE_ARTIFACT_TYPES.has(type as MobileBridgeInvocationArtifactDto["type"])
           || (artifact.sizeBytes !== undefined && (!Number.isSafeInteger(artifact.sizeBytes) || Number(artifact.sizeBytes) < 0))
         ) continue;
         const binding = bindingLookup.get(taskId, chatId, runId, manifestId, artifactRef) as {
@@ -579,7 +627,7 @@ export function listRecentOneArtifactsForMobile(input: {
             manifestId,
             artifactRef,
             label,
-            type: type as MobileBridgeOneArtifactDto["type"],
+            type: type as MobileBridgeInvocationArtifactDto["type"],
             sizeBytes: Number(binding.size_bytes),
             contentSha256: binding.sha256,
           },
@@ -1207,6 +1255,41 @@ export function listChatRunTimeline(
     out.push({ receipt, events: listRunEvents(row.run_id, eventsPerRun) });
   }
   return out;
+}
+
+/**
+ * Streams artifact-bearing events newest first across the conversation's full
+ * durable invocation history. Consumers can stop after collecting their
+ * bounded result set, so a long artifact-sparse chat does not need to load its
+ * whole ledger and an arbitrary recent-run window cannot hide the last result.
+ *
+ * The correlated start-row check keeps the iterator on genuine invocation
+ * runs for this exact chat. Payload validation remains the caller's job.
+ */
+export function* iterateRecentChatOneArtifactEvents(
+  chatId: string,
+): Generator<RunEventUi> {
+  if (!chatId) return;
+  const rows = getDb()
+    .prepare(
+      `SELECT event.*
+       FROM run_events AS event
+       WHERE event.chat_id = ?
+         AND event.payload_json LIKE '%"oneArtifacts"%'
+         AND EXISTS (
+           SELECT 1
+           FROM run_events AS started
+           WHERE started.run_id = event.run_id
+             AND started.chat_id = event.chat_id
+             AND started.kind = 'invoke_started'
+         )
+       ORDER BY event.ts DESC, event.rowid DESC`,
+    )
+    .iterate(chatId) as IterableIterator<RunEventRow>;
+  for (const row of rows) {
+    const event = runRowToUi(row);
+    if (Array.isArray(event.payload.oneArtifacts)) yield event;
+  }
 }
 
 export function listFailureEvents(input: {

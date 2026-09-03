@@ -7,28 +7,103 @@
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["startTime", "endTime"],
+        "required": [
+          "startTime",
+          "endTime"
+        ],
         "properties": {
-          "startTime": { "type": "string", "format": "date-time", "description": "Inclusive UTC start with an explicit timezone." },
-          "endTime": { "type": "string", "format": "date-time", "description": "Inclusive UTC end with an explicit timezone; at most 366 days after start." },
-          "minMagnitude": { "type": "number", "minimum": -2, "maximum": 10, "default": 0 },
-          "maxMagnitude": { "type": ["number", "null"], "minimum": -2, "maximum": 10, "description": "Optional inclusive maximum preferred magnitude." },
-          "minDepthKm": { "type": "number", "minimum": -100, "maximum": 1000, "default": -100 },
-          "maxDepthKm": { "type": "number", "minimum": -100, "maximum": 1000, "default": 1000 },
+          "startTime": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Inclusive UTC start with an explicit timezone."
+          },
+          "endTime": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Inclusive UTC end with an explicit timezone; at most 366 days after start."
+          },
+          "minMagnitude": {
+            "type": "number",
+            "minimum": -2,
+            "maximum": 10,
+            "default": 0
+          },
+          "maxMagnitude": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": -2,
+            "maximum": 10,
+            "description": "Optional inclusive maximum preferred magnitude."
+          },
+          "minDepthKm": {
+            "type": "number",
+            "minimum": -100,
+            "maximum": 1000,
+            "default": -100
+          },
+          "maxDepthKm": {
+            "type": "number",
+            "minimum": -100,
+            "maximum": 1000,
+            "default": 1000
+          },
           "bounds": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["minLongitude", "minLatitude", "maxLongitude", "maxLatitude"],
+            "required": [
+              "minLongitude",
+              "minLatitude",
+              "maxLongitude",
+              "maxLatitude"
+            ],
             "properties": {
-              "minLongitude": { "type": "number", "minimum": -180, "maximum": 180 },
-              "minLatitude": { "type": "number", "minimum": -90, "maximum": 90 },
-              "maxLongitude": { "type": "number", "minimum": -180, "maximum": 180 },
-              "maxLatitude": { "type": "number", "minimum": -90, "maximum": 90 }
+              "minLongitude": {
+                "type": "number",
+                "minimum": -180,
+                "maximum": 180
+              },
+              "minLatitude": {
+                "type": "number",
+                "minimum": -90,
+                "maximum": 90
+              },
+              "maxLongitude": {
+                "type": "number",
+                "minimum": -180,
+                "maximum": 180
+              },
+              "maxLatitude": {
+                "type": "number",
+                "minimum": -90,
+                "maximum": 90
+              }
             }
           },
-          "limit": { "type": "integer", "minimum": 1, "maximum": 2000, "default": 500 },
-          "offset": { "type": "integer", "minimum": 1, "maximum": 1000000, "default": 1, "description": "USGS one-based result offset for bounded pagination." },
-          "orderBy": { "type": "string", "enum": ["time", "time-asc", "magnitude", "magnitude-asc"], "default": "time" }
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2000,
+            "default": 500
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000,
+            "default": 1,
+            "description": "USGS one-based result offset for bounded pagination."
+          },
+          "orderBy": {
+            "type": "string",
+            "enum": [
+              "time",
+              "time-asc",
+              "magnitude",
+              "magnitude-asc"
+            ],
+            "default": "time"
+          }
         }
       }
     },
@@ -38,52 +113,198 @@
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["catalog", "completenessMagnitude", "magnitudeType"],
+        "required": [
+          "catalog",
+          "completenessMagnitude",
+          "magnitudeType"
+        ],
         "properties": {
           "catalog": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["schema", "contractRevision", "source", "sourceMetadata", "orderBy", "eventCount", "pagination", "qualityCoverage", "events", "observations", "geojson", "table", "rendererCompatibility", "warnings", "normalizedSha256", "query", "provenance"],
+            "required": [
+              "schema",
+              "contractRevision",
+              "source",
+              "sourceMetadata",
+              "orderBy",
+              "eventCount",
+              "pagination",
+              "qualityCoverage",
+              "events",
+              "observations",
+              "geojson",
+              "table",
+              "rendererCompatibility",
+              "warnings",
+              "normalizedSha256",
+              "query",
+              "provenance"
+            ],
             "properties": {
-              "schema": { "const": "agentlas.earth.usgs-earthquake-catalog/v1" },
-              "contractRevision": { "const": "quality-pagination-detail-compatible/v2" },
-              "source": { "type": "object" },
-              "sourceMetadata": { "type": "object" },
-              "orderBy": { "type": "string", "enum": ["time", "time-asc", "magnitude", "magnitude-asc"] },
-              "eventCount": { "type": "integer", "minimum": 1, "maximum": 2000 },
-              "pagination": { "type": "object" },
-              "qualityCoverage": { "type": "object" },
-              "events": { "type": "array", "minItems": 1, "maxItems": 2000 },
-              "observations": { "type": "array", "minItems": 1, "maxItems": 2000 },
-              "geojson": { "type": "object" },
-              "table": { "type": "object" },
-              "rendererCompatibility": { "type": "object" },
-              "warnings": { "type": "array", "maxItems": 20 },
-              "normalizedSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "schema": {
+                "const": "agentlas.earth.usgs-earthquake-catalog/v1"
+              },
+              "contractRevision": {
+                "const": "quality-pagination-detail-compatible/v2"
+              },
+              "source": {
+                "type": "object"
+              },
+              "sourceMetadata": {
+                "type": "object"
+              },
+              "orderBy": {
+                "type": "string",
+                "enum": [
+                  "time",
+                  "time-asc",
+                  "magnitude",
+                  "magnitude-asc"
+                ]
+              },
+              "eventCount": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2000
+              },
+              "pagination": {
+                "type": "object"
+              },
+              "qualityCoverage": {
+                "type": "object"
+              },
+              "events": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 2000
+              },
+              "observations": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 2000
+              },
+              "geojson": {
+                "type": "object"
+              },
+              "table": {
+                "type": "object"
+              },
+              "rendererCompatibility": {
+                "type": "object"
+              },
+              "warnings": {
+                "type": "array",
+                "maxItems": 20
+              },
+              "normalizedSha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
               "query": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["startTime", "endTime", "minMagnitude", "maxMagnitude", "minDepthKm", "maxDepthKm", "bounds", "limit", "offset", "orderBy"],
+                "required": [
+                  "startTime",
+                  "endTime",
+                  "minMagnitude",
+                  "maxMagnitude",
+                  "minDepthKm",
+                  "maxDepthKm",
+                  "bounds",
+                  "limit",
+                  "offset",
+                  "orderBy"
+                ],
                 "properties": {
-                  "startTime": { "type": "string", "format": "date-time" },
-                  "endTime": { "type": "string", "format": "date-time" },
-                  "minMagnitude": { "type": "number", "minimum": -2, "maximum": 10 },
-                  "maxMagnitude": { "type": ["number", "null"], "minimum": -2, "maximum": 10 },
-                  "minDepthKm": { "type": "number", "minimum": -100, "maximum": 1000 },
-                  "maxDepthKm": { "type": "number", "minimum": -100, "maximum": 1000 },
-                  "bounds": { "type": ["object", "null"] },
-                  "limit": { "type": "integer", "minimum": 1, "maximum": 2000 },
-                  "offset": { "const": 1 },
-                  "orderBy": { "type": "string", "enum": ["time", "time-asc", "magnitude", "magnitude-asc"] }
+                  "startTime": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "endTime": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "minMagnitude": {
+                    "type": "number",
+                    "minimum": -2,
+                    "maximum": 10
+                  },
+                  "maxMagnitude": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "minimum": -2,
+                    "maximum": 10
+                  },
+                  "minDepthKm": {
+                    "type": "number",
+                    "minimum": -100,
+                    "maximum": 1000
+                  },
+                  "maxDepthKm": {
+                    "type": "number",
+                    "minimum": -100,
+                    "maximum": 1000
+                  },
+                  "bounds": {
+                    "type": [
+                      "object",
+                      "null"
+                    ]
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2000
+                  },
+                  "offset": {
+                    "const": 1
+                  },
+                  "orderBy": {
+                    "type": "string",
+                    "enum": [
+                      "time",
+                      "time-asc",
+                      "magnitude",
+                      "magnitude-asc"
+                    ]
+                  }
                 }
               },
-              "provenance": { "type": "object" }
+              "provenance": {
+                "type": "object"
+              }
             }
           },
-          "completenessMagnitude": { "type": "number", "minimum": -2, "maximum": 10, "description": "Researcher-supplied Mc; this tool does not estimate completeness." },
-          "binWidth": { "type": "number", "minimum": 0.01, "maximum": 1, "default": 0.1, "description": "Magnitude discretization ΔM. Mc and included magnitudes must align to this grid." },
-          "magnitudeType": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,40}$", "description": "Exact single USGS preferred magnitude type, for example mw or ml; cross-scale conversion is denied." },
-          "confidenceLevel": { "type": "number", "enum": [0.9, 0.95, 0.99], "default": 0.95 }
+          "completenessMagnitude": {
+            "type": "number",
+            "minimum": -2,
+            "maximum": 10,
+            "description": "Researcher-supplied Mc; this tool does not estimate completeness."
+          },
+          "binWidth": {
+            "type": "number",
+            "minimum": 0.01,
+            "maximum": 1,
+            "default": 0.1,
+            "description": "Magnitude discretization ΔM. Mc and included magnitudes must align to this grid."
+          },
+          "magnitudeType": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._-]{1,40}$",
+            "description": "Exact single USGS preferred magnitude type, for example mw or ml; cross-scale conversion is denied."
+          },
+          "confidenceLevel": {
+            "type": "number",
+            "enum": [
+              0.9,
+              0.95,
+              0.99
+            ],
+            "default": 0.95
+          }
         }
       }
     },
@@ -93,42 +314,173 @@
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["catalog", "mainshockTime", "observationStartTime", "observationEndTime", "completenessStartTime", "completenessMagnitude", "magnitudeType", "rateBinWidthSeconds", "parameterBounds"],
+        "required": [
+          "catalog",
+          "mainshockTime",
+          "observationStartTime",
+          "observationEndTime",
+          "completenessStartTime",
+          "completenessMagnitude",
+          "magnitudeType",
+          "rateBinWidthSeconds",
+          "parameterBounds"
+        ],
         "properties": {
           "catalog": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["schema", "contractRevision", "source", "sourceMetadata", "orderBy", "eventCount", "pagination", "qualityCoverage", "events", "observations", "geojson", "table", "rendererCompatibility", "warnings", "normalizedSha256", "query", "provenance"],
+            "required": [
+              "schema",
+              "contractRevision",
+              "source",
+              "sourceMetadata",
+              "orderBy",
+              "eventCount",
+              "pagination",
+              "qualityCoverage",
+              "events",
+              "observations",
+              "geojson",
+              "table",
+              "rendererCompatibility",
+              "warnings",
+              "normalizedSha256",
+              "query",
+              "provenance"
+            ],
             "properties": {
-              "schema": { "const": "agentlas.earth.usgs-earthquake-catalog/v1" },
-              "contractRevision": { "const": "quality-pagination-detail-compatible/v2" },
-              "source": { "type": "object" }, "sourceMetadata": { "type": "object" },
-              "orderBy": { "type": "string", "enum": ["time", "time-asc", "magnitude", "magnitude-asc"] },
-              "eventCount": { "type": "integer", "minimum": 1, "maximum": 2000 },
-              "pagination": { "type": "object" }, "qualityCoverage": { "type": "object" },
-              "events": { "type": "array", "minItems": 1, "maxItems": 2000 },
-              "observations": { "type": "array", "minItems": 1, "maxItems": 2000 },
-              "geojson": { "type": "object" }, "table": { "type": "object" }, "rendererCompatibility": { "type": "object" },
-              "warnings": { "type": "array", "maxItems": 20 },
-              "normalizedSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-              "query": { "type": "object" }, "provenance": { "type": "object" }
+              "schema": {
+                "const": "agentlas.earth.usgs-earthquake-catalog/v1"
+              },
+              "contractRevision": {
+                "const": "quality-pagination-detail-compatible/v2"
+              },
+              "source": {
+                "type": "object"
+              },
+              "sourceMetadata": {
+                "type": "object"
+              },
+              "orderBy": {
+                "type": "string",
+                "enum": [
+                  "time",
+                  "time-asc",
+                  "magnitude",
+                  "magnitude-asc"
+                ]
+              },
+              "eventCount": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2000
+              },
+              "pagination": {
+                "type": "object"
+              },
+              "qualityCoverage": {
+                "type": "object"
+              },
+              "events": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 2000
+              },
+              "observations": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 2000
+              },
+              "geojson": {
+                "type": "object"
+              },
+              "table": {
+                "type": "object"
+              },
+              "rendererCompatibility": {
+                "type": "object"
+              },
+              "warnings": {
+                "type": "array",
+                "maxItems": 20
+              },
+              "normalizedSha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "query": {
+                "type": "object"
+              },
+              "provenance": {
+                "type": "object"
+              }
             }
           },
-          "mainshockTime": { "type": "string", "format": "date-time", "description": "Researcher-supplied mainshock origin instant; must precede the observation window." },
-          "observationStartTime": { "type": "string", "format": "date-time", "description": "Inclusive observation start contained in the catalog query." },
-          "observationEndTime": { "type": "string", "format": "date-time", "description": "Inclusive observation end contained in the catalog query." },
-          "completenessStartTime": { "type": "string", "format": "date-time", "description": "Researcher-supplied time after which the catalog is considered complete; fit starts here." },
-          "completenessMagnitude": { "type": "number", "minimum": -2, "maximum": 10, "description": "Researcher-supplied Mc; never estimated." },
-          "magnitudeType": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,40}$", "description": "One exact USGS preferred magnitude type; no scale conversion." },
-          "rateBinWidthSeconds": { "type": "integer", "minimum": 60, "maximum": 2678400, "description": "Fixed time-bin width; must produce 4–500 bins after the time-completeness boundary." },
+          "mainshockTime": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Researcher-supplied mainshock origin instant; must precede the observation window."
+          },
+          "observationStartTime": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Inclusive observation start contained in the catalog query."
+          },
+          "observationEndTime": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Inclusive observation end contained in the catalog query."
+          },
+          "completenessStartTime": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Researcher-supplied time after which the catalog is considered complete; fit starts here."
+          },
+          "completenessMagnitude": {
+            "type": "number",
+            "minimum": -2,
+            "maximum": 10,
+            "description": "Researcher-supplied Mc; never estimated."
+          },
+          "magnitudeType": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._-]{1,40}$",
+            "description": "One exact USGS preferred magnitude type; no scale conversion."
+          },
+          "rateBinWidthSeconds": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 2678400,
+            "description": "Fixed time-bin width; must produce 4–500 bins after the time-completeness boundary."
+          },
           "parameterBounds": {
-            "type": "object", "additionalProperties": false,
-            "required": ["pMin", "pMax", "cMinSeconds", "cMaxSeconds"],
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "pMin",
+              "pMax",
+              "cMinSeconds",
+              "cMaxSeconds"
+            ],
             "properties": {
-              "pMin": { "type": "number", "minimum": 0.1, "maximum": 5 },
-              "pMax": { "type": "number", "minimum": 0.1, "maximum": 5 },
-              "cMinSeconds": { "type": "number", "exclusiveMinimum": 0 },
-              "cMaxSeconds": { "type": "number", "exclusiveMinimum": 0 }
+              "pMin": {
+                "type": "number",
+                "minimum": 0.1,
+                "maximum": 5
+              },
+              "pMax": {
+                "type": "number",
+                "minimum": 0.1,
+                "maximum": 5
+              },
+              "cMinSeconds": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "cMaxSeconds": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              }
             }
           }
         }
@@ -140,9 +492,15 @@
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["eventId"],
+        "required": [
+          "eventId"
+        ],
         "properties": {
-          "eventId": { "type": "string", "pattern": "^[A-Za-z0-9._-]{1,120}$", "description": "Exact USGS/ComCat event identifier from a catalog result." }
+          "eventId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._-]{1,120}$",
+            "description": "Exact USGS/ComCat event identifier from a catalog result."
+          }
         }
       }
     },
@@ -152,13 +510,53 @@
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["stationId", "startTime", "endTime", "datum"],
+        "required": [
+          "stationId",
+          "startTime",
+          "endTime",
+          "datum"
+        ],
         "properties": {
-          "stationId": { "type": "string", "pattern": "^[0-9]{7}$", "description": "Exact seven-digit NOAA CO-OPS station identifier." },
-          "startTime": { "type": "string", "format": "date-time", "description": "Inclusive instant with an explicit timezone and exact minute precision." },
-          "endTime": { "type": "string", "format": "date-time", "description": "Inclusive instant with an explicit timezone and exact minute precision; no more than 31 days after start." },
-          "datum": { "type": "string", "enum": ["CRD", "IGLD", "LWD", "MHHW", "MHW", "MTL", "MSL", "MLW", "MLLW", "NAVD", "STND"], "description": "Explicit NOAA vertical datum; never inferred." },
-          "units": { "type": "string", "enum": ["metric", "english"], "default": "metric" }
+          "stationId": {
+            "type": "string",
+            "pattern": "^[0-9]{7}$",
+            "description": "Exact seven-digit NOAA CO-OPS station identifier."
+          },
+          "startTime": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Inclusive instant with an explicit timezone and exact minute precision."
+          },
+          "endTime": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Inclusive instant with an explicit timezone and exact minute precision; no more than 31 days after start."
+          },
+          "datum": {
+            "type": "string",
+            "enum": [
+              "CRD",
+              "IGLD",
+              "LWD",
+              "MHHW",
+              "MHW",
+              "MTL",
+              "MSL",
+              "MLW",
+              "MLLW",
+              "NAVD",
+              "STND"
+            ],
+            "description": "Explicit NOAA vertical datum; never inferred."
+          },
+          "units": {
+            "type": "string",
+            "enum": [
+              "metric",
+              "english"
+            ],
+            "default": "metric"
+          }
         }
       }
     },
@@ -168,12 +566,35 @@
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["geojson"],
+        "required": [
+          "geojson"
+        ],
         "properties": {
-          "geojson": { "type": "object" },
-          "orderBy": { "type": "string", "enum": ["time", "time-asc", "magnitude", "magnitude-asc"], "default": "time" },
-          "offset": { "type": "integer", "minimum": 1, "maximum": 1000000, "default": 1 },
-          "limit": { "type": "integer", "minimum": 1, "maximum": 2000, "default": 2000 }
+          "geojson": {
+            "type": "object"
+          },
+          "orderBy": {
+            "type": "string",
+            "enum": [
+              "time",
+              "time-asc",
+              "magnitude",
+              "magnitude-asc"
+            ],
+            "default": "time"
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000,
+            "default": 1
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2000,
+            "default": 2000
+          }
         }
       }
     },
@@ -183,8 +604,14 @@
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["geojson"],
-        "properties": { "geojson": { "type": "object" } }
+        "required": [
+          "geojson"
+        ],
+        "properties": {
+          "geojson": {
+            "type": "object"
+          }
+        }
       }
     },
     {
@@ -193,21 +620,1355 @@
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["response", "stationId", "startTime", "endTime", "datum"],
+        "required": [
+          "response",
+          "stationId",
+          "startTime",
+          "endTime",
+          "datum"
+        ],
         "properties": {
-          "response": { "type": "object" },
-          "stationId": { "type": "string", "pattern": "^[0-9]{7}$" },
-          "startTime": { "type": "string", "format": "date-time" },
-          "endTime": { "type": "string", "format": "date-time" },
-          "datum": { "type": "string", "enum": ["CRD", "IGLD", "LWD", "MHHW", "MHW", "MTL", "MSL", "MLW", "MLLW", "NAVD", "STND"] },
-          "units": { "type": "string", "enum": ["metric", "english"], "default": "metric" }
+          "response": {
+            "type": "object"
+          },
+          "stationId": {
+            "type": "string",
+            "pattern": "^[0-9]{7}$"
+          },
+          "startTime": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "endTime": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "datum": {
+            "type": "string",
+            "enum": [
+              "CRD",
+              "IGLD",
+              "LWD",
+              "MHHW",
+              "MHW",
+              "MTL",
+              "MSL",
+              "MLW",
+              "MLLW",
+              "NAVD",
+              "STND"
+            ]
+          },
+          "units": {
+            "type": "string",
+            "enum": [
+              "metric",
+              "english"
+            ],
+            "default": "metric"
+          }
+        }
+      }
+    },
+    {
+      "name": "analyze_usgs_seismicity_b_value",
+      "description": "Estimate magnitude of completeness (maximum curvature with correction, goodness-of-fit 90/95%, b-value stability), the Aki maximum-likelihood b-value with Shi & Bolt uncertainty and Utsu binning correction, the a-value, annual rates and return periods with a b-uncertainty band, and a sliding-window b-value series from one complete, provenance-hashed USGS catalog.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "catalog",
+          "magnitudeType"
+        ],
+        "properties": {
+          "catalog": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "schema",
+              "contractRevision",
+              "source",
+              "sourceMetadata",
+              "orderBy",
+              "eventCount",
+              "pagination",
+              "qualityCoverage",
+              "events",
+              "observations",
+              "geojson",
+              "table",
+              "rendererCompatibility",
+              "warnings",
+              "normalizedSha256",
+              "query",
+              "provenance"
+            ],
+            "properties": {
+              "schema": {
+                "const": "agentlas.earth.usgs-earthquake-catalog/v1"
+              },
+              "contractRevision": {
+                "const": "quality-pagination-detail-compatible/v2"
+              },
+              "source": {
+                "type": "object"
+              },
+              "sourceMetadata": {
+                "type": "object"
+              },
+              "orderBy": {
+                "type": "string",
+                "enum": [
+                  "time",
+                  "time-asc",
+                  "magnitude",
+                  "magnitude-asc"
+                ]
+              },
+              "eventCount": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2000
+              },
+              "pagination": {
+                "type": "object"
+              },
+              "qualityCoverage": {
+                "type": "object"
+              },
+              "events": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 2000
+              },
+              "observations": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 2000
+              },
+              "geojson": {
+                "type": "object"
+              },
+              "table": {
+                "type": "object"
+              },
+              "rendererCompatibility": {
+                "type": "object"
+              },
+              "warnings": {
+                "type": "array",
+                "maxItems": 20
+              },
+              "normalizedSha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "query": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "startTime",
+                  "endTime",
+                  "minMagnitude",
+                  "maxMagnitude",
+                  "minDepthKm",
+                  "maxDepthKm",
+                  "bounds",
+                  "limit",
+                  "offset",
+                  "orderBy"
+                ],
+                "properties": {
+                  "startTime": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "endTime": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "minMagnitude": {
+                    "type": "number",
+                    "minimum": -2,
+                    "maximum": 10
+                  },
+                  "maxMagnitude": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "minimum": -2,
+                    "maximum": 10
+                  },
+                  "minDepthKm": {
+                    "type": "number",
+                    "minimum": -100,
+                    "maximum": 1000
+                  },
+                  "maxDepthKm": {
+                    "type": "number",
+                    "minimum": -100,
+                    "maximum": 1000
+                  },
+                  "bounds": {
+                    "type": [
+                      "object",
+                      "null"
+                    ]
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2000
+                  },
+                  "offset": {
+                    "const": 1
+                  },
+                  "orderBy": {
+                    "type": "string",
+                    "enum": [
+                      "time",
+                      "time-asc",
+                      "magnitude",
+                      "magnitude-asc"
+                    ]
+                  }
+                }
+              },
+              "provenance": {
+                "type": "object"
+              }
+            }
+          },
+          "magnitudeType": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          },
+          "binWidth": {
+            "type": "number",
+            "minimum": 0.01,
+            "maximum": 1,
+            "default": 0.1
+          },
+          "confidenceLevel": {
+            "type": "number",
+            "enum": [
+              0.9,
+              0.95,
+              0.99
+            ],
+            "default": 0.95
+          },
+          "completenessSelection": {
+            "type": "string",
+            "enum": [
+              "maximum-curvature",
+              "maximum-curvature-corrected",
+              "goodness-of-fit-90",
+              "goodness-of-fit-95",
+              "b-value-stability",
+              "explicit"
+            ],
+            "default": "maximum-curvature-corrected"
+          },
+          "completenessMagnitude": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": -2,
+            "maximum": 10
+          },
+          "maximumCurvatureCorrection": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "default": 0.2
+          },
+          "windowEvents": {
+            "type": "integer",
+            "minimum": 20,
+            "maximum": 2000,
+            "default": 100
+          },
+          "stepEvents": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2000,
+            "default": 25
+          },
+          "stabilityWindowBins": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 50
+          },
+          "returnPeriodMagnitudes": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "minItems": 1,
+            "maxItems": 40,
+            "items": {
+              "type": "number",
+              "minimum": -2,
+              "maximum": 10
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "analyze_usgs_aftershock_productivity",
+      "description": "Extend a bounded Omori–Utsu fit with Båth's law (observed and modified), the aftershock b-value, sequence duration to a declared background rate, and a caveated forecast table of expected aftershocks ≥ M over N days with Poisson counting intervals.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "catalog",
+          "mainshockTime",
+          "mainshockMagnitude",
+          "observationStartTime",
+          "observationEndTime",
+          "completenessStartTime",
+          "completenessMagnitude",
+          "magnitudeType",
+          "rateBinWidthSeconds",
+          "parameterBounds",
+          "forecastHorizonDays",
+          "forecastMagnitudes"
+        ],
+        "properties": {
+          "catalog": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "schema",
+              "contractRevision",
+              "source",
+              "sourceMetadata",
+              "orderBy",
+              "eventCount",
+              "pagination",
+              "qualityCoverage",
+              "events",
+              "observations",
+              "geojson",
+              "table",
+              "rendererCompatibility",
+              "warnings",
+              "normalizedSha256",
+              "query",
+              "provenance"
+            ],
+            "properties": {
+              "schema": {
+                "const": "agentlas.earth.usgs-earthquake-catalog/v1"
+              },
+              "contractRevision": {
+                "const": "quality-pagination-detail-compatible/v2"
+              },
+              "source": {
+                "type": "object"
+              },
+              "sourceMetadata": {
+                "type": "object"
+              },
+              "orderBy": {
+                "type": "string",
+                "enum": [
+                  "time",
+                  "time-asc",
+                  "magnitude",
+                  "magnitude-asc"
+                ]
+              },
+              "eventCount": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2000
+              },
+              "pagination": {
+                "type": "object"
+              },
+              "qualityCoverage": {
+                "type": "object"
+              },
+              "events": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 2000
+              },
+              "observations": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 2000
+              },
+              "geojson": {
+                "type": "object"
+              },
+              "table": {
+                "type": "object"
+              },
+              "rendererCompatibility": {
+                "type": "object"
+              },
+              "warnings": {
+                "type": "array",
+                "maxItems": 20
+              },
+              "normalizedSha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "query": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "startTime",
+                  "endTime",
+                  "minMagnitude",
+                  "maxMagnitude",
+                  "minDepthKm",
+                  "maxDepthKm",
+                  "bounds",
+                  "limit",
+                  "offset",
+                  "orderBy"
+                ],
+                "properties": {
+                  "startTime": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "endTime": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "minMagnitude": {
+                    "type": "number",
+                    "minimum": -2,
+                    "maximum": 10
+                  },
+                  "maxMagnitude": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "minimum": -2,
+                    "maximum": 10
+                  },
+                  "minDepthKm": {
+                    "type": "number",
+                    "minimum": -100,
+                    "maximum": 1000
+                  },
+                  "maxDepthKm": {
+                    "type": "number",
+                    "minimum": -100,
+                    "maximum": 1000
+                  },
+                  "bounds": {
+                    "type": [
+                      "object",
+                      "null"
+                    ]
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2000
+                  },
+                  "offset": {
+                    "const": 1
+                  },
+                  "orderBy": {
+                    "type": "string",
+                    "enum": [
+                      "time",
+                      "time-asc",
+                      "magnitude",
+                      "magnitude-asc"
+                    ]
+                  }
+                }
+              },
+              "provenance": {
+                "type": "object"
+              }
+            }
+          },
+          "mainshockTime": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "mainshockMagnitude": {
+            "type": "number",
+            "minimum": -2,
+            "maximum": 10
+          },
+          "observationStartTime": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "observationEndTime": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completenessStartTime": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completenessMagnitude": {
+            "type": "number",
+            "minimum": -2,
+            "maximum": 10
+          },
+          "magnitudeType": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          },
+          "rateBinWidthSeconds": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 2678400
+          },
+          "parameterBounds": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "pMin",
+              "pMax",
+              "cMinSeconds",
+              "cMaxSeconds"
+            ],
+            "properties": {
+              "pMin": {
+                "type": "number",
+                "minimum": 0.1,
+                "maximum": 5
+              },
+              "pMax": {
+                "type": "number",
+                "minimum": 0.1,
+                "maximum": 5
+              },
+              "cMinSeconds": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "cMaxSeconds": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              }
+            }
+          },
+          "forecastHorizonDays": {
+            "type": "number",
+            "minimum": 0.01,
+            "maximum": 3650
+          },
+          "forecastMagnitudes": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 20,
+            "items": {
+              "type": "number",
+              "minimum": -2,
+              "maximum": 10
+            }
+          },
+          "bValue": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0.1,
+            "maximum": 3
+          },
+          "binWidth": {
+            "type": "number",
+            "minimum": 0.01,
+            "maximum": 1,
+            "default": 0.1
+          },
+          "backgroundRatePerDay": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "exclusiveMinimum": 0
+          },
+          "bathReferenceDifference": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 5,
+            "default": 1.2
+          }
+        }
+      }
+    },
+    {
+      "name": "analyze_tidal_harmonics",
+      "description": "Least-squares tidal harmonic analysis over a bounded constituent catalogue (M2, S2, N2, K2, K1, O1, P1, Q1, M4, MS4, Sa, Ssa) with Rayleigh-criterion selection, amplitude and phase standard errors, residuals, form factor, a predicted high/low water table, and an observed-versus-predicted figure.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sourceContentSha256",
+          "series",
+          "valueUnit"
+        ],
+        "properties": {
+          "sourceContentSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "series": {
+            "type": "array",
+            "minItems": 24,
+            "maxItems": 20000,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "time",
+                "value"
+              ],
+              "properties": {
+                "time": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "value": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              }
+            }
+          },
+          "valueUnit": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          },
+          "verticalDatum": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 40
+          },
+          "constituents": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "minItems": 1,
+            "maxItems": 12,
+            "items": {
+              "type": "string",
+              "enum": [
+                "M2",
+                "S2",
+                "N2",
+                "K2",
+                "K1",
+                "O1",
+                "P1",
+                "Q1",
+                "M4",
+                "MS4",
+                "Sa",
+                "Ssa"
+              ]
+            }
+          },
+          "referenceTime": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "predictionStepMinutes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1440,
+            "default": 6
+          },
+          "predictionStartTime": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "predictionEndTime": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      }
+    },
+    {
+      "name": "analyze_climate_trend",
+      "description": "Sea-level or climate series trend: OLS linear trend with seasonal harmonics and AR(1)-corrected uncertainty (Santer et al. 2000), Mann–Kendall with the Hamed–Rao autocorrelation correction, Sen's slope with a Gilbert confidence interval, and the Pettitt change point.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sourceContentSha256",
+          "series",
+          "valueUnit"
+        ],
+        "properties": {
+          "sourceContentSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "series": {
+            "type": "array",
+            "minItems": 10,
+            "maxItems": 20000,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "time",
+                "value"
+              ],
+              "properties": {
+                "time": {
+                  "type": "number",
+                  "description": "decimal year"
+                },
+                "value": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              }
+            }
+          },
+          "valueUnit": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          },
+          "seasonalHarmonics": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4,
+            "default": 2
+          },
+          "confidenceLevel": {
+            "type": "number",
+            "minimum": 0.8,
+            "maximum": 0.999,
+            "default": 0.95
+          }
+        }
+      }
+    },
+    {
+      "name": "analyze_drought_index",
+      "description": "Standardized Precipitation Index at 1/3/6/12-month (or declared) scales with the Thom gamma fit and mixed zero distribution, or SPEI with the L-moment log-logistic fit when potential evapotranspiration is supplied; returns monthly index values, McKee drought categories, event tables, and per-month fit parameters.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sourceContentSha256",
+          "series",
+          "precipitationUnit"
+        ],
+        "properties": {
+          "sourceContentSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "series": {
+            "type": "array",
+            "minItems": 120,
+            "maxItems": 6000,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "year",
+                "month",
+                "precipitation"
+              ],
+              "properties": {
+                "year": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9999
+                },
+                "month": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 12
+                },
+                "precipitation": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "potentialEvapotranspiration": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "precipitationUnit": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          },
+          "scales": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "minItems": 1,
+            "maxItems": 6,
+            "items": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 48
+            }
+          },
+          "index": {
+            "type": "string",
+            "enum": [
+              "spi",
+              "spei"
+            ],
+            "default": "spi"
+          },
+          "primaryScale": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 48
+          },
+          "referencePeriod": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": false,
+            "required": [
+              "startYear",
+              "endYear"
+            ],
+            "properties": {
+              "startYear": {
+                "type": "integer"
+              },
+              "endYear": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "analyze_flood_frequency",
+      "description": "Annual-peak flood frequency analysis: Log-Pearson III by Bulletin 17B method of moments with optional regional-skew weighting and Appendix 9 confidence limits, Gumbel method of moments with Kite standard errors, and GEV by L-moments; returns a return-period table and a frequency-curve figure with plotting positions.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sourceContentSha256",
+          "peaks",
+          "flowUnit"
+        ],
+        "properties": {
+          "sourceContentSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "peaks": {
+            "type": "array",
+            "minItems": 10,
+            "maxItems": 2000,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "year",
+                "flow"
+              ],
+              "properties": {
+                "year": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9999
+                },
+                "flow": {
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                }
+              }
+            }
+          },
+          "flowUnit": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          },
+          "returnPeriods": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "minItems": 1,
+            "maxItems": 20,
+            "items": {
+              "type": "number",
+              "minimum": 1.01,
+              "maximum": 100000
+            }
+          },
+          "regionalSkew": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": false,
+            "required": [
+              "value",
+              "meanSquareError"
+            ],
+            "properties": {
+              "value": {
+                "type": "number",
+                "minimum": -3,
+                "maximum": 3
+              },
+              "meanSquareError": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              }
+            }
+          },
+          "plottingPosition": {
+            "type": "string",
+            "enum": [
+              "weibull",
+              "gringorten"
+            ],
+            "default": "weibull"
+          },
+          "confidenceLevel": {
+            "type": "number",
+            "minimum": 0.8,
+            "maximum": 0.999,
+            "default": 0.95
+          }
+        }
+      }
+    },
+    {
+      "name": "analyze_isochron",
+      "description": "York (2004) errors-in-variables isochron regression with correlated x/y errors, MSWD and probability of fit, initial ratio, and the isochron age from a tabulated decay-constant catalogue (Rb–Sr, Sm–Nd, Lu–Hf, Re–Os, U–Pb 238/235, or custom λ).",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sourceContentSha256",
+          "system",
+          "samples"
+        ],
+        "properties": {
+          "sourceContentSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "system": {
+            "type": "string",
+            "enum": [
+              "rb-sr",
+              "sm-nd",
+              "lu-hf",
+              "re-os",
+              "u-pb-238",
+              "u-pb-235",
+              "custom"
+            ]
+          },
+          "decayConstantPerYear": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "exclusiveMinimum": 0
+          },
+          "samples": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 500,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "x",
+                "y",
+                "sigmaX",
+                "sigmaY"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                },
+                "x": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "y": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "sigmaX": {
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                },
+                "sigmaY": {
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                },
+                "correlation": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": -0.999999,
+                  "maximum": 0.999999
+                }
+              }
+            }
+          },
+          "uncertaintyKind": {
+            "type": "string",
+            "enum": [
+              "1-sigma-absolute",
+              "2-sigma-absolute",
+              "1-sigma-percent",
+              "2-sigma-percent"
+            ],
+            "default": "1-sigma-absolute"
+          },
+          "confidenceLevel": {
+            "type": "number",
+            "minimum": 0.8,
+            "maximum": 0.999,
+            "default": 0.95
+          },
+          "ageUnit": {
+            "type": "string",
+            "enum": [
+              "a",
+              "ka",
+              "Ma",
+              "Ga"
+            ],
+            "default": "Ma"
+          }
+        }
+      }
+    },
+    {
+      "name": "classify_tas",
+      "description": "Classify volcanic rock analyses on the total alkali–silica diagram (Le Bas et al. 1986) with optional anhydrous recalculation, report the field vertex catalogue used, and return AFM ternary fractions and coordinates.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sourceContentSha256",
+          "samples"
+        ],
+        "properties": {
+          "sourceContentSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "normalizeToAnhydrous": {
+            "type": "boolean",
+            "default": true
+          },
+          "samples": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5000,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "sio2",
+                "na2o",
+                "k2o"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                },
+                "sio2": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                "tio2": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                "al2o3": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                "fe2o3": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                "feo": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                "mno": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                "mgo": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                "cao": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                "na2o": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                "k2o": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                "p2o5": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                "loi": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                "h2o": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                "co2": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "maximum": 100
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "analyze_spatial_autocorrelation",
+      "description": "Global Moran's I and Geary's C with inverse-distance or k-nearest-neighbour weights and randomisation z-scores, plus a local Moran (LISA) table with quadrant clusters and analytical conditional-randomisation moments.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sourceContentSha256",
+          "locations"
+        ],
+        "properties": {
+          "sourceContentSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "coordinateSystem": {
+            "type": "string",
+            "enum": [
+              "geographic",
+              "planar"
+            ],
+            "default": "geographic"
+          },
+          "distanceUnit": {
+            "type": "string",
+            "maxLength": 20
+          },
+          "valueUnit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 40
+          },
+          "locations": {
+            "type": "array",
+            "minItems": 4,
+            "maxItems": 3000,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "x",
+                "y",
+                "value"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                },
+                "x": {
+                  "type": "number"
+                },
+                "y": {
+                  "type": "number"
+                },
+                "value": {
+                  "type": "number"
+                }
+              }
+            }
+          },
+          "weights": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "inverse-distance",
+                  "knn"
+                ],
+                "default": "inverse-distance"
+              },
+              "power": {
+                "type": "number",
+                "minimum": 0.1,
+                "maximum": 4,
+                "default": 1
+              },
+              "bandwidth": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "exclusiveMinimum": 0
+              },
+              "k": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "rowStandardize": {
+                "type": "boolean",
+                "default": true
+              }
+            }
+          },
+          "confidenceLevel": {
+            "type": "number",
+            "minimum": 0.8,
+            "maximum": 0.999,
+            "default": 0.95
+          }
         }
       }
     },
     {
       "name": "describe_earth_science_capabilities",
       "description": "Return the exact implemented source, output, renderer, and unsupported-feature boundaries for this plugin.",
-      "inputSchema": { "type": "object", "additionalProperties": false, "properties": {} }
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      }
     }
   ]
 }

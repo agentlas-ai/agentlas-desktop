@@ -1,0 +1,32 @@
+{
+  "type": "object",
+  "description": "Uniformly sampled signal analysis: windowed FFT amplitude spectrum and PSD, dominant peaks with quadratic interpolation, FFT autocorrelation, SNR estimate, optional STFT spectrogram. The table is supplied by the host from a completed physics dataset run; give exactly one of time_column or sample_rate.",
+  "properties": {
+    "value_column": { "type": "string", "minLength": 1, "maxLength": 160, "description": "numeric column holding the samples (no missing cells; at least 8 samples)" },
+    "time_column": { "type": "string", "minLength": 1, "maxLength": 160, "description": "numeric time column; spacing must be uniform to 1e-6 relative; the sample rate and its unit are inferred (unit s → Hz, otherwise 1/<unit>)" },
+    "sample_rate": { "type": "number", "exclusiveMinimum": 0, "maximum": 1e15, "description": "samples per second when no time column exists (assumed Hz)" },
+    "options": {
+      "type": "object",
+      "properties": {
+        "window": { "type": "string", "enum": ["rectangular", "hann", "hamming", "blackman", "blackman_harris", "flat_top"], "default": "hann" },
+        "detrend": { "type": "string", "enum": ["none", "mean", "linear"], "default": "mean" },
+        "peak_count": { "type": "integer", "minimum": 1, "maximum": 20, "default": 5 },
+        "min_peak_separation_bins": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 2 },
+        "stft": {
+          "type": "object",
+          "description": "when present, an STFT spectrogram table and panel are produced",
+          "properties": {
+            "frame_size": { "type": "integer", "minimum": 16, "maximum": 4096, "default": 256, "description": "power of two, at most the sample count" },
+            "hop": { "type": "integer", "minimum": 1, "maximum": 4096, "description": "default frame_size / 2" }
+          },
+          "additionalProperties": false
+        },
+        "autocorrelation_max_lag": { "type": "integer", "minimum": 1, "maximum": 10000, "description": "default min(n − 1, 2000); must be below the sample count" },
+        "zero_pad_to_power_of_two": { "type": "boolean", "default": false }
+      },
+      "additionalProperties": false
+    }
+  },
+  "required": ["value_column"],
+  "additionalProperties": false
+}

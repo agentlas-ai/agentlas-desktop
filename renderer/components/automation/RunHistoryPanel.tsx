@@ -8,7 +8,7 @@ import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { askAutomationSession } from "@/components/automation/AutomationSessionPanel";
-import { IconClose } from "@/components/Icon";
+import { IconAlertTriangle, IconClose } from "@/components/Icon";
 import {
   runtimeBackendForSelection,
   runtimeEngineLabel,
@@ -100,11 +100,26 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
   const [fixPlan, setFixPlan] = useState<AutomationFixPlan | null>(null);
   const [fixBusy, setFixBusy] = useState<string | null>(null);
   const [fixMessage, setFixMessage] = useState("");
-  const [attentionDismissed, setAttentionDismissed] = useState(false);
+  // 닫기는 이 렌더러의 잠깐짜리 상태가 아니다. Main 저장값을 다시 읽어 확인한 뒤
+  // 이 시각까지의 요구를 숨긴다. 폴링·재진입·앱 재실행 뒤에도 닫은 카드가 되살아나지
+  // 않고, 그 뒤에 생긴 새 실패만 다시 나타나야 한다.
+  const [dismissedThrough, setDismissedThrough] = useState<string | null>(automation.attentionClearedAt ?? null);
   const [dismissingAttention, setDismissingAttention] = useState(false);
   const reconciliationAttemptRef = useRef<string | null>(null);
 
-  useEffect(() => setAttentionDismissed(false), [automation.id, automation.attentionClearedAt]);
+  useEffect(() => {
+    setDismissedThrough(automation.attentionClearedAt ?? null);
+  }, [automation.id]);
+
+  useEffect(() => {
+    const incoming = automation.attentionClearedAt;
+    if (!incoming) return;
+    setDismissedThrough((current) => {
+      const currentAt = current ? Date.parse(current) : Number.NEGATIVE_INFINITY;
+      const incomingAt = Date.parse(incoming);
+      return Number.isFinite(incomingAt) && incomingAt > currentAt ? incoming : current;
+    });
+  }, [automation.attentionClearedAt]);
 
   /* ★"눌렀는데 아무 일도 안 일어남"을 구조적으로 금지한다.
      어떤 행동이든 (1) 실행하고 (2) 다시 읽는다. 조용히 그대로 두면 사용자는 같은
@@ -213,6 +228,20 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
     }),
     [attentions, reconciliation?.triggerEvent?.id, lastOkAt],
   );
+  const clearedAt = dismissedThrough ? Date.parse(dismissedThrough) : Number.NEGATIVE_INFINITY;
+  const visibleRegularAttentions = useMemo(
+    () => regularAttentions.filter((attention) => {
+      const updatedAt = Date.parse(attention.updatedAt);
+      return !Number.isFinite(clearedAt) || !Number.isFinite(updatedAt) || updatedAt > clearedAt;
+    }),
+    [clearedAt, regularAttentions],
+  );
+  const visibleReconciliation = reconciliation && (() => {
+    const updatedAt = Date.parse(reconciliation.updatedAt);
+    return !Number.isFinite(clearedAt) || !Number.isFinite(updatedAt) || updatedAt > clearedAt;
+  })()
+    ? reconciliation
+    : null;
   // 밀려난 건을 여기서 따로 렌더하지 않는 이유: 아래 실행 기록 목록에 그 실행이
   // 그대로 남아 있어 사용자가 언제든 확인할 수 있다. 사라지는 것은 "지금 조치하라"는
   // 요구뿐이고, 기록은 사라지지 않는다.
@@ -255,9 +284,6 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
   /* 닫기가 남긴 시각 이전에 시작된 실행의 요구는 종류와 무관하게 닫힌 것으로 본다.
      예전에는 run_history 행으로만 판단해서, 스냅샷의 error 로 떠 있는 카드는
      닫아도 그대로 남았다 — 끌 수 없는 카드가 곧 막다른 길이다. */
-  const clearedAt = automation.attentionClearedAt
-    ? Date.parse(automation.attentionClearedAt)
-    : Number.NEGATIVE_INFINITY;
   const latestClearedByUser = Boolean(
     latest && Number.isFinite(clearedAt) && Date.parse(latest.startedAt) <= clearedAt,
   );
@@ -288,8 +314,8 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
   const blockingRunOpen = Boolean(blockingRun) && !(
     Number.isFinite(clearedAt) && blockingRun && Date.parse(blockingRun.ranAt) <= clearedAt
   );
-  const needsHelp = !attentionDismissed && !canvasOwnsDecision && !liveRunning && (!latestKernelOk || latestOutcomeNeedsHelp)
-    && Boolean(reconciliation || regularAttentions.length > 0
+  const needsHelp = !canvasOwnsDecision && !liveRunning && (!latestKernelOk || latestOutcomeNeedsHelp)
+    && Boolean(visibleReconciliation || visibleRegularAttentions.length > 0
       || (latest?.status === "error" && !latestAcknowledged) || blockingRunOpen);
   // 기록 원문(판정 코드 접두사 제거). 평이한 설명 아래 "자세히"로만 노출한다.
   // 미확정 부작용이 남아 있으면 백엔드가 재실행을 즉시 거부한다(중복 게시 방지).
@@ -328,17 +354,39 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
     setNodeDecisions((drafts) => ({ ...drafts, [nodeId]: { ...drafts[nodeId], output } }));
   }
 
+  /**
+   * 기록이나 실제 실행 결과를 지우지 않고, 현재 시점까지의 "지금 조치하세요" 카드만 닫는다.
+   * invoke 응답이 유실돼도 Main 저장값을 다시 읽어 중복 클릭을 막는다.
+   */
   async function dismissCurrentAttention() {
     const api = ipc();
     if (!api || dismissingAttention) return;
     setDismissingAttention(true);
     setRecoveryError("");
+    const before = dismissedThrough ? Date.parse(dismissedThrough) : Number.NEGATIVE_INFINITY;
     try {
       await api.automations.acknowledgeAttention(automation.id);
       const persisted = await api.automations.get(automation.id);
-      if (!persisted?.attentionClearedAt) throw new Error("automation_attention_dismiss_readback_failed");
-      setAttentionDismissed(true);
+      const persistedAt = persisted?.attentionClearedAt ?? null;
+      const persistedMs = persistedAt ? Date.parse(persistedAt) : NaN;
+      if (!persistedAt || !Number.isFinite(persistedMs) || persistedMs < before) {
+        throw new Error("automation_attention_dismiss_readback_failed");
+      }
+      setDismissedThrough(persistedAt);
     } catch {
+      // 쓰기 성공 뒤 응답만 사라진 경우가 있으므로 한 번 더 읽는다. 상태가 바뀌었으면
+      // 같은 닫기를 반복하지 않고 성공으로 수용한다.
+      try {
+        const persisted = await api.automations.get(automation.id);
+        const persistedAt = persisted?.attentionClearedAt ?? null;
+        const persistedMs = persistedAt ? Date.parse(persistedAt) : NaN;
+        if (persistedAt && Number.isFinite(persistedMs) && persistedMs > before) {
+          setDismissedThrough(persistedAt);
+          return;
+        }
+      } catch {
+        // 아래의 검증 가능한 실패 상태로 합친다.
+      }
       setRecoveryError(ko
         ? "카드를 닫지 못했습니다. 기록은 바뀌지 않았습니다. 잠시 뒤 다시 시도해 주세요."
         : "Could not dismiss the card. The record was not changed. Try again shortly.");
@@ -476,8 +524,12 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
       const terminalMessage =
         result.resumeRequired
           ? ko
-            ? "확인 내용을 저장했습니다. 남은 노드를 안전하게 다시 시작합니다."
-            : "Saved the confirmation. Safely resuming the remaining nodes."
+            ? result.simulation
+              ? "확인 내용을 저장했습니다. 남은 노드를 시뮬레이션으로 다시 시작합니다."
+              : "확인 내용을 저장했습니다. 남은 노드를 안전하게 다시 시작합니다."
+            : result.simulation
+              ? "Saved the confirmation. Resuming the remaining nodes in simulation mode."
+              : "Saved the confirmation. Safely resuming the remaining nodes."
           : ko
             ? "확인 내용을 저장했습니다. 이 발생은 완료 처리됐습니다."
             : "Saved the confirmation. This occurrence is complete.";
@@ -595,7 +647,7 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
           <button type="button" className="automation-alert-close" aria-label={ko ? "확인 요청 닫기" : "Dismiss attention request"} disabled={dismissingAttention} onClick={() => void dismissCurrentAttention()} data-testid="dismiss-automation-attention"><IconClose size={14} /></button>
           <div className="automation-reconcile-head">
             <div>
-              <div className="automation-reconcile-eyebrow"><span>{ko ? "확인이 필요해요" : "Needs attention"}</span></div>
+              <div className="automation-reconcile-eyebrow"><IconAlertTriangle size={12} /><span>{ko ? "확인이 필요해요" : "Needs attention"}</span></div>
               <strong>{blockingRun ? plainRun(blockingRun, ko).title : plainOutcome("error", ko).title}</strong>
             </div>
           </div>
@@ -661,13 +713,13 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
       ) : null}
 
       {/* 외부 동작의 완료 여부가 불확실한 실행 — 사람이 직접 확정해야 재개된다. */}
-      {reconciliation && !attentionDismissed ? (
-        <section className="automation-reconcile-card" aria-labelledby={`reconcile-${reconciliation.runId}`}>
+      {visibleReconciliation ? (
+        <section className="automation-reconcile-card" aria-labelledby={`reconcile-${visibleReconciliation.runId}`}>
           <button type="button" className="automation-alert-close" aria-label={ko ? "확인 요청 닫기" : "Dismiss attention request"} disabled={dismissingAttention} onClick={() => void dismissCurrentAttention()}><IconClose size={14} /></button>
           <div className="automation-reconcile-head">
             <div>
-              <div className="automation-reconcile-eyebrow"><span>{ko ? "확인이 필요해요" : "Needs attention"}</span></div>
-              <strong id={`reconcile-${reconciliation.runId}`}>
+              <div className="automation-reconcile-eyebrow"><IconAlertTriangle size={12} /><span>{ko ? "확인이 필요해요" : "Needs attention"}</span></div>
+              <strong id={`reconcile-${visibleReconciliation.runId}`}>
                 {ko ? "이 단계가 실제로 실행됐는지 알려주세요" : "Tell us whether this step actually happened"}
               </strong>
             </div>
@@ -677,7 +729,14 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
               ? "앱이 꺼지거나 응답이 끊겨서, 아래 단계가 끝났는지 확정하지 못했어요. 실제 결과(예: 올라간 글, 저장된 파일)를 먼저 확인한 뒤 골라 주세요. 잘못 고르면 같은 동작이 한 번 더 일어날 수 있어요."
               : "The app closed or the response was lost, so we could not confirm whether the step below finished. Check the real result first — a posted message, a saved file — then choose. A wrong choice can repeat the action."}
           </p>
-          {reconciliation.triggerEvent ? (
+          {visibleReconciliation.simulation ? (
+            <div className="automation-reconcile-event-note">
+              {ko
+                ? "이 실행은 시뮬레이션입니다. 재시도해도 게시·클릭 같은 외부 변경은 계속 차단됩니다."
+                : "This run is a simulation. Retrying continues to block external changes such as posting or clicking."}
+            </div>
+          ) : null}
+          {visibleReconciliation.triggerEvent ? (
             <div className="automation-reconcile-event-note">
               {ko
                 ? "이 결정으로 대기 중이던 같은 건도 함께 정리됩니다."
@@ -686,7 +745,7 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
           ) : null}
 
           <div className="automation-reconcile-node-list">
-            {reconciliation.nodes.map((node) => {
+            {visibleReconciliation.nodes.map((node) => {
               const draft = nodeDecisions[node.nodeId] ?? { output: "" };
               return (
                 <fieldset key={node.nodeId} className="automation-reconcile-node">
@@ -755,12 +814,12 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
         </section>
       ) : null}
 
-      {regularAttentions.length > 0 && !attentionDismissed ? (
+      {visibleRegularAttentions.length > 0 ? (
         <section
           className="automation-event-attention-list"
           aria-label={ko ? "확인이 필요한 자동화 발생" : "Automation occurrences requiring review"}
         >
-          {regularAttentions.map((attention) => (
+          {visibleRegularAttentions.map((attention) => (
             <article key={attention.id} className="automation-event-attention">
               <button type="button" className="automation-alert-close" aria-label={ko ? "확인 요청 닫기" : "Dismiss attention request"} disabled={dismissingAttention} onClick={() => void dismissCurrentAttention()}><IconClose size={14} /></button>
               <div>

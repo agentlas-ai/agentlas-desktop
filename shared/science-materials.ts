@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 export const SCIENCE_MATERIALS_TOOL_ID = "agentlas.oqmd-optimade-structures" as const;
-export const SCIENCE_MATERIALS_TOOL_VERSION = "1.0.0" as const;
+export const SCIENCE_MATERIALS_TOOL_VERSION = "1.1.0" as const;
 export const SCIENCE_MATERIALS_LAB_ID = "materials-structures" as const;
 export const SCIENCE_MATERIALS_ARTIFACT_SCHEMA = "agentlas.science.materials-catalog-artifact/v1" as const;
 export const SCIENCE_MATERIALS_RESULT_SCHEMA = "agentlas.materials.oqmd-optimade/v1" as const;

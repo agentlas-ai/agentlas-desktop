@@ -33,7 +33,7 @@ export function browserCaptureDir(): string {
 /** 브라우저 MCP --output-max-size 값(바이트) — playwright 가 스스로 오래된 파일을 비운다. */
 export const BROWSER_CAPTURE_MAX_BYTES = 256 * 1024 * 1024;
 
-const MAX_SCREEN_CAPTURE_FILES = 300;
+const MAX_CAPTURE_FILES = 300;
 const DATA_URL_RE = /^data:image\/(png|jpeg);base64,([A-Za-z0-9+/=]+)$/;
 
 /**
@@ -51,7 +51,36 @@ export function saveScreenCaptureArtifact(dataUrl: string | null | undefined): s
     const ext = match[1] === "png" ? ".png" : ".jpg";
     const filePath = path.join(dir, `screen-${stamp}-${randomUUID().slice(0, 8)}${ext}`);
     fs.writeFileSync(filePath, Buffer.from(match[2], "base64"), { mode: 0o600 });
-    pruneScreenCaptures(dir);
+    pruneCaptureDir(dir);
+    return filePath;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 브라우저 MCP 가 인라인 base64 로 돌려준 스크린샷을 정본 파일로 남기고 절대경로를 반환한다.
+ *
+ * 배경(2026-09-03 실측): "이 사이트 화면 한 장 찍어줘" 를 실행하면 도구는 이미지를
+ * 돌려주고 모델도 그 이미지를 보는데, 저장하는 곳이 없어 사용자에게는 아무것도 남지
+ * 않았다(산출물 0 · 레일 이미지 0 · 채팅 이미지 0). 이 모듈 상단이 브라우저 캡처 폴더를
+ * 이미 정본으로 선언해 두었으나 거기에 쓰는 함수가 없었다.
+ *
+ * 저장 실패는 도구 호출 자체를 막지 않는다 — 경로 없이 null.
+ */
+export function saveBrowserCaptureArtifact(
+  mediaType: "image/png" | "image/jpeg",
+  base64Data: string | null | undefined,
+): string | null {
+  if (typeof base64Data !== "string" || !/^[A-Za-z0-9+/=]+$/.test(base64Data)) return null;
+  try {
+    const dir = browserCaptureDir();
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const ext = mediaType === "image/png" ? ".png" : ".jpg";
+    const filePath = path.join(dir, `browser-${stamp}-${randomUUID().slice(0, 8)}${ext}`);
+    fs.writeFileSync(filePath, Buffer.from(base64Data, "base64"), { mode: 0o600 });
+    pruneCaptureDir(dir);
     return filePath;
   } catch {
     return null;
@@ -59,7 +88,7 @@ export function saveScreenCaptureArtifact(dataUrl: string | null | undefined): s
 }
 
 /** 파일 수 상한으로 무한 성장 방지 — 가장 오래된 것부터 지운다(정리 실패는 무해). */
-function pruneScreenCaptures(dir: string): void {
+function pruneCaptureDir(dir: string): void {
   try {
     const entries = fs
       .readdirSync(dir)
@@ -74,7 +103,7 @@ function pruneScreenCaptures(dir: string): void {
       })
       .filter((entry): entry is { full: string; mtimeMs: number } => entry !== null)
       .sort((a, b) => b.mtimeMs - a.mtimeMs);
-    for (const entry of entries.slice(MAX_SCREEN_CAPTURE_FILES)) {
+    for (const entry of entries.slice(MAX_CAPTURE_FILES)) {
       try {
         fs.rmSync(entry.full, { force: true });
       } catch {

@@ -29,6 +29,7 @@ import {
   MCP_PROXY_SESSION_ENV,
   MCP_PROXY_TARGET_ENV,
 } from "../mcp-tools/proxy-channel";
+import { BROWSER_CDP_LAUNCHER_BASENAME } from "../mcp-tools/browser-cdp-launcher";
 
 /**
  * 중지 사유를 그대로 전한다. 중지는 사람이 누른 것 외에도 무활동 워치독·단계 시간 초과·
@@ -162,7 +163,27 @@ async function getBin(opts?: { source?: string }): Promise<string | null> {
   return firstExisting(AGY_CANDIDATES);
 }
 
-function buildPrompt(req: RunnerRequest): string {
+/**
+ * A browser-only run must not replay an entire long-lived automation chat.
+ * Antigravity receives this prompt directly in argv, and the browser-only
+ * policy intentionally cannot use a private prompt file to bypass argv
+ * limits. Keep enough recent context to make the current browser task
+ * coherent, but bound the replay independently from the normal CLI budget.
+ */
+export const AGY_BROWSER_HISTORY_CONTEXT_TOKENS = 8_000;
+export const AGY_ARGV_PROMPT_LIMIT = 100_000;
+const AGY_BROWSER_HISTORY_CHAR_LIMIT = 32_000;
+
+function capBrowserHistoryBlock(block: string): string {
+  if (block.length <= AGY_BROWSER_HISTORY_CHAR_LIMIT) return block;
+  // Keep the section header and the newest tail. A giant single recent
+  // message must not be able to recreate the argv overflow after compaction.
+  const head = block.slice(0, 1_000);
+  const tail = block.slice(-(AGY_BROWSER_HISTORY_CHAR_LIMIT - head.length - 80));
+  return `${head}\n[… browser history shortened by Agentlas …]\n${tail}`;
+}
+
+export function buildAntigravityPrompt(req: RunnerRequest): string {
   const sys = wrapSystemPrompt(
     req.systemPrompt,
     req.locale,
@@ -176,12 +197,17 @@ function buildPrompt(req: RunnerRequest): string {
   const turnContext = req.turnContext?.trim();
   const parts: string[] = [`[SYSTEM]\n${sys}${turnContext ? `\n\n${turnContext}` : ""}`, ""];
   if (req.history.length > 0) {
-    const { block } = renderConversationContext(req.history, req.locale, CLI_HISTORY_CONTEXT_TOKENS);
-    parts.push(block, "");
+    const historyBudget = req.browserOnly ? AGY_BROWSER_HISTORY_CONTEXT_TOKENS : CLI_HISTORY_CONTEXT_TOKENS;
+    const { block } = renderConversationContext(req.history, req.locale, historyBudget);
+    parts.push(req.browserOnly ? capBrowserHistoryBlock(block) : block, "");
   }
   parts.push(tStatus(req.locale, "histThisSection"), req.userPrompt);
   return parts.join("\n");
 }
+
+// Kept as a local alias for callers that are not concerned with the prompt's
+// transport boundary. Tests and diagnostics use the named export above.
+const buildPrompt = buildAntigravityPrompt;
 
 /**
  * ★권한 칩 → agy 권한 플래그. 형제 러너와 같은 규칙이다.
@@ -208,10 +234,13 @@ export function antigravityPermissionArgs(
   permission?: "read" | "write" | "full",
   browserOnly = false,
 ): string[] {
-  // Browser-only runs are approved by a dedicated Antigravity project policy.
-  // Do not use the global bypass flag here: it would also approve run_command
-  // and lets a model launch an unmanaged Playwright with cookie values in argv.
-  if (browserOnly) return ["--sandbox"];
+  // Antigravity's headless CLI does not honor project settings' allow-rules for
+  // MCP calls; its own diagnostic says to use `--dangerously-skip-permissions`
+  // when no interactive approver is attached. Browser-only runs therefore need
+  // the CLI bypass to get past its internal MCP gate, but keep `--sandbox` and
+  // the Agentlas-owned one-server MCP config/Browser approval rail. This opens
+  // the headless CLI gate without opening an unmanaged shell/browser path.
+  if (browserOnly) return ["--dangerously-skip-permissions", "--sandbox"];
   if (permission === "full") return ["--dangerously-skip-permissions"];
   if (permission === "write") return ["--dangerously-skip-permissions", "--sandbox"];
   return [];
@@ -228,10 +257,11 @@ export interface AntigravityBrowserProjectPolicy {
 
 /**
  * Create the Agentlas-owned Antigravity project used by browser-only runs.
- * It is intentionally outside every user project and allows only the canonical
- * Agentlas Browser MCP. Headless Antigravity therefore needs no approval prompt,
- * while shell/file/provider-native browser fallbacks are denied by the runtime
- * before they can expose cookies or create unmanaged browser processes.
+ * It is intentionally outside every user project and carries only the canonical
+ * Agentlas Browser MCP. The CLI's headless permission gate is opened separately
+ * because project allow-rules do not authorize MCP calls in print mode; shell,
+ * file, and provider-native browser fallbacks remain outside the serialized
+ * server set and are denied by the runtime prompt/rail.
  */
 export async function ensureAntigravityBrowserProjectPolicy(
   home = os.homedir(),
@@ -544,6 +574,58 @@ interface AgyMcpServerEntry {
   [key: string]: unknown;
 }
 
+interface AgyMcpReplacement {
+  previous: AgyMcpServerEntry;
+  staged: AgyMcpServerEntry;
+}
+
+// The global agy config is shared by installed and source Desktop instances.
+// Keep the previous Agentlas-owned browser entry while a newer instance is
+// using the canonical key, then restore it when the last local reference ends.
+const AGY_MCP_REPLACEMENTS = new Map<string, AgyMcpReplacement>();
+
+function isAgyMcpEntryEqual(left: AgyMcpServerEntry | undefined, right: AgyMcpServerEntry | undefined): boolean {
+  return Boolean(left && right && JSON.stringify(left) === JSON.stringify(right));
+}
+
+/**
+ * Recognise an Agentlas-owned browser proxy left by another Desktop instance.
+ *
+ * agy has one process-wide mcp_config.json, so a source/dev Desktop otherwise
+ * reuses the installed app's approval channel and gets denied by the wrong
+ * run. User MCP entries are left untouched: all four proxy markers plus the
+ * canonical Agentlas Browser launcher must be present before this returns true.
+ */
+export function isAgentlasOwnedBrowserMcpEntry(
+  entry: AgyMcpServerEntry,
+): boolean {
+  if (
+    !entry.command
+    || !Array.isArray(entry.args)
+    || entry.args.length !== 1
+    || path.basename(entry.args[0] ?? "") !== "proxy-child.cjs"
+  ) return false;
+  const env = entry.env;
+  if (
+    !env
+    || env.ELECTRON_RUN_AS_NODE !== "1"
+    || typeof env[MCP_PROXY_CONTROL_FILE_ENV] !== "string"
+    || typeof env[MCP_PROXY_SERVER_KEY_ENV] !== "string"
+    || typeof env[MCP_PROXY_SESSION_ENV] !== "string"
+    || typeof env[MCP_PROXY_TARGET_ENV] !== "string"
+  ) return false;
+  let target: { command?: unknown; args?: unknown; env?: unknown };
+  try {
+    target = JSON.parse(env[MCP_PROXY_TARGET_ENV]);
+  } catch {
+    return false;
+  }
+  if (!target || typeof target !== "object" || !Array.isArray(target.args)) return false;
+  const targetArgs = target.args.filter((arg): arg is string => typeof arg === "string");
+  return targetArgs.length === target.args.length
+    && targetArgs.some((arg) => path.basename(arg) === BROWSER_CDP_LAUNCHER_BASENAME);
+}
+
 /**
  * A previous Desktop process can leave its Agentlas-owned entry in agy's
  * process-wide config after the run itself has settled. In particular, the old
@@ -616,9 +698,11 @@ export function isStaleAgentlasPlaywrightProxyEntry(entry: AgyMcpServerEntry): b
  * 더한 키만 되돌린다 — grok 러너의 `grok mcp add/remove` 리컨실과 같은 계약이다.
  *
  * 규칙:
- * - 이미 있는 키는 절대 건드리지 않는다(사용자 자신의 서버·동시 실행의 서버).
- *   cleanup 도 우리가 더한 키만 지운다. 파일을 백업으로 통째 되돌리지 않는 이유:
- *   실행 중 다른 프로세스(안티그래비티 데스크탑 앱 포함)가 파일을 고칠 수 있다.
+ * - 이미 있는 사용자 키는 절대 건드리지 않는다. 단, 다른 Agentlas Desktop 인스턴스가
+ *   남긴 **우리 소유의 canonical browser proxy**는 현재 실행의 proxy로 잠시 교체하고,
+ *   마지막 실행이 끝나면 원래 항목을 복원한다. source/dev와 설치 앱이 같은 agy 전역
+ *   키를 공유하기 때문에 이 예외가 없으면 dev가 production 승인 채널을 재사용한다.
+ *   cleanup은 우리가 넣거나 교체한 값이 아직 그대로일 때만 수행한다.
  * - 전역 파일이 깨진 JSON 이면 **덮어쓰지 않는다** — 사용자 설정을 지키는 쪽이
  *   이 실행에 도구를 주는 것보다 우선이고, 그 사실을 상태줄로 말한다(정직한 강등).
  * - 동시 agy 실행 둘이 같은 키를 원하는 짧은 경합은 grok 리컨실과 동일하게 남는다.
@@ -673,6 +757,7 @@ async function reconcileAgyMcpServers(
   }
 
   const added: string[] = [];
+  const stagedEntries = new Map<string, AgyMcpServerEntry>();
   for (const [key, server] of entries) {
     if (parsed.mcpServers[key]) {
       /*
@@ -682,30 +767,57 @@ async function reconcileAgyMcpServers(
        * (b) **동시에 도는 다른 실행이 방금 넣은 서버**: 이걸 그냥 건너뛰면, 먼저 넣은
        *     실행이 끝나면서 지워 버려 이 실행은 도중에 도구를 잃는다. 실행 하나가
        *     끝났다고 다른 실행의 도구가 사라지면 안 된다.
+       * (c) 다른 Agentlas Desktop 설치/소스 인스턴스가 남긴 browser proxy: 같은
+       *     canonical 키를 써야 하는 agy 특성상 이번 실행의 proxy로 잠시 교체한다.
        *
        * 그래서 우리가 넣은 키는 참조 계수로 센다. 계수가 0이 될 때만 걷어낸다.
        */
+      if (
+        key === "agentlas-browser"
+        && !AGY_MCP_REFCOUNT.has(key)
+        && isAgentlasOwnedBrowserMcpEntry(parsed.mcpServers[key])
+      ) {
+        const staged: AgyMcpServerEntry = {
+          command: server.command,
+          ...(server.args?.length ? { args: server.args } : {}),
+          ...(server.env && Object.keys(server.env).length ? { env: server.env } : {}),
+          ...(server.url ? { serverUrl: server.url } : {}),
+          ...(server.headers && Object.keys(server.headers).length ? { headers: server.headers } : {}),
+        };
+        const previous = parsed.mcpServers[key];
+        parsed.mcpServers[key] = staged;
+        AGY_MCP_REPLACEMENTS.set(key, { previous, staged });
+        stagedEntries.set(key, staged);
+        added.push(key);
+        AGY_MCP_REFCOUNT.set(key, 1);
+        globalDirty = true;
+        continue;
+      }
       const live = AGY_MCP_REFCOUNT.get(key);
       if (live !== undefined) {
         AGY_MCP_REFCOUNT.set(key, live + 1);
+        stagedEntries.set(key, parsed.mcpServers[key]);
         added.push(key);
       }
       continue;
     }
-    if (server.command) {
-      parsed.mcpServers[key] = {
+    const staged: AgyMcpServerEntry | null = server.command
+      ? {
         command: server.command,
         ...(server.args?.length ? { args: server.args } : {}),
         ...(server.env && Object.keys(server.env).length ? { env: server.env } : {}),
-      };
-    } else if (server.url) {
-      parsed.mcpServers[key] = {
+      }
+      : server.url
+        ? {
         serverUrl: server.url,
         ...(server.headers && Object.keys(server.headers).length ? { headers: server.headers } : {}),
-      };
-    } else {
+        }
+        : null;
+    if (!staged) {
       continue;
     }
+    parsed.mcpServers[key] = staged;
+    stagedEntries.set(key, staged);
     added.push(key);
     AGY_MCP_REFCOUNT.set(key, (AGY_MCP_REFCOUNT.get(key) ?? 0) + 1);
   }
@@ -732,7 +844,19 @@ async function reconcileAgyMcpServers(
             continue;
           }
           AGY_MCP_REFCOUNT.delete(key);
-          if (current.mcpServers[key]) {
+          const staged = stagedEntries.get(key);
+          const replacement = AGY_MCP_REPLACEMENTS.get(key);
+          if (!isAgyMcpEntryEqual(current.mcpServers[key], staged)) {
+            // Another Desktop instance changed the key after us. Never remove
+            // or restore a value that this run can no longer identify.
+            if (replacement) AGY_MCP_REPLACEMENTS.delete(key);
+            continue;
+          }
+          if (replacement) {
+            current.mcpServers[key] = replacement.previous;
+            AGY_MCP_REPLACEMENTS.delete(key);
+            dirty = true;
+          } else if (current.mcpServers[key]) {
             delete current.mcpServers[key];
             dirty = true;
           }
@@ -830,7 +954,6 @@ async function runPreparedAntigravity(
    * 죽거나 재현 프롬프트가 10분+ 행. 프롬프트를 argv로 직접 주면 도구가 아예 필요 없다.
    * macOS ARG_MAX ~1MB — 100KB 이하는 직접, 그 이상만 파일.
    */
-  const AGY_ARGV_PROMPT_LIMIT = 100_000;
   /*
    * ★세션 규칙은 이 실행이 실제로 도구를 쓸 수 있는지에 맞춰 말한다.
    *
@@ -881,7 +1004,9 @@ async function runPreparedAntigravity(
     spawnPrompt,
   ].join("\n");
   if (runReq.browserOnly && spawnPrompt.length > AGY_ARGV_PROMPT_LIMIT) {
-    throw new Error("Browser-only Antigravity request exceeds the verified private argv boundary");
+    throw new Error(
+      `BROWSER_ONLY_PROMPT_TOO_LARGE: ${spawnPrompt.length} characters exceed the ${AGY_ARGV_PROMPT_LIMIT}-character private argv boundary`,
+    );
   }
   if (spawnPrompt.length <= AGY_ARGV_PROMPT_LIMIT) {
     // 직접 전달 — 부트스트랩 없음.

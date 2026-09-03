@@ -1,26 +1,21 @@
-// Desktop bridge to the shared persistent-goal ledger (Python:
-// agentlas_cloud/workforce/goal_ledger.py, stored in
-// ~/.agentlas/networking/workforce-goals.sqlite3).
-//
-// The ledger is the host-owned half of the persistent-goal loop: the model
-// marker (<<stormbreaker-continue>>) says "I want to keep going"; the ledger
-// says "the goal is not achieved yet". The continuation decision is the OR of
-// both — the loop no longer dies just because the model forgot the marker.
-//
-// Deliberately account-free: unlike workforce goal-bind/goal-turn, the ledger
-// must work signed-out, so no accountContext() round trip is made here.
-//
-// Every call is fail-soft (null on any failure): a machine without the
-// Hephaestus runtime keeps exactly the old marker-only behavior instead of
-// breaking the send path.
+// Compatibility bridge from the existing Goal-mode loop to Desktop-owned
+// long-running work. Agentlas OS and its Python ledger are intentionally not
+// part of this path: One, Work, and Science must remain inspectable and
+// pausable from the Desktop store alone.
 import { createHash } from "node:crypto";
-import path from "node:path";
+import {
+  ensureGoalLongRun,
+  getLongRunByGoalId,
+  listLongRunTasks,
+  longRunContinueDecision,
+  recordLongRunCycle,
+  requestLongRunVerification,
+  transitionLongRun,
+  tryCompleteVerifiedLongRun,
+} from "../store/long-runs";
 
 export interface GoalLedgerDecision {
-  /** True exactly when: goal active AND open tasks remain AND budgets have headroom. */
   continue: boolean;
-  /** Machine reason marker (e.g. open_tasks_remain, no_open_tasks, goal_blocked,
-   *  budget_wallclock_exhausted, budget_cycles_exhausted, budget_cost_exhausted). */
   reason: string;
   status: string | null;
   openTaskCount: number;
@@ -34,77 +29,77 @@ export interface GoalLedgerSnapshot {
   objective: string;
   acceptanceCriteria: string[];
   status: "active" | "blocked" | "completed" | "cancelled";
+  runId: string;
+  runStatus: string;
+  pauseReason: string | null;
+  version: number;
+  executionLocation: "desktop-local" | "web-hosted";
 }
 
-const DECISION_SCHEMA = "agentlas.goal-ledger-decision.v1";
-const GOAL_SCHEMA = "agentlas.goal-ledger.v1";
+export interface GoalLedgerTask {
+  taskId: string;
+  summary: string;
+  state: string;
+  evidenceRef: string | null;
+  blockedReason: string | null;
+}
 
-/**
- * Reasons that must stop the loop even when the model marker asks to continue:
- * explicit end, human-call block (no-progress stall), and every budget
- * exhaustion. Shared by the live chat loop and the background scheduler so the
- * two surfaces cannot drift.
- */
 export const GOAL_HARD_STOP_REASONS: ReadonlySet<string> = new Set([
   "goal_blocked",
   "goal_terminal",
+  "goal_paused",
   "budget_wallclock_exhausted",
   "budget_cycles_exhausted",
   "budget_cost_exhausted",
 ]);
 
-function parseDecision(value: unknown): GoalLedgerDecision | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const row = value as Record<string, unknown>;
-  if (row.schemaVersion !== DECISION_SCHEMA || typeof row.continue !== "boolean") return null;
+function snapshotStatus(status: string): GoalLedgerSnapshot["status"] {
+  if (status === "blocked" || status === "failed") return "blocked";
+  if (status === "completed") return "completed";
+  if (status === "cancelled" || status === "cancelling") return "cancelled";
+  return "active";
+}
+
+function decisionForGoal(goalId: string): GoalLedgerDecision | null {
+  const decision = longRunContinueDecision(goalId);
+  if (!decision) return null;
   return {
-    continue: row.continue,
-    reason: typeof row.reason === "string" ? row.reason : "unknown",
-    status: typeof row.status === "string" ? row.status : null,
-    openTaskCount: Number.isFinite(Number(row.openTaskCount)) ? Number(row.openTaskCount) : 0,
-    cycleCount: Number.isFinite(Number(row.cycleCount)) ? Number(row.cycleCount) : 0,
-    objective: typeof row.objective === "string" ? row.objective : null,
-    blockedReason: typeof row.blockedReason === "string" ? row.blockedReason : null,
+    continue: decision.continue,
+    // The existing Goal loop uses no_open_tasks as its evidence-gated close
+    // handshake. A completed long run has already passed that gate.
+    reason: decision.status === "completed" ? "no_open_tasks" : decision.reason,
+    status: decision.status,
+    openTaskCount: decision.openTaskCount,
+    cycleCount: decision.cycleCount,
+    objective: decision.objective,
+    blockedReason: decision.blockedReason,
   };
 }
 
-function parseSnapshot(value: unknown): GoalLedgerSnapshot | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const row = value as Record<string, unknown>;
-  if (
-    row.schemaVersion !== GOAL_SCHEMA
-    || typeof row.goalId !== "string"
-    || typeof row.objective !== "string"
-    || !["active", "blocked", "completed", "cancelled"].includes(String(row.status ?? ""))
-  ) return null;
-  return {
-    goalId: row.goalId,
-    objective: row.objective.trim(),
-    acceptanceCriteria: Array.isArray(row.acceptanceCriteria)
-      ? row.acceptanceCriteria.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim())
-      : [],
-    status: row.status as GoalLedgerSnapshot["status"],
-  };
-}
-
-/** Read the durable contract without changing it. */
 export async function getGoalLedgerGoal(
   goalId: string,
-  projectDir?: string | null,
+  _projectDir?: string | null,
 ): Promise<GoalLedgerSnapshot | null> {
-  return parseSnapshot(await ledgerCall<unknown>(["get", goalId], projectDir));
+  try {
+    const run = getLongRunByGoalId(goalId);
+    if (!run) return null;
+    return {
+      goalId: run.goalId,
+      objective: run.objective,
+      acceptanceCriteria: run.acceptanceCriteria,
+      status: snapshotStatus(run.status),
+      runId: run.id,
+      runStatus: run.status,
+      pauseReason: run.pauseReason,
+      version: run.version,
+      executionLocation: run.executionLocation,
+    };
+  } catch {
+    return null;
+  }
 }
 
-/**
- * Deterministic first-pass acceptance contract. The runtime must make these
- * more concrete in its visible kickoff, but even a disconnected Goal ledger
- * starts with target-surface, regression, and evidence requirements instead
- * of a vague "do your best" objective.
- */
-export function deriveGoalAcceptanceCriteria(
-  objective: string,
-  locale: "ko" | "en",
-): string[] {
+export function deriveGoalAcceptanceCriteria(objective: string, locale: "ko" | "en"): string[] {
   const normalized = objective.replace(/\s+/g, " ").trim().slice(0, 500);
   const requestedOutcome = locale === "ko"
     ? `요청 결과가 실제 대상 표면에서 확인 가능하게 완성되어야 합니다: ${normalized}`
@@ -126,28 +121,7 @@ export function deriveGoalAcceptanceCriteria(
       ];
 }
 
-async function ledgerCall<T>(args: string[], projectDir?: string | null): Promise<T | null> {
-  try {
-    // Lazy import: the engine module touches Electron app paths, and this
-    // module's pure helpers (progress keys, hard-stop reasons) must stay
-    // loadable from plain-node contract gates.
-    const { runHephaestus } = await import("../hephaestus/engine");
-    const result = await runHephaestus<T>("agentlas_cloud", ["workforce", "goal-ledger", ...args], {
-      ...(projectDir ? { cwd: path.resolve(projectDir) } : {}),
-      timeoutMs: 20_000,
-    });
-    if (!result.ok || !result.json) return null;
-    return result.json;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Idempotent goal upsert. On a fresh goal a bootstrap task is seeded by the
- * ledger so the continue decision never dead-ends before the first cycle.
- */
-export async function ensureGoalLedgerGoal(input: {
+export function ensureGoalLedgerGoal(input: {
   goalId: string;
   objective: string;
   projectDir?: string | null;
@@ -156,152 +130,154 @@ export async function ensureGoalLedgerGoal(input: {
   maxCycles?: number;
   maxCostUsd?: number;
   stallWindow?: number;
-}): Promise<boolean> {
-  const args = ["create", input.goalId, "--objective", input.objective.slice(0, 2_000)];
-  for (const criterion of input.acceptanceCriteria ?? []) args.push("--criteria", criterion);
-  if (input.projectDir) args.push("--project", path.resolve(input.projectDir));
-  if (input.wallclockDeadline) args.push("--deadline", input.wallclockDeadline);
-  if (input.maxCycles != null) args.push("--max-cycles", String(input.maxCycles));
-  if (input.maxCostUsd != null) args.push("--max-cost", String(input.maxCostUsd));
-  if (input.stallWindow != null) args.push("--stall-window", String(input.stallWindow));
-  const result = await ledgerCall<{ goalId?: string; status?: string }>(args, input.projectDir);
-  return result?.status === "active";
+}): boolean {
+  try {
+    const run = ensureGoalLongRun({
+      goalId: input.goalId,
+      objective: input.objective,
+      acceptanceCriteria: input.acceptanceCriteria ?? [],
+      projectDir: input.projectDir,
+      wallclockDeadline: input.wallclockDeadline,
+      maxCycles: input.maxCycles,
+      maxCostUsd: input.maxCostUsd,
+      stallWindow: input.stallWindow,
+    });
+    return !["blocked", "completed", "failed", "cancelled"].includes(run.status);
+  } catch {
+    return false;
+  }
 }
 
-/** Pure read of the host-owned continue decision. */
 export async function goalLedgerShouldContinue(
   goalId: string,
-  projectDir?: string | null,
+  _projectDir?: string | null,
 ): Promise<GoalLedgerDecision | null> {
-  return parseDecision(await ledgerCall<unknown>(["should-continue", goalId], projectDir));
+  try { return decisionForGoal(goalId); } catch { return null; }
 }
 
-/**
- * Account one loop cycle (progress + stall detection + budgets) and return the
- * fresh continue decision in the same spawn. Identical consecutive progress
- * keys are "no progress"; a stall streak blocks the goal and calls a human.
- */
 export async function recordGoalLedgerCycle(input: {
   goalId: string;
   progressKey?: string | null;
   outcome?: string | null;
   projectDir?: string | null;
 }): Promise<GoalLedgerDecision | null> {
-  const args = ["record-cycle", input.goalId];
-  if (input.progressKey) args.push("--progress-key", input.progressKey);
-  if (input.outcome) args.push("--outcome", input.outcome.slice(0, 240));
-  return parseDecision(await ledgerCall<unknown>(args, input.projectDir));
+  try {
+    const result = recordLongRunCycle({
+      goalId: input.goalId,
+      progressKey: input.progressKey,
+      outcome: input.outcome,
+    });
+    return result ? decisionForGoal(input.goalId) : null;
+  } catch {
+    return null;
+  }
 }
 
-/** Explicit goal terminal — completed / cancelled (or human-call blocked). */
+function cancelRun(goalId: string, reason: string): boolean {
+  let run = getLongRunByGoalId(goalId);
+  if (!run) return false;
+  if (run.status === "cancelled") return true;
+  if (run.status === "completed" || run.status === "failed") return false;
+  if (run.status === "draft" || run.status === "paused" || run.status === "blocked") {
+    transitionLongRun({ runId: run.id, to: "cancelled", reason, actorKind: "user" });
+    return true;
+  }
+  if (run.status !== "cancelling") {
+    run = transitionLongRun({ runId: run.id, to: "cancelling", reason, actorKind: "user" });
+  }
+  transitionLongRun({ runId: run.id, to: "cancelled", reason, actorKind: "host" });
+  return true;
+}
+
 export async function completeGoalLedgerGoal(input: {
   goalId: string;
   status: "completed" | "cancelled" | "blocked";
   reason?: string;
   projectDir?: string | null;
 }): Promise<boolean> {
-  const args = ["complete", input.goalId, "--terminal-status", input.status];
-  if (input.reason) args.push("--reason", input.reason.slice(0, 240));
-  const result = await ledgerCall<{ status?: string }>(args, input.projectDir);
-  return result?.status === input.status;
+  try {
+    const run = getLongRunByGoalId(input.goalId);
+    if (!run) return false;
+    if (input.status === "cancelled") return cancelRun(input.goalId, input.reason ?? "cancelled");
+    if (input.status === "blocked") {
+      if (run.status === "blocked") return true;
+      transitionLongRun({ runId: run.id, to: "blocked", reason: input.reason ?? "blocked", actorKind: "host" });
+      return true;
+    }
+    if (run.status === "completed") return true;
+    return tryCompleteVerifiedLongRun(run.id);
+  } catch {
+    return false;
+  }
 }
 
-/**
- * Progress fingerprint for one cycle: the digest of the visible result text.
- * Two cycles that end with byte-identical output made no progress — the exact
- * `progress_key` contract from networking/goal_loop.py.
- */
 export function goalProgressKeyForText(text: string): string {
   return `sha256:${createHash("sha256").update((text ?? "").trim()).digest("hex").slice(0, 40)}`;
 }
 
-/*
- * ── task 층 ────────────────────────────────────────────────────────────────
- * 원장 CLI는 8개 하위명령을 노출한다:
- *   create · get · tasks · add-task · complete-task · record-cycle ·
- *   should-continue · complete
- * 이 브리지는 오랫동안 5개만 감쌌고, 빠진 셋이 전부 task 층이었다. 결과는
- * 조용한 구조적 고장이었다(실측): create가 심는 `task:bootstrap`을 닫는 코드가
- * 없어 openTaskCount가 영원히 1 → 판정 사유 `no_open_tasks` 도달 불가 →
- * automation-scheduler의 verifiedComplete 영원히 거짓 → **어떤 goal도
- * completed로 끝날 수 없었다.** 남은 종료는 사용자 취소와 blocked뿐이었다.
- *
- * 원장 쪽은 멀쩡했다. 아무도 그 문을 두드리지 않았을 뿐이다.
- */
-
-export interface GoalLedgerTask {
-  taskId: string;
-  summary: string;
-  state: string;
-  evidenceRef: string | null;
-  blockedReason: string | null;
-}
-
-function parseTasks(value: unknown): GoalLedgerTask[] | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const row = value as Record<string, unknown>;
-  // 원장 goal 스키마 태그. 리터럴로 두는 것은 이 task 층이 goal 스냅샷 파서와
-  // 독립적으로 커밋될 수 있어야 하기 때문이다(같은 파일을 다른 세션이 편집 중).
-  if (row.schemaVersion !== "agentlas.goal-ledger.v1" || !Array.isArray(row.openTasks)) return null;
-  return row.openTasks
-    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
-    .filter((item) => typeof item.taskId === "string" && typeof item.summary === "string")
-    .map((item) => ({
-      taskId: String(item.taskId),
-      summary: String(item.summary),
-      state: typeof item.state === "string" ? item.state : "todo",
-      evidenceRef: typeof item.evidenceRef === "string" ? item.evidenceRef : null,
-      blockedReason: typeof item.blockedReason === "string" ? item.blockedReason : null,
-    }));
-}
-
-/** 미완 task 목록. 원장에 닿지 못하면 null(빈 배열과 구분된다). */
 export async function listGoalLedgerTasks(
   goalId: string,
-  projectDir?: string | null,
+  _projectDir?: string | null,
 ): Promise<GoalLedgerTask[] | null> {
-  return parseTasks(await ledgerCall<unknown>(["tasks", goalId], projectDir));
+  try {
+    const run = getLongRunByGoalId(goalId);
+    if (!run) return null;
+    return listLongRunTasks(run.id, true).map((task) => ({
+      taskId: task.id,
+      summary: task.title,
+      state: task.state,
+      evidenceRef: task.evidenceRef,
+      blockedReason: task.blockedReason,
+    }));
+  } catch {
+    return null;
+  }
 }
 
-/** task 하나를 근거와 함께 done으로 닫는다. */
+/** A completion claim requests verification; it never completes a task. */
 export async function completeGoalLedgerTask(input: {
   goalId: string;
   taskId: string;
   evidence?: string | null;
   projectDir?: string | null;
 }): Promise<boolean> {
-  const args = ["complete-task", input.goalId, "--task-id", input.taskId];
-  if (input.evidence) args.push("--evidence", input.evidence.slice(0, 240));
-  const result = await ledgerCall<{ state?: string }>(args, input.projectDir);
-  return result?.state === "done";
+  try {
+    const run = getLongRunByGoalId(input.goalId);
+    if (!run || !listLongRunTasks(run.id, true).some((task) => task.id === input.taskId)) return false;
+    requestLongRunVerification(input.goalId, input.evidence);
+    return false;
+  } catch {
+    return false;
+  }
 }
 
-/**
- * 모델이 goal 전체 완료를 선언했을 때 미완 task를 전부 닫고 닫은 개수를 돌려준다.
- *
- * 이것은 완료 판정이 아니라 **회계**다. 호출자는 이 뒤에 판정을 다시 읽어
- * (`no_open_tasks`) 기존 신호 일치 규칙으로 goal을 닫을지 정한다. 여기서 바로
- * goal을 completed로 만들면 모델의 한마디가 곧 완료가 되어, 지금 고치려는
- * 결함의 정반대 결함(조기 완료)을 새로 만든다.
- *
- * 원장에 못 닿으면 0을 돌려주고 아무것도 바꾸지 않는다 — 기존 동작 그대로다.
- */
+/** Compatibility name: record the claim and move to verification, closing zero tasks. */
 export async function closeOpenGoalLedgerTasks(input: {
   goalId: string;
   evidence?: string | null;
   projectDir?: string | null;
+  outcomeText?: string | null;
+  invocationRunId?: string | null;
+  /** InvocationService sets this while its terminal receipt is not durable yet. */
+  deferVerificationUntilTerminal?: boolean;
 }): Promise<number> {
-  const open = await listGoalLedgerTasks(input.goalId, input.projectDir);
-  if (!open || open.length === 0) return 0;
-  let closed = 0;
-  for (const task of open) {
-    const ok = await completeGoalLedgerTask({
+  try {
+    const before = await listGoalLedgerTasks(input.goalId, input.projectDir);
+    if (input.deferVerificationUntilTerminal) {
+      requestLongRunVerification(input.goalId, input.evidence);
+      return 0;
+    }
+    const { verifyGoalCompletionClaim } = await import("../long-run/verifier");
+    await verifyGoalCompletionClaim({
       goalId: input.goalId,
-      taskId: task.taskId,
-      evidence: input.evidence ?? null,
+      outcomeText: input.outcomeText?.trim() || input.evidence?.trim() || "Completion claimed without result text.",
+      evidence: input.evidence,
+      invocationRunId: input.invocationRunId,
       projectDir: input.projectDir,
     });
-    if (ok) closed += 1;
+    const after = await listGoalLedgerTasks(input.goalId, input.projectDir);
+    return Math.max(0, (before?.length ?? 0) - (after?.length ?? 0));
+  } catch {
+    return 0;
   }
-  return closed;
 }

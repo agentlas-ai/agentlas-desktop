@@ -62,8 +62,6 @@ let lastError: string | null = null;
 let runtimeOptions: MobileBridgeRuntimeOptions | null = null;
 let networkWatchTimer: NodeJS.Timeout | null = null;
 let lifecycleTail: Promise<void> = Promise.resolve();
-let lifecycleGeneration = 0;
-const lifecycleDelayCancelers = new Set<() => void>();
 export type MobileBridgeStateChangeReason =
   | MobileBridgePairingChangeReason
   | "runtime-started"
@@ -152,49 +150,6 @@ function serializeLifecycle<T>(work: () => Promise<T>): Promise<T> {
   const run = lifecycleTail.then(work, work);
   lifecycleTail = run.then(() => undefined, () => undefined);
   return run;
-}
-
-/**
- * Records the newest lifecycle intent and wakes any retained-port retry sleep.
- * In particular, app shutdown must never wait behind a bridge start/rebind.
- */
-function beginLifecycleIntent(): number {
-  lifecycleGeneration += 1;
-  for (const cancel of lifecycleDelayCancelers) cancel();
-  lifecycleDelayCancelers.clear();
-  return lifecycleGeneration;
-}
-
-function lifecycleIntentIsCurrent(generation: number): boolean {
-  return generation === lifecycleGeneration;
-}
-
-function waitForLifecycleRetry(generation: number, delayMs: number): Promise<boolean> {
-  if (!lifecycleIntentIsCurrent(generation)) return Promise.resolve(false);
-  return new Promise<boolean>((resolve) => {
-    let settled = false;
-    const finish = (current: boolean) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      lifecycleDelayCancelers.delete(cancel);
-      resolve(current);
-    };
-    const cancel = () => finish(false);
-    const timer = setTimeout(() => finish(lifecycleIntentIsCurrent(generation)), delayMs);
-    timer.unref?.();
-    lifecycleDelayCancelers.add(cancel);
-    if (!lifecycleIntentIsCurrent(generation)) cancel();
-  });
-}
-
-async function settleCanceledBridgeStart(generation: number): Promise<boolean> {
-  if (lifecycleIntentIsCurrent(generation)) return false;
-  // stopAgentlasMobileBridge may have run before startBridgeInternal published
-  // `running`. If the late start did publish, close that exact serialized
-  // predecessor now; a newer start/rebind is still queued behind this work.
-  await stopRunningBridge(true);
-  return true;
 }
 
 function networkWatchIntervalMs(): number {
@@ -385,24 +340,19 @@ async function stopRunningBridge(emitStopped: boolean): Promise<void> {
 export async function startAgentlasMobileBridge(
   options: MobileBridgeRuntimeOptions,
 ): Promise<MobileBridgeRuntimeStatus> {
-  const generation = beginLifecycleIntent();
   runtimeOptions = { ...options };
   ensureNetworkWatcher();
   return serializeLifecycle(async () => {
-    if (!lifecycleIntentIsCurrent(generation)) return mobileBridgeRuntimeStatus();
     // A paired phone stores this endpoint. Reusing the last port means closing
     // and reopening Desktop restores the same secure WebSocket automatically.
     const retainedPort = retainedEndpointPort(options);
     const retryDelaysMs = [1_000, 2_000, 3_000, 4_000, 5_000];
     for (let attempt = 0; ; attempt += 1) {
       try {
-        const status = await startBridgeInternal(options, {
+        return await startBridgeInternal(options, {
           ...(retainedPort ? { port: retainedPort } : {}),
         });
-        if (await settleCanceledBridgeStart(generation)) return mobileBridgeRuntimeStatus();
-        return status;
       } catch (error) {
-        if (!lifecycleIntentIsCurrent(generation)) return mobileBridgeRuntimeStatus();
         if (!retainedPort || !addressAlreadyInUse(error)) throw error;
         // During an app update/restart the outgoing instance (or its socket in
         // TIME_WAIT) can still hold the retained port for a few seconds. Losing
@@ -416,13 +366,12 @@ export async function startAgentlasMobileBridge(
           console.warn(
             `[mobile-bridge] retained port ${retainedPort} stayed busy; falling back to an ephemeral port (paired phones need a new QR)`,
           );
-          const status = await startBridgeInternal(options, { port: 0 });
-          if (await settleCanceledBridgeStart(generation)) return mobileBridgeRuntimeStatus();
-          return status;
+          return startBridgeInternal(options, { port: 0 });
         }
-        if (!(await waitForLifecycleRetry(generation, delayMs))) {
-          return mobileBridgeRuntimeStatus();
-        }
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, delayMs);
+          timer.unref?.();
+        });
       }
     }
   });
@@ -434,9 +383,7 @@ async function rebindAgentlasMobileBridge(
 ): Promise<MobileBridgeRuntimeStatus> {
   const options = runtimeOptions;
   if (!options) throw new Error("Agentlas Mobile Bridge has not been configured");
-  const generation = beginLifecycleIntent();
   return serializeLifecycle(async () => {
-    if (!lifecycleIntentIsCurrent(generation)) return mobileBridgeRuntimeStatus();
     emitMobileBridgeStateChange("runtime-rebinding");
     const currentManifest = running?.manifest ?? (() => {
       try { return readMobileBridgeEndpointManifest(options.userDataPath); } catch { return null; }
@@ -445,17 +392,14 @@ async function rebindAgentlasMobileBridge(
       ? undefined
       : currentManifest?.port;
     await stopRunningBridge(false);
-    if (!lifecycleIntentIsCurrent(generation)) return mobileBridgeRuntimeStatus();
     try {
       const status = await startBridgeInternal(options, {
         ...(hostOverride ? { host: hostOverride } : {}),
         ...(retainedPort ? { port: retainedPort } : {}),
       });
-      if (await settleCanceledBridgeStart(generation)) return mobileBridgeRuntimeStatus();
       emitMobileBridgeStateChange(reason);
       return status;
     } catch (error) {
-      if (!lifecycleIntentIsCurrent(generation)) return mobileBridgeRuntimeStatus();
       emitMobileBridgeStateChange("runtime-retry-failed");
       throw error;
     }
@@ -584,11 +528,7 @@ export function revokeAllMobileBridgeDevicesByOwner(
 
 export async function stopAgentlasMobileBridge(): Promise<void> {
   runtimeOptions = null;
-  beginLifecycleIntent();
   if (networkWatchTimer) clearInterval(networkWatchTimer);
   networkWatchTimer = null;
-  // Shutdown is terminal and unconditional: do not queue it behind a retained
-  // port retry or a slow start. A late start observes the generation change
-  // and closes itself before any newer serialized lifecycle intent can run.
-  await stopRunningBridge(true);
+  await serializeLifecycle(() => stopRunningBridge(true));
 }

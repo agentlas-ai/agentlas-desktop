@@ -136,6 +136,15 @@
       "status": "implemented"
     },
     {
+      "code": "BROWSER_ONLY_PROMPT_TOO_LARGE",
+      "since": "1.1",
+      "severity": "node",
+      "retryable": true,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "Browser-only Antigravity runs pass the prompt directly to the CLI and cannot use a private prompt-file bootstrap. The browser history is compacted and bounded first; this code remains for an oversized system/request payload and preserves the exact transport failure."
+    },
+    {
       "code": "CODE_DEPENDENCY_MISSING",
       "since": "1.1",
       "severity": "node",

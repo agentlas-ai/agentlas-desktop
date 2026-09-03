@@ -1,0 +1,58 @@
+{
+  "type": "object",
+  "description": "ODE simulation catalogue on an adaptive Dormand–Prince RK5(4) integrator. Parameters and initial_state are validated per system; unknown keys are rejected. Units are declared by the catalogue (see the per-system definitions).",
+  "properties": {
+    "system": { "type": "string", "enum": ["projectile_drag", "damped_driven_oscillator", "nonlinear_pendulum", "rlc_series", "lorenz", "two_body_orbit", "decay_chain", "logistic", "sir"] },
+    "parameters": { "type": "object", "description": "System parameters; every key optional with catalogue defaults. See the per-system if/then blocks." },
+    "initial_state": { "type": "object", "description": "Named initial state components; every key optional with catalogue defaults." },
+    "time_span": {
+      "type": "object",
+      "properties": {
+        "start": { "type": "number", "minimum": -1000000000, "maximum": 1000000000, "default": 0 },
+        "end": { "type": "number", "minimum": -1000000000, "maximum": 1000000000, "description": "must exceed start; default start + 10" }
+      },
+      "additionalProperties": false
+    },
+    "options": {
+      "type": "object",
+      "properties": {
+        "rtol": { "type": "number", "minimum": 1e-12, "maximum": 0.01, "default": 1e-8 },
+        "atol": { "type": "number", "minimum": 0, "maximum": 1000000, "default": 1e-10 },
+        "output_points": { "type": "integer", "minimum": 10, "maximum": 5000, "default": 1000 },
+        "max_steps": { "type": "integer", "minimum": 100, "maximum": 200000, "default": 100000 }
+      },
+      "additionalProperties": false
+    }
+  },
+  "required": ["system"],
+  "additionalProperties": false,
+  "allOf": [
+    { "if": { "properties": { "system": { "const": "projectile_drag" } } }, "then": { "properties": {
+      "parameters": { "type": "object", "properties": { "m": { "type": "number", "minimum": 1e-12, "maximum": 1e12, "default": 1, "description": "kg" }, "g": { "type": "number", "minimum": 0, "maximum": 1000000, "default": 9.80665, "description": "m/s^2" }, "drag": { "type": "string", "enum": ["none", "linear", "quadratic"], "default": "quadratic" }, "drag_coefficient": { "type": "number", "minimum": 0, "maximum": 1000000, "default": 0.01, "description": "kg/s (linear) or kg/m (quadratic)" } }, "additionalProperties": false },
+      "initial_state": { "type": "object", "properties": { "x": { "type": "number", "default": 0, "description": "m" }, "y": { "type": "number", "default": 0, "description": "m" }, "vx": { "type": "number", "default": 20, "description": "m/s" }, "vy": { "type": "number", "default": 20, "description": "m/s" } }, "additionalProperties": false } } } },
+    { "if": { "properties": { "system": { "const": "damped_driven_oscillator" } } }, "then": { "properties": {
+      "parameters": { "type": "object", "properties": { "m": { "type": "number", "minimum": 1e-12, "maximum": 1e12, "default": 1, "description": "kg" }, "omega0": { "type": "number", "minimum": 1e-9, "maximum": 1e9, "default": 6.283185307179586, "description": "rad/s" }, "zeta": { "type": "number", "minimum": 0, "maximum": 100, "default": 0.05 }, "F0": { "type": "number", "minimum": 0, "maximum": 1e12, "default": 1, "description": "N" }, "omega_drive": { "type": "number", "minimum": 0, "maximum": 1e9, "default": 5.654866776461628, "description": "rad/s" } }, "additionalProperties": false },
+      "initial_state": { "type": "object", "properties": { "x": { "type": "number", "default": 0, "description": "m" }, "v": { "type": "number", "default": 0, "description": "m/s" } }, "additionalProperties": false } } } },
+    { "if": { "properties": { "system": { "const": "nonlinear_pendulum" } } }, "then": { "properties": {
+      "parameters": { "type": "object", "properties": { "g": { "type": "number", "minimum": 1e-9, "maximum": 1000000, "default": 9.80665, "description": "m/s^2" }, "L": { "type": "number", "minimum": 1e-9, "maximum": 1e9, "default": 1, "description": "m" }, "m": { "type": "number", "minimum": 1e-12, "maximum": 1e12, "default": 1, "description": "kg" }, "b": { "type": "number", "minimum": 0, "maximum": 1000000, "default": 0, "description": "1/s" } }, "additionalProperties": false },
+      "initial_state": { "type": "object", "properties": { "theta": { "type": "number", "default": 1, "description": "rad" }, "omega": { "type": "number", "default": 0, "description": "rad/s" } }, "additionalProperties": false } } } },
+    { "if": { "properties": { "system": { "const": "rlc_series" } } }, "then": { "properties": {
+      "parameters": { "type": "object", "properties": { "R": { "type": "number", "minimum": 0, "maximum": 1e12, "default": 10, "description": "Ω" }, "L": { "type": "number", "minimum": 1e-15, "maximum": 1000000, "default": 0.001, "description": "H" }, "C": { "type": "number", "minimum": 1e-18, "maximum": 1000, "default": 0.000001, "description": "F" }, "V0": { "type": "number", "minimum": 0, "maximum": 1e9, "default": 1, "description": "V" }, "omega": { "type": "number", "minimum": 0, "maximum": 1e12, "default": 0, "description": "rad/s; 0 = DC step" } }, "additionalProperties": false },
+      "initial_state": { "type": "object", "properties": { "q": { "type": "number", "default": 0, "description": "C" }, "i": { "type": "number", "default": 0, "description": "A" } }, "additionalProperties": false } } } },
+    { "if": { "properties": { "system": { "const": "lorenz" } } }, "then": { "properties": {
+      "parameters": { "type": "object", "properties": { "sigma": { "type": "number", "minimum": 0, "maximum": 10000, "default": 10 }, "rho": { "type": "number", "minimum": 0, "maximum": 10000, "default": 28 }, "beta": { "type": "number", "minimum": 0, "maximum": 10000, "default": 2.6666666666666665 } }, "additionalProperties": false },
+      "initial_state": { "type": "object", "properties": { "x": { "type": "number", "default": 1 }, "y": { "type": "number", "default": 1 }, "z": { "type": "number", "default": 1 } }, "additionalProperties": false } } } },
+    { "if": { "properties": { "system": { "const": "two_body_orbit" } } }, "then": { "properties": {
+      "parameters": { "type": "object", "properties": { "preset": { "type": "string", "enum": ["none", "earth_satellite"], "default": "none", "description": "earth_satellite sets mu = 3.986004418e14 m^3/s^2 and a 400 km circular default state; cannot be combined with mu" }, "mu": { "type": "number", "minimum": 1e-30, "maximum": 1e30, "default": 1, "description": "m^3/s^2 (normalized units when preset is none)" } }, "additionalProperties": false },
+      "initial_state": { "type": "object", "properties": { "x": { "type": "number", "default": 1 }, "y": { "type": "number", "default": 0 }, "vx": { "type": "number", "default": 0 }, "vy": { "type": "number", "default": 1 } }, "additionalProperties": false } } } },
+    { "if": { "properties": { "system": { "const": "decay_chain" } } }, "then": { "properties": {
+      "parameters": { "type": "object", "properties": { "decay_constants": { "type": "array", "minItems": 2, "maxItems": 8, "items": { "type": "number", "minimum": 0, "maximum": 1e12 }, "description": "1/s; only the last entry may be 0 (stable). Default [ln2/10, ln2/100, 0]" }, "half_lives": { "type": "array", "minItems": 2, "maxItems": 8, "items": { "type": ["number", "null"], "minimum": 1e-12, "maximum": 1e30 }, "description": "s; null = stable; alternative to decay_constants" } }, "additionalProperties": false },
+      "initial_state": { "type": "object", "description": "N1..Nk counts (>= 0); default N1 = 1, others 0", "additionalProperties": { "type": "number", "minimum": 0 } } } } },
+    { "if": { "properties": { "system": { "const": "logistic" } } }, "then": { "properties": {
+      "parameters": { "type": "object", "properties": { "r": { "type": "number", "minimum": 0, "maximum": 1000000, "default": 1, "description": "1/time" }, "K": { "type": "number", "minimum": 1e-12, "maximum": 1e30, "default": 100, "description": "count" } }, "additionalProperties": false },
+      "initial_state": { "type": "object", "properties": { "N": { "type": "number", "exclusiveMinimum": 0, "default": 1, "description": "count" } }, "additionalProperties": false } } } },
+    { "if": { "properties": { "system": { "const": "sir" } } }, "then": { "properties": {
+      "parameters": { "type": "object", "properties": { "beta": { "type": "number", "minimum": 0, "maximum": 1000, "default": 0.3, "description": "1/day" }, "gamma": { "type": "number", "minimum": 1e-12, "maximum": 1000, "default": 0.1, "description": "1/day" }, "N": { "type": "number", "minimum": 1e-9, "maximum": 1e15, "default": 1000, "description": "count" } }, "additionalProperties": false },
+      "initial_state": { "type": "object", "properties": { "S": { "type": "number", "minimum": 0, "default": 990 }, "I": { "type": "number", "minimum": 0, "default": 10 }, "R": { "type": "number", "minimum": 0, "default": 0 } }, "additionalProperties": false } } } }
+  ]
+}

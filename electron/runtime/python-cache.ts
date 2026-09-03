@@ -1,8 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { app } from "electron";
-import { userDataPath } from "../runtime-paths";
+import { optionalElectronAppPath, userDataPath } from "../runtime-paths";
 
 const PYTHON_CACHE_RELATIVE = ["cache", "python-bytecode"];
 
@@ -14,11 +13,8 @@ function isInside(parent: string, candidate: string): boolean {
 function applicationRoots(): string[] {
   const roots: string[] = [];
   if (process.resourcesPath) roots.push(process.resourcesPath);
-  try {
-    roots.push(app.getAppPath());
-  } catch {
-    // Electron's app path is unavailable in isolated source-contract tests.
-  }
+  const appPath = optionalElectronAppPath();
+  if (appPath) roots.push(appPath);
   return roots;
 }
 

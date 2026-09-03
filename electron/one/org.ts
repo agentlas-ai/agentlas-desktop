@@ -73,7 +73,7 @@ const MAX_STATUS_LINE = 40;
 const SOURCE_VALUES = new Set<OneOrgSource>(["local", "cloud", "hub"]);
 const COLLABORATION_STYLES = new Set(["default", "concise", "warm", "direct"] as const);
 const ONE_CHARACTER_IDS = new Set([
-  "blue-wave", "green-cloud", "purple-beacon", "amber-pod", "orange-sprout", "red-triangle",
+  "orange-dino", "blue-wave", "green-cloud", "purple-beacon", "amber-pod", "orange-sprout", "red-triangle",
   "blue-wave-2d", "green-cloud-2d", "purple-beacon-2d", "amber-pod-2d", "orange-sprout-2d", "red-triangle-2d",
 ]);
 
@@ -783,10 +783,9 @@ export function replaceOneOrgMember(input: ReplaceOneOrgMemberInput): OneOrgStat
     const clearCache = getDb().prepare("DELETE FROM one_org_completion_cache WHERE installed_agent_id = ?");
     clearCache.run(agent.id);
     if (row.installed_agent_id !== agent.id) clearCache.run(row.installed_agent_id);
-    // T2 점유자 교체(SEAT-SESSION-PLAN-v2 I5·I6·I9) — 같은 좌석에서 이전 봇의 열린
-    // 점유 행을 닫고 새 봇을 앉힌다. 세션은 그대로 이어지고(chats 불변), "마지막 담당"
-    // (chats.agent_id)만 새 봇으로 갱신해 기존 조회 경로의 연속성을 지킨다. 열린 세션엔
-    // 시스템 줄 1개를 남긴다 — 이전 발화는 이전 발화자 명의 그대로다.
+    // T2 점유자 교체 — 조직의 자리는 이어지지만 기존 direct 세션의 agent set은
+    // 생성 시점 값으로 고정한다. 이전 세션을 새 봇 명의로 바꾸지 않고 기록 전용으로
+    // 남기며, 사용자는 새 봇과 새 세션을 명시적으로 연다.
     if (row.installed_agent_id !== agent.id) {
       try {
         const db = getDb();
@@ -798,7 +797,6 @@ export function replaceOneOrgMember(input: ReplaceOneOrgMemberInput): OneOrgStat
         ).get(row.installed_agent_id) as { seatId: string } | undefined;
         if (seatRow) {
           replaceSeatOccupant(seatRow.seatId, row.installed_agent_id, agent.id);
-          db.prepare("UPDATE chats SET agent_id = ? WHERE seat_id = ?").run(agent.id, seatRow.seatId);
           const previousName = row.display_name || row.agent_slug;
           const nextName = agent.name || agent.slug;
           const line = seatEventText(currentUiLocale() === "ko"

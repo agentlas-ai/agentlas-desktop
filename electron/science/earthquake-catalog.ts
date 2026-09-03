@@ -1,7 +1,7 @@
-import path from "node:path";
 import { createHash } from "node:crypto";
 import type { ScienceSource } from "../../shared/science-contract";
 import { ScienceStore } from "./store";
+import { loadSciencePluginRuntime } from "./plugin-runtime";
 
 export const EARTHQUAKE_CATALOG_TOOL_ID = "agentlas.earthquake-catalog";
 export const EARTHQUAKE_CATALOG_TOOL_VERSION = "1.0.0";
@@ -77,9 +77,9 @@ export interface EarthquakeCatalogResult {
 }
 
 function readEngine(): EarthEngine {
-  const enginePath = path.resolve(__dirname, "../../../plugins/agentlas-earth-science/runtime/earth-science.cjs");
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  return require(enginePath) as EarthEngine;
+  return loadSciencePluginRuntime<EarthEngine>(
+    "agentlas-earth-science", "runtime/earth-science.cjs", 16 * 1024 * 1024,
+  ).runtime;
 }
 
 function canonicalJson(value: unknown): string {

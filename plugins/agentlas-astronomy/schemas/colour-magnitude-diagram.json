@@ -1,0 +1,235 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "agentlas.astronomy.colour-magnitude-diagram-input/v1",
+  "title": "build_colour_magnitude_diagram",
+  "description": "Colour-magnitude (HR) diagram: absolute magnitudes from parallax with a fractional-error guard and declared extinction/reddening, first-order errors in both axes, comparison against a caller-declared main-sequence locus, and a CMD figure with error bars. No calibration table is embedded.",
+  "x-agentlas": {
+    "schema": "agentlas.astronomy.tool-schema/v1",
+    "toolName": "build_colour_magnitude_diagram",
+    "runtimeModule": "runtime/colour-magnitude.cjs",
+    "runtimeExport": "analyzeColourMagnitudeDiagram",
+    "resultSchema": "agentlas.science.astronomy-colour-magnitude-diagram-result/v1",
+    "argumentKeyStyle": "snake_case-to-camelCase"
+  },
+  "type": "object",
+  "properties": {
+    "source_content_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "Lowercase hex SHA-256 of the exact source bytes the measurements were taken from."
+    },
+    "sample_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "band_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 40
+    },
+    "colour_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 40
+    },
+    "max_fractional_parallax_error": {
+      "type": "number",
+      "minimum": 0.01,
+      "maximum": 1,
+      "default": 0.2
+    },
+    "extinction": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "none",
+            "uniform",
+            "per-row"
+          ]
+        },
+        "extinction_mag": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 50
+        },
+        "extinction_error_mag": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 50
+        },
+        "reddening_mag": {
+          "type": "number",
+          "minimum": -5,
+          "maximum": 50
+        },
+        "reddening_error_mag": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 50
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "additionalProperties": false
+    },
+    "locus": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160
+            },
+            "points": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "colour": {
+                    "type": "number",
+                    "minimum": -10,
+                    "maximum": 10
+                  },
+                  "absolute_magnitude": {
+                    "type": "number",
+                    "minimum": -30,
+                    "maximum": 40
+                  }
+                },
+                "required": [
+                  "colour",
+                  "absolute_magnitude"
+                ],
+                "additionalProperties": false
+              },
+              "minItems": 2,
+              "maxItems": 500,
+              "description": "Strictly increasing colour."
+            }
+          },
+          "required": [
+            "label",
+            "points"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "locus_tolerance_mag": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 10,
+      "default": 0.25
+    },
+    "measurements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "object_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          },
+          "parallax_mas": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": -10000,
+            "maximum": 10000
+          },
+          "parallax_error_mas": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "maximum": 10000,
+            "exclusiveMinimum": 0
+          },
+          "magnitude": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": -30,
+            "maximum": 40
+          },
+          "magnitude_error": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "maximum": 10,
+            "exclusiveMinimum": 0
+          },
+          "colour": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": -10,
+            "maximum": 10
+          },
+          "colour_error": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "maximum": 10,
+            "exclusiveMinimum": 0
+          },
+          "extinction_mag": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 50
+          },
+          "reddening_mag": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": -5,
+            "maximum": 50
+          },
+          "use": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "object_id",
+          "parallax_mas",
+          "parallax_error_mas",
+          "magnitude",
+          "magnitude_error",
+          "colour",
+          "colour_error",
+          "use"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1,
+      "maxItems": 5000
+    }
+  },
+  "required": [
+    "source_content_sha256",
+    "sample_id",
+    "band_name",
+    "colour_name",
+    "measurements"
+  ],
+  "additionalProperties": false
+}

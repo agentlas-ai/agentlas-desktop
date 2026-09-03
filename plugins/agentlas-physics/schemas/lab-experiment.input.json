@@ -1,0 +1,35 @@
+{
+  "type": "object",
+  "properties": {
+    "experiment": { "type": "string", "enum": ["free_fall", "pendulum", "ohms_law"] },
+    "time_column": { "type": "string", "minLength": 1, "maxLength": 160, "description": "free_fall: time column (s)" },
+    "distance_column": { "type": "string", "minLength": 1, "maxLength": 160, "description": "free_fall: distance fallen from release (m); exactly one of distance_column/height_column" },
+    "height_column": { "type": "string", "minLength": 1, "maxLength": 160, "description": "free_fall: alias of distance_column (drop height measured from release, m)" },
+    "sigma_column": { "type": "string", "minLength": 1, "maxLength": 160, "description": "free_fall: positive distance uncertainties; when absent errors are scaled from scatter" },
+    "length_column": { "type": "string", "minLength": 1, "maxLength": 160, "description": "pendulum: length column (m), values > 0" },
+    "period_column": { "type": "string", "minLength": 1, "maxLength": 160, "description": "pendulum: period column (s), values > 0" },
+    "sigma_period_column": { "type": "string", "minLength": 1, "maxLength": 160, "description": "pendulum: positive period uncertainties" },
+    "amplitude_deg": { "type": "number", "minimum": 0, "maximum": 179, "description": "pendulum: single release amplitude in degrees for the finite-amplitude correction; mutually exclusive with amplitude_column" },
+    "amplitude_column": { "type": "string", "minLength": 1, "maxLength": 160, "description": "pendulum: per-point amplitude column in degrees [0, 180)" },
+    "voltage_column": { "type": "string", "minLength": 1, "maxLength": 160, "description": "ohms_law: voltage column (V)" },
+    "current_column": { "type": "string", "minLength": 1, "maxLength": 160, "description": "ohms_law: current column (A)" },
+    "sigma_voltage_column": { "type": "string", "minLength": 1, "maxLength": 160, "description": "ohms_law: positive voltage uncertainties" },
+    "sigma_current_column": { "type": "string", "minLength": 1, "maxLength": 160, "description": "ohms_law: positive current uncertainties, folded into an effective voltage uncertainty with the fitted R" },
+    "model": {
+      "type": "string",
+      "enum": ["half_g_t_squared", "with_initial_velocity", "full", "through_origin", "with_intercept"],
+      "description": "free_fall: half_g_t_squared | with_initial_velocity (default) | full; pendulum: through_origin (default) | with_intercept; ohms_law: through_origin | with_intercept (default)"
+    },
+    "reference_g": { "type": "number", "minimum": 0.1, "maximum": 100, "default": 9.80665, "description": "free_fall/pendulum: reference g (m/s²); mutually exclusive with latitude_deg/altitude_m" },
+    "latitude_deg": { "type": "number", "minimum": -90, "maximum": 90, "description": "free_fall/pendulum: latitude for the WGS84 local-g reference" },
+    "altitude_m": { "type": "number", "minimum": -500, "maximum": 10000, "default": 0, "description": "free_fall/pendulum: altitude for the WGS84 local-g reference (requires latitude_deg)" },
+    "reference_resistance": { "type": "number", "exclusiveMinimum": 0, "maximum": 1e12, "description": "ohms_law: reference resistance (Ω) for the z-score" },
+    "options": {
+      "type": "object",
+      "properties": { "curve_points": { "type": "integer", "minimum": 50, "maximum": 2000, "default": 200 } },
+      "additionalProperties": false
+    }
+  },
+  "required": ["experiment"],
+  "additionalProperties": false
+}

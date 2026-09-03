@@ -90,7 +90,6 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
   const [connecting, setConnecting] = useState(false);
   const [connected, setConnected] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
-  const [visibilityResolved, setVisibilityResolved] = useState(false);
 
   // ── 7단계: 브라우저에 이미 있는 로그인 ─────────────────────────────────────
   //
@@ -145,22 +144,13 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
       seen = window.localStorage.getItem(STORAGE_KEY) === "1";
       saved = window.localStorage.getItem(PHASE_KEY);
     } catch { /* private mode */ }
-    if (!seen) {
-      if (saved === "credentials") setStep(7);
-      else if (saved === "plugins") setStep(8);
-      setOpen(true);
-    }
-    // Resolve the parent's promotion gate in the same effect that reads the
-    // durable onboarding marker. Reporting the initial `open=false` render
-    // first created a one-frame window where two modal overlays mounted.
-    onVisibilityChange?.(!seen);
-    setVisibilityResolved(true);
-  }, [onVisibilityChange]);
+    if (seen) return;
+    if (saved === "credentials") setStep(7);
+    else if (saved === "plugins") setStep(8);
+    setOpen(true);
+  }, []);
 
-  useEffect(() => {
-    if (!visibilityResolved) return;
-    onVisibilityChange?.(open);
-  }, [onVisibilityChange, open, visibilityResolved]);
+  useEffect(() => onVisibilityChange?.(open), [onVisibilityChange, open]);
 
   /** 세팅 단계에 도달한 사실을 남긴다 — 여기서 앱을 닫아도 설명을 다시 보지 않는다. */
   useEffect(() => {
@@ -357,6 +347,19 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
       }
       const linked = res.linkedSites.length;
       const skipped = res.skipped.length;
+      const loginRequired = res.requiresLoginSites ?? [];
+      if (loginRequired.length > 0) {
+        const first = loginRequired[0];
+        const opened = await api.browser.openLogin(first);
+        setSitePicked(new Set());
+        setSiteNote(opened.ok
+          ? (ko
+              ? `${first}은 Chrome이 보호한 세션이라 깨진 복사본을 만들지 않고 Agentlas 전용 로그인 창을 열었어요. 여기서 한 번 로그인하면 이후 자동화가 계속 재사용합니다.${loginRequired.length > 1 ? ` 나머지 ${loginRequired.length - 1}개는 Connect 목록에 추가했어요.` : ""}`
+              : `${first} is protected by Chrome, so Agentlas opened its dedicated sign-in instead of making a broken copy. Sign in once and later automations will reuse it.${loginRequired.length > 1 ? ` The other ${loginRequired.length - 1} were added to Connect.` : ""}`)
+          : (opened.error ?? (ko ? "전용 로그인 창을 열지 못했어요." : "Could not open the dedicated sign-in window.")));
+        await loadSites(siteProfileId);
+        return;
+      }
       if (skipped > 0) {
         setSiteNote(ko
           ? `${linked}개를 가져왔어요. 가져오지 못한 곳: ${res.skipped.map((row) => `${row.domain} (${row.reason})`).join(", ")}`

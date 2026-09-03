@@ -5,7 +5,7 @@ const { buildResearchDecisionLinkage } = require("./decision-linkage.cjs");
 
 const ENGINE = Object.freeze({
   id: "agentlas-science-statistics",
-  version: "1.9.0",
+  version: "1.10.0",
   algorithmRevision: "gaussian-random-intercept-lmm-v9-js-2026-09-01",
 });
 
@@ -45,7 +45,7 @@ const LIMITS = Object.freeze({
   maxArtifactRows: 10_000,
 });
 
-const METHODS = Object.freeze([
+const CORE_METHODS = Object.freeze([
   "descriptive",
   "distribution_fit",
   "pearson_correlation",
@@ -78,6 +78,14 @@ const METHODS = Object.freeze([
   "response_surface_regression",
   "gaussian_random_intercept_lmm",
 ]);
+
+const { loadMethodRegistry } = require("./methods/index.cjs");
+const METHOD_REGISTRY = loadMethodRegistry();
+for (const method of METHOD_REGISTRY.methods) {
+  if (CORE_METHODS.includes(method)) throw new Error(`statistics method registry duplicates core method ${method}`);
+}
+const METHODS = Object.freeze([...CORE_METHODS, ...METHOD_REGISTRY.methods]);
+const SHARED_OPTION_KEYS = Object.freeze(["confidenceLevel", "alternative", "correction", "estimator", "intercept", "timeoutMs", "maxIterations", "tolerance", "ties", "postHoc", "covariance", "pValueMethod", "scaling", "components", "maxLag", "differenceOrder", "metaModel", "tauEstimator", "gridSize", "fitMethod"]);
 
 class StatisticsError extends Error {
   constructor(code, message, details = undefined) {
@@ -238,9 +246,16 @@ class Budget {
   }
 }
 
-function parseOptions(raw) {
+function parseOptions(raw, method = null) {
   const value = raw === undefined ? {} : assertObject(raw, "options");
-  assertKeys(value, ["confidenceLevel", "alternative", "correction", "estimator", "intercept", "timeoutMs", "maxIterations", "tolerance", "ties", "postHoc", "covariance", "pValueMethod", "scaling", "components", "maxLag", "differenceOrder", "metaModel", "tauEstimator", "gridSize", "fitMethod"], "options");
+  assertKeys(value, [...SHARED_OPTION_KEYS, ...METHOD_REGISTRY.customOptionKeys], "options");
+  const custom = {};
+  const definition = method === null ? null : METHOD_REGISTRY.byMethod[method];
+  if (definition) {
+    for (const [key, spec] of Object.entries(definition.customOptions)) {
+      custom[key] = value[key] === undefined ? spec.default : spec.parse(value[key], HELPERS, `options.${key}`);
+    }
+  }
   const confidenceLevel = value.confidenceLevel === undefined ? 0.95 : finiteNumber(value.confidenceLevel, "options.confidenceLevel");
   if (confidenceLevel < 0.5 || confidenceLevel >= 1) fail("STAT_INVALID_INPUT", "options.confidenceLevel must be in [0.5, 1)");
   const alternative = value.alternative === undefined ? "two-sided" : value.alternative;
@@ -261,7 +276,10 @@ function parseOptions(raw) {
   const postHoc = value.postHoc === undefined ? "none" : value.postHoc;
   if (!["none", "holm"].includes(postHoc)) fail("STAT_INVALID_INPUT", "options.postHoc must be none or holm");
   const covariance = value.covariance === undefined ? "classical" : value.covariance;
-  if (!["classical", "hc0", "hc1", "hc2", "hc3"].includes(covariance)) fail("STAT_INVALID_INPUT", "options.covariance must be classical, hc0, hc1, hc2, or hc3");
+  // "hac" is the Newey-West estimator: heteroskedasticity AND autocorrelation consistent. A
+  // time-series regression -- an asset-pricing factor model, a Fama-MacBeth premium -- needs it,
+  // because HC alone assumes the residuals are independent across periods and they are not.
+  if (!["classical", "hc0", "hc1", "hc2", "hc3", "hac"].includes(covariance)) fail("STAT_INVALID_INPUT", "options.covariance must be classical, hc0, hc1, hc2, hc3, or hac");
   const pValueMethod = value.pValueMethod === undefined ? "auto" : value.pValueMethod;
   if (!["auto", "exact", "asymptotic"].includes(pValueMethod)) fail("STAT_INVALID_INPUT", "options.pValueMethod must be auto, exact, or asymptotic");
   const scaling = value.scaling === undefined ? "correlation" : value.scaling;
@@ -298,10 +316,11 @@ function parseOptions(raw) {
     tauEstimator,
     gridSize,
     fitMethod,
+    ...custom,
   };
 }
 
-const METHOD_OPTION_KEYS = Object.freeze({
+const CORE_METHOD_OPTION_KEYS = Object.freeze({
   descriptive: ["confidenceLevel", "timeoutMs"],
   distribution_fit: ["timeoutMs"],
   pearson_correlation: ["confidenceLevel", "alternative", "timeoutMs"],
@@ -333,6 +352,14 @@ const METHOD_OPTION_KEYS = Object.freeze({
   meta_analysis: ["confidenceLevel", "metaModel", "tauEstimator", "timeoutMs", "maxIterations", "tolerance"],
   response_surface_regression: ["confidenceLevel", "gridSize", "timeoutMs"],
   gaussian_random_intercept_lmm: ["confidenceLevel", "fitMethod", "intercept", "timeoutMs", "maxIterations", "tolerance"],
+});
+
+const METHOD_OPTION_KEYS = Object.freeze({
+  ...CORE_METHOD_OPTION_KEYS,
+  ...Object.fromEntries(METHOD_REGISTRY.definitions.map((definition) => [
+    definition.method,
+    Object.freeze([...definition.optionKeys, ...Object.keys(definition.customOptions)]),
+  ])),
 });
 
 function assertMethodOptions(method, raw) {
@@ -427,7 +454,7 @@ function parseRequest(raw) {
   if (!METHODS.includes(request.method)) fail("STAT_INVALID_INPUT", `unsupported method: ${String(request.method)}`);
   const data = assertObject(request.data, "data");
   assertMethodOptions(request.method, request.options);
-  const options = parseOptions(request.options);
+  const options = parseOptions(request.options, request.method);
   let parsedData;
 
   switch (request.method) {
@@ -875,8 +902,13 @@ function parseRequest(raw) {
       };
       break;
     }
-    default:
-      fail("STAT_INTERNAL", "unreachable method parser");
+    default: {
+      const definition = METHOD_REGISTRY.byMethod[request.method];
+      if (!definition) fail("STAT_INTERNAL", "unreachable method parser");
+      parsedData = definition.parse(data, options, HELPERS);
+      if (!plainObject(parsedData)) fail("STAT_INTERNAL", `${request.method} parser must return an object`);
+      break;
+    }
   }
 
   return { schema: REQUEST_SCHEMA, method: request.method, data: parsedData, options };
@@ -1074,12 +1106,26 @@ function gammaQ(a, x) {
   return x < a + 1 ? 1 - gammaSeries(a, x) : gammaContinuedFraction(a, x);
 }
 
+/**
+ * Upper tail of the standard normal, computed directly rather than as 1 - CDF.
+ *
+ * The previous implementation was the five-term Abramowitz & Stegun 7.1.26 erf approximation,
+ * whose stated accuracy is 1.5e-7 ABSOLUTE. That is fine for a CDF near 0.5 and useless in a tail:
+ * measured against scipy it was wrong in the fifth significant figure at z = 3 (0.00269993 against
+ * 0.00269980), 1.6e-3 relative at z = 5, 7% at z = 8, and returned exactly 0 from z = 10 -- and a
+ * p value is precisely the number a paper prints in the tail. Q(z) = 1/2 Q_gamma(1/2, z^2/2) is
+ * exact to the working precision of the incomplete gamma, and it never forms 1 - (something tiny),
+ * so the tail survives instead of cancelling to zero.
+ */
+function normalSurvival(x) {
+  if (!Number.isFinite(x)) return x > 0 ? 0 : 1;
+  if (x === 0) return 0.5;
+  const tail = 0.5 * gammaQ(0.5, x * x / 2);
+  return x > 0 ? tail : 1 - tail;
+}
+
 function normalCdf(x) {
-  const sign = x < 0 ? -1 : 1;
-  const z = Math.abs(x) / Math.sqrt(2);
-  const t = 1 / (1 + 0.3275911 * z);
-  const erf = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-z * z);
-  return 0.5 * (1 + sign * erf);
+  return normalSurvival(-x);
 }
 
 function normalInv(p) {
@@ -1128,16 +1174,35 @@ function tCritical(confidenceLevel, df) {
   return (low + high) / 2;
 }
 
+/**
+ * Student t p values taken from the tail itself.
+ *
+ * The two-sided form used to be 2 (1 - F(|t|)). `tCdf` builds F as 1 - tail, so for a large
+ * statistic the tail is lost to rounding, 1 - tail rounds to exactly 1, and the p value comes back
+ * as exactly 0: measured, t = 15 on 56 df returned 0 where the true value is 2.9e-21, and t = 22.6
+ * returned 0 against 8.0e-30. Zero is not a small number, it is a different claim -- it says the
+ * result is impossible under the null rather than merely extreme.
+ *
+ * The regularized incomplete beta IS twice the one-sided tail, so the two-sided p value is one
+ * evaluation with no subtraction anywhere.
+ */
+function tTailProbability(value, df) {
+  if (!Number.isFinite(value)) return 0;
+  return 0.5 * regularizedBeta(df / (df + value * value), df / 2, 0.5);
+}
+
 function pFromT(value, df, alternative) {
-  if (alternative === "less") return Math.min(1, Math.max(0, tCdf(value, df)));
-  if (alternative === "greater") return Math.min(1, Math.max(0, 1 - tCdf(value, df)));
-  return Math.min(1, Math.max(0, 2 * (1 - tCdf(Math.abs(value), df))));
+  if (df <= 0) fail("STAT_INTERNAL", "t distribution df must be positive");
+  const tail = tTailProbability(value, df);
+  if (alternative === "less") return Math.min(1, Math.max(0, value >= 0 ? 1 - tail : tail));
+  if (alternative === "greater") return Math.min(1, Math.max(0, value >= 0 ? tail : 1 - tail));
+  return Math.min(1, Math.max(0, 2 * tail));
 }
 
 function pFromNormal(value, alternative) {
   if (alternative === "less") return normalCdf(value);
-  if (alternative === "greater") return 1 - normalCdf(value);
-  return 2 * (1 - normalCdf(Math.abs(value)));
+  if (alternative === "greater") return normalSurvival(value);
+  return Math.min(1, 2 * normalSurvival(Math.abs(value)));
 }
 
 function pFromF(value, df1, df2) {
@@ -1208,12 +1273,70 @@ function tableArtifact(title, caption, columns, rows, notes = [], role = "public
   };
 }
 
+/**
+ * A publication figure's default plotting area.
+ *
+ * Single-column journal width at a readable aspect. It is a DEFAULT: a method that knows better --
+ * a tall forest, a faceted panel -- sets its own and this stays out of the way.
+ */
+const DEFAULT_CHART_SIZE = Object.freeze({ width: 560, height: 320 });
+
+/**
+ * The two Vega-Lite defaults that make a figure unreadable, turned off.
+ *
+ * `labelLimit` truncates an axis label at 180px with an ellipsis. On screen that is a tolerable
+ * space saving; in a paper it is a figure that will not say what it plotted -- the effect-size
+ * figure came out listing "common language effec...", "probability of superi..." and
+ * "Hedges g (approximate...", four rows the reader cannot identify. A figure that cannot name its
+ * own rows is not evidence. Zero means no limit, and the canvas grows to fit because sizing is
+ * `pad`.
+ *
+ * A facet row header is the same decision: with the label on the left it becomes a wide empty
+ * gutter, and truncating it hides which group the panel is. Put it above the panel it names.
+ *
+ * This is deliberately the smallest possible config -- legibility only, no colours, no fonts, no
+ * spacing. Visual styling belongs to the surface that renders the figure and merges its own config
+ * over this one.
+ */
+const FIGURE_LEGIBILITY_CONFIG = Object.freeze({
+  axis: { labelLimit: 0 },
+  // A category axis reads horizontally. Vega-Lite's default stands discrete labels on end, and a
+  // rendered figure showed "Control" and "Treated" -- two values -- turned ninety degrees for no
+  // reason. A spec that genuinely needs an angle (many long categories) still overrides this.
+  axisX: { labelAngle: 0 },
+  // A figure title sits over the figure. Vega-Lite anchors a multi-panel title to the start, and a
+  // rendered paper showed the title hanging off the left edge, clear of the panels it named.
+  title: { anchor: "middle" },
+  legend: { labelLimit: 0 },
+  header: { labelLimit: 0, labelOrient: "top", labelAnchor: "start", titleOrient: "top" },
+});
+
+/**
+ * Wraps a method's Vega-Lite spec as a figure artifact.
+ *
+ * Two sizing decisions live here, and they were both wrong before.
+ *
+ * `autosize: fit` used to be applied to every chart. `fit` shrinks the PLOTTING AREA until the whole
+ * view -- title, axis labels, legend -- fits inside the declared width, and almost no method declared
+ * one, so the default 200 was split between the furniture and the data. Measured across the shipped
+ * fixtures: 70 of 175 figures rendered a plotting area under 120px, and the Fama-MacBeth premium
+ * forest came out 8px wide with three risk premia stacked on top of each other at 0.00. Every one of
+ * them was a valid Vega-Lite spec and every contract was green. `pad` is the publication behaviour:
+ * the plotting area is what you asked for and the canvas grows to hold the labels.
+ *
+ * The size default matters for the same reason -- a figure with no width is not asking for 200px,
+ * it simply has not said. Concat, facet and repeat specs are left alone: their sizing belongs to the
+ * inner view, and putting a width at the top level of one of those means something different.
+ */
 function vegaArtifact(role, title, spec) {
+  const composed = spec.facet !== undefined || spec.vconcat !== undefined || spec.hconcat !== undefined
+    || spec.concat !== undefined || spec.repeat !== undefined || spec.spec !== undefined;
+  const size = composed || spec.width !== undefined || spec.height !== undefined ? {} : DEFAULT_CHART_SIZE;
   return {
     kind: "vega-lite",
     role,
     schema: "vega-lite/v6",
-    payload: { $schema: VEGA_SCHEMA, title, background: "white", autosize: { type: "fit", contains: "padding" }, ...spec },
+    payload: { $schema: VEGA_SCHEMA, title, background: "white", autosize: { type: "pad", contains: "padding" }, ...size, config: FIGURE_LEGIBILITY_CONFIG, ...spec },
   };
 }
 
@@ -1228,11 +1351,22 @@ function summaryChart(groups, confidenceLevel) {
   return vegaArtifact("estimate-plot", `Group means with ${Math.round(confidenceLevel * 100)}% confidence intervals`, {
     data: { values: rows },
     layer: [
-      { mark: { type: "rule", strokeWidth: 2 }, encoding: { x: { field: "group", type: "nominal", title: "Group" }, y: { field: "lower", type: "quantitative", title: "Mean" }, y2: { field: "upper" } } },
-      { mark: { type: "point", filled: true, size: 80 }, encoding: { x: { field: "group", type: "nominal" }, y: { field: "mean", type: "quantitative" }, tooltip: [{ field: "group" }, { field: "mean", format: ".4g" }, { field: "lower", format: ".4g" }, { field: "upper", format: ".4g" }, { field: "n" }] } },
+      { mark: { type: "rule", strokeWidth: 2 }, encoding: { x: { field: "group", type: "nominal", title: "Group", sort: null }, y: { field: "lower", type: "quantitative", title: "Mean", scale: MEASUREMENT_SCALE }, y2: { field: "upper" } } },
+      { mark: { type: "point", filled: true, size: 80 }, encoding: { x: { field: "group", type: "nominal", sort: null }, y: { field: "mean", type: "quantitative", scale: MEASUREMENT_SCALE }, tooltip: [{ field: "group" }, { field: "mean", format: ".4g" }, { field: "lower", format: ".4g" }, { field: "upper", format: ".4g" }, { field: "n" }] } },
     ],
   });
 }
+
+/**
+ * Axis settings for a value that lives on the data's own measurement scale.
+ *
+ * Vega-Lite anchors a quantitative axis at zero by default. For a count or a proportion that is
+ * correct, but for a mean, an adjusted mean, a rate, or a return level, zero is an arbitrary point
+ * on the instrument. Anchoring there squeezes the estimates and their confidence intervals into a
+ * sliver at the top of the frame, so the interval a reader is supposed to judge becomes invisible.
+ * These figures are bound into manuscripts, so a flattened interval is a published defect.
+ */
+const MEASUREMENT_SCALE = Object.freeze({ zero: false, nice: true });
 
 function validateArtifact(artifact) {
   assertObject(artifact, "artifact");
@@ -1937,7 +2071,7 @@ function analyzeWelchOneWayAnova(data, options, budget) {
     artifacts: [
       tableArtifact("Welch one-way analysis of variance", "Heteroscedastic omnibus Welch ANOVA with fractional denominator degrees of freedom.", [{ key: "statistic", label: "F", type: "number" }, { key: "df1", label: "Numerator df", type: "number" }, { key: "df2", label: "Denominator df", type: "number" }, { key: "pValue", label: "p", type: "number" }, { key: "weightedMean", label: "Weighted mean", type: "number" }, { key: "denominatorCorrection", label: "Denominator correction", type: "number" }], [testRow], ["No equal-variance assumption or post-hoc procedure is claimed."], "welch-anova-table"),
       tableArtifact("Welch group summaries", `Group means and unadjusted ${Math.round(options.confidenceLevel * 100)}% confidence intervals.`, [{ key: "group", label: "Group", type: "string" }, { key: "n", label: "N", type: "number" }, { key: "mean", label: "Mean", type: "number" }, { key: "variance", label: "Variance", type: "number" }, { key: "standardError", label: "SE", type: "number" }, { key: "lower", label: "CI lower", type: "number" }, { key: "upper", label: "CI upper", type: "number" }, { key: "weight", label: "Welch weight", type: "number" }], summaries, ["Confidence intervals are groupwise and are not simultaneous."], "welch-group-summary-table"),
-      vegaArtifact("estimate-plot", `Group means with ${Math.round(options.confidenceLevel * 100)}% confidence intervals`, { data: { values: summaries }, layer: [{ mark: { type: "rule", strokeWidth: 2 }, encoding: { x: { field: "group", type: "nominal", title: "Group" }, y: { field: "lower", type: "quantitative", title: "Mean" }, y2: { field: "upper" } } }, { mark: { type: "point", filled: true, size: 80 }, encoding: { x: { field: "group", type: "nominal" }, y: { field: "mean", type: "quantitative" }, tooltip: [{ field: "group" }, { field: "mean", format: ".6g" }, { field: "lower", format: ".6g" }, { field: "upper", format: ".6g" }, { field: "variance", format: ".6g" }, { field: "n" }] } }] }),
+      vegaArtifact("estimate-plot", `Group means with ${Math.round(options.confidenceLevel * 100)}% confidence intervals`, { data: { values: summaries }, layer: [{ mark: { type: "rule", strokeWidth: 2 }, encoding: { x: { field: "group", type: "nominal", title: "Group", sort: null }, y: { field: "lower", type: "quantitative", title: "Mean", scale: MEASUREMENT_SCALE }, y2: { field: "upper" } } }, { mark: { type: "point", filled: true, size: 80 }, encoding: { x: { field: "group", type: "nominal", sort: null }, y: { field: "mean", type: "quantitative", scale: MEASUREMENT_SCALE }, tooltip: [{ field: "group" }, { field: "mean", format: ".6g" }, { field: "lower", format: ".6g" }, { field: "upper", format: ".6g" }, { field: "variance", format: ".6g" }, { field: "n" }] } }] }),
     ],
   };
 }
@@ -4753,6 +4887,9 @@ function analyze(rawRequest) {
   try {
     requestBytes = Buffer.byteLength(canonicalJson(rawRequest));
   } catch (error) {
+    if (error instanceof StatisticsError && error.code === "STAT_INTERNAL") {
+      fail("STAT_INVALID_INPUT", "statistics request contains a non-finite number");
+    }
     if (error instanceof StatisticsError) throw error;
     fail("STAT_INVALID_INPUT", "statistics request must be canonical JSON data");
   }
@@ -4798,10 +4935,46 @@ function analyze(rawRequest) {
     case "meta_analysis": analysis = analyzeMetaAnalysis(parsed.data, parsed.options, budget); break;
     case "response_surface_regression": analysis = analyzeResponseSurfaceRegression(parsed.data, parsed.options, budget); break;
     case "gaussian_random_intercept_lmm": analysis = analyzeGaussianRandomInterceptLmm(parsed.data, parsed.options, budget); break;
-    default: fail("STAT_INTERNAL", "unreachable method dispatcher");
+    default: {
+      const definition = METHOD_REGISTRY.byMethod[parsed.method];
+      if (!definition) fail("STAT_INTERNAL", "unreachable method dispatcher");
+      analysis = definition.analyze(parsed.data, parsed.options, budget, HELPERS);
+      assertAnalysisShape(analysis, parsed.method);
+      break;
+    }
   }
   return finalize(parsed, analysis);
 }
+
+function assertAnalysisShape(analysis, method) {
+  if (!plainObject(analysis)) fail("STAT_INTERNAL", `${method} analysis must be an object`);
+  for (const key of ["estimates", "tests", "confidenceIntervals", "effectSizes", "assumptions", "diagnostics", "artifacts"]) {
+    if (!Array.isArray(analysis[key])) fail("STAT_INTERNAL", `${method} analysis.${key} must be an array`);
+  }
+  if (!plainObject(analysis.sample)) fail("STAT_INTERNAL", `${method} analysis.sample must be an object`);
+  if (!analysis.artifacts.some((artifact) => artifact?.kind === "table") || !analysis.artifacts.some((artifact) => artifact?.kind === "vega-lite")) {
+    fail("STAT_INTERNAL", `${method} must emit at least one table and one vega-lite artifact`);
+  }
+}
+
+/**
+ * Helper surface handed to registry method modules. Modules must never require engine.cjs
+ * directly (circular load); everything numeric, validating, or artifact-building comes from here.
+ */
+const HELPERS = Object.freeze({
+  MEASUREMENT_SCALE,
+  LIMITS, TABLE_SCHEMA, VEGA_SCHEMA, NUMERIC_SURFACE_SOURCE_SCHEMA, StatisticsError, Budget,
+  fail, plainObject, assertObject, assertKeys, assertExactKeys, label, optionalUnit, finiteNumber, integer,
+  numericVector, categoryVector, regressionPredictors, canonicalize, canonicalJson, sha256, rawSha256,
+  parseGroups, parseConditions, survivalCohort, survivalPredictors,
+  sum, mean, variance, sorted, quantileR7, moments, descriptiveStats, averageRanks, correlation, minMax, histogram, bivariateBins,
+  logGamma, betaContinuedFraction, regularizedBeta, gammaSeries, gammaContinuedFraction, gammaQ,
+  normalCdf, normalInv, tCdf, tCritical, pFromT, pFromNormal, pFromF, pFromChiSquare, jarqueBera, logChoose,
+  transpose, matMul, invert, matrixRank, matrixInfinityNorm, positiveDefiniteLogDeterminant, quadraticForm,
+  symmetricEigenJacobi, covarianceMatrix, designMatrix, olsCore, leverageValues, sandwichCovariance, standardizePredictors,
+  tableArtifact, vegaArtifact, summaryChart, validateArtifact, adjustedPValues, leveneDiagnostic, anovaCore,
+  kaplanMeierCore, survivalRows, coxState, sigmoid, auc, trapezoidArea, finiteExp,
+});
 
 function publicError(error) {
   if (error instanceof StatisticsError) return { code: error.code, message: error.message, ...(error.details === undefined ? {} : { details: error.details }) };
@@ -4812,6 +4985,11 @@ module.exports = {
   ENGINE,
   LIMITS,
   METHODS,
+  CORE_METHODS,
+  METHOD_REGISTRY,
+  METHOD_OPTION_KEYS,
+  SHARED_OPTION_KEYS,
+  HELPERS,
   REQUEST_SCHEMA,
   RESULT_SCHEMA,
   RECEIPT_SCHEMA,

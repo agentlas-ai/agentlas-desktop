@@ -2,7 +2,7 @@
   "schema": "agentlas.plugin/v2",
   "slug": "agentlas-science-statistics",
   "name": "Agentlas Science Statistics",
-  "version": "1.9.0",
+  "version": "1.10.0",
   "builtin": false,
   "publisher": {
     "name": "Agentlas",
@@ -13,8 +13,8 @@
     "displayNameKo": "사이언스 통계",
     "tagline": "Reproducible local statistics with publication artifacts",
     "taglineKo": "출판용 산출물과 재현 가능한 로컬 통계 분석",
-    "description": "Runs 31 bounded local statistical methods, including explicit distribution fitting, regression, survival, PCA, time-series diagnostics, meta-analysis, a two-factor quadratic response surface, and a Gaussian one-group random-intercept LMM, returning typed estimates, publication tables, Vega-Lite or numeric-surface sources, and canonical receipts; see the machine-readable coverage manifest for exact limits.",
-    "descriptionKo": "명시적 확률분포 적합, 회귀, 생존, PCA, 시계열 진단, 메타분석, 2요인 이차 반응표면 및 단일 grouping factor Gaussian random-intercept LMM을 포함한 31개의 제한된 로컬 통계 메서드를 실행하고 추정치, 출판용 표, Vega-Lite 또는 수치 표면 소스와 정규 영수증을 반환합니다. 정확한 범위는 기계 판독 커버리지 매니페스트에 명시됩니다.",
+    "description": "Runs 179 bounded local statistical methods, including explicit distribution fitting, regression, survival, PCA, time-series diagnostics, meta-analysis, a two-factor quadratic response surface, and a Gaussian one-group random-intercept LMM, returning typed estimates, publication tables, Vega-Lite or numeric-surface sources, and canonical receipts; see the machine-readable coverage manifest for exact limits.",
+    "descriptionKo": "명시적 확률분포 적합, 회귀, 생존, PCA, 시계열 진단, 메타분석, 2요인 이차 반응표면 및 단일 grouping factor Gaussian random-intercept LMM을 포함한 167개의 제한된 로컬 통계 메서드를 실행하고 추정치, 출판용 표, Vega-Lite 또는 수치 표면 소스와 정규 영수증을 반환합니다. 정확한 범위는 기계 판독 커버리지 매니페스트에 명시됩니다.",
     "category": "data",
     "brandColor": "#5A67D8",
     "defaultPrompts": [
@@ -54,8 +54,8 @@
         "surface": {
           "name": "사이언스 통계 분석",
           "nameEn": "Science Statistical Analysis",
-          "description": "엄격한 입력 계약으로 31개 제한 통계 메서드의 계산·진단·출판용 표·Vega-Lite 및 수치 표면 소스 생성",
-          "descriptionEn": "Run 31 bounded, contract-validated statistical methods with diagnostics, publication tables, and Vega-Lite or numeric-surface sources",
+          "description": "엄격한 입력 계약으로 167개 제한 통계 메서드의 계산·진단·출판용 표·Vega-Lite 및 수치 표면 소스 생성",
+          "descriptionEn": "Run 179 bounded, contract-validated statistical methods with diagnostics, publication tables, and Vega-Lite or numeric-surface sources",
           "category": "data",
           "brandColor": "#5A67D8",
           "mark": "ST"
@@ -92,19 +92,531 @@
   "integrity": {
     "algo": "sha256",
     "files": [
-      { "path": "bin/statistics-server.cjs", "sha256": "0f88cb669e1e01d441a5e24178b5de0f8f5a264864798950621780659d05068c", "bytes": 3274 },
-      { "path": "coverage-manifest.json", "sha256": "939d3a32371ba8d6aa5d3b6f1e1507fe0c80de2d894c69f53e61875e9834e5c4", "bytes": 45884 },
-      { "path": "figure-catalog.json", "sha256": "79bb155a128676de54cd524bcab6020318ce0bf955bfa8e334e775c67e2ecdd4", "bytes": 91621 },
-      { "path": "matlab-parity-manifest.json", "sha256": "1c4dea204dfe135effffd4e80c179fcadb247c359f04f6a7d7e50c454bc8d031", "bytes": 31059 },
-      { "path": "runtime/analysis-worker.cjs", "sha256": "f777b49cb63de9334410d79ac58db7ee1d41fa55b3b624fd71642b8d48b4f578", "bytes": 391 },
-      { "path": "runtime/contracts.cjs", "sha256": "1d6fea6f0fb61b5d633b6a150b25e744e7e769b064efd94e598dd4bd016b69b4", "bytes": 14876 },
-      { "path": "runtime/coverage.cjs", "sha256": "f0c4681844c8f9dd307673647fc5bdca047e9c46c4add489d9eaa01029e2714f", "bytes": 25214 },
-      { "path": "runtime/decision-linkage.cjs", "sha256": "311ec90ddc73f8440e86eb51f429793d7f305ebd79b62e80230558b7993b8d92", "bytes": 36274 },
-      { "path": "runtime/engine.cjs", "sha256": "c4943d4842480a20a103cc14137d25e8c4d61cad46f7c5fcc83a0f7cb05466ac", "bytes": 317537 },
-      { "path": "runtime/figure-catalog.cjs", "sha256": "bb5b60c13ba962aa1d0f3e2fbcb539415a65a0cf6106afa035f9d309bf3e72b2", "bytes": 13319 },
-      { "path": "runtime/worker-runner.cjs", "sha256": "eda2884a60ebe1cbde5cb8fca020fae7efec4a3a35c20cf4774c38323d29ff7c", "bytes": 1866 },
-      { "path": "skills/analyze/SKILL.md", "sha256": "50fd730b193c0c704bec2dd9ff62036c6619ae4d0f1044d9b9b2b69af0ab20c4", "bytes": 7187 },
-      { "path": "skills/index/SKILL.md", "sha256": "324e035664b3bcc513536eab78e518c4c45825beb8093ecba6cf514136399514", "bytes": 1257 }
+      {
+        "path": "bin/statistics-server.cjs",
+        "sha256": "0f88cb669e1e01d441a5e24178b5de0f8f5a264864798950621780659d05068c",
+        "bytes": 3274
+      },
+      {
+        "path": "contracts/advanced-scipy-crosscheck.py",
+        "sha256": "39d439247e5f02f4d5e2ae4ef747e9776a7416dea424656f47a8e69f1ae43c2e",
+        "bytes": 7954
+      },
+      {
+        "path": "contracts/anova-extended-contract.cjs",
+        "sha256": "9bf33cf380f13a517a599cf20f44c236f30bb98a39b8d0ade750e2ccafcef6b6",
+        "bytes": 12062
+      },
+      {
+        "path": "contracts/anova-extended-scipy-crosscheck.py",
+        "sha256": "b206fcafdb03bf16eb949cf7971c8091c2f4ad45e2b931820867057779e1beed",
+        "bytes": 18794
+      },
+      {
+        "path": "contracts/asset-pricing-statsmodels-crosscheck.py",
+        "sha256": "14d281c2e033c303ab84005cc181c2e7b92e2ce1121076bdff25a6b8763e34c5",
+        "bytes": 30740
+      },
+      {
+        "path": "contracts/assumption-tests-contract.cjs",
+        "sha256": "0082ba603fe543bbd32f08a99d76a9ecfb87c86967c8f2a7b2fdcd2ba505d573",
+        "bytes": 23473
+      },
+      {
+        "path": "contracts/assumption-tests-scipy-crosscheck.py",
+        "sha256": "e54f530c274eae6312cd9506fe1bf74d2ad238dd8e0c3fe23da338dc876b4af9",
+        "bytes": 8131
+      },
+      {
+        "path": "contracts/categorical-extended-scipy-crosscheck.py",
+        "sha256": "7527758e7aab666de1c0c8db18eed5dcda3ad3b242c62b617b0cde417a8762dc",
+        "bytes": 13111
+      },
+      {
+        "path": "contracts/clustering-scipy-crosscheck.py",
+        "sha256": "cdd60e4cf71064d07c71b35a390caa288ae3c1040a0023c1b368247af0f40899",
+        "bytes": 7532
+      },
+      {
+        "path": "contracts/core-scipy-crosscheck.py",
+        "sha256": "22d9759a16ca196c24ab536839338e8c67e95521b48b1f2e2c642373502425ef",
+        "bytes": 10603
+      },
+      {
+        "path": "contracts/coverage-contract.cjs",
+        "sha256": "fe45fe79855aa47f50461832f096b6a6ce6611323b4b3acd7a54ede89377fd8d",
+        "bytes": 14325
+      },
+      {
+        "path": "contracts/decision-linkage-contract.cjs",
+        "sha256": "65385080db4ccb045a682d0449f2d8839eb2853ca1f1c96efc31d45bceac0680",
+        "bytes": 2266
+      },
+      {
+        "path": "contracts/diagnostic-accuracy-contract.cjs",
+        "sha256": "d5c6df6535b9658074c985786411b66174750217d514f9f288e7b21e36fb0717",
+        "bytes": 37450
+      },
+      {
+        "path": "contracts/diagnostic-accuracy-scipy-crosscheck.py",
+        "sha256": "4165117135f415e616923f155aaa07adcaf56ef0abae5d85171fcab08a8607a5",
+        "bytes": 24231
+      },
+      {
+        "path": "contracts/distribution-fit-contract.cjs",
+        "sha256": "2a27dbd1e1826750e517e56b63852fb87e359416ffcdf4fe27537211d1ba1b80",
+        "bytes": 7553
+      },
+      {
+        "path": "contracts/distribution-fit-scipy-crosscheck.py",
+        "sha256": "b42d4e0f911fe99a1aa20daee3156c3f79c5cf56d2684b0569d7537cbe1bdb82",
+        "bytes": 5665
+      },
+      {
+        "path": "contracts/effect-sizes-contract.cjs",
+        "sha256": "d9ca53feae9c56d80e7fe7b505616eeb387b70a785325f9a10273dc2e97bce77",
+        "bytes": 16540
+      },
+      {
+        "path": "contracts/effect-sizes-scipy-crosscheck.py",
+        "sha256": "774a0c45cd19310ae538113b103efafd879ac2f60e320a259b6372eb9b3f1b2e",
+        "bytes": 8005
+      },
+      {
+        "path": "contracts/equivalence-contract.cjs",
+        "sha256": "32491b367778d6dd83b3283de74463c6e322c00f80d30270a61317ce4941a7c0",
+        "bytes": 23362
+      },
+      {
+        "path": "contracts/equivalence-scipy-crosscheck.py",
+        "sha256": "e832e8fe3c9edbb6dd061b95059c6cf3e799e10145af330ada68f139fb72fbe7",
+        "bytes": 7800
+      },
+      {
+        "path": "contracts/figure-catalog-contract.cjs",
+        "sha256": "27a8c560cef97a202db90a2cf79a45818122cf6c2bd06dd3c593959f633f6a10",
+        "bytes": 14866
+      },
+      {
+        "path": "contracts/lmm-contract.cjs",
+        "sha256": "5dbadc399ef58957a73fbf129d36247545a706cba4816da12969214428410157",
+        "bytes": 10939
+      },
+      {
+        "path": "contracts/lmm-scale-contract.cjs",
+        "sha256": "f80667c521d14063404e16428174e5ec2d842972f707064803071588ba76472f",
+        "bytes": 4964
+      },
+      {
+        "path": "contracts/lmm-scipy-crosscheck.py",
+        "sha256": "42366ab4c0f61de8f33943d2c54d29e044f324dd61adc3c58b3b61be2d440965",
+        "bytes": 9368
+      },
+      {
+        "path": "contracts/matlab-parity-contract.cjs",
+        "sha256": "da2ed223a15bc677a2552349b4ea6fcd983bcadf0a2dd2420d7a306adf14bc21",
+        "bytes": 12624
+      },
+      {
+        "path": "contracts/meta-analysis-contract.cjs",
+        "sha256": "e7abe83bfe87d2e3c005af10867c55d790313d3e00fa201a04c2ec7284829ab9",
+        "bytes": 7713
+      },
+      {
+        "path": "contracts/meta-analysis-extended-contract.cjs",
+        "sha256": "c2c65fc4a592499f706ecd0fb75f86af63278894aafa81312f5b2651687d1002",
+        "bytes": 27097
+      },
+      {
+        "path": "contracts/meta-analysis-extended-numpy-crosscheck.py",
+        "sha256": "49540bfc9f2307fd0828cd6e71bac4edf35ef60afdf8c8b7192e67960abd31e5",
+        "bytes": 19711
+      },
+      {
+        "path": "contracts/meta-analysis-scipy-crosscheck.py",
+        "sha256": "bc4cabb7c97ce5bb400ee47f476a7965daf12305817aedf9ea4a50449b60c674",
+        "bytes": 8363
+      },
+      {
+        "path": "contracts/missing-data-contract.cjs",
+        "sha256": "ec426468d48b10c1097076f1da6f5184ea1987da8ad424eeb7ef2b65cdd4ec2b",
+        "bytes": 29896
+      },
+      {
+        "path": "contracts/missing-data-scipy-crosscheck.py",
+        "sha256": "455671ededa6bea460368c7e2c0576cb74e7a47f8a75f2108013af376d5ac757",
+        "bytes": 26217
+      },
+      {
+        "path": "contracts/mixed-models-contract.cjs",
+        "sha256": "f67efa6335ccf4f54c0b51b443d49b7ddfb3daa2a200c9e03f48d9eac7518d0b",
+        "bytes": 30651
+      },
+      {
+        "path": "contracts/mixed-models-scipy-crosscheck.py",
+        "sha256": "286d4c3b7dfbca969251b4d7f38790c3852a1f631a9ea5f9479def5eadea6636",
+        "bytes": 9845
+      },
+      {
+        "path": "contracts/multivariate-extended-contract.cjs",
+        "sha256": "bf80c6fc0375e45e9f676a6b03f245beb239a6af9fc3bdb2b7bea6858e176006",
+        "bytes": 21840
+      },
+      {
+        "path": "contracts/multivariate-extended-scipy-crosscheck.py",
+        "sha256": "0d8a583d191319b5621e69fc171f35849f85835e1c9b059e4a1e7e3970ab613f",
+        "bytes": 13074
+      },
+      {
+        "path": "contracts/multivariate-timeseries-contract.cjs",
+        "sha256": "5e655dad0ef252db40b59147ad26d134d567a0d83a5ad79f52ec0646b28de44a",
+        "bytes": 8906
+      },
+      {
+        "path": "contracts/multivariate-timeseries-scipy-crosscheck.py",
+        "sha256": "533f71b7ffb0c42ceba0a4523818cd68e4b299f7b582d635bab60abdb6a4b35e",
+        "bytes": 8221
+      },
+      {
+        "path": "contracts/poisson-scipy-crosscheck.py",
+        "sha256": "63a14de1237f2f90e76005d8dabc6c89931a6b28ccc46afe2ef478146d368dde",
+        "bytes": 5310
+      },
+      {
+        "path": "contracts/power-analysis-contract.cjs",
+        "sha256": "a11ac85d648402f36c0d7af23b1055fb238fc7f9f93cda032b0302aa1ff1d982",
+        "bytes": 19559
+      },
+      {
+        "path": "contracts/power-analysis-scipy-crosscheck.py",
+        "sha256": "396f42d078e6e1527c1db12fe6441de56a952f79706ccfadf75b41a41abece5c",
+        "bytes": 8021
+      },
+      {
+        "path": "contracts/quality-control-contract.cjs",
+        "sha256": "79fb3b8d21d40b40280b829f959671c8e5013d06d0369e284e5fa1f7e0089c5b",
+        "bytes": 25328
+      },
+      {
+        "path": "contracts/quality-control-numpy-crosscheck.py",
+        "sha256": "dfdd79c97cecee995e74c15cce348d4aa28ee068f77fa4c296487227498a4a17",
+        "bytes": 15289
+      },
+      {
+        "path": "contracts/reliability-contract.cjs",
+        "sha256": "bda671b2b63da94b4088fb45d2bfe55a521d65943b5d3c230dc18bbd5d8993ca",
+        "bytes": 20105
+      },
+      {
+        "path": "contracts/reliability-scipy-crosscheck.py",
+        "sha256": "01e19bf8f18fbd59b26a3a5d87d4f3b50338a55b663a9e78cba2e57da98a46c1",
+        "bytes": 12437
+      },
+      {
+        "path": "contracts/resampling-contract.cjs",
+        "sha256": "453c5f534e90576946d9c5747e973945571223a0d17076a9bdc4dcca8f3f162c",
+        "bytes": 28610
+      },
+      {
+        "path": "contracts/resampling-scipy-crosscheck.py",
+        "sha256": "7e8795862685312ee4bf83f4ac8021a3b2894233a3cf52f9800489120dec338c",
+        "bytes": 19317
+      },
+      {
+        "path": "contracts/response-surface-contract.cjs",
+        "sha256": "960160948645b1bf6986d68c6a739ce583d012599f44d4ae371b2ce6c6640a40",
+        "bytes": 15745
+      },
+      {
+        "path": "contracts/response-surface-numpy-crosscheck.py",
+        "sha256": "d045e0142997ea532a678e14eefaa3ef80664aeb95b7afbcd9ee4c3aea2c425f",
+        "bytes": 8939
+      },
+      {
+        "path": "contracts/robust-blocked-roc-contract.cjs",
+        "sha256": "e8b70e336b430678041e76ae0f76e4846545c935e0c811c3c831cf302c4c3297",
+        "bytes": 11670
+      },
+      {
+        "path": "contracts/robust-blocked-roc-scipy-crosscheck.py",
+        "sha256": "0529d8b652734146c1ba658bd709cef9ef5ce41eff8b0621d1cf0fad02a1c2b7",
+        "bytes": 10748
+      },
+      {
+        "path": "contracts/statistics-contract.cjs",
+        "sha256": "fef67c9b4a9a63d0f1af19ee64af645452539e3856911eda50e67650fcffb3c0",
+        "bytes": 25366
+      },
+      {
+        "path": "contracts/survival-contract.cjs",
+        "sha256": "b267a19212140342e234db9cf5063a50bbd319489abda27c99897a5c807eaad7",
+        "bytes": 5192
+      },
+      {
+        "path": "contracts/survival-extended-contract.cjs",
+        "sha256": "e2d4a1eaca5455a5ffeb645b76e313505051e5509d46b29884171aba0caf0778",
+        "bytes": 28072
+      },
+      {
+        "path": "contracts/survival-extended-scipy-crosscheck.py",
+        "sha256": "9cfecd28bcc72fa0504bb3b5c18f82a5beef8a49b5ae69e8b877ad7626c6e69b",
+        "bytes": 16260
+      },
+      {
+        "path": "contracts/survival-scipy-crosscheck.py",
+        "sha256": "20c3bfb44e21ffa1579aea5632329aa6e7a3c4d3540752a0456eae640999a1cb",
+        "bytes": 5501
+      },
+      {
+        "path": "contracts/theil-sen-regression-contract.cjs",
+        "sha256": "7ccc2bbbb2b103058fd893eb2656ed7090c4ac928f23fd5ca9c5364039c6ecb9",
+        "bytes": 4061
+      },
+      {
+        "path": "contracts/theil-sen-regression-scipy-crosscheck.py",
+        "sha256": "a568f7641172e3657114901218802839e0561b03e16e6ecb6d95b88825da3387",
+        "bytes": 3470
+      },
+      {
+        "path": "contracts/time-series-extended-contract.cjs",
+        "sha256": "140ea9bd24f531f7e88e5c25e334c5ab48b68274e6835a6d1ca9f7bcf4b158fc",
+        "bytes": 44673
+      },
+      {
+        "path": "contracts/time-series-extended-scipy-crosscheck.py",
+        "sha256": "ffc35d04b042d68281db342c80f47e7703b166814c630b529c49db5c85ac39b7",
+        "bytes": 25268
+      },
+      {
+        "path": "coverage-manifest.json",
+        "sha256": "2f47b94462aeba8b5ce9f729b67e057c45ea7358d191e3c655b3c6651082278d",
+        "bytes": 269021
+      },
+      {
+        "path": "figure-catalog.json",
+        "sha256": "8cf615c518369eaddd4846a52af76a0c12379079d34e4b5d1576d4405b5bc00d",
+        "bytes": 523203
+      },
+      {
+        "path": "matlab-parity-manifest.json",
+        "sha256": "7336451c2b0526a81c12264656f493817e91834565a6fe1761b793d3dbfdc6f1",
+        "bytes": 136298
+      },
+      {
+        "path": "README.md",
+        "sha256": "03c2ef889528dbb4c1a65fbbb4ea9c98ecfeac12d2f8ea01e44d576c0e9134eb",
+        "bytes": 20543
+      },
+      {
+        "path": "runtime/analysis-worker.cjs",
+        "sha256": "f777b49cb63de9334410d79ac58db7ee1d41fa55b3b624fd71642b8d48b4f578",
+        "bytes": 391
+      },
+      {
+        "path": "runtime/contracts.cjs",
+        "sha256": "e80a10d746f7dad8671e7c9001d38c3c25e652438336214cd4d386a20afbefce",
+        "bytes": 15202
+      },
+      {
+        "path": "runtime/core-data-schemas.cjs",
+        "sha256": "88e7df1dc694565b8a492596598b1b19aa7250fb0f2e719e3a7472ea6bfce7a3",
+        "bytes": 8987
+      },
+      {
+        "path": "runtime/coverage.cjs",
+        "sha256": "dc06c5f7ff4433f6f90bc3740fca32356cfce353cfff83fce9dfa583643f2bed",
+        "bytes": 27083
+      },
+      {
+        "path": "runtime/decision-linkage.cjs",
+        "sha256": "a410ff382f051b9bd4e69feec9353fa4a47d2e36c7701885443ed21ce9e4e638",
+        "bytes": 36689
+      },
+      {
+        "path": "runtime/engine.cjs",
+        "sha256": "b5e393edef0766edd197b4acd0a817296ac9c4754487e4b2ab92665afaef9a08",
+        "bytes": 327778
+      },
+      {
+        "path": "runtime/figure-catalog.cjs",
+        "sha256": "bb5b60c13ba962aa1d0f3e2fbcb539415a65a0cf6106afa035f9d309bf3e72b2",
+        "bytes": 13319
+      },
+      {
+        "path": "runtime/methods/anova-extended.cjs",
+        "sha256": "d727cb9b04318a98cf68de14880bdf4f20612e625724d08da521674e54b4ce0b",
+        "bytes": 78718
+      },
+      {
+        "path": "runtime/methods/asset-pricing.cjs",
+        "sha256": "62a8c319c216246c81025efccaa1017e048cfae1e0a139cdb5d1791d03100705",
+        "bytes": 82843
+      },
+      {
+        "path": "runtime/methods/assumption-tests.cjs",
+        "sha256": "cd120106bf0b2f4a999fa3c1452d8a5796d3ce66413cb9a1ed07fb842c657c93",
+        "bytes": 86909
+      },
+      {
+        "path": "runtime/methods/bayesian.cjs",
+        "sha256": "002b38c5558a5b10ddde1e40354707e15cc5ccb559eb69bc000baa711befa1db",
+        "bytes": 102712
+      },
+      {
+        "path": "runtime/methods/categorical-extended.cjs",
+        "sha256": "7ef0b4f47dc1c9c36db6a5595f66fdeacfb0fbe1049565d9f1aa0b23287355bd",
+        "bytes": 130888
+      },
+      {
+        "path": "runtime/methods/causal-inference.cjs",
+        "sha256": "226041e0eb5a1fe8931178f304bd0b8df296dec2983ac162994a509ce8688ba1",
+        "bytes": 102461
+      },
+      {
+        "path": "runtime/methods/clustering.cjs",
+        "sha256": "23e85e516009b881e0b766ccc19482243110242f249e69bf047087a55e4b80d0",
+        "bytes": 95838
+      },
+      {
+        "path": "runtime/methods/diagnostic-accuracy.cjs",
+        "sha256": "5203e4a337256bde61e4a79f6db5c18cf25d934aeaa08962203e4001a0824e7a",
+        "bytes": 97756
+      },
+      {
+        "path": "runtime/methods/distributions-extended.cjs",
+        "sha256": "0eb3081ede1baa06c9cc2654e107214957d94691c3d789b315ac11f53b1e785d",
+        "bytes": 129387
+      },
+      {
+        "path": "runtime/methods/effect-sizes.cjs",
+        "sha256": "804d185c47da0572f7c7ce3b83513d22e4b450e500bb278489c72e2802eed79f",
+        "bytes": 44446
+      },
+      {
+        "path": "runtime/methods/equivalence.cjs",
+        "sha256": "d232ce0c1c4b2eb6a8367221f10bf4dc1f9cd7f3fd7f92de097fd63c0a4109e7",
+        "bytes": 50056
+      },
+      {
+        "path": "runtime/methods/extended-shared-numeric.cjs",
+        "sha256": "0d14c0529fc2b03532683f120eead06f257f48664b245275f6615a82aff09a34",
+        "bytes": 38695
+      },
+      {
+        "path": "runtime/methods/index.cjs",
+        "sha256": "119a65ed88e035181595bd608ed63f457146a8d1365cbd59d2e0c3426ff8a593",
+        "bytes": 11535
+      },
+      {
+        "path": "runtime/methods/meta-analysis-extended.cjs",
+        "sha256": "e4ce5c1c57d15fbec6c7bc1c05de7682a303b56f2b3328975266d60dfe3c8600",
+        "bytes": 115678
+      },
+      {
+        "path": "runtime/methods/missing-data.cjs",
+        "sha256": "ff70817180bcd36ded44f92c72efe0c608f88c467a6568183652e85d8303a69a",
+        "bytes": 83333
+      },
+      {
+        "path": "runtime/methods/mixed-models.cjs",
+        "sha256": "afd9590836615ea074311f3d3fff5cd3c6c142bedded5539f85dba174e5110f1",
+        "bytes": 112715
+      },
+      {
+        "path": "runtime/methods/multivariate-extended.cjs",
+        "sha256": "790bc9e3e15b565be47aeb229639617aed528d0d3170dd1774d5942f93eedac3",
+        "bytes": 138804
+      },
+      {
+        "path": "runtime/methods/nonparametric-extended.cjs",
+        "sha256": "9c4433321d8f401022297860b6c0a0a1345872a5663b46bdc384ee0c390dcf6f",
+        "bytes": 109100
+      },
+      {
+        "path": "runtime/methods/power-analysis.cjs",
+        "sha256": "e2c121c31ed61041bf071f30c0e4a3ad40005756ef4c56dbbf05bfa81485cc5b",
+        "bytes": 80209
+      },
+      {
+        "path": "runtime/methods/power-noncentral.cjs",
+        "sha256": "03c6c8806e0527d9c0065e0e44f1f5b7169cd29cc42cce03a63a71a8bc8674c6",
+        "bytes": 9589
+      },
+      {
+        "path": "runtime/methods/quality-control.cjs",
+        "sha256": "65c9712f127f6a734ac8f37d1e353f5da28eb17d440b9db49262f6f9e5599f2c",
+        "bytes": 83741
+      },
+      {
+        "path": "runtime/methods/README.md",
+        "sha256": "89cd56736c6c4ee93b755ace09458b27be830120e6f64d857172a7c6bdde3f55",
+        "bytes": 6191
+      },
+      {
+        "path": "runtime/methods/regression-extended.cjs",
+        "sha256": "5eefa35b02116588e3d7298e0b220b48d1091d6455ded45f43abe3cf8c2933fc",
+        "bytes": 172756
+      },
+      {
+        "path": "runtime/methods/regression-kit.cjs",
+        "sha256": "28a24a631cc6e00985ffb9dadaf7198424726e655c82275d86cf3f653f81d848",
+        "bytes": 24812
+      },
+      {
+        "path": "runtime/methods/reliability.cjs",
+        "sha256": "75d8b0944b1fe0104231708f1a966fa456c13bc27ea254f1d0d572bcff357c15",
+        "bytes": 91898
+      },
+      {
+        "path": "runtime/methods/resampling-prng.cjs",
+        "sha256": "934615bac1332eb17cdd8bf8129663b56c71054f6deaaa7a8c2d4416ed21f51e",
+        "bytes": 3997
+      },
+      {
+        "path": "runtime/methods/resampling.cjs",
+        "sha256": "36a7c5d17481cae7f58dbbfafd05b7c0657dc6701a9cc4eac75488a0f3304962",
+        "bytes": 68999
+      },
+      {
+        "path": "runtime/methods/shared-precision-distributions.cjs",
+        "sha256": "297602e8ed4d256ec7e1a8b6c6ca039e0e972fce3be6dc3253ff56bae457280c",
+        "bytes": 18914
+      },
+      {
+        "path": "runtime/methods/survival-extended.cjs",
+        "sha256": "5b097b00f7ef29d249633b4435a7a623149830fe25816ac10d8b21a14478cb79",
+        "bytes": 127032
+      },
+      {
+        "path": "runtime/methods/theil-sen-regression.cjs",
+        "sha256": "ec39ec6f170bcc9320526dd14d102fd7cd26f0171f7d220752f76634216c1626",
+        "bytes": 14327
+      },
+      {
+        "path": "runtime/methods/time-series-extended.cjs",
+        "sha256": "f91079a4b85664ba87664529a8659721a078b7e62b494a5520ed9f922e81b1f8",
+        "bytes": 143628
+      },
+      {
+        "path": "runtime/methods/time-series-kernels.cjs",
+        "sha256": "fffd867df4e71b6ae076d89a2b4dad5c81fac22dae9a2052d3bb154d1685f778",
+        "bytes": 87775
+      },
+      {
+        "path": "runtime/worker-runner.cjs",
+        "sha256": "eda2884a60ebe1cbde5cb8fca020fae7efec4a3a35c20cf4774c38323d29ff7c",
+        "bytes": 1866
+      },
+      {
+        "path": "skills/analyze/SKILL.md",
+        "sha256": "50fd730b193c0c704bec2dd9ff62036c6619ae4d0f1044d9b9b2b69af0ab20c4",
+        "bytes": 7187
+      },
+      {
+        "path": "skills/index/SKILL.md",
+        "sha256": "324e035664b3bcc513536eab78e518c4c45825beb8093ecba6cf514136399514",
+        "bytes": 1257
+      }
     ]
   }
 }

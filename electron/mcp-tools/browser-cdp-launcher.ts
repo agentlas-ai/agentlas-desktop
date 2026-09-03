@@ -20,6 +20,7 @@ import { execFile, spawn } from "node:child_process";
 import { BROWSER_APPROVAL_FILE_ENV } from "../browser/approval-channel";
 import {
   legacySystemBrowserExecutableCandidates,
+  resolveAgentlasBrowserRuntime,
   resolveAgentlasBrowserRuntimeExecutable,
 } from "../browser/runtime";
 
@@ -1928,8 +1929,11 @@ async function guardOwnedBrowser(browserPid, ownerPid) {
  * 그래서 파일이 자기 계약 번호와 writer를 들고 다닌다. 더 높은 계약과 같은 계약의 다른
  * writer는 보존한다. 같은 Desktop 계약은 현재 설치 앱의 런타임 경로로 다시 결합한다.
  */
-export const BROWSER_CDP_LAUNCHER_CONTRACT = 12;
+export const BROWSER_CDP_LAUNCHER_CONTRACT = 14;
 export const BROWSER_CDP_LAUNCHER_WRITER = "agentlas-desktop";
+
+const CURRENT_BROWSER_RUNTIME = resolveAgentlasBrowserRuntime();
+const CURRENT_LAUNCHER_IS_PACKAGED = CURRENT_BROWSER_RUNTIME?.source === "packaged";
 
 /** 설치된 런처 파일에서 계약 번호를 읽는다. 표식이 없으면 null(= 계약 이전 파일). */
 export function readLauncherContractVersion(source: string): number | null {
@@ -1943,6 +1947,36 @@ export function readLauncherContractVersion(source: string): number | null {
 export function readLauncherWriter(source: string): string | null {
   const match = source.match(/@agentlas-browser-cdp-writer\s+([a-z0-9._-]+)/i);
   return match?.[1]?.toLowerCase() || null;
+}
+
+/** Materialized Desktop launchers bind two absolute executables. */
+export function readLauncherRuntimeBindings(source: string): {
+  playwrightMcpCli: string;
+  browserRuntimeExe: string;
+} | null {
+  const playwright = source.match(/const PLAYWRIGHT_MCP_CLI = ("(?:[^"\\]|\\.)*");/);
+  const browser = source.match(/const BROWSER_RUNTIME_EXE = ("(?:[^"\\]|\\.)*");/);
+  if (!playwright || !browser) return null;
+  try {
+    return {
+      playwrightMcpCli: JSON.parse(playwright[1]) as string,
+      browserRuntimeExe: JSON.parse(browser[1]) as string,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** A higher contract cannot be trusted when its bound runtime no longer exists. */
+export function hasUsableLauncherRuntimeBindings(source: string): boolean {
+  const bindings = readLauncherRuntimeBindings(source);
+  return Boolean(
+    bindings
+    && path.isAbsolute(bindings.playwrightMcpCli)
+    && path.isAbsolute(bindings.browserRuntimeExe)
+    && fs.statSync(bindings.playwrightMcpCli, { throwIfNoEntry: false })?.isFile()
+    && fs.statSync(bindings.browserRuntimeExe, { throwIfNoEntry: false })?.isFile(),
+  );
 }
 
 const LAUNCHER_SOURCE = String.raw`#!/usr/bin/env node
@@ -1983,7 +2017,7 @@ const HEADLESS = String(process.env.AGENTLAS_CDP_HEADLESS || '1').toLowerCase() 
 const SKILLS_DIR = process.env.AGENTLAS_BROWSER_SKILLS_DIR || path.join(os.homedir(), '.agentlas', 'browser-skills');
 const APPROVAL_FILE = process.env.${BROWSER_APPROVAL_FILE_ENV} || '';
 const PLAYWRIGHT_MCP_CLI = ${JSON.stringify(playwrightMcpCliPath())};
-const BROWSER_RUNTIME_EXE = ${JSON.stringify(resolveAgentlasBrowserRuntimeExecutable() ?? "")};
+const BROWSER_RUNTIME_EXE = ${JSON.stringify(CURRENT_BROWSER_RUNTIME?.executable ?? "")};
 const LEGACY_BROWSER_EXES = ${JSON.stringify(legacySystemBrowserExecutableCandidates())};
 const log = (...a) => console.error('[agentlas-browser]', ...a);
 
@@ -2271,6 +2305,19 @@ async function main() {
     },
   });
 
+  // The generic call_mcp_tool surface does not expose each nested MCP schema
+  // to the agent. browser_tabs is naturally a list operation when the
+  // action is omitted, while Playwright's raw schema requires action=list.
+  // Normalize only that safe, read-only omission so a graph does not turn a
+  // harmless tab inspection into a misleading permission failure.
+  const normalizeToolArguments = (name, args) => {
+    if (name !== 'browser_tabs' || !args || typeof args !== 'object' || Array.isArray(args)) return args || {};
+    if (!Object.prototype.hasOwnProperty.call(args, 'action') || args.action == null || args.action === '') {
+      return { ...args, action: 'list' };
+    }
+    return args;
+  };
+
   // 승인 게이트 통과 여부 판정(공유). 통과=null, 거부=사유문자열.
   const gate = async (name, args, signal) => {
     const observedUrl = await readCdpPageUrl();
@@ -2293,7 +2340,7 @@ async function main() {
   const callChild = (name, args) => new Promise((resolve) => {
     const id = 'agx-' + (++internalSeq);
     waiters.set(id, resolve);
-    forwardRaw(JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }));
+    forwardRaw(JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: normalizeToolArguments(name, args) } }));
   });
 
   const doReplay = async (name, replyId) => {
@@ -2323,7 +2370,11 @@ async function main() {
     }
     if (msg && msg.method === 'tools/call' && msg.params) {
       const name = msg.params.name || '';
-      const args = msg.params.arguments || {};
+      const originalArgs = msg.params.arguments || {};
+      const args = normalizeToolArguments(name, originalArgs);
+      const forwardedLine = args === originalArgs
+        ? line
+        : JSON.stringify({ ...msg, params: { ...msg.params, arguments: args } });
       // 스킬 툴은 로컬 처리(child 로 안 보냄).
       if (name === 'browser_skill_list') { writeClient({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: JSON.stringify(listSkills()) }] } }); return; }
       if (name === 'browser_skill_save') {
@@ -2343,7 +2394,7 @@ async function main() {
             if (denied) { writeClient({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'DENIED: The user declined this ' + denied + ' browser action. The action was not executed. Do not say approval is still pending and do not retry it in this run.' }], isError: true } }); return; }
             if (name === 'browser_navigate' && args.url) currentUrl = String(args.url);
             if (RECORDABLE.has(name)) pending.set(msg.id, { name, arguments: args });
-            forwardRaw(line);
+            forwardRaw(forwardedLine);
           }).catch((error) => {
             if (!gateLifecycle.settle(msg.id, controller)) return;
             writeClient({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'Browser approval gate failed safely: ' + String(error) }], isError: true } });
@@ -2351,7 +2402,7 @@ async function main() {
           return;
         }
         if (RECORDABLE.has(name)) pending.set(msg.id, { name, arguments: args });
-        forwardRaw(line);
+        forwardRaw(forwardedLine);
       }).catch((error) => writeBrowserStartFailure(msg.id, error));
       return;
     }
@@ -2435,13 +2486,30 @@ export function browserCdpLauncherSourceForTest(): string {
  * 실패하고 마지막 lease 뒤 브라우저가 남는다. 같은 계약의 다른 writer와 더 높은 계약은
  * 덮지 않아 Desktop/Core 간 write oscillation을 막는다.
  */
-export function shouldReplaceBrowserCdpLauncher(existing: string | null): boolean {
+export function shouldReplaceBrowserCdpLauncher(
+  existing: string | null,
+  candidateIsPackaged = CURRENT_LAUNCHER_IS_PACKAGED,
+): boolean {
+  // Never publish a launcher that is already known to be unusable. This is
+  // especially important in development, where a transient cross-arch build
+  // resource used to overwrite the installed application's healthy launcher.
+  if (!hasUsableLauncherRuntimeBindings(LAUNCHER_SOURCE)) return false;
   if (existing === null) return true;
   if (existing === LAUNCHER_SOURCE) return false;
   const installed = readLauncherContractVersion(existing);
+  const installedWriter = readLauncherWriter(existing);
+
+  // A same-writer file with dead absolute bindings is not a valid newer
+  // contract. A packaged Desktop must always be able to repair it. A
+  // development build may repair an already-broken file, but it may never
+  // replace a healthy shared production launcher merely to test newer code.
+  if (installedWriter === BROWSER_CDP_LAUNCHER_WRITER) {
+    if (!hasUsableLauncherRuntimeBindings(existing)) return true;
+    if (!candidateIsPackaged) return false;
+  }
   if (installed === null || installed < BROWSER_CDP_LAUNCHER_CONTRACT) return true;
   if (installed > BROWSER_CDP_LAUNCHER_CONTRACT) return false;
-  return readLauncherWriter(existing) === BROWSER_CDP_LAUNCHER_WRITER;
+  return installedWriter === BROWSER_CDP_LAUNCHER_WRITER;
 }
 
 /**

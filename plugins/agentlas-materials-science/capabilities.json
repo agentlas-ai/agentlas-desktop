@@ -9,7 +9,7 @@
       "license": "CC-BY-4.0",
       "docsUrl": "https://www.oqmd.org/optimade/",
       "operations": ["element-set structure search"],
-      "guards": { "timeoutMs": 30000, "minimumRequestIntervalMs": 1000, "maxResponseBytes": 8388608, "maxResults": 50, "maxOffset": 10000, "maxSitesPerStructure": 1000 }
+      "guards": { "totalDeadlineMs": 30000, "maximumAttempts": 3, "retryableStatuses": [429, 502, 503, 504], "maximumRetryAfterMs": 5000, "minimumRequestIntervalMs": 1000, "allowedMimeTypes": ["application/json", "application/vnd.api+json"], "maxResponseBytes": 8388608, "maxResults": 50, "maxOffset": 10000, "maxSitesPerStructure": 1000, "exactReturnedElementSetRequired": true }
     },
     {
       "id": "cod",
@@ -35,14 +35,15 @@
       "lineage": "normalized-source-sha256-and-raw-cif-sha256-when-applicable"
     }
   ],
-  "contracts": ["agentlas.materials.oqmd-optimade/v1", "agentlas.materials.cod-search/v1", "agentlas.materials.cod-crystal/v1", "agentlas.materials.lattice-metrics/v1", "agentlas.provenance-receipt/v1", "agentlas.science-table/v1"],
+  "contracts": ["agentlas.materials.oqmd-optimade/v1", "agentlas.materials.oqmd-retrieval/v2", "agentlas.materials.cod-search/v1", "agentlas.materials.cod-crystal/v1", "agentlas.materials.lattice-metrics/v1", "agentlas.provenance-receipt/v1", "agentlas.science-table/v1"],
   "limitations": [
     "No renderer library is bundled; the Science Lab host must supply a declared compatible renderer.",
     "Mol* compatibility is not claimed because this plugin has not verified a general crystal-CIF integration contract with the host Mol* surface.",
     "POSCAR is emitted only when each OPTIMADE site maps to one fully occupied element; coordinates remain available otherwise.",
     "The CIF adapter preserves the exact file but normalizes only selected scalar fields and deposited asymmetric-unit atom rows; it is not a complete CIF validator and does not expand symmetry.",
     "COD formula search intentionally accepts only a constrained space-separated Hill-style subset. COD has no documented result limit, so result JSON is skipped when the count exceeds maxMatches.",
-    "OQMD OPTIMADE extension fields are provider-defined; null values are preserved as null and OQMD pagination links are neither trusted nor followed."
+    "OQMD OPTIMADE extension fields are provider-defined; null values are preserved as null and OQMD pagination links are neither trusted nor followed.",
+    "The direct MCP OQMD receipt proves only the returned standalone response. It does not claim immutable Agentlas Science ResearchRun, Source, or artifact persistence; use the host search_materials_structures route for that evidence boundary."
     ,"Density is not inferred from formula text or site counts; it is withheld unless composition, formula-units Z, and formula weight are explicit in the normalized source."
   ]
 }

@@ -31,6 +31,8 @@ export interface RuntimeCapabilityDescriptor {
   /** 세션 재개 — none 이면 매 턴 히스토리 재주입(러너가 정직하게 유지). */
   resume: {
     kind: "cli-flag" | "acp-load" | "none";
+    /** True only when the Agentlas runner actually uses this surface today. */
+    implemented: boolean;
     flag?: string;
     evidence: string;
   };
@@ -71,7 +73,7 @@ export const RUNTIME_CAPABILITIES: Record<RuntimeKind, RuntimeCapabilityDescript
       flag: "--system-prompt-file",
       evidence: "electron/runtime/claude-code.ts passes the wrapped prompt via a stable-path file, which is also what keeps the prompt cache warm",
     },
-    resume: { kind: "cli-flag", flag: "--resume", evidence: "claude-code.ts stores and resumes session ids per chat" },
+    resume: { kind: "cli-flag", implemented: true, flag: "--resume", evidence: "claude-code.ts stores and resumes session ids per chat" },
     image: { kind: "native-inline", evidence: "stream-json input carries image blocks; claude-code.ts stages attachments inline" },
     commandSurfaces: [{ segments: [".claude", "commands"], layout: "md-tree" }],
     transcript: {
@@ -91,7 +93,7 @@ export const RUNTIME_CAPABILITIES: Record<RuntimeKind, RuntimeCapabilityDescript
       delivery: "inline",
       evidence: "codex exec has no system flag (help, codex current as of 2026-08-18); resume turns do not resend it — electron/runtime/codex.ts",
     },
-    resume: { kind: "cli-flag", flag: "exec resume", evidence: "probed 2026-08-18: `codex exec resume <SESSION_ID|--last> [PROMPT]` in help" },
+    resume: { kind: "cli-flag", implemented: true, flag: "exec resume", evidence: "probed 2026-08-18: `codex exec resume <SESSION_ID|--last> [PROMPT]` in help" },
     image: { kind: "cli-flag", flag: "-i", evidence: "probed 2026-08-18: `-i, --image <FILE>...` in `codex exec --help`" },
     commandSurfaces: [{ segments: [".codex", "prompts"], layout: "md-tree" }],
     transcript: {
@@ -113,6 +115,7 @@ export const RUNTIME_CAPABILITIES: Record<RuntimeKind, RuntimeCapabilityDescript
     },
     resume: {
       kind: "cli-flag",
+      implemented: false,
       flag: "--conversation",
       evidence: "probed 2026-08-18 (agy 1.1.14 help): `--conversation  Resume a previous conversation by ID`. Not wired yet — the stream's conversation-id source is unverified, and resuming the wrong conversation is worse than resending history",
     },
@@ -137,7 +140,7 @@ export const RUNTIME_CAPABILITIES: Record<RuntimeKind, RuntimeCapabilityDescript
       flag: "--system-prompt-override",
       evidence: "probed 2026-08-18 (grok 1.0.5 help): `--system-prompt-override <PROMPT>` (compat alias --system-prompt)",
     },
-    resume: { kind: "cli-flag", flag: "--resume", evidence: "electron/runtime/grok.ts resumes with the session id from streaming-json" },
+    resume: { kind: "cli-flag", implemented: true, flag: "--resume", evidence: "electron/runtime/grok.ts resumes with the session id from streaming-json" },
     image: { kind: "prose-path", evidence: "no image flag in grok 1.0.5 help; prose fallback" },
     commandSurfaces: [],
     transcript: null,
@@ -152,7 +155,7 @@ export const RUNTIME_CAPABILITIES: Record<RuntimeKind, RuntimeCapabilityDescript
   },
   cursor: {
     systemPrompt: { delivery: "inline", evidence: "routed via ACP (ACP_PREFERRED_KINDS); acp.ts wraps the system prompt into session prompt" },
-    resume: { kind: "acp-load", evidence: "acp.ts session/load when the agent declares loadSession" },
+    resume: { kind: "acp-load", implemented: true, evidence: "acp.ts session/load when the agent declares loadSession" },
     image: { kind: "native-inline", evidence: "ACP prompt blocks carry images; acp.ts stages them" },
     commandSurfaces: [{ segments: [".cursor", "commands"], layout: "md-tree" }],
     transcript: {
@@ -169,7 +172,7 @@ export const RUNTIME_CAPABILITIES: Record<RuntimeKind, RuntimeCapabilityDescript
   },
   kimi: {
     systemPrompt: { delivery: "inline", evidence: "routed via ACP; no system flag on the native CLI (`-p` mode) per capability matrix 2026-08-18" },
-    resume: { kind: "acp-load", evidence: "acp.ts session/load when declared" },
+    resume: { kind: "acp-load", implemented: true, evidence: "acp.ts session/load when declared" },
     image: { kind: "native-inline", evidence: "ACP prompt blocks" },
     commandSurfaces: [],
     transcript: null,
@@ -183,7 +186,7 @@ export const RUNTIME_CAPABILITIES: Record<RuntimeKind, RuntimeCapabilityDescript
   },
   acp: {
     systemPrompt: { delivery: "inline", evidence: "generic ACP seat: system prompt wrapped into session prompt (acp.ts)" },
-    resume: { kind: "acp-load", evidence: "session/load is optional per agent; acp.ts honors the declaration" },
+    resume: { kind: "acp-load", implemented: true, evidence: "session/load is optional per agent; acp.ts honors the declaration" },
     image: { kind: "native-inline", evidence: "ACP prompt blocks" },
     commandSurfaces: [],
     transcript: null,
@@ -194,6 +197,7 @@ export const RUNTIME_CAPABILITIES: Record<RuntimeKind, RuntimeCapabilityDescript
     systemPrompt: { delivery: "native-role", evidence: "electron/runtime/byok.ts sends a real system role message" },
     resume: {
       kind: "none",
+      implemented: false,
       evidence: "provider HTTP APIs are stateless — there is no session to resume; the runner resends compressed history every turn (structural, will not change with versions)",
     },
     image: { kind: "native-inline", evidence: "multimodal content parts on the provider API" },
@@ -204,7 +208,7 @@ export const RUNTIME_CAPABILITIES: Record<RuntimeKind, RuntimeCapabilityDescript
   },
   ollama: {
     systemPrompt: { delivery: "native-role", evidence: "electron/runtime/ollama.ts sends a system role message" },
-    resume: { kind: "none", evidence: "stateless local HTTP API (structural)" },
+    resume: { kind: "none", implemented: false, evidence: "stateless local HTTP API (structural)" },
     image: { kind: "native-inline", evidence: "multimodal content parts" },
     commandSurfaces: [],
     transcript: null,
@@ -213,7 +217,7 @@ export const RUNTIME_CAPABILITIES: Record<RuntimeKind, RuntimeCapabilityDescript
   },
   lmstudio: {
     systemPrompt: { delivery: "native-role", evidence: "same OpenAI-compatible path as ollama" },
-    resume: { kind: "none", evidence: "stateless local HTTP API (structural)" },
+    resume: { kind: "none", implemented: false, evidence: "stateless local HTTP API (structural)" },
     image: { kind: "native-inline", evidence: "multimodal content parts" },
     commandSurfaces: [],
     transcript: null,
@@ -222,7 +226,7 @@ export const RUNTIME_CAPABILITIES: Record<RuntimeKind, RuntimeCapabilityDescript
   },
   mlx: {
     systemPrompt: { delivery: "native-role", evidence: "same OpenAI-compatible path as ollama" },
-    resume: { kind: "none", evidence: "stateless local HTTP API (structural)" },
+    resume: { kind: "none", implemented: false, evidence: "stateless local HTTP API (structural)" },
     image: { kind: "native-inline", evidence: "multimodal content parts" },
     commandSurfaces: [],
     transcript: null,
@@ -231,7 +235,7 @@ export const RUNTIME_CAPABILITIES: Record<RuntimeKind, RuntimeCapabilityDescript
   },
   agentlas: {
     systemPrompt: { delivery: "native-role", evidence: "electron/runtime/agentlas-serving.ts sends the system prompt as its own field" },
-    resume: { kind: "none", evidence: "each turn carries its history; the server holds no session (structural)" },
+    resume: { kind: "none", implemented: false, evidence: "each turn carries its history; the server holds no session (structural)" },
     image: { kind: "none", evidence: "the serving endpoint takes text turns only" },
     commandSurfaces: [],
     transcript: null,

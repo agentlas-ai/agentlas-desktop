@@ -52,8 +52,7 @@ jobs:
       # Publish installers to the SEPARATE public releases repository.
       AGENTLAS_DESKTOP_GITHUB_REPO: agentlas-ai/agentlas-desktop-releases
       AGENTLAS_PUBLIC_RELEASE: "1"
-      # Public verification keys only. Private extension-signing keys never
-      # enter Desktop packaging; absent policy blocks the release before signing.
+      # Public verification keys only; private extension-signing keys never enter the app.
       # Keep the release-owned public key policy available to this caller job.
       # The reusable cross-platform workflow receives the repository variable,
       # but GitHub evaluates this caller's vars expression as empty.
@@ -274,6 +273,7 @@ jobs:
       # while making the release-owned policy available on the macOS runner.
       AGENTLAS_PRODUCT_EXTENSION_TRUSTED_KEYS_JSON: >-
         {"agentlas-product-extension-release-v1":"-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAhdzhuUqdSa8P+ydZZZ9pgrvoPDLZJq9mBohjEw9qa8g=\n-----END PUBLIC KEY-----"}
+      AGENTLAS_PRODUCT_EXTENSION_TRUSTED_KEYS_JSON: ${{ vars.AGENTLAS_PRODUCT_EXTENSION_TRUSTED_KEYS_JSON }}
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.59,v0.8.60"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history

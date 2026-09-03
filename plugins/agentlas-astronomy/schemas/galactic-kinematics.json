@@ -1,0 +1,230 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "agentlas.astronomy.galactic-kinematics-input/v1",
+  "title": "analyze_galactic_kinematics",
+  "description": "Inverse-parallax distance with a fractional-error guard, tangential velocity, heliocentric and LSR UVW after Johnson & Soderblom (1987) with first-order error propagation, a Toomre diagram, and a Bensby-style thin/thick-disc/halo membership screen. Proper motions must include cos(dec) in the RA component.",
+  "x-agentlas": {
+    "schema": "agentlas.astronomy.tool-schema/v1",
+    "toolName": "analyze_galactic_kinematics",
+    "runtimeModule": "runtime/galactic-kinematics.cjs",
+    "runtimeExport": "analyzeGalacticKinematics",
+    "resultSchema": "agentlas.science.astronomy-galactic-kinematics-result/v1",
+    "argumentKeyStyle": "snake_case-to-camelCase"
+  },
+  "type": "object",
+  "properties": {
+    "source_content_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "Lowercase hex SHA-256 of the exact source bytes the measurements were taken from."
+    },
+    "sample_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "max_fractional_parallax_error": {
+      "type": "number",
+      "minimum": 0.01,
+      "maximum": 1,
+      "default": 0.2
+    },
+    "solar_motion": {
+      "type": "object",
+      "properties": {
+        "u_km_s": {
+          "type": "number",
+          "minimum": -100,
+          "maximum": 100
+        },
+        "v_km_s": {
+          "type": "number",
+          "minimum": -100,
+          "maximum": 100
+        },
+        "w_km_s": {
+          "type": "number",
+          "minimum": -100,
+          "maximum": 100
+        }
+      },
+      "required": [
+        "u_km_s",
+        "v_km_s",
+        "w_km_s"
+      ],
+      "additionalProperties": false,
+      "description": "Solar motion relative to the LSR; default Schoenrich et al. (2010) 11.1, 12.24, 7.25 km/s."
+    },
+    "populations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          },
+          "fraction": {
+            "type": "number",
+            "maximum": 1,
+            "exclusiveMinimum": 0
+          },
+          "sigma_u_km_s": {
+            "type": "number",
+            "maximum": 10000,
+            "exclusiveMinimum": 0
+          },
+          "sigma_v_km_s": {
+            "type": "number",
+            "maximum": 10000,
+            "exclusiveMinimum": 0
+          },
+          "sigma_w_km_s": {
+            "type": "number",
+            "maximum": 10000,
+            "exclusiveMinimum": 0
+          },
+          "asymmetric_drift_km_s": {
+            "type": "number",
+            "minimum": -10000,
+            "maximum": 10000
+          }
+        },
+        "required": [
+          "id",
+          "fraction",
+          "sigma_u_km_s",
+          "sigma_v_km_s",
+          "sigma_w_km_s",
+          "asymmetric_drift_km_s"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 2,
+      "maxItems": 6,
+      "description": "Velocity-ellipsoid populations; must include ids thin-disc and thick-disc. Default Bensby et al. (2014) parameters."
+    },
+    "measurements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "object_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          },
+          "ra_deg": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "exclusiveMaximum": 360
+          },
+          "dec_deg": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": -90,
+            "maximum": 90
+          },
+          "parallax_mas": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": -10000,
+            "maximum": 10000
+          },
+          "parallax_error_mas": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "maximum": 10000,
+            "exclusiveMinimum": 0
+          },
+          "pm_ra_mas_yr": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": -1000000,
+            "maximum": 1000000,
+            "description": "mu_alpha* = mu_alpha cos(delta)"
+          },
+          "pm_ra_error_mas_yr": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "maximum": 1000000,
+            "exclusiveMinimum": 0
+          },
+          "pm_dec_mas_yr": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": -1000000,
+            "maximum": 1000000
+          },
+          "pm_dec_error_mas_yr": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "maximum": 1000000,
+            "exclusiveMinimum": 0
+          },
+          "radial_velocity_km_s": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": -100000,
+            "maximum": 100000
+          },
+          "radial_velocity_error_km_s": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "maximum": 100000,
+            "exclusiveMinimum": 0
+          },
+          "use": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "object_id",
+          "ra_deg",
+          "dec_deg",
+          "parallax_mas",
+          "parallax_error_mas",
+          "pm_ra_mas_yr",
+          "pm_ra_error_mas_yr",
+          "pm_dec_mas_yr",
+          "pm_dec_error_mas_yr",
+          "radial_velocity_km_s",
+          "radial_velocity_error_km_s",
+          "use"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1,
+      "maxItems": 2000
+    }
+  },
+  "required": [
+    "source_content_sha256",
+    "sample_id",
+    "measurements"
+  ],
+  "additionalProperties": false
+}

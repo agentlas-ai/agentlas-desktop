@@ -1,0 +1,142 @@
+{
+  "schema": "agentlas.plugin/v2",
+  "slug": "agentlas-paleontology",
+  "name": "Agentlas Paleontology",
+  "version": "0.2.0",
+  "builtin": false,
+  "publisher": {
+    "name": "Agentlas",
+    "url": "https://agentlas.ai"
+  },
+  "surface": {
+    "displayName": "Paleontology",
+    "displayNameKo": "고생물학",
+    "tagline": "Evidence-bounded fossil occurrence research",
+    "taglineKo": "증거 경계가 보존되는 화석 산출 연구",
+    "description": "Retrieves and compares exact PBDB taxon, fossil-occurrence, and stratigraphic evidence without caller scores or biological-feasibility claims.",
+    "descriptionKo": "PBDB 분류·화석 산출·지층 근거를 정확히 비교하며 호출자 점수나 생물학적 가능성 주장으로 승격하지 않습니다.",
+    "category": "data",
+    "brandColor": "#8A6846",
+    "icon": "assets/icon.svg",
+    "defaultPrompts": [
+      "PBDB에서 이 분류군의 화석 산출 기록과 지층 연대 범위를 찾아줘",
+      "이 화석 기록이 실제로 지지하는 주장과 지지하지 못하는 주장을 나눠줘",
+      "여러 후보의 PBDB catalog와 지층 분석을 정확히 묶어 화석 근거만 비교해줘"
+    ]
+  },
+  "invocation": {
+    "mention": "@agentlas-paleontology",
+    "implicit": "router",
+    "standalone": true
+  },
+  "provides": {
+    "skills": {
+      "router": "skills/index/SKILL.md",
+      "workflows": [
+        "pbdb-occurrences",
+        "stratigraphic-support",
+        "deextinction-feasibility"
+      ]
+    },
+    "tools": [
+      {
+        "id": "agentlas-paleontology",
+        "capability": "data",
+        "kind": "stdio",
+        "command": "${node}",
+        "args": [
+          "${pluginDir}/runtime/mcp-server.cjs"
+        ],
+        "envKeys": [],
+        "timeoutMs": 45000,
+        "surface": {
+          "name": "Agentlas 고생물학 데이터",
+          "nameEn": "Agentlas Paleontology Data",
+          "description": "PBDB 화석 분류·산출·지층 기록을 증거 경계와 함께 정규화",
+          "descriptionEn": "Normalize PBDB fossil taxon, occurrence, and stratigraphic records with explicit evidence boundaries",
+          "category": "data",
+          "brandColor": "#8A6846",
+          "mark": "PA",
+          "docsUrl": "https://paleobiodb.org/data1.2/"
+        }
+      }
+    ]
+  },
+  "requires": {
+    "prereq": [
+      {
+        "id": "node",
+        "provided-by": "app"
+      }
+    ],
+    "os": [
+      "darwin",
+      "win32",
+      "linux"
+    ]
+  },
+  "permissions": {
+    "fileWrite": "none",
+    "network": "allow",
+    "shell": "deny"
+  },
+  "state": {
+    "files": [],
+    "assets": false
+  },
+  "integrity": {
+    "algo": "sha256",
+    "files": [
+      {
+        "path": "assets/icon.svg",
+        "sha256": "74eb0b8d5a1e3623da35ec2ce4385c2853d85fc1f6c0d0c98a682343feb42cb2",
+        "bytes": 391
+      },
+      {
+        "path": "capabilities.json",
+        "sha256": "3bfa91a47af4ba458a68af8d463b45510eb8a99cb10dbaa6097e3b631c7826b4",
+        "bytes": 3504
+      },
+      {
+        "path": "README.md",
+        "sha256": "4191532e80771f35c6e4aa91e667731d91fdddeba90a47744691780a5dcdb7e1",
+        "bytes": 4712
+      },
+      {
+        "path": "runtime/mcp-server.cjs",
+        "sha256": "a71a13b7749d249ffc76a501467299859d6580b15d7c8420429c4a6888e458d5",
+        "bytes": 2349
+      },
+      {
+        "path": "runtime/paleontology.cjs",
+        "sha256": "77051833ac932fb8e527506e258a64140981c7e72f406afd39809783eea18cb5",
+        "bytes": 53206
+      },
+      {
+        "path": "schemas/tools.json",
+        "sha256": "b5e38dbf533356bc23394d3ffd7b2d9bdf43f3c241f3808e13fc0d518ec46a62",
+        "bytes": 29965
+      },
+      {
+        "path": "skills/deextinction-feasibility/SKILL.md",
+        "sha256": "cde24ef3d5e18a7ad88108efde53e7f5371681f9da2088b83dd5e3dcf724016f",
+        "bytes": 4653
+      },
+      {
+        "path": "skills/index/SKILL.md",
+        "sha256": "ddfabe6ca9cb71b333dae62dd0fccd7af8661a4cec00dd8b1564ab860713d34b",
+        "bytes": 854
+      },
+      {
+        "path": "skills/pbdb-occurrences/SKILL.md",
+        "sha256": "67c860a6e5d670668d3c582137c469e3fd2aaa5896ef9efb7dc619493735a8da",
+        "bytes": 834
+      },
+      {
+        "path": "skills/stratigraphic-support/SKILL.md",
+        "sha256": "4947c1f0dc809976014f7dfbdca834abb536af77f0771027c1720a184aac4685",
+        "bytes": 796
+      }
+    ]
+  }
+}

@@ -652,8 +652,10 @@ function macCookieReencryptor(
 interface MacCdpCookieImportResult {
   accepted: number;
   domains: string[];
-  /** 쿠키 저장이 아니라 공급자 화면에서 실제 로그인까지 확인된 도메인. */
+  /** Provider pages that confirmed a usable authenticated session, not merely stored cookies. */
   verifiedDomains: string[];
+  /** Provider pages that explicitly redirected to a sign-in route. */
+  loginRequiredDomains: string[];
 }
 
 function processIsLive(pid: number): boolean {
@@ -697,7 +699,9 @@ async function importMacCookiesThroughDedicatedRuntime(
   schemaVersion: number,
   jobs: Array<{ domain: string; rows: Record<string, unknown>[] }>,
 ): Promise<MacCdpCookieImportResult> {
-  if (jobs.length === 0) return { accepted: 0, domains: [], verifiedDomains: [] };
+  if (jobs.length === 0) {
+    return { accepted: 0, domains: [], verifiedDomains: [], loginRequiredDomains: [] };
+  }
   const sourceService = MAC_SAFE_STORAGE_SERVICE[browser];
   if (!sourceService) throw new Error(`${browser}의 macOS 쿠키 암호화 방식을 지원하지 않습니다.`);
   const sourceKey = readMacSafeStorageKey(sourceService);
@@ -766,7 +770,7 @@ async function importMacCookiesThroughDedicatedRuntime(
   }
   if (cookies.length === 0) {
     for (const plaintext of plaintexts) plaintext.fill(0);
-    return { accepted: 0, domains: [], verifiedDomains: [] };
+    return { accepted: 0, domains: [], verifiedDomains: [], loginRequiredDomains: [] };
   }
 
   const runtime = resolveAgentlasBrowserRuntime();
@@ -826,20 +830,28 @@ async function importMacCookiesThroughDedicatedRuntime(
       acceptedDomains.add(domain);
     }
     const verifiedDomains: string[] = [];
+    const loginRequiredDomains: string[] = [];
+    // A provider can retain syntactically valid cookies after the account
+    // session expires. Cookie-store acceptance is therefore not login proof;
+    // confirm X itself before Connect shows a green authenticated state.
     if (acceptedDomains.has("x.com")) {
       const page = await context.newPage();
       try {
         await page.goto("https://x.com/home", { waitUntil: "domcontentloaded", timeout: 20_000 });
-        const redirectedToLogin = /\/i\/flow\/login|\/login(?:[/?#]|$)/i.test(page.url());
-        const signedInUi = await page.locator('[data-testid="SideNav_AccountSwitcher_Button"], [data-testid="primaryColumn"] [aria-label="Home timeline"]').first().isVisible({ timeout: 8_000 }).catch(() => false);
-        if (!redirectedToLogin && signedInUi) verifiedDomains.push("x.com");
+        const finalUrl = page.url();
+        const redirectedToLogin = /\/i\/flow\/login|\/login(?:[/?#]|$)/i.test(finalUrl);
+        const signedInUi = await page.locator(
+          '[data-testid="SideNav_AccountSwitcher_Button"], [data-testid="primaryColumn"] [aria-label="Home timeline"]',
+        ).first().isVisible({ timeout: 8_000 }).catch(() => false);
+        if (redirectedToLogin) loginRequiredDomains.push("x.com");
+        else if (signedInUi) verifiedDomains.push("x.com");
       } catch {
-        // 네트워크 또는 공급자 오류는 로그인 확인으로 승격하지 않는다.
+        // A network/provider failure cannot be upgraded to a verified login.
       } finally {
         await page.close().catch(() => undefined);
       }
     }
-    return { accepted, domains: [...acceptedDomains], verifiedDomains };
+    return { accepted, domains: [...acceptedDomains], verifiedDomains, loginRequiredDomains };
   } finally {
     for (const plaintext of plaintexts) plaintext.fill(0);
     if (connection) await connection.close().catch(() => undefined);
@@ -899,6 +911,15 @@ export async function importBrowserCredentials(
   if (!sourceStore) {
     return { ok: false, cookiesAdded: 0, linkedSites: [], skipped, error: "이 프로필에는 쿠키 저장소가 없습니다." };
   }
+
+  // Refreshes must not erase a connection that was already verified in
+  // Connect. A provider check can fail transiently (network outage, provider
+  // UI change, or a short-lived rate limit), and Windows may hide protected
+  // cookie values from the importer; retain the pre-refresh state and only
+  // downgrade when the provider explicitly redirects to its login route.
+  const existingSessionStatuses = new Map(
+    listBrowserSites().map((row) => [normalizeSite(row.site), row.session.status] as const),
+  );
 
   const workDir = makeWorkDir();
   try {
@@ -1089,10 +1110,26 @@ export async function importBrowserCredentials(
 
     const importedSites: string[] = [];
     const requiresLoginSites: string[] = [];
+    const preservedSites: string[] = [];
     const acceptedJobDomains = runtimeImported
-      ? jobs.map((job) => job.domain).filter((domain) => runtimeImported!.domains.includes(domain))
+      ? jobs.map((job) => job.domain).filter((domain) => (
+        runtimeImported!.domains.includes(domain)
+        && (domain !== "x.com" || runtimeImported!.verifiedDomains.includes(domain))
+      ))
       : jobs.map((job) => job.domain);
-    for (const domain of [...acceptedJobDomains, ...interactiveDomains]) {
+    const providerVerificationFailed = runtimeImported
+      ? jobs.map((job) => job.domain).filter((domain) => (
+        domain === "x.com"
+        && runtimeImported!.domains.includes(domain)
+        && !runtimeImported!.verifiedDomains.includes(domain)
+      ))
+      : [];
+    const providerLoginRequired = runtimeImported
+      ? jobs.map((job) => job.domain).filter((domain) => (
+        runtimeImported!.loginRequiredDomains.includes(domain)
+      ))
+      : [];
+    for (const domain of [...acceptedJobDomains, ...providerVerificationFailed, ...interactiveDomains]) {
       const site = normalizeSite(`https://${domain}`);
       if (!site) {
         skipped.push({ domain, reason: "사이트 주소로 바꿀 수 없는 도메인입니다." });
@@ -1101,12 +1138,21 @@ export async function importBrowserCredentials(
       // eslint-disable-next-line no-await-in-loop -- 사이트 수는 사용자가 고른 만큼이라 작다.
       await upsertBrowserSite({ site, label: domain });
       linkedSites.push(site);
-      const providerVerificationFailed = domain === "x.com"
-        && runtimeImported !== null
-        && !runtimeImported.verifiedDomains.includes(domain);
-      if (interactiveDomains.includes(domain) || providerVerificationFailed) {
+      const providerCheckUnavailable = interactiveDomains.includes(domain)
+        || (providerVerificationFailed.includes(domain) && !providerLoginRequired.includes(domain));
+      if (interactiveDomains.includes(domain) || providerLoginRequired.includes(domain)) {
         setBrowserSession(site, "none");
         requiresLoginSites.push(site);
+      } else if (providerCheckUnavailable && !existingSessionStatuses.has(site)) {
+        // A new site has no trusted state to retain. Leave its newly-created
+        // session as `none` and ask for one explicit login; an existing site,
+        // including a previously valid one, is deliberately left untouched.
+        setBrowserSession(site, "none");
+        requiresLoginSites.push(site);
+      } else if (providerCheckUnavailable) {
+        // Do not add this site to importedSites: the final valid-state pass
+        // must not turn an unverified refresh back into a green connection.
+        preservedSites.push(site);
       } else {
         importedSites.push(site);
       }
@@ -1120,7 +1166,10 @@ export async function importBrowserCredentials(
      * earlier import. Only fail when no importable or interactive site exists.
      */
     const moved = runtimeImported?.accepted ?? (added + refreshed);
-    if (moved === 0 && importedSites.length === 0 && requiresLoginSites.length === 0) {
+    if (moved === 0
+      && importedSites.length === 0
+      && requiresLoginSites.length === 0
+      && preservedSites.length === 0) {
       return {
         ok: false,
         cookiesAdded: 0,

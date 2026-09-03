@@ -2,10 +2,14 @@
 
 const { createHash } = require("node:crypto");
 
+const PLUGIN_VERSION = "0.2.2";
 const OQMD_ENDPOINT = "https://oqmd.org/optimade/v1/structures";
 const COD_SEARCH_ENDPOINT = "https://www.crystallography.net/cod/result";
 const COD_CIF_ORIGIN = "https://www.crystallography.net";
 const MAX_OPTIMADE_BYTES = 8 * 1024 * 1024;
+const MAX_OPTIMADE_ATTEMPTS = 3;
+const OPTIMADE_RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
+const OPTIMADE_JSON_MIME_TYPES = new Set(["application/json", "application/vnd.api+json"]);
 const MAX_COD_SEARCH_BYTES = 4 * 1024 * 1024;
 const MAX_CIF_BYTES = 4 * 1024 * 1024;
 const MAX_OPTIMADE_RESULTS = 50;
@@ -121,7 +125,7 @@ function normalizeOqmdInput(input) {
 function buildOqmdUrl(input) {
   const normalized = normalizeOqmdInput(input);
   const params = new URLSearchParams();
-  params.set("filter", `elements HAS ALL ${normalized.elements.map((symbol) => `"${symbol}"`).join(",")}`);
+  params.set("filter", `elements HAS ALL ${normalized.elements.map((symbol) => `"${symbol}"`).join(",")} AND nelements = ${normalized.elements.length}`);
   params.set("page_limit", String(normalized.limit));
   params.set("page_offset", String(normalized.offset));
   params.set("sort", "id");
@@ -672,6 +676,9 @@ function analyzeLatticeMetrics(input) {
       ["density", density.gramsPerCm3, "g/cm^3", density.status],
     ],
   };
+  const contentReceipts = {
+    publicationTable: { sha256: sha256(stableStringify(publicationTable)) },
+  };
   const normalized = {
     schema: "agentlas.materials.lattice-metrics/v1",
     sourceKind,
@@ -679,6 +686,7 @@ function analyzeLatticeMetrics(input) {
     volume: { angstrom3: volumeAngstrom3, method: volumeMethod, validation: volumeValidation },
     density,
     publicationTable,
+    contentReceipts,
     constants: { avogadroPerMol: AVOGADRO_PER_MOL, angstromCubedToCmCubed: 1e-24 },
     warnings: density.status === "computed" ? [] : ["Density was not computed because every required explicit field (composition, Z, and formula weight) was not present; no chemical mass or Z was inferred."],
   };
@@ -688,17 +696,44 @@ function analyzeLatticeMetrics(input) {
 function createRateGate({ minIntervalMs, clockMs, sleep }) {
   let tail = Promise.resolve();
   let lastStartedAt = -Infinity;
-  return async (operation) => {
+  return async (operation, deadline = Infinity) => {
     const previous = tail;
     let release;
-    tail = new Promise((resolve) => { release = resolve; });
-    await previous;
+    const turn = new Promise((resolve) => { release = resolve; });
+    tail = previous.catch(() => undefined).then(() => turn);
+    let waitTimer = null;
     try {
+      if (Number.isFinite(deadline)) {
+        const remaining = deadline - clockMs();
+        if (remaining <= 0) throw new MaterialsScienceError("optimade-timeout");
+        await Promise.race([
+          previous,
+          new Promise((_, reject) => {
+            waitTimer = setTimeout(() => reject(new MaterialsScienceError("optimade-timeout")), remaining);
+          }),
+        ]);
+      } else {
+        await previous;
+      }
+      if (waitTimer !== null) clearTimeout(waitTimer);
       const waitMs = Math.max(0, lastStartedAt + minIntervalMs - clockMs());
-      if (waitMs > 0) await sleep(waitMs);
+      if (waitMs > 0) {
+        if (Number.isFinite(deadline)) {
+          const remaining = deadline - clockMs();
+          if (remaining <= 0) throw new MaterialsScienceError("optimade-timeout");
+          await sleep(Math.min(waitMs, remaining));
+          if (clockMs() >= deadline || waitMs > remaining) throw new MaterialsScienceError("optimade-timeout");
+        } else {
+          await sleep(waitMs);
+        }
+      }
+      if (Number.isFinite(deadline) && clockMs() >= deadline) throw new MaterialsScienceError("optimade-timeout");
       lastStartedAt = clockMs();
       return await operation();
-    } finally { release(); }
+    } finally {
+      if (waitTimer !== null) clearTimeout(waitTimer);
+      release();
+    }
   };
 }
 
@@ -716,14 +751,204 @@ async function readBoundedResponse(response, maxBytes, label) {
 async function fetchBytes(fetchImpl, url, { timeoutMs, maxBytes, label }) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
-  let response;
   try {
-    response = await fetchImpl(url, { headers: { accept: label === "cod-cif" ? "chemical/x-cif,text/plain;q=0.9,*/*;q=0.1" : "application/json,text/plain;q=0.5" }, signal: controller.signal });
+    const response = await fetchImpl(url, { headers: { accept: label === "cod-cif" ? "chemical/x-cif,text/plain;q=0.9,*/*;q=0.1" : "application/json,text/plain;q=0.5" }, signal: controller.signal });
+    return await readBoundedResponse(response, maxBytes, label);
   } catch (error) {
+    if (error instanceof MaterialsScienceError) throw error;
     if (error?.name === "AbortError") throw new MaterialsScienceError(`${label}-timeout`);
     throw new MaterialsScienceError(`${label}-network-error`, error?.message ?? `${label} network error`);
   } finally { clearTimeout(timer); }
-  return readBoundedResponse(response, maxBytes, label);
+}
+
+function optimadeMediaType(contentType) {
+  const value = (contentType ?? "").toLowerCase().split(";", 1)[0].trim();
+  return value || null;
+}
+
+function optimadeRetryAfterMs(response, nowMs) {
+  const raw = response.headers?.get?.("retry-after")?.trim();
+  if (!raw) return null;
+  if (/^\d+$/.test(raw)) return Math.min(Number(raw) * 1_000, 5_000);
+  const parsed = Date.parse(raw);
+  if (!Number.isFinite(parsed)) return null;
+  return Math.max(0, Math.min(parsed - nowMs, 5_000));
+}
+
+function optimadeReceipt(attempts) {
+  return {
+    schema: "agentlas.materials.oqmd-retrieval/v2",
+    evidenceScope: "standalone-response-only",
+    hostPersisted: false,
+    attemptCount: attempts.length,
+    attempts: attempts.map((attempt) => ({ ...attempt })),
+  };
+}
+
+function optimadeFailure(code, message, attempts, extra = null) {
+  const details = { retrieval: optimadeReceipt(attempts), ...(extra ?? {}) };
+  return new MaterialsScienceError(code, message ?? code, details);
+}
+
+async function readOptimadeBody(response) {
+  const declared = response.headers?.get?.("content-length");
+  if (declared !== null && declared !== undefined
+    && (!/^\d+$/.test(declared) || Number(declared) > MAX_OPTIMADE_BYTES)) {
+    await response.body?.cancel?.().catch(() => undefined);
+    throw new MaterialsScienceError("optimade-response-too-large", "OQMD OPTIMADE response exceeds the byte limit.", { observedByteLength: 0 });
+  }
+  if (!response.body || typeof response.body.getReader !== "function") {
+    let bytes;
+    try { bytes = Buffer.from(await response.arrayBuffer()); }
+    catch { throw new MaterialsScienceError("optimade-response-read-failed", "OQMD OPTIMADE response body could not be read.", { observedByteLength: 0 }); }
+    if (bytes.length > MAX_OPTIMADE_BYTES) throw new MaterialsScienceError("optimade-response-too-large", "OQMD OPTIMADE response exceeds the byte limit.", { observedByteLength: MAX_OPTIMADE_BYTES + 1 });
+    return bytes;
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = Buffer.from(value);
+      total += chunk.length;
+      if (total > MAX_OPTIMADE_BYTES) {
+        await reader.cancel();
+        throw new MaterialsScienceError("optimade-response-too-large", "OQMD OPTIMADE response exceeds the byte limit.", { observedByteLength: MAX_OPTIMADE_BYTES + 1 });
+      }
+      chunks.push(chunk);
+    }
+  } catch (error) {
+    if (error instanceof MaterialsScienceError) throw error;
+    throw new MaterialsScienceError("optimade-response-read-failed", "OQMD OPTIMADE response body could not be read.", { observedByteLength: total });
+  }
+  return Buffer.concat(chunks, total);
+}
+
+async function fetchOqmdWithReceipt(fetchImpl, url, request, { clockMs, sleep, timeoutMs, deadline }) {
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000) throw new MaterialsScienceError("optimade-timeout-invalid");
+  const attempts = [];
+  if (!Number.isFinite(deadline)) throw new MaterialsScienceError("optimade-timeout-invalid");
+  for (let index = 0; index < MAX_OPTIMADE_ATTEMPTS; index += 1) {
+    const remaining = deadline - clockMs();
+    if (remaining <= 0) {
+      attempts.push({
+        attempt: index + 1, status: null, contentType: null, mimeType: null,
+        byteLength: 0, rawSha256: null, bodyComplete: false,
+        retrievedAt: new Date(clockMs()).toISOString(), retryable: false, willRetry: false,
+        retryAfterMs: null, errorCode: "optimade-timeout",
+      });
+      throw optimadeFailure("optimade-timeout", "OQMD OPTIMADE request exceeded the total deadline.", attempts);
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), remaining);
+    let attemptRecorded = false;
+    try {
+      const response = await fetchImpl(url, {
+        headers: {
+          accept: "application/vnd.api+json, application/json;q=0.9",
+          "user-agent": `Agentlas-Materials-Science/${PLUGIN_VERSION} (materials research; https://agentlas.ai)`,
+        },
+        redirect: "error",
+        signal: controller.signal,
+      });
+      const status = Number(response?.status);
+      if (!Number.isInteger(status) || status < 100 || status > 599) {
+        throw new MaterialsScienceError("optimade-response-invalid");
+      }
+      const retrievedAt = new Date(clockMs()).toISOString();
+      const rawContentType = response.headers?.get?.("content-type") ?? null;
+      const contentTypeValid = rawContentType === null
+        || (rawContentType.length >= 1 && rawContentType.length <= 240 && !/[\u0000-\u001f\u007f]/.test(rawContentType));
+      const contentType = contentTypeValid ? rawContentType : null;
+      const mimeType = optimadeMediaType(contentType);
+      let bytes;
+      try {
+        bytes = await readOptimadeBody(response);
+      } catch (error) {
+        const observedByteLength = Number(error?.details?.observedByteLength ?? 0);
+        const retryable = OPTIMADE_RETRYABLE_STATUSES.has(status) || error?.code === "optimade-response-read-failed";
+        const canRetry = retryable && index + 1 < MAX_OPTIMADE_ATTEMPTS && !controller.signal.aborted;
+        const delay = canRetry
+          ? Math.min(optimadeRetryAfterMs(response, clockMs()) ?? 250 * 2 ** index, Math.max(0, deadline - clockMs()))
+          : null;
+        const bodyErrorCode = controller.signal.aborted
+          ? "optimade-timeout"
+          : error?.code ?? "optimade-response-read-failed";
+        attempts.push({
+          attempt: index + 1, status, contentType, mimeType,
+          byteLength: Number.isSafeInteger(observedByteLength) && observedByteLength >= 0 ? observedByteLength : 0,
+          rawSha256: null, bodyComplete: false, retrievedAt, retryable, willRetry: canRetry,
+          retryAfterMs: delay, errorCode: bodyErrorCode,
+        });
+        attemptRecorded = true;
+        if (controller.signal.aborted) throw optimadeFailure("optimade-timeout", "OQMD OPTIMADE request exceeded the total deadline.", attempts);
+        if (canRetry) {
+          if (delay > 0) await sleep(delay);
+          continue;
+        }
+        const code = OPTIMADE_RETRYABLE_STATUSES.has(status) ? `optimade-http-${status}` : error?.code ?? "optimade-response-read-failed";
+        throw optimadeFailure(code, error?.message ?? code, attempts);
+      }
+      const retryable = OPTIMADE_RETRYABLE_STATUSES.has(status);
+      const canRetry = retryable && index + 1 < MAX_OPTIMADE_ATTEMPTS;
+      const delay = canRetry
+        ? Math.min(optimadeRetryAfterMs(response, clockMs()) ?? 250 * 2 ** index, Math.max(0, deadline - clockMs()))
+        : null;
+      const responseErrorCode = status !== 200
+        ? `optimade-http-${status}`
+        : !contentTypeValid
+          ? "optimade-content-type-invalid"
+          : !mimeType || !OPTIMADE_JSON_MIME_TYPES.has(mimeType) || bytes.length < 2
+            ? "optimade-response-invalid"
+            : null;
+      attempts.push({
+        attempt: index + 1, status, contentType, mimeType,
+        byteLength: bytes.length, rawSha256: sha256(bytes), bodyComplete: true,
+        retrievedAt, retryable, willRetry: canRetry, retryAfterMs: delay, errorCode: responseErrorCode,
+      });
+      attemptRecorded = true;
+      if (status === 200) {
+        if (!contentTypeValid) throw optimadeFailure(responseErrorCode, "OQMD OPTIMADE returned an invalid Content-Type header.", attempts);
+        if (responseErrorCode) {
+          throw optimadeFailure("optimade-response-invalid", "OQMD OPTIMADE did not return an allowed JSON response.", attempts);
+        }
+        return { bytes, retrievedAt, mimeType, retrieval: optimadeReceipt(attempts) };
+      }
+      if (canRetry) {
+        if (delay > 0) await sleep(delay);
+        continue;
+      }
+      throw optimadeFailure(`optimade-http-${status}`, `OQMD OPTIMADE returned HTTP ${status}.`, attempts);
+    } catch (error) {
+      if (error instanceof MaterialsScienceError && error.details?.retrieval) throw error;
+      if (!attemptRecorded) {
+        const aborted = controller.signal.aborted || error?.name === "AbortError";
+        const networkLike = !(error instanceof MaterialsScienceError) || error.code === "optimade-network-error";
+        const retryable = networkLike && !aborted;
+        const canRetry = retryable && index + 1 < MAX_OPTIMADE_ATTEMPTS;
+        const delay = canRetry ? Math.min(250 * 2 ** index, Math.max(0, deadline - clockMs())) : null;
+        const errorCode = aborted
+          ? "optimade-timeout"
+          : error instanceof MaterialsScienceError ? error.code : "optimade-network-error";
+        attempts.push({
+          attempt: index + 1, status: null, contentType: null, mimeType: null,
+          byteLength: 0, rawSha256: null, bodyComplete: false,
+          retrievedAt: new Date(clockMs()).toISOString(), retryable, willRetry: canRetry,
+          retryAfterMs: delay, errorCode,
+        });
+        if (aborted) throw optimadeFailure("optimade-timeout", "OQMD OPTIMADE request exceeded the total deadline.", attempts);
+        if (canRetry) {
+          if (delay > 0) await sleep(delay);
+          continue;
+        }
+      }
+      if (error instanceof MaterialsScienceError) throw optimadeFailure(error.code, error.message, attempts, error.details);
+      throw optimadeFailure("optimade-network-error", error?.message ?? "OQMD OPTIMADE network error.", attempts);
+    } finally { clearTimeout(timer); }
+  }
+  throw optimadeFailure("optimade-retry-exhausted", "OQMD OPTIMADE retry budget exhausted.", attempts);
 }
 
 function decodeJson(bytes, label) {
@@ -749,20 +974,58 @@ function createMaterialsScienceClient(options = {}) {
   if (typeof fetchImpl !== "function") throw new MaterialsScienceError("materials-fetch-unavailable");
   const clockMs = options.clockMs ?? Date.now;
   const sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+  const optimadeTimeoutMs = options.optimadeTimeoutMs ?? 30_000;
   const optimadeGate = createRateGate({ minIntervalMs: 1_000, clockMs, sleep });
   const codGate = createRateGate({ minIntervalMs: 1_000, clockMs, sleep });
 
   async function searchOqmdOptimadeStructures(input) {
     const built = buildOqmdUrl(input);
-    return optimadeGate(async () => {
-      const bytes = await fetchBytes(fetchImpl, built.url, { timeoutMs: 30_000, maxBytes: MAX_OPTIMADE_BYTES, label: "optimade" });
-      const normalized = normalizeOqmdOptimade(decodeJson(bytes, "optimade"));
+    const deadline = clockMs() + optimadeTimeoutMs;
+    try {
+      return await optimadeGate(async () => {
+      const fetched = await fetchOqmdWithReceipt(fetchImpl, built.url, built.input, {
+        clockMs, sleep, timeoutMs: optimadeTimeoutMs, deadline,
+      });
+      let normalized;
+      try {
+        normalized = normalizeOqmdOptimade(decodeJson(fetched.bytes, "optimade"));
+      } catch (error) {
+        if (error instanceof MaterialsScienceError) {
+          throw new MaterialsScienceError(error.code, error.message, { ...(error.details ?? {}), retrieval: fetched.retrieval });
+        }
+        throw error;
+      }
+      const expectedElements = built.input.elements.join("\u0000");
+      if (normalized.structures.some((structure) => [...structure.elements].sort().join("\u0000") !== expectedElements)) {
+        throw new MaterialsScienceError("optimade-provider-query-mismatch", "OQMD OPTIMADE returned a structure outside the requested exact element set.", { retrieval: fetched.retrieval });
+      }
       return {
         ...normalized,
         query: built.input,
-        provenance: receipt({ provider: "OQMD OPTIMADE", url: built.url, request: built.input, bytes, retrievedAt: new Date(clockMs()).toISOString(), license: "CC-BY-4.0", docsUrl: "https://www.oqmd.org/optimade/" }),
+        provenance: {
+          ...fetched.retrieval,
+          provider: "OQMD OPTIMADE",
+          request: { method: "GET", url: built.url, descriptorSha256: sha256(stableStringify(built.input)) },
+          response: { rawSha256: sha256(fetched.bytes), byteLength: fetched.bytes.length, mimeType: fetched.mimeType },
+          retrievedAt: fetched.retrievedAt,
+          license: "CC-BY-4.0",
+          docsUrl: "https://www.oqmd.org/optimade/",
+          hostPersistenceRequirement: "Use the Agentlas Science search_materials_structures host route when immutable ResearchRun, Source, and artifact persistence is required.",
+        },
       };
-    });
+      }, deadline);
+    } catch (error) {
+      if (error instanceof MaterialsScienceError && error.code === "optimade-timeout" && !error.details?.retrieval) {
+        const attempts = [{
+          attempt: 1, status: null, contentType: null, mimeType: null,
+          byteLength: 0, rawSha256: null, bodyComplete: false,
+          retrievedAt: new Date(clockMs()).toISOString(), retryable: false, willRetry: false,
+          retryAfterMs: null, errorCode: "optimade-timeout",
+        }];
+        throw optimadeFailure("optimade-timeout", "OQMD OPTIMADE request exceeded the total deadline while waiting for the provider gate.", attempts);
+      }
+      throw error;
+    }
   }
 
   async function searchCodCrystals(input) {
@@ -827,6 +1090,7 @@ function createMaterialsScienceClient(options = {}) {
 }
 
 module.exports = {
+  PLUGIN_VERSION,
   MaterialsScienceError,
   buildOqmdUrl,
   normalizeOqmdOptimade,

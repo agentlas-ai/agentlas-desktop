@@ -5,8 +5,8 @@
 // 코드가 0이었다. 파일이 있는 것과 모델이 그것을 아는 것은 다르다.
 //
 // 예산 규칙(플러그인이 늘어나도 무너지지 않게):
-//  · 항상 들어가는 것은 **목록 한 줄씩**이다 — 멘션, 짧은 라우터 요약, 상대 경로.
-//    절대 경로·전체 workflow 열거를 반복하지 않아 플러그인이 늘어도 문맥을 잠식하지 않는다.
+//  · 항상 들어가는 것은 **목록 한 줄씩**이다 — 멘션, 라우터 description, 라우터 경로.
+//    플러그인이 20개여도 이 부분은 수 KB 다.
 //  · 라우터 **전문**은 그 플러그인이 이번 턴에 `@slug` 로 불렸을 때만 인라인한다.
 //  · implicit:"never" 인 플러그인은 목록에도 넣지 않는다 — 불린 적 없으면 존재를 말하지
 //    않는다는 뜻이 그 값이다.
@@ -104,18 +104,6 @@ function mentioned(userPrompt: string, plugin: InstalledPlugin): boolean {
   return userPrompt.toLowerCase().includes(needle);
 }
 
-function compactRouterDescription(plugin: InstalledPlugin): string {
-  const normalized = (plugin.routerDescription || plugin.name)
-    .replace(/\s+/g, " ")
-    .trim();
-  const characters = Array.from(normalized);
-  return characters.length > 48 ? `${characters.slice(0, 47).join("")}…` : normalized;
-}
-
-function compactRouterPath(plugin: InstalledPlugin): string {
-  return path.relative(pluginsRoot(), plugin.routerPath).split(path.sep).join("/");
-}
-
 /**
  * 이번 실행의 플러그인 안내. 설치된 것이 없으면 `""` — 없는 것을 있다고 말하지 않는다.
  *
@@ -130,9 +118,11 @@ export function pluginRouterPrompt(userPrompt?: string): string {
   const lines: string[] = [
     "## Plugins available in this run",
     "",
-    "Match plugins from ordinary-language intent; never require the user to know a plugin, MCP, or tool name. Match every meaningful sub-requirement of a compound request, so generic file, network, or image tools never displace a domain workflow plugin for the visual, document, audio, video, or other specialist part. Open each matching Router under ~/.agentlas/plugins, then follow the workflow skill it selects.",
-    "Agentlas Routers are authoritative: resolve each listed path under ~/.agentlas/plugins before any same-named host skill; never substitute ~/.codex or ~/.agents.",
-    "Inside a skill, `$name` is another skill/reference and `@name` is a host tool.",
+    "A plugin is a capability package: a router skill that decides which of its workflow skills applies, plus the reference documents those skills cite. It is not an agent and has no memory of its own.",
+    "",
+    "How to use one:",
+    `- Open the router file listed below, follow its routing rules, then open the workflow skill it names.`,
+    `- Inside a skill, \`$name\` means another skill (\`<plugin>/skills/<name>/SKILL.md\`) or a shared reference (\`<plugin>/references/<name>.md\`); \`@name\` means a host tool.`,
     "- If a skill needs a tool you do not have, say so and stop. Never describe work you could not carry out.",
     "",
   ];
@@ -145,9 +135,12 @@ export function pluginRouterPrompt(userPrompt?: string): string {
   }
 
   for (const p of listed) {
-    lines.push(`- ${p.mention}: ${compactRouterDescription(p)} | Router: ${compactRouterPath(p)}`);
+    lines.push(`### ${p.mention} — ${p.name}`);
+    if (p.routerDescription) lines.push(p.routerDescription);
+    lines.push(`Router: ${p.routerPath}`);
+    if (p.workflows.length) lines.push(`Skills: ${p.workflows.join(", ")}`);
+    lines.push("");
   }
-  lines.push("");
 
   // 명시 호출된 플러그인은 라우터를 읽는 왕복 없이 바로 따를 수 있도록 전문을 싣는다.
   for (const p of listed) {

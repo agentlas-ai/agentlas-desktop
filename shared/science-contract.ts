@@ -8,6 +8,20 @@ import type {
   ScienceNumericSurfaceRasterArtifactPayload,
   ScienceNumericSurfaceV2ArtifactPayload,
 } from "./science-numeric-3d";
+import type {
+  ScienceManuscriptDocument,
+  ScienceManuscriptOperation,
+} from "./science-manuscript-document";
+import type {
+  ScienceManuscriptEditProposal,
+  ScienceManuscriptSelectionContext,
+} from "./science-manuscript-proposal";
+
+export * from "./science-manuscript-document";
+export * from "./science-manuscript-proposal";
+export * from "./science-manuscript-scholarly-assessment";
+export * from "./science-manuscript-comparable-eligibility";
+export * from "./science-manuscript-drafting";
 
 export const SCIENCE_DOMAINS = [
   "general",
@@ -168,6 +182,12 @@ export interface ScienceMessage {
   projectId: string;
   conversationId: string;
   role: "user" | "assistant" | "system";
+  /**
+   * Controller continuation prompts are durable runtime inputs, but are not
+   * researcher-authored chat.  Keeping the visibility on the canonical row
+   * lets the UI omit them without falsifying the runtime history.
+   */
+  visibility: "visible" | "internal";
   content: string;
   createdAt: string;
 }
@@ -235,6 +255,10 @@ export interface ScienceTurn {
   runtimeChatId: string;
   invocationRunId: string;
   parentTurnId: string | null;
+  /** Whether this invocation came from a researcher or an authorized loop continuation. */
+  origin: "user" | "loop-continuation";
+  continuationBasis: Record<string, unknown> | null;
+  continuationBasisSha256: string | null;
   status: ScienceTurnStatus;
   lastSequence: number;
   partialText: string;
@@ -256,6 +280,7 @@ export type StartScienceTurnInput = {
 } & (
   | { mode: "existing-user-message"; userMessageId: string }
   | { mode: "append-user-message"; content: string }
+  | { mode: "append-controller-message"; content: string; continuationBasis: Record<string, unknown> }
 );
 
 export interface StartScienceTurnResult {
@@ -449,7 +474,7 @@ export interface ScienceDatasetTablePayload {
     formulaLikeCellCount: number;
   };
   receipts: {
-    parserId: "agentlas.csv-to-table";
+    parserId: "agentlas.csv-to-table" | "agentlas.comparative-genomics-publication-table";
     parserVersion: "1.0.0";
     rawSha256: string;
     headerSha256: string;
@@ -467,6 +492,16 @@ export interface ScienceResearchRunSourceBinding {
   sourceId: string;
   sourceVersionId: string;
   contentSha256: string;
+  createdAt: string;
+}
+
+export interface ScienceResearchRunSourceOutputBinding {
+  bindingId: string;
+  projectId: string;
+  runId: string;
+  outputId: string;
+  outputOrdinal: number;
+  outputSha256: string;
   createdAt: string;
 }
 
@@ -707,6 +742,43 @@ export interface ScienceResearchContract {
   updatedAt: string;
 }
 
+/**
+ * The decisions a project can authorize in advance.
+ *
+ * Each names a point where the product would otherwise wait for a person. `submission-attestation`
+ * is deliberately separate from the rest: it is a statement made in the researcher's name to a
+ * publisher, so a project has to opt into it explicitly rather than inherit it from a blanket
+ * "proceed".
+ */
+export const SCIENCE_APPROVAL_SCOPES = Object.freeze([
+  "research-contract",
+  "hypothesis",
+  "journal-identity",
+  "submission-attestation",
+] as const);
+export type ScienceApprovalScope = typeof SCIENCE_APPROVAL_SCOPES[number];
+
+export interface ScienceApprovalPolicy {
+  id: string;
+  projectId: string;
+  revision: number;
+  /** `autonomous` lets the scopes below proceed without stopping; `checkpoint` asks every time. */
+  mode: "autonomous" | "checkpoint";
+  scopes: ScienceApprovalScope[];
+  grantedBy: string;
+  note: string | null;
+  createdAt: string;
+}
+
+export interface SetScienceApprovalPolicyInput {
+  requestId: string;
+  projectId: string;
+  mode: "autonomous" | "checkpoint";
+  scopes: ScienceApprovalScope[];
+  grantedBy: string;
+  note?: string | null;
+}
+
 export interface SaveScienceResearchContractInput {
   requestId: string;
   projectId: string;
@@ -886,6 +958,99 @@ export interface ScienceResearchEpisodeResult {
   resultSha256: string;
   createdAt: string;
 }
+
+export type ScienceEpisodeResultReviewVerdict = "accepted" | "rejected";
+
+export interface ScienceEpisodeResultReviewArtifactBinding {
+  artifactId: string;
+  artifactVersion: number;
+  contentSha256: string;
+}
+
+export interface ScienceEpisodeResultReviewSelectedAction {
+  trigger: string;
+  action: string;
+  reason: string;
+  destinationKind: "lab" | "artifact" | "analysis-plan" | "human-decision" | "manuscript";
+  destinationId: string | null;
+  requiresHumanDecision: boolean;
+}
+
+export interface ScienceEpisodeResultReviewReceipt {
+  schema: "agentlas.science.episode-result-review/v1";
+  id: string;
+  requestId: string;
+  projectId: string;
+  projectVersion: number;
+  projectContentSha256: string;
+  loopSessionId: string;
+  loopVersion: number;
+  loopStateSha256: string;
+  episodeId: string;
+  episodeVersion: number;
+  episodeStateSha256: string;
+  resultSha256: string;
+  labId: string;
+  basisSha256: string;
+  projectionSha256: string;
+  artifacts: ScienceEpisodeResultReviewArtifactBinding[];
+  revision: number;
+  previousReviewSha256: string | null;
+  verdict: ScienceEpisodeResultReviewVerdict;
+  rationale: string;
+  selectedNextTrigger: string;
+  selectedNextAction: ScienceEpisodeResultReviewSelectedAction;
+  selectedNextActionSha256: string;
+  reviewerRef: string;
+  createdAt: string;
+  reviewSha256: string;
+}
+
+export interface InspectScienceEpisodeResultReviewInput {
+  projectId: string;
+  labId: string;
+  episodeId: string;
+  expectedProjectionSha256: string;
+}
+
+export interface ScienceEpisodeResultReviewInspection {
+  project: ScienceProject;
+  projectContentSha256: string;
+  session: ScienceLoopSession;
+  episode: ScienceResearchEpisode;
+  labId: string;
+  basisSha256: string;
+  projectionSha256: string;
+  boundary: string;
+  availableActions: ScienceEpisodeResultReviewSelectedAction[];
+  latestReceipt: ScienceEpisodeResultReviewReceipt | null;
+}
+
+export interface RecordScienceEpisodeResultReviewInput {
+  requestId: string;
+  projectId: string;
+  loopSessionId: string;
+  episodeId: string;
+  labId: string;
+  expectedProjectVersion: number;
+  expectedProjectContentSha256: string;
+  expectedLoopVersion: number;
+  expectedLoopStateSha256: string;
+  expectedEpisodeVersion: number;
+  expectedEpisodeStateSha256: string;
+  expectedResultSha256: string;
+  expectedBasisSha256: string;
+  expectedProjectionSha256: string;
+  expectedReviewRevision: number;
+  expectedReviewSha256: string | null;
+  verdict: ScienceEpisodeResultReviewVerdict;
+  rationale: string;
+  selectedNextTrigger: string;
+}
+
+export type RecordScienceEpisodeResultReviewResult =
+  | { outcome: "recorded"; receipt: ScienceEpisodeResultReviewReceipt; replayed: boolean }
+  | { outcome: "refresh-required"; reason: string; inspection: ScienceEpisodeResultReviewInspection | null; replayed: false };
 
 export interface ScienceResearchEpisode {
   id: string;
@@ -1094,6 +1259,28 @@ export interface ScienceResearchRunAnalysisPlanBinding {
   contentSha256: string;
 }
 
+/**
+ * Immutable, project-scoped lineage from one research run to an exact succeeded
+ * parent run. `parentRunId` on ScienceResearchRun remains the compatibility
+ * pointer to the single primary parent; this collection carries every parent.
+ */
+export interface ScienceResearchRunParentBinding {
+  id: string;
+  projectId: string;
+  runId: string;
+  ordinal: number;
+  role: string;
+  parentRunId: string;
+  parentContentSha256: string;
+  createdAt: string;
+}
+
+export interface ScienceResearchRunParentBindingInput {
+  ordinal: number;
+  role: string;
+  parentRunId: string;
+}
+
 export interface ScienceResearchRun {
   id: string;
   projectId: string;
@@ -1167,6 +1354,7 @@ export interface ScienceRunArtifactBinding {
   projectId: string;
   runId: string;
   outputId: string;
+  outputOrdinal: number;
   outputSha256: string;
   artifactId: string;
   artifactVersion: number;
@@ -1196,6 +1384,12 @@ export interface CreateScienceResearchRunInput {
   originMessageId: string;
   loopSessionId?: string | null;
   parentRunId?: string | null;
+  /**
+   * Optional explicit multi-parent lineage. When present, exactly one `primary`
+   * binding must match `parentRunId`. Legacy callers may keep passing only
+   * `parentRunId`; the store synthesizes its immutable primary binding.
+   */
+  parentBindings?: ScienceResearchRunParentBindingInput[];
   toolId: string;
   toolVersion: string;
   runtime: ScienceResearchRunRuntime;
@@ -1843,6 +2037,7 @@ export interface ScienceArtifactVisualCapture {
     architecture: string;
     locale: string;
     colorScheme: "light" | "dark";
+    captureMethod?: "cdp-staged-origin-clip";
     deviceScaleFactor: number;
     cssWidth: number;
     cssHeight: number;
@@ -1958,6 +2153,27 @@ export interface ScienceArtifactValidationReceipt {
   createdAt: string;
 }
 
+/**
+ * Immutable companion closure for publication validators that prove which
+ * exact succeeded-run output produced the validated artifact version. Older
+ * validation receipts may legitimately have no companion row; validator v2
+ * and later must require one before replaying or binding the receipt.
+ */
+export interface ScienceArtifactValidationRunArtifactBinding {
+  receiptId: string;
+  projectId: string;
+  runArtifactBindingId: string;
+  runId: string;
+  outputId: string;
+  outputOrdinal: number;
+  outputRole: string;
+  outputSha256: string;
+  artifactId: string;
+  artifactVersion: number;
+  artifactContentSha256: string;
+  createdAt: string;
+}
+
 export interface RecordScienceArtifactValidationInput {
   requestId: string;
   projectId: string;
@@ -1973,10 +2189,17 @@ export interface RecordScienceArtifactValidationInput {
   challengeSha256: string;
   inputSha256: string;
   environmentSha256: string;
+  /**
+   * When supplied, the store must atomically persist an immutable companion
+   * row derived from this binding and the exact run output. Callers may not
+   * supply any of the derived closure fields themselves.
+   */
+  runArtifactBindingId?: string;
 }
 
 export interface RecordScienceArtifactValidationResult {
   receipt: ScienceArtifactValidationReceipt;
+  runArtifactBinding?: ScienceArtifactValidationRunArtifactBinding;
   replayed: boolean;
 }
 
@@ -2012,8 +2235,18 @@ export const SCIENCE_ANALYSIS_MODEL_FAMILIES = [
   "gee",
   "pca",
   "time-series-diagnostics",
+  // Added with the extension method registry. Additive only: existing frozen AnalysisSpec documents
+  // keep resolving, and a plan may still classify a survival or categorical model as "glm" as the
+  // core methods do. These names let a plan say what it actually is instead of the nearest fit.
+  "lmm",
+  "nonparametric",
+  "survival",
+  "categorical",
+  "meta-analysis",
   "rank-test",
   "classification-evaluation",
+  "diagnostic-accuracy",
+  "mixed-models",
 ] as const;
 export type ScienceAnalysisModelFamily = typeof SCIENCE_ANALYSIS_MODEL_FAMILIES[number];
 
@@ -2236,8 +2469,15 @@ export interface ScienceManuscriptVersion {
   version: number;
   markdown: string;
   contentSha256: string;
+  /** Structured editor state. Absent only on manuscripts created before the document-IDE migration. */
+  document?: ScienceManuscriptDocument;
+  /** Integrity hash of `document`; distinct from the renderer-facing Markdown content hash. */
+  documentSha256?: string;
+  /** Fresh baseline identity epoch; never inferred by matching legacy Markdown content. */
+  identityEpoch?: string;
   bindingManifestSha256: string;
   bindings: ScienceManuscriptBinding[];
+  blueprintBinding?: import("./science-manuscript-blueprint").ScienceManuscriptBlueprintBinding;
   createdAt: string;
 }
 
@@ -2259,7 +2499,10 @@ export interface CreateScienceManuscriptInput {
   projectId: string;
   title: string;
   markdown: string;
+  /** Optional structured baseline. When present, its deterministic serialization must equal `markdown`. */
+  document?: ScienceManuscriptDocument;
   bindings: ScienceManuscriptBindingInput[];
+  blueprintBinding?: import("./science-manuscript-blueprint").ScienceManuscriptBlueprintBindingInput;
 }
 
 export interface CreateScienceManuscriptResult {
@@ -2274,7 +2517,10 @@ export interface AppendScienceManuscriptVersionInput {
   expectedVersion: number;
   expectedContentSha256: string;
   markdown: string;
+  /** Optional structured next version. When present, its deterministic serialization must equal `markdown`. */
+  document?: ScienceManuscriptDocument;
   bindings: ScienceManuscriptBindingInput[];
+  blueprintBinding?: import("./science-manuscript-blueprint").ScienceManuscriptBlueprintBindingInput;
 }
 
 export interface AppendScienceManuscriptVersionResult {
@@ -2282,7 +2528,119 @@ export interface AppendScienceManuscriptVersionResult {
   replayed: boolean;
 }
 
+export type ScienceManuscriptTransactionActor = "user" | "assistant";
+
+/** The sole mutation contract used by direct manipulation and assistant edits. */
+export interface ApplyScienceManuscriptTransactionInput {
+  requestId: string;
+  projectId: string;
+  manuscriptId: string;
+  expectedVersion: number;
+  expectedContentSha256: string;
+  expectedDocumentSha256: string;
+  actor: ScienceManuscriptTransactionActor;
+  reason: string | null;
+  operations: ScienceManuscriptOperation[];
+}
+
+export interface ScienceManuscriptTransaction {
+  id: string;
+  requestId: string;
+  projectId: string;
+  manuscriptId: string;
+  baseVersion: number;
+  baseContentSha256: string;
+  baseDocumentSha256: string;
+  resultVersion: number;
+  resultContentSha256: string;
+  resultDocumentSha256: string;
+  actor: ScienceManuscriptTransactionActor;
+  reason: string | null;
+  /** Non-null only when this transaction is the durable inverse of another transaction. */
+  revertsTransactionId: string | null;
+  operations: ScienceManuscriptOperation[];
+  createdAt: string;
+}
+
+export interface ApplyScienceManuscriptTransactionResult {
+  manuscript: ScienceManuscript;
+  transaction: ScienceManuscriptTransaction;
+  replayed: boolean;
+}
+
+export interface RevertScienceManuscriptTransactionInput {
+  requestId: string;
+  projectId: string;
+  manuscriptId: string;
+  transactionId: string;
+  expectedVersion: number;
+  expectedContentSha256: string;
+  expectedDocumentSha256: string;
+  actor: ScienceManuscriptTransactionActor;
+  reason: string | null;
+}
+
+export type RevertScienceManuscriptTransactionResult = ApplyScienceManuscriptTransactionResult;
+
+export interface GetScienceManuscriptEditorModelResult {
+  manuscript: ScienceManuscript;
+  document: ScienceManuscriptDocument;
+  recentTransactions: ScienceManuscriptTransaction[];
+  canUndo: boolean;
+}
+
+export interface CreateScienceManuscriptSelectionContextResult {
+  selectionContext: ScienceManuscriptSelectionContext;
+  replayed: boolean;
+}
+
+export interface CreateScienceManuscriptEditProposalResult {
+  proposal: ScienceManuscriptEditProposal;
+  replayed: boolean;
+}
+
+export interface ApplyScienceManuscriptEditProposalResult {
+  proposal: ScienceManuscriptEditProposal;
+  manuscript: ScienceManuscript;
+  transaction: ScienceManuscriptTransaction;
+  replayed: boolean;
+}
+
+export interface RejectScienceManuscriptEditProposalResult {
+  proposal: ScienceManuscriptEditProposal;
+  replayed: boolean;
+}
+
 export type ScienceJournalRuleSeverity = "error" | "warning" | "manual";
+
+export type ScienceManuscriptPageSize = "a4" | "letter";
+export type ScienceManuscriptFontFamily = "serif" | "sans-serif";
+export type ScienceManuscriptLineSpacing = "single" | "one-and-half" | "double";
+export type ScienceManuscriptRenderTarget = "initial-submission" | "accepted-source" | "published-approximation";
+export type ScienceManuscriptLatexTemplate = "generic-article" | "aps-revtex4-2";
+export type ScienceManuscriptApsJournalStyle = "pra" | "prb" | "prc" | "prd" | "pre" | "prl" | "rmp";
+export type ScienceManuscriptTitlePageMode = "inline" | "separate";
+
+export interface ScienceManuscriptLayoutSpec {
+  pageSize: ScienceManuscriptPageSize;
+  marginsMm: { top: number; right: number; bottom: number; left: number };
+  fontFamily: ScienceManuscriptFontFamily;
+  fontSizePt: 10 | 11 | 12;
+  lineSpacing: ScienceManuscriptLineSpacing;
+  lineNumbers: boolean;
+  /** Submission manuscripts and publication-like proofs are different artifacts. */
+  renderTarget?: ScienceManuscriptRenderTarget;
+  /** Exact installed LaTeX recipe. Omitted legacy rules use generic-article. */
+  latexTemplate?: ScienceManuscriptLatexTemplate;
+  /** Required to claim one specific APS journal rather than the REVTeX default. */
+  latexJournalStyle?: ScienceManuscriptApsJournalStyle;
+  /** Main-text column count; title and abstract remain full-width in HTML preview. */
+  columnCount?: 1 | 2;
+  /** Inter-column gap. Only meaningful when columnCount is 2. */
+  columnGapMm?: number;
+  /** Whether author/front matter occupies its own first page. */
+  titlePageMode?: ScienceManuscriptTitlePageMode;
+}
 
 export type ScienceJournalRuleCheck =
   | { kind: "heading-present"; headings: string[]; minimumMatches: number }
@@ -2292,6 +2650,8 @@ export type ScienceJournalRuleCheck =
   | { kind: "binding-count"; role: ScienceManuscriptBinding["role"]; minimum?: number; maximum?: number }
   | { kind: "required-text"; patterns: string[]; minimumMatches: number }
   | { kind: "output-format"; allowed: Array<"docx" | "tex" | "pdf" | "zip">; preferred: "docx" | "tex" | "pdf" }
+  | { kind: "bibliography-style"; style: "numeric" | "apa" | "nature" }
+  | ({ kind: "manuscript-layout" } & ScienceManuscriptLayoutSpec)
   | { kind: "figure-raster-profile"; minimumDpi: 300 | 600; allowedColorSpaces: Array<"srgb" | "cmyk"> }
   | { kind: "figure-vector-profile"; allowedFormats: Array<"svg"> }
   | { kind: "manual-attestation"; code: string };
@@ -2439,6 +2799,18 @@ export interface ScienceJournalValidationReport {
   journalProfileId: string;
   journalProfileVersion: number;
   journalProfileContentSha256: string;
+  manuscriptBlueprintId: string | null;
+  manuscriptBlueprintVersion: number | null;
+  manuscriptBlueprintContentSha256: string | null;
+  manuscriptBlueprintAssessmentId: string | null;
+  manuscriptBlueprintAssessmentReportSha256: string | null;
+  manuscriptBlueprintAssessmentPolicyContentSha256: string | null;
+  manuscriptScholarlyAssessmentId: string | null;
+  manuscriptScholarlyAssessmentReportSha256: string | null;
+  manuscriptScholarlyAssessmentPolicyContentSha256: string | null;
+  manuscriptCoherenceAssessmentId: string | null;
+  manuscriptCoherenceAssessmentReportSha256: string | null;
+  manuscriptCoherenceAssessmentContentSha256: string | null;
   claimLedgerId: string | null;
   claimLedgerRevision: number | null;
   claimLedgerManifestSha256: string | null;
@@ -2478,6 +2850,15 @@ export interface ScienceJournalValidationReceipt {
   journalIdentityReceiptId: string;
   journalIdentityReceiptSha256: string;
   humanAttestationReceiptIds: string[];
+  manuscriptBlueprintAssessmentId: string | null;
+  manuscriptBlueprintAssessmentReportSha256: string | null;
+  manuscriptBlueprintAssessmentPolicyContentSha256: string | null;
+  manuscriptScholarlyAssessmentId: string | null;
+  manuscriptScholarlyAssessmentReportSha256: string | null;
+  manuscriptScholarlyAssessmentPolicyContentSha256: string | null;
+  manuscriptCoherenceAssessmentId: string | null;
+  manuscriptCoherenceAssessmentReportSha256: string | null;
+  manuscriptCoherenceAssessmentContentSha256: string | null;
   claimLedgerId: string | null;
   claimLedgerRevision: number | null;
   claimLedgerManifestSha256: string | null;
@@ -2543,6 +2924,12 @@ export interface ScienceSubmissionExport {
   validationReceiptId: string;
   validationReceiptSha256: string;
   validationReportSha256: string;
+  manuscriptScholarlyAssessmentId: string | null;
+  manuscriptScholarlyAssessmentReportSha256: string | null;
+  manuscriptScholarlyAssessmentPolicyContentSha256: string | null;
+  manuscriptCoherenceAssessmentId: string | null;
+  manuscriptCoherenceAssessmentReportSha256: string | null;
+  manuscriptCoherenceAssessmentContentSha256: string | null;
   claimLedgerId: string | null;
   claimLedgerRevision: number | null;
   claimLedgerManifestSha256: string | null;
@@ -2576,3 +2963,4 @@ export interface CreateScienceSubmissionExportResult {
   replayed: boolean;
 }
 import type { ScienceRendererPackStatus } from "./science-renderer-pack";
+export * from "./science-manuscript-blueprint";

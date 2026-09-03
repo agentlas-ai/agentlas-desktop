@@ -1,0 +1,12 @@
+{
+  "schema": "agentlas.astronomy.analysis-tool-index/v1",
+  "tools": [
+    "light-curve-periodicity-depth.json",
+    "transit-search-bls.json",
+    "galactic-kinematics.json",
+    "colour-magnitude-diagram.json",
+    "flat-lambda-cdm-cosmology.json",
+    "sed-blackbody-fit.json",
+    "radial-velocity-orbit.json"
+  ]
+}

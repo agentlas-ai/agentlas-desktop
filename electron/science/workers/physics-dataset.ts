@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Module from "node:module";
 import { createHash } from "node:crypto";
+import { loadSciencePluginRuntime } from "../plugin-runtime";
 
 const NETWORK_MODULES = new Set(["http", "https", "http2", "net", "tls", "dns", "dgram", "node:http", "node:https", "node:http2", "node:net", "node:tls", "node:dns", "node:dgram"]);
 const originalLoad = (Module as unknown as { _load: (...args: unknown[]) => unknown })._load;
@@ -16,11 +17,11 @@ function fail(message: string): never { process.stderr.write(`${message}\n`); pr
 function digest(bytes: Buffer | string): string { return createHash("sha256").update(bytes).digest("hex"); }
 
 function readPhysicsRuntime(): PhysicsRuntime {
-  const runtimePath = path.resolve(__dirname, "../../../plugins/agentlas-physics/runtime/physics.cjs");
-  const stat = fs.lstatSync(runtimePath);
-  if (!stat.isFile() || stat.isSymbolicLink()) fail("science-physics-runtime-invalid");
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  return require(runtimePath) as PhysicsRuntime;
+  try {
+    return loadSciencePluginRuntime<PhysicsRuntime>(
+      "agentlas-physics", "runtime/physics.cjs", 16 * 1024 * 1024,
+    ).runtime;
+  } catch { return fail("science-physics-runtime-invalid"); }
 }
 
 function main(): void {

@@ -43,6 +43,11 @@ interface CurrentPointer {
   enabled: boolean;
 }
 
+export interface ProductExtensionActivationSnapshot {
+  id: string;
+  pointer: CurrentPointer | null;
+}
+
 interface ExtensionLock {
   fd: number;
   filePath: string;
@@ -302,6 +307,7 @@ export class ProductExtensionInstaller {
     return entries
       .filter((entry) => entry.isDirectory() && !entry.name.startsWith(".") && isProductExtensionId(entry.name) && entry.name.startsWith(prefix))
       .map((entry) => this.status(entry.name))
+      .filter((status) => status.phase !== "not-installed")
       .sort((left, right) => left.id.localeCompare(right.id));
   }
 
@@ -317,6 +323,54 @@ export class ProductExtensionInstaller {
       releaseDir,
       entryPath: exactChild(releaseDir, manifest.entry),
     };
+  }
+
+  captureActivationState(ids: readonly string[]): ProductExtensionActivationSnapshot[] {
+    const unique = [...new Set(ids)];
+    if (unique.length !== ids.length || unique.some((id) => !isProductExtensionId(id))) {
+      throw new Error("invalid-extension-activation-snapshot-request");
+    }
+    return unique.map((id) => {
+      const target = currentPath(this.options.rootDir, id);
+      if (!fs.existsSync(target)) return { id, pointer: null };
+      const stat = fs.lstatSync(target);
+      if (stat.isSymbolicLink() || !stat.isFile() || stat.size > MAX_MANIFEST_BYTES) {
+        throw new Error("invalid-current-pointer");
+      }
+      const pointer = readCurrent(this.options.rootDir, id);
+      if (!pointer) return { id, pointer: null };
+      return { id, pointer: { ...pointer } };
+    });
+  }
+
+  restoreActivationState(snapshots: readonly ProductExtensionActivationSnapshot[]): void {
+    const ids = snapshots.map((snapshot) => snapshot.id);
+    if (new Set(ids).size !== ids.length || ids.some((id) => !isProductExtensionId(id))) {
+      throw new Error("invalid-extension-activation-snapshot");
+    }
+    const failures: string[] = [];
+    for (const snapshot of snapshots) {
+      let lock: ExtensionLock | null = null;
+      try {
+        lock = acquireExtensionLock(this.options.rootDir, snapshot.id);
+        const target = currentPath(this.options.rootDir, snapshot.id);
+        if (snapshot.pointer) {
+          if (snapshot.pointer.id !== snapshot.id || snapshot.pointer.schema !== PRODUCT_EXTENSION_INSTALL_SCHEMA) {
+            throw new Error("invalid-extension-activation-snapshot");
+          }
+          writeJsonAtomic(target, snapshot.pointer);
+        } else if (fs.existsSync(target)) {
+          const stat = fs.lstatSync(target);
+          if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("invalid-current-pointer");
+          fs.rmSync(target);
+        }
+      } catch (error) {
+        failures.push(`${snapshot.id}:${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        releaseExtensionLock(lock);
+      }
+    }
+    if (failures.length > 0) throw new Error(`extension-activation-rollback-failed:${failures.join(",")}`);
   }
 
   installFromDirectory(sourceDir: string): ProductExtensionInstallReceipt {

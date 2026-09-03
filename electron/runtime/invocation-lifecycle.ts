@@ -72,6 +72,14 @@ export class InvocationLifecycleRegistry<T extends InvocationLifecycleRecord> {
   }
 
   requestCancel(runId: string, at = new Date().toISOString()): InvocationCancelResult {
+    return this.requestCancelWithReason(runId, new Error(STOPPED_BY_USER), at);
+  }
+
+  requestCancelWithReason(
+    runId: string,
+    reason: Error,
+    at = new Date().toISOString(),
+  ): InvocationCancelResult {
     const record = this.active.get(runId);
     if (!record) return "not-found";
     if (record.cancelRequestedAt || record.controller.signal.aborted) return "already-requested";
@@ -84,7 +92,7 @@ export class InvocationLifecycleRegistry<T extends InvocationLifecycleRecord> {
      * 사용자가 누른 중지는 실패가 아니고, 그 사실은 지어낼 필요 없이 여기서 이미 안다.
      * 러너들은 abortReasonError() 로 signal.reason 을 먼저 읽으므로 이 문장이 쓰인다.
      */
-    record.controller.abort(new Error(STOPPED_BY_USER));
+    record.controller.abort(reason);
     return "requested";
   }
 

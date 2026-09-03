@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { app } from "electron";
 import { userDataPath } from "../runtime-paths";
+import { detachedSpawnOpts, killCliTree, trackRunChild } from "../runtime/exec";
 
 export type ImageModel = "codex" | "gemini" | "auto";
 export interface ImageResult {
@@ -17,10 +18,7 @@ export interface ImageResult {
   reason?: string;
   /** 실제 생성에 성공한 엔진(auto 페일오버 추적용). */
   engine?: "codex" | "gemini";
-  /**
-   * Main-only durable artifact source. It is attached as a non-enumerable
-   * property so IPC/JSON/tool text can never disclose a host-absolute path.
-   */
+  /** Main-only source path; never put this path in model/user text. */
   artifactPath?: string;
 }
 
@@ -92,7 +90,9 @@ async function runCodexImage(prompt: string, target: string, cwd: string): Promi
         cwd,
         env: process.env,
         stdio: ["ignore", "ignore", "ignore"],
+        ...detachedSpawnOpts(),
       });
+      trackRunChild(child);
     } catch {
       finish();
       return;
@@ -100,7 +100,7 @@ async function runCodexImage(prompt: string, target: string, cwd: string): Promi
     // 실측: codex image_gen은 콜드 스타트 시 2~4분 — 150s는 완성 직전에 죽인다(all-engines 오탐 원인).
     const timer = setTimeout(() => {
       try {
-        child?.kill("SIGKILL");
+        if (child) killCliTree(child, 250);
       } catch {
         /* ignore */
       }
@@ -181,14 +181,16 @@ async function runAgyNanoBanana(prompt: string, target: string): Promise<boolean
         cwd: outDir,
         env,
         stdio: ["ignore", "ignore", "ignore"],
+        ...detachedSpawnOpts(),
       });
+      trackRunChild(child);
     } catch {
       finish();
       return;
     }
     const timer = setTimeout(() => {
       try {
-        child?.kill("SIGKILL");
+        if (child) killCliTree(child, 250);
       } catch {
         /* ignore */
       }
@@ -235,12 +237,13 @@ const COOLDOWN_MS = 15 * 60 * 1000;
  * 슬롯에서 온 선택을 몰래 다른 공급자로 바꾸면 저장된 선택과 실제 영수증이 달라진다.
  */
 export async function generateImage(model: ImageModel, prompt: string): Promise<ImageResult> {
+  let target: string | undefined;
   try {
     const clean = (prompt || "").trim().slice(0, 1200);
     if (!clean) return { ok: false, reason: "empty-prompt" };
     const dir = userDataPath("multimodal-images");
     fs.mkdirSync(dir, { recursive: true });
-    const target = path.join(dir, `trex_${Date.now()}_${Math.floor(Math.random() * 1e6)}.png`);
+    target = path.join(dir, `trex_${Date.now()}_${Math.floor(Math.random() * 1e6)}.png`);
 
     const now = Date.now();
     const preferred: Array<"codex" | "gemini"> =
@@ -268,20 +271,44 @@ export async function generateImage(model: ImageModel, prompt: string): Promise<
       }
       engineCooldown[e] = now + COOLDOWN_MS;
     }
-    if (!engine) return { ok: false, reason: "all-engines-unavailable" };
+    if (!engine) {
+      try { fs.unlinkSync(target); } catch { /* partial engine output is disposable */ }
+      return { ok: false, reason: "all-engines-unavailable" };
+    }
 
     const buf = fs.readFileSync(target);
     const mime = sniffImageMime(buf);
-    const result: ImageResult = { ok: true, src: `data:${mime};base64,${buf.toString("base64")}`, engine };
-    Object.defineProperty(result, "artifactPath", {
-      value: target,
-      enumerable: false,
-      configurable: false,
-      writable: false,
-    });
-    return result;
+    return {
+      ok: true,
+      src: `data:${mime};base64,${buf.toString("base64")}`,
+      engine,
+      artifactPath: target,
+    };
   } catch (e) {
+    if (target) {
+      try { fs.unlinkSync(target); } catch { /* cleanup is best-effort after a failed run */ }
+    }
     return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * Remove one generated source after its bytes have been copied into the
+ * durable chat attachment store. The path is accepted only inside the
+ * app-owned multimodal root and only when it is a private regular file.
+ */
+export function removeGeneratedImageArtifact(filePath: string): boolean {
+  try {
+    const root = fs.realpathSync.native(path.resolve(userDataPath("multimodal-images")));
+    const candidate = path.resolve(filePath);
+    const relative = path.relative(root, candidate);
+    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return false;
+    const stat = fs.lstatSync(candidate, { bigint: true });
+    if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1n) return false;
+    fs.unlinkSync(candidate);
+    return true;
+  } catch {
+    return false;
   }
 }
 

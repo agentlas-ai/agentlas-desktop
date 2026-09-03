@@ -10,8 +10,6 @@ let sharpModulePromise: Promise<SharpModule> | null = null;
 
 async function getSharp(): Promise<SharpModule> {
   if (!sharpModulePromise) {
-    // This native dependency is needed only while validating a Science PNG;
-    // loading it during Electron startup can strand native updater relaunches.
     sharpModulePromise = import("sharp").then((module) => module.default);
   }
   return sharpModulePromise;

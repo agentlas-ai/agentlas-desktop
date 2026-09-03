@@ -608,7 +608,10 @@ function SoloAgentSummary({
 
 function soloWaterfallItems(timeline: NetTimelineItem[], locale: "ko" | "en"): SoloWaterfallItem[] {
   return timeline
-    .slice(-14)
+    // TaskCockpit keeps the durable timeline bounded at 80 entries. Do not
+    // silently discard the older half of a completed run in the Work rail;
+    // long executions need the same inspectable history as the One result rail.
+    .slice(-80)
     .map<SoloWaterfallItem | null>((item) => {
       const text = item.kind === "message"
         ? item.text.replace(/\s+/g, " ").trim()

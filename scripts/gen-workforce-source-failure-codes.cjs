@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * Core → Desktop 코드젠: 소스 실패 코드 목록 하나만.
+ * Core → Desktop 코드젠: Desktop이 사용하는 Workforce 유한 코드 목록.
  *
  * 병(실측): Core(agentlas_cloud/workforce/federation.py)는 19개를 올리는데
  * Desktop의 workforce-orchestrator.ts는 손으로 적은 18개를 갖고 있었다. 빠진 것은
@@ -14,8 +14,12 @@
  *
  * 정본: Agentlas-OS/agentlas_cloud/workforce/federation.py
  *       WORKFORCE_SOURCE_FAILURE_CODES
+ *       Agentlas-OS/agentlas_cloud/workforce/contracts.py
+ *       WORKFORCE_SELECTION_REASON_CODES
  * 생성물: electron/mcp-tools/workforce-protocol-contract.json
- *       sourceFailureCodes (top-level; protocolMetadata must mirror Core's advertised keys EXACTLY, and Core does not advertise the codes there)
+ *       sourceFailureCodes, selectionReasonCodes (top-level; protocolMetadata
+ *       must mirror Core's advertised keys EXACTLY, and Core does not advertise
+ *       either catalog there)
  *
  * Agentlas-OS가 체크아웃돼 있지 않은 머신에서는 사유를 찍고 SKIP한다 — 부재를
  * 통과로 위장하지 않되, 저장소 하나만 가진 개발자를 막지도 않는다.
@@ -26,14 +30,23 @@ const path = require("node:path");
 
 const root = path.resolve(__dirname, "..");
 const contractFile = path.join(root, "electron", "mcp-tools", "workforce-protocol-contract.json");
-const coreRoot = process.env.AGENTLAS_OS_REPO || path.resolve(root, "..", "Agentlas-OS");
+const coreRootCandidates = process.env.AGENTLAS_OS_REPO
+  ? [path.resolve(process.env.AGENTLAS_OS_REPO)]
+  : [
+      path.resolve(root, "..", "Agentlas-OS"),
+      path.resolve(root, "..", "..", "Agentlas-OS"),
+    ];
+const coreRoot = coreRootCandidates.find((candidate) => (
+  fs.existsSync(path.join(candidate, "agentlas_cloud", "workforce", "federation.py"))
+)) || coreRootCandidates[0];
 const coreFile = path.join(coreRoot, "agentlas_cloud", "workforce", "federation.py");
+const coreContractsFile = path.join(coreRoot, "agentlas_cloud", "workforce", "contracts.py");
 
 const check = process.argv.includes("--check");
 
-if (!fs.existsSync(coreFile)) {
+if (!fs.existsSync(coreFile) || !fs.existsSync(coreContractsFile)) {
   console.log(
-    `SKIP workforce source failure codes — Core가 없다: ${coreFile}\n` +
+    `SKIP workforce contract codes — Core가 없다: ${!fs.existsSync(coreFile) ? coreFile : coreContractsFile}\n` +
       "  (Agentlas-OS를 형제 디렉터리로 체크아웃하거나 AGENTLAS_OS_REPO를 지정하면 검사한다)",
   );
   process.exit(0);
@@ -56,28 +69,53 @@ if (new Set(codes).size !== codes.length) {
   process.exit(1);
 }
 
+const coreContractsSrc = fs.readFileSync(coreContractsFile, "utf8");
+const selectionBlock = /^WORKFORCE_SELECTION_REASON_CODES = frozenset\(\{\n([\s\S]*?)\n\}\)/m.exec(coreContractsSrc);
+if (!selectionBlock) {
+  console.error("CONFORMANCE_GATE_FAILED — Core에서 WORKFORCE_SELECTION_REASON_CODES를 찾지 못했다.");
+  console.error(`  파일: ${coreContractsFile}`);
+  process.exit(1);
+}
+const selectionCodes = [...selectionBlock[1].matchAll(/"([a-z0-9:-]+)"/g)]
+  .map((m) => m[1])
+  .sort();
+if (selectionCodes.length === 0 || new Set(selectionCodes).size !== selectionCodes.length) {
+  console.error("CONFORMANCE_GATE_FAILED — Core의 선택 사유 코드 목록이 비었거나 중복됐다.");
+  process.exit(1);
+}
+
 const contract = JSON.parse(fs.readFileSync(contractFile, "utf8"));
 const current = contract.sourceFailureCodes;
 const same = Array.isArray(current) && current.length === codes.length
   && current.every((code, i) => code === codes[i]);
+const currentSelection = contract.selectionReasonCodes;
+const sameSelection = Array.isArray(currentSelection) && currentSelection.length === selectionCodes.length
+  && currentSelection.every((code, i) => code === selectionCodes[i]);
 
 if (check) {
-  if (!same) {
+  if (!same || !sameSelection) {
     const missing = codes.filter((code) => !(current || []).includes(code));
     const extra = (current || []).filter((code) => !codes.includes(code));
     console.error("CONFORMANCE_GATE_FAILED — Desktop의 소스 실패 코드가 Core와 다르다.");
     if (missing.length) console.error(`  Desktop에 없는 코드: ${missing.join(", ")}`);
     if (extra.length) console.error(`  Core에 없는 코드: ${extra.join(", ")}`);
     if (!missing.length && !extra.length) console.error("  순서가 다르다(정본 순서를 그대로 쓴다).");
+    const missingSelection = selectionCodes.filter((code) => !(currentSelection || []).includes(code));
+    const extraSelection = (currentSelection || []).filter((code) => !selectionCodes.includes(code));
+    if (missingSelection.length) console.error(`  Desktop에 없는 선택 사유 코드: ${missingSelection.join(", ")}`);
+    if (extraSelection.length) console.error(`  Core에 없는 선택 사유 코드: ${extraSelection.join(", ")}`);
+    if (!missingSelection.length && !extraSelection.length && !sameSelection) {
+      console.error("  선택 사유 코드 순서가 다르다(Core 공개 카탈로그 순서를 쓴다).");
+    }
     console.error("  고치는 법: node scripts/gen-workforce-source-failure-codes.cjs");
     process.exit(1);
   }
-  console.log(`ok workforce source failure codes (${codes.length}) — Core와 일치`);
+  console.log(`ok workforce contract codes (source ${codes.length}, selection ${selectionCodes.length}) — Core와 일치`);
   process.exit(0);
 }
 
-if (same) {
-  console.log(`unchanged — workforce source failure codes (${codes.length})`);
+if (same && sameSelection) {
+  console.log(`unchanged — workforce contract codes (source ${codes.length}, selection ${selectionCodes.length})`);
   process.exit(0);
 }
 // ★최상위 필드로 쓴다 — protocolMetadata는 Core가 광고하는 키 집합과 정확히
@@ -85,6 +123,8 @@ if (same) {
 // 않는다. v1.0.25 프리플라이트가 이 배치 오류를 "metadata keys are incompatible"로
 // 실측해 잡았다.
 delete contract.protocolMetadata.sourceFailureCodes;
+delete contract.protocolMetadata.selectionReasonCodes;
 contract.sourceFailureCodes = codes;
+contract.selectionReasonCodes = selectionCodes;
 fs.writeFileSync(contractFile, `${JSON.stringify(contract, null, 2)}\n`, "utf8");
-console.log(`wrote ${path.relative(root, contractFile)} — ${codes.length} source failure codes from Core`);
+console.log(`wrote ${path.relative(root, contractFile)} — source ${codes.length}, selection ${selectionCodes.length} codes from Core`);

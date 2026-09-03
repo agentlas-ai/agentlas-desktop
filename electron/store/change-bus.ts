@@ -15,7 +15,9 @@ export type DesktopStoreEntity =
   | "one-profile"
   | "one-org"
   | "one-taskforce"
-  | "automation";
+  | "long-run"
+  | "automation"
+  | "runtime";
 
 export interface DesktopStoreChange {
   entity: DesktopStoreEntity;

@@ -7,6 +7,9 @@ const path = require("node:path");
 const POLICY_SCHEMA_VERSION = "agentlas.product-extension-signing-policy.v1";
 const POLICY_ENV = "AGENTLAS_PRODUCT_EXTENSION_TRUSTED_KEYS_JSON";
 const KEY_ID_RE = /^[a-zA-Z0-9._-]{1,96}$/;
+const KEY_ID_COMPATIBILITY_ALIASES = Object.freeze({
+  "agentlas-science-release-v1": "agentlas-product-extension-release-v1",
+});
 
 function validateTrustedKeys(value, label = POLICY_ENV) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -56,6 +59,34 @@ function parsePolicyText(text, label) {
   };
 }
 
+function withCompatibilityAliases(keys) {
+  const normalized = { ...keys };
+  for (const [alias, canonical] of Object.entries(KEY_ID_COMPATIBILITY_ALIASES)) {
+    if (normalized[alias] && normalized[canonical] && normalized[alias] !== normalized[canonical]) {
+      throw new Error(`[product-extension-policy] compatibility alias ${alias} conflicts with ${canonical}`);
+    }
+    if (!normalized[alias] && normalized[canonical]) normalized[alias] = normalized[canonical];
+  }
+  return Object.fromEntries(Object.entries(normalized).sort(([left], [right]) => left.localeCompare(right)));
+}
+
+function parsePolicyEnvironment(text, label = POLICY_ENV) {
+  let value;
+  try {
+    value = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`[product-extension-policy] ${label} is not valid JSON`, { cause: error });
+  }
+  const parsed = value && typeof value === "object" && !Array.isArray(value)
+    && ("schemaVersion" in value || "keys" in value)
+    ? parsePolicyText(text, label)
+    : { schemaVersion: POLICY_SCHEMA_VERSION, keys: validateTrustedKeys(value, label) };
+  return {
+    schemaVersion: POLICY_SCHEMA_VERSION,
+    keys: withCompatibilityAliases(parsed.keys),
+  };
+}
+
 function canonicalPolicy(policy) {
   return `${JSON.stringify({
     schemaVersion: POLICY_SCHEMA_VERSION,
@@ -71,16 +102,7 @@ function materializeProductExtensionSigningPolicy(projectDir, env = process.env)
       + "provide the release-owned Ed25519 public keys and never a private key",
     );
   }
-  let source;
-  try {
-    source = JSON.parse(raw);
-  } catch (error) {
-    throw new Error(`[product-extension-policy] ${POLICY_ENV} is not valid JSON`, { cause: error });
-  }
-  const policy = {
-    schemaVersion: POLICY_SCHEMA_VERSION,
-    keys: validateTrustedKeys(source),
-  };
+  const policy = parsePolicyEnvironment(raw, POLICY_ENV);
   const text = canonicalPolicy(policy);
   const outputPath = path.join(projectDir, "dist", "product-extension-signing-policy.json");
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
@@ -110,7 +132,9 @@ function verifyProductExtensionSigningPolicyFile(filePath, expectedPath = null) 
       throw new Error(`[product-extension-policy] prepared policy is missing or mutable: ${expectedPath}`);
     }
     const expected = fs.readFileSync(expectedPath);
-    if (!crypto.timingSafeEqual(crypto.createHash("sha256").update(expected).digest(), crypto.createHash("sha256").update(text).digest())) {
+    const expectedHash = crypto.createHash("sha256").update(expected).digest();
+    const actualHash = crypto.createHash("sha256").update(text).digest();
+    if (!crypto.timingSafeEqual(expectedHash, actualHash)) {
       throw new Error("[product-extension-policy] packaged policy differs from the prepared release policy");
     }
   }
@@ -123,7 +147,9 @@ function verifyProductExtensionSigningPolicyFile(filePath, expectedPath = null) 
 module.exports = {
   POLICY_ENV,
   POLICY_SCHEMA_VERSION,
+  KEY_ID_COMPATIBILITY_ALIASES,
   materializeProductExtensionSigningPolicy,
+  parsePolicyEnvironment,
   parsePolicyText,
   validateTrustedKeys,
   verifyProductExtensionSigningPolicyFile,

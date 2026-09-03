@@ -1,0 +1,16 @@
+{
+  "type": "object",
+  "properties": {
+    "operation": { "type": "string", "enum": ["convert", "constants", "natural_units", "check_formula"] },
+    "value": { "type": "number", "description": "convert / natural_units: the numeric quantity." },
+    "from": { "type": "string", "minLength": 1, "maxLength": 120, "description": "convert: source unit, e.g. \"km/h\", \"kg*m^2/s^2\", \"MeV/c^2\", \"degC\" (bare only)." },
+    "to": { "type": "string", "minLength": 1, "maxLength": 120, "description": "convert: target unit with the same dimension." },
+    "ids": { "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true, "items": { "type": "string", "enum": ["c", "h", "hbar", "e", "k_B", "N_A", "R", "F", "sigma_SB", "G", "epsilon_0", "mu_0", "m_e", "m_p", "m_n", "m_u", "alpha", "a_0", "R_infinity", "eV", "g_n", "atm", "hbar_c", "hbar_c_MeV_fm"] }, "description": "constants: subset of CODATA 2018 ids; default all." },
+    "unit": { "type": "string", "minLength": 1, "maxLength": 120, "description": "natural_units: unit of the quantity (m, kg, s, K dimensions only)." },
+    "equation": { "type": "string", "minLength": 3, "maxLength": 2000, "description": "check_formula: \"lhs = rhs\" using the safe expression grammar." },
+    "variables": { "type": "object", "minProperties": 1, "maxProperties": 64, "additionalProperties": { "type": "string", "minLength": 1, "maxLength": 120 }, "description": "check_formula: variable name → unit string." },
+    "label": { "type": "string", "minLength": 1, "maxLength": 160 }
+  },
+  "required": ["operation"],
+  "additionalProperties": false
+}

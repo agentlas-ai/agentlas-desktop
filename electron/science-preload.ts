@@ -48,10 +48,18 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
     get: (projectId: string) => ipcRenderer.invoke("science:researchContracts:get", { extensionId, projectId }),
     approve: (input: unknown) => ipcRenderer.invoke("science:researchContracts:approve", { extensionId, input }),
   }),
+  approvalPolicy: Object.freeze({
+    get: (projectId: string) => ipcRenderer.invoke("science:approvalPolicy:get", { extensionId, projectId }),
+    set: (input: unknown) => ipcRenderer.invoke("science:approvalPolicy:set", { extensionId, input }),
+  }),
   researchLoops: Object.freeze({
     inspect: (projectId: string) => ipcRenderer.invoke("science:researchLoops:inspect", { extensionId, projectId }),
     start: (input: unknown) => ipcRenderer.invoke("science:researchLoops:start", { extensionId, input }),
     transition: (input: unknown) => ipcRenderer.invoke("science:researchLoops:transition", { extensionId, input }),
+  }),
+  resultReviews: Object.freeze({
+    inspect: (input: unknown) => ipcRenderer.invoke("science:resultReviews:inspect", { extensionId, input }),
+    record: (input: unknown) => ipcRenderer.invoke("science:resultReviews:record", { extensionId, input }),
   }),
   conversations: Object.freeze({
     list: (projectId: string) => ipcRenderer.invoke("science:conversations:list", { extensionId, projectId }),
@@ -114,6 +122,9 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
     observation: (projectId: string, artifactId: string) => ipcRenderer.invoke("science:artifacts:observation", { extensionId, projectId, artifactId }),
     updateVega: (input: unknown) => ipcRenderer.invoke("science:artifacts:updateVega", { extensionId, input }),
     listStatisticsFigures: (projectId: string, statisticsArtifactId?: string) => ipcRenderer.invoke("science:artifacts:listStatisticsFigures", { extensionId, projectId, statisticsArtifactId }),
+    // Every method the engine actually registers, so the launch screen can offer more than the one
+    // it used to hard-code.
+    statisticsMethods: () => ipcRenderer.invoke("science:statistics:methods", { extensionId }),
     materializeStatisticsFigure: (input: unknown) => ipcRenderer.invoke("science:artifacts:materializeStatisticsFigure", { extensionId, input }),
     materializeStatisticsNumericSurface: (input: unknown) => ipcRenderer.invoke("science:artifacts:materializeStatisticsNumericSurface", { extensionId, input }),
     getNumericSurfaceViewState: (projectId: string, artifactId: string, artifactVersion: number, artifactContentSha256: string) => ipcRenderer.invoke(
@@ -131,6 +142,10 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
       return () => ipcRenderer.removeListener("science:artifactChanged", listener);
     },
   }),
+  hypotheses: Object.freeze({
+    list: (projectId: string, currentOnly = true) => ipcRenderer.invoke("science:hypotheses:list", { extensionId, projectId, currentOnly }),
+    decide: (input: unknown) => ipcRenderer.invoke("science:hypotheses:decide", { extensionId, input }),
+  }),
   labs: Object.freeze({
     list: (projectId: string) => ipcRenderer.invoke("science:labs:list", { extensionId, projectId }),
     catalog: () => ipcRenderer.invoke("science:labs:catalog", { extensionId }),
@@ -139,13 +154,30 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
   }),
   validations: Object.freeze({
     list: (projectId: string, artifactId: string, artifactVersion?: number) => ipcRenderer.invoke("science:artifactValidations:list", { extensionId, projectId, artifactId, artifactVersion }),
+    closure: (projectId: string, receiptId: string) => ipcRenderer.invoke("science:artifactValidations:closure", { extensionId, projectId, receiptId }),
     validate: (input: unknown) => ipcRenderer.invoke("science:artifactValidations:validate", { extensionId, input }),
   }),
   manuscripts: Object.freeze({
     list: (projectId: string) => ipcRenderer.invoke("science:manuscripts:list", { extensionId, projectId }),
     get: (projectId: string, manuscriptId: string) => ipcRenderer.invoke("science:manuscripts:get", { extensionId, projectId, manuscriptId }),
-    create: (input: unknown) => ipcRenderer.invoke("science:manuscripts:create", { extensionId, input }),
+    editorModel: (projectId: string, manuscriptId: string) => ipcRenderer.invoke("science:manuscripts:editorModel", { extensionId, projectId, manuscriptId }),
+    blueprintAssessment: (projectId: string, manuscriptId: string) => ipcRenderer.invoke("science:manuscripts:blueprintAssessment", { extensionId, projectId, manuscriptId }),
+    scholarlyAssessment: (projectId: string, manuscriptId: string) => ipcRenderer.invoke("science:manuscripts:scholarlyAssessment", { extensionId, projectId, manuscriptId }),
+    coherenceAssessment: (projectId: string, manuscriptId: string) => ipcRenderer.invoke("science:manuscripts:coherenceAssessment", { extensionId, projectId, manuscriptId }),
+    recordBlueprintAssessment: (input: unknown) => ipcRenderer.invoke("science:manuscripts:recordBlueprintAssessment", { extensionId, input }),
+    history: (projectId: string, manuscriptId: string, limit = 100) => ipcRenderer.invoke("science:manuscripts:history", { extensionId, projectId, manuscriptId, limit }),
     appendVersion: (input: unknown) => ipcRenderer.invoke("science:manuscripts:appendVersion", { extensionId, input }),
+    applyTransaction: (input: unknown) => ipcRenderer.invoke("science:manuscripts:applyTransaction", { extensionId, input }),
+    revertTransaction: (input: unknown) => ipcRenderer.invoke("science:manuscripts:revertTransaction", { extensionId, input }),
+    selectionContexts: (projectId: string, manuscriptId: string, limit = 100) => ipcRenderer.invoke("science:manuscripts:selectionContexts", { extensionId, projectId, manuscriptId, limit }),
+    selectionContext: (projectId: string, manuscriptId: string, selectionContextId: string) => ipcRenderer.invoke("science:manuscripts:selectionContext", { extensionId, projectId, manuscriptId, selectionContextId }),
+    createSelectionContext: (input: unknown) => ipcRenderer.invoke("science:manuscripts:createSelectionContext", { extensionId, input }),
+    editProposals: (projectId: string, manuscriptId: string, limit = 100) => ipcRenderer.invoke("science:manuscripts:editProposals", { extensionId, projectId, manuscriptId, limit }),
+    editProposal: (projectId: string, manuscriptId: string, proposalId: string) => ipcRenderer.invoke("science:manuscripts:editProposal", { extensionId, projectId, manuscriptId, proposalId }),
+    createEditProposal: (input: unknown) => ipcRenderer.invoke("science:manuscripts:createEditProposal", { extensionId, input }),
+    applyEditProposal: (input: unknown) => ipcRenderer.invoke("science:manuscripts:applyEditProposal", { extensionId, input }),
+    rejectEditProposal: (input: unknown) => ipcRenderer.invoke("science:manuscripts:rejectEditProposal", { extensionId, input }),
+    render: (input: unknown) => ipcRenderer.invoke("science:manuscripts:render", { extensionId, input }),
   }),
   claimLedgers: Object.freeze({
     getForManuscript: (projectId: string, manuscriptId: string) => ipcRenderer.invoke("science:claimLedgers:getForManuscript", { extensionId, projectId, manuscriptId }),

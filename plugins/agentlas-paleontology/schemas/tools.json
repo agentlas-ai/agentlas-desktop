@@ -1,0 +1,579 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "nullableShortText": {
+      "type": ["string", "null"],
+      "maxLength": 500
+    },
+    "classification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phylum", "class", "order", "family", "genus"],
+      "properties": {
+        "phylum": { "$ref": "#/$defs/nullableShortText" },
+        "class": { "$ref": "#/$defs/nullableShortText" },
+        "order": { "$ref": "#/$defs/nullableShortText" },
+        "family": { "$ref": "#/$defs/nullableShortText" },
+        "genus": { "$ref": "#/$defs/nullableShortText" }
+      }
+    },
+    "appearance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxMa", "minMa"],
+      "properties": {
+        "maxMa": { "type": ["number", "null"], "minimum": 0, "maximum": 5000 },
+        "minMa": { "type": ["number", "null"], "minimum": 0, "maximum": 5000 }
+      }
+    },
+    "taxon": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["taxonId", "acceptedTaxonId", "name", "acceptedName", "rank", "parentTaxonId", "parentName", "isExtant", "occurrenceCount", "firstAppearance", "lastAppearance", "classification", "providerRecordSha256"],
+      "properties": {
+        "taxonId": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "acceptedTaxonId": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "acceptedName": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "rank": { "type": ["string", "null"], "maxLength": 80 },
+        "parentTaxonId": { "type": ["string", "null"], "maxLength": 80 },
+        "parentName": { "$ref": "#/$defs/nullableShortText" },
+        "isExtant": { "type": "boolean" },
+        "occurrenceCount": { "type": "integer", "minimum": 0 },
+        "firstAppearance": { "$ref": "#/$defs/appearance" },
+        "lastAppearance": { "$ref": "#/$defs/appearance" },
+        "classification": { "$ref": "#/$defs/classification" },
+        "providerRecordSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "occurrence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["occurrenceId", "collectionId", "identifiedName", "acceptedName", "acceptedTaxonId", "classification", "age", "stratigraphy", "coordinates", "countryCode", "state", "primaryReference", "providerRecordSha256"],
+      "properties": {
+        "occurrenceId": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "collectionId": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "identifiedName": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "acceptedName": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "acceptedTaxonId": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "classification": { "$ref": "#/$defs/classification" },
+        "age": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["maxMa", "minMa", "midpointMa", "halfRangeMa", "isPointEstimate"],
+          "properties": {
+            "maxMa": { "type": "number", "minimum": 0, "maximum": 5000 },
+            "minMa": { "type": "number", "minimum": 0, "maximum": 5000 },
+            "midpointMa": { "type": "number", "minimum": 0, "maximum": 5000 },
+            "halfRangeMa": { "type": "number", "minimum": 0, "maximum": 2500 },
+            "isPointEstimate": { "const": false }
+          }
+        },
+        "stratigraphy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["earlyInterval", "lateInterval", "group", "formation", "member"],
+          "properties": {
+            "earlyInterval": { "$ref": "#/$defs/nullableShortText" },
+            "lateInterval": { "$ref": "#/$defs/nullableShortText" },
+            "group": { "$ref": "#/$defs/nullableShortText" },
+            "formation": { "$ref": "#/$defs/nullableShortText" },
+            "member": { "$ref": "#/$defs/nullableShortText" }
+          }
+        },
+        "coordinates": {
+          "anyOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["longitude", "latitude", "basis", "precision"],
+              "properties": {
+                "longitude": { "type": "number", "minimum": -180, "maximum": 180 },
+                "latitude": { "type": "number", "minimum": -90, "maximum": 90 },
+                "basis": { "$ref": "#/$defs/nullableShortText" },
+                "precision": { "$ref": "#/$defs/nullableShortText" }
+              }
+            }
+          ]
+        },
+        "countryCode": { "type": ["string", "null"], "maxLength": 8 },
+        "state": { "$ref": "#/$defs/nullableShortText" },
+        "primaryReference": { "type": ["string", "null"], "maxLength": 8000 },
+        "providerRecordSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "catalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "provider", "title", "taxon", "occurrences", "pagination", "receipt", "sources", "warnings", "evidenceBoundary", "runId", "replayed"],
+      "properties": {
+        "schema": { "const": "agentlas.paleontology-catalog-result/v1" },
+        "provider": { "const": "pbdb-data1.2" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "taxon": { "$ref": "#/$defs/taxon" },
+        "occurrences": { "type": "array", "minItems": 1, "maxItems": 2000, "items": { "$ref": "#/$defs/occurrence" } },
+        "pagination": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["pageSize", "maxPages", "maxRecords", "pagesFetched", "recordsAvailable", "recordsReturned", "truncated"],
+          "properties": {
+            "pageSize": { "type": "integer", "minimum": 1, "maximum": 100 },
+            "maxPages": { "type": "integer", "minimum": 1, "maximum": 20 },
+            "maxRecords": { "type": "integer", "minimum": 1, "maximum": 2000 },
+            "pagesFetched": { "type": "integer", "minimum": 1, "maximum": 20 },
+            "recordsAvailable": { "type": "integer", "minimum": 0 },
+            "recordsReturned": { "type": "integer", "minimum": 1, "maximum": 2000 },
+            "truncated": { "type": "boolean" }
+          }
+        },
+        "receipt": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["taxonResponseSha256", "occurrencePages"],
+          "properties": {
+            "taxonResponseSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "occurrencePages": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 20,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["offset", "responseSha256", "rowCount"],
+                "properties": {
+                  "offset": { "type": "integer", "minimum": 0 },
+                  "responseSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                  "rowCount": { "type": "integer", "minimum": 0, "maximum": 100 }
+                }
+              }
+            }
+          }
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 21,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["role", "sourceId", "sourceVersionId", "responseSha256"],
+            "properties": {
+              "role": { "enum": ["taxon-response", "occurrence-page"] },
+              "pageIndex": { "type": "integer", "minimum": 0, "maximum": 19 },
+              "sourceId": { "type": "string", "minLength": 1, "maxLength": 160 },
+              "sourceVersionId": { "type": "string", "minLength": 1, "maxLength": 160 },
+              "responseSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+            }
+          }
+        },
+        "warnings": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+        "evidenceBoundary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["observed", "molecularEvidence", "prohibitedInference"],
+          "properties": {
+            "observed": { "const": "fossil-occurrence-and-taxonomic-metadata" },
+            "molecularEvidence": { "const": "none" },
+            "prohibitedInference": {
+              "type": "array",
+              "contains": { "const": "direct-dna" },
+              "minContains": 1,
+              "items": { "enum": ["direct-dna", "genome-sequence", "reconstructed-genome"] },
+              "minItems": 3,
+              "uniqueItems": true
+            }
+          }
+        },
+        "runId": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "replayed": { "type": "boolean" }
+      }
+    },
+    "stratigraphicAnalysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "methodRevision", "source", "estimates", "formationSummary", "publicationTable", "spec", "contentReceipts", "evidenceBoundary", "assumptions", "warnings", "analysisSha256"],
+      "properties": {
+        "schema": { "const": "agentlas.paleontology-stratigraphic-analysis/v1" },
+        "methodRevision": { "const": "interval-preserving-stratigraphic-support/v1" },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["parentRunId", "provider", "taxonName", "acceptedTaxonId", "parentTruncated"],
+          "properties": {
+            "parentRunId": { "type": "string", "minLength": 1, "maxLength": 80 },
+            "provider": { "const": "pbdb-data1.2" },
+            "taxonName": { "type": "string", "minLength": 1, "maxLength": 500 },
+            "acceptedTaxonId": { "type": "string", "minLength": 1, "maxLength": 80 },
+            "parentTruncated": { "type": "boolean" }
+          }
+        },
+        "estimates": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["occurrenceCount", "georeferencedCount", "formationCount", "intervalNameCount", "oldestBoundMa", "youngestBoundMa", "medianIntervalWidthMa", "figureOccurrenceCount", "figureOmittedCount"],
+          "properties": {
+            "occurrenceCount": { "type": "integer", "minimum": 1, "maximum": 2000 },
+            "georeferencedCount": { "type": "integer", "minimum": 0, "maximum": 2000 },
+            "formationCount": { "type": "integer", "minimum": 0, "maximum": 2000 },
+            "intervalNameCount": { "type": "integer", "minimum": 0, "maximum": 4000 },
+            "oldestBoundMa": { "type": "number", "minimum": 0, "maximum": 5000 },
+            "youngestBoundMa": { "type": "number", "minimum": 0, "maximum": 5000 },
+            "medianIntervalWidthMa": { "type": "number", "minimum": 0, "maximum": 5000 },
+            "figureOccurrenceCount": { "type": "integer", "minimum": 1, "maximum": 200 },
+            "figureOmittedCount": { "type": "integer", "minimum": 0, "maximum": 2000 }
+          }
+        },
+        "formationSummary": { "type": "array", "minItems": 1, "maxItems": 2000, "items": { "type": "object" } },
+        "publicationTable": { "type": "object" },
+        "spec": { "type": "object" },
+        "contentReceipts": { "type": "object" },
+        "evidenceBoundary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["evidenceClass", "molecularEvidence", "pointEstimateUsed"],
+          "properties": {
+            "evidenceClass": { "const": "stratigraphic-occurrence-support" },
+            "molecularEvidence": { "const": "none" },
+            "pointEstimateUsed": { "const": false }
+          }
+        },
+        "assumptions": { "type": "array", "items": { "type": "string" } },
+        "warnings": { "type": "array", "items": { "type": "string" } },
+        "analysisSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "build_pbdb_taxon_request",
+      "description": "Build the exact allowlisted PBDB taxon request. The host performs the network call and preserves bytes.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["taxonName"],
+        "properties": {
+          "taxonName": { "type": "string", "minLength": 1, "maxLength": 500 }
+        }
+      }
+    },
+    {
+      "name": "build_pbdb_occurrence_request",
+      "description": "Build a bounded deterministic PBDB fossil-occurrence request with fixed fields, row count, data metadata, and strict matching.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["taxonName"],
+        "properties": {
+          "taxonName": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+          "offset": { "type": "integer", "minimum": 0, "maximum": 100000 }
+        }
+      }
+    },
+    {
+      "name": "analyze_paleontology_stratigraphic_support",
+      "description": "Derive a hash-receipted publication table and interval-bar Vega figure from one sealed PBDB catalog without treating age midpoints as observations or claiming morphology or molecular evidence.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["catalog"],
+        "properties": {
+          "catalog": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["schema", "provider", "title", "taxon", "occurrences", "pagination", "receipt", "sources", "warnings", "evidenceBoundary", "runId", "replayed"],
+            "properties": {
+              "schema": { "const": "agentlas.paleontology-catalog-result/v1" },
+              "provider": { "const": "pbdb-data1.2" },
+              "title": { "type": "string", "minLength": 1, "maxLength": 240 },
+              "taxon": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["taxonId", "acceptedTaxonId", "name", "acceptedName", "rank", "parentTaxonId", "parentName", "isExtant", "occurrenceCount", "firstAppearance", "lastAppearance", "classification", "providerRecordSha256"],
+                "properties": {
+                  "taxonId": { "type": "string", "minLength": 1, "maxLength": 80 },
+                  "acceptedTaxonId": { "type": "string", "minLength": 1, "maxLength": 80 },
+                  "name": { "type": "string", "minLength": 1, "maxLength": 500 },
+                  "acceptedName": { "type": "string", "minLength": 1, "maxLength": 500 },
+                  "rank": { "type": ["string", "null"], "maxLength": 80 },
+                  "parentTaxonId": { "type": ["string", "null"], "maxLength": 80 },
+                  "parentName": { "type": ["string", "null"], "maxLength": 500 },
+                  "isExtant": { "type": "boolean" },
+                  "occurrenceCount": { "type": "integer", "minimum": 0 },
+                  "firstAppearance": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["maxMa", "minMa"],
+                    "properties": { "maxMa": { "type": ["number", "null"], "minimum": 0, "maximum": 5000 }, "minMa": { "type": ["number", "null"], "minimum": 0, "maximum": 5000 } }
+                  },
+                  "lastAppearance": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["maxMa", "minMa"],
+                    "properties": { "maxMa": { "type": ["number", "null"], "minimum": 0, "maximum": 5000 }, "minMa": { "type": ["number", "null"], "minimum": 0, "maximum": 5000 } }
+                  },
+                  "classification": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["phylum", "class", "order", "family", "genus"],
+                    "properties": {
+                      "phylum": { "type": ["string", "null"], "maxLength": 500 },
+                      "class": { "type": ["string", "null"], "maxLength": 500 },
+                      "order": { "type": ["string", "null"], "maxLength": 500 },
+                      "family": { "type": ["string", "null"], "maxLength": 500 },
+                      "genus": { "type": ["string", "null"], "maxLength": 500 }
+                    }
+                  },
+                  "providerRecordSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+                }
+              },
+              "occurrences": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 2000,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["occurrenceId", "collectionId", "identifiedName", "acceptedName", "acceptedTaxonId", "classification", "age", "stratigraphy", "coordinates", "countryCode", "state", "primaryReference", "providerRecordSha256"],
+                  "properties": {
+                    "occurrenceId": { "type": "string", "minLength": 1, "maxLength": 80 },
+                    "collectionId": { "type": "string", "minLength": 1, "maxLength": 80 },
+                    "identifiedName": { "type": "string", "minLength": 1, "maxLength": 500 },
+                    "acceptedName": { "type": "string", "minLength": 1, "maxLength": 500 },
+                    "acceptedTaxonId": { "type": "string", "minLength": 1, "maxLength": 80 },
+                    "classification": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["phylum", "class", "order", "family", "genus"],
+                      "properties": {
+                        "phylum": { "type": ["string", "null"], "maxLength": 500 },
+                        "class": { "type": ["string", "null"], "maxLength": 500 },
+                        "order": { "type": ["string", "null"], "maxLength": 500 },
+                        "family": { "type": ["string", "null"], "maxLength": 500 },
+                        "genus": { "type": ["string", "null"], "maxLength": 500 }
+                      }
+                    },
+                    "age": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["maxMa", "minMa", "midpointMa", "halfRangeMa", "isPointEstimate"],
+                      "properties": {
+                        "maxMa": { "type": "number", "minimum": 0, "maximum": 5000 },
+                        "minMa": { "type": "number", "minimum": 0, "maximum": 5000 },
+                        "midpointMa": { "type": "number", "minimum": 0, "maximum": 5000 },
+                        "halfRangeMa": { "type": "number", "minimum": 0, "maximum": 2500 },
+                        "isPointEstimate": { "const": false }
+                      }
+                    },
+                    "stratigraphy": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["earlyInterval", "lateInterval", "group", "formation", "member"],
+                      "properties": {
+                        "earlyInterval": { "type": ["string", "null"], "maxLength": 500 },
+                        "lateInterval": { "type": ["string", "null"], "maxLength": 500 },
+                        "group": { "type": ["string", "null"], "maxLength": 500 },
+                        "formation": { "type": ["string", "null"], "maxLength": 500 },
+                        "member": { "type": ["string", "null"], "maxLength": 500 }
+                      }
+                    },
+                    "coordinates": {
+                      "anyOf": [
+                        { "type": "null" },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": ["longitude", "latitude", "basis", "precision"],
+                          "properties": {
+                            "longitude": { "type": "number", "minimum": -180, "maximum": 180 },
+                            "latitude": { "type": "number", "minimum": -90, "maximum": 90 },
+                            "basis": { "type": ["string", "null"], "maxLength": 500 },
+                            "precision": { "type": ["string", "null"], "maxLength": 500 }
+                          }
+                        }
+                      ]
+                    },
+                    "countryCode": { "type": ["string", "null"], "maxLength": 8 },
+                    "state": { "type": ["string", "null"], "maxLength": 500 },
+                    "primaryReference": { "type": ["string", "null"], "maxLength": 8000 },
+                    "providerRecordSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+                  }
+                }
+              },
+              "pagination": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["pageSize", "maxPages", "maxRecords", "pagesFetched", "recordsAvailable", "recordsReturned", "truncated"],
+                "properties": {
+                  "pageSize": { "type": "integer", "minimum": 1, "maximum": 100 },
+                  "maxPages": { "type": "integer", "minimum": 1, "maximum": 20 },
+                  "maxRecords": { "type": "integer", "minimum": 1, "maximum": 2000 },
+                  "pagesFetched": { "type": "integer", "minimum": 1, "maximum": 20 },
+                  "recordsAvailable": { "type": "integer", "minimum": 0 },
+                  "recordsReturned": { "type": "integer", "minimum": 1, "maximum": 2000 },
+                  "truncated": { "type": "boolean" }
+                }
+              },
+              "receipt": { "type": "object" },
+              "sources": { "type": "array", "minItems": 2, "maxItems": 21 },
+              "warnings": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+              "evidenceBoundary": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["observed", "molecularEvidence", "prohibitedInference"],
+                "properties": {
+                  "observed": { "const": "fossil-occurrence-and-taxonomic-metadata" },
+                  "molecularEvidence": { "const": "none" },
+                  "prohibitedInference": { "type": "array", "minItems": 3, "uniqueItems": true, "items": { "enum": ["direct-dna", "genome-sequence", "reconstructed-genome"] } }
+                }
+              },
+              "runId": { "type": "string", "minLength": 1, "maxLength": 80 },
+              "replayed": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "compare_fossil_candidate_evidence",
+      "description": "Build a descriptive matrix from 2–20 exact PBDB catalog and deterministic stratigraphic-analysis run pairs. Derives taxonomy, occurrence, formation, interval, georeference, primary-reference, temporal-bound, interval-width, and missingness evidence without accepting caller scores or producing ranks.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "candidates"],
+        "properties": {
+          "title": { "type": "string", "minLength": 1, "maxLength": 240 },
+          "candidates": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["catalogRunId", "stratigraphicRunId", "catalog", "stratigraphicAnalysis"],
+              "properties": {
+                "catalogRunId": { "type": "string", "minLength": 1, "maxLength": 80 },
+                "stratigraphicRunId": { "type": "string", "minLength": 1, "maxLength": 80 },
+                "catalog": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["schema", "provider", "title", "taxon", "occurrences", "pagination", "receipt", "sources", "warnings", "evidenceBoundary", "runId", "replayed"],
+                  "properties": {
+                    "schema": { "const": "agentlas.paleontology-catalog-result/v1" },
+                    "provider": { "const": "pbdb-data1.2" },
+                    "title": { "type": "string" },
+                    "taxon": { "type": "object" },
+                    "occurrences": { "type": "array", "minItems": 1, "maxItems": 2000 },
+                    "pagination": { "type": "object" },
+                    "receipt": { "type": "object" },
+                    "sources": { "type": "array" },
+                    "warnings": { "type": "array" },
+                    "evidenceBoundary": { "type": "object" },
+                    "runId": { "type": "string", "minLength": 1, "maxLength": 80 },
+                    "replayed": { "type": "boolean" }
+                  }
+                },
+                "stratigraphicAnalysis": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["schema", "methodRevision", "source", "estimates", "formationSummary", "publicationTable", "spec", "contentReceipts", "evidenceBoundary", "assumptions", "warnings", "analysisSha256"],
+                  "properties": {
+                    "schema": { "const": "agentlas.paleontology-stratigraphic-analysis/v1" },
+                    "methodRevision": { "const": "interval-preserving-stratigraphic-support/v1" },
+                    "source": { "type": "object" },
+                    "estimates": { "type": "object" },
+                    "formationSummary": { "type": "array" },
+                    "publicationTable": { "type": "object" },
+                    "spec": { "type": "object" },
+                    "contentReceipts": { "type": "object" },
+                    "evidenceBoundary": { "type": "object" },
+                    "assumptions": { "type": "array" },
+                    "warnings": { "type": "array" },
+                    "analysisSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "assess_deextinction_feasibility",
+      "description": "Audit multiple candidates under one explicit objective. Actual biological revival uses exactly four evidence hard stops; comparative proxy research is kept separate. The tool accepts no caller score, emits no biological-feasibility score, and fixes PBDB coverage contribution to zero.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "$defs": {
+          "evidence": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["criterionId", "evidenceStatus", "finding", "sourceRunIds", "detail"],
+            "properties": {
+              "criterionId": {
+                "enum": [
+                  "authenticated-endogenous-dinosaur-dna",
+                  "species-level-nuclear-genome-and-karyotype",
+                  "viable-cell-or-nucleus",
+                  "validated-avian-embryo-surrogate-platform",
+                  "target-taxonomy-and-specimen-identity",
+                  "version-pinned-extant-relative-genomes",
+                  "orthology-alignment-species-tree",
+                  "ancestral-state-uncertainty",
+                  "regulatory-chromosomal-research-model",
+                  "pbdb-fossil-occurrence-coverage"
+                ]
+              },
+              "evidenceStatus": { "enum": ["observed", "inferred", "hypothetical", "missing"] },
+              "finding": { "enum": ["supports", "contradicts", "inconclusive", "not-assessed"] },
+              "sourceRunIds": {
+                "type": "array",
+                "maxItems": 20,
+                "uniqueItems": true,
+                "items": { "type": "string", "minLength": 1, "maxLength": 160 }
+              },
+              "detail": { "type": "string", "minLength": 1, "maxLength": 2000 }
+            }
+          },
+          "candidate": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["candidateId", "taxonName", "label", "evidence"],
+            "properties": {
+              "candidateId": { "type": "string", "minLength": 1, "maxLength": 120 },
+              "taxonName": { "type": "string", "minLength": 1, "maxLength": 500 },
+              "label": { "type": "string", "minLength": 1, "maxLength": 240 },
+              "evidence": {
+                "type": "array",
+                "minItems": 6,
+                "maxItems": 10,
+                "items": { "$ref": "#/$defs/evidence" }
+              }
+            }
+          }
+        },
+        "required": ["title", "targetObjective", "candidates"],
+        "properties": {
+          "title": { "type": "string", "minLength": 1, "maxLength": 240 },
+          "targetObjective": { "enum": ["actual-biological-revival", "comparative-proxy-research"] },
+          "candidates": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 50,
+            "items": { "$ref": "#/$defs/candidate" }
+          }
+        }
+      }
+    },
+    {
+      "name": "describe_paleontology_capabilities",
+      "description": "Return provider, evidence, renderer, workflow, and claim boundaries.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      }
+    }
+  ]
+}

@@ -140,6 +140,11 @@ export async function probeCodex(): Promise<CodexProbe | null> {
 }
 
 let cachedBin: string | null | undefined;
+/** Runtime updates may replace the executable or move it to another path. */
+export function clearCodexBinCache(): void {
+  cachedBin = undefined;
+}
+
 async function getBin(): Promise<string | null> {
   if (cachedBin !== undefined) return cachedBin;
   const probe = await probeCodex();

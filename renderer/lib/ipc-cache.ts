@@ -70,6 +70,9 @@ interface CacheEntry {
 
 const valueCache = new Map<string, CacheEntry>();
 const inFlight = new Map<string, Promise<unknown>>();
+// An invalidated in-flight IPC call can still resolve after a newer call has
+// started. Its result must not become the post-update cache snapshot.
+let invalidationEpoch = 0;
 const namespaceProxies = new WeakMap<object, unknown>();
 // 브릿지/테스트 목이 교체되더라도 이전 객체에 바인딩된 함수를 재사용하지 않는다.
 // 전역 spec 키만 쓰면 `team.list`처럼 이름이 같은 새 브릿지가 옛 target을 호출한다.
@@ -106,6 +109,7 @@ function evictIfOverfull(): void {
 
 /** 네임스페이스(예: "team") 또는 전체(인자 없음) 캐시를 비운다. */
 export function invalidateIpcCache(namespace?: string): void {
+  invalidationEpoch += 1;
   if (!namespace) {
     valueCache.clear();
     inFlight.clear();
@@ -156,17 +160,24 @@ function wrapMethod(
     }
     const pending = inFlight.get(key);
     if (pending) return pending.then(cloneValue);
-    const flight = Promise.resolve(fn.apply(target, args)).then(
+    const requestEpoch = invalidationEpoch;
+    let flight!: Promise<unknown>;
+    flight = Promise.resolve(fn.apply(target, args)).then(
       (result) => {
-        inFlight.delete(key);
-        if (ttl > 0 && !forced) {
-          valueCache.set(key, { at: Date.now(), value: result });
-          evictIfOverfull();
+        // Only the request currently registered for this key may clear or
+        // write it. An older response may still be delivered to its caller,
+        // but it cannot erase a newer request or restore stale data.
+        if (inFlight.get(key) === flight) {
+          inFlight.delete(key);
+          if (ttl > 0 && !forced && requestEpoch === invalidationEpoch) {
+            valueCache.set(key, { at: Date.now(), value: result });
+            evictIfOverfull();
+          }
         }
         return result;
       },
       (error) => {
-        inFlight.delete(key);
+        if (inFlight.get(key) === flight) inFlight.delete(key);
         throw error;
       },
     );
@@ -218,6 +229,7 @@ const STORE_ENTITY_TO_NAMESPACES: Record<string, string[]> = {
   firm: ["firms", "team"],
   project: ["projects", "tasks"],
   automation: ["automations"],
+  runtime: ["runtime"],
 };
 
 export function connectIpcCacheToStoreEvents(

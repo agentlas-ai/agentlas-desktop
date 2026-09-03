@@ -49,6 +49,16 @@ type HypothesisManifest = {
 export interface ScienceResearchLifecycleGateReader {
   getProject(projectId: string): ScienceProject | null;
   latestResearchContract(projectId: string): ScienceResearchContract | null;
+  /**
+   * The content hash of the approved research contract, over the terms the gate cares about.
+   *
+   * The intake gate used to demand the lifecycle head's own `stateSha256` as its evidence, which
+   * proves only that the caller read the row it was already writing to. It gates on the research
+   * contract, so its evidence has to name that contract: change an approved objective or a success
+   * criterion and the hash moves, and the transition that was authorized against the old terms no
+   * longer verifies.
+   */
+  approvedResearchContractSha256(projectId: string): string | null;
   currentLiteratureEvidenceManifest(projectId: string): LiteratureManifest;
   getSourceVersionForProject(projectId: string, sourceId: string, sourceVersionId: string): ScienceSource | null;
   getEvidenceSpanForProject(projectId: string, evidenceId: string): ScienceEvidenceSpan | null;
@@ -181,7 +191,9 @@ export function assertScienceResearchLifecyclePhaseGate(input: AssertScienceRese
       || contract.successCriteria.length < 1 || contract.failureCriteria.length < 1 || !contract.approvedAt) {
       throw new Error("science-research-lifecycle-intake-gate-blocked");
     }
-    requireEvidenceSha256(preconditions.evidenceSha256, current.stateSha256, "science-research-lifecycle-intake-gate-blocked");
+    const contractSha256 = reader.approvedResearchContractSha256(projectId);
+    if (!contractSha256) throw new Error("science-research-lifecycle-intake-gate-blocked");
+    requireEvidenceSha256(preconditions.evidenceSha256, contractSha256, "science-research-lifecycle-intake-gate-blocked");
     return;
   }
 
@@ -221,6 +233,18 @@ export function assertScienceResearchLifecyclePhaseGate(input: AssertScienceRese
     const unresolved = reader.listDecisionRequests(projectId, plan.id, ["queued", "presented", "deferred"]);
     if (unresolved.length) throw new Error("science-research-lifecycle-plan-decision-gate-blocked");
     requireEvidenceSha256(preconditions.evidenceSha256, plan.currentDocumentSha256, "science-research-lifecycle-plan-gate-blocked");
+    if (edge === "analysis_plan_frozen->execution") {
+      // Freezing a plan and authorizing its execution are different acts, and this edge used to
+      // run a check identical to the one before it on identical evidence, so it authorized
+      // nothing. What it has to establish is the thing prespecification exists for: that the plan
+      // being run is the one that was frozen, and that the freeze happened first. A plan whose
+      // freeze timestamp is later than the authorization it is being run under is a plan that
+      // moved after the commitment -- which is exactly the sequence a preregistered analysis is
+      // supposed to make impossible.
+      if (!plan.frozenAt || plan.frozenAt > current.createdAt) {
+        throw new Error("science-research-lifecycle-plan-authorization-out-of-order");
+      }
+    }
     return;
   }
 

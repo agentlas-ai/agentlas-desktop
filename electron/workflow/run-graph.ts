@@ -18,6 +18,7 @@ import type {
   RuntimeSelection,
 } from "../../shared/types";
 import { isRuntimeKind as isSharedRuntimeKind } from "../../shared/runtime-kinds";
+import { resolveAutomationToolMode } from "../../shared/automation-tool-policy";
 import { createHash, randomUUID } from "node:crypto";
 import {
   canonicalJsonValue,
@@ -1168,9 +1169,35 @@ type ConditionOutcome =
 function evalCondition(node: WorkflowNode, vars: Record<string, unknown>): ConditionOutcome {
   const cfg = node.config;
   const label = node.label || node.id;
-  const varName = str(cfg, "var");
-  const op = str(cfg, "op") ?? "truthy";
-  const right = cfg.value;
+  let varName = str(cfg, "var");
+  let op = str(cfg, "op") ?? "truthy";
+  let right = cfg.value;
+  /*
+   * Older graph authors stored the condition as a small template expression
+   * (`{{verdict}} == 'pass'`).  The typed kernel later moved to var/op/value,
+   * but existing automations were never migrated.  Treating an expression-only
+   * node as `truthy(undefined)` silently forced the false branch and could burn
+   * through a retry loop even when the verifier had returned `pass`.
+   *
+   * Keep this compatibility parser deliberately tiny: it recognizes only one
+   * variable and literal equality/inequality (or a bare variable).  It never
+   * evaluates JavaScript or interpolates arbitrary source text.
+   */
+  if (!varName) {
+    const expression = str(cfg, "expression")?.trim();
+    const comparison = expression?.match(
+      /^\{\{\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*\}\}\s*(===|!==|==|!=)\s*(["'])(.*?)\3$/,
+    );
+    const bare = expression?.match(/^\{\{\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*\}\}$/);
+    if (comparison) {
+      varName = comparison[1];
+      op = comparison[2] === "===" || comparison[2] === "==" ? "eq" : "ne";
+      right = comparison[4];
+    } else if (bare) {
+      varName = bare[1];
+      op = "truthy";
+    }
+  }
   const unresolved = (reason: string, nextAction: string): ConditionOutcome => ({
     ok: false,
     failure: { code: "EDGE_CONDITION_UNRESOLVED", reason, nextAction },
@@ -1386,6 +1413,16 @@ export async function runGraph(
     );
   }
   const graphDigest = graphExecutionDigest(automation, graph);
+  const dryRun = opts.dryRun === true;
+  // A workflow graph is browser-backed by default so its authenticated session
+  // cookies land in the same Agentlas Browser profile that the node uses. The
+  // refresh is consumed by the first real host invocation only; parallel graph
+  // branches must not repeatedly close/reopen the shared browser profile.
+  const graphToolMode = resolveAutomationToolMode({
+    toolMode: automation.toolMode,
+    graph,
+  });
+  let browserCredentialRefreshPending = !dryRun && graphToolMode === "browser";
   const graphNodeIds = new Set(graph.nodes.map((node) => node.id));
   const graphEdgeIds = new Set(graph.edges.map((edge) => edge.id));
   const effectNodeIds = new Set(
@@ -1397,6 +1434,7 @@ export async function runGraph(
   // Trigger deliveries carry a stable event occurrence. Never resume the
   // latest failure from a different fs/chain/webhook/poll event.
   const latestFailed = latestFailedCandidate &&
+      latestFailedCandidate.simulation === dryRun &&
       (!requestedOccurrenceId || latestFailedCandidate.occurrenceId === requestedOccurrenceId)
     ? latestFailedCandidate
     : null;
@@ -1739,7 +1777,6 @@ export async function runGraph(
       /* 저널은 감사용이다 — 쓰지 못해도 실행은 계속한다 */
     }
   };
-  const dryRun = opts.dryRun === true;
   /** 시뮬레이션에서 막은 것들 — "실전이었으면 무엇이 일어났는가"를 그대로 보여주는 영수증. */
   const dryRunBlocks: GraphDryRunBlock[] = [];
   // 커넥터 C38 — 노드별로 도구 중개가 **실제로** 어디까지 걸렸는지. 계획이 아니라 결과다.
@@ -1834,6 +1871,7 @@ export async function runGraph(
       graphDigest,
       checkpoint: syncCheckpoint(),
       resumeOfRunId,
+      dryRun,
       initialNodeStates,
     });
     tryRecordRunEvent({
@@ -1846,6 +1884,7 @@ export async function runGraph(
         occurrenceId: checkpoint.occurrenceId,
         graphDigest,
         resumeOfRunId: resumeOfRunId ?? null,
+        simulation: dryRun,
       },
     });
     if (resumeOfRunId) {
@@ -3260,6 +3299,9 @@ export async function runGraph(
           // `final`이 안 와도 스트리밍으로 쌓인 본문은 결과다. 실제로 일을 해 놓고
           // "결과가 없다"며 죽던 노드가 이 경로로 산다 — 다만 출처를 meta에 남긴다.
           let accumulatedText = "";
+          const forceBrowserCredentialRefresh = browserCredentialRefreshPending
+            && (node.type === "agent" || node.type === "action" || node.type === "output");
+          if (forceBrowserCredentialRefresh) browserCredentialRefreshPending = false;
           const result = await runMcpInvocation(
             {
               runId,
@@ -3276,7 +3318,8 @@ export async function runGraph(
               ...(declaredToolsForNode(node) ? { requiredToolCatalogIds: declaredToolsForNode(node) } : {}),
               borrowVersions: hubBorrowVersionsForNode(node),
               mcpBrowserProfileKey: `automation-${automation.id}`,
-              toolMode: automation.toolMode ?? "auto",
+              toolMode: graphToolMode,
+              ...(forceBrowserCredentialRefresh ? { forceBrowserCredentialRefresh: true } : {}),
               hubMode: automation.hubMode ?? "hub-allowed",
               runtimeSelection: runtimeSelectionForNode(node),
               // 커넥터 C38 — 이 노드의 도구 중개 관문을 만들 자리. 실제 도구 이름은

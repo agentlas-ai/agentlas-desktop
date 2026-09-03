@@ -26,6 +26,8 @@ import { projectPoolMemberKey } from "@shared/project-agent-pool";
 import { LiveOutputViewer, type LiveOutputKind } from "./LiveOutputViewer";
 import { CodeIdeViewer, isCodeArtifactName } from "./CodeIdeViewer";
 import { NativeLiveWebView } from "./NativeLiveWebView";
+import { RailAgentScreen } from "./browser/RailAgentScreen";
+import type { AgentScreenMode } from "./browser/AgentScreenView";
 import {
   isWideOutputKind,
   outputPresentationKindForViewerKind,
@@ -46,6 +48,12 @@ type OutputRow = {
 };
 
 interface Props {
+  /**
+   * 에이전트가 지금 보고 있는 화면(브라우저·컴퓨터). One 과 같은 자리 — 결과 레일 안이다.
+   * 떠 있는 카드로 떨어져 나가지 않는다.
+   */
+  agentScreen?: { mode: AgentScreenMode } | null;
+  onAgentScreenMode?: (mode: AgentScreenMode) => void;
   activeTab: ChatRightPanelTab;
   onTabChange: (tab: ChatRightPanelTab) => void;
   onClose: () => void;
@@ -54,6 +62,8 @@ interface Props {
   surface: WorkbenchSurface | null;
   filePreview?: WorkspaceFilePreview | null;
   linkedFiles?: WorkspaceFilePreview[];
+  /** Files the agent changed or linked as a result; read-only inputs stay out of this list. */
+  linkedOutputs?: WorkspaceFilePreview[];
   onSurfaceAction?: SurfaceActionHandler;
   onSurfaceStatePatch?: SurfaceStatePatchHandler;
   firm: InstalledFirm | null;
@@ -86,6 +96,9 @@ export function ChatRightPanel({
   filePreview: externalFilePreview,
   onHydrateFilePreview,
   linkedFiles = [],
+  linkedOutputs = [],
+  agentScreen,
+  onAgentScreenMode,
   onSurfaceAction,
   onSurfaceStatePatch,
   firm,
@@ -117,7 +130,7 @@ export function ChatRightPanel({
     const parent = shellRef.current?.parentElement;
     return parent?.clientHeight || (typeof window === "undefined" ? 720 : window.innerHeight);
   }
-  const hasPanelContent = Boolean(artifact || surface || filePreview);
+  const hasPanelContent = Boolean(artifact || surface || filePreview || externalFilePreview || linkedOutputs.length > 0);
   const showFilePreview = viewerSource === "file" && filePreview;
   const showWorkbench = viewerSource === "workbench" && (artifact || surface);
   const outputKind: OutputPresentationKind = showFilePreview
@@ -164,17 +177,10 @@ export function ChatRightPanel({
   }, [artifact?.id, surface?.id]);
 
   useEffect(() => {
-    if (externalFilePreview) {
-      setFilePreview(externalFilePreview);
-      setViewerSource("file");
-      return;
-    }
-    // The parent owns the active result slot. When a new turn clears that
-    // slot, clear this panel's hydrated copy too; otherwise the previous
-    // image remains visible throughout the next run and looks like its result.
-    setFilePreview(null);
-    if (!artifact && !surface) setViewerSource("workbench");
-  }, [artifact, externalFilePreview, surface]);
+    if (!externalFilePreview) return;
+    setFilePreview(externalFilePreview);
+    setViewerSource("file");
+  }, [externalFilePreview?.path, externalFilePreview?.fileUrl]);
 
   useEffect(() => {
     if (!onResizeWidth || activeTab !== "panel" || !isWideOutputKind(outputKind)) return;
@@ -357,6 +363,7 @@ export function ChatRightPanel({
             }}
             chatId={chatId}
             linkedFiles={linkedFiles}
+            linkedOutputs={linkedOutputs}
             project={project}
           />
         )}
@@ -381,7 +388,14 @@ export function ChatRightPanel({
           </div>
         )}
         {activeTab === "panel" && (
-          showFilePreview ? (
+          agentScreen ? (
+            <RailAgentScreen
+              mode={agentScreen.mode}
+              active
+              onModeChange={(next) => onAgentScreenMode?.(next)}
+              ko={ko}
+            />
+          ) : showFilePreview ? (
             <FileViewer file={filePreview} />
           ) : showWorkbench ? (
             <WorkbenchPanel
@@ -761,6 +775,7 @@ function FileTab({
   onOpenFilePreview,
   chatId,
   linkedFiles,
+  linkedOutputs,
   project,
 }: {
   artifact: CodeArtifact | null;
@@ -769,6 +784,7 @@ function FileTab({
   onOpenFilePreview: (preview: WorkspaceFilePreview) => void;
   chatId: string | null;
   linkedFiles: WorkspaceFilePreview[];
+  linkedOutputs: WorkspaceFilePreview[];
   project: Project | null;
 }) {
   const { locale } = useT();
@@ -795,6 +811,8 @@ function FileTab({
       : null,
   ];
   const outputRows = rawOutputRows.filter((row): row is OutputRow => row !== null);
+  const outputKeys = new Set(linkedOutputs.map((file) => file.path || file.fileUrl));
+  const inspectedFiles = linkedFiles.filter((file) => !outputKeys.has(file.path || file.fileUrl));
 
   return (
     <div style={fileTabStyle}>
@@ -836,14 +854,14 @@ function FileTab({
             : "Nothing produced yet. Files the agent creates show up here."}
         </div>
       )}
-      {linkedFiles.length > 0 && (
+      {linkedOutputs.length > 0 && (
         <section style={outputsStyle}>
           <div style={sectionHeaderStyle}>
             <span>{ko ? "산출물" : "Outputs"}</span>
-            <span>{linkedFiles.length}</span>
+            <span>{linkedOutputs.length}</span>
           </div>
           <div style={outputListStyle}>
-            {linkedFiles.map((file) => (
+            {linkedOutputs.map((file) => (
               <button
                 key={`${file.path}:${file.fileUrl}`}
                 type="button"
@@ -864,15 +882,45 @@ function FileTab({
               </button>
             ))}
           </div>
-          {contextMenu && (
-            <FileContextMenu
-              x={contextMenu.x}
-              y={contextMenu.y}
-              file={contextMenu.file}
-              onClose={() => setContextMenu(null)}
-            />
-          )}
         </section>
+      )}
+      {inspectedFiles.length > 0 && (
+        <section style={outputsStyle}>
+          <div style={sectionHeaderStyle}>
+            <span>{ko ? "확인한 파일" : "Inspected files"}</span>
+            <span>{inspectedFiles.length}</span>
+          </div>
+          <div style={outputListStyle}>
+            {inspectedFiles.map((file) => (
+              <button
+                key={`${file.path}:${file.fileUrl}`}
+                type="button"
+                className="chat-right-output-row"
+                onClick={() => onOpenFilePreview(file)}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  setContextMenu({ x: event.clientX, y: event.clientY, file });
+                }}
+                style={outputRowStyle}
+                title={file.path}
+              >
+                <span style={outputIconStyle}>{iconForViewerKind(file.viewerKind)}</span>
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <strong style={outputTitleStyle}>{file.name}</strong>
+                  <span style={outputMetaStyle}>{previewMeta(file, ko)}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+      {contextMenu && (
+        <FileContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          file={contextMenu.file}
+          onClose={() => setContextMenu(null)}
+        />
       )}
       <div style={workspaceWrapStyle}>
         <WorkspacePanel
@@ -891,7 +939,6 @@ function FileViewer({ file }: { file: WorkspaceFilePreview }) {
   const ko = locale === "ko";
   const codePreview = isCodeFilePreview(file);
   const typeLabel = viewerKindLabel(file.viewerKind, ko);
-  const sizeLabel = file.size > 0 ? formatBytes(file.size) : ko ? "로컬 파일" : "Local file";
   return (
     <section style={fileViewerStyle}>
       {!codePreview && (
@@ -899,13 +946,27 @@ function FileViewer({ file }: { file: WorkspaceFilePreview }) {
           <span style={fileViewerIconStyle}>{iconForViewerKind(file.viewerKind)}</span>
           <div style={{ flex: 1, minWidth: 0 }}>
             <strong style={fileViewerTitleStyle} title={file.path}>{file.name}</strong>
-            <span style={fileViewerMetaStyle}>{typeLabel} · {sizeLabel}{file.live ? <b style={{ marginLeft: 6, color: "#23724d", fontSize: 9, letterSpacing: ".04em" }}>● LIVE</b> : null}</span>
+            <span style={fileViewerMetaStyle}>{typeLabel} · {formatBytes(file.size)}{file.live ? <b style={{ marginLeft: 6, color: "#23724d", fontSize: 9, letterSpacing: ".04em" }}>● LIVE</b> : null}</span>
           </div>
         </header>
       )}
       {file.available === false && <div role="status" style={fileNoticeStyle}>{ko ? "파일 교체를 감지했습니다. 새 버전을 기다리는 중…" : "File replacement detected. Waiting for the new version…"}</div>}
       <div style={fileViewerBodyStyle}>
-        {codePreview ? (
+        {codePreview && !file.content ? (
+          /* ★코드·HTML 도 **백지 대신 이유를 말한다.** 마크다운·JSON·텍스트에는 이미 이
+             안내가 있었는데 코드류에는 없어서, 지워지거나 못 읽은 파일이 "빈 편집기"로
+             열렸다 — 사람은 그것을 "파일이 비었다"로 읽는다(2026-09-03 실측: 지운 .html 을
+             열면 경로와 '읽기 전용'만 뜨고 본문이 백지). */
+          <div style={unsupportedViewerStyle}>
+            <IconFileUp size={28} style={{ color: "var(--muted)" }} />
+            <strong>{ko ? "이 파일의 내용을 읽지 못했습니다" : "Could not read this file"}</strong>
+            <p>
+              {ko
+                ? "파일이 옮겨졌거나 이 대화의 작업 폴더 밖에 있을 수 있습니다. 채팅에서 다시 생성하거나 경로를 확인하세요."
+                : "It may have moved, or it sits outside this chat's working folder. Recreate it in chat or check the path."}
+            </p>
+          </div>
+        ) : codePreview ? (
           <CodeIdeViewer path={file.path} name={file.name} locale={ko ? "ko" : "en"} initialContent={file.viewerKind === "json" ? prettyJson(file.content || "") : file.content || ""} fill />
         ) : file.viewerKind === "browser" ? (
           <BrowserViewer file={file} />
@@ -1032,7 +1093,6 @@ function FileContextMenu({
     fn();
     onClose();
   };
-  const isImage = file.viewerKind === "image";
   return (
     <div
       ref={menuRef}
@@ -1050,26 +1110,6 @@ function FileContextMenu({
         boxShadow: "0 14px 34px rgba(15, 23, 42, 0.18)",
       }}
     >
-      {isImage ? (
-        <>
-          <button
-            type="button"
-            role="menuitem"
-            style={contextMenuItemStyle}
-            onClick={() => run(() => { void window.agentlas.media.copyImage({ src: file.fileUrl, suggestedName: file.name }); })}
-          >
-            {ko ? "이미지 복사" : "Copy image"}
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            style={contextMenuItemStyle}
-            onClick={() => run(() => { void window.agentlas.media.saveImage({ src: file.fileUrl, suggestedName: file.name }); })}
-          >
-            {ko ? "다운로드" : "Download"}
-          </button>
-        </>
-      ) : null}
       <button
         type="button"
         role="menuitem"

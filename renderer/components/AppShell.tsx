@@ -63,12 +63,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [activeChatCount, setActiveChatCount] = useState<number | null>(null);
   const [multimodalJobs, setMultimodalJobs] = useState<MultimodalJob[]>([]);
   const [appUpdateBusy, setAppUpdateBusy] = useState(true);
-  // `null` means the dashboard onboarding has not inspected its durable
-  // first-run marker yet. Treat that as a blocking surface: otherwise the
-  // Science offer can open during the child's first effect, immediately
-  // underneath the onboarding overlay, and its visible controls become
-  // impossible to click.
-  const [workFirstRunVisible, setWorkFirstRunVisible] = useState<boolean | null>(null);
+  const [workFirstRunVisible, setWorkFirstRunVisible] = useState(false);
   const [sciencePromoVisible, setSciencePromoVisible] = useState(false);
   const router = useRouter();
   const pathname = usePathname() ?? "/";
@@ -167,10 +162,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     };
   }, [syncAttention]);
 
-  // Feature news must never cover live work. Seed from main-owned authority,
-  // then follow the same active-chat broadcast used by the Work sidebar. A
-  // null seed is deliberately ineligible so launch cannot flash the intro
-  // before the authoritative run state arrives.
   useEffect(() => {
     if (!SCIENCE_INSTALL_DISCOVERY_ENABLED) return;
     let cancelled = false;
@@ -240,9 +231,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  // A release/update safety surface has higher priority than optional feature
-  // news. Start fail-closed until the current updater state is known, then keep
-  // the flag synchronized with the same main-owned broadcast as UpdateBanner.
   useEffect(() => {
     if (!SCIENCE_INSTALL_DISCOVERY_ENABLED) return;
     let cancelled = false;
@@ -276,19 +264,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     sciencePromoPath === "/"
     || sciencePromoPath === "/dashboard"
     || sciencePromoPath.startsWith("/library");
-  // Product promotion never covers setup, approvals, an app update, or live work.
-  // The sidebar entry remains available while the automatic offer is deferred.
   const sciencePromoEligible = SCIENCE_INSTALL_DISCOVERY_ENABLED
     && sciencePromoRouteEligible
-    && workFirstRunVisible === false
+    && !workFirstRunVisible
     && pendingConfirmations === 0
     && activeChatCount === 0
     && !appUpdateBusy
     && !multimodalJobs.some(isMultimodalJobActive)
     && !importOpen;
-  // Science is now the only automatic product announcement on these routes.
-  // Page tours remain available from the help control but do not race this offer.
-  const pageTourAutoOpenSuspended = workFirstRunVisible === true
+  const pageTourAutoOpenSuspended = workFirstRunVisible
     || sciencePromoVisible
     || (SCIENCE_INSTALL_DISCOVERY_ENABLED && sciencePromoRouteEligible);
 

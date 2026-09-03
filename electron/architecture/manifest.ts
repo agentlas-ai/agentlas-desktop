@@ -35,15 +35,17 @@
 // This module is intentionally DATA + tiny pure helpers only (no electron/node imports)
 // so it compiles into dist/electron/** (packaged).
 
-export const ARCHITECTURE_VERSION = "1.10.1";
+export const ARCHITECTURE_VERSION = "1.10.3";
 export const GLOBAL_ORCHESTRATOR_SLUG = "agentlas-orchestrator";
 export const APP_BUILDER_SLUG = "agentlas-app-builder";
 export const CORE_META_AGENT_SLUG = "agentlas-core-engine-meta-agent-builtin";
 export const SCIENCE_RESEARCH_DIRECTOR_SLUG = "agentlas-science-research-director";
-export const RESEARCH_DIRECTOR_PLUGIN_VERSION = "1.15.1";
-// Hash of the canonical prompt assembled from agent/agent.md and direct-study/SKILL.md.
+export const RESEARCH_DIRECTOR_PLUGIN_VERSION = "1.24.1";
+// Hash of the canonical prompt assembled from agent/soul.md, agent/agent.md,
+// skills/direct-study/SKILL.md and skills/write-manuscript/SKILL.md (persona -> contract -> workflows).
 // The Science runtime refuses to dispatch when the installed package differs.
-export const RESEARCH_DIRECTOR_SYSTEM_PROMPT_SHA256 = "267d43a6b24c5099fd044b76b155ad313f4180a8768912affe3117bc21b9d9bd";
+// Regenerate: node plugins/agentlas-science-research-director/tests/validate-package.mjs --print-hash
+export const RESEARCH_DIRECTOR_SYSTEM_PROMPT_SHA256 = "3ef8641110f676088816437fa26c468ef53d3961af2d504af9cf6fef23c296a3";
 
 // ── Memory contract ────────────────────────────────────────────────────────
 // Mirrors agent_memory_curator_agent/docs/integration-contract.md + memory-taxonomy.md.

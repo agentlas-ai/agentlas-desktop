@@ -1,0 +1,175 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "agentlas.astronomy.transit-search-bls-input/v1",
+  "title": "search_light_curve_transits_bls",
+  "description": "Exact data-resolution Box Least Squares transit search over declared period and duration grids: signal residue spectrum, SDE, best box (period, duration, mid-transit epoch, depth with uncertainty), secondary-eclipse and odd/even screens, folded observations, and a two-panel figure. The light curve must already be normalized; no detrending is applied.",
+  "x-agentlas": {
+    "schema": "agentlas.astronomy.tool-schema/v1",
+    "toolName": "search_light_curve_transits_bls",
+    "runtimeModule": "runtime/transit-search.cjs",
+    "runtimeExport": "searchLightCurveTransitsBls",
+    "resultSchema": "agentlas.science.astronomy-transit-search-bls-result/v1",
+    "argumentKeyStyle": "snake_case-to-camelCase"
+  },
+  "type": "object",
+  "properties": {
+    "source_content_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "Lowercase hex SHA-256 of the exact source bytes the measurements were taken from."
+    },
+    "target_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "time_system": {
+      "type": "string",
+      "enum": [
+        "BJD_TDB",
+        "BJD_UTC",
+        "HJD_UTC",
+        "JD_UTC",
+        "MJD_UTC",
+        "relative-day"
+      ]
+    },
+    "time_offset_days": {
+      "type": "number",
+      "minimum": -1000000000,
+      "maximum": 1000000000
+    },
+    "value_kind": {
+      "type": "string",
+      "enum": [
+        "flux",
+        "relative-flux"
+      ]
+    },
+    "value_unit": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "weighting": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "weighted",
+        "unweighted"
+      ]
+    },
+    "minimum_period_days": {
+      "type": "number",
+      "minimum": 0.000001,
+      "maximum": 1000000
+    },
+    "maximum_period_days": {
+      "type": "number",
+      "minimum": 0.000001,
+      "maximum": 1000000
+    },
+    "period_count": {
+      "type": "integer",
+      "minimum": 32,
+      "maximum": 5000
+    },
+    "minimum_duration_hours": {
+      "type": "number",
+      "minimum": 0.0001,
+      "maximum": 100000
+    },
+    "maximum_duration_hours": {
+      "type": "number",
+      "minimum": 0.0001,
+      "maximum": 100000
+    },
+    "duration_count": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 50
+    },
+    "maximum_peaks": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 20,
+      "default": 5
+    },
+    "minimum_in_transit_points": {
+      "type": "integer",
+      "minimum": 2,
+      "maximum": 1000,
+      "default": 3
+    },
+    "measurements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "observation_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          },
+          "time": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": -1000000000,
+            "maximum": 1000000000
+          },
+          "value": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": -1000000000000000,
+            "maximum": 1000000000000000
+          },
+          "standard_error": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "maximum": 1000000000000000,
+            "exclusiveMinimum": 0
+          },
+          "use": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "observation_id",
+          "time",
+          "value",
+          "standard_error",
+          "use"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 8,
+      "maxItems": 5000
+    }
+  },
+  "required": [
+    "source_content_sha256",
+    "target_id",
+    "time_system",
+    "time_offset_days",
+    "value_kind",
+    "value_unit",
+    "weighting",
+    "minimum_period_days",
+    "maximum_period_days",
+    "period_count",
+    "minimum_duration_hours",
+    "maximum_duration_hours",
+    "duration_count",
+    "measurements"
+  ],
+  "additionalProperties": false
+}

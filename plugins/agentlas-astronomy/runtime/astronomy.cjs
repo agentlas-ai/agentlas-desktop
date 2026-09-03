@@ -3,7 +3,7 @@
 const crypto = require("node:crypto");
 
 const PLUGIN_ID = "agentlas-astronomy";
-const PLUGIN_VERSION = "1.2.0";
+const PLUGIN_VERSION = "1.2.1";
 const SIMBAD_ORIGIN = "https://simbad.cds.unistra.fr";
 const SIMBAD_TAP_PATH = "/simbad/sim-tap/sync";
 const SIMBAD_TAP_ENDPOINT = `${SIMBAD_ORIGIN}${SIMBAD_TAP_PATH}`;
@@ -1274,9 +1274,26 @@ function lightCurvePeriodogramTable(periodogram, metadata) {
   };
 }
 
+/**
+ * The scale for an axis that carries a measurement rather than a count.
+ *
+ * Vega-Lite anchors a quantitative scale at zero by default. That is right for a count and wrong
+ * for a measurement: a radial velocity near -21.5 km/s, a magnitude near 12, a normalized flux near
+ * 1.0 all collapse to a flat line once the axis is padded down to zero, and the figure stops
+ * showing the one thing it exists to show. Measured on the rendered panels, the folded transit
+ * filled 5% of its own height and the Keplerian orbit 4% -- the discovery and the fit were both
+ * invisible while every number in the table was correct.
+ *
+ * `magnitude` additionally runs brighter-upward, which is a display convention and not a scale
+ * choice, so it travels with the same helper rather than being remembered separately at each site.
+ */
+function measurementScale(valueKind, extra) {
+  return { zero: false, nice: true, ...(valueKind === "magnitude" ? { reverse: true } : {}), ...(extra ?? {}) };
+}
+
 function lightCurvePublicationFigure(periodogram, foldedRows, modelRows, bestPeak, metadata, provenance) {
   const valueTitle = metadata.valueUnit ? `Observed value (${metadata.valueUnit})` : "Observed value";
-  const yScale = metadata.valueKind === "magnitude" ? { reverse: true } : {};
+  const yScale = measurementScale(metadata.valueKind);
   return {
     schema: "agentlas.astronomy.light-curve-publication-figure/v1",
     rendererId: "vega-lite",
@@ -1328,7 +1345,7 @@ function lightCurvePublicationFigure(periodogram, foldedRows, modelRows, bestPea
               data: { values: modelRows },
               mark: { type: "line", color: "#C2415D", strokeWidth: 1.8 },
               encoding: {
-                x: { field: "phase", type: "quantitative", title: `Phase at ${bestPeak.periodDays} day grid period`, scale: { domain: [0, 1] } },
+                x: { field: "phase", type: "quantitative", title: `Phase at ${Number(bestPeak.periodDays.toPrecision(6))} day grid period`, scale: { domain: [0, 1] } },
                 y: { field: "fittedValue", type: "quantitative", title: valueTitle, scale: yScale },
               },
             },
@@ -1336,7 +1353,7 @@ function lightCurvePublicationFigure(periodogram, foldedRows, modelRows, bestPea
               data: { values: foldedRows.filter((row) => row.errorLower !== null) },
               mark: { type: "rule", color: "#6B7280", strokeWidth: 1 },
               encoding: {
-                x: { field: "phase", type: "quantitative", title: `Phase at ${bestPeak.periodDays} day grid period`, scale: { domain: [0, 1] } },
+                x: { field: "phase", type: "quantitative", title: `Phase at ${Number(bestPeak.periodDays.toPrecision(6))} day grid period`, scale: { domain: [0, 1] } },
                 y: { field: "errorLower", type: "quantitative", title: valueTitle, scale: yScale },
                 y2: { field: "errorUpper" },
               },
@@ -1345,7 +1362,7 @@ function lightCurvePublicationFigure(periodogram, foldedRows, modelRows, bestPea
               data: { values: foldedRows },
               mark: { type: "point", filled: true, color: "#255C99", size: 50, stroke: "#FFFFFF", strokeWidth: 0.7 },
               encoding: {
-                x: { field: "phase", type: "quantitative", title: `Phase at ${bestPeak.periodDays} day grid period`, scale: { domain: [0, 1] } },
+                x: { field: "phase", type: "quantitative", title: `Phase at ${Number(bestPeak.periodDays.toPrecision(6))} day grid period`, scale: { domain: [0, 1] } },
                 y: { field: "value", type: "quantitative", title: valueTitle, scale: yScale },
                 tooltip: [
                   { field: "observationId", type: "nominal", title: "Observation" },
@@ -1616,6 +1633,7 @@ function analyzeLightCurvePeriodicity(input) {
 }
 
 module.exports = {
+  measurementScale,
   ASTROMETRIC_EXCLUSION_REASONS,
   ASTROMETRIC_KINEMATICS_ALGORITHM,
   ASTROMETRIC_KINEMATICS_SCHEMA,

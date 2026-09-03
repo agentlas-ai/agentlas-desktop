@@ -85,7 +85,6 @@ function mainOneProfileContext(req: McpInvocationRequest): string {
   const value = (req as McpInvocationRequest & { oneProfileContext?: unknown }).oneProfileContext;
   return typeof value === "string" && value.length > 0 && value.length <= 16_000 ? value : "";
 }
-
 function sameRuntime(left: RuntimeStatus, right: RuntimeStatus): boolean {
   return left.kind === right.kind && left.backend === right.backend && left.source === right.source;
 }

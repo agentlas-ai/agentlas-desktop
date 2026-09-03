@@ -47,8 +47,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
-      # Public verification keys only. The packaging hook refuses an empty or
-      # malformed policy so no release can silently ship an untrusted extension installer.
+      # Public verification keys only; absence blocks packaging before release.
       AGENTLAS_PRODUCT_EXTENSION_TRUSTED_KEYS_JSON: ${{ vars.AGENTLAS_PRODUCT_EXTENSION_TRUSTED_KEYS_JSON }}
       HEPHAESTUS_REF: v1.2.40
       HEPHAESTUS_COMMIT: 0c29abdb9505df32b61522861a17bbc537de5263
@@ -160,6 +159,9 @@ jobs:
       - name: Build renderer + electron
         run: npm run build
 
+      - name: Verify browser auth and lifecycle policy on the target OS
+        run: npm run test:browser-auth-portability
+
       # Tests run after the initial clone. Recheck the immutable commit and the
       # ignored-file boundary immediately before electron-builder sees Core.
       - name: Reverify embedded engine release boundary
@@ -183,6 +185,9 @@ jobs:
       # CLI 설치 버튼이 "npm 을 찾을 수 없습니다"로 끝나던 원인이다.
       - name: Materialize pinned private Node runtime for CLI bootstrap
         run: npm run fetch:node
+
+      - name: Materialize Playwright-pinned Agentlas browser runtime
+        run: npm run fetch:browser
 
       - name: Package verified Actions artifacts only
         shell: bash

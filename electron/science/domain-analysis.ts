@@ -1,6 +1,4 @@
-import path from "node:path";
 import { createHash } from "node:crypto";
-import { createRequire } from "node:module";
 import type { ScienceArtifact } from "../../shared/science-contract";
 import { SCIENCE_MATERIALS_TOOL_ID, SCIENCE_MATERIALS_TOOL_VERSION, type ScienceMaterialsArtifactPayload } from "../../shared/science-materials";
 import {
@@ -10,6 +8,8 @@ import {
 } from "../../shared/science-physics";
 import { ScienceStore } from "./store";
 import { EARTHQUAKE_CATALOG_TOOL_ID, EARTHQUAKE_CATALOG_TOOL_VERSION, type EarthquakeCatalogResult } from "./earthquake-catalog";
+import { isOqmdJsonMimeType } from "./materials-catalog";
+import { loadSciencePluginRuntime } from "./plugin-runtime";
 
 export const EARTH_GUTENBERG_RICHTER_TOOL_ID = "agentlas.earth-gutenberg-richter-analysis";
 export const EARTH_GUTENBERG_RICHTER_TOOL_VERSION = "1.0.0";
@@ -43,9 +43,9 @@ type GutenbergRichterResult = {
     confidenceLevel: number;
     confidenceInterval: { lower: number; upper: number };
   };
-  publicationTable: { rows: Array<[number, number, number, number, number]> };
+  publicationTable: { schema: "agentlas.science-table/v1"; rows: Array<[number, number, number, number, number]> };
   assumptions: string[];
-  contentReceipts: { figure: { sha256: string } };
+  contentReceipts: { publicationTable: { sha256: string }; figure: { sha256: string } };
   analysisSha256: string;
 };
 
@@ -85,6 +85,7 @@ type HepDataChiSquareResult = {
   };
   rows: Array<{ ordinal: number; x: number; observed: number | null; prediction: number | null; propagatedSigma: number | null; pull: number | null; included: boolean }>;
   publicationTable: Record<string, unknown>;
+  contentReceipts: { publicationTable: { sha256: string } };
   warnings: string[];
   analysisBytes: number;
   analysisSha256: string;
@@ -112,6 +113,7 @@ type LatticeMetricsResult = {
   };
   density: { status: string; gramsPerCm3: number | null; formula: string | null; missingInputs: string[]; method: string | null };
   publicationTable: Record<string, unknown>;
+  contentReceipts: { publicationTable: { sha256: string } };
   constants: Record<string, number>;
   warnings: string[];
   analysisSha256: string;
@@ -246,17 +248,19 @@ function title(value: unknown, fallback: string): string {
 }
 
 function earthRuntime(): EarthRuntime {
-  const runtimePath = path.resolve(__dirname, "../../../plugins/agentlas-earth-science/runtime/earth-science.cjs");
-  const runtime = createRequire(__filename)(runtimePath) as Partial<EarthRuntime>;
-  if (runtime.PLUGIN_VERSION !== "0.4.0" || typeof runtime.analyzeGutenbergRichter !== "function") {
+  const { runtime } = loadSciencePluginRuntime<Partial<EarthRuntime>>(
+    "agentlas-earth-science", "runtime/earth-science.cjs", 16 * 1024 * 1024,
+  );
+  if (runtime.PLUGIN_VERSION !== "0.6.0" || typeof runtime.analyzeGutenbergRichter !== "function") {
     throw new Error("science-earth-gutenberg-richter-runtime-invalid");
   }
   return runtime as EarthRuntime;
 }
 
 function physicsRuntime(): PhysicsRuntime {
-  const runtimePath = path.resolve(__dirname, "../../../plugins/agentlas-physics/runtime/physics.cjs");
-  const runtime = createRequire(__filename)(runtimePath) as Partial<PhysicsRuntime>;
+  const { runtime } = loadSciencePluginRuntime<Partial<PhysicsRuntime>>(
+    "agentlas-physics", "runtime/physics.cjs", 16 * 1024 * 1024,
+  );
   if (typeof runtime.normalizeHepDataTable !== "function" || typeof runtime.analyzeHepDataChiSquare !== "function") {
     throw new Error("science-physics-hepdata-chi-square-runtime-invalid");
   }
@@ -264,8 +268,9 @@ function physicsRuntime(): PhysicsRuntime {
 }
 
 function materialsRuntime(): MaterialsRuntime {
-  const runtimePath = path.resolve(__dirname, "../../../plugins/agentlas-materials-science/runtime/materials-science.cjs");
-  const runtime = createRequire(__filename)(runtimePath) as Partial<MaterialsRuntime>;
+  const { runtime } = loadSciencePluginRuntime<Partial<MaterialsRuntime>>(
+    "agentlas-materials-science", "runtime/materials-science.cjs", 16 * 1024 * 1024,
+  );
   if (typeof runtime.analyzeLatticeMetrics !== "function") throw new Error("science-materials-lattice-metrics-runtime-invalid");
   return runtime as MaterialsRuntime;
 }
@@ -353,7 +358,7 @@ function exactMaterialsParent(store: ScienceStore, projectId: string, catalogRun
   if (!run || run.status !== "succeeded" || run.toolId !== SCIENCE_MATERIALS_TOOL_ID || run.toolVersion !== SCIENCE_MATERIALS_TOOL_VERSION) {
     throw new Error("science-materials-lattice-metrics-parent-run-invalid");
   }
-  const rawOutput = run.outputs.find((resource) => resource.role === "provider-response" && resource.mimeType === "application/json");
+  const rawOutput = run.outputs.find((resource) => resource.role === "provider-response" && isOqmdJsonMimeType(resource.mimeType));
   const resultOutput = run.outputs.find((resource) => resource.role === "materials-catalog" && resource.mimeType === "application/vnd.agentlas.science-materials-catalog+json");
   if (!rawOutput || !resultOutput || run.outputs.length !== 2) throw new Error("science-materials-lattice-metrics-parent-output-invalid");
   const rawBytes = store.readRunBlob(rawOutput);
@@ -438,7 +443,9 @@ function materialsLatticeVega(analysis: LatticeMetricsResult): Record<string, un
   return {
     $schema: "https://vega.github.io/schema/vega/v5.json",
     width: 680,
-    height: 180,
+    // The publication validator refuses a capture under 320x200 (artifact-publication-validator.ts),
+    // so a figure drawn shorter than that can never be bound into a manuscript.
+    height: 220,
     padding: 16,
     background: "white",
     data: [{ name: "metrics", values: [{ metric: "Cell volume", value: analysis.volume.angstrom3 }] }],
@@ -577,7 +584,7 @@ export class ScienceDomainAnalysisService {
         provenance: {
           sourceRunId: run.id,
           sourceRefs: [source.canonicalUri],
-          datasetSha256: [parent.rawOutput.sha256, parent.catalogOutput.sha256, analysis.source.normalizedCatalogSha256, analysis.analysisSha256, analysis.contentReceipts.figure.sha256],
+          datasetSha256: [parent.rawOutput.sha256, parent.catalogOutput.sha256, analysis.source.normalizedCatalogSha256, analysis.analysisSha256, analysis.contentReceipts.publicationTable.sha256, analysis.contentReceipts.figure.sha256],
           codeSha256: sha256(`${EARTH_GUTENBERG_RICHTER_TOOL_ID}@${EARTH_GUTENBERG_RICHTER_TOOL_VERSION}:${analysis.methodRevision}`),
           environmentSha256,
         },
@@ -702,7 +709,7 @@ export class ScienceDomainAnalysisService {
         provenance: {
           sourceRunId: run.id,
           sourceRefs,
-          datasetSha256: [parent.tableOutput.sha256, parent.resultOutput.sha256, parent.normalizedTable.normalizedSha256, analysis.analysisSha256],
+          datasetSha256: [parent.tableOutput.sha256, parent.resultOutput.sha256, parent.normalizedTable.normalizedSha256, analysis.analysisSha256, analysis.contentReceipts.publicationTable.sha256],
           codeSha256: sha256(`${PHYSICS_HEPDATA_CHI_SQUARE_TOOL_ID}@${PHYSICS_HEPDATA_CHI_SQUARE_TOOL_VERSION}:agentlas-physics@0.2.0`),
           environmentSha256,
         },
@@ -813,7 +820,7 @@ export class ScienceDomainAnalysisService {
         provenance: {
           sourceRunId: run.id,
           sourceRefs: [parent.stored.endpoint],
-          datasetSha256: [parent.rawOutput.sha256, parent.resultOutput.sha256, parent.stored.normalized.normalizedSha256, analysis.analysisSha256],
+          datasetSha256: [parent.rawOutput.sha256, parent.resultOutput.sha256, parent.stored.normalized.normalizedSha256, analysis.analysisSha256, analysis.contentReceipts.publicationTable.sha256],
           codeSha256: sha256(`${MATERIALS_LATTICE_METRICS_TOOL_ID}@${MATERIALS_LATTICE_METRICS_TOOL_VERSION}:agentlas-materials-science@0.2.0`),
           environmentSha256,
         },

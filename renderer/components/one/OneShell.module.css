@@ -358,6 +358,150 @@
   color: #a84b42;
   outline: 2px solid transparent;
 }
+.sessionButton {
+  min-height: 64px;
+  grid-template-columns: 40px minmax(0, 1fr);
+  gap: 10px;
+  padding: 8px 9px;
+}
+
+.conversationRow .sessionButton {
+  padding-right: 9px;
+}
+
+.sessionButton > :first-child {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.sessionCopy {
+  min-width: 0;
+  display: grid;
+  grid-column: 2;
+  gap: 4px;
+}
+
+.sessionTitleLine {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.sessionTitleLine strong {
+  overflow: hidden;
+  font-size: 12.5px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessionTitleLine time {
+  color: #858b90;
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.sessionCopy > small {
+  overflow: hidden;
+  color: #747b80;
+  font-size: 10.5px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessionWarning {
+  display: inline-grid;
+  place-items: center;
+  color: #c83e37;
+}
+
+.sessionGroupAvatar {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  display: block;
+}
+
+.sessionGroupAvatar > span {
+  position: absolute;
+  transform: scale(.66);
+  transform-origin: center;
+}
+
+.sessionGroupAvatar > span:first-child { left: -8px; top: 2px; z-index: 1; }
+.sessionGroupAvatar > span:nth-child(2) { right: -8px; top: -5px; z-index: 3; }
+.sessionGroupAvatar > span:nth-child(3) { right: -8px; bottom: -8px; z-index: 2; }
+
+.conversationRow[data-unavailable="true"] .sessionCopy > small {
+  color: #9a514d;
+}
+
+.conversationRow[data-unavailable="true"] .taskButton[data-active="true"] {
+  background: #f6eeee;
+}
+
+.sessionUnavailableBanner {
+  width: min(820px, calc(100% - 48px));
+  min-height: 54px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  margin: 0 auto 10px;
+  padding: 9px 10px 9px 13px;
+  border: 1px solid #efcfcc;
+  border-radius: 11px;
+  background: #fffafa;
+  color: #bd3932;
+}
+
+.sessionUnavailableBanner strong {
+  color: #5a3330;
+  font-size: 11.5px;
+  font-weight: 560;
+  line-height: 1.45;
+}
+
+.sessionUnavailableBanner button {
+  min-height: 34px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 8px;
+  background: #1f2224;
+  color: #fff;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.composer[data-unavailable="true"] {
+  border-color: #e0e1e2;
+  background: #f6f6f6;
+  box-shadow: none;
+}
+
+.composer[data-unavailable="true"] textarea {
+  color: #9ca1a5;
+  cursor: not-allowed;
+}
+
+@media (max-width: 640px) {
+  .sessionUnavailableBanner {
+    width: calc(100% - 20px);
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .sessionUnavailableBanner button {
+    grid-column: 1 / -1;
+    justify-self: stretch;
+  }
+}
+
 
 .taskButton strong {
   overflow: hidden;
@@ -1144,15 +1288,18 @@
 .resultAnchor {
   min-width: 0;
   scroll-margin-top: 24px;
+  margin: 20px 0 12px;
 }
 
 .message {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
   min-width: 0;
 }
 
 .message[data-role="user"] {
-  display: flex;
-  justify-content: flex-end;
+  justify-items: end;
 }
 
 .messageBody {
@@ -2141,7 +2288,7 @@
   overflow-y: hidden;
 }
 
-.composer textarea::placeholder { color: #666b70; }
+.composer textarea::placeholder { color: #9a9fa3; }
 
 .sendButton {
   width: 34px;
@@ -2535,7 +2682,7 @@
   }
   .sidebarRevealButton,
   .body[data-rail-collapsed="true"] .sidebarRevealButton {
-    left: 64px;
+    left: 16px;
     display: grid;
   }
   .taskSidebarRevealButton { display: grid !important; }
@@ -2578,7 +2725,11 @@
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-bottom: 8px;
+  max-width: min(640px, 88%);
+}
+
+.message[data-role="user"] .messageImages {
+  justify-content: flex-end;
 }
 
 .messageImage {
@@ -2632,20 +2783,25 @@
 .steeringQueueRemove:hover { background: #f2f3f4; color: #303438; }
 
 .failureCard {
+  position: relative;
   margin: 0 auto 16px;
   width: min(720px, 100%);
-  padding: 14px 16px;
-  border: 1px solid rgba(191, 78, 58, 0.28);
-  border-radius: 14px;
-  background: rgba(255, 247, 244, 0.96);
-  color: #46211b;
+  padding: 22px 54px 22px 24px;
+  border: 1px solid #e8e8ea;
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 12px 30px rgba(20, 25, 30, .06);
+  color: #292d30;
 }
+.failureCardClose { position: absolute; top: 12px; right: 12px; width: 32px; height: 32px; display: inline-grid; place-items: center; padding: 0; border: 0; border-radius: 9px; background: transparent; color: #8a9095; cursor: pointer; }
+.failureCardClose:hover, .failureCardClose:focus-visible { background: #f2f3f4; color: #454b50; }
+.failureCardClose:focus-visible { outline: 2px solid rgba(96, 122, 54, .3); outline-offset: 2px; }
 .failureCardHeader { display: flex; align-items: center; gap: 8px; }
-.failureCardHeader strong { color: #b13b2a; }
+.failureCardHeader strong { color: #4f575d; }
 .failureCardHeader span { font: 11px/1.4 var(--font-mono, ui-monospace); color: #865d55; }
 .failureCard p { margin: 7px 0 10px; font-size: 13px; line-height: 1.5; }
 .failureCardActions { display: flex; flex-wrap: wrap; gap: 7px; }
-.failureCardActions button { border: 1px solid rgba(177, 59, 42, 0.28); border-radius: 8px; background: #fff; padding: 6px 10px; color: #6e2d24; cursor: pointer; }
+.failureCardActions button { border: 1px solid #e1e4e6; border-radius: 10px; background: #fff; padding: 8px 12px; color: #4b5358; cursor: pointer; }
 .failureCardActions button:disabled { opacity: .45; cursor: not-allowed; }
 
 /* --------------------------------------------------------------------------
@@ -2778,7 +2934,7 @@
 .railBottomMenu .connection {
   min-height: 25px;
   padding: 2px 9px 0;
-  color: #666b70;
+  color: #979b9e;
   font-size: 9px;
 }
 
@@ -2835,7 +2991,7 @@
 
 .homeChatHeader small {
   overflow: hidden;
-  color: #666b70;
+  color: #989da1;
   font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2883,7 +3039,7 @@
 
 .homeDate {
   justify-self: center;
-  color: #666b70;
+  color: #a0a4a7;
   font-size: 9px;
   font-weight: 590;
 }
@@ -3046,8 +3202,8 @@
 }
 
 .message[data-role="assistant"] {
-  display: flex;
-  justify-content: flex-start;
+  display: grid;
+  justify-items: start;
 }
 
 /*
@@ -3065,8 +3221,12 @@
   justify-items: start;
 }
 
-.message[data-role="assistant"] .messageBody {
-  padding: 10px 13px;
+.message[data-taskforce="true"][data-role="assistant"] .messageImages {
+  margin-left: 46px;
+}
+
+.message[data-role="assistant"] .messageBody:not([data-doc="true"]) {
+  padding: 14px 13px 16px;
   border-radius: 15px 15px 15px 4px;
   background: #f1f1f2;
   color: #282b2e;
@@ -3076,6 +3236,12 @@
   --ink: #282b2e;
   --ink-soft: #656a6e;
   --accent-soft: #aaa1c7;
+}
+
+/* 산출물이 답변의 경계에 붙어 보이지 않게, 문서/미디어 카드에도 최소한의
+   호흡을 남긴다. 카드 자체의 내부 패딩은 각 산출물 컴포넌트가 소유한다. */
+.message[data-role="assistant"] .messageBody > [data-one-document="true"] {
+  margin-block: 4px 8px;
 }
 
 .message[data-role="user"] .messageBody {
@@ -3185,40 +3351,6 @@
   .body[data-task-active="true"][data-rail-collapsed="true"][data-context-rail="true"] {
     grid-template-columns: 0 minmax(0, 1fr) min(var(--one-rail-width, 210px), calc(100% - 320px));
   }
-
-  /* Browser zoom makes the task column narrow before the phone layout takes
-     over. Keep every composer control visible in that in-between width: the
-     selected values may ellipsize, but a later chip must never be pushed under
-     the fixed voice/send actions (the permission label used to show only
-     `Fu`). */
-  .body[data-task-active="true"] .composerTools {
-    overflow-x: hidden;
-  }
-
-  .body[data-task-active="true"] .composerChip {
-    min-width: 0;
-    flex: 0 1 auto;
-    gap: 4px;
-    padding-inline: 4px;
-  }
-
-  .body[data-task-active="true"] .composerChip > span {
-    min-width: 0;
-    max-width: none;
-  }
-
-  .body[data-task-active="true"] .composerChip > svg:last-child {
-    display: none;
-  }
-
-  .body[data-task-active="true"] .composerChip[data-one-composer-trigger="model"] {
-    flex: 1 1 96px;
-  }
-
-  .body[data-task-active="true"] .composerQuickMode {
-    width: 30px;
-    flex: 0 0 30px;
-  }
 }
 
 /* Phone widths keep the Outputs panel as an overlay sheet — there is no room
@@ -3242,8 +3374,15 @@
   .body,
   .body[data-rail-collapsed="true"],
   .body[data-task-active="true"],
-  .body[data-task-active="true"][data-rail-collapsed="true"] {
-    grid-template-columns: 1fr;
+  .body[data-task-active="true"][data-rail-collapsed="true"],
+  .body[data-context-rail="true"],
+  .body[data-task-active="true"][data-context-rail="true"],
+  .body[data-home-history="closed"],
+  .body[data-home-history="closed"][data-rail-collapsed="true"] {
+    /* The ≤1080px home-history rule has higher specificity; keep the phone
+       layout a single track so a hidden history rail cannot leave a blank
+       desktop-sized column beside the conversation. */
+    grid-template-columns: 1fr !important;
   }
 
   .homeContent { width: 100%; padding: 0 0 194px; }

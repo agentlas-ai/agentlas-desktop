@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { escapeLatex as latex } from "./science-latex-text";
 import { strToU8, unzipSync, zipSync } from "fflate";
 import type {
   ScienceArtifactContext,
@@ -70,6 +71,15 @@ function manifestResource(resource: ScienceResearchRunResource): Record<string, 
   return core;
 }
 
+function manifestResourceWithNulls(resource: ScienceResearchRunResource): Record<string, unknown> {
+  return { ...manifestResource(resource), artifactId: resource.artifactId, artifactVersion: resource.artifactVersion };
+}
+
+function storedManifestMatches(resources: ScienceResearchRunResource[], expectedSha256: string): boolean {
+  return sciencePublicationTableSha256(resources.map(manifestResource)) === expectedSha256
+    || sciencePublicationTableSha256(resources.map(manifestResourceWithNulls)) === expectedSha256;
+}
+
 function cellText(value: ScienceDatasetCell, nullDisplay: string): string {
   if (value === null) return nullDisplay;
   if (typeof value === "boolean") return value ? "true" : "false";
@@ -80,9 +90,7 @@ function xml(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\"/g, "&quot;").replace(/'/g, "&apos;");
 }
 
-function latex(value: string): string {
-  return value.replace(/\\/g, "\\textbackslash{}").replace(/([#$%&_{}])/g, "\\$1").replace(/~/g, "\\textasciitilde{}").replace(/\^/g, "\\textasciicircum{}");
-}
+
 
 export interface SciencePublicationEditableTableSelectionInput {
   title: string;
@@ -109,7 +117,7 @@ export interface SciencePublicationEditableTableBinding {
     version: number;
     contentSha256: string;
     linkageSha256: string;
-    rendererId: typeof SCIENCE_TABLE_RENDERER_ID;
+    rendererId: string;
     rendererVersion: string;
   };
   dataset: {
@@ -176,7 +184,19 @@ export interface BuildSciencePublicationEditableTableInput {
   selection: SciencePublicationEditableTableSelectionInput;
 }
 
-function selectionDocument(table: ScienceDatasetTablePayload, selection: SciencePublicationEditableTableSelectionInput): {
+export interface BuildSciencePublicationEditableDomainTableInput {
+  context: ScienceArtifactContext;
+  run: ScienceResearchRun;
+  runArtifactBinding: ScienceRunArtifactBinding;
+  selection: Omit<SciencePublicationEditableTableSelectionInput, "columns" | "rowIndices">;
+}
+
+interface SciencePublicationTableData {
+  columns: ScienceDatasetTablePayload["columns"];
+  rows: ScienceDatasetTablePayload["rows"];
+}
+
+function selectionDocument(table: SciencePublicationTableData, selection: SciencePublicationEditableTableSelectionInput): {
   document: Omit<SciencePublicationEditableTableDocument, "bindingSha256">;
   selection: Omit<SciencePublicationEditableTableBinding["selection"], "selectionSha256">;
 } {
@@ -214,6 +234,76 @@ function selectionDocument(table: ScienceDatasetTablePayload, selection: Science
   };
 }
 
+function domainPublicationTableProjection(value: unknown): {
+  sourceSha256: string;
+  table: SciencePublicationTableData;
+  notes: string[];
+} {
+  const source = record(value);
+  if (!source || source.schema !== SCIENCE_TABLE_SCHEMA || !Array.isArray(source.columns) || !Array.isArray(source.rows)
+    || source.columns.length < 1 || source.columns.length > SCIENCE_PUBLICATION_EDITABLE_TABLE_LIMITS.maxColumns
+    || source.rows.length < 1 || source.rows.length > SCIENCE_PUBLICATION_EDITABLE_TABLE_LIMITS.maxRows
+    || source.columns.length * source.rows.length > SCIENCE_PUBLICATION_EDITABLE_TABLE_LIMITS.maxCells) {
+    throw new Error("science-publication-domain-table-invalid");
+  }
+  const declared = source.columns.map((entry, ordinal) => {
+    const column = record(entry);
+    if (!column) throw new Error("science-publication-domain-table-column-invalid");
+    const id = safeText(typeof column.id === "string" ? column.id : column.key, 240, "science-publication-domain-table-column-invalid");
+    const label = safeText(typeof column.label === "string" ? column.label : id, 240, "science-publication-domain-table-column-invalid");
+    const unit = column.unit === null || column.unit === undefined || column.unit === "" ? null
+      : safeText(column.unit, 120, "science-publication-domain-table-column-invalid");
+    const declaredType = String(column.type ?? column.datatype ?? "string").toLowerCase();
+    const logicalType: ScienceDatasetTablePayload["columns"][number]["logicalType"] = declaredType === "integer" ? "integer"
+      : declaredType === "number" ? "number" : declaredType === "boolean" ? "boolean" : "string";
+    return { id, ordinal, baseName: `${label}${unit ? ` (${unit})` : ""}`, logicalType };
+  });
+  if (new Set(declared.map((column) => column.id.toLocaleLowerCase("en-US"))).size !== declared.length) {
+    throw new Error("science-publication-domain-table-column-duplicate");
+  }
+  const baseNameCounts = new Map<string, number>();
+  const columns = declared.map((column) => {
+    const key = column.baseName.toLocaleLowerCase("en-US");
+    const count = (baseNameCounts.get(key) ?? 0) + 1;
+    baseNameCounts.set(key, count);
+    const name = count === 1 ? column.baseName : `${column.baseName} [${column.id}]`;
+    return { name, logicalType: column.logicalType, nullable: false };
+  });
+  const rows = source.rows.map((entry) => {
+    if (!Array.isArray(entry) && !record(entry)) throw new Error("science-publication-domain-table-row-invalid");
+    if (Array.isArray(entry) && entry.length !== declared.length) throw new Error("science-publication-domain-table-row-invalid");
+    const rowRecord = record(entry);
+    const normalized: Record<string, ScienceDatasetCell> = {};
+    declared.forEach((column, ordinal) => {
+      const cell = Array.isArray(entry) ? entry[ordinal] : rowRecord![column.id];
+      if (cell === null || cell === undefined) {
+        columns[ordinal].nullable = true;
+        normalized[columns[ordinal].name] = null;
+        return;
+      }
+      if (column.logicalType === "integer" && (typeof cell !== "number" || !Number.isSafeInteger(cell))) {
+        throw new Error("science-publication-domain-table-cell-invalid");
+      }
+      if (column.logicalType === "number" && (typeof cell !== "number" || !Number.isFinite(cell))) {
+        throw new Error("science-publication-domain-table-cell-invalid");
+      }
+      if (column.logicalType === "boolean" && typeof cell !== "boolean") {
+        throw new Error("science-publication-domain-table-cell-invalid");
+      }
+      if (column.logicalType === "string" && (typeof cell !== "string" || CONTROL_RE.test(cell) || Buffer.byteLength(cell, "utf8") > 16 * 1024)) {
+        throw new Error("science-publication-domain-table-cell-invalid");
+      }
+      normalized[columns[ordinal].name] = cell as ScienceDatasetCell;
+    });
+    return normalized;
+  });
+  const notes = Array.isArray(source.notes)
+    ? source.notes.map((note) => safeText(note, 2_000, "science-publication-domain-table-note-invalid"))
+    : [];
+  if (notes.length > SCIENCE_PUBLICATION_EDITABLE_TABLE_LIMITS.maxNotes) throw new Error("science-publication-table-notes-limit");
+  return { sourceSha256: sciencePublicationTableSha256(source), table: { columns, rows }, notes };
+}
+
 function bindingCore(input: BuildSciencePublicationEditableTableInput): { binding: SciencePublicationEditableTableBinding; document: SciencePublicationEditableTableDocument } {
   const { context, run, runArtifactBinding } = input;
   const projectId = safeUuid(context?.artifact?.projectId, "science-publication-table-project-invalid");
@@ -236,8 +326,8 @@ function bindingCore(input: BuildSciencePublicationEditableTableInput): { bindin
   const inputManifestSha256 = safeSha256(run.inputManifestSha256, "science-publication-table-run-input-hash-invalid");
   const outputManifestSha256 = safeSha256(run.outputManifestSha256, "science-publication-table-run-output-hash-invalid");
   const environmentSha256 = safeSha256(run.environmentSha256, "science-publication-table-run-environment-hash-invalid");
-  if (sciencePublicationTableSha256(run.inputs.map(manifestResource)) !== inputManifestSha256
-    || sciencePublicationTableSha256(run.outputs.map(manifestResource)) !== outputManifestSha256) throw new Error("science-publication-table-run-manifest-invalid");
+  if (!storedManifestMatches(run.inputs, inputManifestSha256)
+    || !storedManifestMatches(run.outputs, outputManifestSha256)) throw new Error("science-publication-table-run-manifest-invalid");
   if (runArtifactBinding.projectId !== projectId || runArtifactBinding.runId !== runId || runArtifactBinding.artifactId !== artifactId
     || runArtifactBinding.artifactVersion !== artifactVersion || runArtifactBinding.artifactContentSha256 !== artifactContentSha256) {
     throw new Error("science-publication-table-run-artifact-binding-invalid");
@@ -287,6 +377,92 @@ function bindingCore(input: BuildSciencePublicationEditableTableInput): { bindin
   };
 }
 
+function domainBindingCore(input: BuildSciencePublicationEditableDomainTableInput): { binding: SciencePublicationEditableTableBinding; document: SciencePublicationEditableTableDocument } {
+  const { context, run, runArtifactBinding } = input;
+  const projectId = safeUuid(context?.artifact?.projectId, "science-publication-domain-table-project-invalid");
+  const artifactId = safeUuid(context?.artifact?.id, "science-publication-domain-table-artifact-invalid");
+  const artifactVersion = context?.selectedVersion?.version;
+  if (context.artifact.status !== "ready" || context.artifact.kind !== "chart.vega" || !Number.isSafeInteger(artifactVersion) || artifactVersion < 1
+    || context.selectedVersion.artifactId !== artifactId || context.selectedVersion.rendererId !== "agentlas.vega"
+    || context.linkage.schema !== "agentlas.science-artifact-linkage/v1" || context.linkage.projectId !== projectId
+    || context.linkage.artifactId !== artifactId || context.linkage.artifactVersion !== artifactVersion || context.linkage.rendererId !== "agentlas.vega") {
+    throw new Error("science-publication-domain-table-artifact-invalid");
+  }
+  const artifactContentSha256 = safeSha256(context.selectedVersion.contentSha256, "science-publication-domain-table-artifact-hash-invalid");
+  const payload = record(context.selectedVersion.payload);
+  const analysis = record(payload?.analysis);
+  const projection = domainPublicationTableProjection(analysis?.publicationTable);
+  const receipt = record(record(analysis?.contentReceipts)?.publicationTable);
+  if (!receipt || safeSha256(receipt.sha256, "science-publication-domain-table-receipt-invalid") !== projection.sourceSha256
+    || !context.selectedVersion.provenance.datasetSha256.includes(projection.sourceSha256)) {
+    throw new Error("science-publication-domain-table-receipt-invalid");
+  }
+  const runId = safeUuid(run?.id, "science-publication-domain-table-run-invalid");
+  if (run.projectId !== projectId || run.status !== "succeeded" || !run.finishedAt || context.artifact.sourceRunId !== runId
+    || context.selectedVersion.provenance.sourceRunId !== runId || context.linkage.origin.runId !== runId
+    || context.selectedVersion.provenance.environmentSha256 !== run.environmentSha256 || !run.outputManifestSha256) {
+    throw new Error("science-publication-domain-table-run-invalid");
+  }
+  const inputManifestSha256 = safeSha256(run.inputManifestSha256, "science-publication-domain-table-run-input-hash-invalid");
+  const outputManifestSha256 = safeSha256(run.outputManifestSha256, "science-publication-domain-table-run-output-hash-invalid");
+  const environmentSha256 = safeSha256(run.environmentSha256, "science-publication-domain-table-run-environment-hash-invalid");
+  if (!storedManifestMatches(run.inputs, inputManifestSha256) || !storedManifestMatches(run.outputs, outputManifestSha256)) {
+    throw new Error("science-publication-domain-table-run-manifest-invalid");
+  }
+  if (runArtifactBinding.projectId !== projectId || runArtifactBinding.runId !== runId || runArtifactBinding.artifactId !== artifactId
+    || runArtifactBinding.artifactVersion !== artifactVersion || runArtifactBinding.artifactContentSha256 !== artifactContentSha256) {
+    throw new Error("science-publication-domain-table-run-artifact-binding-invalid");
+  }
+  const output = run.outputs.find((item) => item.id === runArtifactBinding.outputId);
+  if (!output || output.sha256 !== runArtifactBinding.outputSha256 || !/analysis/u.test(output.role)
+    || !/^application\/(?:vnd\.agentlas\.)?.*json$/u.test(output.mimeType)) throw new Error("science-publication-domain-table-run-output-invalid");
+  const selectionInput: SciencePublicationEditableTableSelectionInput = {
+    ...input.selection,
+    notes: input.selection.notes ?? projection.notes,
+    columns: projection.table.columns.map((column) => column.name),
+    rowIndices: projection.table.rows.map((_row, index) => index),
+  };
+  const { document: documentWithoutBinding, selection } = selectionDocument(projection.table, selectionInput);
+  const selectionSha256 = sciencePublicationTableSha256(selection);
+  const normalizedTableSha256 = sciencePublicationTableSha256({ schema: SCIENCE_TABLE_SCHEMA, columns: projection.table.columns, rows: projection.table.rows });
+  const core = {
+    schema: SCIENCE_PUBLICATION_EDITABLE_TABLE_SCHEMA,
+    projectId,
+    artifact: {
+      id: artifactId,
+      versionId: safeUuid(context.selectedVersion.id, "science-publication-domain-table-artifact-version-id-invalid"),
+      version: artifactVersion,
+      contentSha256: artifactContentSha256,
+      linkageSha256: safeSha256(context.linkage.linkageSha256, "science-publication-domain-table-linkage-hash-invalid"),
+      rendererId: context.selectedVersion.rendererId,
+      rendererVersion: safeText(context.selectedVersion.rendererVersion, 120, "science-publication-domain-table-renderer-version-invalid"),
+    },
+    dataset: {
+      schema: SCIENCE_TABLE_SCHEMA,
+      rawSha256: projection.sourceSha256,
+      headerSha256: sciencePublicationTableSha256(projection.table.columns.map((column) => column.name)),
+      rowsSha256: sciencePublicationTableSha256(projection.table.rows),
+      tableSha256: normalizedTableSha256,
+    },
+    run: {
+      id: runId,
+      toolId: safeText(run.toolId, 240, "science-publication-domain-table-run-tool-invalid"),
+      toolVersion: safeText(run.toolVersion, 120, "science-publication-domain-table-run-tool-version-invalid"),
+      inputManifestSha256,
+      outputManifestSha256,
+      environmentSha256,
+      outputId: safeUuid(output.id, "science-publication-domain-table-run-output-id-invalid"),
+      outputSha256: safeSha256(output.sha256, "science-publication-domain-table-run-output-hash-invalid"),
+    },
+    selection: { ...selection, selectionSha256 },
+  };
+  const bindingSha256 = sciencePublicationTableSha256(core);
+  return {
+    binding: { ...core, bindingSha256 },
+    document: { ...documentWithoutBinding, bindingSha256 },
+  };
+}
+
 function documentXml(document: SciencePublicationEditableTableDocument): string {
   const cell = (value: string, bold = false) => `<w:tc><w:tcPr><w:tcMar><w:top w:w="80" w:type="dxa"/><w:left w:w="100" w:type="dxa"/><w:bottom w:w="80" w:type="dxa"/><w:right w:w="100" w:type="dxa"/></w:tcMar></w:tcPr><w:p><w:r>${bold ? "<w:rPr><w:b/></w:rPr>" : ""}<w:t xml:space="preserve">${xml(value)}</w:t></w:r></w:p></w:tc>`;
   const header = `<w:tr><w:trPr><w:tblHeader/></w:trPr>${document.columns.map((column) => cell(column.name, true)).join("")}</w:tr>`;
@@ -300,7 +476,7 @@ function docxBytes(xmlDocument: string): Uint8Array {
     "[Content_Types].xml": strToU8(`<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`),
     "_rels/.rels": strToU8(`<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`),
     "word/document.xml": strToU8(xmlDocument),
-  }, { level: 6 });
+  }, { level: 6, mtime: new Date("2000-01-01T00:00:00Z") });
 }
 
 function latexText(document: SciencePublicationEditableTableDocument): string {
@@ -308,7 +484,7 @@ function latexText(document: SciencePublicationEditableTableDocument): string {
   const header = `${document.columns.map((column) => latex(column.name)).join(" & ")} \\\\`;
   const rows = document.rows.map((row) => `${document.columns.map((column) => latex(cellText(row.cells[column.name], document.nullDisplay))).join(" & ")} \\\\`).join("\n");
   const notes = document.notes.length ? `\n\\par\\small ${document.notes.map(latex).join("; ")}` : "";
-  return `\\begin{table}[htbp]\n\\centering\n\\caption{${latex(document.caption)}}\n\\begin{tabular}{${alignment}}\n\\hline\n${header}\n\\hline\n${rows}\n\\hline\n\\end{tabular}${notes}\n\\end{table}\n`;
+  return `\\begin{table}[htbp]\n\\centering\n\\caption{${latex(document.caption)}}\n\\begin{tabular}{${alignment}}\n\\toprule\n${header}\n\\midrule\n${rows}\n\\bottomrule\n\\end{tabular}${notes}\n\\end{table}\n`;
 }
 
 function assembleExport(binding: SciencePublicationEditableTableBinding, document: SciencePublicationEditableTableDocument): SciencePublicationEditableTableExport {
@@ -337,6 +513,11 @@ function sciencePublicationTableSha256Bytes(bytes: Uint8Array): string {
 
 export function buildSciencePublicationEditableTable(input: BuildSciencePublicationEditableTableInput): SciencePublicationEditableTableExport {
   const { binding, document } = bindingCore(input);
+  return assembleExport(binding, document);
+}
+
+export function buildSciencePublicationEditableDomainTable(input: BuildSciencePublicationEditableDomainTableInput): SciencePublicationEditableTableExport {
+  const { binding, document } = domainBindingCore(input);
   return assembleExport(binding, document);
 }
 

@@ -4,11 +4,9 @@
 import fs from "node:fs";
 import { isCallOnlyHubAgent } from "../../shared/call-only-agent";
 import path from "node:path";
-import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { detectRuntimes } from "../runtime/detect";
 import { ONE_AGENT_ID } from "../runtime/agent-residency";
-import { getRuntimeToolPermissionArbiter } from "../runtime/tool-approval";
 // Stormbreaker Loop — 목표 분해/연속 실행/검증 가능한 오류 repair를 감독(비차단·실패-무해).
 import { superviseStormbreaker, type StormbreakerHandle } from "../hephaestus/stormbreaker-supervisor";
 import { isStormbreakerAutoEnabled } from "../hephaestus/supervisor";
@@ -68,7 +66,7 @@ import { getProject, listProjects } from "../store/projects";
 import { getDb } from "../store/db";
 import { listRentAllowedSlugs } from "../store/project-agent-rent";
 import { activeLeasedSlugs } from "../cloud-agents/leases";
-import { ensureCanonicalTaskForChat, findCanonicalTaskForChat } from "../store/tasks";
+import { findCanonicalTaskForChat } from "../store/tasks";
 import { touchRuntimeSession } from "../store/runtime-sessions";
 import { getInterviewMode } from "../store/interview-mode";
 import { isUserFacingProjectAgent } from "../../shared/project-agent-pool";
@@ -147,9 +145,6 @@ import {
 } from "../../shared/one-friendly-followups";
 import { buildOneSurfaceFromMarkdown, chooseOneSurfaceForDisplay, resolveOneMarkdownSurfaceIntent } from "../one/markdown-surface";
 import { bindOneRuntimeToolArtifacts } from "../one/artifact-preview";
-import { screenCaptureDir } from "../media/capture-artifacts";
-import { chatImageAttachmentFromTrustedFile } from "../store/chat-message-attachments";
-import { userDataPath } from "../runtime-paths";
 import { classifyToolFailure, toolFailureCopy } from "../../shared/tool-failure";
 import { createAutomation, findAutomationByGoalId, listAutomations, toggleAutomation, updateAutomation, updateAutomationGraph } from "../store/automations";
 import { previousTurnObservation, projectContextKey, recordContextSourceMarker, tryRecordRunEvent } from "../store/run-events";
@@ -163,8 +158,17 @@ import { autoSelectMcpTools, buildMcpAutoSelectionPrompt } from "../mcp-tools/au
 import { runMcpKeyElicitationGate } from "./run-key-elicitation";
 import { bridgeHubPluginCandidates } from "../mcp-tools/hub-plugin-bridge";
 import { buildMcpConfigFile } from "../mcp-tools/mcp-config";
+import {
+  refreshBrowserCredentialsIfDue,
+  type BrowserCredentialRefreshReport,
+} from "../browser/credential-sync";
 import { buildAgentAppRunnerEnv, buildRunnerEnv, restrictedRunnerEnv } from "../runtime/env-resolver";
 import { agentRunCwd } from "../runtime/exec";
+import { generateImage, removeGeneratedImageArtifact } from "../multimodal/image";
+import { multimodalImageSlot } from "../multimodal/slot";
+import { chatImageAttachmentFromTrustedFile } from "../store/chat-message-attachments";
+import { browserCaptureDir } from "../media/capture-artifacts";
+import { userDataPath } from "../runtime-paths";
 import {
   normalizeRemoteInvocationPermission,
   revalidateInvocationWorkspaceBinding,
@@ -191,7 +195,7 @@ import { untrustedRuntimeFailurePayload } from "../runtime/untrusted-error";
 import { extractBuildInterviewQuestions } from "../../shared/build-turn";
 import {
   oneTeamRuntimeBinding,
-  resolveOneTeamRuntimeBinding,
+  oneTeamRuntimeBindingMatches,
   type OneTeamRuntimeBinding,
 } from "../one/team-preflight";
 import {
@@ -214,11 +218,11 @@ import { runtimeKindCanUseMcp } from "../../shared/runtime-mcp";
 import type {
   Chat,
   AppFactoryAppRecord,
+  ImageAttachment,
   InstalledAgent,
   McpInvocationEvent,
   McpInvocationRequest,
   AgentlasSurfaceManifest,
-  ImageAttachment,
   JsonObject,
   OrchestrationTarget,
   ProjectAgentPoolMember,
@@ -367,6 +371,41 @@ export function oneControllerOnlyHephaestusCommand(prompt: string): "build" | "c
 type EventSink = (ev: McpInvocationEvent) => void;
 const careerGraphRefreshTriggered = new Set<string>();
 
+function browserCredentialSyncNotice(
+  report: BrowserCredentialRefreshReport,
+  locale: "ko" | "en",
+): NonNullable<McpInvocationEvent["notice"]> {
+  const loginRequired = report.requiresLoginSites.length > 0;
+  const ko = report.state === "refreshed"
+    ? loginRequired
+      ? `그래프 실행 전 세션을 동기화했지만 ${report.requiresLoginSites.length}개 사이트는 Agentlas Browser에서 한 번 로그인이 필요합니다.`
+      : `그래프 실행 전 Agentlas Browser 세션을 동기화했습니다 — ${report.linkedSites.length}개 사이트, ${report.cookiesAdded}개 쿠키.`
+    : report.state === "not-consented"
+      ? "가져오기를 승인한 브라우저 세션이 없어 기존 Agentlas Browser 세션으로 실행합니다."
+      : report.state === "failed"
+        ? "그래프 실행 전 세션 동기화에 실패해 기존 Agentlas Browser 세션으로 계속합니다."
+        : report.state === "discarded"
+          ? "동기화 중 브라우저 승인 범위가 바뀌어 결과를 폐기했습니다. 기존 Agentlas Browser 세션으로 계속합니다."
+          : "Agentlas Browser 세션이 이미 최근 동기화되어 그대로 사용합니다.";
+  const en = report.state === "refreshed"
+    ? loginRequired
+      ? `The session was synced before this graph, but ${report.requiresLoginSites.length} site(s) need one login in Agentlas Browser.`
+      : `Agentlas Browser session synced before this graph — ${report.linkedSites.length} site(s), ${report.cookiesAdded} cookie(s).`
+    : report.state === "not-consented"
+      ? "No consented browser session import is available; continuing with the existing Agentlas Browser session."
+      : report.state === "failed"
+        ? "Session sync failed before this graph; continuing with the existing Agentlas Browser session."
+        : report.state === "discarded"
+          ? "The browser consent scope changed during sync, so its result was discarded; continuing with the existing Agentlas Browser session."
+          : "The Agentlas Browser session was synced recently and is reused as-is.";
+  return {
+    level: report.state === "failed" || loginRequired ? "warning" : report.state === "refreshed" ? "success" : "info",
+    code: "browser-session-sync",
+    message: locale === "ko" ? ko : en,
+    i18n: { ko, en },
+  };
+}
+
 /**
  * Some host CLIs occasionally stop immediately after opening the hidden
  * memory JSON fence. A language-qualified fence at end-of-message cannot be a
@@ -416,103 +455,29 @@ function buildOneRecoveryDecisionPrompt(previousText: string, locale: "ko" | "en
   ].join("\n");
 }
 
+function hasOneRecoveryDecision(text: unknown): boolean {
+  return extractBuildInterviewQuestions(text).length > 0;
+}
+
 /**
- * A user asks for the outcome, not an implementation symbol. Keep this
- * deliberately conservative: it recognizes ordinary image-delivery wording
- * only when a visual noun and a delivery/generation action occur together.
+ * Positive image-generation intent is a host capability contract, not a
+ * renderer hint. Keep it conservative so opening or inspecting an existing
+ * image never causes a new image to be generated behind the user's back.
  */
-export function naturalLanguageRequiresImageArtifact(prompt: unknown): boolean {
+export function naturalLanguageRequiresImageGeneration(prompt: unknown): boolean {
   if (typeof prompt !== "string") return false;
   const text = prompt
     .normalize("NFKC")
-    .replace(/(?:do\s+not|don't)\s+(?:create|generate|draw|show|display|attach|capture|render|open)\b[^.!?\n]*/giu, " ")
-    // Korean action stems conjugate the negation directly (만들지 말고,
-    // 붙이지 마, 표시하지 않아). Strip only that exact negated action;
-    // a different positive action in the same sentence must remain visible.
-    .replace(/(?:생성|만들|그리|보이|보여|표시|첨부|붙이|캡처|열|렌더)(?:하)?지\s*(?:마|말|않)[^.!?\n]*/gu, " ")
-    .replace(/(?:이미지|사진|그림|포스터|스크린샷)[^.!?\n]{0,24}(?:생성|표시|첨부|캡처|렌더)?(?:은|는|을|를)?\s*하지\s*(?:마|말|않)[^.!?\n]*/gu, " ")
+    .replace(/\b(?:do\s+not|don't|never)\s+(?:create|generate|draw|illustrate|design|make|render|compose|produce)\b/giu, " ")
+    .replace(/(?:만들|생성|그리|그려|제작|디자인)(?:지\s*(?:마|말|않)|하지\s*(?:마|말|않))/gu, " ")
     .toLowerCase();
-  // People often name the format instead of saying "image" ("PNG를 만들어
-  // 보여줘"). Treat common raster format nouns as visual intent only when the
-  // separate action check below is also present, so a passive filename mention
-  // does not turn an ordinary file question into a required-image contract.
-  const visual = /(?:이미지|사진|그림|포스터|일러스트|도표|다이어그램|스크린샷|화면\s*캡처|image|photo|picture|poster|illustration|diagram|screenshot|screen\s*capture|\b(?:png|jpe?g|gif|webp|avif|bmp)\b)/iu;
-  const action = /(?:만들|생성|그려|그리|보여|보이게|표시|띄워|첨부|가져와|캡처|열어|렌더|create|generate|draw|show|display|attach|capture|render|open)/iu;
-  return visual.test(text) && action.test(text);
-}
-
-/**
- * Some image requests explicitly define a valid no-image outcome: inspect the
- * candidates, show only verified images, and explain every missing/corrupt
- * candidate instead of inventing a replacement. A truthful negative result is
- * complete work; it must not be converted into a failed run just because no
- * image artifact exists.
- */
-export function naturalLanguageAllowsNoImageArtifact(prompt: unknown): boolean {
-  if (typeof prompt !== "string") return false;
-  const text = prompt.normalize("NFKC").toLowerCase();
-  const conditionalDelivery = /(?:확인(?:된|되면|될\s*때)만|정상(?:인)?\s*(?:이미지|사진|그림)(?:인\s*것)?만|있(?:으면|을\s*때만)[^.!?\n]{0,30}(?:보여|표시|첨부|열어)|only\s+(?:show|display|attach|open)[^.!?\n]{0,30}(?:valid|verified|existing)|(?:show|display|attach|open)[^.!?\n]{0,30}only\s+if)/iu;
-  const negativeBranch = /(?:(?:없|못\s*(?:열|찾|읽|보)|손상|깨진|유효하지\s*않)[^.!?\n]{0,50}(?:말|알려|이유|설명|보고)|(?:if\s+not|otherwise|missing|invalid|corrupt|cannot|can't)[^.!?\n]{0,60}(?:say|tell|explain|report|reason))/iu;
-  // Security/containment checks define another legitimate no-image result:
-  // "if this link reaches outside the workspace, do not open or show it;
-  // report the failure." Requiring a media artifact in that branch would
-  // force the runtime to violate the user's safety condition, then replace a
-  // truthful inspection report with an unrelated image-generation failure.
-  const unsafeConditionalDelivery = /(?:(?:외부|작업\s*폴더\s*밖|안전하지\s*않|위험|unsafe|outside\s+(?:the\s+)?workspace)[^.!?\n]{0,120}(?:이미지|사진|그림|포스터|image|photo|picture)[^.!?\n]{0,100}(?:열|보여|표시|첨부|open|show|display|attach)[^.!?\n]{0,40}(?:마|말|않|do\s+not|don't)|(?:외부|작업\s*폴더\s*밖|안전하지\s*않|위험|unsafe|outside\s+(?:the\s+)?workspace)[^.!?\n]{0,120}(?:마|말|않|do\s+not|don't)[^.!?\n]{0,30}(?:열|보여|표시|첨부|open|show|display|attach)[^.!?\n]{0,80}(?:이미지|사진|그림|포스터|image|photo|picture)|(?:이미지|사진|그림|포스터|image|photo|picture)[^.!?\n]{0,100}(?:열|보여|표시|첨부|open|show|display|attach)[^.!?\n]{0,40}(?:마|말|않|do\s+not|don't)[^.!?\n]{0,120}(?:외부|작업\s*폴더\s*밖|안전하지\s*않|위험|unsafe|outside\s+(?:the\s+)?workspace))/iu;
-  const unsafeNegativeBranch = /(?:(?:실패|위험|안전하지\s*않)[^.!?\n]{0,50}(?:말|알려|이유|설명|보고)|(?:say|tell|explain|report)[^.!?\n]{0,60}(?:fail|unsafe|outside))/iu;
-  // People also put the failure branch after a positive request: "show this
-  // poster; if the file is missing or not a real PNG, report the failure and
-  // do not create a replacement." That is still an explicit, valid no-image
-  // outcome. Keep it strict by requiring both the missing/invalid condition
-  // with a failure-only report and an explicit no-replacement instruction.
-  const missingOrInvalidFailureBranch = /(?:(?:파일|이미지|사진|그림|포스터|\b(?:png|jpe?g|gif|webp|avif|bmp)\b)[^.!?\n]{0,100}(?:없|찾을\s*수\s*없|(?:실제[^.!?\n]{0,20})?(?:이|가)?\s*아니|유효하지\s*않|손상|깨졌)[^.!?\n]{0,80}(?:실패|이유|말|알려|설명|보고)|(?:if|when)[^.!?\n]{0,40}(?:file|image|photo|picture|poster)[^.!?\n]{0,50}(?:missing|not\s+(?:a\s+)?real|invalid|corrupt|cannot\s+be\s+found)[^.!?\n]{0,70}(?:fail|reason|say|tell|explain|report))/iu;
-  const noReplacementGeneration = /(?:(?:새|대체|다른)[^.!?\n]{0,35}(?:이미지|사진|그림|포스터)?[^.!?\n]{0,35}(?:만들|생성)[^.!?\n]{0,24}(?:마|말|않)|(?:do\s+not|don't)[^.!?\n]{0,45}(?:create|generate)[^.!?\n]{0,35}(?:new|another|replacement)?[^.!?\n]{0,20}(?:image|photo|picture|poster)?)/iu;
-  // A later turn can deliberately ask for read-only re-verification while the
-  // durable image from an earlier turn is already visible. Requiring another
-  // image artifact would duplicate the card the person explicitly asked us
-  // not to duplicate, and can turn a successful read-only check into a false
-  // one-required-step-failed result. Keep this branch strict: require all of
-  // prior-visible evidence, an explicit no-repeat instruction, and a
-  // text/result-only outcome.
-  const priorVisibleArtifact = /(?:(?:앞서|이미|기존|전에|이전에)[^.!?\n]{0,50}(?:이미지|사진|그림|카드)[^.!?\n]{0,50}(?:보였|보여졌|보여줬|표시됐|첨부됐|열렸|표시했|첨부했|열었)|(?:이미지|사진|그림|카드)[^.!?\n]{0,24}(?:이미|앞서|전에|이전에)[^.!?\n]{0,35}(?:보였|보여졌|보여줬|표시됐|첨부됐|열렸|표시했|첨부했|열었)|(?:앞서|이미|기존|전에|이전에)[^.!?\n]{0,50}(?:이미지|사진|그림|카드)[^.!?\n]{0,50}(?:표시|보여|첨부|열)[^.!?\n]{0,24}(?:됐|되었|했|있)|(?:이미지|사진|그림|카드)[^.!?\n]{0,24}(?:이미|앞서|전에|이전에)[^.!?\n]{0,35}(?:표시|보여|첨부|열)[^.!?\n]{0,24}(?:됐|되었|했|있)|(?:image|photo|picture|card)[^.!?\n]{0,50}(?:already|previously|earlier|before)[^.!?\n]{0,35}(?:shown|displayed|attached|opened)|(?:already|previously|earlier)[^.!?\n]{0,35}(?:shown|displayed|attached|opened)[^.!?\n]{0,50}(?:image|photo|picture|card))/iu;
-  const noDuplicateDelivery = /(?:(?:새|추가|다시|중복)[^.!?\n]{0,35}(?:카드|이미지|사진|그림)?[^.!?\n]{0,35}(?:표시|보여|첨부|열)[^.!?\n]{0,24}(?:마|말|않)|(?:do\s+not|don't)[^.!?\n]{0,40}(?:show|display|attach|open)[^.!?\n]{0,30}(?:again|another|new|duplicate)|(?:no|without)[^.!?\n]{0,30}(?:new|another|duplicate)[^.!?\n]{0,20}(?:image|photo|picture|card|artifact))/iu;
-  const verificationOnlyOutcome = /(?:(?:검증|확인|결과)[^.!?\n]{0,30}(?:만|알려|말|보고)|(?:결과|텍스트)(?:로)?만|(?:only|just)[^.!?\n]{0,30}(?:report|tell|verification|result|text)|(?:report|tell)[^.!?\n]{0,30}(?:only|instead))/iu;
-  return (conditionalDelivery.test(text) && negativeBranch.test(text))
-    || (unsafeConditionalDelivery.test(text) && unsafeNegativeBranch.test(text))
-    || (missingOrInvalidFailureBranch.test(text) && noReplacementGeneration.test(text))
-    || (priorVisibleArtifact.test(text) && noDuplicateDelivery.test(text) && verificationOnlyOutcome.test(text));
-}
-
-function requiredImageArtifactPrompt(resultFolder: string, locale: "ko" | "en", recovery = false): string {
-  const heading = recovery
-    ? "The previous pass did not produce a host-verified image artifact."
-    : "The user requested a visible image outcome in ordinary language.";
-  return [
-    "[Verified image outcome contract]",
-    heading,
-    "Automatically choose and execute the configured image-generation, screenshot, or image-reading capability that matches the request. The user must never need to know or type an internal tool name.",
-    `If your runtime has no direct image tool, use the already configured media engine and save one real image inside this exact result folder, then inspect that exact file: ${resultFolder}`,
-    "Do not claim that an image was generated, opened, attached, displayed, or shown unless a successful tool result supplies a real host-verifiable image artifact in this turn.",
-    "A Markdown path, prose description, progress percentage, or statement that the image appears above is not evidence.",
-    "If no real image can be produced after using the available capabilities, say plainly that it was not produced. Do not invent a filename or success claim.",
-    locale === "ko" ? "사용자에게는 내부 도구명이나 이 계약을 설명하지 말고 한국어로 결과만 말하세요." : "Do not expose internal tool names or this contract; report only the user-facing outcome.",
-    "[/Verified image outcome contract]",
-  ].join("\n");
-}
-
-function conditionalImageArtifactPrompt(locale: "ko" | "en"): string {
-  return [
-    "[Conditional verified image outcome contract]",
-    "The user explicitly allowed a no-image result when the named candidates are missing, empty, corrupt, or otherwise invalid.",
-    "Inspect the candidates with real tools. If any candidate is valid and you claim it is shown, the tool result must supply a real host-verifiable image artifact.",
-    "If no candidate is valid, do not create or substitute an image. A tool-verified explanation for each rejected candidate is the complete result and must not be described as an interrupted or incomplete answer.",
-    locale === "ko" ? "사용자에게는 내부 도구명이나 이 계약을 설명하지 말고 한국어로 결과만 말하세요." : "Do not expose internal tool names or this contract; report only the user-facing outcome.",
-    "[/Conditional verified image outcome contract]",
-  ].join("\n");
-}
-
-function hasOneRecoveryDecision(text: unknown): boolean {
-  return extractBuildInterviewQuestions(text).length > 0;
+  const clauses = text
+    .split(/(?:[.!?\n;:。！？；：]+|\s+(?:그리고|하지만|또는|및|and|but|or|then)\s+)/iu)
+    .map((clause) => clause.trim())
+    .filter(Boolean);
+  const visual = /(?:이미지|사진|그림|포스터|일러스트(?:레이션)?|도표|다이어그램|아이콘|로고|배너|삽화|작품|image|photo|picture|poster|illustration|drawing|diagram|icon|logo|banner|artwork|graphic|visual)/iu;
+  const generation = /(?:만들|생성|그리|그려|제작|디자인|create|generate|draw|illustrate|design|make|render|compose|produce|generation|creation|production)/iu;
+  return clauses.some((clause) => visual.test(clause) && generation.test(clause));
 }
 
 function wrapOneRecoveryProposal(text: string, locale: "ko" | "en"): string {
@@ -617,67 +582,6 @@ function cleanPathCandidate(raw: string | undefined): string | null {
   return cleaned;
 }
 
-/**
- * Korean prose commonly places a case particle immediately after a pasted
- * absolute path (`/Users/me/project를`). The broad bare-path matcher cannot
- * distinguish that particle from the final path segment. Never strip it
- * eagerly: a real directory is allowed to end in the same syllable. Instead
- * the caller checks the exact candidate first and only tries this alternate
- * when the exact path does not exist.
- */
-function withoutTrailingKoreanPathParticle(candidate: string): string | null {
-  const stripped = candidate.replace(
-    /(?:으로부터|에게서|으로|에서|까지|부터|처럼|보다|에게|한테|은|는|이|가|을|를|와|과|로)$/u,
-    "",
-  );
-  return stripped !== candidate && path.isAbsolute(stripped) ? stripped : null;
-}
-
-/**
- * People commonly say `document/github/acme/app` instead of pasting their
- * account-specific `/Users/name/Documents/...` path. Resolve only the three
- * standard owner folders, only for an existing path, and never create or
- * search for a guessed directory. This keeps the authority as narrow as an
- * absolute path while removing the requirement to know the macOS home prefix.
- */
-function standardUserFolderCandidate(raw: string): string | null {
-  const cleaned = raw.trim().replace(/^`|`$/g, "").replace(/[),.;:!?]+$/g, "");
-  const parts = cleaned.split("/").filter(Boolean);
-  const prefix = parts.shift()?.toLocaleLowerCase();
-  if (!prefix || parts.length === 0 || parts.some((part) => part === "." || part === "..")) return null;
-  const standardFolder = /^(?:document|documents|문서)$/iu.test(prefix)
-    ? "Documents"
-    : /^(?:desktop|바탕화면)$/iu.test(prefix)
-      ? "Desktop"
-      : /^(?:download|downloads|다운로드)$/iu.test(prefix)
-        ? "Downloads"
-        : null;
-  return standardFolder ? path.join(os.homedir(), standardFolder, ...parts) : null;
-}
-
-function canonicalExistingDirectory(candidate: string): string | null {
-  const resolved = path.resolve(candidate);
-  const parsed = path.parse(resolved);
-  let cursor = parsed.root;
-  const relativeParts = resolved.slice(parsed.root.length).split(path.sep).filter(Boolean);
-  const folded = (value: string) => value.normalize("NFC").toLocaleLowerCase();
-  try {
-    for (const requestedPart of relativeParts) {
-      const entries = fs.readdirSync(cursor);
-      const chosen = entries.includes(requestedPart)
-        ? requestedPart
-        : entries.filter((entry) => folded(entry) === folded(requestedPart)).length === 1
-          ? entries.find((entry) => folded(entry) === folded(requestedPart)) ?? null
-          : null;
-      if (!chosen) return null;
-      cursor = path.join(cursor, chosen);
-    }
-    return fs.statSync(cursor).isDirectory() ? fs.realpathSync(cursor) : null;
-  } catch {
-    return null;
-  }
-}
-
 /** reasoning 전문 상한 — 원장 payload와 IPC를 지킨다(Claude thinking은 수만 자가 될 수 있다). */
 const REASONING_SPAN_TEXT_CAP = 6_000;
 
@@ -706,48 +610,15 @@ export function inferWorkingFolderFromPrompt(
   const explicit = prompt.match(
     /(?:(?:project|working|workspace|target|output)?\s*(?:folder|directory|dir)|(?:작업|프로젝트|워크스페이스|대상|출력)\s*(?:루트|폴더|디렉터리|경로))\s*(?:only|전용|만)?[^/]*(\/(?:Volumes|Users|tmp|private\/tmp)\/[^\s`"'<>]+)/i,
   );
-  const candidates: string[] = [];
-  if (explicit?.[1]) candidates.push(explicit[1]);
-
-  /*
-   * Ordinary people paste a repository path and say "이 제품을 고쳐"; they do
-   * not usually write the literal phrase "working folder".  Accept that narrow
-   * human form only when product/project intent is adjacent to the path and the
-   * path already names a real directory.  This keeps the no-guessed-folder
-   * contract above: machine-authored prompts are still disabled, target files
-   * are not accepted, and nothing is ever created while inferring.
-   */
-  const productIntent = /(?:project|workspace|repo(?:sitory)?|codebase|app|product|build|create|finish|improve|프로젝트|워크스페이스|저장소|코드베이스|앱|제품|개선|수정|고쳐|감사|검증|점검|분석|개발|빌드|작업|만들|완성|품질|퀄리티)/i;
-  const barePath = /\/(?:Volumes|Users|tmp|private\/tmp)\/[^\s`"'<>]+/g;
-  for (const match of prompt.matchAll(barePath)) {
-    const start = match.index ?? 0;
-    const end = start + match[0].length;
-    const nearby = prompt.slice(Math.max(0, start - 48), Math.min(prompt.length, end + 48));
-    if (productIntent.test(nearby)) candidates.push(match[0]);
+  const candidate = cleanPathCandidate(explicit?.[1]);
+  if (!candidate) return null;
+  try {
+    if (!fs.statSync(candidate).isDirectory()) return null;
+  } catch {
+    // 없는 경로다. 만들지 않는다 — 추측으로 사용자 폴더에 흔적을 남기지 않는다.
+    return null;
   }
-  const standardFolderPath = /(?:^|[\s`"'(])((?:documents?|문서|desktop|바탕화면|downloads?|다운로드)\/[A-Za-z0-9._~+@%=-]+(?:\/[A-Za-z0-9._~+@%=-]+)+)/giu;
-  for (const match of prompt.matchAll(standardFolderPath)) {
-    const raw = match[1];
-    if (!raw) continue;
-    const start = (match.index ?? 0) + match[0].indexOf(raw);
-    const end = start + raw.length;
-    const nearby = prompt.slice(Math.max(0, start - 64), Math.min(prompt.length, end + 64));
-    const candidate = standardUserFolderCandidate(raw);
-    if (candidate && productIntent.test(nearby)) candidates.push(candidate);
-  }
-
-  for (const rawCandidate of candidates) {
-    const candidate = cleanPathCandidate(rawCandidate);
-    if (!candidate) continue;
-    const existingCandidates = [candidate, withoutTrailingKoreanPathParticle(candidate)]
-      .filter((value): value is string => Boolean(value));
-    for (const existingCandidate of existingCandidates) {
-      const existingDirectory = canonicalExistingDirectory(existingCandidate);
-      if (existingDirectory) return existingDirectory;
-      // 없는 경로다. 만들지 않는다 — 추측으로 사용자 폴더에 흔적을 남기지 않는다.
-    }
-  }
-  return null;
+  return candidate;
 }
 
 function refreshCareerGraphInBackground(projectPath: string, sink: EventSink, locale: "ko" | "en"): void {
@@ -1048,16 +919,7 @@ async function buildStructuredTaskForceSpecs(input: {
     }
     if (target.source === "local" && target.entityKind === "team") {
       const locator = target.firmId.split("/").pop() || target.firmId;
-      // One stores a standing team by its installed top-level/CEO agent id,
-      // while the execution registry addresses that same package by firms.id.
-      // Accept both immutable identities, but still require one exact match.
-      // Without this bridge the UI can add a team and create a Taskforce, then
-      // every first message fails with "Installed team is unavailable".
-      const matches = listFirms().filter((candidate) => (
-        candidate.id === target.firmId
-        || candidate.slug === locator
-        || candidate.ceoAgentId === target.firmId
-      ));
+      const matches = listFirms().filter((candidate) => candidate.id === target.firmId || candidate.slug === locator);
       const firm = matches.length === 1 ? matches[0] : null;
       if (!firm) throw new Error(`Installed team is unavailable: ${target.firmId}`);
       specs.push({
@@ -1368,6 +1230,8 @@ export interface InvocationExecutionContext {
     researchDirectorPackageVersion: string;
     researchDirectorPackageDigest: string;
     researchDirectorSystemPromptSha256: string;
+    /** Main-selected route hint for a bounded Science workflow. */
+    workflowRoute?: "dinosaur-comparative-proxy";
   }>;
   /**
    * 표면이 붙이는 안내(방 정보·언어 규칙·모드 지시). **userPrompt 에 섞으면 안 된다** —
@@ -1401,7 +1265,7 @@ export interface McpInvocationResult {
    * 호출자 쪽에 있다. 그 호출자에게 선언을 전달할 유일한 통로가 이 칸이다 —
    * 없으면 마커는 텍스트에서 지워진 뒤 아무 데도 도달하지 못한다.
    */
-  goalCompletionClaim?: { claimed: boolean; evidence: string | null };
+  goalCompletionClaim?: { claimed: boolean; evidence: string | null; goalId: string | null };
   resultFolder?: string;
   /**
    * 커넥터 C38 — 이 호출에서 도구 중개가 **실제로** 어디까지 걸렸는가. 계획이 아니라
@@ -1605,9 +1469,6 @@ export async function runMcpInvocation(
   workspaceBinding?: InvocationWorkspaceBinding,
   executionContext?: InvocationExecutionContext,
 ): Promise<McpInvocationResult> {
-  // Main owns this timestamp before any preflight or runtime can create output.
-  // Final-answer recovery may only bind files produced by this invocation.
-  const invocationStartedAtMs = Date.now();
   // A scheduled invocation is the worker leg of the automation, even though
   // it shares this implementation with an interactive orchestrator turn.
   // Keep usage and replay attribution aligned with the runtime that actually
@@ -1664,7 +1525,6 @@ export async function runMcpInvocation(
   const callerSink = sink;
   let runtimeAgentId: string | undefined;
   let finalTextFromSink = "";
-  let durableAssistantTextForVerification: string | undefined;
   let resolvedResultFolder: string | undefined;
   let workforcePrepareReceipt: WorkforcePrepareCheckpointReceipt | undefined;
   let backstopSurfaceSeq = 0;
@@ -1785,7 +1645,13 @@ export async function runMcpInvocation(
   // Freeze conversation state before this turn becomes durable. Every routing
   // decision and model history below must see only earlier turns; otherwise the
   // current request is duplicated as both history and the active user prompt.
-  const history = req.agentAppMode ? [] : listChatMessages(chat.id, 80);
+  // A scheduled graph is not a chat turn: its state is already carried by the
+  // graph checkpoint, node variables, and the current node prompt. Replaying
+  // the automation's durable chat here only injects stale recovery prose and
+  // can make a model change rebuild an enormous, unrelated transcript.
+  const history = req.agentAppMode || executionContext?.source === "automation"
+    ? []
+    : listChatMessages(chat.id, 80);
   const priorHistory = history;
   const hadPriorConversationContext = req.agentAppMode
     ? false
@@ -2162,72 +2028,6 @@ ${effectiveUserPrompt}`;
     effectiveUserPrompt = buildRecommendedPipelineUserPrompt(effectiveUserPrompt, req.pipelineStages, locale);
   }
 
-  // Resolve the user's explicit folder boundary before runtime discovery or
-  // remote-agent preparation. CLI probes can be slow or unavailable; neither
-  // may delay the consent card that explains why this turn needs local files.
-  const existingWorkingFolder = workspaceBinding
-    ? boundMobileWorkingFolder
-    : suppressProjectBinding
-      ? null
-      : getChatWorkingFolder(chat.id);
-  const projectWorkingFolder = workspaceBinding
-    ? null
-    : invocationProjectId
-      ? getProject(invocationProjectId)?.folderPath ?? null
-      : null;
-  const promptWorkingFolder =
-    workspaceBinding || suppressProjectBinding || targetApp
-      ? null
-      : inferWorkingFolderFromPrompt(req.userPrompt, {
-        // 자동화·사이트·트렉 실행의 프롬프트는 제품이 조립한 것이다. 거기 담긴 경로는
-        // 작업 폴더 선언이 아니라 처리 대상이다(위 주석의 실측 참고).
-        authored: isUnattendedExecution(executionContext) ? "machine" : "human",
-      });
-  let inferredWorkingFolder: string | null = null;
-  if (promptWorkingFolder) {
-    const currentWorkingFolder = existingWorkingFolder ?? projectWorkingFolder;
-    if (currentWorkingFolder === promptWorkingFolder) {
-      inferredWorkingFolder = promptWorkingFolder;
-    } else if (normalizedPermission === "full") {
-      // Full access is the owner's explicit One authority. A real directory
-      // named in their own request becomes the chat workspace without making
-      // them understand or repeat the folder-picker ceremony.
-      inferredWorkingFolder = promptWorkingFolder;
-      setChatWorkingFolder(chat.id, promptWorkingFolder);
-    } else {
-      // Restricted modes ask exactly when the requested path crosses the
-      // current workspace boundary. Reuse the one live approval channel so the
-      // choice appears beside the conversation and expires fail-closed.
-      const arbiter = getRuntimeToolPermissionArbiter();
-      if (arbiter && !isUnattendedExecution(executionContext)) {
-        try {
-          const decision = await arbiter({
-            runtime: "agentlas",
-            sessionKey: `folder-access:${chat.id}`,
-            tool: "folder-access",
-            kind: normalizedPermission === "write" ? "edit" : "read",
-            // Keep the exact canonical path as the rule/session key. Approval
-            // surfaces shorten it for people, but two unrelated folders with
-            // the same last components must never share an "always allow".
-            detail: promptWorkingFolder,
-            cwd: promptWorkingFolder,
-            permission: normalizedPermission,
-            mutating: true,
-            chatId: chat.id,
-            ...(runtimeAgentId ? { agentId: runtimeAgentId } : {}),
-          });
-          if (decision !== "deny") {
-            inferredWorkingFolder = promptWorkingFolder;
-            if (decision === "allow_session") setChatWorkingFolder(chat.id, promptWorkingFolder);
-          }
-        } catch {
-          // Approval transport failure is denial. The run stays in its safe
-          // default folder and can explain that it could not access the path.
-        }
-      }
-    }
-  }
-
   // 추천 시트 네트워크 모드(단일) — 고른 Hub 에이전트를 빌려와 프롬프트 앞에 borrow 지시를 붙인다(BYOM).
   // 2개 이상은 아래 Borrowed Task Force 실행기로 분기해 plan → parallel delegate → synthesize를 수행한다.
   const shouldPrepareBorrowPreamble =
@@ -2249,7 +2049,7 @@ ${effectiveUserPrompt}`;
           ? boundMobileWorkingFolder
           : suppressProjectBinding
             ? null
-            : existingWorkingFolder ?? projectWorkingFolder ?? inferredWorkingFolder,
+            : getChatWorkingFolder(chat.id),
         locale,
         signal,
         req.borrowVersions,
@@ -2269,10 +2069,7 @@ ${effectiveUserPrompt}`;
 
   const runtimes = await detectRuntimes();
   throwIfInvocationAborted(signal, locale);
-  const resolvedBoundOneTeamRuntime = boundOneTeamRuntime
-    ? resolveOneTeamRuntimeBinding(boundOneTeamRuntime, runtimes)
-    : null;
-  if (boundOneTeamRuntime && !resolvedBoundOneTeamRuntime) {
+  if (boundOneTeamRuntime && !oneTeamRuntimeBindingMatches(boundOneTeamRuntime, runtimes)) {
     sink({
       kind: "error",
       error: {
@@ -2319,6 +2116,27 @@ ${effectiveUserPrompt}`;
     sink({ kind: "tool-use", status: autoRouteStatus(autoRoute, locale) });
   }
 
+  // 사용자가 프롬프트 안에 "project folder: /abs/path"처럼 명시하면, 채팅 워킹 폴더로
+  // 자동 고정한다. firm 경로도 단일 에이전트 경로와 같은 cwd/MCP 구성을 받아야 한다.
+  const existingWorkingFolder = workspaceBinding
+    ? boundMobileWorkingFolder
+    : suppressProjectBinding
+      ? null
+      : getChatWorkingFolder(chat.id);
+  const projectWorkingFolder = workspaceBinding
+    ? null
+    : invocationProjectId
+      ? getProject(invocationProjectId)?.folderPath ?? null
+      : null;
+  const inferredWorkingFolder =
+    workspaceBinding || !canWrite || existingWorkingFolder || projectWorkingFolder
+      ? null
+      : inferWorkingFolderFromPrompt(req.userPrompt, {
+        // 자동화·사이트·트렉 실행의 프롬프트는 제품이 조립한 것이다. 거기 담긴 경로는
+        // 작업 폴더 선언이 아니라 처리 대상이다(위 주석의 실측 참고).
+        authored: isUnattendedExecution(executionContext) ? "machine" : "human",
+      });
+  if (inferredWorkingFolder) setChatWorkingFolder(chat.id, inferredWorkingFolder);
   const targetAppWorkingFolder = !workspaceBinding && !suppressProjectBinding && targetApp
     ? path.resolve(targetApp.rootPath)
     : null;
@@ -2326,7 +2144,7 @@ ${effectiveUserPrompt}`;
     ? null
     : workspaceBinding
       ? boundMobileWorkingFolder
-      : targetAppWorkingFolder ?? inferredWorkingFolder ?? existingWorkingFolder ?? projectWorkingFolder;
+      : targetAppWorkingFolder ?? existingWorkingFolder ?? projectWorkingFolder ?? inferredWorkingFolder;
   // Even a global chat executes in a concrete local folder. Persist it in the
   // run receipt so generated files do not become undiscoverable after reload.
   resolvedResultFolder = workingFolder ?? agentRunCwd();
@@ -2382,30 +2200,21 @@ ${effectiveUserPrompt}`;
     { scope: "agent" as const, targetId: agent.id },
     { scope: "firm" as const, targetId: chat.firmId },
   ];
+  // A message typed in an automation's session panel is still an explicit
+  // request against that automation's pinned runtime. It must not silently
+  // turn a Gemini failure into a Codex answer; show the actual failure so the
+  // user can repair the selected runtime or graph.
+  const automationRuntimePinned = Boolean(req.automationId && req.runtimeSelection);
   // One's composer selection is the controller's first runtime for both One
   // chat and One Work/graph runs. A normal Library assignment remains the
   // default for other surfaces; One only leaves its pin after a typed runtime
   // failure, at which point the ordered orchestrator pool takes over.
-  // A claimed One team preflight is already the Main-owned runtime pin. The
-  // follow-up invocation that starts the reserved run may not repeat the
-  // renderer's model selection; reselecting from the global active runtime here
-  // made a confirmed Sol team fail against an unrelated active Sonnet row.
-  const runtimeResolution = resolvedBoundOneTeamRuntime
-    ? {
-        choice: {
-          active: resolvedBoundOneTeamRuntime,
-          picked: pickRunner(resolvedBoundOneTeamRuntime),
-          override: null,
-          unavailableOverride: null,
-        },
-        pinHonored: true,
-        pinYieldedToOverride: null,
-      }
-    : selectInvocationRuntime(runtimes, runtimeTargets, {
-        pin: req.runtimeSelection,
-        pinIsAuthoritative: isUnattendedExecution(executionContext) || req.oneMode === true,
-        agentAppMode: req.agentAppMode === true,
-      });
+  const runtimeResolution = selectInvocationRuntime(runtimes, runtimeTargets, {
+    pin: req.runtimeSelection,
+    pinIsAuthoritative:
+      isUnattendedExecution(executionContext) || req.oneMode === true || automationRuntimePinned,
+    agentAppMode: req.agentAppMode === true,
+  });
   let runtimeChoice = runtimeResolution.choice;
   let controllerFallbackBeforeRun: RuntimeStatus | null = null;
   // A One composer pin is a preference with an ordered recovery chain, not a
@@ -2784,6 +2593,13 @@ ${effectiveUserPrompt}`;
   // 여기서 통째로 빠져 JIT 인라인 grant 밖의 도구를 하나도 못 받았다.
   if (runtimeCanUseMcp && !workforceOwnsCapabilityChoice && !explicitWorkforceGoal) {
     try {
+      if (req.forceBrowserCredentialRefresh) {
+        const report = await refreshBrowserCredentialsIfDue({ force: true });
+        sink({
+          kind: "notice",
+          notice: browserCredentialSyncNotice(report, locale),
+        });
+      }
       let oneMemberToolPolicy: { autoSelectTools: boolean; fixedServerIds: string[] } | null = null;
       if (req.oneMode && !req.agentAppMode) {
         try {
@@ -2883,26 +2699,14 @@ ${effectiveUserPrompt}`;
       const selectedTools = selectedContext.tools;
       const installedTools = selectedTools.filter((tool) => tool.installed);
       const degradedTools = selectedTools.filter((tool) => tool.state !== "ready");
-      const browserHostReady = selectedTools.some(
-        (tool) => tool.id === "agentlas-browser" && tool.state === "ready",
-      ) || (
-        req.toolMode !== "browser" &&
-        selectedTools.some((tool) =>
-          (tool.id === "playwright" || tool.capabilityId === "playwright")
-          && tool.state === "ready")
-      );
       if (
         selectedContext.effectiveToolMode === "browser" &&
-        !browserHostReady
+        !selectedTools.some((tool) => tool.id === "agentlas-browser" && tool.state === "ready")
       ) {
         throw new Error(
-          req.toolMode === "browser"
-            ? locale === "ko"
-              ? "로그인된 Agentlas Browser 호스트를 확인할 수 없어 자동화를 실행하지 않았습니다. Agentlas Browser를 다시 연결한 뒤 재시도하세요."
-              : "The authenticated Agentlas Browser host is unavailable. The automation was blocked before model execution; reconnect Agentlas Browser and retry."
-            : locale === "ko"
-              ? "사용 가능한 브라우저 호스트를 확인할 수 없어 자동화를 실행하지 않았습니다. Agentlas Browser를 다시 연결하거나 Playwright 상태를 확인한 뒤 재시도하세요."
-              : "No browser host is available. The automation was blocked before model execution; reconnect Agentlas Browser or check Playwright and retry.",
+          locale === "ko"
+            ? "로그인된 Agentlas Browser 호스트를 확인할 수 없어 자동화를 실행하지 않았습니다. Agentlas Browser를 다시 연결한 뒤 재시도하세요."
+            : "The authenticated Agentlas Browser host is unavailable. The automation was blocked before model execution; reconnect Agentlas Browser and retry.",
         );
       }
       if (installedTools.length > 0) {
@@ -3005,13 +2809,21 @@ ${effectiveUserPrompt}`;
   if (executionContext?.source === "science") {
     if (!executionContext.science) throw new Error("science-execution-context-missing");
     const { materializeScienceMcpGrant } = await import("../science/tool-control-server");
-    const scienceGrant = await materializeScienceMcpGrant(executionContext.science, mcpConfigPath);
+    // Science turns use the Main-owned catalog as their single tool boundary.
+    // Keeping the auto-selected standalone domain servers in the same config
+    // creates duplicate tools (for example PBDB's low-level occurrence call
+    // beside the host's receipt-producing search_paleontology_occurrences),
+    // so a Research Director can loop on the wrong surface and bypass the
+    // downstream Science receipts. The built-in catalog already contains the
+    // trusted adapters for every installed Science Lab; other MCP servers are
+    // intentionally not carried into this turn.
+    const scienceGrant = await materializeScienceMcpGrant(executionContext.science);
     mcpConfigPath = scienceGrant.configPath;
-    mcpAllowedTools = [...new Set([...(mcpAllowedTools ?? []), ...scienceGrant.allowedTools])];
-    mcpCodexConfigArgs = [...(mcpCodexConfigArgs ?? []), ...scienceGrant.codexConfigArgs];
-    mcpRuntimeEnv = { ...(mcpRuntimeEnv ?? {}), ...scienceGrant.runtimeEnv };
-    mcpIncludedServers = [...mcpIncludedServers, scienceGrant.includedServer];
-    mcpAutoSelectionPrompt = `${mcpAutoSelectionPrompt}\nAgentlas Science provides search_academic_literature. Before making claims about prior research, novelty, state of the art, citations, related papers, or a literature review, call it and ground the answer in its returned project Source ids and provider receipts. Treat metadata-only results as discovery evidence, not full-text verification; disclose partial provider failures and never invent a source. For an astronomical sky field, call search_astronomy_catalog with exact ICRS coordinates, then pass its runId to build_astronomy_sky_map so the user receives a durable interactive Lab artifact; never invent catalog rows or replace missing measurements. For irregular astronomical time-series data already stored as an exact immutable Data Table, call analyze_light_curve_periodicity with the exact artifact version/hash, explicit time system, column mapping, period grid, and weighting policy. Report its false-alarm-probability, period-uncertainty, single-sinusoid, cadence, and sampling-window warnings without upgrading a grid peak into a confirmed physical period; direct the user to the returned Figure Lab artifact for the publication tables and interactive Vega figure. Agentlas Science also provides render_table_as_vega. Use it when measured tabular data should become a durable interactive Lab artifact; never fabricate an artifact receipt. Respond as Agentlas Science without the One or Hope name/prefix.`.trim();
+    mcpAllowedTools = scienceGrant.allowedTools;
+    mcpCodexConfigArgs = scienceGrant.codexConfigArgs;
+    mcpRuntimeEnv = scienceGrant.runtimeEnv;
+    mcpIncludedServers = [scienceGrant.includedServer];
+    mcpAutoSelectionPrompt = `Agentlas Science is the only MCP server enabled for this turn. Use its Main-owned platform tools and the installed Science Lab descriptors; do not call a standalone duplicate domain server. Agentlas Science provides search_academic_literature. Before making claims about prior research, novelty, state of the art, citations, related papers, or a literature review, call it and ground the answer in its returned project Source ids and provider receipts. Treat metadata-only results as discovery evidence, not full-text verification; disclose partial provider failures and never invent a source. For a dinosaur or de-extinction question, this literature rule has a hard exception: follow the dinosaurResearchRoute in the Science surface context and call search_paleontology_occurrences first for an initial batch of 2–4 named taxa, then use the returned stratigraphic receipts and advance to the extant-reference and comparative-gene-tree tools. Read the returned dinosaurRoute metadata before selecting ASR or the extant-locus-panel: use its exact hypotheticalAsrTargetNodeId and locusPanelSelection when present; if availableLeafGroups reports fewer than two crocodilian leaves, do not duplicate or relabel a leaf and ask one focused human decision because the exact provider data cannot satisfy the panel contract. The host may materialize the stratigraphic child automatically; do not call PBDB repeatedly after the route-control response says the candidate-search budget is reached. Do not call broad academic search repeatedly while a dedicated route step is available; advance once per receipt or ask one focused missing-input question. Fossil and extant-proxy evidence never establishes recovered dinosaur DNA, a dinosaur genome, an embryo, hatching, or biological revival. For an astronomical sky field, call search_astronomy_catalog with exact ICRS coordinates, then pass its runId to build_astronomy_sky_map so the user receives a durable interactive Lab artifact; never invent catalog rows or replace missing measurements. For irregular astronomical time-series data already stored as an exact immutable Data Table, call analyze_light_curve_periodicity with the exact artifact version/hash, explicit time system, column mapping, period grid, and weighting policy. Report its false-alarm-probability, period-uncertainty, single-sinusoid, cadence, and sampling-window warnings without upgrading a grid peak into a confirmed physical period; direct the user to the returned Figure Lab artifact for the publication tables and interactive Vega figure. Agentlas Science also provides render_table_as_vega. Use it when measured tabular data should become a durable interactive Lab artifact; never fabricate an artifact receipt. Respond as Agentlas Science without the One or Hope name/prefix.`.trim();
   }
 
   /*
@@ -3076,201 +2888,37 @@ ${effectiveUserPrompt}`;
   // asking a conversational turn must not manufacture one. The chat id is the
   // durable fallback goal key until an authoritative promotion occurs.
   const canonicalTask = findCanonicalTaskForChat(chat.id);
-  const imageArtifactIntent = !req.agentAppMode
+  const imageGenerationRequired = !req.agentAppMode
+    && !req.oneMode
     && chat.kind !== "division"
-    && naturalLanguageRequiresImageArtifact(req.userPrompt);
-  // A conditional no-image request can contain only negated image actions
-  // ("do not open or show it if unsafe"). In that case the positive-intent
-  // recognizer correctly returns false, but the explicit safe negative branch
-  // still has to suppress artifact recovery and unrelated failure promotion.
-  const conditionalImageNoArtifactAllowed = !req.agentAppMode
-    && chat.kind !== "division"
-    && naturalLanguageAllowsNoImageArtifact(req.userPrompt);
-  const imageArtifactRequired = imageArtifactIntent && !conditionalImageNoArtifactAllowed;
+    && naturalLanguageRequiresImageGeneration(req.userPrompt);
   let observedImageArtifactEvidence = false;
-  let requiredImageArtifactFailed = false;
-  const trustedArtifactRootForTool = (toolName: string): string | undefined => {
-    const normalized = toolName.trim();
-    if (/^mcp__cua-driver__(?:get_screen|get_app_state)$/u.test(normalized)) return screenCaptureDir();
-    if (/(?:^|[_.-])generate[_-]image$/iu.test(normalized)) return userDataPath("multimodal-images");
-    return undefined;
-  };
-  const requestedArtifactRoots = (() => {
-    if (req.agentAppMode) return [] as string[];
-    const recentUserIntent = [
-      ...listChatMessages(chat.id, 24)
-        .filter((entry) => entry.role === "user")
-        .map((entry) => entry.text),
-      req.userPrompt,
-    ].join("\n");
-    const roots: string[] = [];
-    if (/(?:\bdesktop\b|바탕\s*화면|데스크톱)/iu.test(recentUserIntent)) {
-      roots.push(path.join(os.homedir(), "Desktop"));
-    }
-    if (/(?:\bdownloads?\s+(?:folder|directory)\b|다운로드\s*(?:폴더|디렉터리))/iu.test(recentUserIntent)) {
-      roots.push(path.join(os.homedir(), "Downloads"));
-    }
-    if (/(?:\bdocuments?\s+(?:folder|directory)\b|문서\s*(?:폴더|디렉터리))/iu.test(recentUserIntent)) {
-      roots.push(path.join(os.homedir(), "Documents"));
-    }
-    // A user may name the project/output directory in ordinary language. It is
-    // authority for newly-created result files under that exact real directory,
-    // not for arbitrary paths mentioned later by the model. Existing inputs are
-    // still rejected by the run-start mtime gate below.
-    const mentioned = recentUserIntent.match(/\/[A-Za-z0-9._~+@%=-]+(?:\/[A-Za-z0-9._~+@%=-]+)+/gu) ?? [];
-    for (const raw of mentioned.slice(0, 16)) {
-      const candidate = raw.replace(/[),.;:!?]+$/u, "");
-      try {
-        const stat = fs.lstatSync(candidate);
-        if (stat.isSymbolicLink()) continue;
-        const directory = stat.isDirectory() ? candidate : stat.isFile() ? path.dirname(candidate) : null;
-        if (!directory) continue;
-        roots.push(fs.realpathSync(directory));
-      } catch {
-        // A nonexistent or unreadable path is not a trusted output root.
-      }
-    }
-    return [...new Set(roots.map((root) => path.resolve(root)))].slice(0, 12);
-  })();
-  const finalMarkdownArtifactPaths = (text: string): string[] => {
-    const candidates: string[] = [];
-    for (const match of text.matchAll(/\[[^\]\n]{1,240}\]\((file:\/\/)?(\/[^)\n]+)\)/gu)) {
-      const raw = match[2]?.trim();
-      if (!raw) continue;
-      try {
-        const decoded = decodeURI(raw);
-        if (path.isAbsolute(decoded)) candidates.push(path.normalize(decoded));
-      } catch {
-        // Malformed link targets remain ordinary answer text.
-      }
-      if (candidates.length >= 24) break;
-    }
-    return [...new Set(candidates)];
-  };
-  const runtimeToolArtifactPaths = (
-    toolName: string,
-    args: string | undefined,
-    artifactPaths: readonly string[] | undefined,
-  ): readonly string[] => {
-    if (artifactPaths?.length) return artifactPaths;
-    // Filesystem MCP returns a real image content block but the provider callback
-    // does not expose an artifactPaths side channel. Never trust or persist the
-    // returned base64 itself: recover only the exact requested path, then let the
-    // Main-owned binding seal re-open it under the invocation result folder and
-    // enforce regular-file, containment, MIME, inode, size and hash checks.
-    if (!/^mcp__.+__read_media_file$/u.test(toolName.trim()) || !args) return [];
-    try {
-      const parsed = JSON.parse(args) as unknown;
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
-      const requestedPath = (parsed as Record<string, unknown>).path;
-      return typeof requestedPath === "string" && requestedPath.trim()
-        ? [requestedPath.trim()]
-        : [];
-    } catch {
-      return [];
-    }
-  };
+  const pendingWorkToolImages: Array<{ sourcePath: string; image: ImageAttachment }> = [];
+  const generatedImageSourcePaths = new Set<string>();
   const bindInvocationOneArtifacts = (
     toolId: string,
     paths: readonly string[],
-    trustedSourceRoot?: string,
   ): NonNullable<McpInvocationEvent["oneArtifacts"]> => {
     const runId = req.runId;
-    if (req.oneMode !== true || !runId || !toolId || paths.length === 0 || !resolvedResultFolder) return [];
-    // A conversational One chat remains Task-free until it produces a real
-    // host-verified work product. The artifact itself is that authoritative
-    // promotion signal; resolve at call time so the closure cannot retain the
-    // pre-promotion null observed at invocation start.
-    const artifactTask = findCanonicalTaskForChat(chat.id) ?? ensureCanonicalTaskForChat(chat.id);
-    if (!artifactTask) return [];
-    const isWithin = (root: string, candidate: string): boolean => {
-      const relative = path.relative(path.resolve(root), path.resolve(candidate));
-      return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
-    };
-    const rootCandidates = trustedSourceRoot
-      ? [path.resolve(trustedSourceRoot)]
-      : [path.resolve(resolvedResultFolder), ...requestedArtifactRoots];
-    const pathsByRoot = new Map<string, string[]>();
-    for (const candidate of paths) {
-      if (typeof candidate !== "string" || !path.isAbsolute(candidate)) continue;
-      const root = rootCandidates.find((candidateRoot) => isWithin(candidateRoot, candidate));
-      if (!root) continue;
-      pathsByRoot.set(root, [...(pathsByRoot.get(root) ?? []), candidate]);
-    }
-    const bound = [...pathsByRoot.entries()].flatMap(([root, rootedPaths]) => bindOneRuntimeToolArtifacts({
-      taskId: artifactTask.id,
-      taskVersion: artifactTask.version,
+    if (req.oneMode !== true || !canonicalTask || !runId || !toolId || paths.length === 0) return [];
+    return bindOneRuntimeToolArtifacts({
+      taskId: canonicalTask.id,
+      taskVersion: canonicalTask.version,
       chatId: chat.id,
       runId,
       toolId,
-      paths: rootedPaths,
-      resultFolder: resolvedResultFolder,
-      ...(root !== path.resolve(resolvedResultFolder) ? { trustedSourceRoot: root } : {}),
-      runStartedAtMs: invocationStartedAtMs,
-      onRestoredExisting: (artifact) => {
-        if (artifact.kind === "image") observedImageArtifactEvidence = true;
-      },
-    }));
-    if (bound.some((artifact) => artifact.type === "image")) observedImageArtifactEvidence = true;
-    return bound.map((artifact) => ({
-      taskId: artifact.taskId,
-      taskVersion: artifact.taskVersion,
-      chatId: artifact.chatId,
-      runId: artifact.runId,
+      paths,
+    }).map((artifact) => ({
+      taskId: canonicalTask.id,
+      taskVersion: canonicalTask.version,
+      chatId: chat.id,
+      runId,
       manifestId: artifact.manifestId,
       artifactRef: artifact.artifactRef,
       label: artifact.label,
       type: artifact.type,
       sizeBytes: artifact.sizeBytes,
     }));
-  };
-  const pendingWorkToolImages: Array<{ sourcePath: string; image: ImageAttachment }> = [];
-  const pendingInlineImages: ImageAttachment[] = [];
-  const collectInlineImage = (value: string | undefined) => {
-    if (req.oneMode !== true || !value || pendingInlineImages.length >= 8) return;
-    const match = /^data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/=]+)$/u.exec(value.trim());
-    if (!match) return;
-    const data = match[2];
-    if (Buffer.byteLength(data, "base64") > 12 * 1024 * 1024) return;
-    const bytes = Buffer.from(data, "base64");
-    const valid = match[1] === "image/png"
-      ? bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
-      : match[1] === "image/jpeg"
-        ? bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
-        : match[1] === "image/gif"
-          ? bytes.subarray(0, 6).toString("latin1") === "GIF87a" || bytes.subarray(0, 6).toString("latin1") === "GIF89a"
-          : bytes.length >= 12 && bytes.subarray(0, 4).toString("latin1") === "RIFF" && bytes.subarray(8, 12).toString("latin1") === "WEBP";
-    if (!valid) return;
-    pendingInlineImages.push({ mediaType: match[1], data, name: `generated-image-${pendingInlineImages.length + 1}` });
-  };
-  const collectWorkToolImages = (paths: readonly string[], trustedSourceRoot?: string) => {
-    if (req.oneMode === true) return;
-    // Ordinary Work chats also own their resolved result folder. Host-structured
-    // artifact paths from Read/Write/Bash may be sealed from that root even
-    // when the tool is not one of the special capture/generation providers.
-    // Model-authored Markdown paths never call this function.
-    const sourceRoot = trustedSourceRoot ?? resolvedResultFolder;
-    for (const sourcePath of paths) {
-      if (pendingWorkToolImages.some((item) => item.sourcePath === sourcePath)) continue;
-      try {
-        pendingWorkToolImages.push({
-          sourcePath,
-          image: chatImageAttachmentFromTrustedFile({ filePath: sourcePath, trustedRoot: sourceRoot }),
-        });
-        observedImageArtifactEvidence = true;
-      } catch {
-        // A missing, linked, changed, or non-image tool path never enters the transcript.
-      }
-    }
-  };
-  const takeWorkToolImageOptions = () => {
-    if (pendingWorkToolImages.length === 0 && pendingInlineImages.length === 0) return undefined;
-    const inline = pendingInlineImages.splice(0, pendingInlineImages.length);
-    const items = pendingWorkToolImages.splice(0, pendingWorkToolImages.length);
-    return {
-      images: [...inline, ...items.map((item) => item.image)],
-      imageSourcePaths: items.map((item) => item.sourcePath),
-    };
   };
   const runBoundTaskForceInvocation = (
     params: Parameters<typeof runBorrowedTaskForceInvocation>[0],
@@ -3290,10 +2938,17 @@ ${effectiveUserPrompt}`;
   });
   let durableTurnDecision: DesktopWorkforceTurnDecision | null = null;
   let durableRuntimePlan: DesktopWorkforceRuntimePlan | null = null;
-  try {
-    const durableContext = await loadDesktopWorkforceGoal(workforceProjectDir, durableWorkforceGoalId);
-    const goal = durableContext.goals[0];
-    if (goal) {
+  // A Main-issued, user-confirmed external Workforce capability is already the
+  // authoritative staffing decision for this exact turn. Re-running durable
+  // goal arbitration here allowed a prior failed preparation to downgrade the
+  // next explicit "bring an expert" confirmation to local-only, so the run
+  // falsely claimed no PDF/file tools were available without invoking the
+  // selected Workforce at all.
+  if (oneTeamExecutionPolicy !== "confirmed_external_workforce") {
+    try {
+      const durableContext = await loadDesktopWorkforceGoal(workforceProjectDir, durableWorkforceGoalId);
+      const goal = durableContext.goals[0];
+      if (goal) {
       const readyPlans = goal.plans.filter((plan) => plan.status === "ready" && plan.preparation);
       if (turnEscalation.level === "solo") {
         /* 난이도가 solo면 판정 자체를 건너뛴다.
@@ -3368,11 +3023,12 @@ ${effectiveUserPrompt}`;
         }
       }
     }
-  } catch (error) {
-    if (explicitWorkforceGoal) throw error;
-    // A chat with no binding or no signed-in account remains an ordinary local
-    // turn. Once the user explicitly invokes Workforce, the same failure is
-    // surfaced instead of silently falling back.
+    } catch (error) {
+      if (explicitWorkforceGoal) throw error;
+      // A chat with no binding or no signed-in account remains an ordinary local
+      // turn. Once the user explicitly invokes Workforce, the same failure is
+      // surfaced instead of silently falling back.
+    }
   }
 
   if (durableTurnDecision?.decision === "blocked") {
@@ -4091,11 +3747,6 @@ ${effectiveUserPrompt}`;
   // 세션 지원 러너는 새 세션이면 시스템 프롬프트 뒤에 붙이고, resume 턴이면 사용자
   // 메시지 앞에 싣는다. 세션 미지원 러너에는 기존처럼 시스템 프롬프트에 합쳐 전달한다.
   const turnContextParts: string[] = [];
-  if (imageArtifactRequired) {
-    turnContextParts.push(requiredImageArtifactPrompt(resolvedResultFolder, locale));
-  } else if (conditionalImageNoArtifactAllowed) {
-    turnContextParts.push(conditionalImageArtifactPrompt(locale));
-  }
   // A resumed Codex session does not receive `systemPrompt` again. Reassert the
   // visible One language as host context on *every* interactive turn, otherwise
   // a Korean task marker can pull a previously English-seeded session back into
@@ -4105,16 +3756,6 @@ ${effectiveUserPrompt}`;
     turnContextParts.push(locale === "ko"
       ? "[호스트 출력 언어 계약]\n현재 One 화면 언어는 한국어입니다. 이번 사용자 메시지·인용문·파일의 언어와 무관하게 한국어로 답변하세요. 사용자가 이번 메시지에서 다른 출력 언어를 명시적으로 요구할 때만 예외입니다. 이 계약을 언급하거나 인용하지 마세요.\n[/호스트 출력 언어 계약]"
       : "[Host response-language contract]\nThe visible One interface language is English. Reply in English regardless of the language of this user message, quoted text, or files. Only an explicit request in this message for another output language is an exception. Do not mention or quote this contract.\n[/Host response-language contract]");
-  }
-  // People describe outcomes; they do not memorize server IDs, function names,
-  // or runtime command spellings. Main keeps those identifiers in Activity and
-  // durable receipts for audit, while every human-facing chat translates them
-  // into ordinary capability language unless the person explicitly asks for
-  // technical identifiers.
-  if (!req.agentAppMode) {
-    turnContextParts.push(locale === "ko"
-      ? "[사용자 기능 언어 계약]\n사용자가 원하는 결과만 자연어로 말하면 필요한 기능과 도구를 스스로 선택해 실행하세요. 사용자에게 MCP 서버명·함수명·도구 ID·내부 명령을 말하거나 외우게 하지 마세요. 최종 답변에서는 ‘시스템 시각으로 확인했습니다’, ‘브라우저에서 확인했습니다’, ‘파일을 직접 열어 확인했습니다’처럼 사람이 이해하는 결과와 근거로 번역하세요. 사용자가 이번 메시지에서 기술 식별자를 명시적으로 요청한 경우에만 정확한 내부 이름을 답할 수 있습니다. 기술 식별자는 Activity와 실행 원장에 이미 남으므로, 이 계약을 설명하거나 인용하지 마세요.\n[/사용자 기능 언어 계약]"
-      : "[User capability-language contract]\nThe person states the outcome they need in ordinary language; automatically choose and run the necessary capabilities. Never make them know, type, or memorize MCP server names, function names, tool IDs, or internal commands. In the final answer, translate evidence into human language such as ‘checked against the system clock’, ‘verified in the browser’, or ‘opened the file directly’. Only include exact internal identifiers when the person explicitly asks for technical identifiers in this message. Activity and durable receipts already retain those identifiers for audit. Do not explain or quote this contract.\n[/User capability-language contract]");
   }
   /*
    * 보고서로 낼지는 에이전트가 정한다(오너 지시 2026-08-24). 호스트는 글의
@@ -4717,10 +4358,7 @@ ${effectiveUserPrompt}`;
     // 끝났을 때에만 실패 흔적을 지운다(도구 없이 말로만 끝내는 가짜 성공 방지).
     let passToolFailures = 0;
     let passToolSuccesses = 0;
-    const oneToolFailureBlocksCompletion = () => Boolean(
-      (oneTeamExecutionPolicy && observedOneToolFailure && !conditionalImageNoArtifactAllowed)
-      || requiredImageArtifactFailed,
-    );
+    const oneToolFailureBlocksCompletion = () => Boolean(oneTeamExecutionPolicy && observedOneToolFailure);
     const collectObservedSourceUrls = (value?: string): string[] => {
       if (!value || !oneTeamExecutionPolicy || observedOneSourceUrls.size >= 32) return [];
       const added: string[] = [];
@@ -4745,6 +4383,34 @@ ${effectiveUserPrompt}`;
       }
       return added;
     };
+    const collectWorkToolImages = (paths: readonly string[]): boolean => {
+      if (req.agentAppMode || req.oneMode || !paths.length) return false;
+      let added = false;
+      const maxImages = imageGenerationRequired ? 1 : 4;
+      for (const sourcePath of paths) {
+        if (pendingWorkToolImages.length >= maxImages) break;
+        if (typeof sourcePath !== "string" || !path.isAbsolute(sourcePath)) continue;
+        generatedImageSourcePaths.add(sourcePath);
+        // 임의의 읽기 대상이 채팅 이미지로 승격되면 안 된다. 그 경계는 도구 이름이 아니라
+        // **정본 폴더 소속**으로 긋는다 — 우리가 쓴 파일만 우리 폴더에 있다.
+        // 정본 폴더는 둘이다: 내장 이미지 도구의 산출물과 캡처 정본.
+        // 어느 쪽에도 안 들어 있으면 봉인이 거절한다(추론 없음).
+        const trustedRoot = sourcePath.startsWith(browserCaptureDir())
+          ? browserCaptureDir()
+          : userDataPath("multimodal-images");
+        try {
+          const image = chatImageAttachmentFromTrustedFile({ filePath: sourcePath, trustedRoot });
+          if (pendingWorkToolImages.some((item) => item.sourcePath === sourcePath)) continue;
+          pendingWorkToolImages.push({ sourcePath, image });
+          added = true;
+          if (imageGenerationRequired) observedImageArtifactEvidence = true;
+        } catch {
+          // Main sealing is fail-closed. An untrusted or malformed file is not
+          // image evidence and must not cross into chat history.
+        }
+      }
+      return added;
+    };
     const runnerEvents = {
       onStatus: (status: string, activity?: McpInvocationEvent["activity"]) => sink({
         kind: "tool-use",
@@ -4759,8 +4425,7 @@ ${effectiveUserPrompt}`;
         }
       },
       // Claude Code식 tool-use 블록 — 이름 + 인자 JSON
-      onTool: (name: string, args?: string, result?: string, id?: string, isError?: boolean, artifactPaths?: readonly string[], imageDataUrl?: string) => {
-        collectInlineImage(imageDataUrl);
+      onTool: (name: string, args?: string, result?: string, id?: string, isError?: boolean, artifactPaths?: readonly string[]) => {
         let sourceUrls: string[] | undefined;
         if (isError) {
           observedOneToolFailure = true;
@@ -4784,14 +4449,18 @@ ${effectiveUserPrompt}`;
           // the separate exact-result-folder filesystem seal below.
           if (oneTeamExecutionPolicy && name.trim()) observedOneToolEvidence = true;
         }
-        const trustedSourceRoot = trustedArtifactRootForTool(name);
-        const resolvedArtifactPaths = !isError
-          ? runtimeToolArtifactPaths(name, args, artifactPaths)
-          : [];
-        const oneArtifacts = !isError && id && resolvedArtifactPaths.length
-          ? bindInvocationOneArtifacts(id, resolvedArtifactPaths, trustedSourceRoot)
+        // ★오너 지시(2026-09-03): "사진/영상 증빙 렌더링을 전부 One과 동일하게 맞출 것.
+        // 애초에 다를 이유가 없음." One 은 아무 도구의 산출물이나 바인딩하는데 Work 만
+        // generate_image 한 도구로 막혀 있어, 브라우저 스크린샷이 화면에 아무것도 남기지
+        // 못했다(2026-09-03 실측: 산출물 0 · 레일 이미지 0 · 채팅 이미지 0).
+        // 도구 이름을 추측하는 대신 **우리 정본 폴더 안에 있는가**로 판정한다 —
+        // 아래 봉인이 fail-closed 라 남의 경로는 어차피 통과하지 못한다.
+        if (!isError && artifactPaths?.length) {
+          collectWorkToolImages(artifactPaths);
+        }
+        const oneArtifacts = !isError && id && artifactPaths?.length
+          ? bindInvocationOneArtifacts(id, artifactPaths)
           : undefined;
-        if (!isError && resolvedArtifactPaths.length) collectWorkToolImages(resolvedArtifactPaths, trustedSourceRoot);
         sink({
           kind: "tool-use",
           tool: {
@@ -4838,7 +4507,10 @@ ${effectiveUserPrompt}`;
       // 상태줄과 달리 대화에 남는다.
       onNotice: (notice: NonNullable<McpInvocationEvent["notice"]>) => sink({ kind: "notice", notice }),
     };
-    const directRuntimeFallbackAllowed = !req.agentAppMode && !isUnattendedExecution(executionContext);
+    const directRuntimeFallbackAllowed =
+      !req.agentAppMode
+      && !isUnattendedExecution(executionContext)
+      && !automationRuntimePinned;
     const invokeCurrentRuntime = async (request: RunnerRequest): Promise<Awaited<ReturnType<Runner>>> => {
       const currentPicked = picked;
       if (!currentPicked) throw new Error("no-runner");
@@ -4905,7 +4577,53 @@ ${effectiveUserPrompt}`;
       restrictedDiscardedMemoryEvents += parsed.events.length;
       return { ...passResult, text: parsed.cleanedText };
     };
+    let hostGeneratedImageAttachment: ImageAttachment | undefined;
+    let hostGeneratedImageContext = "";
+    if (imageGenerationRequired && !signal?.aborted) {
+      const imageSlot = multimodalImageSlot();
+      if (!imageSlot) {
+        throw new Error("image_tool_unavailable: no configured multimodal image runtime");
+      }
+      sink({
+        kind: "tool-use",
+        status: locale === "ko"
+          ? "요청한 이미지를 전용 멀티모달 엔진으로 생성하는 중…"
+          : "Generating the requested image with the configured multimodal engine…",
+      });
+      const generated = await generateImage(imageSlot.model, req.userPrompt);
+      if (!generated.ok || !generated.artifactPath || !generated.src) {
+        throw new Error(`image_tool_unavailable: ${generated.reason ?? "no image was produced"}`);
+      }
+      generatedImageSourcePaths.add(generated.artifactPath);
+      collectWorkToolImages([generated.artifactPath]);
+      if (!pendingWorkToolImages.length) {
+        throw new Error("image_tool_unavailable: generated bytes failed Main sealing");
+      }
+      hostGeneratedImageAttachment = pendingWorkToolImages[0].image;
+      runnerEvents.onTool(
+        "generate_image",
+        JSON.stringify({ prompt: req.userPrompt }),
+        JSON.stringify({ ok: true, engine: generated.engine ?? imageSlot.runtimeKind }),
+        `host-image-${randomUUID()}`,
+        false,
+        [generated.artifactPath],
+      );
+      hostGeneratedImageContext = locale === "ko"
+        ? "\n\n[Agentlas 이미지 결과]\n호스트가 실제 이미지 한 장을 생성해 이 메시지에 첨부했습니다. 첨부된 이미지를 실제 결과로 사용하고, 추가 이미지를 생성했다고 말하지 마세요."
+        : "\n\n[Agentlas image result]\nThe host generated and attached one real image for this request. Use that attached image as the actual result and do not claim that another image was generated.";
+      sink({
+        kind: "tool-use",
+        status: locale === "ko" ? "실제 이미지 결과를 채팅과 결과 탭에 연결했습니다." : "The real image result is attached to the chat and Results rail.",
+      });
+    }
     let activeRunnerReq = runnerRequestForRuntime(active, picked);
+    if (hostGeneratedImageAttachment) {
+      activeRunnerReq = {
+        ...activeRunnerReq,
+        userPrompt: `${activeRunnerReq.userPrompt}${hostGeneratedImageContext}`,
+        images: [...(req.images ?? []), hostGeneratedImageAttachment],
+      };
+    }
     modelTurnStarted = true;
     let result = await invokeCurrentRuntime(activeRunnerReq);
     /*
@@ -4953,6 +4671,9 @@ ${effectiveUserPrompt}`;
             evidence: passClaim.evidence
               ?? `chat:${chat.id} pass:${pass - 1} ${goalProgressKeyForText(continuation.text)}`,
             projectDir: workforceProjectDir,
+            outcomeText: continuation.text,
+            invocationRunId: req.runId ?? null,
+            deferVerificationUntilTerminal: true,
           });
         }
         latestGoalDecision = await recordGoalLedgerCycle({
@@ -4987,12 +4708,7 @@ ${effectiveUserPrompt}`;
       if (continuousMode) {
         // 이 턴의 완료된 결과를 즉시 별도 assistant 메시지로 남긴다 — 화면엔 새 말풍선이
         // 계속 이어 붙는 것처럼 보이고, 앱이 중간에 꺼져도 그때까지 기록은 남는다.
-        appendChatMessage(
-          chat.id,
-          "assistant",
-          stripPermissionEscalationMarker(redactOneAttachmentText(req, continuation.text)),
-          takeWorkToolImageOptions(),
-        );
+        appendChatMessage(chat.id, "assistant", stripPermissionEscalationMarker(redactOneAttachmentText(req, continuation.text)));
         // 세션 워터마크 전진 — 다음 resume 턴이 방금 자기 답변을 gap으로 재주입하지 않게.
         if (sessionCapableRuntime) touchRuntimeSession(chat.id, active.kind, agent.id);
         sink({
@@ -5040,7 +4756,7 @@ ${effectiveUserPrompt}`;
     // 같은 대화 안에서 스스로 복구 패스를 돌려 막힌 단계를 재실행하고 결과까지
     // 완주한다. 복구 패스가 도구 성공 증거를 남기고 무오류로 끝났을 때에만
     // 실패 흔적을 지운다 — 말로만 "됐다"고 하는 가짜 성공은 통과하지 못한다.
-    if (oneTeamExecutionPolicy && !req.agentAppMode && !conditionalImageNoArtifactAllowed) {
+    if (oneTeamExecutionPolicy && !req.agentAppMode) {
       const ONE_RECOVERY_MAX_PASSES = 2;
       for (let attempt = 1; attempt <= ONE_RECOVERY_MAX_PASSES && observedOneToolFailure && !signal?.aborted; attempt += 1) {
         sink({
@@ -5099,54 +4815,6 @@ ${effectiveUserPrompt}`;
         if (oneRecoveryDecisionPending) partialFloor = "";
       }
     }
-    // A visible-image request is complete only when Main received and sealed a
-    // real image from a tool. This applies to ordinary Work/One chats too: the
-    // user should never have to know a capability's internal name, and prose
-    // such as "shown above" cannot satisfy the request.
-    if (imageArtifactRequired && !observedImageArtifactEvidence && !signal?.aborted) {
-      const IMAGE_ARTIFACT_RECOVERY_PASSES = 2;
-      // Do not carry a prior unsupported success claim into the replacement
-      // answer. Tool rows remain in the activity ledger for diagnosis.
-      partialFloor = "";
-      for (let attempt = 1; attempt <= IMAGE_ARTIFACT_RECOVERY_PASSES && !observedImageArtifactEvidence && !signal?.aborted; attempt += 1) {
-        sink({
-          kind: "tool-use",
-          status: locale === "ko" ? "요청한 이미지를 실제 결과로 확인하는 중…" : "Verifying the requested image outcome…",
-          activity: { code: "recovery_retry" },
-        });
-        passToolFailures = 0;
-        passToolSuccesses = 0;
-        const recoveryPrompt = requiredImageArtifactPrompt(resolvedResultFolder, locale, true);
-        activeRunnerReq = {
-          ...runnerReq,
-          userPrompt: explicitBorrowUserPreamble
-            ? `${explicitBorrowUserPreamble}\n\nContinuation request:\n${recoveryPrompt}`
-            : recoveryPrompt,
-          images: undefined,
-        };
-        result = await invokeCurrentRuntime(activeRunnerReq);
-        if (result.failure) {
-          throw new Error(`${result.failure.runtime} runtime ${result.failure.kind}: ${result.failure.message}`);
-        }
-        result = sanitizeRestrictedPass(result);
-        advanceUsageFloor();
-      }
-      if (!observedImageArtifactEvidence && !signal?.aborted) {
-        requiredImageArtifactFailed = true;
-        partialFloor = "";
-        result = {
-          ...result,
-          text: locale === "ko"
-            ? "요청한 이미지를 실제 파일로 생성하거나 첨부하지 못했습니다. 이미지가 만들어졌거나 표시됐다고 처리하지 않았습니다."
-            : "I could not produce or attach a real image file for this request, so I have not treated it as generated or displayed.",
-        };
-        // Replace the live partial snapshot too. InvocationService retains the
-        // latest partial for an interrupted/failed turn; leaving the model's
-        // earlier "shown above" prose there would reintroduce the false claim
-        // even though the terminal result correctly failed closed.
-        sink({ kind: "partial", text: result.text });
-      }
-    }
     const finalContinuation = stripStormbreakerContinueMarker(result.text);
     // 완료 선언 회수는 **모든 경로가 지나는 이 한 지점**에서 한다. 패스 루프 안에서만
     // 떼면 agentAppMode(maxPasses=1)나 One 복구 패스로 끝난 턴에서 마커가 사용자에게
@@ -5179,6 +4847,9 @@ ${effectiveUserPrompt}`;
           evidence: goalCompletion.evidence
             ?? `chat:${chat.id} ${goalProgressKeyForText(goalCompletion.text)}`,
           projectDir: workforceProjectDir,
+          outcomeText: goalCompletion.text,
+          invocationRunId: req.runId ?? null,
+          deferVerificationUntilTerminal: true,
         });
         latestGoalDecision = null;
       }
@@ -5870,16 +5541,20 @@ ${effectiveUserPrompt}`;
      * 권한 승격 표식은 저장 본문에서 지운다 — 화면/승인칩 감지는 final 이벤트
      * (displayWithFloor 원문)를 받는 invocation service 가 맡는다. 히스토리 새로고침
      * 때 표식 줄이 되살아나지 않게 하는 것이 이 한 줄의 전부다.
-     */
-    // Persist the same display-hygiene body that the universal sink publishes.
-    // Persisting the pre-hygiene body made the invocation durability gate reject
-    // a legitimate final whenever the backstop removed a renderer directive.
-    // The backstop is pure and idempotent, so the sink below will produce this
-    // exact text again while still emitting any extracted structured surfaces.
-    const persistedDisplay = stripPermissionEscalationMarker(applyFinalDisplayBackstop(displayWithFloor, {
+    */
+    const finalDisplay = applyFinalDisplayBackstop(displayWithFloor, {
       locale: pickLocale(req),
       allowSurfaceRender: !req.agentAppMode,
-    }).text);
+    });
+    const persistedDisplay = stripPermissionEscalationMarker(finalDisplay.text);
+    const finalWorkImages = (!req.agentAppMode && !req.oneMode)
+      ? pendingWorkToolImages.splice(0, pendingWorkToolImages.length).map((item) => item.image)
+      : [];
+    if (imageGenerationRequired && (!observedImageArtifactEvidence || finalWorkImages.length === 0) && !signal?.aborted) {
+      throw new Error("image_tool_unavailable: the generated image was not durably bound");
+    }
+    const finalImageOptions = finalWorkImages.length > 0 ? { images: finalWorkImages } : undefined;
+    let durableAssistantEntry: ReturnType<typeof appendChatMessage> | null = null;
     if (!req.agentAppMode) {
       /*
        * ★빈 답은 빈 말풍선으로 남기지 않는다 — 대화창 하단에 아무것도 안 적힌 잔해만
@@ -5887,13 +5562,8 @@ ${effectiveUserPrompt}`;
        * 중간 턴이 길이 0 assistant 메시지로 저장됨).
        * 삼키지도 않는다 — 빈 답 자체가 진단 신호이므로 사실은 원장에 남긴다.
        */
-      if (persistedDisplay.trim()) {
-        durableAssistantTextForVerification = appendChatMessage(
-          chat.id,
-          "assistant",
-          persistedDisplay,
-          takeWorkToolImageOptions(),
-        ).text;
+      if (persistedDisplay.trim() || finalImageOptions?.images?.length) {
+        durableAssistantEntry = appendChatMessage(chat.id, "assistant", persistedDisplay, finalImageOptions);
       } else {
         tryRecordRunEvent({
           runId: req.runId ?? `chat:${chat.id}`,
@@ -5903,6 +5573,8 @@ ${effectiveUserPrompt}`;
           payload: { phase: "chat", emptyDisplayText: true, runtime: active.kind },
         });
       }
+      for (const sourcePath of generatedImageSourcePaths) removeGeneratedImageArtifact(sourcePath);
+      generatedImageSourcePaths.clear();
       // 세션 워터마크 전진 — 이 kind의 세션은 방금 답변까지 봤다. 다음 resume 턴의
       // gap-replay가 자기 답변을 중복 주입하지 않고, 스웜/다른 러너 턴만 메우게 된다.
       if (sessionCapableRuntime) touchRuntimeSession(chat.id, active.kind, agent.id);
@@ -5950,41 +5622,35 @@ ${effectiveUserPrompt}`;
         finalText: displayWithFloor,
         tokens: result.tokens,
         stormbreakerContinueRequested,
-        goalCompletionClaim: { claimed: goalCompletion.claimed, evidence: goalCompletion.evidence },
+        goalCompletionClaim: {
+          claimed: goalCompletion.claimed,
+          evidence: goalCompletion.evidence,
+          goalId: activeGoalId,
+        },
         resultFolder: resolvedResultFolder,
         workforcePrepareReceipt,
       };
     }
     // 연속 패스에서 result.tokens는 마지막 패스만 반영 — 라이브 누적 최고치와 큰 쪽을 확정치로.
-    // When the transcript write only replaced a transient image path with its
-    // durable attachment URL, publish that durable body to Work as well. This
-    // keeps the live viewer on Main-owned bytes and avoids an out-of-scope file
-    // watcher. A permission marker is different: InvocationService still needs
-    // the original transport text to mint the approval receipt before stripping
-    // it, so that path keeps displayWithFloor.
-    const finalWireText = durableAssistantTextForVerification
-      && persistedDisplay === displayWithFloor
-      ? durableAssistantTextForVerification
-      : displayWithFloor;
-    const finalOneArtifacts = req.oneMode === true
-      ? bindInvocationOneArtifacts("final-answer", finalMarkdownArtifactPaths(persistedDisplay))
-      : [];
     sink({
       kind: "final",
-      text: finalWireText,
-      ...(durableAssistantTextForVerification
-        ? { durableTextForVerification: durableAssistantTextForVerification }
-        : {}),
+      text: displayWithFloor,
       tokens: finalObservedTokens || undefined,
       model: active.model ?? active.kind,
       modelRole: invocationModelRole,
-      ...(finalOneArtifacts.length ? { oneArtifacts: finalOneArtifacts } : {}),
+      ...(durableAssistantEntry?.imageDataUrls?.length
+        ? { imageDataUrls: durableAssistantEntry.imageDataUrls }
+        : {}),
     });
     return {
       finalText: displayWithFloor,
       tokens: result.tokens,
       stormbreakerContinueRequested,
-      goalCompletionClaim: { claimed: goalCompletion.claimed, evidence: goalCompletion.evidence },
+      goalCompletionClaim: {
+        claimed: goalCompletion.claimed,
+        evidence: goalCompletion.evidence,
+        goalId: activeGoalId,
+      },
       resultFolder: resolvedResultFolder,
       workforcePrepareReceipt,
       // C38 — 계획이 아니라 **결과**를 돌려준다. 관문 파일을 만들어 놓고 실행이 다른
@@ -6001,6 +5667,8 @@ ${effectiveUserPrompt}`;
         : {}),
     };
   } catch (err) {
+    for (const sourcePath of generatedImageSourcePaths) removeGeneratedImageArtifact(sourcePath);
+    generatedImageSourcePaths.clear();
     if (modelTurnStarted) {
       try {
         recordTerminalMemoryTurn({

@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.1.2 — 2026-09-03
+
+This source update reconciles the newest Desktop, One, Work, and Science runtime
+changes without treating local QA material as public release content. Release
+artifacts and update feeds remain separate acceptance gates.
+
+- One keeps an attached image visible while a new conversation is created and
+  renders the image separately from the accompanying chat text.
+- One and Work preserve per-conversation execution identity across stop, retry,
+  queued follow-up, and durable reload paths, preventing late events from an
+  older run from replacing the active answer.
+- Work accepts free-text answers with Enter, retains answers submitted while a
+  run is settling, and sends each answer exactly once instead of treating it as
+  a skipped choice.
+- Generated images and document outputs remain Main-owned artifacts with
+  preview, copy, download, missing-file reporting, and right-side result tabs;
+  long documents stay out of the conversation body.
+- Runtime traces redact operational credentials, write-capable team turns use a
+  project lease, inactivity is measured from meaningful progress, and team
+  completion requires concrete tool, artifact, or verification evidence.
+- Planner, worker, verifier, and synthesis executions use isolated runtime
+  sessions while retaining bounded mobile artifact pagination and local image
+  evidence.
+- Linux AppImage relaunches discard an inherited extraction root before locating
+  the replacement payload, and Science extension packages accept the canonical
+  release key through its compatibility identifier.
+
 ## 1.1.1 — 2026-09-03
 
 This release binds Agentlas OS v1.2.40 at

@@ -7,6 +7,7 @@ import {
   IconCheck,
   IconChevronRight,
   IconFileUp,
+  IconFolder,
   IconLayers,
   IconRoute,
   IconSearch,
@@ -66,8 +67,11 @@ type Props = {
   plugins: OneComposerPluginOption[];
   permission: OnePermissionMode;
   turnOptions: Partial<Record<OneTurnOptionKey, true>>;
+  localFilesConnected: boolean;
   onMenuChange: (menu: OneComposerMenuKey | null) => void;
   onAttach: () => void;
+  onAddFolder: () => void;
+  onClearFolder: () => void;
   onOpenPlugins: () => void;
   /** 플러그인 행 자체가 켜기/끄기 스위치다. 설정이 덜 된 항목은 관리 화면으로 보낸다. */
   onTogglePlugin: (id: string) => void;
@@ -94,8 +98,11 @@ export function OneComposerControls({
   plugins,
   permission,
   turnOptions,
+  localFilesConnected,
   onMenuChange,
   onAttach,
+  onAddFolder,
+  onClearFolder,
   onOpenPlugins,
   onTogglePlugin,
   onToggleAgent,
@@ -189,6 +196,23 @@ export function OneComposerControls({
         <div className={styles.composerPopoverList}>
           <div className={styles.composerPopoverSectionLabel}>{locale === "ko" ? "추가" : "Add"}</div>
           <ComposerRow icon={<IconFileUp size={15} />} title={locale === "ko" ? "사진 및 파일 추가" : "Add photos and files"} onClick={onAttach} />
+          <ComposerRow
+            icon={<IconFolder size={15} />}
+            title={localFilesConnected
+              ? (locale === "ko" ? "로컬 파일 연결됨" : "Local files connected")
+              : (locale === "ko" ? "로컬 파일 연결" : "Connect local files")}
+            subtitle={localFilesConnected
+              ? (locale === "ko" ? "이번 대화의 실행 컨텍스트입니다. 눌러서 바꿀 수 있습니다" : "Execution context for this conversation. Select to change it")
+              : (locale === "ko" ? "필요할 때만 원본 위치에서 읽습니다. 업로드하거나 복사하지 않습니다" : "Read in place only when needed. Nothing is uploaded or copied")}
+            checked={localFilesConnected}
+            onClick={onAddFolder}
+          />
+          {localFilesConnected ? <ComposerRow
+            icon={<IconShield size={15} />}
+            title={locale === "ko" ? "로컬 파일 접근 해제" : "Disconnect local files"}
+            subtitle={locale === "ko" ? "대화는 유지하고 로컬 파일 경로만 분리합니다" : "Keep the conversation and remove only its local file access"}
+            onClick={onClearFolder}
+          /> : null}
           <div className={styles.composerPopoverDivider} />
           <ComposerRow icon={<IconRoute size={15} />} title={locale === "ko" ? "플랜 모드" : "Plan mode"} toggle checked={Boolean(turnOptions.planMode)} onClick={() => onToggleTurnOption("planMode")} />
           <ComposerRow icon={<IconTarget size={15} />} title={locale === "ko" ? "목표 추진" : "Goal mode"} toggle checked={Boolean(turnOptions.goalMode)} onClick={() => onToggleTurnOption("goalMode")} />

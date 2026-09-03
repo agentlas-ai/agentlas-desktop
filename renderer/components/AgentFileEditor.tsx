@@ -225,7 +225,7 @@ export function AgentFileEditor({ agentId, locale, source, title, subtitle }: {
       )}
 
       <div style={{ display: "grid", gridTemplateColumns: "minmax(150px, 220px) 1fr", gap: 12, minHeight: 320 }}>
-        <div style={{ border: "1px solid var(--paper-edge)", borderRadius: 10, overflowX: "hidden", overflowY: "auto", maxHeight: 420, minWidth: 0 }}>
+        <div style={{ border: "1px solid var(--paper-edge)", borderRadius: 10, overflow: "auto", maxHeight: 420 }}>
           {entries.length === 0 && (
             <p style={{ margin: 0, padding: 12, fontSize: 11.5, color: "var(--muted-deep)" }}>
               {sourceMissing
@@ -245,10 +245,8 @@ export function AgentFileEditor({ agentId, locale, source, title, subtitle }: {
                   padding: "8px 10px", border: 0, borderBottom: "1px solid var(--paper-edge)",
                   background: active ? "var(--fill-1)" : "transparent",
                   fontWeight: active ? 700 : 500, fontSize: 12, cursor: "pointer",
-                  color: "var(--ink)", minWidth: 0, overflow: "hidden",
-                  textOverflow: "ellipsis", whiteSpace: "nowrap",
+                  color: "var(--ink)",
                 }}
-                title={entry.name}
               >
                 {entry.name}
                 {entry.path === activePath && dirty && <span style={{ marginLeft: 6, color: "var(--accent)" }}>●</span>}

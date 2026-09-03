@@ -22,11 +22,8 @@ Explores product concepts by generating 3 distinct, production-quality visual de
    - Construct 3 separate prompt concepts with distinct information hierarchy, layout strategies, and interaction models.
    - Run generation for each concept independently using the built-in image generation tool (do not combine multiple ideas into one image).
    - For mobile apps, generate content-only views without device bezels, notches, status bars, or home indicators.
-   - Immediately copy each returned image out of the generator's global/cache location and into the current result workspace as `design-options/option-1.png`, `design-options/option-2.png`, and `design-options/option-3.png`. Never leave the only copy under `~/.codex/generated_images`, another host cache, or a temporary tool directory.
-   - Open or decode those exact workspace files and verify their dimensions before presentation. If any file cannot be persisted and read back, report that option as blocked; do not say it is visible.
 4. **Order and Present Selection**:
    - Number the results strictly in the order they appear in the chat context: Option 1, Option 2, Option 3.
-   - Present the three verified workspace images themselves. Text descriptions, generator receipts, or cache paths are not substitutes for visible image artifacts in chat/the Result rail.
    - Send the concise selection prompt: `"Which option should I build: 1, 2, or 3? Or tell me what you'd like to refine or personalize first."`
 5. **Incorporate Feedback Loop**: If the user requests refinements or remixes between options, generate updated visual concepts before proceeding.
 6. **Pin Target Design**:
@@ -35,7 +32,7 @@ Explores product concepts by generating 3 distinct, production-quality visual de
 7. **Handoff to Build**: Immediately transition to `$image-to-code` with `assets/target-design.png` bound as the active visual anchor.
 
 # Outputs
-- 3 independent, high-resolution visual design option images persisted as visible workspace artifacts under `design-options/`.
+- 3 independent, high-resolution visual design option images.
 - Pinned visual target file `assets/target-design.png`.
 - Seamless handoff to `$image-to-code`.
 

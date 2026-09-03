@@ -2,42 +2,62 @@
   "schema": "agentlas.plugin/v2",
   "slug": "agentlas-physics",
   "name": "Agentlas Physics",
-  "version": "0.2.0",
+  "version": "0.3.2",
   "builtin": false,
-  "publisher": { "name": "Agentlas", "url": "https://agentlas.ai" },
+  "publisher": {
+    "name": "Agentlas",
+    "url": "https://agentlas.ai"
+  },
   "surface": {
     "displayName": "Physics",
     "displayNameKo": "물리학",
-    "tagline": "INSPIRE, HEPData, and user measurements with exact lineage",
-    "taglineKo": "정확한 계보를 보존하는 INSPIRE·HEPData·사용자 측정 데이터",
-    "description": "Searches INSPIRE, retrieves version-pinned HEPData tables, and performs hash-bound diagonal chi-square analysis with explicit uncertainty declarations, publication tables, and Vega payloads.",
-    "descriptionKo": "INSPIRE 검색과 버전 고정 HEPData 표를 제공하고 명시적 오차 선언에 따라 해시 결합된 대각 카이제곱 분석·출판 표·Vega 페이로드를 생성합니다.",
+    "tagline": "INSPIRE, HEPData, user measurements, and a deterministic physics analysis catalogue with exact lineage",
+    "taglineKo": "정확한 계보를 보존하는 INSPIRE·HEPData·사용자 측정 데이터와 결정론적 물리 분석 카탈로그",
+    "description": "Searches INSPIRE, retrieves version-pinned HEPData tables, performs hash-bound diagonal chi-square analysis, and runs a deterministic physics analysis catalogue (spectrum peak fits, significance and limits, uncertainty propagation, dimensional analysis, ODE simulation, signal spectra, York errors-in-variables fits, teaching-lab checks) with declared boundaries, publication tables, and Vega figures.",
+    "descriptionKo": "INSPIRE 검색과 버전 고정 HEPData 표, 해시 결합 대각 카이제곱 분석에 더해 스펙트럼 피크 피팅·유의성과 상한·오차 전파·차원 분석·ODE 시뮬레이션·신호 스펙트럼·York 오차 내재 회귀·교육 실험 점검을 경계가 명시된 결정론적 분석 카탈로그로 제공하고 출판 표와 Vega 그림을 생성합니다.",
     "category": "data",
     "brandColor": "#455A8E",
     "icon": "assets/icon.svg",
     "defaultPrompts": [
       "이 고에너지물리 주제의 INSPIRE 논문을 찾고 실험 데이터 연결점을 정리해줘",
-      "이 HEPData 표의 축·단위·오차를 보존해 분석 가능한 아티팩트로 만들어줘"
-      ,"이 HEPData 측정값과 예측을 명시한 오차 성분으로 카이제곱 검정하고 잔차 그림과 출판 표를 만들어줘"
+      "이 HEPData 표의 축·단위·오차를 보존해 분석 가능한 아티팩트로 만들어줘",
+      "이 HEPData 측정값과 예측을 명시한 오차 성분으로 카이제곱 검정하고 잔차 그림과 출판 표를 만들어줘",
+      "이 스펙트럼의 피크를 가우시안+선형 배경으로 피팅해서 χ²/ndf·풀·FWHM을 보고해줘",
+      "관측 15, 배경 8±2, 기대 신호 5일 때 유의성과 95% CLs 상한, Feldman–Cousins 구간을 계산해줘"
     ]
   },
-  "invocation": { "mention": "@agentlas-physics", "implicit": "router", "standalone": true },
+  "invocation": {
+    "mention": "@agentlas-physics",
+    "implicit": "router",
+    "standalone": true
+  },
   "provides": {
-    "skills": { "router": "skills/index/SKILL.md", "workflows": ["search-inspire", "hepdata", "hepdata-chi-square", "physics-dataset"] },
+    "skills": {
+      "router": "skills/index/SKILL.md",
+      "workflows": [
+        "search-inspire",
+        "hepdata",
+        "hepdata-chi-square",
+        "physics-dataset",
+        "analysis"
+      ]
+    },
     "tools": [
       {
         "id": "agentlas-physics",
         "capability": "data",
         "kind": "stdio",
         "command": "${node}",
-        "args": ["${pluginDir}/runtime/mcp-server.cjs"],
+        "args": [
+          "${pluginDir}/runtime/mcp-server.cjs"
+        ],
         "envKeys": [],
         "timeoutMs": 25000,
         "surface": {
           "name": "Agentlas 물리학 데이터",
           "nameEn": "Agentlas Physics Data",
-          "description": "INSPIRE·HEPData 측정표를 정규화하고 명시적 오차 모델로 카이제곱·잔차·출판 표를 계산",
-          "descriptionEn": "Normalize INSPIRE and HEPData measurements and compute declared-error chi-square, residual, and publication tables",
+          "description": "INSPIRE·HEPData 측정표 정규화, 카이제곱, 그리고 피크 피팅·유의성·오차 전파·단위·ODE·신호·York·실험 점검 분석 카탈로그",
+          "descriptionEn": "Normalize INSPIRE/HEPData measurements, declared-error chi-square, and a deterministic analysis catalogue (peak fits, significance, uncertainty, units, ODE, signal, York, lab checks)",
           "category": "data",
           "brandColor": "#455A8E",
           "mark": "PH",
@@ -46,28 +66,181 @@
       }
     ]
   },
-  "requires": { "prereq": [{ "id": "node", "provided-by": "app" }], "os": ["darwin", "win32", "linux"] },
-  "permissions": { "fileWrite": "none", "network": "allow", "shell": "deny" },
-  "state": { "files": [], "assets": false },
+  "requires": {
+    "prereq": [
+      {
+        "id": "node",
+        "provided-by": "app"
+      }
+    ],
+    "os": [
+      "darwin",
+      "win32",
+      "linux"
+    ]
+  },
+  "permissions": {
+    "fileWrite": "none",
+    "network": "allow",
+    "shell": "deny"
+  },
+  "state": {
+    "files": [],
+    "assets": false
+  },
   "integrity": {
     "algo": "sha256",
     "files": [
-      { "path": "README.md", "sha256": "665a86fe9de196c534c6ad96de28f1a020ae6a27e8c9291063003b1f7f4ef795", "bytes": 1931 },
-      { "path": "assets/icon.svg", "sha256": "0cc415032ec239d684615214160797c8a495a292400fb3f56a434e2a0a2fd786", "bytes": 570 },
-      { "path": "capabilities.json", "sha256": "3f442790d0da822ad82a307494c0328b5ec08f6ca05358dc171cfe094993d307", "bytes": 3931 },
-      { "path": "runtime/mcp-server.cjs", "sha256": "82ec5715152fcc7e6e7c5b981e202000d65ce281840cc93fcc52dab1df816699", "bytes": 2940 },
-      { "path": "runtime/physics.cjs", "sha256": "683fa61113ea74179a79da19b3c1f66d9aa4b1b2955a865d264aed84d4b84ce9", "bytes": 54368 },
-      { "path": "schemas/tools.json", "sha256": "06306865a2a2c0a3f55a55dd7b239366ecdaf6d66102cd94d577a4d08ec26bb3", "bytes": 5831 },
-      { "path": "skills/hepdata-chi-square/SKILL.md", "sha256": "f40924e4f6836fcd181ea067c635746ff8c23c270e4cf9102c0c6af67445edfe", "bytes": 1221 },
-      { "path": "skills/hepdata/SKILL.md", "sha256": "122ad868699894c1f31c37193d7d18b7edabc9335a164407d5b212051ff6b77e", "bytes": 1847 },
-      { "path": "skills/index/SKILL.md", "sha256": "ddd8f6ec276ba82870b90ce53a159998e699ea7820bdb192302c55b1231ffce1", "bytes": 776 },
-      { "path": "skills/physics-dataset/SKILL.md", "sha256": "f6314e6809d94fce7ea99d0b2559f4e5309b950e95a737453371d52614a0233f", "bytes": 803 },
-      { "path": "skills/search-inspire/SKILL.md", "sha256": "9b0cbed3f0a8ce586faff9c294668968e8e8138a0c9da0e5ee1a8e057772aa02", "bytes": 1022 },
-      { "path": "tests/contract.cjs", "sha256": "05f93c613de8a6af0fafaa6e0b8e4d81586422d290097acc533dbad6462046b8", "bytes": 15989 },
-      { "path": "tests/fixtures/hepdata-inclusive-table.json", "sha256": "6abdb110a3acadb24b22fd709089bd9bb57b41eb0ac856501ea3575fb3c8063d", "bytes": 658 },
-      { "path": "tests/fixtures/hepdata-record.json", "sha256": "6b1692ff1e02c5fd55701ab3a5136b5507342ebd1fe85bb015b50c7ab806c4c1", "bytes": 946 },
-      { "path": "tests/fixtures/hepdata-table.json", "sha256": "8d4c16bee1f99a70af9590b6d6f83cc03af1a321ab389b87124f2b6790151a6e", "bytes": 590 },
-      { "path": "tests/fixtures/inspire-search.json", "sha256": "0e1b21bc56e2587be1ef5c1565ee7edd13f33ccbf8aede952821d92389464518", "bytes": 982 }
+      {
+        "path": "assets/icon.svg",
+        "sha256": "0cc415032ec239d684615214160797c8a495a292400fb3f56a434e2a0a2fd786",
+        "bytes": 570
+      },
+      {
+        "path": "capabilities.json",
+        "sha256": "02000aa72ef5abe7c0c1f4bb2069946c831052f13ef9cd6d9ff339a8c038353e",
+        "bytes": 7873
+      },
+      {
+        "path": "README.md",
+        "sha256": "751d8aa6858ed4381ffe25f2b0380404d1f657ab1ee230556b4cac04980827f2",
+        "bytes": 4586
+      },
+      {
+        "path": "runtime/analysis-common.cjs",
+        "sha256": "ea53be23cc920c6c010fa256ed175016915246579e45770da770113e28f6d266",
+        "bytes": 29485
+      },
+      {
+        "path": "runtime/expression.cjs",
+        "sha256": "12cbc1091e5d7f851ed6d445abb47e4cea49fbefae326ec2e3333bb5d368dd6a",
+        "bytes": 19491
+      },
+      {
+        "path": "runtime/lab-checkers.cjs",
+        "sha256": "1bd9df464fe1ed3cfd837021df45e4d1dd71370b5fe9dd9fabadec268d150014",
+        "bytes": 33977
+      },
+      {
+        "path": "runtime/mcp-server.cjs",
+        "sha256": "ba01e33d6ccc18bb9ebf5406850f58e05a47790eb1b595a26e1f5a0605a94833",
+        "bytes": 4098
+      },
+      {
+        "path": "runtime/ode-simulation.cjs",
+        "sha256": "11e0c8dcbb2e0e3c66f79eeeec6d0d1b46e2dede5b45736d0d14a3bbfb2abe45",
+        "bytes": 42638
+      },
+      {
+        "path": "runtime/physics.cjs",
+        "sha256": "80751664acfe9ecbd919827e125ba21635215bdf57730221e639e1436edb2a16",
+        "bytes": 54532
+      },
+      {
+        "path": "runtime/signal-analysis.cjs",
+        "sha256": "ca89d454034200df4a13513839567604846b7234806e155c3e5248fa0a4290c2",
+        "bytes": 29690
+      },
+      {
+        "path": "runtime/significance-limits.cjs",
+        "sha256": "6ec8ccf1d5632757ac624cf416a2e43d76d0b76bdd3aba1aa4c3ecb77c156659",
+        "bytes": 21816
+      },
+      {
+        "path": "runtime/spectrum-fit.cjs",
+        "sha256": "a9aa5fe8fe11dc026d21960345159d91ce08b448b2070c7455beca918711dc41",
+        "bytes": 40390
+      },
+      {
+        "path": "runtime/uncertainty-propagation.cjs",
+        "sha256": "ab32a155b94e9af47a8faa44cdba72153f2b7f0079d3f3c947358660bc33a2c1",
+        "bytes": 19915
+      },
+      {
+        "path": "runtime/units.cjs",
+        "sha256": "0501b6214e827aebd2eb994bd6ded4048d2a89e8bc754301c967df5229f5c081",
+        "bytes": 34952
+      },
+      {
+        "path": "runtime/york-fit.cjs",
+        "sha256": "b903d6ec63f92fd5830353260b315dac290c064f695f6e30bf6d972fa194ff17",
+        "bytes": 20422
+      },
+      {
+        "path": "schemas/lab-experiment.input.json",
+        "sha256": "220e9b91ef597c23adab9571b4c92c7618e604fbd8cabde96038b2961b7696d1",
+        "bytes": 3482
+      },
+      {
+        "path": "schemas/ode-simulation.input.json",
+        "sha256": "a81dbaa6c0e69000667bc0a72fac6d5cfac10621de7a8c9a30d781b11f8bc6ef",
+        "bytes": 8964
+      },
+      {
+        "path": "schemas/signal-analysis.input.json",
+        "sha256": "c81059914e60529e2a7a39b92fd6de0407f7e3ed064e492fe6bf74e72a7f316e",
+        "bytes": 2280
+      },
+      {
+        "path": "schemas/significance-limits.input.json",
+        "sha256": "46af0df2e691ae5b18bad760d2e8ebabfecfa1dfc166dde1b4b6649476106116",
+        "bytes": 1484
+      },
+      {
+        "path": "schemas/spectrum-fit.input.json",
+        "sha256": "be3c6874089e73c1a7fa109dcd17995aedf5b766b2d073140a00f86c7bcf4e37",
+        "bytes": 3461
+      },
+      {
+        "path": "schemas/tools.json",
+        "sha256": "ab40cf69a302f7a69e16457c79d2b720f3ad910d1f4834583c1d059bcaf6ff1d",
+        "bytes": 65023
+      },
+      {
+        "path": "schemas/uncertainty-propagation.input.json",
+        "sha256": "7692d33ab09928339e1d3613da0b9ec47de7eef5a3a23fc95830a3b172dfa4cf",
+        "bytes": 2324
+      },
+      {
+        "path": "schemas/unit-analysis.input.json",
+        "sha256": "e1cb2dee4e732a52a541eccb9302a7f9bd62bb682d3ad28bcf5973dc9118e12c",
+        "bytes": 1603
+      },
+      {
+        "path": "schemas/york-fit.input.json",
+        "sha256": "11183b2014d556f0e7a63282d5d546349e7b596fbbf8eb2737bfaf94c754d071",
+        "bytes": 1819
+      },
+      {
+        "path": "skills/analysis/SKILL.md",
+        "sha256": "8b7bd61882c3fc244dbd9a63907dacd13ce1a6e66b38b994b7e9d9717958ec08",
+        "bytes": 1701
+      },
+      {
+        "path": "skills/hepdata/SKILL.md",
+        "sha256": "122ad868699894c1f31c37193d7d18b7edabc9335a164407d5b212051ff6b77e",
+        "bytes": 1847
+      },
+      {
+        "path": "skills/hepdata-chi-square/SKILL.md",
+        "sha256": "f40924e4f6836fcd181ea067c635746ff8c23c270e4cf9102c0c6af67445edfe",
+        "bytes": 1221
+      },
+      {
+        "path": "skills/index/SKILL.md",
+        "sha256": "cffe2326c5980b1f79ecabaff90744d9af6b2f34ca20c412022ede9f32734df2",
+        "bytes": 1236
+      },
+      {
+        "path": "skills/physics-dataset/SKILL.md",
+        "sha256": "f6314e6809d94fce7ea99d0b2559f4e5309b950e95a737453371d52614a0233f",
+        "bytes": 803
+      },
+      {
+        "path": "skills/search-inspire/SKILL.md",
+        "sha256": "9b0cbed3f0a8ce586faff9c294668968e8e8138a0c9da0e5ee1a8e057772aa02",
+        "bytes": 1022
+      }
     ]
   }
 }

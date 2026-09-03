@@ -149,6 +149,20 @@ function workspacePreviewFromMedia(media: MediaArtifact): WorkspaceFilePreview {
   };
 }
 
+function workspacePreviewFromImageUrl(url: string, index: number): WorkspaceFilePreview {
+  return {
+    path: url,
+    name: `generated-image-${index + 1}.png`,
+    size: 0,
+    viewerKind: "image",
+    fileUrl: url,
+    openTargets: [url],
+    content: "",
+    truncated: false,
+    reason: "binary",
+  };
+}
+
 /**
  * 도구 호출이 실제로 건드린 파일 경로.
  *
@@ -157,8 +171,50 @@ function workspacePreviewFromMedia(media: MediaArtifact): WorkspaceFilePreview {
  * 그렇게 무너졌다). 읽은 파일도 포함한다: 사람이 "그 파일 좀 보자"고 할 대상은
  * 우리가 만든 것만이 아니다.
  */
-function toolFilePathsFromSteps(steps: StreamStep[] | undefined): string[] {
+/**
+ * 실행 기록에서 "지금 돌고 있는 로컬 서버" 주소를 찾는다.
+ *
+ * 예전에는 답변 본문만 훑었다. 그래서 모델이 "서버를 띄웠습니다"라고만 하고 주소를 적지
+ * 않으면 — 주소는 `Serving HTTP on 127.0.0.1 port 8932` 처럼 도구 결과에만 있었다 —
+ * 우측 레일이 아예 열리지 않았고, 화면에는 떠 있는 컴퓨터-화면 카드의 "화면 연결 대기 중"만
+ * 남았다(2026-09-03 실측: 레일 탭 null, 라이브뷰 호출 0회).
+ * 파일 경로는 이미 도구 기록에서 모으고 있었다 — 주소도 같은 자리에서 모은다.
+ */
+function normalizeLocalServerUrl(url: string): string {
+  // 같은 서버가 본문에는 `…:8932`, 도구 결과에는 `…:8932/` 로 적힌다. 그대로 두면 프리뷰
+  // 정체가 바뀐 것으로 보여 네이티브 뷰가 닫혔다 다시 열린다(화면이 한 번 깜빡인다).
+  try {
+    return new URL(url).toString();
+  } catch {
+    return url;
+  }
+}
+
+function localServerUrlsFromSteps(steps: StreamStep[] | undefined): string[] {
   if (!steps || steps.length === 0) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const step of steps) {
+    if (step.kind !== "tool") continue;
+    for (const text of [step.result, step.args]) {
+      if (!text) continue;
+      for (const raw of localServerUrlsInText(text)) {
+        const url = normalizeLocalServerUrl(raw);
+        if (seen.has(url)) continue;
+        seen.add(url);
+        out.push(url);
+      }
+    }
+  }
+  return out;
+}
+
+function toolFilePathsFromSteps(
+  steps: StreamStep[] | undefined,
+  options: { includeReads?: boolean } = {},
+): string[] {
+  if (!steps || steps.length === 0) return [];
+  const includeReads = options.includeReads !== false;
   const out: string[] = [];
   const seen = new Set<string>();
   for (const step of steps) {
@@ -169,6 +225,7 @@ function toolFilePathsFromSteps(steps: StreamStep[] | undefined): string[] {
     } catch {
       continue;
     }
+    if (detail.type === "read" && !includeReads) continue;
     if (detail.type !== "read" && detail.type !== "write" && detail.type !== "edit") continue;
     const filePath = detail.filePath;
     if (!filePath || seen.has(filePath)) continue;
@@ -281,15 +338,10 @@ function workspacePreviewFromLocalFile(path: string): WorkspaceFilePreview {
 function workspacePreviewFromLinkedFile(file: LinkedFileArtifact): WorkspaceFilePreview {
   const path = file.path || file.paths?.[0] || file.href;
   const isRemoteUrl = /^https?:\/\//i.test(path);
-  const isDurableChatImage = /^agentlas:\/\/chat-attachment\/[0-9a-f-]+/iu.test(path);
-  const viewerKind = isRemoteUrl
-    ? "browser"
-    : isDurableChatImage
-      ? "image"
-      : viewerKindFromName(file.name || path);
+  const viewerKind = isRemoteUrl ? "browser" : viewerKindFromName(file.name || path);
   return {
     path,
-    name: isDurableChatImage ? "chat-image" : (file.name || basename(path)),
+    name: file.name || basename(path),
     size: 0,
     viewerKind,
     fileUrl: isAbsoluteLocalPath(path) ? fileUrlForToolPath(path) : file.fileUrl,
@@ -428,6 +480,23 @@ const RIGHT_PANEL_WIDTH_KEY = "agentlas.chat.right_panel_width";
 const RIGHT_PANEL_DEFAULT_WIDTH = 392;
 const RIGHT_PANEL_MIN_WIDTH = 320;
 const RIGHT_PANEL_MAX_WIDTH = 1280;
+/**
+ * 이 폭 이하에서는 결과 레일이 채팅 옆에 서지 않고 위를 덮는다.
+ * 값은 globals.css 의 `.chat-right-panel` 오버레이 media query 와 같아야 한다 —
+ * 어긋나면 CSS 는 덮는데 JS 는 자리를 비워두거나 그 반대가 된다.
+ * scripts/qa-work-responsive-rail.cjs 가 두 값을 대조한다.
+ *
+ * 앱 창 자체의 최소 폭은 960px 이라(electron/main.ts) 이 경계는 임베드/작은 창 전용이다.
+ */
+const RIGHT_PANEL_OVERLAY_MAX_VIEWPORT = 760;
+/**
+ * 레일이 옆에 설 때 비워 둬야 하는 폭 = 셸 사이드바(.project-sidebar 274px 고정)
+ * + 채팅이 읽히는 최소 폭.
+ *
+ * 예전에는 사이드바를 세지 않은 520 이었다. 그래서 최소 창(960px)에서 레일이 415px 까지
+ * 자라 채팅이 271px 로 눌렸다(2026-09-03 실측: 작성창 215px, 한 문장이 3줄).
+ */
+const CHAT_COLUMN_RESERVED_WIDTH = 274 + RIGHT_PANEL_MIN_WIDTH;
 const RIGHT_PANEL_RESULT_RATIO = 0.432;
 // 세로 높이는 폭과 달리 기본이 '전체'다 — null 이면 키를 지워 창 크기를 그대로 따라간다.
 const RIGHT_PANEL_HEIGHT_KEY = "agentlas.chat.right_panel_height";
@@ -481,15 +550,17 @@ function writeRightPanelPreference(open: boolean, tab: ChatRightPanelTab) {
 function clampRightPanelWidth(width: number): number {
   const viewportMax = typeof window === "undefined"
     ? RIGHT_PANEL_MAX_WIDTH
-    : window.innerWidth <= 760
+    : window.innerWidth <= RIGHT_PANEL_OVERLAY_MAX_VIEWPORT
       ? Math.max(RIGHT_PANEL_MIN_WIDTH, window.innerWidth - 40)
-      : Math.max(RIGHT_PANEL_MIN_WIDTH, window.innerWidth - 520);
+      : Math.max(RIGHT_PANEL_MIN_WIDTH, window.innerWidth - CHAT_COLUMN_RESERVED_WIDTH);
   return Math.min(RIGHT_PANEL_MAX_WIDTH, viewportMax, Math.max(RIGHT_PANEL_MIN_WIDTH, Math.round(width)));
 }
 
 function preferredRichResultWidth(): number {
   if (typeof window === "undefined") return 720;
-  const requested = window.innerWidth <= 760
+  // 좁은 폭 분기는 clampRightPanelWidth 와 같은 경계를 써야 한다 — 예전에는 760 이 세 군데
+  // 흩어져 있어 한 곳만 고치면 반쪽만 착지했다.
+  const requested = window.innerWidth <= RIGHT_PANEL_OVERLAY_MAX_VIEWPORT
     ? Math.round(window.innerWidth * 0.86)
     : Math.round(window.innerWidth * RIGHT_PANEL_RESULT_RATIO);
   return clampRightPanelWidth(requested);
@@ -525,7 +596,9 @@ function readRightPanelWidth(): number {
   } catch {
     // ignore
   }
-  return RIGHT_PANEL_DEFAULT_WIDTH;
+  // 기본값도 창에 맞춘다. 예전에는 저장된 값만 clamp 해서, 한 번도 크기를 바꾸지 않은
+  // 사용자는 좁은 창에서도 392px 레일을 그대로 받았다.
+  return clampRightPanelWidth(RIGHT_PANEL_DEFAULT_WIDTH);
 }
 
 function writeRightPanelWidth(width: number) {
@@ -774,11 +847,11 @@ function completePipeline(stages: PipelineStage[] | undefined): PipelineStage[] 
   return stages.map((s) => ({ ...s, status: "done" as const }));
 }
 
-function historyEntryToStreamMessage(entry: { id: string; role: string; text: string }): StreamMessage {
+function historyEntryToStreamMessage(entry: { id: string; role: string; text: string; imageDataUrls?: string[] }): StreamMessage {
   const role: StreamMessage["role"] =
     entry.role === "assistant" ? "agent" : entry.role === "user" ? "user" : "system";
   if (role !== "agent") {
-    return { id: entry.id, role, text: entry.text };
+    return { id: entry.id, role, text: entry.text, imageDataUrls: entry.imageDataUrls };
   }
   const parsed = extractQuestions(entry.text, entry.id);
   const setup = stripMultimodalSetup(parsed.text);
@@ -786,6 +859,7 @@ function historyEntryToStreamMessage(entry: { id: string; role: string; text: st
     id: entry.id,
     role,
     text: setup.text,
+    imageDataUrls: entry.imageDataUrls,
     questions: parsed.questions.length > 0 ? parsed.questions : undefined,
     needsMultimodalSetup: setup.needsSetup || undefined,
   };
@@ -805,27 +879,7 @@ function reconcileTranscriptSnapshot(
   optimisticIds: ReadonlySet<string> = new Set<string>(),
 ): StreamMessage[] {
   if (current.some((message) => message.busy || message.streaming)) return current;
-  const reconciliationText = (text: string) => {
-    let normalized = text.replace(
-      /agentlas:\/\/chat-attachment\/[0-9a-f-]+/giu,
-      "<durable-chat-image>",
-    );
-    // A live completion still carries its trusted source path so the current
-    // turn can present the image immediately. The durable history row replaces
-    // that same path with an attachment URL. Treat only image references as
-    // equivalent here; otherwise reconciliation appends the live placeholder
-    // after the durable row and paints the same answer twice.
-    for (const file of linkedFileArtifactsInText(text)) {
-      if (!/\.(?:png|jpe?g|gif|webp|avif)$/iu.test(file.name)) continue;
-      for (const ref of [file.path, file.href, file.fileUrl]) {
-        if (ref && normalized.includes(ref)) {
-          normalized = normalized.split(ref).join("<durable-chat-image>");
-        }
-      }
-    }
-    return normalized.trim();
-  };
-  const signature = (message: StreamMessage) => `${message.role}\u0000${reconciliationText(message.text)}`;
+  const signature = (message: StreamMessage) => `${message.role}\u0000${message.text.trim()}`;
   // History rows intentionally store only the assistant text. Preserve the
   // rich tool steps that arrived live when a terminal reconciliation races
   // the history read; otherwise the MCP card flashes and disappears as soon
@@ -876,8 +930,45 @@ function reconcileTranscriptSnapshot(
   return next;
 }
 
+/**
+ * 초기 이력 재수화처럼 "durable snapshot"으로 통째로 교체해야 하는 경로에서도
+ * 라이브 스트림이 이미 받은 도구 산출물은 보존한다. Main의 답변 본문은 DB에 먼저
+ * 저장되지만 tool step은 별도 원장에 있어 두 읽기가 잠깐 어긋날 수 있다. 이때
+ * 본문만 같은 완료 답변으로 바꾸면 파일/차트 링크가 사라져 사용자는 산출물을 잃은
+ * 것처럼 보게 된다. ID는 재수화 때 달라질 수 있으므로 role+trimmed text 서명을 쓴다.
+ */
+function preserveRichStepsBySignature(
+  current: StreamMessage[],
+  durable: StreamMessage[],
+): StreamMessage[] {
+  if (!Array.isArray(current) || !Array.isArray(durable)) return durable;
+  const signature = (message: StreamMessage) => `${message.role}\u0000${typeof message.text === "string" ? message.text.trim() : ""}`;
+  const richBySignature = new Map<string, StreamMessage>();
+  for (const message of current) {
+    const steps = Array.isArray(message.steps) ? message.steps : [];
+    if (message.role !== "agent" || !steps.some((step) => step.tool && step.result)) continue;
+    richBySignature.set(signature(message), message);
+  }
+  return durable.map((message) => {
+    const live = richBySignature.get(signature(message));
+    return live?.steps?.length
+      ? {
+          ...message,
+          steps: live.steps,
+          ...(live.finishedAt != null ? { finishedAt: live.finishedAt } : {}),
+          ...(live.tokens != null ? { tokens: live.tokens } : {}),
+        }
+      : message;
+  });
+}
+
 /** Convert redacted durable tool-use rows back into chat steps after reload. */
-function mcpStepsFromLedger(events: RunEventUi[]): StreamStep[] {
+/**
+ * 상태줄에 붙일 단계는 최근 것만 있으면 되지만, 재진입 복원은 다르다 — 여기서 자른 만큼
+ * 결과 탭의 산출물이 사라진다. 도구를 33번 넘게 쓴 실행을 다시 열면 앞쪽 산출물이
+ * 통째로 없어졌다(2026-09-03 실측: 40개 중 32개만 남고 step-01~08 소실).
+ */
+function mcpStepsFromLedger(events: RunEventUi[], limit = 32): StreamStep[] {
   const steps: StreamStep[] = [];
   const byToolId = new Map<string, number>();
   for (const event of events) {
@@ -917,7 +1008,40 @@ function mcpStepsFromLedger(events: RunEventUi[]): StreamStep[] {
       };
     }
   }
-  return steps.slice(-32);
+  return limit > 0 ? steps.slice(-limit) : steps;
+}
+
+/**
+ * 재진입 복원 — 지난 실행의 도구 기록을 각자 제자리로 돌려놓는다.
+ *
+ * 대화 메시지에는 본문만 저장된다(도구 기록 칸이 없다). 그래서 다시 열 때 실행 원장에서
+ * 되살리지 않으면, 파일 이름을 답변 글에 적지 않은 산출물은 결과 탭에서 통째로 사라진다.
+ * 예전에는 "마지막 실행 하나"만 되살려 마지막 답변에 붙였다 — 두 번 실행한 대화를 다시
+ * 열면 첫 실행에서 만든 파일이 없어졌다(2026-09-03 실측: 산출물 2개 중 1개만 남음).
+ * One 은 이미 같은 원장(runLedger.chatTimeline)으로 지난 턴을 되살린다.
+ */
+function stepsByMessageFromTimeline(
+  history: readonly { id: string; role: string; createdAt?: string }[],
+  timeline: readonly { receipt: InvocationRunReceipt; events: RunEventUi[] }[],
+): Map<string, StreamStep[]> {
+  const byMessage = new Map<string, StreamStep[]>();
+  const answers = history.filter((entry) => entry.role === "assistant");
+  if (answers.length === 0) return byMessage;
+  const runs = [...timeline]
+    .filter((entry) => entry.receipt?.runId && entry.receipt.startedAt)
+    .sort((a, b) => a.receipt.startedAt.localeCompare(b.receipt.startedAt));
+  for (const run of runs) {
+    // 복원은 자르지 않는다. 창은 원장 조회(eventsPerRun)가 이미 정한다 —
+    // 여기서 한 번 더 자르면 그만큼이 산출물에서 사라진다.
+    const steps = mcpStepsFromLedger(run.events, 0);
+    if (steps.length === 0) continue;
+    // 그 실행이 시작된 뒤 처음 나온 답변이 그 실행의 답이다. 못 찾으면 마지막 답변에 붙인다
+    // (예전 동작과 같은 자리) — 붙일 곳이 없다고 기록을 버리지는 않는다.
+    const target = answers.find((entry) => (entry.createdAt ?? "") >= run.receipt.startedAt)
+      ?? answers[answers.length - 1];
+    byMessage.set(target.id, [...(byMessage.get(target.id) ?? []), ...steps]);
+  }
+  return byMessage;
 }
 
 function attachMcpStepsToLatestAgent(messages: StreamMessage[], steps: StreamStep[]): StreamMessage[] {
@@ -1230,7 +1354,17 @@ function ChatPage() {
   }, [mediaPreview?.openTargets, mediaPreview?.path]);
   useEffect(() => {
     const bridge = ipc();
-    if (!bridge?.fs?.watchFile || !bridge.fs.onFileChanged || !watchedPreviewPath || !chatId) return;
+    // Optional file-watch APIs are unavailable in the static web shell and
+    // may be older in an already-running Desktop preload. Check callable
+    // shapes (not mere truthiness) so a compatibility stub returning a
+    // Promise cannot later be invoked as an unsubscribe function.
+    if (
+      typeof bridge?.fs?.watchFile !== "function"
+      || typeof bridge.fs.onFileChanged !== "function"
+      || typeof bridge.fs.unwatchFile !== "function"
+      || !watchedPreviewPath
+      || !chatId
+    ) return;
     let disposed = false;
     let watchId: string | null = null;
     let refreshTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1281,7 +1415,7 @@ function ChatPage() {
     }).catch(() => undefined);
     return () => {
       disposed = true;
-      unsubscribe();
+      if (typeof unsubscribe === "function") unsubscribe();
       if (refreshTimer) clearTimeout(refreshTimer);
       if (watchId) void bridge.fs.unwatchFile(watchId);
     };
@@ -1310,6 +1444,15 @@ function ChatPage() {
   const [restoredFolder, setRestoredFolder] = useState<string | null>(null);
   // /clear 뒤에 메시지를 다시 적재하지 않고도 실제 컨텍스트 리셋이 끝났음을 알려준다.
   const [sessionNotice, setSessionNotice] = useState<string | null>(null);
+  // 이번 실행의 도구 기록에서 본 로컬 서버 주소. 모델이 답변 본문에 주소를 안 적어도
+  // 우측 레일이 열려야 한다(2026-09-03 실측: 주소가 도구 결과에만 있으면 레일이 안 열렸다).
+  const runServerUrlsRef = useRef<string[]>([]);
+  /**
+   * 에이전트가 보고 있는 화면(브라우저·컴퓨터). 도구가 도는 동안 우측 레일 안에 그린다 —
+   * One 과 같은 자리다. 예전에는 떠 있는 카드만 이 사실을 들었고 레일은 열리지도 않았다
+   * (2026-09-03 실측: 브라우저 도구 실행 중 레일 없음, 카드만 창 한가운데).
+   */
+  const [agentScreen, setAgentScreen] = useState<{ mode: "browser" | "computer" } | null>(null);
   const [questionCommitPending, setQuestionCommitPending] = useState(false);
   const questionCommitPendingRef = useRef<string | null>(null);
   // 세션 recap — 자리를 비운 사이 도착한 에이전트 응답 한 줄 요약(있을 때만 배너).
@@ -1329,26 +1472,35 @@ function ChatPage() {
       baseKey: string;
       stepsKey: string;
       previews: WorkspaceFilePreview[];
+      outputPreviews: WorkspaceFilePreview[];
     }>(),
   );
-  const linkedFiles = useMemo(() => {
+  const { files: linkedFiles, outputs: linkedOutputFiles } = useMemo(() => {
     const baseKey = mediaBasePaths.join("\u0000");
     const cache = linkedFileScanCacheRef.current;
     const out: WorkspaceFilePreview[] = [];
+    const outputOut: WorkspaceFilePreview[] = [];
     const seen = new Set<string>();
+    const outputSeen = new Set<string>();
     const liveIds = new Set<string>();
     for (const message of messages) {
       if (message.role !== "agent") continue;
       const text = message.text ?? "";
-      /* ★산출물은 **모델이 언급한 것**이 아니라 **실제로 만들어진 것**이다.
+      /* ★파일 링크와 실제 산출물은 별도 집합이다.
          본문 스캔만 하면, 파일을 쓰고 그 이름을 산문에 적지 않은 답변은 산출물이
-         하나도 없는 것처럼 보인다. 도구 호출 인자에 경로가 이미 실려 오므로
-         (읽기/쓰기/편집), 공용 판별기로 그것도 함께 거둔다 — 도구 이름을 여기서
-         다시 추측하면 러너마다 갈라진다. */
+         하나도 없는 것처럼 보인다. 반대로 Read까지 산출물로 세면, 채팅을 다시 열 때
+         마지막 입력 파일이 결과 탭으로 자동 복원된다. 공용 판별기로 읽기·쓰기·편집을
+         모두 수집하되, 출력 집합에는 읽기만 제외한다. */
       const toolPaths = toolFilePathsFromSteps(message.steps);
+      const outputToolPaths = toolFilePathsFromSteps(message.steps, { includeReads: false });
+      const imageDataUrls = message.imageDataUrls ?? [];
       // 에이전트가 앱을 세웠으면, 사람이 다음에 할 일은 그걸 보는 것이다.
-      const serverUrls = localServerUrlsInText(text);
-      const stepsKey = [...toolPaths, ...serverUrls].join("\u0000");
+      // 본문에 적힌 주소 + 도구 기록에 남은 주소. 둘 다 "지금 돌고 있는 것"의 증거다.
+      const serverUrls = [...new Set([
+        ...localServerUrlsInText(text).map(normalizeLocalServerUrl),
+        ...localServerUrlsFromSteps(message.steps),
+      ])];
+      const stepsKey = [...toolPaths, ...outputToolPaths, ...serverUrls, ...imageDataUrls].join("\u0000");
       liveIds.add(message.id);
       let entry = cache.get(message.id);
       if (
@@ -1357,17 +1509,24 @@ function ChatPage() {
         || entry.baseKey !== baseKey
         || entry.stepsKey !== stepsKey
       ) {
+        const textPreviews = linkedFileArtifactsInText(text, mediaBasePaths)
+          .map((file) => workspacePreviewFromLinkedFile(file));
+        const toolPreviews = toolPaths
+          .map((filePath) => workspacePreviewFromLinkedFile(linkedFileArtifactFromPath(filePath)));
+        const outputToolPreviews = outputToolPaths
+          .map((filePath) => workspacePreviewFromLinkedFile(linkedFileArtifactFromPath(filePath)));
+        const serverPreviews = serverUrls.map((url) => workspacePreviewFromLocalServer(url));
+        const imagePreviews = imageDataUrls.map((url, index) => workspacePreviewFromImageUrl(url, index));
         entry = {
           textLength: text.length,
           baseKey,
           stepsKey,
-          previews: [
-            ...[
-              ...linkedFileArtifactsInText(text, mediaBasePaths),
-              ...toolPaths.map((p) => linkedFileArtifactFromPath(p)),
-            ].map((file) => workspacePreviewFromLinkedFile(file)),
-            ...serverUrls.map((url) => workspacePreviewFromLocalServer(url)),
-          ],
+          previews: [...textPreviews, ...toolPreviews, ...serverPreviews, ...imagePreviews],
+          // A read is useful for inspection but is not evidence that the agent
+          // produced that file. Keep that distinction through the whole rail:
+          // it prevents a reopened chat from presenting the latest Read target
+          // as if it were the latest deliverable.
+          outputPreviews: [...textPreviews, ...outputToolPreviews, ...serverPreviews, ...imagePreviews],
         };
         cache.set(message.id, entry);
       }
@@ -1377,12 +1536,18 @@ function ChatPage() {
         seen.add(key);
         out.push(preview);
       }
+      for (const preview of entry.outputPreviews) {
+        const key = preview.path || preview.fileUrl;
+        if (outputSeen.has(key)) continue;
+        outputSeen.add(key);
+        outputOut.push(preview);
+      }
     }
     // 채팅 전환·/clear로 사라진 메시지의 캐시는 함께 버린다.
     if (cache.size > liveIds.size) {
       for (const id of cache.keys()) if (!liveIds.has(id)) cache.delete(id);
     }
-    return out;
+    return { files: out, outputs: outputOut };
   }, [messages, mediaBasePaths]);
 
   // 사용자가 직접 패널을 접고/펴면 선호값을 영속화 (자동 노출과 구분).
@@ -1440,6 +1605,18 @@ function ChatPage() {
         fileUrl: fileUrlForToolPath(readablePath),
       };
     }
+    /*
+     * ★자리를 **먼저** 연다. 내용은 읽히는 대로 채운다.
+     *
+     * 예전에는 파일을 다 읽은 뒤에야 패널을 열었다. 그래서 실행이 끝나는 순간 결과 레일이
+     * 사라졌다가 읽기가 끝나야 돌아왔다 — 사람이 결과를 보려는 바로 그 순간 결과창이
+     * 없어진다(2026-09-03 실측: 완료 직후 2.5초간 레일 소멸, 그 길이는 읽기 시간과 일치).
+     * 먼저 열면 빈 프레임이 잠깐 보이지만, 사라졌다 돌아오는 것보다 낫다.
+     */
+    setSurface(null);
+    setArtifact(null);
+    setMediaPreview(next);
+    openPanelTab("panel");
     const shouldReadText =
       api &&
       Boolean(chatId) &&
@@ -1458,10 +1635,8 @@ function ChatPage() {
         };
       }
     }
-    setSurface(null);
-    setArtifact(null);
+    // 읽은 내용으로 채운다. 자리는 위에서 이미 열었으므로 여기서 다시 열지 않는다.
     setMediaPreview(next);
-    openPanelTab("panel");
   }, [chatId, openPanelTab]);
 
   // Restore the latest rich result when a conversation is reopened. The
@@ -1470,8 +1645,8 @@ function ChatPage() {
   // respected until a different output key arrives.
   const autoPresentedWorkspaceOutputRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!chatId || busy || linkedFiles.length === 0) return;
-    const candidate = [...linkedFiles].reverse().find((file) => (
+    if (!chatId || busy || linkedOutputFiles.length === 0) return;
+    const candidate = [...linkedOutputFiles].reverse().find((file) => (
       ["markdown", "json", "text", "browser", "image", "video", "audio", "pdf", "document", "spreadsheet", "presentation", "archive"]
         .includes(file.viewerKind)
     ));
@@ -1480,7 +1655,7 @@ function ChatPage() {
     if (autoPresentedWorkspaceOutputRef.current === key) return;
     autoPresentedWorkspaceOutputRef.current = key;
     void openWorkspaceFilePreview(candidate);
-  }, [busy, chatId, linkedFiles, openWorkspaceFilePreview]);
+  }, [busy, chatId, linkedOutputFiles, openWorkspaceFilePreview]);
   const openLinkedFile = useCallback((file: LinkedFileArtifact) => {
     void openWorkspaceFilePreview(workspacePreviewFromLinkedFile(file));
   }, [openWorkspaceFilePreview]);
@@ -1793,6 +1968,18 @@ function ChatPage() {
         return;
       }
       if (ev.kind === "tool-use" && ev.tool) {
+        const screenMode = computerUseModeForTool(ev.tool.name);
+        if (screenMode) {
+          setAgentScreen({ mode: screenMode });
+          openPanelTab("panel");
+        }
+        for (const text of [ev.tool.result, ev.tool.args]) {
+          if (!text) continue;
+          for (const raw of localServerUrlsInText(text)) {
+            const url = normalizeLocalServerUrl(raw);
+            if (!runServerUrlsRef.current.includes(url)) runServerUrlsRef.current.push(url);
+          }
+        }
         pushWorkflow("tool", ev.status?.trim() || toolWorkflowText(ev.tool, locale), {
           toolName: ev.tool.name,
           tokens: ev.tokens,
@@ -2007,6 +2194,7 @@ function ChatPage() {
             return {
               ...msg,
               text: setup.text,
+              imageDataUrls: ev.imageDataUrls ?? msg.imageDataUrls,
               busy: false,
               streaming: false,
               finishedAt: Date.now(),
@@ -2051,9 +2239,19 @@ function ChatPage() {
            우측 패널이 끝내 비어 있었고("열린 산출물이 아직 없습니다"), 사람은 뭐가
            만들어졌는지 알 수 없었다. 이미지를 우선하되, 없으면 이 답이 언급한 첫 파일을
            **내용까지 읽어서** 올린다. */
+        // 실행이 끝나면 화면 자리를 놓아준다 — 그 자리는 이제 산출물이 쓴다.
+        setAgentScreen(null);
         const resultText = ev.text ?? "";
+        const autoImage = ev.imageDataUrls?.[0]
+          ? workspacePreviewFromImageUrl(ev.imageDataUrls[0], 0)
+          : null;
         const autoMedia = firstMediaArtifactInText(resultText, mediaBasePaths);
-        if (autoMedia) {
+        if (autoImage) {
+          setSurface(null);
+          setArtifact(null);
+          setMediaPreview(autoImage);
+          openPanelTab("panel");
+        } else if (autoMedia) {
           setSurface(null);
           setArtifact(null);
           setMediaPreview(workspacePreviewFromMedia(autoMedia));
@@ -2062,7 +2260,9 @@ function ChatPage() {
           // A runnable local web result is the thing the user wants to inspect,
           // not merely its source file. Keep it in this BrowserWindow's right
           // rail through the native live-view host.
-          const liveUrl = localServerUrlsInText(resultText)[0];
+          // 본문에 주소가 없어도 이 실행이 서버를 띄웠다면 그것이 사람이 볼 것이다.
+          const liveUrl = localServerUrlsInText(resultText).map(normalizeLocalServerUrl)[0]
+            ?? runServerUrlsRef.current[0];
           if (liveUrl) {
             void openWorkspaceFilePreview(workspacePreviewFromLocalServer(liveUrl));
           } else {
@@ -2197,6 +2397,8 @@ function ChatPage() {
     lastRunIdRef.current = null;
     partialTextRef.current = "";
     processedTextLenRef.current = 0;
+    runServerUrlsRef.current = [];
+    setAgentScreen(null);
     setComposerPrefill(null);
     cancelRequestedRef.current = false;
     steerQueueRef.current = [];
@@ -2320,13 +2522,17 @@ function ChatPage() {
         api.invoke.history(chatId),
         fetchCommittedReplies(api, chatId),
         api.invoke.latestReceipt(chatId).catch(() => null),
+        typeof api.runLedger?.chatTimeline === "function"
+          ? api.runLedger.chatTimeline(chatId, { maxRuns: 40, eventsPerRun: 400 }).catch(() => [])
+          : Promise.resolve([]),
       ])
-        .then(async ([history, committedReplies, receipt]) => {
+        .then(async ([history, committedReplies, receipt, chatTimeline]) => {
           if (cancelled) return;
           const ledgerEvents = receipt && receipt.status !== "running" && receipt.status !== "cancelling"
             ? await api.runLedger.events(receipt.runId, 500).catch(() => [])
             : [];
           const mcpSteps = mcpStepsFromLedger(ledgerEvents);
+          const stepsByMessage = stepsByMessageFromTimeline(history, chatTimeline);
           if (
             requestedFocusMessageId
             && !history.some((entry) => entry.id === requestedFocusMessageId)
@@ -2341,13 +2547,25 @@ function ChatPage() {
             history.map(historyEntryToStreamMessage),
             committedReplies,
           );
-          const historyWithMcp = attachMcpStepsToLatestAgent(historyMessages, mcpSteps);
+          // 원장에 지난 실행이 남아 있으면 실행마다 제 답변에 붙인다. 없으면 예전처럼
+          // 마지막 실행 하나만 마지막 답변에 붙인다(원장을 못 읽어도 화면은 나빠지지 않게).
+          const historyWithMcp = stepsByMessage.size > 0
+            ? historyMessages.map((message) => {
+                const steps = stepsByMessage.get(message.id);
+                return steps && steps.length > 0 ? { ...message, steps } : message;
+              })
+            : attachMcpStepsToLatestAgent(historyMessages, mcpSteps);
           const recovery = receiptRecoveryMessage(receipt, locale);
           const restoredMessages = recovery ? [...historyWithMcp, recovery] : historyWithMcp;
           setMessages((current) => {
             if (transcriptRevisionRef.current !== hydrationRevision) return current;
             const hasLiveDraft = current.some((msg) => msg.busy || msg.streaming);
-            return hasLiveDraft ? current : restoredMessages;
+            // History and the redacted run ledger are separate reads. If the
+            // history read wins a race with a just-finished live stream, keep
+            // that stream's tool-backed outputs while adopting the durable
+            // message IDs/text. Otherwise a late hydration silently removes
+            // files, charts, or previews from the right rail.
+            return hasLiveDraft ? current : preserveRichStepsBySignature(current, restoredMessages);
           });
         }).catch(() => {
           if (!cancelled && requestedFocusMessageId) {
@@ -2694,15 +2912,13 @@ function ChatPage() {
     let stopped = false;
     const reconcile = async () => {
       if (stopped) return;
+      // 탭 숨김 시 이 tick만 skip(타이머·escalation 유지) — 백그라운드 폴링 폭주 방지.
+      if (typeof document !== "undefined" && document.hidden) return;
       try {
         const ids = await api.invoke.activeChats();
-        if (stopped || ids.includes(chatId)) return;
+        if (stopped || !runIdRef.current || ids.includes(chatId)) return;
         // main은 이 실행을 끝냈는데 UI는 여전히 진행중 → final/activeChats를 놓친 것. 화해.
-        // `busy`와 runId ref는 서로 다른 React/imperative 저장소다. terminal
-        // event와 늦게 도착한 attach Promise가 교차하면 ref만 먼저 비워지고
-        // state가 다시 true가 될 수 있다. Main이 이 chat을 active로 보지 않는
-        // 사실이 권위이므로 ref 유무와 상관없이 종료 상태로 화해한다.
-        const endedRunId = runIdRef.current ?? lastRunIdRef.current;
+        const endedRunId = runIdRef.current;
         runIdRef.current = null;
         lastRunIdRef.current = null;
         subRef.current?.();
@@ -2904,12 +3120,6 @@ function ChatPage() {
         if (!duplicate) effectiveTaskForceTargets.push(target);
       }
       transcriptRevisionRef.current += 1;
-      // A newly submitted turn owns the visible output slot. Keeping the prior
-      // conversation's file open while the new run is working makes unrelated
-      // media look like the current answer until a replacement arrives.
-      setArtifact(null);
-      setSurface(null);
-      setMediaPreview(null);
       setMessages((m) => [
         ...m,
         { id: uid(), role: "user" as const, text: visiblePrompt, imageDataUrls },
@@ -2980,6 +3190,8 @@ function ChatPage() {
       lastRunIdRef.current = runId;
       partialTextRef.current = "";
       processedTextLenRef.current = 0;
+      // 지난 실행이 띄운 서버 주소가 이번 답에 딸려 열리지 않게 비운다.
+      runServerUrlsRef.current = [];
       // 이벤트 처리는 consumeEvent로 추출됨 — 재접속(attach) 경로와 동일 로직 공유.
       subscribeRun(runId, placeholderId);
       try {
@@ -3941,8 +4153,7 @@ function ChatPage() {
     apps: INSTALLED_APPS,
     generatedApps: allGeneratedApps,
     envKeys: allEnvKeys,
-    plugins: installedPlugins,
-  }), [allEnvKeys, allFirms, allGeneratedApps, allProjects, displayAgents, hubBookmarks, installedPlugins]);
+  }), [allEnvKeys, allFirms, allGeneratedApps, allProjects, displayAgents, hubBookmarks]);
   const composerTokenBaselineRef = useRef(currentTokens);
   if (!busy) composerTokenBaselineRef.current = currentTokens;
   const composerTokenCount = busy ? composerTokenBaselineRef.current : currentTokens;
@@ -3985,6 +4196,19 @@ function ChatPage() {
       })
       .catch(() => setChat(previous));
   }, [chat]);
+  const handleResumeGoal = useCallback(() => {
+    if (!chat || !goalContext?.version) return;
+    const expectedVersion = goalContext.version;
+    void ipc()?.chats.resumeGoal(chat.id, expectedVersion)
+      .then((context) => {
+        if (context) setGoalContext(context);
+      })
+      .catch(() => {
+        // A stale version means another surface changed the run. Re-read the
+        // main-owned snapshot instead of guessing whether resume succeeded.
+        void ipc()?.chats.getGoalContext(chat.id).then((context) => setGoalContext(context));
+      });
+  }, [chat, goalContext?.version]);
   const handleToggleContinuous = useCallback(() => {
     if (!chat) return;
     const next = !chat.continuousMode;
@@ -4173,7 +4397,7 @@ function ChatPage() {
           aria-label={locale === "ko" ? "뷰어 패널" : "Viewer panel"}
           title={locale === "ko" ? "뷰어 패널" : "Viewer panel"}
           data-active={rightPanelOpen && rightPanelTab === "panel" ? "true" : "false"}
-          data-has-content={artifact || surface ? "true" : "false"}
+          data-has-content={artifact || surface || mediaPreview || linkedOutputFiles.length > 0 ? "true" : "false"}
         >
           <IconPanelRight size={16} />
         </button>
@@ -4447,6 +4671,9 @@ function ChatPage() {
           onToggleGoal={handleToggleGoal}
           progressLabel={goalContext?.objective}
           goalCriteria={goalContext?.acceptanceCriteria}
+          goalRunStatus={goalContext?.runStatus}
+          goalPauseReason={goalContext?.pauseReason}
+          onResumeGoal={handleResumeGoal}
           onToggleContinuous={handleToggleContinuous}
           onToggleSwarm={handleToggleSwarm}
         />
@@ -4463,7 +4690,10 @@ function ChatPage() {
           surface={liveWorkbenchSurface}
           filePreview={mediaPreview}
           onHydrateFilePreview={openWorkspaceFilePreview}
+          agentScreen={agentScreen}
+          onAgentScreenMode={(mode) => setAgentScreen({ mode })}
           linkedFiles={linkedFiles}
+          linkedOutputs={linkedOutputFiles}
           onSurfaceAction={handleSurfaceAction}
           onSurfaceStatePatch={handleSurfaceStatePatch}
           firm={firm}

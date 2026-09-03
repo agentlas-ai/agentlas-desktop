@@ -26,6 +26,9 @@ import {
   resolveRolePoolPicks,
   setActiveRuntime,
 } from "./runtime/detect";
+import { disposeAcpSessionPool } from "./runtime/acp";
+import { disposeClaudeSessionPool } from "./runtime/claude-session";
+import { disposeCodexSessionPool } from "./runtime/codex-session";
 import {
   listModelRoleMembers,
   pickModelRoleFromPool,
@@ -412,6 +415,12 @@ import {
   getGoalLedgerGoal,
 } from "./mcp/goal-ledger";
 import { findAutomationByGoalId } from "./store/automations";
+import { emitDesktopStoreChange } from "./store/change-bus";
+import {
+  confirmDesktopLongRunResumeDispatched,
+  failDesktopLongRunResumeDispatch,
+  resumeDesktopLongRunManually,
+} from "./long-run/app-runtime-coordinator";
 import { getOrCreateAutomationSession } from "./store/automation-sessions";
 import {
   acceptCanonicalTaskResult,
@@ -1359,14 +1368,13 @@ function rendererInvocationRequest(req: McpInvocationRequest): McpInvocationRequ
     agentAppRuntimeToolGrant: _agentAppRuntimeToolGrant,
     oneBriefingActionRef: _oneBriefingActionRef,
     oneProfileContext: _oneProfileContext,
-    oneUserAuthoredPrompt: _oneUserAuthoredPrompt,
     oneTeamExecutionPolicy: _oneTeamExecutionPolicy,
     oneTeamRuntimeBinding: _oneTeamRuntimeBinding,
     oneAttachmentContext: _oneAttachmentContext,
     oneAttachmentRedactions: _oneAttachmentRedactions,
+    forceBrowserCredentialRefresh: _forceBrowserCredentialRefresh,
     ...rendererFields
   } = req as McpInvocationRequest & {
-    oneUserAuthoredPrompt?: unknown;
     oneTeamExecutionPolicy?: unknown;
     oneTeamRuntimeBinding?: unknown;
     oneAttachmentContext?: unknown;
@@ -2746,7 +2754,17 @@ export function registerIpcHandlers(): void {
       const selected = runtimes.find((runtime) => runtime.kind === kind && runtime.active)
         ?? runtimes.find((runtime) => runtime.kind === kind);
       const result = await updateCli(kind, selected?.source);
-      if (result.ok) clearDetectCache();
+      if (result.ok) {
+        clearDetectCache();
+        // CLI 교체는 이미 떠 있는 상주 프로세스의 바이너리를 바꾸지 않는다. 자동 업데이트
+        // 경로와 같은 정리 계약을 수동 업데이트에도 적용해, 다음 턴이 새 CLI로 시작하게 한다.
+        disposeAcpSessionPool();
+        disposeClaudeSessionPool();
+        disposeCodexSessionPool();
+        // 렌더러의 IPC/view snapshot도 즉시 비우게 한다. TTL(최대 5분)을 기다리거나 모델
+        // 선택을 다시 눌러야 연결이 살아나는 현재 증상을 막는다.
+        emitDesktopStoreChange({ entity: "runtime" });
+      }
       return result;
     } finally {
       releaseMaintenance();
@@ -3566,11 +3584,11 @@ export function registerIpcHandlers(): void {
   });
   ipcMain.handle("daemon:setAutostart", async (_e, enabled: boolean) => {
     const { setDaemonAutostartEnabled, getDaemonAutostartEnabled } = await import("./store/daemon-autostart");
-    setDaemonAutostartEnabled(enabled === true);
+    setDaemonAutostartEnabled(false);
     try {
       const { reconcileDaemonAutostart } = await import("./daemon/app-launcher");
       // main.ts 부팅 경로와 **같은** 커맨드로 정합시킨다(경로가 갈리면 부팅 항목이 둘이 된다).
-      reconcileDaemonAutostart(getDaemonAutostartEnabled(), {
+      reconcileDaemonAutostart(false, {
         executable: process.execPath,
         entry: path.join(__dirname, "daemon", "main.js"),
       });
@@ -3582,7 +3600,12 @@ export function registerIpcHandlers(): void {
         reason: error instanceof Error ? error.message : String(error),
       };
     }
-    return { enabled: getDaemonAutostartEnabled(), reconciled: true };
+    return {
+      enabled: getDaemonAutostartEnabled(),
+      reconciled: true,
+      requested: enabled === true,
+      reason: enabled === true ? "desktop_runtime_is_app_scoped" : null,
+    };
   });
   ipcMain.handle("capability:listGrants", (_e, scope?: string) => listCapabilityGrants(scope));
   ipcMain.handle("capability:revokeGrant", (_e, id: number) => revokeCapabilityGrant(Number(id)));
@@ -3668,12 +3691,8 @@ export function registerIpcHandlers(): void {
     if (ruled === "deny") return "deny";
     if (ruled === "allow") return "allow_session";
     if (ask.permission === "full") return "allow_session";
-    const folderAccess = ask.tool === "folder-access";
-    // A restricted One turn may name an existing folder, but selecting read or
-    // write mode is not consent for an arbitrary new directory. Ask at the
-    // moment that boundary is crossed. Full access above remains automatic.
-    if (!folderAccess && !ask.mutating) return "allow_once";
-    if (!folderAccess && ask.permission === "write") return "allow_session";
+    if (!ask.mutating) return "allow_once";
+    if (ask.permission === "write") return "allow_session";
     const deniedAt = recentUserDenials.get(denialKey(ask));
     if (deniedAt && Date.now() - deniedAt < USER_DENIAL_TTL_MS) return "deny";
     /*
@@ -4034,6 +4053,31 @@ export function registerIpcHandlers(): void {
       projectDir,
     });
     return getGoalLedgerGoal(chat.goalId, projectDir);
+  });
+  ipcMain.handle("chats:resumeGoal", async (_e, id: string, expectedVersion: number) => {
+    const chat = getChat(id);
+    if (!chat?.goalId) return null;
+    if (!Number.isSafeInteger(expectedVersion) || expectedVersion <= 0) {
+      throw new TypeError("A current long-run version is required to resume");
+    }
+    const context = await getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
+    if (!context || context.version !== expectedVersion) {
+      throw new Error("long_run_resume_version_conflict");
+    }
+    const continuation = findAutomationByGoalId(chat.goalId);
+    if (!continuation) throw new Error("long_run_resume_dispatch_unavailable");
+    const queued = resumeDesktopLongRunManually(context.runId, expectedVersion);
+    try {
+      if (!continuation.enabled) toggleAutomation(continuation.id, true);
+      const { enqueueAutomationRunNow } = await import("./automation-scheduler");
+      const accepted = enqueueAutomationRunNow(continuation.id);
+      if (!accepted.accepted) throw new Error("long_run_resume_dispatch_rejected");
+      confirmDesktopLongRunResumeDispatched(queued.id);
+    } catch (error) {
+      failDesktopLongRunResumeDispatch(queued.id, error instanceof Error ? error.message : String(error));
+      throw error;
+    }
+    return getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
   });
   ipcMain.handle("chats:setSwarmMode", (_e, id: string, enabled: boolean) => {
     setChatSwarmMode(id, enabled);
@@ -4676,7 +4720,10 @@ export function registerIpcHandlers(): void {
         wakeTriggerOutbox();
       } else if (result.resumeRequired && result.eventStatus === null) {
         const { runAutomationNow } = await import("./automation-scheduler");
-        void runAutomationNow(result.automationId).catch((error) => {
+        void runAutomationNow(
+          result.automationId,
+          result.simulation ? { dryRun: true } : undefined,
+        ).catch((error) => {
           console.error(`[automation] reconciled graph resume failed (${result.automationId}):`, error);
         });
       }
@@ -5276,11 +5323,15 @@ export function registerIpcHandlers(): void {
     }
     // 수동 실행은 실제 스케줄러의 접수·최종 상태를 돌려준다. 버튼 클릭 자체를 성공으로
     // 간주하면 리스 충돌이나 실행 실패가 "시작됨"으로 보이므로 fire-and-forget하지 않는다.
-    if (getAutomationGraphReconciliation(id)) {
+    const dryRun = opts?.dryRun === true;
+    // An uncertain live occurrence must block another live replay, but it must
+    // not block a side-effect-proof simulation used to diagnose the graph.
+    // runGraph also mode-matches durable checkpoints, so this simulation starts
+    // a fresh occurrence and can never inherit or consume the live coordinate.
+    if (!dryRun && getAutomationGraphReconciliation(id)) {
       throw new Error("automation_reconciliation_pending");
     }
     const { runAutomationNow } = await import("./automation-scheduler");
-    const dryRun = opts?.dryRun === true;
     const result = await runAutomationNow(id, dryRun ? { dryRun: true } : undefined);
     if (!result.accepted) {
       const error = new Error("automation_run_not_accepted") as Error & { code?: string };
@@ -5506,7 +5557,7 @@ export function registerIpcHandlers(): void {
     return defaultTz();
   });
 
-  // ── launchd LaunchAgent (opt-in 앱 꺼져도 실행, macOS) ───
+  // ── legacy launchd cleanup (Desktop local execution is app-scoped) ───
   ipcMain.handle("launchd:status", async () => {
     const { launchdStatus } = await import("./launchd/agent");
     return launchdStatus();
@@ -6007,6 +6058,7 @@ export function registerIpcHandlers(): void {
          */
         {
           let departed = false;
+          let directAgentChanged = false;
           if (seat && seat.kind === "solo" && seat.occupants.length === 0) {
             try {
               departed = listSeatOccupantHistory(seat.id).length > 0;
@@ -6031,11 +6083,18 @@ export function registerIpcHandlers(): void {
               // 조직 상태를 못 읽으면 증명이 없는 것이다 — 막지 않는다.
             }
           }
-          if (departed) {
+          if (seat && seat.kind === "solo" && seat.occupants.length > 0) {
+            const sessionAgentId = getChat(request.chatId)?.agentId;
+            directAgentChanged = Boolean(
+              sessionAgentId
+              && !seat.occupants.some((occupant) => occupant.agentId === sessionAgentId),
+            );
+          }
+          if (departed || directAgentChanged) {
             throw new Error(
               currentUiLocale() === "ko"
-                ? "이 자리의 담당이 조직에서 나가 지금은 빈 자리입니다. 대화는 그대로 남아 있으니, 위의 빈 자리 카드에서 담당을 앉히거나 조직 화면의 '보관됨'에서 복원한 뒤 이어가세요."
-                : "The member who held this seat has left, so the seat is empty. The conversation is kept — assign someone from the empty-seat card above, or restore them from Archived in the organisation view, then continue.",
+                ? "이 세션의 에이전트가 사라졌습니다. 세션을 새로 시작해주세요."
+                : "This session's agent is no longer available. Start a new session to continue.",
             );
           }
         }

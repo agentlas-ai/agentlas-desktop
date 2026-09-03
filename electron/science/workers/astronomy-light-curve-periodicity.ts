@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import Module, { createRequire } from "node:module";
+import Module from "node:module";
 import { createHash } from "node:crypto";
 import {
   SCIENCE_ASTRONOMY_LIGHT_CURVE_ARTIFACT_SCHEMA,
@@ -11,6 +11,7 @@ import {
   validateScienceAstronomyLightCurveArtifactPayload,
   validateScienceAstronomyLightCurveInputDescriptor,
 } from "../../../shared/science-astronomy";
+import { loadSciencePluginRuntime } from "../plugin-runtime";
 
 const NETWORK_MODULES = new Set([
   "http", "https", "http2", "net", "tls", "dns", "dgram",
@@ -45,19 +46,16 @@ function main(): void {
   try { descriptor = validateScienceAstronomyLightCurveInputDescriptor(JSON.parse(fs.readFileSync(inputPath, "utf8"))); }
   catch (error) { fail(error instanceof Error ? error.message : "science-tool-input-invalid"); }
 
-  const runtimePath = path.resolve(__dirname, "../../../../plugins/agentlas-astronomy/runtime/astronomy.cjs");
-  let runtimeBytes: Buffer;
+  let resolvedRuntime: ReturnType<typeof loadSciencePluginRuntime<AstronomyRuntime>>;
   try {
-    const stat = fs.lstatSync(runtimePath);
-    if (!stat.isFile() || stat.isSymbolicLink()) fail("science-tool-astronomy-runtime-invalid");
-    runtimeBytes = fs.readFileSync(runtimePath);
+    resolvedRuntime = loadSciencePluginRuntime<AstronomyRuntime>(
+      "agentlas-astronomy", "runtime/astronomy.cjs", 16 * 1024 * 1024,
+    );
   } catch { fail("science-tool-astronomy-runtime-unavailable"); }
-  if (createHash("sha256").update(runtimeBytes).digest("hex") !== descriptor.runtime.runtimeSha256) {
+  if (resolvedRuntime.sha256 !== descriptor.runtime.runtimeSha256) {
     fail("science-tool-astronomy-runtime-integrity-failed");
   }
-  let runtime: AstronomyRuntime;
-  try { runtime = createRequire(__filename)(runtimePath) as AstronomyRuntime; }
-  catch { fail("science-tool-astronomy-runtime-unavailable"); }
+  const runtime = resolvedRuntime.runtime;
   if (runtime.PLUGIN_VERSION !== SCIENCE_ASTRONOMY_LIGHT_CURVE_PLUGIN_VERSION
     || runtime.LOMB_SCARGLE_SCHEMA !== "agentlas.astronomy.lomb-scargle-periodogram/v1"
     || typeof runtime.analyzeLightCurvePeriodicity !== "function") fail("science-tool-astronomy-runtime-invalid");

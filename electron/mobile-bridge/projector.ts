@@ -101,6 +101,7 @@ import {
   type MobileBridgeBrowserApprovalDto,
   type MobileBridgeToolApprovalDto,
   type MobileBridgeChatDto,
+  type MobileBridgeChatImageDto,
   type MobileBridgeChatMessageDto,
   type MobileBridgeFirmDto,
   type MobileBridgeHostDto,
@@ -136,6 +137,37 @@ import {
 
 const INITIAL_PROJECTION_BUDGET_MS = 2_500;
 const INITIAL_DECISION_JUDGE_BUDGET_MS = 1_500;
+const CHAT_ATTACHMENT_ID_PATTERN = "[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}";
+const CHAT_ATTACHMENT_URL_RE = new RegExp(
+  `^agentlas://chat-attachment/(${CHAT_ATTACHMENT_ID_PATTERN})$`,
+  "iu",
+);
+const CHAT_ATTACHMENT_MARKDOWN_RE = new RegExp(
+  `!\\[[^\\]\\n]*\\]\\(\\s*agentlas://chat-attachment/(${CHAT_ATTACHMENT_ID_PATTERN})(?:\\s+"[^"\\n]*")?\\s*\\)`,
+  "giu",
+);
+
+function mobileBridgeChatImages(urls: readonly string[] | undefined): MobileBridgeChatImageDto[] {
+  if (!urls?.length) return [];
+  const seen = new Set<string>();
+  const images: MobileBridgeChatImageDto[] = [];
+  for (const url of urls) {
+    const attachmentId = CHAT_ATTACHMENT_URL_RE.exec(url.trim())?.[1]?.toLowerCase();
+    if (!attachmentId || seen.has(attachmentId)) continue;
+    seen.add(attachmentId);
+    images.push({ attachmentId });
+    if (images.length >= 4) break;
+  }
+  return images;
+}
+
+function stripProjectedChatAttachmentMarkdown(text: string, images: readonly MobileBridgeChatImageDto[]): string {
+  if (!images.length || !text.includes("agentlas://chat-attachment/")) return text;
+  const allowed = new Set(images.map((image) => image.attachmentId));
+  return text.replace(CHAT_ATTACHMENT_MARKDOWN_RE, (whole, rawId: string) => (
+    allowed.has(rawId.toLowerCase()) ? "" : whole
+  )).replace(/\n{3,}/gu, "\n\n").trim();
+}
 
 async function settleInitialProjectionWithin<T>(
   label: string,
@@ -717,6 +749,19 @@ export function projectMobileBridgeChat(
     firmId: chat.firmId,
     agentId: chat.agentId,
     title: displayText(chat.title, 1_024),
+    ...(chat.lastMessagePreview?.trim()
+      ? { lastMessagePreview: displayText(chat.lastMessagePreview.trim(), 160) }
+      : {}),
+    seatId: optionalDisplayText(chat.seatId, 256),
+    seatLabel: optionalDisplayText(chat.seatLabel, 512),
+    seatKind: chat.seatKind === "solo" || chat.seatKind === "group" ? chat.seatKind : null,
+    participants: Array.isArray(chat.participants)
+      ? chat.participants.slice(0, 16).map((participant) => ({
+          slot: Math.max(0, Math.min(15, Math.floor(participant.slot))),
+          agentId: optionalDisplayText(participant.agentId, 256),
+          displayName: displayText(participant.displayName, 160),
+        }))
+      : null,
     archivedAt: chat.archivedAt,
     createdAt: chat.createdAt,
     updatedAt: chat.updatedAt,
@@ -749,11 +794,13 @@ export function projectMobileBridgeHistory(
   // Newest messages are authoritative when a byte budget forces a shorter page.
   for (let index = selected.length - 1; index >= 0; index -= 1) {
     const message = selected[index];
+    const images = mobileBridgeChatImages(message.imageDataUrls);
     const shell: MobileBridgeChatMessageDto = {
       id: message.id,
       role: message.role,
       text: "",
       createdAt: message.createdAt,
+      ...(images.length ? { images } : {}),
     };
     const remaining = budget - outBytes - mobileBridgeJsonBytes(shell) - 16;
     if (remaining <= 0) break;
@@ -767,9 +814,9 @@ export function projectMobileBridgeHistory(
       // ② 폰이 자기 낙관적 에코를 되돌아온 텍스트와 대조하는데 원문과 잘린 본문이
       //    영영 일치하지 않아 "보내는 중…" 말풍선이 중복으로 남았다.
       text: sanitizeMobileBridgeText(
-        message.role === "user"
+        stripProjectedChatAttachmentMarkdown(message.role === "user"
           ? message.text
-          : stripMobileBridgeControlFences(message.text),
+          : stripMobileBridgeControlFences(message.text), images),
         Math.min(MOBILE_BRIDGE_TRANSCRIPT_TEXT_BYTES, remaining),
       ),
     };

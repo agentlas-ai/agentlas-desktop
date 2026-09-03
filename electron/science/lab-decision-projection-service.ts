@@ -10,20 +10,21 @@ export function scienceLabDecisionProjectionsForProject(
   store: ScienceStore,
   projectId: string,
   catalog: ScienceLabCapabilityCatalog,
+  options: { applyReviewReceipts?: boolean } = {},
 ): ScienceLabDecisionProjection[] {
   const project = store.getProject(projectId);
   const lifecycle = store.getResearchLifecycleForProject(projectId);
   if (!project) throw new Error("science-project-not-found");
   if (!lifecycle) throw new Error("science-research-lifecycle-canonical-missing");
 
-  const activeLoopSession = store.getActiveLoopSession(project.id);
-  const activeEpisodes = activeLoopSession ? store.listResearchEpisodes(project.id, activeLoopSession.id) : [];
+  const loopSessions = store.listLoopSessions(project.id);
+  const episodes = loopSessions.flatMap((session) => store.listResearchEpisodes(project.id, session.id));
   const latestAnalysisPlan = store.listAnalysisSpecs(project.id, 1)[0] ?? null;
 
   return catalog.labs.map((lab) => {
-    const episode = activeEpisodes
+    const episode = episodes
       .filter((candidate) => candidate.toolIntents.some((toolIntent) => toolIntent.labId === lab.id))
-      .sort((left, right) => right.ordinal - left.ordinal)[0] ?? null;
+      .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt) || right.ordinal - left.ordinal)[0] ?? null;
     const analysisPlan = lab.id === "statistics-analysis" ? latestAnalysisPlan : null;
     const analysisDecision = analysisPlan
       ? store.listDecisionRequests(project.id, analysisPlan.id, ["presented", "queued", "deferred"])[0] ?? null
@@ -60,7 +61,7 @@ export function scienceLabDecisionProjectionsForProject(
       return artifact ? [artifact] : [];
     });
 
-    return createScienceLabDecisionProjection({
+    const projectionInput = {
       project,
       labId: lab.id,
       episode,
@@ -69,6 +70,25 @@ export function scienceLabDecisionProjectionsForProject(
       currentArtifacts: scienceLabDecisionArtifactBindingsFromCurrent(currentArtifacts),
       blockingDecision,
       matchedTrigger: null,
-    });
+    } as const;
+    const neutral = createScienceLabDecisionProjection(projectionInput);
+    const receipt = episode ? store.getLatestEpisodeResultReviewReceipt(project.id, episode.id, lab.id) : null;
+    const receiptApplies = Boolean(receipt && episode?.result
+      && receipt.projectVersion === neutral.basis.project.version
+      && receipt.projectContentSha256 === neutral.basis.project.contentSha256
+      && receipt.loopSessionId === episode.loopSessionId
+      && receipt.episodeVersion === neutral.basis.episode?.version
+      && receipt.episodeStateSha256 === neutral.basis.episode?.stateSha256
+      && receipt.resultSha256 === neutral.basis.episode?.resultSha256
+      && receipt.basisSha256 === neutral.basis.basisSha256
+      && receipt.projectionSha256 === neutral.projectionSha256
+      && JSON.stringify(receipt.artifacts) === JSON.stringify(neutral.basis.artifacts));
+    return options.applyReviewReceipts !== false && receiptApplies && receipt
+      ? createScienceLabDecisionProjection({
+        ...projectionInput,
+        matchedTrigger: receipt.selectedNextTrigger,
+        matchedAction: receipt.selectedNextAction,
+      })
+      : neutral;
   });
 }

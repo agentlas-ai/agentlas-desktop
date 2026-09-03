@@ -1691,6 +1691,8 @@ export interface Chat {
   createdAt: string;
   /** 마지막 메시지 시각 — 사이드바 정렬 키 */
   updatedAt: string;
+  /** 세션 목록 한 줄용 마지막 사용자/에이전트 메시지 미리보기. */
+  lastMessagePreview?: string;
   /** "계속 라이브로" 모드 — Stormbreaker 연속실행 상한에 닿아도 백그라운드로 넘기지 않고
    *  같은 채팅에서 라이브 스트리밍을 계속 이어간다(수 시간 단위). */
   continuousMode: boolean;
@@ -1752,6 +1754,11 @@ export interface ChatGoalContext {
   objective: string;
   acceptanceCriteria: string[];
   status: "active" | "blocked" | "completed" | "cancelled";
+  runId?: string;
+  runStatus?: string;
+  pauseReason?: "user" | "app_closed" | "budget" | "runtime_unavailable" | "approval_required" | "crash_recovery" | null;
+  version?: number;
+  executionLocation?: "desktop-local" | "web-hosted";
 }
 
 export type CanonicalTaskStatus =
@@ -1822,7 +1829,7 @@ export interface ChatHistoryEntry {
   role: "user" | "assistant" | "system";
   text: string;
   createdAt: string;
-  /** 사용자 메시지에 첨부된 이미지 — 영구화는 V1, 현재는 in-flight만 */
+  /** 사용자 또는 호스트가 생성해 영구화한 이미지 첨부 URL. */
   imageDataUrls?: string[];
 }
 
@@ -2174,6 +2181,8 @@ export interface AutomationGraphReconciliation {
   graphDigest: string;
   checkpointDigest: string;
   updatedAt: string;
+  /** True when the interrupted occurrence was a side-effect-blocking simulation. */
+  simulation: boolean;
   triggerEvent: AutomationGraphReconciliationEvent | null;
   nodes: AutomationGraphReconciliationNode[];
 }
@@ -2203,6 +2212,8 @@ export interface AutomationGraphReconcileResult {
   runId: string;
   checkpointDigest: string;
   updatedAt: string;
+  /** Durable run mode that any automatic resume must preserve. */
+  simulation: boolean;
   eventStatus: "pending" | "delivered" | null;
   resumeRequired: boolean;
   completedNodeIds: string[];
@@ -4231,6 +4242,9 @@ export interface McpInvocationRequest {
   onePermissionMode?: "auto" | "read" | "write" | "full";
   /** 자동화 등 백그라운드 실행에서 Playwright persistent profile lock을 피하기 위한 MCP 브라우저 프로필 키. */
   mcpBrowserProfileKey?: string;
+  /** Main-only Graph boundary: refresh the consented source cookies immediately
+   * before the first Agentlas Browser node. Renderer IPC strips this field. */
+  forceBrowserCredentialRefresh?: boolean;
   /**
    * 그래프가 **명시적으로 붙인** 도구들(MCP 카탈로그 id). 커넥터 C06 — 캔버스에서
    * `tool` 노드를 이 에이전트에 선으로 이어 놓은 것들이다.
@@ -4462,6 +4476,8 @@ export interface McpInvocationEvent {
     code: "runtime_wait" | "queue_wait" | "recovery_retry" | "session_resume";
   };
   text?: string;
+  /** Main-owned durable image attachment URLs for the completed assistant turn. */
+  imageDataUrls?: string[];
   /**
    * Main-internal exact assistant body returned by the durable transcript
    * write. Runtime adapters may rewrite transient media paths to attachment
@@ -4600,6 +4616,8 @@ export interface WorkflowRunSnapshot {
   automationId: string;
   startedAt: string;
   status: "running" | "ok" | "error";
+  /** Durable run mode; a simulation checkpoint must never resume live. */
+  simulation: boolean;
   /** 노드 id → 마지막 상태. */
   nodeStates: Record<string, WorkflowNodeRunState>;
   /**
@@ -7217,6 +7235,8 @@ export interface AgentlasIpc {
     getGoalContext: (id: string) => Promise<ChatGoalContext | null>;
     /** 첫 Goal 요청으로만 goal 계약을 정의한다. 활성 goal은 후속 채팅/steering으로 덮어쓰지 않는다. */
     defineGoal: (id: string, objective: string, locale?: "ko" | "en") => Promise<ChatGoalContext | null>;
+    /** Explicit manual resume. App-close/crash recovery never dispatches on startup. */
+    resumeGoal: (id: string, expectedVersion: number) => Promise<ChatGoalContext | null>;
     /** 스웜 모드 on/off — 여러 워커가 목표를 분해해 병렬 협업. */
     setSwarmMode: (id: string, enabled: boolean) => Promise<Chat>;
     /** Set or clear this chat's exact orchestrator runtime without changing role defaults. */
@@ -7617,7 +7637,7 @@ export interface AgentlasIpc {
     /** 사용자가 고른 조치를 실행. 계획에 없는 id는 아무 일도 하지 않는다. */
     applyFix: (automationId: string, actionId: string) => Promise<AutomationFixActionReceipt>;
   };
-  /** launchd LaunchAgent — 앱이 꺼져도 자동화를 도는 macOS 영속성(opt-in, 설계 §2.6). */
+  /** Legacy macOS background-launcher cleanup compatibility. */
   launchd: {
     status: () => Promise<LaunchdStatus>;
     enable: () => Promise<LaunchdStatus>;

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type {
   ScienceAnalysisSpec,
+  ScienceEpisodeResultReviewSelectedAction,
   ScienceProject,
   ScienceResearchEpisode,
   ScienceResearchEpisodeArtifactBinding,
@@ -179,6 +180,7 @@ export interface CreateScienceLabDecisionProjectionInput {
   currentArtifacts: ScienceLabDecisionArtifactBinding[];
   blockingDecision: ScienceLabDecisionBlockingDecisionSource | null;
   matchedTrigger: string | null;
+  matchedAction?: ScienceEpisodeResultReviewSelectedAction | null;
   supersededByEpisode?: ScienceResearchEpisode | null;
 }
 
@@ -391,14 +393,18 @@ function destinationForIntentAction(
   basis: ScienceLabDecisionProjectionBasis,
 ): ScienceLabDecisionAction["destination"] | null {
   if (intentAction.destinationKind === "artifact") {
-    const artifact = basis.artifacts[0];
+    const artifact = intentAction.destinationId === null
+      ? basis.artifacts.length === 1 ? basis.artifacts[0] : null
+      : basis.artifacts.find((candidate) => candidate.artifactId === intentAction.destinationId) ?? null;
     return artifact ? { kind: "artifact", id: artifact.artifactId, exactVersion: artifact.artifactVersion, exactContentSha256: artifact.contentSha256 } : null;
   }
   if (intentAction.destinationKind === "analysis-plan") {
-    return basis.plan ? { kind: "analysis-plan", id: basis.plan.id, exactVersion: basis.plan.version, exactContentSha256: basis.plan.contentSha256 } : null;
+    return basis.plan?.planKind === "analysis-spec" && (intentAction.destinationId === null || intentAction.destinationId === basis.plan.id)
+      ? { kind: "analysis-plan", id: basis.plan.id, exactVersion: basis.plan.version, exactContentSha256: basis.plan.contentSha256 } : null;
   }
   if (intentAction.destinationKind === "human-decision") {
-    return basis.blockingDecision ? { kind: "human-decision", id: basis.blockingDecision.id, exactVersion: null, exactContentSha256: basis.blockingDecision.contentSha256 } : null;
+    return basis.blockingDecision && (intentAction.destinationId === null || intentAction.destinationId === basis.blockingDecision.id)
+      ? { kind: "human-decision", id: basis.blockingDecision.id, exactVersion: null, exactContentSha256: basis.blockingDecision.contentSha256 } : null;
   }
   if (intentAction.destinationKind === "lab") {
     return { kind: "lab", id: intentAction.destinationId ?? labId, exactVersion: null, exactContentSha256: null };
@@ -415,6 +421,7 @@ function actionFor(input: {
   freshness: ScienceLabDecisionProjectionFreshness;
   supersededBy: ScienceLabDecisionEpisodeBinding | null;
   matchedTrigger: string | null;
+  matchedAction?: ScienceEpisodeResultReviewSelectedAction | null;
 }): ScienceLabDecisionAction {
   const { intent, state, basis, freshness, supersededBy } = input;
   let action: Omit<ScienceLabDecisionAction, "basisSha256">;
@@ -473,7 +480,7 @@ function actionFor(input: {
   } else {
     const intentAction = input.matchedTrigger === null
       ? null
-      : intent.nextActions.find((candidate) => candidate.trigger === input.matchedTrigger) ?? null;
+      : input.matchedAction ?? intent.nextActions.find((candidate) => candidate.trigger === input.matchedTrigger) ?? null;
     const intentDestination = intentAction ? destinationForIntentAction(intentAction, intent.labId, basis) : null;
     if (intentAction && intentDestination) {
       action = {
@@ -523,6 +530,16 @@ export function createScienceLabDecisionProjection(input: CreateScienceLabDecisi
   if (input.episode?.status === "waiting-for-decision" && !input.blockingDecision) throw new Error("science-lab-decision-blocking-decision-required");
   if (input.matchedTrigger !== null && !intent.nextActions.some((action) => action.trigger === input.matchedTrigger)) throw new Error("science-lab-decision-trigger-invalid");
   if (input.matchedTrigger !== null && (!input.episode?.result || input.episode.status !== "succeeded")) throw new Error("science-lab-decision-trigger-result-required");
+  if (input.matchedAction) {
+    const catalogAction = intent.nextActions.find((action) => action.trigger === input.matchedAction?.trigger);
+    if (!catalogAction || input.matchedTrigger !== input.matchedAction.trigger
+      || catalogAction.action !== input.matchedAction.action || catalogAction.reason !== input.matchedAction.reason
+      || catalogAction.destinationKind !== input.matchedAction.destinationKind
+      || catalogAction.requiresHumanDecision !== input.matchedAction.requiresHumanDecision
+      || catalogAction.destinationId !== null && catalogAction.destinationId !== input.matchedAction.destinationId) {
+      throw new Error("science-lab-decision-matched-action-invalid");
+    }
+  }
 
   const project = projectBinding(input.project);
   const episode = input.episode ? episodeBinding(input.episode) : null;
@@ -577,7 +594,7 @@ export function createScienceLabDecisionProjection(input: CreateScienceLabDecisi
       supersededWhen: SCIENCE_LAB_DECISION_SUPERSEDED_CONDITIONS,
       supersededBy,
     },
-    action: actionFor({ intent, state, basis, freshness, supersededBy, matchedTrigger: input.matchedTrigger }),
+    action: actionFor({ intent, state, basis, freshness, supersededBy, matchedTrigger: input.matchedTrigger, matchedAction: input.matchedAction }),
   };
   const projection = { ...core, projectionSha256: scienceLabDecisionProjectionSha256(core) };
   assertScienceLabDecisionProjection(projection);

@@ -24,7 +24,13 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { resolveHephaestusPython } from "../hephaestus/engine";
 import { withPythonCacheBoundary } from "../runtime/python-cache";
-import { agentRunCwd, killCliTree, nodeExecPathForCode } from "../runtime/exec";
+import {
+  agentRunCwd,
+  detachedSpawnOpts,
+  killCliTree,
+  nodeExecPathForCode,
+  trackRunChild,
+} from "../runtime/exec";
 import { userDataPath } from "../runtime-paths";
 
 export type CodeLang = "python" | "js";
@@ -221,10 +227,11 @@ async function ensurePythonPackages(
       const child = spawn(python, [
         "-m", "pip", "install", "--target", dir,
         "--disable-pip-version-check", "--no-input", "--quiet", name,
-      ], { env, stdio: ["ignore", "pipe", "pipe"] });
+      ], { env, stdio: ["ignore", "pipe", "pipe"], ...detachedSpawnOpts() });
+      trackRunChild(child);
       let err = "";
       child.stderr.on("data", (d: Buffer) => { err += d.toString("utf8"); });
-      const timer = setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* already gone */ } }, 180_000);
+      const timer = setTimeout(() => killCliTree(child, 250), 180_000);
       child.on("close", (c) => { clearTimeout(timer); resolve({ code: c, err }); });
       child.on("error", (e) => { clearTimeout(timer); resolve({ code: -1, err: String(e) }); });
     });
@@ -345,7 +352,13 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
       }
     }
     const runOnce = async (): Promise<{ code: number | null; stdout: string; stderr: string }> => {
-      const child = spawn(command, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+      const child = spawn(command, args, {
+        cwd,
+        env,
+        stdio: ["pipe", "pipe", "pipe"],
+        ...detachedSpawnOpts(),
+      });
+      trackRunChild(child);
       let stdout = "";
       let stderr = "";
       child.stdout.on("data", (d: Buffer) => { stdout += d.toString("utf8"); });

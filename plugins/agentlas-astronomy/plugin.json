@@ -2,9 +2,12 @@
   "schema": "agentlas.plugin/v2",
   "slug": "agentlas-astronomy",
   "name": "Agentlas Astronomy",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "builtin": false,
-  "publisher": { "name": "Agentlas", "url": "https://agentlas.ai" },
+  "publisher": {
+    "name": "Agentlas",
+    "url": "https://agentlas.ai"
+  },
   "surface": {
     "displayName": "Astronomy",
     "displayNameKo": "천문학",
@@ -22,16 +25,29 @@
       "이 불규칙 광도곡선의 시간계와 오차를 보존해서 Lomb-Scargle 주기도와 위상 접힘 그림을 만들어줘"
     ]
   },
-  "invocation": { "mention": "@agentlas-astronomy", "implicit": "router", "standalone": true },
+  "invocation": {
+    "mention": "@agentlas-astronomy",
+    "implicit": "router",
+    "standalone": true
+  },
   "provides": {
-    "skills": { "router": "skills/index/SKILL.md", "workflows": ["simbad-catalog", "astrometric-kinematics", "light-curve-periodicity"] },
+    "skills": {
+      "router": "skills/index/SKILL.md",
+      "workflows": [
+        "simbad-catalog",
+        "astrometric-kinematics",
+        "light-curve-periodicity"
+      ]
+    },
     "tools": [
       {
         "id": "agentlas-astronomy",
         "capability": "data",
         "kind": "stdio",
         "command": "${node}",
-        "args": ["${pluginDir}/runtime/mcp-server.cjs"],
+        "args": [
+          "${pluginDir}/runtime/mcp-server.cjs"
+        ],
         "envKeys": [],
         "timeoutMs": 60000,
         "surface": {
@@ -47,31 +63,166 @@
       }
     ]
   },
-  "requires": { "prereq": [{ "id": "node", "provided-by": "app" }], "os": ["darwin", "win32", "linux"] },
-  "permissions": { "fileWrite": "none", "network": "allow", "shell": "deny" },
-  "state": { "files": [], "assets": false },
+  "requires": {
+    "prereq": [
+      {
+        "id": "node",
+        "provided-by": "app"
+      }
+    ],
+    "os": [
+      "darwin",
+      "win32",
+      "linux"
+    ]
+  },
+  "permissions": {
+    "fileWrite": "none",
+    "network": "allow",
+    "shell": "deny"
+  },
+  "state": {
+    "files": [],
+    "assets": false
+  },
   "integrity": {
     "algo": "sha256",
     "files": [
-      { "path": "README.md", "sha256": "91ff54e52fe63013c282fb55700772787223b945dfd680d18f017ebaaf850253", "bytes": 6084 },
-      { "path": "assets/icon.svg", "sha256": "954d6c1aea9ff0894f187339895f4438be024baf0fc69a5f3ac7716938e01e96", "bytes": 507 },
-      { "path": "capabilities.json", "sha256": "d472859991ce50e8bb0aa4cde851e3d03e22a87b70dc4e5ad0fc6ccb74a4a075", "bytes": 6359 },
-      { "path": "runtime/astronomy.cjs", "sha256": "79892e3f3609247b45ad2b015122fc22b04ee11ca27799abdfa85ca7e76fea7c", "bytes": 82392 },
-      { "path": "runtime/mcp-server.cjs", "sha256": "e0ea7ce56a596699f06ed4b0580d80cb9a542cb427d05ac1e163fd71148bdf6d", "bytes": 6681 },
-      { "path": "schemas/tools.json", "sha256": "bf246cb456721cb6eedc1aebc0582361d6dbca85791e9d78cfaf7ab9d7b9bd8c", "bytes": 8010 },
-      { "path": "skills/astrometric-kinematics/SKILL.md", "sha256": "da731e39ae17876ac17f57c027f73da61f8c44e61d1245399e9f3d347f38fb56", "bytes": 1652 },
-      { "path": "skills/index/SKILL.md", "sha256": "b4524b08cfe2be7cdd326dd61de802a6b5edc7705f1e403a3cd93b52c8e6a1d0", "bytes": 1529 },
-      { "path": "skills/light-curve-periodicity/SKILL.md", "sha256": "54dd9c5c2d83c43822708921b845211d79d5ac1818fbfa5bdc9f015cb9083c04", "bytes": 2331 },
-      { "path": "skills/simbad-catalog/SKILL.md", "sha256": "0a5bb4399c1e19ec620e58b5775e2c8e2745721f7d91339ec45ab73a100c5044", "bytes": 1492 },
-      { "path": "tests/contract.cjs", "sha256": "8bec7fcc091070cc2bf03d1440f0c27680b2239c492462f221e8ed1a4474443e", "bytes": 18664 },
-      { "path": "tests/fixtures/astrometry-kinematics.json", "sha256": "2d47169067feae1beb56ca4239e2c5f0d95f5854bd4f74548a0c38c67d4ca855", "bytes": 1619 },
-      { "path": "tests/fixtures/irregular-light-curve.json", "sha256": "295b3248e5e408a2386a04eb25c7e63f46158fca06c90a9c4ecbbe1ee718beeb", "bytes": 2476 },
-      { "path": "tests/fixtures/simbad-duplicate.json", "sha256": "a96aca1aa51dac18826993d1fcdf9fd7af3d4400539cb4f9e0cb219c749c0842", "bytes": 551 },
-      { "path": "tests/fixtures/simbad-response.csv", "sha256": "55b7955b662952b3e932ec203a36f7ff5a8bbba87a1db2ba88ccadce10504e96", "bytes": 233 },
-      { "path": "tests/fixtures/simbad-response.json", "sha256": "ad6ccee8413ba15990bbfe11ba403277619317f923e59b93ba5e982cd3d53aaf", "bytes": 1286 },
-      { "path": "tests/fixtures/simbad-response.tsv", "sha256": "767029ea628b53f88db346684c22923522b81c7909466bb49ade1ffdde221e04", "bytes": 233 },
-      { "path": "tests/kinematics-contract.cjs", "sha256": "a1bb2ef0b81b0a9c326261066690667eaff4a1a69ad3017f1c0fdf6024b15218", "bytes": 9209 },
-      { "path": "tests/periodogram-contract.cjs", "sha256": "09014b81f10e4171a07a04de1d969da5dd59feecd85f347ef4833b6d962d8553", "bytes": 9040 }
+      {
+        "path": "assets/icon.svg",
+        "sha256": "954d6c1aea9ff0894f187339895f4438be024baf0fc69a5f3ac7716938e01e96",
+        "bytes": 507
+      },
+      {
+        "path": "capabilities.json",
+        "sha256": "f56f3210b9b12deccd6598409395f0f727af345acc23c3e250ffdf9e07eacdfc",
+        "bytes": 13540
+      },
+      {
+        "path": "README.md",
+        "sha256": "91ff54e52fe63013c282fb55700772787223b945dfd680d18f017ebaaf850253",
+        "bytes": 6084
+      },
+      {
+        "path": "runtime/analysis-common.cjs",
+        "sha256": "896daf025af8a51ea09370c5d0ac9abd84e04c8351757d68aea8d4f175ff630d",
+        "bytes": 21933
+      },
+      {
+        "path": "runtime/analysis-tools.cjs",
+        "sha256": "bfbbdbc722fbfd312112806e0f68f3a954d3747da9ea658c27d7b1abc6c606d1",
+        "bytes": 3590
+      },
+      {
+        "path": "runtime/astronomy.cjs",
+        "sha256": "9ec858d05f4cdb5b59474f7529ee90af5a16365a72853481aea45ec5470dee92",
+        "bytes": 83447
+      },
+      {
+        "path": "runtime/colour-magnitude.cjs",
+        "sha256": "0a87c209346970c78bd09b5a943bea96809ee5ff6a1a9516b4a83832e3e3049e",
+        "bytes": 21997
+      },
+      {
+        "path": "runtime/cosmology.cjs",
+        "sha256": "1ca4c6d8a709dcfd4ec83064482104e0eb02e4647f55ce57804e142e39fd21e4",
+        "bytes": 14624
+      },
+      {
+        "path": "runtime/galactic-kinematics.cjs",
+        "sha256": "f9d82d45156f36e38e0d9ca31f08e1a4a0c245d72f45aa09a99d8d67fe4a7bdd",
+        "bytes": 26641
+      },
+      {
+        "path": "runtime/mcp-server.cjs",
+        "sha256": "59c17bc0e7cbfb1329af2d3b65330ffe3ddd8b599bd605171e6728836a20c8d0",
+        "bytes": 7181
+      },
+      {
+        "path": "runtime/periodicity-depth.cjs",
+        "sha256": "20cbbf7ba9d10853da9c9738f2faa3492741af1c2832fa957279530f40c5e450",
+        "bytes": 34798
+      },
+      {
+        "path": "runtime/rv-orbit.cjs",
+        "sha256": "6a3740ca16e28d34fdad1f012b7f6f01a63b4902a7381b01dfa3b030e6eb08e1",
+        "bytes": 25971
+      },
+      {
+        "path": "runtime/sed-blackbody.cjs",
+        "sha256": "af6f831eb87d393baa72733176df8cf70d97b3782d1004669039fe37dbdfeb96",
+        "bytes": 18369
+      },
+      {
+        "path": "runtime/transit-search.cjs",
+        "sha256": "dc28235ecb7b8bd215d90ac6a8e4c194378a9d1962cdfb44265e80ea5b41f383",
+        "bytes": 31986
+      },
+      {
+        "path": "schemas/analysis-tools.json",
+        "sha256": "081aecdf2622d1db1659b2d06b665e0c406b8c33528d9dd0769e44e26e381ae2",
+        "bytes": 321
+      },
+      {
+        "path": "schemas/colour-magnitude-diagram.json",
+        "sha256": "9e42f450d0fcdc4291136a092dfa44a134e506ff3f0d394aa86a42f9be4cd348",
+        "bytes": 5888
+      },
+      {
+        "path": "schemas/flat-lambda-cdm-cosmology.json",
+        "sha256": "7ab3951aa877e146d7835559d1197a779e26481ceb9931c4fbbb71efff79acc9",
+        "bytes": 2598
+      },
+      {
+        "path": "schemas/galactic-kinematics.json",
+        "sha256": "d049c46572c18de97d018c94393f9974b2126150f8bf82ff630a71d9b080ce4d",
+        "bytes": 6134
+      },
+      {
+        "path": "schemas/light-curve-periodicity-depth.json",
+        "sha256": "40b93cd98ebf2d80cf0d29744996eea5a42fbcb1985cfe685626b9ef8525b37f",
+        "bytes": 4627
+      },
+      {
+        "path": "schemas/radial-velocity-orbit.json",
+        "sha256": "542eb4d9de0c0e8ed4a29a0511750d114e4e7e759a3a3184d723f53d1566897a",
+        "bytes": 3338
+      },
+      {
+        "path": "schemas/sed-blackbody-fit.json",
+        "sha256": "d6c536c4d04195d741dae65af6553655446d11476352bd808e9815071a05f78a",
+        "bytes": 2552
+      },
+      {
+        "path": "schemas/tools.json",
+        "sha256": "bf246cb456721cb6eedc1aebc0582361d6dbca85791e9d78cfaf7ab9d7b9bd8c",
+        "bytes": 8010
+      },
+      {
+        "path": "schemas/transit-search-bls.json",
+        "sha256": "1e8778c5daff5dcefdec0ef297c10e18dcb01c857e2c67a540d1da3cd0172558",
+        "bytes": 4309
+      },
+      {
+        "path": "skills/astrometric-kinematics/SKILL.md",
+        "sha256": "da731e39ae17876ac17f57c027f73da61f8c44e61d1245399e9f3d347f38fb56",
+        "bytes": 1652
+      },
+      {
+        "path": "skills/index/SKILL.md",
+        "sha256": "b4524b08cfe2be7cdd326dd61de802a6b5edc7705f1e403a3cd93b52c8e6a1d0",
+        "bytes": 1529
+      },
+      {
+        "path": "skills/light-curve-periodicity/SKILL.md",
+        "sha256": "54dd9c5c2d83c43822708921b845211d79d5ac1818fbfa5bdc9f015cb9083c04",
+        "bytes": 2331
+      },
+      {
+        "path": "skills/simbad-catalog/SKILL.md",
+        "sha256": "0a5bb4399c1e19ec620e58b5775e2c8e2745721f7d91339ec45ab73a100c5044",
+        "bytes": 1492
+      }
     ]
   }
 }

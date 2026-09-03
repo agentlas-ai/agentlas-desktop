@@ -8,7 +8,6 @@ import crossSpawn from "cross-spawn";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { app } from "electron";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { userDataPath } from "../runtime-paths";
 import { onHostShutdown } from "../host-lifecycle";
@@ -180,7 +179,7 @@ export function agentRunCwd(): string {
     fs.mkdirSync(dir, { recursive: true });
     _runCwd = dir;
   } catch {
-    _runCwd = app.getPath("home");
+    _runCwd = os.homedir();
   }
   return _runCwd;
 }
@@ -320,19 +319,27 @@ export function detachedSpawnOpts(): { detached?: boolean } {
 export function killCliTree(child: ChildProcess, graceMs = 4000): void {
   if (process.platform !== "win32" && child.pid) {
     try {
-      process.kill(-child.pid, "SIGTERM");
+      const processGroupId = child.pid;
+      process.kill(-processGroupId, "SIGTERM");
       const sigkill = setTimeout(() => {
         try {
-          process.kill(-child.pid!, "SIGKILL");
+          process.kill(-processGroupId, "SIGKILL");
         } catch {
           // already exited
         }
       }, graceMs);
-      // Do not leave a delayed negative-PID kill armed after the original
-      // process group exits. Apart from needless timers, a quickly reused PID
-      // could otherwise target an unrelated later process group.
-      child.once("close", () => clearTimeout(sigkill));
-      child.once("error", () => clearTimeout(sigkill));
+      // A CLI leader can exit on SIGTERM while a grandchild in the same group
+      // ignores it. Only disarm the escalation when the *group* is gone; using
+      // the leader's close event alone leaves that grandchild orphaned.
+      const clearIfGroupGone = () => {
+        try {
+          process.kill(-processGroupId, 0);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ESRCH") clearTimeout(sigkill);
+        }
+      };
+      child.once("close", clearIfGroupGone);
+      child.once("error", clearIfGroupGone);
       sigkill.unref?.();
       return;
     } catch {

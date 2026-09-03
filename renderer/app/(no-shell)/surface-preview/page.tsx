@@ -1,14 +1,17 @@
 "use client";
 import { Suspense, useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
-import { useSearchParams } from "next/navigation";
+import { notFound, useSearchParams } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import type { AgentlasSurfaceAction, AgentlasSurfaceManifest, JsonObject } from "@/lib/types";
 import type { OneTaskProjection } from "@/lib/one-task-adapter";
 import { applySurfaceStatePatch } from "@/lib/surface-state";
 import { OneAdaptiveResult } from "@/components/one/OneAdaptiveResult";
+import { OneTurnWork } from "@/components/one/OneTurnWork";
+import { ChatStream, type StreamMessage } from "@/components/ChatStream";
 import { LiveOutputViewer, type LiveOutputKind } from "@/components/LiveOutputViewer";
 import { WorkbenchPanel, type SurfaceStatePatchHandler, type WorkbenchSurface } from "@/components/WorkbenchPanel";
 import type { OneSurfaceManifestV1 } from "@shared/one-surface";
+import type { OneActivityState } from "@/lib/one-activity";
 
 const LIVE_OUTPUT_KINDS = new Set<LiveOutputKind>([
   "image", "video", "audio", "pdf", "document", "spreadsheet", "presentation", "archive", "data",
@@ -79,8 +82,70 @@ function developerPreviewProjection(manifest: OneSurfaceManifestV1): OneTaskProj
   };
 }
 
+function ProcessLogPreview() {
+  const startedAt = useMemo(() => Date.now() - 42_000, []);
+  const observedAt = useMemo(() => new Date(startedAt).toISOString(), [startedAt]);
+  const oneState = useMemo<OneActivityState>(() => ({
+    items: [
+      { id: "thought:1", kind: "reasoning", status: "completed", observedAt, durationMs: 4_100, agentName: "One", text: "현재 렌더러 위치와 상태 모델을 확인했습니다." },
+      { id: "tool:read", kind: "tool", status: "completed", observedAt, agentName: "One", tool: { id: "read", name: "Read", args: JSON.stringify({ file_path: "/workspace/renderer/components/one/OneTurnWork.tsx" }), result: "ok" } },
+      { id: "tool:shell", kind: "tool", status: "completed", observedAt, agentName: "UI Worker", tool: { id: "shell", name: "Bash", args: JSON.stringify({ command: "npm run typecheck && npm run test:one-turn-work" }), result: "> typecheck\n✓ renderer types\n✓ One turn work contract\n\n2 checks passed" } },
+      { id: "tool:edit", kind: "tool", status: "completed", observedAt, agentName: "UI Worker", tool: { id: "edit", name: "Edit", args: JSON.stringify({ file_path: "/workspace/renderer/components/ChatStream.tsx", old_string: "status dashboard", new_string: "compact disclosure" }), result: "updated" } },
+      { id: "thought:live", kind: "reasoning", status: "running", observedAt, agentName: "One", text: "검증 상태를 확인하는 중" },
+    ],
+    artifacts: [],
+    sources: [],
+    handoffs: [],
+    tokens: 2_480,
+    lastSequence: 5,
+    activeReasoningId: "thought:live",
+    cwd: "/workspace",
+  }), [observedAt]);
+  const workerMessages = useMemo<StreamMessage[]>(() => [{
+    id: "qa-worker-turn",
+    role: "agent",
+    text: "",
+    busy: true,
+    streaming: false,
+    startedAt,
+    liveTokens: 1_240,
+    status: "구현 구조를 확인하는 중",
+    steps: [
+      { id: "worker-step-1", kind: "thinking", text: "작업 범위와 기존 렌더러를 확인했습니다.", agentName: "One", role: "오케스트레이터", createdAt: startedAt + 1_000 },
+      { id: "worker-step-2", kind: "tool", text: "OneTurnWork.tsx 읽기", tool: "Read", args: JSON.stringify({ file_path: "/workspace/renderer/components/one/OneTurnWork.tsx" }), result: "ok", agentName: "UI Worker", role: "Frontend", createdAt: startedAt + 8_000 },
+      { id: "worker-step-3", kind: "thinking", text: "One과 Worker의 진행 행을 같은 밀도로 맞추고 있습니다.", agentName: "UI Worker", role: "Frontend", createdAt: startedAt + 18_000 },
+      { id: "worker-step-4", kind: "tool", text: "렌더러 검증", tool: "Bash", args: JSON.stringify({ command: "npm run typecheck" }), agentName: "QA Worker", role: "Verification", createdAt: startedAt + 35_000 },
+    ],
+  }], [startedAt]);
+
+  return (
+    <main data-testid="process-log-preview" style={processPreviewPage}>
+      <header style={processPreviewHeader}>
+        <span>Agentlas renderer QA</span>
+        <h1>One / Worker process grammar</h1>
+        <p>Codex처럼 본문 안에서 조용히 열리고, 완료되면 한 줄로 접힙니다.</p>
+      </header>
+      <div style={processPreviewGrid}>
+        <section data-testid="process-log-one" style={processPreviewCard}>
+          <small style={processPreviewEyebrow}>ONE</small>
+          <p style={processPreviewPrompt}>진행 과정을 간결하게 보여줘.</p>
+          <OneTurnWork state={oneState} busy startedAt={startedAt} locale="ko" workspacePath="/workspace" />
+          <p style={processPreviewAnswer}>구조를 유지하면서 진행 행, 명령 카드, 파일 변경 목록의 위계를 정리했습니다.</p>
+        </section>
+        <section data-testid="process-log-worker" style={{ ...processPreviewCard, minHeight: 430 }}>
+          <small style={processPreviewEyebrow}>WORK · PARALLEL WORKERS</small>
+          <div style={{ minHeight: 360, display: "flex" }}>
+            <ChatStream messages={workerMessages} agentName="One" agentTone="green" workspaceRoot="/workspace" />
+          </div>
+        </section>
+      </div>
+    </main>
+  );
+}
+
 function SurfacePreviewInner() {
   const searchParams = useSearchParams();
+  const processLogPreview = searchParams.get("processLog") === "1";
   const requestedSurfaceId = searchParams.get("surfaceId") || searchParams.get("id") || "";
   const requestedAppId = searchParams.get("appId") || "";
   const encodedManifest = searchParams.get("manifest") || "";
@@ -231,6 +296,8 @@ function SurfacePreviewInner() {
     setMessage(`Preview state patched: ${patch.label || patch.path}`);
   }, [requestedAppId]);
 
+  if (processLogPreview) return <ProcessLogPreview />;
+
   return (
     <main className="agentlas-surface-preview-page" style={page}>
       <style>{`
@@ -329,10 +396,12 @@ function SurfacePreviewInner() {
 }
 
 export default function SurfacePreviewPage() {
-  // This page is exported as a static file for the packaged Electron renderer.
-  // Query parameters (including file/image output sources) only exist in the
-  // browser at load time, so a server-side notFound() here would permanently
-  // replace the page before useSearchParams() can render the requested preview.
+  // This route is a renderer QA harness, not a customer surface. Development keeps
+  // it convenient; production QA must opt in at build time so the shipped app cannot
+  // expose the raw manifest editor through a manually entered URL.
+  if (process.env.NODE_ENV === "production" && process.env.NEXT_PUBLIC_AGENTLAS_QA_SURFACES !== "1") {
+    notFound();
+  }
   return (
     <Suspense fallback={null}>
       <SurfacePreviewInner />
@@ -347,6 +416,68 @@ const page = {
   background: "var(--paper-2)",
   color: "var(--ink)",
   overflow: "hidden",
+} satisfies CSSProperties;
+
+const processPreviewPage = {
+  minHeight: "100vh",
+  padding: "36px clamp(24px, 5vw, 72px) 56px",
+  background: "#fafaf9",
+  color: "var(--ink)",
+  overflow: "auto",
+} satisfies CSSProperties;
+
+const processPreviewHeader = {
+  width: "min(1180px, 100%)",
+  margin: "0 auto 24px",
+  display: "grid",
+  gap: 5,
+} satisfies CSSProperties;
+
+const processPreviewGrid = {
+  width: "min(1180px, 100%)",
+  margin: "0 auto",
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 500px), 1fr))",
+  gap: 18,
+  alignItems: "start",
+} satisfies CSSProperties;
+
+const processPreviewCard = {
+  minWidth: 0,
+  minHeight: 430,
+  padding: "24px 26px",
+  border: "1px solid #e4e6e4",
+  borderRadius: 14,
+  background: "#fff",
+  boxShadow: "0 8px 24px rgba(32, 36, 33, .035)",
+  overflow: "hidden",
+} satisfies CSSProperties;
+
+const processPreviewEyebrow = {
+  display: "block",
+  marginBottom: 20,
+  color: "#8a8f8b",
+  font: "650 10px/1.2 var(--font-mono)",
+  letterSpacing: ".08em",
+} satisfies CSSProperties;
+
+const processPreviewPrompt = {
+  width: "fit-content",
+  maxWidth: "78%",
+  margin: "0 0 20px auto",
+  padding: "9px 13px",
+  borderRadius: 12,
+  background: "#f0f1ef",
+  color: "#343834",
+  fontSize: 13.5,
+  lineHeight: 1.55,
+} satisfies CSSProperties;
+
+const processPreviewAnswer = {
+  margin: "14px 0 0",
+  color: "#343834",
+  fontSize: 13.5,
+  lineHeight: 1.65,
 } satisfies CSSProperties;
 
 const controlPane = {

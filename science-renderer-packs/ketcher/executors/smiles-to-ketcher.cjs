@@ -65,17 +65,22 @@ async function main() {
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 2 || stat.size > 8 * 1024 * 1024) fail("science-tool-input-invalid");
   const input = JSON.parse(fs.readFileSync(inputPath, "utf8"));
   const directInput = input && input.schema === "agentlas.science-ketcher-validation-input/v1";
-  const sourceInput = input && input.schema === "agentlas.science-source-to-ketcher-input/v1";
+  const sourceInput = input && input.schema === "agentlas.science-source-to-ketcher-input/v2";
   if ((!directInput && !sourceInput) || !input.source
     || (directInput && !["smiles", "ket"].includes(input.source.format))
     || (sourceInput && input.source.format !== "sdf")) fail("science-tool-input-schema-invalid");
   if (sourceInput) {
     const keys = Object.keys(input.source).sort().join(",");
+    const identity = input.expectedIdentity;
     if (keys !== "contentSha256,format,id,value,versionId"
       || typeof input.source.id !== "string" || typeof input.source.versionId !== "string"
-      || typeof input.source.contentSha256 !== "string" || !/^[a-f0-9]{64}$/.test(input.source.contentSha256)) {
+      || typeof input.source.contentSha256 !== "string" || !/^[a-f0-9]{64}$/.test(input.source.contentSha256)
+      || !identity || typeof identity !== "object" || Array.isArray(identity)
+      || Object.keys(identity).sort().join(",") !== "canonicalExternalId,canonicalSmiles,provider"
+      || identity.provider !== "pubchem" || !/^[1-9]\d{0,11}$/.test(String(identity.canonicalExternalId || ""))) {
       fail("science-tool-source-binding-invalid");
     }
+    text(identity.canonicalSmiles, 200_000, "expected-canonical-smiles");
   }
   const title = text(input.title, 240, "title");
   const source = input.source.format === "sdf"
@@ -100,6 +105,14 @@ async function main() {
     if (sourceInput) {
       const sourceCanonicalSmiles = indigo.convert(source, "smiles", inputOptions).trim();
       const sourceInchi = indigo.convert(source, "inchi", inputOptions).trim();
+      const expectedOptions = new indigo.MapStringString();
+      expectedOptions.set("input-format", "chemical/x-daylight-smiles");
+      try {
+        const expectedInchi = indigo.convert(input.expectedIdentity.canonicalSmiles, "inchi", expectedOptions).trim();
+        if (!expectedInchi || expectedInchi !== sourceInchi) fail("science-tool-source-metadata-identity-mismatch");
+      } finally {
+        expectedOptions.delete();
+      }
       ket = indigo.layout(source, "ket", inputOptions);
       const ketOptions = new indigo.MapStringString();
       ketOptions.set("input-format", "ket");

@@ -63,6 +63,43 @@ async function checkUpdatesInteractive(parent: BrowserWindow | null): Promise<vo
   });
 }
 
+/**
+ * Zoom is a property of the window as the person sees it, not of one web contents inside it.
+ *
+ * Product extensions (Science, the Hub profile, the Work live view) are child views of the same
+ * window, each with its own zoom. Electron's built-in zoom roles act on the *focused* contents,
+ * so zooming while the pointer sat over Science and then reaching for "Actual Size" reset the
+ * shell and left Science enlarged -- and Chromium persists that factor per origin, so it came
+ * back on the next launch with no way to undo it. Measured: shell 1.5 -> 1, Science stuck at 1.5.
+ *
+ * Applying every zoom command to the window and all of its child views keeps them in step, which
+ * is what "the screen is too big" means to the person holding the mouse.
+ */
+function everyContents(win: BrowserWindow | null) {
+  if (!win) return [];
+  const all = [win.webContents];
+  const walk = (view: { children?: unknown[]; webContents?: Electron.WebContents }) => {
+    for (const child of (view.children ?? []) as { children?: unknown[]; webContents?: Electron.WebContents }[]) {
+      if (child.webContents && !child.webContents.isDestroyed()) all.push(child.webContents);
+      walk(child);
+    }
+  };
+  walk(win.contentView as unknown as { children?: unknown[] });
+  return all;
+}
+
+function applyZoom(win: BrowserWindow | null, next: (current: number) => number) {
+  const contents = everyContents(win);
+  if (!contents.length) return;
+  // One level for all of them, taken from the window, so a view that drifted is pulled back into
+  // line rather than stepped from wherever it happened to be.
+  const base = contents[0].getZoomLevel();
+  const level = Math.max(-5, Math.min(5, next(base)));
+  for (const target of contents) {
+    try { target.setZoomLevel(level); } catch { /* view went away mid-command */ }
+  }
+}
+
 function send(win: BrowserWindow | null, route: string) {
   if (!win) return;
   // renderer dev: localhost:3100, prod: file:// — 둘 다 hash 경로로 라우팅 안 하고
@@ -93,6 +130,9 @@ function menuLabels(locale: MenuLocale) {
     edit: "Edit",
     view: "View",
     toggleSidebar: "Toggle Sidebar",
+    actualSize: "Actual Size",
+    zoomIn: "Zoom In",
+    zoomOut: "Zoom Out",
     window: "Window",
     docs: "Agentlas Docs",
     reportIssue: "Report an Issue",
@@ -116,6 +156,9 @@ function menuLabels(locale: MenuLocale) {
     edit: "편집",
     view: "보기",
     toggleSidebar: "사이드바 보이기/숨기기",
+    actualSize: "원래 크기로",
+    zoomIn: "크게",
+    zoomOut: "작게",
     window: "창",
     docs: "Agentlas 사용 설명서",
     reportIssue: "문제 신고하기",
@@ -255,9 +298,21 @@ export function buildAppMenu(
         { role: "forceReload" },
         { role: "toggleDevTools" },
         { type: "separator" },
-        { role: "resetZoom" },
-        { role: "zoomIn" },
-        { role: "zoomOut" },
+        {
+          label: L.actualSize,
+          accelerator: "CmdOrCtrl+0",
+          click: () => applyZoom(getWindow(), () => 0),
+        },
+        {
+          label: L.zoomIn,
+          accelerator: "CmdOrCtrl+Plus",
+          click: () => applyZoom(getWindow(), (current) => current + 0.5),
+        },
+        {
+          label: L.zoomOut,
+          accelerator: "CmdOrCtrl+-",
+          click: () => applyZoom(getWindow(), (current) => current - 0.5),
+        },
         { type: "separator" },
         { role: "togglefullscreen" },
       ],

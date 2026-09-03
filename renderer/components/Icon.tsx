@@ -41,6 +41,8 @@ export const IconSearch = (p: Props) =>
 export const IconFilter = (p: Props) => svg("M4 6h16M7 12h10M10 18h4", p);
 export const IconMoreHorizontal = (p: Props) =>
   svg("M5 12h.01M12 12h.01M19 12h.01", { ...p, strokeWidth: (p.strokeWidth ?? 1.7) + 0.6 });
+export const IconAlertTriangle = (p: Props) =>
+  svg("M10.3 3.7 2.7 17a2 2 0 0 0 1.7 3h15.2a2 2 0 0 0 1.7-3L13.7 3.7a2 2 0 0 0-3.4 0zM12 9v4M12 17h.01", p);
 
 // ── 사이드바 ────────────────────────────────────────────
 export const IconChat = (p: Props) =>

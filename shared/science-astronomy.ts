@@ -38,7 +38,7 @@ export interface ScienceAstronomyRendererReceipt extends ScienceAstronomyRendere
 
 export const SCIENCE_ASTRONOMY_LIGHT_CURVE_TOOL_ID = "agentlas.astronomy-light-curve-periodicity" as const;
 export const SCIENCE_ASTRONOMY_LIGHT_CURVE_TOOL_VERSION = "1.0.0" as const;
-export const SCIENCE_ASTRONOMY_LIGHT_CURVE_PLUGIN_VERSION = "1.2.0" as const;
+export const SCIENCE_ASTRONOMY_LIGHT_CURVE_PLUGIN_VERSION = "1.2.1" as const;
 export const SCIENCE_ASTRONOMY_LIGHT_CURVE_INPUT_SCHEMA = "agentlas.science.astronomy-light-curve-periodicity-input/v1" as const;
 export const SCIENCE_ASTRONOMY_LIGHT_CURVE_ARTIFACT_SCHEMA = "agentlas.science.astronomy-light-curve-periodicity-artifact/v1" as const;
 export const SCIENCE_ASTRONOMY_LIGHT_CURVE_INPUT_ROLE = "astronomy-light-curve-periodicity-input" as const;

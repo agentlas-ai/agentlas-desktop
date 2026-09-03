@@ -4,8 +4,6 @@
 // 사용자가 OFF로 두면 존중한다(가짜 토글 금지). 슈퍼바이저 finish 게이트는 매 write턴을
 // 지연시키므로, 끄는 선택은 정당한 사용자 트레이드오프다(감사 지적 반영).
 import fs from "node:fs";
-import path from "node:path";
-import { app } from "electron";
 import { userDataPath } from "../runtime-paths";
 
 interface HephaestusSettings {

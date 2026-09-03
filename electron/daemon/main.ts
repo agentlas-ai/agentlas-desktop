@@ -364,7 +364,24 @@ export async function startDaemon(): Promise<void> {
   if (!processIsAlive(desktopParentPid)) {
     throw new Error("Desktop parent exited before agentlasd startup");
   }
+
+  // Unlike the GUI process, this Electron child cannot read app.asar metadata
+  // through `app.getAppPath()`. The Desktop parent passes its already-resolved
+  // immutable identity over the private child environment. Configure it before
+  // initStore or any model/Keychain-backed code can touch protected storage.
+  const { configureInstallIdentity, deserializeInstallIdentity } =
+    await import("../install-identity");
+  const rawIdentity = process.env.AGENTLAS_INSTALL_IDENTITY?.trim();
+  if (!rawIdentity) {
+    throw new Error("agentlasd requires AGENTLAS_INSTALL_IDENTITY from its Desktop parent");
+  }
+  const installIdentity = deserializeInstallIdentity(rawIdentity);
+  if (installIdentity.channel === "qa" && installIdentity.userDataOverride !== dir) {
+    throw new Error("agentlasd QA identity does not match its user-data directory");
+  }
+  configureInstallIdentity(installIdentity);
   installSignalHandlers();
+  console.log(`[agentlasd] identity ready: ${installIdentity.channel}`);
   console.log(`[agentlasd] user data: ${userDataDir()}`);
   desktopParentWatch = setInterval(() => {
     const ownerPid = desktopParentPid;

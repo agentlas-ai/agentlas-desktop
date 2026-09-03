@@ -6,7 +6,7 @@ import { ONE_ATTACHMENT_LIMITS } from "../../shared/one-attachments";
 import { resolveMainOwnedReadPath } from "../fs/access";
 import { getDb } from "./db";
 
-const ATTACHMENT_ID_RE = /^[0-9a-f-]{36}$/i;
+const ATTACHMENT_ID_RE = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 const ALLOWED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
@@ -17,13 +17,6 @@ type AttachmentRow = {
   size_bytes: number;
   sha256: string;
   data: Buffer;
-};
-
-type VerifiedAttachment = {
-  mediaType: string;
-  bytes: Buffer;
-  size: number;
-  sha256: string;
 };
 
 type PersistedAttachment = {
@@ -61,11 +54,10 @@ function hasExpectedImageSignature(bytes: Buffer, mediaType: string): boolean {
 }
 
 /**
- * Convert one Main-structured tool artifact into the same durable attachment
- * envelope used for pasted user images. The renderer never grants this root:
- * the caller supplies a Main-owned canonical tool root (for example the CUA
- * capture directory), and this function reopens the exact regular file with
- * O_NOFOLLOW before any bytes become part of chat history.
+ * Convert a Main-structured generated image into the same durable attachment
+ * envelope used for pasted user images. The renderer never grants this root;
+ * the caller supplies a Main-owned canonical root and this function reopens
+ * the exact private regular file with O_NOFOLLOW before reading any bytes.
  */
 export function chatImageAttachmentFromTrustedFile(input: {
   filePath: string;
@@ -86,7 +78,8 @@ export function chatImageAttachmentFromTrustedFile(input: {
   if (pathStatBefore.size < 1n || pathStatBefore.size > BigInt(ONE_ATTACHMENT_LIMITS.maxImageBytes)) {
     throw new TypeError("Trusted chat image size is out of range");
   }
-  const fd = fs.openSync(resolved, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
+  const fd = fs.openSync(resolved, fs.constants.O_RDONLY | noFollow);
   let bytes: Buffer;
   try {
     const fdStat = fs.fstatSync(fd, { bigint: true });
@@ -135,7 +128,7 @@ export function chatImageAttachmentFromTrustedFile(input: {
   }
   return {
     name: path.basename(resolved),
-    mediaType: declaredType as ImageAttachment["mediaType"],
+    mediaType: declaredType,
     data: bytes.toString("base64"),
   };
 }
@@ -228,15 +221,12 @@ export function listChatMessageImageUrls(messageIds: readonly string[]): Map<str
   return result;
 }
 
-function verifiedAttachment(row: AttachmentRow | undefined): VerifiedAttachment | null {
-  if (!row || !ALLOWED_IMAGE_TYPES.has(row.media_type) || !Buffer.isBuffer(row.data)) return null;
-  if (row.data.length !== row.size_bytes || row.data.length > ONE_ATTACHMENT_LIMITS.maxImageBytes) return null;
-  const digest = createHash("sha256").update(row.data).digest("hex");
-  if (digest !== row.sha256) return null;
-  return { mediaType: row.media_type, bytes: row.data, size: row.size_bytes, sha256: row.sha256 };
-}
-
-export function readChatMessageAttachment(id: string): VerifiedAttachment | null {
+export function readChatMessageAttachment(id: string): {
+  mediaType: string;
+  bytes: Buffer;
+  size: number;
+  sha256: string;
+} | null {
   if (!ATTACHMENT_ID_RE.test(id)) return null;
   const row = getDb().prepare(
     `SELECT a.id, a.message_id, a.media_type, a.size_bytes, a.sha256, a.data
@@ -244,33 +234,38 @@ export function readChatMessageAttachment(id: string): VerifiedAttachment | null
        JOIN chat_messages m ON m.id = a.message_id AND m.chat_id = a.chat_id
       WHERE a.id = ?`,
   ).get(id) as AttachmentRow | undefined;
-  return verifiedAttachment(row);
+  if (!row || !ALLOWED_IMAGE_TYPES.has(row.media_type) || !Buffer.isBuffer(row.data)) return null;
+  if (row.data.length !== row.size_bytes || row.data.length > ONE_ATTACHMENT_LIMITS.maxImageBytes) return null;
+  const digest = createHash("sha256").update(row.data).digest("hex");
+  if (digest !== row.sha256) return null;
+  return { mediaType: row.media_type, bytes: row.data, size: row.size_bytes, sha256: row.sha256 };
 }
 
 /**
- * Mobile may read bytes only through the exact transcript binding it already
- * received. Requiring chat + message + attachment prevents a valid opaque
- * attachment id from becoming an ambient cross-conversation capability.
+ * Mobile may read an image only through the exact durable transcript binding
+ * it already received. Requiring all three identities prevents an attachment
+ * UUID from becoming an ambient file capability.
  */
-export function readChatMessageAttachmentForMobile(input: {
+export function readBoundChatMessageAttachment(input: {
   chatId: string;
   messageId: string;
   attachmentId: string;
-}): VerifiedAttachment | null {
+}): { mediaType: string; bytes: Buffer; size: number; sha256: string } | null {
   if (
-    typeof input.chatId !== "string"
-    || input.chatId.length < 1
-    || input.chatId.length > 256
-    || /[\u0000-\u001f]/.test(input.chatId)
+    !ATTACHMENT_ID_RE.test(input.attachmentId)
     || !ATTACHMENT_ID_RE.test(input.messageId)
-    || !ATTACHMENT_ID_RE.test(input.attachmentId)
+    || !input.chatId
+    || input.chatId.length > 256
   ) return null;
   const row = getDb().prepare(
     `SELECT a.id, a.message_id, a.media_type, a.size_bytes, a.sha256, a.data
        FROM chat_message_attachments a
        JOIN chat_messages m ON m.id = a.message_id AND m.chat_id = a.chat_id
-      WHERE a.id = ? AND a.message_id = ? AND a.chat_id = ?
-      LIMIT 1`,
+      WHERE a.id = ? AND a.message_id = ? AND a.chat_id = ?`,
   ).get(input.attachmentId, input.messageId, input.chatId) as AttachmentRow | undefined;
-  return verifiedAttachment(row);
+  if (!row || !ALLOWED_IMAGE_TYPES.has(row.media_type) || !Buffer.isBuffer(row.data)) return null;
+  if (row.data.length !== row.size_bytes || row.data.length > ONE_ATTACHMENT_LIMITS.maxImageBytes) return null;
+  const digest = createHash("sha256").update(row.data).digest("hex");
+  if (digest !== row.sha256) return null;
+  return { mediaType: row.media_type, bytes: row.data, size: row.size_bytes, sha256: row.sha256 };
 }

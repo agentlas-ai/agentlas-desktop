@@ -7,7 +7,6 @@
  * 돌려주는 아주 작은 스크립트 하나. 판단 자체는 shared의 `brokerDecision`이 하고
  * 스크립트는 stdin/stdout만 옮긴다 — 판단을 두 벌 쓰면 반드시 갈라진다.
  */
-import { app } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -55,7 +54,7 @@ function brokerDir(runId: string, nodeId: string): string {
 
 /** 훅 스크립트의 위치. 개발(dist 미빌드 아님)과 패키지 모두 같은 경로 규칙을 쓴다. */
 export function brokerHookScriptPath(): string {
-  return path.join(app.getAppPath(), "dist", "electron", "workflow", "tool-broker-hook.js");
+  return path.join(__dirname, "tool-broker-hook.js");
 }
 
 /**

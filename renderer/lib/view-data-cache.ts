@@ -10,6 +10,10 @@ type CacheEntry<T> = {
 };
 
 const entries = new Map<string, CacheEntry<unknown>>();
+// Invalidating a pending read removes it from the map, but its promise still
+// settles later. Keep an epoch so an old response cannot repopulate the cache
+// after a runtime/store change has already requested fresh data.
+let invalidationEpoch = 0;
 
 export function readViewData<T>(key: string): { value: T; updatedAt: number } | null {
   const entry = entries.get(key) as CacheEntry<T> | undefined;
@@ -33,12 +37,23 @@ export async function loadViewData<T>(
   }
   if (current?.pending) return current.pending;
 
-  const pending = loader().then(
-    (value) => writeViewData(key, value),
+  const requestEpoch = invalidationEpoch;
+  let pending!: Promise<T>;
+  pending = loader().then(
+    (value) => {
+      const latest = entries.get(key) as CacheEntry<T> | undefined;
+      // Return the value to the original caller, but never let a stale
+      // response overwrite the newer cache generation.
+      if (requestEpoch !== invalidationEpoch || latest?.pending !== pending) return value;
+      return writeViewData(key, value);
+    },
     (error) => {
       const latest = entries.get(key) as CacheEntry<T> | undefined;
-      if (latest?.value !== undefined) entries.set(key, { value: latest.value, updatedAt: latest.updatedAt });
-      else entries.delete(key);
+      // Do not delete a replacement request that started after this one.
+      if (latest?.pending === pending) {
+        if (latest.value !== undefined) entries.set(key, { value: latest.value, updatedAt: latest.updatedAt });
+        else entries.delete(key);
+      }
       throw error;
     },
   );
@@ -51,6 +66,7 @@ export async function loadViewData<T>(
 }
 
 export function invalidateViewData(prefix: string): void {
+  invalidationEpoch += 1;
   for (const key of entries.keys()) if (key.startsWith(prefix)) entries.delete(key);
 }
 
@@ -60,6 +76,7 @@ const STORE_ENTITY_TO_VIEW_PREFIXES: Record<string, string[]> = {
   agent: ["dashboard.team"],
   firm: ["dashboard.firms", "dashboard.team"],
   project: ["dashboard.projects", "dashboard.tasks"],
+  runtime: ["dashboard.runtimes", "dashboard.runtime-role-pool"],
 };
 
 /** Main의 store:changed 영수증을 화면 스냅샷 캐시에도 동일하게 적용한다. */

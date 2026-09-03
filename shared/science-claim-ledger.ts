@@ -299,8 +299,76 @@ export interface PrepareScienceClaimLedgerContextResult {
   sentenceCount: number;
   citationSnapshots: Array<{ citationId: string; citationVersion: number; contentSha256: string }>;
   evidenceSpanSnapshots: Array<{ evidenceSpanId: string; evidenceSpanVersion: number; contentSha256: string }>;
-  validationReceiptSnapshots: Array<{ validationReceiptId: string; validationReceiptVersion: number; contentSha256: string; status: "passed" | "failed" }>;
+  validationReceiptSnapshots: Array<{
+    validationReceiptId: string;
+    validationReceiptVersion: number;
+    contentSha256: string;
+    artifactId: string;
+    artifactVersion: number;
+    artifactContentSha256: string;
+    status: "passed" | "failed";
+    runArtifactBinding: {
+      runArtifactBindingId: string;
+      runId: string;
+      outputId: string;
+      outputOrdinal: number;
+      outputRole: string;
+      outputSha256: string;
+    } | null;
+    manuscriptBindings: Array<{
+      ordinal: number;
+      role: "claim" | "citation" | "figure" | "table" | "supplement";
+      locator: string;
+      captureId: string;
+    }>;
+  }>;
+  /**
+   * The manuscript's sentences, as the store segmented them.
+   *
+   * A caller has to decide what each sentence asserts, and it cannot do that from a count. The
+   * store's own segmentation is the only one the publication gate accepts, so returning the
+   * sentences is what makes the decision possible rather than a guess at how the text was split.
+   */
+  sentences: ScienceManuscriptSentenceSnapshot[];
   replayed: boolean;
+}
+
+/**
+ * One sentence's classification, as a caller states it.
+ *
+ * This is the only thing a caller has to decide. Everything hash-shaped -- the locator, the
+ * evidence atoms, each claim record, the manifest -- is sealed by the store from the manuscript
+ * snapshot it already holds. Requiring a caller to emit canonical-JSON SHA-256s was not a strict
+ * integrity design; it was an unreachable one, and it left the claim ledger with no producer
+ * outside a test fixture, which in turn left every study unable to pass evidence reconciliation.
+ */
+export interface ScienceClaimSentenceClassification {
+  /** `id` of a sentence returned by the claim context. */
+  sentenceId: string;
+  claimClass: ScienceClaimClass;
+  status: ScienceClaimStatus;
+  /** Citations that support this sentence. Each must be one the claim context snapshotted. */
+  evidenceCitationIds?: string[];
+  /** Exact evidence assessments made by the caller over host-snapshotted records. */
+  evidenceAssessments?: Array<{
+    citationId: string;
+    validationReceiptId?: string | null;
+    direction: ScienceEvidenceDirection;
+    relevance: number;
+    assessmentConfidence: number;
+  }>;
+}
+
+export interface SealScienceClaimLedgerInput {
+  requestId: string;
+  projectId: string;
+  manuscriptId: string;
+  expectedManuscriptVersion: number;
+  expectedManuscriptContentSha256: string;
+  citationIds: string[];
+  validationReceiptIds: string[];
+  /** One explicit decision for every canonical manuscript sentence. */
+  classifications: ScienceClaimSentenceClassification[];
 }
 
 export interface CreateScienceClaimLedgerInput {

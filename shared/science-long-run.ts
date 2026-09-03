@@ -30,6 +30,7 @@ export interface ScienceLoopLongRunProjection {
   waitingForDecision?: boolean;
   verifying?: boolean;
   completionReceiptSetSha256?: string | null;
+  /** Criterion-specific receipts copied from canonical Science provenance. */
   criterionEvidence?: readonly {
     criterionIndex: number;
     receiptId: string;

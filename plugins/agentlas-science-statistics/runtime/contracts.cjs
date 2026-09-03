@@ -1,6 +1,6 @@
 "use strict";
 
-const { LIMITS, REQUEST_SCHEMA } = require("./engine.cjs");
+const { LIMITS, REQUEST_SCHEMA, METHOD_REGISTRY } = require("./engine.cjs");
 
 const numberVector = (minimum = 2, binary = false) => ({
   type: "array",
@@ -294,6 +294,11 @@ const REQUEST_INPUT_SCHEMA = Object.freeze({
       outcomeLabel: label,
       groupLabel: label,
     }, ["y", "groups"]), ["confidenceLevel", "fitMethod", "intercept", "timeoutMs", "maxIterations", "tolerance"]),
+    ...METHOD_REGISTRY.definitions.map((definition) => {
+      const entry = variant(definition.method, definition.dataSchema, definition.optionKeys);
+      for (const [key, spec] of Object.entries(definition.customOptions)) entry.properties.options.properties[key] = spec.schema;
+      return entry;
+    }),
   ],
 });
 

@@ -11,7 +11,6 @@ import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { app } from "electron";
 import { ensureDefaultMcpPluginsInstalled } from "./defaults";
 import { listInstalledServers } from "./registry";
 import { readEnvVar } from "../secrets/vault";

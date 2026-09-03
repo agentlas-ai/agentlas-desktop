@@ -174,6 +174,7 @@ function isValidRuntimeIdentity(identity: InstallIdentity): boolean {
       && !identity.updatesEnabled
       && identity.userDataOverride === null;
   }
+  if (identity.channel !== "qa") return false;
   return identity.appName === QA_INSTALL_IDENTITY.appName
     && identity.userDataNamespace === QA_INSTALL_IDENTITY.userDataNamespace
     && identity.keychainService === QA_INSTALL_IDENTITY.keychainService
@@ -205,6 +206,57 @@ export function configureInstallIdentity(identity: InstallIdentity): void {
 /** Returns null instead of silently choosing an identity for a packaged app. */
 export function configuredIdentity(): InstallIdentity | null {
   return configuredInstallIdentity;
+}
+
+/**
+ * The headless daemon is an Electron child process, so it cannot read the
+ * packaged app metadata through `app.getAppPath()`. Desktop therefore passes
+ * the identity it already resolved at startup over the private child
+ * environment. Keep the payload small, explicit, and independently checked
+ * before the daemon touches protected storage.
+ */
+export function serializeInstallIdentity(identity: InstallIdentity): string {
+  if (!isValidRuntimeIdentity(identity)) {
+    throw new InstallIdentityError("cannot serialize an invalid runtime identity");
+  }
+  return JSON.stringify(identity);
+}
+
+export function deserializeInstallIdentity(raw: string): InstallIdentity {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new InstallIdentityError("daemon identity payload is not valid JSON");
+  }
+  if (!isRecord(parsed)) {
+    throw new InstallIdentityError("daemon identity payload is not an object");
+  }
+  const expectedKeys = [
+    "appName",
+    "channel",
+    "keychainService",
+    "updatesEnabled",
+    "userDataNamespace",
+    "userDataOverride",
+  ].sort();
+  const actualKeys = Object.keys(parsed).sort();
+  if (actualKeys.length !== expectedKeys.length || actualKeys.some((key, index) => key !== expectedKeys[index])) {
+    throw new InstallIdentityError("daemon identity payload has unexpected fields");
+  }
+
+  const identity = {
+    channel: parsed.channel,
+    appName: parsed.appName,
+    userDataNamespace: parsed.userDataNamespace,
+    keychainService: parsed.keychainService,
+    updatesEnabled: parsed.updatesEnabled,
+    userDataOverride: parsed.userDataOverride,
+  } as InstallIdentity;
+  if (!isValidRuntimeIdentity(identity)) {
+    throw new InstallIdentityError("daemon identity payload failed the immutable contract");
+  }
+  return Object.freeze({ ...identity });
 }
 
 export function requireConfiguredInstallIdentity(): InstallIdentity {

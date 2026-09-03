@@ -452,7 +452,7 @@ export function OneOrgChart({
           onOpenOne();
         }}
       >
-        <OneAgentPortrait status="quiet" label="Agentlas One" size="medium" tone={oneAvatarIcon?.trim() || "purple"} />
+        <OneAgentPortrait status="quiet" label="Agentlas One" size="medium" tone={oneAvatarIcon?.trim() || "character:orange-dino"} />
         <div className={styles.rowCopy}><strong>One</strong><span>{locale === "ko" ? "CEO 오케스트레이터 · 항상 켜짐" : "CEO orchestrator · Always on"}</span></div>
         <span className={styles.badge}>CEO</span>
         {onEditOne && <button

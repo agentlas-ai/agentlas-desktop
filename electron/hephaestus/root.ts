@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { app } from "electron";
+import { optionalElectronAppPath } from "../runtime-paths";
 
 type RuntimeCandidate = {
   root: string;
@@ -214,11 +214,8 @@ export function hephaestusRootDetail(
     { root: path.join(os.homedir(), ".agentlas", "runtime", "current"), kind: "managed" },
   ];
   if (process.resourcesPath) paths.push({ root: path.join(process.resourcesPath, "Hephaestus"), kind: "bundled" });
-  try {
-    paths.push({ root: path.join(app.getAppPath(), "Hephaestus"), kind: "bundled" });
-  } catch {
-    // Electron app path is unavailable in some isolated tests.
-  }
+  const appPath = optionalElectronAppPath();
+  if (appPath) paths.push({ root: path.join(appPath, "Hephaestus"), kind: "bundled" });
   paths.push({ root: path.join(__dirname, "..", "..", "..", "Hephaestus"), kind: "bundled" });
   paths.push({ root: path.join(__dirname, "..", "..", "Hephaestus"), kind: "bundled" });
   try {

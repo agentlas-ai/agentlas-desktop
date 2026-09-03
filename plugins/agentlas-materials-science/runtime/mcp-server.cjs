@@ -3,7 +3,7 @@
 
 const readline = require("node:readline");
 const toolCatalog = require("../schemas/tools.json");
-const { analyzeLatticeMetrics, createMaterialsScienceClient, MaterialsScienceError } = require("./materials-science.cjs");
+const { PLUGIN_VERSION, analyzeLatticeMetrics, createMaterialsScienceClient, MaterialsScienceError } = require("./materials-science.cjs");
 
 const client = createMaterialsScienceClient();
 
@@ -25,7 +25,7 @@ async function callTool(name, args) {
 
 async function handle(message) {
   if (message.method === "initialize") {
-    return { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "agentlas-materials-science", version: "0.2.0" } };
+    return { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "agentlas-materials-science", version: PLUGIN_VERSION } };
   }
   if (message.method === "tools/list") return { tools: toolCatalog.tools };
   if (message.method === "tools/call") return callTool(message.params?.name, message.params?.arguments ?? {});

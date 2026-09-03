@@ -2,7 +2,7 @@
 
 const { createHash } = require("node:crypto");
 
-const PLUGIN_VERSION = "0.5.0";
+const PLUGIN_VERSION = "0.6.0";
 const USGS_ORIGIN = "https://earthquake.usgs.gov";
 const USGS_QUERY_PATH = "/fdsnws/event/1/query";
 const USGS_ENDPOINT = `${USGS_ORIGIN}${USGS_QUERY_PATH}`;
@@ -1709,4 +1709,33 @@ module.exports = {
   normalizeUsgsGeoJson,
   sha256,
   stableStringify,
+  // Internal helpers shared with the analysis modules (earth-seismicity, earth-hydrology,
+  // earth-geochemistry, earth-spatial). They are exported so the modules can reuse the exact
+  // same validation, receipt, and Omori–Utsu fitting code instead of re-implementing it.
+  LOG10_E,
+  MIN_GUTENBERG_RICHTER_EVENTS,
+  NORMAL_CRITICAL_VALUES,
+  contentReceipt,
+  exactObject,
+  finite,
+  fitBoundedOmoriUtsu,
+  integer,
+  isoInstant,
+  normalizeEventId,
+  optionalFinite,
+  optionalInteger,
+  optionalText,
+  rounded,
+  text,
+  validateGutenbergRichterCatalog,
 };
+
+// Analysis modules are attached after module.exports exists so their lazy requires of this
+// file resolve to the fully initialised export object (no partial-module cycle).
+Object.assign(
+  module.exports,
+  require("./earth-seismicity.cjs"),
+  require("./earth-hydrology.cjs"),
+  require("./earth-geochemistry.cjs"),
+  require("./earth-spatial.cjs"),
+);

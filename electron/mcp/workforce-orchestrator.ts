@@ -24,6 +24,7 @@ export const WORKFORCE_SOURCE_SCOPE = "network";
 const WORKFORCE_HUB_SOURCE_SCOPE = "hub";
 export const WORKFORCE_NETWORK_SOURCES = ["local", "cloud", "hub"] as const;
 const WORKFORCE_HUB_SOURCES = ["hub"] as const;
+const WORKFORCE_SELECTION_REASON_CODES = new Set<string>(workforceProtocolContract.selectionReasonCodes);
 /** Federation never reranks; Core pins this and the host must not widen it. */
 export const WORKFORCE_FEDERATION_ORDERING_POLICY = "canonical_identity_no_rerank";
 export const WORKFORCE_FEDERATION_RESULT_SCHEMA = FEDERATION_RESULT_SCHEMA;
@@ -166,6 +167,7 @@ const SUCCEEDED_SOURCE_RECEIPT_KEYS = [
 const FAILED_SOURCE_RECEIPT_KEYS = [
   "source", "status", "failureCode", "observedAt", "receiptDigest",
 ] as const;
+const SOURCE_RECEIPT_OPTIONAL_KEYS = ["attemptCount"] as const;
 const CANDIDATE_PROVENANCE_KEYS = [
   "slotId", "agentDefinitionId", "selectedAgentReleaseId", "selectedSource",
   "resolution", "appearances",
@@ -191,7 +193,9 @@ const CANDIDATE_SEMANTIC_KEYS = [
   "summaries", "roles", "skills", "toolCapabilities", "consumes", "produces",
   "authorities", "runtimes", "languages",
 ] as const;
-const CANDIDATE_SEMANTIC_OPTIONAL_KEYS = ["knowledge", "modalities"] as const;
+const CANDIDATE_SEMANTIC_OPTIONAL_KEYS = [
+  "knowledge", "modalities", "forbiddenAuthorities",
+] as const;
 const CANDIDATE_OPERATIONAL_KEYS = ["callable", "installable"] as const;
 const CANDIDATE_OPERATIONAL_OPTIONAL_KEYS = ["unavailableReasons"] as const;
 const SOURCE_PIN_KEYS = [
@@ -203,6 +207,9 @@ const SOURCE_PIN_KEYS = [
 const FEDERATED_PREPARATION_KEYS = workforceProtocolContract.prepareResponse.requiredFields;
 const LEVELED_CONCEPT_KEYS = ["concept", "level"] as const;
 const PREPARATION_KEYS = workforceProtocolContract.prepareResponse.executionPlanRequiredFields;
+const PREPARATION_LOCAL_EXTENSION_KEYS = new Set<string>(
+  workforceProtocolContract.prepareResponse.localExtensionFields,
+);
 const EXECUTION_BUNDLE_KEYS = [
   "slotId", "agentDefinitionId", "agentReleaseId", "releaseVersion", "packageHash",
   "contentDigest", "entityKind", "directiveBundle", "permissionPolicy",
@@ -1661,6 +1668,9 @@ export function validateCandidateSet(
         requireIds(semantic.produces, "candidate semanticSnapshot.produces");
       }
       requireIds(semantic.authorities, "candidate semanticSnapshot.authorities");
+      if (Object.prototype.hasOwnProperty.call(semantic, "forbiddenAuthorities")) {
+        requireIds(semantic.forbiddenAuthorities, "candidate semanticSnapshot.forbiddenAuthorities");
+      }
       requireStrings(semantic.runtimes, "candidate semanticSnapshot.runtimes");
       requireStrings(semantic.languages, "candidate semanticSnapshot.languages");
       if (Object.prototype.hasOwnProperty.call(semantic, "modalities")) {
@@ -1864,9 +1874,18 @@ export function validateFederationSearchResult(
   let hubReceipt: JsonObject | null = null;
   if (sourcePolicy === "hub-required") {
     const receipt = receipts[0];
-    const hasExactKeys = (required: readonly string[]): boolean => (
-      Object.keys(receipt).length === required.length &&
-      required.every((key) => Object.prototype.hasOwnProperty.call(receipt, key))
+    const hasExactKeys = (required: readonly string[]): boolean => {
+      const allowed = new Set([...required, ...SOURCE_RECEIPT_OPTIONAL_KEYS]);
+      return required.every((key) => Object.prototype.hasOwnProperty.call(receipt, key)) &&
+        Object.keys(receipt).every((key) => allowed.has(key));
+    };
+    const hasValidAttemptCount = (): boolean => (
+      !Object.prototype.hasOwnProperty.call(receipt, "attemptCount") ||
+      (
+        Number.isInteger(receipt.attemptCount) &&
+        Number(receipt.attemptCount) >= 0 &&
+        Number(receipt.attemptCount) <= 2
+      )
     );
     const hasValidReceiptDigest = (): boolean => {
       if (typeof receipt.receiptDigest !== "string" || !SHA256_RE.test(receipt.receiptDigest)) return false;
@@ -1889,6 +1908,7 @@ export function validateFederationSearchResult(
       if (
         !hasExactKeys(FAILED_SOURCE_RECEIPT_KEYS) ||
         !WORKFORCE_SOURCE_FAILURE_CODES.has(failureCode) ||
+        !hasValidAttemptCount() ||
         !timestampValid ||
         !hasValidReceiptDigest()
       ) {
@@ -1910,6 +1930,7 @@ export function validateFederationSearchResult(
     if (
       receipt.status !== "succeeded" ||
       !hasExactKeys(SUCCEEDED_SOURCE_RECEIPT_KEYS) ||
+      !hasValidAttemptCount() ||
       typeof receipt.selectionSessionId !== "string" || !ID_RE.test(receipt.selectionSessionId) ||
       typeof receipt.candidateSetDigest !== "string" || !SHA256_RE.test(receipt.candidateSetDigest) ||
       !Number.isInteger(receipt.slotCount) || Number(receipt.slotCount) < 0 ||
@@ -2070,6 +2091,7 @@ export function validateLeaderSelection(
   }
   const expansionSlotIds = requireIds(selection.requestExpansionForSlots, "selection requestExpansionForSlots");
   const pairs = candidatePairs(candidateSet);
+  const candidates = candidateRows(candidateSet);
   const orderSlots = new Map(arrayValue(workOrder.roleSlots).map((raw) => {
     const slot = objectValue(raw, "role slot");
     return [requireId(slot.slotId, "slotId"), slot] as const;
@@ -2100,8 +2122,30 @@ export function validateLeaderSelection(
     const slotReleases = releasesBySlot.get(slotId) ?? new Set<string>();
     slotReleases.add(releaseId);
     releasesBySlot.set(slotId, slotReleases);
-    if (requireIds(assignment.reasonCodes, `assignment ${slotId}/${releaseId}.reasonCodes`, 16).length < 1) {
+    const reasonCodes = requireIds(assignment.reasonCodes, `assignment ${slotId}/${releaseId}.reasonCodes`, 16);
+    if (reasonCodes.length < 1) {
       throw new Error(`Assignment ${slotId}/${releaseId} is missing reason codes.`);
+    }
+    const candidate = candidates.get(key);
+    if (!candidate) {
+      throw new NonRepairableWorkforceDecisionError(
+        "workforce_selection_outside_candidate_set",
+        "Host LLM selected a release outside the candidate set.",
+      );
+    }
+    const allowedReasonCodes = new Set<string>([
+      ...WORKFORCE_SELECTION_REASON_CODES,
+      `fit:${slotId}`,
+      ...requireIds(candidate.fitEvidence, `candidate ${slotId}/${releaseId}.fitEvidence`, 256),
+      ...requireIds(candidate.qualificationEvidence, `candidate ${slotId}/${releaseId}.qualificationEvidence`, 256),
+      ...requireIds(candidate.optionalGaps, `candidate ${slotId}/${releaseId}.optionalGaps`, 256),
+    ]);
+    const invalidReasonCode = reasonCodes.find((reasonCode) => !allowedReasonCodes.has(reasonCode));
+    if (invalidReasonCode) {
+      throw new RepairableWorkforceDecisionError(
+        "selection_invalid",
+        `Assignment ${slotId}/${releaseId} uses a non-canonical reason code. Use an exact supplied candidate evidence code, fit:${slotId}, or a public reason code from the selection contract.`,
+      );
     }
   }
   for (const [slotId, slot] of orderSlots) {
@@ -2494,8 +2538,42 @@ export function validateExecutionPreparation(
   const goalBinding = receivedWrapper.goalBinding && typeof receivedWrapper.goalBinding === "object"
     ? receivedWrapper.goalBinding as JsonObject
     : null;
+  const localContextSlice = receivedWrapper.localContextSlice;
+  const localContextBoundary = receivedWrapper.localContextBoundary;
+  const localContextSliceStatus = receivedWrapper.localContextSliceStatus;
+  for (const key of Object.keys(receivedWrapper)) {
+    if (!FEDERATED_PREPARATION_KEYS.includes(key) && !PREPARATION_LOCAL_EXTENSION_KEYS.has(key)) {
+      throw new Error(`federated execution preparation contains an unknown field: ${key}`);
+    }
+  }
+  if (localContextSlice != null) {
+    objectValue(localContextSlice, "local context slice");
+    const boundary = objectValue(localContextBoundary, "local context boundary");
+    assertExactHubKeys(
+      boundary,
+      ["networkTransfer", "scope", "inheritance"],
+      "local context boundary",
+    );
+    if (
+      boundary.networkTransfer !== "denied" ||
+      boundary.scope !== "project-local" ||
+      boundary.inheritance !== "all-selected-workers"
+    ) {
+      throw new Error("Local context boundary does not preserve the project-only no-transfer contract.");
+    }
+    if (localContextSliceStatus != null) {
+      throw new Error("Federated preparation cannot contain both a local context slice and unavailable status.");
+    }
+  } else {
+    if (localContextBoundary != null) {
+      throw new Error("Federated preparation has a local context boundary without a context slice.");
+    }
+    if (localContextSliceStatus != null && localContextSliceStatus !== "unavailable") {
+      throw new Error("Federated preparation has an unsupported local context status.");
+    }
+  }
   const wrapper = Object.fromEntries(
-    Object.entries(receivedWrapper).filter(([key]) => key !== "goalBinding"),
+    Object.entries(receivedWrapper).filter(([key]) => !PREPARATION_LOCAL_EXTENSION_KEYS.has(key)),
   ) as JsonObject;
   assertExactHubKeys(wrapper, FEDERATED_PREPARATION_KEYS, "federated execution preparation");
   if (wrapper.schemaVersion !== FEDERATED_PREPARATION_SCHEMA) {
@@ -2839,7 +2917,7 @@ function workOrderExactShape(workOrderId: string): string {
 }
 
 function selectionExactShape(modelId: string, runtimeId: string): string {
-  return `${SELECTION_HEADING}\n\`\`\`json\n{"schemaVersion":"${SELECTION_SCHEMA}","selectionSessionId":"<copy>","candidateSetDigest":"<copy>","decisionAuthor":{"kind":"host_llm","modelId":"${modelId}","runtimeId":"${runtimeId}"},"assignments":[{"slotId":"<exact slot>","agentReleaseId":"<exact candidate release>","reasonCodes":["fit:task-specific"]}],"edges":[],"alternativesConsidered":["<exact non-selected candidate release>"],"requestExpansionForSlots":[]}\n\`\`\``;
+  return `${SELECTION_HEADING}\n\`\`\`json\n{"schemaVersion":"${SELECTION_SCHEMA}","selectionSessionId":"<copy>","candidateSetDigest":"<copy>","decisionAuthor":{"kind":"host_llm","modelId":"${modelId}","runtimeId":"${runtimeId}"},"assignments":[{"slotId":"<exact slot>","agentReleaseId":"<exact candidate release>","reasonCodes":["reason:host-semantic-judgment"]}],"edges":[],"alternativesConsidered":["<exact non-selected candidate release>"],"requestExpansionForSlots":[]}\n\`\`\``;
 }
 
 function workOrderSchemaRequirements(workOrderId: string): string[] {
@@ -2919,6 +2997,7 @@ function selectionSystemPrompt(modelId: string, runtimeId: string): string {
     "Use each numbered candidate's summary, fitEvidence, semanticSnapshot counts and optionalGaps. Consider at least one non-selected exact release when available.",
     "Fill every required slot to exact cardinality unless that exact slot is listed in requestExpansionForSlots. An expansion-requested slot may be unfilled or partially filled because execution stops; every non-requested required slot must remain exactly filled and no slot may exceed cardinality. requestExpansionForSlots is exceptional: use it only when the available hard-eligible candidates can fill cardinality but their supplied semantic content shows true inability to execute that slot's responsibility. Do not request expansion because selectionPolicy.minimumCandidatesPerSlot is unmet while cardinality is filled, because of optional preference gaps, or merely to get more choices. Otherwise author requestExpansionForSlots as [].",
     "The response must include schemaVersion, selectionSessionId, candidateSetDigest, decisionAuthor, assignments, edges, and alternativesConsidered. assignments must contain 1 through 64 items; every assignment must include an exact slotId, an exact candidate agentReleaseId, and at least one canonical reasonCodes item.",
+    `Each reasonCodes item must be exactly one of these public finite codes: ${[...WORKFORCE_SELECTION_REASON_CODES].join(", ")}; or fit:<the assignment's exact slotId>; or an exact string copied from that selected candidate's fitEvidence, qualificationEvidence, or optionalGaps. Never invent, translate, summarize, or generalize a reason code.`,
     "decisionAuthor.kind must be exactly host_llm.",
     `edges may be empty. Every nonempty edge item must include fromSlot, toSlot, relation, and artifactKinds; artifactKinds must be an array of canonical IDs and may be empty. fromSlot and toSlot must be selected exact slot IDs; relation must be exactly one of: ${WORKFORCE_RELATION_ENUM}. Do not translate, snake-case, or invent relation IDs.`,
     "alternativesConsidered must be an array of exact releases from the candidate set. Keep requestExpansionForSlots empty when every required post has semantically capable candidates; a nonempty array intentionally stops execution and requests a new candidate set instead of triggering schema repair.",
@@ -3402,6 +3481,14 @@ function candidateSearchArgs(
 ): JsonObject {
   return {
     workOrder,
+    // Desktop validates the complete candidate cards and canonical federation
+    // digest locally. Core's default MCP response is a bounded shortlist
+    // projection (`menu.v3-shortlist`) intended for an interactive host that
+    // will call workforce.expand_candidates before deciding. This
+    // orchestrator has no such shortlist phase, so request the authoritative
+    // self-contained response instead of rejecting Core's projected menu as a
+    // stale schema.
+    fullDossier: true,
     sourceScope: sourcePolicy === "hub-required"
       ? WORKFORCE_HUB_SOURCE_SCOPE
       : WORKFORCE_SOURCE_SCOPE,

@@ -18,6 +18,7 @@ import { abortReasonError } from "./abort-reason";
 import { listInstalledServers } from "../mcp-tools/registry";
 import { mcpConfigKey } from "../mcp-tools/mcp-config";
 import { testServerConnection, callServerToolContent } from "../mcp-tools/client";
+import { saveBrowserCaptureArtifact } from "../media/capture-artifacts";
 import type { InstalledMcpServer } from "../../shared/types";
 import { getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions";
 import {
@@ -329,8 +330,21 @@ export async function runOneToolCall(
   try {
     const result = await callServerToolContent(resolved.server, resolved.serverToolName, args, { timeoutMs: 30_000 });
     const text = result?.text ?? "";
-    events.onTool?.(call.function.name, call.function.arguments, text, call.id, false);
     const images = result?.images ?? [];
+    // ★도구가 돌려준 이미지는 모델만 보고 끝나면 안 된다 — 디스크에 정본을 남기고
+    // 산출물 경로로 알려야 사용자의 결과 레일과 채팅에 실물로 뜬다.
+    // (2026-09-03 실측: 저장하는 곳이 없어 스크린샷 요청이 산출물 0건으로 끝났다.)
+    const capturePaths = images
+      .map((image) => saveBrowserCaptureArtifact(image.mediaType, image.data))
+      .filter((filePath): filePath is string => filePath !== null);
+    events.onTool?.(
+      call.function.name,
+      call.function.arguments,
+      text,
+      call.id,
+      false,
+      capturePaths.length > 0 ? capturePaths : undefined,
+    );
     return {
       toolMessage: { role: "tool", tool_call_id: call.id, content: text.slice(0, MAX_TOOL_RESULT_CHARS) },
       visionMessage: images.length > 0

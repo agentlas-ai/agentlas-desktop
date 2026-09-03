@@ -469,8 +469,44 @@ export class ScienceEvidenceGraphService {
     }
     for (const run of runs) {
       const runNode = runNodes.get(run.id);
-      const parent = run.parentRunId ? runNodes.get(run.parentRunId) : null;
-      if (runNode && parent) addEdge(builder, { kind: "derived-from", from: runNode, to: parent, evidencePathNodeIds: [parent.id], ruleId: "research-run-parent-binding" });
+      if (!runNode) continue;
+      const bindings = this.store.getResearchRunParentBindings(projectId, run.id);
+      for (const binding of bindings) {
+        const parent = runNodes.get(binding.parentRunId);
+        // The projection has a bounded node budget. Preserve the previous
+        // behavior for a parent outside that window, but never accept a hash
+        // mismatch for a parent that is present in the projection.
+        if (!parent) continue;
+        if (parent.canonicalRef.contentSha256 !== binding.parentContentSha256) {
+          throw new Error("science-evidence-graph-run-parent-binding-invalid");
+        }
+        addEdge(builder, {
+          kind: "derived-from",
+          from: runNode,
+          to: parent,
+          evidencePathNodeIds: [parent.id],
+          ruleId: "research-run-parent-binding",
+        });
+      }
+      const sourceBindings = this.store.getResearchRunSourceBindings(projectId, run.id);
+      for (const binding of sourceBindings) {
+        const source = this.store.getSourceVersionForProject(projectId, binding.sourceId, binding.sourceVersionId);
+        const sourceNode = sourceNodes.get(binding.sourceVersionId);
+        if (!source || source.version.contentSha256 !== binding.contentSha256) {
+          throw new Error("science-evidence-graph-run-source-binding-invalid");
+        }
+        // A bounded graph may omit older source nodes, but a present node must
+        // still point to the exact bound SourceVersion rather than a current
+        // or same-URI substitute.
+        if (!sourceNode) continue;
+        addEdge(builder, {
+          kind: "uses-input",
+          from: runNode,
+          to: sourceNode,
+          evidencePathNodeIds: [sourceNode.id],
+          ruleId: "research-run-source-binding",
+        });
+      }
     }
 
     const episodes = this.store.listLoopSessions(projectId).flatMap((session) => this.store.listResearchEpisodes(projectId, session.id));
@@ -888,7 +924,20 @@ export class ScienceEvidenceGraphService {
     };
   }
 
-  private assertCanonicalGraph(graph: ScienceEvidenceGraphRevision): void {
+  /**
+   * Which nodes' pinned versions no longer match what they point at.
+   *
+   * Separated from the assertion because a WRITE and a READ need opposite things from this answer. A
+   * write must refuse: building on a graph whose pins have moved records a claim about a state that
+   * no longer exists. A read must not -- and it used to, for the whole graph, because of one node.
+   *
+   * Staleness here is not a fault, it is the normal consequence of a study progressing: a node
+   * pinned to project v1 goes stale the moment the research contract is approved, which is a
+   * required step. So the graph became permanently unreadable at the exact point every study passes
+   * through, and the director could not even see WHICH pin had moved -- the read that would have
+   * told it was the read that refused.
+   */
+  private canonicalStaleness(graph: ScienceEvidenceGraphRevision): Array<{ nodeId: string; kind: string; pinnedVersion: number | null; currentVersion: number | null }> {
     validateScienceResearchOntologyGraph(graph.nodes, graph.edges);
     const project = this.store.getProject(graph.projectId);
     if (!project) throw new Error("science-evidence-graph-project-not-found");
@@ -899,6 +948,7 @@ export class ScienceEvidenceGraphService {
     const manuscriptSentencesById = new Map([...manuscriptsByVersionId.values()]
       .flatMap((manuscript) => this.store.listManuscriptSentenceSnapshots(graph.projectId, manuscript.version.id))
       .map((sentence) => [sentence.id, sentence]));
+    const stale: Array<{ nodeId: string; kind: string; pinnedVersion: number | null; currentVersion: number | null }> = [];
     const manuscriptClaimsById = new Map([...manuscriptsByVersionId.values()].flatMap((manuscript) => {
       const claimLedger = this.store.getClaimLedgerForManuscript(graph.projectId, manuscript.id);
       return claimLedger?.manifest.claims ?? [];
@@ -946,14 +996,30 @@ export class ScienceEvidenceGraphService {
         currentVersion = ref.id === value.id && value.kind === "inference-candidate" ? 1 : null;
         currentSha256 = currentVersion ? scienceEvidenceGraphInferenceCanonicalContentSha256(value) : null;
       }
-      if (currentVersion !== ref.version || currentSha256 !== ref.contentSha256) throw new Error("science-evidence-graph-canonical-ref-stale");
+      if (currentVersion !== ref.version || currentSha256 !== ref.contentSha256) {
+        stale.push({ nodeId: value.id, kind: String(ref.kind), pinnedVersion: ref.version ?? null, currentVersion });
+      }
     }
+    return stale;
   }
 
-  get(projectId: string): { graph: ScienceEvidenceGraphRevision | null; reviews: ScienceEvidenceGraphInferenceReview[] } {
+  /** Refuses a graph whose pins have moved. For writes only: a read reports staleness instead. */
+  private assertCanonicalGraph(graph: ScienceEvidenceGraphRevision): void {
+    if (this.canonicalStaleness(graph).length) throw new Error("science-evidence-graph-canonical-ref-stale");
+  }
+
+  /**
+   * Reads the graph, and SAYS which pins have moved rather than refusing to answer.
+   *
+   * This used to throw for the whole graph when any node's pin had moved -- which happens the moment
+   * a study progresses -- so the evidence graph became unreadable at the point every study passes
+   * through, and nothing could report which node it was. Writes still refuse (see the assertion),
+   * because building on moved pins records a claim about a state that no longer exists.
+   */
+  get(projectId: string): { graph: ScienceEvidenceGraphRevision | null; reviews: ScienceEvidenceGraphInferenceReview[]; staleNodes: Array<{ nodeId: string; kind: string; pinnedVersion: number | null; currentVersion: number | null }> } {
     const graph = this.store.latestEvidenceGraphRevision(projectId);
-    if (graph) this.assertCanonicalGraph(graph);
-    return { graph, reviews: this.store.listEvidenceGraphInferenceReviews(projectId) };
+    const staleNodes = graph ? this.canonicalStaleness(graph) : [];
+    return { graph, reviews: this.store.listEvidenceGraphInferenceReviews(projectId), staleNodes };
   }
 
   refresh(input: RefreshScienceEvidenceGraphInput): RefreshScienceEvidenceGraphResult {
@@ -1203,7 +1269,10 @@ export class ScienceEvidenceGraphService {
   explainPath(projectId: string, fromNodeId: string, toNodeId: string): ScienceEvidenceGraphPathExplanation {
     const graph = this.store.latestEvidenceGraphRevision(projectId);
     if (!graph) throw new Error("science-evidence-graph-missing");
-    this.assertCanonicalGraph(graph);
+    // A read does not refuse a graph whose pins have moved -- that is the normal consequence of a
+    // study progressing, and refusing made the graph unreadable at the point every study passes
+    // through. Staleness is reported by get(), whose result is not content-hashed; this payload is,
+    // so the list is not added here rather than changing what its receipt covers.
     const nodeIds = new Set(graph.nodes.map((item) => item.id));
     if (!nodeIds.has(fromNodeId) || !nodeIds.has(toNodeId)) throw new Error("science-evidence-graph-path-node-invalid");
     const queue: Array<{ nodeId: string; nodes: string[]; edges: string[] }> = [{ nodeId: fromNodeId, nodes: [fromNodeId], edges: [] }];
@@ -1227,7 +1296,10 @@ export class ScienceEvidenceGraphService {
   boundedContext(projectId: string, query: string, limit = 40, options: ScienceEvidenceGraphBoundedContextOptions = {}): ScienceEvidenceGraphBoundedSubgraph | null {
     const graph = this.store.latestEvidenceGraphRevision(projectId);
     if (!graph) return null;
-    this.assertCanonicalGraph(graph);
+    // A read does not refuse a graph whose pins have moved -- that is the normal consequence of a
+    // study progressing, and refusing made the graph unreadable at the point every study passes
+    // through. Staleness is reported by get(), whose result is not content-hashed; this payload is,
+    // so the list is not added here rather than changing what its receipt covers.
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100
       || !options || typeof options !== "object" || Array.isArray(options)
       || Object.keys(options).some((key) => !["direction", "edgeKinds", "maxHops", "maxSeeds", "maxNodes", "maxEdges"].includes(key))) {

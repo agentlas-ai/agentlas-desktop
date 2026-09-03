@@ -57,8 +57,8 @@ export const MULTIMODAL_PROVIDERS: MultimodalProvider[] = [
     setupUrl: "https://developers.openai.com/codex",
     docsUrl: "https://developers.openai.com/codex",
     billing: "subscription",
-    summary: "Uses the locally connected Codex CLI account when available.",
-    summaryKo: "로컬에 연결된 Codex CLI 계정을 우선 사용합니다.",
+    summary: "Uses the user's logged-in Codex/OpenAI subscription runtime when available.",
+    summaryKo: "로그인된 Codex/OpenAI 구독 런타임을 우선 사용합니다.",
   },
   {
     id: "nanobanana-image",

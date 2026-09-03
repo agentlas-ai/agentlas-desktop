@@ -5,8 +5,17 @@ const readline = require("node:readline");
 const toolCatalog = require("../schemas/tools.json");
 const {
   PLUGIN_VERSION,
+  analyzeAftershockProductivity,
+  analyzeClimateTrend,
+  analyzeDroughtIndex,
+  analyzeFloodFrequency,
   analyzeGutenbergRichter,
+  analyzeIsochron,
   analyzeOmoriUtsu,
+  analyzeSeismicityBValue,
+  analyzeSpatialAutocorrelation,
+  analyzeTasClassification,
+  analyzeTidalHarmonics,
   createEarthScienceClient,
   normalizeNoaaCoopsWaterLevel,
   normalizeUsgsEventDetail,
@@ -27,6 +36,15 @@ async function callTool(name, args) {
   if (name === "search_usgs_earthquakes") return toolResult(await client.searchUsgsEarthquakes(args));
   if (name === "analyze_usgs_gutenberg_richter") return toolResult(analyzeGutenbergRichter(args));
   if (name === "analyze_usgs_omori_utsu") return toolResult(analyzeOmoriUtsu(args));
+  if (name === "analyze_usgs_seismicity_b_value") return toolResult(analyzeSeismicityBValue(args));
+  if (name === "analyze_usgs_aftershock_productivity") return toolResult(analyzeAftershockProductivity(args));
+  if (name === "analyze_tidal_harmonics") return toolResult(analyzeTidalHarmonics(args));
+  if (name === "analyze_climate_trend") return toolResult(analyzeClimateTrend(args));
+  if (name === "analyze_drought_index") return toolResult(analyzeDroughtIndex(args));
+  if (name === "analyze_flood_frequency") return toolResult(analyzeFloodFrequency(args));
+  if (name === "analyze_isochron") return toolResult(analyzeIsochron(args));
+  if (name === "classify_tas") return toolResult(analyzeTasClassification(args));
+  if (name === "analyze_spatial_autocorrelation") return toolResult(analyzeSpatialAutocorrelation(args));
   if (name === "get_usgs_event_detail") return toolResult(await client.getUsgsEventDetail(args));
   if (name === "fetch_noaa_coops_water_levels") return toolResult(await client.fetchNoaaCoopsWaterLevels(args));
   if (name === "normalize_usgs_earthquake_geojson") {

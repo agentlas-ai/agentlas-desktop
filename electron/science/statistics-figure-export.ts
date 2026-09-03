@@ -118,10 +118,6 @@ let sharpModulePromise: Promise<SharpModule> | null = null;
 
 async function getSharp(): Promise<SharpModule> {
   if (!sharpModulePromise) {
-    // sharp loads a platform-native image pipeline. Keep it out of the
-    // Electron entrypoint's synchronous import graph: figure export is an
-    // on-demand Science capability and must not hold a freshly relaunched
-    // updater before its install journal can be reconciled.
     sharpModulePromise = import("sharp").then((module) => module.default);
   }
   return sharpModulePromise;
@@ -273,19 +269,88 @@ function buildDeterministicPdf(objects: Buffer[]): Buffer {
   return Buffer.concat(chunks);
 }
 
+/**
+ * Renders one Vega spec to a journal vector, with the same sanitisation for every caller.
+ *
+ * Statistics figures are not the only figures a paper carries. A domain analysis -- a
+ * magnitude-frequency fit, a light curve, a spectrum -- also produces a `chart.vega` artifact with
+ * a `spec`, and until this was factored out only the statistics payload could reach the vector
+ * path. That left every domain figure in a manuscript as a raster while a statistics figure beside
+ * it was vector, for no reason a reader or a journal would recognise.
+ *
+ * `sourceSpecSha256` is the hash the caller vouches for, so the export still names exactly which
+ * spec it came from.
+ */
+/**
+ * Whether a spec is written in Vega-Lite rather than Vega.
+ *
+ * The `$schema` URL is the declaration to trust when it is present. When it is absent -- and some
+ * of the product's own domain specs omit it -- fall back to the top-level keys, which are
+ * disjoint between the two languages: Vega describes `marks`/`scales`/`signals`, Vega-Lite
+ * describes `mark`/`encoding`/`layer`/`facet`/`repeat`/`concat`.
+ */
+function isVegaLiteSpec(spec: unknown): boolean {
+  if (!spec || typeof spec !== "object" || Array.isArray(spec)) return false;
+  const record = spec as Record<string, unknown>;
+  const schema = typeof record.$schema === "string" ? record.$schema : "";
+  if (/\/vega-lite\//u.test(schema)) return true;
+  if (/\/schema\/vega\//u.test(schema)) return false;
+  if ("marks" in record || "signals" in record || "scales" in record) return false;
+  return ["mark", "encoding", "layer", "facet", "repeat", "concat", "vconcat", "hconcat"].some((key) => key in record);
+}
+
+/** Compiles a Vega-Lite spec to the Vega spec the renderer runs, with its warnings suppressed. */
+async function compileVegaLite(spec: unknown): Promise<unknown> {
+  const module = await dynamicImport("vega-lite") as unknown as {
+    compile?: (spec: unknown, options?: unknown) => { spec: unknown };
+    default?: { compile?: (spec: unknown, options?: unknown) => { spec: unknown } };
+  };
+  const compile = module.compile ?? module.default?.compile;
+  if (typeof compile !== "function") throw new Error("science-statistics-figure-svg-vega-lite-unavailable");
+  try {
+    // A compile warning is not a render failure -- an unused field or a default axis title change
+    // must not take the figure out of the paper -- so the logger swallows them and only a thrown
+    // error stops the export.
+    const compiled = compile(spec, { logger: { level: () => 0, warn: () => {}, info: () => {}, debug: () => {}, error: () => {} } });
+    if (!compiled?.spec || typeof compiled.spec !== "object") throw new Error("science-statistics-figure-svg-vega-lite-compile-empty");
+    return compiled.spec;
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("science-statistics-figure-svg-")) throw error;
+    throw new Error("science-statistics-figure-svg-vega-lite-compile-failed");
+  }
+}
+
+export async function renderScienceChartSvg(
+  spec: unknown,
+  sourceSpecSha256: string,
+): Promise<ScienceStatisticsFigureSvgExport> {
+  const serialized = JSON.stringify(spec);
+  if (typeof serialized !== "string") throw new Error("science-statistics-figure-svg-source-invalid");
+  return renderVegaSpecToSvg(spec, serialized, sourceSpecSha256);
+}
+
 export async function renderScienceStatisticsFigureSvg(
   value: ScienceStatisticsFigureArtifactPayload | Record<string, unknown>,
 ): Promise<ScienceStatisticsFigureSvgExport> {
   const payload = validateScienceStatisticsFigureArtifactPayload(value);
-  const serialized = JSON.stringify(payload.spec);
+  return renderVegaSpecToSvg(payload.spec, JSON.stringify(payload.spec), payload.originalSpecSha256);
+}
+
+async function renderVegaSpecToSvg(
+  spec: unknown,
+  serialized: string,
+  sourceSpecSha256: string,
+): Promise<ScienceStatisticsFigureSvgExport> {
+  const scannable = serialized.replace(/"\$schema"\s*:\s*"[^"]*"/gu, '"$schema":""');
   if (Buffer.byteLength(serialized, "utf8") > 3 * 1024 * 1024
-    || /\b(?:https?|file|data):\/\//iu.test(serialized.replaceAll("https://vega.github.io/schema/vega/v6.json", ""))) {
+    || /\b(?:https?|file|data):\/\//iu.test(scannable)) {
     throw new Error("science-statistics-figure-svg-source-invalid");
   }
   const vega = await dynamicImport("vega");
+  const runnable = isVegaLiteSpec(spec) ? await compileVegaLite(spec) : spec;
   let view: VegaViewLike | null = null;
   try {
-    view = new vega.View(vega.parse(payload.spec), { renderer: "none" }).initialize();
+    view = new vega.View(vega.parse(runnable as never), { renderer: "none" }).initialize();
     await view.runAsync();
     const svg = normalizeVegaSvgResourceIds(await view.toSVG(1));
     validateRenderedSvg(svg);
@@ -295,7 +360,7 @@ export async function renderScienceStatisticsFigureSvg(
       schema: SCIENCE_STATISTICS_FIGURE_SVG_EXPORT_SCHEMA,
       mimeType: "image/svg+xml",
       renderer: { id: "agentlas.vega", version: SCIENCE_STATISTICS_FIGURE_RENDERER_VERSION },
-      sourceSpecSha256: payload.originalSpecSha256,
+      sourceSpecSha256,
       width: Number(view.width()) >= 1 ? safeDimension(view.width(), "width") : rootDimensions.width,
       height: Number(view.height()) >= 1 ? safeDimension(view.height(), "height") : rootDimensions.height,
       byteSize,
@@ -316,6 +381,14 @@ export async function renderScienceStatisticsFigureSvg(
  * the authoritative vector asset in the run CAS and the preview only enables
  * the normal Figure Lab inspection/validation binding flow.
  */
+/**
+ * The smallest preview the publication validator accepts.
+ *
+ * Kept here so the exporter can guarantee what the validator demands rather than producing
+ * something it will refuse. If the validator's floor moves, this moves with it.
+ */
+const SCIENCE_PUBLICATION_PREVIEW_MINIMUM = Object.freeze({ width: 320, height: 200 });
+
 export async function renderScienceStatisticsFigureSvgPreviewPng(
   rendered: ScienceStatisticsFigureSvgExport,
 ): Promise<ScienceStatisticsFigureSvgPreviewPng> {
@@ -329,11 +402,18 @@ export async function renderScienceStatisticsFigureSvgPreviewPng(
     throw new Error("science-statistics-figure-vector-preview-source-invalid");
   }
   validateRenderedSvg(rendered.svg);
+  const scale = Math.min(
+    Math.max(1, Math.ceil(SCIENCE_PUBLICATION_PREVIEW_MINIMUM.width / rendered.width), Math.ceil(SCIENCE_PUBLICATION_PREVIEW_MINIMUM.height / rendered.height)),
+    // Stay inside the source-validation bounds this function already enforces on its input.
+    Math.max(1, Math.floor(Math.min(8_192 / rendered.width, 8_192 / rendered.height, Math.sqrt(16_000_000 / (rendered.width * rendered.height))))),
+  );
+  const previewWidth = rendered.width * scale;
+  const previewHeight = rendered.height * scale;
   try {
     const sharp = await getSharp();
-    const bytes = await sharp(Buffer.from(rendered.svg, "utf8"), { density: 96 })
+    const bytes = await sharp(Buffer.from(rendered.svg, "utf8"), { density: 96 * scale })
       .flatten({ background: "#ffffff" })
-      .resize({ width: rendered.width, height: rendered.height, fit: "fill", kernel: sharp.kernel.lanczos3 })
+      .resize({ width: previewWidth, height: previewHeight, fit: "fill", kernel: sharp.kernel.lanczos3 })
       .toColourspace("srgb")
       .png({ compressionLevel: 9, adaptiveFiltering: true, palette: false })
       .toBuffer();
@@ -343,8 +423,8 @@ export async function renderScienceStatisticsFigureSvgPreviewPng(
     }
     return {
       mimeType: "image/png",
-      width: rendered.width,
-      height: rendered.height,
+      width: previewWidth,
+      height: previewHeight,
       byteSize: bytes.byteLength,
       sha256: createHash("sha256").update(bytes).digest("hex"),
       dataBase64: bytes.toString("base64"),

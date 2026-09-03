@@ -14,8 +14,8 @@
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  /* 제목은 카드 좌우 패딩(9px)보다 안쪽에서 시작한다 — 선택지 글자와 같은 줄. */
-  padding: 0 9px;
+  /* 제목은 카드 안쪽 여백과 같은 흐름에서 시작한다 — 선택지 글자와 같은 줄. */
+  padding: 0 2px;
   margin-bottom: var(--ask-title-gap);
 }
 

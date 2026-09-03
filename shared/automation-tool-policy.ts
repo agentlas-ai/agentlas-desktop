@@ -28,6 +28,59 @@ function hasAny(text: string, patterns: RegExp[]): boolean {
 
 export const COMPUTER_USE_JUDGMENT_KIND = "automation-needs-human-web";
 
+const GRAPH_BROWSER_TOOL_IDS = new Set(["agentlas-browser", "playwright"]);
+const GRAPH_COMPUTER_USE_TOOL_IDS = new Set(["cua-driver"]);
+
+function graphNodesOf(graph: unknown): Array<{ type?: unknown; config?: Record<string, unknown> }> {
+  if (typeof graph === "string") {
+    try {
+      return graphNodesOf(JSON.parse(graph));
+    } catch {
+      return [];
+    }
+  }
+  if (!graph || typeof graph !== "object" || !Array.isArray((graph as { nodes?: unknown }).nodes)) return [];
+  return (graph as { nodes: Array<{ type?: unknown; config?: Record<string, unknown> }> }).nodes;
+}
+
+/**
+ * Read an explicit host binding from graph tool nodes.
+ *
+ * A graph is not a plain prompt: the canvas is where the user declares which
+ * host a step is allowed to use. Browser is the authenticated default, while
+ * an explicit Computer Use node remains an opt-in exception. If both legacy
+ * browser and CUA declarations exist, keep the authenticated browser binding
+ * because it is the only host that can carry the imported session.
+ */
+export function graphDeclaredToolMode(graph: unknown): AutomationToolMode | null {
+  const nodes = graphNodesOf(graph);
+  const declaredModes = new Set<AutomationToolMode>();
+  for (const node of nodes) {
+    if (node.type !== "tool") continue;
+    const config = node.config ?? {};
+    const explicit = typeof config.toolMode === "string" ? config.toolMode.trim() : "";
+    if (explicit === "browser" || explicit === "computer-use") declaredModes.add(explicit);
+    const catalog = typeof config.catalog === "string" ? config.catalog.trim() : "";
+    if (GRAPH_BROWSER_TOOL_IDS.has(catalog)) declaredModes.add("browser");
+    if (GRAPH_COMPUTER_USE_TOOL_IDS.has(catalog)) declaredModes.add("computer-use");
+  }
+  if (declaredModes.has("browser")) return "browser";
+  if (declaredModes.has("computer-use")) return "computer-use";
+  return null;
+}
+
+/** Whether the value is a real workflow graph rather than a legacy null field. */
+export function isWorkflowGraphValue(graph: unknown): boolean {
+  if (graph && typeof graph === "object" && Array.isArray((graph as { nodes?: unknown }).nodes)) return true;
+  if (typeof graph !== "string" || !graph.trim()) return false;
+  try {
+    const parsed = JSON.parse(graph) as { nodes?: unknown };
+    return Boolean(parsed && typeof parsed === "object" && Array.isArray(parsed.nodes));
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Whether this automation should be forced onto the slow computer-use path.
  *
@@ -88,7 +141,20 @@ export function resolveAutomationToolMode(input: {
    * 어휘에 화면 조작 capability가 생기는 날, 여기가 그것을 읽는 자리다.
    * 텍스트 판정은 그래프 없는 레거시 단일 프롬프트 전용으로 남는다.
    */
-  if (input.graph !== undefined) return "auto";
+  /*
+   * ★그래프는 Agentlas Browser를 기본 호스트로 쓴다.
+   *
+   * 그래프의 웹 단계는 평소 브라우저에서 승인한 세션 쿠키를 전용 Agentlas
+   * 프로필로 가져와야 한다. 그래프의 auto를 resident judge에 맡기면 같은
+   * 작업이 어떤 실행에서는 Playwright/CUA로 갈라지고, 로그인 세션이 없는
+   * 호스트에서 다시 시작한다. 따라서 그래프는 authenticated Browser가
+   * 기본이며, 캔버스에 명시한 Computer Use 노드만 예외로 허용한다.
+   *
+   * 그래프의 capability 어휘는 닫혀 있고(needs — graph-tool-binding.ts CAPABILITIES),
+   * tool 노드의 `catalog`/`toolMode`가 명시한 호스트만 이 기본값을 바꾼다.
+   * 이름·프롬프트에 들어간 사이트명은 호스트를 바꾸는 근거로 쓰지 않는다.
+   */
+  if (isWorkflowGraphValue(input.graph)) return graphDeclaredToolMode(input.graph) ?? "browser";
   const text = [input.name ?? "", input.promptTemplate ?? "", input.targetLabel ?? ""].join("\n");
   // Exact real-login browser intent outranks the generic social-site heuristic.
   // Otherwise a Reddit job that explicitly says "Agentlas Browser / 9222" is silently

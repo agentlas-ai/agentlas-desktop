@@ -4,8 +4,12 @@
 const readline = require("node:readline");
 const toolCatalog = require("../schemas/tools.json");
 const { AstronomyDataError, analyzeAstrometricKinematics, analyzeLightCurvePeriodicity, createAstronomyClient } = require("./astronomy.cjs");
+const { ANALYSIS_TOOLS, analysisToolCatalog, callAnalysisTool } = require("./analysis-tools.cjs");
 
 const client = createAstronomyClient();
+const ANALYSIS_TOOL_NAMES = new Set(ANALYSIS_TOOLS.map((tool) => tool.name));
+const describeIndex = toolCatalog.tools.findIndex((tool) => tool.name === "describe_astronomy_capabilities");
+const TOOL_LIST = [...toolCatalog.tools.slice(0, describeIndex), ...analysisToolCatalog(), ...toolCatalog.tools.slice(describeIndex)];
 
 function toolResult(value) {
   return { content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value };
@@ -96,6 +100,7 @@ async function callTool(name, args) {
     exactArguments(args, [], "astronomy-capabilities-input-invalid");
     return toolResult(client.describeCapabilities());
   }
+  if (ANALYSIS_TOOL_NAMES.has(name)) return toolResult(callAnalysisTool(name, args));
   throw new AstronomyDataError("astronomy-tool-not-found", `Unknown Astronomy tool: ${name}`);
 }
 
@@ -104,10 +109,10 @@ async function handle(message) {
     return {
       protocolVersion: "2024-11-05",
       capabilities: { tools: {} },
-      serverInfo: { name: "agentlas-astronomy", version: "1.2.0" },
+      serverInfo: { name: "agentlas-astronomy", version: "1.2.1" },
     };
   }
-  if (message.method === "tools/list") return { tools: toolCatalog.tools };
+  if (message.method === "tools/list") return { tools: TOOL_LIST };
   if (message.method === "tools/call") return callTool(message.params?.name, message.params?.arguments ?? {});
   if (message.method?.startsWith("notifications/")) return null;
   throw new AstronomyDataError("astronomy-method-not-found", `Unknown JSON-RPC method: ${message.method}`);

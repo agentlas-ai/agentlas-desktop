@@ -2,7 +2,7 @@
   "tools": [
     {
       "name": "search_oqmd_optimade_structures",
-      "description": "Search the anonymous OQMD OPTIMADE v1 structures endpoint by an exact set of element symbols. Returns normalized lattice/site coordinates, ordered POSCAR when representable without losing occupancy, a Vega-compatible property table, and byte-level provenance.",
+      "description": "Search the anonymous OQMD OPTIMADE v1 structures endpoint by an exact set of element symbols. Uses a three-attempt total-deadline policy, validates JSON MIME and every returned element set, and returns normalized structures plus a standalone response receipt. This direct MCP receipt is not immutable host Science persistence; use search_materials_structures in Agentlas Science when a ResearchRun, Source, and artifact must be committed.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -11,6 +11,91 @@
           "elements": { "type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": true, "items": { "type": "string", "pattern": "^[A-Z][a-z]?$", "maxLength": 2 } },
           "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 20 },
           "offset": { "type": "integer", "minimum": 0, "maximum": 10000, "default": 0 }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": ["schema", "structureCount", "structures", "table", "normalizedSha256", "query", "provenance"],
+        "properties": {
+          "schema": { "const": "agentlas.materials.oqmd-optimade/v1" },
+          "structureCount": { "type": "integer", "minimum": 0, "maximum": 50 },
+          "structures": { "type": "array", "maxItems": 50 },
+          "table": { "type": "object" },
+          "normalizedSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "query": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["elements", "limit", "offset"],
+            "properties": {
+              "elements": { "type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": true, "items": { "type": "string" } },
+              "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
+              "offset": { "type": "integer", "minimum": 0, "maximum": 10000 }
+            }
+          },
+          "provenance": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["schema", "evidenceScope", "hostPersisted", "attemptCount", "attempts", "provider", "request", "response", "retrievedAt", "license", "docsUrl", "hostPersistenceRequirement"],
+            "properties": {
+              "schema": { "const": "agentlas.materials.oqmd-retrieval/v2" },
+              "evidenceScope": { "const": "standalone-response-only" },
+              "hostPersisted": { "const": false },
+              "attemptCount": { "type": "integer", "minimum": 1, "maximum": 3 },
+              "attempts": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 3,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["attempt", "status", "contentType", "mimeType", "byteLength", "rawSha256", "bodyComplete", "retrievedAt", "retryable", "willRetry", "retryAfterMs", "errorCode"],
+                  "properties": {
+                    "attempt": { "type": "integer", "minimum": 1, "maximum": 3 },
+                    "status": { "type": ["integer", "null"], "minimum": 100, "maximum": 599 },
+                    "contentType": { "type": ["string", "null"], "minLength": 1, "maxLength": 240 },
+                    "mimeType": { "type": ["string", "null"], "minLength": 1, "maxLength": 240 },
+                    "byteLength": { "type": "integer", "minimum": 0, "maximum": 8388609 },
+                    "rawSha256": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
+                    "bodyComplete": { "type": "boolean" },
+                    "retrievedAt": { "type": "string" },
+                    "retryable": { "type": "boolean" },
+                    "willRetry": { "type": "boolean" },
+                    "retryAfterMs": { "type": ["integer", "null"], "minimum": 0, "maximum": 5000 },
+                    "errorCode": { "type": ["string", "null"], "minLength": 1, "maxLength": 160 }
+                  },
+                  "allOf": [
+                    { "if": { "properties": { "bodyComplete": { "const": true } } }, "then": { "properties": { "rawSha256": { "type": "string" } } }, "else": { "properties": { "rawSha256": { "const": null } } } },
+                    { "if": { "properties": { "willRetry": { "const": true } } }, "then": { "properties": { "retryAfterMs": { "type": "integer" } } }, "else": { "properties": { "retryAfterMs": { "const": null } } } }
+                  ]
+                }
+              },
+              "provider": { "const": "OQMD OPTIMADE" },
+              "request": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["method", "url", "descriptorSha256"],
+                "properties": {
+                  "method": { "const": "GET" },
+                  "url": { "type": "string" },
+                  "descriptorSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+                }
+              },
+              "response": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["rawSha256", "byteLength", "mimeType"],
+                "properties": {
+                  "rawSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+                  "byteLength": { "type": "integer", "minimum": 2, "maximum": 8388608 },
+                  "mimeType": { "type": "string", "enum": ["application/json", "application/vnd.api+json"] }
+                }
+              },
+              "retrievedAt": { "type": "string" },
+              "license": { "const": "CC-BY-4.0" },
+              "docsUrl": { "type": "string" },
+              "hostPersistenceRequirement": { "type": "string" }
+            }
+          }
         }
       }
     },

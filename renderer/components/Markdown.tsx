@@ -40,8 +40,6 @@ export interface LinkedFileArtifact {
   fileUrl: string;
 }
 
-const DURABLE_CHAT_IMAGE_SENTINEL = "<durable-chat-image>";
-
 export function Markdown({
   text,
   messageId,
@@ -49,8 +47,6 @@ export function Markdown({
   onOpenMedia,
   onOpenLinkedFile,
   mediaBasePaths = [],
-  allowMedia = true,
-  allowLocalMedia = true,
 }: {
   text: string;
   /** 안정적 artifact id 생성용 */
@@ -63,19 +59,11 @@ export function Markdown({
   onOpenLinkedFile?: (a: LinkedFileArtifact) => void;
   /** 상대 이미지 경로를 해석할 로컬 기준 폴더들. */
   mediaBasePaths?: string[];
-  /** User prompts remain text; only trusted result surfaces auto-render media references. */
-  allowMedia?: boolean;
-  /** Model-authored local paths are not durable results unless Main bound them. */
-  allowLocalMedia?: boolean;
 }) {
   const { t } = useT();
   const resolvedMediaBasePaths = useMemo(
     () => mediaBasePathsWithTextHints(text, mediaBasePaths),
     [text, mediaBasePaths],
-  );
-  const explicitImagePaths = useMemo(
-    () => explicitImageCanonicalPathsInText(text, resolvedMediaBasePaths),
-    [text, resolvedMediaBasePaths],
   );
   const blocks = useMemo(() => parseBlocks(text, messageId), [text, messageId]);
   return (
@@ -83,7 +71,7 @@ export function Markdown({
       {...designOutputSurfaceProps("report")}
       style={{ fontSize: 14, lineHeight: 1.65, fontFamily: "var(--design-font-sans)", overflowWrap: "anywhere" }}
     >
-      {blocks.map((b, i) => renderBlock(b, i, onOpenArtifact, t, onOpenMedia, onOpenLinkedFile, resolvedMediaBasePaths, explicitImagePaths, allowMedia, allowLocalMedia))}
+      {blocks.map((b, i) => renderBlock(b, i, onOpenArtifact, t, onOpenMedia, onOpenLinkedFile, resolvedMediaBasePaths))}
     </div>
   );
 }
@@ -98,8 +86,6 @@ export const MarkdownSegment = memo(function MarkdownSegment({
   onOpenMedia,
   onOpenLinkedFile,
   mediaBasePaths = [],
-  allowMedia = true,
-  allowLocalMedia = true,
 }: {
   text: string;
   messageId: string;
@@ -107,8 +93,6 @@ export const MarkdownSegment = memo(function MarkdownSegment({
   onOpenMedia?: (a: MediaArtifact) => void;
   onOpenLinkedFile?: (a: LinkedFileArtifact) => void;
   mediaBasePaths?: string[];
-  allowMedia?: boolean;
-  allowLocalMedia?: boolean;
 }) {
   return (
     <Markdown
@@ -118,8 +102,6 @@ export const MarkdownSegment = memo(function MarkdownSegment({
       onOpenMedia={onOpenMedia}
       onOpenLinkedFile={onOpenLinkedFile}
       mediaBasePaths={mediaBasePaths}
-      allowMedia={allowMedia}
-      allowLocalMedia={allowLocalMedia}
     />
   );
 });
@@ -134,7 +116,6 @@ export function StreamingMarkdown({
   onOpenMedia,
   onOpenLinkedFile,
   mediaBasePaths = [],
-  allowLocalMedia = true,
 }: {
   text: string;
   messageId: string;
@@ -142,7 +123,6 @@ export function StreamingMarkdown({
   onOpenMedia?: (a: MediaArtifact) => void;
   onOpenLinkedFile?: (a: LinkedFileArtifact) => void;
   mediaBasePaths?: string[];
-  allowLocalMedia?: boolean;
 }) {
   // 콜백 identity를 고정 — 부모가 매 렌더 새 함수를 넘겨도 memo 세그먼트가 깨지지 않게.
   const artifactRef = useRef(onOpenArtifact);
@@ -200,7 +180,6 @@ export function StreamingMarkdown({
           onOpenMedia={stableMedia}
           onOpenLinkedFile={stableLinkedFile}
           mediaBasePaths={mediaBasePaths}
-          allowLocalMedia={allowLocalMedia}
         />
       ))}
     </>
@@ -467,12 +446,7 @@ function renderBlock(
   onOpenMedia?: (a: MediaArtifact) => void,
   onOpenLinkedFile?: (a: LinkedFileArtifact) => void,
   mediaBasePaths: string[] = [],
-  explicitImagePaths: ReadonlySet<string> = new Set(),
-  allowMedia = true,
-  allowLocalMedia = true,
 ) {
-  const renderInlineValue = (value: string) =>
-    inline(value, onOpenMedia, onOpenLinkedFile, mediaBasePaths, explicitImagePaths, allowMedia, allowLocalMedia);
   switch (b.type) {
     case "math":
       return <MathSpan key={i} tex={b.tex} display />;
@@ -501,7 +475,7 @@ function renderBlock(
             color: "var(--ink)",
           }}
         >
-          {renderInlineValue(b.text)}
+          {inline(b.text, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
         </h1>
       );
     case "h2":
@@ -516,7 +490,7 @@ function renderBlock(
             color: "var(--ink)",
           }}
         >
-          {renderInlineValue(b.text)}
+          {inline(b.text, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
         </h2>
       );
     case "h3":
@@ -531,7 +505,7 @@ function renderBlock(
             color: "var(--ink)",
           }}
         >
-          {renderInlineValue(b.text)}
+          {inline(b.text, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
         </h3>
       );
     case "ul":
@@ -544,7 +518,7 @@ function renderBlock(
           <li key={j} style={{ marginBottom: 2 }}>
             {textLines.map((line, k) => (
               <span key={k}>
-                {renderInlineValue(line)}
+                {inline(line, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
                 {k < textLines.length - 1 ? <br /> : null}
               </span>
             ))}
@@ -556,7 +530,7 @@ function renderBlock(
                     <li key={k} style={{ marginBottom: 2 }}>
                       {childLines.map((line, l) => (
                         <span key={l}>
-                          {renderInlineValue(line)}
+                          {inline(line, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
                           {l < childLines.length - 1 ? <br /> : null}
                         </span>
                       ))}
@@ -575,7 +549,7 @@ function renderBlock(
     case "hr":
       return <hr key={i} style={{ border: 0, borderTop: "var(--hairline, 1px solid #e0e2e3)", margin: "12px 0" }} />;
     case "table":
-      return <TableBlock key={i} block={b} onOpenMedia={onOpenMedia} onOpenLinkedFile={onOpenLinkedFile} mediaBasePaths={mediaBasePaths} explicitImagePaths={explicitImagePaths} allowMedia={allowMedia} allowLocalMedia={allowLocalMedia} />;
+      return <TableBlock key={i} block={b} onOpenMedia={onOpenMedia} onOpenLinkedFile={onOpenLinkedFile} mediaBasePaths={mediaBasePaths} />;
     case "quote":
       return (
         <blockquote
@@ -591,7 +565,7 @@ function renderBlock(
           }}
         >
           {b.text.split("\n").map((line, j) => (
-            <div key={j}>{renderInlineValue(line)}</div>
+            <div key={j}>{inline(line, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}</div>
           ))}
         </blockquote>
       );
@@ -602,7 +576,7 @@ function renderBlock(
         <p key={i} style={{ margin: "6px 0" }}>
           {lines.map((line, j) => (
             <span key={j}>
-              {renderInlineValue(line)}
+              {inline(line, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
               {j < lines.length - 1 ? <br /> : null}
             </span>
           ))}
@@ -618,20 +592,12 @@ function TableBlock({
   onOpenMedia,
   onOpenLinkedFile,
   mediaBasePaths = [],
-  explicitImagePaths = new Set(),
-  allowMedia = true,
-  allowLocalMedia = true,
 }: {
   block: { type: "table"; header: string[]; align: TableAlign[]; rows: string[][] };
   onOpenMedia?: (a: MediaArtifact) => void;
   onOpenLinkedFile?: (a: LinkedFileArtifact) => void;
   mediaBasePaths?: string[];
-  explicitImagePaths?: ReadonlySet<string>;
-  allowMedia?: boolean;
-  allowLocalMedia?: boolean;
 }) {
-  const renderInlineValue = (value: string) =>
-    inline(value, onOpenMedia, onOpenLinkedFile, mediaBasePaths, explicitImagePaths, allowMedia, allowLocalMedia);
   const alignToCss = (a: TableAlign): React.CSSProperties["textAlign"] => {
     if (a === "default") return undefined;
     return a;
@@ -675,7 +641,7 @@ function TableBlock({
                   whiteSpace: "nowrap",
                 }}
                 >
-                  {renderInlineValue(h)}
+                  {inline(h, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
                 </th>
             ))}
           </tr>
@@ -702,7 +668,7 @@ function TableBlock({
                     whiteSpace: "nowrap",
                   }}
                 >
-                  {renderInlineValue(cell)}
+                  {inline(cell, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
                 </td>
               ))}
             </tr>
@@ -790,7 +756,7 @@ function CodeBlock({
         >
           {block.lang}
         </span>
-        <span style={{ fontSize: 10, color: "#66706b" }}>· {label("chatstream.lines", { count: linesCount })}</span>
+        <span style={{ fontSize: 10, color: "#8a968f" }}>· {label("chatstream.lines", { count: linesCount })}</span>
         <div style={{ flex: 1 }} />
         {onOpen && (
           <button
@@ -834,7 +800,7 @@ function CodeBlock({
             padding: "12px 12px 12px 14px",
             textAlign: "right",
             userSelect: "none",
-            color: "#66706b",
+            color: "#9aa6a0",
             fontFamily: "var(--font-mono)",
             fontSize: 12.5,
             lineHeight: 1.55,
@@ -869,19 +835,11 @@ function inline(
   onOpenMedia?: (a: MediaArtifact) => void,
   onOpenLinkedFile?: (a: LinkedFileArtifact) => void,
   mediaBasePaths: string[] = [],
-  explicitImagePaths: ReadonlySet<string> = new Set(),
-  allowMedia = true,
-  allowLocalMedia = true,
 ): React.ReactNode {
   // 토큰화 — `code` > **bold** > *italic* > [text](url) 순서대로 처리
   const out: React.ReactNode[] = [];
   let remaining = text;
   let key = 0;
-  const canRenderMediaRef = (ref: string) => allowMedia && (allowLocalMedia || !looksLikeLocalFileRef(ref));
-  const hasDurableChatImage = explicitImagePaths.has(DURABLE_CHAT_IMAGE_SENTINEL);
-  const canRenderImplicitMediaRef = (ref: string) =>
-    canRenderMediaRef(ref)
-    && (!hasDurableChatImage || /^agentlas:\/\/chat-attachment\//iu.test(ref));
 
   // matchers를 while 루프 밖으로 끌어올림 — 매 반복마다 정규식 객체를 재생성하던 비용 제거.
   // render는 key(증가)·onOpenMedia를 클로저로 참조하므로 모듈 상수가 아닌 호출당 1회만 만든다(동작 동일).
@@ -892,23 +850,12 @@ function inline(
       {
         // 이미지: ![alt](src) — http/https/data는 그대로, 로컬 경로는 agentlas://localfile로 서빙
         regex: /^!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/,
-        render: (m) => {
-          const src = m[2].trim();
-          if (!allowMedia) return m[0];
-          if (canRenderMediaRef(src)) return renderInlineImage(key++, src, m[1], onOpenMedia, mediaBasePaths);
-          return renderInlineLink(key++, m[1] || imageNameFromSrc(src, mediaBasePaths), src, onOpenLinkedFile, mediaBasePaths);
-        },
+        render: (m) => renderInlineImage(key++, m[2].trim(), m[1], onOpenMedia, mediaBasePaths),
       },
       {
         // 모델/CLI가 "created at /abs/path.png"처럼 plain path만 답해도 즉시 이미지로 보여준다.
         regex: /^((?:file:\/\/[^\s`'"<>)]*?|\/[^\s`'"<>)]*?|(?:\.{1,2}\/)?[A-Za-z0-9_. -]+(?:\/[^\s`'"<>)]*)?)\.(?:png|jpe?g|gif|webp|avif|svg))(?=$|[\s).,;:])/i,
-        render: (m) => {
-          const raw = m[1].trim();
-          if (!canRenderImplicitMediaRef(raw)) return raw;
-          const media = mediaArtifactFromImage(raw, imageNameFromSrc(raw, mediaBasePaths), mediaBasePaths);
-          if (explicitImagePaths.has(media.path || media.src)) return raw;
-          return renderInlineImage(key++, raw, media.name, onOpenMedia, mediaBasePaths);
-        },
+        render: (m) => renderInlineImage(key++, m[1].trim(), imageNameFromSrc(m[1], mediaBasePaths), onOpenMedia, mediaBasePaths),
       },
       {
         /*
@@ -939,10 +886,7 @@ function inline(
         render: (m) => {
           const codeText = m[1].trim();
           if (isImageLikePath(codeText)) {
-            const media = mediaArtifactFromImage(codeText, imageNameFromSrc(codeText, mediaBasePaths), mediaBasePaths);
-            if (canRenderImplicitMediaRef(codeText) && !explicitImagePaths.has(media.path || media.src)) {
-              return renderInlineImage(key++, codeText, media.name, onOpenMedia, mediaBasePaths);
-            }
+            return renderInlineImage(key++, codeText, imageNameFromSrc(codeText, mediaBasePaths), onOpenMedia, mediaBasePaths);
           }
           return (
             <code
@@ -979,13 +923,7 @@ function inline(
       },
       {
         regex: /^\[([^\]]+)\]\(([^)]+)\)/,
-        render: (m) => {
-          const href = cleanLinkHref(m[2]);
-          if (canRenderMediaRef(href) && isImageLikePath(href)) {
-            return renderInlineImage(key++, href, m[1], onOpenMedia, mediaBasePaths);
-          }
-          return renderInlineLink(key++, m[1], href, onOpenLinkedFile, mediaBasePaths);
-        },
+        render: (m) => renderInlineLink(key++, m[1], m[2].trim(), onOpenLinkedFile, mediaBasePaths),
       },
     ];
 
@@ -1055,15 +993,9 @@ export function firstMediaArtifactInText(text: string, mediaBasePaths: string[] 
 
 export function linkedFileArtifactsInText(text: string, mediaBasePaths: string[] = []): LinkedFileArtifact[] {
   const resolvedMediaBasePaths = mediaBasePathsWithTextHints(text, mediaBasePaths);
-  const hasDurableChatImage = /!\[[^\]]*\]\(agentlas:\/\/chat-attachment\/[0-9a-f-]+(?:\s+"[^"]*")?\)/iu.test(text);
   const out: LinkedFileArtifact[] = [];
   const seen = new Set<string>();
   for (const ref of localFileRefsFromText(text)) {
-    // Once Main has persisted an image, its opaque attachment URL is the only
-    // canonical image result. A model-authored provenance path (often repeated
-    // in inline code as "saved at ...png") must stay text, otherwise reopening
-    // the chat paints a second, broken local-file card beside the durable image.
-    if (hasDurableChatImage && isImageLikePath(ref) && !/^agentlas:\/\/chat-attachment\//iu.test(ref)) continue;
     const artifact = linkedFileArtifactFromRef(ref, "", resolvedMediaBasePaths);
     const key = artifact.path || artifact.href;
     if (seen.has(key)) continue;
@@ -1158,31 +1090,8 @@ function InlineChatImage({
 }) {
   const { locale } = useT();
   const [failed, setFailed] = useState(false);
-  const [actionState, setActionState] = useState<"idle" | "copying" | "copied" | "saving" | "saved" | "error">("idle");
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
-  const contextMenuRef = useRef<HTMLSpanElement>(null);
   const media = mediaArtifactFromImage(rawSrc, alt, mediaBasePaths);
   const { src, name } = media;
-  useEffect(() => {
-    if (!contextMenu) return;
-    const dismiss = (event: Event) => {
-      if (event instanceof PointerEvent && contextMenuRef.current?.contains(event.target as Node)) return;
-      setContextMenu(null);
-    };
-    const dismissOnKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setContextMenu(null);
-    };
-    window.addEventListener("pointerdown", dismiss, true);
-    window.addEventListener("scroll", dismiss, true);
-    window.addEventListener("blur", dismiss);
-    window.addEventListener("keydown", dismissOnKey, true);
-    return () => {
-      window.removeEventListener("pointerdown", dismiss, true);
-      window.removeEventListener("scroll", dismiss, true);
-      window.removeEventListener("blur", dismiss);
-      window.removeEventListener("keydown", dismissOnKey, true);
-    };
-  }, [contextMenu]);
   if (failed) {
     const ko = locale === "ko";
     return (
@@ -1196,9 +1105,9 @@ function InlineChatImage({
           margin: "8px 0",
           padding: "10px 12px",
           borderRadius: "var(--radius-md)",
-          border: "1px dashed #c9c5c1",
-          background: "#f7f7f6",
-          color: "#5f5c5a",
+          border: "1px dashed var(--paper-edge)",
+          background: "color-mix(in srgb, var(--paper) 88%, transparent)",
+          color: "var(--muted-deep)",
           fontSize: 12,
           lineHeight: 1.45,
           maxWidth: "100%",
@@ -1206,7 +1115,7 @@ function InlineChatImage({
       >
         <span aria-hidden="true" style={{ fontSize: 15, flexShrink: 0 }}>⚠︎</span>
         <span style={{ minWidth: 0 }}>
-          <strong style={{ display: "block", color: "#242321" }}>
+          <strong style={{ display: "block", color: "var(--ink)" }}>
             {ko ? "이미지 파일을 찾을 수 없습니다" : "Image file is missing"}
           </strong>
           <span style={{ display: "block", overflowWrap: "anywhere" }}>
@@ -1228,12 +1137,13 @@ function InlineChatImage({
         maxHeight: 420,
         borderRadius: "var(--radius-md)",
         border: "1px solid var(--paper-edge)",
-        margin: 0,
+        margin: "8px 0",
         objectFit: "contain",
       }}
     />
   );
-  const preview = !onOpenMedia ? image : (
+  if (!onOpenMedia) return image;
+  return (
     <button
       type="button"
       onClick={() => onOpenMedia(media)}
@@ -1251,115 +1161,18 @@ function InlineChatImage({
       {image}
     </button>
   );
-  const ko = locale === "ko";
-  const runAction = async (kind: "copy" | "save") => {
-    setActionState(kind === "copy" ? "copying" : "saving");
-    try {
-      const result = kind === "copy"
-        ? await window.agentlas.media.copyImage({ src, suggestedName: name })
-        : await window.agentlas.media.saveImage({ src, suggestedName: name });
-      if (result.ok) setActionState(kind === "copy" ? "copied" : "saved");
-      else if ("canceled" in result && result.canceled) setActionState("idle");
-      else setActionState("error");
-    } catch {
-      setActionState("error");
-    }
-  };
-  return (
-    <span
-      style={{
-        display: "block",
-        maxWidth: "100%",
-        margin: "8px 0",
-      }}
-    >
-      <span
-        onContextMenu={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          setContextMenu({ x: event.clientX, y: event.clientY });
-        }}
-      >
-        {preview}
-      </span>
-      <span style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, minHeight: 26 }}>
-        <button
-          type="button"
-          onClick={() => void runAction("copy")}
-          disabled={actionState === "copying" || actionState === "saving"}
-          style={{ border: "1px solid var(--paper-edge)", borderRadius: 999, background: "var(--paper)", color: "var(--ink)", padding: "4px 9px", fontSize: 11, cursor: "pointer" }}
-        >
-          {actionState === "copying" ? (ko ? "복사 중…" : "Copying…") : (ko ? "이미지 복사" : "Copy image")}
-        </button>
-        <button
-          type="button"
-          onClick={() => void runAction("save")}
-          disabled={actionState === "copying" || actionState === "saving"}
-          style={{ border: "1px solid var(--paper-edge)", borderRadius: 999, background: "var(--paper)", color: "var(--ink)", padding: "4px 9px", fontSize: 11, cursor: "pointer" }}
-        >
-          {actionState === "saving" ? (ko ? "준비 중…" : "Preparing…") : (ko ? "다운로드" : "Download")}
-        </button>
-        {actionState === "copied" || actionState === "saved" || actionState === "error" ? (
-          <span role="status" style={{ color: actionState === "error" ? "var(--danger)" : "var(--muted-deep)", fontSize: 11 }}>
-            {actionState === "copied" ? (ko ? "복사됨" : "Copied") : actionState === "saved" ? (ko ? "저장됨" : "Saved") : (ko ? "처리하지 못했습니다" : "Action failed")}
-          </span>
-        ) : null}
-      </span>
-      {contextMenu ? (
-        <span
-          ref={contextMenuRef}
-          role="menu"
-          style={{
-            position: "fixed",
-            left: contextMenu.x,
-            top: contextMenu.y,
-            zIndex: 120,
-            display: "grid",
-            minWidth: 168,
-            padding: 6,
-            borderRadius: 8,
-            border: "1px solid var(--paper-edge)",
-            background: "var(--paper)",
-            boxShadow: "0 14px 34px rgba(15, 23, 42, 0.18)",
-          }}
-        >
-          <button type="button" role="menuitem" style={inlineImageMenuItemStyle} onClick={() => { setContextMenu(null); void runAction("copy"); }}>
-            {ko ? "이미지 복사" : "Copy image"}
-          </button>
-          <button type="button" role="menuitem" style={inlineImageMenuItemStyle} onClick={() => { setContextMenu(null); void runAction("save"); }}>
-            {ko ? "다운로드" : "Download"}
-          </button>
-        </span>
-      ) : null}
-    </span>
-  );
 }
-
-const inlineImageMenuItemStyle: React.CSSProperties = {
-  border: "none",
-  borderRadius: 6,
-  background: "transparent",
-  color: "var(--ink)",
-  padding: "8px 10px",
-  textAlign: "left",
-  fontSize: 12,
-  cursor: "pointer",
-};
 
 function mediaArtifactFromImage(rawSrc: string, alt: string, mediaBasePaths: string[] = []): MediaArtifact {
   const src = normalizeImageSrc(rawSrc, mediaBasePaths);
   const paths = localPathsFromImageSrc(rawSrc, mediaBasePaths);
-  const sourceName = imageNameFromSrc(rawSrc, mediaBasePaths);
   return {
     id: `media:${src}`,
     kind: "image",
     src,
     path: paths[0],
     paths,
-    // Markdown alt text describes the picture; it is not the file name. Image
-    // actions must retain the source basename so Save As does not silently
-    // rename an existing user file to a sentence authored by the model.
-    name: sourceName === "generated image" ? (alt || sourceName) : sourceName,
+    name: alt || imageNameFromSrc(rawSrc, mediaBasePaths),
   };
 }
 
@@ -1478,10 +1291,7 @@ function looksLikeLocalFileRef(value: string): boolean {
   const cleaned = cleanImageSrcCandidate(value);
   if (!cleaned) return false;
   if (/^(https?:|data:|blob:|mailto:|tel:|#)/i.test(cleaned)) return false;
-  if (
-    /^agentlas:\/\/(?:localfile|chat-attachment)\//i.test(cleaned)
-    || cleaned.startsWith("file://")
-  ) return true;
+  if (/^agentlas:\/\/localfile\//i.test(cleaned) || cleaned.startsWith("file://")) return true;
   if (cleaned.startsWith("/") || /^[A-Za-z]:[\\/]/.test(cleaned)) return LOCAL_FILE_REF_EXT.test(cleaned);
   return LOCAL_FILE_REF_EXT.test(cleaned) && !/^[a-z][a-z0-9+.-]*:/i.test(cleaned);
 }
@@ -1489,22 +1299,8 @@ function looksLikeLocalFileRef(value: string): boolean {
 function orderedBasePathsForRef(ref: string, mediaBasePaths: string[]): string[] {
   const cleaned = ref.trim().replace(/^\.?[\\/]+/, "");
   const hasDirectory = /[\\/]/.test(cleaned);
+  if (hasDirectory) return mediaBasePaths;
   const normalized = mediaBasePaths.map((base) => base.replace(/[\\/]+$/, ""));
-  if (hasDirectory) {
-    const firstSegment = cleaned.split(/[\\/]/, 1)[0] || "";
-    const alignedParents = normalized.map((base) => {
-      const baseName = base.split(/[\\/]/).filter(Boolean).pop() || "";
-      const matches = /^[A-Za-z]:/.test(base)
-        ? baseName.toLowerCase() === firstSegment.toLowerCase()
-        : baseName === firstSegment;
-      return matches ? parentLocalPath(base) : undefined;
-    });
-    // If the answer says `output/file.png` and another absolute media reference
-    // already taught us `/cwd/output`, align the shared `output` segment once.
-    // The previous order produced `/cwd/output/output/file.png` and a false
-    // missing-image card even though `/cwd/output/file.png` existed.
-    return uniqueStrings([...alignedParents, ...normalized]);
-  }
   const descendantBases = normalized.filter((base) =>
     normalized.some((other) => base !== other && base.startsWith(`${other}/`)),
   );
@@ -1527,20 +1323,6 @@ function mediaBasePathsWithTextHints(text: string, mediaBasePaths: string[]): st
   }
   for (const ref of localFileRefsFromText(text)) {
     for (const file of localPathsFromFileRef(ref, mediaBasePaths)) pushDir(parentLocalPath(file));
-  }
-  return out;
-}
-
-function explicitImageCanonicalPathsInText(text: string, mediaBasePaths: string[]): ReadonlySet<string> {
-  const out = new Set<string>();
-  if (/!\[[^\]]*\]\(agentlas:\/\/chat-attachment\/[0-9a-f-]+(?:\s+"[^"]*")?\)/iu.test(text)) {
-    out.add(DURABLE_CHAT_IMAGE_SENTINEL);
-  }
-  for (const match of text.matchAll(/!\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g)) {
-    const raw = match[1]?.trim();
-    if (!raw) continue;
-    const media = mediaArtifactFromImage(raw, "", mediaBasePaths);
-    out.add(media.path || media.src);
   }
   return out;
 }

@@ -73,7 +73,7 @@ const COLLABORATION_STYLE_OPTIONS: Array<{
 
 const EMPTY_DRAFT: StoredDraft = {
   mode: "original",
-  characterId: "blue-wave",
+  characterId: "orange-dino",
   name: "",
   title: "",
   description: "",

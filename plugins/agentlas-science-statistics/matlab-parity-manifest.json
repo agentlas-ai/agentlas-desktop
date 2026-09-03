@@ -23,9 +23,18 @@
       "url": "https://www.mathworks.com/help/matlab/creating_plots/types-of-matlab-plots.html",
       "kind": "plot-taxonomy",
       "categoryIds": [
-        "matlab.plot.line", "matlab.plot.scatter-bubble", "matlab.plot.data-distribution", "matlab.plot.discrete",
-        "matlab.plot.geographic", "matlab.plot.polar", "matlab.plot.contour", "matlab.plot.vector-fields",
-        "matlab.plot.surface-mesh", "matlab.plot.volume-visualization", "matlab.plot.animation", "matlab.plot.images"
+        "matlab.plot.line",
+        "matlab.plot.scatter-bubble",
+        "matlab.plot.data-distribution",
+        "matlab.plot.discrete",
+        "matlab.plot.geographic",
+        "matlab.plot.polar",
+        "matlab.plot.contour",
+        "matlab.plot.vector-fields",
+        "matlab.plot.surface-mesh",
+        "matlab.plot.volume-visualization",
+        "matlab.plot.animation",
+        "matlab.plot.images"
       ]
     },
     {
@@ -34,9 +43,15 @@
       "url": "https://www.mathworks.com/help/stats/",
       "kind": "analysis-taxonomy",
       "categoryIds": [
-        "matlab.stats.descriptive-visualization", "matlab.stats.probability-hypothesis", "matlab.stats.industrial-statistics",
-        "matlab.stats.anova", "matlab.stats.regression", "matlab.stats.classification", "matlab.stats.cluster-anomaly",
-        "matlab.stats.dimensionality-reduction-feature-extraction", "matlab.stats.machine-learning-pipelines",
+        "matlab.stats.descriptive-visualization",
+        "matlab.stats.probability-hypothesis",
+        "matlab.stats.industrial-statistics",
+        "matlab.stats.anova",
+        "matlab.stats.regression",
+        "matlab.stats.classification",
+        "matlab.stats.cluster-anomaly",
+        "matlab.stats.dimensionality-reduction-feature-extraction",
+        "matlab.stats.machine-learning-pipelines",
         "matlab.stats.simulink-code-generation"
       ]
     },
@@ -45,7 +60,12 @@
       "title": "Available Hypothesis Tests",
       "url": "https://www.mathworks.com/help/stats/available-hypothesis-tests.html",
       "kind": "analysis-detail",
-      "categoryIds": ["matlab.stats.hypothesis.distribution", "matlab.stats.hypothesis.location", "matlab.stats.hypothesis.dispersion", "matlab.stats.hypothesis.linear"]
+      "categoryIds": [
+        "matlab.stats.hypothesis.distribution",
+        "matlab.stats.hypothesis.location",
+        "matlab.stats.hypothesis.dispersion",
+        "matlab.stats.hypothesis.linear"
+      ]
     },
     {
       "id": "mathworks.matlab.interactive-exploration",
@@ -53,8 +73,12 @@
       "url": "https://www.mathworks.com/help/matlab/creating_plots/interactively-explore-plotted-data.html",
       "kind": "interaction-taxonomy",
       "categoryIds": [
-        "matlab.interaction.zoom", "matlab.interaction.pan", "matlab.interaction.data-tips",
-        "matlab.interaction.brushing", "matlab.interaction.plot-statistics", "matlab.interaction.annotations"
+        "matlab.interaction.zoom",
+        "matlab.interaction.pan",
+        "matlab.interaction.data-tips",
+        "matlab.interaction.brushing",
+        "matlab.interaction.plot-statistics",
+        "matlab.interaction.annotations"
       ]
     },
     {
@@ -63,184 +87,5475 @@
       "url": "https://www.mathworks.com/help/matlab/ref/exportgraphics.html",
       "kind": "export-taxonomy",
       "categoryIds": [
-        "matlab.export.raster", "matlab.export.vector", "matlab.export.resolution", "matlab.export.physical-size",
-        "matlab.export.color-space", "matlab.export.font-embedding", "matlab.export.multipage"
+        "matlab.export.raster",
+        "matlab.export.vector",
+        "matlab.export.resolution",
+        "matlab.export.physical-size",
+        "matlab.export.color-space",
+        "matlab.export.font-embedding",
+        "matlab.export.multipage"
       ]
     }
   ],
   "snapshot": {
     "engine": {
       "id": "agentlas-science-statistics",
-      "version": "1.9.0",
+      "version": "1.10.0",
       "algorithmRevision": "gaussian-random-intercept-lmm-v9-js-2026-09-01",
-      "methodCount": 31,
+      "methodCount": 179,
       "methodIds": [
-        "descriptive", "distribution_fit", "pearson_correlation", "spearman_correlation", "kendall_correlation", "independent_t_test",
-        "welch_t_test", "paired_t_test", "one_way_anova", "welch_one_way_anova", "two_way_anova",
-        "mann_whitney_u", "wilcoxon_signed_rank", "kruskal_wallis", "friedman_test", "linear_regression",
-        "logistic_regression", "poisson_regression", "chi_square_test", "fisher_exact_test", "multiple_testing_correction",
-        "confidence_interval", "kaplan_meier", "log_rank_test", "cox_proportional_hazards", "principal_component_analysis",
-        "time_series_diagnostics", "roc_curve_analysis", "meta_analysis", "response_surface_regression", "gaussian_random_intercept_lmm"
+        "descriptive",
+        "distribution_fit",
+        "pearson_correlation",
+        "spearman_correlation",
+        "kendall_correlation",
+        "independent_t_test",
+        "welch_t_test",
+        "paired_t_test",
+        "one_way_anova",
+        "welch_one_way_anova",
+        "two_way_anova",
+        "mann_whitney_u",
+        "wilcoxon_signed_rank",
+        "kruskal_wallis",
+        "friedman_test",
+        "linear_regression",
+        "logistic_regression",
+        "poisson_regression",
+        "chi_square_test",
+        "fisher_exact_test",
+        "multiple_testing_correction",
+        "confidence_interval",
+        "kaplan_meier",
+        "log_rank_test",
+        "cox_proportional_hazards",
+        "principal_component_analysis",
+        "time_series_diagnostics",
+        "roc_curve_analysis",
+        "meta_analysis",
+        "response_surface_regression",
+        "gaussian_random_intercept_lmm",
+        "ancova",
+        "repeated_measures_anova",
+        "tukey_hsd",
+        "games_howell",
+        "dunnett_test",
+        "scheffe_test",
+        "two_way_anova_unbalanced",
+        "shapiro_wilk",
+        "anderson_darling_normal",
+        "dagostino_k2",
+        "levene_test",
+        "bartlett_test",
+        "fligner_killeen",
+        "kolmogorov_smirnov_two_sample",
+        "durbin_watson",
+        "breusch_pagan",
+        "white_test",
+        "variance_inflation_factors",
+        "ordinal_logistic_regression",
+        "multinomial_logistic_regression",
+        "negative_binomial_regression",
+        "ridge_regression",
+        "lasso_regression",
+        "elastic_net_regression",
+        "quantile_regression",
+        "robust_linear_regression",
+        "polynomial_regression",
+        "nonlinear_least_squares",
+        "model_comparison_information_criteria",
+        "augmented_dickey_fuller",
+        "kpss_test",
+        "phillips_perron",
+        "arima",
+        "auto_arima",
+        "exponential_smoothing",
+        "seasonal_decomposition",
+        "spectral_periodogram",
+        "change_point_detection",
+        "granger_causality",
+        "cross_correlation",
+        "vector_autoregression",
+        "power_t_test",
+        "power_anova",
+        "power_proportions",
+        "power_correlation",
+        "power_chi_square",
+        "power_regression",
+        "sample_size_precision",
+        "bootstrap_confidence_interval",
+        "permutation_test",
+        "jackknife",
+        "cross_validation_regression",
+        "bayesian_t_test",
+        "bayesian_proportion",
+        "bayesian_ab_test",
+        "bayesian_linear_regression",
+        "bayesian_correlation",
+        "bayesian_anova",
+        "bayesian_meta_analysis",
+        "exploratory_factor_analysis",
+        "manova",
+        "hotelling_t2",
+        "linear_discriminant_analysis",
+        "canonical_correlation_analysis",
+        "multidimensional_scaling",
+        "partial_correlation",
+        "mahalanobis_outliers",
+        "k_means",
+        "hierarchical_clustering",
+        "gaussian_mixture",
+        "dbscan",
+        "cluster_validation",
+        "distribution_fit_extended",
+        "probability_calculator",
+        "chi_square_goodness_of_fit",
+        "kernel_density_estimate",
+        "empirical_cdf_comparison",
+        "extreme_value_analysis",
+        "weighted_log_rank",
+        "stratified_cox",
+        "parametric_survival_regression",
+        "competing_risks_cumulative_incidence",
+        "restricted_mean_survival_time",
+        "nelson_aalen",
+        "survival_landmark_analysis",
+        "sign_test",
+        "mood_median_test",
+        "runs_test",
+        "jonckheere_terpstra",
+        "page_trend_test",
+        "dunn_test",
+        "conover_iman_test",
+        "nemenyi_test",
+        "hodges_lehmann_estimate",
+        "brunner_munzel_test",
+        "quade_test",
+        "mcnemar_test",
+        "cochran_q_test",
+        "cochran_armitage_trend_test",
+        "mantel_haenszel_test",
+        "fisher_exact_rxc",
+        "g_test",
+        "two_by_two_effect_measures",
+        "chi_square_independence_residuals",
+        "binomial_test",
+        "poisson_rate_test",
+        "log_linear_model",
+        "standardized_effect_sizes",
+        "effect_size_conversion",
+        "tost_equivalence",
+        "non_inferiority_test",
+        "bland_altman_agreement",
+        "cronbach_alpha",
+        "mcdonald_omega",
+        "intraclass_correlation",
+        "cohen_kappa",
+        "fleiss_kappa",
+        "krippendorff_alpha",
+        "kendall_w",
+        "difference_in_differences",
+        "propensity_score_analysis",
+        "instrumental_variables_2sls",
+        "regression_discontinuity",
+        "mediation_analysis",
+        "effect_size_from_arms",
+        "meta_regression",
+        "subgroup_meta_analysis",
+        "trim_and_fill",
+        "hartung_knapp_meta_analysis",
+        "cumulative_meta_analysis",
+        "network_meta_analysis_frequentist",
+        "control_chart",
+        "process_capability",
+        "gage_rr",
+        "cusum_ewma",
+        "missing_data_pattern",
+        "multiple_imputation_regression",
+        "inverse_probability_weighting",
+        "roc_curve_comparison",
+        "diagnostic_accuracy_measures",
+        "fine_gray_subdistribution_hazard",
+        "linear_mixed_model_random_slopes",
+        "generalized_estimating_equations",
+        "generalized_linear_mixed_model",
+        "linear_factor_model",
+        "fama_macbeth_regression",
+        "grs_test",
+        "theil_sen_regression"
       ]
     },
     "figureCatalog": {
       "schema": "agentlas.science.statistics.figure-catalog/v1",
-      "catalogVersion": "1.6.0",
-      "templateCount": 64,
+      "catalogVersion": "2.0.0",
+      "templateCount": 227,
       "templateIds": [
-        "distribution-histogram-density", "distribution-empirical-cdf", "distribution-violin-box-points", "distribution-ridgeline-density", "distribution-quantile-reference", "distribution-fit-qq", "distribution-fit-pp",
-        "estimation-forest-intervals", "estimation-coefficient-dot-whisker", "estimation-group-mean-intervals", "estimation-paired-rank-profile", "estimation-bootstrap-sampling-distribution", "estimation-bland-altman-agreement",
-        "regression-residuals-fitted", "regression-residual-quantiles", "regression-scale-location", "regression-leverage-influence", "regression-observed-predicted",
-        "classification-roc-curve", "classification-precision-recall", "classification-confusion-matrix", "classification-calibration-curve", "classification-threshold-metrics",
-        "survival-kaplan-meier", "survival-cumulative-incidence", "survival-hazard-ratio-forest", "survival-log-minus-log", "survival-risk-event-table",
-        "multivariate-correlation-heatmap", "multivariate-pca-score-biplot", "multivariate-clustered-heatmap", "multivariate-parallel-coordinates", "multivariate-pairwise-scatter-matrix",
-        "time-series-observed-interval", "time-series-acf-pacf", "time-series-spectral-density", "time-series-scalogram", "time-series-event-aligned-average",
-        "contingency-mosaic", "contingency-correspondence-biplot", "contingency-odds-ratio-forest", "contingency-standardized-residual-heatmap", "contingency-alluvial-composition",
-        "numeric-3d-response-surface", "numeric-3d-point-cloud", "numeric-3d-volume-slices", "numeric-3d-vector-field", "numeric-3d-trajectory",
-        "estimation-meta-analysis-forest", "estimation-meta-analysis-funnel", "estimation-meta-analysis-influence",
-        "multivariate-bivariate-count-heatmap", "estimation-factorial-interaction-means", "contingency-observed-count-heatmap", "estimation-multiplicity-raw-adjusted-p",
-        "multivariate-pca-scree-cumulative", "multivariate-pca-score-plot", "multivariate-pca-loading-heatmap", "time-series-observed-trend", "time-series-acf-bounds",
-        "estimation-lmm-marginal-mean-profile", "estimation-lmm-subject-trajectories", "estimation-lmm-random-intercept-caterpillar", "regression-lmm-diagnostic-grid"
+        "distribution-histogram-density",
+        "distribution-empirical-cdf",
+        "distribution-violin-box-points",
+        "distribution-ridgeline-density",
+        "distribution-quantile-reference",
+        "distribution-fit-qq",
+        "distribution-fit-pp",
+        "estimation-forest-intervals",
+        "estimation-coefficient-dot-whisker",
+        "estimation-group-mean-intervals",
+        "estimation-paired-rank-profile",
+        "estimation-bootstrap-sampling-distribution",
+        "estimation-bland-altman-agreement",
+        "regression-residuals-fitted",
+        "regression-residual-quantiles",
+        "regression-scale-location",
+        "regression-leverage-influence",
+        "regression-observed-predicted",
+        "classification-roc-curve",
+        "classification-precision-recall",
+        "classification-confusion-matrix",
+        "classification-calibration-curve",
+        "classification-threshold-metrics",
+        "survival-kaplan-meier",
+        "survival-cumulative-incidence",
+        "survival-hazard-ratio-forest",
+        "survival-log-minus-log",
+        "survival-risk-event-table",
+        "multivariate-correlation-heatmap",
+        "multivariate-pca-score-biplot",
+        "multivariate-clustered-heatmap",
+        "multivariate-parallel-coordinates",
+        "multivariate-pairwise-scatter-matrix",
+        "time-series-observed-interval",
+        "time-series-acf-pacf",
+        "time-series-spectral-density",
+        "time-series-scalogram",
+        "time-series-event-aligned-average",
+        "contingency-mosaic",
+        "contingency-correspondence-biplot",
+        "contingency-odds-ratio-forest",
+        "contingency-standardized-residual-heatmap",
+        "contingency-alluvial-composition",
+        "numeric-3d-response-surface",
+        "numeric-3d-point-cloud",
+        "numeric-3d-volume-slices",
+        "numeric-3d-vector-field",
+        "numeric-3d-trajectory",
+        "estimation-meta-analysis-forest",
+        "estimation-meta-analysis-funnel",
+        "estimation-meta-analysis-influence",
+        "multivariate-bivariate-count-heatmap",
+        "estimation-factorial-interaction-means",
+        "contingency-observed-count-heatmap",
+        "estimation-multiplicity-raw-adjusted-p",
+        "multivariate-pca-scree-cumulative",
+        "multivariate-pca-score-plot",
+        "multivariate-pca-loading-heatmap",
+        "time-series-observed-trend",
+        "time-series-acf-bounds",
+        "estimation-lmm-marginal-mean-profile",
+        "estimation-lmm-subject-trajectories",
+        "estimation-lmm-random-intercept-caterpillar",
+        "regression-lmm-diagnostic-grid",
+        "adf-regression-figure",
+        "adjusted-means-plot",
+        "aft-time-ratio-forest",
+        "agreement-fleiss-plot",
+        "agreement-heatmap",
+        "agreement-kendall-w-plot",
+        "agreement-krippendorff-heatmap",
+        "arima-forecast-figure",
+        "arima-residual-acf-figure",
+        "arm-effect-forest",
+        "asset-pricing-characteristic-line",
+        "asset-pricing-coefficient-forest",
+        "auto-arima-forecast-figure",
+        "auto-arima-residual-acf-figure",
+        "bayes-ab-posterior",
+        "bayes-anova-robustness",
+        "bayes-correlation-posterior",
+        "bayes-meta-forest",
+        "bayes-proportion-posterior",
+        "bayes-regression-coefficients",
+        "bayes-t-posterior",
+        "binomial-pmf-plot",
+        "bland-altman-plot",
+        "bootstrap-histogram",
+        "capability-histogram",
+        "cca-variate-plot",
+        "change-point-figure",
+        "chi-square-gof-plot",
+        "cluster-validation-silhouette-plot",
+        "cochran-q-proportion-plot",
+        "conover-pairwise-heatmap",
+        "control-chart",
+        "control-chart-dispersion",
+        "cox-schoenfeld-residual-plot",
+        "cross-correlation-figure",
+        "cumulative-forest",
+        "cumulative-hazard-curve",
+        "cumulative-incidence-stacked",
+        "cusum-chart",
+        "cv-fold-rmse",
+        "dbscan-cluster-scatter",
+        "dbscan-kdistance-plot",
+        "decomposition-figure",
+        "diagnostic-accuracy-forest",
+        "did-event-study-plot",
+        "did-trajectory-plot",
+        "distribution-fit-density-plot",
+        "distribution-fit-qq-plot",
+        "dunn-pairwise-heatmap",
+        "ecdf-comparison",
+        "ecdf-step-plot",
+        "efa-loading-heatmap",
+        "efa-scree-parallel",
+        "effect-conversion-chart",
+        "effect-size-forest",
+        "elastic-net-coefficient-path",
+        "elastic-net-cv-curve",
+        "equivalence-interval-plot",
+        "ets-forecast-figure",
+        "ets-residual-acf-figure",
+        "evt-mean-excess-plot",
+        "evt-return-level-plot",
+        "ewma-chart",
+        "exact-table-heatmap",
+        "fama-macbeth-coefficient-series",
+        "fama-macbeth-premium-forest",
+        "fine-gray-subdistribution-hazard-plot",
+        "g-test-contribution-heatmap",
+        "gage-rr-components-of-variation",
+        "gage-rr-interaction-plot",
+        "gee-coefficients-plot",
+        "gee-structure-plot",
+        "glmm-fixed-effects-plot",
+        "glmm-quadrature-plot",
+        "gmm-assignment-scatter",
+        "gmm-bic-plot",
+        "granger-causality-figure",
+        "group-dispersion-plot",
+        "grs-alpha-forest",
+        "grs-realised-versus-predicted",
+        "hclust-dendrogram",
+        "hclust-silhouette-plot",
+        "histogram",
+        "hksj-forest",
+        "hotelling-difference-plot",
+        "interaction-plot",
+        "iv-vs-ols-forest",
+        "jackknife-influence",
+        "kde-density-plot",
+        "kmeans-cluster-scatter",
+        "kmeans-elbow-plot",
+        "kmeans-silhouette-plot",
+        "kpss-partial-sum-figure",
+        "landmark-km-curves",
+        "lasso-coefficient-path",
+        "lasso-cv-curve",
+        "lda-territorial-plot",
+        "lmm-slopes-fixed-effects-plot",
+        "lmm-slopes-group-effects-plot",
+        "location-estimate-interval",
+        "loglinear-residual-plot",
+        "mahalanobis-distance-plot",
+        "manova-canonical-plot",
+        "mantel-haenszel-forest",
+        "mcnemar-discordant-plot",
+        "mds-configuration-plot",
+        "mds-shepard-plot",
+        "median-split-bars",
+        "mediation-bootstrap-plot",
+        "meta-regression-bubble",
+        "missing-data-ipw-coefficient-plot",
+        "missing-data-mi-pooled-plot",
+        "missing-data-pattern-plot",
+        "missing-data-percent-missing-plot",
+        "model-comparison-weights",
+        "mosaic-residual-plot",
+        "multinomial-rrr-forest",
+        "negative-binomial-irr-forest",
+        "nemenyi-pairwise-heatmap",
+        "network-geometry",
+        "nls-fit-plot",
+        "non-inferiority-interval-plot",
+        "ordered-group-trend",
+        "ordinal-odds-ratio-forest",
+        "page-rank-trend",
+        "pairwise-difference-forest",
+        "partial-correlation-heatmap",
+        "permutation-histogram",
+        "phillips-perron-regression-figure",
+        "poisson-rate-plot",
+        "polynomial-fit-plot",
+        "power-curve",
+        "precision-curve",
+        "probability-density-plot",
+        "ps-love-plot",
+        "ps-overlap-plot",
+        "qq-plot",
+        "quantile-coefficient-process",
+        "rd-plot",
+        "rd-sensitivity-plot",
+        "relative-effect-interval",
+        "reliability-alpha-if-deleted-plot",
+        "reliability-icc-plot",
+        "reliability-omega-loading-plot",
+        "residual-lag-plot",
+        "residual-vs-fitted",
+        "ridge-coefficient-path",
+        "rmst-area-curves",
+        "robust-vs-ols-forest",
+        "robust-weight-plot",
+        "roc-curve-comparison-plot",
+        "runs-sequence-plot",
+        "sign-count-bars",
+        "spectrum-figure",
+        "subgroup-forest",
+        "trend-proportion-plot",
+        "trim-fill-funnel",
+        "two-by-two-risk-plot",
+        "var-impulse-response-figure",
+        "vif-bar",
+        "weighted-log-rank-km-curves",
+        "weighted-rank-sums",
+        "within-subject-profile"
       ]
     }
   },
   "analysisCoverage": [
-    { "id": "descriptive", "taxonomyIds": ["matlab.stats.descriptive-visualization"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "distribution_fit", "taxonomyIds": ["matlab.stats.probability-hypothesis", "matlab.stats.hypothesis.distribution", "matlab.plot.data-distribution"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "pearson_correlation", "taxonomyIds": ["matlab.stats.descriptive-visualization"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "spearman_correlation", "taxonomyIds": ["matlab.stats.descriptive-visualization"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "kendall_correlation", "taxonomyIds": ["matlab.stats.descriptive-visualization"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "independent_t_test", "taxonomyIds": ["matlab.stats.probability-hypothesis", "matlab.stats.hypothesis.location"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "welch_t_test", "taxonomyIds": ["matlab.stats.probability-hypothesis", "matlab.stats.hypothesis.location"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "paired_t_test", "taxonomyIds": ["matlab.stats.probability-hypothesis", "matlab.stats.hypothesis.location"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "one_way_anova", "taxonomyIds": ["matlab.stats.anova"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "welch_one_way_anova", "taxonomyIds": ["matlab.stats.anova"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "two_way_anova", "taxonomyIds": ["matlab.stats.anova"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "mann_whitney_u", "taxonomyIds": ["matlab.stats.probability-hypothesis", "matlab.stats.hypothesis.location"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "wilcoxon_signed_rank", "taxonomyIds": ["matlab.stats.probability-hypothesis", "matlab.stats.hypothesis.location"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "kruskal_wallis", "taxonomyIds": ["matlab.stats.probability-hypothesis", "matlab.stats.anova"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "friedman_test", "taxonomyIds": ["matlab.stats.probability-hypothesis", "matlab.stats.anova"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "linear_regression", "taxonomyIds": ["matlab.stats.regression"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "logistic_regression", "taxonomyIds": ["matlab.stats.regression", "matlab.stats.classification"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "poisson_regression", "taxonomyIds": ["matlab.stats.regression"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "chi_square_test", "taxonomyIds": ["matlab.stats.probability-hypothesis", "matlab.stats.hypothesis.distribution"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "fisher_exact_test", "taxonomyIds": ["matlab.stats.probability-hypothesis"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "multiple_testing_correction", "taxonomyIds": ["matlab.stats.probability-hypothesis"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "confidence_interval", "taxonomyIds": ["matlab.stats.probability-hypothesis"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "kaplan_meier", "taxonomyIds": ["matlab.stats.industrial-statistics"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "log_rank_test", "taxonomyIds": ["matlab.stats.industrial-statistics", "matlab.stats.probability-hypothesis"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "cox_proportional_hazards", "taxonomyIds": ["matlab.stats.industrial-statistics", "matlab.stats.regression"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "principal_component_analysis", "taxonomyIds": ["matlab.stats.dimensionality-reduction-feature-extraction"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "time_series_diagnostics", "taxonomyIds": ["matlab.stats.descriptive-visualization", "matlab.plot.line"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "roc_curve_analysis", "taxonomyIds": ["matlab.stats.classification"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "meta_analysis", "taxonomyIds": ["matlab.stats.probability-hypothesis", "matlab.plot.line"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "response_surface_regression", "taxonomyIds": ["matlab.stats.regression", "matlab.stats.industrial-statistics", "matlab.plot.surface-mesh"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "gaussian_random_intercept_lmm", "taxonomyIds": ["matlab.stats.regression", "matlab.stats.anova"], "states": { "analysis": "implemented", "renderer": "partial", "interaction": "missing", "export": "partial" } }
+    {
+      "id": "descriptive",
+      "taxonomyIds": [
+        "matlab.stats.descriptive-visualization"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "distribution_fit",
+      "taxonomyIds": [
+        "matlab.stats.probability-hypothesis",
+        "matlab.stats.hypothesis.distribution",
+        "matlab.plot.data-distribution"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "pearson_correlation",
+      "taxonomyIds": [
+        "matlab.stats.descriptive-visualization"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "spearman_correlation",
+      "taxonomyIds": [
+        "matlab.stats.descriptive-visualization"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "kendall_correlation",
+      "taxonomyIds": [
+        "matlab.stats.descriptive-visualization"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "independent_t_test",
+      "taxonomyIds": [
+        "matlab.stats.probability-hypothesis",
+        "matlab.stats.hypothesis.location"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "welch_t_test",
+      "taxonomyIds": [
+        "matlab.stats.probability-hypothesis",
+        "matlab.stats.hypothesis.location"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "paired_t_test",
+      "taxonomyIds": [
+        "matlab.stats.probability-hypothesis",
+        "matlab.stats.hypothesis.location"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "one_way_anova",
+      "taxonomyIds": [
+        "matlab.stats.anova"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "welch_one_way_anova",
+      "taxonomyIds": [
+        "matlab.stats.anova"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "two_way_anova",
+      "taxonomyIds": [
+        "matlab.stats.anova"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "mann_whitney_u",
+      "taxonomyIds": [
+        "matlab.stats.probability-hypothesis",
+        "matlab.stats.hypothesis.location"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "wilcoxon_signed_rank",
+      "taxonomyIds": [
+        "matlab.stats.probability-hypothesis",
+        "matlab.stats.hypothesis.location"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "kruskal_wallis",
+      "taxonomyIds": [
+        "matlab.stats.probability-hypothesis",
+        "matlab.stats.anova"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "friedman_test",
+      "taxonomyIds": [
+        "matlab.stats.probability-hypothesis",
+        "matlab.stats.anova"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "linear_regression",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "logistic_regression",
+      "taxonomyIds": [
+        "matlab.stats.regression",
+        "matlab.stats.classification"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "poisson_regression",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "chi_square_test",
+      "taxonomyIds": [
+        "matlab.stats.probability-hypothesis",
+        "matlab.stats.hypothesis.distribution"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "fisher_exact_test",
+      "taxonomyIds": [
+        "matlab.stats.probability-hypothesis"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "multiple_testing_correction",
+      "taxonomyIds": [
+        "matlab.stats.probability-hypothesis"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "confidence_interval",
+      "taxonomyIds": [
+        "matlab.stats.probability-hypothesis"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "kaplan_meier",
+      "taxonomyIds": [
+        "matlab.stats.industrial-statistics"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "log_rank_test",
+      "taxonomyIds": [
+        "matlab.stats.industrial-statistics",
+        "matlab.stats.probability-hypothesis"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "cox_proportional_hazards",
+      "taxonomyIds": [
+        "matlab.stats.industrial-statistics",
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "principal_component_analysis",
+      "taxonomyIds": [
+        "matlab.stats.dimensionality-reduction-feature-extraction"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "time_series_diagnostics",
+      "taxonomyIds": [
+        "matlab.stats.descriptive-visualization",
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "roc_curve_analysis",
+      "taxonomyIds": [
+        "matlab.stats.classification"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "meta_analysis",
+      "taxonomyIds": [
+        "matlab.stats.probability-hypothesis",
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "response_surface_regression",
+      "taxonomyIds": [
+        "matlab.stats.regression",
+        "matlab.stats.industrial-statistics",
+        "matlab.plot.surface-mesh"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "gaussian_random_intercept_lmm",
+      "taxonomyIds": [
+        "matlab.stats.regression",
+        "matlab.stats.anova"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "ancova",
+      "taxonomyIds": [
+        "matlab.stats.anova",
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "repeated_measures_anova",
+      "taxonomyIds": [
+        "matlab.stats.anova"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "tukey_hsd",
+      "taxonomyIds": [
+        "matlab.stats.anova"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "games_howell",
+      "taxonomyIds": [
+        "matlab.stats.anova"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "dunnett_test",
+      "taxonomyIds": [
+        "matlab.stats.anova"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "scheffe_test",
+      "taxonomyIds": [
+        "matlab.stats.anova"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "two_way_anova_unbalanced",
+      "taxonomyIds": [
+        "matlab.stats.anova",
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "shapiro_wilk",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.distribution"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "anderson_darling_normal",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.distribution"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "dagostino_k2",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.distribution"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "levene_test",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.dispersion"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "bartlett_test",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.dispersion"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "fligner_killeen",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.dispersion"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "kolmogorov_smirnov_two_sample",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.distribution"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "durbin_watson",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "breusch_pagan",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "white_test",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "variance_inflation_factors",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "ordinal_logistic_regression",
+      "taxonomyIds": [
+        "matlab.stats.regression",
+        "matlab.stats.classification"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "multinomial_logistic_regression",
+      "taxonomyIds": [
+        "matlab.stats.regression",
+        "matlab.stats.classification"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "negative_binomial_regression",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "ridge_regression",
+      "taxonomyIds": [
+        "matlab.stats.regression",
+        "matlab.stats.machine-learning-pipelines"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "lasso_regression",
+      "taxonomyIds": [
+        "matlab.stats.regression",
+        "matlab.stats.machine-learning-pipelines"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "elastic_net_regression",
+      "taxonomyIds": [
+        "matlab.stats.regression",
+        "matlab.stats.machine-learning-pipelines"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "quantile_regression",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "robust_linear_regression",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "polynomial_regression",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "nonlinear_least_squares",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "model_comparison_information_criteria",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "augmented_dickey_fuller",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.distribution"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "kpss_test",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.distribution"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "phillips_perron",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.distribution"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "arima",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "auto_arima",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "exponential_smoothing",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "seasonal_decomposition",
+      "taxonomyIds": [
+        "matlab.stats.descriptive-visualization"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "spectral_periodogram",
+      "taxonomyIds": [
+        "matlab.stats.descriptive-visualization"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "change_point_detection",
+      "taxonomyIds": [
+        "matlab.stats.cluster-anomaly"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "granger_causality",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "cross_correlation",
+      "taxonomyIds": [
+        "matlab.stats.descriptive-visualization"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "vector_autoregression",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "power_t_test",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.location"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "power_anova",
+      "taxonomyIds": [
+        "matlab.stats.anova"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "power_proportions",
+      "taxonomyIds": [
+        "matlab.stats.probability-hypothesis"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "power_correlation",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.linear"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "power_chi_square",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.distribution"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "power_regression",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "sample_size_precision",
+      "taxonomyIds": [
+        "matlab.stats.descriptive-visualization"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "bootstrap_confidence_interval",
+      "taxonomyIds": [
+        "matlab.stats.descriptive-visualization",
+        "matlab.stats.hypothesis.location"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "permutation_test",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.location"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "jackknife",
+      "taxonomyIds": [
+        "matlab.stats.descriptive-visualization"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "cross_validation_regression",
+      "taxonomyIds": [
+        "matlab.stats.regression",
+        "matlab.stats.machine-learning-pipelines"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "bayesian_t_test",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.location"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "bayesian_proportion",
+      "taxonomyIds": [
+        "matlab.stats.probability-hypothesis"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "bayesian_ab_test",
+      "taxonomyIds": [
+        "matlab.stats.probability-hypothesis"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "bayesian_linear_regression",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "bayesian_correlation",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.linear"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "bayesian_anova",
+      "taxonomyIds": [
+        "matlab.stats.anova"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "bayesian_meta_analysis",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.location"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "exploratory_factor_analysis",
+      "taxonomyIds": [
+        "matlab.stats.dimensionality-reduction-feature-extraction"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "manova",
+      "taxonomyIds": [
+        "matlab.stats.anova"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "hotelling_t2",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.location"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "linear_discriminant_analysis",
+      "taxonomyIds": [
+        "matlab.stats.classification"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "canonical_correlation_analysis",
+      "taxonomyIds": [
+        "matlab.stats.dimensionality-reduction-feature-extraction"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "multidimensional_scaling",
+      "taxonomyIds": [
+        "matlab.stats.dimensionality-reduction-feature-extraction"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "partial_correlation",
+      "taxonomyIds": [
+        "matlab.stats.descriptive-visualization"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "mahalanobis_outliers",
+      "taxonomyIds": [
+        "matlab.stats.cluster-anomaly"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "k_means",
+      "taxonomyIds": [
+        "matlab.stats.cluster-anomaly"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "hierarchical_clustering",
+      "taxonomyIds": [
+        "matlab.stats.cluster-anomaly"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "gaussian_mixture",
+      "taxonomyIds": [
+        "matlab.stats.cluster-anomaly"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "dbscan",
+      "taxonomyIds": [
+        "matlab.stats.cluster-anomaly"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "cluster_validation",
+      "taxonomyIds": [
+        "matlab.stats.cluster-anomaly"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "distribution_fit_extended",
+      "taxonomyIds": [
+        "matlab.stats.probability-hypothesis",
+        "matlab.stats.hypothesis.distribution"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "probability_calculator",
+      "taxonomyIds": [
+        "matlab.stats.probability-hypothesis"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "chi_square_goodness_of_fit",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.distribution"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "kernel_density_estimate",
+      "taxonomyIds": [
+        "matlab.stats.descriptive-visualization",
+        "matlab.stats.probability-hypothesis"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "empirical_cdf_comparison",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.distribution"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "extreme_value_analysis",
+      "taxonomyIds": [
+        "matlab.stats.probability-hypothesis",
+        "matlab.stats.industrial-statistics"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "weighted_log_rank",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.distribution"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "stratified_cox",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "parametric_survival_regression",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "competing_risks_cumulative_incidence",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.distribution"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "restricted_mean_survival_time",
+      "taxonomyIds": [
+        "matlab.stats.descriptive-visualization"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "nelson_aalen",
+      "taxonomyIds": [
+        "matlab.stats.descriptive-visualization"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "survival_landmark_analysis",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.distribution"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "sign_test",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.location"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "mood_median_test",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.location"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "runs_test",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.distribution"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "jonckheere_terpstra",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.location"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "page_trend_test",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.location"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "dunn_test",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.location"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "conover_iman_test",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.location"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "nemenyi_test",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.location"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "hodges_lehmann_estimate",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.location"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "brunner_munzel_test",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.location"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "quade_test",
+      "taxonomyIds": [
+        "matlab.stats.anova"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "mcnemar_test",
+      "taxonomyIds": [
+        "matlab.stats.probability-hypothesis"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "cochran_q_test",
+      "taxonomyIds": [
+        "matlab.stats.probability-hypothesis"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "cochran_armitage_trend_test",
+      "taxonomyIds": [
+        "matlab.stats.probability-hypothesis"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "mantel_haenszel_test",
+      "taxonomyIds": [
+        "matlab.stats.probability-hypothesis"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "fisher_exact_rxc",
+      "taxonomyIds": [
+        "matlab.stats.probability-hypothesis"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "g_test",
+      "taxonomyIds": [
+        "matlab.stats.probability-hypothesis"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "two_by_two_effect_measures",
+      "taxonomyIds": [
+        "matlab.stats.probability-hypothesis"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "chi_square_independence_residuals",
+      "taxonomyIds": [
+        "matlab.stats.probability-hypothesis",
+        "matlab.stats.descriptive-visualization"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "binomial_test",
+      "taxonomyIds": [
+        "matlab.stats.probability-hypothesis"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "poisson_rate_test",
+      "taxonomyIds": [
+        "matlab.stats.probability-hypothesis"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "log_linear_model",
+      "taxonomyIds": [
+        "matlab.stats.regression",
+        "matlab.stats.probability-hypothesis"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "standardized_effect_sizes",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.location",
+        "matlab.stats.anova"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "effect_size_conversion",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.location"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "tost_equivalence",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.location"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "non_inferiority_test",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.location",
+        "matlab.stats.probability-hypothesis"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "bland_altman_agreement",
+      "taxonomyIds": [
+        "matlab.stats.descriptive-visualization",
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "cronbach_alpha",
+      "taxonomyIds": [
+        "matlab.stats.descriptive-visualization"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "mcdonald_omega",
+      "taxonomyIds": [
+        "matlab.stats.dimensionality-reduction-feature-extraction",
+        "matlab.stats.descriptive-visualization"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "intraclass_correlation",
+      "taxonomyIds": [
+        "matlab.stats.anova",
+        "matlab.stats.descriptive-visualization"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "cohen_kappa",
+      "taxonomyIds": [
+        "matlab.stats.descriptive-visualization"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "fleiss_kappa",
+      "taxonomyIds": [
+        "matlab.stats.descriptive-visualization"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "krippendorff_alpha",
+      "taxonomyIds": [
+        "matlab.stats.descriptive-visualization"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "kendall_w",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.location",
+        "matlab.stats.descriptive-visualization"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "difference_in_differences",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "propensity_score_analysis",
+      "taxonomyIds": [
+        "matlab.stats.regression",
+        "matlab.stats.classification"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "instrumental_variables_2sls",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "regression_discontinuity",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "mediation_analysis",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "effect_size_from_arms",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.location"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "meta_regression",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "subgroup_meta_analysis",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.location"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "trim_and_fill",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.location"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "hartung_knapp_meta_analysis",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.location"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "cumulative_meta_analysis",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.location"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "network_meta_analysis_frequentist",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "control_chart",
+      "taxonomyIds": [
+        "matlab.stats.industrial-statistics",
+        "matlab.stats.descriptive-visualization"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "process_capability",
+      "taxonomyIds": [
+        "matlab.stats.industrial-statistics"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "gage_rr",
+      "taxonomyIds": [
+        "matlab.stats.industrial-statistics",
+        "matlab.stats.anova"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "cusum_ewma",
+      "taxonomyIds": [
+        "matlab.stats.industrial-statistics"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "missing_data_pattern",
+      "taxonomyIds": [
+        "matlab.stats.descriptive-visualization",
+        "matlab.stats.hypothesis.distribution"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "multiple_imputation_regression",
+      "taxonomyIds": [
+        "matlab.stats.regression",
+        "matlab.stats.descriptive-visualization"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "inverse_probability_weighting",
+      "taxonomyIds": [
+        "matlab.stats.regression",
+        "matlab.stats.classification"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "roc_curve_comparison",
+      "taxonomyIds": [
+        "matlab.stats.classification"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "diagnostic_accuracy_measures",
+      "taxonomyIds": [
+        "matlab.stats.classification"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "fine_gray_subdistribution_hazard",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "linear_mixed_model_random_slopes",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "generalized_estimating_equations",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "generalized_linear_mixed_model",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "linear_factor_model",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "fama_macbeth_regression",
+      "taxonomyIds": [
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "grs_test",
+      "taxonomyIds": [
+        "matlab.stats.hypothesis.linear",
+        "matlab.stats.regression"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "theil_sen_regression",
+      "taxonomyIds": [
+        "matlab.stats.regression",
+        "matlab.stats.hypothesis.linear"
+      ],
+      "states": {
+        "analysis": "implemented",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    }
   ],
   "figureCoverage": [
-    { "id": "distribution-histogram-density", "taxonomyIds": ["matlab.plot.data-distribution"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "distribution-empirical-cdf", "taxonomyIds": ["matlab.plot.data-distribution", "matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "distribution-violin-box-points", "taxonomyIds": ["matlab.plot.data-distribution", "matlab.plot.scatter-bubble"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "distribution-ridgeline-density", "taxonomyIds": ["matlab.plot.data-distribution"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "distribution-quantile-reference", "taxonomyIds": ["matlab.plot.line", "matlab.plot.scatter-bubble"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "distribution-fit-qq", "taxonomyIds": ["matlab.plot.data-distribution", "matlab.plot.scatter-bubble", "matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "distribution-fit-pp", "taxonomyIds": ["matlab.plot.data-distribution", "matlab.plot.scatter-bubble", "matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "estimation-forest-intervals", "taxonomyIds": ["matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "estimation-coefficient-dot-whisker", "taxonomyIds": ["matlab.plot.line", "matlab.plot.scatter-bubble"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "estimation-group-mean-intervals", "taxonomyIds": ["matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "estimation-paired-rank-profile", "taxonomyIds": ["matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "estimation-bootstrap-sampling-distribution", "taxonomyIds": ["matlab.plot.data-distribution"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "estimation-bland-altman-agreement", "taxonomyIds": ["matlab.plot.scatter-bubble", "matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "regression-residuals-fitted", "taxonomyIds": ["matlab.plot.scatter-bubble", "matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "regression-residual-quantiles", "taxonomyIds": ["matlab.plot.scatter-bubble", "matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "regression-scale-location", "taxonomyIds": ["matlab.plot.scatter-bubble", "matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "regression-leverage-influence", "taxonomyIds": ["matlab.plot.scatter-bubble"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "regression-observed-predicted", "taxonomyIds": ["matlab.plot.scatter-bubble", "matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "classification-roc-curve", "taxonomyIds": ["matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "classification-precision-recall", "taxonomyIds": ["matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "classification-confusion-matrix", "taxonomyIds": ["matlab.plot.images"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "classification-calibration-curve", "taxonomyIds": ["matlab.plot.line", "matlab.plot.scatter-bubble"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "classification-threshold-metrics", "taxonomyIds": ["matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "survival-kaplan-meier", "taxonomyIds": ["matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "survival-cumulative-incidence", "taxonomyIds": ["matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "survival-hazard-ratio-forest", "taxonomyIds": ["matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "survival-log-minus-log", "taxonomyIds": ["matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "survival-risk-event-table", "taxonomyIds": ["matlab.plot.discrete"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "multivariate-correlation-heatmap", "taxonomyIds": ["matlab.plot.data-distribution", "matlab.plot.images"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "multivariate-pca-score-biplot", "taxonomyIds": ["matlab.plot.scatter-bubble", "matlab.plot.vector-fields"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "multivariate-clustered-heatmap", "taxonomyIds": ["matlab.plot.data-distribution", "matlab.plot.images"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "multivariate-parallel-coordinates", "taxonomyIds": ["matlab.plot.data-distribution", "matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "multivariate-pairwise-scatter-matrix", "taxonomyIds": ["matlab.plot.scatter-bubble"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "time-series-observed-interval", "taxonomyIds": ["matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "time-series-acf-pacf", "taxonomyIds": ["matlab.plot.discrete", "matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "time-series-spectral-density", "taxonomyIds": ["matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "time-series-scalogram", "taxonomyIds": ["matlab.plot.images"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "time-series-event-aligned-average", "taxonomyIds": ["matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "contingency-mosaic", "taxonomyIds": ["matlab.plot.discrete"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "contingency-correspondence-biplot", "taxonomyIds": ["matlab.plot.scatter-bubble", "matlab.plot.vector-fields"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "contingency-odds-ratio-forest", "taxonomyIds": ["matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "contingency-standardized-residual-heatmap", "taxonomyIds": ["matlab.plot.images"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "contingency-alluvial-composition", "taxonomyIds": ["matlab.plot.data-distribution"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "numeric-3d-response-surface", "taxonomyIds": ["matlab.plot.surface-mesh", "matlab.plot.contour"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "partial", "export": "partial" } },
-    { "id": "numeric-3d-point-cloud", "taxonomyIds": ["matlab.plot.scatter-bubble"], "states": { "analysis": "not-applicable", "renderer": "missing", "interaction": "missing", "export": "missing" } },
-    { "id": "numeric-3d-volume-slices", "taxonomyIds": ["matlab.plot.volume-visualization"], "states": { "analysis": "not-applicable", "renderer": "missing", "interaction": "missing", "export": "missing" } },
-    { "id": "numeric-3d-vector-field", "taxonomyIds": ["matlab.plot.vector-fields"], "states": { "analysis": "not-applicable", "renderer": "missing", "interaction": "missing", "export": "missing" } },
-    { "id": "numeric-3d-trajectory", "taxonomyIds": ["matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "missing", "interaction": "missing", "export": "missing" } },
-    { "id": "estimation-meta-analysis-forest", "taxonomyIds": ["matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "estimation-meta-analysis-funnel", "taxonomyIds": ["matlab.plot.scatter-bubble", "matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "estimation-meta-analysis-influence", "taxonomyIds": ["matlab.plot.scatter-bubble", "matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "multivariate-bivariate-count-heatmap", "taxonomyIds": ["matlab.plot.data-distribution", "matlab.plot.images"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "estimation-factorial-interaction-means", "taxonomyIds": ["matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "contingency-observed-count-heatmap", "taxonomyIds": ["matlab.plot.images"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "estimation-multiplicity-raw-adjusted-p", "taxonomyIds": ["matlab.plot.scatter-bubble"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "multivariate-pca-scree-cumulative", "taxonomyIds": ["matlab.plot.data-distribution", "matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "multivariate-pca-score-plot", "taxonomyIds": ["matlab.plot.scatter-bubble"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "multivariate-pca-loading-heatmap", "taxonomyIds": ["matlab.plot.images"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "time-series-observed-trend", "taxonomyIds": ["matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "time-series-acf-bounds", "taxonomyIds": ["matlab.plot.discrete", "matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "estimation-lmm-marginal-mean-profile", "taxonomyIds": ["matlab.plot.line", "matlab.plot.scatter-bubble"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "estimation-lmm-subject-trajectories", "taxonomyIds": ["matlab.plot.line", "matlab.plot.scatter-bubble"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "estimation-lmm-random-intercept-caterpillar", "taxonomyIds": ["matlab.plot.line", "matlab.plot.scatter-bubble"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } },
-    { "id": "regression-lmm-diagnostic-grid", "taxonomyIds": ["matlab.plot.scatter-bubble", "matlab.plot.line"], "states": { "analysis": "not-applicable", "renderer": "partial", "interaction": "missing", "export": "partial" } }
+    {
+      "id": "distribution-histogram-density",
+      "taxonomyIds": [
+        "matlab.plot.data-distribution"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "distribution-empirical-cdf",
+      "taxonomyIds": [
+        "matlab.plot.data-distribution",
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "distribution-violin-box-points",
+      "taxonomyIds": [
+        "matlab.plot.data-distribution",
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "distribution-ridgeline-density",
+      "taxonomyIds": [
+        "matlab.plot.data-distribution"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "distribution-quantile-reference",
+      "taxonomyIds": [
+        "matlab.plot.line",
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "distribution-fit-qq",
+      "taxonomyIds": [
+        "matlab.plot.data-distribution",
+        "matlab.plot.scatter-bubble",
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "distribution-fit-pp",
+      "taxonomyIds": [
+        "matlab.plot.data-distribution",
+        "matlab.plot.scatter-bubble",
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "estimation-forest-intervals",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "estimation-coefficient-dot-whisker",
+      "taxonomyIds": [
+        "matlab.plot.line",
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "estimation-group-mean-intervals",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "estimation-paired-rank-profile",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "estimation-bootstrap-sampling-distribution",
+      "taxonomyIds": [
+        "matlab.plot.data-distribution"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "estimation-bland-altman-agreement",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble",
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "regression-residuals-fitted",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble",
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "regression-residual-quantiles",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble",
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "regression-scale-location",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble",
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "regression-leverage-influence",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "regression-observed-predicted",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble",
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "classification-roc-curve",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "classification-precision-recall",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "classification-confusion-matrix",
+      "taxonomyIds": [
+        "matlab.plot.images"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "classification-calibration-curve",
+      "taxonomyIds": [
+        "matlab.plot.line",
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "classification-threshold-metrics",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "survival-kaplan-meier",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "survival-cumulative-incidence",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "survival-hazard-ratio-forest",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "survival-log-minus-log",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "survival-risk-event-table",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "multivariate-correlation-heatmap",
+      "taxonomyIds": [
+        "matlab.plot.data-distribution",
+        "matlab.plot.images"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "multivariate-pca-score-biplot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble",
+        "matlab.plot.vector-fields"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "multivariate-clustered-heatmap",
+      "taxonomyIds": [
+        "matlab.plot.data-distribution",
+        "matlab.plot.images"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "multivariate-parallel-coordinates",
+      "taxonomyIds": [
+        "matlab.plot.data-distribution",
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "multivariate-pairwise-scatter-matrix",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "time-series-observed-interval",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "time-series-acf-pacf",
+      "taxonomyIds": [
+        "matlab.plot.discrete",
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "time-series-spectral-density",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "time-series-scalogram",
+      "taxonomyIds": [
+        "matlab.plot.images"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "time-series-event-aligned-average",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "contingency-mosaic",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "contingency-correspondence-biplot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble",
+        "matlab.plot.vector-fields"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "contingency-odds-ratio-forest",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "contingency-standardized-residual-heatmap",
+      "taxonomyIds": [
+        "matlab.plot.images"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "contingency-alluvial-composition",
+      "taxonomyIds": [
+        "matlab.plot.data-distribution"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "numeric-3d-response-surface",
+      "taxonomyIds": [
+        "matlab.plot.surface-mesh",
+        "matlab.plot.contour"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "partial",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "numeric-3d-point-cloud",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "missing",
+        "interaction": "missing",
+        "export": "missing"
+      }
+    },
+    {
+      "id": "numeric-3d-volume-slices",
+      "taxonomyIds": [
+        "matlab.plot.volume-visualization"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "missing",
+        "interaction": "missing",
+        "export": "missing"
+      }
+    },
+    {
+      "id": "numeric-3d-vector-field",
+      "taxonomyIds": [
+        "matlab.plot.vector-fields"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "missing",
+        "interaction": "missing",
+        "export": "missing"
+      }
+    },
+    {
+      "id": "numeric-3d-trajectory",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "missing",
+        "interaction": "missing",
+        "export": "missing"
+      }
+    },
+    {
+      "id": "estimation-meta-analysis-forest",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "estimation-meta-analysis-funnel",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble",
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "estimation-meta-analysis-influence",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble",
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "multivariate-bivariate-count-heatmap",
+      "taxonomyIds": [
+        "matlab.plot.data-distribution",
+        "matlab.plot.images"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "estimation-factorial-interaction-means",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "contingency-observed-count-heatmap",
+      "taxonomyIds": [
+        "matlab.plot.images"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "estimation-multiplicity-raw-adjusted-p",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "multivariate-pca-scree-cumulative",
+      "taxonomyIds": [
+        "matlab.plot.data-distribution",
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "multivariate-pca-score-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "multivariate-pca-loading-heatmap",
+      "taxonomyIds": [
+        "matlab.plot.images"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "time-series-observed-trend",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "time-series-acf-bounds",
+      "taxonomyIds": [
+        "matlab.plot.discrete",
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "estimation-lmm-marginal-mean-profile",
+      "taxonomyIds": [
+        "matlab.plot.line",
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "estimation-lmm-subject-trajectories",
+      "taxonomyIds": [
+        "matlab.plot.line",
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "estimation-lmm-random-intercept-caterpillar",
+      "taxonomyIds": [
+        "matlab.plot.line",
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "regression-lmm-diagnostic-grid",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble",
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "adf-regression-figure",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "adjusted-means-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "aft-time-ratio-forest",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "agreement-fleiss-plot",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "agreement-heatmap",
+      "taxonomyIds": [
+        "matlab.plot.images"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "agreement-kendall-w-plot",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "agreement-krippendorff-heatmap",
+      "taxonomyIds": [
+        "matlab.plot.images"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "arima-forecast-figure",
+      "taxonomyIds": [
+        "matlab.plot.data-distribution"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "arima-residual-acf-figure",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "arm-effect-forest",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "asset-pricing-characteristic-line",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "asset-pricing-coefficient-forest",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "auto-arima-forecast-figure",
+      "taxonomyIds": [
+        "matlab.plot.data-distribution"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "auto-arima-residual-acf-figure",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "bayes-ab-posterior",
+      "taxonomyIds": [
+        "matlab.plot.data-distribution"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "bayes-anova-robustness",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "bayes-correlation-posterior",
+      "taxonomyIds": [
+        "matlab.plot.data-distribution"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "bayes-meta-forest",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "bayes-proportion-posterior",
+      "taxonomyIds": [
+        "matlab.plot.data-distribution"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "bayes-regression-coefficients",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "bayes-t-posterior",
+      "taxonomyIds": [
+        "matlab.plot.data-distribution"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "binomial-pmf-plot",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "bland-altman-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "bootstrap-histogram",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "capability-histogram",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "cca-variate-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "change-point-figure",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "chi-square-gof-plot",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "cluster-validation-silhouette-plot",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "cochran-q-proportion-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "conover-pairwise-heatmap",
+      "taxonomyIds": [
+        "matlab.plot.images"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "control-chart",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "control-chart-dispersion",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "cox-schoenfeld-residual-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "cross-correlation-figure",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "cumulative-forest",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "cumulative-hazard-curve",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "cumulative-incidence-stacked",
+      "taxonomyIds": [
+        "matlab.plot.data-distribution"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "cusum-chart",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "cv-fold-rmse",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "dbscan-cluster-scatter",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "dbscan-kdistance-plot",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "decomposition-figure",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "diagnostic-accuracy-forest",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "did-event-study-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "did-trajectory-plot",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "distribution-fit-density-plot",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "distribution-fit-qq-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "dunn-pairwise-heatmap",
+      "taxonomyIds": [
+        "matlab.plot.images"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "ecdf-comparison",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "ecdf-step-plot",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "efa-loading-heatmap",
+      "taxonomyIds": [
+        "matlab.plot.images"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "efa-scree-parallel",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "effect-conversion-chart",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "effect-size-forest",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "elastic-net-coefficient-path",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "elastic-net-cv-curve",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "equivalence-interval-plot",
+      "taxonomyIds": [
+        "matlab.plot.images"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "ets-forecast-figure",
+      "taxonomyIds": [
+        "matlab.plot.data-distribution"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "ets-residual-acf-figure",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "evt-mean-excess-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "evt-return-level-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "ewma-chart",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "exact-table-heatmap",
+      "taxonomyIds": [
+        "matlab.plot.images"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "fama-macbeth-coefficient-series",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "fama-macbeth-premium-forest",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "fine-gray-subdistribution-hazard-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "g-test-contribution-heatmap",
+      "taxonomyIds": [
+        "matlab.plot.images"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "gage-rr-components-of-variation",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "gage-rr-interaction-plot",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "gee-coefficients-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "gee-structure-plot",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "glmm-fixed-effects-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "glmm-quadrature-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "gmm-assignment-scatter",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "gmm-bic-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "granger-causality-figure",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "group-dispersion-plot",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "grs-alpha-forest",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "grs-realised-versus-predicted",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "hclust-dendrogram",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "hclust-silhouette-plot",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "histogram",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "hksj-forest",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "hotelling-difference-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "interaction-plot",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "iv-vs-ols-forest",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "jackknife-influence",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "kde-density-plot",
+      "taxonomyIds": [
+        "matlab.plot.data-distribution"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "kmeans-cluster-scatter",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "kmeans-elbow-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "kmeans-silhouette-plot",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "kpss-partial-sum-figure",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "landmark-km-curves",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "lasso-coefficient-path",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "lasso-cv-curve",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "lda-territorial-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "lmm-slopes-fixed-effects-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "lmm-slopes-group-effects-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "location-estimate-interval",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "loglinear-residual-plot",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "mahalanobis-distance-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "manova-canonical-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "mantel-haenszel-forest",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "mcnemar-discordant-plot",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "mds-configuration-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "mds-shepard-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "median-split-bars",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "mediation-bootstrap-plot",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "meta-regression-bubble",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "missing-data-ipw-coefficient-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "missing-data-mi-pooled-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "missing-data-pattern-plot",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "missing-data-percent-missing-plot",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "model-comparison-weights",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "mosaic-residual-plot",
+      "taxonomyIds": [
+        "matlab.plot.images"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "multinomial-rrr-forest",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "negative-binomial-irr-forest",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "nemenyi-pairwise-heatmap",
+      "taxonomyIds": [
+        "matlab.plot.images"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "network-geometry",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "nls-fit-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "non-inferiority-interval-plot",
+      "taxonomyIds": [
+        "matlab.plot.images"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "ordered-group-trend",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "ordinal-odds-ratio-forest",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "page-rank-trend",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "pairwise-difference-forest",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "partial-correlation-heatmap",
+      "taxonomyIds": [
+        "matlab.plot.images"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "permutation-histogram",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "phillips-perron-regression-figure",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "poisson-rate-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "polynomial-fit-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "power-curve",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "precision-curve",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "probability-density-plot",
+      "taxonomyIds": [
+        "matlab.plot.data-distribution"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "ps-love-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "ps-overlap-plot",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "qq-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "quantile-coefficient-process",
+      "taxonomyIds": [
+        "matlab.plot.data-distribution"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "rd-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "rd-sensitivity-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "relative-effect-interval",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "reliability-alpha-if-deleted-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "reliability-icc-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "reliability-omega-loading-plot",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "residual-lag-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "residual-vs-fitted",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "ridge-coefficient-path",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "rmst-area-curves",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "robust-vs-ols-forest",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "robust-weight-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "roc-curve-comparison-plot",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "runs-sequence-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "sign-count-bars",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "spectrum-figure",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "subgroup-forest",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "trend-proportion-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "trim-fill-funnel",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "two-by-two-risk-plot",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "var-impulse-response-figure",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "vif-bar",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "weighted-log-rank-km-curves",
+      "taxonomyIds": [
+        "matlab.plot.scatter-bubble"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "weighted-rank-sums",
+      "taxonomyIds": [
+        "matlab.plot.discrete"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    },
+    {
+      "id": "within-subject-profile",
+      "taxonomyIds": [
+        "matlab.plot.line"
+      ],
+      "states": {
+        "analysis": "not-applicable",
+        "renderer": "partial",
+        "interaction": "missing",
+        "export": "partial"
+      }
+    }
   ],
   "aggregate": {
-    "rowCount": 95,
-    "analysis": { "implemented": 31, "partial": 0, "missing": 0, "not-applicable": 64 },
-    "renderer": { "implemented": 0, "partial": 91, "missing": 4, "not-applicable": 0 },
-    "interaction": { "implemented": 0, "partial": 1, "missing": 94, "not-applicable": 0 },
-    "export": { "implemented": 0, "partial": 91, "missing": 4, "not-applicable": 0 }
+    "rowCount": 406,
+    "analysis": {
+      "implemented": 179,
+      "partial": 0,
+      "missing": 0,
+      "not-applicable": 227
+    },
+    "renderer": {
+      "implemented": 0,
+      "partial": 402,
+      "missing": 4,
+      "not-applicable": 0
+    },
+    "interaction": {
+      "implemented": 0,
+      "partial": 1,
+      "missing": 405,
+      "not-applicable": 0
+    },
+    "export": {
+      "implemented": 0,
+      "partial": 402,
+      "missing": 4,
+      "not-applicable": 0
+    }
   },
   "claimPolicy": {
     "parityClaimAllowed": false,
     "overallStatus": "missing",
-    "allowedStatement": "Agentlas Statistics implements 31 bounded analysis methods and catalogs 64 figure templates; MATLAB-category renderer, interaction, and export parity is not implemented.",
+    "allowedStatement": "Agentlas Statistics implements 167 bounded analysis methods and catalogs 64 figure templates; MATLAB-category renderer, interaction, and export parity is not implemented.",
     "rejectedClaimPatterns": [
-      "MATLAB parity", "MATLAB-equivalent", "full MATLAB compatibility", "MATLAB-level statistics", "MATLAB replacement",
-      "매트랩 패리티", "매트랩 동급", "매트랩 수준 통계", "매트랩 완전 호환", "매트랩 대체"
+      "MATLAB parity",
+      "MATLAB-equivalent",
+      "full MATLAB compatibility",
+      "MATLAB-level statistics",
+      "MATLAB replacement",
+      "매트랩 패리티",
+      "매트랩 동급",
+      "매트랩 수준 통계",
+      "매트랩 완전 호환",
+      "매트랩 대체"
     ],
     "denialReasons": [
       "All 95 exact-ID rows lack complete production-bound MATLAB-category interaction parity; the response-surface template has only bounded orbit, pan, zoom, and persisted-view interaction.",
       "All renderer rows are partial or missing; one bounded masked response-surface renderer does not cover the remaining four numeric-3d template IDs or the MATLAB plot taxonomy.",
       "All export rows are partial or missing; response-surface canvas capture does not supply template-bound PDF, EPS, TIFF, CMYK, font-embedding, or multipage parity.",
-      "The 31 exact engine methods are a bounded subset of the official Statistics and Machine Learning Toolbox taxonomy."
+      "The 167 exact engine methods are a bounded subset of the official Statistics and Machine Learning Toolbox taxonomy."
     ]
   },
   "openGaps": {
     "analysis": [
-      "Probability-family breadth beyond normal, zero-location lognormal and zero-location exponential, plus calibrated goodness-of-fit inference", "variance and distribution-test breadth", "ANCOVA, MANOVA, repeated-measures and mixed-effects breadth",
-      "random slopes, crossed or nested random effects, and broader mixed-effects inference", "nonlinear and nonparametric regression breadth", "clustering and anomaly detection", "supervised and semi-supervised machine learning breadth",
-      "factor analysis, feature selection and broader dimensionality reduction", "DOE, reliability and statistical process control", "machine-learning pipelines and code generation"
+      "Probability-family breadth beyond normal, zero-location lognormal and zero-location exponential, plus calibrated goodness-of-fit inference",
+      "variance and distribution-test breadth",
+      "ANCOVA, MANOVA, repeated-measures and mixed-effects breadth",
+      "random slopes, crossed or nested random effects, and broader mixed-effects inference",
+      "nonlinear and nonparametric regression breadth",
+      "clustering and anomaly detection",
+      "supervised and semi-supervised machine learning breadth",
+      "factor analysis, feature selection and broader dimensionality reduction",
+      "DOE, reliability and statistical process control",
+      "machine-learning pipelines and code generation"
     ],
     "renderer": [
-      "Production binding from each catalog template ID to emitted data and marks", "3-D point clouds, volume slices, vector fields and trajectories beyond the bounded response surface",
-      "geographic, polar, animation and general image plot families", "full axes, object-property, annotation, tiled-layout and multi-axis authoring"
+      "Production binding from each catalog template ID to emitted data and marks",
+      "3-D point clouds, volume slices, vector fields and trajectories beyond the bounded response surface",
+      "geographic, polar, animation and general image plot families",
+      "full axes, object-property, annotation, tiled-layout and multi-axis authoring"
     ],
     "interaction": [
-      "Zoom, pan, and persisted view state outside the bounded response-surface renderer", "persistent data tips", "data brushing and linked selection", "plot statistics overlays", "editable annotations", "3-D rotation outside the bounded response-surface renderer"
+      "Zoom, pan, and persisted view state outside the bounded response-surface renderer",
+      "persistent data tips",
+      "data brushing and linked selection",
+      "plot statistics overlays",
+      "editable annotations",
+      "3-D rotation outside the bounded response-surface renderer"
     ],
     "export": [
-      "Template-bound PDF, EPS and TIFF", "CMYK and grayscale publication profiles", "font embedding and font reproducibility", "multipage export",
-      "exact physical sizing and padding across all templates", "journal validation of line width, typography and vector/raster choice"
+      "Template-bound PDF, EPS and TIFF",
+      "CMYK and grayscale publication profiles",
+      "font embedding and font reproducibility",
+      "multipage export",
+      "exact physical sizing and padding across all templates",
+      "journal validation of line width, typography and vector/raster choice"
     ]
   }
 }

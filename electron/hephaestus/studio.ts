@@ -11,7 +11,7 @@ import net from "node:net";
 import path from "node:path";
 import { app, session } from "electron";
 import type { ChildProcess } from "node:child_process";
-import { withCliPath } from "../runtime/exec";
+import { detachedSpawnOpts, killCliTree, trackRunChild, withCliPath } from "../runtime/exec";
 import { withPythonCacheBoundary } from "../runtime/python-cache";
 import { resolveHephaestusPython } from "./engine";
 import { currentUiLocale } from "../ui-locale";
@@ -424,7 +424,13 @@ async function startStudioInner(): Promise<StudioStartResult> {
   if (proc) stopStudio();
   let child: ChildProcess;
   try {
-    child = crossSpawn(py.python, args, { cwd: runRoot, env, stdio: ["ignore", "pipe", "pipe"] });
+    child = crossSpawn(py.python, args, {
+      cwd: runRoot,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+      ...detachedSpawnOpts(),
+    });
+    trackRunChild(child);
   } catch (e) {
     activeRequestToken = null;
     return { ok: false, reason: (e as Error).message };
@@ -456,7 +462,7 @@ async function startStudioInner(): Promise<StudioStartResult> {
 export function stopStudio(): void {
   if (proc) {
     try {
-      proc.kill("SIGTERM");
+      killCliTree(proc, 750);
     } catch {
       /* noop */
     }

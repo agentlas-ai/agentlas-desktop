@@ -6,7 +6,7 @@ const { ENGINE, METHODS, sha256 } = require("./engine.cjs");
 
 const COVERAGE_SCHEMA = "agentlas.science.statistics-coverage/v1";
 const COVERAGE_FILE = "coverage-manifest.json";
-const MAX_COVERAGE_BYTES = 256 * 1024;
+const MAX_COVERAGE_BYTES = 2 * 1024 * 1024;
 
 const INTERNAL_VERIFIED = Object.freeze([
   "deterministic numeric fixtures",
@@ -16,6 +16,19 @@ const INTERNAL_VERIFIED = Object.freeze([
 
 const INTERNAL_EXCLUDED = Object.freeze([
   "independent external implementation equivalence",
+]);
+
+// These registry modules currently have deterministic fixtures but no checked-in
+// independent oracle bytes. They must not inherit the registry's normal
+// `external-library-partial` claim merely because a proposed filename exists in
+// method metadata. Adding a real oracle requires removing its exact id here and
+// regenerating the coverage and integrity manifests in the same change.
+const UNVERIFIED_REGISTRY_EVIDENCE = new Set([
+  "contracts/bayesian-scipy-crosscheck.py",
+  "contracts/causal-inference-scipy-crosscheck.py",
+  "contracts/distributions-extended-scipy-crosscheck.py",
+  "contracts/nonparametric-extended-scipy-crosscheck.py",
+  "contracts/regression-extended-scipy-crosscheck.py",
 ]);
 
 const oraclePolicy = Object.fromEntries(METHODS.map((method) => [method, Object.freeze({
@@ -347,7 +360,27 @@ oraclePolicy.gaussian_random_intercept_lmm = Object.freeze({
   independentlyCrossChecked: true,
 });
 
+const { loadMethodRegistry } = require("./methods/index.cjs");
+for (const definition of loadMethodRegistry().definitions) {
+  const independentlyCrossChecked = definition.coverage.oracle.evidence.every(
+    (item) => !UNVERIFIED_REGISTRY_EVIDENCE.has(item),
+  );
+  oraclePolicy[definition.method] = Object.freeze({
+    level: independentlyCrossChecked ? definition.coverage.oracle.level : "internal-fixture-only",
+    evidence: independentlyCrossChecked
+      ? Object.freeze([...definition.coverage.oracle.evidence])
+      : Object.freeze(["deterministic runtime fixture only"]),
+    verifiedOutputs: independentlyCrossChecked
+      ? Object.freeze([...definition.coverage.oracle.verifiedOutputs])
+      : INTERNAL_VERIFIED,
+    excludedOutputs: independentlyCrossChecked
+      ? Object.freeze([...definition.coverage.oracle.excludedOutputs])
+      : Object.freeze([...definition.coverage.oracle.excludedOutputs, ...INTERNAL_EXCLUDED]),
+    independentlyCrossChecked,
+  });
+}
 const ORACLE_POLICY = Object.freeze(oraclePolicy);
+const REGISTRY_COVERAGE = Object.freeze(Object.fromEntries(loadMethodRegistry().definitions.map((definition) => [definition.method, definition.coverage])));
 
 const METHOD_KEYS = Object.freeze([
   "method",
@@ -503,6 +536,7 @@ module.exports = {
   COVERAGE_SCHEMA,
   CoverageManifestError,
   ORACLE_POLICY,
+  REGISTRY_COVERAGE,
   digestManifest,
   loadCoverageManifest,
   validateCoverageManifest,

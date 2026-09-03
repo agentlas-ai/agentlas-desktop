@@ -1,4 +1,6 @@
 import fs from "node:fs";
+import { projectScienceDeclaredColumns, type ScienceDeclaredColumnMapping, type ScienceDeclaredSchemaNode } from "./statistics-declared-projection";
+import { prepareScienceTable, type ScienceTablePreparation } from "./statistics-table-preparation";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -12,6 +14,7 @@ import type {
   ScienceRunBlobReceipt,
   ScienceToolExecution,
 } from "../../shared/science-contract";
+
 import {
   defaultScienceProteinColorTheme,
   scienceRendererBindingsEqual,
@@ -23,6 +26,7 @@ import {
 } from "../../shared/science-renderer-runtime";
 import { ScienceStore } from "./store";
 import { runSignedScienceExecutor } from "./signed-executor";
+import { loadSciencePluginRuntime, readSciencePluginFile, readSciencePluginRelease } from "./plugin-runtime";
 import type { ResolvedScienceRendererExecutor } from "./renderer-registry";
 import {
   SCIENCE_STATISTICS_LAB_ID,
@@ -32,6 +36,7 @@ import {
   SCIENCE_STATISTICS_EXECUTION_BINDING_SCHEMA,
   SCIENCE_STATISTICS_DATA_TABLE_PROJECTION_RECEIPT_SCHEMA,
   SCIENCE_STATISTICS_DATA_TABLE_PROJECTION_RECEIPT_V2_SCHEMA,
+  SCIENCE_STATISTICS_DATA_TABLE_PROJECTION_RECEIPT_V4_SCHEMA,
   SCIENCE_STATISTICS_DATA_TABLE_PROJECTION_RECEIPT_V3_SCHEMA,
   isScienceStatisticsMethod,
   scienceStatisticsSha256,
@@ -83,6 +88,14 @@ const MAX_INPUT_BYTES = 8 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 const STATISTICS_MAX_INPUT_BYTES = 8 * 1024 * 1024;
 const STATISTICS_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+const STATISTICS_DEFAULT_ANALYSIS_TIMEOUT_MS = 5_000;
+const STATISTICS_MAX_ANALYSIS_TIMEOUT_MS = 10_000;
+const STATISTICS_TERMINATION_GRACE_MS = 1_000;
+const STATISTICS_CHILD_RESOURCE_LIMITS = Object.freeze({
+  maxOldSpaceMb: 192,
+  maxSemiSpaceMb: 16,
+  stackSizeKb: 8 * 1024,
+});
 const MAX_LOG_BYTES = 64 * 1024;
 const TIMEOUT_MS = 15_000;
 const MOLSTAR_TOOL_ID = "agentlas.source-to-molstar";
@@ -94,7 +107,7 @@ const KETCHER_TOOL_VERSION = "1.0.0";
 const KETCHER_INPUT_MIME = "application/vnd.agentlas.science.smiles+json";
 const KETCHER_OUTPUT_MIME = "application/vnd.agentlas.science.tool-artifact-candidate+json";
 const SOURCE_TO_KETCHER_TOOL_ID = "agentlas.source-to-ketcher";
-const SOURCE_TO_KETCHER_TOOL_VERSION = "1.0.0";
+const SOURCE_TO_KETCHER_TOOL_VERSION = "1.1.0";
 const SOURCE_TO_KETCHER_INPUT_MIME = "application/vnd.agentlas.science.source-to-ketcher+json";
 const CITATION_NETWORK_TOOL_ID = "agentlas.academic-to-citation-network";
 const CITATION_NETWORK_TOOL_VERSION = "1.0.0";
@@ -332,132 +345,47 @@ type StatisticsRuntimeReceipt = {
   platform: NodeJS.Platform;
   arch: string;
   networkPolicy: "builtin-module-deny-v1";
+  processLimits: {
+    isolation: "electron-run-as-node-child";
+    analysisTimeoutMs: number;
+    terminationTimeoutMs: number;
+    maxOldSpaceMb: number;
+    maxSemiSpaceMb: number;
+    stackSizeKb: number;
+  };
   plugin: {
     slug: typeof STATISTICS_PLUGIN_SLUG;
     version: typeof SCIENCE_STATISTICS_TOOL_VERSION;
     manifestSha256: string;
     integrityManifestSha256: string;
+    releaseSha256: string;
+    runtimeFiles: StatisticsPluginIntegrityFile[];
     engine: StatisticsPluginIntegrityFile;
-    workerRunner: StatisticsPluginIntegrityFile;
   };
   receiptSha256: string;
 };
 
-function readStatisticsRuntimeFile(target: string, maximum: number): Buffer {
-  let lstat: fs.Stats;
-  try { lstat = fs.lstatSync(target); }
-  catch { throw new Error("science-statistics-runtime-unavailable"); }
-  if (!lstat.isFile() || lstat.isSymbolicLink() || lstat.size < 1 || lstat.size > maximum) {
-    throw new Error("science-statistics-runtime-file-invalid");
-  }
-  const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0);
-  let fd: number;
-  try { fd = fs.openSync(target, flags); }
-  catch { throw new Error("science-statistics-runtime-file-invalid"); }
-  try {
-    const before = fs.fstatSync(fd);
-    if (!before.isFile() || before.size !== lstat.size || before.dev !== lstat.dev || before.ino !== lstat.ino) {
-      throw new Error("science-statistics-runtime-file-invalid");
-    }
-    const bytes = Buffer.allocUnsafe(before.size);
-    let offset = 0;
-    while (offset < bytes.length) {
-      const read = fs.readSync(fd, bytes, offset, bytes.length - offset, offset);
-      if (read < 1) throw new Error("science-statistics-runtime-file-invalid");
-      offset += read;
-    }
-    const after = fs.fstatSync(fd);
-    if (after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size || after.mtimeMs !== before.mtimeMs) {
-      throw new Error("science-statistics-runtime-file-changed");
-    }
-    return bytes;
-  } finally {
-    fs.closeSync(fd);
-  }
-}
-
-function statisticsPluginRootCandidates(): string[] {
-  const candidates = [path.resolve(__dirname, "../../plugins", STATISTICS_PLUGIN_SLUG)];
-  const resources = typeof process.resourcesPath === "string" && process.resourcesPath.trim()
-    ? process.resourcesPath
-    : null;
-  if (resources) {
-    candidates.push(
-      path.join(resources, "app.asar.unpacked", "dist", "plugins", STATISTICS_PLUGIN_SLUG),
-      path.join(resources, "app.asar", "dist", "plugins", STATISTICS_PLUGIN_SLUG),
-      path.join(resources, "dist", "plugins", STATISTICS_PLUGIN_SLUG),
-    );
-  }
-  // A compiled development build can be executed before copy-builtin-plugins. The
-  // immutable source package is the only fallback and does not depend on cwd.
-  candidates.push(path.resolve(__dirname, "../../../plugins", STATISTICS_PLUGIN_SLUG));
-  return [...new Set(candidates)];
-}
-
-function resolveStatisticsPluginRoot(): string {
-  for (const candidate of statisticsPluginRootCandidates()) {
-    let stat: fs.Stats;
-    try { stat = fs.lstatSync(candidate); }
-    catch { continue; }
-    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("science-statistics-runtime-root-invalid");
-    return candidate;
-  }
-  throw new Error("science-statistics-runtime-unavailable");
-}
-
-function normalizeStatisticsIntegrityFiles(value: unknown): StatisticsPluginIntegrityFile[] {
-  if (!Array.isArray(value) || value.length < 1 || value.length > 4_096) {
-    throw new Error("science-statistics-runtime-integrity-invalid");
-  }
-  const seen = new Set<string>();
-  const files = value.map((entry) => {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)
-      || !exactObjectKeys(entry as Record<string, unknown>, ["path", "sha256", "bytes"])) {
-      throw new Error("science-statistics-runtime-integrity-invalid");
-    }
-    const raw = entry as Record<string, unknown>;
-    const relativePath = String(raw.path ?? "");
-    const digest = String(raw.sha256 ?? "");
-    const byteSize = Number(raw.bytes);
-    if (!relativePath || relativePath.includes("\\") || path.posix.isAbsolute(relativePath)
-      || path.posix.normalize(relativePath) !== relativePath || relativePath.split("/").includes("..")
-      || !/^[a-f0-9]{64}$/.test(digest) || !Number.isInteger(byteSize) || byteSize < 1 || byteSize > 128 * 1024 * 1024
-      || seen.has(relativePath)) throw new Error("science-statistics-runtime-integrity-invalid");
-    seen.add(relativePath);
-    return { path: relativePath, sha256: digest, bytes: byteSize };
-  });
-  return files.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
-}
-
-function createStatisticsRuntimeReceipt(workerSha256: string): StatisticsRuntimeReceipt {
-  const pluginRoot = resolveStatisticsPluginRoot();
-  const manifestBytes = readStatisticsRuntimeFile(path.join(pluginRoot, "plugin.json"), 2 * 1024 * 1024);
-  let manifest: Record<string, unknown>;
-  try { manifest = JSON.parse(manifestBytes.toString("utf8")) as Record<string, unknown>; }
-  catch { throw new Error("science-statistics-runtime-manifest-invalid"); }
-  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)
-    || manifest.schema !== "agentlas.plugin/v2" || manifest.slug !== STATISTICS_PLUGIN_SLUG
-    || manifest.version !== SCIENCE_STATISTICS_TOOL_VERSION) {
+function createStatisticsRuntimeReceipt(
+  workerSha256: string,
+  analysisTimeoutMs: number,
+  terminationTimeoutMs: number,
+): StatisticsRuntimeReceipt {
+  const release = readSciencePluginRelease(STATISTICS_PLUGIN_SLUG, "runtime/");
+  if (release.manifest.version !== SCIENCE_STATISTICS_TOOL_VERSION) {
     throw new Error("science-statistics-runtime-version-mismatch");
   }
-  const integrity = manifest.integrity;
-  if (!integrity || typeof integrity !== "object" || Array.isArray(integrity)
-    || !exactObjectKeys(integrity as Record<string, unknown>, ["algo", "files"])
-    || (integrity as Record<string, unknown>).algo !== "sha256") {
-    throw new Error("science-statistics-runtime-integrity-invalid");
-  }
-  const files = normalizeStatisticsIntegrityFiles((integrity as Record<string, unknown>).files);
-  const runtimeFile = (relativePath: string, maximum: number): StatisticsPluginIntegrityFile => {
-    const expected = files.find((entry) => entry.path === relativePath);
-    if (!expected) throw new Error("science-statistics-runtime-integrity-invalid");
-    const bytes = readStatisticsRuntimeFile(path.join(pluginRoot, ...relativePath.split("/")), maximum);
-    if (bytes.length !== expected.bytes || sha256(bytes) !== expected.sha256) {
-      throw new Error("science-statistics-runtime-integrity-mismatch");
-    }
-    return expected;
+  const files = [...release.manifest.integrity.files]
+    .sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+  const runtimeFiles = [...release.files.entries()]
+    .filter(([relativePath]) => relativePath.startsWith("runtime/"))
+    .map(([relativePath, file]) => ({ path: relativePath, sha256: file.sha256, bytes: file.bytes.length }))
+    .sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+  const runtimeFile = (relativePath: string): StatisticsPluginIntegrityFile => {
+    const file = runtimeFiles.find((entry) => entry.path === relativePath);
+    if (!file) throw new Error("science-statistics-runtime-integrity-invalid");
+    return file;
   };
-  const engine = runtimeFile("runtime/engine.cjs", 16 * 1024 * 1024);
-  const workerRunner = runtimeFile("runtime/worker-runner.cjs", 2 * 1024 * 1024);
+  const engine = runtimeFile("runtime/engine.cjs");
   const core: Omit<StatisticsRuntimeReceipt, "receiptSha256"> = {
     schema: STATISTICS_RUNTIME_RECEIPT_SCHEMA,
     toolId: SCIENCE_STATISTICS_TOOL_ID,
@@ -469,16 +397,33 @@ function createStatisticsRuntimeReceipt(workerSha256: string): StatisticsRuntime
     platform: process.platform,
     arch: process.arch,
     networkPolicy: "builtin-module-deny-v1" as const,
+    processLimits: {
+      isolation: "electron-run-as-node-child",
+      analysisTimeoutMs,
+      terminationTimeoutMs,
+      ...STATISTICS_CHILD_RESOURCE_LIMITS,
+    },
     plugin: {
       slug: STATISTICS_PLUGIN_SLUG,
       version: SCIENCE_STATISTICS_TOOL_VERSION,
-      manifestSha256: sha256(manifestBytes),
+      manifestSha256: release.manifestSha256,
       integrityManifestSha256: sha256(canonicalJson({ algo: "sha256", files })),
+      releaseSha256: release.releaseSha256,
+      runtimeFiles,
       engine,
-      workerRunner,
     },
   };
   return { ...core, receiptSha256: sha256(canonicalJson(core)) };
+}
+
+function statisticsAnalysisTimeoutMs(normalized: Record<string, unknown>): number {
+  const options = normalized.options;
+  const value = options && typeof options === "object" && !Array.isArray(options)
+    ? (options as Record<string, unknown>).timeoutMs
+    : undefined;
+  return Number.isSafeInteger(value) && Number(value) >= 1 && Number(value) <= STATISTICS_MAX_ANALYSIS_TIMEOUT_MS
+    ? Number(value)
+    : STATISTICS_DEFAULT_ANALYSIS_TIMEOUT_MS;
 }
 
 function stableUuid(value: string): string {
@@ -615,6 +560,35 @@ function assertStatisticsLmmAnalysisSpecCompatibility(
   }
 }
 
+/**
+ * The registered definition for a method, or null when the engine does not describe it.
+ *
+ * Loaded through the same integrity-verified plugin path the analysis itself runs from, so a
+ * projection can never be built against a definition that differs from the one that will execute.
+ */
+function statisticsMethodDefinition(method: string): { dataSchema?: ScienceDeclaredSchemaNode } | null {
+  try {
+    // Through the shared resolver so this definition comes from the same pinned, verified release
+    // the analysis will actually execute -- a second path here could hand back a schema from a
+    // different copy of the plugin than the one that runs.
+    const engine = loadSciencePluginRuntime<{
+      METHOD_REGISTRY?: { byMethod?: Record<string, { dataSchema?: ScienceDeclaredSchemaNode }> };
+    }>("agentlas-science-statistics", "runtime/engine.cjs", 16 * 1024 * 1024).runtime;
+    const registered = engine.METHOD_REGISTRY?.byMethod?.[method];
+    if (registered) return registered;
+    // The core methods parse their input imperatively and register no definition, so their shapes
+    // are declared beside the engine instead. Without this the analyses a researcher reaches for
+    // first -- a t-test, a correlation, a regression -- could not read an uploaded table at all.
+    const core = loadSciencePluginRuntime<{
+      CORE_DATA_SCHEMAS?: Record<string, ScienceDeclaredSchemaNode>;
+    }>("agentlas-science-statistics", "runtime/core-data-schemas.cjs", 4 * 1024 * 1024).runtime;
+    const declared = core.CORE_DATA_SCHEMAS?.[method];
+    return declared ? { dataSchema: declared } : null;
+  } catch {
+    return null;
+  }
+}
+
 function projectStatisticsSourceTable(
   method: string,
   raw: Record<string, unknown>,
@@ -675,7 +649,12 @@ function projectStatisticsSourceTable(
       groups.set(group, values);
       includedRows.push({ rowIndex, group, value });
     });
-    const names = [...groups.keys()].sort(compareStatisticsLabels);
+    // A Map preserves insertion order, which is the order the arms appear in the researcher's table.
+    // For a dose study that order is the only thing that encodes low-dose before high-dose, and
+    // sorting the labels alphabetically put control, high-dose, low-dose on the axis of a figure
+    // captioned "dose response". The comparison itself is order-independent, so no statistic
+    // changes; the axis and the reported row order follow the table instead of the alphabet.
+    const names = [...groups.keys()];
     if (names.length < 2 || names.some((name) => (groups.get(name)?.length ?? 0) < 2)) throw new Error("science-statistics-source-group-incomplete");
     const projectedData = { groups: names.map((name) => ({ name, values: groups.get(name) as number[] })) };
     const sourceTable = { ...sourceArtifact, method: "welch_one_way_anova" as const, projectionKind: "welch-one-way-anova-long" as const, groupColumn, valueColumn };
@@ -933,6 +912,49 @@ function projectStatisticsSourceTable(
     };
     return { sourceTable, dataProjection: { data: projectedData, receipt: validateScienceStatisticsDataTableProjectionReceipt({ ...core, receiptSha256: scienceStatisticsSha256(core) }) } };
   }
+  // Any method that has no bespoke projection above, projected against its own declared data shape.
+  //
+  // The six projections above were written one at a time, by hand, for six methods. The engine
+  // registers 178. Everything else could only be reached by putting the numbers in the request,
+  // which is the retyping this whole mechanism exists to prevent -- so 172 methods were unreachable
+  // from an uploaded table, including every one added after the last hand-written projection.
+  //
+  // This projects from the method's own `dataSchema`, which the registry already validates, so a
+  // method becomes reachable the day it is registered. Measured: 165 of 178 -- 141 of the 147
+  // registered extension methods, and 23 of the 24 core methods whose shapes are declared beside
+  // the engine in `core-data-schemas.cjs`. The rest are refused BY NAME rather than approximated.
+  // The counts are re-measured by `science-statistics-table-reachability` and
+  // `science-statistics-core-projection`; this comment is not where they are checked.
+  if (raw.projectionKind === "declared-columns") {
+    const definition = statisticsMethodDefinition(method);
+    if (!definition) throw new Error("science-statistics-source-method-invalid");
+    const mapping = raw.columns;
+    if (!mapping || typeof mapping !== "object" || Array.isArray(mapping)) throw new Error("science-statistics-declared-mapping-invalid");
+    // Narrow the table BEFORE projecting, when the caller asked to. Projection can only map columns
+    // that exist, so without this the two things most studies need -- keep the rows above a
+    // completeness cut, split a series into two windows -- were impossible on a real table.
+    const prepared = prepareScienceTable(table, raw.preparation as ScienceTablePreparation | undefined);
+    const projection = projectScienceDeclaredColumns(definition.dataSchema, prepared.table, mapping as Record<string, ScienceDeclaredColumnMapping>);
+    const sourceTable = { ...sourceArtifact, method, projectionKind: "declared-columns" as const, columns: projection.columns };
+    const core = {
+      schema: SCIENCE_STATISTICS_DATA_TABLE_PROJECTION_RECEIPT_V4_SCHEMA,
+      method,
+      projectionKind: "declared-columns" as const,
+      sourceArtifact,
+      sourceTableSha256: table.receipts.tableSha256,
+      columns: projection.columns,
+      // What was cut and what was derived, so the analysis can be re-run from the exact table
+      // version and this rule alone. Absent when nothing was asked for.
+      ...(prepared.receipt ? { preparation: prepared.receipt } : {}),
+      includedRowCount: projection.includedRows.length,
+      includedRowsSha256: scienceStatisticsSha256(projection.includedRows as unknown as Record<string, unknown>[]),
+      projectedDataSha256: scienceStatisticsSha256(projection.data),
+    };
+    return {
+      sourceTable: sourceTable as unknown as ScienceStatisticsSourceTableBinding,
+      dataProjection: { data: projection.data, receipt: validateScienceStatisticsDataTableProjectionReceipt({ ...core, receiptSha256: scienceStatisticsSha256(core) }) },
+    };
+  }
   throw new Error("science-statistics-source-method-invalid");
 }
 
@@ -969,12 +991,19 @@ function normalizeStatisticsInput(input: ExecuteStatisticsAnalysisInput, store: 
   let sourceTable: ScienceStatisticsSourceTableBinding | null = null;
   let dataProjection: { data: Record<string, unknown>; receipt: ReturnType<typeof validateScienceStatisticsDataTableProjectionReceipt> } | null = null;
   if (hasSourceTable) {
-    if (!["kaplan_meier", "welch_one_way_anova", "friedman_test", "roc_curve_analysis", "response_surface_regression", "gaussian_random_intercept_lmm"].includes(request.method)) {
+    const raw = input.sourceTable as unknown as Record<string, unknown>;
+    // The general projection is keyed by projection kind, not by method: it serves every method
+    // that declares a data shape, so an allowlist of method names is the wrong gate for it. The
+    // list below stays for the six bespoke projections, each of which reads named columns this
+    // request shape cannot express.
+    const declaredColumns = raw && (raw as Record<string, unknown>).projectionKind === "declared-columns";
+    if (!declaredColumns && !["kaplan_meier", "welch_one_way_anova", "friedman_test", "roc_curve_analysis", "response_surface_regression", "gaussian_random_intercept_lmm"].includes(request.method)) {
       throw new Error("science-statistics-source-method-invalid");
     }
-    const raw = input.sourceTable as unknown as Record<string, unknown>;
     const commonSourceKeys = ["artifactId", "artifactVersion", "contentSha256"];
-    const expectedSourceKeys = request.method === "kaplan_meier"
+    const expectedSourceKeys = declaredColumns
+      ? [...commonSourceKeys, "method", "projectionKind", "columns"]
+      : request.method === "kaplan_meier"
       ? [...commonSourceKeys, "timeColumn", "eventColumn", ...(raw && Object.hasOwn(raw, "label") ? ["label"] : [])]
       : request.method === "welch_one_way_anova"
         ? [...commonSourceKeys, "method", "projectionKind", "groupColumn", "valueColumn"]
@@ -1258,7 +1287,7 @@ function normalizeAstronomyLightCurvePeriodicityInput(
   return validateScienceAstronomyLightCurveInputDescriptor({
     schema: "agentlas.science.astronomy-light-curve-periodicity-input/v1",
     title: boundedText(input.title, 240, "title"),
-    runtime: { pluginId: "agentlas-astronomy", pluginVersion: "1.2.0", runtimeSha256: pluginRuntimeSha256 },
+    runtime: { pluginId: "agentlas-astronomy", pluginVersion: "1.2.1", runtimeSha256: pluginRuntimeSha256 },
     sourceTable: {
       artifactId: context.artifact.id,
       artifactVersion: context.selectedVersion.version,
@@ -1378,10 +1407,15 @@ function normalizeSourceKetcherInput(
     throw new Error("science-tool-source-chemistry-encoding-invalid");
   }
   return {
-    schema: "agentlas.science-source-to-ketcher-input/v1",
+    schema: "agentlas.science-source-to-ketcher-input/v2",
     title: boundedText(input.title ?? verified.source.title, 240, "title"),
     retrievalRunId: verified.retrievalRun.id,
     retrievalOutputSha256: verified.retrievalOutputSha256,
+    expectedIdentity: {
+      provider: "pubchem",
+      canonicalExternalId: verified.externalId,
+      canonicalSmiles: verified.canonicalSmiles,
+    },
     source: {
       id: verified.source.id,
       versionId: verified.source.version.id,
@@ -1413,9 +1447,19 @@ function readRegularFileNoFollow(target: string, maximum: number): Buffer {
   }
 }
 
-async function runChild(workerPath: string, jobRoot: string, onSpawn: (pid: number) => void): Promise<{ pid: number; exitCode: number; stderr: string }> {
+type ScienceChildExecutionPolicy = {
+  timeoutMs?: number;
+  nodeArgs?: readonly string[];
+};
+
+async function runChild(
+  workerPath: string,
+  jobRoot: string,
+  onSpawn: (pid: number) => void,
+  policy: ScienceChildExecutionPolicy = {},
+): Promise<{ pid: number; exitCode: number; stderr: string }> {
   return await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [workerPath, path.join(jobRoot, "input.json"), path.join(jobRoot, "output.json")], {
+    const child = spawn(process.execPath, [...(policy.nodeArgs ?? []), workerPath, path.join(jobRoot, "input.json"), path.join(jobRoot, "output.json")], {
       cwd: jobRoot,
       shell: false,
       detached: process.platform !== "win32",
@@ -1457,7 +1501,7 @@ async function runChild(workerPath: string, jobRoot: string, onSpawn: (pid: numb
         settled = true;
         reject(new Error("science-tool-timeout"));
       }
-    }, TIMEOUT_MS);
+    }, policy.timeoutMs ?? TIMEOUT_MS);
     child.stdout?.on("data", (chunk: Buffer) => {
       stdoutBytes += chunk.length;
       if (stdoutBytes > MAX_LOG_BYTES) terminate();
@@ -2102,7 +2146,9 @@ export class ScienceToolGateway {
     const workerStat = fs.lstatSync(workerPath);
     if (!workerStat.isFile() || workerStat.isSymbolicLink()) throw new Error("science-tool-worker-invalid");
     const workerSha256 = sha256(fs.readFileSync(workerPath));
-    const runtimeReceipt = createStatisticsRuntimeReceipt(workerSha256);
+    const analysisTimeoutMs = statisticsAnalysisTimeoutMs(normalized);
+    const terminationTimeoutMs = Math.min(TIMEOUT_MS, analysisTimeoutMs + STATISTICS_TERMINATION_GRACE_MS);
+    const runtimeReceipt = createStatisticsRuntimeReceipt(workerSha256, analysisTimeoutMs, terminationTimeoutMs);
     const environmentSha256 = runtimeReceipt.receiptSha256;
     const inputBlob = this.store.putRunBlob(inputBytes);
     const inputResource = {
@@ -2211,6 +2257,13 @@ export class ScienceToolGateway {
       const child = await runChild(workerPath, jobRoot, (pid) => {
         execution = this.store.markToolExecutionSpawned(input.projectId, input.requestId, pid);
         this.activeChildPids.set(input.requestId, pid);
+      }, {
+        timeoutMs: terminationTimeoutMs,
+        nodeArgs: [
+          `--max-old-space-size=${STATISTICS_CHILD_RESOURCE_LIMITS.maxOldSpaceMb}`,
+          `--max-semi-space-size=${STATISTICS_CHILD_RESOURCE_LIMITS.maxSemiSpaceMb}`,
+          `--stack-size=${STATISTICS_CHILD_RESOURCE_LIMITS.stackSizeKb}`,
+        ],
       });
       childPid = child.pid;
       const outputBytes = readRegularFileNoFollow(path.join(jobRoot, "output.json"), STATISTICS_MAX_OUTPUT_BYTES);
@@ -2602,14 +2655,17 @@ export class ScienceToolGateway {
     input: ExecuteAstronomyLightCurvePeriodicityInput,
   ): Promise<ScienceToolExecutionReceipt> {
     const workerPath = path.join(__dirname, "workers", "astronomy-light-curve-periodicity.js");
-    const pluginRuntimePath = path.resolve(__dirname, "../../../plugins/agentlas-astronomy/runtime/astronomy.cjs");
+    const pluginRuntimeFile = readSciencePluginFile(
+      "agentlas-astronomy", "runtime/astronomy.cjs", 16 * 1024 * 1024,
+    );
+    const pluginRuntimePath = pluginRuntimeFile.path;
     const workerStat = fs.lstatSync(workerPath);
     const pluginRuntimeStat = fs.lstatSync(pluginRuntimePath);
     if (!workerStat.isFile() || workerStat.isSymbolicLink() || !pluginRuntimeStat.isFile() || pluginRuntimeStat.isSymbolicLink()) {
       throw new Error("science-tool-astronomy-light-curve-runtime-invalid");
     }
     const workerSha256 = sha256(fs.readFileSync(workerPath));
-    const pluginRuntimeSha256 = sha256(fs.readFileSync(pluginRuntimePath));
+    const pluginRuntimeSha256 = pluginRuntimeFile.sha256;
     const normalized = normalizeAstronomyLightCurvePeriodicityInput(input, this.store, pluginRuntimeSha256);
     const sourceContext = this.store.getArtifactContextForProject(
       input.projectId,
@@ -2627,7 +2683,7 @@ export class ScienceToolGateway {
       toolId: SCIENCE_ASTRONOMY_LIGHT_CURVE_TOOL_ID,
       toolVersion: SCIENCE_ASTRONOMY_LIGHT_CURVE_TOOL_VERSION,
       workerSha256,
-      plugin: { id: "agentlas-astronomy", version: "1.2.0", runtimeSha256: pluginRuntimeSha256 },
+      plugin: { id: "agentlas-astronomy", version: "1.2.1", runtimeSha256: pluginRuntimeSha256 },
       runtime: TOOL_RUNTIME,
       electron: process.versions.electron ?? null,
       node: process.versions.node,

@@ -34,6 +34,48 @@ export function hasInjectedUserDataDir(): boolean {
 }
 
 /**
+ * Whether this host must follow packaged-app storage rules.
+ *
+ * The packaged daemon runs with `ELECTRON_RUN_AS_NODE=1`, so requiring Electron
+ * there throws even though the process belongs to an installed app. An injected
+ * app user-data directory is the daemon's explicit ownership proof and therefore
+ * implies packaged semantics. Regular Electron development still reads the real
+ * `app.isPackaged` value.
+ */
+export function isPackagedRuntime(): boolean {
+  if (injectedUserDataDir) return true;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const electron = require("electron") as { app?: { isPackaged?: boolean } };
+    return electron?.app?.isPackaged ?? true;
+  } catch {
+    return true;
+  }
+}
+
+/** Optional GUI app root. Headless helpers use resourcesPath/injected paths. */
+export function optionalElectronAppPath(): string | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const electron = require("electron") as { app?: { getAppPath?: () => string } };
+    return electron?.app?.getAppPath?.() ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Version metadata for headless protocol clients; GUI Electron remains authoritative. */
+export function electronAppVersion(): string {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const electron = require("electron") as { app?: { getVersion?: () => string } };
+    return electron?.app?.getVersion?.() || process.env.npm_package_version || "0.0.0";
+  } catch {
+    return process.env.npm_package_version || "0.0.0";
+  }
+}
+
+/**
  * 이 프로세스의 사용자 데이터 디렉터리.
  *
  * Electron 이 있으면 그 값이 이긴다 — 앱이 실제로 여는 곳이 거기이고, 주입값이

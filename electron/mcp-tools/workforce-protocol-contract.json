@@ -113,6 +113,12 @@
       "executionContext",
       "executionContextDigest",
       "executionRoster"
+    ],
+    "localExtensionFields": [
+      "goalBinding",
+      "localContextSlice",
+      "localContextBoundary",
+      "localContextSliceStatus"
     ]
   },
   "sourceFailureCodes": [
@@ -135,5 +141,17 @@
     "owner_only",
     "no_cloud_package",
     "agent_not_found"
+  ],
+  "selectionReasonCodes": [
+    "best-semantic-fit",
+    "exact-fit",
+    "reason:best-content-fit",
+    "reason:best-contract-fit",
+    "reason:declared-team-fit",
+    "reason:edge-compatibility",
+    "reason:host-semantic-judgment",
+    "reason:required-capability-fit",
+    "reason:required-mongodb-capability",
+    "reason:team-composition-fit"
   ]
 }

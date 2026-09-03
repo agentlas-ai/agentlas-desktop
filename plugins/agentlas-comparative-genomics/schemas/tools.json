@@ -1,0 +1,173 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "tools": [
+    {
+      "name": "build_ensembl_reference_assembly_manifest_request",
+      "description": "Build exact allowlisted Ensembl REST and FTP metadata requests for 2–8 extant species. The trusted host performs retrieval and preserves exact bytes.",
+      "inputSchema": { "$ref": "#/$defs/referenceAssemblyRequest" }
+    },
+    {
+      "name": "normalize_ensembl_reference_assembly_manifest",
+      "description": "Cross-check Ensembl assembly accessions across genome metadata, assembly metadata, README, and CHECKSUMS, then emit a publication table of extant reference assets without claiming downloaded sequence content.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["request", "releaseResponse", "speciesResponses", "title"],
+        "properties": {
+          "request": { "$ref": "#/$defs/referenceAssemblyRequest" },
+          "releaseResponse": { "type": "object" },
+          "speciesResponses": { "type": "array", "minItems": 2, "maxItems": 8, "items": { "type": "object" } },
+          "title": { "type": "string", "minLength": 1, "maxLength": 240 }
+        }
+      }
+    },
+    {
+      "name": "build_ensembl_compara_gene_tree_request",
+      "description": "Build exact allowlisted Ensembl REST release and Compara gene-tree requests for a bounded extant taxon. The host performs network retrieval and preserves exact bytes.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["species", "geneId", "pruneTaxon", "sequenceType"],
+        "properties": {
+          "species": { "type": "string", "pattern": "^[a-z][a-z0-9_]+$", "maxLength": 80 },
+          "geneId": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "maxLength": 80 },
+          "pruneTaxon": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+          "sequenceType": { "enum": ["protein", "cdna"] }
+        }
+      }
+    },
+    {
+      "name": "normalize_ensembl_compara_gene_tree",
+      "description": "Normalize one exact Ensembl release response and one rooted aligned Compara gene tree into extant sequence records, an alignment-QC publication table, and a Vega tree while preserving observed/inferred/hypothetical evidence boundaries.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["request", "releaseResponse", "treeResponse", "title"],
+        "properties": {
+          "request": { "$ref": "#/$defs/request" },
+          "releaseResponse": { "type": "object" },
+          "treeResponse": { "type": "object" },
+          "title": { "type": "string", "minLength": 1, "maxLength": 240 }
+        }
+      }
+    },
+    {
+      "name": "describe_comparative_genomics_capabilities",
+      "description": "Report the exact provider, implemented analyses, unavailable downstream analyses, and scientific evidence-status policy.",
+      "inputSchema": { "type": "object", "additionalProperties": false, "properties": {} }
+    },
+    {
+      "name": "reconstruct_hypothetical_ancestor_fitch",
+      "description": "Compute deterministic Fitch-parsimony ambiguity sets for one explicit non-root internal node from a rooted strictly bifurcating tree and observed extant DNA alignment. The result is exploratory and hypothetical only, never publication-grade ASR or an extinct genome, phenotype, embryo, or hatching claim.",
+      "inputSchema": { "$ref": "#/$defs/hypotheticalAsrRequest" }
+    },
+    {
+      "name": "compute_extant_archosaur_locus_panel",
+      "description": "Compute an extant-only avian/crocodilian locus panel from exact succeeded comparative-genomics and reference-assembly assessments. Emit deterministic MRCA/path/site QC, a publication table, and a Vega specification without returning raw aligned sequences or claiming an extinct genome.",
+      "inputSchema": { "$ref": "#/$defs/extantArchosaurLocusPanelRequest" }
+    }
+  ],
+  "$defs": {
+    "referenceAssemblyRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["species"],
+      "properties": {
+        "species": { "type": "array", "minItems": 2, "maxItems": 8, "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]+$", "maxLength": 80 } }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["species", "geneId", "pruneTaxon", "sequenceType"],
+      "properties": {
+        "species": { "type": "string", "pattern": "^[a-z][a-z0-9_]+$", "maxLength": 80 },
+        "geneId": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "maxLength": 80 },
+        "pruneTaxon": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "sequenceType": { "enum": ["protein", "cdna"] }
+      }
+    },
+    "hypotheticalAsrRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "moleculeType", "tree", "targetNodeId", "alignment"],
+      "properties": {
+        "schema": { "const": "agentlas.comparative-genomics.hypothetical-asr-request/v1" },
+        "moleculeType": { "const": "dna" },
+        "targetNodeId": { "$ref": "#/$defs/safeNodeId" },
+        "tree": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["rooted", "rootId", "nodes"],
+          "properties": {
+            "rooted": { "const": true },
+            "rootId": { "$ref": "#/$defs/safeNodeId" },
+            "nodes": {
+              "type": "array",
+              "minItems": 5,
+              "maxItems": 511,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id", "children"],
+                "properties": {
+                  "id": { "$ref": "#/$defs/safeNodeId" },
+                  "children": { "type": "array", "minItems": 0, "maxItems": 2, "items": { "$ref": "#/$defs/safeNodeId" } }
+                }
+              }
+            }
+          }
+        },
+        "alignment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sequences"],
+          "properties": {
+            "sequences": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 256,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["leafId", "sequence", "extant", "evidenceStatus"],
+                "properties": {
+                  "leafId": { "$ref": "#/$defs/safeNodeId" },
+                  "sequence": { "type": "string", "minLength": 1, "maxLength": 20000, "pattern": "^[ACGTRYSWKMBDHVN-]+$" },
+                  "extant": { "const": true },
+                  "evidenceStatus": { "const": "observed" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "extantArchosaurLocusPanelRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "title", "comparativeAssessment", "assemblyManifest", "selection"],
+      "properties": {
+        "schema": { "const": "agentlas.comparative-genomics.extant-archosaur-locus-panel-request/v1" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "comparativeAssessment": { "type": "object" },
+        "assemblyManifest": { "type": "object" },
+        "selection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["avianLeafNodeIds", "crocodilianLeafNodeIds"],
+          "properties": {
+            "avianLeafNodeIds": { "type": "array", "minItems": 2, "maxItems": 4, "uniqueItems": true, "items": { "$ref": "#/$defs/safeNodeId" } },
+            "crocodilianLeafNodeIds": { "type": "array", "minItems": 2, "maxItems": 4, "uniqueItems": true, "items": { "$ref": "#/$defs/safeNodeId" } }
+          }
+        }
+      }
+    },
+    "safeNodeId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+    }
+  }
+}

@@ -226,6 +226,10 @@ export function codexProtocolReceipt(init: any): string {
 /* ────────────────────────────── 풀 ────────────────────────────── */
 
 let sessionPool: AcpSessionPool<CodexResidentSession> | null = null;
+// A missing app-server is learned per process so one old CLI does not retry it
+// on every turn. A runtime replacement is a new executable generation, so the
+// learned downgrade must be forgotten with the resident pool.
+let appServerSupported = true;
 
 export function codexSessionPool(): AcpSessionPool<CodexResidentSession> {
   if (!sessionPool) {
@@ -265,6 +269,7 @@ export function codexSessionPool(): AcpSessionPool<CodexResidentSession> {
 export function disposeCodexSessionPool(): void {
   sessionPool?.disposeAll();
   sessionPool = null;
+  appServerSupported = true;
 }
 
 /* ──────────────────────────── 강등(구형 CLI) ──────────────────────────── */
@@ -273,8 +278,6 @@ export function disposeCodexSessionPool(): void {
  * 이 CLI 에는 `app-server` 가 없다(구버전) — 프로세스 수명 동안 1회 학습해 영구히
  * 기존 `codex exec` 1회성 경로로 강등한다. claude 상주의 `--input-format` 학습과 같은 모양.
  */
-let appServerSupported = true;
-
 export function codexAppServerSupported(): boolean {
   return appServerSupported;
 }

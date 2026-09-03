@@ -7,7 +7,6 @@
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { app } from "electron";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
@@ -38,6 +37,7 @@ import {
 } from "../hephaestus/engine";
 import { rejectHephaestusRuntimeRoot } from "../hephaestus/root";
 import workforceProtocolContract from "./workforce-protocol-contract.json";
+import { electronAppVersion } from "../runtime-paths";
 
 /** npx 첫 다운로드까지 고려한 넉넉한 연결 타임아웃. */
 const CONNECT_TIMEOUT_MS = 45_000;
@@ -622,7 +622,7 @@ export async function testServerConnection(
   }
 
   const client = new Client(
-    { name: "agentlas-desktop", version: app.getVersion() },
+    { name: "agentlas-desktop", version: electronAppVersion() },
     { capabilities: {} },
   );
 
@@ -724,7 +724,7 @@ async function callServerToolContentInternal(
           boundaryState.phase = "pre-request";
           boundaryState.requestId = null;
           const activeClient = new Client(
-            { name: "agentlas-desktop", version: app.getVersion() },
+            { name: "agentlas-desktop", version: electronAppVersion() },
             { capabilities: {} },
           );
           client = activeClient;

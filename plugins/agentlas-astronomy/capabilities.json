@@ -1,7 +1,7 @@
 {
   "schema": "agentlas.science-capabilities/v1",
   "domain": "astronomy",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "sourceAuthority": {
     "schema": "agentlas.astronomy.official-source/v1",
     "providerId": "simbad-tap",
@@ -77,6 +77,76 @@
       "uncertainty": "inverse-variance weighting when explicitly resolved as weighted; missing errors are preserved and never imputed",
       "outputs": ["full periodogram table", "sampling-window power", "local grid-peak table", "best-period folded observation/residual table", "two-panel Vega-Lite FigureSpec", "input/algorithm/table/figure/result SHA-256 receipts"],
       "notComputed": ["false-alarm probability", "period confidence interval", "red-noise model", "detrending", "multi-harmonic fit", "transit model"],
+      "network": "none"
+    },
+    {
+      "id": "light-curve-periodicity-depth",
+      "inputRows": "5-2000 strict irregular time-series rows with explicit astronomical time system, nullable values/errors, use flags, and exact source-content SHA-256",
+      "method": "weighted floating-mean generalized Lomb-Scargle extended with Baluev analytic FAP, seeded permutation bootstrap, local peak refinement, period uncertainty, alias screen, and two-harmonic refinement",
+      "bounds": { "minimumFrequencyCount": 32, "maximumFrequencyCount": 5000, "maximumReportedPeaks": 20, "maximumBootstrapSamples": 1000, "maximumAliasPeriods": 6 },
+      "uncertainty": "analytic frequency/period error from Montgomery–O'Donoghue, local peak-width error, and optional seeded residual-bootstrap period standard deviation",
+      "outputs": ["Baluev false-alarm thresholds", "optional permutation-bootstrap FAP", "daily/sidereal alias screen", "two-harmonic folded model", "publication table", "two-panel Vega-Lite FigureSpec", "input/algorithm/table/figure/result SHA-256 receipts"],
+      "notComputed": ["red-noise correction", "detrending", "barycentric time correction", "transit model", "more than two harmonics"],
+      "network": "none"
+    },
+    {
+      "id": "transit-search-bls",
+      "inputRows": "8-5000 normalized relative-flux observations with explicit time system, uncertainties, use flags, and exact source-content SHA-256",
+      "method": "exact data-resolution Box Least Squares search over inclusive period and duration grids with inverse-variance or explicit unweighted statistics",
+      "bounds": { "minimumPeriodCount": 32, "maximumPeriodCount": 5000, "maximumDurationCount": 50, "maximumReportedPeaks": 20, "maximumWorkUnits": 100000000 },
+      "uncertainty": "weighted box-depth standard error or unweighted out-of-transit scatter; secondary-eclipse and odd/even diagnostic screens",
+      "outputs": ["BLS signal-residue spectrum", "SDE and ranked box candidates", "best depth/epoch/duration", "secondary-eclipse and odd/even diagnostics", "folded table", "two-panel Vega-Lite FigureSpec", "input/algorithm/table/figure/result SHA-256 receipts"],
+      "notComputed": ["detrending", "limb darkening", "ingress/egress shape", "calibrated false-alarm probability", "transit validation verdict"],
+      "network": "none"
+    },
+    {
+      "id": "galactic-kinematics",
+      "inputRows": "1-2000 astrometric/radial-velocity rows with explicit errors and exact source-content SHA-256",
+      "method": "Johnson–Soderblom heliocentric and LSR UVW transformation with first-order uncertainty propagation and a Toomre diagram",
+      "bounds": { "maximumRows": 2000, "maximumPopulationModels": 6 },
+      "uncertainty": "first-order propagation from parallax, proper-motion, and radial-velocity errors with an explicit uncorrelated-parameter assumption",
+      "outputs": ["distance and tangential velocity", "heliocentric/LSR UVW", "Bensby-style population likelihood screen", "Toomre arcs", "publication table", "multi-layer Vega-Lite FigureSpec", "input/algorithm/table/figure/result SHA-256 receipts"],
+      "notComputed": ["Bayesian distance posterior", "Galactic potential/orbit integration", "age inference", "population assignment beyond the declared likelihood screen"],
+      "network": "none"
+    },
+    {
+      "id": "colour-magnitude-diagram",
+      "inputRows": "1-5000 photometric/parallax rows with explicit errors, optional caller-declared extinction/locus, and exact source-content SHA-256",
+      "method": "naive inverse-parallax absolute magnitude with first-order error propagation and comparison against a strictly increasing caller-declared locus",
+      "bounds": { "maximumRows": 5000, "maximumLocusPoints": 500 },
+      "uncertainty": "photometric, parallax, and declared extinction/reddening errors combined by first-order propagation",
+      "outputs": ["intrinsic colour and absolute magnitude", "locus offset and screen class", "exclusion audit", "publication table", "error-bar Vega-Lite CMD FigureSpec", "input/algorithm/table/figure/result SHA-256 receipts"],
+      "notComputed": ["dust-map lookup", "extinction-law fit", "isochrone/evolutionary-track inference", "metallicity or binarity modelling"],
+      "network": "none"
+    },
+    {
+      "id": "flat-lambda-cdm-cosmology",
+      "inputRows": "0-500 explicit positive redshifts plus an optional 2-2000 point positive-redshift grid and exact source-content SHA-256",
+      "method": "flat Lambda-CDM numerical quadrature following Hogg (1999) for comoving, angular-diameter, luminosity, time, volume, and angular-scale quantities",
+      "bounds": { "maximumRedshift": 1100, "maximumExplicitRedshifts": 500, "maximumGridPoints": 2000 },
+      "uncertainty": "none; rerun with alternative declared cosmological parameters to bracket systematic sensitivity",
+      "outputs": ["explicit distance table", "distance and time grids", "distance-modulus and comoving-volume quantities", "two-panel Vega-Lite distance/time FigureSpec", "input/algorithm/table/figure/result SHA-256 receipts"],
+      "notComputed": ["curvature", "dynamical dark energy w != -1", "massive-neutrino correction", "cosmological-parameter uncertainty", "peculiar-velocity correction"],
+      "network": "none"
+    },
+    {
+      "id": "sed-blackbody-fit",
+      "inputRows": "3-500 broadband photometry rows with effective wavelengths, declared flux convention, errors/use flags, and exact source-content SHA-256",
+      "method": "deterministic temperature-grid seed followed by Levenberg–Marquardt fit of a single Planck blackbody temperature and solid-angle scale",
+      "bounds": { "minimumPoints": 3, "maximumPoints": 500, "temperatureRangeK": [100, 1000000] },
+      "uncertainty": "covariance estimates with chi-square inflation when reduced chi-square exceeds one",
+      "outputs": ["temperature and angular radius", "bolometric flux", "residual/pull table", "log-log SED Vega-Lite FigureSpec", "input/algorithm/table/figure/result SHA-256 receipts"],
+      "notComputed": ["bandpass integration", "extinction correction", "multi-temperature components", "spectral lines", "jitter model"],
+      "network": "none"
+    },
+    {
+      "id": "radial-velocity-orbit",
+      "inputRows": "8-5000 radial-velocity observations with explicit time system, errors, use flags, and exact source-content SHA-256",
+      "method": "GLS period seed followed by multi-start Levenberg–Marquardt single-Keplerian fit over period, semi-amplitude, eccentricity, argument, periastron, and systemic velocity",
+      "bounds": { "minimumFrequencyCount": 32, "maximumFrequencyCount": 20000, "maximumEccentricity": 0.95 },
+      "uncertainty": "covariance estimates with reduced-chi-square scaling plus first-order minimum-mass propagation when a primary mass is declared",
+      "outputs": ["phase-folded orbit and residuals", "mass function and optional m sin i", "publication table", "two-panel Vega-Lite FigureSpec", "input/algorithm/table/figure/result SHA-256 receipts"],
+      "notComputed": ["jitter", "trend", "multi-planet model", "barycentric time correction", "non-negligible companion-mass correction"],
       "network": "none"
     }
   ],

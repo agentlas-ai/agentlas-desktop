@@ -7,15 +7,28 @@ import { ScienceAcademicSearchService } from "./academic-search";
 import { ScienceAcademicFullTextService } from "./academic-full-text";
 import { ScienceAstronomyCatalogService } from "./astronomy-catalog";
 import { ScienceBiodiversityCatalogService } from "./biodiversity-catalog";
+import { SciencePaleontologyCatalogService } from "./paleontology-catalog";
+import { SciencePaleontologyAnalysisService } from "./paleontology-analysis";
+import { SciencePaleontologyCandidateComparisonService } from "./paleontology-candidate-comparison";
+import { ScienceDeextinctionFeasibilityService } from "./deextinction-feasibility";
 import { ScienceEarthquakeCatalogService } from "./earthquake-catalog";
+import { ScienceNoaaCoopsWaterLevelService } from "./noaa-coops-water-level";
 import { ScienceEconomicsCatalogService } from "./economics-catalog";
+import { ScienceEconomicsAnalysisService } from "./economics-analysis";
 import { ScienceGenomicsCatalogService } from "./genomics-catalog";
+import { ScienceComparativeGenomicsService } from "./comparative-genomics";
+import { ScienceExtantReferenceAssemblyService } from "./extant-reference-assemblies";
+import { ScienceComparativeGenomicsTableService } from "./comparative-genomics-table";
+import { ScienceHypotheticalAsrService } from "./hypothetical-asr";
+import { ScienceExtantArchosaurLocusPanelService } from "./extant-archosaur-locus-panel";
 import { ScienceMaterialsCatalogService } from "./materials-catalog";
 import { SciencePhysicsHepDataLiveService, SciencePhysicsInspireLiveService } from "./physics-live-sources";
 import { ScienceScientificDataService } from "./scientific-data";
 import { ScienceJournalPublicationService } from "./journal-publication";
+import { ScienceManuscriptRenderService } from "./manuscript";
 import { ScienceArtifactPublicationValidator } from "./artifact-publication-validator";
 import { ScienceDomainAnalysisService } from "./domain-analysis";
+import { SciencePhysicsAnalysisService } from "./physics-analysis";
 import {
   resolveExactVerifiedScienceRenderer,
   resolveExactVerifiedScienceRendererExecutor,
@@ -34,16 +47,29 @@ let activeAcademicSearchService: ScienceAcademicSearchService | null = null;
 let activeAcademicFullTextService: ScienceAcademicFullTextService | null = null;
 let activeAstronomyCatalogService: ScienceAstronomyCatalogService | null = null;
 let activeBiodiversityCatalogService: ScienceBiodiversityCatalogService | null = null;
+let activePaleontologyCatalogService: SciencePaleontologyCatalogService | null = null;
+let activePaleontologyAnalysisService: SciencePaleontologyAnalysisService | null = null;
+let activePaleontologyCandidateComparisonService: SciencePaleontologyCandidateComparisonService | null = null;
+let activeDeextinctionFeasibilityService: ScienceDeextinctionFeasibilityService | null = null;
 let activeEarthquakeCatalogService: ScienceEarthquakeCatalogService | null = null;
+let activeNoaaCoopsWaterLevelService: ScienceNoaaCoopsWaterLevelService | null = null;
 let activeEconomicsCatalogService: ScienceEconomicsCatalogService | null = null;
+let activeEconomicsAnalysisService: ScienceEconomicsAnalysisService | null = null;
 let activeGenomicsCatalogService: ScienceGenomicsCatalogService | null = null;
+let activeComparativeGenomicsService: ScienceComparativeGenomicsService | null = null;
+let activeExtantReferenceAssemblyService: ScienceExtantReferenceAssemblyService | null = null;
+let activeComparativeGenomicsTableService: ScienceComparativeGenomicsTableService | null = null;
+let activeHypotheticalAsrService: ScienceHypotheticalAsrService | null = null;
+let activeExtantArchosaurLocusPanelService: ScienceExtantArchosaurLocusPanelService | null = null;
 let activeMaterialsCatalogService: ScienceMaterialsCatalogService | null = null;
 let activePhysicsInspireLiveService: SciencePhysicsInspireLiveService | null = null;
 let activePhysicsHepDataLiveService: SciencePhysicsHepDataLiveService | null = null;
 let activeScientificDataService: ScienceScientificDataService | null = null;
 let activeJournalPublicationService: ScienceJournalPublicationService | null = null;
+let activeManuscriptRenderService: ScienceManuscriptRenderService | null = null;
 let activeArtifactPublicationValidator: ScienceArtifactPublicationValidator | null = null;
 let activeDomainAnalysisService: ScienceDomainAnalysisService | null = null;
+let activePhysicsAnalysisService: SciencePhysicsAnalysisService | null = null;
 let activeLongRunBridge: ScienceLongRunBridge | null = null;
 let activeEvidenceGraphService: ScienceEvidenceGraphService | null = null;
 
@@ -114,9 +140,36 @@ export function scienceBiodiversityCatalogService(): ScienceBiodiversityCatalogS
   return activeBiodiversityCatalogService;
 }
 
+export function sciencePaleontologyCatalogService(): SciencePaleontologyCatalogService {
+  if (!activePaleontologyCatalogService) activePaleontologyCatalogService = new SciencePaleontologyCatalogService(scienceStore());
+  return activePaleontologyCatalogService;
+}
+
+export function sciencePaleontologyAnalysisService(): SciencePaleontologyAnalysisService {
+  if (!activePaleontologyAnalysisService) activePaleontologyAnalysisService = new SciencePaleontologyAnalysisService(scienceStore());
+  return activePaleontologyAnalysisService;
+}
+
+export function sciencePaleontologyCandidateComparisonService(): SciencePaleontologyCandidateComparisonService {
+  if (!activePaleontologyCandidateComparisonService) {
+    activePaleontologyCandidateComparisonService = new SciencePaleontologyCandidateComparisonService(scienceStore());
+  }
+  return activePaleontologyCandidateComparisonService;
+}
+
+export function scienceDeextinctionFeasibilityService(): ScienceDeextinctionFeasibilityService {
+  if (!activeDeextinctionFeasibilityService) activeDeextinctionFeasibilityService = new ScienceDeextinctionFeasibilityService(scienceStore());
+  return activeDeextinctionFeasibilityService;
+}
+
 export function scienceEarthquakeCatalogService(): ScienceEarthquakeCatalogService {
   if (!activeEarthquakeCatalogService) activeEarthquakeCatalogService = new ScienceEarthquakeCatalogService(scienceStore());
   return activeEarthquakeCatalogService;
+}
+
+export function scienceNoaaCoopsWaterLevelService(): ScienceNoaaCoopsWaterLevelService {
+  if (!activeNoaaCoopsWaterLevelService) activeNoaaCoopsWaterLevelService = new ScienceNoaaCoopsWaterLevelService(scienceStore());
+  return activeNoaaCoopsWaterLevelService;
 }
 
 export function scienceEconomicsCatalogService(): ScienceEconomicsCatalogService {
@@ -124,9 +177,41 @@ export function scienceEconomicsCatalogService(): ScienceEconomicsCatalogService
   return activeEconomicsCatalogService;
 }
 
+export function scienceEconomicsAnalysisService(): ScienceEconomicsAnalysisService {
+  if (!activeEconomicsAnalysisService) activeEconomicsAnalysisService = new ScienceEconomicsAnalysisService(scienceStore());
+  return activeEconomicsAnalysisService;
+}
+
 export function scienceGenomicsCatalogService(): ScienceGenomicsCatalogService {
   if (!activeGenomicsCatalogService) activeGenomicsCatalogService = new ScienceGenomicsCatalogService(scienceStore());
   return activeGenomicsCatalogService;
+}
+
+export function scienceComparativeGenomicsService(): ScienceComparativeGenomicsService {
+  if (!activeComparativeGenomicsService) activeComparativeGenomicsService = new ScienceComparativeGenomicsService(scienceStore());
+  return activeComparativeGenomicsService;
+}
+
+export function scienceExtantReferenceAssemblyService(): ScienceExtantReferenceAssemblyService {
+  if (!activeExtantReferenceAssemblyService) activeExtantReferenceAssemblyService = new ScienceExtantReferenceAssemblyService(scienceStore());
+  return activeExtantReferenceAssemblyService;
+}
+
+export function scienceComparativeGenomicsTableService(): ScienceComparativeGenomicsTableService {
+  if (!activeComparativeGenomicsTableService) activeComparativeGenomicsTableService = new ScienceComparativeGenomicsTableService(scienceStore());
+  return activeComparativeGenomicsTableService;
+}
+
+export function scienceHypotheticalAsrService(): ScienceHypotheticalAsrService {
+  if (!activeHypotheticalAsrService) activeHypotheticalAsrService = new ScienceHypotheticalAsrService(scienceStore());
+  return activeHypotheticalAsrService;
+}
+
+export function scienceExtantArchosaurLocusPanelService(): ScienceExtantArchosaurLocusPanelService {
+  if (!activeExtantArchosaurLocusPanelService) {
+    activeExtantArchosaurLocusPanelService = new ScienceExtantArchosaurLocusPanelService(scienceStore());
+  }
+  return activeExtantArchosaurLocusPanelService;
 }
 
 export function scienceMaterialsCatalogService(): ScienceMaterialsCatalogService {
@@ -161,6 +246,11 @@ export function scienceJournalPublicationService(): ScienceJournalPublicationSer
   return activeJournalPublicationService;
 }
 
+export function scienceManuscriptRenderService(): ScienceManuscriptRenderService {
+  if (!activeManuscriptRenderService) activeManuscriptRenderService = new ScienceManuscriptRenderService(scienceStore());
+  return activeManuscriptRenderService;
+}
+
 export function scienceArtifactPublicationValidator(): ScienceArtifactPublicationValidator {
   if (!activeArtifactPublicationValidator) activeArtifactPublicationValidator = new ScienceArtifactPublicationValidator(scienceStore());
   return activeArtifactPublicationValidator;
@@ -169,6 +259,11 @@ export function scienceArtifactPublicationValidator(): ScienceArtifactPublicatio
 export function scienceDomainAnalysisService(): ScienceDomainAnalysisService {
   if (!activeDomainAnalysisService) activeDomainAnalysisService = new ScienceDomainAnalysisService(scienceStore());
   return activeDomainAnalysisService;
+}
+
+export function sciencePhysicsAnalysisService(): SciencePhysicsAnalysisService {
+  if (!activePhysicsAnalysisService) activePhysicsAnalysisService = new SciencePhysicsAnalysisService(scienceStore());
+  return activePhysicsAnalysisService;
 }
 
 export async function recoverScienceRuntimeAtStartup(): Promise<{
@@ -255,7 +350,12 @@ export function closeScienceStore(): void {
   activeAcademicFullTextService = null;
   activeAstronomyCatalogService = null;
   activeBiodiversityCatalogService = null;
+  activePaleontologyCatalogService = null;
+  activePaleontologyAnalysisService = null;
+  activePaleontologyCandidateComparisonService = null;
+  activeDeextinctionFeasibilityService = null;
   activeEarthquakeCatalogService = null;
+  activeNoaaCoopsWaterLevelService = null;
   activeEconomicsCatalogService = null;
   activeGenomicsCatalogService = null;
   activeMaterialsCatalogService = null;
@@ -263,8 +363,10 @@ export function closeScienceStore(): void {
   activePhysicsHepDataLiveService = null;
   activeScientificDataService = null;
   activeJournalPublicationService = null;
+  activeManuscriptRenderService = null;
   activeArtifactPublicationValidator = null;
   activeDomainAnalysisService = null;
+  activePhysicsAnalysisService = null;
   activeEvidenceGraphService = null;
   activeStore?.close();
   activeStore = null;

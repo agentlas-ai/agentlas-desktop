@@ -12,7 +12,6 @@ import { extractQuestions } from "@/lib/ask-question";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { IconClose } from "@/components/Icon";
 import type { PreparedOneAttachments } from "@shared/one-attachments";
-import { isChatAlwaysApproved, waitForAlwaysApprovedChats } from "@/lib/always-approved-chats";
 import type {
   AutomationExecutionPermission,
   AutomationHubMode,
@@ -32,23 +31,6 @@ export interface AutomationSessionPromptDetail {
   send?: boolean;
   /** 패널이 실제로 받았는지 — 호출자가 폴백(플로우 화면으로 이동)을 결정하는 근거. */
   handled?: boolean;
-}
-
-export interface AutomationPermissionIntervention {
-  question: string;
-  nextAction: string;
-}
-
-function latestPermissionIntervention(messages: ChatHistoryEntry[]): AutomationPermissionIntervention | null {
-  const message = [...messages].reverse().find((item) =>
-    item.role === "assistant" && /(?:^|\n)\s*type:\s*permission-required\b/i.test(item.text));
-  if (!message) return null;
-  const question = message.text.match(/(?:^|\n)\s*question:\s*([^\n]+)/i)?.[1]?.trim();
-  const nextAction = message.text.match(/(?:^|\n)\s*(?:options|retry_after):\s*([^\n]+)/i)?.[1]?.trim();
-  return {
-    question: question || "Agentlas Browser permission is required for this automation.",
-    nextAction: nextAction || "Allow the browser for this automation, then run it again.",
-  };
 }
 
 function pendingKey(automationId: string): string {
@@ -114,10 +96,6 @@ interface AutomationSessionPanelProps {
   embedded?: boolean;
   /** 바깥 공용 입력이 세션 전송을 부를 수 있는 손잡이. */
   sendHandleRef?: React.MutableRefObject<((text: string, files?: File[], onAccepted?: () => void) => void) | null>;
-  /** 우측 상세가 이 세션의 실시간 승인 요청만 표시할 수 있게 chat id를 전달한다. */
-  onChatId?: (chatId: string | null) => void;
-  /** 만료된 실시간 승인도 우측에서 복구할 수 있도록 최신 구조화 개입을 전달한다. */
-  onPermissionIntervention?: (intervention: AutomationPermissionIntervention | null) => void;
 }
 
 /**
@@ -150,8 +128,6 @@ export function AutomationSessionPanel({
   onCollapse,
   embedded = false,
   sendHandleRef,
-  onChatId,
-  onPermissionIntervention,
 }: AutomationSessionPanelProps) {
   const ko = locale === "ko";
   const [messages, setMessages] = useState<ChatHistoryEntry[]>([]);
@@ -174,31 +150,22 @@ export function AutomationSessionPanel({
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const chatIdRef = useRef<string | null>(null);
   chatIdRef.current = chatId;
-  useEffect(() => {
-    onChatId?.(chatId);
-    return () => onChatId?.(null);
-  }, [chatId, onChatId]);
 
   const load = useCallback(async () => {
     const api = ipc();
     if (!api) return;
     try {
       const session = await api.automations.getSession(automationId);
-      const visibleMessages = session.messages.filter((message) => (
+      setMessages(session.messages.filter((message) => (
         message.role !== "system" || isVisibleAutomationSystemNotice(message)
-      ));
-      setMessages(visibleMessages);
-      await waitForAlwaysApprovedChats();
-      onPermissionIntervention?.(isChatAlwaysApproved(session.chatId)
-        ? null
-        : latestPermissionIntervention(visibleMessages));
+      )));
       setChatId(session.chatId ?? null);
       setRuntimeSelection(session.runtimeSelection ?? null);
       setUnavailable(false);
     } catch {
       setUnavailable(true);
     }
-  }, [automationId, onPermissionIntervention]);
+  }, [automationId]);
 
   useEffect(() => {
     void load();

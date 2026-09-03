@@ -8,6 +8,7 @@
 // - sandbox: true (renderer는 sandboxed)
 // - 모든 Node API는 preload → ipc 경로로만 노출
 import { startInstallBeacon } from "./install-beacon";
+import { scienceStatisticsMethodCatalogue } from "./science/statistics-method-catalogue";
 import {
   app,
   autoUpdater as electronAutoUpdater,
@@ -40,7 +41,7 @@ import { closeStore, initStore, runPostContinuityStoreRepairs } from "./store/db
 import { onDesktopStoreChange } from "./store/change-bus";
 import { repairPlaceholderTaskTitles } from "./store/chats";
 import { settleInterruptedTasksOnBoot } from "./store/tasks";
-import { tryRecordRunEvent } from "./store/run-events";
+import { scrubLegacyRunEventSecrets, tryRecordRunEvent } from "./store/run-events";
 import { startAutomationScheduler, stopAutomationScheduler } from "./automation-scheduler";
 import { claimOneBriefingDesktopNotification, configureOneBriefingRuntime } from "./one/briefing";
 import { invocationService } from "./invocation/service";
@@ -48,6 +49,7 @@ import {
   disposeAutoUpdater,
   getUpdaterState,
   handleUpdaterBootstrapFailure,
+  hasUpdaterInstallRecoveryState,
   initAutoUpdater,
   noteHealthyStartup,
   onUpdaterStateChange,
@@ -62,6 +64,7 @@ import { disposeAppFactoryLivePreviews } from "./app-factory/live-preview";
 import { disposeSiteAgentAppRuntimes } from "./site/agent-app-runtime";
 import {
   bootAuthFromKeychain,
+  getAuthenticatedActorIds,
   getAuthSession,
   onAuthSessionInvalidated,
   retryTemporaryAuthRestore,
@@ -98,7 +101,6 @@ import { reconcileOneHubDerivativeDraftStorage } from "./one/hub-derivative";
 import { recoverDesktopStartup, type StartupRecoveryPresentation } from "./one/startup-recovery";
 import { initFileLogging, mainLogFilePath } from "./logging";
 import { currentUiLocale, setCurrentUiLocale } from "./ui-locale";
-import { copyImageSource, saveImageSource } from "./media/image-actions";
 import { prepareMacRuntimeResourcesForExecution } from "./runtime/mac-resource-seal";
 import {
   issueMobileBridgePairing,
@@ -113,6 +115,17 @@ import {
 } from "./mobile-bridge/runtime";
 import { userDataDir } from "./runtime-paths";
 import { runHostShutdownHooks } from "./host-lifecycle";
+import {
+  initializeAppRuntimeCoordinator,
+  registerAppRuntimeParticipant,
+  shutdownAppRuntimeCoordinator,
+} from "./long-run/app-runtime-coordinator";
+import {
+  closeLongRunVerifierAdmission,
+  interruptLongRunVerifiers,
+  longRunVerifiersSettled,
+  openLongRunVerifierAdmission,
+} from "./long-run/verifier";
 import { classifyStartupNavigationFailure } from "./startup-navigation";
 import {
   recoverAgentlasBrowserRuntimeAtStartup,
@@ -143,6 +156,7 @@ import {
   disposeScienceRendererView,
   scienceRendererHandshake,
   scienceRendererReport,
+  captureStableScienceRenderer,
   markScienceRendererCaptured,
   failScienceRendererCapture,
   authorizeScienceChemistryCommit,
@@ -158,7 +172,7 @@ import {
   scienceChemistryValidator,
   scienceConversationService,
   scienceEvidenceGraphService,
-  scienceJournalPublicationService,
+  scienceJournalPublicationService, scienceManuscriptRenderService,
   scienceStore,
   scienceToolGateway,
   shutdownScienceRuntimeForAppClose,
@@ -172,6 +186,7 @@ import type {
 import { ScienceDatasetIngestionService } from "./science/dataset-ingestion";
 import { SCIENCE_SCHEMA_VERSION } from "./science/store";
 import { scienceLabDecisionProjectionsForProject } from "./science/lab-decision-projection-service";
+import { inspectScienceEpisodeResultReview, recordScienceEpisodeResultReview } from "./science/result-review-service";
 import { commitScienceVegaEdit, parseScienceVegaEditInput } from "./science/vega-editor";
 import {
   renderScienceStatisticsFigurePdf,
@@ -182,10 +197,23 @@ import {
 } from "./science/statistics-figure-export";
 import { validateScienceNumericSurfacePngBytes } from "./science/numeric-surface-export";
 import { validateScienceResidueInteraction } from "./science/protein-residue-validator";
+import { draftManuscript } from "./science/manuscript";
+import { inspectScienceManuscriptDepth } from "./science/manuscript/depth-preflight";
 import type {
+  ReviseScienceHypothesisInput,
+  ScienceManuscriptBinding,
+  ScienceSubmissionMetadata,
+  ApplyScienceManuscriptTransactionInput,
+  RevertScienceManuscriptTransactionInput,
+  CreateScienceManuscriptSelectionContextInput,
+  CreateScienceManuscriptEditProposalInput,
+  ApplyScienceManuscriptEditProposalInput,
+  RejectScienceManuscriptEditProposalInput,
   AppendScienceManuscriptVersionInput,
+  InspectScienceEpisodeResultReviewInput,
+  RecordScienceEpisodeResultReviewInput,
   CaptureScienceArtifactInput,
-  CreateScienceManuscriptInput,
+  RecordScienceManuscriptBlueprintAssessmentInput,
   CreateScienceJournalProfileInput,
   CreateScienceSubmissionExportInput,
   ConfirmScienceJournalIdentityInput,
@@ -196,6 +224,7 @@ import type {
   UpdateScienceProjectRelatedDomainsInput,
   UpsertScienceProjectLabBindingInput,
   ApproveScienceResearchContractInput,
+  SetScienceApprovalPolicyInput,
   StartScienceLoopSessionInput,
   TransitionScienceLoopSessionInput,
   AnswerScienceDecisionInput,
@@ -472,16 +501,6 @@ let lastStartupNavigationFailure: {
   target: string;
 } | null = null;
 let shellReadyForWindows = false;
-let mobileBridgeOwnershipSettled = false;
-let resolveMobileBridgeOwnershipReady!: (ready: boolean) => void;
-const mobileBridgeOwnershipReady = new Promise<boolean>((resolve) => {
-  resolveMobileBridgeOwnershipReady = resolve;
-});
-function settleMobileBridgeOwnership(ready: boolean): void {
-  if (mobileBridgeOwnershipSettled) return;
-  mobileBridgeOwnershipSettled = true;
-  resolveMobileBridgeOwnershipReady(ready);
-}
 let oneBriefingLaunchTimer: NodeJS.Timeout | null = null;
 let oneBriefingInterval: NodeJS.Timeout | null = null;
 
@@ -607,38 +626,25 @@ function stopOneBriefingScheduler(): void {
 }
 
 const allowMultiInstance = process.env.AGENTLAS_ALLOW_MULTI_INSTANCE === "1";
-function hasPendingUpdateJournal(): boolean {
-  try {
-    return fs.existsSync(path.join(app.getPath("userData"), "updater", "install-journal.v1.json"));
-  } catch {
-    return false;
-  }
-}
-// electron-updater's AppImageUpdater relaunches the replacement without an
-// argv marker. Carry the handoff through the inherited environment so the
-// replacement also gets the bounded single-instance-lock retry. Without this,
-// Linux can start Chromium helper processes while the Electron main process
-// exits on the old instance's still-releasing lock, leaving the install journal
-// behind even though the replacement payload is present.
+// AppImageUpdater relaunches the replacement with no `--updated` argument.
+// Use our durable install state as the cross-platform authority, otherwise the
+// replacement mistakes itself for an ordinary second launch, exits before
+// reconciliation, and leaves only the AppImage wrapper plus a permanent journal.
 const isPackagedUpdateRelaunch = app.isPackaged && (
   process.argv.includes("--updated")
   || process.env.AGENTLAS_UPDATE_RELAUNCH === "1"
-  // AppImageUpdater always supplies this to the detached replacement, while
-  // its launcher does not preserve an argv update marker.
   || process.env.APPIMAGE_SILENT_INSTALL === "true"
-  // The durable journal is the last-resort marker when a native launcher
-  // strips both argv and custom environment variables.
-  || hasPendingUpdateJournal()
+  || hasUpdaterInstallRecoveryState()
 );
 const UPDATE_RELAUNCH_LOCK_RETRY_MS = 250;
 const UPDATE_RELAUNCH_LOCK_TIMEOUT_MS = 60_000;
 traceUpdaterStartup("before-single-instance-lock");
-// Electron documents a failed request as a terminal second-instance path: the
-// process should exit rather than call requestSingleInstanceLock repeatedly.
-// Native update installers already serialize replacement and launch the target
-// after the old executable has quit; asking for the old lock again here can
-// leave the replacement stranded forever with its journal in place.
-const initialSingleInstanceLock = allowMultiInstance || isPackagedUpdateRelaunch || app.requestSingleInstanceLock();
+// Native update installers already serialize replacement and start the target
+// after the previous executable exits. Re-requesting Electron's old singleton
+// lock in that path can strand the replacement with its journal still present.
+const initialSingleInstanceLock = allowMultiInstance
+  || isPackagedUpdateRelaunch
+  || app.requestSingleInstanceLock();
 const singleInstanceLockPromise = initialSingleInstanceLock
   ? Promise.resolve(true)
   : new Promise<boolean>((resolve) => {
@@ -910,29 +916,6 @@ async function createWindow(options: { startupPlaceholder?: boolean } = {}): Pro
   mainWindow.webContents.on("context-menu", (_event, params) => {
     const { editFlags, isEditable, selectionText } = params;
     const items: Electron.MenuItemConstructorOptions[] = [];
-    if (params.mediaType === "image" && params.hasImageContents && params.srcURL) {
-      const isKo = currentUiLocale() === "ko";
-      const suggestedImageName = params.suggestedFilename || params.altText || params.titleText || undefined;
-      items.push(
-        {
-          label: isKo ? "이미지 복사" : "Copy Image",
-          click: () => {
-            void copyImageSource(params.srcURL, suggestedImageName).then((result) => {
-              if (!result.ok && mainWindow && !mainWindow.isDestroyed()) {
-                mainWindow.webContents.copyImageAt(params.x, params.y);
-              }
-            });
-          },
-        },
-        {
-          label: isKo ? "이미지를 다른 이름으로 저장…" : "Save Image As…",
-          click: () => {
-            if (mainWindow && !mainWindow.isDestroyed()) void saveImageSource(mainWindow, params.srcURL, suggestedImageName);
-          },
-        },
-      );
-      if (isEditable || (selectionText && selectionText.trim().length > 0)) items.push({ type: "separator" });
-    }
     if (isEditable) {
       items.push(
         { role: "undo", enabled: editFlags.canUndo },
@@ -1036,6 +1019,7 @@ let quitCleanupPromise: Promise<void> | null = null;
 let quitServicesStopPromise: Promise<void> | null = null;
 let systemShutdownInProgress = false;
 let systemShutdownResetTimer: NodeJS.Timeout | null = null;
+let daemonMobileBridgeClaimed = false;
 let browserOrphanSweepTimer: NodeJS.Timeout | null = null;
 let browserOrphanSweepRunning = false;
 
@@ -1061,6 +1045,16 @@ function stopBrowserOrphanSweep(): void {
   browserOrphanSweepTimer = null;
 }
 
+async function stopDesktopOwnedMobileBridge(): Promise<void> {
+  try {
+    await stopAgentlasMobileBridge();
+  } catch (error) {
+    console.error("[mobile-bridge] shutdown failed", error);
+  } finally {
+    daemonMobileBridgeClaimed = false;
+  }
+}
+
 function stopQuitServices(): Promise<void> {
   if (quitServicesStopPromise) return quitServicesStopPromise;
   shellReadyForWindows = false;
@@ -1082,9 +1076,7 @@ function stopQuitServices(): Promise<void> {
     import("./triggers/manager").then((module) => { module.stopTriggerManager(); }).catch(() => {}),
     import("./telegram/connect").then((module) => { module.stopTelegramWorkers(); }).catch(() => {}),
     import("./agents/hephaestus-sync").then((module) => { module.stopHephaestusSync(); }).catch(() => {}),
-    stopAgentlasMobileBridge().catch((error) => {
-      console.error("[mobile-bridge] shutdown failed", error);
-    }),
+    stopDesktopOwnedMobileBridge(),
     import("./daemon/app-launcher")
       .then((module) => module.shutdownDaemon(userDataDir(), process.pid))
       .then((result) => {
@@ -1096,18 +1088,36 @@ function stopQuitServices(): Promise<void> {
 }
 
 async function prepareAutomaticUpdateQuit(): Promise<void> {
-  await stopQuitServices();
-  // An active invocation can still write its terminal receipt after renderer
-  // windows close. In that case preserve normal quit semantics and defer the
-  // update until a later idle quit instead of snapshotting a moving database.
-  if (invocationService.activeChatIds().length > 0) {
-    throw new Error("Active invocation prevented update continuity capture");
+  const report = await shutdownAppRuntimeCoordinator(15_000);
+  if (report.failedParticipantNames.length > 0) {
+    throw new Error(`App runtime shutdown failed: ${report.failedParticipantNames.join(", ")}`);
   }
+  if (report.timedOut) {
+    throw new Error(`App runtime did not settle: ${report.unsettledParticipantNames.join(", ")}`);
+  }
+  await stopQuitServices();
 }
 
 function finishQuitCleanup(): Promise<void> {
   if (quitCleanupPromise) return quitCleanupPromise;
   quitCleanupPromise = (async () => {
+    try {
+      const report = await shutdownAppRuntimeCoordinator(15_000);
+      if (report.pausedRunIds.length > 0) {
+        console.info(`[long-run] paused ${report.pausedRunIds.length} local run(s) for app close`);
+      }
+      if (report.timedOut) {
+        console.error("[long-run] app runtime shutdown timed out", report.unsettledParticipantNames);
+      }
+      if (report.failedParticipantNames.length > 0) {
+        console.error("[long-run] app runtime participant shutdown failed", {
+          participants: report.failedParticipantNames,
+          errorCodes: report.participantErrorCodes,
+        });
+      }
+    } catch (error) {
+      console.error("[long-run] app runtime shutdown failed", error);
+    }
     try {
       const scienceShutdown = await shutdownScienceRuntimeForAppClose();
       if (scienceShutdown.pausedLoops || scienceShutdown.interruptedTurns || scienceShutdown.cancellationRequests
@@ -1151,6 +1161,11 @@ const automaticQuitInstaller = createAutomaticQuitInstaller({
 });
 electronAutoUpdater.on("before-quit-for-update", () => {
   automaticQuitInstaller.authorizeNativeQuit();
+  // The replacement can be launched by NSIS/AppImageUpdater before this
+  // process has fully exited. Hand over the lock only after the native updater
+  // has committed to quitting, so the replacement can enter startup and clear
+  // the durable journal instead of waiting behind a dying process.
+  if (!allowMultiInstance && app.hasSingleInstanceLock()) app.releaseSingleInstanceLock();
 });
 app.on("will-quit", (event) => {
   // electron-updater's raw auto-install-on-quit path is intentionally disabled:
@@ -1255,7 +1270,7 @@ app.whenReady().then(async () => {
     console.error("[opencrab] legacy generated MCP config scrub failed");
   }
   // Older releases could be launched by a persisted LaunchAgent. Local work is
-  // app-scoped now, so this legacy entry may clean up the launcher but may not
+  // now app-scoped, so this legacy entry may clean up the launcher but may not
   // open the store, claim work, or execute an automation.
   // ── 그래프 표면(커넥터 C47·C48) ───────────────────────────────
   // 코드(SDK)와 다른 에이전트(MCP)가 그래프를 부르는 입구. **stdio 전용**이라
@@ -1316,6 +1331,30 @@ app.whenReady().then(async () => {
   traceStartup("startup-window-visible");
   startupStage = "store-opening";
   initStore({ deferPostContinuityRepairs: updatePreflight.pendingInstall });
+  try {
+    const scrubbed = scrubLegacyRunEventSecrets();
+    if (scrubbed > 0) console.warn(`[security] scrubbed ${scrubbed} legacy run-event payload(s)`);
+  } catch (error) {
+    console.error("[security] legacy run-event scrub failed:", error);
+  }
+  const longRunStartup = initializeAppRuntimeCoordinator();
+  invocationService.openAppAdmission();
+  openLongRunVerifierAdmission();
+  registerAppRuntimeParticipant("invocation-service", {
+    closeAdmission: () => { invocationService.beginAppShutdown(); },
+    interrupt: () => { invocationService.beginAppShutdown(); },
+    isSettled: () => invocationService.activeRunIds().length === 0,
+  });
+  registerAppRuntimeParticipant("long-run-verifier", {
+    closeAdmission: closeLongRunVerifierAdmission,
+    interrupt: interruptLongRunVerifiers,
+    isSettled: longRunVerifiersSettled,
+  });
+  if (longRunStartup.recoveredRunIds.length > 0) {
+    console.warn(
+      `[long-run] recovered ${longRunStartup.recoveredRunIds.length} interrupted local run(s) as paused; manual resume required`,
+    );
+  }
   traceUpdaterStartup("store-ready");
   repairPlaceholderTaskTitles();
   /*
@@ -1415,12 +1454,7 @@ app.whenReady().then(async () => {
   ipcMain.handle("mobileBridge:status", () => mobileBridgeRuntimeStatus());
   ipcMain.handle("mobileBridge:issuePairing", () => issueMobileBridgePairing());
   ipcMain.handle("mobileBridge:listDevices", () => listMobileBridgeDevices());
-  ipcMain.handle("mobileBridge:retry", async () => {
-    if (!await mobileBridgeOwnershipReady) {
-      throw new Error("Agentlas Mobile Bridge ownership is unavailable");
-    }
-    return retryAgentlasMobileBridge();
-  });
+  ipcMain.handle("mobileBridge:retry", () => retryAgentlasMobileBridge());
   ipcMain.handle("mobileBridge:revokeDevice", (_event, deviceId: unknown) => {
     if (typeof deviceId !== "string" || !/^device_[a-f0-9]{32}$/.test(deviceId)) {
       return { ok: false };
@@ -1439,25 +1473,63 @@ app.whenReady().then(async () => {
     const status = scienceExtensionStatus();
     for (const window of BrowserWindow.getAllWindows()) {
       if (window.isDestroyed() || window.webContents.isDestroyed()) continue;
-      window.webContents.send("productExtensions:changed", status);
+      try {
+        window.webContents.send("productExtensions:changed", status);
+      } catch (error) {
+        console.warn("[science-extension] status broadcast failed", error);
+      }
     }
     return status;
+  };
+  const refreshScienceExtensionViews = (changed: boolean) => {
+    if (changed) {
+      try { closeAllScienceExtensionViews(); }
+      catch (error) { console.warn("[science-extension] closing stale views failed", error); }
+    }
+    try { broadcastScienceExtension(); }
+    catch (error) { console.warn("[science-extension] status refresh failed", error); }
   };
   ipcMain.handle("productExtensions:scienceStatus", () => scienceExtensionStatus());
   ipcMain.handle("productExtensions:scienceSuiteStatus", () => scienceSuiteStatus());
   ipcMain.handle("productExtensions:installScience", async () => {
-    const receipt = await installScienceExtension();
-    if (receipt.ok && receipt.action !== "unchanged") closeAllScienceExtensionViews();
-    broadcastScienceExtension();
-    return receipt;
+    try {
+      const receipt = await installScienceExtension();
+      refreshScienceExtensionViews(receipt.ok && receipt.action !== "unchanged");
+      return receipt;
+    } catch (error) {
+      refreshScienceExtensionViews(false);
+      console.error("[science-extension] install failed outside the receipt boundary", error);
+      return {
+        ok: false,
+        id: "agentlas-science",
+        action: "failed",
+        version: null,
+        code: "science-extension-install-unexpected",
+        message: "Agentlas Science could not be installed.",
+      };
+    }
   });
   ipcMain.handle("productExtensions:installScienceSuite", async (event) => {
-    const receipt = await installScienceSuite((progress) => {
-      if (!event.sender.isDestroyed()) event.sender.send("productExtensions:scienceSuiteProgress", progress);
-    });
-    if (receipt.ok && receipt.action !== "unchanged") closeAllScienceExtensionViews();
-    broadcastScienceExtension();
-    return receipt;
+    try {
+      const receipt = await installScienceSuite((progress) => {
+        if (event.sender.isDestroyed()) return;
+        try { event.sender.send("productExtensions:scienceSuiteProgress", progress); }
+        catch (error) { console.warn("[science-extension] progress delivery failed", error); }
+      });
+      refreshScienceExtensionViews(receipt.ok && receipt.action !== "unchanged");
+      return receipt;
+    } catch (error) {
+      refreshScienceExtensionViews(false);
+      console.error("[science-extension] suite install failed outside the receipt boundary", error);
+      return {
+        ok: false,
+        id: "agentlas-science-suite",
+        action: "failed",
+        components: [],
+        code: "science-suite-install-unexpected",
+        message: "The Agentlas Science suite could not be installed.",
+      };
+    }
   });
   ipcMain.handle("productExtensions:setScienceEnabled", (_event, enabled: unknown) => {
     if (typeof enabled !== "boolean") return scienceExtensionStatus();
@@ -1503,6 +1575,22 @@ app.whenReady().then(async () => {
   };
   const scienceTurnSubscribers = new Map<number, { projectId: string; conversationId: string }>();
   const scienceLifecycleSubscribers = new Map<number, string>();
+  let scienceLifecycleProjectionStarted = false;
+  const ensureScienceLifecycleProjection = () => {
+    if (scienceLifecycleProjectionStarted) return;
+    scienceStore().onResearchLifecycleChanged((change) => {
+      for (const [senderId, projectId] of scienceLifecycleSubscribers) {
+        if (projectId !== change.projectId) continue;
+        const sender = webContents.fromId(senderId);
+        if (!sender || sender.isDestroyed()) {
+          scienceLifecycleSubscribers.delete(senderId);
+          continue;
+        }
+        sender.send("science:researchLifecycleChanged", change);
+      }
+    });
+    scienceLifecycleProjectionStarted = true;
+  };
   ipcMain.handle("science:shell:backToWork", (event, input: unknown) => {
     assertScienceSender(event, input);
     if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) throw new Error("science-owner-window-missing");
@@ -1511,30 +1599,21 @@ app.whenReady().then(async () => {
     mainWindow.focus();
     return { ok: true, route: "/dashboard" };
   });
-  scienceStore().onResearchLifecycleChanged((change) => {
-    for (const [senderId, projectId] of scienceLifecycleSubscribers) {
-      if (projectId !== change.projectId) continue;
-      const sender = webContents.fromId(senderId);
-      if (!sender || sender.isDestroyed()) {
-        scienceLifecycleSubscribers.delete(senderId);
-        continue;
-      }
-      sender.send("science:researchLifecycleChanged", change);
-    }
-  });
   let scienceTurnProjectionStarted = false;
   const ensureScienceTurnProjection = () => {
     if (scienceTurnProjectionStarted) return;
-    scienceTurnProjectionStarted = true;
+    ensureScienceLifecycleProjection();
     scienceConversationService().onEvent((turnEvent) => {
       for (const [senderId, subscription] of scienceTurnSubscribers) {
         if (subscription.projectId !== turnEvent.projectId || subscription.conversationId !== turnEvent.conversationId) continue;
         if (!sendScienceTurnEventToView(senderId, turnEvent)) scienceTurnSubscribers.delete(senderId);
       }
     });
+    scienceTurnProjectionStarted = true;
   };
   ipcMain.handle("science:bootstrap", (event, input: unknown) => {
     const status = assertScienceSender(event, input);
+    ensureScienceLifecycleProjection();
     return {
       extensionId: status.id,
       extensionVersion: status.version ?? "0.0.0",
@@ -1608,6 +1687,18 @@ app.whenReady().then(async () => {
     assertScienceSender(event, envelope);
     const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
     return scienceStore().approveResearchContract(input as ApproveScienceResearchContractInput);
+  });
+  // How this project wants to be asked. Reading is free; changing it is a decision the researcher
+  // makes, so it goes through Main like every other authorization rather than the agent's tools.
+  ipcMain.handle("science:approvalPolicy:get", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope);
+    const record = envelope && typeof envelope === "object" ? envelope as { projectId?: unknown } : null;
+    return scienceStore().approvalPolicy(String(record?.projectId ?? ""));
+  });
+  ipcMain.handle("science:approvalPolicy:set", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope);
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    return scienceStore().setApprovalPolicy(input as SetScienceApprovalPolicyInput);
   });
   ipcMain.handle("science:researchLoops:inspect", (event, input: unknown) => {
     assertScienceSender(event, input);
@@ -1808,6 +1899,14 @@ app.whenReady().then(async () => {
     assertScienceSender(event, input, "science:artifacts");
     const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
     return scienceStore().listArtifacts(projectId);
+  });
+  // The method catalogue the launch screen offers. Read from the same loader the Research Director
+  // uses, so the screen and the agent cannot end up offering different sets of methods.
+  ipcMain.handle("science:statistics:methods", (event, input: unknown) => {
+    assertScienceSender(event, input, "science:compute");
+    const record = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+    if (Object.keys(record).some((key) => key !== "extensionId")) throw new Error("science-statistics-method-catalogue-input-invalid");
+    return scienceStatisticsMethodCatalogue();
   });
   ipcMain.handle("science:artifacts:listStatisticsFigures", (event, input: unknown) => {
     assertScienceSender(event, input, "science:artifacts");
@@ -2217,6 +2316,36 @@ app.whenReady().then(async () => {
     const catalog = await activeScienceLabCapabilityCatalog();
     return scienceLabDecisionProjectionsForProject(scienceStore(), projectId, catalog);
   });
+  ipcMain.handle("science:resultReviews:inspect", async (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:artifacts");
+    if (event.senderFrame !== event.sender.mainFrame) throw new Error("science-episode-result-review-frame-denied");
+    const input = envelope && typeof envelope === "object" && "input" in envelope
+      ? (envelope as { input?: unknown }).input
+      : null;
+    const { activeScienceLabCapabilityCatalog } = await import("./science/tool-control-server");
+    return inspectScienceEpisodeResultReview(
+      scienceStore(),
+      await activeScienceLabCapabilityCatalog(),
+      input as InspectScienceEpisodeResultReviewInput,
+    );
+  });
+  ipcMain.handle("science:resultReviews:record", async (event, envelope: unknown) => {
+    assertScienceSender(event, envelope, "science:artifacts");
+    if (event.senderFrame !== event.sender.mainFrame) throw new Error("science-episode-result-review-frame-denied");
+    const actor = getAuthenticatedActorIds();
+    if (!actor) throw new Error("science-episode-result-review-actor-required");
+    const reviewerRef = `account-sha256:${createHash("sha256").update(`${actor.workspaceId}\0${actor.userId}`, "utf8").digest("hex")}`;
+    const input = envelope && typeof envelope === "object" && "input" in envelope
+      ? (envelope as { input?: unknown }).input
+      : null;
+    const { activeScienceLabCapabilityCatalog } = await import("./science/tool-control-server");
+    return recordScienceEpisodeResultReview(
+      scienceStore(),
+      await activeScienceLabCapabilityCatalog(),
+      input as RecordScienceEpisodeResultReviewInput,
+      reviewerRef,
+    );
+  });
   ipcMain.handle("science:labs:upsertBinding", async (event, envelope: unknown) => {
     assertScienceSender(event, envelope, "science:artifacts");
     const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
@@ -2284,40 +2413,47 @@ app.whenReady().then(async () => {
     const instanceId = input && typeof input === "object" && "instanceId" in input ? String((input as { instanceId?: unknown }).instanceId ?? "") : "";
     return scienceRendererHandshake(event.sender.id, instanceId);
   });
-  ipcMain.handle("scienceRenderer:report", async (event, input: unknown) => {
+  ipcMain.handle("scienceRenderer:report", (event, input: unknown) => {
     const instanceId = input && typeof input === "object" && "instanceId" in input ? String((input as { instanceId?: unknown }).instanceId ?? "") : "";
     const report = input && typeof input === "object" && "report" in input ? (input as { report?: unknown }).report : null;
-    const result = await scienceRendererReport(event.sender.id, instanceId, report);
-    if (!("png" in result)) return result;
-    try {
-      scienceStore().recordArtifactVisualCapture({
-        projectId: result.identity.projectId,
-        artifactId: result.identity.artifactId,
-        artifactVersion: result.identity.artifactVersion,
-        contentSha256: result.identity.contentSha256,
-        png: result.png,
-        renderContext: result.renderContext,
-        renderRequestId: result.renderRequestId,
-        rendererBinding: result.rendererBinding,
-        sceneRevision: result.sceneRevision,
-      });
-      try {
-        scienceArtifactPublicationValidator().validate({
+    const status = scienceRendererReport(event.sender.id, instanceId, report);
+    if (status.phase !== "capturing") return status;
+    // A guest must receive its stable-report acknowledgement before Main asks
+    // that same WebContents to paint into capturePage. Awaiting capture inside
+    // ipcRenderer.invoke can deadlock the renderer paint needed by capture.
+    setImmediate(() => {
+      void captureStableScienceRenderer(instanceId).then((result) => {
+        scienceStore().recordArtifactVisualCapture({
           projectId: result.identity.projectId,
           artifactId: result.identity.artifactId,
           artifactVersion: result.identity.artifactVersion,
+          contentSha256: result.identity.contentSha256,
+          png: result.png,
+          renderContext: result.renderContext,
+          renderRequestId: result.renderRequestId,
+          rendererBinding: result.rendererBinding,
+          sceneRevision: result.sceneRevision,
         });
-      } catch (error) {
-        // Rendering and immutable capture are useful even when an older or
-        // imported artifact cannot yet pass the stricter manuscript gate.
-        // The explicit validation API returns the same machine error later.
-        console.warn("[science-publication] capture not eligible", error instanceof Error ? error.message : String(error));
-      }
-      return markScienceRendererCaptured(instanceId);
-    } catch (error) {
-      const summary = error instanceof Error ? error.message : String(error);
-      return failScienceRendererCapture(instanceId, "science-renderer-capture-store-failed", summary);
-    }
+        try {
+          scienceArtifactPublicationValidator().validate({
+            projectId: result.identity.projectId,
+            artifactId: result.identity.artifactId,
+            artifactVersion: result.identity.artifactVersion,
+          });
+        } catch (error) {
+          // Rendering and immutable capture are useful even when an older or
+          // imported artifact cannot yet pass the stricter manuscript gate.
+          // The explicit validation API returns the same machine error later.
+          console.warn("[science-publication] capture not eligible", error instanceof Error ? error.message : String(error));
+        }
+        markScienceRendererCaptured(instanceId);
+      }).catch((error) => {
+        const summary = error instanceof Error ? error.message : String(error);
+        try { failScienceRendererCapture(instanceId, "science-renderer-capture-store-failed", summary); }
+        catch { console.warn("[science-renderer] capture failed after renderer disposal", summary); }
+      });
+    });
+    return status;
   });
   ipcMain.handle("scienceRenderer:chemistryCommit", async (event, input: unknown) => {
     if (!isScienceChemistryCommitInput(input)) throw new Error("science-chemistry-commit-input-invalid");
@@ -2458,6 +2594,11 @@ app.whenReady().then(async () => {
     const artifactVersion = record.artifactVersion === undefined ? undefined : Number(record.artifactVersion);
     return scienceStore().listArtifactValidationReceipts(String(record.projectId ?? ""), String(record.artifactId ?? ""), artifactVersion);
   });
+  ipcMain.handle("science:artifactValidations:closure", (event, input: unknown) => {
+    assertScienceSender(event, input, "science:artifacts");
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    return scienceStore().getArtifactValidationRunArtifactBindingForProject(String(record.projectId ?? ""), String(record.receiptId ?? ""));
+  });
   ipcMain.handle("science:artifactValidations:validate", (event, envelope: unknown) => {
     assertScienceSender(event, envelope, "science:artifacts");
     const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
@@ -2480,18 +2621,94 @@ app.whenReady().then(async () => {
     const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
     return scienceStore().getManuscriptForProject(String(record.projectId ?? ""), String(record.manuscriptId ?? ""));
   });
+  ipcMain.handle("science:manuscripts:editorModel", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    const editorModel = scienceStore().getManuscriptEditorModelForProject(String(record.projectId ?? ""), String(record.manuscriptId ?? ""));
+    return editorModel ? {
+      ...editorModel,
+      depthPreflight: inspectScienceManuscriptDepth(editorModel.manuscript.version.markdown),
+      blueprint: editorModel.manuscript.version.blueprintBinding
+        ? scienceStore().getManuscriptBlueprintForProject(String(record.projectId ?? ""), editorModel.manuscript.version.blueprintBinding.blueprintId)
+        : null,
+      blueprintAssessment: scienceStore().getManuscriptBlueprintAssessmentForManuscript(String(record.projectId ?? ""), String(record.manuscriptId ?? "")),
+      scholarlyAssessment: scienceStore().getManuscriptScholarlyAssessmentForManuscript(String(record.projectId ?? ""), String(record.manuscriptId ?? "")),
+      coherenceAssessment: scienceStore().getManuscriptCoherenceAssessmentForManuscript(String(record.projectId ?? ""), String(record.manuscriptId ?? "")),
+    } : null;
+  });
+  ipcMain.handle("science:manuscripts:blueprintAssessment", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    return scienceStore().getManuscriptBlueprintAssessmentForManuscript(String(record.projectId ?? ""), String(record.manuscriptId ?? ""));
+  });
+  ipcMain.handle("science:manuscripts:scholarlyAssessment", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    return scienceStore().getManuscriptScholarlyAssessmentForManuscript(String(record.projectId ?? ""), String(record.manuscriptId ?? ""));
+  });
+  ipcMain.handle("science:manuscripts:coherenceAssessment", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    return scienceStore().getManuscriptCoherenceAssessmentForManuscript(String(record.projectId ?? ""), String(record.manuscriptId ?? ""));
+  });
+  ipcMain.handle("science:manuscripts:recordBlueprintAssessment", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope);
+    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
+    if (!input || typeof input !== "object") throw new Error("science-manuscript-blueprint-assessment-input-invalid");
+    return scienceStore().recordManuscriptBlueprintAssessment(input as RecordScienceManuscriptBlueprintAssessmentInput);
+  });
+  ipcMain.handle("science:manuscripts:history", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    const limit = Number(record.limit ?? 100);
+    return scienceStore().listManuscriptTransactions(
+      String(record.projectId ?? ""),
+      String(record.manuscriptId ?? ""),
+      Number.isFinite(limit) ? limit : 100,
+    );
+  });
+  ipcMain.handle("science:manuscripts:selectionContexts", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    const limit = Number(record.limit ?? 100);
+    return scienceStore().listManuscriptSelectionContexts(
+      String(record.projectId ?? ""),
+      String(record.manuscriptId ?? ""),
+      Number.isFinite(limit) ? limit : 100,
+    );
+  });
+  ipcMain.handle("science:manuscripts:selectionContext", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    return scienceStore().getManuscriptSelectionContextForProject(
+      String(record.projectId ?? ""),
+      String(record.manuscriptId ?? ""),
+      String(record.selectionContextId ?? ""),
+    );
+  });
+  ipcMain.handle("science:manuscripts:editProposals", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    const limit = Number(record.limit ?? 100);
+    return scienceStore().listManuscriptEditProposals(
+      String(record.projectId ?? ""),
+      String(record.manuscriptId ?? ""),
+      Number.isFinite(limit) ? limit : 100,
+    );
+  });
+  ipcMain.handle("science:manuscripts:editProposal", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    return scienceStore().getManuscriptEditProposalForProject(
+      String(record.projectId ?? ""),
+      String(record.manuscriptId ?? ""),
+      String(record.proposalId ?? ""),
+    );
+  });
   ipcMain.handle("science:claimLedgers:getForManuscript", (event, input: unknown) => {
     assertScienceSender(event, input);
     const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
     return scienceStore().getClaimLedgerForManuscript(String(record.projectId ?? ""), String(record.manuscriptId ?? ""));
-  });
-  ipcMain.handle("science:manuscripts:create", (event, envelope: unknown) => {
-    assertScienceSender(event, envelope);
-    const input = envelope && typeof envelope === "object" && "input" in envelope
-      ? (envelope as { input?: unknown }).input
-      : null;
-    if (!input || typeof input !== "object") throw new Error("science-manuscript-input-invalid");
-    return scienceStore().createManuscript(input as CreateScienceManuscriptInput);
   });
   ipcMain.handle("science:manuscripts:appendVersion", (event, envelope: unknown) => {
     assertScienceSender(event, envelope);
@@ -2500,6 +2717,72 @@ app.whenReady().then(async () => {
       : null;
     if (!input || typeof input !== "object") throw new Error("science-manuscript-input-invalid");
     return scienceStore().appendManuscriptVersion(input as AppendScienceManuscriptVersionInput);
+  });
+  ipcMain.handle("science:manuscripts:applyTransaction", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope);
+    const input = envelope && typeof envelope === "object" && "input" in envelope
+      ? (envelope as { input?: unknown }).input
+      : null;
+    if (!input || typeof input !== "object") throw new Error("science-manuscript-transaction-input-invalid");
+    return scienceStore().applyManuscriptTransaction(input as ApplyScienceManuscriptTransactionInput);
+  });
+  ipcMain.handle("science:manuscripts:revertTransaction", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope);
+    const input = envelope && typeof envelope === "object" && "input" in envelope
+      ? (envelope as { input?: unknown }).input
+      : null;
+    if (!input || typeof input !== "object") throw new Error("science-manuscript-transaction-input-invalid");
+    return scienceStore().revertManuscriptTransaction(input as RevertScienceManuscriptTransactionInput);
+  });
+  ipcMain.handle("science:manuscripts:createSelectionContext", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope);
+    const input = envelope && typeof envelope === "object" && "input" in envelope
+      ? (envelope as { input?: unknown }).input
+      : null;
+    if (!input || typeof input !== "object") throw new Error("science-manuscript-selection-input-invalid");
+    return scienceStore().createManuscriptSelectionContext(input as CreateScienceManuscriptSelectionContextInput);
+  });
+  ipcMain.handle("science:manuscripts:createEditProposal", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope);
+    const input = envelope && typeof envelope === "object" && "input" in envelope
+      ? (envelope as { input?: unknown }).input
+      : null;
+    if (!input || typeof input !== "object") throw new Error("science-manuscript-proposal-input-invalid");
+    return scienceStore().createManuscriptEditProposal(input as CreateScienceManuscriptEditProposalInput);
+  });
+  ipcMain.handle("science:manuscripts:applyEditProposal", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope);
+    const input = envelope && typeof envelope === "object" && "input" in envelope
+      ? (envelope as { input?: unknown }).input
+      : null;
+    if (!input || typeof input !== "object") throw new Error("science-manuscript-proposal-input-invalid");
+    return scienceStore().applyManuscriptEditProposal(input as ApplyScienceManuscriptEditProposalInput);
+  });
+  ipcMain.handle("science:manuscripts:rejectEditProposal", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope);
+    const input = envelope && typeof envelope === "object" && "input" in envelope
+      ? (envelope as { input?: unknown }).input
+      : null;
+    if (!input || typeof input !== "object") throw new Error("science-manuscript-proposal-input-invalid");
+    return scienceStore().rejectManuscriptEditProposal(input as RejectScienceManuscriptEditProposalInput);
+  });
+  ipcMain.handle("science:manuscripts:render", async (event, envelope: unknown) => {
+    assertScienceSender(event, envelope);
+    const input = envelope && typeof envelope === "object" && "input" in envelope
+      ? (envelope as { input?: Record<string, unknown> }).input
+      : null;
+    if (!input || typeof input !== "object" || typeof input.projectId !== "string") throw new Error("science-manuscript-render-input-invalid");
+    const service = scienceManuscriptRenderService();
+    const options = {
+      outputs: Array.isArray(input.outputs) && input.outputs.length ? input.outputs as Array<"html" | "latex" | "docx" | "pdf" | "package"> : ["html" as const],
+      style: (input.style as "numeric" | "apa" | "nature" | undefined) ?? "numeric",
+      lineNumbers: input.lineNumbers === true, doubleSpacing: input.doubleSpacing === true,
+      metadata: input.metadata && typeof input.metadata === "object" ? input.metadata as ScienceSubmissionMetadata : null,
+    };
+    if (typeof input.manuscriptId === "string") return service.renderStored(input.projectId, input.manuscriptId, options);
+    const draft = input.draft as { title?: unknown; markdown?: unknown; bindings?: unknown } | undefined;
+    if (!draft || typeof draft.markdown !== "string" || !Array.isArray(draft.bindings)) throw new Error("science-manuscript-render-input-invalid");
+    return service.render(draftManuscript(input.projectId, typeof draft.title === "string" ? draft.title : "", draft.markdown, draft.bindings as ScienceManuscriptBinding[]), options);
   });
   ipcMain.handle("science:journals:list", (event, input: unknown) => {
     assertScienceSender(event, input);
@@ -2589,6 +2872,45 @@ app.whenReady().then(async () => {
     assertScienceSender(event, envelope, "science:agent-runtime");
     const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
     return scienceStore().deferDecision(input as DeferScienceDecisionInput);
+  });
+  // Hypothesis authorization is the human half of the research loop. The AI-visible MCP route
+  // records only evidence-derived states (proposed / supported / contradicted); `approved` and
+  // `rejected` may be written solely here, from the verified Science view, so an agent cannot
+  // authorize its own hypothesis. The successor revision stays immutable and version-fenced.
+  ipcMain.handle("science:hypotheses:list", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
+    const currentOnly = record.currentOnly === undefined ? true : record.currentOnly === true;
+    return scienceStore().listHypotheses(String(record.projectId ?? ""), currentOnly);
+  });
+  ipcMain.handle("science:hypotheses:decide", (event, envelope: unknown) => {
+    assertScienceSender(event, envelope);
+    const input = envelope && typeof envelope === "object" && "input" in envelope
+      ? (envelope as { input?: Record<string, unknown> }).input
+      : null;
+    if (!input || typeof input !== "object") throw new Error("science-hypothesis-decision-input-invalid");
+    const decision = input.decision;
+    if (decision !== "approved" && decision !== "rejected") throw new Error("science-hypothesis-decision-invalid");
+    const parent = scienceStore().getHypothesisForProject(String(input.projectId ?? ""), String(input.hypothesisId ?? ""));
+    if (!parent) throw new Error("science-hypothesis-not-found");
+    // The decision succeeds the exact reviewed revision; the statement and falsification criteria
+    // are carried over verbatim so a decision can never silently restate the hypothesis.
+    return scienceStore().reviseHypothesis({
+      requestId: String(input.requestId ?? ""),
+      projectId: String(input.projectId ?? ""),
+      parentHypothesisId: parent.id,
+      expectedParentVersion: Number(input.expectedVersion),
+      expectedParentContentSha256: String(input.expectedContentSha256 ?? ""),
+      role: parent.role,
+      status: decision,
+      statement: parent.statement,
+      rationale: typeof input.rationale === "string" && input.rationale.trim()
+        ? input.rationale
+        : parent.rationale,
+      falsificationCriteria: parent.falsificationCriteria,
+      evidenceSpanIds: parent.evidenceSpanIds,
+      episodeResultIds: parent.episodeResultIds,
+    } as ReviseScienceHypothesisInput);
   });
   ipcMain.handle("science:decisions:answer", (event, envelope: unknown) => {
     assertScienceSender(event, envelope);
@@ -2760,10 +3082,11 @@ app.whenReady().then(async () => {
   startOneBriefingScheduler();
   startOneTeamNotificationBridge();
   /*
-   * agentlasd is an app-scoped internal host. Establish it before choosing the
-   * one physical Mobile Bridge listener, then lease that listener to Desktop.
-   * This prevents the old two-authority race where both processes rewrote the
-   * same endpoint manifest and phones attached to whichever process won last.
+   * Establish the daemon before choosing the physical Mobile Bridge owner.
+   * Previously Desktop opened its listener first and `ensureDaemonRunning`
+   * happened later on an unrelated promise. agentlasd then opened a second
+   * listener for the same user-data and whichever process wrote endpoint.json
+   * last silently redirected newly paired phones away from the other one.
    */
   const daemonStartupPromise = import("./daemon/app-launcher")
     .then(async (module) => {
@@ -2771,6 +3094,7 @@ app.whenReady().then(async () => {
         userDataDir: userDataDir(),
         appVersion: app.getVersion(),
         parentPid: process.pid,
+        installIdentity,
       });
       if (outcome.status === "failed") console.error("[daemon] ensure failed:", outcome.reason);
       else console.info(`[daemon] ${outcome.status}`);
@@ -2781,7 +3105,9 @@ app.whenReady().then(async () => {
           executable: process.execPath,
           entry: path.join(__dirname, "daemon", "main.js"),
         });
-        if (reconciled.changed) console.info("[daemon] removed legacy autostart");
+        if (reconciled.changed) {
+          console.info(`[daemon] autostart ${reconciled.installed ? "installed" : "removed"}`);
+        }
         const { disableLaunchd } = await import("./launchd/agent");
         const legacyAutomationLauncher = disableLaunchd();
         if (legacyAutomationLauncher.error) {
@@ -2790,16 +3116,9 @@ app.whenReady().then(async () => {
       } catch (err) {
         console.error("[daemon] autostart reconcile failed:", err);
       }
-      let bridgeClaimed = false;
-      if (outcome.status !== "disabled" && outcome.status !== "failed") {
-        bridgeClaimed = await module.claimDaemonMobileBridge(userDataDir(), process.pid);
-        if (!bridgeClaimed) console.error("[daemon] Mobile Bridge lease was not granted");
-      }
-      settleMobileBridgeOwnership(outcome.status === "disabled" || bridgeClaimed);
-      return { module, outcome, bridgeClaimed };
+      return { module, outcome };
     })
     .catch((error) => {
-      settleMobileBridgeOwnership(false);
       console.error("[daemon] launcher wiring failed:", error);
       return null;
     });
@@ -2807,21 +3126,37 @@ app.whenReady().then(async () => {
   // bridge failure must not make Desktop unusable; Settings exposes the exact
   // failure and can retry on the next launch.
   const startMobileBridgeAfterAuth = async () => {
+    if (!shellReadyForWindows) return;
     const daemon = await daemonStartupPromise;
+    let claimed = false;
     try {
       if (!shellReadyForWindows) return;
-      if (!daemon) throw new Error("Agentlas helper startup state is unavailable");
-      if (daemon.outcome.status === "failed") {
-        throw new Error(`Agentlas helper failed to start: ${daemon.outcome.reason}`);
+      if (daemon && daemon.outcome.status !== "disabled" && daemon.outcome.status !== "failed") {
+        claimed = await daemon.module.claimDaemonMobileBridge(userDataDir(), process.pid);
+        if (!claimed) {
+          // The daemon still owns a healthy listener. Opening a fallback here
+          // would recreate the two-authority split; leave Mobile service on the
+          // daemon and expose the failed handoff instead.
+          throw new Error("Agentlas daemon did not grant Mobile Bridge ownership");
+        }
+        daemonMobileBridgeClaimed = true;
       }
-      if (daemon.outcome.status !== "disabled" && !daemon.bridgeClaimed) {
-        throw new Error("Agentlas helper did not grant Mobile Bridge ownership");
+      if (!shellReadyForWindows) {
+        if (claimed && daemon) {
+          daemonMobileBridgeClaimed = false;
+          await daemon.module.releaseDaemonMobileBridge(userDataDir(), process.pid);
+        }
+        return;
       }
       await startAgentlasMobileBridge({
         userDataPath: userDataDir(),
         appVersion: app.getVersion(),
       });
     } catch (err) {
+      if (claimed && daemon) {
+        daemonMobileBridgeClaimed = false;
+        await daemon.module.releaseDaemonMobileBridge(userDataDir(), process.pid).catch(() => false);
+      }
       console.error("[mobile-bridge] start failed:", err);
     }
   };

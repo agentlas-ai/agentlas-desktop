@@ -21,6 +21,7 @@ import {
   stripAgentIdentityBadges,
 } from "@shared/agent-control-blocks";
 import { McpResultPreview } from "./McpResultPreview";
+import { LiveOutputViewer } from "./LiveOutputViewer";
 
 /** 작업 중 패널에 누적되는 단일 단계. 새 이벤트마다 push (replace 아님). */
 export interface StreamStep {
@@ -849,7 +850,10 @@ const Bubble = memo(function Bubble({
       <div className="agentlas-chat-avatar" style={{ position: "relative", flexShrink: 0 }}>
         <AgentAvatar name={agentName} tone={agentTone} size={28} />
       </div>
-      <div style={{ minWidth: 0, flex: 1, paddingTop: 1 }}>
+      <div
+        className="agentlas-chat-answer"
+        style={{ minWidth: 0, flex: 1, padding: "9px 0 14px" }}
+      >
         {message.pipeline && message.pipeline.length > 0 && showParallelWork && (
           <PipelineStepper stages={message.pipeline} running={Boolean(message.busy)} />
         )}
@@ -904,6 +908,23 @@ const Bubble = memo(function Bubble({
             onOpenWorkflow={onOpenWorkflow}
             mediaBasePaths={mediaBasePaths}
           />
+        )}
+        {message.imageDataUrls && message.imageDataUrls.length > 0 && (
+          <div
+            data-testid="chat-generated-images"
+            style={{ display: "grid", gap: 8, marginTop: 10, maxWidth: 620 }}
+          >
+            {message.imageDataUrls.map((url, index) => (
+              <LiveOutputViewer
+                key={`${message.id}-image-${index}`}
+                source={url}
+                name={`agentlas-image-${index + 1}.png`}
+                kind="image"
+                locale={locale === "ko" ? "ko" : "en"}
+                imageActions
+              />
+            ))}
+          </div>
         )}
         {!showParallelWork && <RunStatusLine message={message} onOpenWorkflow={onOpenWorkflow} />}
         {/* 질문은 이제 바텀 시트(ChatQuestionSheet)에서 답한다 — 스트림에는 답변이 끝난

@@ -1,4 +1,5 @@
 import type { ScienceSuiteComponentId } from "../../shared/product-extension";
+import { SCIENCE_DESKTOP_HOST_API_NAME, SCIENCE_DESKTOP_HOST_API_VERSION } from "../../shared/science-extension-host-compatibility";
 import type { SciencePackageArchiveSpec } from "./downloader";
 
 const CATALOG_SCHEMA = "agentlas.science-catalog/v1";
@@ -15,6 +16,10 @@ const COMPONENT_IDS = [
 export interface ScienceCatalogPackageSpec extends SciencePackageArchiveSpec {
   displayName: string;
   description: string;
+  desktopHostApi?: {
+    name: typeof SCIENCE_DESKTOP_HOST_API_NAME;
+    version: typeof SCIENCE_DESKTOP_HOST_API_VERSION;
+  };
 }
 
 export interface ScienceReleaseCatalog {
@@ -58,7 +63,8 @@ function parseComponent(value: unknown): ScienceCatalogPackageSpec {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("science-catalog-invalid");
   const record = value as Record<string, unknown>;
   const keys = Object.keys(record).sort().join(",");
-  if (keys !== "archiveBytes,archiveSha256,archiveUrl,description,displayName,id,version") {
+  if (keys !== "archiveBytes,archiveSha256,archiveUrl,description,desktopHostApi,displayName,id,version"
+    && keys !== "archiveBytes,archiveSha256,archiveUrl,description,displayName,id,version") {
     throw new Error("science-catalog-invalid");
   }
   if (
@@ -76,6 +82,18 @@ function parseComponent(value: unknown): ScienceCatalogPackageSpec {
   ) {
     throw new Error("science-catalog-invalid");
   }
+  let desktopHostApi: ScienceCatalogPackageSpec["desktopHostApi"];
+  if (record.desktopHostApi !== undefined) {
+    if (record.id !== "agentlas-science" || !record.desktopHostApi || typeof record.desktopHostApi !== "object" || Array.isArray(record.desktopHostApi)) {
+      throw new Error("science-catalog-invalid");
+    }
+    const hostApi = record.desktopHostApi as Record<string, unknown>;
+    if (Object.keys(hostApi).sort().join(",") !== "name,version"
+      || hostApi.name !== SCIENCE_DESKTOP_HOST_API_NAME
+      || typeof hostApi.version !== "string" || !/^\d+\.\d+\.\d+$/u.test(hostApi.version)) throw new Error("science-catalog-invalid");
+    if (hostApi.version !== SCIENCE_DESKTOP_HOST_API_VERSION) throw new Error("science-catalog-desktop-host-api-incompatible");
+    desktopHostApi = { name: SCIENCE_DESKTOP_HOST_API_NAME, version: SCIENCE_DESKTOP_HOST_API_VERSION };
+  }
   return {
     id: record.id as ScienceSuiteComponentId,
     displayName: record.displayName,
@@ -84,6 +102,7 @@ function parseComponent(value: unknown): ScienceCatalogPackageSpec {
     archiveUrl: record.archiveUrl,
     archiveBytes: Number(record.archiveBytes),
     archiveSha256: record.archiveSha256,
+    ...(desktopHostApi ? { desktopHostApi } : {}),
   };
 }
 
@@ -113,6 +132,15 @@ function parseCatalog(value: unknown): ScienceReleaseCatalog {
   if (
     ids.size !== COMPONENT_IDS.length
     || COMPONENT_IDS.some((id) => !ids.has(id))
+    || record.releaseTag !== `science-v${record.suiteVersion}`
+    || components.some((component) => {
+      try {
+        const archive = new URL(component.archiveUrl);
+        return !archive.pathname.includes(`/releases/download/${record.releaseTag}/`);
+      } catch {
+        return true;
+      }
+    })
     || totalDownloadBytes !== record.totalDownloadBytes
   ) {
     throw new Error("science-catalog-invalid");

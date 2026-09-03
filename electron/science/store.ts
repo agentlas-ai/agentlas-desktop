@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { TextDecoder } from "node:util";
 import { strFromU8, unzipSync } from "fflate";
 import {
   SCIENCE_ARTIFACT_KINDS,
@@ -65,6 +66,8 @@ import {
   type ScienceResearchEpisodeResult,
   type ScienceResearchEpisodeStatus,
   type ScienceResearchEpisodeToolIntent,
+  type ScienceEpisodeResultReviewReceipt,
+  type RecordScienceEpisodeResultReviewResult,
   type StartScienceLoopSessionInput,
   type StartScienceLoopSessionResult,
   type PlanScienceResearchEpisodeInput,
@@ -98,6 +101,9 @@ import {
   type UpdateScienceProjectRelatedDomainsResult,
   type UpsertScienceProjectLabBindingInput,
   type UpsertScienceProjectLabBindingResult,
+  type ScienceApprovalPolicy,
+  type ScienceApprovalScope,
+  type SetScienceApprovalPolicyInput,
   type ScienceResearchContract,
   type ScienceHypothesis,
   type ProposeScienceHypothesisInput,
@@ -130,11 +136,14 @@ import {
   type CompleteScienceResearchRunInput,
   type CompleteScienceResearchRunResult,
   type ScienceResearchRun,
+  type ScienceResearchRunParentBinding,
+  type ScienceResearchRunParentBindingInput,
   type ScienceResearchRunResource,
   type ScienceResearchRunResourceInput,
   type ScienceRunBlobReceipt,
   type ScienceDatasetTablePayload,
   type ScienceResearchRunSourceBinding,
+  type ScienceResearchRunSourceOutputBinding,
   type CommitScienceDatasetIngestionInput,
   type CommitScienceDatasetIngestionResult,
   type MaterializeScienceDatasetTableInput,
@@ -164,19 +173,53 @@ import {
   type RecordScienceArtifactValidationInput,
   type RecordScienceArtifactValidationResult,
   type ScienceArtifactValidationReceipt,
+  type ScienceArtifactValidationRunArtifactBinding,
   type CreateScienceManuscriptInput,
   type CreateScienceManuscriptResult,
   type AppendScienceManuscriptVersionInput,
   type AppendScienceManuscriptVersionResult,
+  type ApplyScienceManuscriptTransactionInput,
+  type ApplyScienceManuscriptTransactionResult,
+  type RevertScienceManuscriptTransactionInput,
+  type RevertScienceManuscriptTransactionResult,
+  type GetScienceManuscriptEditorModelResult,
   type ScienceManuscript,
   type ScienceManuscriptBinding,
   type ScienceManuscriptBindingInput,
+  type AssembleScienceManuscriptDraftingSessionInput,
+  type AssembleScienceManuscriptDraftingSessionResult,
+  type CancelScienceManuscriptDraftingSessionInput,
+  type CancelScienceManuscriptDraftingSessionResult,
+  type SaveScienceManuscriptDraftSectionInput,
+  type SaveScienceManuscriptDraftSectionResult,
+  type ScienceManuscriptDraftingSession,
+  type ScienceManuscriptDraftPlanSection,
+  type ScienceManuscriptDraftSectionRevision,
+  type StartScienceManuscriptDraftingSessionInput,
+  type StartScienceManuscriptDraftingSessionResult,
+  type ScienceManuscriptDocument,
+  type ScienceManuscriptNode,
+  type ScienceManuscriptParagraphNode,
+  type ScienceManuscriptOperation,
+  type ScienceManuscriptTransaction,
+  type ScienceManuscriptSelectionContext,
+  type CreateScienceManuscriptSelectionContextInput,
+  type CreateScienceManuscriptSelectionContextResult,
+  type ScienceManuscriptEditProposal,
+  type ScienceManuscriptEditProposalDecision,
+  type CreateScienceManuscriptEditProposalInput,
+  type CreateScienceManuscriptEditProposalResult,
+  type ApplyScienceManuscriptEditProposalInput,
+  type ApplyScienceManuscriptEditProposalResult,
+  type RejectScienceManuscriptEditProposalInput,
+  type RejectScienceManuscriptEditProposalResult,
   type ScienceJournalGuidelineInspection,
   type ScienceJournalGuidelineSource,
   type ScienceJournalCoverageEntry,
   type ScienceJournalIdentityReceipt,
   type ScienceJournalHumanAttestationReceipt,
   type ScienceJournalValidationReceipt,
+  type ScienceJournalValidationFinding,
   type ConfirmScienceJournalIdentityInput,
   type ConfirmScienceJournalHumanAttestationInput,
   type ScienceJournalProfile,
@@ -203,7 +246,18 @@ import {
   type AnswerScienceDecisionResult,
   type FreezeScienceAnalysisSpecInput,
   type FreezeScienceAnalysisSpecResult,
-} from "../../shared/science-contract";
+  SCIENCE_APPROVAL_SCOPES,} from "../../shared/science-contract";
+import {
+  assertScienceEpisodeResultReviewReceipt,
+} from "../../shared/science-result-review";
+import {
+  SCIENCE_MANUSCRIPT_DOCUMENT_SCHEMA,
+  scienceManuscriptDocumentSha256,
+  serializeScienceManuscriptDocument,
+  validateScienceManuscriptDocument,
+  validateScienceManuscriptOperation,
+} from "../../shared/science-manuscript-document";
+import { scienceLabDecisionProjectSha256 } from "../../shared/science-lab-decision-projection";
 import {
   defaultScienceProteinColorTheme,
   scienceResidueLocatorKey,
@@ -315,6 +369,12 @@ import {
   validateScienceMaterialsArtifactPayload,
 } from "../../shared/science-materials";
 import {
+  EXTANT_ARCHOSAUR_LOCUS_PANEL_TOOL_ID,
+  EXTANT_ARCHOSAUR_LOCUS_PANEL_TOOL_VERSION,
+  validateScienceExtantArchosaurLocusPanelArtifactPayload,
+  type ScienceExtantArchosaurLocusPanelArtifactPayload,
+} from "../../shared/science-extant-archosaur-locus-panel";
+import {
   SCIENCE_RESEARCH_LIFECYCLE_PHASES,
   SCIENCE_RESEARCH_LIFECYCLE_SCHEMA,
   SCIENCE_RESEARCH_MAIN_PHASES,
@@ -340,6 +400,10 @@ import {
   evaluateScienceClaimLedgerPublicationGate,
   scienceClaimLedgerSha256,
   scienceClaimLedgerTextSha256,
+  sealScienceClaimEvidenceAtom,
+  sealScienceClaimLedgerManifest,
+  sealScienceClaimLocator,
+  sealScienceClaimRecord,
   validateScienceClaimLedgerManifest,
   validateScienceClaimLedgerTransition,
 } from "./claim-ledger";
@@ -359,7 +423,11 @@ import type {
   ScienceClaimLedgerMutationResult,
   ScienceClaimLedgerReadModel,
   ScienceClaimLedgerValidationContext,
+  ScienceClaimEvidenceAtom,
+  ScienceClaimSentenceClassification,
+  SealScienceClaimLedgerInput,
 } from "../../shared/science-claim-ledger";
+import { SCIENCE_CLAIM_CLASSES, SCIENCE_CLAIM_STATUSES, SCIENCE_EVIDENCE_DIRECTIONS } from "../../shared/science-claim-ledger";
 import { assertScienceResearchLifecyclePhaseGate } from "./research-lifecycle-gates";
 import {
   STATISTICS_FIGURE_CATALOG_VERSION,
@@ -376,18 +444,143 @@ import type {
   ScienceEvidenceGraphRevision,
 } from "../../shared/science-evidence-graph";
 import { SCIENCE_EVIDENCE_GRAPH_MAX_NODES } from "../../shared/science-evidence-graph";
+import {
+  applyScienceManuscriptTransactionOperations,
+  createScienceManuscriptCompatibilityDocument,
+  scienceManuscriptTransactionJson,
+  scienceManuscriptTransactionSha256,
+} from "./manuscript/transactions";
+import {
+  SCIENCE_MANUSCRIPT_EDIT_PROPOSAL_DECISION_SCHEMA,
+  SCIENCE_MANUSCRIPT_EDIT_PROPOSAL_SCHEMA,
+  SCIENCE_MANUSCRIPT_SELECTION_CONTEXT_SCHEMA,
+  findScienceManuscriptNode,
+  scienceManuscriptEditProposalDecisionSha256,
+  scienceManuscriptEditProposalPayloadSha256,
+  scienceManuscriptNodeSelectionText,
+  scienceManuscriptProposalJson,
+  scienceManuscriptProposalSha256,
+  scienceManuscriptProposalTextSha256,
+  scienceManuscriptSelectionContextSha256,
+  validateScienceManuscriptEditProposalDecision,
+  validateScienceManuscriptEditProposalPayload,
+  validateScienceManuscriptSelectionContext,
+} from "../../shared/science-manuscript-proposal";
 import type {
   ScienceSourceTextChunk,
   ScienceSourceTextEvidenceScope,
   ScienceSourceTextIndex,
   ScienceSourceTextSearchResult,
 } from "../../shared/science-literature-chunks";
+import { inspectScienceManuscriptDepth, SCIENCE_MANUSCRIPT_DEPTH_PREFLIGHT_POLICY, type ScienceManuscriptDepthPreflight } from "./manuscript/depth-preflight";
+import { sectionRole } from "./manuscript/document-model";
+import {
+  SCIENCE_MANUSCRIPT_ARTICLE_FAMILIES,
+  SCIENCE_MANUSCRIPT_BLUEPRINT_ASSESSMENT_SCHEMA,
+  SCIENCE_MANUSCRIPT_BLUEPRINT_SCHEMA,
+  SCIENCE_MANUSCRIPT_CORPUS_STRUCTURE_PROFILE_SCHEMA,
+  type AppendScienceManuscriptBlueprintVersionInput,
+  type CreateScienceManuscriptBlueprintInput,
+  type ScienceManuscriptArticleFamily,
+  type ScienceManuscriptBlueprint,
+  type ScienceManuscriptBlueprintBinding,
+  type ScienceManuscriptBlueprintBindingInput,
+  type ScienceManuscriptBlueprintComparable,
+  type ScienceManuscriptBlueprintComparableSectionObservation,
+  type ScienceManuscriptBlueprintCorpusSummary,
+  type ScienceManuscriptBlueprintDocument,
+  type ScienceManuscriptBlueprintJournalBindingInput,
+  type ScienceManuscriptBlueprintRange,
+  type ScienceManuscriptBlueprintAssessmentFinding,
+  type ScienceManuscriptBlueprintAssessmentReadModel,
+  type ScienceManuscriptBlueprintAssessmentReceipt,
+  type ScienceManuscriptBlueprintAssessmentSection,
+  type ScienceManuscriptBlueprintSection,
+  type ScienceManuscriptBlueprintSectionInput,
+  type ScienceManuscriptCorpusStructureComparableProfile,
+  type ScienceManuscriptCorpusStructureMetricSummary,
+  type ScienceManuscriptCorpusStructureProfile,
+  type ScienceManuscriptSectionRole,
+  type RecordScienceManuscriptBlueprintAssessmentInput,
+  type RecordScienceManuscriptBlueprintAssessmentResult,
+  type WriteScienceManuscriptBlueprintResult,
+} from "../../shared/science-manuscript-blueprint";
+import {
+  SCIENCE_MANUSCRIPT_SCHOLARLY_ASSESSMENT_SCHEMA,
+  type RecordScienceManuscriptScholarlyAssessmentInput,
+  type RecordScienceManuscriptScholarlyAssessmentResult,
+  type ScienceManuscriptExactQuoteLocator,
+  type ScienceManuscriptScholarlyAssessmentFinding,
+  type ScienceManuscriptScholarlyAssessmentReadModel,
+  type ScienceManuscriptScholarlyAssessmentReceipt,
+  type ScienceManuscriptScholarlyEvaluator,
+  type ScienceManuscriptScholarlySectionAssessment,
+  type ScienceManuscriptScholarlySectionInput,
+  type ScienceManuscriptStableNodeLocator,
+} from "../../shared/science-manuscript-scholarly-assessment";
+import {
+  SCIENCE_MANUSCRIPT_COMPARABLE_DECISIONS,
+  SCIENCE_MANUSCRIPT_COMPARABLE_ELIGIBILITY_SCHEMA,
+  SCIENCE_MANUSCRIPT_COMPARABLE_VENUE_RELATIONS,
+  type RecordScienceManuscriptComparableEligibilityInput,
+  type RecordScienceManuscriptComparableEligibilityResult,
+  type ScienceManuscriptComparableEligibilityReadModel,
+  type ScienceManuscriptComparableEligibilityReceipt,
+  type ScienceManuscriptComparableSourceQuoteLocator,
+} from "../../shared/science-manuscript-comparable-eligibility";
+import { SCIENCE_MANUSCRIPT_DRAFTING_SESSION_SCHEMA } from "../../shared/science-manuscript-drafting";
+import {
+  SCIENCE_MANUSCRIPT_COHERENCE_POLICY,
+  SCIENCE_MANUSCRIPT_COHERENCE_SCHEMA,
+  type EvaluateScienceManuscriptCoherenceInput,
+  type PrepareScienceManuscriptCoherenceContextInput,
+  type PrepareScienceManuscriptCoherenceContextResult,
+  type RecordScienceManuscriptCoherenceAssessmentInput,
+  type RecordScienceManuscriptCoherenceAssessmentResult,
+  type ScienceCoherenceSectionRole,
+  type ScienceCoherenceNumericSourceContext,
+  type ScienceCoherenceNumericSourceSelectorInput,
+  type ScienceCoherenceVisualContext,
+  type ScienceManuscriptCoherenceAssessmentReadModel,
+  type ScienceManuscriptCoherenceAssessmentReceipt,
+  type ScienceManuscriptCoherenceContext,
+} from "../../shared/science-manuscript-coherence";
+import { assertScienceAgentManuscriptDraft } from "./manuscript/agent-draft-gate";
+import { evaluateScienceManuscriptCoherence } from "./manuscript-coherence";
+import {
+  RESEARCH_DIRECTOR_PLUGIN_VERSION,
+  RESEARCH_DIRECTOR_SYSTEM_PROMPT_SHA256,
+  SCIENCE_RESEARCH_DIRECTOR_SLUG,
+  builtinAgentId,
+} from "../architecture/manifest";
 
-export const SCIENCE_SCHEMA_VERSION = 44;
+export const SCIENCE_SCHEMA_VERSION = 55;
 const UUID_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const SCIENCE_SOURCE_TEXT_CHUNK_MAX_BYTES = 2_400;
 const SCIENCE_SOURCE_TEXT_CHUNK_MAX_COUNT = 100_000;
+const SCIENCE_BLUEPRINT_MIN_COMPARABLES = 1;
+const SCIENCE_BLUEPRINT_MAX_COMPARABLES = 20;
+const SCIENCE_BLUEPRINT_SECTION_ROLES = new Set([
+  "abstract", "introduction", "related-work", "methods", "theory", "results", "discussion",
+  "limitations", "conclusion", "references", "appendix", "other",
+]);
+const SCIENCE_BLUEPRINT_REQUIRED_ROLES: Record<ScienceManuscriptArticleFamily, string[]> = {
+  empirical: ["introduction", "methods", "results", "discussion", "limitations", "conclusion"],
+  "theoretical-proof": ["introduction", "theory", "discussion", "conclusion"],
+  "review-synthesis": ["introduction", "methods", "results", "discussion", "limitations", "conclusion"],
+  "methods-model": ["introduction", "methods", "results", "discussion", "limitations", "conclusion"],
+  "data-resource": ["introduction", "methods", "results", "discussion", "limitations", "conclusion"],
+};
+const SCIENCE_BLUEPRINT_CALIBRATION_ROLES: Record<ScienceManuscriptArticleFamily, string[]> = {
+  empirical: ["introduction", "methods", "results", "discussion"],
+  "theoretical-proof": ["introduction", "theory", "conclusion"],
+  "review-synthesis": ["introduction", "methods", "results", "discussion"],
+  "methods-model": ["introduction", "methods", "results", "discussion"],
+  "data-resource": ["introduction", "methods", "results", "discussion"],
+};
+const SCIENCE_RESEARCH_DIRECTOR_AGENT_ID = builtinAgentId(SCIENCE_RESEARCH_DIRECTOR_SLUG);
+const SCIENCE_MANUSCRIPT_SCHOLARLY_MINIMUM_CONFIDENCE = 0.8;
 const LAB_ID_RE = /^[a-z0-9](?:[a-z0-9._-]{0,78}[a-z0-9])?$/;
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const TABLE_TO_VEGA_TOOL_ID = "agentlas.table-to-vega";
@@ -423,7 +616,7 @@ const SMILES_TO_KETCHER_INPUT_MIME = "application/vnd.agentlas.science.smiles+js
 const SMILES_TO_KETCHER_OUTPUT_ROLE = "ketcher-artifact-output";
 const SMILES_TO_KETCHER_OUTPUT_MIME = "application/vnd.agentlas.science.tool-artifact-candidate+json";
 const SOURCE_TO_KETCHER_TOOL_ID = "agentlas.source-to-ketcher";
-const SOURCE_TO_KETCHER_TOOL_VERSION = "1.0.0";
+const SOURCE_TO_KETCHER_TOOL_VERSION = "1.1.0";
 const SOURCE_TO_KETCHER_INPUT_ROLE = "source-version-input";
 const SOURCE_TO_KETCHER_INPUT_MIME = "application/vnd.agentlas.science.source-to-ketcher+json";
 const CITATION_NETWORK_TOOL_ID = "agentlas.academic-to-citation-network";
@@ -458,6 +651,14 @@ const EARTHQUAKE_MAP_RENDERER_ID = "agentlas.vega";
 const EARTHQUAKE_MAP_RENDERER_VERSION = "6.4.0";
 const CITATION_NETWORK_RENDERER_ID = "agentlas.cytoscape";
 const CITATION_NETWORK_RENDERER_VERSION = "3.34.1";
+const COMPARATIVE_GENOMICS_TOOL_ID = "agentlas.comparative-genomics-gene-tree";
+const COMPARATIVE_GENOMICS_TOOL_VERSION = "1.0.0";
+const COMPARATIVE_GENOMICS_TABLE_TOOL_ID = "agentlas.comparative-genomics-publication-table";
+const COMPARATIVE_GENOMICS_TABLE_TOOL_VERSION = "1.0.0";
+const COMPARATIVE_GENOMICS_TABLE_PARSER_ID = "agentlas.comparative-genomics-publication-table";
+const COMPARATIVE_GENOMICS_TABLE_INPUT_MIME = "application/vnd.agentlas.science.comparative-genomics-table-input+json";
+const COMPARATIVE_GENOMICS_SOURCE_TABLE_MIME = "application/vnd.agentlas.science-table+json";
+const COMPARATIVE_GENOMICS_NORMALIZED_TABLE_MIME = "application/vnd.agentlas.science.table+json";
 const CLAIM_SEGMENTATION_POLICY_ID = "agentlas.markdown-sentence-segmenter";
 const CLAIM_SEGMENTATION_POLICY_VERSION = 2;
 const CLAIM_SENTENCE_MAX_CODE_UNITS = 64 * 1024;
@@ -547,6 +748,237 @@ function safeJsonRecord(value: unknown, maximumBytes: number, field: string): Re
 
 function sha256Json(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(canonicalValue(value)), "utf8").digest("hex");
+}
+
+const MANUSCRIPT_NUMERIC_DECIMAL_RE = /^[+\-]?(?:(?:0|[1-9]\d*)(?:\.\d+)?|\.\d+)(?:[eE][+\-]?\d+)?$/u;
+const MANUSCRIPT_NUMERIC_POINTER_FORBIDDEN = new Set(["__proto__", "prototype", "constructor"]);
+
+function normalizedArtifactJsonPointer(value: unknown): string {
+  if (typeof value !== "string" || value.length < 2 || value.length > 2_048 || !value.startsWith("/")) {
+    throw new Error("science-manuscript-coherence-numeric-pointer-invalid");
+  }
+  const segments = value.slice(1).split("/");
+  if (segments.length > 32) throw new Error("science-manuscript-coherence-numeric-pointer-invalid");
+  for (const segment of segments) {
+    if (/~(?:[^01]|$)/u.test(segment)) throw new Error("science-manuscript-coherence-numeric-pointer-invalid");
+    const decoded = segment.replace(/~1/gu, "/").replace(/~0/gu, "~");
+    if (!decoded || decoded.length > 240 || MANUSCRIPT_NUMERIC_POINTER_FORBIDDEN.has(decoded)) {
+      throw new Error("science-manuscript-coherence-numeric-pointer-invalid");
+    }
+  }
+  return value;
+}
+
+function resolveArtifactJsonPointer(payload: Record<string, unknown>, pointer: string): unknown {
+  let current: unknown = payload;
+  for (const encoded of normalizedArtifactJsonPointer(pointer).slice(1).split("/")) {
+    const segment = encoded.replace(/~1/gu, "/").replace(/~0/gu, "~");
+    if (Array.isArray(current)) {
+      if (!/^(?:0|[1-9]\d*)$/u.test(segment)) throw new Error("science-manuscript-coherence-numeric-pointer-unresolved");
+      const index = Number(segment);
+      if (!Number.isSafeInteger(index) || index >= current.length) throw new Error("science-manuscript-coherence-numeric-pointer-unresolved");
+      current = current[index];
+    } else if (current && typeof current === "object" && Object.prototype.hasOwnProperty.call(current, segment)) {
+      current = (current as Record<string, unknown>)[segment];
+    } else {
+      throw new Error("science-manuscript-coherence-numeric-pointer-unresolved");
+    }
+  }
+  return current;
+}
+
+function canonicalArtifactDecimal(value: unknown): string {
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("science-manuscript-coherence-numeric-source-value-invalid");
+    return Object.is(value, -0) ? "0" : String(value);
+  }
+  if (typeof value === "string" && value.length <= 128 && MANUSCRIPT_NUMERIC_DECIMAL_RE.test(value)) return value;
+  throw new Error("science-manuscript-coherence-numeric-source-value-invalid");
+}
+
+function manuscriptCorpusWords(value: string): number {
+  return (value.match(/[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*/gu) ?? []).length;
+}
+
+function manuscriptCorpusParagraphs(value: string): number {
+  return value.split(/\n\s*\n+/u).filter((paragraph) => paragraph.trim().length >= 40).length;
+}
+
+function manuscriptDraftPlan(blueprint: ScienceManuscriptBlueprintDocument): ScienceManuscriptDraftPlanSection[] {
+  const planned = blueprint.sections.map((section, index): ScienceManuscriptDraftPlanSection => ({
+    key: section.key,
+    title: section.title,
+    role: section.role,
+    required: section.required,
+    origin: "blueprint",
+    ordinal: index + 1,
+    targetWords: section.targetWords ?? { minimum: section.required ? 120 : 60, maximum: section.required ? 4_000 : 2_000 },
+    targetParagraphs: section.targetParagraphs ?? { minimum: section.required ? 2 : 1, maximum: section.required ? 80 : 40 },
+    rhetoricalMoves: [...section.rhetoricalMoves],
+    evidenceRoles: [...section.evidenceRoles],
+    visualExpectation: section.visualExpectation,
+  }));
+  if (!planned.some((section) => section.role === "abstract")) {
+    const words = blueprint.structureProfile?.scopeSummary.abstractWords;
+    const paragraphs = blueprint.structureProfile?.scopeSummary.abstractParagraphs;
+    planned.unshift({
+      key: "abstract",
+      title: "Abstract",
+      role: "abstract",
+      required: true,
+      origin: "system-abstract",
+      ordinal: 1,
+      targetWords: words ? { minimum: Math.max(80, words.minimum), maximum: Math.max(80, words.maximum) } : { minimum: 80, maximum: 500 },
+      targetParagraphs: paragraphs ? { minimum: Math.max(1, paragraphs.minimum), maximum: Math.max(1, paragraphs.maximum) } : { minimum: 1, maximum: 4 },
+      rhetoricalMoves: ["state the research problem", "summarize the method", "report the principal result", "state the contribution and limitation"],
+      evidenceRoles: ["principal-result", "study-scope"],
+      visualExpectation: "none",
+    });
+  }
+  return planned.map((section, index) => ({ ...section, ordinal: index + 1 }));
+}
+
+function normalizeManuscriptDraftSectionMarkdown(value: unknown): string {
+  const markdown = safeText(value, 2_000_000, "manuscript-draft-section-markdown");
+  if (/^---\s*$/mu.test(markdown) || /^#{1,2}\s+/mu.test(markdown)) {
+    throw new Error("science-manuscript-draft-section-body-only");
+  }
+  return markdown;
+}
+
+function manuscriptDraftStateSha256(input: {
+  id: string;
+  projectId: string;
+  title: string;
+  status: ScienceManuscriptDraftingSession["status"];
+  version: number;
+  blueprintBinding: ScienceManuscriptDraftingSession["blueprintBinding"];
+  bindingManifestSha256: string;
+  plan: ScienceManuscriptDraftPlanSection[];
+  sections: Array<{ sectionKey: string; revision: number; status: string; contentSha256: string; writerInvocationRunId: string }>;
+  assembledManuscript: ScienceManuscriptDraftingSession["assembledManuscript"];
+  cancellationReason: string | null;
+}): string {
+  return sha256Json({
+    schema: SCIENCE_MANUSCRIPT_DRAFTING_SESSION_SCHEMA,
+    ...input,
+    planSha256: sha256Json(input.plan),
+    sections: [...input.sections].sort((left, right) => left.sectionKey.localeCompare(right.sectionKey)),
+  });
+}
+
+function manuscriptCorpusSectionRole(title: string): ScienceManuscriptSectionRole {
+  const normalized = title
+    .replace(/^\s*#+\s*/u, "")
+    .replace(/^\s*(?:(?:section|chapter)\s+)?(?:\d+(?:\.\d+)*|[A-Z](?:\.\d+)*)[.)]?\s+/iu, "")
+    .replace(/[:：]\s*$/u, "")
+    .trim();
+  const role = sectionRole(normalized);
+  if (role === "supplement") return "appendix";
+  if (role === "acknowledgements") return "other";
+  return role as ScienceManuscriptSectionRole;
+}
+
+function manuscriptCorpusUniqueLabelCount(value: string, pattern: RegExp): number {
+  return new Set([...value.matchAll(pattern)].map((match) => String(match[1] ?? "").toLocaleLowerCase())).size;
+}
+
+function manuscriptCorpusReferenceCount(value: string): number {
+  if (!value.trim()) return 0;
+  const numbered = value.match(/^\s*(?:\[\d+\]|\d+\.\s+)\s*\p{L}/gmu)?.length ?? 0;
+  const bullets = value.match(/^\s*(?:[-*•●▪◦])\s+\p{L}/gmu)?.length ?? 0;
+  if (numbered + bullets > 0) return numbered + bullets;
+  return manuscriptCorpusParagraphs(value);
+}
+
+function manuscriptCorpusMetricSummary(values: number[]): ScienceManuscriptCorpusStructureMetricSummary {
+  const ordered = [...values].sort((left, right) => left - right);
+  const nearestRank = (fraction: number): number => ordered[Math.max(0, Math.min(ordered.length - 1, Math.ceil(ordered.length * fraction) - 1))]!;
+  return { minimum: ordered[0]!, median: nearestRank(0.5), maximum: ordered[ordered.length - 1]! };
+}
+
+function buildManuscriptCorpusStructureProfile(
+  comparables: ScienceManuscriptCorpusStructureComparableProfile[],
+  plannedSections: Array<{ role: ScienceManuscriptSectionRole }>,
+): ScienceManuscriptCorpusStructureProfile {
+  const comparableCount = comparables.length;
+  const observedOrders = comparables.map((comparable) => comparable.observedRoleOrder);
+  const allRoles = [...new Set(observedOrders.flat())];
+  const roleSupport = allRoles.map((role) => ({
+    role,
+    supportCount: observedOrders.filter((order) => order.includes(role)).length,
+    comparableCount,
+  })).sort((left, right) => left.role.localeCompare(right.role));
+  const eligibleRoles = roleSupport.filter((item) => item.supportCount >= Math.ceil(comparableCount / 2)).map((item) => item.role);
+  const medianPosition = (role: ScienceManuscriptSectionRole): number => {
+    const positions = observedOrders.flatMap((order) => {
+      const index = order.indexOf(role);
+      return index < 0 ? [] : [order.length <= 1 ? 0 : index / (order.length - 1)];
+    }).sort((left, right) => left - right);
+    return positions[Math.max(0, Math.ceil(positions.length / 2) - 1)] ?? Number.POSITIVE_INFINITY;
+  };
+  const roleOrder = eligibleRoles.sort((left, right) => medianPosition(left) - medianPosition(right) || left.localeCompare(right));
+  const transitionCounts = new Map<string, { from: ScienceManuscriptSectionRole; to: ScienceManuscriptSectionRole; supportCount: number }>();
+  for (const order of observedOrders) {
+    const seen = new Set<string>();
+    for (let index = 0; index + 1 < order.length; index += 1) {
+      const from = order[index]!;
+      const to = order[index + 1]!;
+      const key = `${from}\u0000${to}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const current = transitionCounts.get(key) ?? { from, to, supportCount: 0 };
+      current.supportCount += 1;
+      transitionCounts.set(key, current);
+    }
+  }
+  const transitions = [...transitionCounts.values()].map((transition) => ({
+    ...transition,
+    comparableCount,
+    supportFraction: Number((transition.supportCount / comparableCount).toFixed(6)),
+  })).sort((left, right) => roleOrder.indexOf(left.from) - roleOrder.indexOf(right.from)
+    || roleOrder.indexOf(left.to) - roleOrder.indexOf(right.to)
+    || left.from.localeCompare(right.from) || left.to.localeCompare(right.to));
+  const plannedRoles = [...new Set(plannedSections.map((section) => section.role).filter((role) => role !== "other"))];
+  const conflicts: Array<{ before: ScienceManuscriptSectionRole; after: ScienceManuscriptSectionRole }> = [];
+  for (let leftIndex = 0; leftIndex < plannedRoles.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < plannedRoles.length; rightIndex += 1) {
+      const before = plannedRoles[leftIndex]!;
+      const after = plannedRoles[rightIndex]!;
+      const consensusBefore = roleOrder.indexOf(before);
+      const consensusAfter = roleOrder.indexOf(after);
+      if (consensusBefore >= 0 && consensusAfter >= 0 && consensusBefore > consensusAfter) conflicts.push({ before, after });
+    }
+  }
+  const profileCore = {
+    schema: SCIENCE_MANUSCRIPT_CORPUS_STRUCTURE_PROFILE_SCHEMA,
+    derivation: {
+      parserId: "agentlas.source-text-chunker" as const,
+      parserVersion: "1.0.0" as const,
+      metricRevision: "exact-full-text-structure/v1" as const,
+      roleClassification: "normalized-section-heading" as const,
+      visualCountBasis: "unique-explicit-labels" as const,
+      referenceCountBasis: "reference-section-entry-boundaries" as const,
+    },
+    comparables,
+    scopeSummary: {
+      abstractWords: manuscriptCorpusMetricSummary(comparables.map((item) => item.scopes.abstract.wordCount)),
+      abstractParagraphs: manuscriptCorpusMetricSummary(comparables.map((item) => item.scopes.abstract.paragraphCount)),
+      referenceWords: manuscriptCorpusMetricSummary(comparables.map((item) => item.scopes.references.wordCount)),
+      referenceParagraphs: manuscriptCorpusMetricSummary(comparables.map((item) => item.scopes.references.paragraphCount)),
+      appendixWords: manuscriptCorpusMetricSummary(comparables.map((item) => item.scopes.appendix.wordCount)),
+      appendixParagraphs: manuscriptCorpusMetricSummary(comparables.map((item) => item.scopes.appendix.paragraphCount)),
+    },
+    countSummary: {
+      figures: manuscriptCorpusMetricSummary(comparables.map((item) => item.counts.figures)),
+      tables: manuscriptCorpusMetricSummary(comparables.map((item) => item.counts.tables)),
+      equations: manuscriptCorpusMetricSummary(comparables.map((item) => item.counts.equations)),
+      references: manuscriptCorpusMetricSummary(comparables.map((item) => item.counts.references)),
+    },
+    consensus: { roleOrder, roleSupport, transitions },
+    plannedOrder: { roles: plannedRoles, conflicts, policy: "explicit-limitation" as const },
+  };
+  return { ...profileCore, contentSha256: sha256Json(profileCore) };
 }
 
 function stableUuid(value: string): string {
@@ -1335,12 +1767,17 @@ function validateGenomicsVariantTrackPayload(value: unknown, run?: ScienceResear
   const ids = new Set<string>();
   for (const [index, item] of payload.variants.entries()) {
     const variant = safeJsonRecord(item, 16 * 1024, `genomics-variant-${index}`);
+    const start = Number(variant.start);
+    const end = Number(variant.end);
+    const isInsertion = end === start - 1;
     if (!hasExactKeys(variant, ["id", "name", "refName", "start", "end", "start0", "end0", "strand", "source", "alleles", "consequenceTypes", "clinicalSignificance"])
       || !UUID_RE.test(String(variant.id ?? "")) || ids.has(String(variant.id))
       || !safeText(variant.name, 240, "genomics-variant-name") || variant.refName !== region.refName
-      || !Number.isSafeInteger(variant.start) || Number(variant.start) < Number(region.start)
-      || !Number.isSafeInteger(variant.end) || Number(variant.end) < Number(variant.start) || Number(variant.end) > Number(region.end)
-      || variant.start0 !== Number(variant.start) - 1 || variant.end0 !== variant.end
+      || !Number.isSafeInteger(variant.start) || start < 1 || start > Number(assembly.refNameLength)
+      || !Number.isSafeInteger(variant.end) || end < 0 || end > Number(assembly.refNameLength)
+      || !isInsertion && end < start
+      || end < Number(region.start) || start > Number(region.end)
+      || variant.start0 !== start - 1 || variant.end0 !== end
       || ![-1, 0, 1].includes(Number(variant.strand))
       || !safeText(variant.source, 120, "genomics-variant-source")
       || !Array.isArray(variant.alleles) || variant.alleles.length > 24
@@ -1363,7 +1800,7 @@ function validateGenomicsVariantTrackPayload(value: unknown, run?: ScienceResear
   if (run) {
     const assemblyOutput = run.outputs.find((resource) => resource.role === "assembly-response" && resource.mimeType === "application/json");
     const variantOutput = run.outputs.find((resource) => resource.role === "provider-response" && resource.mimeType === "application/json");
-    if (run.toolId !== "agentlas.ensembl-variant-track" || run.toolVersion !== "1.0.0" || run.status !== "succeeded"
+    if (run.toolId !== "agentlas.ensembl-variant-track" || !["1.0.0", "1.1.0"].includes(run.toolVersion) || run.status !== "succeeded"
       || provenance.runId !== run.id || !assemblyOutput || !variantOutput
       || provenance.assemblyResponseSha256 !== assemblyOutput.sha256
       || provenance.variantResponseSha256 !== variantOutput.sha256) {
@@ -1481,6 +1918,10 @@ function normalizeRenderContext(value: unknown): ScienceArtifactVisualCapture["r
     return candidate;
   };
   if (record.colorScheme !== "light" && record.colorScheme !== "dark") throw new Error("science-capture-render-context-color-scheme-invalid");
+  const captureMethod = record.captureMethod;
+  if (captureMethod !== undefined && captureMethod !== "cdp-staged-origin-clip") {
+    throw new Error("science-capture-render-context-capture-method-invalid");
+  }
   return {
     electronVersion: safeText(record.electronVersion, 80, "capture-electron-version"),
     chromiumVersion: safeText(record.chromiumVersion, 80, "capture-chromium-version"),
@@ -1488,6 +1929,7 @@ function normalizeRenderContext(value: unknown): ScienceArtifactVisualCapture["r
     architecture: safeText(record.architecture, 40, "capture-architecture"),
     locale: safeText(record.locale, 80, "capture-locale"),
     colorScheme: record.colorScheme,
+    ...(captureMethod === undefined ? {} : { captureMethod }),
     deviceScaleFactor: finite("deviceScaleFactor", 0.25, 8),
     cssWidth: finite("cssWidth", 1, 4096),
     cssHeight: finite("cssHeight", 1, 4096),
@@ -1608,6 +2050,7 @@ function messageFromRow(row: Record<string, unknown>): ScienceMessage {
     projectId: String(row.project_id),
     conversationId: String(row.conversation_id),
     role: String(row.role) as ScienceMessage["role"],
+    visibility: row.visibility === "internal" ? "internal" : "visible",
     content: String(row.content),
     createdAt: String(row.created_at),
   };
@@ -1633,6 +2076,11 @@ function scienceTurnFromRow(row: Record<string, unknown>): ScienceTurn {
     runtimeChatId: String(row.runtime_chat_id),
     invocationRunId: String(row.invocation_run_id),
     parentTurnId: row.parent_turn_id === null || row.parent_turn_id === undefined ? null : String(row.parent_turn_id),
+    origin: row.origin === "loop-continuation" ? "loop-continuation" : "user",
+    continuationBasis: row.continuation_basis_json === null || row.continuation_basis_json === undefined
+      ? null : parseObject(row.continuation_basis_json),
+    continuationBasisSha256: row.continuation_basis_sha256 === null || row.continuation_basis_sha256 === undefined
+      ? null : String(row.continuation_basis_sha256),
     status: String(row.status) as ScienceTurn["status"],
     lastSequence: Number(row.last_sequence),
     partialText: String(row.partial_text ?? ""),
@@ -2244,6 +2692,40 @@ function researchEpisodeFromRow(row: Record<string, unknown>, result: ScienceRes
   return episode;
 }
 
+function episodeResultReviewFromRow(row: Record<string, unknown>): ScienceEpisodeResultReviewReceipt {
+  const receipt: ScienceEpisodeResultReviewReceipt = {
+    schema: "agentlas.science.episode-result-review/v1",
+    id: String(row.id),
+    requestId: String(row.request_id),
+    projectId: String(row.project_id),
+    projectVersion: Number(row.project_version),
+    projectContentSha256: String(row.project_content_sha256),
+    loopSessionId: String(row.loop_session_id),
+    loopVersion: Number(row.loop_version),
+    loopStateSha256: String(row.loop_state_sha256),
+    episodeId: String(row.episode_id),
+    episodeVersion: Number(row.episode_version),
+    episodeStateSha256: String(row.episode_state_sha256),
+    resultSha256: String(row.result_sha256),
+    labId: String(row.lab_id),
+    basisSha256: String(row.basis_sha256),
+    projectionSha256: String(row.projection_sha256),
+    artifacts: JSON.parse(String(row.artifact_refs_json)) as ScienceEpisodeResultReviewReceipt["artifacts"],
+    revision: Number(row.revision),
+    previousReviewSha256: row.previous_review_sha256 == null ? null : String(row.previous_review_sha256),
+    verdict: String(row.verdict) as ScienceEpisodeResultReviewReceipt["verdict"],
+    rationale: String(row.rationale),
+    selectedNextTrigger: String(row.selected_next_trigger),
+    selectedNextAction: JSON.parse(String(row.selected_next_action_json)) as ScienceEpisodeResultReviewReceipt["selectedNextAction"],
+    selectedNextActionSha256: String(row.selected_next_action_sha256),
+    reviewerRef: String(row.reviewer_ref),
+    createdAt: String(row.created_at),
+    reviewSha256: String(row.review_sha256),
+  };
+  assertScienceEpisodeResultReviewReceipt(receipt);
+  return receipt;
+}
+
 function artifactFromRow(row: Record<string, unknown>): ScienceArtifact {
   const rendererBinding = row.renderer_binding_json === null || row.renderer_binding_json === undefined
     ? null
@@ -2371,6 +2853,26 @@ function normalizeResearchRunResourceInput(value: unknown, field: string): Scien
     artifactId,
     artifactVersion,
   };
+}
+
+function normalizeResearchRunParentBindingInputs(value: unknown): ScienceResearchRunParentBindingInput[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 100) throw new Error("science-run-parent-bindings-invalid");
+  const bindings = value.map((item) => {
+    const record = safeJsonRecord(item, 8 * 1024, "run-parent-binding");
+    const parentRunId = String(record.parentRunId ?? "");
+    if (!UUID_RE.test(parentRunId)) throw new Error("science-run-parent-binding-parent-invalid");
+    return {
+      ordinal: safePositiveInteger(record.ordinal, 1, 100, "run-parent-binding-ordinal"),
+      role: safeText(record.role, 160, "run-parent-binding-role"),
+      parentRunId,
+    };
+  }).sort((left, right) => left.ordinal - right.ordinal);
+  if (bindings.some((binding, index) => binding.ordinal !== index + 1)) throw new Error("science-run-parent-binding-ordinal-invalid");
+  if (new Set(bindings.map((binding) => binding.parentRunId)).size !== bindings.length
+    || new Set(bindings.map((binding) => binding.role)).size !== bindings.length) {
+    throw new Error("science-run-parent-binding-duplicate");
+  }
+  return bindings;
 }
 
 function researchRunResourceFromRow(row: Record<string, unknown>): ScienceResearchRunResource {
@@ -2518,6 +3020,233 @@ function manuscriptBindingFromRow(row: Record<string, unknown>): ScienceManuscri
     };
   }
   throw new Error("science-manuscript-binding-integrity-failed");
+}
+
+function normalizeManuscriptTransactionReason(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  return safeText(value, 4_000, "manuscript-transaction-reason");
+}
+
+function manuscriptBindingInput(binding: ScienceManuscriptBinding): ScienceManuscriptBindingInput {
+  return { ordinal: binding.ordinal, role: binding.role, locator: binding.locator, target: binding.target };
+}
+
+function manuscriptArtifactLocators(nodes: ScienceManuscriptNode[]): { figures: Set<string>; tables: Set<string> } {
+  const figures = new Set<string>();
+  const tables = new Set<string>();
+  const visit = (items: ScienceManuscriptNode[]): void => {
+    for (const node of items) {
+      if (node.kind === "figure") figures.add(node.locator);
+      else if (node.kind === "table" && node.mode === "artifact") tables.add(node.locator);
+      else if (node.kind === "list") for (const item of node.items) visit(item.nodes);
+      else if (node.kind === "blockquote") visit(node.children);
+    }
+  };
+  visit(nodes);
+  return { figures, tables };
+}
+
+function coherenceOwnerKey(owner: EvaluateScienceManuscriptCoherenceInput["numericAssertions"][number]["owner"]): string {
+  return owner.kind === "claim" ? `claim:${owner.claimId}` : `visual:${owner.nodeId}`;
+}
+
+function canonicalCoherenceDeclarations(input: EvaluateScienceManuscriptCoherenceInput): EvaluateScienceManuscriptCoherenceInput {
+  return {
+    summaryClaimLinks: input.summaryClaimLinks.map((link) => ({
+      summaryClaimId: link.summaryClaimId,
+      bodyClaimIds: [...link.bodyClaimIds].sort(),
+    })).sort((left, right) => left.summaryClaimId.localeCompare(right.summaryClaimId)),
+    resultsDiscussionLinks: input.resultsDiscussionLinks.map((link) => ({
+      resultClaimId: link.resultClaimId,
+      discussionClaimIds: [...link.discussionClaimIds].sort(),
+    })).sort((left, right) => left.resultClaimId.localeCompare(right.resultClaimId)),
+    numericAssertions: input.numericAssertions.map((assertion) => ({
+      ...assertion,
+      ...(assertion.sources ? { sources: [...assertion.sources].sort((left, right) => left.componentRole.localeCompare(right.componentRole)) } : {}),
+    })).sort((left, right) =>
+      `${left.groupId}:${coherenceOwnerKey(left.owner)}:${left.from}:${left.to}`
+        .localeCompare(`${right.groupId}:${coherenceOwnerKey(right.owner)}:${right.from}:${right.to}`)),
+    numericExemptions: [...input.numericExemptions].sort((left, right) =>
+      `${coherenceOwnerKey(left.owner)}:${left.from}:${left.to}:${left.reason}`
+        .localeCompare(`${coherenceOwnerKey(right.owner)}:${right.from}:${right.to}:${right.reason}`)),
+  };
+}
+
+function coherenceSectionRole(value: string): ScienceCoherenceSectionRole {
+  const role = sectionRole(value);
+  return ["abstract", "introduction", "methods", "results", "discussion", "limitations", "conclusion"].includes(role)
+    ? role as ScienceCoherenceSectionRole
+    : "other";
+}
+
+function manuscriptCoherenceVisualNodes(nodes: ScienceManuscriptNode[]): Array<Extract<ScienceManuscriptNode, { kind: "figure" | "table" }>> {
+  const visuals: Array<Extract<ScienceManuscriptNode, { kind: "figure" | "table" }>> = [];
+  const visit = (items: ScienceManuscriptNode[]): void => {
+    for (const node of items) {
+      if (node.kind === "figure" || node.kind === "table") visuals.push(node);
+      else if (node.kind === "list") for (const item of node.items) visit(item.nodes);
+      else if (node.kind === "blockquote") visit(node.children);
+    }
+  };
+  visit(nodes);
+  return visuals;
+}
+
+function manuscriptDocumentFromStorage(row: Record<string, unknown>): ScienceManuscriptDocument {
+  try {
+    if (String(row.schema_name) !== SCIENCE_MANUSCRIPT_DOCUMENT_SCHEMA) throw new Error("schema");
+    const document = validateScienceManuscriptDocument(JSON.parse(String(row.document_json)));
+    if (document.documentSha256 !== String(row.document_sha256)
+      || document.identityEpoch !== String(row.epoch_id)
+      || scienceManuscriptDocumentSha256(document) !== document.documentSha256
+      || sha256Text(serializeScienceManuscriptDocument(document)) !== String(row.markdown_sha256)) {
+      throw new Error("hash");
+    }
+    return document;
+  } catch {
+    throw new Error("science-manuscript-document-integrity-failed");
+  }
+}
+
+function manuscriptTransactionIntegrityInput(
+  transaction: ScienceManuscriptTransaction,
+  operationsSha256: string,
+  inverseOperationsSha256: string,
+): Record<string, unknown> {
+  return {
+    ...transaction,
+    operationsSha256,
+    inverseOperationsSha256,
+  };
+}
+
+function manuscriptTransactionFromStorage(row: Record<string, unknown>): ScienceManuscriptTransaction {
+  try {
+    const operations = (JSON.parse(String(row.operations_json)) as unknown[]).map(validateScienceManuscriptOperation);
+    const operationsSha256 = safeSha256(row.operations_sha256, "manuscript-transaction-operations-sha256");
+    const inverseOperations = (JSON.parse(String(row.inverse_operations_json)) as unknown[]).map(validateScienceManuscriptOperation);
+    const inverseOperationsSha256 = safeSha256(row.inverse_operations_sha256, "manuscript-transaction-inverse-sha256");
+    if (operations.length < 1 || inverseOperations.length < 1
+      || scienceManuscriptTransactionSha256(operations) !== operationsSha256
+      || scienceManuscriptTransactionSha256(inverseOperations) !== inverseOperationsSha256) {
+      throw new Error("operations");
+    }
+    const transaction: ScienceManuscriptTransaction = {
+      id: String(row.id),
+      requestId: String(row.request_id),
+      projectId: String(row.project_id),
+      manuscriptId: String(row.manuscript_id),
+      baseVersion: Number(row.base_manuscript_version),
+      baseContentSha256: safeSha256(row.base_manuscript_content_sha256, "manuscript-transaction-base-content-sha256"),
+      baseDocumentSha256: safeSha256(row.base_document_sha256, "manuscript-transaction-base-document-sha256"),
+      resultVersion: Number(row.result_manuscript_version),
+      resultContentSha256: safeSha256(row.result_manuscript_content_sha256, "manuscript-transaction-result-content-sha256"),
+      resultDocumentSha256: safeSha256(row.result_document_sha256, "manuscript-transaction-result-document-sha256"),
+      actor: String(row.actor) as ScienceManuscriptTransaction["actor"],
+      reason: row.reason === null || row.reason === undefined ? null : String(row.reason),
+      revertsTransactionId: row.reverts_transaction_id === null || row.reverts_transaction_id === undefined ? null : String(row.reverts_transaction_id),
+      operations,
+      createdAt: String(row.created_at),
+    };
+    if (!UUID_RE.test(transaction.id) || !UUID_RE.test(transaction.requestId)
+      || !UUID_RE.test(transaction.projectId) || !UUID_RE.test(transaction.manuscriptId)
+      || (transaction.revertsTransactionId !== null && !UUID_RE.test(transaction.revertsTransactionId))
+      || !["user", "assistant"].includes(transaction.actor)
+      || transaction.baseVersion < 1 || transaction.resultVersion !== transaction.baseVersion + 1
+      || scienceManuscriptTransactionSha256(manuscriptTransactionIntegrityInput(transaction, operationsSha256, inverseOperationsSha256))
+        !== safeSha256(row.transaction_sha256, "manuscript-transaction-sha256")) {
+      throw new Error("integrity");
+    }
+    return transaction;
+  } catch {
+    throw new Error("science-manuscript-transaction-integrity-failed");
+  }
+}
+
+function manuscriptSelectionContextFromStorage(row: Record<string, unknown>): ScienceManuscriptSelectionContext {
+  try {
+    return validateScienceManuscriptSelectionContext({
+      schemaVersion: String(row.schema_name),
+      id: String(row.id),
+      requestId: String(row.request_id),
+      projectId: String(row.project_id),
+      manuscriptId: String(row.manuscript_id),
+      manuscriptVersion: Number(row.manuscript_version),
+      manuscriptContentSha256: String(row.manuscript_content_sha256),
+      manuscriptDocumentSha256: String(row.manuscript_document_sha256),
+      nodeId: String(row.node_id),
+      nodeRevision: Number(row.node_revision),
+      nodeContentSha256: String(row.node_content_sha256),
+      startOffset: Number(row.start_offset),
+      endOffset: Number(row.end_offset),
+      selectedText: String(row.selected_text),
+      selectedTextSha256: String(row.selected_text_sha256),
+      sourceTextSha256: String(row.source_text_sha256),
+      contextSha256: String(row.context_sha256),
+      createdAt: String(row.created_at),
+    });
+  } catch {
+    throw new Error("science-manuscript-selection-integrity-failed");
+  }
+}
+
+function manuscriptEditProposalPayloadFromStorage(
+  row: Record<string, unknown>,
+): Omit<ScienceManuscriptEditProposal, "status" | "decision"> {
+  try {
+    return validateScienceManuscriptEditProposalPayload({
+      schemaVersion: String(row.schema_name),
+      id: String(row.id),
+      requestId: String(row.request_id),
+      projectId: String(row.project_id),
+      manuscriptId: String(row.manuscript_id),
+      baseVersion: Number(row.base_manuscript_version),
+      baseContentSha256: String(row.base_manuscript_content_sha256),
+      baseDocumentSha256: String(row.base_document_sha256),
+      operations: JSON.parse(String(row.operations_json)),
+      operationsSha256: String(row.operations_sha256),
+      previewMarkdown: String(row.preview_markdown),
+      previewContentSha256: String(row.preview_content_sha256),
+      previewDocument: JSON.parse(String(row.preview_document_json)),
+      previewDocumentSha256: String(row.preview_document_sha256),
+      summary: String(row.summary),
+      rationale: String(row.rationale),
+      conversationId: row.conversation_id === null || row.conversation_id === undefined ? null : String(row.conversation_id),
+      messageId: row.message_id === null || row.message_id === undefined ? null : String(row.message_id),
+      selectionContextIds: JSON.parse(String(row.selection_context_ids_json)),
+      payloadSha256: String(row.payload_sha256),
+      createdAt: String(row.created_at),
+    });
+  } catch {
+    throw new Error("science-manuscript-proposal-integrity-failed");
+  }
+}
+
+function manuscriptEditProposalDecisionFromStorage(row: Record<string, unknown>): ScienceManuscriptEditProposalDecision {
+  try {
+    return validateScienceManuscriptEditProposalDecision({
+      schemaVersion: String(row.schema_name),
+      id: String(row.id),
+      requestId: String(row.request_id),
+      projectId: String(row.project_id),
+      manuscriptId: String(row.manuscript_id),
+      proposalId: String(row.proposal_id),
+      decision: String(row.decision),
+      resultingTransactionId: row.resulting_transaction_id === null || row.resulting_transaction_id === undefined
+        ? null : String(row.resulting_transaction_id),
+      resultVersion: row.result_manuscript_version === null || row.result_manuscript_version === undefined
+        ? null : Number(row.result_manuscript_version),
+      resultContentSha256: row.result_manuscript_content_sha256 === null || row.result_manuscript_content_sha256 === undefined
+        ? null : String(row.result_manuscript_content_sha256),
+      resultDocumentSha256: row.result_document_sha256 === null || row.result_document_sha256 === undefined
+        ? null : String(row.result_document_sha256),
+      reason: row.reason === null || row.reason === undefined ? null : String(row.reason),
+      decisionSha256: String(row.decision_sha256),
+      createdAt: String(row.created_at),
+    });
+  } catch {
+    throw new Error("science-manuscript-proposal-decision-integrity-failed");
+  }
 }
 
 function nullableAnalysisText(value: unknown, maximum: number, field: string): string | null {
@@ -2747,6 +3476,54 @@ function normalizeJournalRuleInput(value: unknown): ScienceJournalRuleInput {
     const preferred = String(raw.preferred) as "docx" | "tex" | "pdf";
     if (!["docx", "tex", "pdf"].includes(preferred) || !allowed.includes(preferred)) throw new Error("science-journal-rule-output-format-invalid");
     check = { kind, allowed, preferred };
+  } else if (kind === "bibliography-style") {
+    const style = String(raw.style) as "numeric" | "apa" | "nature";
+    if (!["numeric", "apa", "nature"].includes(style)) throw new Error("science-journal-rule-bibliography-style-invalid");
+    check = { kind, style };
+  } else if (kind === "manuscript-layout") {
+    const pageSize = String(raw.pageSize) as "a4" | "letter";
+    const fontFamily = String(raw.fontFamily) as "serif" | "sans-serif";
+    const fontSizePt = safePositiveInteger(raw.fontSizePt, 10, 12, "journal-rule-font-size");
+    const lineSpacing = String(raw.lineSpacing) as "single" | "one-and-half" | "double";
+    const margins = raw.marginsMm;
+    const renderTarget = raw.renderTarget === undefined ? undefined : String(raw.renderTarget) as "initial-submission" | "accepted-source" | "published-approximation";
+    const latexTemplate = raw.latexTemplate === undefined ? undefined : String(raw.latexTemplate) as "generic-article" | "aps-revtex4-2";
+    const latexJournalStyle = raw.latexJournalStyle === undefined ? undefined : String(raw.latexJournalStyle) as "pra" | "prb" | "prc" | "prd" | "pre" | "prl" | "rmp";
+    const columnCount = raw.columnCount === undefined ? undefined : safePositiveInteger(raw.columnCount, 1, 2, "journal-rule-column-count") as 1 | 2;
+    const columnGapMm = raw.columnGapMm === undefined ? undefined : safePositiveInteger(raw.columnGapMm, 3, 30, "journal-rule-column-gap");
+    const titlePageMode = raw.titlePageMode === undefined ? undefined : String(raw.titlePageMode) as "inline" | "separate";
+    if (!["a4", "letter"].includes(pageSize) || !["serif", "sans-serif"].includes(fontFamily)
+      || ![10, 11, 12].includes(fontSizePt) || !["single", "one-and-half", "double"].includes(lineSpacing)
+      || !margins || typeof margins !== "object" || Array.isArray(margins) || typeof raw.lineNumbers !== "boolean"
+      || renderTarget !== undefined && !["initial-submission", "accepted-source", "published-approximation"].includes(renderTarget)
+      || latexTemplate !== undefined && !["generic-article", "aps-revtex4-2"].includes(latexTemplate)
+      || latexJournalStyle !== undefined && !["pra", "prb", "prc", "prd", "pre", "prl", "rmp"].includes(latexJournalStyle)
+      || latexJournalStyle !== undefined && latexTemplate !== "aps-revtex4-2"
+      || titlePageMode !== undefined && !["inline", "separate"].includes(titlePageMode)
+      || columnGapMm !== undefined && columnCount !== 2) {
+      throw new Error("science-journal-rule-manuscript-layout-invalid");
+    }
+    const marginRecord = margins as Record<string, unknown>;
+    check = {
+      kind,
+      pageSize,
+      marginsMm: {
+        top: safePositiveInteger(marginRecord.top, 5, 100, "journal-rule-margin"),
+        right: safePositiveInteger(marginRecord.right, 5, 100, "journal-rule-margin"),
+        bottom: safePositiveInteger(marginRecord.bottom, 5, 100, "journal-rule-margin"),
+        left: safePositiveInteger(marginRecord.left, 5, 100, "journal-rule-margin"),
+      },
+      fontFamily,
+      fontSizePt: fontSizePt as 10 | 11 | 12,
+      lineSpacing,
+      lineNumbers: raw.lineNumbers,
+      ...(renderTarget === undefined ? {} : { renderTarget }),
+      ...(latexTemplate === undefined ? {} : { latexTemplate }),
+      ...(latexJournalStyle === undefined ? {} : { latexJournalStyle }),
+      ...(columnCount === undefined ? {} : { columnCount }),
+      ...(columnGapMm === undefined ? {} : { columnGapMm }),
+      ...(titlePageMode === undefined ? {} : { titlePageMode }),
+    };
   } else if (kind === "figure-raster-profile") {
     const minimumDpi = safePositiveInteger(raw.minimumDpi, 300, 600, "journal-rule-figure-dpi");
     if (minimumDpi !== 300 && minimumDpi !== 600) throw new Error("science-journal-rule-figure-dpi-invalid");
@@ -2800,6 +3577,15 @@ function normalizeOfficialHosts(value: unknown): string[] {
   return hosts.sort();
 }
 
+/**
+ * The exact gate code each phase transition must carry.
+ *
+ * Exported because a caller has to be able to LEARN these. They lived here privately, were required
+ * by the store, appeared in no tool schema, no response and no instruction -- so the research
+ * director had to produce "intake.complete" with no way to know it. A live model tried and wrote
+ * "gate-token guessing isn't converging". A gate whose key is unobtainable is not a gate, it is a
+ * wall.
+ */
 const SCIENCE_RESEARCH_PHASE_GATE_CODES = new Map<string, string>([
   ["intake->literature", "intake.complete"],
   ["literature->hypothesis", "literature.complete"],
@@ -2813,6 +3599,15 @@ const SCIENCE_RESEARCH_PHASE_GATE_CODES = new Map<string, string>([
   ["journal_profile->submission_validation", "journal_profile.verified"],
   ["submission_validation->ready_to_submit", "submission.package_verified"],
 ]);
+
+/** The next phase in the ordered chain, and the gate code that transition requires. */
+export function scienceNextResearchPhaseGate(fromPhase: string): { toPhase: string; gateCode: string } | null {
+  for (const [edge, gateCode] of SCIENCE_RESEARCH_PHASE_GATE_CODES) {
+    const [from, to] = edge.split("->");
+    if (from === fromPhase) return { toPhase: to, gateCode };
+  }
+  return null;
+}
 
 function isScienceResearchMainPhase(value: unknown): value is ScienceResearchMainPhase {
   return SCIENCE_RESEARCH_MAIN_PHASES.includes(value as ScienceResearchMainPhase);
@@ -3209,14 +4004,155 @@ export class ScienceStore {
     this.migrate();
   }
 
+  private refreshManuscriptBindingValidationTriggers(): void {
+    this.db.exec(`
+      DROP TRIGGER IF EXISTS trg_science_manuscript_binding_insert;
+      DROP TRIGGER IF EXISTS trg_science_manuscript_binding_update;
+
+      CREATE TRIGGER trg_science_manuscript_binding_insert
+      BEFORE INSERT ON manuscript_bindings BEGIN
+        SELECT RAISE(ABORT, 'science-manuscript-version-project-invalid') WHERE NOT EXISTS (
+          SELECT 1 FROM manuscript_versions mv JOIN manuscripts m ON m.id = mv.manuscript_id
+          WHERE mv.id = NEW.manuscript_version_id AND m.project_id = NEW.project_id
+        );
+        SELECT RAISE(ABORT, 'science-manuscript-citation-invalid') WHERE NEW.target_kind = 'citation' AND NOT EXISTS (
+          SELECT 1 FROM citations c WHERE c.id = NEW.citation_id AND c.project_id = NEW.project_id
+        );
+        SELECT RAISE(ABORT, 'science-manuscript-source-figure-invalid') WHERE NEW.target_kind = 'source-figure' AND NOT EXISTS (
+          SELECT 1 FROM source_figures f WHERE f.id = NEW.source_figure_id AND f.project_id = NEW.project_id
+        );
+        SELECT RAISE(ABORT, 'science-manuscript-artifact-validation-rejected') WHERE NEW.target_kind = 'artifact' AND NOT EXISTS (
+          SELECT 1 FROM artifact_validation_receipts vr
+            JOIN artifact_visual_captures c ON c.id = vr.visual_capture_id
+          WHERE vr.id = NEW.validation_receipt_id AND vr.project_id = NEW.project_id
+            AND vr.status = 'verified' AND vr.artifact_id = NEW.artifact_id AND vr.artifact_version = NEW.artifact_version
+            AND c.id = NEW.artifact_capture_id AND c.artifact_id = NEW.artifact_id
+            AND c.artifact_version = NEW.artifact_version
+        );
+      END;
+
+      CREATE TRIGGER trg_science_manuscript_binding_update
+      BEFORE UPDATE ON manuscript_bindings BEGIN
+        SELECT RAISE(ABORT, 'science-manuscript-version-project-invalid') WHERE NOT EXISTS (
+          SELECT 1 FROM manuscript_versions mv JOIN manuscripts m ON m.id = mv.manuscript_id
+          WHERE mv.id = NEW.manuscript_version_id AND m.project_id = NEW.project_id
+        );
+        SELECT RAISE(ABORT, 'science-manuscript-citation-invalid') WHERE NEW.target_kind = 'citation' AND NOT EXISTS (
+          SELECT 1 FROM citations c WHERE c.id = NEW.citation_id AND c.project_id = NEW.project_id
+        );
+        SELECT RAISE(ABORT, 'science-manuscript-source-figure-invalid') WHERE NEW.target_kind = 'source-figure' AND NOT EXISTS (
+          SELECT 1 FROM source_figures f WHERE f.id = NEW.source_figure_id AND f.project_id = NEW.project_id
+        );
+        SELECT RAISE(ABORT, 'science-manuscript-artifact-validation-rejected') WHERE NEW.target_kind = 'artifact' AND NOT EXISTS (
+          SELECT 1 FROM artifact_validation_receipts vr
+            JOIN artifact_visual_captures c ON c.id = vr.visual_capture_id
+          WHERE vr.id = NEW.validation_receipt_id AND vr.project_id = NEW.project_id
+            AND vr.status = 'verified' AND vr.artifact_id = NEW.artifact_id AND vr.artifact_version = NEW.artifact_version
+            AND c.id = NEW.artifact_capture_id AND c.artifact_id = NEW.artifact_id
+            AND c.artifact_version = NEW.artifact_version
+        );
+      END;
+    `);
+  }
+
+  /**
+   * Add the continuation columns before the main schema statement creates its
+   * turn triggers.  Installed Science databases intentionally remain at
+   * schema 55, so this is an idempotent compatibility extension rather than a
+   * version bump.
+   */
+  private ensureLoopContinuationColumns(): void {
+    const messageColumns = new Set((this.db.pragma("table_info('messages')") as Array<{ name: string }>).map((item) => item.name));
+    if (messageColumns.size > 0 && !messageColumns.has("visibility")) {
+      this.db.exec("ALTER TABLE messages ADD COLUMN visibility TEXT NOT NULL DEFAULT 'visible' CHECK (visibility IN ('visible','internal'))");
+    }
+    const turnColumns = new Set((this.db.pragma("table_info('science_turns')") as Array<{ name: string }>).map((item) => item.name));
+    if (turnColumns.size === 0) return;
+    if (!turnColumns.has("origin")) this.db.exec("ALTER TABLE science_turns ADD COLUMN origin TEXT NOT NULL DEFAULT 'user' CHECK (origin IN ('user','loop-continuation'))");
+    if (!turnColumns.has("continuation_basis_json")) this.db.exec("ALTER TABLE science_turns ADD COLUMN continuation_basis_json TEXT CHECK (continuation_basis_json IS NULL OR json_valid(continuation_basis_json))");
+    if (!turnColumns.has("continuation_basis_sha256")) this.db.exec("ALTER TABLE science_turns ADD COLUMN continuation_basis_sha256 TEXT CHECK (continuation_basis_sha256 IS NULL OR length(continuation_basis_sha256) = 64)");
+    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_science_loop_continuation_parent ON science_turns(parent_turn_id) WHERE origin = 'loop-continuation' AND parent_turn_id IS NOT NULL");
+  }
+
+  /** Recreate the scope triggers after an installed v55 database gains origin/basis columns. */
+  private refreshScienceTurnScopeTriggers(): void {
+    this.db.exec(`
+      DROP TRIGGER IF EXISTS trg_science_turn_scope_insert;
+      DROP TRIGGER IF EXISTS trg_science_turn_scope_update;
+
+      CREATE TRIGGER trg_science_turn_scope_insert
+      BEFORE INSERT ON science_turns
+      BEGIN
+        SELECT CASE WHEN NOT EXISTS (
+          SELECT 1 FROM conversation_runtime_bindings b
+          WHERE b.project_id = NEW.project_id AND b.conversation_id = NEW.conversation_id AND b.runtime_chat_id = NEW.runtime_chat_id
+        ) THEN RAISE(ABORT, 'science-turn-runtime-binding-mismatch') END;
+        SELECT CASE WHEN NOT EXISTS (
+          SELECT 1 FROM messages m
+          WHERE m.id = NEW.user_message_id AND m.project_id = NEW.project_id AND m.conversation_id = NEW.conversation_id AND m.role = 'user'
+        ) THEN RAISE(ABORT, 'science-turn-user-message-mismatch') END;
+        SELECT CASE WHEN NEW.origin = 'loop-continuation' AND (NEW.parent_turn_id IS NULL OR NEW.continuation_basis_json IS NULL OR NEW.continuation_basis_sha256 IS NULL)
+          THEN RAISE(ABORT, 'science-turn-continuation-basis-missing') END;
+        SELECT CASE WHEN NEW.origin = 'user' AND (NEW.continuation_basis_json IS NOT NULL OR NEW.continuation_basis_sha256 IS NOT NULL)
+          THEN RAISE(ABORT, 'science-turn-continuation-basis-forbidden') END;
+        SELECT CASE WHEN NEW.parent_turn_id IS NOT NULL AND NOT EXISTS (
+          SELECT 1 FROM science_turns p
+          WHERE p.id = NEW.parent_turn_id AND p.project_id = NEW.project_id AND p.conversation_id = NEW.conversation_id
+        ) THEN RAISE(ABORT, 'science-turn-parent-mismatch') END;
+      END;
+
+      CREATE TRIGGER trg_science_turn_scope_update
+      BEFORE UPDATE ON science_turns
+      BEGIN
+        SELECT CASE WHEN NEW.id != OLD.id OR NEW.request_id != OLD.request_id OR NEW.project_id != OLD.project_id
+          OR NEW.conversation_id != OLD.conversation_id OR NEW.user_message_id != OLD.user_message_id
+          OR NEW.runtime_chat_id != OLD.runtime_chat_id OR NEW.invocation_run_id != OLD.invocation_run_id
+          OR COALESCE(NEW.parent_turn_id, '') != COALESCE(OLD.parent_turn_id, '')
+          OR NEW.origin != OLD.origin OR COALESCE(NEW.continuation_basis_json, '') != COALESCE(OLD.continuation_basis_json, '')
+          OR COALESCE(NEW.continuation_basis_sha256, '') != COALESCE(OLD.continuation_basis_sha256, '')
+          THEN RAISE(ABORT, 'science-turn-identity-immutable') END;
+        SELECT CASE WHEN NEW.assistant_message_id IS NOT NULL AND NOT EXISTS (
+          SELECT 1 FROM messages m
+          WHERE m.id = NEW.assistant_message_id AND m.project_id = NEW.project_id AND m.conversation_id = NEW.conversation_id AND m.role = 'assistant'
+        ) THEN RAISE(ABORT, 'science-turn-assistant-message-mismatch') END;
+        SELECT CASE WHEN NOT (
+          NEW.status = OLD.status
+          OR (OLD.status = 'queued' AND NEW.status IN ('running','cancelling','failed','interrupted'))
+          OR (OLD.status = 'running' AND NEW.status IN ('cancelling','completed','failed','interrupted'))
+          OR (OLD.status = 'cancelling' AND NEW.status IN ('completed','cancelled','failed','interrupted'))
+        ) THEN RAISE(ABORT, 'science-turn-status-transition-invalid') END;
+        SELECT CASE WHEN NEW.last_sequence < OLD.last_sequence OR NEW.last_sequence > OLD.last_sequence + 1
+          THEN RAISE(ABORT, 'science-turn-sequence-update-invalid') END;
+        SELECT CASE WHEN NEW.status = 'completed' AND NEW.assistant_message_id IS NULL
+          THEN RAISE(ABORT, 'science-turn-completed-without-assistant') END;
+        SELECT CASE WHEN NEW.status IN ('completed','failed','cancelled','interrupted') AND NEW.finished_at IS NULL
+          THEN RAISE(ABORT, 'science-turn-terminal-time-missing') END;
+      END;
+    `);
+  }
+
   private migrate(): void {
     const found = Number(this.db.pragma("user_version", { simple: true }));
     if (!Number.isSafeInteger(found) || found < 0 || found > SCIENCE_SCHEMA_VERSION) throw new Error("science-schema-incompatible");
-    if (found === SCIENCE_SCHEMA_VERSION) return;
+    if (found === SCIENCE_SCHEMA_VERSION) {
+      this.db.transaction(() => {
+        // The visibility/origin extension is a backward-compatible minor
+        // migration retained at schema 55 so existing contract fixtures and
+        // installed databases do not need a destructive version jump.
+        this.ensureLoopContinuationColumns();
+        this.refreshScienceTurnScopeTriggers();
+        this.refreshManuscriptBindingValidationTriggers();
+      })();
+      return;
+    }
     const requiresTableRebuild = found > 0 && found < 44;
     if (requiresTableRebuild) this.db.pragma("foreign_keys = OFF");
     try {
       this.db.transaction(() => {
+      // Existing pre-continuation turn tables must gain these columns before
+      // the schema SQL below recreates triggers that reference NEW.origin.
+      this.ensureLoopContinuationColumns();
+      this.db.exec("DROP TRIGGER IF EXISTS trg_science_turn_scope_insert; DROP TRIGGER IF EXISTS trg_science_turn_scope_update;");
       if (found > 0 && found < 35) {
         const loopTableExists = Boolean(this.db.prepare("SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = 'loop_sessions'").get());
         if (loopTableExists) {
@@ -3321,6 +4257,7 @@ export class ScienceStore {
           project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
           conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
           role TEXT NOT NULL CHECK (role IN ('user','assistant','system')),
+          visibility TEXT NOT NULL DEFAULT 'visible' CHECK (visibility IN ('visible','internal')),
           content TEXT NOT NULL,
           created_at TEXT NOT NULL
         );
@@ -3344,6 +4281,9 @@ export class ScienceStore {
           runtime_chat_id TEXT NOT NULL,
           invocation_run_id TEXT NOT NULL UNIQUE,
           parent_turn_id TEXT REFERENCES science_turns(id) ON DELETE RESTRICT,
+          origin TEXT NOT NULL DEFAULT 'user' CHECK (origin IN ('user','loop-continuation')),
+          continuation_basis_json TEXT CHECK (continuation_basis_json IS NULL OR json_valid(continuation_basis_json)),
+          continuation_basis_sha256 TEXT CHECK (continuation_basis_sha256 IS NULL OR length(continuation_basis_sha256) = 64),
           status TEXT NOT NULL CHECK (status IN ('queued','running','cancelling','completed','failed','cancelled','interrupted')),
           last_sequence INTEGER NOT NULL DEFAULT 0 CHECK (last_sequence >= 0),
           partial_text TEXT NOT NULL DEFAULT '' CHECK (length(partial_text) <= 2097152),
@@ -3359,6 +4299,8 @@ export class ScienceStore {
         CREATE INDEX IF NOT EXISTS idx_science_turns_conversation ON science_turns(conversation_id, created_at, id);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_science_turn_one_active ON science_turns(conversation_id)
           WHERE status IN ('queued','running','cancelling');
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_science_loop_continuation_parent ON science_turns(parent_turn_id)
+          WHERE origin = 'loop-continuation' AND parent_turn_id IS NOT NULL;
 
         CREATE TABLE IF NOT EXISTS science_turn_events (
           id TEXT PRIMARY KEY,
@@ -3417,6 +4359,10 @@ export class ScienceStore {
             SELECT 1 FROM messages m
             WHERE m.id = NEW.user_message_id AND m.project_id = NEW.project_id AND m.conversation_id = NEW.conversation_id AND m.role = 'user'
           ) THEN RAISE(ABORT, 'science-turn-user-message-mismatch') END;
+          SELECT CASE WHEN NEW.origin = 'loop-continuation' AND (NEW.parent_turn_id IS NULL OR NEW.continuation_basis_json IS NULL OR NEW.continuation_basis_sha256 IS NULL)
+            THEN RAISE(ABORT, 'science-turn-continuation-basis-missing') END;
+          SELECT CASE WHEN NEW.origin = 'user' AND (NEW.continuation_basis_json IS NOT NULL OR NEW.continuation_basis_sha256 IS NOT NULL)
+            THEN RAISE(ABORT, 'science-turn-continuation-basis-forbidden') END;
           SELECT CASE WHEN NEW.parent_turn_id IS NOT NULL AND NOT EXISTS (
             SELECT 1 FROM science_turns p
             WHERE p.id = NEW.parent_turn_id AND p.project_id = NEW.project_id AND p.conversation_id = NEW.conversation_id
@@ -3430,6 +4376,8 @@ export class ScienceStore {
             OR NEW.conversation_id != OLD.conversation_id OR NEW.user_message_id != OLD.user_message_id
             OR NEW.runtime_chat_id != OLD.runtime_chat_id OR NEW.invocation_run_id != OLD.invocation_run_id
             OR COALESCE(NEW.parent_turn_id, '') != COALESCE(OLD.parent_turn_id, '')
+            OR NEW.origin != OLD.origin OR COALESCE(NEW.continuation_basis_json, '') != COALESCE(OLD.continuation_basis_json, '')
+            OR COALESCE(NEW.continuation_basis_sha256, '') != COALESCE(OLD.continuation_basis_sha256, '')
             THEN RAISE(ABORT, 'science-turn-identity-immutable') END;
           SELECT CASE WHEN NEW.assistant_message_id IS NOT NULL AND NOT EXISTS (
             SELECT 1 FROM messages m
@@ -4207,6 +5155,58 @@ export class ScienceStore {
         CREATE INDEX IF NOT EXISTS idx_science_research_runs_project ON research_runs(project_id, started_at DESC, id);
         CREATE INDEX IF NOT EXISTS idx_science_research_runs_message ON research_runs(project_id, conversation_id, origin_message_id, started_at, id);
 
+        CREATE TABLE IF NOT EXISTS research_run_parent_bindings (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          run_id TEXT NOT NULL REFERENCES research_runs(id) ON DELETE RESTRICT,
+          ordinal INTEGER NOT NULL CHECK (ordinal >= 1 AND ordinal <= 100),
+          role TEXT NOT NULL CHECK (length(role) >= 1 AND length(role) <= 160),
+          parent_run_id TEXT NOT NULL REFERENCES research_runs(id) ON DELETE RESTRICT,
+          parent_content_sha256 TEXT NOT NULL CHECK (length(parent_content_sha256) = 64),
+          created_at TEXT NOT NULL,
+          UNIQUE(run_id, ordinal),
+          UNIQUE(run_id, role),
+          UNIQUE(run_id, parent_run_id),
+          CHECK(run_id != parent_run_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_science_research_run_parent_bindings_project
+          ON research_run_parent_bindings(project_id, run_id, ordinal);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_science_research_run_parent_primary
+          ON research_run_parent_bindings(run_id) WHERE role = 'primary';
+
+        CREATE TRIGGER IF NOT EXISTS trg_science_research_run_parent_binding_scope_insert
+        BEFORE INSERT ON research_run_parent_bindings BEGIN
+          SELECT RAISE(ABORT, 'science-run-parent-binding-run-mismatch') WHERE NOT EXISTS (
+            SELECT 1 FROM research_runs r WHERE r.id = NEW.run_id AND r.project_id = NEW.project_id
+          );
+          SELECT RAISE(ABORT, 'science-run-parent-binding-parent-mismatch') WHERE NOT EXISTS (
+            SELECT 1 FROM research_runs p
+            WHERE p.id = NEW.parent_run_id AND p.project_id = NEW.project_id AND p.status = 'succeeded'
+          );
+          SELECT RAISE(ABORT, 'science-run-parent-binding-primary-mismatch')
+            WHERE NEW.role = 'primary' AND NOT EXISTS (
+              SELECT 1 FROM research_runs r
+              WHERE r.id = NEW.run_id AND r.project_id = NEW.project_id AND r.parent_run_id = NEW.parent_run_id
+            );
+          SELECT RAISE(ABORT, 'science-run-parent-binding-cycle') WHERE EXISTS (
+            WITH RECURSIVE ancestors(id) AS (
+              SELECT NEW.parent_run_id
+              UNION
+              SELECT binding.parent_run_id
+              FROM research_run_parent_bindings binding JOIN ancestors ON binding.run_id = ancestors.id
+            )
+            SELECT 1 FROM ancestors WHERE id = NEW.run_id
+          );
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_science_research_run_parent_binding_immutable_update
+        BEFORE UPDATE ON research_run_parent_bindings BEGIN
+          SELECT RAISE(ABORT, 'science-run-parent-binding-immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_science_research_run_parent_binding_immutable_delete
+        BEFORE DELETE ON research_run_parent_bindings BEGIN
+          SELECT RAISE(ABORT, 'science-run-parent-binding-immutable');
+        END;
+
         CREATE TABLE IF NOT EXISTS research_run_inputs (
           id TEXT PRIMARY KEY,
           run_id TEXT NOT NULL REFERENCES research_runs(id) ON DELETE CASCADE,
@@ -4276,6 +5276,40 @@ export class ScienceStore {
         CREATE TRIGGER IF NOT EXISTS trg_science_run_source_binding_immutable_delete
         BEFORE DELETE ON research_run_source_bindings BEGIN
           SELECT RAISE(ABORT, 'science-run-source-binding-immutable');
+        END;
+
+        CREATE TABLE IF NOT EXISTS research_run_source_output_bindings (
+          binding_id TEXT PRIMARY KEY REFERENCES research_run_source_bindings(id) ON DELETE RESTRICT,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          run_id TEXT NOT NULL REFERENCES research_runs(id) ON DELETE RESTRICT,
+          output_id TEXT NOT NULL REFERENCES research_run_outputs(id) ON DELETE RESTRICT,
+          output_ordinal INTEGER NOT NULL CHECK(output_ordinal >= 1),
+          output_sha256 TEXT NOT NULL CHECK(length(output_sha256) = 64),
+          created_at TEXT NOT NULL,
+          UNIQUE(run_id, output_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_science_run_source_output_bindings_project
+          ON research_run_source_output_bindings(project_id, run_id, output_ordinal);
+        CREATE TRIGGER IF NOT EXISTS trg_science_run_source_output_binding_scope_insert
+        BEFORE INSERT ON research_run_source_output_bindings
+        BEGIN
+          SELECT CASE WHEN NOT EXISTS (
+            SELECT 1 FROM research_run_source_bindings b
+            WHERE b.id = NEW.binding_id AND b.project_id = NEW.project_id AND b.run_id = NEW.run_id
+          ) THEN RAISE(ABORT, 'science-run-source-output-binding-source-mismatch') END;
+          SELECT CASE WHEN NOT EXISTS (
+            SELECT 1 FROM research_run_outputs o
+            WHERE o.id = NEW.output_id AND o.run_id = NEW.run_id AND o.ordinal = NEW.output_ordinal
+              AND o.sha256 = NEW.output_sha256
+          ) THEN RAISE(ABORT, 'science-run-source-output-binding-output-mismatch') END;
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_science_run_source_output_binding_immutable_update
+        BEFORE UPDATE ON research_run_source_output_bindings BEGIN
+          SELECT RAISE(ABORT, 'science-run-source-output-binding-immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_science_run_source_output_binding_immutable_delete
+        BEFORE DELETE ON research_run_source_output_bindings BEGIN
+          SELECT RAISE(ABORT, 'science-run-source-output-binding-immutable');
         END;
 
         CREATE TABLE IF NOT EXISTS research_run_artifact_bindings (
@@ -4522,6 +5556,55 @@ export class ScienceStore {
           UNIQUE(artifact_version_id, validator_id, validator_version, policy_id, policy_version, challenge_sha256, input_sha256, environment_sha256)
         );
         CREATE INDEX IF NOT EXISTS idx_science_artifact_validation ON artifact_validation_receipts(project_id, artifact_id, artifact_version DESC, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS artifact_validation_run_artifact_bindings (
+          receipt_id TEXT PRIMARY KEY REFERENCES artifact_validation_receipts(id) ON DELETE RESTRICT,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          run_artifact_binding_id TEXT NOT NULL REFERENCES research_run_artifact_bindings(id) ON DELETE RESTRICT,
+          run_id TEXT NOT NULL REFERENCES research_runs(id) ON DELETE RESTRICT,
+          output_id TEXT NOT NULL REFERENCES research_run_outputs(id) ON DELETE RESTRICT,
+          output_ordinal INTEGER NOT NULL CHECK(output_ordinal >= 1),
+          output_role TEXT NOT NULL,
+          output_sha256 TEXT NOT NULL CHECK(length(output_sha256) = 64),
+          artifact_id TEXT NOT NULL,
+          artifact_version INTEGER NOT NULL CHECK(artifact_version >= 1),
+          artifact_content_sha256 TEXT NOT NULL CHECK(length(artifact_content_sha256) = 64),
+          created_at TEXT NOT NULL,
+          FOREIGN KEY (artifact_id, artifact_version) REFERENCES artifact_versions(artifact_id, version) ON DELETE RESTRICT
+        );
+        CREATE INDEX IF NOT EXISTS idx_science_artifact_validation_run_artifact_project
+          ON artifact_validation_run_artifact_bindings(project_id, artifact_id, artifact_version, receipt_id);
+        CREATE TRIGGER IF NOT EXISTS trg_science_artifact_validation_run_artifact_binding_insert
+        BEFORE INSERT ON artifact_validation_run_artifact_bindings BEGIN
+          SELECT RAISE(ABORT, 'science-artifact-validation-run-artifact-binding-scope-mismatch') WHERE NOT EXISTS (
+            SELECT 1 FROM artifact_validation_receipts r
+            WHERE r.id = NEW.receipt_id AND r.project_id = NEW.project_id
+              AND r.research_run_id = NEW.run_id AND r.artifact_id = NEW.artifact_id
+              AND r.artifact_version = NEW.artifact_version
+              AND r.artifact_content_sha256 = NEW.artifact_content_sha256
+          );
+          SELECT RAISE(ABORT, 'science-artifact-validation-run-artifact-binding-scope-mismatch') WHERE NOT EXISTS (
+            SELECT 1 FROM research_run_artifact_bindings b
+            WHERE b.id = NEW.run_artifact_binding_id AND b.project_id = NEW.project_id
+              AND b.run_id = NEW.run_id AND b.output_id = NEW.output_id
+              AND b.output_sha256 = NEW.output_sha256 AND b.artifact_id = NEW.artifact_id
+              AND b.artifact_version = NEW.artifact_version
+              AND b.artifact_content_sha256 = NEW.artifact_content_sha256
+          );
+          SELECT RAISE(ABORT, 'science-artifact-validation-run-artifact-binding-scope-mismatch') WHERE NOT EXISTS (
+            SELECT 1 FROM research_run_outputs o
+            WHERE o.id = NEW.output_id AND o.run_id = NEW.run_id AND o.ordinal = NEW.output_ordinal
+              AND o.role = NEW.output_role AND o.sha256 = NEW.output_sha256
+          );
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_science_artifact_validation_run_artifact_binding_immutable_update
+        BEFORE UPDATE ON artifact_validation_run_artifact_bindings BEGIN
+          SELECT RAISE(ABORT, 'science-artifact-validation-run-artifact-binding-immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_science_artifact_validation_run_artifact_binding_immutable_delete
+        BEFORE DELETE ON artifact_validation_run_artifact_bindings BEGIN
+          SELECT RAISE(ABORT, 'science-artifact-validation-run-artifact-binding-immutable');
+        END;
 
         CREATE TABLE IF NOT EXISTS manuscripts (
           id TEXT PRIMARY KEY,
@@ -5563,7 +6646,10 @@ export class ScienceStore {
           );
         END;
 
-        CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_binding_insert
+        DROP TRIGGER IF EXISTS trg_science_manuscript_binding_insert;
+        DROP TRIGGER IF EXISTS trg_science_manuscript_binding_update;
+
+        CREATE TRIGGER trg_science_manuscript_binding_insert
         BEFORE INSERT ON manuscript_bindings BEGIN
           SELECT RAISE(ABORT, 'science-manuscript-version-project-invalid') WHERE NOT EXISTS (
             SELECT 1 FROM manuscript_versions mv JOIN manuscripts m ON m.id = mv.manuscript_id
@@ -5581,12 +6667,12 @@ export class ScienceStore {
             WHERE vr.id = NEW.validation_receipt_id AND vr.project_id = NEW.project_id
               AND vr.status = 'verified' AND vr.artifact_id = NEW.artifact_id AND vr.artifact_version = NEW.artifact_version
               AND c.id = NEW.artifact_capture_id AND c.artifact_id = NEW.artifact_id
-              AND c.artifact_version = NEW.artifact_version AND c.adopted = 1
+              AND c.artifact_version = NEW.artifact_version
           );
         END;
 
 
-        CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_binding_update
+        CREATE TRIGGER trg_science_manuscript_binding_update
         BEFORE UPDATE ON manuscript_bindings BEGIN
           SELECT RAISE(ABORT, 'science-manuscript-version-project-invalid') WHERE NOT EXISTS (
             SELECT 1 FROM manuscript_versions mv JOIN manuscripts m ON m.id = mv.manuscript_id
@@ -5604,7 +6690,7 @@ export class ScienceStore {
             WHERE vr.id = NEW.validation_receipt_id AND vr.project_id = NEW.project_id
               AND vr.status = 'verified' AND vr.artifact_id = NEW.artifact_id AND vr.artifact_version = NEW.artifact_version
               AND c.id = NEW.artifact_capture_id AND c.artifact_id = NEW.artifact_id
-              AND c.artifact_version = NEW.artifact_version AND c.adopted = 1
+              AND c.artifact_version = NEW.artifact_version
           );
         END;
       `);
@@ -5616,6 +6702,27 @@ export class ScienceStore {
           created_at TEXT NOT NULL,
           PRIMARY KEY (project_id, domain),
           UNIQUE (project_id, display_order)
+        );
+
+        -- Standing authorization for the decisions a study would otherwise stop at.
+        --
+        -- Three lifecycle gates need evidence only a person may mint, and a fourth boundary keeps
+        -- an agent from approving its own hypothesis. Those boundaries are right, but stopping a
+        -- research run four times is friction the researcher did not ask for, so a project records
+        -- once how it wants to be asked. The record is the point: an autonomous run still names
+        -- who authorized it, when, and under what scope, so the audit trail is the same shape as
+        -- a click. Revoking is a new row, never an edit, so history stays readable.
+        CREATE TABLE IF NOT EXISTS project_approval_policies (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          revision INTEGER NOT NULL CHECK (revision >= 1),
+          mode TEXT NOT NULL CHECK (mode IN ('autonomous','checkpoint')),
+          -- Scopes the standing authorization covers. A decision outside them always asks.
+          scopes_json TEXT NOT NULL CHECK (json_valid(scopes_json) AND length(scopes_json) BETWEEN 2 AND 4096),
+          granted_by TEXT NOT NULL CHECK (length(granted_by) BETWEEN 1 AND 200),
+          note TEXT,
+          created_at TEXT NOT NULL,
+          UNIQUE (project_id, revision)
         );
 
         CREATE TABLE IF NOT EXISTS project_lab_bindings (
@@ -6598,9 +7705,7 @@ export class ScienceStore {
         }
         if (found > 0 && found < 44) {
           const preservedArtifactVersionTriggers = this.db.prepare(`SELECT name, sql FROM sqlite_master
-            WHERE type = 'trigger' AND sql IS NOT NULL
-              AND instr(lower(sql), 'artifact_versions') > 0
-            ORDER BY name`)
+            WHERE type = 'trigger' AND sql IS NOT NULL AND (tbl_name = 'artifact_versions' OR sql LIKE '%artifact_versions%') ORDER BY name`)
             .all() as Array<{ name: string; sql: string }>;
           for (const trigger of preservedArtifactVersionTriggers) {
             if (!/^[a-z0-9_]+$/i.test(trigger.name)) throw new Error("science-v44-trigger-name-invalid");
@@ -6627,6 +7732,1093 @@ export class ScienceStore {
             CREATE INDEX idx_science_artifact_versions ON artifact_versions(artifact_id, version DESC);
           `);
           for (const trigger of preservedArtifactVersionTriggers) this.db.exec(trigger.sql);
+        }
+        if (found < 45) {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS research_episode_result_review_receipts (
+              id TEXT PRIMARY KEY,
+              request_id TEXT NOT NULL UNIQUE,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+              project_version INTEGER NOT NULL CHECK (project_version >= 1),
+              project_content_sha256 TEXT NOT NULL CHECK (length(project_content_sha256) = 64),
+              loop_session_id TEXT NOT NULL REFERENCES loop_sessions(id) ON DELETE RESTRICT,
+              loop_version INTEGER NOT NULL CHECK (loop_version >= 1),
+              loop_state_sha256 TEXT NOT NULL CHECK (length(loop_state_sha256) = 64),
+              episode_id TEXT NOT NULL REFERENCES research_episodes(id) ON DELETE RESTRICT,
+              episode_version INTEGER NOT NULL CHECK (episode_version >= 1),
+              episode_state_sha256 TEXT NOT NULL CHECK (length(episode_state_sha256) = 64),
+              result_sha256 TEXT NOT NULL CHECK (length(result_sha256) = 64),
+              lab_id TEXT NOT NULL,
+              basis_sha256 TEXT NOT NULL CHECK (length(basis_sha256) = 64),
+              projection_sha256 TEXT NOT NULL CHECK (length(projection_sha256) = 64),
+              artifact_refs_json TEXT NOT NULL CHECK (json_valid(artifact_refs_json)),
+              revision INTEGER NOT NULL CHECK (revision >= 1),
+              previous_review_sha256 TEXT CHECK (previous_review_sha256 IS NULL OR length(previous_review_sha256) = 64),
+              verdict TEXT NOT NULL CHECK (verdict IN ('accepted','rejected')),
+              rationale TEXT NOT NULL CHECK (length(rationale) BETWEEN 1 AND 20000),
+              selected_next_trigger TEXT NOT NULL,
+              selected_next_action_json TEXT NOT NULL CHECK (json_valid(selected_next_action_json)),
+              selected_next_action_sha256 TEXT NOT NULL CHECK (length(selected_next_action_sha256) = 64),
+              reviewer_ref TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              review_sha256 TEXT NOT NULL UNIQUE CHECK (length(review_sha256) = 64),
+              UNIQUE (episode_id, lab_id, revision)
+            );
+            CREATE INDEX IF NOT EXISTS idx_science_episode_result_review_latest
+              ON research_episode_result_review_receipts(project_id, episode_id, lab_id, revision DESC);
+            CREATE TRIGGER IF NOT EXISTS trg_science_episode_result_review_scope_insert
+            BEFORE INSERT ON research_episode_result_review_receipts BEGIN
+              SELECT RAISE(ABORT, 'science-episode-result-review-scope-invalid') WHERE NOT EXISTS (
+                SELECT 1 FROM projects p
+                JOIN loop_sessions l ON l.project_id = p.id
+                JOIN research_episodes e ON e.loop_session_id = l.id AND e.project_id = p.id
+                JOIN research_episode_results r ON r.episode_id = e.id AND r.project_id = p.id
+                WHERE p.id = NEW.project_id AND p.version = NEW.project_version
+                  AND l.id = NEW.loop_session_id AND l.version = NEW.loop_version AND l.state_sha256 = NEW.loop_state_sha256
+                  AND e.id = NEW.episode_id AND e.version = NEW.episode_version AND e.state_sha256 = NEW.episode_state_sha256
+                  AND e.status = 'succeeded' AND r.result_sha256 = NEW.result_sha256
+              );
+              SELECT RAISE(ABORT, 'science-episode-result-review-revision-invalid') WHERE NEW.revision != COALESCE((
+                SELECT MAX(review.revision) + 1 FROM research_episode_result_review_receipts review
+                WHERE review.episode_id = NEW.episode_id AND review.lab_id = NEW.lab_id
+              ), 1);
+              SELECT RAISE(ABORT, 'science-episode-result-review-chain-invalid') WHERE
+                (NEW.revision = 1 AND NEW.previous_review_sha256 IS NOT NULL)
+                OR (NEW.revision > 1 AND NOT EXISTS (
+                  SELECT 1 FROM research_episode_result_review_receipts previous
+                  WHERE previous.episode_id = NEW.episode_id AND previous.lab_id = NEW.lab_id
+                    AND previous.revision = NEW.revision - 1 AND previous.review_sha256 = NEW.previous_review_sha256
+                ));
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_episode_result_review_immutable_update
+            BEFORE UPDATE ON research_episode_result_review_receipts BEGIN
+              SELECT RAISE(ABORT, 'science-episode-result-review-immutable');
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_episode_result_review_immutable_delete
+            BEFORE DELETE ON research_episode_result_review_receipts BEGIN
+              SELECT RAISE(ABORT, 'science-episode-result-review-immutable');
+            END;
+          `);
+        }
+        if (found < 46) {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS manuscript_transactions (
+              id TEXT PRIMARY KEY,
+              request_id TEXT NOT NULL UNIQUE,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+              manuscript_id TEXT NOT NULL REFERENCES manuscripts(id) ON DELETE RESTRICT,
+              base_manuscript_version INTEGER NOT NULL CHECK (base_manuscript_version >= 1),
+              base_manuscript_content_sha256 TEXT NOT NULL CHECK (length(base_manuscript_content_sha256) = 64),
+              base_document_sha256 TEXT NOT NULL CHECK (length(base_document_sha256) = 64),
+              result_manuscript_version INTEGER NOT NULL CHECK (result_manuscript_version = base_manuscript_version + 1),
+              result_manuscript_content_sha256 TEXT NOT NULL CHECK (length(result_manuscript_content_sha256) = 64),
+              result_document_sha256 TEXT NOT NULL CHECK (length(result_document_sha256) = 64),
+              actor TEXT NOT NULL CHECK (actor IN ('user','assistant')),
+              reason TEXT CHECK (reason IS NULL OR length(reason) BETWEEN 1 AND 4000),
+              operations_json TEXT NOT NULL CHECK (json_valid(operations_json) AND length(operations_json) BETWEEN 2 AND 8388608),
+              operations_sha256 TEXT NOT NULL CHECK (length(operations_sha256) = 64),
+              inverse_operations_json TEXT NOT NULL CHECK (json_valid(inverse_operations_json) AND length(inverse_operations_json) BETWEEN 2 AND 8388608),
+              inverse_operations_sha256 TEXT NOT NULL CHECK (length(inverse_operations_sha256) = 64),
+              reverts_transaction_id TEXT REFERENCES manuscript_transactions(id) ON DELETE RESTRICT,
+              transaction_sha256 TEXT NOT NULL UNIQUE CHECK (length(transaction_sha256) = 64),
+              created_at TEXT NOT NULL,
+              FOREIGN KEY (manuscript_id, base_manuscript_version) REFERENCES manuscript_versions(manuscript_id, version) ON DELETE RESTRICT,
+              FOREIGN KEY (manuscript_id, result_manuscript_version) REFERENCES manuscript_versions(manuscript_id, version) ON DELETE RESTRICT,
+              UNIQUE (manuscript_id, result_manuscript_version)
+            );
+            CREATE INDEX IF NOT EXISTS idx_science_manuscript_transactions_history
+              ON manuscript_transactions(project_id, manuscript_id, result_manuscript_version DESC, id);
+
+            CREATE TABLE IF NOT EXISTS manuscript_document_versions (
+              manuscript_version_id TEXT PRIMARY KEY REFERENCES manuscript_versions(id) ON DELETE RESTRICT,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+              manuscript_id TEXT NOT NULL REFERENCES manuscripts(id) ON DELETE RESTRICT,
+              manuscript_version INTEGER NOT NULL CHECK (manuscript_version >= 1),
+              epoch_id TEXT NOT NULL,
+              schema_name TEXT NOT NULL CHECK (schema_name = 'agentlas.science.manuscript-document/v1'),
+              document_json TEXT NOT NULL CHECK (json_valid(document_json) AND length(document_json) BETWEEN 2 AND 8388608),
+              document_sha256 TEXT NOT NULL CHECK (length(document_sha256) = 64),
+              markdown_sha256 TEXT NOT NULL CHECK (length(markdown_sha256) = 64),
+              binding_manifest_sha256 TEXT NOT NULL CHECK (length(binding_manifest_sha256) = 64),
+              basis TEXT NOT NULL CHECK (basis IN ('legacy-baseline','compatibility-baseline','transaction')),
+              transaction_id TEXT REFERENCES manuscript_transactions(id) ON DELETE RESTRICT,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY (manuscript_id, manuscript_version) REFERENCES manuscript_versions(manuscript_id, version) ON DELETE RESTRICT,
+              UNIQUE (manuscript_id, manuscript_version),
+              CHECK ((basis = 'transaction' AND transaction_id IS NOT NULL) OR (basis != 'transaction' AND transaction_id IS NULL))
+            );
+            CREATE INDEX IF NOT EXISTS idx_science_manuscript_document_history
+              ON manuscript_document_versions(project_id, manuscript_id, manuscript_version DESC, manuscript_version_id);
+
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_transaction_scope_insert
+            BEFORE INSERT ON manuscript_transactions BEGIN
+              SELECT RAISE(ABORT, 'science-manuscript-transaction-scope-invalid') WHERE NOT EXISTS (
+                SELECT 1 FROM manuscripts m
+                JOIN manuscript_versions before_version
+                  ON before_version.manuscript_id = m.id AND before_version.version = NEW.base_manuscript_version
+                JOIN manuscript_versions after_version
+                  ON after_version.manuscript_id = m.id AND after_version.version = NEW.result_manuscript_version
+                WHERE m.id = NEW.manuscript_id AND m.project_id = NEW.project_id
+                  AND before_version.content_sha256 = NEW.base_manuscript_content_sha256
+                  AND after_version.content_sha256 = NEW.result_manuscript_content_sha256
+              );
+              SELECT RAISE(ABORT, 'science-manuscript-transaction-operations-integrity-failed')
+                WHERE length(NEW.operations_sha256) != 64 OR length(NEW.inverse_operations_sha256) != 64;
+              SELECT RAISE(ABORT, 'science-manuscript-transaction-revert-invalid')
+                WHERE NEW.reverts_transaction_id IS NOT NULL AND NOT EXISTS (
+                  SELECT 1 FROM manuscript_transactions previous
+                  WHERE previous.id = NEW.reverts_transaction_id
+                    AND previous.project_id = NEW.project_id AND previous.manuscript_id = NEW.manuscript_id
+                    AND previous.result_manuscript_version <= NEW.base_manuscript_version
+                );
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_transaction_immutable_update
+            BEFORE UPDATE ON manuscript_transactions BEGIN SELECT RAISE(ABORT, 'science-manuscript-transaction-immutable'); END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_transaction_immutable_delete
+            BEFORE DELETE ON manuscript_transactions BEGIN SELECT RAISE(ABORT, 'science-manuscript-transaction-immutable'); END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_document_scope_insert
+            BEFORE INSERT ON manuscript_document_versions BEGIN
+              SELECT RAISE(ABORT, 'science-manuscript-document-scope-invalid') WHERE NOT EXISTS (
+                SELECT 1 FROM manuscripts m JOIN manuscript_versions version
+                  ON version.manuscript_id = m.id AND version.version = NEW.manuscript_version
+                WHERE m.id = NEW.manuscript_id AND m.project_id = NEW.project_id
+                  AND version.id = NEW.manuscript_version_id
+                  AND version.content_sha256 = NEW.markdown_sha256
+                  AND version.binding_manifest_sha256 = NEW.binding_manifest_sha256
+              );
+              SELECT RAISE(ABORT, 'science-manuscript-document-transaction-invalid')
+                WHERE NEW.transaction_id IS NOT NULL AND NOT EXISTS (
+                  SELECT 1 FROM manuscript_transactions transaction_row
+                  WHERE transaction_row.id = NEW.transaction_id
+                    AND transaction_row.project_id = NEW.project_id
+                    AND transaction_row.manuscript_id = NEW.manuscript_id
+                    AND transaction_row.result_manuscript_version = NEW.manuscript_version
+                    AND transaction_row.result_manuscript_content_sha256 = NEW.markdown_sha256
+                    AND transaction_row.result_document_sha256 = NEW.document_sha256
+                );
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_document_immutable_update
+            BEFORE UPDATE ON manuscript_document_versions BEGIN SELECT RAISE(ABORT, 'science-manuscript-document-immutable'); END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_document_immutable_delete
+            BEFORE DELETE ON manuscript_document_versions BEGIN SELECT RAISE(ABORT, 'science-manuscript-document-immutable'); END;
+          `);
+          const legacyVersions = this.db.prepare(`SELECT mv.id AS manuscript_version_id, m.project_id, mv.manuscript_id,
+            mv.version AS manuscript_version, mv.markdown, mv.content_sha256, mv.binding_manifest_sha256, mv.created_at
+            FROM manuscript_versions mv JOIN manuscripts m ON m.id = mv.manuscript_id
+            LEFT JOIN manuscript_document_versions document ON document.manuscript_version_id = mv.id
+            WHERE document.manuscript_version_id IS NULL ORDER BY m.project_id, mv.manuscript_id, mv.version`)
+            .all() as Array<Record<string, unknown>>;
+          const insertLegacyDocument = this.db.prepare(`INSERT INTO manuscript_document_versions
+            (manuscript_version_id,project_id,manuscript_id,manuscript_version,epoch_id,schema_name,document_json,document_sha256,
+             markdown_sha256,binding_manifest_sha256,basis,transaction_id,created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?, 'legacy-baseline',NULL,?)`);
+          for (const row of legacyVersions) {
+            const markdown = String(row.markdown);
+            const document = createScienceManuscriptCompatibilityDocument(markdown);
+            if (sha256Text(markdown) !== String(row.content_sha256)
+              || serializeScienceManuscriptDocument(document) !== markdown
+              || scienceManuscriptDocumentSha256(document) !== document.documentSha256) {
+              throw new Error("science-manuscript-document-migration-integrity-failed");
+            }
+            insertLegacyDocument.run(
+              String(row.manuscript_version_id), String(row.project_id), String(row.manuscript_id), Number(row.manuscript_version),
+              document.identityEpoch, document.schemaVersion, scienceManuscriptTransactionJson(document), document.documentSha256,
+              String(row.content_sha256), String(row.binding_manifest_sha256), String(row.created_at),
+            );
+          }
+        }
+        if (found < 47) {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS manuscript_selection_contexts (
+              id TEXT PRIMARY KEY,
+              request_id TEXT NOT NULL UNIQUE,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+              manuscript_id TEXT NOT NULL REFERENCES manuscripts(id) ON DELETE RESTRICT,
+              manuscript_version INTEGER NOT NULL CHECK (manuscript_version >= 1),
+              manuscript_content_sha256 TEXT NOT NULL CHECK (length(manuscript_content_sha256) = 64),
+              manuscript_document_sha256 TEXT NOT NULL CHECK (length(manuscript_document_sha256) = 64),
+              schema_name TEXT NOT NULL CHECK (schema_name = 'agentlas.science.manuscript-selection-context/v1'),
+              node_id TEXT NOT NULL,
+              node_revision INTEGER NOT NULL CHECK (node_revision >= 1),
+              node_content_sha256 TEXT NOT NULL CHECK (length(node_content_sha256) = 64),
+              start_offset INTEGER NOT NULL CHECK (start_offset >= 0),
+              end_offset INTEGER NOT NULL CHECK (end_offset >= start_offset),
+              selected_text TEXT NOT NULL CHECK (length(selected_text) <= 2000000),
+              selected_text_sha256 TEXT NOT NULL CHECK (length(selected_text_sha256) = 64),
+              source_text_sha256 TEXT NOT NULL CHECK (length(source_text_sha256) = 64),
+              context_sha256 TEXT NOT NULL UNIQUE CHECK (length(context_sha256) = 64),
+              created_at TEXT NOT NULL,
+              FOREIGN KEY (manuscript_id, manuscript_version) REFERENCES manuscript_versions(manuscript_id, version) ON DELETE RESTRICT
+            );
+            CREATE INDEX IF NOT EXISTS idx_science_manuscript_selection_contexts
+              ON manuscript_selection_contexts(project_id, manuscript_id, created_at DESC, id DESC);
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_selection_scope_insert
+            BEFORE INSERT ON manuscript_selection_contexts BEGIN
+              SELECT RAISE(ABORT, 'science-manuscript-selection-scope-invalid') WHERE NOT EXISTS (
+                SELECT 1 FROM manuscripts manuscript
+                JOIN manuscript_versions version
+                  ON version.manuscript_id = manuscript.id AND version.version = NEW.manuscript_version
+                JOIN manuscript_document_versions document
+                  ON document.manuscript_id = manuscript.id AND document.manuscript_version = version.version
+                WHERE manuscript.id = NEW.manuscript_id AND manuscript.project_id = NEW.project_id
+                  AND version.content_sha256 = NEW.manuscript_content_sha256
+                  AND document.document_sha256 = NEW.manuscript_document_sha256
+              );
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_selection_immutable_update
+            BEFORE UPDATE ON manuscript_selection_contexts BEGIN SELECT RAISE(ABORT, 'science-manuscript-selection-immutable'); END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_selection_immutable_delete
+            BEFORE DELETE ON manuscript_selection_contexts BEGIN SELECT RAISE(ABORT, 'science-manuscript-selection-immutable'); END;
+
+            CREATE TABLE IF NOT EXISTS manuscript_edit_proposals (
+              id TEXT PRIMARY KEY,
+              request_id TEXT NOT NULL UNIQUE,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+              manuscript_id TEXT NOT NULL REFERENCES manuscripts(id) ON DELETE RESTRICT,
+              base_manuscript_version INTEGER NOT NULL CHECK (base_manuscript_version >= 1),
+              base_manuscript_content_sha256 TEXT NOT NULL CHECK (length(base_manuscript_content_sha256) = 64),
+              base_document_sha256 TEXT NOT NULL CHECK (length(base_document_sha256) = 64),
+              schema_name TEXT NOT NULL CHECK (schema_name = 'agentlas.science.manuscript-edit-proposal/v1'),
+              operations_json TEXT NOT NULL CHECK (json_valid(operations_json) AND length(operations_json) BETWEEN 2 AND 8388608),
+              operations_sha256 TEXT NOT NULL CHECK (length(operations_sha256) = 64),
+              preview_markdown TEXT NOT NULL CHECK (length(preview_markdown) <= 2000000),
+              preview_content_sha256 TEXT NOT NULL CHECK (length(preview_content_sha256) = 64),
+              preview_document_json TEXT NOT NULL CHECK (json_valid(preview_document_json) AND length(preview_document_json) BETWEEN 2 AND 8388608),
+              preview_document_sha256 TEXT NOT NULL CHECK (length(preview_document_sha256) = 64),
+              summary TEXT NOT NULL CHECK (length(summary) BETWEEN 1 AND 1000),
+              rationale TEXT NOT NULL CHECK (length(rationale) BETWEEN 1 AND 20000),
+              conversation_id TEXT REFERENCES conversations(id) ON DELETE RESTRICT,
+              message_id TEXT REFERENCES messages(id) ON DELETE RESTRICT,
+              selection_context_ids_json TEXT NOT NULL CHECK (json_valid(selection_context_ids_json) AND length(selection_context_ids_json) BETWEEN 2 AND 65536),
+              payload_sha256 TEXT NOT NULL UNIQUE CHECK (length(payload_sha256) = 64),
+              created_at TEXT NOT NULL,
+              FOREIGN KEY (manuscript_id, base_manuscript_version) REFERENCES manuscript_versions(manuscript_id, version) ON DELETE RESTRICT,
+              CHECK (message_id IS NULL OR conversation_id IS NOT NULL)
+            );
+            CREATE INDEX IF NOT EXISTS idx_science_manuscript_edit_proposals
+              ON manuscript_edit_proposals(project_id, manuscript_id, created_at DESC, id DESC);
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_proposal_scope_insert
+            BEFORE INSERT ON manuscript_edit_proposals BEGIN
+              SELECT RAISE(ABORT, 'science-manuscript-proposal-scope-invalid') WHERE NOT EXISTS (
+                SELECT 1 FROM manuscripts manuscript
+                JOIN manuscript_versions version
+                  ON version.manuscript_id = manuscript.id AND version.version = NEW.base_manuscript_version
+                JOIN manuscript_document_versions document
+                  ON document.manuscript_id = manuscript.id AND document.manuscript_version = version.version
+                WHERE manuscript.id = NEW.manuscript_id AND manuscript.project_id = NEW.project_id
+                  AND version.content_sha256 = NEW.base_manuscript_content_sha256
+                  AND document.document_sha256 = NEW.base_document_sha256
+              );
+              SELECT RAISE(ABORT, 'science-manuscript-proposal-conversation-scope-invalid')
+                WHERE NEW.conversation_id IS NOT NULL AND NOT EXISTS (
+                  SELECT 1 FROM conversations conversation
+                  WHERE conversation.id = NEW.conversation_id AND conversation.project_id = NEW.project_id
+                );
+              SELECT RAISE(ABORT, 'science-manuscript-proposal-conversation-scope-invalid')
+                WHERE NEW.message_id IS NOT NULL AND NOT EXISTS (
+                  SELECT 1 FROM messages message
+                  WHERE message.id = NEW.message_id AND message.project_id = NEW.project_id
+                    AND message.conversation_id = NEW.conversation_id
+                );
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_proposal_immutable_update
+            BEFORE UPDATE ON manuscript_edit_proposals BEGIN SELECT RAISE(ABORT, 'science-manuscript-proposal-immutable'); END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_proposal_immutable_delete
+            BEFORE DELETE ON manuscript_edit_proposals BEGIN SELECT RAISE(ABORT, 'science-manuscript-proposal-immutable'); END;
+
+            CREATE TABLE IF NOT EXISTS manuscript_edit_proposal_decisions (
+              id TEXT PRIMARY KEY,
+              request_id TEXT NOT NULL UNIQUE,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+              manuscript_id TEXT NOT NULL REFERENCES manuscripts(id) ON DELETE RESTRICT,
+              proposal_id TEXT NOT NULL UNIQUE REFERENCES manuscript_edit_proposals(id) ON DELETE RESTRICT,
+              schema_name TEXT NOT NULL CHECK (schema_name = 'agentlas.science.manuscript-edit-proposal-decision/v1'),
+              decision TEXT NOT NULL CHECK (decision IN ('applied','rejected')),
+              resulting_transaction_id TEXT REFERENCES manuscript_transactions(id) ON DELETE RESTRICT,
+              result_manuscript_version INTEGER CHECK (result_manuscript_version IS NULL OR result_manuscript_version >= 1),
+              result_manuscript_content_sha256 TEXT CHECK (result_manuscript_content_sha256 IS NULL OR length(result_manuscript_content_sha256) = 64),
+              result_document_sha256 TEXT CHECK (result_document_sha256 IS NULL OR length(result_document_sha256) = 64),
+              reason TEXT CHECK (reason IS NULL OR length(reason) BETWEEN 1 AND 4000),
+              decision_sha256 TEXT NOT NULL UNIQUE CHECK (length(decision_sha256) = 64),
+              created_at TEXT NOT NULL,
+              CHECK ((decision = 'applied' AND resulting_transaction_id IS NOT NULL AND result_manuscript_version IS NOT NULL
+                AND result_manuscript_content_sha256 IS NOT NULL AND result_document_sha256 IS NOT NULL)
+                OR (decision = 'rejected' AND resulting_transaction_id IS NULL AND result_manuscript_version IS NULL
+                AND result_manuscript_content_sha256 IS NULL AND result_document_sha256 IS NULL))
+            );
+            CREATE INDEX IF NOT EXISTS idx_science_manuscript_proposal_decisions
+              ON manuscript_edit_proposal_decisions(project_id, manuscript_id, created_at DESC, id DESC);
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_proposal_decision_scope_insert
+            BEFORE INSERT ON manuscript_edit_proposal_decisions BEGIN
+              SELECT RAISE(ABORT, 'science-manuscript-proposal-decision-scope-invalid') WHERE NOT EXISTS (
+                SELECT 1 FROM manuscript_edit_proposals proposal
+                WHERE proposal.id = NEW.proposal_id AND proposal.project_id = NEW.project_id
+                  AND proposal.manuscript_id = NEW.manuscript_id
+              );
+              SELECT RAISE(ABORT, 'science-manuscript-proposal-decision-transaction-invalid')
+                WHERE NEW.decision = 'applied' AND NOT EXISTS (
+                  SELECT 1 FROM manuscript_edit_proposals proposal
+                  JOIN manuscript_transactions transaction_row
+                    ON transaction_row.id = NEW.resulting_transaction_id
+                  WHERE proposal.id = NEW.proposal_id AND proposal.project_id = NEW.project_id
+                    AND proposal.manuscript_id = NEW.manuscript_id
+                    AND transaction_row.project_id = proposal.project_id
+                    AND transaction_row.manuscript_id = proposal.manuscript_id
+                    AND transaction_row.request_id = NEW.request_id
+                    AND transaction_row.actor = 'assistant'
+                    AND transaction_row.base_manuscript_version = proposal.base_manuscript_version
+                    AND transaction_row.base_manuscript_content_sha256 = proposal.base_manuscript_content_sha256
+                    AND transaction_row.base_document_sha256 = proposal.base_document_sha256
+                    AND transaction_row.operations_sha256 = proposal.operations_sha256
+                    AND transaction_row.result_manuscript_version = NEW.result_manuscript_version
+                    AND transaction_row.result_manuscript_version = proposal.base_manuscript_version + 1
+                    AND transaction_row.result_manuscript_content_sha256 = NEW.result_manuscript_content_sha256
+                    AND transaction_row.result_manuscript_content_sha256 = proposal.preview_content_sha256
+                    AND transaction_row.result_document_sha256 = NEW.result_document_sha256
+                    AND transaction_row.result_document_sha256 = proposal.preview_document_sha256
+                );
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_proposal_decision_immutable_update
+            BEFORE UPDATE ON manuscript_edit_proposal_decisions BEGIN SELECT RAISE(ABORT, 'science-manuscript-proposal-decision-immutable'); END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_proposal_decision_immutable_delete
+            BEFORE DELETE ON manuscript_edit_proposal_decisions BEGIN SELECT RAISE(ABORT, 'science-manuscript-proposal-decision-immutable'); END;
+          `);
+        }
+        if (found < 48) {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS manuscript_blueprints (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+              title TEXT NOT NULL CHECK (length(title) BETWEEN 1 AND 500),
+              current_version INTEGER NOT NULL CHECK (current_version >= 1),
+              current_content_sha256 TEXT NOT NULL CHECK (length(current_content_sha256) = 64),
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              UNIQUE(id, project_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_science_manuscript_blueprints_project
+              ON manuscript_blueprints(project_id, updated_at DESC, id);
+
+            CREATE TABLE IF NOT EXISTS manuscript_blueprint_versions (
+              id TEXT PRIMARY KEY,
+              blueprint_id TEXT NOT NULL,
+              project_id TEXT NOT NULL,
+              version INTEGER NOT NULL CHECK (version >= 1),
+              schema_name TEXT NOT NULL CHECK (schema_name = 'agentlas.science.manuscript-blueprint/v1'),
+              article_family TEXT NOT NULL CHECK (article_family IN ('empirical','theoretical-proof','review-synthesis','methods-model','data-resource')),
+              journal_profile_id TEXT,
+              journal_profile_version INTEGER,
+              journal_profile_content_sha256 TEXT,
+              document_json TEXT NOT NULL CHECK (json_valid(document_json) AND length(document_json) BETWEEN 2 AND 4194304),
+              content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+              created_at TEXT NOT NULL,
+              UNIQUE(blueprint_id, version),
+              UNIQUE(blueprint_id, version, content_sha256),
+              FOREIGN KEY (blueprint_id, project_id) REFERENCES manuscript_blueprints(id, project_id) ON DELETE CASCADE,
+              FOREIGN KEY (journal_profile_id, journal_profile_version) REFERENCES journal_profile_versions(profile_id, version) ON DELETE RESTRICT,
+              CHECK ((journal_profile_id IS NULL AND journal_profile_version IS NULL AND journal_profile_content_sha256 IS NULL)
+                OR (journal_profile_id IS NOT NULL AND journal_profile_version IS NOT NULL AND journal_profile_version >= 1
+                  AND journal_profile_content_sha256 IS NOT NULL AND length(journal_profile_content_sha256) = 64))
+            );
+            CREATE INDEX IF NOT EXISTS idx_science_manuscript_blueprint_versions
+              ON manuscript_blueprint_versions(project_id, blueprint_id, version DESC);
+
+            CREATE TABLE IF NOT EXISTS manuscript_blueprint_comparables (
+              blueprint_version_id TEXT NOT NULL REFERENCES manuscript_blueprint_versions(id) ON DELETE CASCADE,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+              ordinal INTEGER NOT NULL CHECK (ordinal BETWEEN 1 AND 20),
+              source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
+              source_version_id TEXT NOT NULL REFERENCES source_versions(id) ON DELETE RESTRICT,
+              source_version INTEGER NOT NULL CHECK (source_version >= 1),
+              source_content_sha256 TEXT NOT NULL CHECK (length(source_content_sha256) = 64),
+              text_index_id TEXT NOT NULL REFERENCES source_text_indexes(id) ON DELETE RESTRICT,
+              text_index_content_sha256 TEXT NOT NULL CHECK (length(text_index_content_sha256) = 64),
+              snapshot_sha256 TEXT NOT NULL CHECK (length(snapshot_sha256) = 64),
+              created_at TEXT NOT NULL,
+              PRIMARY KEY (blueprint_version_id, ordinal),
+              UNIQUE(blueprint_version_id, source_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS manuscript_version_blueprint_bindings (
+              manuscript_version_id TEXT PRIMARY KEY REFERENCES manuscript_versions(id) ON DELETE RESTRICT,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+              manuscript_id TEXT NOT NULL REFERENCES manuscripts(id) ON DELETE RESTRICT,
+              manuscript_version INTEGER NOT NULL CHECK (manuscript_version >= 1),
+              manuscript_content_sha256 TEXT NOT NULL CHECK (length(manuscript_content_sha256) = 64),
+              manuscript_document_sha256 TEXT NOT NULL CHECK (length(manuscript_document_sha256) = 64),
+              manuscript_binding_manifest_sha256 TEXT NOT NULL CHECK (length(manuscript_binding_manifest_sha256) = 64),
+              blueprint_id TEXT NOT NULL,
+              blueprint_version INTEGER NOT NULL CHECK (blueprint_version >= 1),
+              blueprint_content_sha256 TEXT NOT NULL CHECK (length(blueprint_content_sha256) = 64),
+              created_at TEXT NOT NULL,
+              FOREIGN KEY (manuscript_id, manuscript_version) REFERENCES manuscript_versions(manuscript_id, version) ON DELETE RESTRICT,
+              FOREIGN KEY (blueprint_id, blueprint_version, blueprint_content_sha256)
+                REFERENCES manuscript_blueprint_versions(blueprint_id, version, content_sha256) ON DELETE RESTRICT
+            );
+            CREATE INDEX IF NOT EXISTS idx_science_manuscript_blueprint_bindings
+              ON manuscript_version_blueprint_bindings(project_id, blueprint_id, blueprint_version, manuscript_id, manuscript_version);
+
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_blueprint_version_insert
+            BEFORE INSERT ON manuscript_blueprint_versions BEGIN
+              SELECT RAISE(ABORT, 'science-manuscript-blueprint-version-sequence-invalid') WHERE NEW.version != COALESCE((
+                SELECT MAX(version) + 1 FROM manuscript_blueprint_versions WHERE blueprint_id = NEW.blueprint_id
+              ), 1);
+              SELECT RAISE(ABORT, 'science-manuscript-blueprint-journal-invalid') WHERE NEW.journal_profile_id IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM journal_profiles p JOIN journal_profile_versions v
+                  ON v.profile_id = p.id AND v.version = NEW.journal_profile_version
+                WHERE p.id = NEW.journal_profile_id AND p.project_id = NEW.project_id
+                  AND v.content_sha256 = NEW.journal_profile_content_sha256
+              );
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_blueprint_version_immutable_update
+            BEFORE UPDATE ON manuscript_blueprint_versions BEGIN SELECT RAISE(ABORT, 'science-manuscript-blueprint-version-immutable'); END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_blueprint_version_immutable_delete
+            BEFORE DELETE ON manuscript_blueprint_versions BEGIN SELECT RAISE(ABORT, 'science-manuscript-blueprint-version-immutable'); END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_blueprint_comparable_insert
+            BEFORE INSERT ON manuscript_blueprint_comparables BEGIN
+              SELECT RAISE(ABORT, 'science-manuscript-blueprint-comparable-invalid') WHERE NOT EXISTS (
+                SELECT 1 FROM manuscript_blueprint_versions b
+                JOIN source_text_indexes i ON i.id = NEW.text_index_id
+                JOIN sources s ON s.id = NEW.source_id
+                JOIN source_versions v ON v.id = NEW.source_version_id AND v.source_id = s.id
+                WHERE b.id = NEW.blueprint_version_id AND b.project_id = NEW.project_id
+                  AND s.project_id = NEW.project_id AND v.version = NEW.source_version
+                  AND v.content_sha256 = NEW.source_content_sha256
+                  AND i.project_id = NEW.project_id AND i.source_id = NEW.source_id
+                  AND i.source_version_id = NEW.source_version_id AND i.source_version = NEW.source_version
+                  AND i.source_content_sha256 = NEW.source_content_sha256
+                  AND i.evidence_scope = 'full-text' AND i.content_sha256 = NEW.text_index_content_sha256
+              );
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_blueprint_comparable_immutable_update
+            BEFORE UPDATE ON manuscript_blueprint_comparables BEGIN SELECT RAISE(ABORT, 'science-manuscript-blueprint-comparable-immutable'); END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_blueprint_comparable_immutable_delete
+            BEFORE DELETE ON manuscript_blueprint_comparables BEGIN SELECT RAISE(ABORT, 'science-manuscript-blueprint-comparable-immutable'); END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_blueprint_binding_insert
+            BEFORE INSERT ON manuscript_version_blueprint_bindings BEGIN
+              SELECT RAISE(ABORT, 'science-manuscript-blueprint-binding-manuscript-invalid') WHERE NOT EXISTS (
+                SELECT 1 FROM manuscripts m
+                JOIN manuscript_versions v ON v.manuscript_id = m.id AND v.version = NEW.manuscript_version
+                JOIN manuscript_document_versions d ON d.manuscript_version_id = v.id
+                WHERE m.id = NEW.manuscript_id AND m.project_id = NEW.project_id AND v.id = NEW.manuscript_version_id
+                  AND v.content_sha256 = NEW.manuscript_content_sha256
+                  AND v.binding_manifest_sha256 = NEW.manuscript_binding_manifest_sha256
+                  AND d.project_id = NEW.project_id AND d.manuscript_id = NEW.manuscript_id
+                  AND d.manuscript_version = NEW.manuscript_version AND d.document_sha256 = NEW.manuscript_document_sha256
+              );
+              SELECT RAISE(ABORT, 'science-manuscript-blueprint-binding-blueprint-invalid') WHERE NOT EXISTS (
+                SELECT 1 FROM manuscript_blueprints b JOIN manuscript_blueprint_versions v
+                  ON v.blueprint_id = b.id AND v.version = NEW.blueprint_version
+                WHERE b.id = NEW.blueprint_id AND b.project_id = NEW.project_id AND v.content_sha256 = NEW.blueprint_content_sha256
+              );
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_blueprint_binding_immutable_update
+            BEFORE UPDATE ON manuscript_version_blueprint_bindings BEGIN SELECT RAISE(ABORT, 'science-manuscript-blueprint-binding-immutable'); END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_blueprint_binding_immutable_delete
+            BEFORE DELETE ON manuscript_version_blueprint_bindings BEGIN SELECT RAISE(ABORT, 'science-manuscript-blueprint-binding-immutable'); END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_blueprint_update
+            BEFORE UPDATE ON manuscript_blueprints BEGIN
+              SELECT RAISE(ABORT, 'science-manuscript-blueprint-identity-immutable')
+                WHERE NEW.id != OLD.id OR NEW.project_id != OLD.project_id OR NEW.title != OLD.title OR NEW.created_at != OLD.created_at;
+              SELECT RAISE(ABORT, 'science-manuscript-blueprint-version-invalid') WHERE NEW.current_version != OLD.current_version + 1;
+              SELECT RAISE(ABORT, 'science-manuscript-blueprint-head-invalid') WHERE NOT EXISTS (
+                SELECT 1 FROM manuscript_blueprint_versions v WHERE v.blueprint_id = OLD.id
+                  AND v.version = NEW.current_version AND v.content_sha256 = NEW.current_content_sha256
+              );
+            END;
+          `);
+        }
+        if (found < 49) {
+          const bindingColumns = this.db.pragma("table_info(manuscript_version_blueprint_bindings)") as Array<{ name?: string }>;
+          if (!bindingColumns.some((column) => column.name === "blueprint_version_id")) this.db.exec(`
+            DROP TRIGGER IF EXISTS trg_science_manuscript_blueprint_binding_insert;
+            DROP TRIGGER IF EXISTS trg_science_manuscript_blueprint_binding_immutable_update;
+            DROP TRIGGER IF EXISTS trg_science_manuscript_blueprint_binding_immutable_delete;
+            DROP INDEX IF EXISTS idx_science_manuscript_blueprint_bindings;
+            ALTER TABLE manuscript_version_blueprint_bindings RENAME TO manuscript_version_blueprint_bindings_v48;
+            CREATE TABLE manuscript_version_blueprint_bindings (
+              manuscript_version_id TEXT PRIMARY KEY REFERENCES manuscript_versions(id) ON DELETE RESTRICT,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+              manuscript_id TEXT NOT NULL REFERENCES manuscripts(id) ON DELETE RESTRICT,
+              manuscript_version INTEGER NOT NULL CHECK (manuscript_version >= 1),
+              manuscript_content_sha256 TEXT NOT NULL CHECK (length(manuscript_content_sha256) = 64),
+              manuscript_document_sha256 TEXT NOT NULL CHECK (length(manuscript_document_sha256) = 64),
+              manuscript_binding_manifest_sha256 TEXT NOT NULL CHECK (length(manuscript_binding_manifest_sha256) = 64),
+              blueprint_id TEXT NOT NULL,
+              blueprint_version_id TEXT NOT NULL REFERENCES manuscript_blueprint_versions(id) ON DELETE RESTRICT,
+              blueprint_version INTEGER NOT NULL CHECK (blueprint_version >= 1),
+              blueprint_content_sha256 TEXT NOT NULL CHECK (length(blueprint_content_sha256) = 64),
+              created_at TEXT NOT NULL,
+              FOREIGN KEY (manuscript_id, manuscript_version) REFERENCES manuscript_versions(manuscript_id, version) ON DELETE RESTRICT,
+              FOREIGN KEY (blueprint_id, blueprint_version, blueprint_content_sha256)
+                REFERENCES manuscript_blueprint_versions(blueprint_id, version, content_sha256) ON DELETE RESTRICT
+            );
+            INSERT INTO manuscript_version_blueprint_bindings
+              (manuscript_version_id,project_id,manuscript_id,manuscript_version,manuscript_content_sha256,manuscript_document_sha256,
+               manuscript_binding_manifest_sha256,blueprint_id,blueprint_version_id,blueprint_version,blueprint_content_sha256,created_at)
+            SELECT old.manuscript_version_id,old.project_id,old.manuscript_id,old.manuscript_version,old.manuscript_content_sha256,
+              old.manuscript_document_sha256,old.manuscript_binding_manifest_sha256,old.blueprint_id,
+              (SELECT v.id FROM manuscript_blueprint_versions v WHERE v.blueprint_id = old.blueprint_id
+                AND v.version = old.blueprint_version AND v.content_sha256 = old.blueprint_content_sha256),
+              old.blueprint_version,old.blueprint_content_sha256,old.created_at
+            FROM manuscript_version_blueprint_bindings_v48 old;
+            DROP TABLE manuscript_version_blueprint_bindings_v48;
+            CREATE INDEX idx_science_manuscript_blueprint_bindings
+              ON manuscript_version_blueprint_bindings(project_id, blueprint_id, blueprint_version, manuscript_id, manuscript_version);
+            CREATE TRIGGER trg_science_manuscript_blueprint_binding_insert
+            BEFORE INSERT ON manuscript_version_blueprint_bindings BEGIN
+              SELECT RAISE(ABORT, 'science-manuscript-blueprint-binding-manuscript-invalid') WHERE NOT EXISTS (
+                SELECT 1 FROM manuscripts m
+                JOIN manuscript_versions v ON v.manuscript_id = m.id AND v.version = NEW.manuscript_version
+                JOIN manuscript_document_versions d ON d.manuscript_version_id = v.id
+                WHERE m.id = NEW.manuscript_id AND m.project_id = NEW.project_id AND v.id = NEW.manuscript_version_id
+                  AND v.content_sha256 = NEW.manuscript_content_sha256
+                  AND v.binding_manifest_sha256 = NEW.manuscript_binding_manifest_sha256
+                  AND d.project_id = NEW.project_id AND d.manuscript_id = NEW.manuscript_id
+                  AND d.manuscript_version = NEW.manuscript_version AND d.document_sha256 = NEW.manuscript_document_sha256
+              );
+              SELECT RAISE(ABORT, 'science-manuscript-blueprint-binding-blueprint-invalid') WHERE NOT EXISTS (
+                SELECT 1 FROM manuscript_blueprints b JOIN manuscript_blueprint_versions v
+                  ON v.blueprint_id = b.id AND v.version = NEW.blueprint_version
+                WHERE b.id = NEW.blueprint_id AND b.project_id = NEW.project_id AND v.id = NEW.blueprint_version_id
+                  AND v.content_sha256 = NEW.blueprint_content_sha256
+              );
+            END;
+            CREATE TRIGGER trg_science_manuscript_blueprint_binding_immutable_update
+            BEFORE UPDATE ON manuscript_version_blueprint_bindings BEGIN SELECT RAISE(ABORT, 'science-manuscript-blueprint-binding-immutable'); END;
+            CREATE TRIGGER trg_science_manuscript_blueprint_binding_immutable_delete
+            BEFORE DELETE ON manuscript_version_blueprint_bindings BEGIN SELECT RAISE(ABORT, 'science-manuscript-blueprint-binding-immutable'); END;
+          `);
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS manuscript_blueprint_assessments (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+              manuscript_id TEXT NOT NULL REFERENCES manuscripts(id) ON DELETE RESTRICT,
+              manuscript_version_id TEXT NOT NULL REFERENCES manuscript_versions(id) ON DELETE RESTRICT,
+              manuscript_version INTEGER NOT NULL CHECK (manuscript_version >= 1),
+              manuscript_content_sha256 TEXT NOT NULL CHECK (length(manuscript_content_sha256) = 64),
+              manuscript_document_sha256 TEXT NOT NULL CHECK (length(manuscript_document_sha256) = 64),
+              manuscript_binding_manifest_sha256 TEXT NOT NULL CHECK (length(manuscript_binding_manifest_sha256) = 64),
+              blueprint_id TEXT NOT NULL,
+              blueprint_version_id TEXT NOT NULL REFERENCES manuscript_blueprint_versions(id) ON DELETE RESTRICT,
+              blueprint_version INTEGER NOT NULL CHECK (blueprint_version >= 1),
+              blueprint_content_sha256 TEXT NOT NULL CHECK (length(blueprint_content_sha256) = 64),
+              journal_profile_id TEXT NOT NULL,
+              journal_profile_version INTEGER NOT NULL CHECK (journal_profile_version >= 1),
+              journal_profile_content_sha256 TEXT NOT NULL CHECK (length(journal_profile_content_sha256) = 64),
+              policy_id TEXT NOT NULL,
+              policy_version INTEGER NOT NULL CHECK (policy_version >= 1),
+              policy_content_sha256 TEXT NOT NULL CHECK (length(policy_content_sha256) = 64),
+              report_json TEXT NOT NULL CHECK (json_valid(report_json) AND length(report_json) BETWEEN 2 AND 4194304),
+              report_sha256 TEXT NOT NULL CHECK (length(report_sha256) = 64),
+              content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+              created_at TEXT NOT NULL,
+              UNIQUE(manuscript_version_id, blueprint_id, blueprint_version, journal_profile_id, journal_profile_version, policy_content_sha256),
+              FOREIGN KEY (manuscript_id, manuscript_version) REFERENCES manuscript_versions(manuscript_id, version) ON DELETE RESTRICT,
+              FOREIGN KEY (blueprint_id, blueprint_version, blueprint_content_sha256)
+                REFERENCES manuscript_blueprint_versions(blueprint_id, version, content_sha256) ON DELETE RESTRICT,
+              FOREIGN KEY (journal_profile_id, journal_profile_version)
+                REFERENCES journal_profile_versions(profile_id, version) ON DELETE RESTRICT
+            );
+            CREATE INDEX IF NOT EXISTS idx_science_manuscript_blueprint_assessments
+              ON manuscript_blueprint_assessments(project_id, manuscript_id, created_at DESC, id DESC);
+
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_blueprint_assessment_insert
+            BEFORE INSERT ON manuscript_blueprint_assessments BEGIN
+              SELECT RAISE(ABORT, 'science-manuscript-blueprint-assessment-manuscript-invalid') WHERE NOT EXISTS (
+                SELECT 1 FROM manuscripts m
+                JOIN manuscript_versions v ON v.manuscript_id = m.id AND v.version = NEW.manuscript_version
+                JOIN manuscript_document_versions d ON d.manuscript_version_id = v.id
+                WHERE m.id = NEW.manuscript_id AND m.project_id = NEW.project_id AND v.id = NEW.manuscript_version_id
+                  AND v.content_sha256 = NEW.manuscript_content_sha256
+                  AND v.binding_manifest_sha256 = NEW.manuscript_binding_manifest_sha256
+                  AND d.document_sha256 = NEW.manuscript_document_sha256
+              );
+              SELECT RAISE(ABORT, 'science-manuscript-blueprint-assessment-binding-invalid') WHERE NOT EXISTS (
+                SELECT 1 FROM manuscript_version_blueprint_bindings b
+                WHERE b.manuscript_version_id = NEW.manuscript_version_id AND b.project_id = NEW.project_id
+                  AND b.manuscript_id = NEW.manuscript_id AND b.manuscript_version = NEW.manuscript_version
+                  AND b.manuscript_content_sha256 = NEW.manuscript_content_sha256
+                  AND b.manuscript_document_sha256 = NEW.manuscript_document_sha256
+                  AND b.manuscript_binding_manifest_sha256 = NEW.manuscript_binding_manifest_sha256
+                  AND b.blueprint_id = NEW.blueprint_id AND b.blueprint_version_id = NEW.blueprint_version_id
+                  AND b.blueprint_version = NEW.blueprint_version
+                  AND b.blueprint_content_sha256 = NEW.blueprint_content_sha256
+              );
+              SELECT RAISE(ABORT, 'science-manuscript-blueprint-assessment-blueprint-invalid') WHERE NOT EXISTS (
+                SELECT 1 FROM manuscript_blueprint_versions v
+                WHERE v.id = NEW.blueprint_version_id AND v.blueprint_id = NEW.blueprint_id
+                  AND v.project_id = NEW.project_id AND v.version = NEW.blueprint_version
+                  AND v.content_sha256 = NEW.blueprint_content_sha256
+              );
+              SELECT RAISE(ABORT, 'science-manuscript-blueprint-assessment-journal-invalid') WHERE NOT EXISTS (
+                SELECT 1 FROM journal_profiles p JOIN journal_profile_versions v
+                  ON v.profile_id = p.id AND v.version = NEW.journal_profile_version
+                WHERE p.id = NEW.journal_profile_id AND p.project_id = NEW.project_id
+                  AND v.content_sha256 = NEW.journal_profile_content_sha256
+              );
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_blueprint_assessment_immutable_update
+            BEFORE UPDATE ON manuscript_blueprint_assessments BEGIN SELECT RAISE(ABORT, 'science-manuscript-blueprint-assessment-immutable'); END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_blueprint_assessment_immutable_delete
+            BEFORE DELETE ON manuscript_blueprint_assessments BEGIN SELECT RAISE(ABORT, 'science-manuscript-blueprint-assessment-immutable'); END;
+
+            CREATE TABLE IF NOT EXISTS journal_validation_blueprint_assessment_closures (
+              validation_receipt_id TEXT PRIMARY KEY REFERENCES journal_validation_receipts(id) ON DELETE RESTRICT,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+              assessment_id TEXT NOT NULL REFERENCES manuscript_blueprint_assessments(id) ON DELETE RESTRICT,
+              assessment_report_sha256 TEXT NOT NULL CHECK (length(assessment_report_sha256) = 64),
+              assessment_policy_content_sha256 TEXT NOT NULL CHECK (length(assessment_policy_content_sha256) = 64),
+              assessment_content_sha256 TEXT NOT NULL CHECK (length(assessment_content_sha256) = 64),
+              created_at TEXT NOT NULL
+            );
+            CREATE TRIGGER IF NOT EXISTS trg_science_journal_validation_blueprint_assessment_closure_insert
+            BEFORE INSERT ON journal_validation_blueprint_assessment_closures BEGIN
+              SELECT RAISE(ABORT, 'science-journal-validation-blueprint-assessment-closure-cross-project') WHERE NOT EXISTS (
+                SELECT 1 FROM journal_validation_receipts r JOIN manuscript_blueprint_assessments a
+                  ON a.id = NEW.assessment_id
+                WHERE r.id = NEW.validation_receipt_id AND r.project_id = NEW.project_id AND a.project_id = NEW.project_id
+                  AND a.report_sha256 = NEW.assessment_report_sha256
+                  AND a.policy_content_sha256 = NEW.assessment_policy_content_sha256
+                  AND a.content_sha256 = NEW.assessment_content_sha256
+              );
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_journal_validation_blueprint_assessment_closure_immutable_update
+            BEFORE UPDATE ON journal_validation_blueprint_assessment_closures BEGIN SELECT RAISE(ABORT, 'science-journal-validation-blueprint-assessment-closure-immutable'); END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_journal_validation_blueprint_assessment_closure_immutable_delete
+            BEFORE DELETE ON journal_validation_blueprint_assessment_closures BEGIN SELECT RAISE(ABORT, 'science-journal-validation-blueprint-assessment-closure-immutable'); END;
+          `);
+        }
+        if (found < 50) {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS manuscript_scholarly_assessments (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+              manuscript_id TEXT NOT NULL REFERENCES manuscripts(id) ON DELETE RESTRICT,
+              manuscript_version_id TEXT NOT NULL REFERENCES manuscript_versions(id) ON DELETE RESTRICT,
+              manuscript_version INTEGER NOT NULL CHECK (manuscript_version >= 1),
+              manuscript_content_sha256 TEXT NOT NULL CHECK (length(manuscript_content_sha256) = 64),
+              manuscript_document_sha256 TEXT NOT NULL CHECK (length(manuscript_document_sha256) = 64),
+              manuscript_binding_manifest_sha256 TEXT NOT NULL CHECK (length(manuscript_binding_manifest_sha256) = 64),
+              blueprint_id TEXT NOT NULL,
+              blueprint_version_id TEXT NOT NULL REFERENCES manuscript_blueprint_versions(id) ON DELETE RESTRICT,
+              blueprint_version INTEGER NOT NULL CHECK (blueprint_version >= 1),
+              blueprint_content_sha256 TEXT NOT NULL CHECK (length(blueprint_content_sha256) = 64),
+              journal_profile_id TEXT NOT NULL,
+              journal_profile_version INTEGER NOT NULL CHECK (journal_profile_version >= 1),
+              journal_profile_content_sha256 TEXT NOT NULL CHECK (length(journal_profile_content_sha256) = 64),
+              blueprint_assessment_id TEXT NOT NULL REFERENCES manuscript_blueprint_assessments(id) ON DELETE RESTRICT,
+              blueprint_assessment_report_sha256 TEXT NOT NULL CHECK (length(blueprint_assessment_report_sha256) = 64),
+              blueprint_assessment_policy_content_sha256 TEXT NOT NULL CHECK (length(blueprint_assessment_policy_content_sha256) = 64),
+              blueprint_assessment_content_sha256 TEXT NOT NULL CHECK (length(blueprint_assessment_content_sha256) = 64),
+              evaluator_invocation_run_id TEXT NOT NULL,
+              evaluator_json TEXT NOT NULL CHECK (json_valid(evaluator_json) AND length(evaluator_json) BETWEEN 2 AND 32768),
+              policy_id TEXT NOT NULL,
+              policy_version INTEGER NOT NULL CHECK (policy_version >= 1),
+              policy_content_sha256 TEXT NOT NULL CHECK (length(policy_content_sha256) = 64),
+              report_json TEXT NOT NULL CHECK (json_valid(report_json) AND length(report_json) BETWEEN 2 AND 8388608),
+              report_sha256 TEXT NOT NULL CHECK (length(report_sha256) = 64),
+              content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+              created_at TEXT NOT NULL,
+              UNIQUE(manuscript_version_id, blueprint_assessment_id, evaluator_invocation_run_id, policy_content_sha256),
+              FOREIGN KEY (manuscript_id, manuscript_version) REFERENCES manuscript_versions(manuscript_id, version) ON DELETE RESTRICT,
+              FOREIGN KEY (blueprint_id, blueprint_version, blueprint_content_sha256)
+                REFERENCES manuscript_blueprint_versions(blueprint_id, version, content_sha256) ON DELETE RESTRICT,
+              FOREIGN KEY (journal_profile_id, journal_profile_version)
+                REFERENCES journal_profile_versions(profile_id, version) ON DELETE RESTRICT
+            );
+            CREATE INDEX IF NOT EXISTS idx_science_manuscript_scholarly_assessments
+              ON manuscript_scholarly_assessments(project_id, manuscript_id, created_at DESC, id DESC);
+
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_scholarly_assessment_insert
+            BEFORE INSERT ON manuscript_scholarly_assessments BEGIN
+              SELECT RAISE(ABORT, 'science-manuscript-scholarly-assessment-manuscript-invalid') WHERE NOT EXISTS (
+                SELECT 1 FROM manuscripts m
+                JOIN manuscript_versions v ON v.manuscript_id = m.id AND v.version = NEW.manuscript_version
+                JOIN manuscript_document_versions d ON d.manuscript_version_id = v.id
+                WHERE m.id = NEW.manuscript_id AND m.project_id = NEW.project_id AND v.id = NEW.manuscript_version_id
+                  AND v.content_sha256 = NEW.manuscript_content_sha256
+                  AND v.binding_manifest_sha256 = NEW.manuscript_binding_manifest_sha256
+                  AND d.document_sha256 = NEW.manuscript_document_sha256
+              );
+              SELECT RAISE(ABORT, 'science-manuscript-scholarly-assessment-structural-invalid') WHERE NOT EXISTS (
+                SELECT 1 FROM manuscript_blueprint_assessments a
+                WHERE a.id = NEW.blueprint_assessment_id AND a.project_id = NEW.project_id
+                  AND a.manuscript_id = NEW.manuscript_id AND a.manuscript_version_id = NEW.manuscript_version_id
+                  AND a.blueprint_id = NEW.blueprint_id AND a.blueprint_version_id = NEW.blueprint_version_id
+                  AND a.journal_profile_id = NEW.journal_profile_id AND a.journal_profile_version = NEW.journal_profile_version
+                  AND a.report_sha256 = NEW.blueprint_assessment_report_sha256
+                  AND a.policy_content_sha256 = NEW.blueprint_assessment_policy_content_sha256
+                  AND a.content_sha256 = NEW.blueprint_assessment_content_sha256
+              );
+              SELECT RAISE(ABORT, 'science-manuscript-scholarly-assessment-turn-invalid') WHERE NOT EXISTS (
+                SELECT 1 FROM science_turns t WHERE t.project_id = NEW.project_id
+                  AND t.invocation_run_id = NEW.evaluator_invocation_run_id
+              );
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_scholarly_assessment_immutable_update
+            BEFORE UPDATE ON manuscript_scholarly_assessments BEGIN SELECT RAISE(ABORT, 'science-manuscript-scholarly-assessment-immutable'); END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_scholarly_assessment_immutable_delete
+            BEFORE DELETE ON manuscript_scholarly_assessments BEGIN SELECT RAISE(ABORT, 'science-manuscript-scholarly-assessment-immutable'); END;
+
+            CREATE TABLE IF NOT EXISTS journal_validation_scholarly_assessment_closures (
+              validation_receipt_id TEXT PRIMARY KEY REFERENCES journal_validation_receipts(id) ON DELETE RESTRICT,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+              assessment_id TEXT NOT NULL REFERENCES manuscript_scholarly_assessments(id) ON DELETE RESTRICT,
+              assessment_report_sha256 TEXT NOT NULL CHECK (length(assessment_report_sha256) = 64),
+              assessment_policy_content_sha256 TEXT NOT NULL CHECK (length(assessment_policy_content_sha256) = 64),
+              assessment_content_sha256 TEXT NOT NULL CHECK (length(assessment_content_sha256) = 64),
+              created_at TEXT NOT NULL
+            );
+            CREATE TRIGGER IF NOT EXISTS trg_science_journal_validation_scholarly_assessment_closure_insert
+            BEFORE INSERT ON journal_validation_scholarly_assessment_closures BEGIN
+              SELECT RAISE(ABORT, 'science-journal-validation-scholarly-assessment-closure-cross-project') WHERE NOT EXISTS (
+                SELECT 1 FROM journal_validation_receipts r JOIN manuscript_scholarly_assessments a
+                  ON a.id = NEW.assessment_id
+                WHERE r.id = NEW.validation_receipt_id AND r.project_id = NEW.project_id AND a.project_id = NEW.project_id
+                  AND a.report_sha256 = NEW.assessment_report_sha256
+                  AND a.policy_content_sha256 = NEW.assessment_policy_content_sha256
+                  AND a.content_sha256 = NEW.assessment_content_sha256
+              );
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_journal_validation_scholarly_assessment_closure_immutable_update
+            BEFORE UPDATE ON journal_validation_scholarly_assessment_closures BEGIN SELECT RAISE(ABORT, 'science-journal-validation-scholarly-assessment-closure-immutable'); END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_journal_validation_scholarly_assessment_closure_immutable_delete
+            BEFORE DELETE ON journal_validation_scholarly_assessment_closures BEGIN SELECT RAISE(ABORT, 'science-journal-validation-scholarly-assessment-closure-immutable'); END;
+          `);
+        }
+        if (found < 51) {
+          const legacyParents = this.db.prepare(`SELECT id,project_id,parent_run_id,created_at
+            FROM research_runs WHERE parent_run_id IS NOT NULL ORDER BY created_at,id`).all() as Array<{
+              id: string; project_id: string; parent_run_id: string; created_at: string;
+            }>;
+          const insertLegacyParent = this.db.prepare(`INSERT INTO research_run_parent_bindings
+            (id,project_id,run_id,ordinal,role,parent_run_id,parent_content_sha256,created_at)
+            VALUES (?,?,?,1,'primary',?,?,?)`);
+          for (const child of legacyParents) {
+            const parent = this.getResearchRunForProject(child.project_id, child.parent_run_id);
+            if (!parent || parent.status !== "succeeded") throw new Error("science-v51-run-parent-reconciliation-required");
+            insertLegacyParent.run(randomUUID(), child.project_id, child.id, child.parent_run_id,
+              scienceEvidenceGraphResearchRunContentSha256(parent), child.created_at);
+          }
+        }
+        if (found < 53) {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS manuscript_comparable_eligibility_receipts (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+              source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
+              source_version_id TEXT NOT NULL REFERENCES source_versions(id) ON DELETE RESTRICT,
+              source_version INTEGER NOT NULL CHECK (source_version >= 1),
+              source_content_sha256 TEXT NOT NULL CHECK (length(source_content_sha256) = 64),
+              project_domain TEXT NOT NULL CHECK (project_domain IN ('general','life-science','chemistry','physics','materials-science','genomics','astronomy','earth-ecology','statistics','economics','finance')),
+              source_domain TEXT NOT NULL CHECK (source_domain IN ('general','life-science','chemistry','physics','materials-science','genomics','astronomy','earth-ecology','statistics','economics','finance')),
+              article_family TEXT NOT NULL CHECK (article_family IN ('empirical','theoretical-proof','review-synthesis','methods-model','data-resource')),
+              decision TEXT NOT NULL CHECK (decision IN ('quantitative-calibration','rhetorical-analogue-only','ineligible')),
+              venue_relation TEXT NOT NULL CHECK (venue_relation IN ('exact-target-journal','same-field-peer-journal','cross-field-analogue','incompatible')),
+              target_journal_profile_id TEXT,
+              target_journal_profile_version INTEGER,
+              target_journal_profile_content_sha256 TEXT,
+              evaluator_invocation_run_id TEXT NOT NULL,
+              evaluator_json TEXT NOT NULL CHECK (json_valid(evaluator_json) AND length(evaluator_json) BETWEEN 2 AND 32768),
+              evidence_json TEXT NOT NULL CHECK (json_valid(evidence_json) AND length(evidence_json) BETWEEN 2 AND 1048576),
+              receipt_json TEXT NOT NULL CHECK (json_valid(receipt_json) AND length(receipt_json) BETWEEN 2 AND 2097152),
+              report_sha256 TEXT NOT NULL CHECK (length(report_sha256) = 64),
+              content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+              created_at TEXT NOT NULL,
+              FOREIGN KEY (target_journal_profile_id, target_journal_profile_version)
+                REFERENCES journal_profile_versions(profile_id, version) ON DELETE RESTRICT,
+              CHECK ((target_journal_profile_id IS NULL AND target_journal_profile_version IS NULL AND target_journal_profile_content_sha256 IS NULL)
+                OR (target_journal_profile_id IS NOT NULL AND target_journal_profile_version IS NOT NULL AND target_journal_profile_version >= 1
+                  AND target_journal_profile_content_sha256 IS NOT NULL AND length(target_journal_profile_content_sha256) = 64)),
+              CHECK ((decision = 'quantitative-calibration' AND venue_relation IN ('exact-target-journal','same-field-peer-journal'))
+                OR (decision = 'rhetorical-analogue-only' AND venue_relation IN ('same-field-peer-journal','cross-field-analogue'))
+                OR (decision = 'ineligible')),
+              CHECK (venue_relation != 'exact-target-journal' OR target_journal_profile_id IS NOT NULL)
+            );
+            CREATE INDEX IF NOT EXISTS idx_science_manuscript_comparable_eligibility
+              ON manuscript_comparable_eligibility_receipts(project_id, source_id, source_version_id, article_family, decision, created_at DESC, id DESC);
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_comparable_eligibility_insert
+            BEFORE INSERT ON manuscript_comparable_eligibility_receipts BEGIN
+              SELECT RAISE(ABORT, 'science-manuscript-comparable-eligibility-source-invalid') WHERE NOT EXISTS (
+                SELECT 1 FROM sources s JOIN source_versions v ON v.source_id = s.id
+                WHERE s.id = NEW.source_id AND s.project_id = NEW.project_id AND s.current_version = NEW.source_version
+                  AND s.verification_status = 'content-checked' AND s.kind IN ('journal-article','preprint','book')
+                  AND v.id = NEW.source_version_id AND v.version = NEW.source_version
+                  AND v.content_sha256 = NEW.source_content_sha256 AND v.access_state IN ('parsed','evidence-linked')
+              );
+              SELECT RAISE(ABORT, 'science-manuscript-comparable-eligibility-project-invalid') WHERE NOT EXISTS (
+                SELECT 1 FROM projects p WHERE p.id = NEW.project_id AND p.domain = NEW.project_domain
+              );
+              SELECT RAISE(ABORT, 'science-manuscript-comparable-eligibility-turn-invalid') WHERE NOT EXISTS (
+                SELECT 1 FROM science_turns t WHERE t.project_id = NEW.project_id
+                  AND t.invocation_run_id = NEW.evaluator_invocation_run_id
+              );
+              SELECT RAISE(ABORT, 'science-manuscript-comparable-eligibility-journal-invalid')
+                WHERE NEW.target_journal_profile_id IS NOT NULL AND NOT EXISTS (
+                  SELECT 1 FROM journal_profiles p JOIN journal_profile_versions v
+                    ON v.profile_id = p.id AND v.version = NEW.target_journal_profile_version
+                  WHERE p.id = NEW.target_journal_profile_id AND p.project_id = NEW.project_id
+                    AND p.status = 'verified' AND p.current_version = NEW.target_journal_profile_version
+                    AND v.content_sha256 = NEW.target_journal_profile_content_sha256
+                );
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_comparable_eligibility_immutable_update
+            BEFORE UPDATE ON manuscript_comparable_eligibility_receipts BEGIN
+              SELECT RAISE(ABORT, 'science-manuscript-comparable-eligibility-immutable');
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_comparable_eligibility_immutable_delete
+            BEFORE DELETE ON manuscript_comparable_eligibility_receipts BEGIN
+              SELECT RAISE(ABORT, 'science-manuscript-comparable-eligibility-immutable');
+            END;
+          `);
+          const blueprintComparableColumns = new Set((this.db.pragma("table_info('manuscript_blueprint_comparables')") as Array<{ name: string }>)
+            .map((column) => column.name));
+          if (!blueprintComparableColumns.has("eligibility_receipt_id")) {
+            this.db.exec(`ALTER TABLE manuscript_blueprint_comparables ADD COLUMN eligibility_receipt_id TEXT
+              REFERENCES manuscript_comparable_eligibility_receipts(id) ON DELETE RESTRICT`);
+          }
+          this.db.exec(`
+            CREATE INDEX IF NOT EXISTS idx_science_manuscript_blueprint_comparable_eligibility
+              ON manuscript_blueprint_comparables(project_id, eligibility_receipt_id);
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_blueprint_comparable_eligibility_insert
+            BEFORE INSERT ON manuscript_blueprint_comparables BEGIN
+              SELECT RAISE(ABORT, 'science-manuscript-blueprint-comparable-eligibility-invalid') WHERE NEW.eligibility_receipt_id IS NULL OR NOT EXISTS (
+                SELECT 1 FROM manuscript_comparable_eligibility_receipts receipt
+                JOIN manuscript_blueprint_versions blueprint ON blueprint.id = NEW.blueprint_version_id
+                WHERE receipt.id = NEW.eligibility_receipt_id AND receipt.project_id = NEW.project_id
+                  AND receipt.source_id = NEW.source_id AND receipt.source_version_id = NEW.source_version_id
+                  AND receipt.source_version = NEW.source_version AND receipt.source_content_sha256 = NEW.source_content_sha256
+                  AND receipt.article_family = blueprint.article_family AND receipt.decision = 'quantitative-calibration'
+                  AND COALESCE(receipt.target_journal_profile_id, '') = COALESCE(blueprint.journal_profile_id, '')
+                  AND COALESCE(receipt.target_journal_profile_version, 0) = COALESCE(blueprint.journal_profile_version, 0)
+                  AND COALESCE(receipt.target_journal_profile_content_sha256, '') = COALESCE(blueprint.journal_profile_content_sha256, '')
+              );
+            END;
+          `);
+        }
+        if (found < 54) {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS manuscript_drafting_sessions (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+              title TEXT NOT NULL CHECK (length(title) BETWEEN 1 AND 500),
+              status TEXT NOT NULL CHECK (status IN ('drafting','assembled','cancelled')),
+              version INTEGER NOT NULL CHECK (version >= 1),
+              state_sha256 TEXT NOT NULL CHECK (length(state_sha256) = 64),
+              blueprint_id TEXT NOT NULL,
+              blueprint_version_id TEXT NOT NULL REFERENCES manuscript_blueprint_versions(id) ON DELETE RESTRICT,
+              blueprint_version INTEGER NOT NULL CHECK (blueprint_version >= 1),
+              blueprint_content_sha256 TEXT NOT NULL CHECK (length(blueprint_content_sha256) = 64),
+              bindings_json TEXT NOT NULL CHECK (json_valid(bindings_json) AND length(bindings_json) BETWEEN 2 AND 8388608),
+              binding_manifest_sha256 TEXT NOT NULL CHECK (length(binding_manifest_sha256) = 64),
+              plan_json TEXT NOT NULL CHECK (json_valid(plan_json) AND length(plan_json) BETWEEN 2 AND 4194304),
+              assembled_manuscript_id TEXT REFERENCES manuscripts(id) ON DELETE RESTRICT,
+              assembled_manuscript_version INTEGER,
+              assembled_manuscript_content_sha256 TEXT,
+              cancellation_reason TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY (blueprint_id, blueprint_version, blueprint_content_sha256)
+                REFERENCES manuscript_blueprint_versions(blueprint_id, version, content_sha256) ON DELETE RESTRICT,
+              FOREIGN KEY (assembled_manuscript_id, assembled_manuscript_version)
+                REFERENCES manuscript_versions(manuscript_id, version) ON DELETE RESTRICT,
+              CHECK ((status = 'drafting' AND assembled_manuscript_id IS NULL AND assembled_manuscript_version IS NULL
+                        AND assembled_manuscript_content_sha256 IS NULL AND cancellation_reason IS NULL)
+                OR (status = 'assembled' AND assembled_manuscript_id IS NOT NULL AND assembled_manuscript_version IS NOT NULL
+                        AND assembled_manuscript_content_sha256 IS NOT NULL AND length(assembled_manuscript_content_sha256) = 64
+                        AND cancellation_reason IS NULL)
+                OR (status = 'cancelled' AND assembled_manuscript_id IS NULL AND assembled_manuscript_version IS NULL
+                        AND assembled_manuscript_content_sha256 IS NULL AND cancellation_reason IS NOT NULL
+                        AND length(cancellation_reason) BETWEEN 1 AND 4000))
+            );
+            CREATE INDEX IF NOT EXISTS idx_science_manuscript_drafting_sessions
+              ON manuscript_drafting_sessions(project_id, status, updated_at DESC, id);
+
+            CREATE TABLE IF NOT EXISTS manuscript_draft_section_versions (
+              id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL REFERENCES manuscript_drafting_sessions(id) ON DELETE RESTRICT,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+              section_key TEXT NOT NULL CHECK (length(section_key) BETWEEN 1 AND 120),
+              revision INTEGER NOT NULL CHECK (revision >= 1),
+              status TEXT NOT NULL CHECK (status IN ('draft','ready')),
+              markdown TEXT NOT NULL CHECK (length(markdown) BETWEEN 1 AND 2097152),
+              content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+              word_count INTEGER NOT NULL CHECK (word_count >= 1),
+              paragraph_count INTEGER NOT NULL CHECK (paragraph_count >= 1),
+              writer_invocation_run_id TEXT NOT NULL,
+              writer_json TEXT NOT NULL CHECK (json_valid(writer_json) AND length(writer_json) BETWEEN 2 AND 32768),
+              created_at TEXT NOT NULL,
+              UNIQUE(session_id, section_key, revision)
+            );
+            CREATE INDEX IF NOT EXISTS idx_science_manuscript_draft_section_heads
+              ON manuscript_draft_section_versions(project_id, session_id, section_key, revision DESC);
+
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_drafting_session_insert
+            BEFORE INSERT ON manuscript_drafting_sessions BEGIN
+              SELECT RAISE(ABORT, 'science-manuscript-drafting-blueprint-invalid') WHERE NOT EXISTS (
+                SELECT 1 FROM manuscript_blueprints b JOIN manuscript_blueprint_versions v
+                  ON v.blueprint_id = b.id AND v.version = b.current_version
+                WHERE b.id = NEW.blueprint_id AND b.project_id = NEW.project_id
+                  AND b.current_version = NEW.blueprint_version AND b.current_content_sha256 = NEW.blueprint_content_sha256
+                  AND v.id = NEW.blueprint_version_id AND v.content_sha256 = NEW.blueprint_content_sha256
+              );
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_drafting_session_update
+            BEFORE UPDATE ON manuscript_drafting_sessions BEGIN
+              SELECT RAISE(ABORT, 'science-manuscript-drafting-session-immutable') WHERE
+                NEW.id != OLD.id OR NEW.project_id != OLD.project_id OR NEW.title != OLD.title
+                OR NEW.blueprint_id != OLD.blueprint_id OR NEW.blueprint_version_id != OLD.blueprint_version_id
+                OR NEW.blueprint_version != OLD.blueprint_version OR NEW.blueprint_content_sha256 != OLD.blueprint_content_sha256
+                OR NEW.bindings_json != OLD.bindings_json OR NEW.binding_manifest_sha256 != OLD.binding_manifest_sha256
+                OR NEW.plan_json != OLD.plan_json OR NEW.created_at != OLD.created_at;
+              SELECT RAISE(ABORT, 'science-manuscript-drafting-session-terminal') WHERE OLD.status != 'drafting';
+              SELECT RAISE(ABORT, 'science-manuscript-drafting-session-version-conflict') WHERE NEW.version != OLD.version + 1;
+              SELECT RAISE(ABORT, 'science-manuscript-drafting-session-transition-invalid')
+                WHERE NEW.status NOT IN ('drafting','assembled','cancelled');
+              SELECT RAISE(ABORT, 'science-manuscript-drafting-session-manuscript-invalid')
+                WHERE NEW.status = 'assembled' AND NOT EXISTS (
+                  SELECT 1 FROM manuscripts m JOIN manuscript_versions v
+                    ON v.manuscript_id = m.id AND v.version = NEW.assembled_manuscript_version
+                  WHERE m.id = NEW.assembled_manuscript_id AND m.project_id = NEW.project_id
+                    AND v.content_sha256 = NEW.assembled_manuscript_content_sha256
+                );
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_drafting_session_delete
+            BEFORE DELETE ON manuscript_drafting_sessions BEGIN
+              SELECT RAISE(ABORT, 'science-manuscript-drafting-session-immutable');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_draft_section_insert
+            BEFORE INSERT ON manuscript_draft_section_versions BEGIN
+              SELECT RAISE(ABORT, 'science-manuscript-draft-section-session-invalid') WHERE NOT EXISTS (
+                SELECT 1 FROM manuscript_drafting_sessions s
+                WHERE s.id = NEW.session_id AND s.project_id = NEW.project_id AND s.status = 'drafting'
+              );
+              SELECT RAISE(ABORT, 'science-manuscript-draft-section-key-invalid') WHERE NOT EXISTS (
+                SELECT 1 FROM manuscript_drafting_sessions s, json_each(s.plan_json) plan
+                WHERE s.id = NEW.session_id AND json_extract(plan.value, '$.key') = NEW.section_key
+              );
+              SELECT RAISE(ABORT, 'science-manuscript-draft-section-revision-conflict') WHERE NEW.revision != (
+                SELECT COALESCE(MAX(previous.revision), 0) + 1 FROM manuscript_draft_section_versions previous
+                WHERE previous.session_id = NEW.session_id AND previous.section_key = NEW.section_key
+              );
+              SELECT RAISE(ABORT, 'science-manuscript-draft-section-turn-invalid') WHERE NOT EXISTS (
+                SELECT 1 FROM science_turns t WHERE t.project_id = NEW.project_id
+                  AND t.invocation_run_id = NEW.writer_invocation_run_id
+              );
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_draft_section_update
+            BEFORE UPDATE ON manuscript_draft_section_versions BEGIN
+              SELECT RAISE(ABORT, 'science-manuscript-draft-section-immutable');
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_draft_section_delete
+            BEFORE DELETE ON manuscript_draft_section_versions BEGIN
+              SELECT RAISE(ABORT, 'science-manuscript-draft-section-immutable');
+            END;
+          `);
+        }
+        if (found < 55) {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS manuscript_coherence_assessments (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+              manuscript_id TEXT NOT NULL REFERENCES manuscripts(id) ON DELETE RESTRICT,
+              manuscript_version_id TEXT NOT NULL REFERENCES manuscript_versions(id) ON DELETE RESTRICT,
+              manuscript_version INTEGER NOT NULL CHECK (manuscript_version >= 1),
+              manuscript_content_sha256 TEXT NOT NULL CHECK (length(manuscript_content_sha256) = 64),
+              manuscript_document_sha256 TEXT NOT NULL CHECK (length(manuscript_document_sha256) = 64),
+              manuscript_binding_manifest_sha256 TEXT NOT NULL CHECK (length(manuscript_binding_manifest_sha256) = 64),
+              claim_ledger_id TEXT NOT NULL REFERENCES claim_ledgers(id) ON DELETE RESTRICT,
+              claim_ledger_revision INTEGER NOT NULL CHECK (claim_ledger_revision >= 1),
+              claim_ledger_manifest_sha256 TEXT NOT NULL REFERENCES claim_ledger_manifests(manifest_sha256) ON DELETE RESTRICT,
+              claim_ledger_gate_report_sha256 TEXT NOT NULL CHECK (length(claim_ledger_gate_report_sha256) = 64),
+              claim_ledger_policy_content_sha256 TEXT NOT NULL CHECK (length(claim_ledger_policy_content_sha256) = 64),
+              declarations_json TEXT NOT NULL CHECK (json_valid(declarations_json) AND length(declarations_json) BETWEEN 2 AND 8388608),
+              declarations_sha256 TEXT NOT NULL CHECK (length(declarations_sha256) = 64),
+              policy_id TEXT NOT NULL,
+              policy_version INTEGER NOT NULL CHECK (policy_version >= 1),
+              policy_content_sha256 TEXT NOT NULL CHECK (length(policy_content_sha256) = 64),
+              assessment_status TEXT NOT NULL CHECK (assessment_status IN ('passed','blocked')),
+              report_json TEXT NOT NULL CHECK (json_valid(report_json) AND length(report_json) BETWEEN 2 AND 8388608),
+              report_sha256 TEXT NOT NULL CHECK (length(report_sha256) = 64),
+              content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+              created_at TEXT NOT NULL,
+              UNIQUE(manuscript_version_id, claim_ledger_manifest_sha256, claim_ledger_gate_report_sha256,
+                claim_ledger_policy_content_sha256, declarations_sha256, policy_content_sha256),
+              FOREIGN KEY (manuscript_id, manuscript_version)
+                REFERENCES manuscript_versions(manuscript_id, version) ON DELETE RESTRICT,
+              FOREIGN KEY (claim_ledger_id, claim_ledger_revision)
+                REFERENCES claim_ledger_manifests(ledger_id, revision) ON DELETE RESTRICT
+            );
+            CREATE INDEX IF NOT EXISTS idx_science_manuscript_coherence_assessments
+              ON manuscript_coherence_assessments(project_id, manuscript_id, created_at DESC, id DESC);
+
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_coherence_assessment_insert
+            BEFORE INSERT ON manuscript_coherence_assessments BEGIN
+              SELECT RAISE(ABORT, 'science-manuscript-coherence-assessment-manuscript-invalid') WHERE NOT EXISTS (
+                SELECT 1 FROM manuscripts m
+                JOIN manuscript_versions v ON v.manuscript_id = m.id AND v.version = NEW.manuscript_version
+                JOIN manuscript_document_versions d ON d.manuscript_version_id = v.id
+                WHERE m.id = NEW.manuscript_id AND m.project_id = NEW.project_id
+                  AND v.id = NEW.manuscript_version_id
+                  AND v.content_sha256 = NEW.manuscript_content_sha256
+                  AND v.binding_manifest_sha256 = NEW.manuscript_binding_manifest_sha256
+                  AND d.document_sha256 = NEW.manuscript_document_sha256
+              );
+              SELECT RAISE(ABORT, 'science-manuscript-coherence-assessment-ledger-invalid') WHERE NOT EXISTS (
+                SELECT 1 FROM claim_ledgers l
+                JOIN claim_ledger_manifests manifest
+                  ON manifest.ledger_id = l.id AND manifest.revision = NEW.claim_ledger_revision
+                WHERE l.id = NEW.claim_ledger_id AND l.project_id = NEW.project_id
+                  AND l.manuscript_id = NEW.manuscript_id
+                  AND l.current_revision = NEW.claim_ledger_revision
+                  AND l.current_manifest_sha256 = NEW.claim_ledger_manifest_sha256
+                  AND manifest.project_id = NEW.project_id
+                  AND manifest.manifest_sha256 = NEW.claim_ledger_manifest_sha256
+                  AND manifest.manuscript_id = NEW.manuscript_id
+                  AND manifest.manuscript_version = NEW.manuscript_version
+                  AND manifest.manuscript_content_sha256 = NEW.manuscript_content_sha256
+              );
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_coherence_assessment_immutable_update
+            BEFORE UPDATE ON manuscript_coherence_assessments BEGIN
+              SELECT RAISE(ABORT, 'science-manuscript-coherence-assessment-immutable');
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_manuscript_coherence_assessment_immutable_delete
+            BEFORE DELETE ON manuscript_coherence_assessments BEGIN
+              SELECT RAISE(ABORT, 'science-manuscript-coherence-assessment-immutable');
+            END;
+
+            CREATE TABLE IF NOT EXISTS journal_validation_coherence_assessment_closures (
+              validation_receipt_id TEXT PRIMARY KEY REFERENCES journal_validation_receipts(id) ON DELETE RESTRICT,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+              assessment_id TEXT NOT NULL REFERENCES manuscript_coherence_assessments(id) ON DELETE RESTRICT,
+              assessment_report_sha256 TEXT NOT NULL CHECK (length(assessment_report_sha256) = 64),
+              assessment_content_sha256 TEXT NOT NULL CHECK (length(assessment_content_sha256) = 64),
+              created_at TEXT NOT NULL
+            );
+            CREATE TRIGGER IF NOT EXISTS trg_science_journal_validation_coherence_assessment_closure_insert
+            BEFORE INSERT ON journal_validation_coherence_assessment_closures BEGIN
+              SELECT RAISE(ABORT, 'science-journal-validation-coherence-assessment-closure-cross-project') WHERE NOT EXISTS (
+                SELECT 1 FROM journal_validation_receipts receipt
+                JOIN manuscript_coherence_assessments assessment ON assessment.id = NEW.assessment_id
+                WHERE receipt.id = NEW.validation_receipt_id AND receipt.project_id = NEW.project_id
+                  AND assessment.project_id = NEW.project_id
+                  AND assessment.report_sha256 = NEW.assessment_report_sha256
+                  AND assessment.content_sha256 = NEW.assessment_content_sha256
+              );
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_journal_validation_coherence_assessment_closure_immutable_update
+            BEFORE UPDATE ON journal_validation_coherence_assessment_closures BEGIN
+              SELECT RAISE(ABORT, 'science-journal-validation-coherence-assessment-closure-immutable');
+            END;
+            CREATE TRIGGER IF NOT EXISTS trg_science_journal_validation_coherence_assessment_closure_immutable_delete
+            BEFORE DELETE ON journal_validation_coherence_assessment_closures BEGIN
+              SELECT RAISE(ABORT, 'science-journal-validation-coherence-assessment-closure-immutable');
+            END;
+          `);
         }
         if (found < 28) this.repairCanonicalResearchLifecycles();
         const migrationForeignKeyViolations = this.db.pragma("foreign_key_check") as Array<Record<string, unknown>>;
@@ -7076,7 +9268,7 @@ export class ScienceStore {
   }
 
   putRunBlob(bytes: Buffer): ScienceRunBlobReceipt {
-    if (!Buffer.isBuffer(bytes) || bytes.length < 1 || bytes.length > 64 * 1024 * 1024) throw new Error("science-run-blob-bytes-invalid");
+    if (!Buffer.isBuffer(bytes) || bytes.length > 64 * 1024 * 1024) throw new Error("science-run-blob-bytes-invalid");
     const sha256 = createHash("sha256").update(bytes).digest("hex");
     const prefix = path.join(this.runBlobRoot, sha256.slice(0, 2));
     ensurePrivateDirectory(prefix);
@@ -7111,7 +9303,7 @@ export class ScienceStore {
 
   readRunBlob(receipt: ScienceRunBlobReceipt): Buffer {
     if (!receipt || typeof receipt !== "object" || !SHA256_RE.test(String(receipt.sha256 ?? ""))) throw new Error("science-run-blob-receipt-invalid");
-    if (!Number.isSafeInteger(receipt.byteSize) || receipt.byteSize < 1 || receipt.byteSize > 64 * 1024 * 1024) throw new Error("science-run-blob-receipt-invalid");
+    if (!Number.isSafeInteger(receipt.byteSize) || receipt.byteSize < 0 || receipt.byteSize > 64 * 1024 * 1024) throw new Error("science-run-blob-receipt-invalid");
     if (receipt.blobRef !== `science-run-blob:sha256:${receipt.sha256}`) throw new Error("science-run-blob-ref-invalid");
     const target = path.join(this.runBlobRoot, receipt.sha256.slice(0, 2), receipt.sha256);
     let stat: fs.Stats;
@@ -7473,13 +9665,13 @@ export class ScienceStore {
       const now = new Date().toISOString();
       const project: ScienceProject = { id: randomUUID(), title, question, domain, relatedDomains, status: "draft", version: 1, createdAt: now, updatedAt: now };
       const conversation: ScienceConversation = { id: randomUUID(), projectId: project.id, title, createdAt: now, updatedAt: now };
-      const message: ScienceMessage = { id: randomUUID(), projectId: project.id, conversationId: conversation.id, role: "user", content: question, createdAt: now };
+      const message: ScienceMessage = { id: randomUUID(), projectId: project.id, conversationId: conversation.id, role: "user", visibility: "visible", content: question, createdAt: now };
       this.db.prepare("INSERT INTO projects (id,title,question,domain,status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)")
         .run(project.id, project.title, project.question, project.domain, project.status, project.version, now, now);
       this.db.prepare("INSERT INTO conversations (id,project_id,title,created_at,updated_at) VALUES (?,?,?,?,?)")
         .run(conversation.id, conversation.projectId, conversation.title, now, now);
-      this.db.prepare("INSERT INTO messages (id,project_id,conversation_id,role,content,created_at) VALUES (?,?,?,?,?,?)")
-        .run(message.id, message.projectId, message.conversationId, message.role, message.content, now);
+      this.db.prepare("INSERT INTO messages (id,project_id,conversation_id,role,visibility,content,created_at) VALUES (?,?,?,?,?,?,?)")
+        .run(message.id, message.projectId, message.conversationId, message.role, message.visibility, message.content, now);
       const insertRelatedDomain = this.db.prepare("INSERT INTO project_related_domains (project_id,domain,display_order,created_at) VALUES (?,?,?,?)");
       relatedDomains.forEach((relatedDomain, index) => insertRelatedDomain.run(project.id, relatedDomain, index, now));
       this.db.prepare(`INSERT INTO project_navigation_states
@@ -7705,14 +9897,14 @@ export class ScienceStore {
 
   listMessages(conversationId: string): ScienceMessage[] {
     if (!UUID_RE.test(conversationId)) return [];
-    const rows = this.db.prepare("SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at, rowid").all(conversationId) as Record<string, unknown>[];
+    const rows = this.db.prepare("SELECT * FROM messages WHERE conversation_id = ? AND visibility = 'visible' ORDER BY created_at, rowid").all(conversationId) as Record<string, unknown>[];
     return rows.map(messageFromRow);
   }
 
   listMessagesForProject(projectId: string, conversationId: string): ScienceMessage[] {
     if (!UUID_RE.test(projectId) || !UUID_RE.test(conversationId)) return [];
     const rows = this.db.prepare(`SELECT m.* FROM messages m JOIN conversations c ON c.id = m.conversation_id
-      WHERE m.project_id = ? AND c.project_id = ? AND m.conversation_id = ? ORDER BY m.created_at, m.id`).all(projectId, projectId, conversationId) as Record<string, unknown>[];
+      WHERE m.project_id = ? AND c.project_id = ? AND m.conversation_id = ? AND m.visibility = 'visible' ORDER BY m.created_at, m.id`).all(projectId, projectId, conversationId) as Record<string, unknown>[];
     return rows.map(messageFromRow);
   }
 
@@ -7728,9 +9920,9 @@ export class ScienceStore {
       const conversation = this.db.prepare("SELECT project_id FROM conversations WHERE id = ?").get(input.conversationId) as { project_id: string } | undefined;
       if (!conversation || conversation.project_id !== input.projectId) throw new Error("science-conversation-not-found");
       const now = new Date().toISOString();
-      const message: ScienceMessage = { id: randomUUID(), projectId: input.projectId, conversationId: input.conversationId, role: input.role, content, createdAt: now };
-      this.db.prepare("INSERT INTO messages (id,project_id,conversation_id,role,content,created_at) VALUES (?,?,?,?,?,?)")
-        .run(message.id, message.projectId, message.conversationId, message.role, message.content, now);
+      const message: ScienceMessage = { id: randomUUID(), projectId: input.projectId, conversationId: input.conversationId, role: input.role, visibility: "visible", content, createdAt: now };
+      this.db.prepare("INSERT INTO messages (id,project_id,conversation_id,role,visibility,content,created_at) VALUES (?,?,?,?,?,?,?)")
+        .run(message.id, message.projectId, message.conversationId, message.role, message.visibility, message.content, now);
       this.db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(now, message.conversationId);
       this.db.prepare("UPDATE projects SET updated_at = ? WHERE id = ?").run(now, message.projectId);
       const result: AppendScienceMessageResult = { message, replayed: false };
@@ -7782,12 +9974,17 @@ export class ScienceStore {
     }
     const parentTurnId = input.parentTurnId == null ? null : String(input.parentTurnId);
     if (parentTurnId !== null && !UUID_RE.test(parentTurnId)) throw new Error("science-parent-turn-id-invalid");
-    let normalizedMode: { mode: "existing-user-message"; userMessageId: string } | { mode: "append-user-message"; content: string };
+    let normalizedMode: { mode: "existing-user-message"; userMessageId: string } | { mode: "append-user-message"; content: string } | { mode: "append-controller-message"; content: string; continuationBasis: Record<string, unknown> };
     if (input.mode === "existing-user-message") {
       if (!UUID_RE.test(String(input.userMessageId ?? ""))) throw new Error("science-user-message-id-invalid");
       normalizedMode = { mode: input.mode, userMessageId: input.userMessageId };
     } else if (input.mode === "append-user-message") {
       normalizedMode = { mode: input.mode, content: safeText(input.content, 20_000, "message-content") };
+    } else if (input.mode === "append-controller-message") {
+      if (!input.continuationBasis || typeof input.continuationBasis !== "object" || Array.isArray(input.continuationBasis)) {
+        throw new Error("science-continuation-basis-invalid");
+      }
+      normalizedMode = { mode: input.mode, content: safeText(input.content, 20_000, "message-content"), continuationBasis: safeJsonRecord(input.continuationBasis, 64 * 1024, "continuation-basis") };
     } else {
       throw new Error("science-turn-mode-invalid");
     }
@@ -7811,22 +10008,32 @@ export class ScienceStore {
       const now = new Date().toISOString();
       let userMessage: ScienceMessage;
       if (normalizedMode.mode === "existing-user-message") {
-        const row = this.db.prepare("SELECT * FROM messages WHERE id = ? AND project_id = ? AND conversation_id = ? AND role = 'user'")
+        const row = this.db.prepare("SELECT * FROM messages WHERE id = ? AND project_id = ? AND conversation_id = ? AND role = 'user' AND visibility = 'visible'")
           .get(normalizedMode.userMessageId, input.projectId, input.conversationId) as Record<string, unknown> | undefined;
         if (!row) throw new Error("science-user-message-not-found");
+        // One turn per user message, enforced by the schema (`user_message_id ... UNIQUE`), so the
+        // check must stay strict: relaxing it here only turned a clear refusal into a raw
+        // constraint error from SQLite. A researcher whose first turn DIED still has to be able to
+        // start -- that is real and it is fixed where it belongs, in the composer, by asking the
+        // same question again as a new message rather than reusing a message the record has closed.
         const used = this.db.prepare("SELECT id FROM science_turns WHERE user_message_id = ? LIMIT 1").get(normalizedMode.userMessageId) as { id: string } | undefined;
         if (used) throw new Error("science-user-message-already-used");
         userMessage = messageFromRow(row);
       } else {
-        userMessage = { id: randomUUID(), projectId: input.projectId, conversationId: input.conversationId, role: "user", content: normalizedMode.content, createdAt: now };
-        this.db.prepare("INSERT INTO messages (id,project_id,conversation_id,role,content,created_at) VALUES (?,?,?,?,?,?)")
-          .run(userMessage.id, userMessage.projectId, userMessage.conversationId, userMessage.role, userMessage.content, now);
+        const visibility = normalizedMode.mode === "append-controller-message" ? "internal" : "visible";
+        userMessage = { id: randomUUID(), projectId: input.projectId, conversationId: input.conversationId, role: "user", visibility, content: normalizedMode.content, createdAt: now };
+        this.db.prepare("INSERT INTO messages (id,project_id,conversation_id,role,visibility,content,created_at) VALUES (?,?,?,?,?,?,?)")
+          .run(userMessage.id, userMessage.projectId, userMessage.conversationId, userMessage.role, userMessage.visibility, userMessage.content, now);
       }
+      const origin = normalizedMode.mode === "append-controller-message" ? "loop-continuation" : "user";
+      const continuationBasis = normalizedMode.mode === "append-controller-message" ? normalizedMode.continuationBasis : null;
+      const continuationBasisSha256 = continuationBasis === null ? null : sha256Json(continuationBasis);
       const turnId = randomUUID();
       this.db.prepare(`INSERT INTO science_turns
-        (id,request_id,project_id,conversation_id,user_message_id,assistant_message_id,runtime_chat_id,invocation_run_id,parent_turn_id,status,last_sequence,partial_text,partial_sha256,error_code,started_at,finished_at,created_at,updated_at)
-        VALUES (?,?,?,?,?,NULL,?,?,?,'queued',0,'',NULL,NULL,NULL,NULL,?,?)`)
-        .run(turnId, input.requestId, input.projectId, input.conversationId, userMessage.id, input.runtimeChatId, input.invocationRunId, parentTurnId, now, now);
+        (id,request_id,project_id,conversation_id,user_message_id,assistant_message_id,runtime_chat_id,invocation_run_id,parent_turn_id,origin,continuation_basis_json,continuation_basis_sha256,status,last_sequence,partial_text,partial_sha256,error_code,started_at,finished_at,created_at,updated_at)
+        VALUES (?,?,?,?,?,NULL,?,?,?,?,?,?,'queued',0,'',NULL,NULL,NULL,NULL,?,?)`)
+        .run(turnId, input.requestId, input.projectId, input.conversationId, userMessage.id, input.runtimeChatId, input.invocationRunId, parentTurnId, origin,
+          continuationBasis === null ? null : JSON.stringify(canonicalValue(continuationBasis)), continuationBasisSha256, now, now);
       this.db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(now, input.conversationId);
       this.db.prepare("UPDATE projects SET updated_at = ? WHERE id = ?").run(now, input.projectId);
       const turn = this.getTurnForProject(input.projectId, turnId);
@@ -7879,6 +10086,17 @@ export class ScienceStore {
 
   private verifiedTurnFromRow(row: Record<string, unknown>): ScienceTurn {
     const turn = scienceTurnFromRow(row);
+    if (turn.origin === "user" && (turn.continuationBasis !== null || turn.continuationBasisSha256 !== null)) {
+      throw new Error("science-turn-continuation-basis-integrity-failed");
+    }
+    if (turn.origin === "loop-continuation") {
+      if (!turn.continuationBasis || !turn.continuationBasisSha256 || sha256Json(turn.continuationBasis) !== turn.continuationBasisSha256) {
+        throw new Error("science-turn-continuation-basis-integrity-failed");
+      }
+      const continuationMessage = this.db.prepare("SELECT visibility FROM messages WHERE id = ? AND project_id = ? AND conversation_id = ?")
+        .get(turn.userMessageId, turn.projectId, turn.conversationId) as { visibility?: string } | undefined;
+      if (continuationMessage?.visibility !== "internal") throw new Error("science-turn-continuation-message-integrity-failed");
+    }
     const lastEventRow = this.db.prepare("SELECT * FROM science_turn_events WHERE turn_id = ? ORDER BY sequence DESC LIMIT 1")
       .get(turn.id) as Record<string, unknown> | undefined;
     const lastEvent = lastEventRow ? scienceTurnEventFromRow(lastEventRow) : null;
@@ -8028,11 +10246,12 @@ export class ScienceStore {
         projectId: input.projectId,
         conversationId: input.conversationId,
         role: "assistant",
+        visibility: "visible",
         content,
         createdAt: now,
       };
-      this.db.prepare("INSERT INTO messages (id,project_id,conversation_id,role,content,created_at) VALUES (?,?,?,?,?,?)")
-        .run(message.id, message.projectId, message.conversationId, message.role, message.content, now);
+      this.db.prepare("INSERT INTO messages (id,project_id,conversation_id,role,visibility,content,created_at) VALUES (?,?,?,?,?,?,?)")
+        .run(message.id, message.projectId, message.conversationId, message.role, message.visibility, message.content, now);
       const eventId = randomUUID();
       this.db.prepare(`INSERT INTO science_turn_events
         (id,project_id,conversation_id,turn_id,invocation_run_id,sequence,kind,code,payload_json,delta,created_at)
@@ -8476,6 +10695,42 @@ export class ScienceStore {
     return row ? this.researchRunFromRow(row) : null;
   }
 
+  getResearchRunParentBindings(projectId: string, runId: string): ScienceResearchRunParentBinding[] {
+    if (!UUID_RE.test(projectId) || !UUID_RE.test(runId)) return [];
+    const run = this.getResearchRunForProject(projectId, runId);
+    if (!run) return [];
+    const rows = this.db.prepare(`SELECT * FROM research_run_parent_bindings
+      WHERE project_id = ? AND run_id = ? ORDER BY ordinal`).all(projectId, runId) as Record<string, unknown>[];
+    const bindings = rows.map((row): ScienceResearchRunParentBinding => ({
+      id: String(row.id),
+      projectId: String(row.project_id),
+      runId: String(row.run_id),
+      ordinal: Number(row.ordinal),
+      role: String(row.role),
+      parentRunId: String(row.parent_run_id),
+      parentContentSha256: safeSha256(row.parent_content_sha256, "run-parent-binding-content-sha256"),
+      createdAt: String(row.created_at),
+    }));
+    if (bindings.some((binding, index) => binding.ordinal !== index + 1)
+      || new Set(bindings.map((binding) => binding.role)).size !== bindings.length
+      || new Set(bindings.map((binding) => binding.parentRunId)).size !== bindings.length) {
+      throw new Error("science-run-parent-binding-integrity-failed");
+    }
+    const primary = bindings.filter((binding) => binding.role === "primary");
+    if ((run.parentRunId === null && bindings.length !== 0)
+      || (run.parentRunId !== null && (primary.length !== 1 || primary[0]!.parentRunId !== run.parentRunId))) {
+      throw new Error("science-run-parent-binding-integrity-failed");
+    }
+    for (const binding of bindings) {
+      const parent = this.getResearchRunForProject(projectId, binding.parentRunId);
+      if (!parent || parent.status !== "succeeded"
+        || scienceEvidenceGraphResearchRunContentSha256(parent) !== binding.parentContentSha256) {
+        throw new Error("science-run-parent-binding-integrity-failed");
+      }
+    }
+    return bindings;
+  }
+
   getResearchRunSourceBindings(projectId: string, runId: string): ScienceResearchRunSourceBinding[] {
     if (!UUID_RE.test(projectId) || !UUID_RE.test(runId)) return [];
     const rows = this.db.prepare("SELECT * FROM research_run_source_bindings WHERE project_id = ? AND run_id = ? ORDER BY ordinal")
@@ -8496,6 +10751,111 @@ export class ScienceStore {
       if (!source || source.version.contentSha256 !== binding.contentSha256) throw new Error("science-run-source-binding-integrity-failed");
       return binding;
     });
+  }
+
+  getResearchRunSourceOutputBindings(projectId: string, runId: string): ScienceResearchRunSourceOutputBinding[] {
+    if (!UUID_RE.test(projectId) || !UUID_RE.test(runId)) return [];
+    const run = this.getResearchRunForProject(projectId, runId);
+    if (!run) return [];
+    const sourceBindings = new Map(this.getResearchRunSourceBindings(projectId, runId).map((binding) => [binding.id, binding]));
+    const outputs = new Map(run.outputs.map((output) => [output.id, output]));
+    const rows = this.db.prepare(`SELECT * FROM research_run_source_output_bindings
+      WHERE project_id = ? AND run_id = ? ORDER BY output_ordinal,binding_id`).all(projectId, runId) as Record<string, unknown>[];
+    return rows.map((row) => {
+      const binding: ScienceResearchRunSourceOutputBinding = {
+        bindingId: String(row.binding_id),
+        projectId: String(row.project_id),
+        runId: String(row.run_id),
+        outputId: String(row.output_id),
+        outputOrdinal: Number(row.output_ordinal),
+        outputSha256: safeSha256(row.output_sha256, "run-source-output-binding-sha256"),
+        createdAt: String(row.created_at),
+      };
+      const sourceBinding = sourceBindings.get(binding.bindingId);
+      const output = outputs.get(binding.outputId);
+      if (!sourceBinding || !output || output.ordinal !== binding.outputOrdinal
+        || output.sha256 !== binding.outputSha256 || sourceBinding.contentSha256 !== output.sha256) {
+        throw new Error("science-run-source-output-binding-integrity-failed");
+      }
+      return binding;
+    });
+  }
+
+  bindSucceededResearchRunSources(input: {
+    projectId: string;
+    runId: string;
+    bindings: Array<{ ordinal: number; role: string; sourceId: string; sourceVersionId: string; outputOrdinal: number }>;
+  }): ScienceResearchRunSourceBinding[] {
+    if (!UUID_RE.test(String(input.projectId ?? "")) || !UUID_RE.test(String(input.runId ?? ""))
+      || !Array.isArray(input.bindings) || input.bindings.length < 1 || input.bindings.length > 128) {
+      throw new Error("science-run-source-binding-input-invalid");
+    }
+    const run = this.getResearchRunForProject(input.projectId, input.runId);
+    if (!run || run.status !== "succeeded") throw new Error("science-run-source-binding-run-invalid");
+    const normalized = input.bindings.map((binding, index) => {
+      if (!binding || binding.ordinal !== index + 1 || !Number.isSafeInteger(binding.outputOrdinal)
+        || binding.outputOrdinal < 1 || binding.outputOrdinal > run.outputs.length
+        || !UUID_RE.test(String(binding.sourceId ?? "")) || !UUID_RE.test(String(binding.sourceVersionId ?? ""))) {
+        throw new Error("science-run-source-binding-input-invalid");
+      }
+      const role = safeText(binding.role, 160, "run-source-binding-role");
+      const source = this.getSourceVersionForProject(input.projectId, binding.sourceId, binding.sourceVersionId);
+      const output = run.outputs[binding.outputOrdinal - 1];
+      const sourceBytes = source ? this.verifiedSourceBytes(source) : null;
+      if (!source || !output || source.version.contentSha256 !== output.sha256
+        || source.version.mimeType !== output.mimeType || !sourceBytes || sourceBytes.length !== output.byteSize) {
+        throw new Error("science-run-source-binding-output-mismatch");
+      }
+      this.readRunBlob(output);
+      return { ...binding, role, contentSha256: output.sha256, outputId: output.id, outputSha256: output.sha256 };
+    });
+    if (new Set(normalized.map((binding) => binding.role)).size !== normalized.length
+      || new Set(normalized.map((binding) => `${binding.sourceId}:${binding.sourceVersionId}`)).size !== normalized.length) {
+      throw new Error("science-run-source-binding-input-invalid");
+    }
+    return this.db.transaction(() => {
+      const bindOutputs = (sourceBindings: ScienceResearchRunSourceBinding[], now: string): void => {
+        const existingOutputs = this.getResearchRunSourceOutputBindings(input.projectId, input.runId);
+        if (existingOutputs.length) {
+          if (existingOutputs.length !== normalized.length || existingOutputs.some((binding, index) => {
+            const expected = normalized[index]!;
+            const sourceBinding = sourceBindings[index]!;
+            return binding.bindingId !== sourceBinding.id || binding.outputId !== expected.outputId
+              || binding.outputOrdinal !== expected.outputOrdinal || binding.outputSha256 !== expected.outputSha256;
+          })) throw new Error("science-run-source-output-binding-conflict");
+          return;
+        }
+        const statement = this.db.prepare(`INSERT INTO research_run_source_output_bindings
+          (binding_id,project_id,run_id,output_id,output_ordinal,output_sha256,created_at)
+          VALUES (?,?,?,?,?,?,?)`);
+        normalized.forEach((binding, index) => statement.run(sourceBindings[index]!.id, input.projectId, input.runId,
+          binding.outputId, binding.outputOrdinal, binding.outputSha256, now));
+        const created = this.getResearchRunSourceOutputBindings(input.projectId, input.runId);
+        if (created.length !== normalized.length) throw new Error("science-run-source-output-binding-create-failed");
+      };
+      const existing = this.getResearchRunSourceBindings(input.projectId, input.runId);
+      if (existing.length) {
+        if (existing.length !== normalized.length || existing.some((binding, index) => {
+          const expected = normalized[index]!;
+          return binding.ordinal !== expected.ordinal || binding.role !== expected.role
+            || binding.sourceId !== expected.sourceId || binding.sourceVersionId !== expected.sourceVersionId
+            || binding.contentSha256 !== expected.contentSha256;
+        })) throw new Error("science-run-source-binding-conflict");
+        bindOutputs(existing, new Date().toISOString());
+        return existing;
+      }
+      const now = new Date().toISOString();
+      const statement = this.db.prepare(`INSERT INTO research_run_source_bindings
+        (id,project_id,run_id,ordinal,role,source_id,source_version_id,content_sha256,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?)`);
+      for (const binding of normalized) {
+        statement.run(randomUUID(), input.projectId, input.runId, binding.ordinal, binding.role, binding.sourceId, binding.sourceVersionId, binding.contentSha256, now);
+      }
+      const created = this.getResearchRunSourceBindings(input.projectId, input.runId);
+      if (created.length !== normalized.length) throw new Error("science-run-source-binding-create-failed");
+      bindOutputs(created, now);
+      return created;
+    })();
   }
 
   private verifiedDatasetTableForRun(projectId: string, runId: string, candidate?: unknown): {
@@ -8538,6 +10898,124 @@ export class ScienceStore {
       || source.canonicalUri !== `agentlas-dataset:sha256:${sourceRef.contentSha256}`) throw new Error("science-table-source-invalid");
     this.verifiedSourceBytes(source);
     return { run, source, table };
+  }
+
+  private verifiedComparativeGenomicsTableForRun(projectId: string, runId: string, candidate: unknown, requireExactOutput: boolean): {
+    run: ScienceResearchRun;
+    parent: ScienceResearchRun;
+    table: ScienceDatasetTablePayload;
+    sourceTableSha256: string;
+  } {
+    const run = this.getResearchRunForProject(projectId, runId);
+    if (!run || run.status !== "succeeded" || run.toolId !== COMPARATIVE_GENOMICS_TABLE_TOOL_ID
+      || run.toolVersion !== COMPARATIVE_GENOMICS_TABLE_TOOL_VERSION || !run.parentRunId
+      || run.inputs.length !== 2 || run.outputs.length !== 1) {
+      throw new Error("science-comparative-genomics-table-run-invalid");
+    }
+    const descriptorInput = run.inputs[0]!;
+    const sourceInput = run.inputs[1]!;
+    const output = run.outputs[0]!;
+    if (descriptorInput.ordinal !== 1 || descriptorInput.role !== "comparative-genomics-table-projection"
+      || descriptorInput.mimeType !== COMPARATIVE_GENOMICS_TABLE_INPUT_MIME
+      || sourceInput.ordinal !== 2 || sourceInput.role !== "comparative-genomics-publication-table-source"
+      || sourceInput.mimeType !== COMPARATIVE_GENOMICS_SOURCE_TABLE_MIME
+      || output.ordinal !== 1 || output.role !== "normalized-table"
+      || output.mimeType !== COMPARATIVE_GENOMICS_NORMALIZED_TABLE_MIME
+      || output.artifactId !== null || output.artifactVersion !== null) {
+      throw new Error("science-comparative-genomics-table-run-invalid");
+    }
+    const manifestResource = (resource: ScienceResearchRunResource): Record<string, unknown> => ({
+      role: resource.role,
+      mimeType: resource.mimeType,
+      byteSize: resource.byteSize,
+      sha256: resource.sha256,
+      blobRef: resource.blobRef,
+      artifactId: resource.artifactId,
+      artifactVersion: resource.artifactVersion,
+    });
+    if (sha256Json(run.inputs.map(manifestResource)) !== run.inputManifestSha256
+      || sha256Json(run.outputs.map(manifestResource)) !== run.outputManifestSha256) {
+      throw new Error("science-comparative-genomics-table-manifest-invalid");
+    }
+    const table = validateScienceTablePayload(candidate);
+    if (table.receipts.parserId !== COMPARATIVE_GENOMICS_TABLE_PARSER_ID
+      || table.receipts.parserVersion !== COMPARATIVE_GENOMICS_TABLE_TOOL_VERSION
+      || table.receipts.rawSha256 !== sourceInput.sha256) {
+      throw new Error("science-comparative-genomics-table-receipt-invalid");
+    }
+    const outputBytes = this.readRunBlob(output);
+    if (requireExactOutput && !outputBytes.equals(Buffer.from(JSON.stringify(canonicalValue(table)), "utf8"))) {
+      throw new Error("science-comparative-genomics-table-output-mismatch");
+    }
+    const bindings = this.getResearchRunParentBindings(projectId, run.id);
+    const parent = this.getResearchRunForProject(projectId, run.parentRunId);
+    if (!parent || parent.status !== "succeeded" || parent.toolId !== COMPARATIVE_GENOMICS_TOOL_ID
+      || parent.toolVersion !== COMPARATIVE_GENOMICS_TOOL_VERSION || parent.parentRunId !== null
+      || parent.inputs.length !== 1 || parent.outputs.length !== 5 || bindings.length !== 1
+      || bindings[0]?.ordinal !== 1 || bindings[0]?.role !== "primary"
+      || bindings[0]?.parentRunId !== parent.id
+      || bindings[0]?.parentContentSha256 !== scienceEvidenceGraphResearchRunContentSha256(parent)) {
+      throw new Error("science-comparative-genomics-table-parent-invalid");
+    }
+    const expectedParentOutputs = [
+      [1, "ensembl-release-response", "application/json"],
+      [2, "ensembl-compara-gene-tree-response", "application/json"],
+      [3, "comparative-genomics-assessment", "application/vnd.agentlas.comparative-genomics-gene-tree+json"],
+      [4, "alignment-qc-publication-table", COMPARATIVE_GENOMICS_SOURCE_TABLE_MIME],
+      [5, "comparative-gene-tree-figure", "application/vnd.vega.v5+json"],
+    ] as const;
+    if (parent.inputs[0]?.ordinal !== 1 || parent.inputs[0]?.role !== "comparative-genomics-query"
+      || parent.inputs[0]?.mimeType !== "application/vnd.agentlas.science.comparative-genomics-input+json"
+      || sha256Json(parent.inputs.map(manifestResource)) !== parent.inputManifestSha256
+      || sha256Json(parent.outputs.map(manifestResource)) !== parent.outputManifestSha256
+      || parent.outputs.some((resource, index) => resource.ordinal !== expectedParentOutputs[index]![0]
+        || resource.role !== expectedParentOutputs[index]![1] || resource.mimeType !== expectedParentOutputs[index]![2])) {
+      throw new Error("science-comparative-genomics-table-parent-invalid");
+    }
+    parent.inputs.forEach((resource) => this.readRunBlob(resource));
+    parent.outputs.forEach((resource) => this.readRunBlob(resource));
+    const assessmentOutput = parent.outputs[2]!;
+    const sourceTableOutput = parent.outputs[3]!;
+    const sourceBytes = this.readRunBlob(sourceTableOutput);
+    if (sourceInput.sha256 !== sourceTableOutput.sha256 || !this.readRunBlob(sourceInput).equals(sourceBytes)) {
+      throw new Error("science-comparative-genomics-table-source-invalid");
+    }
+    let descriptor: Record<string, unknown>;
+    let assessment: Record<string, unknown>;
+    let sourceTable: Record<string, unknown>;
+    try {
+      descriptor = JSON.parse(this.readRunBlob(descriptorInput).toString("utf8")) as Record<string, unknown>;
+      assessment = JSON.parse(this.readRunBlob(assessmentOutput).toString("utf8")) as Record<string, unknown>;
+      sourceTable = JSON.parse(sourceBytes.toString("utf8")) as Record<string, unknown>;
+    } catch {
+      throw new Error("science-comparative-genomics-table-source-invalid");
+    }
+    const descriptorParent = descriptor.parent && typeof descriptor.parent === "object" && !Array.isArray(descriptor.parent)
+      ? descriptor.parent as Record<string, unknown> : null;
+    const descriptorAssessment = descriptorParent?.assessmentOutput && typeof descriptorParent.assessmentOutput === "object" && !Array.isArray(descriptorParent.assessmentOutput)
+      ? descriptorParent.assessmentOutput as Record<string, unknown> : null;
+    const descriptorTable = descriptorParent?.publicationTableOutput && typeof descriptorParent.publicationTableOutput === "object" && !Array.isArray(descriptorParent.publicationTableOutput)
+      ? descriptorParent.publicationTableOutput as Record<string, unknown> : null;
+    const expectedResourceDescriptor = (resource: ScienceResearchRunResource): Record<string, unknown> => ({
+      id: resource.id, ordinal: resource.ordinal, role: resource.role, mimeType: resource.mimeType,
+      byteSize: resource.byteSize, sha256: resource.sha256,
+    });
+    if (!hasExactKeys(descriptor, ["schema", "projection", "title", "parent"])
+      || descriptor.schema !== "agentlas.science-comparative-genomics-table-input/v1"
+      || descriptor.projection !== "comparative-genomics-publication-table-to-core-table/v1"
+      || typeof descriptor.title !== "string" || !descriptor.title.trim()
+      || !descriptorParent || !hasExactKeys(descriptorParent, ["runId", "toolId", "toolVersion", "contentSha256", "assessmentOutput", "publicationTableOutput"])
+      || descriptorParent.runId !== parent.id || descriptorParent.toolId !== parent.toolId
+      || descriptorParent.toolVersion !== parent.toolVersion
+      || descriptorParent.contentSha256 !== scienceEvidenceGraphResearchRunContentSha256(parent)
+      || sha256Json(descriptorAssessment) !== sha256Json(expectedResourceDescriptor(assessmentOutput))
+      || sha256Json(descriptorTable) !== sha256Json(expectedResourceDescriptor(sourceTableOutput))
+      || assessment.schema !== "agentlas.comparative-genomics-gene-tree/v1"
+      || sha256Json(assessment.publicationTable) !== sha256Json(sourceTable)
+      || sourceTable.schema !== "agentlas.science-table/v1") {
+      throw new Error("science-comparative-genomics-table-source-invalid");
+    }
+    return { run, parent, table, sourceTableSha256: sourceTableOutput.sha256 };
   }
 
   commitDatasetIngestion(input: CommitScienceDatasetIngestionInput): CommitScienceDatasetIngestionResult {
@@ -8763,6 +11241,17 @@ export class ScienceStore {
     const loopSessionId = input.loopSessionId === undefined || input.loopSessionId === null ? null : String(input.loopSessionId);
     const parentRunId = input.parentRunId === undefined || input.parentRunId === null ? null : String(input.parentRunId);
     if ((loopSessionId !== null && !UUID_RE.test(loopSessionId)) || (parentRunId !== null && !UUID_RE.test(parentRunId))) throw new Error("science-run-parent-invalid");
+    const explicitParentBindings = input.parentBindings === undefined
+      ? null
+      : normalizeResearchRunParentBindingInputs(input.parentBindings);
+    if (explicitParentBindings) {
+      const primary = explicitParentBindings.filter((binding) => binding.role === "primary");
+      if (!parentRunId || primary.length !== 1 || primary[0]!.parentRunId !== parentRunId) {
+        throw new Error("science-run-parent-binding-primary-invalid");
+      }
+    }
+    const parentBindings: ScienceResearchRunParentBindingInput[] = explicitParentBindings
+      ?? (parentRunId ? [{ ordinal: 1, role: "primary", parentRunId }] : []);
     const toolId = safeText(input.toolId, 240, "run-tool-id");
     const toolVersion = safeText(input.toolVersion, 120, "run-tool-version");
     const inputManifestSha256 = safeSha256(input.inputManifestSha256, "run-input-manifest-sha256");
@@ -8776,11 +11265,26 @@ export class ScienceStore {
     if (!Array.isArray(input.inputs) || input.inputs.length < 1 || input.inputs.length > 1_000) throw new Error("science-run-inputs-invalid");
     const inputs = input.inputs.map((resource) => normalizeResearchRunResourceInput(resource, "input"));
     if (sha256Json(inputs) !== inputManifestSha256) throw new Error("science-run-input-manifest-mismatch");
-    const canonicalInput = { projectId: input.projectId, conversationId: input.conversationId, originMessageId: input.originMessageId, loopSessionId, parentRunId, toolId, toolVersion, runtime: input.runtime, inputManifestSha256, environmentSha256, analysisPlan, inputs };
+    const canonicalInput = {
+      projectId: input.projectId, conversationId: input.conversationId, originMessageId: input.originMessageId,
+      loopSessionId, parentRunId, toolId, toolVersion, runtime: input.runtime, inputManifestSha256,
+      environmentSha256, analysisPlan, inputs,
+      ...(explicitParentBindings ? { parentBindings: explicitParentBindings } : {}),
+    };
     const inputSha256 = sha256Json(canonicalInput);
     return this.db.transaction(() => {
       const prior = this.replay<CreateScienceResearchRunResult>(input.requestId, "research-run.create", inputSha256);
-      if (prior) return { ...prior, replayed: true };
+      if (prior) {
+        const current = this.getResearchRunForProject(input.projectId, prior.run.id);
+        if (!current) throw new Error("science-run-replay-integrity-failed");
+        const currentParents = this.getResearchRunParentBindings(input.projectId, current.id);
+        if (currentParents.length !== parentBindings.length
+          || currentParents.some((binding, index) => binding.role !== parentBindings[index]!.role
+            || binding.parentRunId !== parentBindings[index]!.parentRunId)) {
+          throw new Error("science-run-parent-binding-replay-integrity-failed");
+        }
+        return { run: current, replayed: true };
+      }
       const origin = this.db.prepare(`SELECT m.id FROM messages m JOIN conversations c ON c.id = m.conversation_id
         WHERE m.project_id = ? AND m.conversation_id = ? AND m.id = ? AND c.project_id = ?`)
         .get(input.projectId, input.conversationId, input.originMessageId, input.projectId) as { id?: string } | undefined;
@@ -8789,9 +11293,11 @@ export class ScienceStore {
         const loop = this.db.prepare("SELECT id FROM loop_sessions WHERE id = ? AND project_id = ?").get(loopSessionId, input.projectId) as { id?: string } | undefined;
         if (!loop?.id) throw new Error("science-run-loop-not-found");
       }
-      if (parentRunId) {
-        const parent = this.db.prepare("SELECT id FROM research_runs WHERE id = ? AND project_id = ? AND status = 'succeeded'").get(parentRunId, input.projectId) as { id?: string } | undefined;
-        if (!parent?.id) throw new Error("science-run-parent-not-found");
+      const exactParents = new Map<string, ScienceResearchRun>();
+      for (const binding of parentBindings) {
+        const parent = this.getResearchRunForProject(input.projectId, binding.parentRunId);
+        if (!parent || parent.status !== "succeeded") throw new Error("science-run-parent-not-found");
+        exactParents.set(parent.id, parent);
       }
       if (analysisPlan) {
         const exactPlan = this.db.prepare(`SELECT s.id FROM analysis_specs s
@@ -8817,8 +11323,20 @@ export class ScienceStore {
       const insertResource = this.db.prepare(`INSERT INTO research_run_inputs
         (id,run_id,ordinal,role,mime_type,byte_size,sha256,blob_ref,artifact_id,artifact_version,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`);
       inputs.forEach((resource, index) => insertResource.run(randomUUID(), runId, index + 1, resource.role, resource.mimeType, resource.byteSize, resource.sha256, resource.blobRef, resource.artifactId ?? null, resource.artifactVersion ?? null, now));
+      const insertParent = this.db.prepare(`INSERT INTO research_run_parent_bindings
+        (id,project_id,run_id,ordinal,role,parent_run_id,parent_content_sha256,created_at)
+        VALUES (?,?,?,?,?,?,?,?)`);
+      parentBindings.forEach((binding) => {
+        const parent = exactParents.get(binding.parentRunId);
+        if (!parent) throw new Error("science-run-parent-not-found");
+        insertParent.run(randomUUID(), input.projectId, runId, binding.ordinal, binding.role, parent.id,
+          scienceEvidenceGraphResearchRunContentSha256(parent), now);
+      });
       const run = this.getResearchRunForProject(input.projectId, runId);
       if (!run) throw new Error("science-run-create-failed");
+      if (this.getResearchRunParentBindings(input.projectId, run.id).length !== parentBindings.length) {
+        throw new Error("science-run-parent-binding-create-failed");
+      }
       const result: CreateScienceResearchRunResult = { run, replayed: false };
       this.remember(input.requestId, "research-run.create", inputSha256, result, now);
       return result;
@@ -8863,6 +11381,7 @@ export class ScienceStore {
       projectId: String(row.project_id),
       runId: String(row.run_id),
       outputId: String(row.output_id),
+      outputOrdinal: safePositiveInteger(row.output_ordinal, 1, 1_000, "run-artifact-output-ordinal"),
       outputSha256: safeSha256(row.output_sha256, "run-artifact-output-sha256"),
       artifactId: String(row.artifact_id),
       artifactVersion: Number(row.artifact_version),
@@ -8873,7 +11392,9 @@ export class ScienceStore {
 
   getRunArtifactBinding(projectId: string, runId: string): ScienceRunArtifactBinding | null {
     if (!UUID_RE.test(projectId) || !UUID_RE.test(runId)) return null;
-    const row = this.db.prepare("SELECT * FROM research_run_artifact_bindings WHERE project_id = ? AND run_id = ?")
+    const row = this.db.prepare(`SELECT b.*,o.ordinal AS output_ordinal FROM research_run_artifact_bindings b
+      JOIN research_run_outputs o ON o.id = b.output_id AND o.run_id = b.run_id
+      WHERE b.project_id = ? AND b.run_id = ?`)
       .get(projectId, runId) as Record<string, unknown> | undefined;
     if (!row) return null;
     const binding = this.runArtifactBindingFromRow(row);
@@ -9484,12 +12005,18 @@ export class ScienceStore {
             throw new Error("science-run-artifact-chemistry-closure-invalid");
           }
         } else {
-          if (!hasExactKeys(descriptor, ["schema", "title", "retrievalRunId", "retrievalOutputSha256", "source"])
-            || descriptor.schema !== "agentlas.science-source-to-ketcher-input/v1"
+          const expectedIdentity = descriptor.expectedIdentity && typeof descriptor.expectedIdentity === "object" && !Array.isArray(descriptor.expectedIdentity)
+            ? descriptor.expectedIdentity as Record<string, unknown> : null;
+          if (!hasExactKeys(descriptor, ["schema", "title", "retrievalRunId", "retrievalOutputSha256", "expectedIdentity", "source"])
+            || descriptor.schema !== "agentlas.science-source-to-ketcher-input/v2"
             || descriptor.title !== envelope.artifact.title
             || typeof descriptor.retrievalRunId !== "string" || !UUID_RE.test(descriptor.retrievalRunId)
             || descriptor.retrievalRunId !== run.parentRunId
             || typeof descriptor.retrievalOutputSha256 !== "string" || !SHA256_RE.test(descriptor.retrievalOutputSha256)
+            || !expectedIdentity || !hasExactKeys(expectedIdentity, ["provider", "canonicalExternalId", "canonicalSmiles"])
+            || expectedIdentity.provider !== "pubchem"
+            || typeof expectedIdentity.canonicalExternalId !== "string" || !/^[1-9]\d{0,11}$/.test(expectedIdentity.canonicalExternalId)
+            || typeof expectedIdentity.canonicalSmiles !== "string" || !expectedIdentity.canonicalSmiles.trim()
             || !source || !hasExactKeys(source, ["id", "versionId", "contentSha256", "format", "value"])
             || source.format !== "sdf" || typeof source.value !== "string" || !source.value.trim()
             || typeof source.id !== "string" || typeof source.versionId !== "string"
@@ -9505,6 +12032,8 @@ export class ScienceStore {
             source.versionId,
           );
           if (verified.retrievalOutputSha256 !== descriptor.retrievalOutputSha256
+            || verified.externalId !== expectedIdentity.canonicalExternalId
+            || verified.canonicalSmiles !== expectedIdentity.canonicalSmiles
             || verified.source.version.contentSha256 !== source.contentSha256
             || verified.bytes.length !== sourceBytesInput.byteSize
             || createHash("sha256").update(verified.bytes).digest("hex") !== sourceBytesInput.sha256
@@ -9689,6 +12218,19 @@ export class ScienceStore {
     return this.verifiedSourceFromRow({ ...row, current_version: row.resolved_version });
   }
 
+  getVerifiedJsonDatabaseSourceVersionForTool(projectId: string, sourceId: string, sourceVersionId: string): { source: ScienceSource; bytes: Buffer } {
+    const source = this.getSourceVersionForProject(projectId, sourceId, sourceVersionId);
+    if (!source || source.kind !== "database-record" || source.version.accessState === "metadata-only"
+      || !source.version.contentSha256 || String(source.version.mimeType ?? "").toLowerCase().split(";", 1)[0].trim() !== "application/json") {
+      throw new Error("science-tool-source-json-database-version-not-found");
+    }
+    const bytes = this.verifiedSourceBytes(source);
+    if (!bytes || bytes.length > 16 * 1024 * 1024) throw new Error("science-tool-source-json-database-size-invalid");
+    try { JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); }
+    catch { throw new Error("science-tool-source-json-database-content-invalid"); }
+    return { source, bytes: Buffer.from(bytes) };
+  }
+
   getVerifiedSourceVersionForTool(projectId: string, sourceId: string, sourceVersionId: string): { source: ScienceSource; bytes: Buffer; format: "pdb" | "mmcif" } {
     const source = this.getSourceVersionForProject(projectId, sourceId, sourceVersionId);
     if (!source || source.version.accessState === "metadata-only" || !source.version.contentSha256) throw new Error("science-tool-source-version-not-found");
@@ -9711,9 +12253,10 @@ export class ScienceStore {
     if (mime !== "chemical/x-mdl-sdfile") throw new Error("science-tool-source-chemistry-format-invalid");
     const bytes = this.verifiedSourceBytes(source);
     if (!bytes || bytes.length > 4 * 1024 * 1024) throw new Error("science-tool-source-chemistry-size-invalid");
-    const value = bytes.toString("utf8");
-    if (Buffer.from(value, "utf8").length !== bytes.length
-      || createHash("sha256").update(value, "utf8").digest("hex") !== source.version.contentSha256
+    let value: string;
+    try { value = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
+    catch { throw new Error("science-tool-source-chemistry-content-invalid"); }
+    if (createHash("sha256").update(value, "utf8").digest("hex") !== source.version.contentSha256
       || (value.match(/^\$\$\$\$\s*$/gm) ?? []).length !== 1
       || !/\$\$\$\$\s*$/.test(value)) {
       throw new Error("science-tool-source-chemistry-content-invalid");
@@ -9726,18 +12269,20 @@ export class ScienceStore {
     retrievalRunId: string,
     sourceId: string,
     sourceVersionId: string,
-  ): { source: ScienceSource; bytes: Buffer; format: "sdf"; retrievalRun: ScienceResearchRun; retrievalOutputSha256: string; externalId: string } {
+  ): { source: ScienceSource; bytes: Buffer; format: "sdf"; retrievalRun: ScienceResearchRun; retrievalOutputSha256: string; externalId: string; canonicalSmiles: string } {
     if (![projectId, retrievalRunId, sourceId, sourceVersionId].every((value) => UUID_RE.test(value))) {
       throw new Error("science-tool-scientific-data-reference-invalid");
     }
     const retrievalRun = this.getResearchRunForProject(projectId, retrievalRunId);
     if (!retrievalRun || retrievalRun.status !== "succeeded"
       || retrievalRun.toolId !== "agentlas.scientific-data" || retrievalRun.toolVersion !== "1.0.0"
-      || retrievalRun.runtime !== "electron-main" || retrievalRun.inputs.length !== 1 || retrievalRun.outputs.length !== 1) {
+      || retrievalRun.runtime !== "electron-main" || retrievalRun.inputs.length !== 1 || retrievalRun.outputs.length !== 3) {
       throw new Error("science-tool-scientific-data-run-invalid");
     }
     const queryResource = retrievalRun.inputs[0];
-    const resultResource = retrievalRun.outputs[0];
+    const metadataResource = retrievalRun.outputs[0];
+    const structureResource = retrievalRun.outputs[1];
+    const resultResource = retrievalRun.outputs[2];
     const manifestResource = (resource: ScienceResearchRunResource): ScienceResearchRunResourceInput => ({
       role: resource.role,
       mimeType: resource.mimeType,
@@ -9754,14 +12299,22 @@ export class ScienceStore {
     }
     if (queryResource.role !== "scientific-data-query"
       || queryResource.mimeType !== "application/vnd.agentlas.scientific-data-query+json"
+      || metadataResource.role !== "provider-metadata-response"
+      || metadataResource.mimeType !== "application/json"
+      || structureResource.role !== "provider-structure-response"
+      || !["chemical/x-mdl-sdfile", "text/plain"].includes(structureResource.mimeType)
       || resultResource.role !== "scientific-data-retrieval"
       || resultResource.mimeType !== "application/vnd.agentlas.scientific-data-retrieval+json") {
       throw new Error("science-tool-scientific-data-run-invalid");
     }
     let queryEnvelope: Record<string, unknown>;
     let result: Record<string, unknown>;
+    let metadata: Record<string, unknown>;
+    let structureBytes: Buffer;
     try {
       queryEnvelope = safeJsonRecord(JSON.parse(this.readRunBlob(queryResource).toString("utf8")), 64 * 1024, "scientific-data-query");
+      metadata = safeJsonRecord(JSON.parse(this.readRunBlob(metadataResource).toString("utf8")), 2 * 1024 * 1024, "scientific-data-metadata");
+      structureBytes = this.readRunBlob(structureResource);
       result = safeJsonRecord(JSON.parse(this.readRunBlob(resultResource).toString("utf8")), 512 * 1024, "scientific-data-retrieval");
     } catch {
       throw new Error("science-tool-scientific-data-run-invalid");
@@ -9772,10 +12325,13 @@ export class ScienceStore {
       || queryEnvelope.schema !== "agentlas.scientific-data-query/v1"
       || !query || !hasExactKeys(query, ["provider", "namespace", "value"])
       || query.provider !== "pubchem" || !["cid", "name", "inchikey"].includes(String(query.namespace ?? ""))
-      || typeof query.value !== "string" || !query.value) {
+      || typeof query.value !== "string" || !query.value
+      || (query.namespace === "cid" && !/^[1-9]\d{0,11}$/.test(query.value))
+      || (query.namespace === "inchikey" && !/^[A-Z]{14}-[A-Z]{10}-[A-Z]$/.test(query.value))
+      || (query.namespace === "name" && !/^[\p{L}\p{N}][\p{L}\p{N} .,'()+\-]{0,239}$/u.test(query.value))) {
       throw new Error("science-tool-scientific-data-query-invalid");
     }
-    if (!hasExactKeys(result, ["schema", "provider", "providerVersion", "canonicalExternalId", "entityKind", "source", "receipts", "materialization", "runId", "replayed"])
+    if (!hasExactKeys(result, ["schema", "provider", "providerVersion", "canonicalExternalId", "entityKind", "metadata", "source", "receipts", "materialization", "runId", "replayed"])
       || result.schema !== "agentlas.scientific-data-retrieval/v1"
       || result.provider !== "pubchem" || result.providerVersion !== "1.0.0" || result.entityKind !== "compound"
       || result.runId !== retrievalRun.id || result.replayed !== false) {
@@ -9783,6 +12339,27 @@ export class ScienceStore {
     }
     const externalId = String(result.canonicalExternalId ?? "");
     if (!/^[1-9]\d{0,11}$/.test(externalId)) throw new Error("science-tool-scientific-data-result-invalid");
+    const propertyTable = metadata.PropertyTable && typeof metadata.PropertyTable === "object" && !Array.isArray(metadata.PropertyTable)
+      ? metadata.PropertyTable as Record<string, unknown> : null;
+    const properties = Array.isArray(propertyTable?.Properties) ? propertyTable.Properties : [];
+    const property = properties[0] && typeof properties[0] === "object" && !Array.isArray(properties[0])
+      ? properties[0] as Record<string, unknown> : null;
+    if (!property || !Number.isSafeInteger(property.CID) || String(property.CID) !== externalId) {
+      throw new Error("science-tool-scientific-data-result-invalid");
+    }
+    const propertyTitle = typeof property.Title === "string" && property.Title.trim()
+      ? property.Title.trim().slice(0, 1_000)
+      : `PubChem CID ${externalId}`;
+    const canonicalSmiles = typeof property.ConnectivitySMILES === "string"
+      ? property.ConnectivitySMILES
+      : typeof property.SMILES === "string" ? property.SMILES : null;
+    const resultMetadata = result.metadata && typeof result.metadata === "object" && !Array.isArray(result.metadata)
+      ? result.metadata as Record<string, unknown> : null;
+    if (!resultMetadata || !hasExactKeys(resultMetadata, ["kind", "cid", "title", "canonicalSmiles"])
+      || resultMetadata.kind !== "pubchem-compound" || resultMetadata.cid !== externalId
+      || resultMetadata.title !== propertyTitle || resultMetadata.canonicalSmiles !== canonicalSmiles) {
+      throw new Error("science-tool-scientific-data-result-invalid");
+    }
     const resultSource = result.source && typeof result.source === "object" && !Array.isArray(result.source)
       ? result.source as Record<string, unknown> : null;
     const resultVersion = resultSource?.version && typeof resultSource.version === "object" && !Array.isArray(resultSource.version)
@@ -9791,10 +12368,21 @@ export class ScienceStore {
       ? result.materialization as Record<string, unknown> : null;
     const canonicalUri = `https://pubchem.ncbi.nlm.nih.gov/compound/${externalId}`;
     if (!resultSource || !resultVersion || !materialization
+      || !hasExactKeys(resultSource, ["id", "projectId", "kind", "canonicalUri", "title", "authors", "publicationYear", "publisher", "containerTitle", "abstract", "verificationStatus", "currentVersion", "version", "createdAt", "updatedAt"])
+      || !hasExactKeys(resultVersion, ["id", "sourceId", "version", "accessState", "contentSha256", "mimeType", "assetRef", "retrievedAt", "retrievalMethod", "license", "createdAt"])
       || resultSource.id !== sourceId || resultSource.projectId !== projectId || resultSource.canonicalUri !== canonicalUri
-      || resultSource.publisher !== "PubChem" || resultVersion.id !== sourceVersionId
-      || resultVersion.sourceId !== sourceId || resultVersion.accessState !== "retrieved"
+      || resultSource.kind !== "database-record" || resultSource.publisher !== "PubChem" || resultSource.title !== propertyTitle
+      || sha256Json(resultSource.authors) !== sha256Json([]) || resultSource.publicationYear !== null
+      || resultSource.containerTitle !== null || resultSource.abstract !== null || resultSource.verificationStatus !== "unverified"
+      || !Number.isSafeInteger(resultSource.currentVersion) || Number(resultSource.currentVersion) < 1
+      || typeof resultSource.createdAt !== "string" || !Number.isFinite(Date.parse(resultSource.createdAt))
+      || typeof resultSource.updatedAt !== "string" || !Number.isFinite(Date.parse(resultSource.updatedAt))
+      || resultVersion.id !== sourceVersionId
+      || resultVersion.sourceId !== sourceId || resultVersion.version !== resultSource.currentVersion || resultVersion.accessState !== "retrieved"
       || resultVersion.mimeType !== "chemical/x-mdl-sdfile" || resultVersion.license !== null
+      || typeof resultVersion.retrievedAt !== "string" || !Number.isFinite(Date.parse(resultVersion.retrievedAt))
+      || resultVersion.retrievalMethod !== "agentlas-scientific-data:pubchem@1.0.0;license=contributor-specific"
+      || typeof resultVersion.createdAt !== "string" || !Number.isFinite(Date.parse(resultVersion.createdAt))
       || typeof resultVersion.contentSha256 !== "string" || !SHA256_RE.test(resultVersion.contentSha256)
       || resultVersion.assetRef !== `science-source-cas:sha256:${resultVersion.contentSha256}`
       || !hasExactKeys(materialization, ["status", "toolId", "retrievalRunId", "sourceId", "sourceVersionId", "reason"])
@@ -9804,8 +12392,19 @@ export class ScienceStore {
       throw new Error("science-tool-scientific-data-source-binding-invalid");
     }
     const verified = this.getVerifiedChemistrySourceVersionForTool(projectId, sourceId, sourceVersionId);
+    const verifiedAtRetrieval = {
+      ...verified.source,
+      currentVersion: resultSource.currentVersion,
+      updatedAt: resultSource.updatedAt,
+    };
     if (verified.source.canonicalUri !== canonicalUri
-      || resultVersion.contentSha256 !== verified.source.version.contentSha256) {
+      || resultVersion.contentSha256 !== verified.source.version.contentSha256
+      || sha256Json(resultSource) !== sha256Json(verifiedAtRetrieval)
+      || verified.source.title !== propertyTitle
+      || structureResource.sha256 !== verified.source.version.contentSha256
+      || structureResource.byteSize !== verified.bytes.length
+      || createHash("sha256").update(structureBytes).digest("hex") !== structureResource.sha256
+      || !verified.bytes.equals(structureBytes)) {
       throw new Error("science-tool-scientific-data-source-binding-invalid");
     }
     const receipts = Array.isArray(result.receipts) ? result.receipts : [];
@@ -9828,23 +12427,43 @@ export class ScienceStore {
       path: `/rest/pug/compound/cid/${externalId}/record/SDF`,
       search: "?record_type=3d",
     });
-    if (!propertyReceipt || propertyReceipt.status !== "ok" || propertyReceipt.httpStatus !== 200
+    const receiptKeys = [
+      "endpointOrigin", "endpointPath", "endpointSearch", "requestSha256", "responseSha256", "retrievedAt", "durationMs",
+      "status", "httpStatus", "mimeType", "byteSize", "retryCount", "headers", "errorCode",
+    ];
+    const headerKeys = ["etag", "lastModified", "retryAfter", "rateLimit", "rateRemaining", "throttlingControl"];
+    const receiptShapeValid = (receipt: Record<string, unknown> | null): boolean => {
+      const headers = receipt?.headers && typeof receipt.headers === "object" && !Array.isArray(receipt.headers)
+        ? receipt.headers as Record<string, unknown> : null;
+      return Boolean(receipt && hasExactKeys(receipt, receiptKeys) && headers && hasExactKeys(headers, headerKeys)
+        && receipt.status === "ok" && receipt.httpStatus === 200 && receipt.errorCode === null
+        && typeof receipt.retrievedAt === "string" && Number.isFinite(Date.parse(receipt.retrievedAt))
+        && Number.isSafeInteger(receipt.durationMs) && Number(receipt.durationMs) >= 0
+        && Number.isSafeInteger(receipt.retryCount) && Number(receipt.retryCount) >= 0 && Number(receipt.retryCount) <= 2
+        && Object.values(headers ?? {}).every((value) => value === null || typeof value === "string"));
+    };
+    if (!receiptShapeValid(propertyReceipt) || !propertyReceipt || propertyReceipt.status !== "ok" || propertyReceipt.httpStatus !== 200
       || propertyReceipt.endpointOrigin !== "https://pubchem.ncbi.nlm.nih.gov"
       || propertyReceipt.endpointPath !== propertyPath
+      || propertyReceipt.endpointSearch !== ""
       || propertyReceipt.requestSha256 !== expectedPropertyRequestSha256
       || propertyReceipt.mimeType !== "application/json"
-      || typeof propertyReceipt.responseSha256 !== "string" || !SHA256_RE.test(propertyReceipt.responseSha256)
-      || typeof propertyReceipt.byteSize !== "number" || propertyReceipt.byteSize < 1
-      || !sdfReceipt || sdfReceipt.status !== "ok" || sdfReceipt.httpStatus !== 200
+      || propertyReceipt.responseSha256 !== metadataResource.sha256
+      || propertyReceipt.byteSize !== metadataResource.byteSize
+      || !receiptShapeValid(sdfReceipt) || !sdfReceipt || sdfReceipt.status !== "ok" || sdfReceipt.httpStatus !== 200
       || sdfReceipt.endpointOrigin !== "https://pubchem.ncbi.nlm.nih.gov"
       || sdfReceipt.endpointPath !== `/rest/pug/compound/cid/${externalId}/record/SDF`
+      || sdfReceipt.endpointSearch !== "?record_type=3d"
       || sdfReceipt.requestSha256 !== expectedRequestSha256
-      || sdfReceipt.mimeType !== "chemical/x-mdl-sdfile"
+      || sdfReceipt.mimeType !== structureResource.mimeType
       || sdfReceipt.responseSha256 !== verified.source.version.contentSha256
       || sdfReceipt.byteSize !== verified.bytes.length) {
       throw new Error("science-tool-scientific-data-receipt-binding-invalid");
     }
-    return { ...verified, retrievalRun, retrievalOutputSha256: resultResource.sha256, externalId };
+    if (typeof canonicalSmiles !== "string" || !canonicalSmiles.trim() || canonicalSmiles.length > 200_000) {
+      throw new Error("science-tool-scientific-data-identity-unavailable");
+    }
+    return { ...verified, retrievalRun, retrievalOutputSha256: resultResource.sha256, externalId, canonicalSmiles: canonicalSmiles.trim() };
   }
 
   private validateStatisticsRunLineage(
@@ -10099,7 +12718,12 @@ export class ScienceStore {
           groups.set(group, values);
           return { rowIndex, group, value };
         });
-        const names = [...groups.keys()].sort(compareLabels);
+        // A Map preserves insertion order, which is the order the arms appear in the researcher's table.
+        // For a dose study that order is the only thing that encodes low-dose before high-dose, and
+        // sorting the labels alphabetically put control, high-dose, low-dose on the axis of a figure
+        // captioned "dose response". The comparison itself is order-independent, so no statistic
+        // changes; the axis and the reported row order follow the table instead of the alphabet.
+        const names = [...groups.keys()];
         if (names.length < 2 || names.some((name) => (groups.get(name)?.length ?? 0) < 2)) throw new Error("science-statistics-data-table-projection-invalid");
         expectedProjected = { groups: names.map((name) => ({ name, values: groups.get(name) as number[] })) };
         expectedSourceTable = { ...source, method: projectionReceipt.method, projectionKind: projectionReceipt.projectionKind, ...columns };
@@ -10670,9 +13294,91 @@ export class ScienceStore {
     return payload;
   }
 
+  private validateExtantArchosaurLocusPanelLineage(
+    projectId: string,
+    payload: Record<string, unknown>,
+    sourceRunId: string | null,
+  ): ScienceExtantArchosaurLocusPanelArtifactPayload {
+    const validated = validateScienceExtantArchosaurLocusPanelArtifactPayload(payload);
+    const source = validated.source;
+    const run = sourceRunId ? this.getResearchRunForProject(projectId, sourceRunId) : null;
+    if (!run || run.status !== "succeeded" || run.id !== source.outputs.runId
+      || run.toolId !== EXTANT_ARCHOSAUR_LOCUS_PANEL_TOOL_ID
+      || run.toolVersion !== EXTANT_ARCHOSAUR_LOCUS_PANEL_TOOL_VERSION
+      || run.inputs.length !== 3 || run.outputs.length !== 3
+      || run.inputManifestSha256 !== source.outputs.inputManifestSha256
+      || run.outputManifestSha256 !== source.outputs.outputManifestSha256
+      || run.environmentSha256 !== source.outputs.environmentSha256) {
+      throw new Error("science-extant-archosaur-locus-panel-run-lineage-invalid");
+    }
+    const expectedOutputs = [source.outputs.analysis, source.outputs.publicationTable, source.outputs.figure];
+    const expectedContracts = [
+      ["extant-archosaur-locus-panel-analysis", "application/vnd.agentlas.science.extant-archosaur-locus-panel+json"],
+      ["extant-archosaur-locus-panel-publication-table", "application/vnd.agentlas.science-table+json"],
+      ["extant-archosaur-locus-panel-figure", "application/vnd.vega.v5+json"],
+    ] as const;
+    run.outputs.forEach((output, index) => {
+      const pointer = expectedOutputs[index]!;
+      const contract = expectedContracts[index]!;
+      if (output.ordinal !== index + 1 || output.role !== contract[0] || output.mimeType !== contract[1]
+        || output.sha256 !== pointer.sha256 || output.role !== pointer.role || output.mimeType !== pointer.mimeType
+        || output.artifactId !== null || output.artifactVersion !== null) {
+        throw new Error("science-extant-archosaur-locus-panel-output-lineage-invalid");
+      }
+    });
+    const manifest = (resource: ScienceResearchRunResource): Record<string, unknown> => ({
+      role: resource.role, mimeType: resource.mimeType, byteSize: resource.byteSize, sha256: resource.sha256,
+      blobRef: resource.blobRef, artifactId: resource.artifactId, artifactVersion: resource.artifactVersion,
+    });
+    if (sha256Json(run.inputs.map(manifest)) !== run.inputManifestSha256
+      || sha256Json(run.outputs.map(manifest)) !== run.outputManifestSha256
+      || !this.readRunBlob(run.outputs[0]!).equals(Buffer.from(JSON.stringify(canonicalValue(validated.analysis)), "utf8"))
+      || !this.readRunBlob(run.outputs[1]!).equals(Buffer.from(JSON.stringify(canonicalValue(validated.analysis.publicationTable)), "utf8"))
+      || !this.readRunBlob(run.outputs[2]!).equals(Buffer.from(JSON.stringify(canonicalValue(validated.spec)), "utf8"))) {
+      throw new Error("science-extant-archosaur-locus-panel-output-lineage-invalid");
+    }
+    const parentBindings = this.getResearchRunParentBindings(projectId, run.id);
+    const expectedParents = [source.parents.geneTree, source.parents.referenceAssembly];
+    const expectedParentContracts = [
+      { role: "primary", toolId: COMPARATIVE_GENOMICS_TOOL_ID, toolVersion: COMPARATIVE_GENOMICS_TOOL_VERSION },
+      { role: "reference-assembly-manifest", toolId: "agentlas.extant-reference-assembly-manifest", toolVersion: "1.0.0" },
+    ] as const;
+    if (parentBindings.length !== expectedParents.length || parentBindings.some((binding, index) => {
+      const pointer = expectedParents[index]!;
+      const contract = expectedParentContracts[index]!;
+      const parent = this.getResearchRunForProject(projectId, binding.parentRunId);
+      const parentOutput = parent?.outputs[pointer.assessmentOutput.ordinal - 1];
+      return binding.ordinal !== index + 1 || binding.role !== contract.role || binding.parentRunId !== pointer.runId
+        || binding.parentContentSha256 !== pointer.runContentSha256 || !parent || parent.status !== "succeeded"
+        || parent.toolId !== contract.toolId || parent.toolVersion !== contract.toolVersion
+        || parent.inputManifestSha256 !== pointer.inputManifestSha256
+        || parent.outputManifestSha256 !== pointer.outputManifestSha256
+        || parent.environmentSha256 !== pointer.environmentSha256
+        || parentOutput?.role !== pointer.assessmentOutput.role
+        || parentOutput?.mimeType !== pointer.assessmentOutput.mimeType
+        || parentOutput?.sha256 !== pointer.assessmentOutput.sha256;
+    })) {
+      throw new Error("science-extant-archosaur-locus-panel-parent-lineage-invalid");
+    }
+    const geneTree = this.getResearchRunForProject(projectId, source.parents.geneTree.runId);
+    const assembly = this.getResearchRunForProject(projectId, source.parents.referenceAssembly.runId);
+    const parentInputs = [run.inputs[1]!, run.inputs[2]!];
+    const geneTreeOutput = geneTree?.outputs[source.parents.geneTree.assessmentOutput.ordinal - 1];
+    const assemblyOutput = assembly?.outputs[source.parents.referenceAssembly.assessmentOutput.ordinal - 1];
+    if (!geneTreeOutput || !assemblyOutput
+      || parentInputs[0].sha256 !== source.parents.geneTree.assessmentOutput.sha256
+      || parentInputs[1].sha256 !== source.parents.referenceAssembly.assessmentOutput.sha256
+      || !this.readRunBlob(parentInputs[0]).equals(this.readRunBlob(geneTreeOutput))
+      || !this.readRunBlob(parentInputs[1]).equals(this.readRunBlob(assemblyOutput))) {
+      throw new Error("science-extant-archosaur-locus-panel-parent-input-lineage-invalid");
+    }
+    return validated;
+  }
+
   private validateArtifactPayloadForProject(projectId: string, rendererId: ScienceRendererId, payload: Record<string, unknown>, sourceRunId: string | null = null): void {
     if (rendererId === "agentlas.vega") {
-      if (payload.schema === SCIENCE_STATISTICS_FIGURE_ARTIFACT_SCHEMA) this.validateStatisticsFigureLineage(projectId, payload, sourceRunId);
+      if (payload.schema === "agentlas.science.extant-archosaur-locus-panel-artifact/v1") this.validateExtantArchosaurLocusPanelLineage(projectId, payload, sourceRunId);
+      else if (payload.schema === SCIENCE_STATISTICS_FIGURE_ARTIFACT_SCHEMA) this.validateStatisticsFigureLineage(projectId, payload, sourceRunId);
       else validateVegaSpec(payload);
       return;
     }
@@ -10724,6 +13430,7 @@ export class ScienceStore {
     }
     if (rendererId === SCIENCE_TABLE_RENDERER_ID) {
       if (!sourceRunId) throw new Error("science-table-ingestion-run-invalid");
+      const sourceRun = this.getResearchRunForProject(projectId, sourceRunId);
       if (payload.schema === SCIENCE_STATISTICS_ARTIFACT_SCHEMA) {
         this.validateStatisticsRunLineage(projectId, sourceRunId, payload);
       } else if (payload.schema === SCIENCE_PHYSICS_ARTIFACT_SCHEMA) {
@@ -10737,14 +13444,124 @@ export class ScienceStore {
         const validated = validateScienceMaterialsArtifactPayload(payload);
         const run = this.getResearchRunForProject(projectId, sourceRunId);
         const source = this.getSourceVersionForProject(projectId, validated.source.id, validated.source.versionId);
-        const rawOutput = run?.outputs.find((output) => output.role === "provider-response" && output.mimeType === "application/json");
+        const rawOutput = run?.outputs.find((output) => output.role === "provider-response"
+          && ["application/json", "application/vnd.api+json"].includes(output.mimeType));
         const catalogOutput = run?.outputs.find((output) => output.role === "materials-catalog" && output.mimeType === "application/vnd.agentlas.science-materials-catalog+json");
-        if (!run || run.status !== "succeeded" || run.toolId !== SCIENCE_MATERIALS_TOOL_ID || run.toolVersion !== SCIENCE_MATERIALS_TOOL_VERSION
+        if (!run || run.status !== "succeeded" || run.toolId !== SCIENCE_MATERIALS_TOOL_ID || !["1.0.0", SCIENCE_MATERIALS_TOOL_VERSION].includes(run.toolVersion)
           || run.inputs.length !== 1 || run.inputs[0]?.role !== "materials-query" || run.inputs[0]?.mimeType !== "application/vnd.agentlas.science-materials-query+json"
           || run.inputs[0]?.sha256 !== validated.inputSha256 || !source || source.version.contentSha256 !== validated.responseSha256
           || source.canonicalUri !== validated.source.canonicalUri || rawOutput?.sha256 !== validated.responseSha256 || !catalogOutput) {
           throw new Error("science-materials-run-lineage-invalid");
         }
+      } else if (payload.schema === "agentlas.science-table/v1"
+        && sourceRun?.toolId === "agentlas.paleontology-candidate-comparison"
+        && sourceRun.toolVersion === "1.0.0") {
+        const columns = Array.isArray(payload.columns) ? payload.columns : null;
+        const rows = Array.isArray(payload.rows) ? payload.rows : null;
+        const notes = Array.isArray(payload.notes) ? payload.notes : null;
+        if (!hasExactKeys(payload, ["schema", "title", "columns", "rows", "notes"])
+          || typeof payload.title !== "string" || !payload.title.trim() || payload.title.length > 500
+          || !columns || columns.length < 1 || columns.length > 100
+          || !rows || rows.length < 2 || rows.length > 20
+          || !notes || notes.length < 1 || notes.length > 20
+          || notes.some((note) => typeof note !== "string" || !note.trim() || note.length > 2_000)
+          || columns.some((rawColumn) => {
+            const column = rawColumn && typeof rawColumn === "object" && !Array.isArray(rawColumn)
+              ? rawColumn as Record<string, unknown> : null;
+            return !column || !hasExactKeys(column, ["id", "label", "type", "unit"])
+              || typeof column.id !== "string" || !column.id.trim() || typeof column.label !== "string" || !column.label.trim()
+              || !["integer", "number", "boolean", "string"].includes(String(column.type))
+              || (column.unit !== null && typeof column.unit !== "string");
+          })
+          || rows.some((row) => !Array.isArray(row) || row.length !== columns.length
+            || row.some((cell) => cell !== null && !["string", "number", "boolean"].includes(typeof cell)
+              || (typeof cell === "number" && !Number.isFinite(cell))))) {
+          throw new Error("science-paleontology-candidate-comparison-table-invalid");
+        }
+        const tableOutput = sourceRun.outputs[1];
+        const manifestResource = (resource: ScienceResearchRunResource): Record<string, unknown> => ({
+          role: resource.role,
+          mimeType: resource.mimeType,
+          byteSize: resource.byteSize,
+          sha256: resource.sha256,
+          blobRef: resource.blobRef,
+          artifactId: resource.artifactId,
+          artifactVersion: resource.artifactVersion,
+        });
+        if (sourceRun.status !== "succeeded" || sourceRun.inputs.length !== 1 || sourceRun.outputs.length !== 2
+          || sourceRun.parentRunId === null || !tableOutput || tableOutput.ordinal !== 2
+          || tableOutput.role !== "paleontology-candidate-comparison-publication-table"
+          || tableOutput.mimeType !== "application/vnd.agentlas.science-table+json"
+          || tableOutput.artifactId !== null || tableOutput.artifactVersion !== null
+          || sha256Json(sourceRun.inputs.map(manifestResource)) !== sourceRun.inputManifestSha256
+          || sha256Json(sourceRun.outputs.map(manifestResource)) !== sourceRun.outputManifestSha256
+          || !this.readRunBlob(tableOutput).equals(Buffer.from(JSON.stringify(canonicalValue(payload)), "utf8"))) {
+          throw new Error("science-paleontology-candidate-comparison-table-lineage-invalid");
+        }
+        const bindings = this.getResearchRunParentBindings(projectId, sourceRun.id);
+        if (bindings.length < 4 || bindings.length % 2 !== 0 || bindings[0]?.role !== "primary"
+          || bindings[0]?.parentRunId !== sourceRun.parentRunId
+          || bindings.some((binding, index) => {
+            const ordinal = index + 1;
+            const candidateOrdinal = Math.floor(index / 2) + 1;
+            const expectedRole = index === 0 ? "primary"
+              : index % 2 === 1 ? `candidate-${candidateOrdinal}-catalog` : `candidate-${candidateOrdinal}-stratigraphic`;
+            const parent = this.getResearchRunForProject(projectId, binding.parentRunId);
+            return binding.ordinal !== ordinal || binding.role !== expectedRole || !parent || parent.status !== "succeeded"
+              || binding.parentContentSha256 !== scienceEvidenceGraphResearchRunContentSha256(parent);
+          })
+          || new Set(bindings.map((binding) => binding.parentRunId)).size !== bindings.length) {
+          throw new Error("science-paleontology-candidate-comparison-parent-lineage-invalid");
+        }
+      } else if (payload.schema === "agentlas.science-table/v1"
+        && sourceRun?.toolId === "agentlas.extant-reference-assembly-manifest"
+        && sourceRun.toolVersion === "1.0.0") {
+        const columns = Array.isArray(payload.columns) ? payload.columns : null;
+        const rows = Array.isArray(payload.rows) ? payload.rows : null;
+        const notes = Array.isArray(payload.notes) ? payload.notes : null;
+        if (!hasExactKeys(payload, ["schema", "title", "columns", "rows", "notes"])
+          || typeof payload.title !== "string" || !payload.title.trim() || payload.title.length > 500
+          || !columns || columns.length < 1 || columns.length > 100
+          || !rows || rows.length < 2 || rows.length > 8
+          || !notes || notes.length < 1 || notes.length > 20
+          || notes.some((note) => typeof note !== "string" || !note.trim() || note.length > 2_000)
+          || columns.some((rawColumn) => {
+            const column = rawColumn && typeof rawColumn === "object" && !Array.isArray(rawColumn) ? rawColumn as Record<string, unknown> : null;
+            return !column || !hasExactKeys(column, ["id", "label", "type", "unit"])
+              || typeof column.id !== "string" || !column.id.trim() || typeof column.label !== "string" || !column.label.trim()
+              || !["integer", "number", "boolean", "string"].includes(String(column.type))
+              || (column.unit !== null && typeof column.unit !== "string");
+          })
+          || rows.some((row) => !Array.isArray(row) || row.length !== columns.length
+            || row.some((cell) => cell !== null && !["string", "number", "boolean"].includes(typeof cell)
+              || (typeof cell === "number" && !Number.isFinite(cell))))) {
+          throw new Error("science-extant-reference-assembly-table-invalid");
+        }
+        const rawCount = sourceRun.outputs.length - 2;
+        const assessmentOutput = sourceRun.outputs[rawCount];
+        const tableOutput = sourceRun.outputs[rawCount + 1];
+        const manifestResource = (resource: ScienceResearchRunResource): Record<string, unknown> => ({
+          role: resource.role, mimeType: resource.mimeType, byteSize: resource.byteSize, sha256: resource.sha256,
+          blobRef: resource.blobRef, artifactId: resource.artifactId, artifactVersion: resource.artifactVersion,
+        });
+        const bindings = this.getResearchRunSourceBindings(projectId, sourceRun.id);
+        const outputBindings = this.getResearchRunSourceOutputBindings(projectId, sourceRun.id);
+        if (rawCount < 9 || (rawCount - 1) % 4 !== 0 || sourceRun.inputs.length !== 1
+          || !assessmentOutput || assessmentOutput.role !== "extant-reference-assembly-assessment"
+          || !tableOutput || tableOutput.role !== "extant-reference-assembly-publication-table"
+          || tableOutput.mimeType !== "application/vnd.agentlas.science-table+json"
+          || sha256Json(sourceRun.inputs.map(manifestResource)) !== sourceRun.inputManifestSha256
+          || sha256Json(sourceRun.outputs.map(manifestResource)) !== sourceRun.outputManifestSha256
+          || !this.readRunBlob(tableOutput).equals(Buffer.from(JSON.stringify(canonicalValue(payload)), "utf8"))
+          || bindings.length !== rawCount || outputBindings.length !== rawCount
+          || bindings.some((binding, index) => binding.ordinal !== index + 1 || outputBindings[index]?.outputOrdinal !== index + 1
+            || binding.contentSha256 !== outputBindings[index]?.outputSha256)) {
+          throw new Error("science-extant-reference-assembly-table-lineage-invalid");
+        }
+      } else if (payload.schema === "agentlas.science-table/v1"
+        && sourceRun?.toolId === COMPARATIVE_GENOMICS_TABLE_TOOL_ID
+        && sourceRun.toolVersion === COMPARATIVE_GENOMICS_TABLE_TOOL_VERSION) {
+        this.verifiedComparativeGenomicsTableForRun(projectId, sourceRunId, payload, false);
       } else {
         this.verifiedDatasetTableForRun(projectId, sourceRunId, payload);
       }
@@ -11305,6 +14122,105 @@ export class ScienceStore {
     })();
   }
 
+  /**
+   * The content hash of the approved research contract, over the terms the intake gate rests on.
+   *
+   * Deliberately not the whole row: timestamps and the row id move for reasons that are not a
+   * change to what was agreed. What is hashed is what an approval means -- the objective, the
+   * criteria that decide success and failure, the constraints, and the budgets -- plus the exact
+   * version, so re-approving different terms cannot reuse an older authorization.
+   */
+  approvedResearchContractSha256(projectId: string): string | null {
+    const contract = this.latestResearchContract(projectId);
+    if (!contract || contract.status !== "approved" || !contract.approvedAt) return null;
+    return sha256Json({
+      schema: "agentlas.science.research-contract-terms/v1",
+      contractId: contract.id,
+      projectId: contract.projectId,
+      version: contract.version,
+      objective: contract.objective,
+      successCriteria: contract.successCriteria,
+      failureCriteria: contract.failureCriteria,
+      constraints: contract.constraints,
+      maxEpisodes: contract.maxEpisodes,
+      maxWallTimeMinutes: contract.maxWallTimeMinutes,
+    });
+  }
+
+  /**
+   * The project's standing approval policy, or the default when it has not set one.
+   *
+   * The default is autonomous for everything except the submission attestation. Stopping a
+   * research run at four separate gates is friction a researcher did not ask for, and the
+   * integrity these gates protect comes from *recording* who authorized what, not from making
+   * them click. The attestation is the exception because it is a statement made in their name to
+   * a publisher; a project has to name that scope deliberately.
+   */
+  approvalPolicy(projectId: string): ScienceApprovalPolicy {
+    const row = UUID_RE.test(projectId)
+      ? this.db.prepare(`SELECT * FROM project_approval_policies WHERE project_id = ?
+          ORDER BY revision DESC LIMIT 1`).get(projectId) as Record<string, unknown> | undefined
+      : undefined;
+    if (!row) {
+      return {
+        id: stableUuid(`science-approval-policy-default:v1:${projectId}`),
+        projectId,
+        revision: 0,
+        mode: "autonomous",
+        scopes: ["research-contract", "hypothesis", "journal-identity"],
+        grantedBy: "project-default",
+        note: "Default policy: the study proceeds and records each authorization. The submission attestation still asks, because it is made in the researcher's name to a publisher.",
+        createdAt: new Date(0).toISOString(),
+      };
+    }
+    return {
+      id: String(row.id),
+      projectId,
+      revision: Number(row.revision),
+      mode: row.mode === "checkpoint" ? "checkpoint" : "autonomous",
+      scopes: JSON.parse(String(row.scopes_json)) as ScienceApprovalScope[],
+      grantedBy: String(row.granted_by),
+      note: row.note === null || row.note === undefined ? null : String(row.note),
+      createdAt: String(row.created_at),
+    };
+  }
+
+  /** Whether a decision may proceed without stopping, under the project's current policy. */
+  approvalIsStanding(projectId: string, scope: ScienceApprovalScope): boolean {
+    const policy = this.approvalPolicy(projectId);
+    return policy.mode === "autonomous" && policy.scopes.includes(scope);
+  }
+
+  /**
+   * Records a new approval policy. Append-only: a change is a new revision, never an edit, so the
+   * history of what was authorized when stays readable.
+   */
+  setApprovalPolicy(input: SetScienceApprovalPolicyInput): ScienceApprovalPolicy {
+    if (!input || !UUID_RE.test(String(input.requestId ?? "")) || !UUID_RE.test(String(input.projectId ?? ""))) {
+      throw new Error("science-approval-policy-target-invalid");
+    }
+    if (input.mode !== "autonomous" && input.mode !== "checkpoint") throw new Error("science-approval-policy-mode-invalid");
+    const scopes = Array.isArray(input.scopes) ? [...new Set(input.scopes)] : null;
+    if (!scopes || scopes.some((scope) => !SCIENCE_APPROVAL_SCOPES.includes(scope))) {
+      throw new Error("science-approval-policy-scope-invalid");
+    }
+    const grantedBy = safeText(input.grantedBy, 200, "approval-policy-granted-by");
+    return this.db.transaction(() => {
+      const project = this.getProject(input.projectId);
+      if (!project) throw new Error("science-approval-policy-project-unavailable");
+      const previous = this.db.prepare("SELECT MAX(revision) AS revision FROM project_approval_policies WHERE project_id = ?")
+        .get(input.projectId) as { revision: number | null };
+      const revision = Number(previous?.revision ?? 0) + 1;
+      const createdAt = new Date().toISOString();
+      const id = stableUuid(`science-approval-policy:v1:${input.projectId}:${revision}`);
+      this.db.prepare(`INSERT INTO project_approval_policies
+        (id,project_id,revision,mode,scopes_json,granted_by,note,created_at) VALUES (?,?,?,?,?,?,?,?)`)
+        .run(id, input.projectId, revision, input.mode, JSON.stringify(scopes), grantedBy,
+          input.note === undefined || input.note === null ? null : safeText(input.note, 2_000, "approval-policy-note"), createdAt);
+      return { id, projectId: input.projectId, revision, mode: input.mode, scopes, grantedBy, note: input.note ?? null, createdAt };
+    })();
+  }
+
   latestResearchContract(projectId: string): ScienceResearchContract | null {
     if (!UUID_RE.test(projectId)) return null;
     const row = this.db.prepare("SELECT * FROM research_contracts WHERE project_id = ? ORDER BY version DESC LIMIT 1").get(projectId) as Record<string, unknown> | undefined;
@@ -11631,7 +14547,7 @@ export class ScienceStore {
   pauseActiveLoopSessionsForHostBoundary(reason: "app_closed" | "crash_recovery"): number {
     return this.db.transaction(() => {
       const rows = this.db.prepare(`SELECT * FROM loop_sessions
-        WHERE status IN ('running','pausing') ORDER BY created_at, id`).all() as Record<string, unknown>[];
+        WHERE status IN ('queued','running','pausing') ORDER BY created_at, id`).all() as Record<string, unknown>[];
       let paused = 0;
       for (const row of rows) {
         const current = loopSessionFromRow(row);
@@ -11653,6 +14569,7 @@ export class ScienceStore {
             action: "pause",
             pauseReason: reason,
             automaticResume: false,
+            priorStatus: current.status,
             priorActiveRunId: current.activeRunId,
             status: session.status,
             version: session.version,
@@ -11712,6 +14629,115 @@ export class ScienceStore {
     const rows = this.db.prepare("SELECT * FROM research_episodes WHERE project_id = ? AND loop_session_id = ? ORDER BY ordinal")
       .all(projectId, loopSessionId) as Record<string, unknown>[];
     return rows.map((row) => researchEpisodeFromRow(row, this.researchEpisodeResult(String(row.id))));
+  }
+
+  listEpisodeResultReviewReceipts(
+    projectId: string,
+    episodeId?: string,
+    labId?: string,
+  ): ScienceEpisodeResultReviewReceipt[] {
+    if (!UUID_RE.test(projectId) || episodeId !== undefined && !UUID_RE.test(episodeId)
+      || labId !== undefined && !LAB_ID_RE.test(labId)) return [];
+    const clauses = ["project_id = ?"];
+    const params: unknown[] = [projectId];
+    if (episodeId !== undefined) { clauses.push("episode_id = ?"); params.push(episodeId); }
+    if (labId !== undefined) { clauses.push("lab_id = ?"); params.push(labId); }
+    const rows = this.db.prepare(`SELECT * FROM research_episode_result_review_receipts
+      WHERE ${clauses.join(" AND ")} ORDER BY created_at, revision, id`).all(...params) as Record<string, unknown>[];
+    return rows.map(episodeResultReviewFromRow);
+  }
+
+  getLatestEpisodeResultReviewReceipt(
+    projectId: string,
+    episodeId: string,
+    labId: string,
+  ): ScienceEpisodeResultReviewReceipt | null {
+    if (!UUID_RE.test(projectId) || !UUID_RE.test(episodeId) || !LAB_ID_RE.test(labId)) return null;
+    const row = this.db.prepare(`SELECT * FROM research_episode_result_review_receipts
+      WHERE project_id = ? AND episode_id = ? AND lab_id = ? ORDER BY revision DESC LIMIT 1`)
+      .get(projectId, episodeId, labId) as Record<string, unknown> | undefined;
+    return row ? episodeResultReviewFromRow(row) : null;
+  }
+
+  getEpisodeResultReviewReceiptByRequestId(requestId: string): ScienceEpisodeResultReviewReceipt | null {
+    if (!UUID_RE.test(requestId)) return null;
+    const row = this.db.prepare("SELECT * FROM research_episode_result_review_receipts WHERE request_id = ?")
+      .get(requestId) as Record<string, unknown> | undefined;
+    return row ? episodeResultReviewFromRow(row) : null;
+  }
+
+  replayEpisodeResultReviewRecord(
+    requestId: string,
+    inputSha256: string,
+  ): RecordScienceEpisodeResultReviewResult | null {
+    if (!UUID_RE.test(requestId) || !SHA256_RE.test(inputSha256)) throw new Error("science-episode-result-review-replay-invalid");
+    const prior = this.replay<RecordScienceEpisodeResultReviewResult>(requestId, "episode-result-review.record", inputSha256);
+    if (!prior) return null;
+    if (prior.outcome !== "recorded") throw new Error("science-episode-result-review-replay-integrity-failed");
+    const receipt = this.getEpisodeResultReviewReceiptByRequestId(requestId);
+    if (!receipt || receipt.id !== prior.receipt.id || receipt.reviewSha256 !== prior.receipt.reviewSha256) {
+      throw new Error("science-episode-result-review-replay-integrity-failed");
+    }
+    return { outcome: "recorded", receipt, replayed: true };
+  }
+
+  appendEpisodeResultReviewReceipt(
+    receipt: ScienceEpisodeResultReviewReceipt,
+    inputSha256: string,
+  ): RecordScienceEpisodeResultReviewResult {
+    assertScienceEpisodeResultReviewReceipt(receipt);
+    if (!SHA256_RE.test(inputSha256)) throw new Error("science-episode-result-review-input-sha-invalid");
+    return this.db.transaction(() => {
+      const replay = this.replayEpisodeResultReviewRecord(receipt.requestId, inputSha256);
+      if (replay) return replay;
+      const project = this.getProject(receipt.projectId);
+      const session = this.getLoopSessionForProject(receipt.projectId, receipt.loopSessionId);
+      const episode = this.getResearchEpisodeForProject(receipt.projectId, receipt.episodeId);
+      if (!project || !session || !episode || episode.loopSessionId !== session.id || episode.status !== "succeeded" || !episode.result) {
+        throw new Error("science-episode-result-review-target-invalid");
+      }
+      if (project.version !== receipt.projectVersion || scienceLabDecisionProjectSha256(project) !== receipt.projectContentSha256
+        || session.version !== receipt.loopVersion || session.stateSha256 !== receipt.loopStateSha256
+        || episode.version !== receipt.episodeVersion || episode.stateSha256 !== receipt.episodeStateSha256
+        || episode.result.resultSha256 !== receipt.resultSha256
+        || !episode.toolIntents.some((intent) => intent.labId === receipt.labId)) {
+        throw new Error("science-episode-result-review-target-stale");
+      }
+      const expectedArtifacts = episode.result.artifacts.flatMap((binding) => {
+        const context = this.getArtifactContextForProject(receipt.projectId, binding.artifactId, binding.artifactVersion);
+        if (!context || context.selectedVersion.contentSha256 !== binding.contentSha256) {
+          throw new Error("science-episode-result-review-artifact-stale");
+        }
+        return context.linkage.labId === receipt.labId ? [binding] : [];
+      }).sort((left, right) => left.artifactId.localeCompare(right.artifactId) || left.artifactVersion - right.artifactVersion);
+      if (sha256Json(expectedArtifacts) !== sha256Json(receipt.artifacts)) {
+        throw new Error("science-episode-result-review-artifact-set-invalid");
+      }
+      const prior = this.getLatestEpisodeResultReviewReceipt(receipt.projectId, receipt.episodeId, receipt.labId);
+      if (receipt.revision !== (prior?.revision ?? 0) + 1 || receipt.previousReviewSha256 !== (prior?.reviewSha256 ?? null)) {
+        throw new Error("science-episode-result-review-chain-stale");
+      }
+      this.db.prepare(`INSERT INTO research_episode_result_review_receipts
+        (id,request_id,project_id,project_version,project_content_sha256,loop_session_id,loop_version,loop_state_sha256,
+         episode_id,episode_version,episode_state_sha256,result_sha256,lab_id,basis_sha256,projection_sha256,
+         artifact_refs_json,revision,previous_review_sha256,verdict,rationale,selected_next_trigger,selected_next_action_json,
+         selected_next_action_sha256,reviewer_ref,created_at,review_sha256)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        receipt.id, receipt.requestId, receipt.projectId, receipt.projectVersion, receipt.projectContentSha256,
+        receipt.loopSessionId, receipt.loopVersion, receipt.loopStateSha256, receipt.episodeId, receipt.episodeVersion,
+        receipt.episodeStateSha256, receipt.resultSha256, receipt.labId, receipt.basisSha256, receipt.projectionSha256,
+        JSON.stringify(receipt.artifacts), receipt.revision, receipt.previousReviewSha256, receipt.verdict, receipt.rationale,
+        receipt.selectedNextTrigger, JSON.stringify(receipt.selectedNextAction), receipt.selectedNextActionSha256,
+        receipt.reviewerRef, receipt.createdAt, receipt.reviewSha256,
+      );
+      const stored = this.getLatestEpisodeResultReviewReceipt(receipt.projectId, receipt.episodeId, receipt.labId);
+      if (!stored || stored.id !== receipt.id || stored.reviewSha256 !== receipt.reviewSha256) {
+        throw new Error("science-episode-result-review-readback-failed");
+      }
+      const result: RecordScienceEpisodeResultReviewResult = { outcome: "recorded", receipt: stored, replayed: false };
+      this.remember(receipt.requestId, "episode-result-review.record", inputSha256, result, receipt.createdAt);
+      return result;
+    })();
   }
 
   private appendLoopEvent(input: {
@@ -12591,6 +15617,244 @@ export class ScienceStore {
     })();
   }
 
+  /**
+   * Prepare exactly one successor controller turn after a completed Science
+   * turn.  This is deliberately a DB-only operation: the runtime is started
+   * by the conversation service after the child turn and queued loop state are
+   * durable.  Replay/OCC therefore make a settlement retry idempotent and a
+   * user pause/cancel wins any race with preparation.
+   */
+  prepareLoopContinuationAfterSettlement(input: {
+    requestId: string;
+    projectId: string;
+    conversationId: string;
+    sourceTurnId: string;
+    sourceInvocationRunId: string;
+    expectedLoopVersion: number;
+    expectedLoopStateSha256: string;
+    receiptStatus: string;
+    targetInvocationRunId: string;
+  }):
+    | { outcome: "dispatch"; session: ScienceLoopSession; turn: ScienceTurn; continuationBasisSha256: string; replayed: boolean }
+    | { outcome: "pause"; session: ScienceLoopSession; reason: string; replayed: boolean }
+    | { outcome: "noop"; session: ScienceLoopSession | null; reason: string; replayed: boolean } {
+    if (!input || !UUID_RE.test(String(input.requestId ?? "")) || !UUID_RE.test(String(input.projectId ?? ""))
+      || !UUID_RE.test(String(input.conversationId ?? "")) || !UUID_RE.test(String(input.sourceTurnId ?? ""))
+      || !UUID_RE.test(String(input.sourceInvocationRunId ?? "")) || !UUID_RE.test(String(input.targetInvocationRunId ?? ""))) {
+      throw new Error("science-loop-continuation-input-invalid");
+    }
+    const expectedLoopVersion = safePositiveInteger(input.expectedLoopVersion, 1, Number.MAX_SAFE_INTEGER, "loop-version");
+    const expectedLoopStateSha256 = safeSha256(input.expectedLoopStateSha256, "loop-state-sha256");
+    const receiptStatus = safeText(input.receiptStatus, 80, "science-loop-receipt-status");
+    const canonical = {
+      projectId: input.projectId,
+      conversationId: input.conversationId,
+      sourceTurnId: input.sourceTurnId,
+      sourceInvocationRunId: input.sourceInvocationRunId,
+      expectedLoopVersion,
+      expectedLoopStateSha256,
+      receiptStatus,
+      targetInvocationRunId: input.targetInvocationRunId,
+    };
+    const inputSha256 = sha256Json(canonical);
+    return this.db.transaction(() => {
+      const prior = this.replay<
+        | { outcome: "dispatch"; session: ScienceLoopSession; turn: ScienceTurn; continuationBasisSha256: string; replayed: boolean }
+        | { outcome: "pause"; session: ScienceLoopSession; reason: string; replayed: boolean }
+        | { outcome: "noop"; session: ScienceLoopSession | null; reason: string; replayed: boolean }
+      >(input.requestId, "research-loop.continuation.prepare", inputSha256);
+      if (prior) {
+        const session = prior.session ? this.getLoopSessionForProject(input.projectId, prior.session.id) : null;
+        if (prior.outcome === "dispatch") {
+          const turn = session ? this.getTurnByInvocationRunId(input.targetInvocationRunId) : null;
+          if (!session || !turn || turn.origin !== "loop-continuation" || turn.parentTurnId !== input.sourceTurnId
+            || turn.continuationBasisSha256 !== prior.continuationBasisSha256) {
+            throw new Error("science-loop-continuation-replay-integrity-failed");
+          }
+          return { ...prior, session, turn, replayed: true };
+        }
+        if (prior.outcome === "pause" && (!session || session.status !== "paused")) {
+          throw new Error("science-loop-continuation-replay-integrity-failed");
+        }
+        if (prior.outcome === "noop" && prior.session && !session) throw new Error("science-loop-continuation-replay-integrity-failed");
+        if (prior.outcome === "pause") return { outcome: "pause" as const, session: session!, reason: prior.reason, replayed: true };
+        return { outcome: "noop" as const, session, reason: prior.reason, replayed: true };
+      }
+      const sourceTurn = this.getTurnForProject(input.projectId, input.sourceTurnId);
+      if (!sourceTurn || sourceTurn.conversationId !== input.conversationId || sourceTurn.invocationRunId !== input.sourceInvocationRunId) {
+        throw new Error("science-loop-continuation-source-turn-invalid");
+      }
+      const row = this.db.prepare("SELECT * FROM loop_sessions WHERE project_id = ? AND active_run_id = ? LIMIT 1")
+        .get(input.projectId, input.sourceInvocationRunId) as Record<string, unknown> | undefined;
+      if (!row) {
+        const result = { outcome: "noop" as const, session: null, reason: "loop-not-active-for-source-run", replayed: false };
+        this.remember(input.requestId, "research-loop.continuation.prepare", inputSha256, result, new Date().toISOString());
+        return result;
+      }
+      let session = loopSessionFromRow(row);
+      if (session.runtimeChatId !== sourceTurn.runtimeChatId || session.projectId !== input.projectId
+        || session.version !== expectedLoopVersion || session.stateSha256 !== expectedLoopStateSha256) {
+        throw new Error("science-loop-continuation-version-conflict");
+      }
+      if (session.status !== "running") {
+        const result = { outcome: "noop" as const, session, reason: "loop-no-longer-running", replayed: false };
+        this.remember(input.requestId, "research-loop.continuation.prepare", inputSha256, result, new Date().toISOString());
+        return result;
+      }
+      const pause = (reason: string, summary: string): { outcome: "pause"; session: ScienceLoopSession; reason: string; replayed: boolean } => {
+        const now = new Date().toISOString();
+        const updated = this.updateLoopSession(session, { status: "paused", activeRunId: null, stage: "awaiting-approval" }, now);
+        this.appendLoopEvent({
+          projectId: updated.projectId,
+          loopSessionId: updated.id,
+          kind: "lifecycle",
+          code: "loop.controller_settled_paused",
+          summary,
+          payload: {
+            action: "pause",
+            pauseReason: reason,
+            automaticResume: false,
+            priorActiveRunId: input.sourceInvocationRunId,
+            receiptStatus,
+            version: updated.version,
+            stateSha256: updated.stateSha256,
+          },
+          createdAt: now,
+        });
+        const result = { outcome: "pause" as const, session: updated, reason, replayed: false };
+        this.remember(input.requestId, "research-loop.continuation.prepare", inputSha256, result, now);
+        return result;
+      };
+      if (sourceTurn.status !== "completed" || !sourceTurn.assistantMessageId || receiptStatus !== "completed") {
+        return pause("controller_receipt_not_completed", "The controller did not complete with a durable assistant result; the loop is paused for review.");
+      }
+      const contract = this.getResearchContractForProject(input.projectId, session.contractId);
+      const policy = this.approvalPolicy(input.projectId);
+      const lifecycle = this.getResearchLifecycleForProject(input.projectId);
+      if (!contract || contract.version !== session.contractVersion || scienceResearchContractContentSha256(contract) !== session.contractContentSha256) {
+        return pause("contract_changed", "The approved research contract changed while the controller was running; continuation requires a fresh review.");
+      }
+      if (!lifecycle || lifecycle.studyId !== session.lifecycleStudyId || lifecycle.status !== "active"
+        || lifecycle.openBlockingDecisions.length > 0 || lifecycle.blockers.length > 0) {
+        return pause("researcher_decision_required", "The canonical research lifecycle has an open decision or blocker; the loop is paused for the researcher.");
+      }
+      if (!this.approvalIsStanding(input.projectId, "research-contract")) {
+        return pause("approval_required", "The project approval policy requires a checkpoint before the next controller turn.");
+      }
+      if (Date.now() >= Date.parse(session.deadlineAt)) {
+        return pause("wall_time_limit", "The research loop reached its wall-time budget before a successor controller turn could start.");
+      }
+      if (session.currentEpisode >= session.maxEpisodes) {
+        return pause("episode_budget_exhausted", "The research loop reached its episode budget; verify the success criteria before completing it.");
+      }
+      const activeEpisodeRow = this.db.prepare(`SELECT * FROM research_episodes WHERE loop_session_id = ?
+        AND status IN ('planned','running','waiting-for-decision') LIMIT 1`).get(session.id) as Record<string, unknown> | undefined;
+      const activeEpisode = activeEpisodeRow ? researchEpisodeFromRow(activeEpisodeRow, this.researchEpisodeResult(String(activeEpisodeRow.id))) : null;
+      if (activeEpisode?.status === "waiting-for-decision") {
+        return pause("researcher_decision_required", "The active research episode is waiting for a material researcher decision.");
+      }
+      const latestEventRow = this.db.prepare("SELECT * FROM loop_events WHERE loop_session_id = ? ORDER BY sequence DESC LIMIT 1")
+        .get(session.id) as Record<string, unknown> | undefined;
+      if (latestEventRow) {
+        const latestEvent = loopEventFromRow(latestEventRow);
+        if (latestEvent.code === "loop.resume_dispatched" && latestEvent.payload.activeRunId === input.sourceInvocationRunId) {
+          return pause("no_loop_progress", "The controller settled without recording a loop transition; the loop is paused instead of spinning a no-op continuation.");
+        }
+      }
+      const continuationBasis = canonicalValue({
+        schema: "agentlas.science.loop-continuation-basis/v1",
+        projectId: input.projectId,
+        conversationId: input.conversationId,
+        loopSessionId: session.id,
+        sourceTurnId: sourceTurn.id,
+        sourceInvocationRunId: input.sourceInvocationRunId,
+        sourceTurnStatus: sourceTurn.status,
+        loopVersion: session.version,
+        loopStateSha256: session.stateSha256,
+        lifecycleStudyId: lifecycle.studyId,
+        lifecycleRevision: lifecycle.revision,
+        lifecycleStateSha256: lifecycle.stateSha256,
+        contractId: contract.id,
+        contractVersion: contract.version,
+        contractContentSha256: session.contractContentSha256,
+        episode: activeEpisode ? {
+          id: activeEpisode.id,
+          version: activeEpisode.version,
+          stateSha256: activeEpisode.stateSha256,
+          resultSha256: activeEpisode.result?.resultSha256 ?? null,
+          status: activeEpisode.status,
+        } : null,
+        approvalPolicyId: policy.id,
+        approvalPolicyRevision: policy.revision,
+        approvalMode: policy.mode,
+        approvalScopes: policy.scopes,
+        currentEpisode: session.currentEpisode,
+        maxEpisodes: session.maxEpisodes,
+        deadlineAt: session.deadlineAt,
+      });
+      const continuationBasisSha256 = sha256Json(continuationBasis);
+      const content = "Continue the authorized research loop from its canonical state. Inspect the loop, lifecycle, evidence graph, and exact OCC receipts first. Plan and execute at most one successor episode, complete the loop if verified, or pause at a concrete decision, blocker, deadline, or budget boundary.";
+      const now = new Date().toISOString();
+      const message: ScienceMessage = {
+        id: randomUUID(),
+        projectId: input.projectId,
+        conversationId: input.conversationId,
+        role: "user",
+        visibility: "internal",
+        content,
+        createdAt: now,
+      };
+      this.db.prepare("INSERT INTO messages (id,project_id,conversation_id,role,visibility,content,created_at) VALUES (?,?,?,?,?,?,?)")
+        .run(message.id, message.projectId, message.conversationId, message.role, message.visibility, message.content, now);
+      const turnId = randomUUID();
+      this.db.prepare(`INSERT INTO science_turns
+        (id,request_id,project_id,conversation_id,user_message_id,assistant_message_id,runtime_chat_id,invocation_run_id,parent_turn_id,origin,continuation_basis_json,continuation_basis_sha256,status,last_sequence,partial_text,partial_sha256,error_code,started_at,finished_at,created_at,updated_at)
+        VALUES (?,?,?,?,?,NULL,?,?,?,?,?,?,'queued',0,'',NULL,NULL,NULL,NULL,?,?)`)
+        .run(turnId, input.requestId, input.projectId, input.conversationId, message.id, session.runtimeChatId, input.targetInvocationRunId,
+          sourceTurn.id, "loop-continuation", JSON.stringify(continuationBasis), continuationBasisSha256, now, now);
+      // Older installed databases intentionally keep their schema-55 trigger
+      // surface.  Its transition matrix predates running -> queued, so make
+      // the same atomic transaction pass through the already-authorized
+      // running -> paused -> queued edges; no observer can see the
+      // intermediate row and the final hash is still the only returned state.
+      const pausedIntermediate = this.updateLoopSession(session, {
+        status: "paused",
+        activeRunId: null,
+        stage: "awaiting-approval",
+      }, now);
+      const updatedSession = this.updateLoopSession(pausedIntermediate, {
+        status: "queued",
+        activeRunId: null,
+        stage: activeEpisode?.status === "planned" ? "preflight" : activeEpisode ? "executing" : "deciding",
+      }, now);
+      const turn = this.getTurnForProject(input.projectId, turnId);
+      if (!turn) throw new Error("science-loop-continuation-turn-create-failed");
+      this.appendLoopEvent({
+        projectId: updatedSession.projectId,
+        loopSessionId: updatedSession.id,
+        kind: "lifecycle",
+        code: "loop.continuation_prepared",
+        summary: "A completed controller turn released one exact successor turn under the standing approval policy.",
+        payload: {
+          action: "continuation-prepared",
+          sourceTurnId: sourceTurn.id,
+          sourceInvocationRunId: input.sourceInvocationRunId,
+          targetTurnId: turn.id,
+          targetInvocationRunId: turn.invocationRunId,
+          continuationBasisSha256,
+          approvalPolicyId: policy.id,
+          approvalPolicyRevision: policy.revision,
+          version: updatedSession.version,
+          stateSha256: updatedSession.stateSha256,
+        },
+        createdAt: now,
+      });
+      const result = { outcome: "dispatch" as const, session: updatedSession, turn, continuationBasisSha256, replayed: false };
+      this.remember(input.requestId, "research-loop.continuation.prepare", inputSha256, result, now);
+      return result;
+    })();
+  }
+
   createArtifact(input: CreateScienceArtifactInput): ScienceArtifact {
     if (!input || typeof input !== "object" || !UUID_RE.test(String(input.projectId ?? ""))) throw new Error("science-project-id-invalid");
     const loopSessionId = input.loopSessionId == null ? null : String(input.loopSessionId);
@@ -12633,7 +15897,9 @@ export class ScienceStore {
     if (linkage.origin.runId !== null && linkage.origin.runId !== sourceRunId) throw new Error("science-artifact-origin-run-mismatch");
     if (linkage.origin.surface === "loop" && (linkage.origin.loopSessionId !== loopSessionId || linkage.origin.runId !== sourceRunId)) throw new Error("science-artifact-origin-run-mismatch");
     if (input.rendererId === "agentlas.vega") {
-      if (payload.schema === SCIENCE_STATISTICS_FIGURE_ARTIFACT_SCHEMA) {
+      if (payload.schema === "agentlas.science.extant-archosaur-locus-panel-artifact/v1") {
+        this.validateExtantArchosaurLocusPanelLineage(input.projectId, payload, sourceRunId);
+      } else if (payload.schema === SCIENCE_STATISTICS_FIGURE_ARTIFACT_SCHEMA) {
         this.validateStatisticsFigureLineage(input.projectId, payload, sourceRunId, linkage);
       } else {
         validateVegaSpec(payload);
@@ -12686,6 +15952,7 @@ export class ScienceStore {
     }
     if (input.rendererId === SCIENCE_TABLE_RENDERER_ID) {
       if (!sourceRunId) throw new Error("science-table-ingestion-run-invalid");
+      const sourceRun = this.getResearchRunForProject(input.projectId, sourceRunId);
       if (payload.schema === SCIENCE_STATISTICS_ARTIFACT_SCHEMA) {
         this.validateStatisticsRunLineage(input.projectId, sourceRunId, payload, provenance, linkage);
       } else if (payload.schema === SCIENCE_PHYSICS_ARTIFACT_SCHEMA) {
@@ -12701,14 +15968,140 @@ export class ScienceStore {
         const validated = validateScienceMaterialsArtifactPayload(payload);
         const run = this.getResearchRunForProject(input.projectId, sourceRunId);
         const source = this.getSourceVersionForProject(input.projectId, validated.source.id, validated.source.versionId);
-        const rawOutput = run?.outputs.find((output) => output.role === "provider-response" && output.mimeType === "application/json");
+        const rawOutput = run?.outputs.find((output) => output.role === "provider-response"
+          && ["application/json", "application/vnd.api+json"].includes(output.mimeType));
         const catalogOutput = run?.outputs.find((output) => output.role === "materials-catalog" && output.mimeType === "application/vnd.agentlas.science-materials-catalog+json");
-        if (!run || run.status !== "succeeded" || run.toolId !== SCIENCE_MATERIALS_TOOL_ID || run.toolVersion !== SCIENCE_MATERIALS_TOOL_VERSION
+        if (!run || run.status !== "succeeded" || run.toolId !== SCIENCE_MATERIALS_TOOL_ID || !["1.0.0", SCIENCE_MATERIALS_TOOL_VERSION].includes(run.toolVersion)
           || run.inputs.length !== 1 || run.inputs[0]?.role !== "materials-query" || run.inputs[0]?.mimeType !== "application/vnd.agentlas.science-materials-query+json"
           || run.inputs[0]?.sha256 !== validated.inputSha256 || !source || source.version.contentSha256 !== validated.responseSha256
           || source.canonicalUri !== validated.source.canonicalUri || rawOutput?.sha256 !== validated.responseSha256 || !catalogOutput
           || !provenance.datasetSha256.includes(validated.responseSha256) || !provenance.datasetSha256.includes(validated.normalized.normalizedSha256)) {
           throw new Error("science-materials-run-lineage-invalid");
+        }
+      } else if (payload.schema === "agentlas.science-table/v1"
+        && sourceRun?.toolId === "agentlas.paleontology-candidate-comparison"
+        && sourceRun.toolVersion === "1.0.0") {
+        const columns = Array.isArray(payload.columns) ? payload.columns : null;
+        const rows = Array.isArray(payload.rows) ? payload.rows : null;
+        const notes = Array.isArray(payload.notes) ? payload.notes : null;
+        if (!hasExactKeys(payload, ["schema", "title", "columns", "rows", "notes"])
+          || typeof payload.title !== "string" || !payload.title.trim() || payload.title.length > 500
+          || !columns || columns.length < 1 || columns.length > 100
+          || !rows || rows.length < 2 || rows.length > 20
+          || !notes || notes.length < 1 || notes.length > 20
+          || notes.some((note) => typeof note !== "string" || !note.trim() || note.length > 2_000)
+          || columns.some((rawColumn) => {
+            const column = rawColumn && typeof rawColumn === "object" && !Array.isArray(rawColumn)
+              ? rawColumn as Record<string, unknown> : null;
+            return !column || !hasExactKeys(column, ["id", "label", "type", "unit"])
+              || typeof column.id !== "string" || !column.id.trim() || typeof column.label !== "string" || !column.label.trim()
+              || !["integer", "number", "boolean", "string"].includes(String(column.type))
+              || (column.unit !== null && typeof column.unit !== "string");
+          })
+          || rows.some((row) => !Array.isArray(row) || row.length !== columns.length
+            || row.some((cell) => cell !== null && !["string", "number", "boolean"].includes(typeof cell)
+              || (typeof cell === "number" && !Number.isFinite(cell))))) {
+          throw new Error("science-paleontology-candidate-comparison-table-invalid");
+        }
+        const tableOutput = sourceRun.outputs[1];
+        const manifestResource = (resource: ScienceResearchRunResource): Record<string, unknown> => ({
+          role: resource.role,
+          mimeType: resource.mimeType,
+          byteSize: resource.byteSize,
+          sha256: resource.sha256,
+          blobRef: resource.blobRef,
+          artifactId: resource.artifactId,
+          artifactVersion: resource.artifactVersion,
+        });
+        if (sourceRun.status !== "succeeded" || sourceRun.inputs.length !== 1 || sourceRun.outputs.length !== 2
+          || sourceRun.parentRunId === null || !tableOutput || tableOutput.ordinal !== 2
+          || tableOutput.role !== "paleontology-candidate-comparison-publication-table"
+          || tableOutput.mimeType !== "application/vnd.agentlas.science-table+json"
+          || tableOutput.artifactId !== null || tableOutput.artifactVersion !== null
+          || sha256Json(sourceRun.inputs.map(manifestResource)) !== sourceRun.inputManifestSha256
+          || sha256Json(sourceRun.outputs.map(manifestResource)) !== sourceRun.outputManifestSha256
+          || !this.readRunBlob(tableOutput).equals(Buffer.from(JSON.stringify(canonicalValue(payload)), "utf8"))) {
+          throw new Error("science-paleontology-candidate-comparison-table-lineage-invalid");
+        }
+        const bindings = this.getResearchRunParentBindings(input.projectId, sourceRun.id);
+        if (bindings.length < 4 || bindings.length % 2 !== 0 || bindings[0]?.role !== "primary"
+          || bindings[0]?.parentRunId !== sourceRun.parentRunId
+          || bindings.some((binding, index) => {
+            const ordinal = index + 1;
+            const candidateOrdinal = Math.floor(index / 2) + 1;
+            const expectedRole = index === 0 ? "primary"
+              : index % 2 === 1 ? `candidate-${candidateOrdinal}-catalog` : `candidate-${candidateOrdinal}-stratigraphic`;
+            const parent = this.getResearchRunForProject(input.projectId, binding.parentRunId);
+            return binding.ordinal !== ordinal || binding.role !== expectedRole || !parent || parent.status !== "succeeded"
+              || binding.parentContentSha256 !== scienceEvidenceGraphResearchRunContentSha256(parent);
+          })
+          || new Set(bindings.map((binding) => binding.parentRunId)).size !== bindings.length
+          || linkage.labId !== "paleontology-evidence" || linkage.origin.runId !== sourceRun.id
+          || !provenance.datasetSha256.includes(tableOutput.sha256)) {
+          throw new Error("science-paleontology-candidate-comparison-parent-lineage-invalid");
+        }
+      } else if (payload.schema === "agentlas.science-table/v1"
+        && sourceRun?.toolId === "agentlas.extant-reference-assembly-manifest"
+        && sourceRun.toolVersion === "1.0.0") {
+        const columns = Array.isArray(payload.columns) ? payload.columns : null;
+        const rows = Array.isArray(payload.rows) ? payload.rows : null;
+        const notes = Array.isArray(payload.notes) ? payload.notes : null;
+        if (!hasExactKeys(payload, ["schema", "title", "columns", "rows", "notes"])
+          || typeof payload.title !== "string" || !payload.title.trim() || payload.title.length > 500
+          || !columns || columns.length < 1 || columns.length > 100
+          || !rows || rows.length < 2 || rows.length > 8
+          || !notes || notes.length < 1 || notes.length > 20
+          || notes.some((note) => typeof note !== "string" || !note.trim() || note.length > 2_000)
+          || columns.some((rawColumn) => {
+            const column = rawColumn && typeof rawColumn === "object" && !Array.isArray(rawColumn) ? rawColumn as Record<string, unknown> : null;
+            return !column || !hasExactKeys(column, ["id", "label", "type", "unit"])
+              || typeof column.id !== "string" || !column.id.trim() || typeof column.label !== "string" || !column.label.trim()
+              || !["integer", "number", "boolean", "string"].includes(String(column.type))
+              || (column.unit !== null && typeof column.unit !== "string");
+          })
+          || rows.some((row) => !Array.isArray(row) || row.length !== columns.length
+            || row.some((cell) => cell !== null && !["string", "number", "boolean"].includes(typeof cell)
+              || (typeof cell === "number" && !Number.isFinite(cell))))) {
+          throw new Error("science-extant-reference-assembly-table-invalid");
+        }
+        const rawCount = sourceRun.outputs.length - 2;
+        const assessmentOutput = sourceRun.outputs[rawCount];
+        const tableOutput = sourceRun.outputs[rawCount + 1];
+        const manifestResource = (resource: ScienceResearchRunResource): Record<string, unknown> => ({
+          role: resource.role, mimeType: resource.mimeType, byteSize: resource.byteSize, sha256: resource.sha256,
+          blobRef: resource.blobRef, artifactId: resource.artifactId, artifactVersion: resource.artifactVersion,
+        });
+        const bindings = this.getResearchRunSourceBindings(input.projectId, sourceRun.id);
+        const outputBindings = this.getResearchRunSourceOutputBindings(input.projectId, sourceRun.id);
+        if (rawCount < 9 || (rawCount - 1) % 4 !== 0 || sourceRun.inputs.length !== 1
+          || !assessmentOutput || assessmentOutput.role !== "extant-reference-assembly-assessment"
+          || !tableOutput || tableOutput.role !== "extant-reference-assembly-publication-table"
+          || tableOutput.mimeType !== "application/vnd.agentlas.science-table+json"
+          || sha256Json(sourceRun.inputs.map(manifestResource)) !== sourceRun.inputManifestSha256
+          || sha256Json(sourceRun.outputs.map(manifestResource)) !== sourceRun.outputManifestSha256
+          || !this.readRunBlob(tableOutput).equals(Buffer.from(JSON.stringify(canonicalValue(payload)), "utf8"))
+          || bindings.length !== rawCount || outputBindings.length !== rawCount
+          || bindings.some((binding, index) => binding.ordinal !== index + 1 || outputBindings[index]?.outputOrdinal !== index + 1
+            || binding.contentSha256 !== outputBindings[index]?.outputSha256)
+          || linkage.labId !== "comparative-genomics" || linkage.origin.runId !== sourceRun.id
+          || !provenance.datasetSha256.includes(tableOutput.sha256)) {
+          throw new Error("science-extant-reference-assembly-table-lineage-invalid");
+        }
+      } else if (payload.schema === "agentlas.science-table/v1"
+        && sourceRun?.toolId === COMPARATIVE_GENOMICS_TABLE_TOOL_ID
+        && sourceRun.toolVersion === COMPARATIVE_GENOMICS_TABLE_TOOL_VERSION) {
+        const verified = this.verifiedComparativeGenomicsTableForRun(input.projectId, sourceRunId, payload, true);
+        const expectedCodeSha256 = createHash("sha256")
+          .update(`${COMPARATIVE_GENOMICS_TABLE_TOOL_ID}@${COMPARATIVE_GENOMICS_TABLE_TOOL_VERSION}`, "utf8").digest("hex");
+        if (provenance.datasetSha256.length !== 1 || provenance.datasetSha256[0] !== verified.sourceTableSha256
+          || provenance.codeSha256 !== expectedCodeSha256
+          || sha256Json(provenance.sourceRefs) !== sha256Json([
+            `research-run:${verified.parent.id}:output:3`,
+            `research-run:${verified.parent.id}:output:4`,
+          ])
+          || linkage.labId !== "comparative-genomics" || linkage.origin.surface !== "lab"
+          || linkage.origin.runId !== sourceRunId || linkage.parent !== null || linkage.inputs.length !== 0) {
+          throw new Error("science-comparative-genomics-table-artifact-lineage-invalid");
         }
       } else {
         const verified = this.verifiedDatasetTableForRun(input.projectId, sourceRunId, payload);
@@ -13645,7 +17038,9 @@ export class ScienceStore {
     const previewPng = Buffer.from(input.previewPng);
     const previewDimensions = pngDimensions(previewPng);
     if (!preview || preview.mimeType !== "image/png" || preview.dataBase64 !== previewPng.toString("base64")
-      || preview.byteSize !== previewPng.length || preview.width !== rendered.width || preview.height !== rendered.height
+      || preview.byteSize !== previewPng.length
+      || preview.width % rendered.width !== 0 || preview.height % rendered.height !== 0
+      || preview.width / rendered.width !== preview.height / rendered.height
       || previewDimensions.width !== preview.width || previewDimensions.height !== preview.height
       || createHash("sha256").update(previewPng).digest("hex") !== preview.sha256) {
       throw new Error("science-statistics-figure-vector-preview-invalid");
@@ -13863,6 +17258,42 @@ export class ScienceStore {
     return { mimeType: "image/svg+xml", byteSize: bytes.length, sha256: payload.export.sha256, bytes };
   }
 
+  /**
+   * The persisted journal vector export for a bound *figure* artifact, if one exists.
+   *
+   * A manuscript binds the figure the analysis produced (`chart.vega`), not the SVG export, which
+   * is a separate child artifact. Without this hop the manuscript could only ever find a vector
+   * when the author bound the export by hand, so every paper fell back to the screen capture.
+   * The hop is exact: the child must declare this figure id, version, and content hash as its
+   * parent, and `statisticsFigureSvgAssetForBinding` re-verifies the export's own lineage.
+   */
+  statisticsFigureSvgAssetForFigure(
+    projectId: string,
+    artifactId: string,
+    artifactVersion: number,
+    contentSha256: string,
+  ): ScienceStatisticsFigureSvgAsset | null {
+    if (!UUID_RE.test(projectId) || !UUID_RE.test(artifactId)
+      || !Number.isSafeInteger(artifactVersion) || artifactVersion < 1
+      || !SHA256_RE.test(contentSha256)) return null;
+    const rows = this.db.prepare(`SELECT l.artifact_id AS artifact_id, l.artifact_version AS artifact_version
+      FROM artifact_version_links l
+      WHERE l.project_id = ? AND l.parent_artifact_id = ? AND l.parent_artifact_version = ?
+      ORDER BY l.created_at DESC, l.artifact_id DESC`)
+      .all(projectId, artifactId, artifactVersion) as { artifact_id: string; artifact_version: number }[];
+    for (const row of rows) {
+      const context = this.getArtifactContextForProject(projectId, row.artifact_id, row.artifact_version);
+      const payload = context?.selectedVersion.payload;
+      if (!payload || payload.schema !== SCIENCE_STATISTICS_FIGURE_VECTOR_ARTIFACT_SCHEMA) continue;
+      const figure = (payload as { figureArtifact?: { artifactId?: unknown; artifactVersion?: unknown; contentSha256?: unknown } }).figureArtifact;
+      if (!figure || figure.artifactId !== artifactId || figure.artifactVersion !== artifactVersion
+        || figure.contentSha256 !== contentSha256) continue;
+      const asset = this.statisticsFigureSvgAssetForBinding(projectId, row.artifact_id, row.artifact_version);
+      if (asset) return asset;
+    }
+    return null;
+  }
+
   listStatisticsFigures(projectId: string, statisticsArtifactId?: string): ScienceArtifact[] {
     if (!UUID_RE.test(projectId) || statisticsArtifactId !== undefined && !UUID_RE.test(statisticsArtifactId)) return [];
     return this.listArtifacts(projectId, 500).filter((artifact) => {
@@ -13931,12 +17362,20 @@ export class ScienceStore {
       if (artifact.sourceRunId !== provenance.sourceRunId) throw new Error("science-artifact-source-run-mismatch");
       if (artifact.version.rendererId === SCIENCE_TABLE_RENDERER_ID) {
         if (!provenance.sourceRunId) throw new Error("science-table-ingestion-run-invalid");
+        const sourceRun = this.getResearchRunForProject(input.projectId, provenance.sourceRunId);
         if (payload.schema === SCIENCE_STATISTICS_ARTIFACT_SCHEMA) {
           this.validateStatisticsRunLineage(input.projectId, provenance.sourceRunId, payload, provenance);
         } else if (payload.schema === SCIENCE_PHYSICS_ARTIFACT_SCHEMA) {
           const run = this.getResearchRunForProject(input.projectId, provenance.sourceRunId);
           const inputSha256 = validateSciencePhysicsDatasetArtifactPayload(payload).inputSha256;
           if (!run || !provenance.datasetSha256.includes(inputSha256) || run.inputs[0]?.sha256 !== inputSha256) throw new Error("science-table-run-lineage-invalid");
+        } else if (payload.schema === "agentlas.science-table/v1"
+          && sourceRun?.toolId === COMPARATIVE_GENOMICS_TABLE_TOOL_ID
+          && sourceRun.toolVersion === COMPARATIVE_GENOMICS_TABLE_TOOL_VERSION) {
+          const verified = this.verifiedComparativeGenomicsTableForRun(input.projectId, provenance.sourceRunId, payload, false);
+          if (provenance.datasetSha256.length !== 1 || provenance.datasetSha256[0] !== verified.sourceTableSha256) {
+            throw new Error("science-table-run-lineage-invalid");
+          }
         } else {
           const verified = this.verifiedDatasetTableForRun(input.projectId, provenance.sourceRunId, payload);
           const sourceSha256 = verified.source.version.contentSha256;
@@ -14253,6 +17692,87 @@ export class ScienceStore {
     return { artifact, selectedVersion, linkage, isCurrent: selectedNumber === artifact.currentVersion };
   }
 
+  inspectArtifactNumericValues(input: {
+    projectId: string;
+    artifactId: string;
+    artifactVersion: number;
+    artifactContentSha256: string;
+    validationReceiptId: string;
+    jsonPointerPrefix?: string;
+    afterJsonPointer?: string;
+    limit?: number;
+  }): {
+    schema: "agentlas.science.artifact-numeric-value-catalog/v1";
+    artifact: { id: string; versionId: string; version: number; contentSha256: string; linkageSha256: string };
+    validation: { receiptId: string; receiptSha256: string; runArtifactBindingId: string; runId: string; outputId: string; outputSha256: string };
+    values: Array<{ jsonPointer: string; canonicalDecimal: string; valueSha256: string }>;
+    catalogSha256: string;
+    truncated: boolean;
+    nextAfterJsonPointer: string | null;
+  } {
+    if (!UUID_RE.test(input.projectId) || !UUID_RE.test(input.artifactId) || !UUID_RE.test(input.validationReceiptId)) {
+      throw new Error("science-artifact-numeric-catalog-target-invalid");
+    }
+    const artifactVersion = safePositiveInteger(input.artifactVersion, 1, Number.MAX_SAFE_INTEGER, "artifact-numeric-catalog-version");
+    const artifactContentSha256 = safeSha256(input.artifactContentSha256, "artifact-numeric-catalog-content-sha256");
+    const limit = input.limit === undefined ? 100 : safePositiveInteger(input.limit, 1, 200, "artifact-numeric-catalog-limit");
+    const prefix = input.jsonPointerPrefix === undefined ? null : normalizedArtifactJsonPointer(input.jsonPointerPrefix);
+    const after = input.afterJsonPointer === undefined ? null : normalizedArtifactJsonPointer(input.afterJsonPointer);
+    const context = this.getArtifactContextForProject(input.projectId, input.artifactId, artifactVersion);
+    if (!context || context.selectedVersion.contentSha256 !== artifactContentSha256) {
+      throw new Error("science-artifact-numeric-catalog-artifact-stale");
+    }
+    const receipt = this.getArtifactValidationReceiptForProject(input.projectId, input.validationReceiptId);
+    if (!receipt || receipt.status !== "verified"
+      || receipt.validatorId !== "agentlas.publication-provenance-closure" || receipt.validatorVersion !== "2.0.0"
+      || receipt.policyId !== "agentlas.science-publication-gate" || receipt.policyVersion !== "1"
+      || receipt.artifactId !== input.artifactId || receipt.artifactVersionId !== context.selectedVersion.id
+      || receipt.artifactVersion !== artifactVersion || receipt.artifactContentSha256 !== artifactContentSha256
+      || receipt.artifactLinkageSha256 !== context.linkage.linkageSha256) {
+      throw new Error("science-artifact-numeric-catalog-validation-invalid");
+    }
+    const closure = this.getArtifactValidationRunArtifactBindingForProject(input.projectId, receipt.id);
+    if (!closure || closure.artifactId !== input.artifactId || closure.artifactVersion !== artifactVersion
+      || closure.artifactContentSha256 !== artifactContentSha256) {
+      throw new Error("science-artifact-numeric-catalog-run-closure-invalid");
+    }
+    const escape = (value: string): string => value.replace(/~/gu, "~0").replace(/\//gu, "~1");
+    const all: Array<{ jsonPointer: string; canonicalDecimal: string; valueSha256: string }> = [];
+    let visited = 0;
+    const visit = (value: unknown, pointer: string, depth: number): void => {
+      visited += 1;
+      if (visited > 100_000 || depth > 32) throw new Error("science-artifact-numeric-catalog-payload-too-complex");
+      try {
+        const canonicalDecimal = canonicalArtifactDecimal(value);
+        if (pointer && (!prefix || pointer === prefix || pointer.startsWith(`${prefix}/`)) && (!after || pointer > after)) {
+          all.push({ jsonPointer: pointer, canonicalDecimal,
+            valueSha256: sha256Json({ artifactContentSha256, jsonPointer: pointer, canonicalDecimal }) });
+        }
+        return;
+      } catch { /* non-numeric containers and leaves are traversed or ignored below */ }
+      if (Array.isArray(value)) value.forEach((item, index) => visit(item, `${pointer}/${index}`, depth + 1));
+      else if (value && typeof value === "object") for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+        if (MANUSCRIPT_NUMERIC_POINTER_FORBIDDEN.has(key)) continue;
+        visit((value as Record<string, unknown>)[key], `${pointer}/${escape(key)}`, depth + 1);
+      }
+    };
+    visit(context.selectedVersion.payload, "", 0);
+    all.sort((left, right) => left.jsonPointer.localeCompare(right.jsonPointer));
+    const values = all.slice(0, limit);
+    const truncated = all.length > values.length;
+    const catalogCore = {
+      artifact: { id: input.artifactId, versionId: context.selectedVersion.id, version: artifactVersion,
+        contentSha256: artifactContentSha256, linkageSha256: context.linkage.linkageSha256 },
+      validation: { receiptId: receipt.id, receiptSha256: receipt.receiptSha256,
+        runArtifactBindingId: closure.runArtifactBindingId, runId: closure.runId, outputId: closure.outputId,
+        outputSha256: closure.outputSha256 },
+      values,
+    };
+    return { schema: "agentlas.science.artifact-numeric-value-catalog/v1", ...catalogCore,
+      catalogSha256: sha256Json(catalogCore), truncated,
+      nextAfterJsonPointer: truncated ? values.at(-1)?.jsonPointer ?? null : null };
+  }
+
   listArtifactContextsForMessage(projectId: string, conversationId: string, messageId: string): ScienceArtifactContext[] {
     if (!UUID_RE.test(projectId) || !UUID_RE.test(conversationId) || !UUID_RE.test(messageId)) return [];
     const directRows = this.db.prepare(`SELECT l.artifact_id, l.artifact_version, l.created_at FROM artifact_version_links l
@@ -14269,12 +17789,31 @@ export class ScienceStore {
         AND (l.origin_run_id IS NULL OR (e.phase = 'committed' AND b.id IS NOT NULL)
           OR (r.status = 'succeeded' AND b.id IS NOT NULL AND (
             (r.tool_id = 'agentlas.csv-ingest' AND r.tool_version = '1.0.0')
-            OR (r.tool_id = 'agentlas.ensembl-variant-track' AND r.tool_version = '1.0.0')
-            OR (r.tool_id = 'agentlas.oqmd-optimade-structures' AND r.tool_version = '1.0.0')
+            OR (r.tool_id = 'agentlas.biodiversity-catalog' AND r.tool_version = '1.0.0')
+            OR (r.tool_id = 'agentlas.ensembl-variant-track' AND r.tool_version IN ('1.0.0','1.1.0'))
+            OR (r.tool_id = 'agentlas.comparative-genomics-gene-tree' AND r.tool_version = '1.0.0')
+            OR (r.tool_id = 'agentlas.oqmd-optimade-structures' AND r.tool_version IN ('1.0.0','1.1.0'))
             OR (r.tool_id = 'agentlas.physics-inspire-live-source' AND r.tool_version = '1.0.0')
             OR (r.tool_id = 'agentlas.physics-hepdata-live-table' AND r.tool_version = '1.0.0')
+            OR (r.tool_id = 'agentlas.world-bank-economic-indicator' AND r.tool_version = '1.0.0')
+            OR (r.tool_id = 'agentlas.noaa-coops-water-level' AND r.tool_version = '1.0.0')
+            OR (r.tool_id = 'agentlas.earth-gutenberg-richter-analysis' AND r.tool_version = '1.0.0')
+            OR (r.tool_id = 'agentlas.physics-hepdata-chi-square-analysis' AND r.tool_version = '1.0.0')
+            OR (r.tool_id = 'agentlas.materials-lattice-metrics-analysis' AND r.tool_version = '1.0.0')
+            OR (r.tool_id = 'agentlas.paleontology-stratigraphic-support' AND r.tool_version = '1.0.0')
+            OR (r.tool_id IN (
+              'agentlas.physics-spectrum-fit-analysis',
+              'agentlas.physics-significance-limits-analysis',
+              'agentlas.physics-uncertainty-propagation-analysis',
+              'agentlas.physics-unit-analysis',
+              'agentlas.physics-ode-simulation-analysis',
+              'agentlas.physics-signal-analysis',
+              'agentlas.physics-york-fit-analysis',
+              'agentlas.physics-lab-experiment-analysis'
+            ) AND r.tool_version = '1.0.0')
             OR (r.tool_id = 'agentlas.statistics-figure-materializer' AND r.tool_version = '1.0.0')
             OR (r.tool_id = '${SCIENCE_STATISTICS_NUMERIC_SURFACE_MATERIALIZER_TOOL_ID}' AND r.tool_version = '${SCIENCE_STATISTICS_NUMERIC_SURFACE_MATERIALIZER_TOOL_VERSION}')
+            OR (r.tool_id = '${EXTANT_ARCHOSAUR_LOCUS_PANEL_TOOL_ID}' AND r.tool_version = '${EXTANT_ARCHOSAUR_LOCUS_PANEL_TOOL_VERSION}')
           )))
       ORDER BY l.created_at, l.artifact_id, l.artifact_version`)
       .all(projectId, conversationId, messageId, projectId, conversationId) as Array<{ artifact_id: string; artifact_version: number; created_at: string }>;
@@ -14303,12 +17842,31 @@ export class ScienceStore {
         ON b.run_id = r.id AND b.project_id = r.project_id
       WHERE t.project_id = ? AND t.conversation_id = ? AND t.assistant_message_id = ?
         AND ((r.tool_id = 'agentlas.csv-ingest' AND r.tool_version = '1.0.0')
-          OR (r.tool_id = 'agentlas.ensembl-variant-track' AND r.tool_version = '1.0.0')
-          OR (r.tool_id = 'agentlas.oqmd-optimade-structures' AND r.tool_version = '1.0.0')
+          OR (r.tool_id = 'agentlas.biodiversity-catalog' AND r.tool_version = '1.0.0')
+          OR (r.tool_id = 'agentlas.ensembl-variant-track' AND r.tool_version IN ('1.0.0','1.1.0'))
+          OR (r.tool_id = 'agentlas.comparative-genomics-gene-tree' AND r.tool_version = '1.0.0')
+          OR (r.tool_id = 'agentlas.oqmd-optimade-structures' AND r.tool_version IN ('1.0.0','1.1.0'))
           OR (r.tool_id = 'agentlas.physics-inspire-live-source' AND r.tool_version = '1.0.0')
           OR (r.tool_id = 'agentlas.physics-hepdata-live-table' AND r.tool_version = '1.0.0')
+          OR (r.tool_id = 'agentlas.world-bank-economic-indicator' AND r.tool_version = '1.0.0')
+          OR (r.tool_id = 'agentlas.noaa-coops-water-level' AND r.tool_version = '1.0.0')
+          OR (r.tool_id = 'agentlas.earth-gutenberg-richter-analysis' AND r.tool_version = '1.0.0')
+          OR (r.tool_id = 'agentlas.physics-hepdata-chi-square-analysis' AND r.tool_version = '1.0.0')
+          OR (r.tool_id = 'agentlas.materials-lattice-metrics-analysis' AND r.tool_version = '1.0.0')
+          OR (r.tool_id = 'agentlas.paleontology-stratigraphic-support' AND r.tool_version = '1.0.0')
+          OR (r.tool_id IN (
+            'agentlas.physics-spectrum-fit-analysis',
+            'agentlas.physics-significance-limits-analysis',
+            'agentlas.physics-uncertainty-propagation-analysis',
+            'agentlas.physics-unit-analysis',
+            'agentlas.physics-ode-simulation-analysis',
+            'agentlas.physics-signal-analysis',
+            'agentlas.physics-york-fit-analysis',
+            'agentlas.physics-lab-experiment-analysis'
+          ) AND r.tool_version = '1.0.0')
           OR (r.tool_id = '${SCIENCE_STATISTICS_FIGURE_MATERIALIZER_TOOL_ID}' AND r.tool_version = '${SCIENCE_STATISTICS_FIGURE_MATERIALIZER_TOOL_VERSION}')
-          OR (r.tool_id = '${SCIENCE_STATISTICS_NUMERIC_SURFACE_MATERIALIZER_TOOL_ID}' AND r.tool_version = '${SCIENCE_STATISTICS_NUMERIC_SURFACE_MATERIALIZER_TOOL_VERSION}'))
+          OR (r.tool_id = '${SCIENCE_STATISTICS_NUMERIC_SURFACE_MATERIALIZER_TOOL_ID}' AND r.tool_version = '${SCIENCE_STATISTICS_NUMERIC_SURFACE_MATERIALIZER_TOOL_VERSION}')
+          OR (r.tool_id = '${EXTANT_ARCHOSAUR_LOCUS_PANEL_TOOL_ID}' AND r.tool_version = '${EXTANT_ARCHOSAUR_LOCUS_PANEL_TOOL_VERSION}'))
       ORDER BY 3, 1, 2`)
       .all(projectId, conversationId, messageId, projectId, conversationId, messageId) as Array<{ artifact_id: string; artifact_version: number; created_at: string }>;
     const rows = [...directRows, ...assistantRows]
@@ -14405,12 +17963,31 @@ export class ScienceStore {
         AND (a.source_run_id IS NULL OR (e.phase = 'committed' AND b.id IS NOT NULL)
           OR (r.status = 'succeeded' AND b.id IS NOT NULL AND (
             (r.tool_id = 'agentlas.csv-ingest' AND r.tool_version = '1.0.0')
-            OR (r.tool_id = 'agentlas.ensembl-variant-track' AND r.tool_version = '1.0.0')
-            OR (r.tool_id = 'agentlas.oqmd-optimade-structures' AND r.tool_version = '1.0.0')
+            OR (r.tool_id = 'agentlas.biodiversity-catalog' AND r.tool_version = '1.0.0')
+            OR (r.tool_id = 'agentlas.ensembl-variant-track' AND r.tool_version IN ('1.0.0','1.1.0'))
+            OR (r.tool_id = 'agentlas.comparative-genomics-gene-tree' AND r.tool_version = '1.0.0')
+            OR (r.tool_id = 'agentlas.oqmd-optimade-structures' AND r.tool_version IN ('1.0.0','1.1.0'))
             OR (r.tool_id = 'agentlas.physics-inspire-live-source' AND r.tool_version = '1.0.0')
             OR (r.tool_id = 'agentlas.physics-hepdata-live-table' AND r.tool_version = '1.0.0')
+            OR (r.tool_id = 'agentlas.world-bank-economic-indicator' AND r.tool_version = '1.0.0')
+            OR (r.tool_id = 'agentlas.noaa-coops-water-level' AND r.tool_version = '1.0.0')
+            OR (r.tool_id = 'agentlas.earth-gutenberg-richter-analysis' AND r.tool_version = '1.0.0')
+            OR (r.tool_id = 'agentlas.physics-hepdata-chi-square-analysis' AND r.tool_version = '1.0.0')
+            OR (r.tool_id = 'agentlas.materials-lattice-metrics-analysis' AND r.tool_version = '1.0.0')
+            OR (r.tool_id = 'agentlas.paleontology-stratigraphic-support' AND r.tool_version = '1.0.0')
+            OR (r.tool_id IN (
+              'agentlas.physics-spectrum-fit-analysis',
+              'agentlas.physics-significance-limits-analysis',
+              'agentlas.physics-uncertainty-propagation-analysis',
+              'agentlas.physics-unit-analysis',
+              'agentlas.physics-ode-simulation-analysis',
+              'agentlas.physics-signal-analysis',
+              'agentlas.physics-york-fit-analysis',
+              'agentlas.physics-lab-experiment-analysis'
+            ) AND r.tool_version = '1.0.0')
             OR (r.tool_id = '${SCIENCE_STATISTICS_FIGURE_MATERIALIZER_TOOL_ID}' AND r.tool_version = '${SCIENCE_STATISTICS_FIGURE_MATERIALIZER_TOOL_VERSION}')
             OR (r.tool_id = '${SCIENCE_STATISTICS_NUMERIC_SURFACE_MATERIALIZER_TOOL_ID}' AND r.tool_version = '${SCIENCE_STATISTICS_NUMERIC_SURFACE_MATERIALIZER_TOOL_VERSION}')
+            OR (r.tool_id = '${EXTANT_ARCHOSAUR_LOCUS_PANEL_TOOL_ID}' AND r.tool_version = '${EXTANT_ARCHOSAUR_LOCUS_PANEL_TOOL_VERSION}')
             OR (r.tool_id = '${SCIENCE_NUMERIC_SURFACE_RASTERIZER_TOOL_ID}' AND r.tool_version = '${SCIENCE_NUMERIC_SURFACE_RASTERIZER_TOOL_VERSION}')
             OR (r.tool_id = '${SCIENCE_STATISTICS_FIGURE_RASTERIZER_TOOL_ID}' AND r.tool_version = '${SCIENCE_STATISTICS_FIGURE_RASTERIZER_TOOL_VERSION}')
             OR (r.tool_id = '${SCIENCE_STATISTICS_FIGURE_VECTORIZER_TOOL_ID}' AND r.tool_version = '${SCIENCE_STATISTICS_FIGURE_VECTORIZER_TOOL_VERSION}')
@@ -14656,6 +18233,45 @@ export class ScienceStore {
     return row ? this.verifiedValidationReceiptFromRow(row) : null;
   }
 
+  getArtifactValidationRunArtifactBindingForProject(
+    projectId: string,
+    receiptId: string,
+  ): ScienceArtifactValidationRunArtifactBinding | null {
+    if (!UUID_RE.test(projectId) || !UUID_RE.test(receiptId)) return null;
+    const row = this.db.prepare(`SELECT * FROM artifact_validation_run_artifact_bindings
+      WHERE project_id = ? AND receipt_id = ?`).get(projectId, receiptId) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    const closure: ScienceArtifactValidationRunArtifactBinding = {
+      receiptId: String(row.receipt_id),
+      projectId: String(row.project_id),
+      runArtifactBindingId: String(row.run_artifact_binding_id),
+      runId: String(row.run_id),
+      outputId: String(row.output_id),
+      outputOrdinal: safePositiveInteger(row.output_ordinal, 1, 1_000, "artifact-validation-output-ordinal"),
+      outputRole: safeText(row.output_role, 160, "artifact-validation-output-role"),
+      outputSha256: safeSha256(row.output_sha256, "artifact-validation-output-sha256"),
+      artifactId: String(row.artifact_id),
+      artifactVersion: safePositiveInteger(row.artifact_version, 1, Number.MAX_SAFE_INTEGER, "artifact-validation-artifact-version"),
+      artifactContentSha256: safeSha256(row.artifact_content_sha256, "artifact-validation-artifact-content-sha256"),
+      createdAt: String(row.created_at),
+    };
+    const receipt = this.getArtifactValidationReceiptForProject(projectId, receiptId);
+    const binding = this.getRunArtifactBinding(projectId, closure.runId);
+    const run = this.getResearchRunForProject(projectId, closure.runId);
+    const output = run?.outputs.find((candidate) => candidate.id === closure.outputId);
+    if (!receipt || !binding || binding.id !== closure.runArtifactBindingId
+      || binding.outputId !== closure.outputId || binding.outputSha256 !== closure.outputSha256
+      || binding.artifactId !== closure.artifactId || binding.artifactVersion !== closure.artifactVersion
+      || binding.artifactContentSha256 !== closure.artifactContentSha256
+      || receipt.researchRunId !== closure.runId || receipt.artifactId !== closure.artifactId
+      || receipt.artifactVersion !== closure.artifactVersion || receipt.artifactContentSha256 !== closure.artifactContentSha256
+      || !output || output.ordinal !== closure.outputOrdinal || output.role !== closure.outputRole
+      || output.sha256 !== closure.outputSha256) {
+      throw new Error("science-artifact-validation-run-artifact-binding-integrity-failed");
+    }
+    return closure;
+  }
+
   recordArtifactValidation(input: RecordScienceArtifactValidationInput): RecordScienceArtifactValidationResult {
     if (!input || typeof input !== "object" || !UUID_RE.test(String(input.requestId ?? ""))) throw new Error("science-request-id-invalid");
     if (!UUID_RE.test(String(input.projectId ?? "")) || !UUID_RE.test(String(input.artifactId ?? ""))) throw new Error("science-artifact-id-invalid");
@@ -14670,6 +18286,9 @@ export class ScienceStore {
     const challengeSha256 = safeSha256(input.challengeSha256, "validation-challenge-sha256");
     const inputSha256 = safeSha256(input.inputSha256, "validation-input-sha256");
     const environmentSha256 = safeSha256(input.environmentSha256, "validation-environment-sha256");
+    const runArtifactBindingId = input.runArtifactBindingId === undefined
+      ? null
+      : (UUID_RE.test(String(input.runArtifactBindingId)) ? String(input.runArtifactBindingId) : (() => { throw new Error("science-run-artifact-binding-id-invalid"); })());
     return this.db.transaction(() => {
       const context = this.getArtifactContextForProject(input.projectId, input.artifactId, artifactVersion);
       if (!context || !context.artifact.sourceRunId) throw new Error("science-artifact-validation-run-invalid");
@@ -14682,6 +18301,28 @@ export class ScienceStore {
       if (!capture) throw new Error("science-artifact-validation-capture-missing");
       const preview = this.artifactVisualPreviewForProject(input.projectId, input.artifactId, artifactVersion);
       if (!preview || preview.sha256 !== String(capture.asset_sha256)) throw new Error("science-artifact-validation-capture-invalid");
+      let runArtifactClosure: Omit<ScienceArtifactValidationRunArtifactBinding, "receiptId" | "createdAt"> | null = null;
+      if (runArtifactBindingId) {
+        const binding = this.getRunArtifactBinding(input.projectId, run.id);
+        const output = binding ? run.outputs.find((candidate) => candidate.id === binding.outputId) : null;
+        if (!binding || binding.id !== runArtifactBindingId || binding.artifactId !== context.artifact.id
+          || binding.artifactVersion !== artifactVersion || binding.artifactContentSha256 !== context.selectedVersion.contentSha256
+          || !output || output.sha256 !== binding.outputSha256) {
+          throw new Error("science-artifact-validation-run-artifact-binding-invalid");
+        }
+        runArtifactClosure = {
+          projectId: input.projectId,
+          runArtifactBindingId: binding.id,
+          runId: run.id,
+          outputId: output.id,
+          outputOrdinal: output.ordinal,
+          outputRole: output.role,
+          outputSha256: output.sha256,
+          artifactId: context.artifact.id,
+          artifactVersion,
+          artifactContentSha256: context.selectedVersion.contentSha256,
+        };
+      }
       const expectedInputSha256 = sha256Json({
         artifactContentSha256: context.selectedVersion.contentSha256,
         artifactLinkageSha256: context.linkage.linkageSha256,
@@ -14689,6 +18330,7 @@ export class ScienceStore {
         researchRunId: run.id,
         runInputManifestSha256: run.inputManifestSha256,
         runOutputManifestSha256: run.outputManifestSha256,
+        ...(runArtifactClosure ? { runArtifactBinding: runArtifactClosure } : {}),
         challengeSha256,
         validatorId,
         validatorVersion,
@@ -14696,10 +18338,22 @@ export class ScienceStore {
         policyVersion,
       });
       if (expectedInputSha256 !== inputSha256) throw new Error("science-artifact-validation-input-mismatch");
-      const canonicalRequest = { projectId: input.projectId, artifactId: input.artifactId, artifactVersion, validatorId, validatorVersion, policyId, policyVersion, status: input.status, checks, warnings, challengeSha256, inputSha256, environmentSha256 };
+      const canonicalRequest = {
+        projectId: input.projectId, artifactId: input.artifactId, artifactVersion, validatorId, validatorVersion,
+        policyId, policyVersion, status: input.status, checks, warnings, challengeSha256, inputSha256, environmentSha256,
+        ...(runArtifactBindingId ? { runArtifactBindingId } : {}),
+      };
       const requestSha256 = sha256Json(canonicalRequest);
       const prior = this.replay<RecordScienceArtifactValidationResult>(input.requestId, "artifact.validation.record", requestSha256);
-      if (prior) return { ...prior, replayed: true };
+      if (prior) {
+        const priorClosure = runArtifactBindingId
+          ? this.getArtifactValidationRunArtifactBindingForProject(input.projectId, prior.receipt.id)
+          : undefined;
+        if (runArtifactBindingId && (!priorClosure || priorClosure.runArtifactBindingId !== runArtifactBindingId)) {
+          throw new Error("science-artifact-validation-run-artifact-binding-replay-invalid");
+        }
+        return { ...prior, ...(priorClosure ? { runArtifactBinding: priorClosure } : {}), replayed: true };
+      }
       const unsigned: Omit<ScienceArtifactValidationReceipt, "id" | "receiptSha256" | "createdAt"> = {
         projectId: input.projectId,
         artifactId: input.artifactId,
@@ -14730,10 +18384,23 @@ export class ScienceStore {
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
         .run(id, input.projectId, input.artifactId, context.selectedVersion.id, artifactVersion, context.selectedVersion.contentSha256, context.linkage.linkageSha256, capture.id, preview.sha256, run.id,
           validatorId, validatorVersion, policyId, policyVersion, input.status, JSON.stringify(checks), JSON.stringify(warnings), challengeSha256, inputSha256, environmentSha256, receiptSha256, now);
+      if (runArtifactClosure) {
+        this.db.prepare(`INSERT INTO artifact_validation_run_artifact_bindings
+          (receipt_id,project_id,run_artifact_binding_id,run_id,output_id,output_ordinal,output_role,output_sha256,
+           artifact_id,artifact_version,artifact_content_sha256,created_at)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+          id, runArtifactClosure.projectId, runArtifactClosure.runArtifactBindingId, runArtifactClosure.runId,
+          runArtifactClosure.outputId, runArtifactClosure.outputOrdinal, runArtifactClosure.outputRole,
+          runArtifactClosure.outputSha256, runArtifactClosure.artifactId, runArtifactClosure.artifactVersion,
+          runArtifactClosure.artifactContentSha256, now,
+        );
+      }
       this.appendValidationReceiptSnapshot(input.projectId, id, now);
       const receipt = this.getArtifactValidationReceiptForProject(input.projectId, id);
       if (!receipt) throw new Error("science-artifact-validation-create-failed");
-      const result: RecordScienceArtifactValidationResult = { receipt, replayed: false };
+      const closure = runArtifactClosure ? this.getArtifactValidationRunArtifactBindingForProject(input.projectId, id) : undefined;
+      if (runArtifactClosure && !closure) throw new Error("science-artifact-validation-run-artifact-binding-create-failed");
+      const result: RecordScienceArtifactValidationResult = { receipt, ...(closure ? { runArtifactBinding: closure } : {}), replayed: false };
       this.remember(input.requestId, "artifact.validation.record", requestSha256, result, now);
       return result;
     })();
@@ -15050,6 +18717,402 @@ export class ScienceStore {
     return bindings;
   }
 
+  private manuscriptBlueprintBindingForVersion(
+    projectId: string,
+    manuscriptId: string,
+    manuscriptVersionId: string,
+    manuscriptVersion: number,
+  ): ScienceManuscriptBlueprintBinding | null {
+    const row = this.db.prepare(`SELECT * FROM manuscript_version_blueprint_bindings
+      WHERE project_id = ? AND manuscript_id = ? AND manuscript_version_id = ? AND manuscript_version = ?`)
+      .get(projectId, manuscriptId, manuscriptVersionId, manuscriptVersion) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    const binding: ScienceManuscriptBlueprintBinding = {
+      manuscriptVersionId: String(row.manuscript_version_id), projectId: String(row.project_id), manuscriptId: String(row.manuscript_id),
+      manuscriptVersion: Number(row.manuscript_version), manuscriptContentSha256: safeSha256(row.manuscript_content_sha256, "manuscript-blueprint-binding-manuscript-sha256"),
+      manuscriptDocumentSha256: safeSha256(row.manuscript_document_sha256, "manuscript-blueprint-binding-document-sha256"),
+      manuscriptBindingManifestSha256: safeSha256(row.manuscript_binding_manifest_sha256, "manuscript-blueprint-binding-manifest-sha256"),
+      blueprintId: String(row.blueprint_id), blueprintVersion: Number(row.blueprint_version),
+      blueprintContentSha256: safeSha256(row.blueprint_content_sha256, "manuscript-blueprint-binding-blueprint-sha256"), createdAt: String(row.created_at),
+    };
+    const blueprintVersionId = String(row.blueprint_version_id ?? "");
+    if (!UUID_RE.test(blueprintVersionId)) throw new Error("science-manuscript-blueprint-binding-integrity-failed");
+    const exact = this.db.prepare(`SELECT 1 AS ok FROM manuscripts m
+      JOIN manuscript_versions mv ON mv.manuscript_id = m.id AND mv.version = ?
+      JOIN manuscript_document_versions md ON md.manuscript_version_id = mv.id
+      JOIN manuscript_blueprint_versions bv ON bv.blueprint_id = ? AND bv.version = ? AND bv.content_sha256 = ?
+      JOIN manuscript_blueprints b ON b.id = bv.blueprint_id AND b.project_id = m.project_id
+      WHERE bv.id = ? AND m.id = ? AND m.project_id = ? AND mv.id = ? AND mv.content_sha256 = ? AND mv.binding_manifest_sha256 = ?
+        AND md.document_sha256 = ?`).get(binding.manuscriptVersion, binding.blueprintId, binding.blueprintVersion,
+          binding.blueprintContentSha256, blueprintVersionId, binding.manuscriptId, binding.projectId, binding.manuscriptVersionId,
+          binding.manuscriptContentSha256, binding.manuscriptBindingManifestSha256, binding.manuscriptDocumentSha256) as { ok?: number } | undefined;
+    if (!exact?.ok) throw new Error("science-manuscript-blueprint-binding-integrity-failed");
+    return binding;
+  }
+
+  private insertManuscriptBlueprintBinding(input: {
+    projectId: string;
+    manuscriptId: string;
+    manuscriptVersionId: string;
+    manuscriptVersion: number;
+    manuscriptContentSha256: string;
+    manuscriptBindingManifestSha256: string;
+    blueprintBinding: ScienceManuscriptBlueprintBindingInput;
+    createdAt: string;
+    allowHistoricalBlueprint?: boolean;
+  }): void {
+    const blueprintId = String(input.blueprintBinding.blueprintId ?? "");
+    const blueprintVersion = safePositiveInteger(input.blueprintBinding.blueprintVersion, 1, Number.MAX_SAFE_INTEGER, "manuscript-blueprint-binding-version");
+    const blueprintContentSha256 = safeSha256(input.blueprintBinding.blueprintContentSha256, "manuscript-blueprint-binding-content-sha256");
+    if (!UUID_RE.test(blueprintId)) throw new Error("science-manuscript-blueprint-binding-id-invalid");
+    const currentBlueprint = this.getManuscriptBlueprintForProject(input.projectId, blueprintId);
+    let blueprintVersionId: string;
+    if (!input.allowHistoricalBlueprint) {
+      const blueprint = currentBlueprint;
+      if (!blueprint || blueprint.status === "stale" || blueprint.currentVersion !== blueprintVersion
+        || blueprint.version.contentSha256 !== blueprintContentSha256) throw new Error("science-manuscript-blueprint-binding-not-current");
+      blueprintVersionId = blueprint.version.id;
+    } else {
+      const historical = this.getManuscriptBlueprintVersionForProject(input.projectId, blueprintId, blueprintVersion, blueprintContentSha256);
+      if (!historical) throw new Error("science-manuscript-blueprint-binding-not-found");
+      blueprintVersionId = historical.id;
+    }
+    const document = this.getManuscriptDocumentByVersionId(input.projectId, input.manuscriptId, input.manuscriptVersionId, input.manuscriptVersion);
+    if (!document) throw new Error("science-manuscript-document-required");
+    this.db.prepare(`INSERT INTO manuscript_version_blueprint_bindings
+      (manuscript_version_id,project_id,manuscript_id,manuscript_version,manuscript_content_sha256,manuscript_document_sha256,
+       manuscript_binding_manifest_sha256,blueprint_id,blueprint_version_id,blueprint_version,blueprint_content_sha256,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(input.manuscriptVersionId, input.projectId, input.manuscriptId, input.manuscriptVersion,
+        input.manuscriptContentSha256, document.documentSha256, input.manuscriptBindingManifestSha256,
+        blueprintId, blueprintVersionId, blueprintVersion, blueprintContentSha256, input.createdAt);
+  }
+
+  private manuscriptDraftSectionFromRow(row: Record<string, unknown>): ScienceManuscriptDraftSectionRevision {
+    const markdown = String(row.markdown ?? "");
+    const contentSha256 = safeSha256(row.content_sha256, "manuscript-draft-section-content-sha256");
+    if (sha256Text(markdown) !== contentSha256) throw new Error("science-manuscript-draft-section-integrity-failed");
+    let writer: ScienceManuscriptScholarlyEvaluator;
+    try {
+      writer = JSON.parse(String(row.writer_json ?? "")) as ScienceManuscriptScholarlyEvaluator;
+    } catch {
+      throw new Error("science-manuscript-draft-section-writer-invalid");
+    }
+    writer = this.normalizeManuscriptScholarlyEvaluator(writer, String(row.project_id));
+    if (writer.invocationRunId !== String(row.writer_invocation_run_id)) {
+      throw new Error("science-manuscript-draft-section-writer-integrity-failed");
+    }
+    const wordCount = manuscriptCorpusWords(markdown);
+    const paragraphCount = manuscriptCorpusParagraphs(markdown);
+    if (wordCount !== Number(row.word_count) || paragraphCount !== Number(row.paragraph_count)) {
+      throw new Error("science-manuscript-draft-section-metrics-integrity-failed");
+    }
+    return {
+      id: String(row.id),
+      sessionId: String(row.session_id),
+      projectId: String(row.project_id),
+      sectionKey: String(row.section_key),
+      revision: Number(row.revision),
+      status: String(row.status) as ScienceManuscriptDraftSectionRevision["status"],
+      markdown,
+      contentSha256,
+      wordCount,
+      paragraphCount,
+      writer,
+      createdAt: String(row.created_at),
+    };
+  }
+
+  private manuscriptDraftingSessionFromRow(row: Record<string, unknown>): ScienceManuscriptDraftingSession {
+    let bindings: ScienceManuscriptBindingInput[];
+    let plan: ScienceManuscriptDraftPlanSection[];
+    try {
+      bindings = JSON.parse(String(row.bindings_json ?? "")) as ScienceManuscriptBindingInput[];
+      plan = JSON.parse(String(row.plan_json ?? "")) as ScienceManuscriptDraftPlanSection[];
+    } catch {
+      throw new Error("science-manuscript-drafting-session-json-invalid");
+    }
+    if (sha256Json(bindings) !== safeSha256(row.binding_manifest_sha256, "manuscript-drafting-binding-manifest-sha256")) {
+      throw new Error("science-manuscript-drafting-session-binding-integrity-failed");
+    }
+    const planKeys = new Set<string>();
+    for (const [index, section] of plan.entries()) {
+      if (!section || section.ordinal !== index + 1 || typeof section.key !== "string" || !section.key
+        || planKeys.has(section.key) || !SCIENCE_BLUEPRINT_SECTION_ROLES.has(section.role)) {
+        throw new Error("science-manuscript-drafting-session-plan-integrity-failed");
+      }
+      planKeys.add(section.key);
+    }
+    const sectionRows = this.db.prepare(`SELECT current.* FROM manuscript_draft_section_versions current
+      WHERE current.session_id = ? AND current.revision = (
+        SELECT MAX(candidate.revision) FROM manuscript_draft_section_versions candidate
+        WHERE candidate.session_id = current.session_id AND candidate.section_key = current.section_key
+      ) ORDER BY current.section_key`).all(String(row.id)) as Record<string, unknown>[];
+    const heads = sectionRows.map((sectionRow) => this.manuscriptDraftSectionFromRow(sectionRow));
+    if (heads.some((section) => !planKeys.has(section.sectionKey))) throw new Error("science-manuscript-drafting-session-section-integrity-failed");
+    const headByKey = new Map(heads.map((section) => [section.sectionKey, section]));
+    const assembledManuscript = row.assembled_manuscript_id === null ? null : {
+      manuscriptId: String(row.assembled_manuscript_id),
+      manuscriptVersion: Number(row.assembled_manuscript_version),
+      manuscriptContentSha256: safeSha256(row.assembled_manuscript_content_sha256, "manuscript-drafting-assembled-content-sha256"),
+    };
+    if (assembledManuscript) {
+      const exact = this.getManuscriptForProject(String(row.project_id), assembledManuscript.manuscriptId);
+      if (!exact || exact.currentVersion < assembledManuscript.manuscriptVersion) throw new Error("science-manuscript-drafting-session-assembled-integrity-failed");
+      const exactVersion = this.db.prepare(`SELECT content_sha256 FROM manuscript_versions WHERE manuscript_id = ? AND version = ?`)
+        .get(assembledManuscript.manuscriptId, assembledManuscript.manuscriptVersion) as { content_sha256?: unknown } | undefined;
+      if (String(exactVersion?.content_sha256 ?? "") !== assembledManuscript.manuscriptContentSha256) {
+        throw new Error("science-manuscript-drafting-session-assembled-integrity-failed");
+      }
+    }
+    const blueprintBinding = {
+      blueprintId: String(row.blueprint_id),
+      blueprintVersion: Number(row.blueprint_version),
+      blueprintContentSha256: safeSha256(row.blueprint_content_sha256, "manuscript-drafting-blueprint-content-sha256"),
+    };
+    const status = String(row.status) as ScienceManuscriptDraftingSession["status"];
+    const version = Number(row.version);
+    const cancellationReason = row.cancellation_reason === null ? null : String(row.cancellation_reason);
+    const calculatedStateSha256 = manuscriptDraftStateSha256({
+      id: String(row.id), projectId: String(row.project_id), title: String(row.title), status, version,
+      blueprintBinding, bindingManifestSha256: String(row.binding_manifest_sha256), plan,
+      sections: heads.map((section) => ({ sectionKey: section.sectionKey, revision: section.revision, status: section.status,
+        contentSha256: section.contentSha256, writerInvocationRunId: section.writer.invocationRunId })),
+      assembledManuscript, cancellationReason,
+    });
+    if (calculatedStateSha256 !== safeSha256(row.state_sha256, "manuscript-drafting-session-state-sha256")) {
+      throw new Error("science-manuscript-drafting-session-integrity-failed");
+    }
+    return {
+      schema: SCIENCE_MANUSCRIPT_DRAFTING_SESSION_SCHEMA,
+      id: String(row.id),
+      projectId: String(row.project_id),
+      title: String(row.title),
+      status,
+      version,
+      stateSha256: calculatedStateSha256,
+      blueprintBinding,
+      bindings,
+      bindingManifestSha256: String(row.binding_manifest_sha256),
+      plan,
+      sections: plan.map((planned) => ({ plan: planned, current: headByKey.get(planned.key) ?? null })),
+      assembledManuscript,
+      cancellationReason,
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    };
+  }
+
+  getManuscriptDraftingSessionForProject(projectId: string, sessionId: string): ScienceManuscriptDraftingSession | null {
+    if (!UUID_RE.test(projectId) || !UUID_RE.test(sessionId)) return null;
+    const row = this.db.prepare("SELECT * FROM manuscript_drafting_sessions WHERE project_id = ? AND id = ?")
+      .get(projectId, sessionId) as Record<string, unknown> | undefined;
+    return row ? this.manuscriptDraftingSessionFromRow(row) : null;
+  }
+
+  listManuscriptDraftingSessions(projectId: string, limit = 100): ScienceManuscriptDraftingSession[] {
+    if (!UUID_RE.test(projectId)) return [];
+    const safeLimit = Math.max(1, Math.min(500, Math.floor(limit)));
+    const rows = this.db.prepare(`SELECT * FROM manuscript_drafting_sessions WHERE project_id = ?
+      ORDER BY updated_at DESC,id LIMIT ?`).all(projectId, safeLimit) as Record<string, unknown>[];
+    return rows.map((row) => this.manuscriptDraftingSessionFromRow(row));
+  }
+
+  startManuscriptDraftingSession(input: StartScienceManuscriptDraftingSessionInput): StartScienceManuscriptDraftingSessionResult {
+    if (!input || typeof input !== "object" || !UUID_RE.test(String(input.requestId ?? ""))) throw new Error("science-request-id-invalid");
+    if (!UUID_RE.test(String(input.projectId ?? ""))) throw new Error("science-project-id-invalid");
+    const title = safeText(input.title, 500, "manuscript-drafting-title");
+    const blueprintId = String(input.blueprintBinding?.blueprintId ?? "");
+    const blueprintVersion = safePositiveInteger(input.blueprintBinding?.blueprintVersion, 1, Number.MAX_SAFE_INTEGER, "manuscript-drafting-blueprint-version");
+    const blueprintContentSha256 = safeSha256(input.blueprintBinding?.blueprintContentSha256, "manuscript-drafting-blueprint-content-sha256");
+    return this.db.transaction(() => {
+      const bindings = this.validateManuscriptBindings(input.projectId, input.bindings);
+      const requestSha256 = sha256Json({ projectId: input.projectId, title, blueprintId, blueprintVersion, blueprintContentSha256, bindings });
+      const prior = this.replay<StartScienceManuscriptDraftingSessionResult>(input.requestId, "manuscript.drafting.start", requestSha256);
+      if (prior) return { ...prior, replayed: true };
+      const blueprint = this.getManuscriptBlueprintForProject(input.projectId, blueprintId);
+      if (!blueprint || blueprint.status !== "current" || blueprint.currentVersion !== blueprintVersion
+        || blueprint.version.contentSha256 !== blueprintContentSha256) throw new Error("science-manuscript-drafting-blueprint-not-current");
+      const plan = manuscriptDraftPlan(blueprint.version.document);
+      const sessionId = randomUUID();
+      const now = new Date().toISOString();
+      const bindingManifestSha256 = sha256Json(bindings);
+      const blueprintBinding = { blueprintId, blueprintVersion, blueprintContentSha256 };
+      const stateSha256 = manuscriptDraftStateSha256({ id: sessionId, projectId: input.projectId, title, status: "drafting", version: 1,
+        blueprintBinding, bindingManifestSha256, plan, sections: [], assembledManuscript: null, cancellationReason: null });
+      this.db.prepare(`INSERT INTO manuscript_drafting_sessions
+        (id,project_id,title,status,version,state_sha256,blueprint_id,blueprint_version_id,blueprint_version,blueprint_content_sha256,
+         bindings_json,binding_manifest_sha256,plan_json,assembled_manuscript_id,assembled_manuscript_version,
+         assembled_manuscript_content_sha256,cancellation_reason,created_at,updated_at)
+        VALUES (?,?,?,'drafting',1,?,?,?,?,?,?,?, ?,NULL,NULL,NULL,NULL,?,?)`)
+        .run(sessionId, input.projectId, title, stateSha256, blueprintId, blueprint.version.id, blueprintVersion, blueprintContentSha256,
+          JSON.stringify(bindings), bindingManifestSha256, JSON.stringify(plan), now, now);
+      const session = this.getManuscriptDraftingSessionForProject(input.projectId, sessionId);
+      if (!session) throw new Error("science-manuscript-drafting-session-create-failed");
+      const result = { session, replayed: false };
+      this.remember(input.requestId, "manuscript.drafting.start", requestSha256, result, now);
+      return result;
+    }).immediate();
+  }
+
+  saveManuscriptDraftSection(
+    input: SaveScienceManuscriptDraftSectionInput,
+    trustedWriter: ScienceManuscriptScholarlyEvaluator,
+  ): SaveScienceManuscriptDraftSectionResult {
+    if (!input || typeof input !== "object" || !UUID_RE.test(String(input.requestId ?? ""))) throw new Error("science-request-id-invalid");
+    if (!UUID_RE.test(String(input.projectId ?? "")) || !UUID_RE.test(String(input.sessionId ?? ""))) throw new Error("science-manuscript-drafting-session-id-invalid");
+    const expectedVersion = safePositiveInteger(input.expectedVersion, 1, Number.MAX_SAFE_INTEGER, "manuscript-drafting-version");
+    const expectedStateSha256 = safeSha256(input.expectedStateSha256, "manuscript-drafting-state-sha256");
+    const sectionKey = safeText(input.sectionKey, 120, "manuscript-draft-section-key");
+    const markdown = normalizeManuscriptDraftSectionMarkdown(input.markdown);
+    const writer = this.normalizeManuscriptScholarlyEvaluator(trustedWriter, input.projectId);
+    return this.db.transaction(() => {
+      const requestSha256 = sha256Json({ projectId: input.projectId, sessionId: input.sessionId, expectedVersion, expectedStateSha256,
+        sectionKey, markdown, writer });
+      const prior = this.replay<SaveScienceManuscriptDraftSectionResult>(input.requestId, "manuscript.drafting.section.save", requestSha256);
+      if (prior) return { ...prior, replayed: true };
+      const session = this.getManuscriptDraftingSessionForProject(input.projectId, input.sessionId);
+      if (!session) throw new Error("science-manuscript-drafting-session-not-found");
+      if (session.status !== "drafting") throw new Error("science-manuscript-drafting-session-terminal");
+      if (session.version !== expectedVersion || session.stateSha256 !== expectedStateSha256) throw new Error("science-manuscript-drafting-session-conflict");
+      const planned = session.plan.find((section) => section.key === sectionKey);
+      if (!planned) throw new Error("science-manuscript-draft-section-key-invalid");
+      if (planned.role === "abstract" && session.sections.some((section) => section.plan.required && section.plan.role !== "abstract" && !section.current)) {
+        throw new Error("science-manuscript-draft-abstract-must-be-last");
+      }
+      const wordCount = manuscriptCorpusWords(markdown);
+      const paragraphCount = manuscriptCorpusParagraphs(markdown);
+      if (wordCount < 1 || paragraphCount < 1) throw new Error("science-manuscript-draft-section-empty");
+      const status = wordCount >= planned.targetWords.minimum && paragraphCount >= planned.targetParagraphs.minimum ? "ready" : "draft";
+      const previous = session.sections.find((section) => section.plan.key === sectionKey)?.current;
+      if (previous?.contentSha256 === sha256Text(markdown)) throw new Error("science-manuscript-draft-section-noop");
+      const revision = (previous?.revision ?? 0) + 1;
+      const sectionId = randomUUID();
+      const createdAt = new Date().toISOString();
+      const contentSha256 = sha256Text(markdown);
+      this.db.prepare(`INSERT INTO manuscript_draft_section_versions
+        (id,session_id,project_id,section_key,revision,status,markdown,content_sha256,word_count,paragraph_count,
+         writer_invocation_run_id,writer_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(sectionId, session.id, input.projectId, sectionKey, revision, status, markdown, contentSha256, wordCount, paragraphCount,
+          writer.invocationRunId, JSON.stringify(writer), createdAt);
+      const heads = session.sections.map((section) => section.current).filter((section): section is ScienceManuscriptDraftSectionRevision => Boolean(section))
+        .filter((section) => section.sectionKey !== sectionKey)
+        .concat([{ id: sectionId, sessionId: session.id, projectId: input.projectId, sectionKey, revision, status, markdown, contentSha256,
+          wordCount, paragraphCount, writer, createdAt }]);
+      const nextVersion = session.version + 1;
+      const stateSha256 = manuscriptDraftStateSha256({ id: session.id, projectId: session.projectId, title: session.title, status: "drafting",
+        version: nextVersion, blueprintBinding: session.blueprintBinding, bindingManifestSha256: session.bindingManifestSha256, plan: session.plan,
+        sections: heads.map((section) => ({ sectionKey: section.sectionKey, revision: section.revision, status: section.status,
+          contentSha256: section.contentSha256, writerInvocationRunId: section.writer.invocationRunId })),
+        assembledManuscript: null, cancellationReason: null });
+      const changed = this.db.prepare(`UPDATE manuscript_drafting_sessions SET version = ?, state_sha256 = ?, updated_at = ?
+        WHERE id = ? AND project_id = ? AND status = 'drafting' AND version = ? AND state_sha256 = ?`)
+        .run(nextVersion, stateSha256, createdAt, session.id, input.projectId, expectedVersion, expectedStateSha256);
+      if (changed.changes !== 1) throw new Error("science-manuscript-drafting-session-conflict");
+      const next = this.getManuscriptDraftingSessionForProject(input.projectId, session.id);
+      const section = next?.sections.find((candidate) => candidate.plan.key === sectionKey)?.current;
+      if (!next || !section || section.id !== sectionId) throw new Error("science-manuscript-draft-section-save-failed");
+      const result = { session: next, section, replayed: false };
+      this.remember(input.requestId, "manuscript.drafting.section.save", requestSha256, result, createdAt);
+      return result;
+    }).immediate();
+  }
+
+  assembleManuscriptDraftingSession(input: AssembleScienceManuscriptDraftingSessionInput): AssembleScienceManuscriptDraftingSessionResult {
+    if (!input || typeof input !== "object" || !UUID_RE.test(String(input.requestId ?? ""))) throw new Error("science-request-id-invalid");
+    if (!UUID_RE.test(String(input.projectId ?? "")) || !UUID_RE.test(String(input.sessionId ?? ""))) throw new Error("science-manuscript-drafting-session-id-invalid");
+    const expectedVersion = safePositiveInteger(input.expectedVersion, 1, Number.MAX_SAFE_INTEGER, "manuscript-drafting-version");
+    const expectedStateSha256 = safeSha256(input.expectedStateSha256, "manuscript-drafting-state-sha256");
+    const requestSha256 = sha256Json({ projectId: input.projectId, sessionId: input.sessionId, expectedVersion, expectedStateSha256 });
+    const prior = this.replay<AssembleScienceManuscriptDraftingSessionResult>(input.requestId, "manuscript.drafting.assemble", requestSha256);
+    if (prior) return { ...prior, replayed: true };
+    const session = this.getManuscriptDraftingSessionForProject(input.projectId, input.sessionId);
+    if (!session) throw new Error("science-manuscript-drafting-session-not-found");
+    if (session.status !== "drafting") throw new Error("science-manuscript-drafting-session-terminal");
+    if (session.version !== expectedVersion || session.stateSha256 !== expectedStateSha256) throw new Error("science-manuscript-drafting-session-conflict");
+    const missing = session.sections.filter((section) => section.plan.required && section.current?.status !== "ready").map((section) => section.plan.key);
+    if (missing.length) throw new Error(`science-manuscript-drafting-session-incomplete:${missing.join(",")}`);
+    const markdown = session.sections
+      .filter((section) => section.current)
+      .sort((left, right) => left.plan.ordinal - right.plan.ordinal)
+      .map((section) => `## ${section.plan.title}\n\n${section.current!.markdown}`)
+      .join("\n\n");
+    const blueprint = this.getManuscriptBlueprintForProject(input.projectId, session.blueprintBinding.blueprintId);
+    if (!blueprint || blueprint.status !== "current" || blueprint.currentVersion !== session.blueprintBinding.blueprintVersion
+      || blueprint.version.contentSha256 !== session.blueprintBinding.blueprintContentSha256) {
+      throw new Error("science-manuscript-drafting-blueprint-not-current");
+    }
+    assertScienceAgentManuscriptDraft(markdown, blueprint.version.document);
+    const created = this.createManuscript({
+      requestId: stableUuid(`science-manuscript-drafting-assemble:v1:${session.id}:${session.version}:${session.stateSha256}`),
+      projectId: input.projectId,
+      title: session.title,
+      markdown,
+      bindings: session.bindings,
+      blueprintBinding: session.blueprintBinding,
+    });
+    return this.db.transaction(() => {
+      const current = this.getManuscriptDraftingSessionForProject(input.projectId, session.id);
+      if (!current || current.status !== "drafting" || current.version !== expectedVersion || current.stateSha256 !== expectedStateSha256) {
+        throw new Error("science-manuscript-drafting-session-conflict");
+      }
+      const assembledManuscript = { manuscriptId: created.manuscript.id, manuscriptVersion: created.manuscript.currentVersion,
+        manuscriptContentSha256: created.manuscript.version.contentSha256 };
+      const nextVersion = current.version + 1;
+      const heads = current.sections.map((section) => section.current).filter((section): section is ScienceManuscriptDraftSectionRevision => Boolean(section));
+      const stateSha256 = manuscriptDraftStateSha256({ id: current.id, projectId: current.projectId, title: current.title, status: "assembled",
+        version: nextVersion, blueprintBinding: current.blueprintBinding, bindingManifestSha256: current.bindingManifestSha256, plan: current.plan,
+        sections: heads.map((section) => ({ sectionKey: section.sectionKey, revision: section.revision, status: section.status,
+          contentSha256: section.contentSha256, writerInvocationRunId: section.writer.invocationRunId })),
+        assembledManuscript, cancellationReason: null });
+      const now = new Date().toISOString();
+      const changed = this.db.prepare(`UPDATE manuscript_drafting_sessions SET status = 'assembled',version = ?,state_sha256 = ?,
+        assembled_manuscript_id = ?,assembled_manuscript_version = ?,assembled_manuscript_content_sha256 = ?,updated_at = ?
+        WHERE id = ? AND project_id = ? AND status = 'drafting' AND version = ? AND state_sha256 = ?`)
+        .run(nextVersion, stateSha256, assembledManuscript.manuscriptId, assembledManuscript.manuscriptVersion,
+          assembledManuscript.manuscriptContentSha256, now, current.id, input.projectId, expectedVersion, expectedStateSha256);
+      if (changed.changes !== 1) throw new Error("science-manuscript-drafting-session-conflict");
+      const next = this.getManuscriptDraftingSessionForProject(input.projectId, current.id);
+      if (!next) throw new Error("science-manuscript-drafting-session-assemble-failed");
+      const result = { session: next, manuscript: created.manuscript, replayed: false };
+      this.remember(input.requestId, "manuscript.drafting.assemble", requestSha256, result, now);
+      return result;
+    }).immediate();
+  }
+
+  cancelManuscriptDraftingSession(input: CancelScienceManuscriptDraftingSessionInput): CancelScienceManuscriptDraftingSessionResult {
+    if (!input || typeof input !== "object" || !UUID_RE.test(String(input.requestId ?? ""))) throw new Error("science-request-id-invalid");
+    if (!UUID_RE.test(String(input.projectId ?? "")) || !UUID_RE.test(String(input.sessionId ?? ""))) throw new Error("science-manuscript-drafting-session-id-invalid");
+    const expectedVersion = safePositiveInteger(input.expectedVersion, 1, Number.MAX_SAFE_INTEGER, "manuscript-drafting-version");
+    const expectedStateSha256 = safeSha256(input.expectedStateSha256, "manuscript-drafting-state-sha256");
+    const reason = safeText(input.reason, 4_000, "manuscript-drafting-cancellation-reason");
+    return this.db.transaction(() => {
+      const requestSha256 = sha256Json({ projectId: input.projectId, sessionId: input.sessionId, expectedVersion, expectedStateSha256, reason });
+      const prior = this.replay<CancelScienceManuscriptDraftingSessionResult>(input.requestId, "manuscript.drafting.cancel", requestSha256);
+      if (prior) return { ...prior, replayed: true };
+      const session = this.getManuscriptDraftingSessionForProject(input.projectId, input.sessionId);
+      if (!session) throw new Error("science-manuscript-drafting-session-not-found");
+      if (session.status !== "drafting") throw new Error("science-manuscript-drafting-session-terminal");
+      if (session.version !== expectedVersion || session.stateSha256 !== expectedStateSha256) throw new Error("science-manuscript-drafting-session-conflict");
+      const nextVersion = session.version + 1;
+      const heads = session.sections.map((section) => section.current).filter((section): section is ScienceManuscriptDraftSectionRevision => Boolean(section));
+      const stateSha256 = manuscriptDraftStateSha256({ id: session.id, projectId: session.projectId, title: session.title, status: "cancelled",
+        version: nextVersion, blueprintBinding: session.blueprintBinding, bindingManifestSha256: session.bindingManifestSha256, plan: session.plan,
+        sections: heads.map((section) => ({ sectionKey: section.sectionKey, revision: section.revision, status: section.status,
+          contentSha256: section.contentSha256, writerInvocationRunId: section.writer.invocationRunId })),
+        assembledManuscript: null, cancellationReason: reason });
+      const now = new Date().toISOString();
+      const changed = this.db.prepare(`UPDATE manuscript_drafting_sessions SET status = 'cancelled',version = ?,state_sha256 = ?,
+        cancellation_reason = ?,updated_at = ? WHERE id = ? AND project_id = ? AND status = 'drafting' AND version = ? AND state_sha256 = ?`)
+        .run(nextVersion, stateSha256, reason, now, session.id, input.projectId, expectedVersion, expectedStateSha256);
+      if (changed.changes !== 1) throw new Error("science-manuscript-drafting-session-conflict");
+      const next = this.getManuscriptDraftingSessionForProject(input.projectId, session.id);
+      if (!next) throw new Error("science-manuscript-drafting-session-cancel-failed");
+      const result = { session: next, replayed: false };
+      this.remember(input.requestId, "manuscript.drafting.cancel", requestSha256, result, now);
+      return result;
+    }).immediate();
+  }
+
   private manuscriptFromRow(row: Record<string, unknown>): ScienceManuscript {
     const versionId = String(row.version_id);
     const bindings = (this.db.prepare("SELECT * FROM manuscript_bindings WHERE manuscript_version_id = ? ORDER BY ordinal").all(versionId) as Record<string, unknown>[]).map(manuscriptBindingFromRow);
@@ -15057,6 +19120,9 @@ export class ScienceStore {
     const contentSha256 = safeSha256(row.content_sha256, "manuscript-content-sha256");
     const bindingManifestSha256 = safeSha256(row.binding_manifest_sha256, "manuscript-binding-manifest-sha256");
     if (sha256Text(markdown) !== contentSha256 || sha256Json(bindings.map(({ ordinal, role, locator, target }) => ({ ordinal, role, locator, target }))) !== bindingManifestSha256) throw new Error("science-manuscript-integrity-failed");
+    const manuscriptVersion = Number(row.current_version);
+    const document = this.getManuscriptDocumentByVersionId(String(row.project_id), String(row.id), versionId, manuscriptVersion);
+    const blueprintBinding = this.manuscriptBlueprintBindingForVersion(String(row.project_id), String(row.id), versionId, manuscriptVersion);
     return {
       id: String(row.id),
       projectId: String(row.project_id),
@@ -15066,11 +19132,13 @@ export class ScienceStore {
       version: {
         id: versionId,
         manuscriptId: String(row.id),
-        version: Number(row.current_version),
+        version: manuscriptVersion,
         markdown,
         contentSha256,
+        ...(document ? { document, documentSha256: document.documentSha256, identityEpoch: document.identityEpoch } : {}),
         bindingManifestSha256,
         bindings,
+        ...(blueprintBinding ? { blueprintBinding } : {}),
         createdAt: String(row.version_created_at),
       },
       createdAt: String(row.created_at),
@@ -15175,7 +19243,7 @@ export class ScienceStore {
     });
   }
 
-  private getCitationForProject(projectId: string, citationId: string): ScienceCitation | null {
+  getCitationForProject(projectId: string, citationId: string): ScienceCitation | null {
     if (!UUID_RE.test(projectId) || !UUID_RE.test(citationId)) return null;
     const row = this.db.prepare("SELECT * FROM citations WHERE project_id = ? AND id = ?").get(projectId, citationId) as Record<string, unknown> | undefined;
     if (!row) return null;
@@ -15297,6 +19365,2166 @@ export class ScienceStore {
       outputSha256, contentSha256, status: canonicalCore.status };
   }
 
+  private insertManuscriptDocumentVersion(input: {
+    projectId: string;
+    manuscriptId: string;
+    manuscriptVersionId: string;
+    manuscriptVersion: number;
+    markdown: string;
+    bindingManifestSha256: string;
+    document: ScienceManuscriptDocument;
+    basis: "legacy-baseline" | "compatibility-baseline" | "transaction";
+    transactionId: string | null;
+    createdAt: string;
+  }): void {
+    const document = validateScienceManuscriptDocument(input.document);
+    const markdown = serializeScienceManuscriptDocument(document);
+    if (markdown !== input.markdown || scienceManuscriptDocumentSha256(document) !== document.documentSha256) {
+      throw new Error("science-manuscript-document-markdown-mismatch");
+    }
+    this.db.prepare(`INSERT INTO manuscript_document_versions
+      (manuscript_version_id,project_id,manuscript_id,manuscript_version,epoch_id,schema_name,document_json,document_sha256,
+       markdown_sha256,binding_manifest_sha256,basis,transaction_id,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      input.manuscriptVersionId, input.projectId, input.manuscriptId, input.manuscriptVersion,
+      document.identityEpoch, document.schemaVersion, scienceManuscriptTransactionJson(document), document.documentSha256,
+      sha256Text(input.markdown), input.bindingManifestSha256, input.basis, input.transactionId, input.createdAt,
+    );
+  }
+
+  private getManuscriptDocumentByVersionId(
+    projectId: string,
+    manuscriptId: string,
+    manuscriptVersionId: string,
+    manuscriptVersion: number,
+  ): ScienceManuscriptDocument | null {
+    const row = this.db.prepare(`SELECT document.*, version.content_sha256 AS version_content_sha256,
+      version.binding_manifest_sha256 AS version_binding_manifest_sha256
+      FROM manuscript_document_versions document
+      JOIN manuscript_versions version ON version.id = document.manuscript_version_id
+      JOIN manuscripts manuscript ON manuscript.id = document.manuscript_id
+      WHERE document.project_id = ? AND document.manuscript_id = ? AND document.manuscript_version_id = ?
+        AND document.manuscript_version = ? AND manuscript.project_id = document.project_id
+        AND version.manuscript_id = document.manuscript_id AND version.version = document.manuscript_version`)
+      .get(projectId, manuscriptId, manuscriptVersionId, manuscriptVersion) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    if (String(row.markdown_sha256) !== String(row.version_content_sha256)
+      || String(row.binding_manifest_sha256) !== String(row.version_binding_manifest_sha256)) {
+      throw new Error("science-manuscript-document-integrity-failed");
+    }
+    return manuscriptDocumentFromStorage(row);
+  }
+
+  getManuscriptDocumentForProject(projectId: string, manuscriptId: string, version?: number): ScienceManuscriptDocument | null {
+    if (!UUID_RE.test(projectId) || !UUID_RE.test(manuscriptId)) return null;
+    const requestedVersion = version === undefined ? null : Math.floor(version);
+    if (requestedVersion !== null && (!Number.isSafeInteger(requestedVersion) || requestedVersion < 1)) return null;
+    const row = requestedVersion === null
+      ? this.db.prepare(`SELECT version.id AS manuscript_version_id, version.version AS manuscript_version
+          FROM manuscripts manuscript JOIN manuscript_versions version
+            ON version.manuscript_id = manuscript.id AND version.version = manuscript.current_version
+          WHERE manuscript.project_id = ? AND manuscript.id = ?`).get(projectId, manuscriptId)
+      : this.db.prepare(`SELECT version.id AS manuscript_version_id, version.version AS manuscript_version
+          FROM manuscripts manuscript JOIN manuscript_versions version ON version.manuscript_id = manuscript.id
+          WHERE manuscript.project_id = ? AND manuscript.id = ? AND version.version = ?`).get(projectId, manuscriptId, requestedVersion);
+    const reference = row as { manuscript_version_id?: unknown; manuscript_version?: unknown } | undefined;
+    if (!reference?.manuscript_version_id) return null;
+    return this.getManuscriptDocumentByVersionId(
+      projectId,
+      manuscriptId,
+      String(reference.manuscript_version_id),
+      Number(reference.manuscript_version),
+    );
+  }
+
+  listManuscriptTransactions(projectId: string, manuscriptId: string, limit = 100): ScienceManuscriptTransaction[] {
+    if (!UUID_RE.test(projectId) || !UUID_RE.test(manuscriptId)) return [];
+    const safeLimit = Math.max(1, Math.min(1_000, Math.floor(limit)));
+    const rows = this.db.prepare(`SELECT * FROM manuscript_transactions
+      WHERE project_id = ? AND manuscript_id = ? ORDER BY result_manuscript_version DESC, id DESC LIMIT ?`)
+      .all(projectId, manuscriptId, safeLimit) as Record<string, unknown>[];
+    return rows.map(manuscriptTransactionFromStorage);
+  }
+
+  getManuscriptEditorModelForProject(projectId: string, manuscriptId: string): GetScienceManuscriptEditorModelResult | null {
+    const manuscript = this.getManuscriptForProject(projectId, manuscriptId);
+    if (!manuscript) return null;
+    const document = manuscript.version.document ?? this.getManuscriptDocumentForProject(projectId, manuscriptId);
+    if (!document) throw new Error("science-manuscript-document-not-found");
+    const recentTransactions = this.listManuscriptTransactions(projectId, manuscriptId, 100);
+    return {
+      manuscript,
+      document,
+      recentTransactions,
+      canUndo: recentTransactions.some((transaction) => transaction.resultVersion === manuscript.currentVersion),
+    };
+  }
+
+  private getManuscriptTransactionStorage(projectId: string, manuscriptId: string, transactionId: string): {
+    transaction: ScienceManuscriptTransaction;
+    inverseOperations: ScienceManuscriptOperation[];
+  } | null {
+    const row = this.db.prepare("SELECT * FROM manuscript_transactions WHERE project_id = ? AND manuscript_id = ? AND id = ?")
+      .get(projectId, manuscriptId, transactionId) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    const transaction = manuscriptTransactionFromStorage(row);
+    try {
+      const inverseOperations = (JSON.parse(String(row.inverse_operations_json)) as unknown[]).map(validateScienceManuscriptOperation);
+      if (scienceManuscriptTransactionSha256(inverseOperations) !== String(row.inverse_operations_sha256)) {
+        throw new Error("hash");
+      }
+      return { transaction, inverseOperations };
+    } catch {
+      throw new Error("science-manuscript-transaction-integrity-failed");
+    }
+  }
+
+  private manuscriptBindingsForVersion(projectId: string, manuscriptId: string, version: number): ScienceManuscriptBindingInput[] {
+    const rows = this.db.prepare(`SELECT binding.* FROM manuscript_bindings binding
+      JOIN manuscript_versions version ON version.id = binding.manuscript_version_id
+      JOIN manuscripts manuscript ON manuscript.id = version.manuscript_id
+      WHERE manuscript.project_id = ? AND manuscript.id = ? AND version.version = ?
+      ORDER BY binding.ordinal`).all(projectId, manuscriptId, version) as Record<string, unknown>[];
+    return rows.map(manuscriptBindingFromRow).map(manuscriptBindingInput);
+  }
+
+  private resolveManuscriptArtifactBinding(
+    projectId: string,
+    operation: Extract<ScienceManuscriptOperation, { kind: "insert-artifact" }>,
+  ): ScienceManuscriptBindingInput {
+    const scope = this.db.prepare("SELECT project_id FROM artifact_validation_receipts WHERE id = ?")
+      .get(operation.validationReceiptId) as { project_id?: unknown } | undefined;
+    if (!scope || String(scope.project_id) !== projectId) throw new Error("science-manuscript-artifact-scope-invalid");
+    const receipt = this.getArtifactValidationReceiptForProject(projectId, operation.validationReceiptId);
+    if (!receipt || receipt.status !== "verified") throw new Error("science-manuscript-artifact-validation-rejected");
+    return {
+      ordinal: 1,
+      role: operation.nodeKind,
+      locator: operation.locator,
+      target: {
+        kind: "artifact",
+        artifactId: receipt.artifactId,
+        artifactVersion: receipt.artifactVersion,
+        captureId: receipt.visualCaptureId,
+        validationReceiptId: receipt.id,
+      },
+    };
+  }
+
+  private reconcileManuscriptBindings(
+    projectId: string,
+    current: ScienceManuscriptBinding[],
+    document: ScienceManuscriptDocument,
+    operations: ScienceManuscriptOperation[],
+  ): ScienceManuscriptBindingInput[] {
+    const locators = manuscriptArtifactLocators(document.nodes);
+    const seenArtifactLocators = new Set<string>();
+    const retained = current.map(manuscriptBindingInput).filter((binding) => {
+      if (binding.role === "figure") return locators.figures.has(binding.locator);
+      if (binding.role === "table") return locators.tables.has(binding.locator);
+      return true;
+    });
+    for (const binding of retained) {
+      if (binding.role === "figure" || binding.role === "table") {
+        const key = `${binding.role}:${binding.locator}`;
+        if (seenArtifactLocators.has(key)) throw new Error("science-manuscript-artifact-locator-conflict");
+        seenArtifactLocators.add(key);
+      }
+    }
+    for (const operation of operations) {
+      if (operation.kind !== "insert-artifact") continue;
+      const key = `${operation.nodeKind}:${operation.locator}`;
+      if (seenArtifactLocators.has(key)) throw new Error("science-manuscript-artifact-locator-conflict");
+      seenArtifactLocators.add(key);
+      retained.push(this.resolveManuscriptArtifactBinding(projectId, operation));
+    }
+    return retained.map((binding, index) => ({ ...binding, ordinal: index + 1 }));
+  }
+
+  private commitManuscriptTransaction(input: {
+    requestId: string;
+    current: ScienceManuscript;
+    currentDocument: ScienceManuscriptDocument;
+    nextDocument: ScienceManuscriptDocument;
+    actor: ScienceManuscriptTransaction["actor"];
+    reason: string | null;
+    operations: ScienceManuscriptOperation[];
+    inverseOperations: ScienceManuscriptOperation[];
+    bindings: ScienceManuscriptBindingInput[];
+    revertsTransactionId: string | null;
+    now: string;
+  }): ApplyScienceManuscriptTransactionResult {
+    const markdown = serializeScienceManuscriptDocument(input.nextDocument);
+    if (!markdown.trim()) throw new Error("science-manuscript-document-empty");
+    const contentSha256 = sha256Text(markdown);
+    const validatedBindings = this.validateManuscriptBindings(input.current.projectId, input.bindings);
+    const bindingManifestSha256 = sha256Json(validatedBindings);
+    const nextVersion = input.current.currentVersion + 1;
+    const manuscriptVersionId = randomUUID();
+    const transactionId = randomUUID();
+    const titleNode = input.nextDocument.nodes.find((node): node is Extract<ScienceManuscriptNode, { kind: "heading" }> => node.kind === "heading" && node.level === 1);
+    const nextTitle = titleNode && titleNode.text.length <= 500 ? titleNode.text : input.current.title;
+
+    this.db.prepare("INSERT INTO manuscript_versions (id,manuscript_id,version,markdown,content_sha256,binding_manifest_sha256,created_at) VALUES (?,?,?,?,?,?,?)")
+      .run(manuscriptVersionId, input.current.id, nextVersion, markdown, contentSha256, bindingManifestSha256, input.now);
+    this.insertManuscriptBindings(input.current.projectId, manuscriptVersionId, validatedBindings, input.now);
+    this.insertManuscriptSentenceSnapshot({
+      projectId: input.current.projectId,
+      manuscriptId: input.current.id,
+      manuscriptVersionId,
+      manuscriptVersion: nextVersion,
+      manuscriptContentSha256: contentSha256,
+      markdown,
+      createdAt: input.now,
+    });
+
+    const operationsSha256 = scienceManuscriptTransactionSha256(input.operations);
+    const inverseOperationsSha256 = scienceManuscriptTransactionSha256(input.inverseOperations);
+    const transaction: ScienceManuscriptTransaction = {
+      id: transactionId,
+      requestId: input.requestId,
+      projectId: input.current.projectId,
+      manuscriptId: input.current.id,
+      baseVersion: input.current.currentVersion,
+      baseContentSha256: input.current.version.contentSha256,
+      baseDocumentSha256: input.currentDocument.documentSha256,
+      resultVersion: nextVersion,
+      resultContentSha256: contentSha256,
+      resultDocumentSha256: input.nextDocument.documentSha256,
+      actor: input.actor,
+      reason: input.reason,
+      revertsTransactionId: input.revertsTransactionId,
+      operations: input.operations,
+      createdAt: input.now,
+    };
+    const transactionSha256 = scienceManuscriptTransactionSha256(
+      manuscriptTransactionIntegrityInput(transaction, operationsSha256, inverseOperationsSha256),
+    );
+    this.db.prepare(`INSERT INTO manuscript_transactions
+      (id,request_id,project_id,manuscript_id,base_manuscript_version,base_manuscript_content_sha256,base_document_sha256,
+       result_manuscript_version,result_manuscript_content_sha256,result_document_sha256,actor,reason,operations_json,operations_sha256,
+       inverse_operations_json,inverse_operations_sha256,reverts_transaction_id,transaction_sha256,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      transaction.id, transaction.requestId, transaction.projectId, transaction.manuscriptId,
+      transaction.baseVersion, transaction.baseContentSha256, transaction.baseDocumentSha256,
+      transaction.resultVersion, transaction.resultContentSha256, transaction.resultDocumentSha256,
+      transaction.actor, transaction.reason, scienceManuscriptTransactionJson(input.operations), operationsSha256,
+      scienceManuscriptTransactionJson(input.inverseOperations), inverseOperationsSha256,
+      transaction.revertsTransactionId, transactionSha256, transaction.createdAt,
+    );
+    this.insertManuscriptDocumentVersion({
+      projectId: input.current.projectId,
+      manuscriptId: input.current.id,
+      manuscriptVersionId,
+      manuscriptVersion: nextVersion,
+      markdown,
+      bindingManifestSha256,
+      document: input.nextDocument,
+      basis: "transaction",
+      transactionId,
+      createdAt: input.now,
+    });
+    if (input.current.version.blueprintBinding) this.insertManuscriptBlueprintBinding({
+      projectId: input.current.projectId, manuscriptId: input.current.id, manuscriptVersionId,
+      manuscriptVersion: nextVersion, manuscriptContentSha256: contentSha256,
+      manuscriptBindingManifestSha256: bindingManifestSha256,
+      blueprintBinding: {
+        blueprintId: input.current.version.blueprintBinding.blueprintId,
+        blueprintVersion: input.current.version.blueprintBinding.blueprintVersion,
+        blueprintContentSha256: input.current.version.blueprintBinding.blueprintContentSha256,
+      },
+      createdAt: input.now, allowHistoricalBlueprint: true,
+    });
+    const changed = this.db.prepare(`UPDATE manuscripts SET title = ?, current_version = ?, updated_at = ?
+      WHERE id = ? AND project_id = ? AND current_version = ?`)
+      .run(nextTitle, nextVersion, input.now, input.current.id, input.current.projectId, input.current.currentVersion);
+    if (changed.changes !== 1) throw new Error("science-manuscript-version-conflict");
+    const manuscript = this.getManuscriptForProject(input.current.projectId, input.current.id);
+    if (!manuscript) throw new Error("science-manuscript-version-create-failed");
+    const persistedTransaction = this.getManuscriptTransactionStorage(input.current.projectId, input.current.id, transactionId)?.transaction;
+    if (!persistedTransaction) throw new Error("science-manuscript-transaction-create-failed");
+    return { manuscript, transaction: persistedTransaction, replayed: false };
+  }
+
+  private manuscriptComparableEligibilityFromRow(
+    row: Record<string, unknown>,
+  ): ScienceManuscriptComparableEligibilityReadModel {
+    const receipt = parseObject(row.receipt_json) as unknown as ScienceManuscriptComparableEligibilityReceipt;
+    const { contentSha256, ...contentCore } = receipt;
+    const { schema: _schema, id: _id, reportSha256, createdAt: _createdAt, ...reportCore } = contentCore;
+    if (receipt.schema !== SCIENCE_MANUSCRIPT_COMPARABLE_ELIGIBILITY_SCHEMA
+      || receipt.id !== String(row.id) || receipt.projectId !== String(row.project_id)
+      || receipt.source.sourceId !== String(row.source_id)
+      || receipt.source.sourceVersionId !== String(row.source_version_id)
+      || receipt.source.sourceVersion !== Number(row.source_version)
+      || receipt.source.sourceContentSha256 !== String(row.source_content_sha256)
+      || receipt.projectDomain !== String(row.project_domain) || receipt.sourceDomain !== String(row.source_domain)
+      || receipt.articleFamily !== String(row.article_family) || receipt.decision !== String(row.decision)
+      || receipt.venueRelation !== String(row.venue_relation)
+      || receipt.evaluator.invocationRunId !== String(row.evaluator_invocation_run_id)
+      || JSON.stringify(canonicalValue(receipt.evaluator)) !== JSON.stringify(canonicalValue(parseObject(row.evaluator_json)))
+      || JSON.stringify(canonicalValue(receipt.evidence)) !== JSON.stringify(canonicalValue(JSON.parse(String(row.evidence_json))))
+      || receipt.reportSha256 !== String(row.report_sha256) || receipt.contentSha256 !== String(row.content_sha256)
+      || sha256Json(reportCore) !== reportSha256 || sha256Json(contentCore) !== contentSha256) {
+      throw new Error("science-manuscript-comparable-eligibility-integrity-failed");
+    }
+    const rowTarget = row.target_journal_profile_id === null ? null : {
+      journalProfileId: String(row.target_journal_profile_id),
+      journalProfileVersion: Number(row.target_journal_profile_version),
+      journalProfileContentSha256: String(row.target_journal_profile_content_sha256),
+    };
+    if (JSON.stringify(canonicalValue(receipt.targetJournal)) !== JSON.stringify(canonicalValue(rowTarget))) {
+      throw new Error("science-manuscript-comparable-eligibility-integrity-failed");
+    }
+    const staleReasons: string[] = [];
+    const project = this.getProject(receipt.projectId);
+    if (!project || project.domain !== receipt.projectDomain
+      || sha256Json(project.relatedDomains) !== sha256Json(receipt.projectRelatedDomains)) {
+      staleReasons.push("project-domain-advanced");
+    }
+    const source = this.getSourceForProject(receipt.projectId, receipt.source.sourceId);
+    if (!source) staleReasons.push("source-missing");
+    else if (source.verificationStatus === "retracted") staleReasons.push("source-retracted");
+    else if (source.verificationStatus !== "content-checked"
+      || source.currentVersion !== receipt.source.sourceVersion
+      || source.version.id !== receipt.source.sourceVersionId
+      || source.version.contentSha256 !== receipt.source.sourceContentSha256
+      || source.kind !== receipt.source.sourceKind || source.canonicalUri !== receipt.source.canonicalUri
+      || source.title !== receipt.source.title || source.containerTitle !== receipt.source.containerTitle) staleReasons.push("source-advanced");
+    if (receipt.targetJournal) {
+      const profile = this.getJournalProfileForProject(receipt.projectId, receipt.targetJournal.journalProfileId);
+      if (!profile || profile.status !== "verified" || profile.currentVersion !== receipt.targetJournal.journalProfileVersion
+        || profile.version.contentSha256 !== receipt.targetJournal.journalProfileContentSha256) staleReasons.push("journal-profile-advanced");
+    }
+    if (receipt.evaluator.agentId !== SCIENCE_RESEARCH_DIRECTOR_AGENT_ID
+      || receipt.evaluator.agentSlug !== SCIENCE_RESEARCH_DIRECTOR_SLUG
+      || receipt.evaluator.packageVersion !== RESEARCH_DIRECTOR_PLUGIN_VERSION
+      || receipt.evaluator.systemPromptSha256 !== RESEARCH_DIRECTOR_SYSTEM_PROMPT_SHA256) staleReasons.push("evaluator-runtime-advanced");
+    const turn = this.getTurnByInvocationRunId(receipt.evaluator.invocationRunId);
+    if (!turn || turn.projectId !== receipt.projectId) staleReasons.push("evaluator-turn-missing");
+    return { receipt, status: staleReasons.length ? "stale" : "current", staleReasons };
+  }
+
+  getManuscriptComparableEligibilityForProject(
+    projectId: string,
+    receiptId: string,
+  ): ScienceManuscriptComparableEligibilityReadModel | null {
+    if (!UUID_RE.test(projectId) || !UUID_RE.test(receiptId)) return null;
+    const row = this.db.prepare("SELECT * FROM manuscript_comparable_eligibility_receipts WHERE id = ? AND project_id = ?")
+      .get(receiptId, projectId) as Record<string, unknown> | undefined;
+    return row ? this.manuscriptComparableEligibilityFromRow(row) : null;
+  }
+
+  recordManuscriptComparableEligibility(
+    input: RecordScienceManuscriptComparableEligibilityInput,
+    trustedEvaluator: ScienceManuscriptScholarlyEvaluator,
+  ): RecordScienceManuscriptComparableEligibilityResult {
+    if (!input || typeof input !== "object" || !UUID_RE.test(String(input.requestId ?? ""))) throw new Error("science-request-id-invalid");
+    if (!UUID_RE.test(String(input.projectId ?? "")) || !UUID_RE.test(String(input.sourceId ?? ""))
+      || !UUID_RE.test(String(input.expectedSourceVersionId ?? ""))) throw new Error("science-manuscript-comparable-eligibility-target-invalid");
+    const project = this.getProject(input.projectId);
+    if (!project) throw new Error("science-project-not-found");
+    const source = this.getSourceVersionForProject(input.projectId, input.sourceId, input.expectedSourceVersionId);
+    const current = this.getSourceForProject(input.projectId, input.sourceId);
+    const expectedVersion = safePositiveInteger(input.expectedSourceVersion, 1, Number.MAX_SAFE_INTEGER, "manuscript-comparable-source-version");
+    const expectedSha256 = safeSha256(input.expectedSourceContentSha256, "manuscript-comparable-source-sha256");
+    if (!source || !current || current.verificationStatus !== "content-checked" || current.currentVersion !== expectedVersion
+      || current.version.id !== input.expectedSourceVersionId || current.version.contentSha256 !== expectedSha256
+      || source.version.version !== expectedVersion || source.version.contentSha256 !== expectedSha256
+      || !["parsed", "evidence-linked"].includes(source.version.accessState)
+      || !["journal-article", "preprint", "book"].includes(source.kind)) {
+      throw new Error("science-manuscript-comparable-eligibility-source-invalid");
+    }
+    const sourceDomain = safeDomain(input.sourceDomain);
+    if (!SCIENCE_MANUSCRIPT_ARTICLE_FAMILIES.includes(input.articleFamily)
+      || !SCIENCE_MANUSCRIPT_COMPARABLE_DECISIONS.includes(input.decision)
+      || !SCIENCE_MANUSCRIPT_COMPARABLE_VENUE_RELATIONS.includes(input.venueRelation)) {
+      throw new Error("science-manuscript-comparable-eligibility-classification-invalid");
+    }
+    if (input.decision === "quantitative-calibration") {
+      if (source.kind === "book" || ![project.domain, ...project.relatedDomains].includes(sourceDomain)
+        || !["exact-target-journal", "same-field-peer-journal"].includes(input.venueRelation)) {
+        throw new Error("science-manuscript-comparable-eligibility-quantitative-invalid");
+      }
+    } else if (input.decision === "rhetorical-analogue-only") {
+      if (!["same-field-peer-journal", "cross-field-analogue"].includes(input.venueRelation)) {
+        throw new Error("science-manuscript-comparable-eligibility-analogue-invalid");
+      }
+    }
+    let targetJournal: ScienceManuscriptBlueprintJournalBindingInput | null = null;
+    let targetProfile: ScienceJournalProfile | null = null;
+    if (input.targetJournal !== null) {
+      if (!input.targetJournal || typeof input.targetJournal !== "object") throw new Error("science-manuscript-comparable-eligibility-journal-invalid");
+      targetProfile = this.getJournalProfileForProject(input.projectId, input.targetJournal.journalProfileId);
+      const version = safePositiveInteger(input.targetJournal.journalProfileVersion, 1, Number.MAX_SAFE_INTEGER, "manuscript-comparable-journal-version");
+      const contentSha256 = safeSha256(input.targetJournal.journalProfileContentSha256, "manuscript-comparable-journal-sha256");
+      if (!targetProfile || targetProfile.status !== "verified" || targetProfile.currentVersion !== version
+        || targetProfile.version.contentSha256 !== contentSha256) throw new Error("science-manuscript-comparable-eligibility-journal-invalid");
+      targetJournal = { journalProfileId: targetProfile.id, journalProfileVersion: version, journalProfileContentSha256: contentSha256 };
+    }
+    if (input.venueRelation === "exact-target-journal") {
+      if (!targetProfile || !source.containerTitle
+        || source.containerTitle.trim().toLocaleLowerCase() !== targetProfile.journalName.trim().toLocaleLowerCase()) {
+        throw new Error("science-manuscript-comparable-eligibility-exact-venue-mismatch");
+      }
+    }
+    const index = this.ensureSourceTextIndex(input.projectId, source.id, source.version.id);
+    const bytes = this.verifiedSourceBytes(source);
+    if (!index || index.evidenceScope !== "full-text" || !bytes) throw new Error("science-manuscript-comparable-eligibility-full-text-required");
+    if (!Array.isArray(input.evidence) || input.evidence.length < (input.decision === "quantitative-calibration" ? 2 : 1)
+      || input.evidence.length > 20) throw new Error("science-manuscript-comparable-eligibility-evidence-invalid");
+    const chunks = this.listSourceTextChunks(input.projectId, source.version.id, index.chunkCount);
+    const sectionRanges = new Map<string, { start: number; end: number }>();
+    for (const chunk of chunks) {
+      const prior = sectionRanges.get(chunk.sectionId);
+      sectionRanges.set(chunk.sectionId, { start: Math.min(prior?.start ?? chunk.startByte, chunk.startByte), end: Math.max(prior?.end ?? chunk.endByte, chunk.endByte) });
+    }
+    const evidence: ScienceManuscriptComparableSourceQuoteLocator[] = input.evidence.map((raw) => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)
+        || !hasExactKeys(raw as unknown as Record<string, unknown>, ["sectionId", "startByte", "endByte", "exactQuote", "exactQuoteSha256"])) {
+        throw new Error("science-manuscript-comparable-eligibility-evidence-invalid");
+      }
+      const sectionId = String(raw.sectionId ?? "");
+      const startByte = Number(raw.startByte);
+      const endByte = Number(raw.endByte);
+      const exactQuote = safeText(raw.exactQuote, 20_000, "manuscript-comparable-evidence-quote");
+      const exactQuoteSha256 = safeSha256(raw.exactQuoteSha256, "manuscript-comparable-evidence-quote-sha256");
+      const range = sectionRanges.get(sectionId);
+      if (!UUID_RE.test(sectionId) || !range || !Number.isSafeInteger(startByte) || !Number.isSafeInteger(endByte)
+        || startByte < range.start || endByte > range.end || endByte <= startByte || endByte > bytes.length
+        || bytes.subarray(startByte, endByte).toString("utf8") !== exactQuote || sha256Text(exactQuote) !== exactQuoteSha256) {
+        throw new Error("science-manuscript-comparable-eligibility-evidence-mismatch");
+      }
+      return { sectionId, startByte, endByte, exactQuote, exactQuoteSha256 };
+    });
+    if (new Set(evidence.map((item) => `${item.sectionId}:${item.startByte}:${item.endByte}`)).size !== evidence.length
+      || input.decision === "quantitative-calibration" && new Set(evidence.map((item) => item.sectionId)).size < 2) {
+      throw new Error("science-manuscript-comparable-eligibility-evidence-duplicate");
+    }
+    const evaluator = this.normalizeManuscriptScholarlyEvaluator(trustedEvaluator, input.projectId);
+    const rationale = safeText(input.rationale, 20_000, "manuscript-comparable-eligibility-rationale");
+    const limitations = safeTextList(input.limitations, 50, 2_000, "manuscript-comparable-eligibility-limitation", 0);
+    const normalized = {
+      projectId: input.projectId, projectDomain: project.domain, projectRelatedDomains: project.relatedDomains,
+      sourceDomain, source: {
+        sourceId: source.id, sourceVersionId: source.version.id, sourceVersion: source.version.version,
+        sourceContentSha256: expectedSha256, sourceKind: source.kind as "journal-article" | "preprint" | "book",
+        canonicalUri: source.canonicalUri, title: source.title, containerTitle: source.containerTitle,
+      },
+      articleFamily: input.articleFamily, decision: input.decision, venueRelation: input.venueRelation,
+      targetJournal, evidence, evaluator, rationale, limitations,
+    };
+    const requestSha256 = sha256Json(normalized);
+    return this.db.transaction(() => {
+      const replay = this.replay<RecordScienceManuscriptComparableEligibilityResult>(
+        input.requestId, "manuscript.comparable.eligibility.record", requestSha256,
+      );
+      if (replay) {
+        const stored = this.getManuscriptComparableEligibilityForProject(input.projectId, replay.eligibility.receipt.id);
+        if (!stored) throw new Error("science-manuscript-comparable-eligibility-replay-integrity-failed");
+        return { eligibility: stored, replayed: true };
+      }
+      const id = randomUUID();
+      const createdAt = new Date().toISOString();
+      const reportSha256 = sha256Json(normalized);
+      const contentCore = { schema: SCIENCE_MANUSCRIPT_COMPARABLE_ELIGIBILITY_SCHEMA, id, ...normalized, reportSha256, createdAt };
+      const receipt: ScienceManuscriptComparableEligibilityReceipt = { ...contentCore, contentSha256: sha256Json(contentCore) };
+      this.db.prepare(`INSERT INTO manuscript_comparable_eligibility_receipts
+        (id,project_id,source_id,source_version_id,source_version,source_content_sha256,project_domain,source_domain,article_family,
+         decision,venue_relation,target_journal_profile_id,target_journal_profile_version,target_journal_profile_content_sha256,
+         evaluator_invocation_run_id,evaluator_json,evidence_json,receipt_json,report_sha256,content_sha256,created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        receipt.id, receipt.projectId, receipt.source.sourceId, receipt.source.sourceVersionId, receipt.source.sourceVersion,
+        receipt.source.sourceContentSha256, receipt.projectDomain, receipt.sourceDomain, receipt.articleFamily, receipt.decision,
+        receipt.venueRelation, receipt.targetJournal?.journalProfileId ?? null, receipt.targetJournal?.journalProfileVersion ?? null,
+        receipt.targetJournal?.journalProfileContentSha256 ?? null, receipt.evaluator.invocationRunId, JSON.stringify(receipt.evaluator),
+        JSON.stringify(receipt.evidence), JSON.stringify(receipt), receipt.reportSha256, receipt.contentSha256, receipt.createdAt,
+      );
+      const eligibility = this.getManuscriptComparableEligibilityForProject(input.projectId, receipt.id);
+      if (!eligibility || eligibility.status !== "current") throw new Error("science-manuscript-comparable-eligibility-create-failed");
+      const result = { eligibility, replayed: false };
+      this.remember(input.requestId, "manuscript.comparable.eligibility.record", requestSha256, result, createdAt);
+      return result;
+    })();
+  }
+
+  private buildManuscriptBlueprintDocument(input: {
+    projectId: string;
+    articleFamily: ScienceManuscriptArticleFamily;
+    comparables: CreateScienceManuscriptBlueprintInput["comparables"];
+    journalBinding: ScienceManuscriptBlueprintJournalBindingInput | null;
+    sections: ScienceManuscriptBlueprintSectionInput[];
+    planningRationale: string;
+    limitations: string[];
+  }): ScienceManuscriptBlueprintDocument {
+    if (!SCIENCE_MANUSCRIPT_ARTICLE_FAMILIES.includes(input.articleFamily)) throw new Error("science-manuscript-blueprint-family-invalid");
+    if (!Array.isArray(input.comparables) || input.comparables.length < SCIENCE_BLUEPRINT_MIN_COMPARABLES
+      || input.comparables.length > SCIENCE_BLUEPRINT_MAX_COMPARABLES) throw new Error("science-manuscript-blueprint-corpus-size-invalid");
+    const seenSources = new Set<string>();
+    const seenWorks = new Set<string>();
+    const eligibilityReceipts: ScienceManuscriptComparableEligibilityReceipt[] = [];
+    const structureComparables: ScienceManuscriptCorpusStructureComparableProfile[] = [];
+    const comparables: ScienceManuscriptBlueprintComparable[] = input.comparables.map((reference) => {
+      if (!reference || typeof reference !== "object" || !UUID_RE.test(String(reference.sourceId ?? ""))
+        || !UUID_RE.test(String(reference.sourceVersionId ?? ""))
+        || !UUID_RE.test(String(reference.eligibilityReceiptId ?? ""))) throw new Error("science-manuscript-blueprint-comparable-reference-invalid");
+      const sourceVersion = safePositiveInteger(reference.sourceVersion, 1, Number.MAX_SAFE_INTEGER, "manuscript-blueprint-source-version");
+      const sourceContentSha256 = safeSha256(reference.sourceContentSha256, "manuscript-blueprint-source-content-sha256");
+      const current = this.getSourceForProject(input.projectId, reference.sourceId);
+      const source = this.getSourceVersionForProject(input.projectId, reference.sourceId, reference.sourceVersionId);
+      if (!current || !source || current.verificationStatus === "retracted" || source.verificationStatus === "retracted"
+        || current.currentVersion !== sourceVersion || current.version.id !== reference.sourceVersionId
+        || current.version.contentSha256 !== sourceContentSha256 || source.version.version !== sourceVersion
+        || source.version.contentSha256 !== sourceContentSha256) throw new Error("science-manuscript-blueprint-comparable-not-current");
+      const eligibility = this.getManuscriptComparableEligibilityForProject(input.projectId, reference.eligibilityReceiptId);
+      if (!eligibility || eligibility.status !== "current" || eligibility.receipt.decision !== "quantitative-calibration"
+        || eligibility.receipt.articleFamily !== input.articleFamily
+        || eligibility.receipt.source.sourceId !== source.id || eligibility.receipt.source.sourceVersionId !== source.version.id
+        || eligibility.receipt.source.sourceVersion !== source.version.version
+        || eligibility.receipt.source.sourceContentSha256 !== sourceContentSha256) {
+        throw new Error("science-manuscript-blueprint-comparable-eligibility-invalid");
+      }
+      eligibilityReceipts.push(eligibility.receipt);
+      const workKey = source.canonicalUri.trim().toLowerCase();
+      if (seenSources.has(source.id) || seenWorks.has(workKey)) throw new Error("science-manuscript-blueprint-comparable-duplicate");
+      seenSources.add(source.id); seenWorks.add(workKey);
+      const index = this.ensureSourceTextIndex(input.projectId, source.id, source.version.id);
+      if (!index || index.evidenceScope !== "full-text" || index.sourceContentSha256 !== sourceContentSha256) {
+        throw new Error("science-manuscript-blueprint-full-text-required");
+      }
+      const bytes = this.verifiedSourceBytes(source);
+      if (!bytes) throw new Error("science-manuscript-blueprint-full-text-required");
+      const text = bytes.toString("utf8");
+      const chunks = this.listSourceTextChunks(input.projectId, source.version.id, index.chunkCount);
+      const chunksBySection = new Map<string, ScienceSourceTextChunk[]>();
+      for (const chunk of chunks) chunksBySection.set(chunk.sectionId, [...(chunksBySection.get(chunk.sectionId) ?? []), chunk]);
+      const sectionBodyText = (sectionChunks: ScienceSourceTextChunk[]): string => {
+        const orderedChunks = [...sectionChunks].sort((left, right) => left.startByte - right.startByte);
+        const firstChunk = orderedChunks[0];
+        const lastChunk = orderedChunks[orderedChunks.length - 1];
+        if (!firstChunk || !lastChunk) return "";
+        // Reconstruct the original source byte interval. Joining storage chunks with paragraph
+        // separators would turn chunk-size boundaries inside one long paragraph into invented
+        // paragraphs and inflate the corpus target.
+        const combined = bytes.subarray(firstChunk.startByte, lastChunk.endByte).toString("utf8");
+        const title = sectionChunks[0]?.sectionTitle.trim() ?? "";
+        const leadingWhitespace = combined.match(/^\s*/u)?.[0].length ?? 0;
+        const content = combined.slice(leadingWhitespace);
+        if (title && (content === title || content.startsWith(`${title}\n`) || content.startsWith(`${title}\r`))) {
+          return content.slice(title.length).replace(/^\s+/u, "");
+        }
+        return combined;
+      };
+      const excludedBodyRoles = new Set(["abstract", "references", "appendix", "supplement"]);
+      const hostBodySectionIds = [...chunksBySection.entries()]
+        .filter(([, sectionChunks]) => !excludedBodyRoles.has(sectionRole(sectionChunks[0]!.sectionTitle)))
+        .map(([sectionId]) => sectionId);
+      if (!Array.isArray(reference.sectionMappings) || reference.sectionMappings.length < 2 || reference.sectionMappings.length > 20) {
+        throw new Error("science-manuscript-blueprint-section-mapping-invalid");
+      }
+      const seenMappingRoles = new Set<string>();
+      const seenMappedSectionIds = new Set<string>();
+      const sectionObservations: ScienceManuscriptBlueprintComparableSectionObservation[] = reference.sectionMappings.map((mapping) => {
+        const role = String(mapping?.role ?? "");
+        if (!SCIENCE_BLUEPRINT_SECTION_ROLES.has(role) || seenMappingRoles.has(role)
+          || !Array.isArray(mapping?.sourceSectionIds) || mapping.sourceSectionIds.length < 1 || mapping.sourceSectionIds.length > 20
+          || new Set(mapping.sourceSectionIds).size !== mapping.sourceSectionIds.length) {
+          throw new Error("science-manuscript-blueprint-section-mapping-invalid");
+        }
+        seenMappingRoles.add(role);
+        const mappedChunks = mapping.sourceSectionIds.flatMap((sectionId) => {
+          if (!UUID_RE.test(sectionId) || !chunksBySection.has(sectionId)) throw new Error("science-manuscript-blueprint-source-section-not-found");
+          if (seenMappedSectionIds.has(sectionId)) throw new Error("science-manuscript-blueprint-source-section-duplicate");
+          seenMappedSectionIds.add(sectionId);
+          const hostRole = sectionRole(chunksBySection.get(sectionId)![0]!.sectionTitle);
+          if (hostRole !== "other" && hostRole !== role) throw new Error("science-manuscript-blueprint-source-section-role-mismatch");
+          return chunksBySection.get(sectionId)!;
+        });
+        const mappedText = mapping.sourceSectionIds
+          .map((sectionId) => sectionBodyText(chunksBySection.get(sectionId)!))
+          .filter(Boolean)
+          .join("\n\n");
+        const unsignedObservation = {
+          role: role as ScienceManuscriptBlueprintComparableSectionObservation["role"],
+          sourceSectionIds: [...mapping.sourceSectionIds],
+          sourceSectionTitles: mapping.sourceSectionIds.map((sectionId) => chunksBySection.get(sectionId)![0]!.sectionTitle),
+          wordCount: (mappedText.match(/[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*/gu) ?? []).length,
+          paragraphCount: mappedText.split(/\n\s*\n+/u).filter((paragraph) => paragraph.trim().length >= 40).length,
+        };
+        if (unsignedObservation.wordCount < 1 || unsignedObservation.paragraphCount < 1) throw new Error("science-manuscript-blueprint-source-section-empty");
+        return { ...unsignedObservation, contentSha256: sha256Json(unsignedObservation) };
+      });
+      if (hostBodySectionIds.some((sectionId) => !seenMappedSectionIds.has(sectionId))) {
+        throw new Error("science-manuscript-blueprint-body-coverage-incomplete");
+      }
+      const bodyText = hostBodySectionIds
+        .map((sectionId) => sectionBodyText(chunksBySection.get(sectionId) ?? []))
+        .filter(Boolean)
+        .join("\n\n");
+      const wordCount = (bodyText.match(/[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*/gu) ?? []).length;
+      const paragraphCount = bodyText.split(/\n\s*\n+/u).filter((paragraph) => paragraph.trim().length >= 40).length;
+      if (wordCount < 1 || paragraphCount < 1) throw new Error("science-manuscript-blueprint-full-text-empty");
+      const unsigned = {
+        sourceId: source.id, sourceVersionId: source.version.id, sourceVersion: source.version.version,
+        sourceContentSha256, eligibilityReceiptId: eligibility.receipt.id, title: source.title, canonicalUri: source.canonicalUri,
+        textIndexId: index.id, textIndexContentSha256: index.contentSha256,
+        wordCount, paragraphCount, sectionCount: sectionObservations.length,
+        figureMentionCount: (text.match(/\bfig(?:ure)?\.?\s*\d+/giu) ?? []).length,
+        tableMentionCount: (text.match(/\btable\s*\d+/giu) ?? []).length,
+        equationMentionCount: (text.match(/\b(?:eq(?:uation)?\.?\s*\(?\d+|theorem\s+\d+|lemma\s+\d+)/giu) ?? []).length,
+        referenceEntryCount: (text.match(/^\s*(?:\[\d+\]|\d+\.\s+)[A-Z\p{L}]/gmu) ?? []).length,
+        sectionObservations,
+      };
+      const observedSections = [...chunksBySection.values()]
+        .sort((left, right) => left[0]!.sectionOrdinal - right[0]!.sectionOrdinal)
+        .map((sectionChunks) => {
+          const sectionText = sectionBodyText(sectionChunks);
+          const sectionCore = {
+            sectionId: sectionChunks[0]!.sectionId,
+            ordinal: sectionChunks[0]!.sectionOrdinal,
+            title: sectionChunks[0]!.sectionTitle,
+            role: manuscriptCorpusSectionRole(sectionChunks[0]!.sectionTitle),
+            wordCount: manuscriptCorpusWords(sectionText),
+            paragraphCount: manuscriptCorpusParagraphs(sectionText),
+          };
+          return { ...sectionCore, contentSha256: sha256Json(sectionCore) };
+        });
+      const scope = (role: ScienceManuscriptSectionRole) => {
+        const matched = observedSections.filter((section) => section.role === role);
+        return {
+          sectionIds: matched.map((section) => section.sectionId),
+          wordCount: matched.reduce((sum, section) => sum + section.wordCount, 0),
+          paragraphCount: matched.reduce((sum, section) => sum + section.paragraphCount, 0),
+        };
+      };
+      const referenceScope = scope("references");
+      const referenceText = observedSections.filter((section) => section.role === "references")
+        .map((section) => sectionBodyText(chunksBySection.get(section.sectionId) ?? []))
+        .join("\n\n");
+      const structureCore = {
+        sourceId: source.id,
+        sourceVersionId: source.version.id,
+        sourceVersion: source.version.version,
+        sourceContentSha256,
+        textIndexId: index.id,
+        textIndexContentSha256: index.contentSha256,
+        observedSections,
+        observedRoleOrder: [...new Set(observedSections.map((section) => section.role).filter((role) => role !== "other"))],
+        scopes: { abstract: scope("abstract"), references: referenceScope, appendix: scope("appendix") },
+        counts: {
+          figures: manuscriptCorpusUniqueLabelCount(text, /\bfig(?:ure)?\.?\s*([A-Z]?\d+(?:\.\d+)*)\b/giu),
+          tables: manuscriptCorpusUniqueLabelCount(text, /\btable\s*([A-Z]?\d+(?:\.\d+)*)\b/giu),
+          equations: manuscriptCorpusUniqueLabelCount(text, /\b(?:eq(?:uation)?\.?|theorem|lemma)\s*\(?([A-Z]?\d+(?:\.\d+)*)\)?/giu),
+          references: manuscriptCorpusReferenceCount(referenceText),
+        },
+      };
+      structureComparables.push({ ...structureCore, contentSha256: sha256Json(structureCore) });
+      return { ...unsigned, snapshotSha256: sha256Json(unsigned) };
+    });
+    const ordered = (key: "wordCount" | "paragraphCount" | "sectionCount"): number[] => comparables.map((item) => item[key]).sort((a, b) => a - b);
+    const percentile = (values: number[], fraction: number): number => values[Math.max(0, Math.min(values.length - 1, Math.ceil(values.length * fraction) - 1))]!;
+    const summaryMetric = (key: "wordCount" | "paragraphCount" | "sectionCount") => {
+      const values = ordered(key);
+      return { minimum: values[0]!, median: percentile(values, 0.5), maximum: values[values.length - 1]! };
+    };
+    const corpusSummary: ScienceManuscriptBlueprintCorpusSummary = {
+      comparableCount: comparables.length,
+      wordCount: summaryMetric("wordCount"), paragraphCount: summaryMetric("paragraphCount"), sectionCount: summaryMetric("sectionCount"),
+      confidence: comparables.length < 5 ? "low" : comparables.length < 8 ? "medium" : "high",
+    };
+    const rawSections = Array.isArray(input.sections) ? input.sections : [];
+    if (rawSections.length < 3 || rawSections.length > 30) throw new Error("science-manuscript-blueprint-sections-invalid");
+    const seenKeys = new Set<string>();
+    const seenSectionRoles = new Set<string>();
+    const normalizedSections = rawSections.map((section) => {
+      if (!section || typeof section !== "object" || "targetWords" in section || "targetParagraphs" in section) {
+        throw new Error("science-manuscript-blueprint-agent-targets-forbidden");
+      }
+      const key = safeText(section.key, 120, "manuscript-blueprint-section-key").toLowerCase();
+      if (!/^[a-z0-9][a-z0-9._-]{0,119}$/.test(key) || seenKeys.has(key)) throw new Error("science-manuscript-blueprint-section-key-invalid");
+      seenKeys.add(key);
+      const role = String(section.role ?? "");
+      if (!SCIENCE_BLUEPRINT_SECTION_ROLES.has(role)) throw new Error("science-manuscript-blueprint-section-role-invalid");
+      if (role !== "other" && seenSectionRoles.has(role)) throw new Error("science-manuscript-blueprint-section-role-duplicate");
+      seenSectionRoles.add(role);
+      if (typeof section.required !== "boolean" || !["none", "optional", "required"].includes(String(section.visualExpectation ?? ""))) {
+        throw new Error("science-manuscript-blueprint-section-invalid");
+      }
+      return {
+        key, title: safeText(section.title, 240, "manuscript-blueprint-section-title"), role: role as ScienceManuscriptBlueprintSection["role"],
+        required: section.required,
+        rhetoricalMoves: safeTextList(section.rhetoricalMoves, 20, 1_000, "manuscript-blueprint-rhetorical-move", 1),
+        visualExpectation: section.visualExpectation,
+        evidenceRoles: safeTextList(section.evidenceRoles, 20, 240, "manuscript-blueprint-evidence-role", 0),
+      };
+    });
+    for (const role of SCIENCE_BLUEPRINT_REQUIRED_ROLES[input.articleFamily]) {
+      if (!normalizedSections.some((section) => section.role === role && section.required)) throw new Error(`science-manuscript-blueprint-required-role-missing:${role}`);
+    }
+    const minimumRoleCoverage = Math.ceil(comparables.length / 2);
+    for (const role of SCIENCE_BLUEPRINT_CALIBRATION_ROLES[input.articleFamily]) {
+      if (comparables.filter((comparable) => comparable.sectionObservations.some((item) => item.role === role)).length < minimumRoleCoverage) {
+        throw new Error(`science-manuscript-blueprint-section-calibration-missing:${role}`);
+      }
+    }
+    let journalBinding: ScienceManuscriptBlueprintJournalBindingInput | null = null;
+    let journalMaximum: number | null = null;
+    if (input.journalBinding !== null) {
+      const profile = this.getJournalProfileForProject(input.projectId, input.journalBinding.journalProfileId);
+      const profileVersion = safePositiveInteger(input.journalBinding.journalProfileVersion, 1, Number.MAX_SAFE_INTEGER, "manuscript-blueprint-journal-version");
+      const profileSha = safeSha256(input.journalBinding.journalProfileContentSha256, "manuscript-blueprint-journal-sha256");
+      if (!profile || profile.status !== "verified" || profile.currentVersion !== profileVersion || profile.version.contentSha256 !== profileSha) {
+        throw new Error("science-manuscript-blueprint-journal-not-current");
+      }
+      journalBinding = { journalProfileId: profile.id, journalProfileVersion: profileVersion, journalProfileContentSha256: profileSha };
+      const maximums = profile.version.rules.filter((rule) => rule.check.kind === "max-manuscript-words")
+        .map((rule) => (rule.check as { maximum: number }).maximum);
+      journalMaximum = maximums.length ? Math.min(...maximums) : null;
+    }
+    if (new Set(eligibilityReceipts.map((receipt) => receipt.sourceDomain)).size !== 1) {
+      throw new Error("science-manuscript-blueprint-comparable-domain-mixed");
+    }
+    for (const receipt of eligibilityReceipts) {
+      if (JSON.stringify(canonicalValue(receipt.targetJournal)) !== JSON.stringify(canonicalValue(journalBinding))) {
+        throw new Error("science-manuscript-blueprint-comparable-journal-mismatch");
+      }
+    }
+    const wordValues = ordered("wordCount");
+    const minimum = Math.max(1, percentile(wordValues, 0.25));
+    let maximum = Math.max(minimum, percentile(wordValues, 0.75));
+    if (journalMaximum !== null) {
+      if (journalMaximum < minimum) throw new Error("science-manuscript-blueprint-journal-corpus-conflict");
+      maximum = Math.min(maximum, journalMaximum);
+    }
+    const totalTargetWords: ScienceManuscriptBlueprintRange = { minimum, maximum };
+    const sections: ScienceManuscriptBlueprintSection[] = normalizedSections.map((section) => {
+      const observations = comparables.flatMap((comparable) => comparable.sectionObservations.filter((item) => item.role === section.role));
+      if (!observations.length) return { ...section, targetWords: null, targetParagraphs: null, calibrationBasis: "unresolved" };
+      const words = observations.map((item) => item.wordCount).sort((a, b) => a - b);
+      const paragraphs = observations.map((item) => item.paragraphCount).sort((a, b) => a - b);
+      return { ...section,
+        targetWords: { minimum: percentile(words, 0.25), maximum: percentile(words, 0.75) },
+        targetParagraphs: { minimum: percentile(paragraphs, 0.25), maximum: percentile(paragraphs, 0.75) },
+        calibrationBasis: "corpus-section",
+      };
+    });
+    const limitations = safeTextList(input.limitations, 50, 2_000, "manuscript-blueprint-limitation", 0);
+    if (comparables.length < 5) limitations.push("Fewer than five eligible comparable full texts; corpus calibration confidence is low.");
+    const structureProfile = buildManuscriptCorpusStructureProfile(structureComparables, normalizedSections);
+    if (structureProfile.plannedOrder.conflicts.length) {
+      limitations.push(`Planned section order differs from the corpus consensus for: ${structureProfile.plannedOrder.conflicts
+        .map((conflict) => `${conflict.before} before ${conflict.after}`).join(", ")}. Retain only with an explicit article- or journal-specific rationale.`);
+    }
+    return {
+      schema: SCIENCE_MANUSCRIPT_BLUEPRINT_SCHEMA, articleFamily: input.articleFamily, comparables, corpusSummary,
+      journalBinding, sections, totalTargetWords, structureProfile,
+      planningRationale: safeText(input.planningRationale, 20_000, "manuscript-blueprint-rationale"), limitations,
+    };
+  }
+
+  private manuscriptBlueprintFromRow(row: Record<string, unknown>): ScienceManuscriptBlueprint {
+    const document = parseObject(row.document_json) as unknown as ScienceManuscriptBlueprintDocument;
+    const contentSha256 = safeSha256(row.content_sha256, "manuscript-blueprint-content-sha256");
+    if (document.schema !== SCIENCE_MANUSCRIPT_BLUEPRINT_SCHEMA || sha256Json(document) !== contentSha256
+      || contentSha256 !== String(row.current_content_sha256) || document.articleFamily !== String(row.article_family)) {
+      throw new Error("science-manuscript-blueprint-integrity-failed");
+    }
+    if (document.structureProfile) {
+      const { contentSha256: profileSha256, ...profileCore } = document.structureProfile;
+      if (document.structureProfile.schema !== SCIENCE_MANUSCRIPT_CORPUS_STRUCTURE_PROFILE_SCHEMA
+        || !SHA256_RE.test(profileSha256) || sha256Json(profileCore) !== profileSha256
+        || document.structureProfile.comparables.length !== document.comparables.length
+        || document.structureProfile.comparables.some((profileComparable, index) => {
+          const comparable = document.comparables[index];
+          const { contentSha256: comparableSha256, ...comparableCore } = profileComparable;
+          return !comparable || !SHA256_RE.test(comparableSha256) || sha256Json(comparableCore) !== comparableSha256
+            || profileComparable.sourceId !== comparable.sourceId
+            || profileComparable.sourceVersionId !== comparable.sourceVersionId
+            || profileComparable.sourceVersion !== comparable.sourceVersion
+            || profileComparable.sourceContentSha256 !== comparable.sourceContentSha256
+            || profileComparable.textIndexId !== comparable.textIndexId
+            || profileComparable.textIndexContentSha256 !== comparable.textIndexContentSha256;
+        })) throw new Error("science-manuscript-blueprint-structure-profile-integrity-failed");
+    }
+    const comparableRows = this.db.prepare("SELECT * FROM manuscript_blueprint_comparables WHERE blueprint_version_id = ? ORDER BY ordinal")
+      .all(String(row.version_id)) as Record<string, unknown>[];
+    if (comparableRows.length !== document.comparables.length || comparableRows.some((entry, index) => {
+      const comparable = document.comparables[index]!;
+      const { snapshotSha256, ...snapshotCore } = comparable;
+      const eligibilityReceiptId = typeof comparable.eligibilityReceiptId === "string" ? comparable.eligibilityReceiptId : "";
+      return Number(entry.ordinal) !== index + 1 || String(entry.source_id) !== comparable.sourceId
+        || String(entry.source_version_id) !== comparable.sourceVersionId || Number(entry.source_version) !== comparable.sourceVersion
+        || String(entry.source_content_sha256) !== comparable.sourceContentSha256 || String(entry.text_index_id) !== comparable.textIndexId
+        || (entry.eligibility_receipt_id !== null || eligibilityReceiptId !== "")
+          && String(entry.eligibility_receipt_id) !== eligibilityReceiptId
+        || String(entry.text_index_content_sha256) !== comparable.textIndexContentSha256 || String(entry.snapshot_sha256) !== comparable.snapshotSha256
+        || sha256Json(snapshotCore) !== snapshotSha256;
+    })) throw new Error("science-manuscript-blueprint-integrity-failed");
+    const journal = document.journalBinding;
+    if ((journal === null) !== (row.journal_profile_id === null)
+      || journal && (journal.journalProfileId !== String(row.journal_profile_id)
+        || journal.journalProfileVersion !== Number(row.journal_profile_version)
+        || journal.journalProfileContentSha256 !== String(row.journal_profile_content_sha256))) {
+      throw new Error("science-manuscript-blueprint-integrity-failed");
+    }
+    const staleReasons: string[] = [];
+    for (const comparable of document.comparables) {
+      const eligibility = UUID_RE.test(String(comparable.eligibilityReceiptId ?? ""))
+        ? this.getManuscriptComparableEligibilityForProject(String(row.project_id), comparable.eligibilityReceiptId)
+        : null;
+      if (!eligibility || eligibility.status !== "current" || eligibility.receipt.decision !== "quantitative-calibration"
+        || eligibility.receipt.articleFamily !== document.articleFamily
+        || eligibility.receipt.source.sourceId !== comparable.sourceId
+        || eligibility.receipt.source.sourceVersionId !== comparable.sourceVersionId
+        || JSON.stringify(canonicalValue(eligibility.receipt.targetJournal)) !== JSON.stringify(canonicalValue(document.journalBinding))) {
+        staleReasons.push(`comparable-eligibility-invalid:${comparable.sourceId}`);
+      }
+      const current = this.getSourceForProject(String(row.project_id), comparable.sourceId);
+      if (!current) staleReasons.push(`comparable-source-missing:${comparable.sourceId}`);
+      else if (current.verificationStatus === "retracted") staleReasons.push(`comparable-source-retracted:${comparable.sourceId}`);
+      else if (current.currentVersion !== comparable.sourceVersion || current.version.id !== comparable.sourceVersionId
+        || current.version.contentSha256 !== comparable.sourceContentSha256) staleReasons.push(`comparable-source-advanced:${comparable.sourceId}`);
+      const indexRow = this.db.prepare("SELECT * FROM source_text_indexes WHERE id = ?").get(comparable.textIndexId) as Record<string, unknown> | undefined;
+      if (!indexRow || sourceTextIndexFromRow(indexRow).contentSha256 !== comparable.textIndexContentSha256) {
+        staleReasons.push(`comparable-index-invalid:${comparable.sourceId}`);
+      } else {
+        try {
+          const verifiedIndex = this.ensureSourceTextIndex(String(row.project_id), comparable.sourceId, comparable.sourceVersionId);
+          if (!verifiedIndex || verifiedIndex.evidenceScope !== "full-text" || verifiedIndex.contentSha256 !== comparable.textIndexContentSha256) {
+            staleReasons.push(`comparable-index-invalid:${comparable.sourceId}`);
+          }
+        } catch {
+          staleReasons.push(`comparable-index-invalid:${comparable.sourceId}`);
+        }
+      }
+    }
+    if (document.journalBinding) {
+      const profile = this.getJournalProfileForProject(String(row.project_id), document.journalBinding.journalProfileId);
+      if (!profile || profile.status !== "verified" || profile.currentVersion !== document.journalBinding.journalProfileVersion
+        || profile.version.contentSha256 !== document.journalBinding.journalProfileContentSha256) staleReasons.push("journal-profile-advanced");
+    }
+    return {
+      id: String(row.id), projectId: String(row.project_id), title: String(row.title),
+      status: staleReasons.length ? "stale" : document.comparables.length < 5 ? "collecting" : "current", staleReasons,
+      currentVersion: Number(row.current_version),
+      version: { id: String(row.version_id), blueprintId: String(row.id), version: Number(row.current_version), document, contentSha256, createdAt: String(row.version_created_at) },
+      createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+    };
+  }
+
+  listManuscriptBlueprints(projectId: string, limit = 100): ScienceManuscriptBlueprint[] {
+    if (!UUID_RE.test(projectId)) return [];
+    const rows = this.db.prepare(`SELECT b.*, v.id AS version_id, v.article_family, v.journal_profile_id, v.journal_profile_version,
+      v.journal_profile_content_sha256, v.document_json, v.content_sha256, v.created_at AS version_created_at
+      FROM manuscript_blueprints b JOIN manuscript_blueprint_versions v ON v.blueprint_id = b.id AND v.version = b.current_version
+      WHERE b.project_id = ? ORDER BY b.updated_at DESC, b.id LIMIT ?`).all(projectId, Math.max(1, Math.min(500, Math.floor(limit)))) as Record<string, unknown>[];
+    return rows.map((row) => this.manuscriptBlueprintFromRow(row));
+  }
+
+  getManuscriptBlueprintForProject(projectId: string, blueprintId: string): ScienceManuscriptBlueprint | null {
+    if (!UUID_RE.test(projectId) || !UUID_RE.test(blueprintId)) return null;
+    const row = this.db.prepare(`SELECT b.*, v.id AS version_id, v.article_family, v.journal_profile_id, v.journal_profile_version,
+      v.journal_profile_content_sha256, v.document_json, v.content_sha256, v.created_at AS version_created_at
+      FROM manuscript_blueprints b JOIN manuscript_blueprint_versions v ON v.blueprint_id = b.id AND v.version = b.current_version
+      WHERE b.project_id = ? AND b.id = ?`).get(projectId, blueprintId) as Record<string, unknown> | undefined;
+    return row ? this.manuscriptBlueprintFromRow(row) : null;
+  }
+
+  getManuscriptBlueprintVersionForProject(projectId: string, blueprintId: string, version: number, contentSha256: string): ScienceManuscriptBlueprint["version"] | null {
+    if (!UUID_RE.test(projectId) || !UUID_RE.test(blueprintId) || !Number.isSafeInteger(version) || version < 1 || !SHA256_RE.test(contentSha256)) return null;
+    const row = this.db.prepare(`SELECT b.*, v.id AS version_id, v.version AS selected_version, v.article_family,
+      v.journal_profile_id, v.journal_profile_version, v.journal_profile_content_sha256, v.document_json,
+      v.content_sha256, v.created_at AS version_created_at
+      FROM manuscript_blueprints b JOIN manuscript_blueprint_versions v ON v.blueprint_id = b.id
+      WHERE b.project_id = ? AND b.id = ? AND v.version = ? AND v.content_sha256 = ?`)
+      .get(projectId, blueprintId, version, contentSha256) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return this.manuscriptBlueprintFromRow({ ...row, current_version: Number(row.selected_version), current_content_sha256: String(row.content_sha256) }).version;
+  }
+
+  private buildManuscriptBlueprintAssessmentReceipt(
+    manuscript: ScienceManuscript,
+    blueprint: ScienceManuscriptBlueprint,
+    profile: ScienceJournalProfile,
+    id: string,
+    createdAt: string,
+  ): ScienceManuscriptBlueprintAssessmentReceipt {
+    if (!manuscript.version.documentSha256 || !manuscript.version.blueprintBinding) {
+      throw new Error("science-manuscript-blueprint-assessment-binding-missing");
+    }
+    const depth = inspectScienceManuscriptDepth(manuscript.version.markdown);
+    const sections: ScienceManuscriptBlueprintAssessmentSection[] = blueprint.version.document.sections.map((section) => {
+      const observed = depth.sections.find((item) => item.role === section.role);
+      const observedHeadingNode = manuscript.version.document?.nodes.find((node) => node.kind === "heading" && sectionRole(node.text) === section.role) ?? null;
+      let status: ScienceManuscriptBlueprintAssessmentSection["status"];
+      if (!observed) status = section.required ? "missing" : "unresolved";
+      else if (!section.targetWords || !section.targetParagraphs) status = "unresolved";
+      else if (section.required && (observed.wordCount < Math.ceil(section.targetWords.minimum * 0.5)
+        || observed.paragraphCount < Math.ceil(section.targetParagraphs.minimum * 0.5))) status = "gross-shortfall";
+      else if (observed.wordCount < section.targetWords.minimum || observed.paragraphCount < section.targetParagraphs.minimum) status = "below-range";
+      else if (observed.wordCount > section.targetWords.maximum || observed.paragraphCount > section.targetParagraphs.maximum) status = "above-range";
+      else status = "within-range";
+      return {
+        key: section.key, title: section.title, role: section.role, required: section.required,
+        observedHeading: observed?.heading ?? null,
+        observedHeadingNode: observedHeadingNode ? { id: observedHeadingNode.id, revision: observedHeadingNode.revision, contentSha256: observedHeadingNode.contentSha256 } : null,
+        observedWords: observed?.wordCount ?? 0,
+        observedParagraphs: observed?.paragraphCount ?? 0, targetWords: section.targetWords,
+        targetParagraphs: section.targetParagraphs, status,
+      };
+    });
+    const missing = sections.filter((section) => section.required && section.status === "missing");
+    const belowCorpus = sections.filter((section) => section.required
+      && ["gross-shortfall", "below-range"].includes(section.status));
+    const documentBelowCorpus = depth.wordCount < blueprint.version.document.totalTargetWords.minimum;
+    const findings: ScienceManuscriptBlueprintAssessmentFinding[] = [
+      {
+        code: "blueprint-current", severity: "error", status: "pass",
+        observed: `blueprint ${blueprint.id}@${blueprint.currentVersion} is current and journal-bound`,
+        required: "Exact current full-text Blueprint and verified journal binding",
+      },
+      {
+        code: "anti-stub-depth", severity: "error", status: depth.antiStubPassed ? "pass" : "fail",
+        observed: `${depth.wordCount} words, ${depth.paragraphCount} substantive paragraphs, ${depth.issues.length} anti-stub issues`,
+        required: "Deterministic anti-stub preflight must pass",
+      },
+      {
+        code: "required-section-role", severity: "error", status: missing.length ? "fail" : "pass",
+        observed: missing.length ? `missing ${missing.map((section) => section.role).join(",")}` : "all required roles present",
+        required: "Every article-family required section role must be present",
+      },
+      {
+        code: "gross-corpus-depth", severity: "error", status: belowCorpus.length || documentBelowCorpus ? "fail" : "pass",
+        observed: [belowCorpus.length ? `sections ${belowCorpus.map((section) => section.role).join(",")}` : null,
+          documentBelowCorpus ? `document ${depth.wordCount}<${blueprint.version.document.totalTargetWords.minimum}` : null]
+          .filter(Boolean).join("; ") || "all required sections and the document meet the corpus-derived lower range",
+        required: "Every required section and the document must meet the corpus-derived lower range",
+      },
+    ];
+    const assessmentPolicyCore = {
+      id: "agentlas.manuscript-blueprint-assessment-policy",
+      version: 2,
+      depthPreflightPolicy: SCIENCE_MANUSCRIPT_DEPTH_PREFLIGHT_POLICY,
+      grossCorpusDepthRatio: 1,
+      rangeEstimator: "nearest-rank-p25-p75",
+      requiredRoleMode: "article-family-blueprint",
+    };
+    const reportCore = {
+      projectId: manuscript.projectId,
+      manuscript: {
+        id: manuscript.id, versionId: manuscript.version.id, version: manuscript.currentVersion,
+        contentSha256: manuscript.version.contentSha256, documentSha256: manuscript.version.documentSha256,
+        bindingManifestSha256: manuscript.version.bindingManifestSha256,
+      },
+      blueprint: { id: blueprint.id, versionId: blueprint.version.id, version: blueprint.currentVersion, contentSha256: blueprint.version.contentSha256 },
+      journalProfile: { id: profile.id, version: profile.currentVersion, contentSha256: profile.version.contentSha256 },
+      policy: { id: assessmentPolicyCore.id, version: assessmentPolicyCore.version, contentSha256: sha256Json(assessmentPolicyCore) },
+      depthPreflight: { ...depth, contentSha256: sha256Json(depth) },
+      sections, findings,
+      structuralStatus: findings.some((finding) => finding.severity === "error" && finding.status === "fail") ? "blocked" as const : "passed" as const,
+    };
+    const reportSha256 = sha256Json(reportCore);
+    const contentCore = { schema: SCIENCE_MANUSCRIPT_BLUEPRINT_ASSESSMENT_SCHEMA, id, ...reportCore, reportSha256, createdAt };
+    return { ...contentCore, contentSha256: sha256Json(contentCore) };
+  }
+
+  private manuscriptBlueprintAssessmentFromRow(row: Record<string, unknown>): ScienceManuscriptBlueprintAssessmentReadModel {
+    const receipt = parseObject(row.report_json) as unknown as ScienceManuscriptBlueprintAssessmentReceipt;
+    const { contentSha256, ...contentCore } = receipt;
+    const { schema: _schema, id: _id, reportSha256, createdAt: _createdAt, ...reportCore } = contentCore;
+    const { contentSha256: depthContentSha256, ...depthCore } = receipt.depthPreflight;
+    if (receipt.schema !== SCIENCE_MANUSCRIPT_BLUEPRINT_ASSESSMENT_SCHEMA || receipt.id !== String(row.id)
+      || receipt.projectId !== String(row.project_id) || reportSha256 !== String(row.report_sha256)
+      || contentSha256 !== String(row.content_sha256) || sha256Json(contentCore) !== contentSha256 || sha256Json(reportCore) !== reportSha256
+      || receipt.manuscript.id !== String(row.manuscript_id) || receipt.manuscript.versionId !== String(row.manuscript_version_id)
+      || receipt.manuscript.version !== Number(row.manuscript_version) || receipt.manuscript.contentSha256 !== String(row.manuscript_content_sha256)
+      || receipt.manuscript.documentSha256 !== String(row.manuscript_document_sha256)
+      || receipt.manuscript.bindingManifestSha256 !== String(row.manuscript_binding_manifest_sha256)
+      || receipt.blueprint.id !== String(row.blueprint_id) || receipt.blueprint.versionId !== String(row.blueprint_version_id)
+      || receipt.blueprint.version !== Number(row.blueprint_version)
+      || receipt.blueprint.contentSha256 !== String(row.blueprint_content_sha256)
+      || receipt.journalProfile.id !== String(row.journal_profile_id) || receipt.journalProfile.version !== Number(row.journal_profile_version)
+      || receipt.journalProfile.contentSha256 !== String(row.journal_profile_content_sha256)
+      || receipt.policy.id !== String(row.policy_id) || receipt.policy.version !== Number(row.policy_version)
+      || receipt.policy.contentSha256 !== String(row.policy_content_sha256)
+      || sha256Json(depthCore) !== depthContentSha256) {
+      throw new Error("science-manuscript-blueprint-assessment-integrity-failed");
+    }
+    const staleReasons: string[] = [];
+    const manuscript = this.getManuscriptForProject(receipt.projectId, receipt.manuscript.id);
+    if (!manuscript || manuscript.currentVersion !== receipt.manuscript.version
+      || manuscript.version.id !== receipt.manuscript.versionId || manuscript.version.contentSha256 !== receipt.manuscript.contentSha256
+      || manuscript.version.documentSha256 !== receipt.manuscript.documentSha256
+      || manuscript.version.bindingManifestSha256 !== receipt.manuscript.bindingManifestSha256) staleReasons.push("manuscript-version-advanced");
+    const blueprint = this.getManuscriptBlueprintForProject(receipt.projectId, receipt.blueprint.id);
+    if (!blueprint || blueprint.status !== "current" || blueprint.currentVersion !== receipt.blueprint.version
+      || blueprint.version.id !== receipt.blueprint.versionId
+      || blueprint.version.contentSha256 !== receipt.blueprint.contentSha256) staleReasons.push("manuscript-blueprint-advanced");
+    const profile = this.getJournalProfileForProject(receipt.projectId, receipt.journalProfile.id);
+    if (!profile || profile.status !== "verified" || profile.currentVersion !== receipt.journalProfile.version
+      || profile.version.contentSha256 !== receipt.journalProfile.contentSha256) staleReasons.push("journal-profile-advanced");
+    const currentPolicyContentSha256 = sha256Json({
+      id: "agentlas.manuscript-blueprint-assessment-policy", version: 2,
+      depthPreflightPolicy: SCIENCE_MANUSCRIPT_DEPTH_PREFLIGHT_POLICY, grossCorpusDepthRatio: 1,
+      rangeEstimator: "nearest-rank-p25-p75", requiredRoleMode: "article-family-blueprint",
+    });
+    if (receipt.policy.contentSha256 !== currentPolicyContentSha256) staleReasons.push("assessment-policy-advanced");
+    return { receipt, status: staleReasons.length ? "stale" : "current", staleReasons };
+  }
+
+  getManuscriptBlueprintAssessmentForManuscript(projectId: string, manuscriptId: string): ScienceManuscriptBlueprintAssessmentReadModel | null {
+    if (!UUID_RE.test(projectId) || !UUID_RE.test(manuscriptId)) return null;
+    const row = this.db.prepare(`SELECT * FROM manuscript_blueprint_assessments
+      WHERE project_id = ? AND manuscript_id = ? ORDER BY created_at DESC, id DESC LIMIT 1`).get(projectId, manuscriptId) as Record<string, unknown> | undefined;
+    return row ? this.manuscriptBlueprintAssessmentFromRow(row) : null;
+  }
+
+  recordManuscriptBlueprintAssessment(input: RecordScienceManuscriptBlueprintAssessmentInput): RecordScienceManuscriptBlueprintAssessmentResult {
+    if (!input || typeof input !== "object" || !UUID_RE.test(String(input.requestId ?? ""))) throw new Error("science-request-id-invalid");
+    if (!UUID_RE.test(String(input.projectId ?? "")) || !UUID_RE.test(String(input.manuscriptId ?? "")) || !UUID_RE.test(String(input.journalProfileId ?? ""))) {
+      throw new Error("science-manuscript-blueprint-assessment-target-invalid");
+    }
+    const requestSha256 = sha256Json(input);
+    return this.db.transaction(() => {
+      const replayed = this.replay<RecordScienceManuscriptBlueprintAssessmentResult>(input.requestId, "manuscript.blueprint.assessment.record", requestSha256);
+      if (replayed) {
+        const current = this.getManuscriptBlueprintAssessmentForManuscript(input.projectId, input.manuscriptId);
+        if (!current || current.receipt.id !== replayed.assessment.receipt.id) throw new Error("science-manuscript-blueprint-assessment-replay-integrity-failed");
+        return { assessment: current, replayed: true };
+      }
+      const manuscript = this.getManuscriptForProject(input.projectId, input.manuscriptId);
+      const profile = this.getJournalProfileForProject(input.projectId, input.journalProfileId);
+      if (!manuscript || manuscript.currentVersion !== input.expectedManuscriptVersion
+        || manuscript.version.contentSha256 !== input.expectedManuscriptContentSha256) throw new Error("science-manuscript-version-conflict");
+      if (!profile || profile.status !== "verified" || profile.currentVersion !== input.expectedJournalProfileVersion
+        || profile.version.contentSha256 !== input.expectedJournalProfileContentSha256) throw new Error("science-journal-profile-version-conflict");
+      const binding = manuscript.version.blueprintBinding;
+      const blueprint = binding ? this.getManuscriptBlueprintForProject(input.projectId, binding.blueprintId) : null;
+      const staleBindingReasons = [
+        !binding ? "binding-missing" : null,
+        !blueprint ? "blueprint-missing" : null,
+        blueprint && blueprint.status !== "current" ? `blueprint-${blueprint.status}` : null,
+        binding && blueprint && blueprint.currentVersion !== binding.blueprintVersion ? "blueprint-version" : null,
+        binding && blueprint && blueprint.version.contentSha256 !== binding.blueprintContentSha256 ? "blueprint-hash" : null,
+        blueprint && blueprint.version.document.journalBinding?.journalProfileId !== profile.id ? "journal-id" : null,
+        blueprint && blueprint.version.document.journalBinding?.journalProfileVersion !== profile.currentVersion ? "journal-version" : null,
+        blueprint && blueprint.version.document.journalBinding?.journalProfileContentSha256 !== profile.version.contentSha256 ? "journal-hash" : null,
+      ].filter((reason): reason is string => Boolean(reason));
+      if (staleBindingReasons.length) {
+        throw new Error(`science-manuscript-blueprint-assessment-binding-stale:${staleBindingReasons.join(",")}`);
+      }
+      if (!binding || !blueprint) throw new Error("science-manuscript-blueprint-assessment-binding-stale:binding-unreachable");
+      const policyCore = {
+        id: "agentlas.manuscript-blueprint-assessment-policy", version: 2,
+        depthPreflightPolicy: SCIENCE_MANUSCRIPT_DEPTH_PREFLIGHT_POLICY, grossCorpusDepthRatio: 1,
+        rangeEstimator: "nearest-rank-p25-p75", requiredRoleMode: "article-family-blueprint",
+      };
+      const policyContentSha256 = sha256Json(policyCore);
+      const priorRow = this.db.prepare(`SELECT * FROM manuscript_blueprint_assessments WHERE manuscript_version_id = ?
+        AND blueprint_id = ? AND blueprint_version = ? AND journal_profile_id = ? AND journal_profile_version = ? AND policy_content_sha256 = ?`)
+        .get(manuscript.version.id, blueprint.id, blueprint.currentVersion, profile.id, profile.currentVersion, policyContentSha256) as Record<string, unknown> | undefined;
+      if (priorRow) {
+        const assessment = this.manuscriptBlueprintAssessmentFromRow(priorRow);
+        const result = { assessment, replayed: true };
+        this.remember(input.requestId, "manuscript.blueprint.assessment.record", requestSha256, result, new Date().toISOString());
+        return result;
+      }
+      const id = randomUUID();
+      const createdAt = new Date().toISOString();
+      const receipt = this.buildManuscriptBlueprintAssessmentReceipt(manuscript, blueprint, profile, id, createdAt);
+      this.db.prepare(`INSERT INTO manuscript_blueprint_assessments
+        (id,project_id,manuscript_id,manuscript_version_id,manuscript_version,manuscript_content_sha256,manuscript_document_sha256,
+         manuscript_binding_manifest_sha256,blueprint_id,blueprint_version_id,blueprint_version,blueprint_content_sha256,journal_profile_id,journal_profile_version,
+         journal_profile_content_sha256,policy_id,policy_version,policy_content_sha256,report_json,report_sha256,content_sha256,created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(id, input.projectId, manuscript.id, manuscript.version.id, manuscript.currentVersion, manuscript.version.contentSha256,
+          manuscript.version.documentSha256, manuscript.version.bindingManifestSha256, blueprint.id, blueprint.version.id, blueprint.currentVersion,
+          blueprint.version.contentSha256, profile.id, profile.currentVersion, profile.version.contentSha256,
+          receipt.policy.id, receipt.policy.version, receipt.policy.contentSha256,
+          JSON.stringify(receipt), receipt.reportSha256, receipt.contentSha256, createdAt);
+      const assessment = this.getManuscriptBlueprintAssessmentForManuscript(input.projectId, manuscript.id);
+      if (!assessment || assessment.receipt.id !== id) throw new Error("science-manuscript-blueprint-assessment-create-failed");
+      const result = { assessment, replayed: false };
+      this.remember(input.requestId, "manuscript.blueprint.assessment.record", requestSha256, result, createdAt);
+      return result;
+    })();
+  }
+
+  private normalizeManuscriptScholarlyEvaluator(
+    value: ScienceManuscriptScholarlyEvaluator,
+    projectId: string,
+  ): ScienceManuscriptScholarlyEvaluator {
+    if (!value || typeof value !== "object" || Array.isArray(value)
+      || !hasExactKeys(value as unknown as Record<string, unknown>, [
+        "method", "agentId", "agentSlug", "packageVersion", "packageDigest", "systemPromptSha256", "invocationRunId",
+      ])) throw new Error("science-manuscript-scholarly-assessment-evaluator-invalid");
+    const normalized: ScienceManuscriptScholarlyEvaluator = {
+      method: value.method,
+      agentId: safeText(value.agentId, 240, "manuscript-scholarly-evaluator-agent-id"),
+      agentSlug: safeText(value.agentSlug, 240, "manuscript-scholarly-evaluator-agent-slug"),
+      packageVersion: safeText(value.packageVersion, 80, "manuscript-scholarly-evaluator-package-version"),
+      packageDigest: safePrefixedSha256(value.packageDigest, "manuscript-scholarly-evaluator-package-digest"),
+      systemPromptSha256: safeSha256(value.systemPromptSha256, "manuscript-scholarly-evaluator-prompt-sha256"),
+      invocationRunId: String(value.invocationRunId ?? ""),
+    };
+    if (normalized.method !== "research-director-attestation"
+      || normalized.agentId !== SCIENCE_RESEARCH_DIRECTOR_AGENT_ID
+      || normalized.agentSlug !== SCIENCE_RESEARCH_DIRECTOR_SLUG
+      || normalized.packageVersion !== RESEARCH_DIRECTOR_PLUGIN_VERSION
+      || normalized.systemPromptSha256 !== RESEARCH_DIRECTOR_SYSTEM_PROMPT_SHA256
+      || !UUID_RE.test(normalized.invocationRunId)) {
+      throw new Error("science-manuscript-scholarly-assessment-evaluator-identity-mismatch");
+    }
+    const turn = this.getTurnByInvocationRunId(normalized.invocationRunId);
+    if (!turn || turn.projectId !== projectId) {
+      throw new Error("science-manuscript-scholarly-assessment-evaluator-turn-invalid");
+    }
+    return normalized;
+  }
+
+  private manuscriptScholarlyAssessmentPolicy() {
+    const core = {
+      id: "agentlas.manuscript-scholarly-assessment-policy",
+      version: 2,
+      minimumConfidence: SCIENCE_MANUSCRIPT_SCHOLARLY_MINIMUM_CONFIDENCE,
+      paragraphSequenceMode: "corpus-blueprint-minimum" as const,
+      requiredMoveMode: "exact-blueprint" as const,
+      exactLocatorMode: true as const,
+      evidenceDistributionMode: "at-least-two-substantive-paragraphs-when-available" as const,
+      visualCoverageMode: "host-derived" as const,
+    };
+    return { ...core, contentSha256: sha256Json(core) };
+  }
+
+  private validateManuscriptScholarlyEvidence(
+    raw: unknown,
+    paragraphNodes: Map<string, ScienceManuscriptParagraphNode>,
+  ): ScienceManuscriptExactQuoteLocator {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)
+      || !hasExactKeys(raw as Record<string, unknown>, [
+        "nodeId", "nodeRevision", "nodeContentSha256", "nodeKind", "from", "to", "exactQuote",
+      ])) throw new Error("science-manuscript-scholarly-assessment-evidence-locator-invalid");
+    const value = raw as Record<string, unknown>;
+    const nodeId = String(value.nodeId ?? "");
+    const nodeRevision = Number(value.nodeRevision);
+    const nodeContentSha256 = safeSha256(value.nodeContentSha256, "manuscript-scholarly-evidence-node-sha256");
+    const from = Number(value.from);
+    const to = Number(value.to);
+    const exactQuote = safeText(value.exactQuote, 20_000, "manuscript-scholarly-evidence-quote");
+    const node = paragraphNodes.get(nodeId);
+    if (value.nodeKind !== "paragraph" || !node || !Number.isSafeInteger(nodeRevision) || nodeRevision !== node.revision
+      || nodeContentSha256 !== node.contentSha256) {
+      throw new Error("science-manuscript-scholarly-assessment-evidence-node-invalid");
+    }
+    if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 0 || to <= from || to > node.markdown.length) {
+      throw new Error("science-manuscript-scholarly-assessment-evidence-offset-invalid");
+    }
+    if (node.markdown.slice(from, to) !== exactQuote) {
+      throw new Error("science-manuscript-scholarly-assessment-evidence-quote-mismatch");
+    }
+    return { nodeId, nodeRevision, nodeContentSha256, nodeKind: "paragraph", from, to, exactQuote };
+  }
+
+  private manuscriptScholarlyAssessmentFromRow(row: Record<string, unknown>): ScienceManuscriptScholarlyAssessmentReadModel {
+    const receipt = parseObject(row.report_json) as unknown as ScienceManuscriptScholarlyAssessmentReceipt;
+    const { contentSha256, ...contentCore } = receipt;
+    const { schema: _schema, id: _id, reportSha256, createdAt: _createdAt, ...reportCore } = contentCore;
+    if (receipt.schema !== SCIENCE_MANUSCRIPT_SCHOLARLY_ASSESSMENT_SCHEMA || receipt.id !== String(row.id)
+      || receipt.projectId !== String(row.project_id) || receipt.reportSha256 !== String(row.report_sha256)
+      || receipt.contentSha256 !== String(row.content_sha256) || sha256Json(reportCore) !== reportSha256
+      || sha256Json(contentCore) !== contentSha256
+      || receipt.manuscript.id !== String(row.manuscript_id) || receipt.manuscript.versionId !== String(row.manuscript_version_id)
+      || receipt.manuscript.version !== Number(row.manuscript_version)
+      || receipt.manuscript.contentSha256 !== String(row.manuscript_content_sha256)
+      || receipt.manuscript.documentSha256 !== String(row.manuscript_document_sha256)
+      || receipt.manuscript.bindingManifestSha256 !== String(row.manuscript_binding_manifest_sha256)
+      || receipt.blueprint.id !== String(row.blueprint_id) || receipt.blueprint.versionId !== String(row.blueprint_version_id)
+      || receipt.blueprint.version !== Number(row.blueprint_version) || receipt.blueprint.contentSha256 !== String(row.blueprint_content_sha256)
+      || receipt.journalProfile.id !== String(row.journal_profile_id) || receipt.journalProfile.version !== Number(row.journal_profile_version)
+      || receipt.journalProfile.contentSha256 !== String(row.journal_profile_content_sha256)
+      || receipt.blueprintAssessment.id !== String(row.blueprint_assessment_id)
+      || receipt.blueprintAssessment.reportSha256 !== String(row.blueprint_assessment_report_sha256)
+      || receipt.blueprintAssessment.policyContentSha256 !== String(row.blueprint_assessment_policy_content_sha256)
+      || receipt.blueprintAssessment.contentSha256 !== String(row.blueprint_assessment_content_sha256)
+      || receipt.evaluator.invocationRunId !== String(row.evaluator_invocation_run_id)
+      || JSON.stringify(canonicalValue(receipt.evaluator)) !== JSON.stringify(canonicalValue(parseObject(row.evaluator_json)))
+      || receipt.policy.id !== String(row.policy_id) || receipt.policy.version !== Number(row.policy_version)
+      || receipt.policy.contentSha256 !== String(row.policy_content_sha256)) {
+      throw new Error("science-manuscript-scholarly-assessment-integrity-failed");
+    }
+    const staleReasons: string[] = [];
+    const manuscript = this.getManuscriptForProject(receipt.projectId, receipt.manuscript.id);
+    if (!manuscript || manuscript.currentVersion !== receipt.manuscript.version || manuscript.version.id !== receipt.manuscript.versionId
+      || manuscript.version.contentSha256 !== receipt.manuscript.contentSha256
+      || manuscript.version.documentSha256 !== receipt.manuscript.documentSha256
+      || manuscript.version.bindingManifestSha256 !== receipt.manuscript.bindingManifestSha256) staleReasons.push("manuscript-version-advanced");
+    const blueprint = this.getManuscriptBlueprintForProject(receipt.projectId, receipt.blueprint.id);
+    if (!blueprint || blueprint.status !== "current" || blueprint.currentVersion !== receipt.blueprint.version
+      || blueprint.version.id !== receipt.blueprint.versionId || blueprint.version.contentSha256 !== receipt.blueprint.contentSha256) {
+      staleReasons.push("manuscript-blueprint-advanced");
+    }
+    const profile = this.getJournalProfileForProject(receipt.projectId, receipt.journalProfile.id);
+    if (!profile || profile.status !== "verified" || profile.currentVersion !== receipt.journalProfile.version
+      || profile.version.contentSha256 !== receipt.journalProfile.contentSha256) staleReasons.push("journal-profile-advanced");
+    const structuralRow = this.db.prepare("SELECT * FROM manuscript_blueprint_assessments WHERE id = ? AND project_id = ?")
+      .get(receipt.blueprintAssessment.id, receipt.projectId) as Record<string, unknown> | undefined;
+    if (!structuralRow) staleReasons.push("blueprint-assessment-missing");
+    else {
+      const structural = this.manuscriptBlueprintAssessmentFromRow(structuralRow);
+      if (structural.status !== "current" || structural.receipt.structuralStatus !== "passed"
+        || structural.receipt.reportSha256 !== receipt.blueprintAssessment.reportSha256
+        || structural.receipt.policy.contentSha256 !== receipt.blueprintAssessment.policyContentSha256
+        || structural.receipt.contentSha256 !== receipt.blueprintAssessment.contentSha256) {
+        staleReasons.push("blueprint-assessment-advanced");
+      }
+    }
+    if (receipt.policy.contentSha256 !== this.manuscriptScholarlyAssessmentPolicy().contentSha256) staleReasons.push("assessment-policy-advanced");
+    if (receipt.evaluator.agentId !== SCIENCE_RESEARCH_DIRECTOR_AGENT_ID
+      || receipt.evaluator.agentSlug !== SCIENCE_RESEARCH_DIRECTOR_SLUG
+      || receipt.evaluator.packageVersion !== RESEARCH_DIRECTOR_PLUGIN_VERSION
+      || receipt.evaluator.systemPromptSha256 !== RESEARCH_DIRECTOR_SYSTEM_PROMPT_SHA256) staleReasons.push("evaluator-runtime-advanced");
+    const turn = this.getTurnByInvocationRunId(receipt.evaluator.invocationRunId);
+    if (!turn || turn.projectId !== receipt.projectId) staleReasons.push("evaluator-turn-missing");
+    return { receipt, status: staleReasons.length ? "stale" : "current", staleReasons };
+  }
+
+  getManuscriptScholarlyAssessmentForManuscript(
+    projectId: string,
+    manuscriptId: string,
+  ): ScienceManuscriptScholarlyAssessmentReadModel | null {
+    if (!UUID_RE.test(projectId) || !UUID_RE.test(manuscriptId)) return null;
+    const row = this.db.prepare(`SELECT * FROM manuscript_scholarly_assessments
+      WHERE project_id = ? AND manuscript_id = ? ORDER BY created_at DESC, id DESC LIMIT 1`)
+      .get(projectId, manuscriptId) as Record<string, unknown> | undefined;
+    return row ? this.manuscriptScholarlyAssessmentFromRow(row) : null;
+  }
+
+  recordManuscriptScholarlyAssessment(
+    input: RecordScienceManuscriptScholarlyAssessmentInput,
+    trustedEvaluator: ScienceManuscriptScholarlyEvaluator,
+  ): RecordScienceManuscriptScholarlyAssessmentResult {
+    if (!input || typeof input !== "object" || !UUID_RE.test(String(input.requestId ?? ""))) throw new Error("science-request-id-invalid");
+    if (!UUID_RE.test(String(input.projectId ?? "")) || !UUID_RE.test(String(input.manuscriptId ?? ""))
+      || !UUID_RE.test(String(input.journalProfileId ?? "")) || !UUID_RE.test(String(input.expectedBlueprintAssessmentId ?? ""))) {
+      throw new Error("science-manuscript-scholarly-assessment-target-invalid");
+    }
+    if (!trustedEvaluator) throw new Error("science-manuscript-scholarly-assessment-evaluator-required");
+    const evaluator = this.normalizeManuscriptScholarlyEvaluator(trustedEvaluator, input.projectId);
+    const policy = this.manuscriptScholarlyAssessmentPolicy();
+    const requestSha256 = sha256Json({ input, evaluator });
+    return this.db.transaction(() => {
+      const replayed = this.replay<RecordScienceManuscriptScholarlyAssessmentResult>(
+        input.requestId, "manuscript.scholarly.assessment.record", requestSha256,
+      );
+      if (replayed) {
+        const current = this.getManuscriptScholarlyAssessmentForManuscript(input.projectId, input.manuscriptId);
+        if (!current || current.receipt.id !== replayed.assessment.receipt.id) {
+          throw new Error("science-manuscript-scholarly-assessment-replay-integrity-failed");
+        }
+        return { assessment: current, replayed: true };
+      }
+      const manuscript = this.getManuscriptForProject(input.projectId, input.manuscriptId);
+      const profile = this.getJournalProfileForProject(input.projectId, input.journalProfileId);
+      if (!manuscript || manuscript.currentVersion !== input.expectedManuscriptVersion
+        || manuscript.version.contentSha256 !== safeSha256(input.expectedManuscriptContentSha256, "manuscript-scholarly-manuscript-sha256")) {
+        throw new Error("science-manuscript-version-conflict");
+      }
+      if (!manuscript.version.document) throw new Error("science-manuscript-document-not-found");
+      if (!profile || profile.status !== "verified" || profile.currentVersion !== input.expectedJournalProfileVersion
+        || profile.version.contentSha256 !== safeSha256(input.expectedJournalProfileContentSha256, "manuscript-scholarly-journal-sha256")) {
+        throw new Error("science-journal-profile-version-conflict");
+      }
+      const structuralRow = this.db.prepare("SELECT * FROM manuscript_blueprint_assessments WHERE id = ? AND project_id = ?")
+        .get(input.expectedBlueprintAssessmentId, input.projectId) as Record<string, unknown> | undefined;
+      if (!structuralRow) throw new Error("science-manuscript-scholarly-assessment-structural-missing");
+      const structural = this.manuscriptBlueprintAssessmentFromRow(structuralRow);
+      if (structural.status !== "current" || structural.receipt.structuralStatus !== "passed"
+        || structural.receipt.reportSha256 !== safeSha256(input.expectedBlueprintAssessmentReportSha256, "manuscript-scholarly-structural-report-sha256")
+        || structural.receipt.manuscript.versionId !== manuscript.version.id
+        || structural.receipt.journalProfile.id !== profile.id || structural.receipt.journalProfile.version !== profile.currentVersion
+        || structural.receipt.journalProfile.contentSha256 !== profile.version.contentSha256) {
+        throw new Error("science-manuscript-scholarly-assessment-structural-stale");
+      }
+      const blueprint = this.getManuscriptBlueprintForProject(input.projectId, structural.receipt.blueprint.id);
+      if (!blueprint || blueprint.status !== "current" || blueprint.version.id !== structural.receipt.blueprint.versionId
+        || blueprint.currentVersion !== structural.receipt.blueprint.version
+        || blueprint.version.contentSha256 !== structural.receipt.blueprint.contentSha256) {
+        throw new Error("science-manuscript-scholarly-assessment-blueprint-stale");
+      }
+      if (!Array.isArray(input.sections) || input.sections.length !== blueprint.version.document.sections.length) {
+        throw new Error("science-manuscript-scholarly-assessment-section-incomplete");
+      }
+      const overallConfidence = Number(input.overallConfidence);
+      if (!Number.isFinite(overallConfidence) || overallConfidence < 0 || overallConfidence > 1) {
+        throw new Error("science-manuscript-scholarly-assessment-confidence-invalid");
+      }
+      const summary = safeText(input.summary, 20_000, "manuscript-scholarly-summary");
+      if (!Array.isArray(input.limitations) || input.limitations.length > 100) {
+        throw new Error("science-manuscript-scholarly-assessment-limitations-invalid");
+      }
+      const limitations = input.limitations.map((item) => safeText(item, 4_000, "manuscript-scholarly-limitation"));
+      const nodes = manuscript.version.document.nodes;
+      const nodeById = new Map(nodes.map((node) => [node.id, node]));
+      const sectionInputs = new Map<string, ScienceManuscriptScholarlySectionInput>();
+      for (const sectionInput of input.sections) {
+        if (!sectionInput || typeof sectionInput !== "object" || sectionInputs.has(String(sectionInput.sectionKey ?? ""))) {
+          throw new Error("science-manuscript-scholarly-assessment-section-invalid");
+        }
+        sectionInputs.set(String(sectionInput.sectionKey), sectionInput);
+      }
+      const findings: ScienceManuscriptScholarlyAssessmentFinding[] = [{
+        code: "structural-assessment-current", sectionKey: null, severity: "error", status: "pass",
+        observed: `${structural.receipt.id} current and passed`, required: "an exact current passed Blueprint assessment",
+      }];
+      let previousHeadingIndex = -1;
+      const assessedSections: ScienceManuscriptScholarlySectionAssessment[] = blueprint.version.document.sections.map((blueprintSection) => {
+        const supplied = sectionInputs.get(blueprintSection.key);
+        if (!supplied) throw new Error("science-manuscript-scholarly-assessment-section-incomplete");
+        const headingLocator = supplied.heading as ScienceManuscriptStableNodeLocator;
+        const headingNode = nodeById.get(String(headingLocator?.nodeId ?? ""));
+        if (!headingLocator || headingLocator.nodeKind !== "heading" || !headingNode || headingNode.kind !== "heading"
+          || headingNode.revision !== Number(headingLocator.nodeRevision)
+          || headingNode.contentSha256 !== safeSha256(headingLocator.nodeContentSha256, "manuscript-scholarly-heading-sha256")
+          || headingNode.text.trim().toLocaleLowerCase() !== blueprintSection.title.trim().toLocaleLowerCase()) {
+          throw new Error("science-manuscript-scholarly-assessment-heading-invalid");
+        }
+        const headingIndex = nodes.findIndex((node) => node.id === headingNode.id);
+        if (headingIndex <= previousHeadingIndex) {
+          throw new Error("science-manuscript-scholarly-assessment-heading-order-invalid");
+        }
+        previousHeadingIndex = headingIndex;
+        const nextIndex = nodes.findIndex((node, index) => index > headingIndex && node.kind === "heading" && node.level <= headingNode.level);
+        const body = nodes.slice(headingIndex + 1, nextIndex < 0 ? nodes.length : nextIndex);
+        const paragraphNodes = new Map(body.filter((node): node is Extract<typeof node, { kind: "paragraph" }> => node.kind === "paragraph")
+          .map((node) => [node.id, node]));
+        const observedParagraphNodeIds = [...paragraphNodes.values()]
+          .filter((node) => node.markdown.trim().split(/\s+/u).length >= 8).map((node) => node.id);
+        const requiredParagraphs = blueprintSection.targetParagraphs?.minimum ?? Math.max(1, Math.min(2, blueprintSection.rhetoricalMoves.length));
+        const paragraphPassed = !blueprintSection.required || observedParagraphNodeIds.length >= requiredParagraphs;
+        findings.push({ code: "section-paragraph-sequence", sectionKey: blueprintSection.key, severity: "error",
+          status: paragraphPassed ? "pass" : "fail", observed: `${observedParagraphNodeIds.length} substantive paragraph nodes`,
+          required: `${requiredParagraphs} corpus-calibrated substantive paragraph nodes` });
+
+        const normalizeItems = (rawItems: unknown, expected: string[], kind: "move" | "role") => {
+          if (!Array.isArray(rawItems) || rawItems.length !== expected.length) {
+            throw new Error(kind === "move" ? "science-manuscript-scholarly-assessment-required-move-incomplete"
+              : "science-manuscript-scholarly-assessment-evidence-role-incomplete");
+          }
+          return rawItems.map((raw, index) => {
+            if (!raw || typeof raw !== "object" || Array.isArray(raw)
+              || !hasExactKeys(raw as Record<string, unknown>, ["label", "status", "confidence", "evidence", "rationale"])) {
+              throw new Error("science-manuscript-scholarly-assessment-item-invalid");
+            }
+            const item = raw as Record<string, unknown>;
+            const label = safeText(item.label, 1_000, "manuscript-scholarly-item-label");
+            if (label !== expected[index]) throw new Error(kind === "move"
+              ? "science-manuscript-scholarly-assessment-required-move-incomplete"
+              : "science-manuscript-scholarly-assessment-evidence-role-incomplete");
+            if (!["satisfied", "partial", "missing"].includes(String(item.status))) {
+              throw new Error("science-manuscript-scholarly-assessment-item-status-invalid");
+            }
+            const confidence = Number(item.confidence);
+            if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+              throw new Error("science-manuscript-scholarly-assessment-confidence-invalid");
+            }
+            if (!Array.isArray(item.evidence) || item.evidence.length > 100) {
+              throw new Error("science-manuscript-scholarly-assessment-evidence-invalid");
+            }
+            const evidence = item.evidence.map((locator) => this.validateManuscriptScholarlyEvidence(locator, paragraphNodes));
+            const rationale = safeText(item.rationale, 8_000, "manuscript-scholarly-item-rationale");
+            return { label, status: item.status as "satisfied" | "partial" | "missing", confidence, evidence, rationale };
+          });
+        };
+        const rhetoricalMoves = normalizeItems(supplied.rhetoricalMoves, blueprintSection.rhetoricalMoves, "move");
+        const evidenceRoleCoverage = normalizeItems(supplied.evidenceRoleCoverage, blueprintSection.evidenceRoles, "role");
+        const movePassed = rhetoricalMoves.every((item) => item.status === "satisfied"
+          && item.confidence >= policy.minimumConfidence && item.evidence.length > 0);
+        const evidencePassed = evidenceRoleCoverage.every((item) => item.status === "satisfied"
+          && item.confidence >= policy.minimumConfidence && item.evidence.length > 0);
+        const evidencedParagraphNodeIds = new Set([
+          ...rhetoricalMoves.flatMap((item) => item.evidence.map((locator) => locator.nodeId)),
+          ...evidenceRoleCoverage.flatMap((item) => item.evidence.map((locator) => locator.nodeId)),
+        ]);
+        const requiredEvidenceParagraphs = Math.min(2, requiredParagraphs, observedParagraphNodeIds.length);
+        const evidenceDistributionPassed = !blueprintSection.required
+          || evidencedParagraphNodeIds.size >= requiredEvidenceParagraphs;
+        findings.push({ code: "rhetorical-move-coverage", sectionKey: blueprintSection.key, severity: "error",
+          status: movePassed ? "pass" : "fail", observed: `${rhetoricalMoves.filter((item) => item.status === "satisfied").length}/${rhetoricalMoves.length} satisfied`,
+          required: "every exact Blueprint rhetorical move satisfied above the confidence floor with exact paragraph evidence" });
+        findings.push({ code: "evidence-role-coverage", sectionKey: blueprintSection.key, severity: "error",
+          status: evidencePassed ? "pass" : "fail", observed: `${evidenceRoleCoverage.filter((item) => item.status === "satisfied").length}/${evidenceRoleCoverage.length} satisfied`,
+          required: "every exact Blueprint evidence role satisfied above the confidence floor with exact paragraph evidence" });
+        findings.push({ code: "evidence-distribution", sectionKey: blueprintSection.key, severity: "error",
+          status: evidenceDistributionPassed ? "pass" : "fail",
+          observed: `${evidencedParagraphNodeIds.size} distinct substantive paragraph nodes cited`,
+          required: `${requiredEvidenceParagraphs} distinct substantive paragraph nodes when the corpus-calibrated section contains them` });
+
+        const flowRaw = supplied.flow as unknown as Record<string, unknown>;
+        if (!flowRaw || typeof flowRaw !== "object" || Array.isArray(flowRaw)
+          || !hasExactKeys(flowRaw, ["status", "readerStartsWith", "contribution", "nextQuestion", "confidence", "evidence", "rationale"])) {
+          throw new Error("science-manuscript-scholarly-assessment-flow-invalid");
+        }
+        if (!["coherent", "partial", "broken"].includes(String(flowRaw.status))) {
+          throw new Error("science-manuscript-scholarly-assessment-flow-invalid");
+        }
+        const flowConfidence = Number(flowRaw.confidence);
+        if (!Number.isFinite(flowConfidence) || flowConfidence < 0 || flowConfidence > 1 || !Array.isArray(flowRaw.evidence)) {
+          throw new Error("science-manuscript-scholarly-assessment-flow-invalid");
+        }
+        const flow = {
+          status: flowRaw.status as "coherent" | "partial" | "broken",
+          readerStartsWith: safeText(flowRaw.readerStartsWith, 4_000, "manuscript-scholarly-flow-start"),
+          contribution: safeText(flowRaw.contribution, 4_000, "manuscript-scholarly-flow-contribution"),
+          nextQuestion: safeText(flowRaw.nextQuestion, 4_000, "manuscript-scholarly-flow-next-question"),
+          confidence: flowConfidence,
+          evidence: (flowRaw.evidence as unknown[]).map((locator) => this.validateManuscriptScholarlyEvidence(locator, paragraphNodes)),
+          rationale: safeText(flowRaw.rationale, 8_000, "manuscript-scholarly-flow-rationale"),
+        };
+        const flowPassed = flow.status === "coherent" && flow.confidence >= policy.minimumConfidence && flow.evidence.length > 0;
+        findings.push({ code: "section-flow", sectionKey: blueprintSection.key, severity: "error", status: flowPassed ? "pass" : "fail",
+          observed: `${flow.status} at ${flow.confidence.toFixed(2)} confidence`,
+          required: "coherent reader-state transition above the confidence floor with exact paragraph evidence" });
+
+        const visualNodes: ScienceManuscriptStableNodeLocator[] = [];
+        for (const node of body) {
+          if (node.kind === "table" && node.mode === "inline") {
+            visualNodes.push({ nodeId: node.id, nodeRevision: node.revision, nodeContentSha256: node.contentSha256, nodeKind: node.kind });
+          } else if (node.kind === "figure" || (node.kind === "table" && node.mode === "artifact")) {
+            const binding = manuscript.version.bindings.find((candidate) => candidate.locator === node.locator
+              && candidate.role === node.kind && candidate.target.kind === "artifact");
+            if (binding) visualNodes.push({ nodeId: node.id, nodeRevision: node.revision, nodeContentSha256: node.contentSha256, nodeKind: node.kind });
+          }
+        }
+        const visualStatus = blueprintSection.visualExpectation === "required"
+          ? (visualNodes.length ? "satisfied" as const : "missing" as const)
+          : "not-required" as const;
+        const visualPassed = visualStatus !== "missing";
+        findings.push({ code: "visual-expectation", sectionKey: blueprintSection.key, severity: "error", status: visualPassed ? "pass" : "fail",
+          observed: `${visualNodes.length} exact visual nodes; expectation=${blueprintSection.visualExpectation}`,
+          required: blueprintSection.visualExpectation === "required" ? "at least one exact inline or artifact-bound visual in this section" : "no mandatory visual" });
+        return {
+          sectionKey: blueprintSection.key, title: blueprintSection.title, role: blueprintSection.role,
+          required: blueprintSection.required,
+          heading: { nodeId: headingNode.id, nodeRevision: headingNode.revision, nodeContentSha256: headingNode.contentSha256, nodeKind: "heading" },
+          observedParagraphNodeIds, requiredParagraphs, rhetoricalMoves, evidenceRoleCoverage, flow,
+          visualExpectationCoverage: { expectation: blueprintSection.visualExpectation, status: visualStatus, evidence: visualNodes },
+          status: paragraphPassed && movePassed && evidencePassed && evidenceDistributionPassed && flowPassed && visualPassed ? "passed" : "blocked",
+        };
+      });
+      if (sectionInputs.size !== assessedSections.length) throw new Error("science-manuscript-scholarly-assessment-section-invalid");
+      const confidencePassed = overallConfidence >= policy.minimumConfidence;
+      findings.push({ code: "evaluator-confidence", sectionKey: null, severity: "error", status: confidencePassed ? "pass" : "fail",
+        observed: overallConfidence.toFixed(2), required: `at least ${policy.minimumConfidence.toFixed(2)}` });
+      const scholarlyStatus = confidencePassed && assessedSections.every((section) => !section.required || section.status === "passed")
+        ? "passed" as const : "blocked" as const;
+      const priorRow = this.db.prepare(`SELECT * FROM manuscript_scholarly_assessments WHERE manuscript_version_id = ?
+        AND blueprint_assessment_id = ? AND evaluator_invocation_run_id = ? AND policy_content_sha256 = ?`)
+        .get(manuscript.version.id, structural.receipt.id, evaluator.invocationRunId, policy.contentSha256) as Record<string, unknown> | undefined;
+      if (priorRow) {
+        const assessment = this.manuscriptScholarlyAssessmentFromRow(priorRow);
+        const result = { assessment, replayed: true };
+        this.remember(input.requestId, "manuscript.scholarly.assessment.record", requestSha256, result, new Date().toISOString());
+        return result;
+      }
+      const id = randomUUID();
+      const createdAt = new Date().toISOString();
+      const reportCore = {
+        projectId: input.projectId,
+        manuscript: structural.receipt.manuscript,
+        blueprint: structural.receipt.blueprint,
+        journalProfile: structural.receipt.journalProfile,
+        blueprintAssessment: {
+          id: structural.receipt.id, reportSha256: structural.receipt.reportSha256,
+          policyContentSha256: structural.receipt.policy.contentSha256, contentSha256: structural.receipt.contentSha256,
+        },
+        evaluator, policy, overallConfidence, sections: assessedSections, findings, summary, limitations, scholarlyStatus,
+      };
+      const reportSha256 = sha256Json(reportCore);
+      const contentCore = { schema: SCIENCE_MANUSCRIPT_SCHOLARLY_ASSESSMENT_SCHEMA, id, ...reportCore, reportSha256, createdAt };
+      const receipt: ScienceManuscriptScholarlyAssessmentReceipt = { ...contentCore, contentSha256: sha256Json(contentCore) };
+      this.db.prepare(`INSERT INTO manuscript_scholarly_assessments
+        (id,project_id,manuscript_id,manuscript_version_id,manuscript_version,manuscript_content_sha256,manuscript_document_sha256,
+         manuscript_binding_manifest_sha256,blueprint_id,blueprint_version_id,blueprint_version,blueprint_content_sha256,
+         journal_profile_id,journal_profile_version,journal_profile_content_sha256,blueprint_assessment_id,
+         blueprint_assessment_report_sha256,blueprint_assessment_policy_content_sha256,blueprint_assessment_content_sha256,
+         evaluator_invocation_run_id,evaluator_json,policy_id,policy_version,policy_content_sha256,report_json,report_sha256,content_sha256,created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        id, input.projectId, manuscript.id, manuscript.version.id, manuscript.currentVersion, manuscript.version.contentSha256,
+        manuscript.version.documentSha256, manuscript.version.bindingManifestSha256, blueprint.id, blueprint.version.id,
+        blueprint.currentVersion, blueprint.version.contentSha256, profile.id, profile.currentVersion, profile.version.contentSha256,
+        structural.receipt.id, structural.receipt.reportSha256, structural.receipt.policy.contentSha256, structural.receipt.contentSha256,
+        evaluator.invocationRunId, JSON.stringify(canonicalValue(evaluator)), policy.id, policy.version, policy.contentSha256,
+        JSON.stringify(receipt), receipt.reportSha256, receipt.contentSha256, createdAt,
+      );
+      const assessment = this.getManuscriptScholarlyAssessmentForManuscript(input.projectId, manuscript.id);
+      if (!assessment || assessment.receipt.id !== id) throw new Error("science-manuscript-scholarly-assessment-create-failed");
+      const result = { assessment, replayed: false };
+      this.remember(input.requestId, "manuscript.scholarly.assessment.record", requestSha256, result, createdAt);
+      return result;
+    })();
+  }
+
+  private manuscriptCoherencePolicy(): ScienceManuscriptCoherenceAssessmentReceipt["policy"] {
+    return { ...SCIENCE_MANUSCRIPT_COHERENCE_POLICY, contentSha256: sha256Json(SCIENCE_MANUSCRIPT_COHERENCE_POLICY) };
+  }
+
+  private normalizeManuscriptCoherenceDeclarations(
+    input: EvaluateScienceManuscriptCoherenceInput,
+    options: { allowLegacyNumericSources?: boolean } = {},
+  ): EvaluateScienceManuscriptCoherenceInput {
+    const boundedArray = (value: unknown, field: string): unknown[] => {
+      if (!Array.isArray(value) || value.length > 100_000) throw new Error(`science-manuscript-coherence-${field}-invalid`);
+      return value;
+    };
+    const uuid = (value: unknown, field: string): string => {
+      const normalized = String(value ?? "");
+      if (!UUID_RE.test(normalized)) throw new Error(`science-manuscript-coherence-${field}-invalid`);
+      return normalized;
+    };
+    const exactQuote = (value: unknown): string => {
+      if (typeof value !== "string" || value.length < 1 || value.length > 20_000) {
+        throw new Error("science-manuscript-coherence-exact-quote-invalid");
+      }
+      return value;
+    };
+    const owner = (value: unknown): EvaluateScienceManuscriptCoherenceInput["numericAssertions"][number]["owner"] => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        throw new Error("science-manuscript-coherence-owner-invalid");
+      }
+      const raw = value as Record<string, unknown>;
+      if (raw.kind === "claim" && hasExactKeys(raw, ["kind", "claimId", "claimContentSha256"])) {
+        return { kind: "claim", claimId: uuid(raw.claimId, "claim-id"),
+          claimContentSha256: safeSha256(raw.claimContentSha256, "manuscript-coherence-claim-sha256") };
+      }
+      if (raw.kind === "visual-caption"
+        && hasExactKeys(raw, ["kind", "nodeId", "nodeRevision", "nodeContentSha256"])) {
+        return { kind: "visual-caption", nodeId: uuid(raw.nodeId, "node-id"),
+          nodeRevision: safePositiveInteger(raw.nodeRevision, 1, Number.MAX_SAFE_INTEGER, "manuscript-coherence-node-revision"),
+          nodeContentSha256: safeSha256(raw.nodeContentSha256, "manuscript-coherence-node-sha256") };
+      }
+      throw new Error("science-manuscript-coherence-owner-invalid");
+    };
+    const numericSource = (value: unknown): ScienceCoherenceNumericSourceSelectorInput => {
+      if (!value || typeof value !== "object" || Array.isArray(value)
+        || !hasExactKeys(value as Record<string, unknown>, ["componentRole", "artifactId", "artifactVersion",
+          "artifactContentSha256", "validationReceiptId", "jsonPointer", "unitJsonPointer"])) {
+        throw new Error("science-manuscript-coherence-numeric-source-invalid");
+      }
+      const raw = value as Record<string, unknown>;
+      if (!["value", "confidence-level", "lower", "upper"].includes(String(raw.componentRole))) {
+        throw new Error("science-manuscript-coherence-numeric-source-invalid");
+      }
+      return {
+        componentRole: raw.componentRole as ScienceCoherenceNumericSourceSelectorInput["componentRole"],
+        artifactId: uuid(raw.artifactId, "numeric-source-artifact-id"),
+        artifactVersion: safePositiveInteger(raw.artifactVersion, 1, Number.MAX_SAFE_INTEGER, "manuscript-coherence-numeric-source-artifact-version"),
+        artifactContentSha256: safeSha256(raw.artifactContentSha256, "manuscript-coherence-numeric-source-artifact-sha256"),
+        validationReceiptId: uuid(raw.validationReceiptId, "numeric-source-validation-receipt-id"),
+        jsonPointer: normalizedArtifactJsonPointer(raw.jsonPointer),
+        unitJsonPointer: raw.unitJsonPointer === null ? null : normalizedArtifactJsonPointer(raw.unitJsonPointer),
+      };
+    };
+    const summaryClaimLinks = boundedArray(input.summaryClaimLinks, "summary-links").map((value) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)
+        || !hasExactKeys(value as Record<string, unknown>, ["summaryClaimId", "bodyClaimIds"])) {
+        throw new Error("science-manuscript-coherence-summary-link-invalid");
+      }
+      const raw = value as Record<string, unknown>;
+      const bodyClaimIds = boundedArray(raw.bodyClaimIds, "body-claim-ids").map((id) => uuid(id, "body-claim-id"));
+      if (new Set(bodyClaimIds).size !== bodyClaimIds.length) throw new Error("science-manuscript-coherence-body-claim-id-duplicate");
+      return { summaryClaimId: uuid(raw.summaryClaimId, "summary-claim-id"), bodyClaimIds };
+    });
+    const resultsDiscussionLinks = boundedArray(input.resultsDiscussionLinks, "results-discussion-links").map((value) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)
+        || !hasExactKeys(value as Record<string, unknown>, ["resultClaimId", "discussionClaimIds"])) {
+        throw new Error("science-manuscript-coherence-results-discussion-link-invalid");
+      }
+      const raw = value as Record<string, unknown>;
+      const discussionClaimIds = boundedArray(raw.discussionClaimIds, "discussion-claim-ids").map((id) => uuid(id, "discussion-claim-id"));
+      if (new Set(discussionClaimIds).size !== discussionClaimIds.length) {
+        throw new Error("science-manuscript-coherence-discussion-claim-id-duplicate");
+      }
+      return { resultClaimId: uuid(raw.resultClaimId, "result-claim-id"), discussionClaimIds };
+    });
+    const numericAssertionValues = boundedArray(input.numericAssertions, "numeric-assertions");
+    if (numericAssertionValues.length > 20_000) throw new Error("science-manuscript-coherence-numeric-assertions-invalid");
+    const numericAssertions = numericAssertionValues.map((value) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        throw new Error("science-manuscript-coherence-numeric-assertion-invalid");
+      }
+      const raw = value as Record<string, unknown>;
+      const legacyKeys = ["groupId", "owner", "from", "to", "exactQuote", "grammar", "presentation"];
+      const currentKeys = [...legacyKeys, "sources"];
+      const legacy = hasExactKeys(raw, legacyKeys);
+      if ((!legacy && !hasExactKeys(raw, currentKeys)) || (legacy && !options.allowLegacyNumericSources)) {
+        throw new Error("science-manuscript-coherence-numeric-assertion-invalid");
+      }
+      if (!["sample-size/v1", "effect-estimate/v1", "confidence-interval/v1", "quantity-unit/v1"].includes(String(raw.grammar))
+        || !["exact", "rounded"].includes(String(raw.presentation))) {
+        throw new Error("science-manuscript-coherence-numeric-assertion-invalid");
+      }
+      const sources = legacy ? undefined : boundedArray(raw.sources, "numeric-sources").map(numericSource);
+      if (sources && (sources.length < 1 || sources.length > 3
+        || new Set(sources.map((source) => source.componentRole)).size !== sources.length)) {
+        throw new Error("science-manuscript-coherence-numeric-source-invalid");
+      }
+      return {
+        groupId: safeText(raw.groupId, 240, "manuscript-coherence-group-id"), owner: owner(raw.owner),
+        from: safePositiveInteger(raw.from, 0, Number.MAX_SAFE_INTEGER, "manuscript-coherence-from"),
+        to: safePositiveInteger(raw.to, 1, Number.MAX_SAFE_INTEGER, "manuscript-coherence-to"),
+        exactQuote: exactQuote(raw.exactQuote), grammar: raw.grammar as EvaluateScienceManuscriptCoherenceInput["numericAssertions"][number]["grammar"],
+        presentation: raw.presentation as "exact" | "rounded",
+        ...(sources ? { sources } : {}),
+      };
+    });
+    const numericExemptionValues = boundedArray(input.numericExemptions, "numeric-exemptions");
+    if (numericExemptionValues.length > 20_000) throw new Error("science-manuscript-coherence-numeric-exemptions-invalid");
+    const numericExemptions = numericExemptionValues.map((value) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)
+        || !hasExactKeys(value as Record<string, unknown>, ["owner", "from", "to", "exactQuote", "reason"])) {
+        throw new Error("science-manuscript-coherence-numeric-exemption-invalid");
+      }
+      const raw = value as Record<string, unknown>;
+      if (!["calendar-year", "citation-number", "identifier"].includes(String(raw.reason))) {
+        throw new Error("science-manuscript-coherence-numeric-exemption-invalid");
+      }
+      return {
+        owner: owner(raw.owner),
+        from: safePositiveInteger(raw.from, 0, Number.MAX_SAFE_INTEGER, "manuscript-coherence-from"),
+        to: safePositiveInteger(raw.to, 1, Number.MAX_SAFE_INTEGER, "manuscript-coherence-to"),
+        exactQuote: exactQuote(raw.exactQuote), reason: raw.reason as EvaluateScienceManuscriptCoherenceInput["numericExemptions"][number]["reason"],
+      };
+    });
+    return canonicalCoherenceDeclarations({ summaryClaimLinks, resultsDiscussionLinks, numericAssertions, numericExemptions });
+  }
+
+  private resolveManuscriptCoherenceNumericSources(
+    projectId: string,
+    declarations: EvaluateScienceManuscriptCoherenceInput | undefined,
+    claims: Array<{ claimId: string; evidence: Array<{
+      artifact: { artifactId: string; artifactVersion: number; artifactContentSha256: string } | null;
+      validationReceipt: { validationReceiptId: string; validationReceiptVersion: number; validationReceiptContentSha256: string } | null;
+    }> }>,
+    visuals: ScienceCoherenceVisualContext[],
+  ): ScienceCoherenceNumericSourceContext[] {
+    const selectors = new Map<string, ScienceCoherenceNumericSourceSelectorInput>();
+    for (const selector of declarations?.numericAssertions.flatMap((assertion) => assertion.sources ?? []) ?? []) {
+      selectors.set(sha256Json(selector), selector);
+    }
+    if (selectors.size > 2_000) throw new Error("science-manuscript-coherence-numeric-source-limit-exceeded");
+    const sources: ScienceCoherenceNumericSourceContext[] = [];
+    const closureCache = new Map<string, {
+      artifact: ScienceArtifactContext;
+      receipt: ScienceArtifactValidationReceipt;
+      closure: ScienceArtifactValidationRunArtifactBinding;
+      allowedOwnerKeys: string[];
+    }>();
+    for (const [selectorSha256, selector] of [...selectors.entries()].sort((left, right) => left[0].localeCompare(right[0]))) {
+      const closureKey = [selector.artifactId, selector.artifactVersion, selector.artifactContentSha256,
+        selector.validationReceiptId].join(":");
+      let trusted = closureCache.get(closureKey);
+      if (!trusted) {
+        const artifact = this.getArtifactContextForProject(projectId, selector.artifactId, selector.artifactVersion);
+        if (!artifact || artifact.selectedVersion.contentSha256 !== selector.artifactContentSha256) {
+          throw new Error("science-manuscript-coherence-numeric-source-artifact-stale");
+        }
+        const receipt = this.getArtifactValidationReceiptForProject(projectId, selector.validationReceiptId);
+        if (!receipt || receipt.status !== "verified"
+          || receipt.validatorId !== "agentlas.publication-provenance-closure" || receipt.validatorVersion !== "2.0.0"
+          || receipt.policyId !== "agentlas.science-publication-gate" || receipt.policyVersion !== "1"
+          || receipt.artifactId !== selector.artifactId
+          || receipt.artifactVersionId !== artifact.selectedVersion.id || receipt.artifactVersion !== selector.artifactVersion
+          || receipt.artifactContentSha256 !== selector.artifactContentSha256
+          || receipt.artifactLinkageSha256 !== artifact.linkage.linkageSha256) {
+          throw new Error("science-manuscript-coherence-numeric-source-validation-invalid");
+        }
+        const closure = this.getArtifactValidationRunArtifactBindingForProject(projectId, receipt.id);
+        if (!closure || closure.artifactId !== selector.artifactId || closure.artifactVersion !== selector.artifactVersion
+          || closure.artifactContentSha256 !== selector.artifactContentSha256) {
+          throw new Error("science-manuscript-coherence-numeric-source-run-closure-invalid");
+        }
+        const claimReceiptAuthorized = (atom: (typeof claims)[number]["evidence"][number]): boolean => {
+          if (!atom.validationReceipt || atom.validationReceipt.validationReceiptId !== selector.validationReceiptId) return false;
+          const row = this.db.prepare(`SELECT canonical_json,content_sha256 FROM claim_validation_receipt_snapshots
+            WHERE project_id = ? AND validation_receipt_id = ? AND version = ?`)
+            .get(projectId, atom.validationReceipt.validationReceiptId, atom.validationReceipt.validationReceiptVersion) as Record<string, unknown> | undefined;
+          if (!row || String(row.content_sha256) !== atom.validationReceipt.validationReceiptContentSha256) return false;
+          const snapshot = parseObject(row.canonical_json);
+          return snapshot.baseReceiptSha256 === receipt.receiptSha256
+            && snapshot.artifactId === selector.artifactId && snapshot.artifactVersion === selector.artifactVersion
+            && snapshot.artifactContentSha256 === selector.artifactContentSha256 && snapshot.status === "passed";
+        };
+        const allowedOwnerKeys = [
+          ...claims.filter((claim) => claim.evidence.some((atom) => atom.artifact?.artifactId === selector.artifactId
+            && atom.artifact.artifactVersion === selector.artifactVersion
+            && atom.artifact.artifactContentSha256 === selector.artifactContentSha256
+            && claimReceiptAuthorized(atom)))
+            .map((claim) => `claim:${claim.claimId}`),
+          ...visuals.filter((visual) => visual.binding?.artifactId === selector.artifactId
+            && visual.binding.artifactVersion === selector.artifactVersion
+            && visual.binding.artifactContentSha256 === selector.artifactContentSha256
+            && visual.binding.validationReceiptId === selector.validationReceiptId
+            && visual.binding.validationPassed && visual.binding.runArtifactClosurePassed)
+            .map((visual) => `visual:${visual.nodeId}`),
+        ].sort();
+        trusted = { artifact, receipt, closure, allowedOwnerKeys };
+        closureCache.set(closureKey, trusted);
+      }
+      const { artifact, receipt, closure, allowedOwnerKeys } = trusted;
+      const canonicalDecimal = canonicalArtifactDecimal(resolveArtifactJsonPointer(artifact.selectedVersion.payload, selector.jsonPointer));
+      const unitValue = selector.unitJsonPointer === null ? null
+        : resolveArtifactJsonPointer(artifact.selectedVersion.payload, selector.unitJsonPointer);
+      if (unitValue !== null && (typeof unitValue !== "string" || unitValue.length < 1 || unitValue.length > 32)) {
+        throw new Error("science-manuscript-coherence-numeric-source-unit-invalid");
+      }
+      const canonicalUnit = unitValue as string | null;
+      const valueSha256 = sha256Json({ canonicalDecimal, canonicalUnit });
+      const sourceCore = {
+        sourceId: selectorSha256, selector, selectorSha256, artifactVersionId: artifact.selectedVersion.id,
+        artifactLinkageSha256: artifact.linkage.linkageSha256, rendererId: artifact.selectedVersion.rendererId,
+        rendererVersion: artifact.selectedVersion.rendererVersion, validationReceiptSha256: receipt.receiptSha256,
+        runArtifactBindingId: closure.runArtifactBindingId, researchRunId: closure.runId,
+        runOutputId: closure.outputId, runOutputSha256: closure.outputSha256,
+        canonicalDecimal, canonicalUnit, valueSha256, allowedOwnerKeys,
+      };
+      sources.push({ ...sourceCore, contentSha256: sha256Json(sourceCore) });
+    }
+    return sources;
+  }
+
+  private buildManuscriptCoherenceContext(
+    projectId: string,
+    manuscriptId: string,
+    declarations?: EvaluateScienceManuscriptCoherenceInput,
+  ):
+    ScienceManuscriptCoherenceContext & { manuscript: ScienceManuscriptCoherenceContext["manuscript"] & { projectId: string; versionId: string } } {
+    const manuscript = this.getManuscriptForProject(projectId, manuscriptId);
+    if (!manuscript) throw new Error("science-manuscript-not-found");
+    if (!manuscript.version.document || !manuscript.version.documentSha256) {
+      throw new Error("science-manuscript-coherence-document-required");
+    }
+    const ledger = this.evaluateClaimLedgerForManuscript(projectId, manuscriptId);
+    const activeClaimIds = new Set(ledger.manifest.activeClaimIds);
+    const roles: ScienceCoherenceSectionRole[] = ["other"];
+    for (const line of manuscript.version.markdown.replace(/\r\n?/gu, "\n").split("\n")) {
+      const heading = /^#{1,6}\s+(.+?)\s*$/u.exec(line);
+      if (heading) roles.push(coherenceSectionRole(heading[1]!));
+    }
+    const claims = ledger.manifest.claims.filter((claim) => activeClaimIds.has(claim.claimId)).map((claim) => ({
+      claimId: claim.claimId,
+      claimContentSha256: claim.contentSha256,
+      claimClass: claim.claimClass,
+      status: claim.status,
+      sectionRole: roles[claim.locator.sectionOrdinal] ?? "other",
+      exactText: claim.exactText,
+      evidenceSignatures: [...new Set(claim.evidence.map((atom) => sha256Json({
+        citationId: atom.citationId,
+        citationVersion: atom.citationVersion,
+        citationContentSha256: atom.citationContentSha256,
+        sourceId: atom.sourceId,
+        sourceVersionId: atom.sourceVersionId,
+        sourceVersion: atom.sourceVersion,
+        sourceContentSha256: atom.sourceContentSha256,
+        evidenceSpanId: atom.evidenceSpanId,
+        evidenceSpanVersion: atom.evidenceSpanVersion,
+        evidenceSpanContentSha256: atom.evidenceSpanContentSha256,
+        evidenceSpanTextSha256: atom.evidenceSpanTextSha256,
+        artifact: atom.artifact,
+        validationReceipt: atom.validationReceipt,
+      })))].sort(),
+    }));
+    const visualNodes = manuscriptCoherenceVisualNodes(manuscript.version.document.nodes);
+    const artifactBindings = manuscript.version.bindings.filter((binding) => binding.target.kind === "artifact"
+      && (binding.role === "figure" || binding.role === "table"));
+    const visuals: ScienceCoherenceVisualContext[] = visualNodes.map((node) => {
+      const visualKind = node.kind;
+      const locator = node.kind === "figure" || node.mode === "artifact" ? node.locator : null;
+      const matches = locator === null ? [] : artifactBindings.filter((binding) => binding.role === visualKind && binding.locator === locator);
+      let binding: ScienceCoherenceVisualContext["binding"] = null;
+      if (matches.length === 1 && matches[0]!.target.kind === "artifact") {
+        const exact = matches[0]!.target;
+        const receipt = this.getArtifactValidationReceiptForProject(projectId, exact.validationReceiptId);
+        const runClosure = receipt ? this.getArtifactValidationRunArtifactBindingForProject(projectId, receipt.id) : null;
+        const validationPassed = Boolean(receipt && receipt.status === "verified"
+          && receipt.validatorId === "agentlas.publication-provenance-closure"
+          && receipt.validatorVersion === "2.0.0"
+          && receipt.policyId === "agentlas.science-publication-gate"
+          && receipt.policyVersion === "1"
+          && receipt.artifactId === exact.artifactId && receipt.artifactVersion === exact.artifactVersion
+          && receipt.visualCaptureId === exact.captureId);
+        const runArtifactClosurePassed = Boolean(receipt && runClosure
+          && runClosure.artifactId === exact.artifactId && runClosure.artifactVersion === exact.artifactVersion
+          && runClosure.artifactContentSha256 === receipt.artifactContentSha256);
+        binding = {
+          role: visualKind, locator: locator!, artifactId: exact.artifactId, artifactVersion: exact.artifactVersion,
+          artifactContentSha256: receipt?.artifactContentSha256 ?? "0".repeat(64), captureId: exact.captureId,
+          validationReceiptId: exact.validationReceiptId, validationPassed, runArtifactClosurePassed,
+        };
+      }
+      return {
+        nodeId: node.id, nodeRevision: node.revision, nodeContentSha256: node.contentSha256,
+        visualKind, bindingRequired: node.kind === "figure" || node.mode === "artifact",
+        locator, caption: node.caption, binding,
+      };
+    });
+    const orphanArtifactBindingLocators = artifactBindings.filter((binding) => visualNodes.filter((node) => {
+      const locator = node.kind === "figure" || node.mode === "artifact" ? node.locator : null;
+      return node.kind === binding.role && locator === binding.locator;
+    }).length !== 1).map((binding) => `${binding.role}:${binding.locator}`).sort();
+    const activeClaims = ledger.manifest.claims.filter((claim) => activeClaimIds.has(claim.claimId));
+    const numericSources = this.resolveManuscriptCoherenceNumericSources(projectId, declarations, activeClaims, visuals);
+    return {
+      projectId,
+      manuscript: {
+        projectId, manuscriptId: manuscript.id, versionId: manuscript.version.id, version: manuscript.currentVersion,
+        contentSha256: manuscript.version.contentSha256, documentSha256: manuscript.version.documentSha256,
+        bindingManifestSha256: manuscript.version.bindingManifestSha256,
+      },
+      claimLedger: {
+        ledgerId: ledger.manifest.ledgerId, revision: ledger.manifest.revision,
+        manifestSha256: ledger.manifest.manifestSha256, gateReportSha256: ledger.gate.reportSha256,
+        policyContentSha256: ledger.gate.policyContentSha256, ready: ledger.gate.ready,
+      },
+      claims, visuals, numericSources, orphanArtifactBindingLocators,
+    };
+  }
+
+  prepareManuscriptCoherenceContext(
+    input: PrepareScienceManuscriptCoherenceContextInput,
+  ): PrepareScienceManuscriptCoherenceContextResult {
+    if (!input || typeof input !== "object" || !UUID_RE.test(String(input.requestId ?? ""))) throw new Error("science-request-id-invalid");
+    if (!UUID_RE.test(String(input.projectId ?? "")) || !UUID_RE.test(String(input.manuscriptId ?? ""))) {
+      throw new Error("science-manuscript-coherence-target-invalid");
+    }
+    const expectedManuscriptVersion = safePositiveInteger(input.expectedManuscriptVersion, 1, Number.MAX_SAFE_INTEGER, "manuscript-coherence-manuscript-version");
+    const expectedManuscriptContentSha256 = safeSha256(input.expectedManuscriptContentSha256, "manuscript-coherence-manuscript-content-sha256");
+    const requestSha256 = sha256Json({ projectId: input.projectId, manuscriptId: input.manuscriptId,
+      expectedManuscriptVersion, expectedManuscriptContentSha256 });
+    return this.db.transaction(() => {
+      const replayed = this.hasReplay(input.requestId, "manuscript.coherence.context.prepare", requestSha256);
+      const context = this.buildManuscriptCoherenceContext(input.projectId, input.manuscriptId);
+      if (context.manuscript.version !== expectedManuscriptVersion
+        || context.manuscript.contentSha256 !== expectedManuscriptContentSha256) {
+        throw new Error("science-manuscript-version-conflict");
+      }
+      const result = { context, contextSha256: sha256Json(context), replayed };
+      if (!replayed) this.remember(input.requestId, "manuscript.coherence.context.prepare", requestSha256, result, new Date().toISOString());
+      return result;
+    })();
+  }
+
+  private manuscriptCoherenceAssessmentFromRow(row: Record<string, unknown>): ScienceManuscriptCoherenceAssessmentReadModel {
+    let receipt: ScienceManuscriptCoherenceAssessmentReceipt;
+    let declarations: EvaluateScienceManuscriptCoherenceInput;
+    try {
+      receipt = parseObject(row.report_json) as unknown as ScienceManuscriptCoherenceAssessmentReceipt;
+      declarations = this.normalizeManuscriptCoherenceDeclarations(receipt.declarations, {
+        allowLegacyNumericSources: Number(receipt.policy?.version) < 2,
+      });
+      if (Number(receipt.policy?.version) >= 2) {
+        const provenance = receipt.numericProvenance;
+        if (!provenance || provenance.sourceCount !== provenance.sources.length
+          || provenance.sourceManifestSha256 !== sha256Json(provenance.sources.map((source) => source.contentSha256))) {
+          throw new Error("science-manuscript-coherence-numeric-provenance-invalid");
+        }
+        for (const source of provenance.sources) {
+          const { contentSha256: sourceContentSha256, ...sourceCore } = source;
+          if (source.selectorSha256 !== sha256Json(source.selector)
+            || source.valueSha256 !== sha256Json({ canonicalDecimal: source.canonicalDecimal, canonicalUnit: source.canonicalUnit })
+            || sourceContentSha256 !== sha256Json(sourceCore)) {
+            throw new Error("science-manuscript-coherence-numeric-provenance-invalid");
+          }
+        }
+      }
+    } catch {
+      throw new Error("science-manuscript-coherence-assessment-integrity-failed");
+    }
+    const { id: _id, declarations: _declarations, policy: _policy, contentSha256, createdAt: _createdAt, ...report } = receipt;
+    const { reportSha256, ...reportCore } = report;
+    const contentCore = { ...report, id: receipt.id, policy: receipt.policy, declarations, createdAt: receipt.createdAt };
+    if (receipt.schema !== SCIENCE_MANUSCRIPT_COHERENCE_SCHEMA || receipt.id !== String(row.id)
+      || receipt.projectId !== String(row.project_id)
+      || receipt.manuscript.manuscriptId !== String(row.manuscript_id)
+      || receipt.manuscript.versionId !== String(row.manuscript_version_id)
+      || receipt.manuscript.version !== Number(row.manuscript_version)
+      || receipt.manuscript.contentSha256 !== String(row.manuscript_content_sha256)
+      || receipt.manuscript.documentSha256 !== String(row.manuscript_document_sha256)
+      || receipt.manuscript.bindingManifestSha256 !== String(row.manuscript_binding_manifest_sha256)
+      || receipt.claimLedger.ledgerId !== String(row.claim_ledger_id)
+      || receipt.claimLedger.revision !== Number(row.claim_ledger_revision)
+      || receipt.claimLedger.manifestSha256 !== String(row.claim_ledger_manifest_sha256)
+      || receipt.claimLedger.gateReportSha256 !== String(row.claim_ledger_gate_report_sha256)
+      || receipt.claimLedger.policyContentSha256 !== String(row.claim_ledger_policy_content_sha256)
+      || receipt.declarationsSha256 !== String(row.declarations_sha256)
+      || sha256Json(declarations) !== receipt.declarationsSha256
+      || JSON.stringify(canonicalValue(declarations)) !== JSON.stringify(canonicalValue(parseObject(row.declarations_json)))
+      || receipt.policy.id !== String(row.policy_id) || receipt.policy.version !== Number(row.policy_version)
+      || receipt.policy.contentSha256 !== String(row.policy_content_sha256)
+      || receipt.status !== String(row.assessment_status)
+      || receipt.reportSha256 !== String(row.report_sha256) || receipt.contentSha256 !== String(row.content_sha256)
+      || sha256Json(reportCore) !== reportSha256 || sha256Json(contentCore) !== contentSha256) {
+      throw new Error("science-manuscript-coherence-assessment-integrity-failed");
+    }
+    const staleReasons: ScienceManuscriptCoherenceAssessmentReadModel["staleReasons"] = [];
+    const manuscript = this.getManuscriptForProject(receipt.projectId, receipt.manuscript.manuscriptId);
+    if (!manuscript || manuscript.currentVersion !== receipt.manuscript.version
+      || manuscript.version.id !== receipt.manuscript.versionId
+      || manuscript.version.contentSha256 !== receipt.manuscript.contentSha256
+      || manuscript.version.documentSha256 !== receipt.manuscript.documentSha256
+      || manuscript.version.bindingManifestSha256 !== receipt.manuscript.bindingManifestSha256) {
+      staleReasons.push("manuscript-version-advanced");
+    }
+    const ledger = this.getClaimLedgerForManuscript(receipt.projectId, receipt.manuscript.manuscriptId);
+    if (!ledger) staleReasons.push("claim-ledger-missing");
+    else {
+      if (ledger.manifest.ledgerId !== receipt.claimLedger.ledgerId
+        || ledger.manifest.revision !== receipt.claimLedger.revision
+        || ledger.manifest.manifestSha256 !== receipt.claimLedger.manifestSha256) staleReasons.push("claim-ledger-advanced");
+      if (ledger.gate.reportSha256 !== receipt.claimLedger.gateReportSha256
+        || ledger.gate.policyContentSha256 !== receipt.claimLedger.policyContentSha256
+        || ledger.gate.ready !== receipt.claimLedger.ready) staleReasons.push("claim-ledger-gate-advanced");
+    }
+    if (receipt.policy.contentSha256 !== this.manuscriptCoherencePolicy().contentSha256
+      || receipt.policy.id !== SCIENCE_MANUSCRIPT_COHERENCE_POLICY.id
+      || receipt.policy.version !== SCIENCE_MANUSCRIPT_COHERENCE_POLICY.version) staleReasons.push("coherence-policy-advanced");
+    if (staleReasons.length === 0) {
+      const currentContext = this.buildManuscriptCoherenceContext(receipt.projectId, receipt.manuscript.manuscriptId, declarations);
+      const currentReport = evaluateScienceManuscriptCoherence(declarations, currentContext);
+      if (currentReport.reportSha256 !== receipt.reportSha256) staleReasons.push("coherence-context-advanced");
+    }
+    return { receipt, status: staleReasons.length ? "stale" : "current", staleReasons: [...new Set(staleReasons)] };
+  }
+
+  getManuscriptCoherenceAssessmentForManuscript(
+    projectId: string,
+    manuscriptId: string,
+  ): ScienceManuscriptCoherenceAssessmentReadModel | null {
+    if (!UUID_RE.test(projectId) || !UUID_RE.test(manuscriptId)) return null;
+    const row = this.db.prepare(`SELECT * FROM manuscript_coherence_assessments
+      WHERE project_id = ? AND manuscript_id = ? ORDER BY created_at DESC, id DESC LIMIT 1`)
+      .get(projectId, manuscriptId) as Record<string, unknown> | undefined;
+    return row ? this.manuscriptCoherenceAssessmentFromRow(row) : null;
+  }
+
+  recordManuscriptCoherenceAssessment(
+    input: RecordScienceManuscriptCoherenceAssessmentInput,
+  ): RecordScienceManuscriptCoherenceAssessmentResult {
+    if (!input || typeof input !== "object" || !UUID_RE.test(String(input.requestId ?? ""))) throw new Error("science-request-id-invalid");
+    if (!UUID_RE.test(String(input.projectId ?? "")) || !UUID_RE.test(String(input.manuscriptId ?? ""))
+      || !UUID_RE.test(String(input.expectedClaimLedgerId ?? ""))) throw new Error("science-manuscript-coherence-target-invalid");
+    const expectedManuscriptVersion = safePositiveInteger(input.expectedManuscriptVersion, 1, Number.MAX_SAFE_INTEGER, "manuscript-coherence-manuscript-version");
+    const expectedManuscriptContentSha256 = safeSha256(input.expectedManuscriptContentSha256, "manuscript-coherence-manuscript-content-sha256");
+    const expectedClaimLedgerRevision = safePositiveInteger(input.expectedClaimLedgerRevision, 1, Number.MAX_SAFE_INTEGER, "manuscript-coherence-ledger-revision");
+    const expectedClaimLedgerManifestSha256 = safeSha256(input.expectedClaimLedgerManifestSha256, "manuscript-coherence-ledger-manifest-sha256");
+    const expectedClaimLedgerGateReportSha256 = safeSha256(input.expectedClaimLedgerGateReportSha256, "manuscript-coherence-ledger-gate-sha256");
+    const expectedClaimLedgerPolicyContentSha256 = safeSha256(input.expectedClaimLedgerPolicyContentSha256, "manuscript-coherence-ledger-policy-sha256");
+    const declarations = this.normalizeManuscriptCoherenceDeclarations(input);
+    const requestSha256 = sha256Json({ projectId: input.projectId, manuscriptId: input.manuscriptId,
+      expectedManuscriptVersion, expectedManuscriptContentSha256, expectedClaimLedgerId: input.expectedClaimLedgerId,
+      expectedClaimLedgerRevision, expectedClaimLedgerManifestSha256, expectedClaimLedgerGateReportSha256,
+      expectedClaimLedgerPolicyContentSha256, declarations });
+    return this.db.transaction(() => {
+      const replayed = this.replay<RecordScienceManuscriptCoherenceAssessmentResult>(
+        input.requestId, "manuscript.coherence.assessment.record", requestSha256,
+      );
+      if (replayed) {
+        const current = this.getManuscriptCoherenceAssessmentForManuscript(input.projectId, input.manuscriptId);
+        if (!current || current.receipt.id !== replayed.assessment.receipt.id) {
+          throw new Error("science-manuscript-coherence-assessment-replay-integrity-failed");
+        }
+        return { assessment: current, replayed: true };
+      }
+      const context = this.buildManuscriptCoherenceContext(input.projectId, input.manuscriptId, declarations);
+      if (context.manuscript.version !== expectedManuscriptVersion
+        || context.manuscript.contentSha256 !== expectedManuscriptContentSha256) throw new Error("science-manuscript-version-conflict");
+      if (context.claimLedger.ledgerId !== input.expectedClaimLedgerId
+        || context.claimLedger.revision !== expectedClaimLedgerRevision
+        || context.claimLedger.manifestSha256 !== expectedClaimLedgerManifestSha256
+        || context.claimLedger.gateReportSha256 !== expectedClaimLedgerGateReportSha256
+        || context.claimLedger.policyContentSha256 !== expectedClaimLedgerPolicyContentSha256) {
+        throw new Error("science-manuscript-coherence-claim-ledger-stale");
+      }
+      const report = evaluateScienceManuscriptCoherence(declarations, context);
+      const policy = this.manuscriptCoherencePolicy();
+      const priorRow = this.db.prepare(`SELECT * FROM manuscript_coherence_assessments
+        WHERE manuscript_version_id = ? AND claim_ledger_manifest_sha256 = ? AND claim_ledger_gate_report_sha256 = ?
+          AND claim_ledger_policy_content_sha256 = ? AND declarations_sha256 = ? AND policy_content_sha256 = ?`)
+        .get(context.manuscript.versionId, context.claimLedger.manifestSha256, context.claimLedger.gateReportSha256,
+          context.claimLedger.policyContentSha256, report.declarationsSha256, policy.contentSha256) as Record<string, unknown> | undefined;
+      if (priorRow) {
+        const assessment = this.manuscriptCoherenceAssessmentFromRow(priorRow);
+        const result = { assessment, replayed: true };
+        this.remember(input.requestId, "manuscript.coherence.assessment.record", requestSha256, result, new Date().toISOString());
+        return result;
+      }
+      const id = randomUUID();
+      const createdAt = new Date().toISOString();
+      const contentCore = { ...report, manuscript: context.manuscript, id, policy, declarations, createdAt };
+      const receipt: ScienceManuscriptCoherenceAssessmentReceipt = { ...contentCore, contentSha256: sha256Json(contentCore) };
+      this.db.prepare(`INSERT INTO manuscript_coherence_assessments
+        (id,project_id,manuscript_id,manuscript_version_id,manuscript_version,manuscript_content_sha256,
+         manuscript_document_sha256,manuscript_binding_manifest_sha256,claim_ledger_id,claim_ledger_revision,
+         claim_ledger_manifest_sha256,claim_ledger_gate_report_sha256,claim_ledger_policy_content_sha256,
+         declarations_json,declarations_sha256,policy_id,policy_version,policy_content_sha256,assessment_status,
+         report_json,report_sha256,content_sha256,created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        id, input.projectId, input.manuscriptId, context.manuscript.versionId, context.manuscript.version,
+        context.manuscript.contentSha256, context.manuscript.documentSha256, context.manuscript.bindingManifestSha256,
+        context.claimLedger.ledgerId, context.claimLedger.revision, context.claimLedger.manifestSha256,
+        context.claimLedger.gateReportSha256, context.claimLedger.policyContentSha256,
+        JSON.stringify(canonicalValue(declarations)), receipt.declarationsSha256, policy.id, policy.version, policy.contentSha256,
+        receipt.status, JSON.stringify(receipt), receipt.reportSha256, receipt.contentSha256, createdAt,
+      );
+      const assessment = this.getManuscriptCoherenceAssessmentForManuscript(input.projectId, input.manuscriptId);
+      if (!assessment || assessment.receipt.id !== id) throw new Error("science-manuscript-coherence-assessment-create-failed");
+      const result = { assessment, replayed: false };
+      this.remember(input.requestId, "manuscript.coherence.assessment.record", requestSha256, result, createdAt);
+      return result;
+    })();
+  }
+
+  evaluateManuscriptBlueprintForJournal(projectId: string, manuscriptId: string, journalProfileId: string): {
+    blueprint: ScienceManuscriptBlueprint | null;
+    depthPreflight: ScienceManuscriptDepthPreflight;
+    findings: ScienceJournalValidationFinding[];
+  } {
+    const manuscript = this.getManuscriptForProject(projectId, manuscriptId);
+    const profile = this.getJournalProfileForProject(projectId, journalProfileId);
+    if (!manuscript) throw new Error("science-manuscript-not-found");
+    if (!profile) throw new Error("science-journal-profile-not-found");
+    const binding = manuscript.version.blueprintBinding ?? null;
+    const blueprint = binding ? this.getManuscriptBlueprintForProject(projectId, binding.blueprintId) : null;
+    const bindingReady = Boolean(binding && blueprint && blueprint.status === "current"
+      && blueprint.currentVersion === binding.blueprintVersion && blueprint.version.contentSha256 === binding.blueprintContentSha256
+      && blueprint.version.document.journalBinding?.journalProfileId === profile.id
+      && blueprint.version.document.journalBinding.journalProfileVersion === profile.currentVersion
+      && blueprint.version.document.journalBinding.journalProfileContentSha256 === profile.version.contentSha256);
+    const depthPreflight = inspectScienceManuscriptDepth(manuscript.version.markdown);
+    const missingRoles: string[] = [];
+    const grossShortfalls: string[] = [];
+    if (bindingReady && blueprint) {
+      for (const section of blueprint.version.document.sections.filter((item) => item.required)) {
+        const observed = depthPreflight.sections.find((item) => item.role === section.role);
+        if (!observed) missingRoles.push(section.role);
+        else if (section.targetWords && observed.wordCount < section.targetWords.minimum) {
+          grossShortfalls.push(`${section.role}:${observed.wordCount}<${section.targetWords.minimum}`);
+        }
+      }
+      if (depthPreflight.wordCount < blueprint.version.document.totalTargetWords.minimum) {
+        grossShortfalls.push(`document:${depthPreflight.wordCount}<${blueprint.version.document.totalTargetWords.minimum}`);
+      }
+    }
+    const conformanceReady = bindingReady && missingRoles.length === 0 && grossShortfalls.length === 0;
+    return {
+      blueprint,
+      depthPreflight,
+      findings: [
+        {
+          ruleId: "agentlas.submission.manuscript-blueprint", severity: "error", status: bindingReady ? "pass" : "fail",
+          requirement: "The current manuscript version must bind an exact current full-text corpus blueprint calibrated for this exact journal profile.",
+          observed: !binding ? "blueprint binding missing" : !blueprint ? "bound blueprint missing"
+            : `blueprint ${blueprint.id}@${blueprint.currentVersion} status=${blueprint.status}; journal=${blueprint.version.document.journalBinding?.journalProfileId ?? "unbound"}`,
+          sourceUrl: "agentlas://submission/manuscript-blueprint",
+          evidenceQuote: "Submission readiness requires a current, journal-bound manuscript blueprint derived from exact full-text SourceVersions.",
+        },
+        {
+          ruleId: "agentlas.submission.manuscript-depth", severity: "error", status: depthPreflight.antiStubPassed ? "pass" : "fail",
+          requirement: "The manuscript must pass deterministic anti-stub depth inspection before corpus conformance is evaluated.",
+          observed: `${depthPreflight.wordCount} words, ${depthPreflight.paragraphCount} substantive paragraphs, ${depthPreflight.issues.length} anti-stub issues`,
+          sourceUrl: "agentlas://submission/manuscript-depth",
+          evidenceQuote: "A heading scaffold or one-sentence section is not a submission-ready manuscript.",
+        },
+        {
+          ruleId: "agentlas.submission.manuscript-blueprint-conformance", severity: "error", status: conformanceReady ? "pass" : "fail",
+          requirement: "Every required article-family role must be present and every required section and document must meet its full-text corpus lower range.",
+          observed: bindingReady ? `missing roles=${missingRoles.join(",") || "none"}; gross shortfalls=${grossShortfalls.join(",") || "none"}` : "blueprint unavailable for conformance",
+          sourceUrl: "agentlas://submission/manuscript-blueprint-conformance",
+          evidenceQuote: "The lower corpus range is a closeout boundary; missing required roles or a section or document below that range blocks submission readiness.",
+        },
+      ],
+    };
+  }
+
+  private insertManuscriptBlueprintVersion(input: { blueprintId: string; projectId: string; version: number; document: ScienceManuscriptBlueprintDocument; now: string }): void {
+    const versionId = randomUUID();
+    const contentSha256 = sha256Json(input.document);
+    const binding = input.document.journalBinding;
+    this.db.prepare(`INSERT INTO manuscript_blueprint_versions
+      (id,blueprint_id,project_id,version,schema_name,article_family,journal_profile_id,journal_profile_version,journal_profile_content_sha256,document_json,content_sha256,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(versionId, input.blueprintId, input.projectId, input.version, input.document.schema,
+        input.document.articleFamily, binding?.journalProfileId ?? null, binding?.journalProfileVersion ?? null,
+        binding?.journalProfileContentSha256 ?? null, JSON.stringify(input.document), contentSha256, input.now);
+    const insertComparable = this.db.prepare(`INSERT INTO manuscript_blueprint_comparables
+      (blueprint_version_id,project_id,ordinal,source_id,source_version_id,source_version,source_content_sha256,eligibility_receipt_id,text_index_id,text_index_content_sha256,snapshot_sha256,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
+    input.document.comparables.forEach((item, index) => insertComparable.run(versionId, input.projectId, index + 1, item.sourceId,
+      item.sourceVersionId, item.sourceVersion, item.sourceContentSha256, item.eligibilityReceiptId, item.textIndexId,
+      item.textIndexContentSha256, item.snapshotSha256, input.now));
+  }
+
+  createManuscriptBlueprint(input: CreateScienceManuscriptBlueprintInput): WriteScienceManuscriptBlueprintResult {
+    if (!input || typeof input !== "object" || !UUID_RE.test(String(input.requestId ?? ""))) throw new Error("science-request-id-invalid");
+    if (!UUID_RE.test(String(input.projectId ?? "")) || !this.getProject(input.projectId)) throw new Error("science-project-not-found");
+    const title = safeText(input.title, 500, "manuscript-blueprint-title");
+    const document = this.buildManuscriptBlueprintDocument(input);
+    const requestSha256 = sha256Json({ projectId: input.projectId, title, document });
+    return this.db.transaction(() => {
+      const prior = this.replay<WriteScienceManuscriptBlueprintResult>(input.requestId, "manuscript.blueprint.create", requestSha256);
+      if (prior) {
+        const persisted = this.getManuscriptBlueprintForProject(input.projectId, prior.blueprint.id);
+        if (!persisted || persisted.currentVersion !== prior.blueprint.currentVersion
+          || persisted.version.contentSha256 !== prior.blueprint.version.contentSha256) throw new Error("science-manuscript-blueprint-replay-integrity-failed");
+        return { blueprint: persisted, replayed: true };
+      }
+      const now = new Date().toISOString();
+      const blueprintId = randomUUID();
+      const contentSha256 = sha256Json(document);
+      this.db.prepare("INSERT INTO manuscript_blueprints (id,project_id,title,current_version,current_content_sha256,created_at,updated_at) VALUES (?,?,?,1,?,?,?)")
+        .run(blueprintId, input.projectId, title, contentSha256, now, now);
+      this.insertManuscriptBlueprintVersion({ blueprintId, projectId: input.projectId, version: 1, document, now });
+      const blueprint = this.getManuscriptBlueprintForProject(input.projectId, blueprintId);
+      if (!blueprint) throw new Error("science-manuscript-blueprint-create-failed");
+      const result: WriteScienceManuscriptBlueprintResult = { blueprint, replayed: false };
+      this.remember(input.requestId, "manuscript.blueprint.create", requestSha256, result, now);
+      return result;
+    })();
+  }
+
+  appendManuscriptBlueprintVersion(input: AppendScienceManuscriptBlueprintVersionInput): WriteScienceManuscriptBlueprintResult {
+    if (!input || typeof input !== "object" || !UUID_RE.test(String(input.requestId ?? ""))) throw new Error("science-request-id-invalid");
+    if (!UUID_RE.test(String(input.projectId ?? "")) || !UUID_RE.test(String(input.blueprintId ?? ""))) throw new Error("science-manuscript-blueprint-id-invalid");
+    const expectedVersion = safePositiveInteger(input.expectedVersion, 1, Number.MAX_SAFE_INTEGER, "manuscript-blueprint-version");
+    const expectedContentSha256 = safeSha256(input.expectedContentSha256, "manuscript-blueprint-content-sha256");
+    const document = this.buildManuscriptBlueprintDocument(input);
+    const requestSha256 = sha256Json({ projectId: input.projectId, blueprintId: input.blueprintId, expectedVersion, expectedContentSha256, document });
+    return this.db.transaction(() => {
+      const prior = this.replay<WriteScienceManuscriptBlueprintResult>(input.requestId, "manuscript.blueprint.append", requestSha256);
+      if (prior) {
+        const persisted = this.getManuscriptBlueprintForProject(input.projectId, prior.blueprint.id);
+        if (!persisted || persisted.currentVersion !== prior.blueprint.currentVersion
+          || persisted.version.contentSha256 !== prior.blueprint.version.contentSha256) throw new Error("science-manuscript-blueprint-replay-integrity-failed");
+        return { blueprint: persisted, replayed: true };
+      }
+      const current = this.getManuscriptBlueprintForProject(input.projectId, input.blueprintId);
+      if (!current) throw new Error("science-manuscript-blueprint-not-found");
+      if (current.currentVersion !== expectedVersion || current.version.contentSha256 !== expectedContentSha256) throw new Error("science-manuscript-blueprint-version-conflict");
+      const nextContentSha256 = sha256Json(document);
+      if (nextContentSha256 === expectedContentSha256) throw new Error("science-manuscript-blueprint-version-noop");
+      const now = new Date().toISOString();
+      const nextVersion = expectedVersion + 1;
+      this.insertManuscriptBlueprintVersion({ blueprintId: current.id, projectId: input.projectId, version: nextVersion, document, now });
+      const changed = this.db.prepare(`UPDATE manuscript_blueprints SET current_version = ?, current_content_sha256 = ?, updated_at = ?
+        WHERE id = ? AND project_id = ? AND current_version = ? AND current_content_sha256 = ?`)
+        .run(nextVersion, nextContentSha256, now, current.id, input.projectId, expectedVersion, expectedContentSha256);
+      if (changed.changes !== 1) throw new Error("science-manuscript-blueprint-version-conflict");
+      const blueprint = this.getManuscriptBlueprintForProject(input.projectId, current.id);
+      if (!blueprint) throw new Error("science-manuscript-blueprint-version-create-failed");
+      const result: WriteScienceManuscriptBlueprintResult = { blueprint, replayed: false };
+      this.remember(input.requestId, "manuscript.blueprint.append", requestSha256, result, now);
+      return result;
+    })();
+  }
+
   listManuscripts(projectId: string, limit = 100): ScienceManuscript[] {
     if (!UUID_RE.test(projectId)) return [];
     const safeLimit = Math.max(1, Math.min(SCIENCE_EVIDENCE_GRAPH_MAX_NODES, Math.floor(limit)));
@@ -15319,9 +21547,12 @@ export class ScienceStore {
     if (!UUID_RE.test(String(input.projectId ?? ""))) throw new Error("science-project-id-invalid");
     const title = safeText(input.title, 500, "manuscript-title");
     const markdown = safeText(input.markdown, 2_000_000, "manuscript-markdown");
-    return this.db.transaction(() => {
+    const requestedDocument = input.document === undefined ? null : validateScienceManuscriptDocument(input.document);
+    if (requestedDocument && serializeScienceManuscriptDocument(requestedDocument) !== markdown) throw new Error("science-manuscript-document-markdown-mismatch");
+    const transaction = this.db.transaction(() => {
       const bindings = this.validateManuscriptBindings(input.projectId, input.bindings);
-      const requestSha256 = sha256Json({ projectId: input.projectId, title, markdown, bindings });
+      const requestSha256 = sha256Json({ projectId: input.projectId, title, markdown, documentSha256: requestedDocument?.documentSha256 ?? null, bindings,
+        blueprintBinding: input.blueprintBinding ?? null });
       const prior = this.replay<CreateScienceManuscriptResult>(input.requestId, "manuscript.create", requestSha256);
       if (prior) return { ...prior, replayed: true };
       if (!this.getProject(input.projectId)) throw new Error("science-project-not-found");
@@ -15334,6 +21565,23 @@ export class ScienceStore {
       this.db.prepare("INSERT INTO manuscript_versions (id,manuscript_id,version,markdown,content_sha256,binding_manifest_sha256,created_at) VALUES (?,?,1,?,?,?,?)")
         .run(versionId, manuscriptId, markdown, sha256Text(markdown), bindingManifestSha256, now);
       this.insertManuscriptBindings(input.projectId, versionId, bindings, now);
+      this.insertManuscriptDocumentVersion({
+        projectId: input.projectId,
+        manuscriptId,
+        manuscriptVersionId: versionId,
+        manuscriptVersion: 1,
+        markdown,
+        bindingManifestSha256,
+        document: requestedDocument ?? createScienceManuscriptCompatibilityDocument(markdown),
+        basis: "compatibility-baseline",
+        transactionId: null,
+        createdAt: now,
+      });
+      if (input.blueprintBinding) this.insertManuscriptBlueprintBinding({
+        projectId: input.projectId, manuscriptId, manuscriptVersionId: versionId, manuscriptVersion: 1,
+        manuscriptContentSha256: sha256Text(markdown), manuscriptBindingManifestSha256: bindingManifestSha256,
+        blueprintBinding: input.blueprintBinding, createdAt: now,
+      });
       this.insertManuscriptSentenceSnapshot({ projectId: input.projectId, manuscriptId, manuscriptVersionId: versionId, manuscriptVersion: 1,
         manuscriptContentSha256: sha256Text(markdown), markdown, createdAt: now });
       const manuscript = this.getManuscriptForProject(input.projectId, manuscriptId);
@@ -15341,7 +21589,8 @@ export class ScienceStore {
       const result: CreateScienceManuscriptResult = { manuscript, replayed: false };
       this.remember(input.requestId, "manuscript.create", requestSha256, result, now);
       return result;
-    })();
+    });
+    return transaction.immediate();
   }
 
   appendManuscriptVersion(input: AppendScienceManuscriptVersionInput): AppendScienceManuscriptVersionResult {
@@ -15350,9 +21599,12 @@ export class ScienceStore {
     const expectedVersion = safePositiveInteger(input.expectedVersion, 1, Number.MAX_SAFE_INTEGER, "manuscript-version");
     const expectedContentSha256 = safeSha256(input.expectedContentSha256, "manuscript-content-sha256");
     const markdown = safeText(input.markdown, 2_000_000, "manuscript-markdown");
-    return this.db.transaction(() => {
+    const requestedDocument = input.document === undefined ? null : validateScienceManuscriptDocument(input.document);
+    if (requestedDocument && serializeScienceManuscriptDocument(requestedDocument) !== markdown) throw new Error("science-manuscript-document-markdown-mismatch");
+    const transaction = this.db.transaction(() => {
       const bindings = this.validateManuscriptBindings(input.projectId, input.bindings);
-      const requestSha256 = sha256Json({ projectId: input.projectId, manuscriptId: input.manuscriptId, expectedVersion, expectedContentSha256, markdown, bindings });
+      const requestSha256 = sha256Json({ projectId: input.projectId, manuscriptId: input.manuscriptId, expectedVersion, expectedContentSha256,
+        markdown, documentSha256: requestedDocument?.documentSha256 ?? null, bindings, blueprintBinding: input.blueprintBinding ?? null });
       const prior = this.replay<AppendScienceManuscriptVersionResult>(input.requestId, "manuscript.version.append", requestSha256);
       if (prior) return { ...prior, replayed: true };
       const current = this.getManuscriptForProject(input.projectId, input.manuscriptId);
@@ -15367,6 +21619,29 @@ export class ScienceStore {
       this.db.prepare("INSERT INTO manuscript_versions (id,manuscript_id,version,markdown,content_sha256,binding_manifest_sha256,created_at) VALUES (?,?,?,?,?,?,?)")
         .run(versionId, current.id, nextVersion, markdown, contentSha256, bindingManifestSha256, now);
       this.insertManuscriptBindings(input.projectId, versionId, bindings, now);
+      this.insertManuscriptDocumentVersion({
+        projectId: input.projectId,
+        manuscriptId: current.id,
+        manuscriptVersionId: versionId,
+        manuscriptVersion: nextVersion,
+        markdown,
+        bindingManifestSha256,
+        document: requestedDocument ?? createScienceManuscriptCompatibilityDocument(markdown),
+        basis: "compatibility-baseline",
+        transactionId: null,
+        createdAt: now,
+      });
+      const blueprintBinding = input.blueprintBinding ?? (current.version.blueprintBinding ? {
+        blueprintId: current.version.blueprintBinding.blueprintId,
+        blueprintVersion: current.version.blueprintBinding.blueprintVersion,
+        blueprintContentSha256: current.version.blueprintBinding.blueprintContentSha256,
+      } : null);
+      if (blueprintBinding) this.insertManuscriptBlueprintBinding({
+        projectId: input.projectId, manuscriptId: current.id, manuscriptVersionId: versionId, manuscriptVersion: nextVersion,
+        manuscriptContentSha256: contentSha256, manuscriptBindingManifestSha256: bindingManifestSha256,
+        blueprintBinding, createdAt: now,
+        allowHistoricalBlueprint: input.blueprintBinding === undefined && current.version.blueprintBinding !== undefined,
+      });
       this.insertManuscriptSentenceSnapshot({ projectId: input.projectId, manuscriptId: current.id, manuscriptVersionId: versionId,
         manuscriptVersion: nextVersion, manuscriptContentSha256: contentSha256, markdown, createdAt: now });
       const changed = this.db.prepare("UPDATE manuscripts SET current_version = ?, updated_at = ? WHERE id = ? AND project_id = ? AND current_version = ?")
@@ -15377,7 +21652,631 @@ export class ScienceStore {
       const result: AppendScienceManuscriptVersionResult = { manuscript, replayed: false };
       this.remember(input.requestId, "manuscript.version.append", requestSha256, result, now);
       return result;
-    })();
+    });
+    return transaction.immediate();
+  }
+
+  applyManuscriptTransaction(input: ApplyScienceManuscriptTransactionInput): ApplyScienceManuscriptTransactionResult {
+    if (!input || typeof input !== "object" || !UUID_RE.test(String(input.requestId ?? ""))) throw new Error("science-request-id-invalid");
+    if (!UUID_RE.test(String(input.projectId ?? "")) || !UUID_RE.test(String(input.manuscriptId ?? ""))) throw new Error("science-manuscript-id-invalid");
+    const expectedVersion = safePositiveInteger(input.expectedVersion, 1, Number.MAX_SAFE_INTEGER, "manuscript-version");
+    const expectedContentSha256 = safeSha256(input.expectedContentSha256, "manuscript-content-sha256");
+    const expectedDocumentSha256 = safeSha256(input.expectedDocumentSha256, "manuscript-document-sha256");
+    if (input.actor !== "user" && input.actor !== "assistant") throw new Error("science-manuscript-transaction-actor-invalid");
+    const actor = input.actor;
+    const reason = normalizeManuscriptTransactionReason(input.reason);
+    if (!Array.isArray(input.operations) || input.operations.length < 1 || input.operations.length > 1_000) throw new Error("science-manuscript-operations-invalid");
+    const operations = input.operations.map(validateScienceManuscriptOperation);
+    const requestSha256 = sha256Json({
+      projectId: input.projectId,
+      manuscriptId: input.manuscriptId,
+      expectedVersion,
+      expectedContentSha256,
+      expectedDocumentSha256,
+      actor,
+      reason,
+      operations,
+    });
+    const transaction = this.db.transaction(() => {
+      const prior = this.replay<ApplyScienceManuscriptTransactionResult>(input.requestId, "manuscript.transaction.apply", requestSha256);
+      if (prior) return { ...prior, replayed: true };
+      const current = this.getManuscriptForProject(input.projectId, input.manuscriptId);
+      if (!current) throw new Error("science-manuscript-not-found");
+      const currentDocument = current.version.document ?? this.getManuscriptDocumentForProject(input.projectId, input.manuscriptId);
+      if (!currentDocument) throw new Error("science-manuscript-document-not-found");
+      if (current.currentVersion !== expectedVersion || current.version.contentSha256 !== expectedContentSha256) {
+        throw new Error("science-manuscript-version-conflict");
+      }
+      if (currentDocument.documentSha256 !== expectedDocumentSha256) throw new Error("science-manuscript-document-conflict");
+      let applied: ReturnType<typeof applyScienceManuscriptTransactionOperations>;
+      try {
+        applied = applyScienceManuscriptTransactionOperations(currentDocument, operations);
+      } catch (error) {
+        const code = error instanceof Error ? error.message : String(error);
+        if (/science-manuscript-operation-(?:node|anchor)-(?:stale|missing)/u.test(code)) {
+          throw new Error("science-manuscript-node-conflict");
+        }
+        throw error;
+      }
+      const bindings = this.reconcileManuscriptBindings(input.projectId, current.version.bindings, applied.document, operations);
+      const now = new Date().toISOString();
+      const result = this.commitManuscriptTransaction({
+        requestId: input.requestId,
+        current,
+        currentDocument,
+        nextDocument: applied.document,
+        actor,
+        reason,
+        operations,
+        inverseOperations: applied.inverseOperations,
+        bindings,
+        revertsTransactionId: null,
+        now,
+      });
+      this.remember(input.requestId, "manuscript.transaction.apply", requestSha256, result, now);
+      return result;
+    });
+    return transaction.immediate();
+  }
+
+  revertManuscriptTransaction(input: RevertScienceManuscriptTransactionInput): RevertScienceManuscriptTransactionResult {
+    if (!input || typeof input !== "object" || !UUID_RE.test(String(input.requestId ?? ""))) throw new Error("science-request-id-invalid");
+    if (!UUID_RE.test(String(input.projectId ?? "")) || !UUID_RE.test(String(input.manuscriptId ?? "")) || !UUID_RE.test(String(input.transactionId ?? ""))) {
+      throw new Error("science-manuscript-transaction-reference-invalid");
+    }
+    const expectedVersion = safePositiveInteger(input.expectedVersion, 1, Number.MAX_SAFE_INTEGER, "manuscript-version");
+    const expectedContentSha256 = safeSha256(input.expectedContentSha256, "manuscript-content-sha256");
+    const expectedDocumentSha256 = safeSha256(input.expectedDocumentSha256, "manuscript-document-sha256");
+    if (input.actor !== "user" && input.actor !== "assistant") throw new Error("science-manuscript-transaction-actor-invalid");
+    const actor = input.actor;
+    const reason = normalizeManuscriptTransactionReason(input.reason);
+    const requestSha256 = sha256Json({
+      projectId: input.projectId,
+      manuscriptId: input.manuscriptId,
+      transactionId: input.transactionId,
+      expectedVersion,
+      expectedContentSha256,
+      expectedDocumentSha256,
+      actor,
+      reason,
+    });
+    const transaction = this.db.transaction(() => {
+      const prior = this.replay<RevertScienceManuscriptTransactionResult>(input.requestId, "manuscript.transaction.revert", requestSha256);
+      if (prior) return { ...prior, replayed: true };
+      const current = this.getManuscriptForProject(input.projectId, input.manuscriptId);
+      if (!current) throw new Error("science-manuscript-not-found");
+      const currentDocument = current.version.document ?? this.getManuscriptDocumentForProject(input.projectId, input.manuscriptId);
+      if (!currentDocument) throw new Error("science-manuscript-document-not-found");
+      if (current.currentVersion !== expectedVersion || current.version.contentSha256 !== expectedContentSha256) {
+        throw new Error("science-manuscript-version-conflict");
+      }
+      if (currentDocument.documentSha256 !== expectedDocumentSha256) throw new Error("science-manuscript-document-conflict");
+      const target = this.getManuscriptTransactionStorage(input.projectId, input.manuscriptId, input.transactionId);
+      if (!target) throw new Error("science-manuscript-transaction-not-found");
+      if (target.transaction.resultVersion !== current.currentVersion
+        || target.transaction.resultContentSha256 !== current.version.contentSha256
+        || target.transaction.resultDocumentSha256 !== currentDocument.documentSha256) {
+        throw new Error("science-manuscript-transaction-not-current");
+      }
+      let restored: ReturnType<typeof applyScienceManuscriptTransactionOperations>;
+      try {
+        restored = applyScienceManuscriptTransactionOperations(currentDocument, target.inverseOperations, { trustedRestore: true });
+      } catch {
+        throw new Error("science-manuscript-transaction-inverse-invalid");
+      }
+      const bindings = this.manuscriptBindingsForVersion(input.projectId, input.manuscriptId, target.transaction.baseVersion);
+      const now = new Date().toISOString();
+      const result = this.commitManuscriptTransaction({
+        requestId: input.requestId,
+        current,
+        currentDocument,
+        nextDocument: restored.document,
+        actor,
+        reason,
+        operations: target.inverseOperations,
+        inverseOperations: restored.inverseOperations,
+        bindings,
+        revertsTransactionId: target.transaction.id,
+        now,
+      });
+      this.remember(input.requestId, "manuscript.transaction.revert", requestSha256, result, now);
+      return result;
+    });
+    return transaction.immediate();
+  }
+
+  private verifyManuscriptSelectionContext(
+    context: ScienceManuscriptSelectionContext,
+  ): ScienceManuscriptSelectionContext {
+    const document = this.getManuscriptDocumentForProject(
+      context.projectId,
+      context.manuscriptId,
+      context.manuscriptVersion,
+    );
+    const node = document ? findScienceManuscriptNode(document, context.nodeId) : null;
+    if (!document || document.documentSha256 !== context.manuscriptDocumentSha256 || !node
+      || node.revision !== context.nodeRevision || node.contentSha256 !== context.nodeContentSha256) {
+      throw new Error("science-manuscript-selection-integrity-failed");
+    }
+    const sourceText = scienceManuscriptNodeSelectionText(node);
+    if (scienceManuscriptProposalTextSha256(sourceText) !== context.sourceTextSha256
+      || context.endOffset > sourceText.length
+      || sourceText.slice(context.startOffset, context.endOffset) !== context.selectedText) {
+      throw new Error("science-manuscript-selection-integrity-failed");
+    }
+    return context;
+  }
+
+  getManuscriptSelectionContextForProject(
+    projectId: string,
+    manuscriptId: string,
+    selectionContextId: string,
+  ): ScienceManuscriptSelectionContext | null {
+    if (!UUID_RE.test(projectId) || !UUID_RE.test(manuscriptId) || !UUID_RE.test(selectionContextId)) return null;
+    const row = this.db.prepare(`SELECT * FROM manuscript_selection_contexts
+      WHERE project_id = ? AND manuscript_id = ? AND id = ?`)
+      .get(projectId, manuscriptId, selectionContextId) as Record<string, unknown> | undefined;
+    return row ? this.verifyManuscriptSelectionContext(manuscriptSelectionContextFromStorage(row)) : null;
+  }
+
+  listManuscriptSelectionContexts(
+    projectId: string,
+    manuscriptId: string,
+    limit = 100,
+  ): ScienceManuscriptSelectionContext[] {
+    if (!UUID_RE.test(projectId) || !UUID_RE.test(manuscriptId)) return [];
+    const safeLimit = Math.max(1, Math.min(1_000, Math.floor(limit)));
+    const rows = this.db.prepare(`SELECT * FROM manuscript_selection_contexts
+      WHERE project_id = ? AND manuscript_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`)
+      .all(projectId, manuscriptId, safeLimit) as Record<string, unknown>[];
+    return rows.map((row) => this.verifyManuscriptSelectionContext(manuscriptSelectionContextFromStorage(row)));
+  }
+
+  createManuscriptSelectionContext(
+    input: CreateScienceManuscriptSelectionContextInput,
+  ): CreateScienceManuscriptSelectionContextResult {
+    if (!input || typeof input !== "object" || !UUID_RE.test(String(input.requestId ?? ""))) throw new Error("science-request-id-invalid");
+    if (!UUID_RE.test(String(input.projectId ?? "")) || !UUID_RE.test(String(input.manuscriptId ?? ""))
+      || !UUID_RE.test(String(input.nodeId ?? ""))) throw new Error("science-manuscript-selection-reference-invalid");
+    const expectedVersion = safePositiveInteger(input.expectedVersion, 1, Number.MAX_SAFE_INTEGER, "manuscript-selection-version");
+    const expectedContentSha256 = safeSha256(input.expectedContentSha256, "manuscript-selection-content-sha256");
+    const expectedDocumentSha256 = safeSha256(input.expectedDocumentSha256, "manuscript-selection-document-sha256");
+    const expectedNodeRevision = safePositiveInteger(input.expectedNodeRevision, 1, Number.MAX_SAFE_INTEGER, "manuscript-selection-node-revision");
+    const expectedNodeContentSha256 = safeSha256(input.expectedNodeContentSha256, "manuscript-selection-node-content-sha256");
+    if (!Number.isSafeInteger(input.startOffset) || !Number.isSafeInteger(input.endOffset)
+      || input.startOffset < 0 || input.endOffset < input.startOffset || input.endOffset > 2_000_000
+      || typeof input.selectedText !== "string" || input.selectedText.length > 2_000_000) {
+      throw new Error("science-manuscript-selection-range-invalid");
+    }
+    const selectedText = input.selectedText.replace(/\r\n?/gu, "\n");
+    const requestSha256 = sha256Json({
+      projectId: input.projectId,
+      manuscriptId: input.manuscriptId,
+      expectedVersion,
+      expectedContentSha256,
+      expectedDocumentSha256,
+      nodeId: input.nodeId,
+      expectedNodeRevision,
+      expectedNodeContentSha256,
+      startOffset: input.startOffset,
+      endOffset: input.endOffset,
+      selectedText,
+    });
+    const transaction = this.db.transaction(() => {
+      const prior = this.replay<CreateScienceManuscriptSelectionContextResult>(
+        input.requestId,
+        "manuscript.selection.create",
+        requestSha256,
+      );
+      if (prior) return { ...prior, replayed: true };
+      const manuscript = this.getManuscriptForProject(input.projectId, input.manuscriptId);
+      const document = manuscript?.version.document ?? this.getManuscriptDocumentForProject(input.projectId, input.manuscriptId);
+      if (!manuscript || !document) throw new Error("science-manuscript-not-found");
+      if (manuscript.currentVersion !== expectedVersion || manuscript.version.contentSha256 !== expectedContentSha256) {
+        throw new Error("science-manuscript-version-conflict");
+      }
+      if (document.documentSha256 !== expectedDocumentSha256) throw new Error("science-manuscript-document-conflict");
+      const node = findScienceManuscriptNode(document, input.nodeId);
+      if (!node || node.revision !== expectedNodeRevision || node.contentSha256 !== expectedNodeContentSha256) {
+        throw new Error("science-manuscript-node-conflict");
+      }
+      const sourceText = scienceManuscriptNodeSelectionText(node);
+      if (input.endOffset > sourceText.length
+        || sourceText.slice(input.startOffset, input.endOffset) !== selectedText) {
+        throw new Error("science-manuscript-selection-text-mismatch");
+      }
+      const now = new Date().toISOString();
+      const unsigned: Omit<ScienceManuscriptSelectionContext, "contextSha256"> = {
+        schemaVersion: SCIENCE_MANUSCRIPT_SELECTION_CONTEXT_SCHEMA,
+        id: randomUUID(),
+        requestId: input.requestId,
+        projectId: input.projectId,
+        manuscriptId: input.manuscriptId,
+        manuscriptVersion: manuscript.currentVersion,
+        manuscriptContentSha256: manuscript.version.contentSha256,
+        manuscriptDocumentSha256: document.documentSha256,
+        nodeId: node.id,
+        nodeRevision: node.revision,
+        nodeContentSha256: node.contentSha256,
+        startOffset: input.startOffset,
+        endOffset: input.endOffset,
+        selectedText,
+        selectedTextSha256: scienceManuscriptProposalTextSha256(selectedText),
+        sourceTextSha256: scienceManuscriptProposalTextSha256(sourceText),
+        createdAt: now,
+      };
+      const context = validateScienceManuscriptSelectionContext({
+        ...unsigned,
+        contextSha256: scienceManuscriptSelectionContextSha256(unsigned),
+      });
+      this.db.prepare(`INSERT INTO manuscript_selection_contexts
+        (id,request_id,project_id,manuscript_id,manuscript_version,manuscript_content_sha256,manuscript_document_sha256,
+         schema_name,node_id,node_revision,node_content_sha256,start_offset,end_offset,selected_text,selected_text_sha256,
+         source_text_sha256,context_sha256,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        context.id, context.requestId, context.projectId, context.manuscriptId, context.manuscriptVersion,
+        context.manuscriptContentSha256, context.manuscriptDocumentSha256, context.schemaVersion,
+        context.nodeId, context.nodeRevision, context.nodeContentSha256, context.startOffset, context.endOffset,
+        context.selectedText, context.selectedTextSha256, context.sourceTextSha256, context.contextSha256, context.createdAt,
+      );
+      const selectionContext = this.getManuscriptSelectionContextForProject(context.projectId, context.manuscriptId, context.id);
+      if (!selectionContext) throw new Error("science-manuscript-selection-create-failed");
+      const result: CreateScienceManuscriptSelectionContextResult = { selectionContext, replayed: false };
+      this.remember(input.requestId, "manuscript.selection.create", requestSha256, result, now);
+      return result;
+    });
+    return transaction.immediate();
+  }
+
+  private projectManuscriptProposal(
+    payload: Omit<ScienceManuscriptEditProposal, "status" | "decision">,
+    decision: ScienceManuscriptEditProposalDecision | null,
+  ): ScienceManuscriptEditProposal {
+    const baseDocument = this.getManuscriptDocumentForProject(payload.projectId, payload.manuscriptId, payload.baseVersion);
+    if (!baseDocument || baseDocument.documentSha256 !== payload.baseDocumentSha256) {
+      throw new Error("science-manuscript-proposal-integrity-failed");
+    }
+    let preview: ReturnType<typeof applyScienceManuscriptTransactionOperations>;
+    try {
+      preview = applyScienceManuscriptTransactionOperations(baseDocument, payload.operations);
+    } catch {
+      throw new Error("science-manuscript-proposal-integrity-failed");
+    }
+    if (preview.document.documentSha256 !== payload.previewDocumentSha256
+      || scienceManuscriptProposalJson(preview.document) !== scienceManuscriptProposalJson(payload.previewDocument)
+      || serializeScienceManuscriptDocument(preview.document) !== payload.previewMarkdown) {
+      throw new Error("science-manuscript-proposal-integrity-failed");
+    }
+    for (const contextId of payload.selectionContextIds) {
+      const context = this.getManuscriptSelectionContextForProject(payload.projectId, payload.manuscriptId, contextId);
+      if (!context || context.manuscriptVersion !== payload.baseVersion
+        || context.manuscriptContentSha256 !== payload.baseContentSha256
+        || context.manuscriptDocumentSha256 !== payload.baseDocumentSha256) {
+        throw new Error("science-manuscript-proposal-selection-integrity-failed");
+      }
+    }
+    if (decision) {
+      if (decision.projectId !== payload.projectId || decision.manuscriptId !== payload.manuscriptId
+        || decision.proposalId !== payload.id) throw new Error("science-manuscript-proposal-decision-integrity-failed");
+      if (decision.decision === "applied") {
+        const stored = decision.resultingTransactionId
+          ? this.getManuscriptTransactionStorage(payload.projectId, payload.manuscriptId, decision.resultingTransactionId)
+          : null;
+        if (!stored || stored.transaction.requestId !== decision.requestId || stored.transaction.actor !== "assistant"
+          || stored.transaction.baseVersion !== payload.baseVersion
+          || stored.transaction.baseContentSha256 !== payload.baseContentSha256
+          || stored.transaction.baseDocumentSha256 !== payload.baseDocumentSha256
+          || scienceManuscriptProposalSha256(stored.transaction.operations) !== payload.operationsSha256
+          || stored.transaction.resultVersion !== decision.resultVersion
+          || stored.transaction.resultContentSha256 !== payload.previewContentSha256
+          || stored.transaction.resultContentSha256 !== decision.resultContentSha256
+          || stored.transaction.resultDocumentSha256 !== payload.previewDocumentSha256
+          || stored.transaction.resultDocumentSha256 !== decision.resultDocumentSha256) {
+          throw new Error("science-manuscript-proposal-decision-integrity-failed");
+        }
+      }
+    }
+    const manuscript = this.getManuscriptForProject(payload.projectId, payload.manuscriptId);
+    if (!manuscript) throw new Error("science-manuscript-proposal-integrity-failed");
+    const currentDocument = manuscript.version.document ?? this.getManuscriptDocumentForProject(payload.projectId, payload.manuscriptId);
+    if (!currentDocument) throw new Error("science-manuscript-proposal-integrity-failed");
+    const status = decision?.decision ?? (
+      manuscript.currentVersion === payload.baseVersion
+      && manuscript.version.contentSha256 === payload.baseContentSha256
+      && currentDocument.documentSha256 === payload.baseDocumentSha256
+        ? "pending"
+        : "stale"
+    );
+    return { ...payload, status, decision };
+  }
+
+  getManuscriptEditProposalForProject(
+    projectId: string,
+    manuscriptId: string,
+    proposalId: string,
+  ): ScienceManuscriptEditProposal | null {
+    if (!UUID_RE.test(projectId) || !UUID_RE.test(manuscriptId) || !UUID_RE.test(proposalId)) return null;
+    const row = this.db.prepare(`SELECT * FROM manuscript_edit_proposals
+      WHERE project_id = ? AND manuscript_id = ? AND id = ?`)
+      .get(projectId, manuscriptId, proposalId) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    const decisionRow = this.db.prepare(`SELECT * FROM manuscript_edit_proposal_decisions
+      WHERE project_id = ? AND manuscript_id = ? AND proposal_id = ?`)
+      .get(projectId, manuscriptId, proposalId) as Record<string, unknown> | undefined;
+    return this.projectManuscriptProposal(
+      manuscriptEditProposalPayloadFromStorage(row),
+      decisionRow ? manuscriptEditProposalDecisionFromStorage(decisionRow) : null,
+    );
+  }
+
+  listManuscriptEditProposals(projectId: string, manuscriptId: string, limit = 100): ScienceManuscriptEditProposal[] {
+    if (!UUID_RE.test(projectId) || !UUID_RE.test(manuscriptId)) return [];
+    const safeLimit = Math.max(1, Math.min(1_000, Math.floor(limit)));
+    const rows = this.db.prepare(`SELECT * FROM manuscript_edit_proposals
+      WHERE project_id = ? AND manuscript_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`)
+      .all(projectId, manuscriptId, safeLimit) as Record<string, unknown>[];
+    return rows.map((row) => {
+      const proposalId = String(row.id);
+      const decisionRow = this.db.prepare(`SELECT * FROM manuscript_edit_proposal_decisions
+        WHERE project_id = ? AND manuscript_id = ? AND proposal_id = ?`)
+        .get(projectId, manuscriptId, proposalId) as Record<string, unknown> | undefined;
+      return this.projectManuscriptProposal(
+        manuscriptEditProposalPayloadFromStorage(row),
+        decisionRow ? manuscriptEditProposalDecisionFromStorage(decisionRow) : null,
+      );
+    });
+  }
+
+  createManuscriptEditProposal(input: CreateScienceManuscriptEditProposalInput): CreateScienceManuscriptEditProposalResult {
+    if (!input || typeof input !== "object" || !UUID_RE.test(String(input.requestId ?? ""))) throw new Error("science-request-id-invalid");
+    if (!UUID_RE.test(String(input.projectId ?? "")) || !UUID_RE.test(String(input.manuscriptId ?? ""))) {
+      throw new Error("science-manuscript-proposal-reference-invalid");
+    }
+    const expectedVersion = safePositiveInteger(input.expectedVersion, 1, Number.MAX_SAFE_INTEGER, "manuscript-proposal-version");
+    const expectedContentSha256 = safeSha256(input.expectedContentSha256, "manuscript-proposal-content-sha256");
+    const expectedDocumentSha256 = safeSha256(input.expectedDocumentSha256, "manuscript-proposal-document-sha256");
+    if (!Array.isArray(input.operations) || input.operations.length < 1 || input.operations.length > 1_000) {
+      throw new Error("science-manuscript-operations-invalid");
+    }
+    const operations = input.operations.map(validateScienceManuscriptOperation);
+    const summary = safeText(input.summary, 1_000, "manuscript-proposal-summary");
+    const rationale = safeText(input.rationale, 20_000, "manuscript-proposal-rationale");
+    const conversationId = input.conversationId === undefined || input.conversationId === null ? null : String(input.conversationId);
+    const messageId = input.messageId === undefined || input.messageId === null ? null : String(input.messageId);
+    if ((conversationId !== null && !UUID_RE.test(conversationId)) || (messageId !== null && !UUID_RE.test(messageId))
+      || (messageId !== null && conversationId === null)) throw new Error("science-manuscript-proposal-conversation-invalid");
+    const selectionContextIds = input.selectionContextIds === undefined ? [] : input.selectionContextIds;
+    if (!Array.isArray(selectionContextIds) || selectionContextIds.length > 100
+      || selectionContextIds.some((id) => typeof id !== "string" || !UUID_RE.test(id))
+      || new Set(selectionContextIds).size !== selectionContextIds.length) {
+      throw new Error("science-manuscript-proposal-selection-invalid");
+    }
+    const requestSha256 = sha256Json({
+      projectId: input.projectId,
+      manuscriptId: input.manuscriptId,
+      expectedVersion,
+      expectedContentSha256,
+      expectedDocumentSha256,
+      operations,
+      summary,
+      rationale,
+      conversationId,
+      messageId,
+      selectionContextIds,
+    });
+    const transaction = this.db.transaction(() => {
+      const prior = this.replay<CreateScienceManuscriptEditProposalResult>(input.requestId, "manuscript.proposal.create", requestSha256);
+      if (prior) return { ...prior, replayed: true };
+      const manuscript = this.getManuscriptForProject(input.projectId, input.manuscriptId);
+      const document = manuscript?.version.document ?? this.getManuscriptDocumentForProject(input.projectId, input.manuscriptId);
+      if (!manuscript || !document) throw new Error("science-manuscript-not-found");
+      if (manuscript.currentVersion !== expectedVersion || manuscript.version.contentSha256 !== expectedContentSha256) {
+        throw new Error("science-manuscript-version-conflict");
+      }
+      if (document.documentSha256 !== expectedDocumentSha256) throw new Error("science-manuscript-document-conflict");
+      for (const selectionContextId of selectionContextIds) {
+        const context = this.getManuscriptSelectionContextForProject(input.projectId, input.manuscriptId, selectionContextId);
+        if (!context || context.manuscriptVersion !== expectedVersion
+          || context.manuscriptContentSha256 !== expectedContentSha256
+          || context.manuscriptDocumentSha256 !== expectedDocumentSha256) {
+          throw new Error("science-manuscript-proposal-selection-stale");
+        }
+      }
+      let preview: ReturnType<typeof applyScienceManuscriptTransactionOperations>;
+      try {
+        preview = applyScienceManuscriptTransactionOperations(document, operations);
+      } catch (error) {
+        const code = error instanceof Error ? error.message : String(error);
+        if (/science-manuscript-operation-(?:node|anchor)-(?:stale|missing)/u.test(code)) {
+          throw new Error("science-manuscript-node-conflict");
+        }
+        throw error;
+      }
+      const previewMarkdown = serializeScienceManuscriptDocument(preview.document);
+      if (!previewMarkdown.trim()) throw new Error("science-manuscript-proposal-empty");
+      // This is a read-only validation pass. It proves every artifact insert is
+      // backed by an exact verified receipt before a proposal can be shown.
+      this.reconcileManuscriptBindings(input.projectId, manuscript.version.bindings, preview.document, operations);
+      const now = new Date().toISOString();
+      const payload = {
+        schemaVersion: SCIENCE_MANUSCRIPT_EDIT_PROPOSAL_SCHEMA,
+        id: randomUUID(),
+        requestId: input.requestId,
+        projectId: input.projectId,
+        manuscriptId: input.manuscriptId,
+        baseVersion: expectedVersion,
+        baseContentSha256: expectedContentSha256,
+        baseDocumentSha256: expectedDocumentSha256,
+        operations,
+        operationsSha256: scienceManuscriptProposalSha256(operations),
+        previewMarkdown,
+        previewContentSha256: scienceManuscriptProposalTextSha256(previewMarkdown),
+        previewDocument: preview.document,
+        previewDocumentSha256: preview.document.documentSha256,
+        summary,
+        rationale,
+        conversationId,
+        messageId,
+        selectionContextIds: [...selectionContextIds],
+        createdAt: now,
+      };
+      const storedPayload = validateScienceManuscriptEditProposalPayload({
+        ...payload,
+        payloadSha256: scienceManuscriptEditProposalPayloadSha256(payload),
+      });
+      this.db.prepare(`INSERT INTO manuscript_edit_proposals
+        (id,request_id,project_id,manuscript_id,base_manuscript_version,base_manuscript_content_sha256,base_document_sha256,
+         schema_name,operations_json,operations_sha256,preview_markdown,preview_content_sha256,preview_document_json,
+         preview_document_sha256,summary,rationale,conversation_id,message_id,selection_context_ids_json,payload_sha256,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        storedPayload.id, storedPayload.requestId, storedPayload.projectId, storedPayload.manuscriptId,
+        storedPayload.baseVersion, storedPayload.baseContentSha256, storedPayload.baseDocumentSha256,
+        storedPayload.schemaVersion, scienceManuscriptProposalJson(storedPayload.operations), storedPayload.operationsSha256,
+        storedPayload.previewMarkdown, storedPayload.previewContentSha256, scienceManuscriptProposalJson(storedPayload.previewDocument),
+        storedPayload.previewDocumentSha256, storedPayload.summary, storedPayload.rationale, storedPayload.conversationId,
+        storedPayload.messageId, scienceManuscriptProposalJson(storedPayload.selectionContextIds), storedPayload.payloadSha256,
+        storedPayload.createdAt,
+      );
+      const proposal = this.getManuscriptEditProposalForProject(input.projectId, input.manuscriptId, storedPayload.id);
+      if (!proposal || proposal.status !== "pending") throw new Error("science-manuscript-proposal-create-failed");
+      const result: CreateScienceManuscriptEditProposalResult = { proposal, replayed: false };
+      this.remember(input.requestId, "manuscript.proposal.create", requestSha256, result, now);
+      return result;
+    });
+    return transaction.immediate();
+  }
+
+  applyManuscriptEditProposal(input: ApplyScienceManuscriptEditProposalInput): ApplyScienceManuscriptEditProposalResult {
+    if (!input || typeof input !== "object" || !UUID_RE.test(String(input.requestId ?? ""))) throw new Error("science-request-id-invalid");
+    if (!UUID_RE.test(String(input.projectId ?? "")) || !UUID_RE.test(String(input.manuscriptId ?? ""))
+      || !UUID_RE.test(String(input.proposalId ?? ""))) throw new Error("science-manuscript-proposal-reference-invalid");
+    const expectedVersion = safePositiveInteger(input.expectedVersion, 1, Number.MAX_SAFE_INTEGER, "manuscript-proposal-version");
+    const expectedContentSha256 = safeSha256(input.expectedContentSha256, "manuscript-proposal-content-sha256");
+    const expectedDocumentSha256 = safeSha256(input.expectedDocumentSha256, "manuscript-proposal-document-sha256");
+    const requestSha256 = sha256Json({ projectId: input.projectId, manuscriptId: input.manuscriptId, proposalId: input.proposalId,
+      expectedVersion, expectedContentSha256, expectedDocumentSha256 });
+    const transaction = this.db.transaction(() => {
+      const prior = this.replay<ApplyScienceManuscriptEditProposalResult>(input.requestId, "manuscript.proposal.apply", requestSha256);
+      if (prior) return { ...prior, replayed: true };
+      const proposal = this.getManuscriptEditProposalForProject(input.projectId, input.manuscriptId, input.proposalId);
+      if (!proposal) throw new Error("science-manuscript-proposal-not-found");
+      if (proposal.decision) throw new Error("science-manuscript-proposal-already-decided");
+      if (proposal.status !== "pending") throw new Error("science-manuscript-proposal-stale");
+      if (proposal.baseVersion !== expectedVersion || proposal.baseContentSha256 !== expectedContentSha256
+        || proposal.baseDocumentSha256 !== expectedDocumentSha256) throw new Error("science-manuscript-proposal-precondition-conflict");
+      const current = this.getManuscriptForProject(input.projectId, input.manuscriptId);
+      const currentDocument = current?.version.document ?? this.getManuscriptDocumentForProject(input.projectId, input.manuscriptId);
+      if (!current || !currentDocument || current.currentVersion !== expectedVersion
+        || current.version.contentSha256 !== expectedContentSha256
+        || currentDocument.documentSha256 !== expectedDocumentSha256) throw new Error("science-manuscript-proposal-stale");
+      const applied = applyScienceManuscriptTransactionOperations(currentDocument, proposal.operations);
+      if (applied.document.documentSha256 !== proposal.previewDocumentSha256
+        || serializeScienceManuscriptDocument(applied.document) !== proposal.previewMarkdown) {
+        throw new Error("science-manuscript-proposal-preview-conflict");
+      }
+      const bindings = this.reconcileManuscriptBindings(input.projectId, current.version.bindings, applied.document, proposal.operations);
+      const now = new Date().toISOString();
+      const committed = this.commitManuscriptTransaction({
+        requestId: input.requestId,
+        current,
+        currentDocument,
+        nextDocument: applied.document,
+        actor: "assistant",
+        reason: proposal.summary,
+        operations: proposal.operations,
+        inverseOperations: applied.inverseOperations,
+        bindings,
+        revertsTransactionId: null,
+        now,
+      });
+      const decisionUnsigned: Omit<ScienceManuscriptEditProposalDecision, "decisionSha256"> = {
+        schemaVersion: SCIENCE_MANUSCRIPT_EDIT_PROPOSAL_DECISION_SCHEMA,
+        id: randomUUID(),
+        requestId: input.requestId,
+        projectId: input.projectId,
+        manuscriptId: input.manuscriptId,
+        proposalId: input.proposalId,
+        decision: "applied",
+        resultingTransactionId: committed.transaction.id,
+        resultVersion: committed.manuscript.currentVersion,
+        resultContentSha256: committed.manuscript.version.contentSha256,
+        resultDocumentSha256: committed.manuscript.version.documentSha256 ?? null,
+        reason: null,
+        createdAt: now,
+      };
+      const decision = validateScienceManuscriptEditProposalDecision({
+        ...decisionUnsigned,
+        decisionSha256: scienceManuscriptEditProposalDecisionSha256(decisionUnsigned),
+      });
+      this.db.prepare(`INSERT INTO manuscript_edit_proposal_decisions
+        (id,request_id,project_id,manuscript_id,proposal_id,schema_name,decision,resulting_transaction_id,
+         result_manuscript_version,result_manuscript_content_sha256,result_document_sha256,reason,decision_sha256,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        decision.id, decision.requestId, decision.projectId, decision.manuscriptId, decision.proposalId,
+        decision.schemaVersion, decision.decision, decision.resultingTransactionId, decision.resultVersion,
+        decision.resultContentSha256, decision.resultDocumentSha256, decision.reason, decision.decisionSha256, decision.createdAt,
+      );
+      const appliedProposal = this.getManuscriptEditProposalForProject(input.projectId, input.manuscriptId, input.proposalId);
+      if (!appliedProposal || appliedProposal.status !== "applied") throw new Error("science-manuscript-proposal-apply-failed");
+      const result: ApplyScienceManuscriptEditProposalResult = {
+        proposal: appliedProposal,
+        manuscript: committed.manuscript,
+        transaction: committed.transaction,
+        replayed: false,
+      };
+      this.remember(input.requestId, "manuscript.proposal.apply", requestSha256, result, now);
+      return result;
+    });
+    return transaction.immediate();
+  }
+
+  rejectManuscriptEditProposal(input: RejectScienceManuscriptEditProposalInput): RejectScienceManuscriptEditProposalResult {
+    if (!input || typeof input !== "object" || !UUID_RE.test(String(input.requestId ?? ""))) throw new Error("science-request-id-invalid");
+    if (!UUID_RE.test(String(input.projectId ?? "")) || !UUID_RE.test(String(input.manuscriptId ?? ""))
+      || !UUID_RE.test(String(input.proposalId ?? ""))) throw new Error("science-manuscript-proposal-reference-invalid");
+    const reason = input.reason === null ? null : normalizeManuscriptTransactionReason(input.reason);
+    const requestSha256 = sha256Json({ projectId: input.projectId, manuscriptId: input.manuscriptId, proposalId: input.proposalId, reason });
+    const transaction = this.db.transaction(() => {
+      const prior = this.replay<RejectScienceManuscriptEditProposalResult>(input.requestId, "manuscript.proposal.reject", requestSha256);
+      if (prior) return { ...prior, replayed: true };
+      const proposal = this.getManuscriptEditProposalForProject(input.projectId, input.manuscriptId, input.proposalId);
+      if (!proposal) throw new Error("science-manuscript-proposal-not-found");
+      if (proposal.decision) throw new Error("science-manuscript-proposal-already-decided");
+      const now = new Date().toISOString();
+      const decisionUnsigned: Omit<ScienceManuscriptEditProposalDecision, "decisionSha256"> = {
+        schemaVersion: SCIENCE_MANUSCRIPT_EDIT_PROPOSAL_DECISION_SCHEMA,
+        id: randomUUID(),
+        requestId: input.requestId,
+        projectId: input.projectId,
+        manuscriptId: input.manuscriptId,
+        proposalId: input.proposalId,
+        decision: "rejected",
+        resultingTransactionId: null,
+        resultVersion: null,
+        resultContentSha256: null,
+        resultDocumentSha256: null,
+        reason,
+        createdAt: now,
+      };
+      const decision = validateScienceManuscriptEditProposalDecision({
+        ...decisionUnsigned,
+        decisionSha256: scienceManuscriptEditProposalDecisionSha256(decisionUnsigned),
+      });
+      this.db.prepare(`INSERT INTO manuscript_edit_proposal_decisions
+        (id,request_id,project_id,manuscript_id,proposal_id,schema_name,decision,resulting_transaction_id,
+         result_manuscript_version,result_manuscript_content_sha256,result_document_sha256,reason,decision_sha256,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        decision.id, decision.requestId, decision.projectId, decision.manuscriptId, decision.proposalId,
+        decision.schemaVersion, decision.decision, decision.resultingTransactionId, decision.resultVersion,
+        decision.resultContentSha256, decision.resultDocumentSha256, decision.reason, decision.decisionSha256, decision.createdAt,
+      );
+      const rejectedProposal = this.getManuscriptEditProposalForProject(input.projectId, input.manuscriptId, input.proposalId);
+      if (!rejectedProposal || rejectedProposal.status !== "rejected") throw new Error("science-manuscript-proposal-reject-failed");
+      const result: RejectScienceManuscriptEditProposalResult = { proposal: rejectedProposal, replayed: false };
+      this.remember(input.requestId, "manuscript.proposal.reject", requestSha256, result, now);
+      return result;
+    });
+    return transaction.immediate();
   }
 
   prepareClaimLedgerContext(input: PrepareScienceClaimLedgerContextInput): PrepareScienceClaimLedgerContextResult {
@@ -15409,7 +22308,36 @@ export class ScienceStore {
       }
       const validationReceiptSnapshots = validationReceiptIds.map((id) => {
         const receipt = this.appendValidationReceiptSnapshot(input.projectId, id, now);
-        return { validationReceiptId: receipt.validationReceiptId, validationReceiptVersion: receipt.validationReceiptVersion, contentSha256: receipt.contentSha256, status: receipt.status };
+        const runArtifactBinding = this.getArtifactValidationRunArtifactBindingForProject(input.projectId, id);
+        const manuscriptBindings = manuscript.version.bindings
+          .filter((binding) => binding.target.kind === "artifact"
+            && binding.target.artifactId === receipt.artifactId
+            && binding.target.artifactVersion === receipt.artifactVersion
+            && binding.target.validationReceiptId === receipt.validationReceiptId)
+          .map((binding) => ({
+            ordinal: binding.ordinal,
+            role: binding.role,
+            locator: binding.locator,
+            captureId: binding.target.kind === "artifact" ? binding.target.captureId : "",
+          }));
+        return {
+          validationReceiptId: receipt.validationReceiptId,
+          validationReceiptVersion: receipt.validationReceiptVersion,
+          contentSha256: receipt.contentSha256,
+          artifactId: receipt.artifactId,
+          artifactVersion: receipt.artifactVersion,
+          artifactContentSha256: receipt.artifactContentSha256,
+          status: receipt.status,
+          runArtifactBinding: runArtifactBinding ? {
+            runArtifactBindingId: runArtifactBinding.runArtifactBindingId,
+            runId: runArtifactBinding.runId,
+            outputId: runArtifactBinding.outputId,
+            outputOrdinal: runArtifactBinding.outputOrdinal,
+            outputRole: runArtifactBinding.outputRole,
+            outputSha256: runArtifactBinding.outputSha256,
+          } : null,
+          manuscriptBindings,
+        };
       });
       const result: PrepareScienceClaimLedgerContextResult = {
         manuscript: { manuscriptId: manuscript.id, projectId: input.projectId, version: manuscript.currentVersion, contentSha256: manuscript.version.contentSha256 },
@@ -15417,6 +22345,7 @@ export class ScienceStore {
         segmentationPolicyVersion: CLAIM_SEGMENTATION_POLICY_VERSION,
         sentenceManifestSha256: sentence.manifestSha256,
         sentenceCount: sentence.sentenceCount,
+        sentences: this.listManuscriptSentenceSnapshots(input.projectId, manuscript.version.id),
         citationSnapshots,
         evidenceSpanSnapshots: [...evidenceById.values()].sort((left, right) => left.evidenceSpanId.localeCompare(right.evidenceSpanId)),
         validationReceiptSnapshots,
@@ -15544,6 +22473,10 @@ export class ScienceStore {
       const live = this.getArtifactValidationReceiptForProject(manifest.projectId, ref.id);
       if (!live || live.receiptSha256 !== canonical.baseReceiptSha256
         || (live.status === "verified" ? canonical.status !== "passed" : canonical.status !== "failed")) throw new Error("science-claim-ledger-validation-receipt-stale");
+      if (live.validatorId === "agentlas.publication-provenance-closure" && live.validatorVersion === "2.0.0"
+        && !this.getArtifactValidationRunArtifactBindingForProject(manifest.projectId, ref.id)) {
+        throw new Error("science-claim-ledger-validation-run-artifact-closure-missing");
+      }
       validationReceipts.push({ validationReceiptId: ref.id, projectId: manifest.projectId, validationReceiptVersion: ref.version,
         artifactId: String(canonical.artifactId), artifactVersion: Number(canonical.artifactVersion), artifactContentSha256: String(canonical.artifactContentSha256),
         inputSha256: String(canonical.inputSha256), outputSha256: String(canonical.outputSha256), contentSha256: String(row.content_sha256), status: canonical.status as "passed" | "failed" });
@@ -15650,6 +22583,267 @@ export class ScienceStore {
     const manuscript = this.getManuscriptForProject(projectId, manuscriptId);
     if (!manuscript || manuscript.currentVersion !== ledger.manifest.manuscript.version || manuscript.version.contentSha256 !== ledger.manifest.manuscript.contentSha256) throw new Error("science-claim-ledger-manuscript-stale");
     return ledger;
+  }
+
+  /**
+   * Builds and stores a claim ledger from per-sentence classifications.
+   *
+   * The manifest a claim ledger needs is entirely derivable from state this store already holds --
+   * the manuscript's own sentence snapshots, the citations and evidence spans the claim context
+   * just revalidated -- except for one thing: which sentences assert something, and whether the
+   * evidence supports them. That judgement is the caller's. Everything else is arithmetic.
+   *
+   * Before this existed the only producer of a ledger was a test fixture that opened the database
+   * with a second handle and called the seal helpers directly, so no study could pass evidence
+   * reconciliation and none could reach `ready_to_submit`. The lifecycle contract was green
+   * because it borrowed that fixture.
+   */
+  sealClaimLedger(input: SealScienceClaimLedgerInput): ScienceClaimLedgerMutationResult {
+    if (!input || typeof input !== "object" || !UUID_RE.test(String(input.requestId ?? ""))) {
+      throw new Error("science-request-id-invalid");
+    }
+    const projectId = String(input.projectId ?? "");
+    const manuscriptId = String(input.manuscriptId ?? "");
+    if (!UUID_RE.test(projectId) || !UUID_RE.test(manuscriptId)) throw new Error("science-claim-ledger-seal-target-invalid");
+    const classifications = Array.isArray(input.classifications) ? input.classifications : null;
+    if (!classifications) throw new Error("science-claim-ledger-seal-classifications-invalid");
+    return this.db.transaction(() => {
+      // Revalidating through the same path a caller would use keeps one definition of "the exact
+      // current manuscript" rather than two that can drift.
+      const prepared = this.prepareClaimLedgerContext({
+        requestId: stableUuid(`science-claim-ledger-seal-context:v1:${input.requestId}`),
+        projectId,
+        manuscriptId,
+        expectedManuscriptVersion: input.expectedManuscriptVersion,
+        expectedManuscriptContentSha256: input.expectedManuscriptContentSha256,
+        citationIds: [...(input.citationIds ?? [])],
+        validationReceiptIds: [...(input.validationReceiptIds ?? [])],
+      });
+      const manuscript = this.getManuscriptForProject(projectId, manuscriptId);
+      if (!manuscript || manuscript.currentVersion !== prepared.manuscript.version) {
+        throw new Error("science-claim-ledger-seal-manuscript-unavailable");
+      }
+      const sentences = this.listManuscriptSentenceSnapshots(projectId, manuscript.version.id);
+      if (sentences.length !== prepared.sentenceCount || sentences.length === 0) {
+        throw new Error("science-claim-ledger-seal-sentence-snapshot-invalid");
+      }
+
+      const decisions = new Map<string, ScienceClaimSentenceClassification>();
+      for (const classification of classifications) {
+        const sentenceId = String(classification?.sentenceId ?? "");
+        if (!sentences.some((sentence) => sentence.id === sentenceId)) {
+          throw new Error("science-claim-ledger-seal-sentence-unknown");
+        }
+        if (!SCIENCE_CLAIM_CLASSES.includes(classification.claimClass)
+          || !SCIENCE_CLAIM_STATUSES.includes(classification.status)) {
+          throw new Error("science-claim-ledger-seal-classification-invalid");
+        }
+        if (decisions.has(sentenceId)) throw new Error("science-claim-ledger-seal-sentence-duplicated");
+        if (classification.evidenceCitationIds !== undefined && classification.evidenceAssessments !== undefined) {
+          throw new Error("science-claim-ledger-seal-evidence-input-conflict");
+        }
+        const evidenceAssessments = Array.isArray(classification.evidenceAssessments)
+          ? classification.evidenceAssessments.map((assessment) => ({
+              citationId: String(assessment?.citationId ?? ""),
+              validationReceiptId: assessment?.validationReceiptId === undefined || assessment.validationReceiptId === null
+                ? null
+                : String(assessment.validationReceiptId),
+              direction: assessment?.direction,
+              relevance: Number(assessment?.relevance),
+              assessmentConfidence: Number(assessment?.assessmentConfidence),
+            }))
+          : (Array.isArray(classification.evidenceCitationIds)
+              ? classification.evidenceCitationIds.map((citationId) => ({
+                  citationId: String(citationId), validationReceiptId: null, direction: "support" as const,
+                  relevance: 1, assessmentConfidence: 1,
+                }))
+              : []);
+        if (new Set(evidenceAssessments.map((assessment) => `${assessment.citationId}:${assessment.validationReceiptId ?? ""}`)).size !== evidenceAssessments.length) {
+          throw new Error("science-claim-ledger-seal-evidence-duplicated");
+        }
+        if (classification.status === "supported" && evidenceAssessments.length === 0) {
+          throw new Error("science-claim-ledger-seal-supported-claim-needs-evidence");
+        }
+        if (evidenceAssessments.some((assessment) => !UUID_RE.test(assessment.citationId)
+          || !(input.citationIds ?? []).includes(assessment.citationId))) {
+          throw new Error("science-claim-ledger-seal-evidence-not-snapshotted");
+        }
+        if (evidenceAssessments.some((assessment) => assessment.validationReceiptId !== null
+          && (!UUID_RE.test(assessment.validationReceiptId) || !(input.validationReceiptIds ?? []).includes(assessment.validationReceiptId)))) {
+          throw new Error("science-claim-ledger-seal-validation-receipt-not-snapshotted");
+        }
+        if (evidenceAssessments.some((assessment) => !SCIENCE_EVIDENCE_DIRECTIONS.includes(assessment.direction)
+          || !Number.isFinite(assessment.relevance) || assessment.relevance < 0 || assessment.relevance > 1
+          || !Number.isFinite(assessment.assessmentConfidence) || assessment.assessmentConfidence < 0 || assessment.assessmentConfidence > 1)) {
+          throw new Error("science-claim-ledger-seal-evidence-direction-invalid");
+        }
+        if (classification.status === "supported" && ["method", "result"].includes(classification.claimClass)
+          && !evidenceAssessments.some((assessment) => assessment.validationReceiptId !== null)) {
+          throw new Error("science-claim-ledger-seal-supported-method-result-needs-artifact-validation");
+        }
+        decisions.set(sentenceId, { ...classification, evidenceAssessments });
+      }
+      if (decisions.size !== sentences.length) {
+        throw new Error("science-claim-ledger-seal-classification-coverage-incomplete");
+      }
+
+      // Evidence stays source-anchored by design -- an artifact does not stand alone as evidence.
+      // The base carries only what the citation itself proves; which validated artifact a given
+      // sentence was read against is decided per claim, from that claim's own assessments, rather
+      // than guessed once for every claim that happens to share the citation.
+      const evidenceBaseByCitation = new Map<string, Omit<ScienceClaimEvidenceAtom,
+        "evidenceAtomId" | "evidenceAtomVersion" | "artifact" | "validationReceipt" | "direction" | "relevance" | "assessmentConfidence" | "contentSha256">>();
+      for (const citationId of input.citationIds ?? []) {
+        const citation = this.getCitationForProject(projectId, citationId);
+        const citationSnapshot = prepared.citationSnapshots.find((entry) => entry.citationId === citationId);
+        if (!citation || !citationSnapshot) throw new Error("science-claim-ledger-seal-citation-unavailable");
+        const evidence = this.getEvidenceSpanForProject(projectId, citation.evidenceSpanId);
+        const evidenceSnapshot = prepared.evidenceSpanSnapshots.find((entry) => entry.evidenceSpanId === citation.evidenceSpanId);
+        const source = this.getSourceVersionForProject(projectId, citation.sourceId, citation.sourceVersionId);
+        if (!evidence || !evidenceSnapshot || !source?.version.contentSha256) {
+          throw new Error("science-claim-ledger-seal-evidence-unavailable");
+        }
+        evidenceBaseByCitation.set(citationId, {
+          citationId,
+          citationVersion: citationSnapshot.citationVersion,
+          citationContentSha256: citationSnapshot.contentSha256,
+          sourceId: source.id,
+          sourceVersionId: source.version.id,
+          sourceVersion: source.version.version,
+          sourceContentSha256: source.version.contentSha256,
+          evidenceSpanId: evidence.id,
+          evidenceSpanVersion: evidenceSnapshot.evidenceSpanVersion,
+          evidenceSpanContentSha256: evidenceSnapshot.contentSha256,
+          evidenceSpanExactText: evidence.excerpt,
+          evidenceSpanTextSha256: evidence.excerptSha256,
+          evidenceSpanLocator: { medium: "other", value: evidence.locator },
+        });
+      }
+
+      const manuscriptBinding = {
+        manuscriptId,
+        projectId,
+        version: manuscript.currentVersion,
+        contentSha256: manuscript.version.contentSha256,
+      };
+      const createdAt = new Date().toISOString();
+      const claims = sentences.map((sentence) => {
+        const decision = decisions.get(sentence.id);
+        if (!decision) throw new Error("science-claim-ledger-seal-classification-coverage-incomplete");
+        const assessments = Array.isArray(decision.evidenceAssessments) ? decision.evidenceAssessments : [];
+        const evidence = assessments.map((assessment, assessmentOrdinal) => {
+          const base = evidenceBaseByCitation.get(assessment.citationId);
+          // Citing something the claim context did not snapshot would put an unverified source in
+          // the ledger, which is exactly what the gate exists to prevent.
+          if (!base) throw new Error("science-claim-ledger-seal-evidence-not-snapshotted");
+          const receipt = assessment.validationReceiptId === undefined || assessment.validationReceiptId === null
+            ? null
+            : prepared.validationReceiptSnapshots.find((candidate) => candidate.validationReceiptId === assessment.validationReceiptId) ?? null;
+          if (assessment.validationReceiptId && !receipt) {
+            throw new Error("science-claim-ledger-seal-validation-receipt-not-snapshotted");
+          }
+          if (receipt) {
+            if (receipt.status !== "passed") {
+              throw new Error("science-claim-ledger-seal-validation-receipt-not-passed");
+            }
+            const liveReceipt = this.getArtifactValidationReceiptForProject(projectId, receipt.validationReceiptId);
+            if (!liveReceipt
+              || liveReceipt.validatorId !== "agentlas.publication-provenance-closure"
+              || liveReceipt.validatorVersion !== "2.0.0"
+              || liveReceipt.policyId !== "agentlas.science-publication-gate"
+              || liveReceipt.policyVersion !== "1") {
+              throw new Error("science-claim-ledger-seal-validation-receipt-untrusted");
+            }
+            const artifact = this.getArtifactContextForProject(projectId, receipt.artifactId, receipt.artifactVersion);
+            if (!artifact || artifact.selectedVersion.contentSha256 !== receipt.artifactContentSha256) {
+              throw new Error("science-claim-ledger-seal-artifact-stale");
+            }
+            const runArtifactClosure = this.getArtifactValidationRunArtifactBindingForProject(projectId, receipt.validationReceiptId);
+            if (!runArtifactClosure
+              || runArtifactClosure.artifactId !== receipt.artifactId
+              || runArtifactClosure.artifactVersion !== receipt.artifactVersion
+              || runArtifactClosure.artifactContentSha256 !== receipt.artifactContentSha256) {
+              throw new Error("science-claim-ledger-seal-run-artifact-closure-required");
+            }
+            const boundToManuscript = manuscript.version.bindings.some((manuscriptEntry) => manuscriptEntry.target.kind === "artifact"
+              && manuscriptEntry.target.artifactId === receipt.artifactId
+              && manuscriptEntry.target.artifactVersion === receipt.artifactVersion
+              && manuscriptEntry.target.validationReceiptId === receipt.validationReceiptId);
+            if (!boundToManuscript) {
+              throw new Error("science-claim-ledger-seal-artifact-not-bound-to-manuscript");
+            }
+          }
+          return sealScienceClaimEvidenceAtom({
+            evidenceAtomId: stableUuid(`science-claim-evidence-atom:v2:${input.requestId}:${sentence.id}:${assessmentOrdinal}:${assessment.citationId}:${assessment.validationReceiptId ?? "citation-only"}:${assessment.direction}`),
+            evidenceAtomVersion: 1,
+            ...base,
+            artifact: receipt ? {
+              artifactId: receipt.artifactId,
+              artifactVersion: receipt.artifactVersion,
+              artifactContentSha256: receipt.artifactContentSha256,
+            } : null,
+            validationReceipt: receipt ? {
+              validationReceiptId: receipt.validationReceiptId,
+              validationReceiptVersion: receipt.validationReceiptVersion,
+              validationReceiptContentSha256: receipt.contentSha256,
+            } : null,
+            direction: assessment.direction,
+            relevance: assessment.relevance,
+            assessmentConfidence: assessment.assessmentConfidence,
+          });
+        });
+        if (decision.status === "supported" && evidence.length === 0) {
+          throw new Error("science-claim-ledger-seal-supported-claim-needs-evidence");
+        }
+        const claimId = stableUuid(`science-claim:v1:${input.requestId}:${sentence.id}`);
+        return sealScienceClaimRecord({
+          claimId,
+          logicalClaimId: claimId,
+          manuscript: manuscriptBinding,
+          // The claim spans the whole sentence. A narrower span is a future refinement; covering
+          // the sentence is what the publication gate measures.
+          locator: sealScienceClaimLocator({
+            sectionId: sentence.sectionId,
+            sectionOrdinal: sentence.sectionOrdinal,
+            paragraphOrdinal: sentence.paragraphOrdinal,
+            sentenceOrdinal: sentence.sentenceOrdinal,
+            claimStartOffset: 0,
+            claimEndOffset: sentence.text.length,
+            sentenceTextSha256: sentence.textSha256,
+          }),
+          exactText: sentence.text,
+          exactTextSha256: sentence.textSha256,
+          claimClass: decision.claimClass,
+          status: decision.status,
+          evidence,
+          supersedesClaimId: null,
+          supersedesClaimContentSha256: null,
+          createdAt,
+        });
+      });
+
+      const manifest = sealScienceClaimLedgerManifest({
+        schema: "agentlas.science.claim-ledger/v1",
+        ledgerId: stableUuid(`science-claim-ledger:v1:${input.requestId}:${manuscriptId}`),
+        projectId,
+        revision: 1,
+        previousManifestSha256: null,
+        manuscript: manuscriptBinding,
+        manuscriptCitations: prepared.citationSnapshots.map((citation) => ({
+          citationId: citation.citationId,
+          citationVersion: citation.citationVersion,
+          citationContentSha256: citation.contentSha256,
+        })),
+        claims,
+        activeClaimIds: claims.map((claim) => claim.claimId),
+        createdAt,
+      });
+      return this.createClaimLedger({
+        requestId: stableUuid(`science-claim-ledger-seal-create:v1:${input.requestId}`),
+        projectId,
+        manifest,
+      });
+    })();
   }
 
   createClaimLedger(input: CreateScienceClaimLedgerInput): ScienceClaimLedgerMutationResult {
@@ -16048,6 +23242,54 @@ export class ScienceStore {
       || report.journalProfileId !== profile.id || report.journalProfileVersion !== profile.currentVersion || report.journalProfileContentSha256 !== profile.version.contentSha256) {
       throw new Error("science-journal-validation-report-integrity-failed");
     }
+    const blueprintReportFields = [report.manuscriptBlueprintId, report.manuscriptBlueprintVersion, report.manuscriptBlueprintContentSha256];
+    if (blueprintReportFields.some((value) => value === null) && blueprintReportFields.some((value) => value !== null)) {
+      throw new Error("science-journal-validation-blueprint-binding-incomplete");
+    }
+    const manuscriptBlueprintBinding = manuscript.version.blueprintBinding ?? null;
+    if ((!manuscriptBlueprintBinding && blueprintReportFields.some((value) => value !== null))
+      || manuscriptBlueprintBinding && (report.manuscriptBlueprintId !== manuscriptBlueprintBinding.blueprintId
+        || report.manuscriptBlueprintVersion !== manuscriptBlueprintBinding.blueprintVersion
+        || report.manuscriptBlueprintContentSha256 !== manuscriptBlueprintBinding.blueprintContentSha256)) {
+      throw new Error("science-journal-validation-blueprint-binding-stale");
+    }
+    const blueprintValidation = this.evaluateManuscriptBlueprintForJournal(input.projectId, manuscript.id, profile.id);
+    for (const expected of blueprintValidation.findings) {
+      const actual = report.findings.find((finding) => finding.ruleId === expected.ruleId);
+      if (!actual || sha256Json(actual) !== sha256Json(expected)) throw new Error("science-journal-validation-blueprint-finding-mismatch");
+    }
+    const assessmentFields = [report.manuscriptBlueprintAssessmentId, report.manuscriptBlueprintAssessmentReportSha256,
+      report.manuscriptBlueprintAssessmentPolicyContentSha256];
+    if (assessmentFields.some((value) => value === null) && assessmentFields.some((value) => value !== null)) {
+      throw new Error("science-journal-validation-blueprint-assessment-binding-incomplete");
+    }
+    let blueprintAssessment: ScienceManuscriptBlueprintAssessmentReadModel | null = null;
+    if (assessmentFields.every((value) => value !== null)) {
+      blueprintAssessment = this.getManuscriptBlueprintAssessmentForManuscript(input.projectId, manuscript.id);
+      if (!blueprintAssessment || blueprintAssessment.status !== "current" || blueprintAssessment.receipt.structuralStatus !== "passed"
+        || report.manuscriptBlueprintAssessmentId !== blueprintAssessment.receipt.id
+        || report.manuscriptBlueprintAssessmentReportSha256 !== blueprintAssessment.receipt.reportSha256
+        || report.manuscriptBlueprintAssessmentPolicyContentSha256 !== blueprintAssessment.receipt.policy.contentSha256) {
+        throw new Error("science-journal-validation-blueprint-assessment-binding-stale");
+      }
+    }
+    const scholarlyAssessmentFields = [report.manuscriptScholarlyAssessmentId, report.manuscriptScholarlyAssessmentReportSha256,
+      report.manuscriptScholarlyAssessmentPolicyContentSha256];
+    if (scholarlyAssessmentFields.some((value) => value === null) && scholarlyAssessmentFields.some((value) => value !== null)) {
+      throw new Error("science-journal-validation-scholarly-assessment-binding-incomplete");
+    }
+    let scholarlyAssessment: ScienceManuscriptScholarlyAssessmentReadModel | null = null;
+    if (scholarlyAssessmentFields.every((value) => value !== null)) {
+      scholarlyAssessment = this.getManuscriptScholarlyAssessmentForManuscript(input.projectId, manuscript.id);
+      if (!scholarlyAssessment || scholarlyAssessment.status !== "current" || scholarlyAssessment.receipt.scholarlyStatus !== "passed"
+        || report.manuscriptScholarlyAssessmentId !== scholarlyAssessment.receipt.id
+        || report.manuscriptScholarlyAssessmentReportSha256 !== scholarlyAssessment.receipt.reportSha256
+        || report.manuscriptScholarlyAssessmentPolicyContentSha256 !== scholarlyAssessment.receipt.policy.contentSha256
+        || !blueprintAssessment || scholarlyAssessment.receipt.blueprintAssessment.id !== blueprintAssessment.receipt.id
+        || scholarlyAssessment.receipt.blueprintAssessment.contentSha256 !== blueprintAssessment.receipt.contentSha256) {
+        throw new Error("science-journal-validation-scholarly-assessment-binding-stale");
+      }
+    }
     const claimFields = [report.claimLedgerId, report.claimLedgerRevision, report.claimLedgerManifestSha256, report.claimGateReportSha256, report.claimPolicyContentSha256];
     if (claimFields.some((value) => value === null) && claimFields.some((value) => value !== null)) throw new Error("science-journal-validation-claim-binding-incomplete");
     let claimLedger: ScienceClaimLedgerReadModel | null = null;
@@ -16058,6 +23300,34 @@ export class ScienceStore {
         || report.claimLedgerManifestSha256 !== claimLedger.manifest.manifestSha256 || report.claimGateReportSha256 !== claimLedger.gate.reportSha256
         || report.claimPolicyContentSha256 !== claimLedger.gate.policyContentSha256) throw new Error("science-journal-validation-claim-binding-stale");
     } else if (claimFields.some((value) => value !== null)) throw new Error("science-journal-validation-claim-binding-stale");
+    const coherenceFields = [report.manuscriptCoherenceAssessmentId, report.manuscriptCoherenceAssessmentReportSha256,
+      report.manuscriptCoherenceAssessmentContentSha256];
+    if (coherenceFields.some((value) => value === null) && coherenceFields.some((value) => value !== null)) {
+      throw new Error("science-journal-validation-coherence-assessment-binding-incomplete");
+    }
+    let coherenceAssessment: ScienceManuscriptCoherenceAssessmentReadModel | null = null;
+    if (coherenceFields.every((value) => value !== null)) {
+      coherenceAssessment = this.getManuscriptCoherenceAssessmentForManuscript(input.projectId, manuscript.id);
+      if (!coherenceAssessment || coherenceAssessment.status !== "current" || coherenceAssessment.receipt.status !== "passed"
+        || coherenceAssessment.receipt.id !== report.manuscriptCoherenceAssessmentId
+        || coherenceAssessment.receipt.reportSha256 !== report.manuscriptCoherenceAssessmentReportSha256
+        || coherenceAssessment.receipt.contentSha256 !== report.manuscriptCoherenceAssessmentContentSha256
+        || coherenceAssessment.receipt.manuscript.projectId !== manuscript.projectId
+        || coherenceAssessment.receipt.manuscript.manuscriptId !== manuscript.id
+        || coherenceAssessment.receipt.manuscript.versionId !== manuscript.version.id
+        || coherenceAssessment.receipt.manuscript.version !== manuscript.currentVersion
+        || coherenceAssessment.receipt.manuscript.contentSha256 !== manuscript.version.contentSha256
+        || coherenceAssessment.receipt.manuscript.documentSha256 !== manuscript.version.documentSha256
+        || coherenceAssessment.receipt.manuscript.bindingManifestSha256 !== manuscript.version.bindingManifestSha256
+        || !claimLedger
+        || coherenceAssessment.receipt.claimLedger.ledgerId !== claimLedger.manifest.ledgerId
+        || coherenceAssessment.receipt.claimLedger.revision !== claimLedger.manifest.revision
+        || coherenceAssessment.receipt.claimLedger.manifestSha256 !== claimLedger.manifest.manifestSha256
+        || coherenceAssessment.receipt.claimLedger.gateReportSha256 !== claimLedger.gate.reportSha256
+        || coherenceAssessment.receipt.claimLedger.policyContentSha256 !== claimLedger.gate.policyContentSha256) {
+        throw new Error("science-journal-validation-coherence-assessment-binding-stale");
+      }
+    }
     const pass = report.findings.filter((finding) => finding.status === "pass").length;
     const fail = report.findings.filter((finding) => finding.status === "fail").length;
     const manual = report.findings.filter((finding) => finding.status === "manual").length;
@@ -16065,6 +23335,12 @@ export class ScienceStore {
     const errorFail = report.findings.some((finding) => finding.status === "fail" && finding.severity === "error");
     const expectedStatus = errorFail ? "blocked" : manual ? "manual-review" : "ready";
     if (expectedStatus === "ready" && (!claimLedger?.gate.ready || report.claimLedgerId === null)) throw new Error("science-journal-validation-claim-gate-blocked");
+    if (expectedStatus === "ready" && (!blueprintAssessment || !scholarlyAssessment || scholarlyAssessment.receipt.scholarlyStatus !== "passed")) {
+      throw new Error("science-journal-validation-scholarly-assessment-blocked");
+    }
+    if (expectedStatus === "ready" && (!coherenceAssessment || coherenceAssessment.receipt.status !== "passed")) {
+      throw new Error("science-journal-validation-coherence-assessment-blocked");
+    }
     if (expectedStatus === "ready" && manualCodes.some((code) => !attestedCodes.has(code))) throw new Error("science-journal-attestation-coverage-incomplete");
     if (report.status !== expectedStatus || report.counts.pass !== pass || report.counts.fail !== fail || report.counts.manual !== manual || report.counts.warning !== warning
       || new Set(report.findings.map((finding) => finding.ruleId)).size !== report.findings.length) throw new Error("science-journal-validation-report-canonical-mismatch");
@@ -16083,6 +23359,15 @@ export class ScienceStore {
       journalProfileId: profile.id, journalProfileVersion: profile.currentVersion, journalProfileContentSha256: profile.version.contentSha256,
       journalIdentityReceiptId: profile.version.identityReceiptId, journalIdentityReceiptSha256: profile.version.identityReceiptSha256,
       humanAttestationReceiptIds: receiptIds,
+      manuscriptBlueprintAssessmentId: report.manuscriptBlueprintAssessmentId,
+      manuscriptBlueprintAssessmentReportSha256: report.manuscriptBlueprintAssessmentReportSha256,
+      manuscriptBlueprintAssessmentPolicyContentSha256: report.manuscriptBlueprintAssessmentPolicyContentSha256,
+      manuscriptScholarlyAssessmentId: report.manuscriptScholarlyAssessmentId,
+      manuscriptScholarlyAssessmentReportSha256: report.manuscriptScholarlyAssessmentReportSha256,
+      manuscriptScholarlyAssessmentPolicyContentSha256: report.manuscriptScholarlyAssessmentPolicyContentSha256,
+      manuscriptCoherenceAssessmentId: report.manuscriptCoherenceAssessmentId,
+      manuscriptCoherenceAssessmentReportSha256: report.manuscriptCoherenceAssessmentReportSha256,
+      manuscriptCoherenceAssessmentContentSha256: report.manuscriptCoherenceAssessmentContentSha256,
       claimLedgerId: report.claimLedgerId, claimLedgerRevision: report.claimLedgerRevision,
       claimLedgerManifestSha256: report.claimLedgerManifestSha256, claimGateReportSha256: report.claimGateReportSha256,
       claimPolicyContentSha256: report.claimPolicyContentSha256,
@@ -16098,6 +23383,18 @@ export class ScienceStore {
       (validation_receipt_id,project_id,claim_ledger_id,claim_ledger_revision,claim_ledger_manifest_sha256,claim_gate_report_sha256,claim_policy_content_sha256,created_at)
       VALUES (?,?,?,?,?,?,?,?)`).run(id, input.projectId, receipt.claimLedgerId, receipt.claimLedgerRevision, receipt.claimLedgerManifestSha256,
         receipt.claimGateReportSha256, receipt.claimPolicyContentSha256, createdAt);
+    if (blueprintAssessment) this.db.prepare(`INSERT INTO journal_validation_blueprint_assessment_closures
+      (validation_receipt_id,project_id,assessment_id,assessment_report_sha256,assessment_policy_content_sha256,assessment_content_sha256,created_at)
+      VALUES (?,?,?,?,?,?,?)`).run(id, input.projectId, blueprintAssessment.receipt.id, blueprintAssessment.receipt.reportSha256,
+        blueprintAssessment.receipt.policy.contentSha256, blueprintAssessment.receipt.contentSha256, createdAt);
+    if (scholarlyAssessment) this.db.prepare(`INSERT INTO journal_validation_scholarly_assessment_closures
+      (validation_receipt_id,project_id,assessment_id,assessment_report_sha256,assessment_policy_content_sha256,assessment_content_sha256,created_at)
+      VALUES (?,?,?,?,?,?,?)`).run(id, input.projectId, scholarlyAssessment.receipt.id, scholarlyAssessment.receipt.reportSha256,
+        scholarlyAssessment.receipt.policy.contentSha256, scholarlyAssessment.receipt.contentSha256, createdAt);
+    if (coherenceAssessment) this.db.prepare(`INSERT INTO journal_validation_coherence_assessment_closures
+      (validation_receipt_id,project_id,assessment_id,assessment_report_sha256,assessment_content_sha256,created_at)
+      VALUES (?,?,?,?,?,?)`).run(id, input.projectId, coherenceAssessment.receipt.id,
+        coherenceAssessment.receipt.reportSha256, coherenceAssessment.receipt.contentSha256, createdAt);
     this.remember(input.requestId, "journal.validation.record", requestSha256, receipt, createdAt);
     return receipt;
   }
@@ -16108,17 +23405,102 @@ export class ScienceStore {
     if (!row) return null;
     const claim = this.db.prepare("SELECT * FROM journal_validation_claim_closures WHERE project_id = ? AND validation_receipt_id = ?").get(projectId, receiptId) as Record<string, unknown> | undefined;
     if (!claim) throw new Error("science-journal-validation-claim-closure-missing");
+    const assessment = this.db.prepare("SELECT * FROM journal_validation_blueprint_assessment_closures WHERE project_id = ? AND validation_receipt_id = ?")
+      .get(projectId, receiptId) as Record<string, unknown> | undefined;
+    const scholarlyAssessment = this.db.prepare("SELECT * FROM journal_validation_scholarly_assessment_closures WHERE project_id = ? AND validation_receipt_id = ?")
+      .get(projectId, receiptId) as Record<string, unknown> | undefined;
+    const coherenceAssessment = this.db.prepare("SELECT * FROM journal_validation_coherence_assessment_closures WHERE project_id = ? AND validation_receipt_id = ?")
+      .get(projectId, receiptId) as Record<string, unknown> | undefined;
+    const report = parseObject(row.report_json) as unknown as ScienceJournalValidationReport;
+    if (report.schema !== "agentlas.science-journal-validation/v1" || report.reportSha256 !== String(row.report_sha256)) {
+      throw new Error("science-journal-validation-receipt-integrity-failed");
+    }
+    const { reportSha256: _reportSha256, ...reportCore } = report;
+    if (sha256Json(reportCore) !== report.reportSha256) throw new Error("science-journal-validation-receipt-integrity-failed");
+    const reportAssessmentFields = [report.manuscriptBlueprintAssessmentId, report.manuscriptBlueprintAssessmentReportSha256,
+      report.manuscriptBlueprintAssessmentPolicyContentSha256];
+    if (reportAssessmentFields.some((value) => value === null) && reportAssessmentFields.some((value) => value !== null)) {
+      throw new Error("science-journal-validation-blueprint-assessment-closure-integrity-failed");
+    }
+    const expectsAssessment = reportAssessmentFields.every((value) => value !== null);
+    if (expectsAssessment !== Boolean(assessment)) throw new Error("science-journal-validation-blueprint-assessment-closure-missing");
+    if (assessment) {
+      const assessmentRow = this.db.prepare("SELECT * FROM manuscript_blueprint_assessments WHERE project_id = ? AND id = ?")
+        .get(projectId, String(assessment.assessment_id)) as Record<string, unknown> | undefined;
+      if (!assessmentRow) throw new Error("science-journal-validation-blueprint-assessment-closure-integrity-failed");
+      const assessmentRead = this.manuscriptBlueprintAssessmentFromRow(assessmentRow);
+      if (assessmentRead.receipt.reportSha256 !== String(assessment.assessment_report_sha256)
+        || assessmentRead.receipt.policy.contentSha256 !== String(assessment.assessment_policy_content_sha256)
+        || assessmentRead.receipt.contentSha256 !== String(assessment.assessment_content_sha256)
+        || report.manuscriptBlueprintAssessmentId !== assessmentRead.receipt.id
+        || report.manuscriptBlueprintAssessmentReportSha256 !== assessmentRead.receipt.reportSha256
+        || report.manuscriptBlueprintAssessmentPolicyContentSha256 !== assessmentRead.receipt.policy.contentSha256) {
+        throw new Error("science-journal-validation-blueprint-assessment-closure-integrity-failed");
+      }
+    }
+    const reportScholarlyFields = [report.manuscriptScholarlyAssessmentId, report.manuscriptScholarlyAssessmentReportSha256,
+      report.manuscriptScholarlyAssessmentPolicyContentSha256];
+    if (reportScholarlyFields.some((value) => value === null) && reportScholarlyFields.some((value) => value !== null)) {
+      throw new Error("science-journal-validation-scholarly-assessment-closure-integrity-failed");
+    }
+    const expectsScholarlyAssessment = reportScholarlyFields.every((value) => value !== null);
+    if (expectsScholarlyAssessment !== Boolean(scholarlyAssessment)) throw new Error("science-journal-validation-scholarly-assessment-closure-missing");
+    if (scholarlyAssessment) {
+      const scholarlyRow = this.db.prepare("SELECT * FROM manuscript_scholarly_assessments WHERE project_id = ? AND id = ?")
+        .get(projectId, String(scholarlyAssessment.assessment_id)) as Record<string, unknown> | undefined;
+      if (!scholarlyRow) throw new Error("science-journal-validation-scholarly-assessment-closure-integrity-failed");
+      const scholarlyRead = this.manuscriptScholarlyAssessmentFromRow(scholarlyRow);
+      if (scholarlyRead.receipt.reportSha256 !== String(scholarlyAssessment.assessment_report_sha256)
+        || scholarlyRead.receipt.policy.contentSha256 !== String(scholarlyAssessment.assessment_policy_content_sha256)
+        || scholarlyRead.receipt.contentSha256 !== String(scholarlyAssessment.assessment_content_sha256)
+        || report.manuscriptScholarlyAssessmentId !== scholarlyRead.receipt.id
+        || report.manuscriptScholarlyAssessmentReportSha256 !== scholarlyRead.receipt.reportSha256
+        || report.manuscriptScholarlyAssessmentPolicyContentSha256 !== scholarlyRead.receipt.policy.contentSha256) {
+        throw new Error("science-journal-validation-scholarly-assessment-closure-integrity-failed");
+      }
+    }
+    const reportCoherenceFields = [report.manuscriptCoherenceAssessmentId, report.manuscriptCoherenceAssessmentReportSha256,
+      report.manuscriptCoherenceAssessmentContentSha256];
+    if (reportCoherenceFields.some((value) => value === null) && reportCoherenceFields.some((value) => value !== null)) {
+      throw new Error("science-journal-validation-coherence-assessment-closure-integrity-failed");
+    }
+    const expectsCoherenceAssessment = reportCoherenceFields.every((value) => value !== null);
+    if (expectsCoherenceAssessment !== Boolean(coherenceAssessment)) {
+      throw new Error("science-journal-validation-coherence-assessment-closure-missing");
+    }
+    if (coherenceAssessment) {
+      const coherenceRow = this.db.prepare("SELECT * FROM manuscript_coherence_assessments WHERE project_id = ? AND id = ?")
+        .get(projectId, String(coherenceAssessment.assessment_id)) as Record<string, unknown> | undefined;
+      if (!coherenceRow) throw new Error("science-journal-validation-coherence-assessment-closure-integrity-failed");
+      const coherenceRead = this.manuscriptCoherenceAssessmentFromRow(coherenceRow);
+      if (coherenceRead.receipt.reportSha256 !== String(coherenceAssessment.assessment_report_sha256)
+        || coherenceRead.receipt.contentSha256 !== String(coherenceAssessment.assessment_content_sha256)
+        || report.manuscriptCoherenceAssessmentId !== coherenceRead.receipt.id
+        || report.manuscriptCoherenceAssessmentReportSha256 !== coherenceRead.receipt.reportSha256
+        || report.manuscriptCoherenceAssessmentContentSha256 !== coherenceRead.receipt.contentSha256) {
+        throw new Error("science-journal-validation-coherence-assessment-closure-integrity-failed");
+      }
+    }
     const receipt: ScienceJournalValidationReceipt = {
       id: String(row.id), projectId: String(row.project_id), manuscriptId: String(row.manuscript_id), manuscriptVersion: Number(row.manuscript_version), manuscriptContentSha256: safeSha256(row.manuscript_content_sha256, "journal-validation-manuscript-sha256"),
       journalProfileId: String(row.journal_profile_id), journalProfileVersion: Number(row.journal_profile_version), journalProfileContentSha256: safeSha256(row.journal_profile_content_sha256, "journal-validation-profile-sha256"),
       journalIdentityReceiptId: String(row.journal_identity_receipt_id), journalIdentityReceiptSha256: safeSha256(row.journal_identity_receipt_sha256, "journal-validation-identity-sha256"),
       humanAttestationReceiptIds: safeTextList(parseArray(row.human_attestation_receipt_ids_json), 500, 36, "journal-validation-attestation-id", 0),
+      manuscriptBlueprintAssessmentId: assessment ? String(assessment.assessment_id) : null,
+      manuscriptBlueprintAssessmentReportSha256: assessment ? safeSha256(assessment.assessment_report_sha256, "journal-validation-blueprint-assessment-report-sha256") : null,
+      manuscriptBlueprintAssessmentPolicyContentSha256: assessment ? safeSha256(assessment.assessment_policy_content_sha256, "journal-validation-blueprint-assessment-policy-sha256") : null,
+      manuscriptScholarlyAssessmentId: scholarlyAssessment ? String(scholarlyAssessment.assessment_id) : null,
+      manuscriptScholarlyAssessmentReportSha256: scholarlyAssessment ? safeSha256(scholarlyAssessment.assessment_report_sha256, "journal-validation-scholarly-assessment-report-sha256") : null,
+      manuscriptScholarlyAssessmentPolicyContentSha256: scholarlyAssessment ? safeSha256(scholarlyAssessment.assessment_policy_content_sha256, "journal-validation-scholarly-assessment-policy-sha256") : null,
+      manuscriptCoherenceAssessmentId: coherenceAssessment ? String(coherenceAssessment.assessment_id) : null,
+      manuscriptCoherenceAssessmentReportSha256: coherenceAssessment ? safeSha256(coherenceAssessment.assessment_report_sha256, "journal-validation-coherence-assessment-report-sha256") : null,
+      manuscriptCoherenceAssessmentContentSha256: coherenceAssessment ? safeSha256(coherenceAssessment.assessment_content_sha256, "journal-validation-coherence-assessment-content-sha256") : null,
       claimLedgerId: claim.claim_ledger_id === null ? null : String(claim.claim_ledger_id),
       claimLedgerRevision: claim.claim_ledger_revision === null ? null : Number(claim.claim_ledger_revision),
       claimLedgerManifestSha256: claim.claim_ledger_manifest_sha256 === null ? null : safeSha256(claim.claim_ledger_manifest_sha256, "journal-validation-claim-ledger-manifest-sha256"),
       claimGateReportSha256: claim.claim_gate_report_sha256 === null ? null : safeSha256(claim.claim_gate_report_sha256, "journal-validation-claim-gate-report-sha256"),
       claimPolicyContentSha256: claim.claim_policy_content_sha256 === null ? null : safeSha256(claim.claim_policy_content_sha256, "journal-validation-claim-policy-sha256"),
-      report: parseObject(row.report_json) as unknown as ScienceJournalValidationReport,
+      report,
       contentSha256: safeSha256(row.content_sha256, "journal-validation-receipt-sha256"), createdAt: String(row.created_at),
     };
     const { contentSha256, ...core } = receipt;
@@ -16155,10 +23537,48 @@ export class ScienceStore {
     const manifestSha256 = safeSha256(input.manifestSha256, "submission-manifest-sha256");
     const ready = validationReceipt.report.status === "ready";
     const claimLedger = ready ? this.evaluateClaimLedgerForManuscript(input.projectId, input.manuscriptId) : null;
+    const blueprintValidation = ready ? this.evaluateManuscriptBlueprintForJournal(input.projectId, input.manuscriptId, input.journalProfileId) : null;
+    const manuscriptBlueprint = blueprintValidation?.blueprint ?? null;
+    const blueprintAssessment = ready ? this.getManuscriptBlueprintAssessmentForManuscript(input.projectId, input.manuscriptId) : null;
+    const scholarlyAssessment = ready ? this.getManuscriptScholarlyAssessmentForManuscript(input.projectId, input.manuscriptId) : null;
+    const coherenceAssessment = ready ? this.getManuscriptCoherenceAssessmentForManuscript(input.projectId, input.manuscriptId) : null;
     if (ready && (!claimLedger?.gate.ready || validationReceipt.claimLedgerId !== claimLedger.manifest.ledgerId
       || validationReceipt.claimLedgerRevision !== claimLedger.manifest.revision || validationReceipt.claimLedgerManifestSha256 !== claimLedger.manifest.manifestSha256
       || validationReceipt.claimGateReportSha256 !== claimLedger.gate.reportSha256 || validationReceipt.claimPolicyContentSha256 !== claimLedger.gate.policyContentSha256)) {
       throw new Error("science-submission-claim-gate-stale");
+    }
+    if (ready && (!manuscriptBlueprint || blueprintValidation!.findings.some((finding) => finding.status !== "pass")
+      || manuscriptBlueprint.id !== validationReceipt.report.manuscriptBlueprintId
+      || manuscriptBlueprint.currentVersion !== validationReceipt.report.manuscriptBlueprintVersion
+      || manuscriptBlueprint.version.contentSha256 !== validationReceipt.report.manuscriptBlueprintContentSha256)) {
+      throw new Error("science-submission-manuscript-blueprint-stale");
+    }
+    if (ready && (!blueprintAssessment || blueprintAssessment.status !== "current" || blueprintAssessment.receipt.structuralStatus !== "passed"
+      || blueprintAssessment.receipt.id !== validationReceipt.manuscriptBlueprintAssessmentId
+      || blueprintAssessment.receipt.reportSha256 !== validationReceipt.manuscriptBlueprintAssessmentReportSha256
+      || blueprintAssessment.receipt.policy.contentSha256 !== validationReceipt.manuscriptBlueprintAssessmentPolicyContentSha256)) {
+      throw new Error("science-submission-manuscript-blueprint-assessment-stale");
+    }
+    if (ready && (!scholarlyAssessment || scholarlyAssessment.status !== "current" || scholarlyAssessment.receipt.scholarlyStatus !== "passed"
+      || scholarlyAssessment.receipt.id !== validationReceipt.manuscriptScholarlyAssessmentId
+      || scholarlyAssessment.receipt.reportSha256 !== validationReceipt.manuscriptScholarlyAssessmentReportSha256
+      || scholarlyAssessment.receipt.policy.contentSha256 !== validationReceipt.manuscriptScholarlyAssessmentPolicyContentSha256
+      || scholarlyAssessment.receipt.blueprintAssessment.id !== blueprintAssessment!.receipt.id
+      || scholarlyAssessment.receipt.blueprintAssessment.contentSha256 !== blueprintAssessment!.receipt.contentSha256)) {
+      throw new Error("science-submission-manuscript-scholarly-assessment-stale");
+    }
+    if (ready && (!coherenceAssessment || coherenceAssessment.status !== "current" || coherenceAssessment.receipt.status !== "passed"
+      || coherenceAssessment.receipt.id !== validationReceipt.manuscriptCoherenceAssessmentId
+      || coherenceAssessment.receipt.reportSha256 !== validationReceipt.manuscriptCoherenceAssessmentReportSha256
+      || coherenceAssessment.receipt.contentSha256 !== validationReceipt.manuscriptCoherenceAssessmentContentSha256
+      || coherenceAssessment.receipt.manuscript.projectId !== manuscript.projectId
+      || coherenceAssessment.receipt.manuscript.versionId !== manuscript.version.id
+      || coherenceAssessment.receipt.manuscript.documentSha256 !== manuscript.version.documentSha256
+      || coherenceAssessment.receipt.manuscript.bindingManifestSha256 !== manuscript.version.bindingManifestSha256
+      || coherenceAssessment.receipt.claimLedger.ledgerId !== claimLedger!.manifest.ledgerId
+      || coherenceAssessment.receipt.claimLedger.revision !== claimLedger!.manifest.revision
+      || coherenceAssessment.receipt.claimLedger.manifestSha256 !== claimLedger!.manifest.manifestSha256)) {
+      throw new Error("science-submission-manuscript-coherence-assessment-stale");
     }
     if (ready !== Boolean(input.packageBytes) || ready !== Boolean(input.fileName)) throw new Error("science-submission-export-readiness-invalid");
     let packageSha256: string | null = null;
@@ -16172,17 +23592,44 @@ export class ScienceStore {
       const embeddedManifestSha256 = safeSha256(manifest.manifestSha256, "submission-manifest-sha256");
       const manifestCore = { ...manifest }; delete manifestCore.manifestSha256;
       const manifestClaimLedger = manifest.claimLedger === null ? null : safeJsonRecord(manifest.claimLedger, 16_000, "submission-manifest-claim-ledger");
-      if (embeddedManifestSha256 !== manifestSha256 || sha256Json(manifestCore) !== manifestSha256 || manifest.schema !== "agentlas.science-submission-manifest/v3"
-        || manifest.projectId !== input.projectId || safeJsonRecord(manifest.manuscript, 16_000, "submission-manifest-manuscript").id !== input.manuscriptId
-        || safeJsonRecord(manifest.manuscript, 16_000, "submission-manifest-manuscript").version !== input.manuscriptVersion
-        || safeJsonRecord(manifest.manuscript, 16_000, "submission-manifest-manuscript").contentSha256 !== input.manuscriptContentSha256
+      const manifestBlueprint = manifest.manuscriptBlueprint === null ? null : safeJsonRecord(manifest.manuscriptBlueprint, 16_000, "submission-manifest-blueprint");
+      const manifestAssessment = manifest.manuscriptBlueprintAssessment === null ? null : safeJsonRecord(manifest.manuscriptBlueprintAssessment, 16_000, "submission-manifest-blueprint-assessment");
+      const manifestScholarlyAssessment = manifest.manuscriptScholarlyAssessment === null ? null : safeJsonRecord(manifest.manuscriptScholarlyAssessment, 16_000, "submission-manifest-scholarly-assessment");
+      const manifestCoherenceAssessment = manifest.manuscriptCoherenceAssessment === null ? null : safeJsonRecord(manifest.manuscriptCoherenceAssessment, 16_000, "submission-manifest-coherence-assessment");
+      const manifestManuscript = safeJsonRecord(manifest.manuscript, 16_000, "submission-manifest-manuscript");
+      if (embeddedManifestSha256 !== manifestSha256 || sha256Json(manifestCore) !== manifestSha256
+        || !["agentlas.science-submission-manifest/v5", "agentlas.science-submission-manifest/v6"].includes(String(manifest.schema))
+        || manifest.projectId !== input.projectId || manifestManuscript.id !== input.manuscriptId
+        || manifestManuscript.versionId !== manuscript.version.id
+        || manifestManuscript.version !== input.manuscriptVersion
+        || manifestManuscript.contentSha256 !== input.manuscriptContentSha256
+        || manifestManuscript.documentSha256 !== manuscript.version.documentSha256
+        || manifestManuscript.bindingManifestSha256 !== manuscript.version.bindingManifestSha256
         || safeJsonRecord(manifest.journalProfile, 16_000, "submission-manifest-profile").id !== input.journalProfileId
         || safeJsonRecord(manifest.journalProfile, 16_000, "submission-manifest-profile").version !== input.journalProfileVersion
         || safeJsonRecord(manifest.journalProfile, 16_000, "submission-manifest-profile").contentSha256 !== input.journalProfileContentSha256
         || manifest.validationReceiptId !== validationReceipt.id || manifest.validationReceiptSha256 !== validationReceipt.contentSha256
-        || manifest.validationReportSha256 !== validationReportSha256 || !manifestClaimLedger
+        || manifest.validationReportSha256 !== validationReportSha256 || !manifestClaimLedger || !manifestBlueprint || !manifestAssessment || !manifestScholarlyAssessment || !manifestCoherenceAssessment
         || manifestClaimLedger.id !== validationReceipt.claimLedgerId || manifestClaimLedger.revision !== validationReceipt.claimLedgerRevision
         || manifestClaimLedger.manifestSha256 !== validationReceipt.claimLedgerManifestSha256
+        || manifestBlueprint.id !== validationReceipt.report.manuscriptBlueprintId
+        || manifestBlueprint.version !== validationReceipt.report.manuscriptBlueprintVersion
+        || manifestBlueprint.contentSha256 !== validationReceipt.report.manuscriptBlueprintContentSha256
+        || manifestAssessment.id !== validationReceipt.manuscriptBlueprintAssessmentId
+        || manifestAssessment.reportSha256 !== validationReceipt.manuscriptBlueprintAssessmentReportSha256
+        || manifestAssessment.policyContentSha256 !== validationReceipt.manuscriptBlueprintAssessmentPolicyContentSha256
+        || manifestAssessment.contentSha256 !== blueprintAssessment!.receipt.contentSha256
+        || manifestScholarlyAssessment.id !== validationReceipt.manuscriptScholarlyAssessmentId
+        || manifestScholarlyAssessment.reportSha256 !== validationReceipt.manuscriptScholarlyAssessmentReportSha256
+        || manifestScholarlyAssessment.policyContentSha256 !== validationReceipt.manuscriptScholarlyAssessmentPolicyContentSha256
+        || manifestScholarlyAssessment.contentSha256 !== scholarlyAssessment!.receipt.contentSha256
+        || manifestCoherenceAssessment.id !== validationReceipt.manuscriptCoherenceAssessmentId
+        || manifestCoherenceAssessment.reportSha256 !== validationReceipt.manuscriptCoherenceAssessmentReportSha256
+        || manifestCoherenceAssessment.contentSha256 !== validationReceipt.manuscriptCoherenceAssessmentContentSha256
+        || manifestCoherenceAssessment.contentSha256 !== coherenceAssessment!.receipt.contentSha256
+        || (manifest.schema === "agentlas.science-submission-manifest/v6"
+          && (manifestCoherenceAssessment.numericSourceCount !== coherenceAssessment!.receipt.numericProvenance.sourceCount
+            || manifestCoherenceAssessment.numericSourceManifestSha256 !== coherenceAssessment!.receipt.numericProvenance.sourceManifestSha256))
         || manifest.claimGateReportSha256 !== validationReceipt.claimGateReportSha256
         || manifest.claimPolicyContentSha256 !== validationReceipt.claimPolicyContentSha256) throw new Error("science-submission-manifest-binding-mismatch");
       const files = Array.isArray(manifest.files) ? manifest.files : [];
@@ -16196,7 +23643,9 @@ export class ScienceStore {
         if (Number(entry.byteSize) !== bundle[name].byteLength || safeSha256(entry.sha256, "submission-manifest-file-sha256") !== createHash("sha256").update(bundle[name]).digest("hex")) throw new Error("science-submission-manifest-file-integrity-failed");
       }
       const unmanifested = Object.keys(bundle).filter((name) => name !== "MANIFEST.json" && !names.has(name));
-      if (unmanifested.length || !["manuscript/manuscript.md", "manuscript/manuscript.tex", "manuscript/manuscript.docx", "submission/metadata.json", "submission/journal-profile.json", "submission/validation-report.json", "submission/validation-receipt.json", "submission/evidence-bindings.json", "submission/claim-ledger.json", "submission/claim-gate-report.json", "submission/cover-letter.md", "README.txt"].every((name) => names.has(name))) {
+      const requiredFiles = ["manuscript/manuscript.md", "manuscript/manuscript.tex", "manuscript/manuscript.docx", "submission/metadata.json", "submission/journal-profile.json", "submission/manuscript-blueprint.json", "submission/manuscript-blueprint-assessment.json", "submission/manuscript-scholarly-assessment.json", "submission/manuscript-coherence-assessment.json", "submission/validation-report.json", "submission/validation-receipt.json", "submission/evidence-bindings.json", "submission/claim-ledger.json", "submission/claim-gate-report.json", "submission/cover-letter.md", "README.txt"];
+      if (manifest.schema === "agentlas.science-submission-manifest/v6") requiredFiles.push("submission/numeric-provenance.json");
+      if (unmanifested.length || !requiredFiles.every((name) => names.has(name))) {
         throw new Error("science-submission-manifest-files-incomplete");
       }
       const embeddedValidation = JSON.parse(strFromU8(bundle["submission/validation-report.json"]));
@@ -16204,15 +23653,37 @@ export class ScienceStore {
       const embeddedMetadata = JSON.parse(strFromU8(bundle["submission/metadata.json"]));
       const embeddedClaimLedger = JSON.parse(strFromU8(bundle["submission/claim-ledger.json"]));
       const embeddedClaimGate = JSON.parse(strFromU8(bundle["submission/claim-gate-report.json"]));
+      const embeddedBlueprint = JSON.parse(strFromU8(bundle["submission/manuscript-blueprint.json"]));
+      const embeddedAssessment = JSON.parse(strFromU8(bundle["submission/manuscript-blueprint-assessment.json"]));
+      const embeddedScholarlyAssessment = JSON.parse(strFromU8(bundle["submission/manuscript-scholarly-assessment.json"]));
+      const embeddedCoherenceAssessment = JSON.parse(strFromU8(bundle["submission/manuscript-coherence-assessment.json"]));
+      const embeddedNumericProvenance = manifest.schema === "agentlas.science-submission-manifest/v6"
+        ? JSON.parse(strFromU8(bundle["submission/numeric-provenance.json"])) : null;
       if (JSON.stringify(canonicalValue(embeddedValidation)) !== JSON.stringify(canonicalValue(validationReceipt.report)) || JSON.stringify(canonicalValue(embeddedValidationReceipt)) !== JSON.stringify(canonicalValue(validationReceipt))
         || manifest.metadataSha256 !== sha256Json(embeddedMetadata) || embeddedClaimLedger.manifestSha256 !== validationReceipt.claimLedgerManifestSha256
         || embeddedClaimLedger.ledgerId !== validationReceipt.claimLedgerId || embeddedClaimLedger.revision !== validationReceipt.claimLedgerRevision
         || embeddedClaimGate.reportSha256 !== validationReceipt.claimGateReportSha256 || embeddedClaimGate.policyContentSha256 !== validationReceipt.claimPolicyContentSha256
+        || JSON.stringify(canonicalValue(embeddedBlueprint)) !== JSON.stringify(canonicalValue(manuscriptBlueprint))
+        || JSON.stringify(canonicalValue(embeddedAssessment)) !== JSON.stringify(canonicalValue(blueprintAssessment!.receipt))
+        || JSON.stringify(canonicalValue(embeddedScholarlyAssessment)) !== JSON.stringify(canonicalValue(scholarlyAssessment!.receipt))
+        || JSON.stringify(canonicalValue(embeddedCoherenceAssessment)) !== JSON.stringify(canonicalValue(coherenceAssessment!.receipt))
+        || (embeddedNumericProvenance !== null
+          && JSON.stringify(canonicalValue(embeddedNumericProvenance)) !== JSON.stringify(canonicalValue(coherenceAssessment!.receipt.numericProvenance)))
         || embeddedClaimGate.ready !== true) throw new Error("science-submission-package-binding-mismatch");
     }
     const requestSha256 = sha256Json({ projectId: input.projectId, manuscriptId: input.manuscriptId, manuscriptVersion: input.manuscriptVersion, manuscriptContentSha256: input.manuscriptContentSha256, journalProfileId: input.journalProfileId, journalProfileVersion: input.journalProfileVersion, journalProfileContentSha256: input.journalProfileContentSha256, validationReceiptId: validationReceipt.id, validationReceiptSha256: validationReceipt.contentSha256, validationReportSha256,
       claimLedgerId: validationReceipt.claimLedgerId, claimLedgerRevision: validationReceipt.claimLedgerRevision, claimLedgerManifestSha256: validationReceipt.claimLedgerManifestSha256,
-      claimGateReportSha256: validationReceipt.claimGateReportSha256, claimPolicyContentSha256: validationReceipt.claimPolicyContentSha256, manifestSha256, packageSha256 });
+      claimGateReportSha256: validationReceipt.claimGateReportSha256, claimPolicyContentSha256: validationReceipt.claimPolicyContentSha256,
+      manuscriptBlueprintAssessmentId: validationReceipt.manuscriptBlueprintAssessmentId,
+      manuscriptBlueprintAssessmentReportSha256: validationReceipt.manuscriptBlueprintAssessmentReportSha256,
+      manuscriptBlueprintAssessmentPolicyContentSha256: validationReceipt.manuscriptBlueprintAssessmentPolicyContentSha256,
+      manuscriptScholarlyAssessmentId: validationReceipt.manuscriptScholarlyAssessmentId,
+      manuscriptScholarlyAssessmentReportSha256: validationReceipt.manuscriptScholarlyAssessmentReportSha256,
+      manuscriptScholarlyAssessmentPolicyContentSha256: validationReceipt.manuscriptScholarlyAssessmentPolicyContentSha256,
+      manuscriptCoherenceAssessmentId: validationReceipt.manuscriptCoherenceAssessmentId,
+      manuscriptCoherenceAssessmentReportSha256: validationReceipt.manuscriptCoherenceAssessmentReportSha256,
+      manuscriptCoherenceAssessmentContentSha256: validationReceipt.manuscriptCoherenceAssessmentContentSha256,
+      manifestSha256, packageSha256 });
     return this.db.transaction(() => {
       const prior = this.replay<{ submissionExport: ScienceSubmissionExport; replayed: boolean }>(input.requestId, "submission.export.create", requestSha256);
       if (prior) return { ...prior, replayed: true };
@@ -16235,6 +23706,12 @@ export class ScienceStore {
         claimLedgerId: validationReceipt.claimLedgerId, claimLedgerRevision: validationReceipt.claimLedgerRevision,
         claimLedgerManifestSha256: validationReceipt.claimLedgerManifestSha256, claimGateReportSha256: validationReceipt.claimGateReportSha256,
         claimPolicyContentSha256: validationReceipt.claimPolicyContentSha256,
+        manuscriptScholarlyAssessmentId: validationReceipt.manuscriptScholarlyAssessmentId,
+        manuscriptScholarlyAssessmentReportSha256: validationReceipt.manuscriptScholarlyAssessmentReportSha256,
+        manuscriptScholarlyAssessmentPolicyContentSha256: validationReceipt.manuscriptScholarlyAssessmentPolicyContentSha256,
+        manuscriptCoherenceAssessmentId: validationReceipt.manuscriptCoherenceAssessmentId,
+        manuscriptCoherenceAssessmentReportSha256: validationReceipt.manuscriptCoherenceAssessmentReportSha256,
+        manuscriptCoherenceAssessmentContentSha256: validationReceipt.manuscriptCoherenceAssessmentContentSha256,
         packageRef: packageAsset?.ref ?? null, fileName: input.fileName, manifestSha256, createdAt: now,
       };
       this.db.prepare(`INSERT INTO submission_export_closures
@@ -16287,6 +23764,12 @@ export class ScienceStore {
       claimLedgerManifestSha256: row.claim_ledger_manifest_sha256 === null ? null : safeSha256(row.claim_ledger_manifest_sha256, "submission-claim-ledger-manifest-sha256"),
       claimGateReportSha256: row.claim_gate_report_sha256 === null ? null : safeSha256(row.claim_gate_report_sha256, "submission-claim-gate-report-sha256"),
       claimPolicyContentSha256: row.claim_policy_content_sha256 === null ? null : safeSha256(row.claim_policy_content_sha256, "submission-claim-policy-sha256"),
+      manuscriptScholarlyAssessmentId: validationReceipt.manuscriptScholarlyAssessmentId,
+      manuscriptScholarlyAssessmentReportSha256: validationReceipt.manuscriptScholarlyAssessmentReportSha256,
+      manuscriptScholarlyAssessmentPolicyContentSha256: validationReceipt.manuscriptScholarlyAssessmentPolicyContentSha256,
+      manuscriptCoherenceAssessmentId: validationReceipt.manuscriptCoherenceAssessmentId,
+      manuscriptCoherenceAssessmentReportSha256: validationReceipt.manuscriptCoherenceAssessmentReportSha256,
+      manuscriptCoherenceAssessmentContentSha256: validationReceipt.manuscriptCoherenceAssessmentContentSha256,
       packageByteSize: row.package_byte_size === null ? null : Number(row.package_byte_size), packageRef: row.package_ref === null ? null : String(row.package_ref), fileName: row.file_name === null ? null : String(row.file_name),
       manifestSha256: String(row.manifest_sha256), createdAt: String(row.created_at),
     }; });
@@ -16339,10 +23822,64 @@ export class ScienceStore {
     const embeddedSha256 = safeSha256(manifest.manifestSha256, "submission-manifest-sha256");
     const manifestCore = { ...manifest }; delete manifestCore.manifestSha256;
     const claimLedger = manifest.claimLedger === null ? null : safeJsonRecord(manifest.claimLedger, 16_000, "submission-manifest-claim-ledger");
-    if (embeddedSha256 !== item.manifestSha256 || sha256Json(manifestCore) !== item.manifestSha256 || manifest.schema !== "agentlas.science-submission-manifest/v3"
+    const assessmentClosure = manifest.manuscriptBlueprintAssessment === null ? null
+      : safeJsonRecord(manifest.manuscriptBlueprintAssessment, 16_000, "submission-manifest-blueprint-assessment");
+    const scholarlyAssessmentClosure = manifest.manuscriptScholarlyAssessment === null ? null
+      : safeJsonRecord(manifest.manuscriptScholarlyAssessment, 16_000, "submission-manifest-scholarly-assessment");
+    const coherenceAssessmentClosure = manifest.manuscriptCoherenceAssessment === null ? null
+      : safeJsonRecord(manifest.manuscriptCoherenceAssessment, 16_000, "submission-manifest-coherence-assessment");
+    const manifestManuscript = safeJsonRecord(manifest.manuscript, 16_000, "submission-manifest-manuscript");
+    const validationReceipt = this.getJournalValidationReceiptForProject(projectId, item.validationReceiptId);
+    const manuscript = this.getManuscriptForProject(projectId, item.manuscriptId);
+    const assessment = this.getManuscriptBlueprintAssessmentForManuscript(projectId, item.manuscriptId);
+    const scholarlyAssessment = this.getManuscriptScholarlyAssessmentForManuscript(projectId, item.manuscriptId);
+    const coherenceAssessment = this.getManuscriptCoherenceAssessmentForManuscript(projectId, item.manuscriptId);
+    if (embeddedSha256 !== item.manifestSha256 || sha256Json(manifestCore) !== item.manifestSha256
+      || !["agentlas.science-submission-manifest/v5", "agentlas.science-submission-manifest/v6"].includes(String(manifest.schema))
+      || manifest.projectId !== projectId || !manuscript
+      || manuscript.currentVersion !== item.manuscriptVersion || manuscript.version.contentSha256 !== item.manuscriptContentSha256
+      || manifestManuscript.id !== item.manuscriptId || manifestManuscript.versionId !== manuscript.version.id
+      || manifestManuscript.version !== item.manuscriptVersion || manifestManuscript.contentSha256 !== item.manuscriptContentSha256
+      || manifestManuscript.documentSha256 !== manuscript.version.documentSha256
+      || manifestManuscript.bindingManifestSha256 !== manuscript.version.bindingManifestSha256
       || manifest.validationReceiptId !== item.validationReceiptId || manifest.validationReceiptSha256 !== item.validationReceiptSha256
       || !claimLedger || claimLedger.id !== item.claimLedgerId || claimLedger.revision !== item.claimLedgerRevision || claimLedger.manifestSha256 !== item.claimLedgerManifestSha256
-      || manifest.claimGateReportSha256 !== item.claimGateReportSha256 || manifest.claimPolicyContentSha256 !== item.claimPolicyContentSha256) {
+      || manifest.claimGateReportSha256 !== item.claimGateReportSha256 || manifest.claimPolicyContentSha256 !== item.claimPolicyContentSha256
+      || !validationReceipt || validationReceipt.report.status !== "ready"
+      || validationReceipt.manuscriptId !== item.manuscriptId || validationReceipt.manuscriptVersion !== item.manuscriptVersion
+      || validationReceipt.manuscriptContentSha256 !== item.manuscriptContentSha256
+      || !assessmentClosure || !assessment || assessment.status !== "current" || assessment.receipt.structuralStatus !== "passed"
+      || assessmentClosure.id !== validationReceipt.manuscriptBlueprintAssessmentId
+      || assessmentClosure.reportSha256 !== validationReceipt.manuscriptBlueprintAssessmentReportSha256
+      || assessmentClosure.policyContentSha256 !== validationReceipt.manuscriptBlueprintAssessmentPolicyContentSha256
+      || assessmentClosure.contentSha256 !== assessment.receipt.contentSha256
+      || assessment.receipt.id !== validationReceipt.manuscriptBlueprintAssessmentId
+      || assessment.receipt.reportSha256 !== validationReceipt.manuscriptBlueprintAssessmentReportSha256
+      || assessment.receipt.policy.contentSha256 !== validationReceipt.manuscriptBlueprintAssessmentPolicyContentSha256
+      || !scholarlyAssessmentClosure || !scholarlyAssessment || scholarlyAssessment.status !== "current" || scholarlyAssessment.receipt.scholarlyStatus !== "passed"
+      || scholarlyAssessmentClosure.id !== validationReceipt.manuscriptScholarlyAssessmentId
+      || scholarlyAssessmentClosure.reportSha256 !== validationReceipt.manuscriptScholarlyAssessmentReportSha256
+      || scholarlyAssessmentClosure.policyContentSha256 !== validationReceipt.manuscriptScholarlyAssessmentPolicyContentSha256
+      || scholarlyAssessmentClosure.contentSha256 !== scholarlyAssessment.receipt.contentSha256
+      || scholarlyAssessment.receipt.id !== validationReceipt.manuscriptScholarlyAssessmentId
+      || scholarlyAssessment.receipt.reportSha256 !== validationReceipt.manuscriptScholarlyAssessmentReportSha256
+      || scholarlyAssessment.receipt.policy.contentSha256 !== validationReceipt.manuscriptScholarlyAssessmentPolicyContentSha256
+      || !coherenceAssessmentClosure || !coherenceAssessment || coherenceAssessment.status !== "current" || coherenceAssessment.receipt.status !== "passed"
+      || coherenceAssessmentClosure.id !== validationReceipt.manuscriptCoherenceAssessmentId
+      || coherenceAssessmentClosure.reportSha256 !== validationReceipt.manuscriptCoherenceAssessmentReportSha256
+      || coherenceAssessmentClosure.contentSha256 !== validationReceipt.manuscriptCoherenceAssessmentContentSha256
+      || coherenceAssessment.receipt.id !== validationReceipt.manuscriptCoherenceAssessmentId
+      || coherenceAssessment.receipt.reportSha256 !== validationReceipt.manuscriptCoherenceAssessmentReportSha256
+      || coherenceAssessment.receipt.contentSha256 !== validationReceipt.manuscriptCoherenceAssessmentContentSha256
+      || coherenceAssessment.receipt.manuscript.projectId !== projectId
+      || coherenceAssessment.receipt.manuscript.versionId !== manuscript.version.id
+      || coherenceAssessment.receipt.manuscript.version !== item.manuscriptVersion
+      || coherenceAssessment.receipt.manuscript.contentSha256 !== item.manuscriptContentSha256
+      || coherenceAssessment.receipt.manuscript.documentSha256 !== manuscript.version.documentSha256
+      || coherenceAssessment.receipt.manuscript.bindingManifestSha256 !== manuscript.version.bindingManifestSha256
+      || (manifest.schema === "agentlas.science-submission-manifest/v6"
+        && (coherenceAssessmentClosure.numericSourceCount !== coherenceAssessment.receipt.numericProvenance.sourceCount
+          || coherenceAssessmentClosure.numericSourceManifestSha256 !== coherenceAssessment.receipt.numericProvenance.sourceManifestSha256))) {
       throw new Error("science-submission-package-integrity-failed");
     }
     const files = Array.isArray(manifest.files) ? manifest.files : [];
@@ -16356,11 +23893,27 @@ export class ScienceStore {
       names.add(name);
     }
     if (Object.keys(bundle).some((name) => name !== "MANIFEST.json" && !names.has(name))
-      || !bundle["submission/claim-ledger.json"] || !bundle["submission/claim-gate-report.json"]) throw new Error("science-submission-package-integrity-failed");
+      || !bundle["submission/claim-ledger.json"] || !bundle["submission/claim-gate-report.json"]
+      || !bundle["submission/manuscript-blueprint-assessment.json"]
+      || !bundle["submission/manuscript-scholarly-assessment.json"]
+      || !bundle["submission/manuscript-coherence-assessment.json"]
+      || (manifest.schema === "agentlas.science-submission-manifest/v6" && !bundle["submission/numeric-provenance.json"])) {
+      throw new Error("science-submission-package-integrity-failed");
+    }
     const embeddedLedger = safeJsonRecord(JSON.parse(strFromU8(bundle["submission/claim-ledger.json"])), 8 * 1024 * 1024, "submission-claim-ledger");
     const embeddedGate = safeJsonRecord(JSON.parse(strFromU8(bundle["submission/claim-gate-report.json"])), 4 * 1024 * 1024, "submission-claim-gate");
+    const embeddedAssessment = safeJsonRecord(JSON.parse(strFromU8(bundle["submission/manuscript-blueprint-assessment.json"])), 4 * 1024 * 1024, "submission-blueprint-assessment");
+    const embeddedScholarlyAssessment = safeJsonRecord(JSON.parse(strFromU8(bundle["submission/manuscript-scholarly-assessment.json"])), 4 * 1024 * 1024, "submission-scholarly-assessment");
+    const embeddedCoherenceAssessment = safeJsonRecord(JSON.parse(strFromU8(bundle["submission/manuscript-coherence-assessment.json"])), 4 * 1024 * 1024, "submission-coherence-assessment");
+    const embeddedNumericProvenance = manifest.schema === "agentlas.science-submission-manifest/v6"
+      ? safeJsonRecord(JSON.parse(strFromU8(bundle["submission/numeric-provenance.json"])), 8 * 1024 * 1024, "submission-numeric-provenance") : null;
     if (embeddedLedger.ledgerId !== item.claimLedgerId || embeddedLedger.revision !== item.claimLedgerRevision || embeddedLedger.manifestSha256 !== item.claimLedgerManifestSha256
-      || embeddedGate.reportSha256 !== item.claimGateReportSha256 || embeddedGate.policyContentSha256 !== item.claimPolicyContentSha256 || embeddedGate.ready !== true) {
+      || embeddedGate.reportSha256 !== item.claimGateReportSha256 || embeddedGate.policyContentSha256 !== item.claimPolicyContentSha256 || embeddedGate.ready !== true
+      || JSON.stringify(canonicalValue(embeddedAssessment)) !== JSON.stringify(canonicalValue(assessment.receipt))
+      || JSON.stringify(canonicalValue(embeddedScholarlyAssessment)) !== JSON.stringify(canonicalValue(scholarlyAssessment.receipt))
+      || JSON.stringify(canonicalValue(embeddedCoherenceAssessment)) !== JSON.stringify(canonicalValue(coherenceAssessment.receipt))
+      || (embeddedNumericProvenance !== null
+        && JSON.stringify(canonicalValue(embeddedNumericProvenance)) !== JSON.stringify(canonicalValue(coherenceAssessment.receipt.numericProvenance)))) {
       throw new Error("science-submission-package-integrity-failed");
     }
     return { export: item, bytes };

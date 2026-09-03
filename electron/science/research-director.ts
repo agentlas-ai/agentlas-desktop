@@ -118,24 +118,53 @@ export function researchDirectorReleaseDigest(root: string): string {
   return `sha256:${hash.digest("hex")}`;
 }
 
-export function composeResearchDirectorSystemPrompt(agentContract: string, directStudySkill: string): string {
+export interface ResearchDirectorPromptAssets {
+  /** agent/soul.md — the principal-investigator persona. */
+  persona: string;
+  /** agent/agent.md — the operating contract. */
+  agentContract: string;
+  /** skills/direct-study/SKILL.md — the end-to-end study workflow. */
+  directStudySkill: string;
+  /** skills/write-manuscript/SKILL.md — the manuscript dialect and closeout workflow. */
+  writeManuscriptSkill: string;
+}
+
+/**
+ * Canonical prompt order: persona -> contract -> workflows. The SHA-256 of this exact string is
+ * pinned in plugin.json (`runtime.promptSha256`) and `RESEARCH_DIRECTOR_SYSTEM_PROMPT_SHA256`.
+ */
+export function composeResearchDirectorSystemPrompt(assets: ResearchDirectorPromptAssets): string {
   return [
     "# Agentlas Science built-in Research Director runtime",
     "",
     "This is the exact package-owned identity and workflow for every Agentlas Science turn.",
     "The user message is not a plugin mention and must not be treated as routing metadata.",
     "",
+    "<research-director-persona>",
+    assets.persona.trim(),
+    "</research-director-persona>",
+    "",
     "<research-director-agent-contract>",
-    agentContract.trim(),
+    assets.agentContract.trim(),
     "</research-director-agent-contract>",
     "",
     "<research-director-direct-study-workflow>",
-    directStudySkill.trim(),
+    assets.directStudySkill.trim(),
     "</research-director-direct-study-workflow>",
+    "",
+    "<research-director-write-manuscript-workflow>",
+    assets.writeManuscriptSkill.trim(),
+    "</research-director-write-manuscript-workflow>",
   ].join("\n");
 }
 
 function defaultInstalledPluginRoot(): string {
+  // A QA run needs to point at a package it built, the same way the product extension root is
+  // redirected for tests. This changes only WHERE the package is read from: every identity, digest
+  // and prompt-hash check below still runs against whatever is found there, so a redirected root
+  // cannot smuggle in a package that would otherwise be refused.
+  const override = process.env.AGENTLAS_SCIENCE_RESEARCH_DIRECTOR_PLUGIN_ROOT;
+  if (override && path.isAbsolute(override)) return override;
   return path.join(os.homedir(), ".agentlas", "plugins", SCIENCE_RESEARCH_DIRECTOR_SLUG);
 }
 
@@ -152,7 +181,14 @@ export function loadResearchDirectorRuntimeBinding(
     || manifest.builtin !== true
     || !Array.isArray(workflows)
     || !workflows.includes("direct-study")
+    || !workflows.includes("write-manuscript")
   ) {
+    // The version is the one that actually goes wrong, and the bare code said nothing about it: a
+    // machine carrying a NEWER research director than this build expects failed every single study
+    // turn with an eight-word identifier. Name the two versions, so the message can be acted on.
+    if (manifest.version !== RESEARCH_DIRECTOR_PLUGIN_VERSION) {
+      throw new Error(`science-research-director-package-version-mismatch:installed=${String(manifest.version)}:expected=${RESEARCH_DIRECTOR_PLUGIN_VERSION}`);
+    }
     throw new Error("science-research-director-package-identity-invalid");
   }
 
@@ -167,9 +203,12 @@ export function loadResearchDirectorRuntimeBinding(
     throw new Error("science-research-director-package-integrity-failed");
   }
 
-  const agentContract = readExactUtf8(pluginRoot, "agent/agent.md", MAX_PROMPT_ASSET_BYTES);
-  const directStudySkill = readExactUtf8(pluginRoot, "skills/direct-study/SKILL.md", MAX_PROMPT_ASSET_BYTES);
-  const systemPrompt = composeResearchDirectorSystemPrompt(agentContract, directStudySkill);
+  const systemPrompt = composeResearchDirectorSystemPrompt({
+    persona: readExactUtf8(pluginRoot, "agent/soul.md", MAX_PROMPT_ASSET_BYTES),
+    agentContract: readExactUtf8(pluginRoot, "agent/agent.md", MAX_PROMPT_ASSET_BYTES),
+    directStudySkill: readExactUtf8(pluginRoot, "skills/direct-study/SKILL.md", MAX_PROMPT_ASSET_BYTES),
+    writeManuscriptSkill: readExactUtf8(pluginRoot, "skills/write-manuscript/SKILL.md", MAX_PROMPT_ASSET_BYTES),
+  });
   const systemPromptSha256 = sha256(systemPrompt);
   if (systemPromptSha256 !== RESEARCH_DIRECTOR_SYSTEM_PROMPT_SHA256) {
     throw new Error("science-research-director-prompt-integrity-failed");

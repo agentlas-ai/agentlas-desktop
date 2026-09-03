@@ -58,6 +58,7 @@ interface ProxyApprovalRequest {
  * or run page JavaScript.
  */
 const AGENTLAS_BROWSER_READ_TOOLS = new Set([
+  "browser_tabs",
   "browser_console_messages",
   "browser_find",
   "browser_hover",

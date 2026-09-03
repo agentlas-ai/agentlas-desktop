@@ -84,11 +84,6 @@
     "algo": "sha256",
     "files": [
       {
-        "path": "README.md",
-        "sha256": "61799b69a233ddba2a723454fab074eb7bcc9540d9198f161f6e819bf4ff7412",
-        "bytes": 2007
-      },
-      {
         "path": "bin/world-bank-mcp.mjs",
         "sha256": "420dc337513c96bfbd7f312416688ab1b3f96fb10421b178dc320b6a1545d177",
         "bytes": 5602
@@ -102,6 +97,11 @@
         "path": "package.json",
         "sha256": "d8c06799e4a412937acc0bd40bfb7aa11859d493fc9cb6cfc20f61c225672a88",
         "bytes": 653
+      },
+      {
+        "path": "README.md",
+        "sha256": "61799b69a233ddba2a723454fab074eb7bcc9540d9198f161f6e819bf4ff7412",
+        "bytes": 2007
       },
       {
         "path": "runtime/economic-data.cjs",
@@ -127,41 +127,6 @@
         "path": "skills/index/SKILL.md",
         "sha256": "b2cee82f4bb639e2b3d5f7bef0368d0b185c529716f65b270d7e67b9f4e9dd6d",
         "bytes": 923
-      },
-      {
-        "path": "tests/contract.test.mjs",
-        "sha256": "e3eceafbf46c58731adc7f6c06fcc53b65ca85425104f9acea530b43ad98e6ac",
-        "bytes": 12314
-      },
-      {
-        "path": "tests/fixtures/duplicate-date.json",
-        "sha256": "0f65d71b83d425b5b9a353f50cb689514795d3725a87349d5ab1347745386d6e",
-        "bytes": 721
-      },
-      {
-        "path": "tests/fixtures/malformed-row.json",
-        "sha256": "121a208731768629f3ad8054f013c506333336dc8ba7967ba0ff3c0bc0eb5c05",
-        "bytes": 443
-      },
-      {
-        "path": "tests/fixtures/world-bank-empty-unit.json",
-        "sha256": "ff53b41c0d04892e9f25ac1b3bab02af4b6f5e3df94f5efce0e8f853d090d7f9",
-        "bytes": 754
-      },
-      {
-        "path": "tests/fixtures/world-bank-page-1-replay.json",
-        "sha256": "a7e55803a6d4736a75a0af4ea935b7d1690003d9c3f891d129ffde1bed129db8",
-        "bytes": 925
-      },
-      {
-        "path": "tests/fixtures/world-bank-page-1.json",
-        "sha256": "b8d94401f7093a90a7aaaddd14b9188e248baea2d6195685fa8192e7402034e8",
-        "bytes": 959
-      },
-      {
-        "path": "tests/fixtures/world-bank-page-2.json",
-        "sha256": "805793eba314f4e1df0c16573036016427810042f552439714e6e9f3dcbf9cbc",
-        "bytes": 749
       }
     ]
   }

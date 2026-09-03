@@ -590,7 +590,8 @@ export interface MobileBridgeInvocationToolDto {
   display?: MobileBridgeToolCallDisplayDto;
 }
 
-export interface MobileBridgeOneArtifactDto {
+export interface MobileBridgeInvocationArtifactDto {
+  /** Exact Main-owned binding only; never a local path or preview capability. */
   taskId: string;
   taskVersion: number;
   chatId: string;
@@ -600,12 +601,13 @@ export interface MobileBridgeOneArtifactDto {
   label: string;
   type: "document" | "spreadsheet" | "image" | "video" | "audio" | "archive" | "data" | "other";
   sizeBytes?: number;
+  /** Optional immutable content identity used to collapse repeated reads. */
   contentSha256?: string;
 }
 
 export interface MobileBridgeOneArtifactsPageDto {
   schemaVersion: 1;
-  items: MobileBridgeOneArtifactDto[];
+  items: MobileBridgeInvocationArtifactDto[];
   nextCursor: string | null;
 }
 
@@ -645,10 +647,10 @@ export interface MobileBridgeInvocationEventDto {
   role?: string;
   phase?: "plan" | "delegate" | "synthesize";
   reasoning?: { phase: "start" | "end"; durationMs?: number; /** end only — the span's bounded, redacted summary text. */ text?: string };
+  /** Bounded exact bindings let Mobile keep prior-run outputs without receiving paths. */
+  oneArtifacts?: MobileBridgeInvocationArtifactDto[];
   /** Main-sanitized, non-executable semantic result shared with Flutter. */
   surface?: OneSurfaceManifestV1;
-  /** Exact Main-bound artifact identities only; paths and capabilities never cross the bridge. */
-  oneArtifacts?: MobileBridgeOneArtifactDto[];
 }
 
 export interface MobileBridgeHostDto {
@@ -1051,6 +1053,17 @@ export interface MobileBridgeChatDto {
   firmId: string | null;
   agentId: string;
   title: string;
+  /** Main-bounded latest user/assistant line used by the One session directory. */
+  lastMessagePreview?: string;
+  /** Durable One seat snapshot. The session remains renderable after a seat is dissolved. */
+  seatId?: string | null;
+  seatLabel?: string | null;
+  seatKind?: "solo" | "group" | null;
+  participants?: Array<{
+    slot: number;
+    agentId: string | null;
+    displayName: string;
+  }> | null;
   archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -1105,11 +1118,18 @@ export interface MobileBridgeRuntimeRolePoolDto {
   };
 }
 
+export interface MobileBridgeChatImageDto {
+  /** Opaque Main-owned attachment identity. It is not a path or renderer URL. */
+  attachmentId: string;
+}
+
 export interface MobileBridgeChatMessageDto {
   id: string;
   role: "user" | "assistant" | "system";
   text: string;
   createdAt: string;
+  /** Bounded references; bytes are fetched only for an exact chat/message binding. */
+  images?: MobileBridgeChatImageDto[];
 }
 
 /**
@@ -2506,11 +2526,11 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
     case "chat.attachment.imagePreview":
       return hasOnlyKeys(params, ["chatId", "messageId", "attachmentId"])
         ? firstError(
-            requiredString(params, "chatId"),
-            requiredString(params, "messageId"),
-            requiredString(params, "attachmentId"),
+            requiredString(params, "chatId", 256),
+            requiredString(params, "messageId", 160),
+            requiredString(params, "attachmentId", 160),
           )
-        : "chat.attachment.imagePreview accepts only chatId, messageId, and attachmentId";
+        : "chat.attachment.imagePreview accepts only exact chat attachment binding fields";
     case "one.suggestions.act": {
       if (!hasOnlyKeys(params, [
         "schemaVersion", "action", "expectedStoreVersion", "suggestionId", "expectedSuggestionVersion",

@@ -82,6 +82,76 @@ function canonicalVersion(updatedAt: string): number {
 }
 
 /**
+ * A task-force run may persist a normal final transcript before its structural
+ * verifier rejects the result. In that case the generic invocation receipt is
+ * still `completed`, so result acceptance must also consult the exact
+ * task-force receipt. Ordinary (non task-force) runs remain eligible.
+ */
+export function hasPassedTaskForceExecutionVerification(runId: string): boolean {
+  if (!runId) return false;
+  const db = getDb();
+  const row = db
+    .prepare(
+      `SELECT payload_json
+       FROM run_events
+       WHERE run_id = ? AND kind = 'task_force_execution_receipt'
+       ORDER BY seq DESC
+       LIMIT 1`,
+    )
+    .get(runId) as { payload_json?: string } | undefined;
+  if (!row) {
+    // A task-force run can be interrupted before it writes its structural
+    // receipt. Absence is therefore success only when the ledger also proves
+    // that this was an ordinary, non task-force invocation.
+    const markers = db
+      .prepare(
+        `SELECT kind, payload_json
+         FROM run_events
+         WHERE run_id = ?
+           AND kind IN (
+             'invoke_started',
+             'one_team_preflight_claimed',
+             'task_force_model_call_started',
+             'task_force_model_call_completed',
+             'task_force_model_call_failed'
+           )
+         ORDER BY seq ASC`,
+      )
+      .all(runId) as { kind: string; payload_json?: string }[];
+    let sawOrdinaryInvokeStart = false;
+    for (const marker of markers) {
+      if (marker.kind !== "invoke_started") return false;
+      try {
+        const payload = JSON.parse(marker.payload_json ?? "") as Record<string, unknown>;
+        if (
+          payload.oneTeamPreflightMode === "team" ||
+          (Array.isArray(payload.taskForceTargets) && payload.taskForceTargets.length > 0) ||
+          (Array.isArray(payload.borrowAgents) && payload.borrowAgents.length > 0)
+        ) return false;
+        sawOrdinaryInvokeStart = true;
+      } catch {
+        // An unreadable start marker cannot prove that a receipt-less run was
+        // ordinary, so keep result acceptance closed.
+        return false;
+      }
+    }
+    return sawOrdinaryInvokeStart;
+  }
+  try {
+    const payload = JSON.parse(row.payload_json ?? "");
+    return Boolean(
+      payload &&
+      typeof payload === "object" &&
+      !Array.isArray(payload) &&
+      (payload as Record<string, unknown>).verifierStatus === "pass",
+    );
+  } catch {
+    // A malformed or legacy task-force receipt cannot authorize completion.
+    return false;
+  }
+}
+
+/**
  * Task v1 exposes the authoritative ISO timestamp as its numeric version. Every
  * material mutation therefore has to advance the timestamp even when two
  * writes land in the same millisecond or the wall clock moves backwards.
@@ -545,9 +615,10 @@ export function acceptCanonicalTaskResult(
       !receipt ||
       receipt.runId !== input.expectedRunId ||
       receipt.chatId !== row.origin_chat_id ||
-      receipt.status !== "completed"
+      receipt.status !== "completed" ||
+      !hasPassedTaskForceExecutionVerification(input.expectedRunId)
     ) {
-      throw new Error("A matching completed run receipt is required");
+      throw new Error("A matching verified completed run receipt is required");
     }
     const nextUpdatedAt = monotonicUpdatedAt(row.updated_at, new Date().toISOString());
     const result = db.prepare(

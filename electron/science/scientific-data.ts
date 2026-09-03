@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { TextDecoder } from "node:util";
 import type { ScienceSource } from "../../shared/science-contract";
 import { ScienceStore } from "./store";
 
@@ -27,6 +28,7 @@ export interface ScientificDataSourceDescriptor {
 export interface ScientificDataHttpReceipt {
   endpointOrigin: string;
   endpointPath: string;
+  endpointSearch: string;
   requestSha256: string;
   responseSha256: string | null;
   retrievedAt: string;
@@ -53,6 +55,9 @@ export interface ScientificDataRetrievalResult {
   providerVersion: string;
   canonicalExternalId: string;
   entityKind: "protein-structure" | "compound";
+  metadata:
+    | { kind: "rcsb-entry"; title: string; authors: string[]; publicationYear: number | null }
+    | { kind: "pubchem-compound"; cid: string; title: string; canonicalSmiles: string | null };
   source: ScienceSource;
   receipts: ScientificDataHttpReceipt[];
   materialization: {
@@ -96,6 +101,7 @@ const PROVIDER_HOSTS: Record<ScientificDataProvider, Set<string>> = {
 };
 const MAX_METADATA_BYTES = 2 * 1024 * 1024;
 const MAX_STRUCTURE_BYTES = 32 * 1024 * 1024;
+const MAX_CHEMISTRY_BYTES = 4 * 1024 * 1024;
 const singleFlights = new Map<string, Promise<ScientificDataRetrievalResult>>();
 const singleFlightInputSha256 = new Map<string, string>();
 const originStarts = new Map<string, Promise<number>>();
@@ -110,6 +116,11 @@ function canonicalJson(value: unknown): string {
 }
 
 function sha256(value: Buffer | string): string { return createHash("sha256").update(value).digest("hex"); }
+function exactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
+}
 function stableUuid(value: string): string {
   const hex = sha256(value);
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-8${hex.slice(13, 16)}-${((Number.parseInt(hex[16], 16) & 0x3) | 0x8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
@@ -230,6 +241,7 @@ async function safeFetch(
         bytes,
         receipt: {
           endpointOrigin: url.origin, endpointPath: url.pathname, requestSha256, responseSha256: sha256(bytes),
+          endpointSearch: url.search,
           retrievedAt: new Date().toISOString(), durationMs: Date.now() - started, status: "ok", httpStatus: response.status,
           mimeType, byteSize: bytes.length, retryCount: attempt, headers: headerReceipt(response.headers), errorCode: null,
         },
@@ -240,6 +252,7 @@ async function safeFetch(
       throw Object.assign(error instanceof Error ? error : new Error("science-data-fetch-failed"), {
         receipt: {
           endpointOrigin: url.origin, endpointPath: url.pathname, requestSha256, responseSha256: null,
+          endpointSearch: url.search,
           retrievedAt: new Date().toISOString(), durationMs: Date.now() - started, status: "error", httpStatus: lastResponse?.status ?? null,
           mimeType, byteSize: 0, retryCount: attempt, headers: lastResponse ? headerReceipt(lastResponse.headers) : headerReceipt(new Headers()),
           errorCode: error instanceof Error ? error.message.slice(0, 240) : "science-data-fetch-failed",
@@ -254,7 +267,7 @@ async function safeFetch(
 
 function jsonRecord(bytes: Buffer, code: string): Record<string, unknown> {
   let value: unknown;
-  try { value = JSON.parse(bytes.toString("utf8")); } catch { throw new Error(code); }
+  try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); } catch { throw new Error(code); }
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(code);
   return value as Record<string, unknown>;
 }
@@ -280,6 +293,64 @@ function pubchemProperty(record: Record<string, unknown>): { cid: string; title:
   return { cid, title, canonicalSmiles: smiles };
 }
 
+function assertPubChemSdf(bytes: Buffer): void {
+  if (bytes.length > MAX_CHEMISTRY_BYTES) throw new Error("science-data-response-too-large");
+  let value: string;
+  try { value = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
+  catch { throw new Error("science-data-pubchem-sdf-invalid"); }
+  if ((value.match(/^\$\$\$\$\s*$/gm) ?? []).length !== 1
+    || !/\$\$\$\$\s*$/.test(value)) {
+    throw new Error("science-data-pubchem-sdf-invalid");
+  }
+}
+
+type RunResourceLike = {
+  role: string;
+  mimeType: string;
+  byteSize: number;
+  sha256: string;
+  blobRef: string;
+  artifactId: string | null;
+  artifactVersion: number | null;
+};
+
+function manifestResource(resource: RunResourceLike): RunResourceLike {
+  return {
+    role: resource.role,
+    mimeType: resource.mimeType,
+    byteSize: resource.byteSize,
+    sha256: resource.sha256,
+    blobRef: resource.blobRef,
+    artifactId: resource.artifactId,
+    artifactVersion: resource.artifactVersion,
+  };
+}
+
+function receiptRecord(value: unknown): ScientificDataHttpReceipt {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("science-data-run-receipt-invalid");
+  const receipt = value as Record<string, unknown>;
+  const headers = receipt.headers && typeof receipt.headers === "object" && !Array.isArray(receipt.headers)
+    ? receipt.headers as Record<string, unknown>
+    : null;
+  if (!exactKeys(receipt, [
+    "endpointOrigin", "endpointPath", "endpointSearch", "requestSha256", "responseSha256", "retrievedAt", "durationMs",
+    "status", "httpStatus", "mimeType", "byteSize", "retryCount", "headers", "errorCode",
+  ]) || !headers || !exactKeys(headers, ["etag", "lastModified", "retryAfter", "rateLimit", "rateRemaining", "throttlingControl"])
+    || receipt.status !== "ok" || receipt.httpStatus !== 200 || receipt.errorCode !== null
+    || typeof receipt.endpointOrigin !== "string" || typeof receipt.endpointPath !== "string" || typeof receipt.endpointSearch !== "string"
+    || typeof receipt.requestSha256 !== "string" || !/^[a-f0-9]{64}$/.test(receipt.requestSha256)
+    || typeof receipt.responseSha256 !== "string" || !/^[a-f0-9]{64}$/.test(receipt.responseSha256)
+    || typeof receipt.mimeType !== "string" || !receipt.mimeType
+    || typeof receipt.retrievedAt !== "string" || !Number.isFinite(Date.parse(receipt.retrievedAt))
+    || !Number.isSafeInteger(receipt.durationMs) || Number(receipt.durationMs) < 0
+    || !Number.isSafeInteger(receipt.byteSize) || Number(receipt.byteSize) < 1
+    || !Number.isSafeInteger(receipt.retryCount) || Number(receipt.retryCount) < 0 || Number(receipt.retryCount) > 2
+    || Object.values(headers).some((header) => header !== null && typeof header !== "string")) {
+    throw new Error("science-data-run-receipt-invalid");
+  }
+  return receipt as unknown as ScientificDataHttpReceipt;
+}
+
 function sourceForBytes(
   store: ScienceStore,
   requestId: string,
@@ -297,7 +368,17 @@ function sourceForBytes(
     authors: metadata.authors, publicationYear: metadata.publicationYear, publisher: metadata.publisher,
     accessState: "retrieved", contentSha256: digest, mimeType, retrievedAt, retrievalMethod, license: metadata.license,
   }, bytes).source;
-  if (existing.version.contentSha256 === digest && existing.version.mimeType?.split(";", 1)[0].toLowerCase() === mimeType) return existing;
+  if (existing.publisher !== metadata.publisher || existing.title !== metadata.title
+    || canonicalJson(existing.authors) !== canonicalJson(metadata.authors)
+    || existing.publicationYear !== metadata.publicationYear) {
+    throw new Error("science-data-source-identity-conflict");
+  }
+  if (existing.version.contentSha256 === digest && existing.version.mimeType?.split(";", 1)[0].toLowerCase() === mimeType) {
+    if (existing.version.retrievalMethod !== retrievalMethod || existing.version.license !== metadata.license) {
+      throw new Error("science-data-source-identity-conflict");
+    }
+    return existing;
+  }
   return store.appendSourceVersion({
     requestId, projectId, sourceId: existing.id, accessState: "retrieved", contentSha256: digest,
     mimeType, retrievedAt, retrievalMethod, license: metadata.license,
@@ -323,6 +404,139 @@ export class ScienceScientificDataService {
   ) {}
 
   listSources(): ScientificDataSourceDescriptor[] { return listScientificDataSources(this.materializerAvailable); }
+
+  private storedResultForRun(
+    projectId: string,
+    runId: string,
+    expectedQuery?: ScientificDataQuery,
+  ): ScientificDataRetrievalResult {
+    const run = this.store.getResearchRunForProject(projectId, runId);
+    const input = run?.inputs[0];
+    const metadataOutput = run?.outputs[0];
+    const structureOutput = run?.outputs[1];
+    const resultOutput = run?.outputs[2];
+    if (!run || run.status !== "succeeded" || run.toolId !== SCIENTIFIC_DATA_TOOL_ID || run.toolVersion !== SCIENTIFIC_DATA_TOOL_VERSION
+      || run.runtime !== "electron-main" || run.inputs.length !== 1 || run.outputs.length !== 3
+      || input?.role !== "scientific-data-query" || input.mimeType !== "application/vnd.agentlas.scientific-data-query+json"
+      || metadataOutput?.role !== "provider-metadata-response" || metadataOutput.mimeType !== "application/json"
+      || structureOutput?.role !== "provider-structure-response"
+      || resultOutput?.role !== "scientific-data-retrieval" || resultOutput.mimeType !== "application/vnd.agentlas.scientific-data-retrieval+json") {
+      throw new Error("science-data-run-closure-invalid");
+    }
+    if (sha256(canonicalJson(run.inputs.map(manifestResource))) !== run.inputManifestSha256
+      || !run.outputManifestSha256
+      || sha256(canonicalJson(run.outputs.map(manifestResource))) !== run.outputManifestSha256) {
+      throw new Error("science-data-run-manifest-invalid");
+    }
+    const inputBytes = this.store.readRunBlob(input);
+    const metadataBytes = this.store.readRunBlob(metadataOutput);
+    const structureBytes = this.store.readRunBlob(structureOutput);
+    const resultBytes = this.store.readRunBlob(resultOutput);
+    let queryEnvelope: Record<string, unknown>;
+    let resultRecord: Record<string, unknown>;
+    try {
+      queryEnvelope = jsonRecord(inputBytes, "science-data-run-query-invalid");
+      resultRecord = jsonRecord(resultBytes, "science-data-run-result-invalid");
+    } catch {
+      throw new Error("science-data-run-closure-invalid");
+    }
+    const rawQuery = queryEnvelope.query && typeof queryEnvelope.query === "object" && !Array.isArray(queryEnvelope.query)
+      ? queryEnvelope.query as ScientificDataQuery
+      : null;
+    let query: ScientificDataQuery;
+    try { query = normalizedQuery(rawQuery as ScientificDataQuery); }
+    catch { throw new Error("science-data-run-query-invalid"); }
+    if (!exactKeys(queryEnvelope, ["schema", "query"]) || queryEnvelope.schema !== "agentlas.scientific-data-query/v1"
+      || !inputBytes.equals(Buffer.from(canonicalJson({ schema: "agentlas.scientific-data-query/v1", query }), "utf8"))
+      || (expectedQuery && canonicalJson(query) !== canonicalJson(normalizedQuery(expectedQuery)))) {
+      throw new Error("science-data-run-query-invalid");
+    }
+    if (!exactKeys(resultRecord, ["schema", "provider", "providerVersion", "canonicalExternalId", "entityKind", "metadata", "source", "receipts", "materialization", "runId", "replayed"])
+      || resultRecord.schema !== "agentlas.scientific-data-retrieval/v1" || resultRecord.provider !== query.provider
+      || resultRecord.providerVersion !== "1.0.0" || resultRecord.runId !== run.id || resultRecord.replayed !== false
+      || !resultBytes.equals(Buffer.from(canonicalJson(resultRecord), "utf8"))) {
+      throw new Error("science-data-run-result-invalid");
+    }
+    const receipts = Array.isArray(resultRecord.receipts) ? resultRecord.receipts.map(receiptRecord) : [];
+    if (receipts.length !== 2) throw new Error("science-data-run-receipt-invalid");
+    const [metadataReceipt, structureReceipt] = receipts;
+    if (metadataReceipt.responseSha256 !== metadataOutput.sha256 || metadataReceipt.byteSize !== metadataOutput.byteSize
+      || metadataReceipt.mimeType !== metadataOutput.mimeType || metadataReceipt.responseSha256 !== sha256(metadataBytes)
+      || structureReceipt.responseSha256 !== structureOutput.sha256 || structureReceipt.byteSize !== structureOutput.byteSize
+      || structureReceipt.mimeType !== structureOutput.mimeType || structureReceipt.responseSha256 !== sha256(structureBytes)) {
+      throw new Error("science-data-run-receipt-invalid");
+    }
+    const resultSource = resultRecord.source && typeof resultRecord.source === "object" && !Array.isArray(resultRecord.source)
+      ? resultRecord.source as ScienceSource
+      : null;
+    const materialization = resultRecord.materialization && typeof resultRecord.materialization === "object" && !Array.isArray(resultRecord.materialization)
+      ? resultRecord.materialization as Record<string, unknown>
+      : null;
+    if (!resultSource || !materialization || !exactKeys(materialization, ["status", "toolId", "retrievalRunId", "sourceId", "sourceVersionId", "reason"])
+      || materialization.retrievalRunId !== run.id || materialization.sourceId !== resultSource.id
+      || materialization.sourceVersionId !== resultSource.version.id) {
+      throw new Error("science-data-run-source-binding-invalid");
+    }
+    const expectedMaterializer = query.provider === "rcsb-pdb" ? "agentlas.source-to-molstar" : "agentlas.source-to-ketcher";
+    if (materialization.status === "ready") {
+      if (materialization.toolId !== expectedMaterializer || materialization.reason !== null) throw new Error("science-data-run-materialization-invalid");
+    } else if (materialization.status === "source-only") {
+      if (materialization.toolId !== null || typeof materialization.reason !== "string" || !materialization.reason.trim()) {
+        throw new Error("science-data-run-materialization-invalid");
+      }
+    } else {
+      throw new Error("science-data-run-materialization-invalid");
+    }
+    const source = this.store.getSourceVersionForProject(projectId, resultSource.id, resultSource.version.id);
+    if (!source || canonicalJson(source) !== canonicalJson(resultSource) || source.kind !== "database-record"
+      || source.version.accessState !== "retrieved" || source.version.contentSha256 !== structureOutput.sha256
+      || source.version.assetRef !== `science-source-cas:sha256:${structureOutput.sha256}`) {
+      throw new Error("science-data-run-source-binding-invalid");
+    }
+    if (query.provider === "rcsb-pdb") {
+      const parsedMetadata = rcsbMetadata(jsonRecord(metadataBytes, "science-data-rcsb-metadata-invalid"), query.entryId);
+      const expectedMetadata = { kind: "rcsb-entry", ...parsedMetadata };
+      const verified = this.store.getVerifiedSourceVersionForTool(projectId, source.id, source.version.id);
+      const metadataPath = `/rest/v1/core/entry/${query.entryId}`;
+      const structurePath = `/download/${query.entryId}.cif`;
+      if (resultRecord.canonicalExternalId !== query.entryId || resultRecord.entityKind !== "protein-structure"
+        || canonicalJson(resultRecord.metadata) !== canonicalJson(expectedMetadata)
+        || source.canonicalUri !== `pdb:${query.entryId}` || source.publisher !== "RCSB Protein Data Bank"
+        || source.title !== parsedMetadata.title || canonicalJson(source.authors) !== canonicalJson(parsedMetadata.authors)
+        || source.publicationYear !== parsedMetadata.publicationYear
+        || source.version.mimeType !== "chemical/x-cif" || source.version.license !== "CC0-1.0"
+        || source.version.retrievalMethod !== "agentlas-scientific-data:rcsb-pdb@1.0.0"
+        || verified.format !== "mmcif" || !verified.bytes.equals(structureBytes)
+        || metadataReceipt.endpointOrigin !== "https://data.rcsb.org" || metadataReceipt.endpointPath !== metadataPath || metadataReceipt.endpointSearch !== ""
+        || metadataReceipt.requestSha256 !== sha256(canonicalJson({ method: "GET", origin: "https://data.rcsb.org", path: metadataPath, search: "" }))
+        || structureReceipt.endpointOrigin !== "https://files.rcsb.org" || structureReceipt.endpointPath !== structurePath || structureReceipt.endpointSearch !== ""
+        || structureReceipt.requestSha256 !== sha256(canonicalJson({ method: "GET", origin: "https://files.rcsb.org", path: structurePath, search: "" }))) {
+        throw new Error("science-data-run-source-binding-invalid");
+      }
+    } else {
+      const property = pubchemProperty(jsonRecord(metadataBytes, "science-data-pubchem-property-invalid"));
+      const expectedMetadata = { kind: "pubchem-compound", ...property };
+      assertPubChemSdf(structureBytes);
+      const verified = this.store.getVerifiedChemistrySourceVersionForTool(projectId, source.id, source.version.id);
+      const encoded = encodeURIComponent(query.value);
+      const propertyPath = `/rest/pug/compound/${query.namespace}/${encoded}/property/Title,ConnectivitySMILES,InChIKey/JSON`;
+      const sdfPath = `/rest/pug/compound/cid/${property.cid}/record/SDF`;
+      if (resultRecord.canonicalExternalId !== property.cid || resultRecord.entityKind !== "compound"
+        || canonicalJson(resultRecord.metadata) !== canonicalJson(expectedMetadata)
+        || source.canonicalUri !== `https://pubchem.ncbi.nlm.nih.gov/compound/${property.cid}` || source.publisher !== "PubChem"
+        || source.title !== property.title || canonicalJson(source.authors) !== "[]" || source.publicationYear !== null
+        || source.version.mimeType !== "chemical/x-mdl-sdfile" || source.version.license !== null
+        || source.version.retrievalMethod !== "agentlas-scientific-data:pubchem@1.0.0;license=contributor-specific"
+        || !verified.bytes.equals(structureBytes)
+        || metadataReceipt.endpointOrigin !== "https://pubchem.ncbi.nlm.nih.gov" || metadataReceipt.endpointPath !== propertyPath || metadataReceipt.endpointSearch !== ""
+        || metadataReceipt.requestSha256 !== sha256(canonicalJson({ method: "GET", origin: "https://pubchem.ncbi.nlm.nih.gov", path: propertyPath, search: "" }))
+        || structureReceipt.endpointOrigin !== "https://pubchem.ncbi.nlm.nih.gov" || structureReceipt.endpointPath !== sdfPath || structureReceipt.endpointSearch !== "?record_type=3d"
+        || structureReceipt.requestSha256 !== sha256(canonicalJson({ method: "GET", origin: "https://pubchem.ncbi.nlm.nih.gov", path: sdfPath, search: "?record_type=3d" }))) {
+        throw new Error("science-data-run-source-binding-invalid");
+      }
+    }
+    return resultRecord as unknown as ScientificDataRetrievalResult;
+  }
 
   retrieve(input: RetrieveScientificDataInput): Promise<ScientificDataRetrievalResult> {
     const inputSha256 = sha256(canonicalJson(input));
@@ -353,63 +567,88 @@ export class ScienceScientificDataService {
       inputs: [inputResource],
     });
     const run = this.store.getResearchRunForProject(input.projectId, created.run.id) ?? created.run;
-    if (created.replayed && run.status === "succeeded" && run.outputs[0]) {
-      const output = run.outputs[0];
-      const stored = JSON.parse(this.store.readRunBlob({ blobRef: output.blobRef, sha256: output.sha256, byteSize: output.byteSize }).toString("utf8")) as ScientificDataRetrievalResult;
-      return { ...stored, replayed: true };
+    if (created.replayed && run.status === "succeeded") {
+      return { ...this.storedResultForRun(input.projectId, run.id, query), replayed: true };
+    }
+    if (created.replayed && run.status !== "running") {
+      throw new Error("science-data-run-terminal");
     }
     const receipts: ScientificDataHttpReceipt[] = [];
     try {
       let source: ScienceSource;
       let canonicalExternalId: string;
       let entityKind: ScientificDataRetrievalResult["entityKind"];
+      let providerMetadata: ScientificDataRetrievalResult["metadata"];
+      let metadataBytes: Buffer;
+      let structureBytes: Buffer;
       if (query.provider === "rcsb-pdb") {
         const metadataUrl = new URL(`https://data.rcsb.org/rest/v1/core/entry/${query.entryId}`);
         const metadataFetch = await safeFetch("rcsb-pdb", metadataUrl, ["application/json"], MAX_METADATA_BYTES, this.fetchImpl);
         receipts.push(metadataFetch.receipt);
+        metadataBytes = metadataFetch.bytes;
         const metadata = rcsbMetadata(jsonRecord(metadataFetch.bytes, "science-data-rcsb-metadata-invalid"), query.entryId);
         const structureUrl = new URL(`https://files.rcsb.org/download/${query.entryId}.cif`);
         const structureFetch = await safeFetch("rcsb-pdb", structureUrl, ["chemical/x-cif", "chemical/x-mmcif", "text/plain"], MAX_STRUCTURE_BYTES, this.fetchImpl);
         receipts.push(structureFetch.receipt);
+        structureBytes = structureFetch.bytes;
         source = sourceForBytes(this.store, stableUuid(`${input.requestId}:source:${query.entryId}`), input.projectId, {
           canonicalUri: `pdb:${query.entryId}`, title: metadata.title, authors: metadata.authors,
           publicationYear: metadata.publicationYear, publisher: "RCSB Protein Data Bank", license: "CC0-1.0",
         }, structureFetch.bytes, "chemical/x-cif", `agentlas-scientific-data:rcsb-pdb@${descriptor.version}`, structureFetch.receipt.retrievedAt);
         canonicalExternalId = query.entryId;
         entityKind = "protein-structure";
+        providerMetadata = { kind: "rcsb-entry", ...metadata };
       } else {
         const namespace = query.namespace === "inchikey" ? "inchikey" : query.namespace;
         const encoded = encodeURIComponent(query.value);
         const propertyUrl = new URL(`https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/${namespace}/${encoded}/property/Title,ConnectivitySMILES,InChIKey/JSON`);
         const propertyFetch = await safeFetch("pubchem", propertyUrl, ["application/json"], MAX_METADATA_BYTES, this.fetchImpl);
         receipts.push(propertyFetch.receipt);
+        metadataBytes = propertyFetch.bytes;
         const property = pubchemProperty(jsonRecord(propertyFetch.bytes, "science-data-pubchem-property-invalid"));
         const sdfUrl = new URL(`https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/${property.cid}/record/SDF?record_type=3d`);
-        const sdfFetch = await safeFetch("pubchem", sdfUrl, ["chemical/x-mdl-sdfile", "text/plain"], MAX_STRUCTURE_BYTES, this.fetchImpl);
+        const sdfFetch = await safeFetch("pubchem", sdfUrl, ["chemical/x-mdl-sdfile", "text/plain"], MAX_CHEMISTRY_BYTES, this.fetchImpl);
         receipts.push(sdfFetch.receipt);
+        assertPubChemSdf(sdfFetch.bytes);
+        structureBytes = sdfFetch.bytes;
         source = sourceForBytes(this.store, stableUuid(`${input.requestId}:source:${property.cid}`), input.projectId, {
           canonicalUri: `https://pubchem.ncbi.nlm.nih.gov/compound/${property.cid}`, title: property.title, authors: [],
           publicationYear: null, publisher: "PubChem", license: null,
         }, sdfFetch.bytes, "chemical/x-mdl-sdfile", `agentlas-scientific-data:pubchem@${descriptor.version};license=contributor-specific`, sdfFetch.receipt.retrievedAt);
         canonicalExternalId = property.cid;
         entityKind = "compound";
+        providerMetadata = { kind: "pubchem-compound", ...property };
       }
       const result: ScientificDataRetrievalResult = {
         schema: "agentlas.scientific-data-retrieval/v1", provider: query.provider, providerVersion: descriptor.version,
-        canonicalExternalId, entityKind, source, receipts,
+        canonicalExternalId, entityKind, metadata: providerMetadata, source, receipts,
         materialization: descriptor.materializer && this.materializerAvailable(descriptor.materializer)
           ? { status: "ready", toolId: descriptor.materializer, retrievalRunId: run.id, sourceId: source.id, sourceVersionId: source.version.id, reason: null }
-          : { status: "source-only", toolId: null, retrievalRunId: run.id, sourceId: source.id, sourceVersionId: source.version.id, reason: "A source-bound PubChem-to-Ketcher materializer is not installed yet." },
+          : { status: "source-only", toolId: null, retrievalRunId: run.id, sourceId: source.id, sourceVersionId: source.version.id, reason: `The source-bound ${query.provider === "rcsb-pdb" ? "RCSB-to-Mol*" : "PubChem-to-Ketcher"} materializer is not installed.` },
         runId: run.id, replayed: false,
+      };
+      const metadataReceipt = receipts[0];
+      const structureReceipt = receipts[1];
+      if (!metadataReceipt?.mimeType || !structureReceipt?.mimeType) throw new Error("science-data-receipts-incomplete");
+      const metadataBlob = this.store.putRunBlob(metadataBytes);
+      const metadataResource = {
+        role: "provider-metadata-response", mimeType: metadataReceipt.mimeType,
+        ...metadataBlob, artifactId: null, artifactVersion: null,
+      };
+      const structureBlob = this.store.putRunBlob(structureBytes);
+      const structureResource = {
+        role: "provider-structure-response", mimeType: structureReceipt.mimeType,
+        ...structureBlob, artifactId: null, artifactVersion: null,
       };
       const outputBytes = Buffer.from(canonicalJson(result), "utf8");
       const outputBlob = this.store.putRunBlob(outputBytes);
       const outputResource = { role: "scientific-data-retrieval", mimeType: "application/vnd.agentlas.scientific-data-retrieval+json", ...outputBlob, artifactId: null, artifactVersion: null };
+      const outputs = [metadataResource, structureResource, outputResource];
       this.store.completeResearchRun({
         requestId: stableUuid(`${input.requestId}:complete`), projectId: input.projectId, runId: run.id, status: "succeeded",
-        outputManifestSha256: sha256(canonicalJson([outputResource])), summary: `Retrieved ${query.provider} ${canonicalExternalId} as an immutable project Source.`, outputs: [outputResource],
+        outputManifestSha256: sha256(canonicalJson(outputs)), summary: `Retrieved ${query.provider} ${canonicalExternalId} with exact provider responses and an immutable project Source.`, outputs,
       });
-      return result;
+      return this.storedResultForRun(input.projectId, run.id, query);
     } catch (error) {
       const receipt = (error as { receipt?: ScientificDataHttpReceipt }).receipt;
       if (receipt) receipts.push(receipt);

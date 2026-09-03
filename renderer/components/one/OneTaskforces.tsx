@@ -36,7 +36,7 @@ function TaskforcePortraits({ taskforce, org, oneAvatarIcon }: { taskforce: OneT
   const visible = taskforce.memberAgentIds.slice(0, 2);
   const overflow = Math.max(0, taskforce.memberAgentIds.length - visible.length);
   return <span className={styles.portraitStack} aria-hidden="true">
-    <OneAgentPortrait status="quiet" label="One" tone={oneAvatarIcon?.trim() || "purple"} size="small" />
+    <OneAgentPortrait status="quiet" label="One" tone={oneAvatarIcon?.trim() || "character:orange-dino"} size="small" />
     {visible.map((agentId) => {
       const member = memberFor(org, agentId);
       return <OneAgentPortrait
@@ -237,7 +237,7 @@ export function OneTaskforceDialog({
       {busy && <div className={styles.busyState} role="status" aria-live="polite"><span aria-hidden="true" /><strong>{taskforce ? (locale === "ko" ? "태스크포스를 업데이트하는 중" : "Updating Taskforce") : (locale === "ko" ? "태스크포스를 만드는 중" : "Creating Taskforce")}</strong><small>{locale === "ko" ? "멤버와 독립 그룹 채팅을 함께 동기화합니다." : "Syncing members with the independent group chat."}</small><LoadingEstimate locale={locale} operationKey="one-taskforce-save" expectedSeconds={[2, 20]} /></div>}
       <section className={styles.memberList} aria-label={locale === "ko" ? "태스크포스 멤버" : "Taskforce members"}>
         <div className={styles.memberRow} data-fixed="true">
-          <OneAgentPortrait status="quiet" label="One" tone={oneAvatarIcon?.trim() || "purple"} />
+          <OneAgentPortrait status="quiet" label="One" tone={oneAvatarIcon?.trim() || "character:orange-dino"} />
           <span><strong>One</strong><small>{locale === "ko" ? "CEO 오케스트레이터 · 항상 참여" : "CEO orchestrator · Always present"}</small></span>
           <span className={styles.fixedBadge}><IconCheck size={12} />{locale === "ko" ? "고정" : "Pinned"}</span>
         </div>

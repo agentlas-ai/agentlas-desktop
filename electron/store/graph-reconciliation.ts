@@ -40,6 +40,7 @@ interface LatestRunRow {
   occurrence_id: string | null;
   graph_digest: string | null;
   checkpoint_json: string | null;
+  dry_run: number;
 }
 
 interface BoundEventRow {
@@ -234,13 +235,13 @@ function loadReconciliation(
   const run = exact
     ? getDb().prepare(
         `SELECT id, automation_id, started_at, last_activity_at, status, node_states_json,
-                occurrence_id, graph_digest, checkpoint_json
+                occurrence_id, graph_digest, checkpoint_json, dry_run
          FROM automation_runs
          WHERE automation_id = ? AND id = ?`,
       ).get(automationId, exact.runId) as LatestRunRow | undefined
     : getDb().prepare(
         `SELECT id, automation_id, started_at, last_activity_at, status, node_states_json,
-                occurrence_id, graph_digest, checkpoint_json
+                occurrence_id, graph_digest, checkpoint_json, dry_run
          FROM automation_runs
          WHERE automation_id = ?
          ORDER BY started_at DESC, rowid DESC
@@ -292,6 +293,9 @@ function loadReconciliation(
   const unresolvedNodes = graph.nodes.filter((node) => ambiguous.has(node.id) || inFlight.has(node.id));
   if (unresolvedNodes.length === 0) return null;
   const boundEvent = boundEventForOccurrence(automationId, checkpoint.occurrenceId);
+  if (run.dry_run === 1 && boundEvent) {
+    throw new Error("automation_graph_reconciliation_simulation_event_invalid");
+  }
   return {
     automation,
     graph,
@@ -307,6 +311,7 @@ function loadReconciliation(
       graphDigest: currentGraphDigest,
       checkpointDigest: checkpoint.checkpointDigest,
       updatedAt: checkpoint.updatedAt,
+      simulation: run.dry_run === 1,
       triggerEvent: boundEvent ? {
         id: boundEvent.id,
         triggerKind: boundEvent.trigger_kind,
@@ -484,7 +489,8 @@ export function forgetStaleGraphCheckpoint(
   if (row.graph_digest === currentGraphDigest) return { forgot: false, reason: "graph_unchanged" };
   db.prepare(
     `UPDATE automation_runs
-        SET node_states_json = '{}', checkpoint_json = NULL, graph_digest = ?, resume_consumed_at = NULL
+        SET status = 'skipped', node_states_json = '{}', checkpoint_json = NULL,
+            node_failures_json = NULL, graph_digest = ?, resume_consumed_at = NULL
       WHERE id = ?`,
   ).run(currentGraphDigest, row.id);
   return { forgot: true };
@@ -700,6 +706,7 @@ export function reconcileAutomationGraph(
         triggerEventId: loaded.boundEvent?.id ?? null,
         triggerEventStatus: eventStatus,
         restoredNextRunAt,
+        simulation: loaded.run.dry_run === 1,
       },
     });
 
@@ -708,6 +715,7 @@ export function reconcileAutomationGraph(
       runId: loaded.run.id,
       checkpointDigest: checkpoint.checkpointDigest,
       updatedAt: checkpoint.updatedAt,
+      simulation: loaded.run.dry_run === 1,
       eventStatus,
       resumeRequired: !allNodesTerminal,
       completedNodeIds: completedByUser,

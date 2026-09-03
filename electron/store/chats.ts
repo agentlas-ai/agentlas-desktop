@@ -2,7 +2,6 @@
 // 사이드바 "최근 채팅" 섹션은 listRecent로 채운다.
 // 프로젝트 페이지는 listByProject로, 회사 페이지는 listByFirm으로 채운다.
 import { createHash, randomUUID } from "node:crypto";
-import path from "node:path";
 import { RUNTIME_KINDS } from "../../shared/runtime-kinds";
 import { RUNTIME_BACKENDS } from "../../shared/runtime-backends";
 import { getDb } from "./db";
@@ -49,6 +48,7 @@ interface ChatRow {
   seat_label: string | null;
   seat_kind: string | null;
   participants_json: string | null;
+  last_message_preview?: string | null;
 }
 
 const CHAT_RUNTIME_KINDS = new Set<RuntimeKind>(RUNTIME_KINDS);
@@ -139,6 +139,9 @@ function toChat(row: ChatRow): Chat {
     archivedAt: row.archived_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    ...(row.last_message_preview?.trim()
+      ? { lastMessagePreview: row.last_message_preview.replace(/\s+/g, " ").trim().slice(0, 160) }
+      : {}),
     kind: row.kind === "division" ? "division" : "user",
     continuousMode: row.continuous_mode === 1,
     swarmMode: row.swarm_mode === 1,
@@ -204,7 +207,13 @@ export function listRecentChats(limit = 50): Chat[] {
 export function listRecentOneChats(limit = 50): Chat[] {
   const rows = getDb()
     .prepare(
-      `SELECT * FROM chats
+      `SELECT chats.*,
+         (SELECT text FROM chat_messages
+           WHERE chat_messages.chat_id = chats.id
+             AND chat_messages.role IN ('user', 'assistant')
+           ORDER BY chat_messages.created_at DESC
+           LIMIT 1) AS last_message_preview
+       FROM chats
        WHERE archived_at IS NULL
          AND kind = 'user'
          AND used_at IS NOT NULL
@@ -877,17 +886,11 @@ export function appendChatMessage(
   chatId: string,
   role: "user" | "assistant" | "system",
   text: string,
-  options?: {
-    images?: readonly ImageAttachment[];
-    /** Exact source path for each assistant image, used only to replace that
-     * transient markdown reference with its new durable attachment URL. */
-    imageSourcePaths?: readonly string[];
-  },
+  options?: { images?: readonly ImageAttachment[] },
 ): ChatHistoryEntry {
   const id = randomUUID();
   const now = new Date().toISOString();
   const db = getDb();
-  let persistedText = text;
   let persistedImageUrls: string[] | undefined;
   const write = db.transaction(() => {
     db.prepare(
@@ -896,17 +899,6 @@ export function appendChatMessage(
     if (options?.images?.length) {
       const persisted = persistChatMessageImages({ messageId: id, chatId, images: options.images, createdAt: now });
       persistedImageUrls = persisted.map((item) => item.url);
-      if (role === "assistant" && options.imageSourcePaths?.length) {
-        for (let index = 0; index < Math.min(options.imageSourcePaths.length, persisted.length); index += 1) {
-          const sourcePath = options.imageSourcePaths[index];
-          if (typeof sourcePath === "string" && path.isAbsolute(sourcePath) && persisted[index]) {
-            persistedText = persistedText.split(sourcePath).join(persisted[index].url);
-          }
-        }
-        if (persistedText !== text) {
-          db.prepare("UPDATE chat_messages SET text = ? WHERE id = ? AND chat_id = ?").run(persistedText, id, chatId);
-        }
-      }
     }
     db.prepare("UPDATE chats SET updated_at = ?, used_at = COALESCE(used_at, ?) WHERE id = ?").run(now, now, chatId);
   });
@@ -917,7 +909,7 @@ export function appendChatMessage(
   return {
     id,
     role,
-    text: persistedText,
+    text,
     createdAt: now,
     ...(persistedImageUrls?.length
       ? { imageDataUrls: persistedImageUrls }

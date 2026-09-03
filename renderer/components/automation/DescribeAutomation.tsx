@@ -13,6 +13,7 @@ import { ipc, ipcEvents } from "@/lib/ipc";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import type { GraphBuildRecoveryPlan, WorkflowGraph } from "@/lib/types";
 import { humanSchedule } from "@shared/graph-blueprint";
+import { IconClose } from "@/components/Icon";
 
 interface Question { id: string; question: string; why: string; choices?: string[] }
 interface Ready {
@@ -119,6 +120,7 @@ export function DescribeAutomation({
    * 런타임은 이미 조각을 주고 있었고 판정기가 버리던 것을 열었다.
    */
   const [liveSteps, setLiveSteps] = useState<string[]>([]);
+  const [dismissed, setDismissed] = useState(false);
 
   useEffect(() => {
     if (!persistenceKey) return;
@@ -379,22 +381,30 @@ export function DescribeAutomation({
   }
 
   const mutations = (ready?.graph.nodes ?? []).filter((n) => n.config?.effect === "mutation");
+  if (dismissed) return null;
 
   return (
     <section
       data-testid="describe-automation"
       data-presentation={presentation}
       style={{
-        border: "1px solid var(--paper-edge)", borderRadius: "var(--radius-md)",
-        background: "var(--paper)", padding: 16, display: "grid", gap: 12,
+        position: "relative",
+        border: "1px solid #e8e8ea", borderRadius: 18,
+        background: "#fff", padding: 24, display: "grid", gap: 12,
+        boxShadow: "0 12px 30px rgba(20, 25, 30, .06)",
         marginBottom: presentation === "chat" ? 8 : 20,
         ...(presentation === "chat" ? { maxWidth: 720 } : {}),
       }}
     >
-      <div style={{ fontSize: 14, fontWeight: 700, color: "var(--ink)" }}>
-        {presentation === "chat"
-          ? (ko ? "One이 이 대화에서 자동화를 설계합니다" : "One is designing this automation in chat")
-          : (ko ? "자동으로 돌릴 일을 적어 주세요." : "Tell me what to run for you.")}
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: "var(--ink)" }}>
+          {presentation === "chat"
+            ? (ko ? "One이 이 대화에서 자동화를 설계합니다" : "One is designing this automation in chat")
+            : (ko ? "자동으로 돌릴 일을 적어 주세요." : "Tell me what to run for you.")}
+        </div>
+        <button type="button" aria-label={ko ? "닫기" : "Close"} onClick={() => setDismissed(true)} style={{ width: 32, height: 32, display: "inline-grid", placeItems: "center", flex: "0 0 auto", marginTop: -8, marginRight: -8, padding: 0, border: 0, borderRadius: 9, background: "transparent", color: "#8a9095", cursor: "pointer" }}>
+          <IconClose size={14} />
+        </button>
       </div>
       {presentation === "chat" ? (
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>

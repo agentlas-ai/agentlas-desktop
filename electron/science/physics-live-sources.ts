@@ -1,6 +1,4 @@
-import path from "node:path";
 import { createHash } from "node:crypto";
-import { createRequire } from "node:module";
 import type { ScienceArtifact, ScienceSource } from "../../shared/science-contract";
 import {
   SCIENCE_PHYSICS_HEPDATA_SOURCE_TOOL_ID,
@@ -17,6 +15,7 @@ import {
   type SciencePhysicsLiveTable,
 } from "../../shared/science-physics";
 import { ScienceStore } from "./store";
+import { loadSciencePluginRuntime } from "./plugin-runtime";
 
 export const INSPIRE_HEP_LITERATURE_ENDPOINT = "https://inspirehep.net/api/literature";
 export const HEPDATA_RECORD_ENDPOINT = "https://www.hepdata.net/record";
@@ -338,8 +337,9 @@ function optionalText(value: unknown, maximum: number): string | null {
 }
 
 function loadRuntime(): PhysicsRuntime {
-  const runtimePath = path.resolve(__dirname, "../../../plugins/agentlas-physics/runtime/physics.cjs");
-  const runtime = createRequire(__filename)(runtimePath) as Partial<PhysicsRuntime>;
+  const { runtime } = loadSciencePluginRuntime<Partial<PhysicsRuntime>>(
+    "agentlas-physics", "runtime/physics.cjs", 16 * 1024 * 1024,
+  );
   if (typeof runtime.buildInspireUrl !== "function" || typeof runtime.normalizeInspireResponse !== "function"
     || typeof runtime.buildHepDataRecordUrl !== "function" || typeof runtime.buildHepDataTableUrl !== "function"
     || typeof runtime.normalizeHepDataRecord !== "function" || typeof runtime.normalizeHepDataTable !== "function") {

@@ -18,13 +18,21 @@
 //   - cookie value 포맷: base64url({ userId, workspaceId, exp }).<HMAC>
 //   - 성공 redirect 형태: /account?auth=google (POST /api/auth/google 응답의 redirectTo)
 //   - 사용자 메타(email, name) 조회 endpoint: /api/account/me (없으면 cookie payload만 표시)
-import { app, BrowserWindow, safeStorage, session as electronSession, shell } from "electron";
-import { createHash } from "node:crypto";
+ import { app, BrowserWindow, safeStorage, session as electronSession, shell } from "electron";
+ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import type { AuthSession } from "../shared/types";
 import { userDataPath } from "./runtime-paths";
+
+type ElectronApi = typeof import("electron");
+
+/** GUI-only auth surfaces are optional in the packaged headless daemon. */
+function electronApi(): ElectronApi {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  return require("electron") as ElectronApi;
+}
 
 const COOKIE_NAME = "agentlas_session";
 const AUTH_PARTITION = "persist:agentlas-auth";
@@ -130,7 +138,7 @@ let safeStorageAvailabilityInFlight: Promise<boolean> | null = null;
 
 interface SafeStorageDecryptAttempt {
   durableIdentity: string;
-  promise: ReturnType<typeof safeStorage.decryptStringAsync>;
+  promise: ReturnType<ElectronApi["safeStorage"]["decryptStringAsync"]>;
   settled: boolean;
 }
 
@@ -139,7 +147,7 @@ let safeStorageDecryptInFlight: SafeStorageDecryptAttempt | null = null;
 function sharedSafeStorageAvailabilityAttempt(): Promise<boolean> {
   if (safeStorageAvailabilityConfirmed) return Promise.resolve(true);
   if (safeStorageAvailabilityInFlight) return safeStorageAvailabilityInFlight;
-  const started = Promise.resolve().then(() => safeStorage.isAsyncEncryptionAvailable());
+  const started = Promise.resolve().then(() => electronApi().safeStorage.isAsyncEncryptionAvailable());
   safeStorageAvailabilityInFlight = started;
   void started.then(
     (available) => {
@@ -166,7 +174,7 @@ function sharedSafeStorageDecryptAttempt(
 
   const entry: SafeStorageDecryptAttempt = {
     durableIdentity,
-    promise: safeStorage.decryptStringAsync(ciphertext),
+    promise: electronApi().safeStorage.decryptStringAsync(ciphertext),
     settled: false,
   };
   safeStorageDecryptInFlight = entry;
@@ -288,6 +296,7 @@ async function writeStoredSessionCookie(value: string): Promise<void> {
     memoryAuthCookie = value;
     return;
   }
+  const { safeStorage } = electronApi();
   if (!safeStorage.isEncryptionAvailable()) {
     throw new Error("safeStorage encryption is not available");
   }
@@ -650,11 +659,13 @@ export function getSessionCookieHeader(): string | null {
 
 /** Main-only authority for signed Hub mutations. Never expose userId to renderer IPC. */
 export function getAuthenticatedActorIds(): { workspaceId: string; userId: string } | null {
+  if (USE_E2E_SESSION && !_cache) return { workspaceId: "e2e", userId: "e2e-user" };
   if (!getSessionCookieHeader() || !_cache?.workspaceId || !_cache.userId) return null;
   return { workspaceId: _cache.workspaceId, userId: _cache.userId };
 }
 
 export async function signInWithGoogle(parent: BrowserWindow | null): Promise<AuthSession> {
+  const { BrowserWindow, session: electronSession } = electronApi();
   const ses = electronSession.fromPartition(AUTH_PARTITION);
   // 로그인 창은 시스템 BrowserWindow — 별도 partition으로 격리해 메인 앱의 쿠키와 섞이지 않음
   const win = new BrowserWindow({
@@ -810,7 +821,7 @@ export async function signInWithBrowser(): Promise<AuthSession> {
       }
       const callback = `http://127.0.0.1:${port}/callback`;
       const loginUrl = `${webBaseUrl()}/account?desktop=1&callback=${encodeURIComponent(callback)}`;
-      void shell.openExternal(loginUrl);
+      void electronApi().shell.openExternal(loginUrl);
       setTimeout(() => finish({ signedIn: false }, server), 180000);
     });
   });
@@ -833,7 +844,7 @@ export async function signOut(): Promise<void> {
   }
   // 로그인 partition의 쿠키도 모두 비움 — 다음 signIn 시 깨끗한 상태에서 시작
   try {
-    const ses = electronSession.fromPartition(AUTH_PARTITION);
+    const ses = electronApi().session.fromPartition(AUTH_PARTITION);
     await ses.clearStorageData({ storages: ["cookies", "localstorage"] });
   } catch (err) {
     console.warn("[auth] clearStorageData failed", err);

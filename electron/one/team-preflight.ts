@@ -283,13 +283,17 @@ async function defaultJudgeTeamNeed(input: {
 }): Promise<{ needed: boolean; source: "llm" | "unavailable"; reason: string }> {
   const { judgeRequired } = await import("../system-agents/judgment");
   const verdict = await judgeRequired<"yes" | "no">({
-    kind: "one-team-preflight-need",
+    // v2 corrects the prior meaning contract. The old judge could call an
+    // explicit plain-language request to add one specialist "single-focus"
+    // and silently run One alone; a new kind also prevents that cached verdict
+    // from surviving the corrected instructions.
+    kind: "one-team-preflight-need-v2",
     question:
       "Would completing this request genuinely benefit from a small team of multiple specialist agents (parallel work, independent verification, or multiple distinct deliverables) instead of one agent?",
     labels: ["yes", "no"] as const,
     input: input.prompt.slice(0, 4_000),
     guidance:
-      "Judge the actual work in any language. Say yes only when multiple specialist agents add real value through independent contributions, parallel execution, or verification. Do not infer from keywords or phrasing templates.",
+      "Judge the actual work in any language. Say yes when multiple specialist agents add real value through independent contributions, parallel execution, or verification. An explicit semantic request to add, attach, bring in, or work with an expert/collaborator is itself a team request even when the person names only the one additional specialist or phrases it as a short follow-up. Do not require tool names, agent IDs, UI toggles, or a repeated description of the earlier task. Do not infer from isolated keywords or phrasing templates; decide the request's meaning.",
   });
   return {
     needed: verdict.verdict === "yes",

@@ -1,7 +1,7 @@
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { createHash } from "node:crypto";
-import { app, BrowserWindow, nativeTheme, screen, WebContentsView } from "electron";
+import { createHash, randomUUID } from "node:crypto";
+import { app, BrowserWindow, nativeImage, nativeTheme, screen, WebContentsView } from "electron";
 import type { Rectangle } from "electron";
 import { productExtensionSignedPayload, type ProductExtensionPermission, type ProductExtensionViewBounds, type ProductExtensionViewStatus } from "../../shared/product-extension";
 import { activeScienceExtension, SCIENCE_EXTENSION_ID } from "./science";
@@ -14,6 +14,8 @@ import {
   type ScienceRendererBinding,
   type ScienceRendererBounds,
   type ScienceRendererGuestReport,
+  type ScienceProteinStructureObservation,
+  type ScienceChemistryDocumentObservation,
   type ScienceRendererRenderRequest,
   type ScienceRendererRuntimeStatus,
   type ScienceChemistryCommitInput,
@@ -32,6 +34,7 @@ interface ActiveScienceRendererView {
   phase: ScienceRendererRuntimeStatus["phase"];
   sequence: number;
   sceneRevision: string | null;
+  observation: ScienceProteinStructureObservation | ScienceChemistryDocumentObservation | null;
   timeout: NodeJS.Timeout | null;
 }
 
@@ -207,8 +210,10 @@ function safeCaptureRect(value: unknown, active: ActiveScienceView): Rectangle {
 export async function captureScienceExtensionViewRegion(senderId: number, identity: { artifactId: string; artifactVersion: number; contentSha256: string }): Promise<{ png: Buffer; renderContext: Record<string, unknown> }> {
   const active = activeViewForSender(senderId);
   if (!active) throw new Error("science-extension-sender-not-authorized");
+  const captureToken = randomUUID();
   const value = await active.view.webContents.executeJavaScript(`(async () => {
     const expected = ${JSON.stringify(identity)};
+    const captureToken = ${JSON.stringify(captureToken)};
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     const host = [...document.querySelectorAll('[data-artifact-host]')].find((node) =>
       node.dataset.artifactHost === expected.artifactId &&
@@ -217,31 +222,85 @@ export async function captureScienceExtensionViewRegion(senderId: number, identi
     );
     const target = host?.querySelector('[data-science-capture]');
     if (!host || !target) throw new Error('science-capture-target-missing');
+    target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     const style = getComputedStyle(target);
     const rect = target.getBoundingClientRect();
     if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0 || rect.width < 1 || rect.height < 1) throw new Error('science-capture-target-hidden');
-    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    Object.defineProperty(target, '__agentlasScienceCaptureRestore', {
+      value: { style: target.getAttribute('style') },
+      configurable: true,
+    });
+    target.dataset.scienceCaptureStage = captureToken;
+    const opaqueBackground = style.backgroundColor === 'rgba(0, 0, 0, 0)' || style.backgroundColor === 'transparent'
+      ? 'rgb(255, 255, 255)'
+      : style.backgroundColor;
+    target.style.setProperty('position', 'fixed', 'important');
+    target.style.setProperty('inset', '0 auto auto 0', 'important');
+    target.style.setProperty('width', rect.width + 'px', 'important');
+    target.style.setProperty('height', rect.height + 'px', 'important');
+    target.style.setProperty('margin', '0', 'important');
+    target.style.setProperty('transform', 'none', 'important');
+    target.style.setProperty('z-index', '2147483647', 'important');
+    target.style.setProperty('isolation', 'isolate', 'important');
+    target.style.setProperty('background-color', opaqueBackground, 'important');
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const staged = target.getBoundingClientRect();
+    if (Math.abs(staged.x) > 0.5 || Math.abs(staged.y) > 0.5 || Math.abs(staged.width - rect.width) > 1 || Math.abs(staged.height - rect.height) > 1) {
+      throw new Error('science-capture-stage-invalid');
+    }
+    return { x: 0, y: 0, width: staged.width, height: staged.height };
   })()`);
   const rect = safeCaptureRect(value, active);
-  const image = await active.view.webContents.capturePage(rect, { stayHidden: true, stayAwake: true });
-  if (image.isEmpty()) throw new Error("science-capture-empty");
-  const pixels = image.getSize();
-  return {
-    png: image.toPNG(),
-    renderContext: {
-      electronVersion: process.versions.electron ?? "unknown",
-      chromiumVersion: process.versions.chrome ?? "unknown",
-      platform: process.platform,
-      architecture: process.arch,
-      locale: app.getLocale(),
-      colorScheme: nativeTheme.shouldUseDarkColors ? "dark" : "light",
-      deviceScaleFactor: screen.getDisplayMatching(active.window.getBounds()).scaleFactor,
-      cssWidth: rect.width,
-      cssHeight: rect.height,
-      pixelWidth: pixels.width,
-      pixelHeight: pixels.height,
-    },
-  };
+  // Electron 43 can ignore non-zero capture origins for an embedded
+  // WebContentsView. Stage the already-laid-out target at the renderer viewport
+  // origin, preserving its measured dimensions, then capture that origin. This
+  // avoids guessing between view, window, bitmap, and scrolled-document spaces.
+  const debuggerWasAttached = active.view.webContents.debugger.isAttached();
+  try {
+    if (!debuggerWasAttached) active.view.webContents.debugger.attach("1.3");
+    const result = await active.view.webContents.debugger.sendCommand("Page.captureScreenshot", {
+      format: "png",
+      fromSurface: true,
+      captureBeyondViewport: false,
+      clip: { x: rect.x, y: rect.y, width: rect.width, height: rect.height, scale: 1 },
+    }) as { data?: unknown };
+    if (typeof result.data !== "string" || !result.data) throw new Error("science-capture-empty");
+    const png = Buffer.from(result.data, "base64");
+    const image = nativeImage.createFromBuffer(png);
+    if (image.isEmpty()) throw new Error("science-capture-empty");
+    const pixels = image.getSize();
+    if (pixels.width < 1 || pixels.height < 1) throw new Error("science-capture-size-invalid");
+    return {
+      png,
+      renderContext: {
+        electronVersion: process.versions.electron ?? "unknown",
+        chromiumVersion: process.versions.chrome ?? "unknown",
+        platform: process.platform,
+        architecture: process.arch,
+        locale: app.getLocale(),
+        colorScheme: nativeTheme.shouldUseDarkColors ? "dark" : "light",
+        deviceScaleFactor: screen.getDisplayMatching(active.window.getBounds()).scaleFactor,
+        captureMethod: "cdp-staged-origin-clip",
+        cssWidth: rect.width,
+        cssHeight: rect.height,
+        pixelWidth: pixels.width,
+        pixelHeight: pixels.height,
+      },
+    };
+  } finally {
+    await active.view.webContents.executeJavaScript(`(() => {
+      const target = document.querySelector('[data-science-capture-stage=${JSON.stringify(captureToken)}]');
+      if (!target) return false;
+      const restore = target.__agentlasScienceCaptureRestore;
+      if (restore?.style === null) target.removeAttribute('style');
+      else if (typeof restore?.style === 'string') target.setAttribute('style', restore.style);
+      delete target.__agentlasScienceCaptureRestore;
+      delete target.dataset.scienceCaptureStage;
+      return true;
+    })()`).catch(() => false);
+    if (!debuggerWasAttached && active.view.webContents.debugger.isAttached()) active.view.webContents.debugger.detach();
+  }
 }
 
 function rendererForGuest(senderId: number, instanceId: string): { active: ActiveScienceView; renderer: ActiveScienceRendererView } | null {
@@ -252,13 +311,18 @@ function rendererForGuest(senderId: number, instanceId: string): { active: Activ
   return null;
 }
 
-function assertCapturedImageHasSignal(image: Electron.NativeImage): void {
+function assertCapturedImageHasSignal(
+  image: Electron.NativeImage,
+  observationKind: ScienceProteinStructureObservation["kind"] | ScienceChemistryDocumentObservation["kind"],
+): void {
   if (image.isEmpty()) throw new Error("science-renderer-capture-empty");
   const size = image.getSize();
   const bitmap = image.toBitmap();
   if (size.width < 240 || size.height < 200 || bitmap.length < size.width * size.height * 4) throw new Error("science-renderer-capture-invalid");
   const colors = new Set<number>();
   let centralChromaticPixels = 0;
+  let centralInkPixels = 0;
+  let centralEdgePixels = 0;
   const total = size.width * size.height;
   const step = Math.max(1, Math.floor(total / 2048));
   for (let pixel = 0; pixel < total && colors.size < 24; pixel += step) {
@@ -266,20 +330,49 @@ function assertCapturedImageHasSignal(image: Electron.NativeImage): void {
     colors.add((bitmap[offset] << 16) | (bitmap[offset + 1] << 8) | bitmap[offset + 2]);
   }
   if (colors.size < 8) throw new Error("science-renderer-capture-low-entropy");
-  const left = Math.floor(size.width * 0.12);
+  // Ketcher renders scientifically meaningful black/gray bond geometry on a
+  // white canvas, while Mol* is a chromatic WebGL scene. Do not use one color
+  // heuristic for both: it rejected valid chemical structures and encouraged
+  // accepting a colorful toolbar as if it were the scientific scene.
+  const chemistry = observationKind === "chemistry-document";
+  const left = Math.floor(size.width * (chemistry ? 0.18 : 0.12));
   const right = Math.ceil(size.width * 0.88);
-  const top = Math.floor(size.height * 0.1);
+  const top = Math.floor(size.height * (chemistry ? 0.2 : 0.1));
   const bottom = Math.ceil(size.height * 0.82);
-  for (let y = top; y < bottom; y += 3) {
-    for (let x = left; x < right; x += 3) {
+  const sampleStride = chemistry ? 2 : 3;
+  for (let y = top; y < bottom; y += sampleStride) {
+    for (let x = left; x < right; x += sampleStride) {
       const offset = (y * size.width + x) * 4;
       const red = bitmap[offset + 2];
       const green = bitmap[offset + 1];
       const blue = bitmap[offset];
-      if (Math.max(red, green, blue) - Math.min(red, green, blue) > 22 && Math.min(red, green, blue) < 225) centralChromaticPixels += 1;
+      const maximum = Math.max(red, green, blue);
+      const minimum = Math.min(red, green, blue);
+      if (maximum - minimum > 22 && minimum < 225) centralChromaticPixels += 1;
+      const luminance = (0.2126 * red) + (0.7152 * green) + (0.0722 * blue);
+      if (luminance < 205) centralInkPixels += 1;
+      if (chemistry && x + sampleStride < right && y + sampleStride < bottom) {
+        const rightOffset = (y * size.width + x + sampleStride) * 4;
+        const downOffset = ((y + sampleStride) * size.width + x) * 4;
+        const rightDelta = Math.max(
+          Math.abs(red - bitmap[rightOffset + 2]),
+          Math.abs(green - bitmap[rightOffset + 1]),
+          Math.abs(blue - bitmap[rightOffset]),
+        );
+        const downDelta = Math.max(
+          Math.abs(red - bitmap[downOffset + 2]),
+          Math.abs(green - bitmap[downOffset + 1]),
+          Math.abs(blue - bitmap[downOffset]),
+        );
+        if (Math.max(rightDelta, downDelta) > 34) centralEdgePixels += 1;
+      }
     }
   }
-  if (centralChromaticPixels < 20) throw new Error("science-renderer-capture-scene-missing");
+  if (chemistry) {
+    if (centralInkPixels < 24 || centralEdgePixels < 12) throw new Error("science-renderer-capture-scene-missing");
+  } else if (centralChromaticPixels < 20) {
+    throw new Error("science-renderer-capture-scene-missing");
+  }
 }
 
 export function updateScienceRendererViewBounds(senderId: number, input: MountScienceRendererInput): ScienceRendererRuntimeStatus {
@@ -358,6 +451,7 @@ export async function mountScienceRendererView(senderId: number, launch: Science
     phase: "launching",
     sequence: 0,
     sceneRevision: null,
+    observation: null,
     timeout: null,
   };
   active.renderer = renderer;
@@ -495,7 +589,7 @@ export function notifyScienceArtifactChanged(projectId: string, artifact: { id: 
   }
 }
 
-export async function scienceRendererReport(senderId: number, instanceId: string, value: unknown): Promise<ScienceRendererCapturedFrame | ScienceRendererRuntimeStatus> {
+export function scienceRendererReport(senderId: number, instanceId: string, value: unknown): ScienceRendererRuntimeStatus {
   const found = rendererForGuest(senderId, instanceId);
   if (!found) throw new Error("science-renderer-guest-not-authorized");
   const { active, renderer } = found;
@@ -513,6 +607,7 @@ export async function scienceRendererReport(senderId: number, instanceId: string
   renderer.sequence = report.sequence;
   renderer.phase = report.phase === "clean" ? "ready" : report.phase;
   renderer.sceneRevision = report.sceneRevision;
+  renderer.observation = report.observation;
   if (report.phase === "failed") {
     const status = rendererStatus(renderer, "failed", report.code ?? "science-renderer-adapter-failed", report.summary);
     notifyRenderer(active, status);
@@ -534,15 +629,29 @@ export async function scienceRendererReport(senderId: number, instanceId: string
   if (report.observation.kind === "chemistry-document") {
     if (renderer.request.input.kind !== "chemistry-document"
       || !report.observation.editable
+      || report.observation.atomCount < 1
+      || report.observation.bondCount < 0
       || report.observation.documentSha256 !== renderer.request.input.ketSha256
       || report.observation.canonicalSmilesSha256 !== renderer.request.input.canonicalSmilesSha256) throw new Error("science-renderer-observation-invalid");
   }
   renderer.phase = "capturing";
   notifyRenderer(active, rendererStatus(renderer, "capturing", null, "Capturing the stable renderer output."));
+  return rendererStatus(renderer, "capturing", null, "Capturing the stable renderer output.");
+}
+
+export async function captureStableScienceRenderer(instanceId: string): Promise<ScienceRendererCapturedFrame> {
+  const found = [...activeViews.values()]
+    .map((active) => ({ active, renderer: active.renderer }))
+    .find((entry) => entry.renderer?.instanceId === instanceId);
+  if (!found?.renderer || found.renderer.phase !== "capturing") throw new Error("science-renderer-not-capturing");
+  const { active, renderer } = found;
+  const observation = renderer.observation;
+  const sceneRevision = renderer.sceneRevision;
+  if (!observation || !sceneRevision) throw new Error("science-renderer-observation-invalid");
   await new Promise((resolve) => setTimeout(resolve, 300));
   if (active.renderer !== renderer || renderer.view.webContents.isDestroyed()) throw new Error("science-renderer-disposed");
   const image = await renderer.view.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true });
-  assertCapturedImageHasSignal(image);
+  assertCapturedImageHasSignal(image, observation.kind);
   const pixels = image.getSize();
   const bounds = renderer.view.getBounds();
   return {
@@ -559,11 +668,11 @@ export async function scienceRendererReport(senderId: number, instanceId: string
       cssHeight: bounds.height,
       pixelWidth: pixels.width,
       pixelHeight: pixels.height,
-      observation: report.observation,
+      observation,
     },
     renderRequestId: renderer.renderRequestId,
     rendererBinding: renderer.request.binding,
-    sceneRevision: report.sceneRevision,
+    sceneRevision,
     identity: {
       projectId: renderer.projectId,
       artifactId: renderer.request.artifactId,

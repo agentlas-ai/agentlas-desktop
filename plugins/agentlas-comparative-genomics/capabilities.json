@@ -1,0 +1,16 @@
+{
+  "schema": "agentlas.science-plugin-capabilities/v1",
+  "plugin": "agentlas-comparative-genomics",
+  "version": "0.2.0",
+  "provider": { "name": "Ensembl Compara", "origin": "https://rest.ensembl.org", "authentication": "anonymous" },
+  "operations": [
+    { "id": "reference-assembly-manifest", "network": true, "outputs": ["source", "research-run", "editable-table-artifact", "provider-fasta-checksum"] },
+    { "id": "gene-tree", "network": true, "outputs": ["source", "research-run", "phylogeny.radial", "publication-table"] },
+    { "id": "alignment-qc", "network": false, "outputs": ["alignment-receipt", "publication-table"] },
+    { "id": "publication-table-materialization", "network": false, "outputs": ["research-run", "editable-table-artifact", "docx-table", "latex-table"] },
+    { "id": "hypothetical-asr-fitch", "network": false, "inputs": ["rooted-strictly-bifurcating-tree", "extant-observed-dna-alignment", "explicit-non-root-internal-node"], "outputs": ["hypothetical-ambiguity-sets", "site-table", "interactive-ambiguity-figure", "research-run", "artifact"] },
+    { "id": "extant-archosaur-locus-panel", "network": false, "inputs": ["succeeded-comparative-genomics-cdna-run", "succeeded-extant-reference-assembly-run", "selected-avian-leaves", "selected-crocodilian-leaves"], "outputs": ["extant-only-locus-qc", "publication-table", "interactive-vega-figure", "research-run", "artifact"] }
+  ],
+  "evidenceClasses": { "extantSequenceBytes": "observed", "orthologyAlignmentTree": "inferred", "ancestralState": "hypothetical" },
+  "unavailable": ["local-realignment", "alternative-topology-sensitivity", "publication-grade-ancestral-sequence-reconstruction", "extinct-species-genome", "phenotype-prediction", "embryo-or-hatching-assessment"]
+}

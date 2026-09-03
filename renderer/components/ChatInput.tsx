@@ -14,7 +14,6 @@ import type {
   AppFactoryAppRecord,
   InstalledAgent,
   InstalledFirm,
-  InstalledMcpServer,
   Project,
   RuntimeStatus,
 } from "@/lib/types";
@@ -127,8 +126,6 @@ interface MentionContext {
   apps: AgentlasAppDefinition[];
   generatedApps?: AppFactoryAppRecord[];
   envKeys: string[]; // 등록된 env 키 (Library > Environment에서 add한)
-  /** Globally installed MCP servers are available even when no agent declares one. */
-  plugins?: InstalledMcpServer[];
 }
 
 interface SendOptions {
@@ -310,6 +307,9 @@ function ChatInputComponent({
   onToggleGoal,
   progressLabel,
   goalCriteria,
+  goalRunStatus,
+  goalPauseReason,
+  onResumeGoal,
   onToggleContinuous,
   onToggleSwarm,
   queuedCount = 0,
@@ -359,6 +359,10 @@ function ChatInputComponent({
   progressLabel?: string;
   /** Host-owned success contract. Steering never changes this list. */
   goalCriteria?: string[];
+  /** Durable Desktop long-run state. Paused runs require an explicit resume. */
+  goalRunStatus?: string;
+  goalPauseReason?: string | null;
+  onResumeGoal?: () => void;
   /** 스웜(swarmMode) 현재 상태 + 토글. */
   swarmMode?: boolean;
   onToggleSwarm?: () => void;
@@ -1031,17 +1035,12 @@ function ChatInputComponent({
     return () => window.removeEventListener("pointerdown", onPointerDown);
   }, [trigger]);
 
-  // ── 플러그인 목록 (전역 설치 + 에이전트 선언 MCP 서버 dedupe) ─────
+  // ── 플러그인 목록 (설치된 에이전트의 MCP 서버 dedupe) ─────
   const plugins = useMemo(() => {
     const set = new Set<string>();
-    for (const server of context?.plugins ?? []) {
-      if (!server.enabled) continue;
-      const label = (locale === "ko" ? server.name : server.nameEn) || server.name || server.id;
-      if (label.trim()) set.add(label.trim());
-    }
     for (const a of context?.agents ?? []) for (const m of a.mcpServers) set.add(m);
     return [...set];
-  }, [context?.agents, context?.plugins, locale]);
+  }, [context?.agents]);
 
   return (
     <footer
@@ -1445,6 +1444,9 @@ function ChatInputComponent({
         <ComposerGoalBar
           label={progressLabel}
           criteria={goalCriteria}
+          runStatus={goalRunStatus}
+          pauseReason={goalPauseReason}
+          onResume={onResumeGoal}
           onEndGoal={() => toggleGoalMode(false)}
         />
       )}
@@ -1587,13 +1589,8 @@ function ChatInputComponent({
           {turnCalls.map((call) => <button type="button" key={call.key} onClick={() => setTurnCalls((current) => current.filter((item) => item.key !== call.key))}>@{call.label}<span>×</span></button>)}
         </div> : null}
 
-        {/* 텍스트 영역. macOS Accessibility can retain the previous native
-            placeholder when React updates only that attribute. Remount at the
-            execution boundary so VoiceOver and UI automation observe the same
-            idle / steering state that is visibly painted. The controlled draft
-            value survives the remount. */}
+        {/* 텍스트 영역 */}
         <textarea
-          key={busy ? "active-run" : "idle-run"}
           ref={textareaRef}
           data-chat-input="true"
           aria-label={locale === "ko" ? "채팅 입력" : "Chat message"}
@@ -2030,16 +2027,30 @@ function ChatInputComponent({
 function ComposerGoalBar({
   label,
   criteria,
+  runStatus,
+  pauseReason,
+  onResume,
   onEndGoal,
 }: {
   label?: string;
   criteria?: string[];
+  runStatus?: string;
+  pauseReason?: string | null;
+  onResume?: () => void;
   onEndGoal: () => void;
 }) {
   const { locale } = useT();
-  const title = label?.replace(/\s+/g, " ").trim() || (locale === "ko"
-    ? "다음 요청으로 목표와 성공 기준을 확정합니다"
-    : "Your next request will define the goal and its acceptance criteria");
+  const paused = runStatus === "paused";
+  const pausedCopy = pauseReason === "app_closed"
+    ? (locale === "ko" ? "앱이 종료되어 일시정지됨" : "Paused when the app closed")
+    : pauseReason === "crash_recovery"
+      ? (locale === "ko" ? "이전 실행 중단을 감지해 일시정지됨" : "Paused after recovering an interrupted run")
+      : (locale === "ko" ? "일시정지됨" : "Paused");
+  const title = paused
+    ? pausedCopy
+    : label?.replace(/\s+/g, " ").trim() || (locale === "ko"
+      ? "다음 요청으로 목표와 성공 기준을 확정합니다"
+      : "Your next request will define the goal and its acceptance criteria");
   const criteriaTitle = (criteria ?? []).join("\n");
   return (
     <div className="chat-composer-progress chat-composer-goal" role="status" aria-live="polite" data-chat-goal-bar="true">
@@ -2050,6 +2061,17 @@ function ComposerGoalBar({
         <span className="chat-composer-goal-criteria" title={criteriaTitle}>
           {locale === "ko" ? `성공 기준 ${criteria?.length}개` : `${criteria?.length} criteria`}
         </span>
+      )}
+      {paused && onResume && (
+        <button
+          type="button"
+          onClick={onResume}
+          data-chat-goal-resume="true"
+          aria-label={locale === "ko" ? "목표 수동 재개" : "Resume goal manually"}
+          title={locale === "ko" ? "이 앱에서 목표를 다시 실행합니다" : "Resume this goal in the app"}
+        >
+          {locale === "ko" ? "재개" : "Resume"}
+        </button>
       )}
       <button
         type="button"

@@ -1,7 +1,5 @@
-import path from "node:path";
 import { createHash } from "node:crypto";
-import { createRequire } from "node:module";
-import type { ScienceArtifact, ScienceSource } from "../../shared/science-contract";
+import type { ScienceArtifact, ScienceResearchRun, ScienceSource } from "../../shared/science-contract";
 import {
   SCIENCE_ECONOMICS_ARTIFACT_SCHEMA,
   SCIENCE_ECONOMICS_EVIDENCE_SCHEMA,
@@ -17,6 +15,7 @@ import {
   type ScienceEconomicIndicatorTableRow,
 } from "../../shared/science-economics";
 import { ScienceStore } from "./store";
+import { loadSciencePluginEsmRuntime } from "./plugin-runtime";
 
 const WORLD_BANK_ORIGIN = "https://api.worldbank.org";
 const WORLD_BANK_RESPONSE_LIMIT_BYTES = 8 * 1024 * 1024;
@@ -132,9 +131,10 @@ function safeInteger(value: unknown, minimum: number, maximum: number, code: str
   return Number(value);
 }
 
-function loadRuntime(): WorldBankRuntime {
-  const runtimePath = path.resolve(__dirname, "../../../plugins/agentlas-economic-data/runtime/economic-data.cjs");
-  const runtime = createRequire(__filename)(runtimePath) as Partial<WorldBankRuntime>;
+async function loadRuntime(): Promise<WorldBankRuntime> {
+  const { runtime } = await loadSciencePluginEsmRuntime<Partial<WorldBankRuntime>>(
+    "agentlas-economic-data", "runtime/world-bank-client.mjs", 16 * 1024 * 1024,
+  );
   if (typeof runtime.buildWorldBankUrl !== "function" || typeof runtime.normalizeWorldBankResponse !== "function") throw new Error("science-economics-runtime-invalid");
   return runtime as WorldBankRuntime;
 }
@@ -281,12 +281,61 @@ function parseReceipt(value: unknown, payload: ScienceEconomicIndicatorArtifactP
   return expected;
 }
 
+/**
+ * Re-verify the immutable retrieval closure before a downstream analysis reads
+ * an economics artifact. Keeping this check exported lets every child analysis
+ * share the same source/run/receipt rules as retrieval replay.
+ */
+export function assertScienceEconomicsCatalogRunClosure(
+  store: ScienceStore,
+  projectId: string,
+  payload: ScienceEconomicIndicatorArtifactPayload,
+): ScienceResearchRun {
+  const run = store.getResearchRunForProject(projectId, payload.evidence.runId);
+  const rawOutput = run?.outputs[0];
+  const receiptOutput = run?.outputs[1];
+  const payloadOutput = run?.outputs[2];
+  if (!run || run.status !== "succeeded" || run.toolId !== SCIENCE_ECONOMICS_TOOL_ID || run.toolVersion !== SCIENCE_ECONOMICS_TOOL_VERSION
+    || run.inputs.length !== 1 || run.inputs[0]?.role !== "economic-indicator-query"
+    || run.inputs[0]?.mimeType !== "application/vnd.agentlas.science.economic-indicator-query+json"
+    || run.outputs.length !== 3
+    || rawOutput?.role !== "provider-response" || rawOutput.mimeType !== "application/json"
+    || receiptOutput?.role !== "provider-receipt" || receiptOutput.mimeType !== "application/vnd.agentlas.science.economic-indicator-receipt+json"
+    || payloadOutput?.role !== "economic-indicator-artifact-payload" || payloadOutput.mimeType !== "application/vnd.agentlas.science.economic-indicator-artifact+json") {
+    throw new Error("science-economics-run-closure-invalid");
+  }
+  const rawBytes = store.readRunBlob(rawOutput);
+  const storedPayloadBytes = store.readRunBlob(payloadOutput);
+  const canonicalPayloadBytes = Buffer.from(canonicalJson(payload), "utf8");
+  if (rawOutput.sha256 !== payload.evidence.response.sha256 || rawOutput.byteSize !== payload.evidence.response.byteSize
+    || sha256(rawBytes) !== payload.evidence.response.sha256
+    || payloadOutput.sha256 !== sha256(canonicalPayloadBytes)
+    || !storedPayloadBytes.equals(canonicalPayloadBytes)) {
+    throw new Error("science-economics-run-closure-invalid");
+  }
+  const source = store.getSourceVersionForProject(projectId, payload.evidence.source.id, payload.evidence.source.versionId);
+  if (!source || source.canonicalUri !== payload.evidence.source.canonicalUri || source.version.accessState !== "retrieved"
+    || source.version.mimeType !== "application/json" || source.version.contentSha256 !== payload.evidence.response.sha256
+    || source.version.assetRef !== `science-source-cas:sha256:${payload.evidence.response.sha256}`) {
+    throw new Error("science-economics-source-run-closure-invalid");
+  }
+  const receipt = parseReceipt(JSON.parse(store.readRunBlob(receiptOutput).toString("utf8")), payload);
+  if (receipt.response.sha256 !== rawOutput.sha256 || receipt.source.id !== source.id || receipt.source.versionId !== source.version.id) {
+    throw new Error("science-economics-receipt-run-closure-invalid");
+  }
+  return run;
+}
+
 export class ScienceEconomicsCatalogService {
+  private readonly runtimePromise: Promise<WorldBankRuntime>;
+
   constructor(
     private readonly store: ScienceStore,
     private readonly fetchImpl: typeof fetch = fetch,
-    private readonly runtime: WorldBankRuntime = loadRuntime(),
-  ) {}
+    runtime?: WorldBankRuntime | Promise<WorldBankRuntime>,
+  ) {
+    this.runtimePromise = runtime === undefined ? loadRuntime() : Promise.resolve(runtime);
+  }
 
   private upsertSource(input: {
     requestId: string;
@@ -428,42 +477,13 @@ export class ScienceEconomicsCatalogService {
   }
 
   private assertRunClosure(projectId: string, payload: ScienceEconomicIndicatorArtifactPayload): void {
-    const run = this.store.getResearchRunForProject(projectId, payload.evidence.runId);
-    const rawOutput = run?.outputs[0];
-    const receiptOutput = run?.outputs[1];
-    const payloadOutput = run?.outputs[2];
-    if (!run || run.status !== "succeeded" || run.toolId !== SCIENCE_ECONOMICS_TOOL_ID || run.toolVersion !== SCIENCE_ECONOMICS_TOOL_VERSION
-      || run.inputs.length !== 1 || run.inputs[0]?.role !== "economic-indicator-query"
-      || run.inputs[0]?.mimeType !== "application/vnd.agentlas.science.economic-indicator-query+json"
-      || run.outputs.length !== 3
-      || rawOutput?.role !== "provider-response" || rawOutput.mimeType !== "application/json"
-      || receiptOutput?.role !== "provider-receipt" || receiptOutput.mimeType !== "application/vnd.agentlas.science.economic-indicator-receipt+json"
-      || payloadOutput?.role !== "economic-indicator-artifact-payload" || payloadOutput.mimeType !== "application/vnd.agentlas.science.economic-indicator-artifact+json") {
-      throw new Error("science-economics-run-closure-invalid");
-    }
-    const rawBytes = this.store.readRunBlob(rawOutput);
-    const storedPayloadBytes = this.store.readRunBlob(payloadOutput);
-    if (rawOutput.sha256 !== payload.evidence.response.sha256 || rawOutput.byteSize !== payload.evidence.response.byteSize
-      || sha256(rawBytes) !== payload.evidence.response.sha256
-      || payloadOutput.sha256 !== sha256(Buffer.from(canonicalJson(payload), "utf8"))
-      || !storedPayloadBytes.equals(Buffer.from(canonicalJson(payload), "utf8"))) {
-      throw new Error("science-economics-run-closure-invalid");
-    }
-    const source = this.store.getSourceVersionForProject(projectId, payload.evidence.source.id, payload.evidence.source.versionId);
-    if (!source || source.canonicalUri !== payload.evidence.source.canonicalUri || source.version.accessState !== "retrieved"
-      || source.version.mimeType !== "application/json" || source.version.contentSha256 !== payload.evidence.response.sha256
-      || source.version.assetRef !== `science-source-cas:sha256:${payload.evidence.response.sha256}`) {
-      throw new Error("science-economics-source-run-closure-invalid");
-    }
-    const receipt = parseReceipt(JSON.parse(this.store.readRunBlob(receiptOutput).toString("utf8")), payload);
-    if (receipt.response.sha256 !== rawOutput.sha256 || receipt.source.id !== source.id || receipt.source.versionId !== source.version.id) {
-      throw new Error("science-economics-receipt-run-closure-invalid");
-    }
+    assertScienceEconomicsCatalogRunClosure(this.store, projectId, payload);
   }
 
   async fetchSeries(input: ScienceEconomicsCatalogInput): Promise<ScienceEconomicsCatalogResult> {
     const requestedTitle = optionalTitle(input.title);
-    const builtUrl = validateWorldBankUrl(this.runtime.buildWorldBankUrl({
+    const runtime = await this.runtimePromise;
+    const builtUrl = validateWorldBankUrl(runtime.buildWorldBankUrl({
       country: input.country,
       indicator: input.indicator,
       startYear: input.startYear,
@@ -561,7 +581,7 @@ export class ScienceEconomicsCatalogService {
       if (fetched.mimeType !== "application/json") throw new Error("science-economics-response-mime-invalid");
       let providerPayload: unknown;
       try { providerPayload = JSON.parse(fetched.body.toString("utf8")); } catch { throw new Error("science-economics-response-json-invalid"); }
-      const runtimeNormalized = this.runtime.normalizeWorldBankResponse(providerPayload);
+      const runtimeNormalized = runtime.normalizeWorldBankResponse(providerPayload);
       const normalized = validateNormalizedWorldBankResponse(runtimeNormalized, query);
       const sourceNotes = sourceNotesFromNormalized(runtimeNormalized);
       const responseSha256 = sha256(fetched.body);

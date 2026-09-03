@@ -1,6 +1,6 @@
-import { app } from "electron";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import type {
   CanonicalTask,
@@ -146,7 +146,7 @@ function globalOneRoot(): string {
     const parent = realDirectory(path.dirname(resolved), "One workspace override parent");
     return ensureChildDirectory(parent, path.basename(resolved));
   }
-  const home = realDirectory(app.getPath("home"), "User home");
+  const home = realDirectory(os.homedir(), "User home");
   const agentlas = ensureChildDirectory(home, ".agentlas");
   return ensureChildDirectory(agentlas, "one");
 }

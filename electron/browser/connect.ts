@@ -7,7 +7,6 @@
 // 승인 게이트: 결제(payment)는 매번 확인. 그 외는 "한 번만 / 항상 승인 / 거부", always만 기억.
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { BrowserWindow } from "electron";
 import { chromium } from "playwright";
 import {
   acquireBrowserCdpLease,
@@ -371,7 +370,7 @@ async function verifyXSession(): Promise<boolean> {
   }
 }
 
-/** 저장 버튼도 X 전용 프로필의 실제 로그인 확인을 통과해야 초록 상태가 된다. */
+/** 사용자가 UI에서 저장을 눌러도 X는 실제 전용 프로필에서 로그인된 경우에만 valid다. */
 export async function browserMarkSession(site: string, status: "valid" | "expired" | "none"): Promise<{ ok: boolean; error?: string }> {
   const norm = normalizeSite(site);
   if (status === "valid" && norm === "x.com") {
@@ -468,7 +467,23 @@ function emitApprovalLifecycle(event: BrowserApprovalLifecycleEvent): void {
 }
 
 function emitToRenderer(channel: string, payload: unknown): void {
-  for (const w of BrowserWindow.getAllWindows()) {
+  let windows: Array<{
+    isDestroyed: () => boolean;
+    webContents: { send: (channel: string, payload: unknown) => void };
+  }>;
+  try {
+    // The packaged daemon projects browser approvals to trusted phones but has
+    // no Electron renderer. Delay the optional desktop surface lookup so that
+    // importing the shared approval registry remains headless-safe.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const electron = require("electron") as {
+      BrowserWindow?: { getAllWindows?: () => typeof windows };
+    };
+    windows = electron.BrowserWindow?.getAllWindows?.() ?? [];
+  } catch {
+    return;
+  }
+  for (const w of windows) {
     if (!w.isDestroyed()) {
       try {
         w.webContents.send(channel, payload);

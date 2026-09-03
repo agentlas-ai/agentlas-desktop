@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "properties": {
+    "observed": { "type": "integer", "minimum": 0, "maximum": 1000000000, "description": "Observed event count n." },
+    "background": { "type": "number", "exclusiveMinimum": 0, "maximum": 1000000000000, "description": "Expected background b (same units as n)." },
+    "background_uncertainty": { "type": "number", "minimum": 0, "maximum": 1000000000000, "default": 0, "description": "Gaussian standard uncertainty on b (0 = background exactly known)." },
+    "signal_expected": { "type": "number", "exclusiveMinimum": 0, "maximum": 1000000000000, "description": "Expected signal events s at signal strength mu = 1." },
+    "confidence_level": { "type": "number", "minimum": 0.5, "maximum": 0.999999, "default": 0.95 },
+    "feldman_cousins": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean", "default": true },
+        "signal_max": { "type": "number", "minimum": 1, "maximum": 100000, "description": "Upper edge of the signal-events grid (default n + 5 sqrt(n + b) + 10, at least 10)." },
+        "signal_step": { "type": "number", "minimum": 0.0001, "maximum": 10, "description": "Grid step (default max(0.01, signal_max / 2000)); signal_max / signal_step must not exceed 20000." }
+      },
+      "additionalProperties": false
+    },
+    "label": { "type": "string", "minLength": 1, "maxLength": 160 }
+  },
+  "required": ["observed", "background", "signal_expected"],
+  "additionalProperties": false
+}

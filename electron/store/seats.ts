@@ -378,7 +378,9 @@ export function replaceSeatOccupant(seatId: string, previousAgentId: string, nex
     "INSERT OR IGNORE INTO one_seat_occupants (seat_id, slot, agent_id, display_name, since, until) VALUES (?, ?, ?, ?, ?, NULL)",
   ).run(seatId, slot, nextAgentId, agentDisplayName(nextAgentId), nextOccupancySince(seatId, slot, now));
   db.prepare("UPDATE one_seats SET updated_at = ? WHERE id = ?").run(now, seatId);
-  applySeatSnapshotToChats(seatId);
+  // Direct sessions keep the agent set captured when they were created. Replacing the
+  // organisational seat must not silently rewrite old rooms to speak as a new agent;
+  // those rooms remain readable and the UI asks the user to start a fresh session.
 }
 
 /**
@@ -400,9 +402,8 @@ export function assignSeatOccupant(seatId: string, agentId: string, slot = 0): O
     "INSERT OR IGNORE INTO one_seat_occupants (seat_id, slot, agent_id, display_name, since, until) VALUES (?, ?, ?, ?, ?, NULL)",
   ).run(seatId, slot, agentId, agentDisplayName(agentId), nextOccupancySince(seatId, slot, now));
   db.prepare("UPDATE one_seats SET updated_at = ? WHERE id = ?").run(now, seatId);
-  // 세션의 "마지막 담당"을 옮긴다 — 실행 경로가 이 칸으로 담당을 찾는다.
-  db.prepare("UPDATE chats SET agent_id = ? WHERE seat_id = ?").run(agentId, seatId);
-  applySeatSnapshotToChats(seatId);
+  // Existing direct sessions stay bound to their original agent. A new occupant becomes
+  // available only to a newly opened session; old rooms are preserved as read-only history.
   emitDesktopStoreChange({ entity: "chat" });
   return getSeat(seatId) as OneSeatRecord;
 }

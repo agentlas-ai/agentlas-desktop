@@ -8,8 +8,7 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { app } from "electron";
-import { userDataPath } from "../runtime-paths";
+import { isPackagedRuntime, userDataPath } from "../runtime-paths";
 import { publicAgentVisibility } from "../agents/policy";
 import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
 import { materializeTeamMemberCells, type MaterializableFirmNode } from "./team-member-cells";
@@ -18,7 +17,7 @@ import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-p
 let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 
-const SCHEMA_VERSION = 107;
+const SCHEMA_VERSION = 110;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -332,6 +331,11 @@ function recoveryOwnerActive(row: RecoverableAutomationRunRow, nowMs: number): b
   return pid != null && age <= AUTOMATION_RUN_STALE_AFTER_MS && recoveryProcessAlive(pid);
 }
 
+function recoveryOwnerProvenDead(row: RecoverableAutomationRunRow): boolean {
+  const pid = trustedRecoveryPid(row.lease_owner);
+  return pid != null && !recoveryProcessAlive(pid);
+}
+
 function rowHasFreshActivity(row: RecoverableAutomationRunRow, cutoffMs: number): boolean {
   const times = [
     row.last_activity_at,
@@ -411,7 +415,8 @@ function recoverStaleAutomationRunsInDb(db: Database.Database, now: Date): numbe
        WHERE r.status = 'running'`,
     ).all() as RecoverableAutomationRunRow[];
     const staleCandidates = candidates.filter((candidate) =>
-      !rowHasFreshActivity(candidate, cutoffMs) && !recoveryOwnerActive(candidate, nowMs)
+      recoveryOwnerProvenDead(candidate)
+      || (!rowHasFreshActivity(candidate, cutoffMs) && !recoveryOwnerActive(candidate, nowMs))
     );
     if (staleCandidates.length === 0) return 0;
 
@@ -1200,15 +1205,9 @@ function resolveStorePath(): string {
   const explicit = process.env.AGENTLAS_STORE_PATH?.trim();
   if (explicit) return explicit;
 
-  /*
-   * ★"패키지된 앱인가" 는 Electron 만 답할 수 있는 질문이다. 데몬(Electron 없음)에는
-   * `app` 이 없으므로, 그 호스트는 위 AGENTLAS_STORE_PATH 로 열 DB 를 **명시해야** 한다.
-   * 여기서 임의로 홈 밑을 고르면 사용자의 실제 DB 가 아닌 빈 DB 를 열어 놓고
-   * "데이터가 없다" 고 말하는 사고가 난다.
-   */
-  const packaged = (() => {
-    try { return app.isPackaged; } catch { return true; }
-  })();
+  // The packaged daemon has no importable Electron module. Its injected app
+  // user-data directory is the ownership proof used by isPackagedRuntime().
+  const packaged = isPackagedRuntime();
   if (!packaged) {
     const entry = process.argv[1] ?? "";
     const sandbox = path.join(
@@ -2118,7 +2117,8 @@ export function initStore(options: StoreInitOptions = {}): void {
         occurrence_id TEXT,
         graph_digest TEXT,
         checkpoint_json TEXT,
-        resume_of_run_id TEXT
+        resume_of_run_id TEXT,
+        dry_run INTEGER NOT NULL DEFAULT 0 CHECK(dry_run IN (0, 1))
       );
       CREATE INDEX IF NOT EXISTS idx_automation_runs_auto
       ON automation_runs(automation_id, started_at);
@@ -5282,6 +5282,11 @@ export function initStore(options: StoreInitOptions = {}): void {
     _db.pragma("foreign_keys = OFF");
     try {
       const migrateSeats = _db.transaction(() => {
+        // Some legitimate legacy/minimal stores never created a chat surface.
+        // There is nothing to rebuild in that case; generating an empty dynamic
+        // column list would produce `CREATE TABLE (..., seat_id ...)` and abort
+        // the entire upgrade with a syntax error.
+        if (!tableExists(_db!, "chats")) return;
         // ① chats 재작성 — seat_id 추가, agent_id 를 NULL 허용 + SET NULL 로 강등.
         //
         // ★ 열 이름을 손으로 나열하지 않는다 (2026-08-23 실측으로 잡은 사고).
@@ -5710,6 +5715,325 @@ export function initStore(options: StoreInitOptions = {}): void {
       console.log(
         `[store] v104 consolidated ${consolidated.groups} split auto experience coordinate(s) — ` +
           `moved ${consolidated.moved} candidate(s), archived ${consolidated.archived} duplicate pack(s)`,
+      );
+    }
+  }
+
+  // v107: Desktop-owned long-running work. These records are the local
+  // authority for One, Work, and Science campaigns; no Agentlas OS plugin or
+  // provider session is required to read, pause, recover, or verify them.
+  // The state tables are projections. long_run_events and verification
+  // receipts retain the append-only evidence needed to rebuild those views.
+  if (userVersion < 107) {
+    _db.exec(`
+      CREATE TABLE IF NOT EXISTS long_runs (
+        id TEXT PRIMARY KEY,
+        goal_id TEXT NOT NULL UNIQUE,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        surface TEXT NOT NULL CHECK(surface IN ('one','work','science')),
+        execution_location TEXT NOT NULL DEFAULT 'desktop-local'
+          CHECK(execution_location IN ('desktop-local','web-hosted')),
+        root_chat_id TEXT,
+        project_id TEXT,
+        science_job_id TEXT,
+        objective TEXT NOT NULL,
+        acceptance_criteria_json TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL CHECK(status IN (
+          'draft','queued','running','waiting_worker','waiting_tool','waiting_user',
+          'verifying','pausing','paused','blocked','completed','failed','cancelling','cancelled'
+        )),
+        pause_reason TEXT CHECK(pause_reason IS NULL OR pause_reason IN (
+          'user','app_closed','budget','runtime_unavailable','approval_required','crash_recovery'
+        )),
+        runtime_fallback_policy TEXT NOT NULL DEFAULT 'locked'
+          CHECK(runtime_fallback_policy IN ('locked','preapproved_safe')),
+        max_cycles INTEGER CHECK(max_cycles IS NULL OR max_cycles > 0),
+        max_cost_usd REAL CHECK(max_cost_usd IS NULL OR max_cost_usd >= 0),
+        wallclock_deadline TEXT,
+        max_workers INTEGER CHECK(max_workers IS NULL OR max_workers > 0),
+        cycle_count INTEGER NOT NULL DEFAULT 0 CHECK(cycle_count >= 0),
+        cost_used_usd REAL NOT NULL DEFAULT 0 CHECK(cost_used_usd >= 0),
+        last_progress_key TEXT,
+        stall_streak INTEGER NOT NULL DEFAULT 0 CHECK(stall_streak >= 0),
+        stall_window INTEGER NOT NULL DEFAULT 3 CHECK(stall_window > 0),
+        blocked_reason TEXT,
+        app_instance_id TEXT,
+        last_event_seq INTEGER NOT NULL DEFAULT 0 CHECK(last_event_seq >= 0),
+        version INTEGER NOT NULL DEFAULT 1 CHECK(version > 0),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        started_at TEXT,
+        paused_at TEXT,
+        completed_at TEXT,
+        FOREIGN KEY(root_chat_id) REFERENCES chats(id) ON DELETE SET NULL,
+        FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE SET NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_long_runs_status_updated
+        ON long_runs(status, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_long_runs_surface_updated
+        ON long_runs(surface, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_long_runs_chat
+        ON long_runs(root_chat_id, updated_at DESC) WHERE root_chat_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_long_runs_project
+        ON long_runs(project_id, updated_at DESC) WHERE project_id IS NOT NULL;
+
+      CREATE TABLE IF NOT EXISTS long_run_tasks (
+        run_id TEXT NOT NULL,
+        id TEXT NOT NULL,
+        parent_task_id TEXT,
+        title TEXT NOT NULL,
+        objective TEXT NOT NULL,
+        acceptance_criteria_json TEXT NOT NULL DEFAULT '[]',
+        dependency_ids_json TEXT NOT NULL DEFAULT '[]',
+        criterion_indices_json TEXT NOT NULL DEFAULT '[]',
+        state TEXT NOT NULL DEFAULT 'todo' CHECK(state IN (
+          'todo','doing','waiting_worker','waiting_tool','waiting_user',
+          'verifying','blocked','completed','failed','cancelled'
+        )),
+        assigned_worker_id TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+        attempt_limit INTEGER CHECK(attempt_limit IS NULL OR attempt_limit > 0),
+        evidence_ref TEXT,
+        blocked_reason TEXT,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT,
+        PRIMARY KEY(run_id, id),
+        FOREIGN KEY(run_id) REFERENCES long_runs(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_long_run_tasks_state
+        ON long_run_tasks(run_id, state, sort_order, created_at);
+      CREATE INDEX IF NOT EXISTS idx_long_run_tasks_worker
+        ON long_run_tasks(run_id, assigned_worker_id, state)
+        WHERE assigned_worker_id IS NOT NULL;
+
+      CREATE TABLE IF NOT EXISTS long_run_workers (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        parent_worker_id TEXT,
+        task_id TEXT,
+        role TEXT NOT NULL CHECK(role IN ('controller','specialist','verifier','executor','multimodal')),
+        agent_definition_id TEXT,
+        agent_release_json TEXT,
+        runtime_selection_json TEXT NOT NULL,
+        capability_descriptor_id TEXT,
+        workspace_binding_json TEXT NOT NULL,
+        permission_profile TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN (
+          'provisioning','idle','running','waiting','blocked','completed',
+          'failed','interrupted','cancelled'
+        )),
+        current_attempt INTEGER NOT NULL DEFAULT 0 CHECK(current_attempt >= 0),
+        last_heartbeat_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(run_id) REFERENCES long_runs(id) ON DELETE CASCADE,
+        FOREIGN KEY(parent_worker_id) REFERENCES long_run_workers(id) ON DELETE SET NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_long_run_workers_run_state
+        ON long_run_workers(run_id, state, created_at);
+      CREATE INDEX IF NOT EXISTS idx_long_run_workers_parent
+        ON long_run_workers(parent_worker_id, created_at)
+        WHERE parent_worker_id IS NOT NULL;
+
+      CREATE TABLE IF NOT EXISTS long_run_worker_attempts (
+        id TEXT PRIMARY KEY,
+        worker_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        task_id TEXT,
+        invocation_run_id TEXT,
+        attempt INTEGER NOT NULL CHECK(attempt > 0),
+        state TEXT NOT NULL CHECK(state IN (
+          'running','completed','failed','interrupted','cancelled','uncertain'
+        )),
+        runtime_selection_json TEXT NOT NULL,
+        native_coordinate_json TEXT,
+        continuity_capsule_json TEXT,
+        app_instance_id TEXT,
+        side_effect_state TEXT NOT NULL DEFAULT 'none'
+          CHECK(side_effect_state IN ('none','committed','uncertain')),
+        error_code TEXT,
+        error_message TEXT,
+        started_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT,
+        FOREIGN KEY(worker_id) REFERENCES long_run_workers(id) ON DELETE CASCADE,
+        FOREIGN KEY(run_id) REFERENCES long_runs(id) ON DELETE CASCADE,
+        UNIQUE(worker_id, attempt),
+        UNIQUE(invocation_run_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_long_run_attempts_run_state
+        ON long_run_worker_attempts(run_id, state, started_at DESC);
+
+      CREATE TABLE IF NOT EXISTS long_run_messages (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        from_worker_id TEXT NOT NULL,
+        to_worker_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('task','result','question','steer','cancel','receipt')),
+        body_ref TEXT NOT NULL,
+        artifact_refs_json TEXT NOT NULL DEFAULT '[]',
+        state TEXT NOT NULL DEFAULT 'queued'
+          CHECK(state IN ('queued','delivered','acknowledged','failed','cancelled')),
+        created_at TEXT NOT NULL,
+        delivered_at TEXT,
+        acknowledged_at TEXT,
+        FOREIGN KEY(run_id) REFERENCES long_runs(id) ON DELETE CASCADE,
+        FOREIGN KEY(from_worker_id) REFERENCES long_run_workers(id) ON DELETE CASCADE,
+        FOREIGN KEY(to_worker_id) REFERENCES long_run_workers(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_long_run_messages_delivery
+        ON long_run_messages(to_worker_id, state, created_at);
+
+      CREATE TABLE IF NOT EXISTS long_run_verification_receipts (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        task_id TEXT,
+        criterion_index INTEGER NOT NULL CHECK(criterion_index >= 0),
+        verifier_worker_id TEXT,
+        verdict TEXT NOT NULL CHECK(verdict IN ('passed','failed','inconclusive')),
+        evidence_refs_json TEXT NOT NULL DEFAULT '[]',
+        artifact_refs_json TEXT NOT NULL DEFAULT '[]',
+        summary TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(run_id) REFERENCES long_runs(id) ON DELETE CASCADE,
+        FOREIGN KEY(verifier_worker_id) REFERENCES long_run_workers(id) ON DELETE SET NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_long_run_verification_criterion
+        ON long_run_verification_receipts(run_id, criterion_index, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_long_run_verification_task
+        ON long_run_verification_receipts(run_id, task_id, created_at DESC)
+        WHERE task_id IS NOT NULL;
+
+      CREATE TABLE IF NOT EXISTS long_run_events (
+        run_id TEXT NOT NULL,
+        seq INTEGER NOT NULL CHECK(seq > 0),
+        kind TEXT NOT NULL,
+        actor_kind TEXT NOT NULL CHECK(actor_kind IN ('host','user','worker','runtime','tool','system')),
+        actor_id TEXT,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        occurred_at TEXT NOT NULL,
+        PRIMARY KEY(run_id, seq),
+        FOREIGN KEY(run_id) REFERENCES long_runs(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_long_run_events_kind
+        ON long_run_events(run_id, kind, seq DESC);
+    `);
+  }
+
+  // v108: one provider invocation may contain a controller plus multiple
+  // projected child workers. The v107 UNIQUE(invocation_run_id) constraint
+  // accidentally made that actual mixed-runtime tree impossible. Preserve
+  // uniqueness per logical worker attempt while allowing every child attempt
+  // to link to the same durable invocation receipt.
+  if (userVersion < 108) {
+    _db.transaction(() => {
+      // A pre-release v108 attempt could have stopped between DDL statements.
+      // Recover the only safe shape, otherwise rebuild the temporary table
+      // inside one SQLite transaction so retries never see a half migration.
+      const hasOriginal = tableExists(_db!, "long_run_worker_attempts");
+      const hasTemporary = tableExists(_db!, "long_run_worker_attempts_v108");
+      if (!hasOriginal && hasTemporary) {
+        _db!.exec("ALTER TABLE long_run_worker_attempts_v108 RENAME TO long_run_worker_attempts");
+      } else {
+        if (hasTemporary) _db!.exec("DROP TABLE long_run_worker_attempts_v108");
+        _db!.exec(`
+      CREATE TABLE long_run_worker_attempts_v108 (
+        id TEXT PRIMARY KEY,
+        worker_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        task_id TEXT,
+        invocation_run_id TEXT,
+        attempt INTEGER NOT NULL CHECK(attempt > 0),
+        state TEXT NOT NULL CHECK(state IN (
+          'running','completed','failed','interrupted','cancelled','uncertain'
+        )),
+        runtime_selection_json TEXT NOT NULL,
+        native_coordinate_json TEXT,
+        continuity_capsule_json TEXT,
+        app_instance_id TEXT,
+        side_effect_state TEXT NOT NULL DEFAULT 'none'
+          CHECK(side_effect_state IN ('none','committed','uncertain')),
+        error_code TEXT,
+        error_message TEXT,
+        started_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT,
+        FOREIGN KEY(worker_id) REFERENCES long_run_workers(id) ON DELETE CASCADE,
+        FOREIGN KEY(run_id) REFERENCES long_runs(id) ON DELETE CASCADE,
+        UNIQUE(worker_id, attempt)
+      );
+      INSERT INTO long_run_worker_attempts_v108 (
+        id, worker_id, run_id, task_id, invocation_run_id, attempt, state,
+        runtime_selection_json, native_coordinate_json, continuity_capsule_json,
+        app_instance_id, side_effect_state, error_code, error_message,
+        started_at, updated_at, completed_at
+      )
+      SELECT
+        id, worker_id, run_id, task_id, invocation_run_id, attempt, state,
+        runtime_selection_json, native_coordinate_json, continuity_capsule_json,
+        app_instance_id, side_effect_state, error_code, error_message,
+        started_at, updated_at, completed_at
+      FROM long_run_worker_attempts;
+      DROP TABLE long_run_worker_attempts;
+      ALTER TABLE long_run_worker_attempts_v108 RENAME TO long_run_worker_attempts;
+        `);
+      }
+      _db!.exec(`
+      CREATE INDEX IF NOT EXISTS idx_long_run_attempts_run_state
+        ON long_run_worker_attempts(run_id, state, started_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_long_run_attempts_invocation
+        ON long_run_worker_attempts(invocation_run_id, worker_id, attempt)
+        WHERE invocation_run_id IS NOT NULL;
+      `);
+    })();
+  }
+
+  // v109: external domain stores (initially Science) remain canonical while
+  // long_runs provides one inspectable Desktop projection. Version/hash/cursor
+  // coordinates make replay idempotent and expose stale or forked projections
+  // instead of silently letting two SQLite owners diverge.
+  if (userVersion < 109) {
+    _db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_long_runs_science_job
+        ON long_runs(science_job_id)
+        WHERE surface = 'science' AND science_job_id IS NOT NULL;
+
+      CREATE TABLE IF NOT EXISTS long_run_domain_bindings (
+        long_run_id TEXT PRIMARY KEY,
+        domain TEXT NOT NULL CHECK(domain IN ('science')),
+        object_type TEXT NOT NULL CHECK(object_type IN ('loop_session')),
+        object_id TEXT NOT NULL,
+        external_project_id TEXT NOT NULL,
+        contract_id TEXT,
+        contract_version INTEGER CHECK(contract_version IS NULL OR contract_version > 0),
+        contract_content_sha256 TEXT,
+        object_version INTEGER NOT NULL CHECK(object_version > 0),
+        state_sha256 TEXT NOT NULL,
+        event_cursor INTEGER NOT NULL DEFAULT 0 CHECK(event_cursor >= 0),
+        projection_status TEXT NOT NULL DEFAULT 'current'
+          CHECK(projection_status IN ('current','stale','error')),
+        last_error TEXT,
+        synced_at TEXT NOT NULL,
+        FOREIGN KEY(long_run_id) REFERENCES long_runs(id) ON DELETE CASCADE,
+        UNIQUE(domain, object_type, object_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_long_run_domain_bindings_status
+        ON long_run_domain_bindings(domain, projection_status, synced_at DESC);
+    `);
+  }
+
+  // v110: simulation/live is part of the durable graph-run identity. Without
+  // this bit, reconciling an interrupted simulation resumed it as a live run,
+  // and a later live click could also inherit a simulation checkpoint. Keep the
+  // default live for historical rows because their original mode is unknowable;
+  // all newly-created rows are explicit and mode-matched before resume.
+  if (userVersion < 110 && tableExists(_db, "automation_runs")) {
+    const runColumns = new Set(schemaColumns(_db, "automation_runs").map((column) => column.name));
+    if (!runColumns.has("dry_run")) {
+      _db.exec(
+        "ALTER TABLE automation_runs ADD COLUMN dry_run INTEGER NOT NULL DEFAULT 0 CHECK(dry_run IN (0, 1))",
       );
     }
   }

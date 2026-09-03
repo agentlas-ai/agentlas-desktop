@@ -2,9 +2,12 @@
   "schema": "agentlas.plugin/v2",
   "slug": "agentlas-earth-science",
   "name": "Agentlas Earth Science",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "builtin": false,
-  "publisher": { "name": "Agentlas", "url": "https://agentlas.ai" },
+  "publisher": {
+    "name": "Agentlas",
+    "url": "https://agentlas.ai"
+  },
   "surface": {
     "displayName": "Earth Science",
     "displayNameKo": "지구과학",
@@ -24,16 +27,30 @@
       "이 USGS GeoJSON을 정규화하고 출처 영수증을 만들어줘"
     ]
   },
-  "invocation": { "mention": "@agentlas-earth-science", "implicit": "router", "standalone": true },
+  "invocation": {
+    "mention": "@agentlas-earth-science",
+    "implicit": "router",
+    "standalone": true
+  },
   "provides": {
-    "skills": { "router": "skills/index/SKILL.md", "workflows": ["earthquake-catalog", "gutenberg-richter-analysis", "omori-utsu-analysis", "noaa-coops-water-level"] },
+    "skills": {
+      "router": "skills/index/SKILL.md",
+      "workflows": [
+        "earthquake-catalog",
+        "gutenberg-richter-analysis",
+        "omori-utsu-analysis",
+        "noaa-coops-water-level"
+      ]
+    },
     "tools": [
       {
         "id": "agentlas-earth-science",
         "capability": "data",
         "kind": "stdio",
         "command": "${node}",
-        "args": ["${pluginDir}/runtime/mcp-server.cjs"],
+        "args": [
+          "${pluginDir}/runtime/mcp-server.cjs"
+        ],
         "envKeys": [],
         "timeoutMs": 20000,
         "surface": {
@@ -49,27 +66,111 @@
       }
     ]
   },
-  "requires": { "prereq": [{ "id": "node", "provided-by": "app" }], "os": ["darwin", "win32", "linux"] },
-  "permissions": { "fileWrite": "none", "network": "allow", "shell": "deny" },
-  "state": { "files": [], "assets": false },
+  "requires": {
+    "prereq": [
+      {
+        "id": "node",
+        "provided-by": "app"
+      }
+    ],
+    "os": [
+      "darwin",
+      "win32",
+      "linux"
+    ]
+  },
+  "permissions": {
+    "fileWrite": "none",
+    "network": "allow",
+    "shell": "deny"
+  },
+  "state": {
+    "files": [],
+    "assets": false
+  },
   "integrity": {
     "algo": "sha256",
     "files": [
-      { "path": "README.md", "sha256": "d48060f9ed900bae019a5b30c2e82d61d9156976520831cebd162fde131e6976", "bytes": 4984 },
-      { "path": "assets/icon.svg", "sha256": "86e37d4c13c45e431fc0458aee5c3fb69978e4f5aa9180ccfa967a1401d0dd6d", "bytes": 387 },
-      { "path": "capabilities.json", "sha256": "f47ba924faa360649cc25df69afddb5c531612f64a96d391bd30b6beb59fc2f9", "bytes": 7728 },
-      { "path": "runtime/earth-science.cjs", "sha256": "18f3efebd4ad50859ff62a2d70564247cbe6b4b79ef1277469000c8d3b82a31a", "bytes": 98222 },
-      { "path": "runtime/mcp-server.cjs", "sha256": "18ca6d6a3c6a5faddfda200b2b49c6a54ef91c11f3e689397c42742a4c36ce56", "bytes": 4359 },
-      { "path": "schemas/tools.json", "sha256": "99a6a80e1eb27bbc925a741a05dab7a19ed0faba6f0470b90442644c9cb7773d", "bytes": 14153 },
-      { "path": "skills/earthquake-catalog/SKILL.md", "sha256": "655718462d67d66733af10abc508ab3b543a7c0a05dc81e86ecbb74eccfbf1c7", "bytes": 2262 },
-      { "path": "skills/gutenberg-richter-analysis/SKILL.md", "sha256": "d0fd2428e9ddc01a4711eb32d304820e0702c52e9bf04868a77457a0c6a943ea", "bytes": 1945 },
-      { "path": "skills/index/SKILL.md", "sha256": "bb194b7a27596889bc2470eacb92137504d79c6ef2bbad6da534b48e298c2482", "bytes": 1569 },
-      { "path": "skills/noaa-coops-water-level/SKILL.md", "sha256": "c0a258ab9261d662d45b832a7bc439a558373a0661bd5c304685e14999f5aed2", "bytes": 2312 },
-      { "path": "skills/omori-utsu-analysis/SKILL.md", "sha256": "3e9d478e6bb51227e890ec46d558340646909f196deab2d75f3be4151f82ff9a", "bytes": 1670 },
-      { "path": "tests/contract.cjs", "sha256": "f75503808ee577b5f4aa49c9e07102ff46db6a61a2eceaddf58f24863a35877d", "bytes": 24072 },
-      { "path": "tests/fixtures/noaa-coops-water-level.json", "sha256": "c65bb3952a9474e45e0cc97e0451fd799c98a5b7a5403694bda588013cfb654a", "bytes": 386 },
-      { "path": "tests/fixtures/usgs-earthquakes.json", "sha256": "a0f5b02380a1aeffecea3193e25ce6480892814557f0782794a23a0d2debed65", "bytes": 2046 },
-      { "path": "tests/fixtures/usgs-event-detail.json", "sha256": "f59ed25747f70acc75bdb0b769b26cb88d45e15a4a0334577ca33fadb806156d", "bytes": 3972 }
+      {
+        "path": "assets/icon.svg",
+        "sha256": "86e37d4c13c45e431fc0458aee5c3fb69978e4f5aa9180ccfa967a1401d0dd6d",
+        "bytes": 387
+      },
+      {
+        "path": "capabilities.json",
+        "sha256": "f47ba924faa360649cc25df69afddb5c531612f64a96d391bd30b6beb59fc2f9",
+        "bytes": 7728
+      },
+      {
+        "path": "README.md",
+        "sha256": "d48060f9ed900bae019a5b30c2e82d61d9156976520831cebd162fde131e6976",
+        "bytes": 4984
+      },
+      {
+        "path": "runtime/earth-geochemistry.cjs",
+        "sha256": "769474a58b86ff14d92b2c80deac6fc48aa9d5eb549b18306622b43fb1e82bb0",
+        "bytes": 35161
+      },
+      {
+        "path": "runtime/earth-hydrology.cjs",
+        "sha256": "056c7c37d3232dbfa9a5571f0a93b8cda703348c2cf0e5596ebb59eefe934cbf",
+        "bytes": 69673
+      },
+      {
+        "path": "runtime/earth-numerics.cjs",
+        "sha256": "8a022b0f4befaa140d11701ae235b73e19fa747ec1708f7441ac094e04ff9aaf",
+        "bytes": 13557
+      },
+      {
+        "path": "runtime/earth-science.cjs",
+        "sha256": "3ab4858fb9bdb88ec8af9d3a1e24f6293aef1b7fdcd2cb725ce04fa54e90c5c5",
+        "bytes": 99143
+      },
+      {
+        "path": "runtime/earth-seismicity.cjs",
+        "sha256": "ebe3d64426bcaa3cd6a0dff298c5a71be95936e9894d00c2060599681d10da45",
+        "bytes": 42875
+      },
+      {
+        "path": "runtime/earth-spatial.cjs",
+        "sha256": "7a2ebe769ed17b5d7309a155522f9ac47e24514dff80c6894227cf55853a0c24",
+        "bytes": 18621
+      },
+      {
+        "path": "runtime/mcp-server.cjs",
+        "sha256": "d97dedd20e71e71182ab287a87ffdfb3bec63fbdfbbb5000623a122b95c730d5",
+        "bytes": 5423
+      },
+      {
+        "path": "schemas/tools.json",
+        "sha256": "4c93766ca3baa0831f428f76fdf9ebbf4b38bfae755d9c7493c956f3cdd0ee78",
+        "bytes": 57114
+      },
+      {
+        "path": "skills/earthquake-catalog/SKILL.md",
+        "sha256": "655718462d67d66733af10abc508ab3b543a7c0a05dc81e86ecbb74eccfbf1c7",
+        "bytes": 2262
+      },
+      {
+        "path": "skills/gutenberg-richter-analysis/SKILL.md",
+        "sha256": "d0fd2428e9ddc01a4711eb32d304820e0702c52e9bf04868a77457a0c6a943ea",
+        "bytes": 1945
+      },
+      {
+        "path": "skills/index/SKILL.md",
+        "sha256": "bb194b7a27596889bc2470eacb92137504d79c6ef2bbad6da534b48e298c2482",
+        "bytes": 1569
+      },
+      {
+        "path": "skills/noaa-coops-water-level/SKILL.md",
+        "sha256": "c0a258ab9261d662d45b832a7bc439a558373a0661bd5c304685e14999f5aed2",
+        "bytes": 2312
+      },
+      {
+        "path": "skills/omori-utsu-analysis/SKILL.md",
+        "sha256": "3e9d478e6bb51227e890ec46d558340646909f196deab2d75f3be4151f82ff9a",
+        "bytes": 1670
+      }
     ]
   }
 }

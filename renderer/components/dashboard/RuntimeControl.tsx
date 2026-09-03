@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { ipc } from "@/lib/ipc";
+import { ipc, ipcEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { loadViewData, readViewData, writeViewData } from "@/lib/view-data-cache";
 import type {
@@ -272,6 +272,15 @@ export function RuntimeControl() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    const events = ipcEvents();
+    if (!events?.onStoreChanged) return;
+    return events.onStoreChanged((change) => {
+      if (change.entity !== "runtime") return;
+      void Promise.all([load(), loadPool()]);
+    });
+  }, [load, loadPool]);
 
   useEffect(() => {
     const api = ipc();

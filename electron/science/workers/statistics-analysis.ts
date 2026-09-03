@@ -11,8 +11,14 @@ import {
   validateScienceStatisticsDataTableProjectionReceipt,
   validateScienceStatisticsExecutionBinding,
 } from "../../../shared/science-statistics";
+import { loadSciencePluginRuntime } from "../plugin-runtime";
 
 const NETWORK_MODULES = new Set(["http", "https", "http2", "net", "tls", "dns", "dgram", "node:http", "node:https", "node:http2", "node:net", "node:tls", "node:dns", "node:dgram"]);
+const REQUIRED_PROCESS_LIMIT_ARGS = Object.freeze([
+  "--max-old-space-size=192",
+  "--max-semi-space-size=16",
+  "--stack-size=8192",
+]);
 const STATISTICS_MAX_INPUT_BYTES = 8 * 1024 * 1024;
 const STATISTICS_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const originalLoad = (Module as unknown as { _load: (...args: unknown[]) => unknown })._load;
@@ -22,10 +28,10 @@ const originalLoad = (Module as unknown as { _load: (...args: unknown[]) => unkn
 };
 
 type StatisticsEngine = {
+  analyze(request: Record<string, unknown>): StatisticsResult;
   publicError(error: unknown): { code: string; message: string };
 };
 type StatisticsResult = Record<string, unknown> & { method: string; artifacts: Array<Record<string, unknown>>; artifactReceipts: Array<{ sha256: string }> };
-type StatisticsRunner = { executeInWorker(request: Record<string, unknown>): Promise<StatisticsResult> };
 
 function fail(message: string): never {
   process.stderr.write(`${message}\n`);
@@ -63,22 +69,17 @@ function numericRange(values: readonly number[]): { minimum: number; maximum: nu
 }
 
 function readEngine(): StatisticsEngine {
-  const enginePath = path.resolve(__dirname, "../../../plugins/agentlas-science-statistics/runtime/engine.cjs");
-  const stat = fs.lstatSync(enginePath);
-  if (!stat.isFile() || stat.isSymbolicLink()) fail("science-statistics-engine-invalid");
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  return require(enginePath) as StatisticsEngine;
-}
-
-function readRunner(): StatisticsRunner {
-  const runnerPath = path.resolve(__dirname, "../../../plugins/agentlas-science-statistics/runtime/worker-runner.cjs");
-  const stat = fs.lstatSync(runnerPath);
-  if (!stat.isFile() || stat.isSymbolicLink()) fail("science-statistics-runner-invalid");
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  return require(runnerPath) as StatisticsRunner;
+  try {
+    return loadSciencePluginRuntime<StatisticsEngine>(
+      "agentlas-science-statistics", "runtime/engine.cjs", 16 * 1024 * 1024,
+    ).runtime;
+  } catch { return fail("science-statistics-engine-invalid"); }
 }
 
 async function main(): Promise<void> {
+  if (!REQUIRED_PROCESS_LIMIT_ARGS.every((argument) => process.execArgv.includes(argument))) {
+    fail("science-statistics-process-limits-invalid");
+  }
   const [inputArg, outputArg] = process.argv.slice(2);
   const cwd = fs.realpathSync(process.cwd());
   const inputPath = path.resolve(String(inputArg ?? ""));
@@ -272,7 +273,7 @@ async function main(): Promise<void> {
   };
   const engine = readEngine();
   let result: StatisticsResult;
-  try { result = await readRunner().executeInWorker(request); } catch (error) { const safe = engine.publicError(error); fail(`${safe.code}:${safe.message}`); }
+  try { result = engine.analyze(request); } catch (error) { const safe = engine.publicError(error); fail(`${safe.code}:${safe.message}`); }
   const visualizations: Array<Record<string, unknown>> = [];
   for (let index = 0; index < result.artifacts.length; index += 1) {
     const artifact = result.artifacts[index];

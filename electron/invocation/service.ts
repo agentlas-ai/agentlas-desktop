@@ -10,7 +10,18 @@ import {
   InvocationLifecycleRegistry,
   registerDurableInvocationStart,
 } from "../runtime/invocation-lifecycle";
+import {
+  bindLongRunWorker,
+  getLongRunByGoalId,
+  listLongRunTasks,
+  settleLongRunWorkerAttempt,
+  startLongRunWorkerAttempt,
+} from "../store/long-runs";
+import { DesktopLongRunInvocationProjection } from "../long-run/invocation-projection";
+import { resolveDesktopRuntimeAdapter } from "../long-run/runtime-adapters";
 import { runMcpInvocation, type InvocationExecutionContext } from "../mcp/client";
+import { deriveGoalAcceptanceCriteria, ensureGoalLedgerGoal } from "../mcp/goal-ledger";
+import { resolveDesktopWorkforceGoalId } from "../mcp/workforce-goal-continuity";
 import {
   invocationWorkspaceBindingsEqual,
   normalizeRemoteInvocationPermission,
@@ -54,6 +65,7 @@ import {
   latestDurableAssistantMessage,
   listChatMessages,
   repairRootChatSurfaceController,
+  setChatGoalBinding,
 } from "../store/chats";
 import {
   ensureCanonicalTaskForChat,
@@ -134,6 +146,7 @@ import type {
   InvocationSteerResult,
   McpInvocationEvent,
   McpInvocationRequest,
+  RuntimeSelection,
 } from "../../shared/types";
 
 /** DESKTOP_MOBILE_BRIDGE: renderer IPC and Mobile Bridge share this authority. */
@@ -193,6 +206,7 @@ interface RunRecord {
   goal: string;
   pendingQuestion: boolean;
   settlementPublished: boolean;
+  longRunProjection?: DesktopLongRunInvocationProjection;
   /** Main-owned monotonic sequence shared by provider and resident-process events. */
   observableStepSequence: number;
   executionSource?: InvocationExecutionContext["source"];
@@ -648,6 +662,7 @@ export class InvocationService {
   private readonly activeChatsListeners = new Set<ActiveChatsListener>();
   private readonly settledListeners = new Set<InvocationSettledListener>();
   private readonly steerQueues = new Map<string, QueuedSteer[]>();
+  private acceptingStarts = true;
 
   constructor() {
     // A resident CLI can close independently of the current runner callback.
@@ -677,34 +692,35 @@ export class InvocationService {
     return this.activeRuns.activeChatIds();
   }
 
+  activeRunIds(): string[] {
+    return [...this.activeRuns.entries()].map(([runId]) => runId);
+  }
+
+  openAppAdmission(): void {
+    this.acceptingStarts = true;
+  }
+
+  /** Close the Desktop execution gate and interrupt every live turn. */
+  beginAppShutdown(): string[] {
+    this.acceptingStarts = false;
+    const runIds = this.activeRunIds();
+    for (const runId of runIds) this.cancelWithReason(runId, new Error("app_closed"));
+    return runIds;
+  }
+
   /** Rehydrate exact accepted directions after SQLite is initialized on boot. */
   recoverQueuedSteers(): number {
     const rows = listRecoverableQueuedSteers();
-    const chats = new Set<string>();
     for (const row of rows) {
       if (row.drainedRunId && hasInvocationRunReceipt(row.drainedRunId)) {
         settleQueuedSteer(row.id, "started");
         continue;
       }
-      const queue = this.steerQueues.get(row.chatId) ?? [];
-      if (queue.length >= MAX_STEER_QUEUE_DEPTH) {
-        settleQueuedSteer(row.id, "failed");
-        continue;
-      }
-      queue.push({
-        id: row.id,
-        originalRunId: row.originalRunId,
-        promptHash: row.promptHash,
-        request: { ...row.request, runId: undefined },
-        queuedAt: row.queuedAt,
-        ...(row.workspaceBinding ? { workspaceBinding: immutableWorkspaceBinding(row.workspaceBinding) } : {}),
-        ...(row.executionContext ? { executionContext: row.executionContext } : {}),
-        ...(row.drainedRunId ? { drainedRunId: row.drainedRunId } : {}),
-      });
-      this.steerQueues.set(row.chatId, queue);
-      chats.add(row.chatId);
+      // A queued direction belonged to a host process that no longer exists.
+      // Never auto-dispatch it on a later app launch; a long run is restored as
+      // paused by AppRuntimeCoordinator and only a user resume may continue it.
+      settleQueuedSteer(row.id, "cancelled");
     }
-    for (const chatId of chats) queueMicrotask(() => this.drainSteerQueue(chatId));
     return rows.length;
   }
 
@@ -717,6 +733,7 @@ export class InvocationService {
      */
     executionContext?: InvocationExecutionContext,
   ): InvocationStartResult {
+    if (!this.acceptingStarts) throw new Error("desktop_execution_admission_closed");
     const incoming = req as OneInvocationRequest;
     const {
       oneProfileContext: _untrustedOneProfileContext,
@@ -1363,6 +1380,114 @@ export class InvocationService {
     this.publishRunEvent(record, { runId, chatId: runReq.chatId, event: lifecycleStartEvent });
 
     let terminalObserved = false;
+    let projectionGoalId = chat.goalId;
+    if (!projectionGoalId && runReq.goalMode && (runReq.permissions === "write" || runReq.permissions === "full")) {
+      projectionGoalId = resolveDesktopWorkforceGoalId({
+        chatGoalId: null,
+        projectId: chat.projectId,
+        taskId: canonicalTask?.id ?? null,
+        chatId: chat.id,
+      });
+      try {
+        const objective = runReq.userPrompt.replace(/\s+/g, " ").trim();
+        if (!objective || !ensureGoalLedgerGoal({
+          goalId: projectionGoalId,
+          objective,
+          acceptanceCriteria: deriveGoalAcceptanceCriteria(objective, pickLocale(runReq)),
+          projectDir: getChatWorkingFolder(chat.id),
+        })) {
+          projectionGoalId = null;
+        } else {
+          setChatGoalBinding(chat.id, projectionGoalId);
+        }
+      } catch (error) {
+        projectionGoalId = null;
+        console.warn("[long-run] first Goal materialization failed:", error);
+      }
+    }
+    const goalLongRun = projectionGoalId ? getLongRunByGoalId(projectionGoalId) : null;
+    const goalLongRunTask = goalLongRun ? listLongRunTasks(goalLongRun.id, true)[0] ?? null : null;
+    const goalInvocationProjection = goalLongRun && goalLongRunTask
+      ? new DesktopLongRunInvocationProjection({
+          longRunId: goalLongRun.id,
+          taskId: goalLongRunTask.id,
+          invocationRunId: runId,
+          controllerAgentId: chat.agentId ?? `controller:${chat.id}`,
+          workspaceBinding: {
+            projectId: chat.projectId,
+            cwd: getChatWorkingFolder(chat.id),
+            revision: null,
+          },
+          permissionProfile: runReq.permissions ?? "read",
+        })
+      : null;
+    if (goalInvocationProjection) record.longRunProjection = goalInvocationProjection;
+    let goalControllerAttemptId: string | null = null;
+    let goalControllerAttemptSettled = false;
+    const bindGoalControllerAttempt = (selection: RuntimeSelection): void => {
+      if (!goalLongRun || !goalLongRunTask || goalControllerAttemptId || goalControllerAttemptSettled) return;
+      const workerId = `controller_${goalLongRun.id}`;
+      const source = selection.source === "cloud" || selection.source === "hub" || selection.source === "builtin"
+        ? selection.source
+        : "local";
+      try {
+        const adapter = resolveDesktopRuntimeAdapter(selection);
+        bindLongRunWorker({
+          workerId,
+          runId: goalLongRun.id,
+          parentWorkerId: null,
+          taskId: goalLongRunTask.id,
+          role: "controller",
+          agentDefinitionId: chat.agentId,
+          agentRelease: null,
+          runtimeSelection: {
+            kind: selection.kind,
+            backend: selection.backend ?? null,
+            model: selection.model ?? null,
+            effort: selection.effort ?? null,
+            source,
+            capabilityDescriptorId: adapter.id,
+          },
+          workspaceBinding: {
+            projectId: chat.projectId,
+            cwd: getChatWorkingFolder(chat.id),
+            revision: null,
+          },
+          permissionProfile: runReq.permissions ?? "read",
+          state: "idle",
+        });
+        goalControllerAttemptId = startLongRunWorkerAttempt({
+          runId: goalLongRun.id,
+          workerId,
+          taskId: goalLongRunTask.id,
+          invocationRunId: runId,
+          runtimeSelection: {
+            kind: selection.kind,
+            backend: selection.backend ?? null,
+            model: selection.model ?? null,
+            effort: selection.effort ?? null,
+            source,
+            capabilityDescriptorId: adapter.id,
+          },
+        }).attemptId;
+        goalInvocationProjection?.bindController(workerId, chat.agentId ?? `controller:${chat.id}`);
+      } catch (error) {
+        console.warn("[long-run] controller attempt binding failed:", error);
+      }
+    };
+    const settleGoalControllerAttempt = (completed: boolean): void => {
+      if (!goalControllerAttemptId || goalControllerAttemptSettled) return;
+      goalControllerAttemptSettled = true;
+      settleLongRunWorkerAttempt({
+        attemptId: goalControllerAttemptId,
+        state: completed ? "completed" : "interrupted",
+        sideEffectState: completed ? "committed" : "uncertain",
+        ...(!completed
+          ? { errorCode: controller.signal.aborted ? "cancelled" : "runtime_interrupted" }
+          : {}),
+      });
+      goalInvocationProjection?.settleOpenWorkers(completed);
+    };
     /*
      * 권한 승격 표식(오너 결정 2026-08-25) — 읽기 전용 실행이 쓰기를 만나 표식을 냈는가.
      * 표식은 본문에서 지워지고, 완주한 뒤 그 대화 안 승인칩으로 "전체 액세스로
@@ -1402,6 +1527,13 @@ export class InvocationService {
           runReq.agentAppMode && boundedEvent.kind === "error"
             ? { ...boundedEvent, error: untrustedRuntimeFailurePayload() }
             : boundedEvent;
+        if (
+          event.runtimeSelection
+          && !event.agentId
+          && (!event.modelRole || event.modelRole === "orchestrator")
+        ) {
+          bindGoalControllerAttempt(event.runtimeSelection);
+        }
         /*
          * 권한 승격 표식은 사용자에게 보여줄 문장이 아니다 — 감지 즉시 화면·기록
          * 본문에서 지우고, 그 사실만 남겨 완주 후 승인칩이 잇는다. 부분 스트림과
@@ -1622,11 +1754,16 @@ export class InvocationService {
           observedAt: new Date().toISOString(),
         };
         const durableTextForVerification = event.durableTextForVerification;
-        // This is a Main-only persistence receipt, not renderer-visible model
-        // output. Remove it before the event enters the observable ledger or
-        // any IPC/mobile projection.
+        // Main-only persistence receipt: keep it out of renderer/mobile events.
         if (durableTextForVerification !== undefined) {
           event = { ...event, durableTextForVerification: undefined };
+        }
+        if (goalInvocationProjection) {
+          try {
+            goalInvocationProjection.observe(event);
+          } catch (error) {
+            console.warn("[long-run] child worker projection failed:", error);
+          }
         }
         if (
           event.kind === "final"
@@ -1741,7 +1878,8 @@ export class InvocationService {
               ? "invoke_completed"
               : controller.signal.aborted
                 ? "invoke_cancelled"
-                : "invoke_failed";
+              : "invoke_failed";
+          settleGoalControllerAttempt(terminalKind === "invoke_completed");
           canonicalTask = trySetTaskStatus(
             runReq.chatId,
             terminalTaskStatus({
@@ -1846,8 +1984,26 @@ export class InvocationService {
             hasFinalText: Boolean(result.finalText?.trim()),
           },
         });
+        const completionClaim = result.goalCompletionClaim;
+        if (completionClaim?.claimed && completionClaim.goalId) {
+          // The client records only a verification request. The independent
+          // judge starts here, after invoke_completed/mcp_final and the result
+          // receipt are durable, so model prose can never outrun host evidence.
+          void import("../long-run/verifier")
+            .then(({ verifyGoalCompletionClaim }) => verifyGoalCompletionClaim({
+              goalId: completionClaim.goalId!,
+              outcomeText: result.finalText?.trim() || "Completion claimed without result text.",
+              evidence: completionClaim.evidence,
+              invocationRunId: runId,
+              projectDir: getChatWorkingFolder(chat.id),
+            }))
+            .catch((error: unknown) => {
+              console.warn("[long-run] terminal verification failed:", error);
+            });
+        }
       })
       .catch((error: unknown) => {
+        settleGoalControllerAttempt(false);
         const rawMessage = redactOneAttachmentText(
           runReq,
           error instanceof Error ? error.message : String(error),
@@ -1912,6 +2068,7 @@ export class InvocationService {
         }
       })
       .finally(() => {
+        settleGoalControllerAttempt(false);
         if (!terminalObserved) {
           canonicalTask = trySetTaskStatus(
             runReq.chatId,
@@ -2003,6 +2160,13 @@ export class InvocationService {
   }
 
   cancel(runId: string): "requested" | "already-requested" | "not-found" {
+    return this.cancelWithReason(runId, new Error("stopped_by_user"));
+  }
+
+  private cancelWithReason(
+    runId: string,
+    reason: Error,
+  ): "requested" | "already-requested" | "not-found" {
     const record = this.activeRuns.get(runId);
     // Stop is terminal for the visible work item: it also clears directions
     // queued behind the active turn. Steering itself never calls cancel.
@@ -2010,7 +2174,7 @@ export class InvocationService {
       this.steerQueues.delete(record.chatId);
       cancelQueuedSteersForChat(record.chatId);
     }
-    const result = this.activeRuns.requestCancel(runId);
+    const result = this.activeRuns.requestCancelWithReason(runId, reason);
     if (result === "requested") {
       if (record) {
         const sequence = nextObservableSequence(record);
@@ -2237,6 +2401,13 @@ export class InvocationService {
         record.events.splice(0, record.events.length - MAX_BUFFERED_EVENTS);
       }
       recordMcpInvocationEvent(runId, record.request, event);
+      if (record.longRunProjection) {
+        try {
+          record.longRunProjection.observe(event);
+        } catch (error) {
+          console.warn("[long-run] resident worker projection failed:", error);
+        }
+      }
       this.publishRunEvent(record, { runId, chatId: record.chatId, event });
     }
   }

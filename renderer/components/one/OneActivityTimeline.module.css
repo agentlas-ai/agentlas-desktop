@@ -1,9 +1,9 @@
 .activity {
-  --activity-ink: var(--design-ink);
-  --activity-muted: var(--design-muted);
-  --activity-faint: var(--design-faint);
-  --activity-line: var(--design-line);
-  --activity-fill: var(--design-panel-muted);
+  --activity-ink: #5a6166;
+  --activity-muted: #878e93;
+  --activity-faint: #aeb4b8;
+  --activity-line: #eef0f1;
+  --activity-fill: #fafbfc;
   --activity-accent: var(--design-accent);
   width: min(720px, 100%);
   margin: 8px 0 26px;
@@ -88,18 +88,18 @@
   max-height: min(42vh, 420px);
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 0 0 10px 18px;
+  padding: 0 0 14px 18px;
 }
 
 .row,
 .rowDetails > summary {
   min-width: 0;
-  min-height: 34px;
+  min-height: 38px;
   display: grid;
   grid-template-columns: 20px minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 7px;
-  padding: 0 2px;
+  padding: 4px 2px;
   border: 0;
   border-top: 1px solid color-mix(in srgb, var(--activity-line) 72%, transparent);
   background: transparent;
@@ -181,14 +181,14 @@
 
 .rowDetails pre {
   max-height: 190px;
-  margin: 0 0 8px 27px;
+  margin: 8px 0 14px;
   overflow: auto;
-  padding: 9px 10px;
-  border: 0;
-  border-radius: 8px;
-  background: var(--activity-fill);
-  color: #646b6f;
-  font: 10px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  padding: 14px 18px;
+  border: 1px solid #eef0f1;
+  border-radius: 11px;
+  background: #fafbfc;
+  color: #747b80;
+  font: 10px/1.7 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -320,13 +320,6 @@
   white-space: nowrap;
   cursor: pointer;
 }
-.artifactTabs button[role="tab"] > span {
-  min-width: 0;
-  max-width: 156px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .artifactTab[data-active="true"] button[role="tab"] { color: #1d2023; font-weight: 650; }
 .artifactTabs button:focus-visible { outline: 2px solid #cbd9c1; outline-offset: -2px; }
 
@@ -345,18 +338,6 @@
  * 내용이 제 높이로만 서고 남는 자리를 아무 행도 먹지 않는다.
  */
 .artifactRail[data-rail-view="result"] .artifactList {
-  padding: 0;
-  grid-template-rows: minmax(0, 1fr);
-  align-content: stretch;
-}
-
-.artifactRail[data-rail-view^="artifact:"] .artifactList {
-  padding: 0;
-  grid-template-rows: minmax(0, 1fr);
-  align-content: stretch;
-}
-
-.artifactRail[data-rail-view^="mcp:"] .artifactList {
   padding: 0;
   grid-template-rows: minmax(0, 1fr);
   align-content: stretch;
@@ -423,7 +404,7 @@
 
 /*
  * 미리보기 ↔ 아래 섹션 분할선 (오너 요구 2026-08-25).
- * 포인터·키보드·저장 계약을 한 손잡이에서 함께 제공한다.
+ * 어포던스·키보드·저장 계약은 기록 패널 높이 드래그(.artifactHistoryResizeHandle)와 동형.
  */
 .previewSplitHandle {
   position: relative;
@@ -500,6 +481,32 @@
   overflow: hidden;
 }
 
+.artifactHistoryResizeHandle {
+  position: relative;
+  flex: 0 0 10px;
+  cursor: row-resize;
+  border-top: 1px solid #eceeef;
+  background: #fff;
+  touch-action: none;
+}
+.artifactHistoryResizeHandle::after {
+  position: absolute;
+  top: 3px;
+  left: 50%;
+  width: 42px;
+  height: 3px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: #d5d8db;
+  opacity: .55;
+  content: "";
+}
+.artifactHistoryResizeHandle:hover::after,
+.artifactHistoryResizeHandle:focus-visible::after,
+.artifactHistoryResizeHandle[data-resizing="true"]::after { opacity: 1; }
+.artifactHistoryResizeHandle:focus-visible { outline: 2px solid rgba(96, 122, 54, .35); outline-offset: -2px; }
+.artifactHistoryPane { min-height: 0; flex: 0 0 auto; overflow: hidden; background: #fff; }
+
 .artifactEmpty {
   min-height: 38px;
   margin: 0;
@@ -568,103 +575,6 @@ a.artifactRuntimeRow:focus-visible {
 .artifactRuntimeRow span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .artifactRuntimeRow small { color: #7e9a55; font-size: 10px; }
 
-.terminalFeed {
-  min-width: 0;
-  display: grid;
-  gap: 0;
-}
-
-.terminalFeedHeader {
-  position: sticky;
-  z-index: 2;
-  top: -10px;
-  min-width: 0;
-  min-height: 54px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  margin: -10px 0 0;
-  padding: 10px 0 8px;
-  border-bottom: 1px solid #eceeef;
-  background: rgba(255, 255, 255, .97);
-  backdrop-filter: blur(8px);
-}
-
-.terminalFeedHeader > span {
-  min-width: 0;
-  flex: 0 0 auto;
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-}
-
-.terminalFeedHeader strong {
-  color: #353a3d;
-  font-size: 13px;
-  font-weight: 650;
-  white-space: nowrap;
-}
-
-.terminalFeedHeader small,
-.terminalFeedLimit {
-  color: #969ca0;
-  font-size: 10px;
-  line-height: 1.4;
-}
-
-.terminalFeedHeader > small {
-  min-width: 0;
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  text-align: right;
-  white-space: nowrap;
-}
-
-.terminalFeedRows {
-  min-width: 0;
-  display: grid;
-  padding: 6px 0 14px;
-}
-
-.terminalFeedRows > .row,
-.terminalFeedRows > .rowDetails {
-  min-width: 0;
-}
-
-.terminalFeedRows > :not(:last-child) {
-  border-bottom: 1px solid #f0f1f2;
-}
-
-.terminalFeedLimit {
-  margin: 0;
-  padding: 9px 0;
-}
-
-.artifactCompactRow {
-  width: 100%;
-  min-width: 0;
-  min-height: 34px;
-  display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 7px;
-  padding: 0 4px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: #596065;
-  font: inherit;
-  font-size: 11.5px;
-  text-align: left;
-  cursor: pointer;
-}
-.artifactCompactRow:hover,
-.artifactCompactRow:focus-visible { background: #f3f4f3; outline: none; }
-.artifactCompactRow > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.artifactCompactRow > small { max-width: 112px; overflow: hidden; color: #8c938f; font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
-
 .artifactSubrail {
   display: grid;
   gap: 8px;
@@ -710,91 +620,6 @@ button.artifactVisual { cursor: pointer; }
 .artifactPreviewCopy small { color: #8b918e; font-size: 9px; }
 .artifactPreviewCopy button { min-height: 32px; padding: 0 10px; border: 1px solid #d9dddb; border-radius: 8px; background: #fff; color: #505753; font: inherit; font-size: 10px; font-weight: 650; cursor: pointer; }
 .artifactPreviewCopy button:hover, .artifactPreviewCopy button:focus-visible { border-color: #b7bdba; background: #f3f4f3; outline: none; }
-
-.inlineArtifacts {
-  width: min(640px, calc(100% - 22px));
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  margin: 5px 0 11px 14px;
-  color: #737a76;
-  font-size: 11.5px;
-}
-
-.inlineArtifacts[data-inline-media="true"] { display: grid; margin: 8px 0 16px 22px; }
-
-.inlineArtifacts .artifactPreviewCard {
-  overflow: hidden;
-  border: 1px solid #e1e4e3;
-  border-radius: 13px;
-  background: #fff;
-}
-
-.inlineArtifacts .artifactVisual {
-  min-height: 118px;
-  overflow: hidden;
-  border-bottom: 1px solid #e8eae9;
-  background: #f4f5f4;
-}
-
-.inlineArtifacts .artifactVisual img,
-.inlineArtifacts .artifactVisual video {
-  width: 100%;
-  max-height: min(58vh, 560px);
-  object-fit: contain;
-  background: #f4f5f4;
-}
-
-.inlineArtifacts .artifactPreviewCopy {
-  padding: 8px 10px 8px 12px;
-  border-top: 0;
-}
-
-.inlineArtifactSummary {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  color: #6a716d;
-  font-weight: 620;
-}
-
-.inlineArtifactLinks {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  overflow: hidden;
-}
-
-.inlineArtifactLinks button {
-  min-width: 0;
-  max-width: 180px;
-  height: 25px;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 0 8px;
-  border: 1px solid #e1e4e2;
-  border-radius: 7px;
-  background: #fff;
-  color: #59605c;
-  font: inherit;
-  cursor: pointer;
-}
-
-.inlineArtifactLinks button:hover,
-.inlineArtifactLinks button:focus-visible { background: #f3f4f3; border-color: #cdd2cf; outline: none; }
-.inlineArtifactLinks button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.inlineArtifactMore { flex: 0 0 auto; color: #969c98; }
-
-@media (max-width: 760px) {
-  .inlineArtifacts {
-    width: 100%;
-    margin-left: 0;
-  }
-}
 
 /*
  * 세로 flex 여야 툴바(탭·주소창·안내)가 제 높이를 갖고 화면 칸이 나머지를 전부 먹는다.
@@ -1372,8 +1197,9 @@ button.artifactVisual { cursor: pointer; }
   background: #b9bec1;
 }
 
-/* 미리보기 분할선은 전환이 없어 딱 바뀌던 상태를 부드럽게 잇는다. */
-.previewSplitHandle::after {
+/* 가로 손잡이 둘(미리보기 분할선·기록 높이)은 전환이 아예 없어 딱 바뀌었다. */
+.previewSplitHandle::after,
+.artifactHistoryResizeHandle::after {
   transition:
     opacity var(--one-motion-fast, 120ms) linear,
     background var(--one-motion-fast, 120ms) linear;
@@ -1383,6 +1209,10 @@ button.artifactVisual { cursor: pointer; }
    드래그 중엔 위 스위치가 0ms 로 눌러 손가락을 따라가고, 더블클릭으로
    되돌릴 때·키보드로 옮길 때만 흐른다. */
 .artifactList[data-preview-fixed="true"] > .livePane {
+  transition: height var(--one-motion-panel, 200ms) var(--one-ease-panel, ease);
+}
+
+.artifactHistoryPane {
   transition: height var(--one-motion-panel, 200ms) var(--one-ease-panel, ease);
 }
 

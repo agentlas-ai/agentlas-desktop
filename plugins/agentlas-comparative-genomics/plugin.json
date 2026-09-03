@@ -1,0 +1,165 @@
+{
+  "schema": "agentlas.plugin/v2",
+  "slug": "agentlas-comparative-genomics",
+  "name": "Agentlas Comparative Genomics",
+  "version": "0.2.0",
+  "builtin": false,
+  "publisher": {
+    "name": "Agentlas",
+    "url": "https://agentlas.ai"
+  },
+  "surface": {
+    "displayName": "Comparative Genomics",
+    "displayNameKo": "비교유전체학",
+    "tagline": "Version-pinned extant assemblies, gene trees, and alignments",
+    "taglineKo": "버전이 고정된 현생종 참조 유전체·유전자 계통수·정렬",
+    "description": "Pins Ensembl extant reference assemblies to exact accessions and provider FASTA checksums, retrieves exact Compara gene trees and alignments, and preserves scientific evidence boundaries without inventing an extinct genome.",
+    "descriptionKo": "Ensembl 현생종 참조 유전체를 정확한 accession과 제공자 FASTA 체크섬에 고정하고 Compara gene tree·정렬을 가져오며, 멸종종 유전체를 발명하지 않고 과학적 증거 경계를 보존합니다.",
+    "category": "data",
+    "brandColor": "#386A63",
+    "icon": "assets/icon.svg",
+    "defaultPrompts": [
+      "이 Ensembl 유전자의 조류 계통 gene tree와 정렬 QC 표를 만들어줘",
+      "이 계통수의 duplication과 낮은 support branch를 표시하고 논문용 그림으로 만들어줘",
+      "현생종 cDNA 정렬의 내부 노드 하나를 골라 탐색적 Fitch ambiguity set을 계산해줘",
+      "조류와 악어류 현생종을 선택해 멸종종 추론 없이 locus panel QC를 만들어줘"
+    ]
+  },
+  "invocation": {
+    "mention": "@agentlas-comparative-genomics",
+    "implicit": "router",
+    "standalone": true
+  },
+  "provides": {
+    "skills": {
+      "router": "skills/index/SKILL.md",
+      "workflows": [
+        "reference-assembly-manifest",
+        "ensembl-compara-gene-tree",
+        "alignment-qc",
+        "hypothetical-asr-fitch",
+        "extant-archosaur-locus-panel"
+      ]
+    },
+    "tools": [
+      {
+        "id": "agentlas-comparative-genomics",
+        "capability": "data",
+        "kind": "stdio",
+        "command": "${node}",
+        "args": [
+          "${pluginDir}/runtime/mcp-server.cjs"
+        ],
+        "envKeys": [],
+        "timeoutMs": 60000,
+        "surface": {
+          "name": "Agentlas 비교유전체학",
+          "nameEn": "Agentlas Comparative Genomics",
+          "description": "Ensembl Compara gene tree·정렬과 증거 경계를 ResearchRun으로 봉인",
+          "descriptionEn": "Seal Ensembl Compara gene trees, alignments, and evidence boundaries into ResearchRuns",
+          "category": "data",
+          "brandColor": "#386A63",
+          "mark": "CG",
+          "docsUrl": "https://rest.ensembl.org/documentation/info/genetree_species_member_id"
+        }
+      }
+    ]
+  },
+  "requires": {
+    "prereq": [
+      {
+        "id": "node",
+        "provided-by": "app"
+      }
+    ],
+    "os": [
+      "darwin",
+      "win32",
+      "linux"
+    ]
+  },
+  "permissions": {
+    "fileWrite": "none",
+    "network": "allow",
+    "shell": "deny"
+  },
+  "state": {
+    "files": [],
+    "assets": false
+  },
+  "integrity": {
+    "algo": "sha256",
+    "files": [
+      {
+        "path": "assets/icon.svg",
+        "sha256": "2c1ecf5815cfa5914b297df35dde74c2036c4555dfa3fe26dbe19b5f6da09d54",
+        "bytes": 454
+      },
+      {
+        "path": "capabilities.json",
+        "sha256": "3e7e0b6e1747eb1a4b8730f69e42facf5e2c30847b030ba7e1394beddc333992",
+        "bytes": 1766
+      },
+      {
+        "path": "README.md",
+        "sha256": "811c670a619e3aeee792f37e93517445b86e20989287ed3801dfe90e145a0104",
+        "bytes": 2440
+      },
+      {
+        "path": "runtime/comparative-genomics.cjs",
+        "sha256": "0a71c3ce175148c511ee9efb09b6ba9ed21d271bc59d7d7f452053b270311e6e",
+        "bytes": 24765
+      },
+      {
+        "path": "runtime/extant-archosaur-locus-panel.cjs",
+        "sha256": "0a6c889fea1a997d7ba90ae095dab346d9a81d7c5a24323ba22226c778228b6e",
+        "bytes": 30380
+      },
+      {
+        "path": "runtime/hypothetical-asr.cjs",
+        "sha256": "89ebb7b797d88950040247beb62d0eaf468f02c6e1e50d9838c6208472b6d3a0",
+        "bytes": 12076
+      },
+      {
+        "path": "runtime/mcp-server.cjs",
+        "sha256": "35364bc9b790e559d2470ded1f3302f634d6035f39ad1a662030778a5431e47f",
+        "bytes": 3653
+      },
+      {
+        "path": "schemas/tools.json",
+        "sha256": "cf0cb67d83c72744b152cee5fddfc018ad80b1a2e08b55d8f4466f0b66afbd44",
+        "bytes": 8107
+      },
+      {
+        "path": "skills/alignment-qc/SKILL.md",
+        "sha256": "979d4e03c1dd9c2345f180666782758c71c0d5eb0f03a3a75f505850b90819f3",
+        "bytes": 882
+      },
+      {
+        "path": "skills/ensembl-compara-gene-tree/SKILL.md",
+        "sha256": "b5c00bbcb4febfe487b245a6e420e187ef94e16f639b8b3da74042c9eaad788e",
+        "bytes": 954
+      },
+      {
+        "path": "skills/extant-archosaur-locus-panel/SKILL.md",
+        "sha256": "5c9a5895487900753bd2795894b34d06270727f4eb999a1d6a2de80115721a9a",
+        "bytes": 912
+      },
+      {
+        "path": "skills/hypothetical-asr-fitch/SKILL.md",
+        "sha256": "738db6bd516cef2c0b31943eb85fd30b0c77f8655b92b58b36d90aeebbde0333",
+        "bytes": 1383
+      },
+      {
+        "path": "skills/index/SKILL.md",
+        "sha256": "063369d1f9cc2c50c4443f3afb0ec6d4f4a39086e0fbb8e4223e808902ae8c07",
+        "bytes": 2373
+      },
+      {
+        "path": "skills/reference-assembly-manifest/SKILL.md",
+        "sha256": "4222996922e0c1205ee20312a325a533dabb9ca5bec45483944b0225e5548878",
+        "bytes": 1128
+      }
+    ]
+  }
+}

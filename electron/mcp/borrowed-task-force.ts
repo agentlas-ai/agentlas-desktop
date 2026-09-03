@@ -13,6 +13,7 @@ import type {
   InstalledAgent,
   McpInvocationEvent,
   McpInvocationRequest,
+  RuntimeSelection,
   RuntimeStatus,
 } from "../../shared/types";
 import type {
@@ -761,6 +762,17 @@ function providerLabel(active: RuntimeStatus): string {
   return active.backend || active.kind || "unknown";
 }
 
+function childRuntimeSelection(active: RuntimeStatus, spec: BorrowedAgentSpec): RuntimeSelection {
+  return {
+    kind: active.kind,
+    backend: active.backend,
+    source: spec.source === "cloud" || spec.source === "hub" ? spec.source : "local",
+    role: "worker",
+    ...(active.model ? { model: active.model } : {}),
+    ...(active.effort ? { effort: active.effort } : {}),
+  };
+}
+
 function canonicalReceiptId(value: string, fallback: string): string {
   const canonical = value.replace(/[^A-Za-z0-9._:/@-]/g, "-").slice(0, 255);
   return /^[A-Za-z0-9][A-Za-z0-9._:/@-]{1,255}$/.test(canonical) ? canonical : fallback;
@@ -1215,6 +1227,7 @@ function taskForceRunnerBase(
   | "mcpAllowedTools"
   | "mcpCodexConfigArgs"
   | "isolatedMcpConfig"
+  | "browserOnly"
   | "env"
   | "untrustedNoTools"
   | "untrustedAllowedMcpTools"
@@ -1239,6 +1252,7 @@ function taskForceRunnerBase(
     mcpAllowedTools: agentAppAllowedTools ?? (toolsAllowed ? p.mcpAllowedTools : undefined),
     mcpCodexConfigArgs: toolsAllowed ? p.mcpCodexConfigArgs : undefined,
     isolatedMcpConfig: p.isolatedMcpConfig,
+    browserOnly: p.isolatedMcpConfig,
     env: p.req.agentAppMode
       ? buildAgentAppRunnerEnv(p.runnerEnv ?? process.env, p.agentAppMcpRuntimeEnv)
       : toolsAllowed
@@ -3464,6 +3478,8 @@ async function runBorrowedAgentTurn(
     assertStrictPlannerResolution(packet.allocation, workloadResolution, `planner allocation for ${packet.agent}`);
   }
   const active = workloadResolution.runtime;
+  const observedRuntimeSelection = childRuntimeSelection(active, spec);
+  const controllerAgentId = p.chat.agentId ?? `controller:${p.chat.id}`;
   if (agentRuntimeChoice?.fallbackStage) {
     p.sink(tag({
       kind: "tool-use",
@@ -3530,6 +3546,17 @@ async function runBorrowedAgentTurn(
     kind: "thinking",
     status: p.locale === "ko" ? `${spec.name} · 입력 패킷 실행 중` : `${spec.name} · running input packet`,
     model: modelLabel(active),
+    runtimeSelection: observedRuntimeSelection,
+    agentLifecycle: { source: "cli-process", state: "running", reason: "turn-started", runtime: active.kind },
+    agentMessage: {
+      messageId: `${handoffId}:task`,
+      direction: "orchestrator-to-worker",
+      fromAgentId: controllerAgentId,
+      toAgentId: id,
+      text: redactSensitiveText(packet.brief).slice(0, 1_000),
+      handoffPermission: workerPermission,
+      permissionInherited: false,
+    },
   }));
   const nodeTask = packet.brief || oneAttachmentExecutionPrompt(p.req);
   const localNodeMemory = await taskForceMemoryContext(p, installedAgent?.id ?? null, nodeTask, workerPermission);
@@ -3640,6 +3667,20 @@ async function runBorrowedAgentTurn(
         status: teamResult.ok
           ? p.locale === "ko" ? `${spec.name} 팀 완료` : `${spec.name} team completed`
           : p.locale === "ko" ? `${spec.name} 팀 실패` : `${spec.name} team failed`,
+        runtimeSelection: observedRuntimeSelection,
+        agentLifecycle: {
+          source: "cli-process",
+          state: teamResult.ok ? "idle" : "failed",
+          reason: teamResult.ok ? "turn-complete" : "error",
+          runtime: active.kind,
+        },
+        agentMessage: {
+          messageId: `${handoffId}:result`,
+          direction: "worker-to-orchestrator",
+          fromAgentId: id,
+          toAgentId: controllerAgentId,
+          text: redactSensitiveText(teamResult.text).slice(0, 1_000),
+        },
       }));
       return {
         ...resultMeta,
@@ -3985,7 +4026,7 @@ async function runBorrowedAgentTurn(
               `executed nested-worker allocation for ${packet.agent}:${worker.id}`,
             );
           }
-          if (spec.agentDefinitionId && spec.agentReleaseId) {
+          if (spec.agentDefinitionId && spec.agentReleaseId && spec.localized) {
             recordBorrowedAgentCareer({
               ownerScopeKey: p.borrowedCareerOwnerScopeKey ?? activeBorrowedOwnerScopeKey(),
               slug: spec.slug,
@@ -3994,7 +4035,7 @@ async function runBorrowedAgentTurn(
               componentId: worker.id,
               entityKind: "agent",
               source: spec.source,
-              localized: spec.localized!,
+              localized: spec.localized,
               runId: p.req.runId ?? nestedExecutionId,
               resolution: workerResolution,
             });
@@ -4196,6 +4237,7 @@ async function runBorrowedAgentTurn(
         workerResults.every((item) => item.ok)
         && spec.agentDefinitionId
         && spec.agentReleaseId
+        && spec.localized
       ) {
         recordBorrowedAgentCareer({
           ownerScopeKey: p.borrowedCareerOwnerScopeKey ?? activeBorrowedOwnerScopeKey(),
@@ -4204,7 +4246,7 @@ async function runBorrowedAgentTurn(
           agentReleaseId: spec.agentReleaseId,
           entityKind: "team",
           source: spec.source,
-          localized: spec.localized!,
+          localized: spec.localized,
           runId: p.req.runId ?? nestedExecutionId,
           resolution: managerSynthesisResolution,
         });
@@ -4217,6 +4259,20 @@ async function runBorrowedAgentTurn(
           ? p.locale === "ko" ? `${spec.name} 팀 완료` : `${spec.name} team completed`
           : p.locale === "ko" ? `${spec.name} 팀 일부 실패` : `${spec.name} team completed with worker failures`,
         tokens,
+        runtimeSelection: observedRuntimeSelection,
+        agentLifecycle: {
+          source: "cli-process",
+          state: workerResults.every((item) => item.ok) ? "idle" : "failed",
+          reason: workerResults.every((item) => item.ok) ? "turn-complete" : "error",
+          runtime: active.kind,
+        },
+        agentMessage: {
+          messageId: `${handoffId}:result`,
+          direction: "worker-to-orchestrator",
+          fromAgentId: id,
+          toAgentId: controllerAgentId,
+          text: redactSensitiveText(teamText).slice(0, 1_000),
+        },
       }));
       return {
         ...resultMeta,
@@ -4402,7 +4458,7 @@ async function runBorrowedAgentTurn(
         ...(outcome.escalationAttempt ? { escalationAttempt: outcome.escalationAttempt } : {}),
       },
     });
-    if (spec.agentDefinitionId && spec.agentReleaseId) {
+    if (spec.agentDefinitionId && spec.agentReleaseId && spec.localized) {
       recordBorrowedAgentCareer({
         ownerScopeKey: p.borrowedCareerOwnerScopeKey ?? activeBorrowedOwnerScopeKey(),
         slug: spec.slug,
@@ -4410,7 +4466,7 @@ async function runBorrowedAgentTurn(
         agentReleaseId: spec.agentReleaseId,
         entityKind: spec.entityKind,
         source: spec.source,
-        localized: spec.localized!,
+        localized: spec.localized,
         runId: p.req.runId ?? `task-force:${p.chat.id}`,
         resolution: executedResolution,
       });
@@ -4424,6 +4480,16 @@ async function runBorrowedAgentTurn(
           ? p.locale === "ko" ? `${spec.name} 실패` : `${spec.name} failed`
           : p.locale === "ko" ? `${spec.name} 미완료` : `${spec.name} incomplete`,
       tokens: result.tokens,
+      runtimeSelection: observedRuntimeSelection,
+      agentLifecycle: { source: "cli-process", state: "idle", reason: "turn-complete", runtime: observedDirectRuntime.kind },
+      agentMessage: {
+        messageId: `${handoffId}:result`,
+        direction: "worker-to-orchestrator",
+        fromAgentId: id,
+        toAgentId: controllerAgentId,
+        text: workerText.slice(0, 1_000),
+        ...(observedTools.length > 0 ? { usedTools: [...observedTools] } : {}),
+      },
     }));
     return {
       ...resultMeta,
@@ -4510,6 +4576,15 @@ async function runBorrowedAgentTurn(
       kind: "tool-use",
       done: true,
       status: p.locale === "ko" ? `${spec.name} 실패` : `${spec.name} failed`,
+      runtimeSelection: observedRuntimeSelection,
+      agentLifecycle: { source: "cli-process", state: "failed", reason: "error", runtime: observedDirectRuntime.kind },
+      agentMessage: {
+        messageId: `${handoffId}:result`,
+        direction: "worker-to-orchestrator",
+        fromAgentId: id,
+        toAgentId: controllerAgentId,
+        text: redactSensitiveText(message).slice(0, 1_000),
+      },
     }));
     return {
       ...resultMeta,

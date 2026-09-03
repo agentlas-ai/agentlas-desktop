@@ -8,7 +8,7 @@ export function OneAgentPortrait({
   status,
   label,
   size = "medium",
-  tone = "green",
+  tone = "character:orange-dino",
 }: {
   status: OneOrgStatusKind;
   label: string;

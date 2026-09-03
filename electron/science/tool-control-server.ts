@@ -1,16 +1,23 @@
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
-import { createRequire } from "node:module";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { userDataPath } from "../runtime-paths";
 import type { InvocationExecutionContext } from "../mcp/client";
+import type { ProductExtensionManifest } from "../../shared/product-extension";
 import {
   parseScienceServiceDescriptor,
   scienceLabCapabilityCatalog,
   type ScienceLabCapabilityCatalog,
   type ScienceLabToolDescriptor,
 } from "../../shared/science-lab-capability";
+import {
+  SCIENCE_DESKTOP_HOST_API_NAME,
+  SCIENCE_DESKTOP_HOST_API_VERSION,
+  assertScienceExtensionHostCompatibility,
+  scienceExtensionHostCompatibilitySha256,
+  type ScienceDesktopHostCompatibilitySnapshot,
+} from "../../shared/science-extension-host-compatibility";
 import { parseScienceVegaEditInput, commitScienceVegaEdit } from "./vega-editor";
 import {
   renderScienceStatisticsFigurePng,
@@ -20,7 +27,10 @@ import {
 import { isScienceResidueInteraction, type ScienceProteinColorTheme, type ScienceProteinRepresentation } from "../../shared/science-renderer-runtime";
 import { commitScienceChemistrySmilesEdit, commitScienceMolstarViewEdit } from "./lab-editors";
 import type { ExecuteStatisticsAnalysisInput } from "./tool-gateway";
-import { scienceAcademicFullTextService, scienceAcademicSearchService, scienceArtifactPublicationValidator, scienceAstronomyCatalogService, scienceBiodiversityCatalogService, scienceChemistryValidator, scienceDomainAnalysisService, scienceEarthquakeCatalogService, scienceEconomicsCatalogService, scienceEvidenceGraphService, scienceGenomicsCatalogService, scienceJournalPublicationService, scienceMaterialsCatalogService, sciencePhysicsHepDataLiveService, sciencePhysicsInspireLiveService, scienceScientificDataService, scienceStore, scienceToolGateway } from "./runtime";
+import { scienceAcademicFullTextService, scienceAcademicSearchService, scienceArtifactPublicationValidator, scienceAstronomyCatalogService, scienceBiodiversityCatalogService, scienceChemistryValidator, scienceComparativeGenomicsService, scienceComparativeGenomicsTableService, scienceDeextinctionFeasibilityService, scienceDomainAnalysisService, scienceEarthquakeCatalogService, scienceEconomicsAnalysisService, scienceEconomicsCatalogService, scienceEvidenceGraphService, scienceExtantArchosaurLocusPanelService, scienceExtantReferenceAssemblyService, scienceGenomicsCatalogService, scienceHypotheticalAsrService, scienceJournalPublicationService, scienceManuscriptRenderService, scienceMaterialsCatalogService, scienceNoaaCoopsWaterLevelService, sciencePaleontologyAnalysisService, sciencePaleontologyCandidateComparisonService, sciencePaleontologyCatalogService, sciencePhysicsAnalysisService, sciencePhysicsHepDataLiveService, sciencePhysicsInspireLiveService, scienceScientificDataService, scienceStore, scienceToolGateway } from "./runtime";
+import { deextinctionFeasibilityToolSummary } from "./deextinction-feasibility";
+import { paleontologyCandidateComparisonToolSummary } from "./paleontology-candidate-comparison";
+import { physicsAnalysisKindForToolId } from "./physics-analysis";
 import { ACADEMIC_SEARCH_PROVIDERS, type AcademicSearchProvider } from "./academic-search";
 import type {
   ScienceAnalysisDecisionDraft,
@@ -30,6 +40,13 @@ import type {
   ScienceJournalCoverageEntry,
   ScienceManuscript,
   ScienceManuscriptBindingInput,
+  ScienceManuscriptEditProposalStatus,
+  ScienceManuscriptOperation,
+  ScienceManuscriptArticleFamily,
+  ScienceManuscriptBlueprintBindingInput,
+  ScienceManuscriptBlueprintComparableInput,
+  ScienceManuscriptBlueprintJournalBindingInput,
+  ScienceManuscriptBlueprintSectionInput,
   ScienceSubmissionMetadata,
 } from "../../shared/science-contract";
 import type {
@@ -41,10 +58,24 @@ import type {
   ScienceResearchSubmissionExportBinding,
 } from "../../shared/science-lifecycle";
 import type { ScienceClaimLedgerManifest } from "../../shared/science-claim-ledger";
+import { SCIENCE_CLAIM_CLASSES, SCIENCE_CLAIM_STATUSES } from "../../shared/science-claim-ledger";
+import type { RecordScienceManuscriptComparableEligibilityInput } from "../../shared/science-manuscript-comparable-eligibility";
+import type {
+  RecordScienceManuscriptCoherenceAssessmentInput,
+  ScienceCoherenceNumericAssertionInput,
+  ScienceCoherenceNumericExemptionInput,
+  ScienceCoherenceNumericSourceSelectorInput,
+  ScienceCoherenceTextOwner,
+} from "../../shared/science-manuscript-coherence";
 import type { ScienceEvidenceGraphConditioningContext, ScienceEvidenceGraphEdgeKind } from "../../shared/science-evidence-graph";
 import { SCIENCE_EVIDENCE_GRAPH_EDGE_KINDS } from "../../shared/science-evidence-graph";
 import { scienceResearchIntentCatalog } from "../../shared/science-research-intent";
+import { scienceStudyProgress } from "./study-progress";
+import { scienceNextResearchPhaseGate } from "./store";
 import { scienceLabDecisionProjectionsForProject } from "./lab-decision-projection-service";
+import { loadSciencePluginRuntime, readSciencePluginFile } from "./plugin-runtime";
+import { inspectScienceManuscriptDepth } from "./manuscript/depth-preflight";
+import { assertScienceAgentManuscriptDraft } from "./manuscript/agent-draft-gate";
 
 const MAX_REQUEST_BYTES = 8 * 1024 * 1024;
 const MAX_AI_VISUAL_BYTES = 8 * 1024 * 1024;
@@ -52,11 +83,361 @@ const TOKEN_ENV = "AGENTLAS_SCIENCE_MCP_TOKEN";
 const ENDPOINT_ENV = "AGENTLAS_SCIENCE_MCP_ENDPOINT";
 const CATALOG_ENV = "AGENTLAS_SCIENCE_MCP_CATALOG";
 const SERVER_KEY = "agentlas-science";
-const requireFromToolControl = createRequire(__filename);
 
 type ScienceContext = NonNullable<InvocationExecutionContext["science"]>;
 type McpTool = { name: string; route: string; description: string; inputSchema: Record<string, unknown> };
-type Grant = { tokenHash: string; context: ScienceContext; catalog: ScienceLabCapabilityCatalog; expiresAt: number };
+type Grant = {
+  tokenHash: string;
+  context: ScienceContext;
+  catalog: ScienceLabCapabilityCatalog;
+  expiresAt: number;
+  routeState: {
+    paleontologyOccurrenceAttempts: number;
+    autoAnalyzedPaleontologyCatalogRuns: Map<string, string>;
+  };
+};
+
+const MANUSCRIPT_UUID_SCHEMA = {
+  type: "string",
+  pattern: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",
+} as const;
+
+const MANUSCRIPT_SHA256_SCHEMA = { type: "string", pattern: "^[a-f0-9]{64}$" } as const;
+const SCIENCE_DOMAIN_SCHEMA = {
+  type: "string",
+  enum: ["general", "life-science", "chemistry", "physics", "materials-science", "genomics", "astronomy", "earth-ecology", "statistics", "economics", "finance"],
+} as const;
+const MANUSCRIPT_COMPARABLE_QUOTE_LOCATOR_SCHEMA = {
+  type: "object",
+  properties: {
+    section_id: MANUSCRIPT_UUID_SCHEMA,
+    start_byte: { type: "integer", minimum: 0, maximum: 100_000_000 },
+    end_byte: { type: "integer", minimum: 1, maximum: 100_000_000 },
+    exact_quote: { type: "string", minLength: 1, maxLength: 20_000 },
+    exact_quote_sha256: MANUSCRIPT_SHA256_SCHEMA,
+  },
+  required: ["section_id", "start_byte", "end_byte", "exact_quote", "exact_quote_sha256"],
+  additionalProperties: false,
+} as const;
+const MANUSCRIPT_BLUEPRINT_COMPARABLE_SCHEMA = {
+  type: "object",
+  properties: {
+    source_id: MANUSCRIPT_UUID_SCHEMA,
+    source_version_id: MANUSCRIPT_UUID_SCHEMA,
+    source_version: { type: "integer", minimum: 1 },
+    source_content_sha256: MANUSCRIPT_SHA256_SCHEMA,
+    eligibility_receipt_id: MANUSCRIPT_UUID_SCHEMA,
+    section_mappings: { type: "array", minItems: 2, maxItems: 20, items: {
+      type: "object", properties: {
+        role: { type: "string", enum: ["abstract", "introduction", "related-work", "methods", "theory", "results", "discussion", "limitations", "conclusion", "references", "appendix", "other"] },
+        source_section_ids: { type: "array", minItems: 1, maxItems: 20, uniqueItems: true, items: MANUSCRIPT_UUID_SCHEMA },
+      }, required: ["role", "source_section_ids"], additionalProperties: false,
+    } },
+  },
+  required: ["source_id", "source_version_id", "source_version", "source_content_sha256", "eligibility_receipt_id", "section_mappings"],
+  additionalProperties: false,
+} as const;
+const MANUSCRIPT_BLUEPRINT_SECTION_SCHEMA = {
+  type: "object",
+  properties: {
+    key: { type: "string", pattern: "^[a-z0-9][a-z0-9._-]{0,119}$" },
+    title: { type: "string", minLength: 1, maxLength: 240 },
+    role: { type: "string", enum: ["abstract", "introduction", "related-work", "methods", "theory", "results", "discussion", "limitations", "conclusion", "references", "appendix", "other"] },
+    required: { type: "boolean" },
+    rhetorical_moves: { type: "array", minItems: 1, maxItems: 20, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 1000 } },
+    visual_expectation: { type: "string", enum: ["none", "optional", "required"] },
+    evidence_roles: { type: "array", maxItems: 20, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 240 } },
+  },
+  required: ["key", "title", "role", "required", "rhetorical_moves", "visual_expectation", "evidence_roles"],
+  additionalProperties: false,
+} as const;
+const MANUSCRIPT_BLUEPRINT_JOURNAL_SCHEMA = {
+  type: ["object", "null"],
+  properties: {
+    journal_profile_id: MANUSCRIPT_UUID_SCHEMA,
+    journal_profile_version: { type: "integer", minimum: 1 },
+    journal_profile_content_sha256: MANUSCRIPT_SHA256_SCHEMA,
+  },
+  required: ["journal_profile_id", "journal_profile_version", "journal_profile_content_sha256"],
+  additionalProperties: false,
+} as const;
+const MANUSCRIPT_BLUEPRINT_BINDING_SCHEMA = {
+  type: "object",
+  properties: {
+    blueprint_id: MANUSCRIPT_UUID_SCHEMA,
+    blueprint_version: { type: "integer", minimum: 1 },
+    blueprint_content_sha256: MANUSCRIPT_SHA256_SCHEMA,
+  },
+  required: ["blueprint_id", "blueprint_version", "blueprint_content_sha256"],
+  additionalProperties: false,
+} as const;
+const MANUSCRIPT_SCHOLARLY_NODE_LOCATOR_SCHEMA = {
+  type: "object",
+  properties: {
+    node_id: MANUSCRIPT_UUID_SCHEMA,
+    node_revision: { type: "integer", minimum: 1 },
+    node_content_sha256: MANUSCRIPT_SHA256_SCHEMA,
+    node_kind: { type: "string", enum: ["heading", "paragraph", "equation", "figure", "table", "list", "blockquote", "code", "rule"] },
+  },
+  required: ["node_id", "node_revision", "node_content_sha256", "node_kind"],
+  additionalProperties: false,
+} as const;
+const MANUSCRIPT_SCHOLARLY_QUOTE_LOCATOR_SCHEMA = {
+  type: "object",
+  properties: {
+    node_id: MANUSCRIPT_UUID_SCHEMA,
+    node_revision: { type: "integer", minimum: 1 },
+    node_content_sha256: MANUSCRIPT_SHA256_SCHEMA,
+    node_kind: { const: "paragraph" },
+    from: { type: "integer", minimum: 0, maximum: 2_000_000 },
+    to: { type: "integer", minimum: 1, maximum: 2_000_000 },
+    exact_quote: { type: "string", minLength: 1, maxLength: 20_000 },
+  },
+  required: ["node_id", "node_revision", "node_content_sha256", "node_kind", "from", "to", "exact_quote"],
+  additionalProperties: false,
+} as const;
+const MANUSCRIPT_SCHOLARLY_ITEM_SCHEMA = {
+  type: "object",
+  properties: {
+    label: { type: "string", minLength: 1, maxLength: 1_000 },
+    status: { type: "string", enum: ["satisfied", "partial", "missing"] },
+    confidence: { type: "number", minimum: 0, maximum: 1 },
+    evidence: { type: "array", minItems: 0, maxItems: 100, items: MANUSCRIPT_SCHOLARLY_QUOTE_LOCATOR_SCHEMA },
+    rationale: { type: "string", minLength: 1, maxLength: 8_000 },
+  },
+  required: ["label", "status", "confidence", "evidence", "rationale"], additionalProperties: false,
+} as const;
+
+const MANUSCRIPT_COHERENCE_TEXT_OWNER_SCHEMA = {
+  oneOf: [
+    {
+      type: "object",
+      properties: {
+        kind: { const: "claim" },
+        claim_id: MANUSCRIPT_UUID_SCHEMA,
+        claim_content_sha256: MANUSCRIPT_SHA256_SCHEMA,
+      },
+      required: ["kind", "claim_id", "claim_content_sha256"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      properties: {
+        kind: { const: "visual-caption" },
+        node_id: MANUSCRIPT_UUID_SCHEMA,
+        node_revision: { type: "integer", minimum: 1 },
+        node_content_sha256: MANUSCRIPT_SHA256_SCHEMA,
+      },
+      required: ["kind", "node_id", "node_revision", "node_content_sha256"],
+      additionalProperties: false,
+    },
+  ],
+} as const;
+
+const MANUSCRIPT_COHERENCE_NUMERIC_SOURCE_SELECTOR_SCHEMA = {
+  type: "object",
+  properties: {
+    component_role: { type: "string", enum: ["value", "confidence-level", "lower", "upper"] },
+    artifact_id: MANUSCRIPT_UUID_SCHEMA,
+    artifact_version: { type: "integer", minimum: 1 },
+    artifact_content_sha256: MANUSCRIPT_SHA256_SCHEMA,
+    validation_receipt_id: MANUSCRIPT_UUID_SCHEMA,
+    json_pointer: { type: "string", minLength: 2, maxLength: 2_048, pattern: "^/(?:[^~]|~[01])+$" },
+    unit_json_pointer: { oneOf: [
+      { type: "null" },
+      { type: "string", minLength: 2, maxLength: 2_048, pattern: "^/(?:[^~]|~[01])+$" },
+    ] },
+  },
+  required: ["component_role", "artifact_id", "artifact_version", "artifact_content_sha256", "validation_receipt_id", "json_pointer", "unit_json_pointer"],
+  additionalProperties: false,
+} as const;
+
+const MANUSCRIPT_COHERENCE_DECLARATIONS_SCHEMA = {
+  summary_claim_links: {
+    type: "array",
+    maxItems: 5_000,
+    items: {
+      type: "object",
+      properties: {
+        summary_claim_id: MANUSCRIPT_UUID_SCHEMA,
+        body_claim_ids: { type: "array", minItems: 1, maxItems: 5_000, uniqueItems: true, items: MANUSCRIPT_UUID_SCHEMA },
+      },
+      required: ["summary_claim_id", "body_claim_ids"],
+      additionalProperties: false,
+    },
+  },
+  results_discussion_links: {
+    type: "array",
+    maxItems: 5_000,
+    items: {
+      type: "object",
+      properties: {
+        result_claim_id: MANUSCRIPT_UUID_SCHEMA,
+        discussion_claim_ids: { type: "array", minItems: 1, maxItems: 5_000, uniqueItems: true, items: MANUSCRIPT_UUID_SCHEMA },
+      },
+      required: ["result_claim_id", "discussion_claim_ids"],
+      additionalProperties: false,
+    },
+  },
+  numeric_assertions: {
+    type: "array",
+    maxItems: 20_000,
+    items: {
+      type: "object",
+      properties: {
+        group_id: { type: "string", minLength: 1, maxLength: 160, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$" },
+        owner: MANUSCRIPT_COHERENCE_TEXT_OWNER_SCHEMA,
+        from: { type: "integer", minimum: 0, maximum: 2_000_000 },
+        to: { type: "integer", minimum: 1, maximum: 2_000_000 },
+        exact_quote: { type: "string", minLength: 1, maxLength: 20_000 },
+        grammar: { type: "string", enum: ["sample-size/v1", "effect-estimate/v1", "confidence-interval/v1", "quantity-unit/v1"] },
+        presentation: { type: "string", enum: ["exact", "rounded"] },
+        sources: { type: "array", minItems: 1, maxItems: 3, uniqueItems: true, items: MANUSCRIPT_COHERENCE_NUMERIC_SOURCE_SELECTOR_SCHEMA },
+      },
+      required: ["group_id", "owner", "from", "to", "exact_quote", "grammar", "presentation", "sources"],
+      additionalProperties: false,
+    },
+  },
+  numeric_exemptions: {
+    type: "array",
+    maxItems: 20_000,
+    items: {
+      type: "object",
+      properties: {
+        owner: MANUSCRIPT_COHERENCE_TEXT_OWNER_SCHEMA,
+        from: { type: "integer", minimum: 0, maximum: 2_000_000 },
+        to: { type: "integer", minimum: 1, maximum: 2_000_000 },
+        exact_quote: { type: "string", minLength: 1, maxLength: 20_000 },
+        reason: { type: "string", enum: ["calendar-year", "citation-number", "identifier"] },
+      },
+      required: ["owner", "from", "to", "exact_quote", "reason"],
+      additionalProperties: false,
+    },
+  },
+} as const;
+
+/**
+ * Closed JSON Schema for the exact stable-ID operation union accepted by the
+ * manuscript document model. The runtime model/store still revalidate every
+ * identity, revision, semantic hash, citation offset and table shape before a
+ * proposal can be persisted or applied.
+ */
+const MANUSCRIPT_SCHEMA_DEFS = {
+    citationMark: {
+      type: "object",
+      properties: {
+        id: MANUSCRIPT_UUID_SCHEMA,
+        revision: { type: "integer", minimum: 1 },
+        contentSha256: MANUSCRIPT_SHA256_SCHEMA,
+        from: { type: "integer", minimum: 0, maximum: 2_000_000 },
+        to: { type: "integer", minimum: 1, maximum: 2_000_000 },
+        syntax: { type: "string", enum: ["placeholder", "pandoc"] },
+        locators: { type: "array", minItems: 1, maxItems: 128, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 240 } },
+      },
+      required: ["id", "revision", "contentSha256", "from", "to", "syntax", "locators"],
+      additionalProperties: false,
+    },
+    node: {
+      oneOf: [
+        {
+          type: "object",
+          properties: { id: MANUSCRIPT_UUID_SCHEMA, revision: { type: "integer", minimum: 1 }, contentSha256: MANUSCRIPT_SHA256_SCHEMA, kind: { const: "heading" }, level: { type: "integer", minimum: 1, maximum: 4 }, text: { type: "string", minLength: 1, maxLength: 8_000 } },
+          required: ["id", "revision", "contentSha256", "kind", "level", "text"], additionalProperties: false,
+        },
+        {
+          type: "object",
+          properties: { id: MANUSCRIPT_UUID_SCHEMA, revision: { type: "integer", minimum: 1 }, contentSha256: MANUSCRIPT_SHA256_SCHEMA, kind: { const: "paragraph" }, markdown: { type: "string", minLength: 1, maxLength: 2_000_000 }, citationMarks: { type: "array", maxItems: 10_000, items: { $ref: "#/$defs/citationMark" } } },
+          required: ["id", "revision", "contentSha256", "kind", "markdown", "citationMarks"], additionalProperties: false,
+        },
+        {
+          type: "object",
+          properties: { id: MANUSCRIPT_UUID_SCHEMA, revision: { type: "integer", minimum: 1 }, contentSha256: MANUSCRIPT_SHA256_SCHEMA, kind: { const: "equation" }, tex: { type: "string", minLength: 1, maxLength: 200_000 }, label: { type: ["string", "null"], maxLength: 120 } },
+          required: ["id", "revision", "contentSha256", "kind", "tex", "label"], additionalProperties: false,
+        },
+        {
+          type: "object",
+          properties: { id: MANUSCRIPT_UUID_SCHEMA, revision: { type: "integer", minimum: 1 }, contentSha256: MANUSCRIPT_SHA256_SCHEMA, kind: { const: "figure" }, locator: { type: "string", minLength: 1, maxLength: 240 }, caption: { type: "string", maxLength: 100_000 } },
+          required: ["id", "revision", "contentSha256", "kind", "locator", "caption"], additionalProperties: false,
+        },
+        {
+          type: "object",
+          properties: { id: MANUSCRIPT_UUID_SCHEMA, revision: { type: "integer", minimum: 1 }, contentSha256: MANUSCRIPT_SHA256_SCHEMA, kind: { const: "table" }, mode: { const: "artifact" }, locator: { type: "string", minLength: 1, maxLength: 240 }, caption: { type: "string", maxLength: 100_000 } },
+          required: ["id", "revision", "contentSha256", "kind", "mode", "locator", "caption"], additionalProperties: false,
+        },
+        {
+          type: "object",
+          properties: {
+            id: MANUSCRIPT_UUID_SCHEMA, revision: { type: "integer", minimum: 1 }, contentSha256: MANUSCRIPT_SHA256_SCHEMA, kind: { const: "table" }, mode: { const: "inline" },
+            caption: { type: "string", maxLength: 100_000 }, label: { type: ["string", "null"], maxLength: 120 },
+            align: { type: "array", minItems: 1, maxItems: 512, items: { type: ["string", "null"], enum: ["left", "center", "right", null] } },
+            header: { type: "array", minItems: 1, maxItems: 512, items: { type: "string", maxLength: 100_000 } },
+            rows: { type: "array", maxItems: 100_000, items: { type: "array", minItems: 1, maxItems: 512, items: { type: "string", maxLength: 100_000 } } },
+          },
+          required: ["id", "revision", "contentSha256", "kind", "mode", "caption", "label", "align", "header", "rows"], additionalProperties: false,
+        },
+        {
+          type: "object",
+          properties: {
+            id: MANUSCRIPT_UUID_SCHEMA, revision: { type: "integer", minimum: 1 }, contentSha256: MANUSCRIPT_SHA256_SCHEMA, kind: { const: "list" }, ordered: { type: "boolean" }, start: { type: "integer", minimum: 1, maximum: 999 },
+            items: { type: "array", minItems: 1, maxItems: 10_000, items: { type: "object", properties: { nodes: { type: "array", minItems: 1, maxItems: 20_000, items: { $ref: "#/$defs/node" } } }, required: ["nodes"], additionalProperties: false } },
+          },
+          required: ["id", "revision", "contentSha256", "kind", "ordered", "start", "items"], additionalProperties: false,
+        },
+        {
+          type: "object",
+          properties: { id: MANUSCRIPT_UUID_SCHEMA, revision: { type: "integer", minimum: 1 }, contentSha256: MANUSCRIPT_SHA256_SCHEMA, kind: { const: "blockquote" }, children: { type: "array", minItems: 1, maxItems: 20_000, items: { $ref: "#/$defs/node" } } },
+          required: ["id", "revision", "contentSha256", "kind", "children"], additionalProperties: false,
+        },
+        {
+          type: "object",
+          properties: { id: MANUSCRIPT_UUID_SCHEMA, revision: { type: "integer", minimum: 1 }, contentSha256: MANUSCRIPT_SHA256_SCHEMA, kind: { const: "code" }, language: { type: ["string", "null"], maxLength: 80 }, text: { type: "string", maxLength: 2_000_000 } },
+          required: ["id", "revision", "contentSha256", "kind", "language", "text"], additionalProperties: false,
+        },
+        {
+          type: "object",
+          properties: { id: MANUSCRIPT_UUID_SCHEMA, revision: { type: "integer", minimum: 1 }, contentSha256: MANUSCRIPT_SHA256_SCHEMA, kind: { const: "rule" } },
+          required: ["id", "revision", "contentSha256", "kind"], additionalProperties: false,
+        },
+      ],
+    },
+} as const;
+
+const MANUSCRIPT_OPERATION_SCHEMA = {
+  oneOf: [
+    {
+      type: "object",
+      properties: { kind: { const: "insert-node" }, afterNodeId: { oneOf: [{ type: "null" }, MANUSCRIPT_UUID_SCHEMA] }, expectedAfterNodeRevision: { type: ["integer", "null"], minimum: 1 }, expectedAfterNodeContentSha256: { oneOf: [{ type: "null" }, MANUSCRIPT_SHA256_SCHEMA] }, node: { $ref: "#/$defs/node" } },
+      required: ["kind", "afterNodeId", "expectedAfterNodeRevision", "expectedAfterNodeContentSha256", "node"], additionalProperties: false,
+    },
+    {
+      type: "object",
+      properties: { kind: { const: "insert-artifact" }, afterNodeId: { oneOf: [{ type: "null" }, MANUSCRIPT_UUID_SCHEMA] }, expectedAfterNodeRevision: { type: ["integer", "null"], minimum: 1 }, expectedAfterNodeContentSha256: { oneOf: [{ type: "null" }, MANUSCRIPT_SHA256_SCHEMA] }, nodeId: MANUSCRIPT_UUID_SCHEMA, nodeKind: { type: "string", enum: ["figure", "table"] }, locator: { type: "string", minLength: 1, maxLength: 240 }, caption: { type: "string", maxLength: 100_000 }, validationReceiptId: MANUSCRIPT_UUID_SCHEMA },
+      required: ["kind", "afterNodeId", "expectedAfterNodeRevision", "expectedAfterNodeContentSha256", "nodeId", "nodeKind", "locator", "caption", "validationReceiptId"], additionalProperties: false,
+    },
+    {
+      type: "object",
+      properties: { kind: { const: "replace-node" }, nodeId: MANUSCRIPT_UUID_SCHEMA, expectedRevision: { type: "integer", minimum: 1 }, expectedContentSha256: MANUSCRIPT_SHA256_SCHEMA, replacement: { $ref: "#/$defs/node" } },
+      required: ["kind", "nodeId", "expectedRevision", "expectedContentSha256", "replacement"], additionalProperties: false,
+    },
+    {
+      type: "object",
+      properties: { kind: { const: "delete-node" }, nodeId: MANUSCRIPT_UUID_SCHEMA, expectedRevision: { type: "integer", minimum: 1 }, expectedContentSha256: MANUSCRIPT_SHA256_SCHEMA },
+      required: ["kind", "nodeId", "expectedRevision", "expectedContentSha256"], additionalProperties: false,
+    },
+    {
+      type: "object",
+      properties: { kind: { const: "move-node" }, nodeId: MANUSCRIPT_UUID_SCHEMA, expectedRevision: { type: "integer", minimum: 1 }, expectedContentSha256: MANUSCRIPT_SHA256_SCHEMA, afterNodeId: { oneOf: [{ type: "null" }, MANUSCRIPT_UUID_SCHEMA] }, expectedAfterNodeRevision: { type: ["integer", "null"], minimum: 1 }, expectedAfterNodeContentSha256: { oneOf: [{ type: "null" }, MANUSCRIPT_SHA256_SCHEMA] } },
+      required: ["kind", "nodeId", "expectedRevision", "expectedContentSha256", "afterNodeId", "expectedAfterNodeRevision", "expectedAfterNodeContentSha256"], additionalProperties: false,
+    },
+  ],
+} as const;
+
+const MANUSCRIPT_SELECTION_CONTEXT_REFS_SCHEMA = {
+  type: "array",
+  maxItems: 100,
+  uniqueItems: true,
+  items: MANUSCRIPT_UUID_SCHEMA,
+} as const;
 
 const MANUSCRIPT_BINDING_SCHEMA = {
   type: "object",
@@ -115,6 +496,22 @@ const JOURNAL_RULE_SCHEMA = {
         { type: "object", properties: { kind: { const: "binding-count" }, role: { type: "string", enum: ["claim", "citation", "figure", "table", "supplement"] }, minimum: { type: "integer", minimum: 0, maximum: 100000 }, maximum: { type: "integer", minimum: 0, maximum: 100000 } }, required: ["kind", "role"], anyOf: [{ required: ["minimum"] }, { required: ["maximum"] }], additionalProperties: false },
         { type: "object", properties: { kind: { const: "required-text" }, patterns: { type: "array", minItems: 1, maxItems: 30, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 500 } }, minimumMatches: { type: "integer", minimum: 1, maximum: 30 } }, required: ["kind", "patterns", "minimumMatches"], additionalProperties: false },
         { type: "object", properties: { kind: { const: "output-format" }, allowed: { type: "array", minItems: 1, maxItems: 4, uniqueItems: true, items: { type: "string", enum: ["docx", "tex", "pdf", "zip"] } }, preferred: { type: "string", enum: ["docx", "tex", "pdf"] } }, required: ["kind", "allowed", "preferred"], additionalProperties: false },
+        { type: "object", properties: { kind: { const: "bibliography-style" }, style: { type: "string", enum: ["numeric", "apa", "nature"] } }, required: ["kind", "style"], additionalProperties: false },
+        { type: "object", properties: {
+          kind: { const: "manuscript-layout" },
+          pageSize: { type: "string", enum: ["a4", "letter"] },
+          marginsMm: { type: "object", properties: { top: { type: "integer", minimum: 5, maximum: 100 }, right: { type: "integer", minimum: 5, maximum: 100 }, bottom: { type: "integer", minimum: 5, maximum: 100 }, left: { type: "integer", minimum: 5, maximum: 100 } }, required: ["top", "right", "bottom", "left"], additionalProperties: false },
+          fontFamily: { type: "string", enum: ["serif", "sans-serif"] },
+          fontSizePt: { type: "integer", enum: [10, 11, 12] },
+          lineSpacing: { type: "string", enum: ["single", "one-and-half", "double"] },
+          lineNumbers: { type: "boolean" },
+          renderTarget: { type: "string", enum: ["initial-submission", "accepted-source", "published-approximation"] },
+          latexTemplate: { type: "string", enum: ["generic-article", "aps-revtex4-2"] },
+          latexJournalStyle: { type: "string", enum: ["pra", "prb", "prc", "prd", "pre", "prl", "rmp"] },
+          columnCount: { type: "integer", enum: [1, 2] },
+          columnGapMm: { type: "integer", minimum: 3, maximum: 30 },
+          titlePageMode: { type: "string", enum: ["inline", "separate"] },
+        }, required: ["kind", "pageSize", "marginsMm", "fontFamily", "fontSizePt", "lineSpacing", "lineNumbers"], additionalProperties: false },
         { type: "object", properties: { kind: { const: "figure-raster-profile" }, minimumDpi: { type: "integer", enum: [300, 600] }, allowedColorSpaces: { type: "array", minItems: 1, maxItems: 2, uniqueItems: true, items: { type: "string", enum: ["srgb", "cmyk"] } } }, required: ["kind", "minimumDpi", "allowedColorSpaces"], additionalProperties: false },
         { type: "object", properties: { kind: { const: "figure-vector-profile" }, allowedFormats: { type: "array", minItems: 1, maxItems: 1, uniqueItems: true, items: { type: "string", enum: ["svg"] } } }, required: ["kind", "allowedFormats"], additionalProperties: false },
         { type: "object", properties: { kind: { const: "manual-attestation" }, code: { type: "string", pattern: "^[a-z0-9][a-z0-9._-]{0,119}$" } }, required: ["kind", "code"], additionalProperties: false },
@@ -313,7 +710,15 @@ const PLATFORM_TOOLS: McpTool[] = [
     description: "Read the current canonical, hash-chained research lifecycle head for this granted project. The project scope comes only from the Main-owned tool grant; use the returned revision and state SHA-256 as append preconditions.",
     inputSchema: {
       type: "object",
-      properties: { tool_call_id: { type: "string", minLength: 1, maxLength: 160 } },
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 },
+        method_selection_detail: {
+          type: "array",
+          maxItems: 40,
+          uniqueItems: true,
+          items: { type: "string", minLength: 1, maxLength: 160 },
+        },
+      },
       required: ["tool_call_id"],
       additionalProperties: false,
     },
@@ -766,7 +1171,7 @@ const PLATFORM_TOOLS: McpTool[] = [
   {
     name: "revise_research_hypothesis",
     route: "/v1/platform/hypotheses/revise",
-    description: "Append an immutable successor revision to one current hypothesis using exact optimistic concurrency. Supported or contradicted states require exact succeeded Research Episode result bindings against that parent hypothesis; stale parents, fabricated outcomes, and invalid transitions are rejected.",
+    description: "Append an immutable successor revision to one current hypothesis using exact optimistic concurrency. Supported or contradicted states require exact succeeded Research Episode result bindings against that parent hypothesis; stale parents, fabricated outcomes, and invalid transitions are rejected. This route records evidence-derived states only: approved and rejected are human authorization decisions and are refused here. To obtain one, call request_human_research_decision and let the accountable human answer it in the app.",
     inputSchema: {
       type: "object",
       properties: {
@@ -775,7 +1180,7 @@ const PLATFORM_TOOLS: McpTool[] = [
         expected_parent_version: { type: "integer", minimum: 1 },
         expected_parent_content_sha256: { type: "string", pattern: "^[a-f0-9]{64}$" },
         role: { type: "string", enum: ["primary", "alternative"] },
-        status: { type: "string", enum: ["proposed", "approved", "rejected", "supported", "contradicted"] },
+        status: { type: "string", enum: ["proposed", "supported", "contradicted"] },
         statement: { type: "string", minLength: 1, maxLength: 20000 },
         rationale: { type: "string", minLength: 1, maxLength: 20000 },
         falsification_criteria: { type: "array", minItems: 1, maxItems: 50, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 4000 } },
@@ -859,6 +1264,24 @@ const PLATFORM_TOOLS: McpTool[] = [
     },
   },
   {
+    name: "search_paleontology_occurrences",
+    route: "/v1/platform/paleontology/occurrence-search",
+    description: "Retrieve bounded, deterministic PBDB taxon and fossil-occurrence pages, preserve every exact provider response as immutable project Sources and one ResearchRun, and return stratigraphic age intervals without presenting midpoints as point dates. This tool records fossil evidence only and never claims recovered DNA, a genome, or de-extinction feasibility.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 },
+        taxon_name: { type: "string", minLength: 1, maxLength: 500 },
+        page_size: { type: "integer", minimum: 1, maximum: 100 },
+        max_pages: { type: "integer", minimum: 1, maximum: 20 },
+        max_records: { type: "integer", minimum: 1, maximum: 2000 },
+        title: { type: "string", minLength: 1, maxLength: 240 },
+      },
+      required: ["tool_call_id", "taxon_name"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "search_earthquake_observations",
     route: "/v1/platform/earth-science/earthquake-search",
     description: "Run a bounded anonymous USGS FDSN Event search, preserve the exact raw GeoJSON and normalized earthquake catalog as a project Source and ResearchRun, and return the catalog run id required by build_earthquake_observation_map. Missing magnitudes and place labels remain missing.",
@@ -902,6 +1325,25 @@ const PLATFORM_TOOLS: McpTool[] = [
     },
   },
   {
+    name: "fetch_noaa_coops_water_levels",
+    route: "/v1/platform/earth-science/noaa-coops-water-levels",
+    description: "Fetch one bounded observed NOAA CO-OPS water_level series for an exact station and UTC-minute interval, preserve the exact provider response as a project Source and ResearchRun, and create a lineage-bound editable table plus interactive Vega artifact. No prediction or interpolation is performed.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 },
+        station_id: { type: "string", pattern: "^[0-9]{7}$", minLength: 7, maxLength: 7 },
+        start_time: { type: "string", format: "date-time" },
+        end_time: { type: "string", format: "date-time" },
+        datum: { type: "string", enum: ["CRD", "IGLD", "LWD", "MHHW", "MHW", "MTL", "MSL", "MLW", "MLLW", "NAVD", "STND"] },
+        units: { type: "string", enum: ["metric", "english"] },
+        title: { type: "string", minLength: 1, maxLength: 240 },
+      },
+      required: ["tool_call_id", "station_id", "start_time", "end_time", "datum"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "fetch_world_bank_indicator",
     route: "/v1/platform/economics/world-bank-indicator",
     description: "Fetch one bounded official World Bank indicator series, preserve the exact provider response as a project Source and ResearchRun, and create a lineage-bound Vega artifact in Economic Indicators Lab. This is official macro/development indicator retrieval, not a stock-price, trading, or free market-data API; finance data must be supplied by the user through Data Table, Statistical Analysis, and Vega.",
@@ -916,6 +1358,21 @@ const PLATFORM_TOOLS: McpTool[] = [
         title: { type: "string", minLength: 1, maxLength: 240 },
       },
       required: ["tool_call_id", "country", "indicator", "start_year", "end_year"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "analyze_world_bank_indicator_growth",
+    route: "/v1/platform/economics/world-bank-growth-analysis",
+    description: "Transform one exact succeeded World Bank indicator run into an adjacent annual year-over-year percentage-change table and Vega artifact. Missing values, zero baselines, and year gaps remain explicit and are never imputed; this is descriptive analysis, not causal inference, forecasting, or investment advice.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 },
+        parent_run_id: { type: "string", format: "uuid", minLength: 36, maxLength: 36 },
+        title: { type: "string", minLength: 1, maxLength: 240 },
+      },
+      required: ["tool_call_id", "parent_run_id"],
       additionalProperties: false,
     },
   },
@@ -952,6 +1409,87 @@ const PLATFORM_TOOLS: McpTool[] = [
         title: { type: "string", minLength: 1, maxLength: 240 },
       },
       required: ["tool_call_id", "species", "assembly", "ref_name", "start", "end"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "build_extant_reference_assembly_manifest",
+    route: "/v1/platform/genomics/extant-reference-assemblies",
+    description: "Retrieve exact Ensembl release, genome, assembly, README, and CHECKSUMS bytes for 2–8 extant species; cross-check each accession; and create a project-scoped publication table that pins the provider's toplevel FASTA locator and BSD checksum. FASTA contents are not downloaded, and no extinct genome, ancestral sequence, phenotype, embryo, or hatching claim is emitted.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 },
+        species: { type: "array", minItems: 2, maxItems: 8, uniqueItems: true, items: { type: "string", pattern: "^[a-z][a-z0-9_]+$", maxLength: 80 } },
+        title: { type: "string", minLength: 1, maxLength: 240 },
+      },
+      required: ["tool_call_id", "species"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "build_comparative_genomics_gene_tree",
+    route: "/v1/platform/genomics/comparative-gene-tree",
+    description: "Retrieve the current Ensembl data-release receipt plus one bounded rooted Compara gene tree with provider-aligned extant protein or cDNA sequences, preserve exact responses as Sources and a ResearchRun, and create a lineage-bound phylogeny artifact with an alignment-QC publication table. Orthology, alignment, and topology remain inferred; no ancestral sequence or extinct-species genome is emitted.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 },
+        species: { type: "string", pattern: "^[a-z][a-z0-9_]+$", maxLength: 80 },
+        gene_id: { type: "string", pattern: "^[A-Za-z0-9_.-]+$", maxLength: 80 },
+        prune_taxon: { type: "integer", minimum: 1, maximum: 2147483647 },
+        sequence_type: { type: "string", enum: ["protein", "cdna"] },
+        title: { type: "string", minLength: 1, maxLength: 240 },
+      },
+      required: ["tool_call_id", "species", "gene_id", "prune_taxon", "sequence_type"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "materialize_comparative_genomics_publication_table",
+    route: "/v1/platform/genomics/comparative-publication-table",
+    description: "Project the exact alignment-QC output of a succeeded comparative-genomics run into an independently editable, run-bound table artifact that can be inserted into a manuscript and exported as DOCX or LaTeX without pretending the data came from CSV.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 },
+        parent_run_id: { type: "string", pattern: "^[0-9a-fA-F-]{36}$" },
+        title: { type: "string", minLength: 1, maxLength: 240 },
+      },
+      required: ["tool_call_id", "parent_run_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "run_hypothetical_asr_fitch",
+    route: "/v1/platform/genomics/hypothetical-asr-fitch",
+    description: "Run deterministic Fitch parsimony over the exact extant cDNA alignment and rooted bifurcating topology of a succeeded comparative-genomics parent run. Persist a site table and interactive ambiguity Figure as a comparative-genomics Lab artifact. The result remains explicitly hypothetical, not probabilistic or publication-grade ASR, and never an extinct genome, phenotype, embryo, or hatching result.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 },
+        parent_run_id: { type: "string", pattern: "^[0-9a-fA-F-]{36}$" },
+        target_node_id: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]*$", maxLength: 80 },
+      },
+      required: ["tool_call_id", "parent_run_id", "target_node_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "materialize_extant_archosaur_locus_panel",
+    route: "/v1/platform/genomics/extant-archosaur-locus-panel",
+    description: "Materialize an extant-only avian/crocodilian locus panel from succeeded Ensembl Compara cDNA and pinned extant reference-assembly runs. The operation emits a lineage-bound exploratory QC analysis, publication table, and Vega figure; it does not reconstruct extinct DNA, an ancestral sequence, a chromosome, a phenotype, an embryo, or a hatching result.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 },
+        parent_run_id: { type: "string", pattern: "^[0-9a-fA-F-]{36}$" },
+        reference_assembly_run_id: { type: "string", pattern: "^[0-9a-fA-F-]{36}$" },
+        avian_leaf_node_ids: { type: "array", minItems: 2, maxItems: 4, uniqueItems: true, items: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]*$", maxLength: 80 } },
+        crocodilian_leaf_node_ids: { type: "array", minItems: 2, maxItems: 4, uniqueItems: true, items: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]*$", maxLength: 80 } },
+        title: { type: "string", minLength: 1, maxLength: 240 },
+      },
+      required: ["tool_call_id", "parent_run_id", "reference_assembly_run_id", "avian_leaf_node_ids", "crocodilian_leaf_node_ids"],
       additionalProperties: false,
     },
   },
@@ -1014,12 +1552,40 @@ const PLATFORM_TOOLS: McpTool[] = [
     },
   },
   {
+    name: "inspect_science_artifact_numeric_values",
+    route: "/v1/platform/artifacts/inspect-numeric-values",
+    description: "Inspect a bounded catalog of exact numeric scalar values from one immutable, publication-validated, run-bound Science artifact. The host returns JSON Pointers and canonical values without exposing the raw payload; use these locators when binding manuscript numbers.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 },
+        artifact_id: MANUSCRIPT_UUID_SCHEMA,
+        artifact_version: { type: "integer", minimum: 1 },
+        artifact_content_sha256: MANUSCRIPT_SHA256_SCHEMA,
+        validation_receipt_id: MANUSCRIPT_UUID_SCHEMA,
+        json_pointer_prefix: { type: "string", minLength: 2, maxLength: 2_048, pattern: "^/(?:[^~]|~[01])+$" },
+        after_json_pointer: { type: "string", minLength: 2, maxLength: 2_048, pattern: "^/(?:[^~]|~[01])+$" },
+        limit: { type: "integer", minimum: 1, maximum: 200, default: 100 },
+      },
+      required: ["tool_call_id", "artifact_id", "artifact_version", "artifact_content_sha256", "validation_receipt_id"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "describe_statistics_capabilities",
     route: "/v1/platform/statistics/capabilities",
     description: "Read the installed statistics engine's validated coverage manifest and Figure catalog before choosing a method or visualization. It reports exact implemented boundaries, independent-oracle coverage, known gaps, renderer capabilities, and current export support so the AI cannot imply R or MATLAB parity that the installed package does not have.",
     inputSchema: {
       type: "object",
-      properties: { tool_call_id: { type: "string", minLength: 1, maxLength: 160 } },
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 },
+        method_selection_detail: {
+          type: "array",
+          maxItems: 40,
+          uniqueItems: true,
+          items: { type: "string", minLength: 1, maxLength: 160 },
+        },
+      },
       required: ["tool_call_id"],
       additionalProperties: false,
     },
@@ -1228,6 +1794,248 @@ const PLATFORM_TOOLS: McpTool[] = [
     },
   },
   {
+    name: "inspect_source_text_structure",
+    route: "/v1/platform/source-text/structure",
+    description: "Inspect the deterministic section map for one exact project SourceVersion before selecting a manuscript corpus. Returns evidence scope, parser/index hashes, stable source-section IDs, titles, word and paragraph counts. Abstract scope is reported explicitly and cannot calibrate a manuscript blueprint.",
+    inputSchema: {
+      type: "object", properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 }, source_id: MANUSCRIPT_UUID_SCHEMA,
+        source_version_id: MANUSCRIPT_UUID_SCHEMA, source_version: { type: "integer", minimum: 1 }, source_content_sha256: MANUSCRIPT_SHA256_SCHEMA,
+      }, required: ["tool_call_id", "source_id", "source_version_id", "source_version", "source_content_sha256"], additionalProperties: false,
+    },
+  },
+  {
+    name: "record_manuscript_comparable_eligibility",
+    route: "/v1/platform/manuscript-comparable-eligibility/record",
+    description: "Attest whether one exact, content-checked full-text SourceVersion may calibrate the target manuscript family. The Research Director must quote exact UTF-8 byte ranges for its field and article-family classification. Cross-field work may be retained only as a rhetorical analogue and can never influence quantitative corpus targets. Evaluator identity is injected from the trusted grant, never caller supplied.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 },
+        source_id: MANUSCRIPT_UUID_SCHEMA,
+        expected_source_version_id: MANUSCRIPT_UUID_SCHEMA,
+        expected_source_version: { type: "integer", minimum: 1 },
+        expected_source_content_sha256: MANUSCRIPT_SHA256_SCHEMA,
+        source_domain: SCIENCE_DOMAIN_SCHEMA,
+        article_family: { type: "string", enum: ["empirical", "theoretical-proof", "review-synthesis", "methods-model", "data-resource"] },
+        decision: { type: "string", enum: ["quantitative-calibration", "rhetorical-analogue-only", "ineligible"] },
+        venue_relation: { type: "string", enum: ["exact-target-journal", "same-field-peer-journal", "cross-field-analogue", "incompatible"] },
+        target_journal: MANUSCRIPT_BLUEPRINT_JOURNAL_SCHEMA,
+        evidence: { type: "array", minItems: 1, maxItems: 20, items: MANUSCRIPT_COMPARABLE_QUOTE_LOCATOR_SCHEMA },
+        rationale: { type: "string", minLength: 1, maxLength: 20_000 },
+        limitations: { type: "array", maxItems: 50, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 2_000 } },
+      },
+      required: ["tool_call_id", "source_id", "expected_source_version_id", "expected_source_version", "expected_source_content_sha256",
+        "source_domain", "article_family", "decision", "venue_relation", "target_journal", "evidence", "rationale", "limitations"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "inspect_manuscript_comparable_eligibility",
+    route: "/v1/platform/manuscript-comparable-eligibility/inspect",
+    description: "Read one immutable comparable-eligibility receipt and its current/stale projection. The receipt closes the project domain, exact source version, article family, venue relation, optional exact journal profile, source quotes, and trusted Research Director release used for the decision.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 },
+        eligibility_receipt_id: MANUSCRIPT_UUID_SCHEMA,
+      },
+      required: ["tool_call_id", "eligibility_receipt_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "list_manuscript_blueprints",
+    route: "/v1/platform/manuscript-blueprints/list",
+    description: "List the project manuscript blueprints. Each blueprint is an immutable, hash-bound calibration snapshot built only from exact full-text SourceVersions; status is re-evaluated against current source and journal versions on every read.",
+    inputSchema: {
+      type: "object",
+      properties: { tool_call_id: { type: "string", minLength: 1, maxLength: 160 } },
+      required: ["tool_call_id"], additionalProperties: false,
+    },
+  },
+  {
+    name: "inspect_manuscript_blueprint",
+    route: "/v1/platform/manuscript-blueprints/inspect",
+    description: "Inspect one exact manuscript blueprint version, host-derived corpus metrics and section targets, full-text source/index hashes, journal binding, confidence, and deterministic stale reasons. This is planning evidence, not manuscript conformance or journal readiness.",
+    inputSchema: {
+      type: "object",
+      properties: { tool_call_id: { type: "string", minLength: 1, maxLength: 160 }, blueprint_id: MANUSCRIPT_UUID_SCHEMA },
+      required: ["tool_call_id", "blueprint_id"], additionalProperties: false,
+    },
+  },
+  {
+    name: "inspect_manuscript_blueprint_assessment",
+    route: "/v1/platform/manuscript-blueprint-assessments/inspect",
+    description: "Read the latest immutable structural assessment for a manuscript. Returns the exact manuscript, Blueprint, journal, and assessment-policy closures plus host-derived per-section observations and deterministic stale reasons. The renderer must not recompute readiness.",
+    inputSchema: {
+      type: "object",
+      properties: { tool_call_id: { type: "string", minLength: 1, maxLength: 160 }, manuscript_id: MANUSCRIPT_UUID_SCHEMA },
+      required: ["tool_call_id", "manuscript_id"], additionalProperties: false,
+    },
+  },
+  {
+    name: "record_manuscript_blueprint_assessment",
+    route: "/v1/platform/manuscript-blueprint-assessments/record",
+    description: "Record or reuse the immutable host-computed structural assessment for one exact current manuscript, its bound full-text Blueprint, verified journal profile, and versioned assessment policy. Callers cannot supply scores or thresholds.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 }, manuscript_id: MANUSCRIPT_UUID_SCHEMA,
+        expected_manuscript_version: { type: "integer", minimum: 1 }, expected_manuscript_content_sha256: MANUSCRIPT_SHA256_SCHEMA,
+        journal_profile_id: MANUSCRIPT_UUID_SCHEMA, expected_journal_profile_version: { type: "integer", minimum: 1 },
+        expected_journal_profile_content_sha256: MANUSCRIPT_SHA256_SCHEMA,
+      },
+      required: ["tool_call_id", "manuscript_id", "expected_manuscript_version", "expected_manuscript_content_sha256", "journal_profile_id", "expected_journal_profile_version", "expected_journal_profile_content_sha256"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "inspect_manuscript_scholarly_assessment",
+    route: "/v1/platform/manuscript-scholarly-assessments/inspect",
+    description: "Read the latest immutable scholarly-flow assessment for one manuscript. It closes the exact manuscript, Blueprint, structural assessment, journal profile, Research Director runtime, policy, paragraph evidence spans, rhetorical moves, evidence roles, section flow, and host-derived visual coverage. Passing is manuscript-conformance evidence, not peer review or scientific truth.",
+    inputSchema: {
+      type: "object", properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 }, manuscript_id: MANUSCRIPT_UUID_SCHEMA,
+      }, required: ["tool_call_id", "manuscript_id"], additionalProperties: false,
+    },
+  },
+  {
+    name: "record_manuscript_scholarly_assessment",
+    route: "/v1/platform/manuscript-scholarly-assessments/record",
+    description: "Attest whether every exact Blueprint rhetorical move, evidence role, section transition, corpus-calibrated paragraph sequence, and conditional visual expectation is actually present in one exact manuscript. Quote spans must resolve byte-for-byte inside stable paragraph nodes. Evaluator identity is injected from the trusted Research Director grant; it cannot be supplied by the caller. A blocked receipt is still recorded for diagnosis and can never satisfy submission readiness.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 }, manuscript_id: MANUSCRIPT_UUID_SCHEMA,
+        expected_manuscript_version: { type: "integer", minimum: 1 }, expected_manuscript_content_sha256: MANUSCRIPT_SHA256_SCHEMA,
+        expected_blueprint_assessment_id: MANUSCRIPT_UUID_SCHEMA, expected_blueprint_assessment_report_sha256: MANUSCRIPT_SHA256_SCHEMA,
+        journal_profile_id: MANUSCRIPT_UUID_SCHEMA, expected_journal_profile_version: { type: "integer", minimum: 1 },
+        expected_journal_profile_content_sha256: MANUSCRIPT_SHA256_SCHEMA,
+        overall_confidence: { type: "number", minimum: 0, maximum: 1 },
+        sections: { type: "array", minItems: 3, maxItems: 30, items: {
+          type: "object", properties: {
+            section_key: { type: "string", pattern: "^[a-z0-9][a-z0-9._-]{0,119}$" },
+            heading: MANUSCRIPT_SCHOLARLY_NODE_LOCATOR_SCHEMA,
+            rhetorical_moves: { type: "array", maxItems: 20, items: MANUSCRIPT_SCHOLARLY_ITEM_SCHEMA },
+            evidence_role_coverage: { type: "array", maxItems: 20, items: MANUSCRIPT_SCHOLARLY_ITEM_SCHEMA },
+            flow: { type: "object", properties: {
+              status: { type: "string", enum: ["coherent", "partial", "broken"] },
+              reader_starts_with: { type: "string", minLength: 1, maxLength: 4_000 },
+              contribution: { type: "string", minLength: 1, maxLength: 4_000 },
+              next_question: { type: "string", minLength: 1, maxLength: 4_000 },
+              confidence: { type: "number", minimum: 0, maximum: 1 },
+              evidence: { type: "array", maxItems: 100, items: MANUSCRIPT_SCHOLARLY_QUOTE_LOCATOR_SCHEMA },
+              rationale: { type: "string", minLength: 1, maxLength: 8_000 },
+            }, required: ["status", "reader_starts_with", "contribution", "next_question", "confidence", "evidence", "rationale"], additionalProperties: false },
+          }, required: ["section_key", "heading", "rhetorical_moves", "evidence_role_coverage", "flow"], additionalProperties: false,
+        } },
+        summary: { type: "string", minLength: 1, maxLength: 20_000 },
+        limitations: { type: "array", maxItems: 100, items: { type: "string", minLength: 1, maxLength: 4_000 } },
+      },
+      required: ["tool_call_id", "manuscript_id", "expected_manuscript_version", "expected_manuscript_content_sha256",
+        "expected_blueprint_assessment_id", "expected_blueprint_assessment_report_sha256", "journal_profile_id",
+        "expected_journal_profile_version", "expected_journal_profile_content_sha256", "overall_confidence", "sections", "summary", "limitations"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "prepare_manuscript_coherence_context",
+    route: "/v1/platform/manuscript-coherence/prepare-context",
+    description: "Prepare the exact current manuscript-coherence context from durable host state. The host revalidates the manuscript, claim-ledger gate, per-claim evidence signatures, visual nodes, artifact validation receipts, and run-output closure. Callers cannot supply or repair context facts.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 },
+        manuscript_id: MANUSCRIPT_UUID_SCHEMA,
+        expected_manuscript_version: { type: "integer", minimum: 1 },
+        expected_manuscript_content_sha256: MANUSCRIPT_SHA256_SCHEMA,
+      },
+      required: ["tool_call_id", "manuscript_id", "expected_manuscript_version", "expected_manuscript_content_sha256"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "inspect_manuscript_coherence_assessment",
+    route: "/v1/platform/manuscript-coherence/inspect",
+    description: "Read the latest immutable manuscript-coherence receipt with its host-revalidated current or stale projection. Missing, advanced, or tampered manuscript and claim-ledger closures fail closed; a passing receipt proves bounded linkage and numeric/visual consistency, not scientific truth.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 },
+        manuscript_id: MANUSCRIPT_UUID_SCHEMA,
+      },
+      required: ["tool_call_id", "manuscript_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "record_manuscript_coherence_assessment",
+    route: "/v1/platform/manuscript-coherence/record",
+    description: "Record or reuse an immutable host-evaluated coherence receipt for one exact manuscript and claim-ledger head. Supply semantic claim links and exact numeric quote declarations only; all manuscript, section, evidence, visual, artifact, receipt, and run-output facts are rebuilt inside the host transaction. Blocked receipts are retained for diagnosis and cannot satisfy submission readiness.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 },
+        manuscript_id: MANUSCRIPT_UUID_SCHEMA,
+        expected_manuscript_version: { type: "integer", minimum: 1 },
+        expected_manuscript_content_sha256: MANUSCRIPT_SHA256_SCHEMA,
+        expected_claim_ledger_id: MANUSCRIPT_UUID_SCHEMA,
+        expected_claim_ledger_revision: { type: "integer", minimum: 1 },
+        expected_claim_ledger_manifest_sha256: MANUSCRIPT_SHA256_SCHEMA,
+        expected_claim_ledger_gate_report_sha256: MANUSCRIPT_SHA256_SCHEMA,
+        expected_claim_ledger_policy_content_sha256: MANUSCRIPT_SHA256_SCHEMA,
+        ...MANUSCRIPT_COHERENCE_DECLARATIONS_SCHEMA,
+      },
+      required: [
+        "tool_call_id", "manuscript_id", "expected_manuscript_version", "expected_manuscript_content_sha256",
+        "expected_claim_ledger_id", "expected_claim_ledger_revision", "expected_claim_ledger_manifest_sha256",
+        "expected_claim_ledger_gate_report_sha256", "expected_claim_ledger_policy_content_sha256", "summary_claim_links",
+        "results_discussion_links", "numeric_assertions", "numeric_exemptions",
+      ],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "create_manuscript_blueprint",
+    route: "/v1/platform/manuscript-blueprints/create",
+    description: "Create the first immutable manuscript blueprint before drafting prose. Supply 1-20 exact current full-text SourceVersions and rhetorical section jobs. One to four sources remain collecting; five or more permit a current corpus calibration. The host measures the complete indexed article body, verifies complete section coverage, recomputes targets, and forbids caller-supplied thresholds.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 }, title: { type: "string", minLength: 1, maxLength: 500 },
+        article_family: { type: "string", enum: ["empirical", "theoretical-proof", "review-synthesis", "methods-model", "data-resource"] },
+        comparables: { type: "array", minItems: 1, maxItems: 20, items: MANUSCRIPT_BLUEPRINT_COMPARABLE_SCHEMA },
+        journal_binding: MANUSCRIPT_BLUEPRINT_JOURNAL_SCHEMA,
+        sections: { type: "array", minItems: 3, maxItems: 30, items: MANUSCRIPT_BLUEPRINT_SECTION_SCHEMA },
+        planning_rationale: { type: "string", minLength: 1, maxLength: 20000 },
+        limitations: { type: "array", maxItems: 50, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 2000 } },
+      },
+      required: ["tool_call_id", "title", "article_family", "comparables", "journal_binding", "sections", "planning_rationale", "limitations"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "revise_manuscript_blueprint",
+    route: "/v1/platform/manuscript-blueprints/append-version",
+    description: "Append a new immutable blueprint version using exact optimistic concurrency. Use this when the comparable corpus, article family, section plan, or target journal changes; ordinary prose edits do not rewrite the blueprint.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 }, blueprint_id: MANUSCRIPT_UUID_SCHEMA,
+        expected_version: { type: "integer", minimum: 1 }, expected_content_sha256: MANUSCRIPT_SHA256_SCHEMA,
+        article_family: { type: "string", enum: ["empirical", "theoretical-proof", "review-synthesis", "methods-model", "data-resource"] },
+        comparables: { type: "array", minItems: 1, maxItems: 20, items: MANUSCRIPT_BLUEPRINT_COMPARABLE_SCHEMA },
+        journal_binding: MANUSCRIPT_BLUEPRINT_JOURNAL_SCHEMA,
+        sections: { type: "array", minItems: 3, maxItems: 30, items: MANUSCRIPT_BLUEPRINT_SECTION_SCHEMA },
+        planning_rationale: { type: "string", minLength: 1, maxLength: 20000 },
+        limitations: { type: "array", maxItems: 50, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 2000 } },
+      },
+      required: ["tool_call_id", "blueprint_id", "expected_version", "expected_content_sha256", "article_family", "comparables", "journal_binding", "sections", "planning_rationale", "limitations"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "list_project_manuscripts",
     route: "/v1/platform/manuscripts/list",
     description: "List the project manuscripts currently stored in the immutable Science manuscript ledger. Returns current version and binding hashes, not a claim that a manuscript is journal-ready.",
@@ -1241,7 +2049,7 @@ const PLATFORM_TOOLS: McpTool[] = [
   {
     name: "inspect_science_manuscript",
     route: "/v1/platform/manuscripts/inspect",
-    description: "Read one exact current manuscript version, including its Markdown, integrity hashes, and evidence bindings. Use the returned version and content hash as the concurrency precondition for saving a revision.",
+    description: "Read one exact current manuscript version, including its stable-ID structured document, Markdown projection, integrity hashes, identity epoch, evidence bindings, and a deterministic anti-stub depth preflight. Use the returned version plus content and document hashes as concurrency preconditions; never infer node identity from Markdown offsets. A passing anti-stub preflight is not journal readiness: compare it with the full-text corpus blueprint and verified journal profile.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1249,6 +2057,107 @@ const PLATFORM_TOOLS: McpTool[] = [
         manuscript_id: { type: "string" },
       },
       required: ["tool_call_id", "manuscript_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "inspect_science_manuscript_editor_model",
+    route: "/v1/platform/manuscripts/editor-model",
+    description: "Read the exact current stable-ID manuscript editor model for this granted project. Returns the immutable document snapshot, current manuscript hashes, recent append-only transactions, and undo availability. This is read-only and is the authoritative source for node-level edit preconditions.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 },
+        manuscript_id: { type: "string", minLength: 1, maxLength: 80 },
+      },
+      required: ["tool_call_id", "manuscript_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "list_science_manuscript_transactions",
+    route: "/v1/platform/manuscripts/transactions",
+    description: "List the bounded append-only transaction history for one manuscript in this granted project. Returns exact operation, version, content-hash, document-hash, actor, and revert lineage; it never reconstructs edits from prose or Markdown diffs.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 },
+        manuscript_id: { type: "string", minLength: 1, maxLength: 80 },
+        limit: { type: "integer", minimum: 1, maximum: 500 },
+      },
+      required: ["tool_call_id", "manuscript_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "propose_science_manuscript_edit",
+    route: "/v1/platform/manuscripts/edit-proposals/create",
+    description: "Persist an assistant-authored preview against one exact manuscript version and stable-ID document. This does not mutate the manuscript: the runtime validates every node/anchor CAS field, applies the operations in memory, and returns the complete preview plus hashes for human review. Exact selection-context ids may ground a request such as 'rewrite this passage'.",
+    inputSchema: {
+      $defs: MANUSCRIPT_SCHEMA_DEFS,
+      type: "object",
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 },
+        manuscript_id: { type: "string", minLength: 1, maxLength: 80 },
+        expected_version: { type: "integer", minimum: 1 },
+        expected_content_sha256: MANUSCRIPT_SHA256_SCHEMA,
+        expected_document_sha256: MANUSCRIPT_SHA256_SCHEMA,
+        operations: { type: "array", minItems: 1, maxItems: 1_000, items: MANUSCRIPT_OPERATION_SCHEMA },
+        summary: { type: "string", minLength: 1, maxLength: 1_000 },
+        rationale: { type: "string", minLength: 1, maxLength: 20_000 },
+        selection_context_ids: MANUSCRIPT_SELECTION_CONTEXT_REFS_SCHEMA,
+      },
+      required: ["tool_call_id", "manuscript_id", "expected_version", "expected_content_sha256", "expected_document_sha256", "operations", "summary", "rationale"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "list_science_manuscript_edit_proposals",
+    route: "/v1/platform/manuscripts/edit-proposals/list",
+    description: "List bounded assistant edit proposals for one manuscript in this granted project. Each read reprojects pending versus stale from the exact current manuscript head and returns immutable preview, selection, payload-hash, and decision lineage.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 },
+        manuscript_id: { type: "string", minLength: 1, maxLength: 80 },
+        statuses: { type: "array", minItems: 1, maxItems: 4, uniqueItems: true, items: { type: "string", enum: ["pending", "stale", "applied", "rejected"] } },
+        limit: { type: "integer", minimum: 1, maximum: 500 },
+      },
+      required: ["tool_call_id", "manuscript_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "apply_science_manuscript_edit_proposal",
+    route: "/v1/platform/manuscripts/edit-proposals/apply",
+    description: "Apply one exact reviewed pending proposal as the manuscript's single atomic assistant transaction. This mutates the manuscript and records an immutable applied decision; it fails closed if the manuscript version, content hash, document hash, proposal payload, node CAS, artifact validation receipt, or project scope is stale.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 },
+        manuscript_id: { type: "string", minLength: 1, maxLength: 80 },
+        proposal_id: MANUSCRIPT_UUID_SCHEMA,
+        expected_version: { type: "integer", minimum: 1 },
+        expected_content_sha256: MANUSCRIPT_SHA256_SCHEMA,
+        expected_document_sha256: MANUSCRIPT_SHA256_SCHEMA,
+      },
+      required: ["tool_call_id", "manuscript_id", "proposal_id", "expected_version", "expected_content_sha256", "expected_document_sha256"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "reject_science_manuscript_edit_proposal",
+    route: "/v1/platform/manuscripts/edit-proposals/reject",
+    description: "Reject one exact pending or stale assistant proposal without changing manuscript content. This records an immutable rejection decision and reason; applied or already rejected proposals cannot be decided again.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 },
+        manuscript_id: { type: "string", minLength: 1, maxLength: 80 },
+        proposal_id: MANUSCRIPT_UUID_SCHEMA,
+        reason: { type: ["string", "null"], maxLength: 4_000 },
+      },
+      required: ["tool_call_id", "manuscript_id", "proposal_id", "reason"],
       additionalProperties: false,
     },
   },
@@ -1283,6 +2192,55 @@ const PLATFORM_TOOLS: McpTool[] = [
     inputSchema: { type: "object", properties: { tool_call_id: { type: "string", minLength: 1, maxLength: 160 }, manifest: { type: "object" } }, required: ["tool_call_id", "manifest"], additionalProperties: false },
   },
   {
+    name: "seal_manuscript_claim_ledger",
+    route: "/v1/platform/claim-ledgers/seal",
+    description: "Create revision 1 of a manuscript claim ledger from explicit per-sentence classifications. Every canonical manuscript sentence returned by prepare_manuscript_claim_context must be classified; omission fails closed instead of silently treating a sentence as non-factual. A supported sentence must name snapshotted evidence. Supported method/result sentences must use evidence_assessments to pair a citation with a passed artifact validation receipt and state evidence direction, relevance, and assessment confidence. The runtime derives and seals exact artifact versions and hashes.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 },
+        manuscript_id: { type: "string" },
+        expected_manuscript_version: { type: "integer", minimum: 1 },
+        expected_manuscript_content_sha256: { type: "string" },
+        citation_ids: { type: "array", items: { type: "string" }, maxItems: 500 },
+        validation_receipt_ids: { type: "array", items: { type: "string" }, maxItems: 500 },
+        classifications: {
+          type: "array",
+          maxItems: 5_000,
+          items: {
+            type: "object",
+            properties: {
+              sentence_id: { type: "string" },
+              claim_class: { type: "string", enum: [...SCIENCE_CLAIM_CLASSES] },
+              status: { type: "string", enum: [...SCIENCE_CLAIM_STATUSES] },
+              evidence_citation_ids: { type: "array", items: { type: "string" }, maxItems: 100 },
+              evidence_assessments: {
+                type: "array",
+                maxItems: 100,
+                items: {
+                  type: "object",
+                  properties: {
+                    citation_id: { type: "string" },
+                    validation_receipt_id: { type: ["string", "null"] },
+                    direction: { type: "string", enum: ["support", "contradict", "qualify"] },
+                    relevance: { type: "number", minimum: 0, maximum: 1 },
+                    assessment_confidence: { type: "number", minimum: 0, maximum: 1 },
+                  },
+                  required: ["citation_id", "direction", "relevance", "assessment_confidence"],
+                  additionalProperties: false,
+                },
+              },
+            },
+            required: ["sentence_id", "claim_class", "status"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["tool_call_id", "manuscript_id", "expected_manuscript_version", "expected_manuscript_content_sha256", "classifications"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "append_manuscript_claim_ledger_revision",
     route: "/v1/platform/claim-ledgers/append",
     description: "Append one full immutable claim-ledger manifest using exact revision and manifest SHA-256 CAS preconditions. Claim history is append-only; changed claims must supersede an exact prior record and stale or replayed evidence is rejected.",
@@ -1295,9 +2253,65 @@ const PLATFORM_TOOLS: McpTool[] = [
     inputSchema: { type: "object", properties: { tool_call_id: { type: "string", minLength: 1, maxLength: 160 }, manuscript_id: { type: "string" } }, required: ["tool_call_id", "manuscript_id"], additionalProperties: false },
   },
   {
+    name: "start_manuscript_drafting_session",
+    route: "/v1/platform/manuscript-drafting/start",
+    description: "Start a durable Blueprint-bound long-form drafting session. The host derives the exact ordered section plan and corpus-calibrated word/paragraph targets. Use this for a real full manuscript instead of trying to emit the entire paper in one model response.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 },
+        title: { type: "string", minLength: 1, maxLength: 500 },
+        bindings: { type: "array", maxItems: 10000, items: MANUSCRIPT_BINDING_SCHEMA },
+        blueprint_binding: MANUSCRIPT_BLUEPRINT_BINDING_SCHEMA,
+      },
+      required: ["tool_call_id", "title", "bindings", "blueprint_binding"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "inspect_manuscript_drafting_session",
+    route: "/v1/platform/manuscript-drafting/inspect",
+    description: "Inspect exact durable progress for a long-form manuscript drafting session, including the Blueprint-derived plan, current immutable section revisions, readiness, optimistic version, and state hash. Call this after restart or before every section save.",
+    inputSchema: { type: "object", properties: {
+      tool_call_id: { type: "string", minLength: 1, maxLength: 160 }, session_id: MANUSCRIPT_UUID_SCHEMA,
+    }, required: ["tool_call_id", "session_id"], additionalProperties: false },
+  },
+  {
+    name: "save_manuscript_section_draft",
+    route: "/v1/platform/manuscript-drafting/save-section",
+    description: "Append one immutable body-only section revision to a durable long-form drafting session. Supply the exact latest session version and state hash. The host measures words and substantive paragraphs against the sealed Blueprint target and reports draft or ready; Abstract is accepted only after every required body section has a revision.",
+    inputSchema: { type: "object", properties: {
+      tool_call_id: { type: "string", minLength: 1, maxLength: 160 },
+      session_id: MANUSCRIPT_UUID_SCHEMA,
+      expected_version: { type: "integer", minimum: 1 },
+      expected_state_sha256: MANUSCRIPT_SHA256_SCHEMA,
+      section_key: { type: "string", minLength: 1, maxLength: 120 },
+      markdown: { type: "string", minLength: 1, maxLength: 2000000 },
+    }, required: ["tool_call_id", "session_id", "expected_version", "expected_state_sha256", "section_key", "markdown"], additionalProperties: false },
+  },
+  {
+    name: "assemble_manuscript_drafting_session",
+    route: "/v1/platform/manuscript-drafting/assemble",
+    description: "Deterministically assemble the latest ready section revisions in Blueprint order and create manuscript v1. Assembly rechecks the exact current Blueprint and the whole-document anti-stub, section-depth, paragraph-flow, total-length, and duplicate-padding gates. Any incomplete or stale session fails closed.",
+    inputSchema: { type: "object", properties: {
+      tool_call_id: { type: "string", minLength: 1, maxLength: 160 }, session_id: MANUSCRIPT_UUID_SCHEMA,
+      expected_version: { type: "integer", minimum: 1 }, expected_state_sha256: MANUSCRIPT_SHA256_SCHEMA,
+    }, required: ["tool_call_id", "session_id", "expected_version", "expected_state_sha256"], additionalProperties: false },
+  },
+  {
+    name: "cancel_manuscript_drafting_session",
+    route: "/v1/platform/manuscript-drafting/cancel",
+    description: "Irreversibly cancel one still-drafting session with exact optimistic concurrency. Existing immutable section revisions remain available for audit but can never be assembled by this session.",
+    inputSchema: { type: "object", properties: {
+      tool_call_id: { type: "string", minLength: 1, maxLength: 160 }, session_id: MANUSCRIPT_UUID_SCHEMA,
+      expected_version: { type: "integer", minimum: 1 }, expected_state_sha256: MANUSCRIPT_SHA256_SCHEMA,
+      reason: { type: "string", minLength: 1, maxLength: 4000 },
+    }, required: ["tool_call_id", "session_id", "expected_version", "expected_state_sha256", "reason"], additionalProperties: false },
+  },
+  {
     name: "create_science_manuscript",
     route: "/v1/platform/manuscripts/create",
-    description: "Create the first immutable version of a project manuscript. Evidence bindings are accepted only when they resolve to exact project citations, source figures, or verified artifact captures; unsupported claims must remain explicitly unbound in the Markdown.",
+    description: "Compatibility/import boundary for an already complete external full draft. New Research Director long-form papers must use start_manuscript_drafting_session, immutable section saves, and assemble_manuscript_drafting_session so generation can resume across model turns. An outline, one-line demonstration, collecting Blueprint, missing required section, or draft grossly below the comparable full-text corpus is rejected.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1305,15 +2319,16 @@ const PLATFORM_TOOLS: McpTool[] = [
         title: { type: "string", minLength: 1, maxLength: 500 },
         markdown: { type: "string", minLength: 1, maxLength: 2000000 },
         bindings: { type: "array", maxItems: 10000, items: MANUSCRIPT_BINDING_SCHEMA },
+        blueprint_binding: MANUSCRIPT_BLUEPRINT_BINDING_SCHEMA,
       },
-      required: ["tool_call_id", "title", "markdown", "bindings"],
+      required: ["tool_call_id", "title", "markdown", "bindings", "blueprint_binding"],
       additionalProperties: false,
     },
   },
   {
     name: "save_science_manuscript_version",
     route: "/v1/platform/manuscripts/append-version",
-    description: "Append a new immutable manuscript version with optimistic concurrency. Supply the exact current version, content hash, complete Markdown, and complete binding manifest returned by inspect_science_manuscript.",
+    description: "Append a new immutable full-draft version with optimistic concurrency. The exact current Blueprint binding is inherited unless an exact current replacement is supplied; an outline, one-line replacement, missing required section, or draft grossly below its comparable full-text corpus is rejected. Supply the exact current version, content hash, complete Markdown, and complete binding manifest returned by inspect_science_manuscript.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1323,6 +2338,7 @@ const PLATFORM_TOOLS: McpTool[] = [
         expected_content_sha256: { type: "string", pattern: "^[a-f0-9]{64}$" },
         markdown: { type: "string", minLength: 1, maxLength: 2000000 },
         bindings: { type: "array", maxItems: 10000, items: MANUSCRIPT_BINDING_SCHEMA },
+        blueprint_binding: MANUSCRIPT_BLUEPRINT_BINDING_SCHEMA,
       },
       required: ["tool_call_id", "manuscript_id", "expected_version", "expected_content_sha256", "markdown", "bindings"],
       additionalProperties: false,
@@ -1365,6 +2381,21 @@ const PLATFORM_TOOLS: McpTool[] = [
     inputSchema: { type: "object", properties: { tool_call_id: { type: "string", minLength: 1, maxLength: 160 }, manuscript_id: { type: "string" }, journal_profile_id: { type: "string" }, human_attestation_receipt_ids: { type: "array", maxItems: 500, uniqueItems: true, items: { type: "string" } }, metadata: SUBMISSION_METADATA_SCHEMA }, required: ["tool_call_id", "manuscript_id", "journal_profile_id", "human_attestation_receipt_ids", "metadata"], additionalProperties: false },
   },
   {
+    name: "render_science_manuscript",
+    route: "/v1/platform/manuscripts/render",
+    description: "Render an exact stored manuscript version into the full paper: numbered figures embedded from verified captures/vector exports, editable tables built from exact artifact rows, numbered equations, formatted references (numeric, APA, or Nature style) with a BibTeX file, and author/affiliation front matter. Writes manuscript.html, manuscript.tex, references.bib, manuscript.docx, and manuscript.pdf (LaTeX via tectonic when installed, otherwise Chromium print, reported honestly) under the project's manuscript-renders directory and returns the numbering report plus every warning (unbound placeholders, unresolved references, missing assets). Use it before claiming a manuscript is complete and after every manuscript edit.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tool_call_id: { type: "string", minLength: 1, maxLength: 160 }, manuscript_id: { type: "string" },
+        style: { type: "string", enum: ["numeric", "apa", "nature"] }, line_numbers: { type: "boolean" }, double_spacing: { type: "boolean" },
+        outputs: { type: "array", minItems: 1, maxItems: 5, uniqueItems: true, items: { type: "string", enum: ["html", "latex", "docx", "pdf", "package"] } },
+        metadata: SUBMISSION_METADATA_SCHEMA,
+      },
+      required: ["tool_call_id", "manuscript_id"], additionalProperties: false,
+    },
+  },
+  {
     name: "export_journal_submission_bundle",
     route: "/v1/platform/journals/export-submission",
     description: "Build a hash-manifested ZIP containing DOCX, TeX, Markdown, exact bound figures, journal profile, validation report, evidence ledger, metadata, and cover letter. Export is blocked unless the exact manuscript/profile versions pass all error rules and every manual rule is explicitly attested.",
@@ -1379,10 +2410,40 @@ const PLATFORM_TOOLS: McpTool[] = [
   },
 ];
 
+const SCIENCE_EXTENSION_REQUIRED_PLATFORM_TOOL_NAMES = [
+  "build_comparative_genomics_gene_tree",
+  "build_extant_reference_assembly_manifest",
+  "materialize_extant_archosaur_locus_panel",
+] as const;
+
+export function scienceDesktopHostCompatibilitySnapshot(): ScienceDesktopHostCompatibilitySnapshot {
+  const byName = new Map(PLATFORM_TOOLS.map((tool) => [tool.name, tool]));
+  return {
+    apiName: SCIENCE_DESKTOP_HOST_API_NAME,
+    apiVersion: SCIENCE_DESKTOP_HOST_API_VERSION,
+    platformTools: SCIENCE_EXTENSION_REQUIRED_PLATFORM_TOOL_NAMES.map((name) => {
+      const tool = byName.get(name);
+      if (!tool) throw new Error("science-desktop-host-contract-tool-missing");
+      return { name: tool.name, route: tool.route, inputSchemaSha256: scienceExtensionHostCompatibilitySha256(tool.inputSchema) };
+    }),
+  };
+}
+
 const IMPLEMENTED_TOOL_IDS = new Set([
   "agentlas.earth-gutenberg-richter-analysis",
   "agentlas.physics-hepdata-chi-square-analysis",
+  "agentlas.physics-spectrum-fit-analysis",
+  "agentlas.physics-significance-limits-analysis",
+  "agentlas.physics-uncertainty-propagation-analysis",
+  "agentlas.physics-unit-analysis",
+  "agentlas.physics-ode-simulation-analysis",
+  "agentlas.physics-signal-analysis",
+  "agentlas.physics-york-fit-analysis",
+  "agentlas.physics-lab-experiment-analysis",
   "agentlas.materials-lattice-metrics-analysis",
+  "agentlas.paleontology-stratigraphic-support",
+  "agentlas.paleontology-candidate-comparison",
+  "agentlas.paleontology-deextinction-feasibility",
   "agentlas.statistics-analysis",
   "agentlas.table-to-vega",
   "agentlas.academic-to-citation-network",
@@ -1438,6 +2499,86 @@ function respond(response: http.ServerResponse, status: number, value: unknown):
   response.end(bytes);
 }
 
+
+/**
+ * Attach the study's standing to a tool result.
+ *
+ * Additive and defensive: a non-object result, a failed result, or one that already carries this is
+ * returned untouched, and a store that cannot answer is not allowed to turn a successful tool call
+ * into an error.
+ */
+
+/**
+ * A decision the RESEARCHER still owes at this phase, or null.
+ *
+ * Only `hypothesis` has one beyond the contract today: the gate out of it refuses any hypothesis
+ * still `proposed`, and only a person can approve one. Reading it here rather than assuming keeps
+ * the answer true for a project whose hypotheses are already approved.
+ */
+
+/** Column names and types for a Data Table artifact version, or null when it is not one. */
+export function dataTableShape(payload: unknown): { columns: Array<{ name: string; logicalType: string; nullable: boolean }>; rowCount: number } | null {
+  const record = payload && typeof payload === "object" ? payload as Record<string, unknown> : null;
+  if (!record || record.schema !== "agentlas.science-table/v1" || !Array.isArray(record.columns)) return null;
+  const profile = record.profile && typeof record.profile === "object" ? record.profile as Record<string, unknown> : null;
+  return {
+    columns: (record.columns as Array<Record<string, unknown>>).slice(0, 512).map((column) => ({
+      name: String(column.name ?? ""),
+      logicalType: String(column.logicalType ?? ""),
+      nullable: Boolean(column.nullable),
+    })),
+    rowCount: Number(profile?.rowCount ?? (Array.isArray(record.rows) ? record.rows.length : 0)),
+  };
+}
+
+
+/**
+ * The tool speaks snake_case and the gateway speaks camelCase; only one key differs, and leaving it
+ * unmapped would silently drop the upper label of a derived cut -- every row would land in one group
+ * and the comparison would look real.
+ */
+function normalizeTablePreparation(value: unknown): unknown {
+  const record = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  if (!record) return value;
+  const derive = record.derive && typeof record.derive === "object" ? { ...record.derive as Record<string, unknown> } : null;
+  if (derive && derive.at_or_above !== undefined) {
+    derive.atOrAbove = derive.at_or_above;
+    delete derive.at_or_above;
+  }
+  return { ...record, ...(derive ? { derive } : {}) };
+}
+
+function pendingResearcherDecisionFor(store: ReturnType<typeof scienceStore>, projectId: string, phase: string | null) {
+  if (phase !== "hypothesis") return null;
+  try {
+    const manifest = store.currentHypothesisManifest(projectId);
+    const unapproved = manifest.hypotheses.filter((item) => item.status !== "approved").length;
+    return unapproved > 0 ? { what: "hypotheses", count: unapproved } : null;
+  } catch {
+    return null;
+  }
+}
+
+function withStudyProgress(result: unknown, projectId: string): unknown {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return result;
+  const record = result as Record<string, unknown>;
+  if (record.ok !== true || record.studyProgress !== undefined) return result;
+  try {
+    const store = scienceStore();
+    const lifecycle = store.getResearchLifecycleForProject(projectId);
+    const contract = store.latestResearchContract(projectId);
+    return { ...record, studyProgress: scienceStudyProgress({
+      phase: lifecycle?.phase ?? null,
+      contract,
+      approvedTermsSha256: store.approvedResearchContractSha256(projectId),
+      nextGate: lifecycle?.phase ? scienceNextResearchPhaseGate(lifecycle.phase) : null,
+      pendingResearcherDecision: pendingResearcherDecisionFor(store, projectId, lifecycle?.phase ?? null),
+    }) };
+  } catch {
+    return result;
+  }
+}
+
 function positiveInteger(value: unknown, code: string): number {
   if (!Number.isSafeInteger(value) || Number(value) < 1) throw new Error(code);
   return Number(value);
@@ -1478,6 +2619,71 @@ function exactText(value: unknown, maximum: number, code: string): string {
 function exactToolBody(value: unknown, allowedKeys: readonly string[], code: string): asserts value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)
     || Object.keys(value).some((key) => !allowedKeys.includes(key))) throw new Error(code);
+}
+
+function localJsonSchemaRef(rootSchemaValue: unknown, ref: string): unknown {
+  if (!ref.startsWith("#/")) return null;
+  let current: unknown = rootSchemaValue;
+  for (const encoded of ref.slice(2).split("/")) {
+    const key = encoded.replace(/~1/gu, "/").replace(/~0/gu, "~");
+    if (!current || typeof current !== "object" || Array.isArray(current)
+      || !Object.prototype.hasOwnProperty.call(current, key)) return null;
+    current = (current as Record<string, unknown>)[key];
+  }
+  return current;
+}
+
+function assertNoUndeclaredToolProperties(
+  value: unknown,
+  schemaValue: unknown,
+  code: string,
+  rootSchemaValue: unknown = schemaValue,
+): void {
+  if (!schemaValue || typeof schemaValue !== "object" || Array.isArray(schemaValue)) return;
+  const schema = schemaValue as Record<string, unknown>;
+  if (typeof schema.$ref === "string") {
+    const resolved = localJsonSchemaRef(rootSchemaValue, schema.$ref);
+    if (!resolved) throw new Error(code);
+    assertNoUndeclaredToolProperties(value, resolved, code, rootSchemaValue);
+    return;
+  }
+  const alternatives = [
+    ...(Array.isArray(schema.oneOf) ? schema.oneOf : []),
+    ...(Array.isArray(schema.anyOf) ? schema.anyOf : []),
+  ];
+  if (Array.isArray(value)) {
+    if (schema.items !== undefined) {
+      for (const item of value) assertNoUndeclaredToolProperties(item, schema.items, code, rootSchemaValue);
+    }
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  const properties = schema.properties && typeof schema.properties === "object" && !Array.isArray(schema.properties)
+    ? schema.properties as Record<string, unknown>
+    : null;
+  if (schema.additionalProperties === false
+    && Object.keys(value).some((key) => !properties || !Object.prototype.hasOwnProperty.call(properties, key))) {
+    throw new Error(code);
+  }
+  if (properties) {
+    const recordValue = value as Record<string, unknown>;
+    for (const [key, propertySchema] of Object.entries(properties)) {
+      if (Object.prototype.hasOwnProperty.call(recordValue, key)) {
+        assertNoUndeclaredToolProperties(recordValue[key], propertySchema, code, rootSchemaValue);
+      }
+    }
+  }
+  if (!properties && alternatives.length > 0) {
+    for (const alternative of alternatives) {
+      try {
+        assertNoUndeclaredToolProperties(value, alternative, code, rootSchemaValue);
+        return;
+      } catch (error) {
+        if (!(error instanceof Error) || error.message !== code) throw error;
+      }
+    }
+    throw new Error(code);
+  }
 }
 
 function exactPatternText(value: unknown, maximum: number, pattern: RegExp, code: string): string {
@@ -1538,6 +2744,190 @@ function genomicsResultRecord(result: Awaited<ReturnType<ReturnType<typeof scien
   };
 }
 
+function extantReferenceAssemblyResultRecord(result: Awaited<ReturnType<ReturnType<typeof scienceExtantReferenceAssemblyService>["build"]>>): Record<string, unknown> {
+  return {
+    ok: true,
+    schema: "agentlas.science-extant-reference-assembly-mcp-result/v1",
+    provider: result.provider,
+    providerRelease: result.assessment.providerRelease,
+    assemblies: result.assessment.assemblies,
+    evidenceBoundary: result.assessment.evidenceBoundary,
+    warnings: result.assessment.warnings,
+    publicationTable: result.assessment.publicationTable,
+    run: { id: result.runId, status: "succeeded" },
+    artifact: {
+      id: result.artifact.id,
+      version: result.artifact.version.version,
+      currentVersion: result.artifact.currentVersion,
+      kind: result.artifact.kind,
+      title: result.artifact.title,
+      contentSha256: result.artifact.version.contentSha256,
+      labId: "comparative-genomics",
+    },
+    sources: result.sources,
+    retrievedAt: result.retrievedAt,
+    replayed: result.replayed,
+  };
+}
+
+function comparativeGenomicsResultRecord(result: Awaited<ReturnType<ReturnType<typeof scienceComparativeGenomicsService>["build"]>>): Record<string, unknown> {
+  return {
+    ok: true,
+    schema: "agentlas.science-comparative-genomics-mcp-result/v1",
+    provider: result.provider,
+    providerRelease: result.assessment.providerRelease,
+    geneTreeId: result.assessment.geneTreeId,
+    targetNode: result.assessment.targetNode,
+    diagnostics: result.assessment.diagnostics,
+    alignment: result.assessment.alignment,
+    evidenceBoundary: result.assessment.evidenceBoundary,
+    warnings: result.assessment.warnings,
+    publicationTable: result.assessment.publicationTable,
+    run: { id: result.runId, status: "succeeded" },
+    artifact: {
+      id: result.artifact.id,
+      version: result.artifact.version.version,
+      currentVersion: result.artifact.currentVersion,
+      kind: result.artifact.kind,
+      title: result.artifact.title,
+      contentSha256: result.artifact.version.contentSha256,
+      labId: "comparative-genomics",
+    },
+    sources: [
+      { id: result.releaseSourceId, versionId: result.releaseSourceVersionId, sha256: result.releaseResponseSha256, url: result.releaseEndpoint },
+      { id: result.treeSourceId, versionId: result.treeSourceVersionId, sha256: result.treeResponseSha256, url: result.treeEndpoint },
+    ],
+    retrievedAt: result.retrievedAt,
+    replayed: result.replayed,
+  };
+}
+
+function dinosaurComparativeRouteMetadata(
+  assessment: Awaited<ReturnType<ReturnType<typeof scienceComparativeGenomicsService>["build"]>>["assessment"],
+  grant: Grant,
+): Record<string, unknown> | null {
+  if (grant.context.workflowRoute !== "dinosaur-comparative-proxy") return null;
+  const nodes = Array.isArray(assessment.nodes) ? assessment.nodes : [];
+  const nodeById = new Map(nodes.map((node) => [String(node.nodeId), node]));
+  const isUnder = (nodeId: string, predicate: (node: Record<string, unknown>) => boolean): boolean => {
+    const seen = new Set<string>();
+    let current = nodeById.get(nodeId);
+    while (current && !seen.has(String(current.nodeId))) {
+      seen.add(String(current.nodeId));
+      if (predicate(current)) return true;
+      current = current.parentId === null ? undefined : nodeById.get(String(current.parentId));
+    }
+    return false;
+  };
+  const avian = [] as string[];
+  const crocodilian = [] as string[];
+  for (const rawLeaf of Array.isArray(assessment.leaves) ? assessment.leaves : []) {
+    const leaf = rawLeaf as Record<string, unknown>;
+    const nodeId = String(leaf.nodeId ?? "");
+    const scientificName = String(leaf.scientificName ?? "");
+    const crocodilianLeaf = /(?:crocodyl|alligator|gavial|caiman)/iu.test(scientificName)
+      || isUnder(nodeId, (node) => /(?:crocodyl|alligator|gavial|caiman)/iu.test(String(node.scientificName ?? node.label ?? "")));
+    const avianLeaf = isUnder(nodeId, (node) => String(node.taxonomyId ?? "") === "8782"
+      || /(?:^|\b)aves(?:\b|$)|birds?/iu.test(String(node.scientificName ?? node.label ?? node.commonName ?? "")));
+    if (crocodilianLeaf) crocodilian.push(nodeId);
+    else if (avianLeaf) avian.push(nodeId);
+  }
+  const root = nodes.find((node) => node.parentId === null);
+  const asrTarget = nodes
+    .filter((node) => node.parentId !== null && node.leaf !== true)
+    .sort((left, right) => Number(left.depth ?? 0) - Number(right.depth ?? 0) || String(left.nodeId).localeCompare(String(right.nodeId)))[0];
+  const panelReady = avian.length >= 2 && crocodilian.length >= 2;
+  return {
+    schema: "agentlas.science.dinosaur-route-advance/v1",
+    stage: "comparative-gene-tree-materialized",
+    nextTool: panelReady ? "materialize_extant_archosaur_locus_panel" : "human-decision",
+    availableLeafGroups: { avian: avian.length, crocodilian: crocodilian.length },
+    ...(panelReady ? {
+      locusPanelSelection: {
+        avianLeafNodeIds: avian.slice(0, 4),
+        crocodilianLeafNodeIds: crocodilian.slice(0, 4),
+      },
+    } : {
+      blockReason: "The exact provider gene tree does not contain at least two leaves in both the avian and crocodilian groups required by the locus-panel contract.",
+      requiredDecision: "Choose another provider gene/tree or explicitly continue with a blocked extant-locus gate; never duplicate a leaf or relabel an avian taxon as crocodilian.",
+    }),
+    ...(asrTarget && (!root || String(asrTarget.nodeId) !== String(root.nodeId)) ? { hypotheticalAsrTargetNodeId: String(asrTarget.nodeId) } : {}),
+    boundary: "This extant comparative tree remains provider evidence and inference only; it does not establish dinosaur DNA, a dinosaur genome, an embryo, hatching, or biological revival.",
+  };
+}
+
+function comparativeGenomicsTableResultRecord(result: ReturnType<ReturnType<typeof scienceComparativeGenomicsTableService>["materialize"]>): Record<string, unknown> {
+  return {
+    ok: true,
+    schema: "agentlas.science-comparative-genomics-table-mcp-result/v1",
+    parentRunId: result.parentRunId,
+    run: { id: result.runId, status: "succeeded" },
+    table: {
+      rowCount: result.table.profile.rowCount,
+      columnCount: result.table.profile.columnCount,
+      columns: result.table.columns,
+      tableSha256: result.table.receipts.tableSha256,
+    },
+    artifact: {
+      id: result.artifact.id,
+      version: result.artifact.version.version,
+      currentVersion: result.artifact.currentVersion,
+      kind: result.artifact.kind,
+      title: result.artifact.title,
+      contentSha256: result.artifact.version.contentSha256,
+      labId: "comparative-genomics",
+    },
+    replayed: result.replayed,
+  };
+}
+
+function hypotheticalAsrResultRecord(result: ReturnType<ReturnType<typeof scienceHypotheticalAsrService>["reconstruct"]>): Record<string, unknown> {
+  return {
+    ok: true,
+    schema: "agentlas.science-hypothetical-asr-mcp-result/v1",
+    run: { id: result.runId, status: "succeeded" },
+    parentRunId: result.parentRunId,
+    targetNodeId: result.targetNodeId,
+    evidenceStatus: result.evidenceStatus,
+    publicationGrade: false,
+    assessment: result.assessment,
+    publicationTable: result.publicationTable,
+    artifact: {
+      id: result.artifact.id,
+      version: result.artifact.version.version,
+      currentVersion: result.artifact.currentVersion,
+      kind: result.artifact.kind,
+      title: result.artifact.title,
+      contentSha256: result.artifact.version.contentSha256,
+      labId: "comparative-genomics",
+    },
+    replayed: result.replayed,
+  };
+}
+
+function extantArchosaurLocusPanelResultRecord(result: ReturnType<ReturnType<typeof scienceExtantArchosaurLocusPanelService>["materialize"]>): Record<string, unknown> {
+  return {
+    ok: true,
+    schema: "agentlas.science-extant-archosaur-locus-panel-mcp-result/v1",
+    run: { id: result.runId, status: "succeeded" },
+    parentRunId: result.geneTreeRunId,
+    referenceAssemblyRunId: result.referenceAssemblyRunId,
+    title: result.title,
+    status: result.status,
+    analysis: result.analysis,
+    artifact: {
+      id: result.artifact.id,
+      version: result.artifact.version,
+      currentVersion: result.artifact.version,
+      kind: "chart.vega",
+      title: result.title,
+      contentSha256: result.artifact.contentSha256,
+      labId: "comparative-genomics",
+    },
+    replayed: result.replayed,
+  };
+}
+
 function manuscriptRecord(manuscript: ScienceManuscript, includeMarkdown: boolean): Record<string, unknown> {
   return {
     id: manuscript.id,
@@ -1551,6 +2941,11 @@ function manuscriptRecord(manuscript: ScienceManuscript, includeMarkdown: boolea
       version: manuscript.version.version,
       ...(includeMarkdown ? { markdown: manuscript.version.markdown } : {}),
       contentSha256: manuscript.version.contentSha256,
+      ...(includeMarkdown ? {
+        document: manuscript.version.document,
+        documentSha256: manuscript.version.documentSha256,
+        identityEpoch: manuscript.version.identityEpoch,
+      } : {}),
       bindingManifestSha256: manuscript.version.bindingManifestSha256,
       bindingCount: manuscript.version.bindings.length,
       ...(includeMarkdown ? { bindings: manuscript.version.bindings } : {}),
@@ -1591,7 +2986,18 @@ async function dispatchDescriptorTool(
           } : {
             method: sourceTable.method as string,
             projectionKind: sourceTable.projection_kind as string,
-            ...(sourceTable.method === "welch_one_way_anova" ? {
+            // The general projection carries a column MAPPING rather than named columns, and it is
+            // keyed by projection kind rather than by method because it serves every method that
+            // has no bespoke branch. It has to be matched before the per-method chain below: that
+            // chain ends in an unguarded `else` that assumes the ROC shape, so a declared-columns
+            // request would have been rewritten into ROC's two columns and its mapping dropped on
+            // the floor -- accepted at the tool boundary and unusable by the time it arrived.
+            ...(sourceTable.projection_kind === "declared-columns" ? {
+              columns: sourceTable.columns,
+              // Optional narrowing: keep some rows, add one derived label column. Carried through
+              // verbatim so the gateway can validate it and record it in the receipt.
+              ...(sourceTable.preparation === undefined ? {} : { preparation: normalizeTablePreparation(sourceTable.preparation) }),
+            } : sourceTable.method === "welch_one_way_anova" ? {
               groupColumn: sourceTable.group_column as string,
               valueColumn: sourceTable.value_column as string,
             } : sourceTable.method === "friedman_test" ? {
@@ -1715,6 +3121,31 @@ async function dispatchDescriptorTool(
       summary: result.analysis.summary,
     };
   }
+  const physicsAnalysisKind = physicsAnalysisKindForToolId(tool.id);
+  if (physicsAnalysisKind) {
+    const parameters = Object.fromEntries(Object.entries(body).filter(([key]) => !["tool_call_id", "dataset_run_id", "title"].includes(key)));
+    const result = sciencePhysicsAnalysisService().analyze({
+      kind: physicsAnalysisKind,
+      requestId: common.requestId,
+      projectId: common.projectId,
+      conversationId: common.conversationId,
+      originMessageId: common.originMessageId,
+      ...(body.dataset_run_id === undefined ? {} : { datasetRunId: body.dataset_run_id as string }),
+      parameters,
+      ...(body.title === undefined ? {} : { title: body.title as string }),
+    });
+    return {
+      ...artifactResult(tool, result.artifact, result.replayed, { id: result.runId, status: "succeeded" }),
+      parentRunId: result.parentRunId,
+      analysisId: result.analysis.analysisId,
+      method: result.analysis.method,
+      summary: result.analysis.summary,
+      publicationTable: result.analysis.publicationTable,
+      boundaries: result.analysis.boundaries,
+      warnings: result.analysis.warnings,
+      analysisSha256: result.analysis.analysisSha256,
+    };
+  }
   if (tool.id === "agentlas.materials-lattice-metrics-analysis") {
     const result = scienceDomainAnalysisService().analyzeMaterialsLatticeMetrics({
       requestId: common.requestId,
@@ -1732,6 +3163,68 @@ async function dispatchDescriptorTool(
       sourceLineage: result.analysis.sourceLineage,
       volume: result.analysis.volume,
       density: result.analysis.density,
+    };
+  }
+  if (tool.id === "agentlas.paleontology-stratigraphic-support") {
+    const result = sciencePaleontologyAnalysisService().analyzeStratigraphicEvidence({
+      requestId: common.requestId,
+      projectId: common.projectId,
+      conversationId: common.conversationId,
+      originMessageId: common.originMessageId,
+      catalogRunId: body.catalog_run_id as string,
+      ...(body.title === undefined ? {} : { title: body.title as string }),
+    });
+    return {
+      ...artifactResult(tool, result.artifact, result.replayed, { id: result.runId, status: "succeeded" }),
+      parentRunId: result.parentRunId,
+      analysis: result.analysis,
+    };
+  }
+  if (tool.id === "agentlas.paleontology-candidate-comparison") {
+    const candidates = (body.candidates as Array<Record<string, unknown>>).map((candidate) => ({
+      catalogRunId: exactText(candidate.catalog_run_id, 160, "science-paleontology-candidate-comparison-catalog-run-id-invalid"),
+      stratigraphicRunId: exactText(candidate.stratigraphic_run_id, 160, "science-paleontology-candidate-comparison-stratigraphic-run-id-invalid"),
+    }));
+    const result = sciencePaleontologyCandidateComparisonService().compare({
+      requestId: common.requestId,
+      projectId: common.projectId,
+      conversationId: common.conversationId,
+      originMessageId: common.originMessageId,
+      title: exactText(body.title, 240, "science-paleontology-candidate-comparison-title-invalid"),
+      candidates,
+    });
+    return {
+      ...artifactResult(tool, result.artifact, result.replayed, { id: result.runId, status: "succeeded" }),
+      parentRunIds: result.parentRunIds,
+      comparison: paleontologyCandidateComparisonToolSummary(result),
+    };
+  }
+  if (tool.id === "agentlas.paleontology-deextinction-feasibility") {
+    const candidates = (body.candidates as Array<Record<string, unknown>>).map((candidate) => ({
+      candidateId: exactText(candidate.candidate_id, 120, "science-deextinction-candidate-id-invalid"),
+      taxonName: exactText(candidate.taxon_name, 500, "science-deextinction-taxon-name-invalid"),
+      label: exactText(candidate.label, 240, "science-deextinction-label-invalid"),
+      evidence: (candidate.evidence as Array<Record<string, unknown>>).map((evidence) => ({
+        criterionId: exactText(evidence.criterion_id, 120, "science-deextinction-criterion-id-invalid"),
+        evidenceStatus: evidence.evidence_status as "observed" | "inferred" | "hypothetical" | "missing",
+        finding: evidence.finding as "supports" | "contradicts" | "inconclusive" | "not-assessed",
+        detail: exactText(evidence.detail, 2_000, "science-deextinction-evidence-detail-invalid"),
+        sourceRunIds: (evidence.source_run_ids as unknown[]).map((value) => exactText(value, 160, "science-deextinction-source-run-id-invalid")),
+      })),
+    }));
+    const result = scienceDeextinctionFeasibilityService().assessDeextinctionFeasibility({
+      requestId: common.requestId,
+      projectId: common.projectId,
+      conversationId: common.conversationId,
+      originMessageId: common.originMessageId,
+      title: exactText(body.title, 240, "science-deextinction-title-invalid"),
+      targetObjective: body.target_objective as "actual-biological-revival" | "comparative-proxy-research",
+      candidates,
+    });
+    return {
+      ...artifactResult(tool, result.artifact, result.replayed, { id: result.runId, status: "succeeded" }),
+      parentRunIds: result.parentRunIds,
+      assessment: deextinctionFeasibilityToolSummary(result),
     };
   }
   if (tool.id === "agentlas.source-to-molstar") {
@@ -2030,6 +3523,9 @@ async function platformResult(route: string, body: Record<string, unknown>, gran
           contentSha256: artifact.version.contentSha256,
           semanticTitle: artifact.version.semantic.title,
           semanticSummary: artifact.version.semantic.summary,
+          // The inventory is where the director looks first, so a table's columns belong here too.
+          // "400 rows and 4 typed columns" tells you a table exists; it does not let you project it.
+          table: dataTableShape(artifact.version.payload),
         },
         linkageSha256: context.linkage.linkageSha256,
         updatedAt: artifact.updatedAt,
@@ -2038,12 +3534,22 @@ async function platformResult(route: string, body: Record<string, unknown>, gran
     const activeLoopSession = store.getActiveLoopSession(project.id);
     const activeEpisodes = activeLoopSession ? store.listResearchEpisodes(project.id, activeLoopSession.id) : [];
     const labDecisionProjections = scienceLabDecisionProjectionsForProject(store, project.id, grant.catalog);
+    const latestContract = store.latestResearchContract(project.id);
     return {
       ok: true,
       schema: "agentlas.science.research-workspace/v1",
       project,
       lifecycle,
-      researchContract: store.latestResearchContract(project.id),
+      researchContract: latestContract,
+      // What the study needs next, in words. The fields above carry the same facts, and a model
+      // reading them still ran a dozen analyses without noticing the study had never started.
+      studyProgress: scienceStudyProgress({
+        phase: lifecycle?.phase ?? null,
+        contract: latestContract,
+        approvedTermsSha256: store.approvedResearchContractSha256(project.id),
+        nextGate: lifecycle?.phase ? scienceNextResearchPhaseGate(lifecycle.phase) : null,
+        pendingResearcherDecision: pendingResearcherDecisionFor(store, project.id, lifecycle?.phase ?? null),
+      }),
       researchLoop: activeLoopSession ? { session: activeLoopSession, episodes: activeEpisodes } : null,
       researchIntents: scienceResearchIntentCatalog(grant.catalog.labs.map((lab) => lab.id)),
       labDecisionProjections,
@@ -2315,6 +3821,17 @@ async function platformResult(route: string, body: Record<string, unknown>, gran
     return { ok: true, schema: "agentlas.science.hypothesis-write-result/v1", ...result };
   }
   if (route === "/v1/platform/hypotheses/revise") {
+    // `approved` and `rejected` are authorizations, not observations an agent derives from
+    // evidence, so they are never something this route decides on its own. What it may do is act
+    // on an authorization the researcher already gave: a project whose approval policy carries a
+    // standing grant for the hypothesis scope has said "proceed, and record it", and that grant
+    // names who gave it and when, so the trail is the same shape as a click. Without the grant the
+    // route still refuses, and only the Main-owned `science:hypotheses:decide` IPC, which records
+    // the deciding human actor, may write those states.
+    if ((body.status === "approved" || body.status === "rejected")
+      && !store.approvalIsStanding(grant.context.projectId, "hypothesis")) {
+      throw new Error("science-hypothesis-human-authority-required");
+    }
     const result = store.reviseHypothesis({
       requestId: stableUuid(`science-hypothesis-revise:v1:${grant.context.invocationRunId}:${toolCallId}`),
       projectId: grant.context.projectId,
@@ -2397,8 +3914,44 @@ async function platformResult(route: string, body: Record<string, unknown>, gran
     if (!manuscript || !profile) throw new Error("science-journal-validation-target-not-found");
     return { ok: true, validation: scienceJournalPublicationService().validate(manuscript, profile, body.metadata as ScienceSubmissionMetadata, body.human_attestation_receipt_ids as string[]) };
   }
+  if (route === "/v1/platform/manuscripts/render") {
+    const manuscriptId = exactText(body.manuscript_id, 80, "science-manuscript-id-invalid");
+    const manuscript = store.getManuscriptForProject(grant.context.projectId, manuscriptId);
+    if (!manuscript) throw new Error("science-manuscript-not-found");
+    const outputs: Array<"html" | "latex" | "docx" | "pdf" | "package"> = Array.isArray(body.outputs) && body.outputs.length ? body.outputs as Array<"html" | "latex" | "docx" | "pdf" | "package"> : ["html", "latex", "docx", "pdf"];
+    const rendered = await scienceManuscriptRenderService().render(manuscript, {
+      outputs, style: (body.style as "numeric" | "apa" | "nature" | undefined) ?? "numeric",
+      lineNumbers: body.line_numbers === true, doubleSpacing: body.double_spacing === true,
+      metadata: body.metadata && typeof body.metadata === "object" ? body.metadata as ScienceSubmissionMetadata : null,
+    });
+    const directory = userDataPath("extensions", "agentlas-science", "manuscript-renders", grant.context.projectId, manuscript.id, `v${manuscript.currentVersion}`);
+    fs.mkdirSync(directory, { recursive: true });
+    const written: Record<string, string> = {};
+    const write = (name: string, bytes: Uint8Array | string | null) => {
+      if (bytes === null) return;
+      const target = path.join(directory, name);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, bytes, { mode: 0o600 });
+      written[name] = target;
+    };
+    write("manuscript.html", rendered.html);
+    write("manuscript.tex", rendered.latex);
+    write("references.bib", rendered.bibtex);
+    write("manuscript.docx", rendered.docx);
+    write("manuscript.pdf", rendered.pdf?.bytes ?? null);
+    for (const file of rendered.files) write(file.name, file.bytes);
+    const report = {
+      schema: rendered.schema, manuscriptId: rendered.manuscriptId, manuscriptVersion: rendered.manuscriptVersion, manuscriptContentSha256: rendered.manuscriptContentSha256,
+      style: rendered.style, document: rendered.document, references: rendered.references.map((reference) => ({ locator: reference.locator, ordinal: reference.ordinal, text: reference.text })),
+      warnings: rendered.warnings, equationFallbacks: rendered.equationFallbacks,
+      pdf: rendered.pdf ? { engine: rendered.pdf.engine, degraded: rendered.pdf.degraded, degradedReason: rendered.pdf.degradedReason, byteSize: rendered.pdf.bytes.byteLength } : null,
+      pdfFailure: rendered.pdfFailure, capabilities: rendered.capabilities,
+    };
+    write("render-report.json", `${JSON.stringify(report, null, 2)}\n`);
+    return { ok: true, ...report, schema: "agentlas.science.manuscript-render-receipt/v1", renderSchema: rendered.schema, directory, files: written };
+  }
   if (route === "/v1/platform/journals/export-submission") {
-    const result = scienceJournalPublicationService().createSubmissionExport({
+    const result = await scienceJournalPublicationService().createSubmissionExport({
       requestId: stableUuid(`science-submission-export:v1:${grant.context.invocationRunId}:${toolCallId}`),
       projectId: grant.context.projectId,
       manuscriptId: exactText(body.manuscript_id, 80, "science-manuscript-id-invalid"),
@@ -2411,6 +3964,331 @@ async function platformResult(route: string, body: Record<string, unknown>, gran
       humanAttestationReceiptIds: body.human_attestation_receipt_ids as string[],
     });
     return { ok: true, schema: "agentlas.science-submission-export-result/v1", ...result };
+  }
+  if (route === "/v1/platform/source-text/structure") {
+    const sourceId = exactText(body.source_id, 80, "science-source-id-invalid");
+    const sourceVersionId = exactText(body.source_version_id, 80, "science-source-version-id-invalid");
+    const sourceVersion = positiveInteger(body.source_version, "science-source-version-invalid");
+    const sourceContentSha256 = exactSha256(body.source_content_sha256, "science-source-content-invalid");
+    const source = store.getSourceVersionForProject(grant.context.projectId, sourceId, sourceVersionId);
+    if (!source || source.version.version !== sourceVersion || source.version.contentSha256 !== sourceContentSha256) throw new Error("science-source-version-not-found");
+    const index = store.ensureSourceTextIndex(grant.context.projectId, sourceId, sourceVersionId);
+    if (!index) return { ok: true, schema: "agentlas.science.source-text-structure/v1", source: { id: sourceId, versionId: sourceVersionId, version: sourceVersion, contentSha256: sourceContentSha256 }, index: null, sections: [] };
+    const chunks = store.listSourceTextChunks(grant.context.projectId, sourceVersionId, index.chunkCount);
+    const groups = new Map<string, typeof chunks>();
+    for (const chunk of chunks) groups.set(chunk.sectionId, [...(groups.get(chunk.sectionId) ?? []), chunk]);
+    const sections = [...groups.values()].map((items) => {
+      const text = items.map((item) => item.text).join("\n\n");
+      return {
+        id: items[0]!.sectionId, ordinal: items[0]!.sectionOrdinal, title: items[0]!.sectionTitle,
+        wordCount: (text.match(/[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*/gu) ?? []).length,
+        paragraphCount: text.split(/\n\s*\n+/u).filter((paragraph) => paragraph.trim().length >= 40).length,
+        chunkCount: items.length,
+        chunkManifestSha256: createHash("sha256").update(JSON.stringify(items.map((item) => ({ id: item.id, contentSha256: item.contentSha256 })))).digest("hex"),
+      };
+    });
+    return { ok: true, schema: "agentlas.science.source-text-structure/v1", source: { id: sourceId, versionId: sourceVersionId, version: sourceVersion, contentSha256: sourceContentSha256 }, index, sections };
+  }
+  if (route === "/v1/platform/manuscript-comparable-eligibility/inspect") {
+    const eligibility = store.getManuscriptComparableEligibilityForProject(
+      grant.context.projectId,
+      exactText(body.eligibility_receipt_id, 80, "science-manuscript-comparable-eligibility-id-invalid"),
+    );
+    if (!eligibility) throw new Error("science-manuscript-comparable-eligibility-not-found");
+    return { ok: true, schema: "agentlas.science.manuscript-comparable-eligibility-read/v1", eligibility };
+  }
+  if (route === "/v1/platform/manuscript-comparable-eligibility/record") {
+    const targetJournal = body.target_journal === null ? null : (() => {
+      const value = body.target_journal as Record<string, unknown>;
+      return {
+        journalProfileId: exactText(value.journal_profile_id, 80, "science-manuscript-comparable-journal-id-invalid"),
+        journalProfileVersion: positiveInteger(value.journal_profile_version, "science-manuscript-comparable-journal-version-invalid"),
+        journalProfileContentSha256: exactSha256(value.journal_profile_content_sha256, "science-manuscript-comparable-journal-content-invalid"),
+      };
+    })();
+    const result = store.recordManuscriptComparableEligibility({
+      requestId: stableUuid(`science-manuscript-comparable-eligibility:v1:${grant.context.invocationRunId}:${toolCallId}`),
+      projectId: grant.context.projectId,
+      sourceId: exactText(body.source_id, 80, "science-manuscript-comparable-source-id-invalid"),
+      expectedSourceVersionId: exactText(body.expected_source_version_id, 80, "science-manuscript-comparable-source-version-id-invalid"),
+      expectedSourceVersion: positiveInteger(body.expected_source_version, "science-manuscript-comparable-source-version-invalid"),
+      expectedSourceContentSha256: exactSha256(body.expected_source_content_sha256, "science-manuscript-comparable-source-content-invalid"),
+      sourceDomain: body.source_domain as RecordScienceManuscriptComparableEligibilityInput["sourceDomain"],
+      articleFamily: body.article_family as RecordScienceManuscriptComparableEligibilityInput["articleFamily"],
+      decision: body.decision as RecordScienceManuscriptComparableEligibilityInput["decision"],
+      venueRelation: body.venue_relation as RecordScienceManuscriptComparableEligibilityInput["venueRelation"],
+      targetJournal,
+      evidence: (body.evidence as Array<Record<string, unknown>>).map((value) => ({
+        sectionId: exactText(value.section_id, 80, "science-manuscript-comparable-evidence-section-invalid"),
+        startByte: nonNegativeInteger(value.start_byte, "science-manuscript-comparable-evidence-offset-invalid"),
+        endByte: positiveInteger(value.end_byte, "science-manuscript-comparable-evidence-offset-invalid"),
+        exactQuote: exactText(value.exact_quote, 20_000, "science-manuscript-comparable-evidence-quote-invalid"),
+        exactQuoteSha256: exactSha256(value.exact_quote_sha256, "science-manuscript-comparable-evidence-quote-sha256-invalid"),
+      })),
+      rationale: exactText(body.rationale, 20_000, "science-manuscript-comparable-rationale-invalid"),
+      limitations: body.limitations as string[],
+    }, {
+      method: "research-director-attestation",
+      agentId: grant.context.researchDirectorAgentId,
+      agentSlug: grant.context.researchDirectorAgentSlug,
+      packageVersion: grant.context.researchDirectorPackageVersion,
+      packageDigest: grant.context.researchDirectorPackageDigest,
+      systemPromptSha256: grant.context.researchDirectorSystemPromptSha256,
+      invocationRunId: grant.context.invocationRunId,
+    });
+    return { ok: true, schema: "agentlas.science.manuscript-comparable-eligibility-write-result/v1", ...result };
+  }
+  const manuscriptBlueprintInput = () => ({
+    projectId: grant.context.projectId,
+    articleFamily: body.article_family as ScienceManuscriptArticleFamily,
+    comparables: (body.comparables as Array<Record<string, unknown>>).map((item): ScienceManuscriptBlueprintComparableInput => ({
+      sourceId: exactText(item.source_id, 80, "science-manuscript-blueprint-source-id-invalid"),
+      sourceVersionId: exactText(item.source_version_id, 80, "science-manuscript-blueprint-source-version-id-invalid"),
+      sourceVersion: positiveInteger(item.source_version, "science-manuscript-blueprint-source-version-invalid"),
+      sourceContentSha256: exactSha256(item.source_content_sha256, "science-manuscript-blueprint-source-sha256-invalid"),
+      eligibilityReceiptId: exactText(item.eligibility_receipt_id, 80, "science-manuscript-blueprint-eligibility-receipt-id-invalid"),
+      sectionMappings: (item.section_mappings as Array<Record<string, unknown>>).map((mapping) => ({
+        role: mapping.role as ScienceManuscriptBlueprintSectionInput["role"],
+        sourceSectionIds: mapping.source_section_ids as string[],
+      })),
+    })),
+    journalBinding: body.journal_binding === null ? null : (() => {
+      const value = body.journal_binding as Record<string, unknown>;
+      return {
+        journalProfileId: exactText(value.journal_profile_id, 80, "science-manuscript-blueprint-journal-id-invalid"),
+        journalProfileVersion: positiveInteger(value.journal_profile_version, "science-manuscript-blueprint-journal-version-invalid"),
+        journalProfileContentSha256: exactSha256(value.journal_profile_content_sha256, "science-manuscript-blueprint-journal-sha256-invalid"),
+      } satisfies ScienceManuscriptBlueprintJournalBindingInput;
+    })(),
+    sections: (body.sections as Array<Record<string, unknown>>).map((item): ScienceManuscriptBlueprintSectionInput => ({
+      key: exactText(item.key, 120, "science-manuscript-blueprint-section-key-invalid"),
+      title: exactText(item.title, 240, "science-manuscript-blueprint-section-title-invalid"),
+      role: item.role as ScienceManuscriptBlueprintSectionInput["role"],
+      required: item.required as boolean,
+      rhetoricalMoves: item.rhetorical_moves as string[],
+      visualExpectation: item.visual_expectation as ScienceManuscriptBlueprintSectionInput["visualExpectation"],
+      evidenceRoles: item.evidence_roles as string[],
+    })),
+    planningRationale: body.planning_rationale as string,
+    limitations: body.limitations as string[],
+  });
+  if (route === "/v1/platform/manuscript-blueprints/list") {
+    return { ok: true, schema: "agentlas.science.manuscript-blueprint-list/v1", blueprints: store.listManuscriptBlueprints(grant.context.projectId) };
+  }
+  if (route === "/v1/platform/manuscript-blueprints/inspect") {
+    const blueprint = store.getManuscriptBlueprintForProject(grant.context.projectId,
+      exactText(body.blueprint_id, 80, "science-manuscript-blueprint-id-invalid"));
+    if (!blueprint) throw new Error("science-manuscript-blueprint-not-found");
+    return { ok: true, schema: "agentlas.science.manuscript-blueprint-read/v1", blueprint };
+  }
+  if (route === "/v1/platform/manuscript-blueprint-assessments/inspect") {
+    const manuscriptId = exactText(body.manuscript_id, 80, "science-manuscript-id-invalid");
+    const assessment = store.getManuscriptBlueprintAssessmentForManuscript(grant.context.projectId, manuscriptId);
+    if (!assessment) throw new Error("science-manuscript-blueprint-assessment-not-found");
+    return { ok: true, schema: "agentlas.science.manuscript-blueprint-assessment-read/v1", assessment };
+  }
+  if (route === "/v1/platform/manuscript-blueprint-assessments/record") {
+    const result = store.recordManuscriptBlueprintAssessment({
+      requestId: stableUuid(`science-manuscript-blueprint-assessment:v1:${grant.context.invocationRunId}:${toolCallId}`),
+      projectId: grant.context.projectId,
+      manuscriptId: exactText(body.manuscript_id, 80, "science-manuscript-id-invalid"),
+      expectedManuscriptVersion: positiveInteger(body.expected_manuscript_version, "science-manuscript-version-invalid"),
+      expectedManuscriptContentSha256: exactSha256(body.expected_manuscript_content_sha256, "science-manuscript-content-invalid"),
+      journalProfileId: exactText(body.journal_profile_id, 80, "science-journal-profile-id-invalid"),
+      expectedJournalProfileVersion: positiveInteger(body.expected_journal_profile_version, "science-journal-profile-version-invalid"),
+      expectedJournalProfileContentSha256: exactSha256(body.expected_journal_profile_content_sha256, "science-journal-profile-content-invalid"),
+    });
+    return { ok: true, schema: "agentlas.science.manuscript-blueprint-assessment-write-result/v1", ...result };
+  }
+  if (route === "/v1/platform/manuscript-scholarly-assessments/inspect") {
+    const manuscriptId = exactText(body.manuscript_id, 80, "science-manuscript-id-invalid");
+    const assessment = store.getManuscriptScholarlyAssessmentForManuscript(grant.context.projectId, manuscriptId);
+    if (!assessment) throw new Error("science-manuscript-scholarly-assessment-not-found");
+    return { ok: true, schema: "agentlas.science.manuscript-scholarly-assessment-read/v1", assessment };
+  }
+  if (route === "/v1/platform/manuscript-scholarly-assessments/record") {
+    const quoteLocator = (value: Record<string, unknown>) => ({
+      nodeId: exactText(value.node_id, 80, "science-manuscript-node-id-invalid"),
+      nodeRevision: positiveInteger(value.node_revision, "science-manuscript-node-revision-invalid"),
+      nodeContentSha256: exactSha256(value.node_content_sha256, "science-manuscript-node-content-invalid"),
+      nodeKind: "paragraph" as const,
+      from: nonNegativeInteger(value.from, "science-manuscript-quote-offset-invalid"),
+      to: positiveInteger(value.to, "science-manuscript-quote-offset-invalid"),
+      exactQuote: exactText(value.exact_quote, 20_000, "science-manuscript-quote-invalid"),
+    });
+    const scholarlyItem = (value: Record<string, unknown>) => ({
+      label: exactText(value.label, 1_000, "science-manuscript-scholarly-label-invalid"),
+      status: value.status as "satisfied" | "partial" | "missing",
+      confidence: finiteNumber(value.confidence, 0, 1, "science-manuscript-scholarly-confidence-invalid"),
+      evidence: (value.evidence as Array<Record<string, unknown>>).map(quoteLocator),
+      rationale: exactText(value.rationale, 8_000, "science-manuscript-scholarly-rationale-invalid"),
+    });
+    const result = store.recordManuscriptScholarlyAssessment({
+      requestId: stableUuid(`science-manuscript-scholarly-assessment:v1:${grant.context.invocationRunId}:${toolCallId}`),
+      projectId: grant.context.projectId,
+      manuscriptId: exactText(body.manuscript_id, 80, "science-manuscript-id-invalid"),
+      expectedManuscriptVersion: positiveInteger(body.expected_manuscript_version, "science-manuscript-version-invalid"),
+      expectedManuscriptContentSha256: exactSha256(body.expected_manuscript_content_sha256, "science-manuscript-content-invalid"),
+      expectedBlueprintAssessmentId: exactText(body.expected_blueprint_assessment_id, 80, "science-manuscript-blueprint-assessment-id-invalid"),
+      expectedBlueprintAssessmentReportSha256: exactSha256(body.expected_blueprint_assessment_report_sha256, "science-manuscript-blueprint-assessment-report-invalid"),
+      journalProfileId: exactText(body.journal_profile_id, 80, "science-journal-profile-id-invalid"),
+      expectedJournalProfileVersion: positiveInteger(body.expected_journal_profile_version, "science-journal-profile-version-invalid"),
+      expectedJournalProfileContentSha256: exactSha256(body.expected_journal_profile_content_sha256, "science-journal-profile-content-invalid"),
+      overallConfidence: finiteNumber(body.overall_confidence, 0, 1, "science-manuscript-scholarly-confidence-invalid"),
+      sections: (body.sections as Array<Record<string, unknown>>).map((section) => {
+        const heading = section.heading as Record<string, unknown>;
+        const flow = section.flow as Record<string, unknown>;
+        return {
+          sectionKey: exactText(section.section_key, 120, "science-manuscript-scholarly-section-key-invalid"),
+          heading: {
+            nodeId: exactText(heading.node_id, 80, "science-manuscript-node-id-invalid"),
+            nodeRevision: positiveInteger(heading.node_revision, "science-manuscript-node-revision-invalid"),
+            nodeContentSha256: exactSha256(heading.node_content_sha256, "science-manuscript-node-content-invalid"),
+            nodeKind: heading.node_kind as "heading",
+          },
+          rhetoricalMoves: (section.rhetorical_moves as Array<Record<string, unknown>>).map(scholarlyItem),
+          evidenceRoleCoverage: (section.evidence_role_coverage as Array<Record<string, unknown>>).map(scholarlyItem),
+          flow: {
+            status: flow.status as "coherent" | "partial" | "broken",
+            readerStartsWith: exactText(flow.reader_starts_with, 4_000, "science-manuscript-scholarly-flow-start-invalid"),
+            contribution: exactText(flow.contribution, 4_000, "science-manuscript-scholarly-flow-contribution-invalid"),
+            nextQuestion: exactText(flow.next_question, 4_000, "science-manuscript-scholarly-flow-next-invalid"),
+            confidence: finiteNumber(flow.confidence, 0, 1, "science-manuscript-scholarly-confidence-invalid"),
+            evidence: (flow.evidence as Array<Record<string, unknown>>).map(quoteLocator),
+            rationale: exactText(flow.rationale, 8_000, "science-manuscript-scholarly-flow-rationale-invalid"),
+          },
+        };
+      }),
+      summary: exactText(body.summary, 20_000, "science-manuscript-scholarly-summary-invalid"),
+      limitations: body.limitations as string[],
+    }, {
+      method: "research-director-attestation",
+      agentId: grant.context.researchDirectorAgentId,
+      agentSlug: grant.context.researchDirectorAgentSlug,
+      packageVersion: grant.context.researchDirectorPackageVersion,
+      packageDigest: grant.context.researchDirectorPackageDigest,
+      systemPromptSha256: grant.context.researchDirectorSystemPromptSha256,
+      invocationRunId: grant.context.invocationRunId,
+    });
+    return { ok: true, schema: "agentlas.science.manuscript-scholarly-assessment-write-result/v1", ...result };
+  }
+  if (route === "/v1/platform/manuscript-coherence/prepare-context") {
+    const result = store.prepareManuscriptCoherenceContext({
+      requestId: stableUuid(`science-manuscript-coherence-context:v1:${grant.context.invocationRunId}:${toolCallId}`),
+      projectId: grant.context.projectId,
+      manuscriptId: exactText(body.manuscript_id, 80, "science-manuscript-id-invalid"),
+      expectedManuscriptVersion: positiveInteger(body.expected_manuscript_version, "science-manuscript-version-invalid"),
+      expectedManuscriptContentSha256: exactSha256(body.expected_manuscript_content_sha256, "science-manuscript-content-invalid"),
+    });
+    return { ok: true, schema: "agentlas.science.manuscript-coherence-context-result/v1", ...result };
+  }
+  if (route === "/v1/platform/manuscript-coherence/inspect") {
+    const manuscriptId = exactText(body.manuscript_id, 80, "science-manuscript-id-invalid");
+    const assessment = store.getManuscriptCoherenceAssessmentForManuscript(grant.context.projectId, manuscriptId);
+    if (!assessment) throw new Error("science-manuscript-coherence-assessment-not-found");
+    return { ok: true, schema: "agentlas.science.manuscript-coherence-assessment-read/v1", assessment };
+  }
+  if (route === "/v1/platform/manuscript-coherence/record") {
+    const coherenceOwner = (value: Record<string, unknown>): ScienceCoherenceTextOwner => value.kind === "claim"
+      ? {
+        kind: "claim",
+        claimId: exactText(value.claim_id, 80, "science-manuscript-coherence-claim-id-invalid"),
+        claimContentSha256: exactSha256(value.claim_content_sha256, "science-manuscript-coherence-claim-content-invalid"),
+      }
+      : {
+        kind: "visual-caption",
+        nodeId: exactText(value.node_id, 80, "science-manuscript-coherence-node-id-invalid"),
+        nodeRevision: positiveInteger(value.node_revision, "science-manuscript-coherence-node-revision-invalid"),
+        nodeContentSha256: exactSha256(value.node_content_sha256, "science-manuscript-coherence-node-content-invalid"),
+      };
+    const numericSource = (value: Record<string, unknown>): ScienceCoherenceNumericSourceSelectorInput => {
+      if (!["value", "confidence-level", "lower", "upper"].includes(String(value.component_role))) {
+        throw new Error("science-manuscript-coherence-numeric-source-role-invalid");
+      }
+      return {
+        componentRole: value.component_role as ScienceCoherenceNumericSourceSelectorInput["componentRole"],
+        artifactId: exactText(value.artifact_id, 80, "science-manuscript-coherence-numeric-source-artifact-invalid"),
+        artifactVersion: positiveInteger(value.artifact_version, "science-manuscript-coherence-numeric-source-version-invalid"),
+        artifactContentSha256: exactSha256(value.artifact_content_sha256, "science-manuscript-coherence-numeric-source-content-invalid"),
+        validationReceiptId: exactText(value.validation_receipt_id, 80, "science-manuscript-coherence-numeric-source-receipt-invalid"),
+        jsonPointer: exactText(value.json_pointer, 2_048, "science-manuscript-coherence-numeric-source-pointer-invalid"),
+        unitJsonPointer: value.unit_json_pointer === null ? null
+          : exactText(value.unit_json_pointer, 2_048, "science-manuscript-coherence-numeric-source-unit-pointer-invalid"),
+      };
+    };
+    const numericAssertion = (value: Record<string, unknown>): ScienceCoherenceNumericAssertionInput => {
+      if (!Array.isArray(value.sources) || value.sources.length < 1 || value.sources.length > 3) {
+        throw new Error("science-manuscript-coherence-numeric-sources-invalid");
+      }
+      const sources = value.sources.map((source) => numericSource(source as Record<string, unknown>));
+      if (new Set(sources.map((source) => source.componentRole)).size !== sources.length) {
+        throw new Error("science-manuscript-coherence-numeric-source-role-duplicate");
+      }
+      const grammar = value.grammar as ScienceCoherenceNumericAssertionInput["grammar"];
+      const requiredRoles = grammar === "confidence-interval/v1" ? ["confidence-level", "lower", "upper"] : ["value"];
+      if (sources.length !== requiredRoles.length || requiredRoles.some((role) => !sources.some((source) => source.componentRole === role))) {
+        throw new Error("science-manuscript-coherence-numeric-source-components-invalid");
+      }
+      return {
+        groupId: exactPatternText(value.group_id, 160, /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u, "science-manuscript-coherence-group-id-invalid"),
+        owner: coherenceOwner(value.owner as Record<string, unknown>),
+        from: nonNegativeInteger(value.from, "science-manuscript-coherence-offset-invalid"),
+        to: positiveInteger(value.to, "science-manuscript-coherence-offset-invalid"),
+        exactQuote: exactText(value.exact_quote, 20_000, "science-manuscript-coherence-quote-invalid"),
+        grammar,
+        presentation: value.presentation as ScienceCoherenceNumericAssertionInput["presentation"],
+        sources,
+      };
+    };
+    const numericExemption = (value: Record<string, unknown>): ScienceCoherenceNumericExemptionInput => ({
+      owner: coherenceOwner(value.owner as Record<string, unknown>),
+      from: nonNegativeInteger(value.from, "science-manuscript-coherence-offset-invalid"),
+      to: positiveInteger(value.to, "science-manuscript-coherence-offset-invalid"),
+      exactQuote: exactText(value.exact_quote, 20_000, "science-manuscript-coherence-quote-invalid"),
+      reason: value.reason as ScienceCoherenceNumericExemptionInput["reason"],
+    });
+    const input: RecordScienceManuscriptCoherenceAssessmentInput = {
+      requestId: stableUuid(`science-manuscript-coherence-assessment:v1:${grant.context.invocationRunId}:${toolCallId}`),
+      projectId: grant.context.projectId,
+      manuscriptId: exactText(body.manuscript_id, 80, "science-manuscript-id-invalid"),
+      expectedManuscriptVersion: positiveInteger(body.expected_manuscript_version, "science-manuscript-version-invalid"),
+      expectedManuscriptContentSha256: exactSha256(body.expected_manuscript_content_sha256, "science-manuscript-content-invalid"),
+      expectedClaimLedgerId: exactText(body.expected_claim_ledger_id, 80, "science-manuscript-coherence-claim-ledger-id-invalid"),
+      expectedClaimLedgerRevision: positiveInteger(body.expected_claim_ledger_revision, "science-manuscript-coherence-claim-ledger-revision-invalid"),
+      expectedClaimLedgerManifestSha256: exactSha256(body.expected_claim_ledger_manifest_sha256, "science-manuscript-coherence-claim-ledger-manifest-invalid"),
+      expectedClaimLedgerGateReportSha256: exactSha256(body.expected_claim_ledger_gate_report_sha256, "science-manuscript-coherence-claim-ledger-gate-invalid"),
+      expectedClaimLedgerPolicyContentSha256: exactSha256(body.expected_claim_ledger_policy_content_sha256, "science-manuscript-coherence-claim-ledger-policy-invalid"),
+      summaryClaimLinks: (body.summary_claim_links as Array<Record<string, unknown>>).map((value) => ({
+        summaryClaimId: exactText(value.summary_claim_id, 80, "science-manuscript-coherence-summary-claim-id-invalid"),
+        bodyClaimIds: value.body_claim_ids as string[],
+      })),
+      resultsDiscussionLinks: (body.results_discussion_links as Array<Record<string, unknown>>).map((value) => ({
+        resultClaimId: exactText(value.result_claim_id, 80, "science-manuscript-coherence-result-claim-id-invalid"),
+        discussionClaimIds: value.discussion_claim_ids as string[],
+      })),
+      numericAssertions: (body.numeric_assertions as Array<Record<string, unknown>>).map(numericAssertion),
+      numericExemptions: (body.numeric_exemptions as Array<Record<string, unknown>>).map(numericExemption),
+    };
+    const result = store.recordManuscriptCoherenceAssessment(input);
+    return { ok: true, schema: "agentlas.science.manuscript-coherence-assessment-write-result/v1", ...result };
+  }
+  if (route === "/v1/platform/manuscript-blueprints/create") {
+    const result = store.createManuscriptBlueprint({
+      requestId: stableUuid(`science-manuscript-blueprint-create:v1:${grant.context.invocationRunId}:${toolCallId}`),
+      title: body.title as string,
+      ...manuscriptBlueprintInput(),
+    });
+    return { ok: true, schema: "agentlas.science.manuscript-blueprint-write-result/v1", ...result };
+  }
+  if (route === "/v1/platform/manuscript-blueprints/append-version") {
+    const result = store.appendManuscriptBlueprintVersion({
+      requestId: stableUuid(`science-manuscript-blueprint-append:v1:${grant.context.invocationRunId}:${toolCallId}`),
+      blueprintId: exactText(body.blueprint_id, 80, "science-manuscript-blueprint-id-invalid"),
+      expectedVersion: positiveInteger(body.expected_version, "science-manuscript-blueprint-version-invalid"),
+      expectedContentSha256: exactSha256(body.expected_content_sha256, "science-manuscript-blueprint-content-invalid"),
+      ...manuscriptBlueprintInput(),
+    });
+    return { ok: true, schema: "agentlas.science.manuscript-blueprint-write-result/v1", ...result };
   }
   if (route === "/v1/platform/manuscripts/list") {
     return {
@@ -2438,7 +4316,78 @@ async function platformResult(route: string, body: Record<string, unknown>, gran
     const manuscriptId = exactText(body.manuscript_id, 80, "science-manuscript-id-invalid");
     const manuscript = store.getManuscriptForProject(grant.context.projectId, manuscriptId);
     if (!manuscript) throw new Error("science-manuscript-not-found");
-    return { ok: true, schema: "agentlas.science-manuscript-inspection/v1", manuscript: manuscriptRecord(manuscript, true) };
+    return {
+      ok: true,
+      schema: "agentlas.science-manuscript-inspection/v1",
+      manuscript: manuscriptRecord(manuscript, true),
+      depthPreflight: inspectScienceManuscriptDepth(manuscript.version.markdown),
+    };
+  }
+  if (route === "/v1/platform/manuscripts/editor-model") {
+    const manuscriptId = exactText(body.manuscript_id, 80, "science-manuscript-id-invalid");
+    const editorModel = store.getManuscriptEditorModelForProject(grant.context.projectId, manuscriptId);
+    if (!editorModel) throw new Error("science-manuscript-not-found");
+    return { ok: true, schema: "agentlas.science.manuscript-editor-model-read/v1", editorModel };
+  }
+  if (route === "/v1/platform/manuscripts/transactions") {
+    const manuscriptId = exactText(body.manuscript_id, 80, "science-manuscript-id-invalid");
+    if (!store.getManuscriptForProject(grant.context.projectId, manuscriptId)) throw new Error("science-manuscript-not-found");
+    const limit = body.limit === undefined ? 100 : positiveInteger(body.limit, "science-manuscript-transaction-limit-invalid");
+    if (limit > 500) throw new Error("science-manuscript-transaction-limit-invalid");
+    return {
+      ok: true,
+      schema: "agentlas.science.manuscript-transaction-history-read/v1",
+      transactions: store.listManuscriptTransactions(grant.context.projectId, manuscriptId, limit),
+    };
+  }
+  if (route === "/v1/platform/manuscripts/edit-proposals/create") {
+    const result = store.createManuscriptEditProposal({
+      requestId: stableUuid(`science-manuscript-edit-proposal-create:v1:${grant.context.invocationRunId}:${toolCallId}`),
+      projectId: grant.context.projectId,
+      manuscriptId: exactText(body.manuscript_id, 80, "science-manuscript-id-invalid"),
+      expectedVersion: positiveInteger(body.expected_version, "science-manuscript-version-invalid"),
+      expectedContentSha256: exactSha256(body.expected_content_sha256, "science-manuscript-content-invalid"),
+      expectedDocumentSha256: exactSha256(body.expected_document_sha256, "science-manuscript-document-invalid"),
+      operations: body.operations as ScienceManuscriptOperation[],
+      summary: body.summary as string,
+      rationale: body.rationale as string,
+      conversationId: grant.context.conversationId,
+      messageId: grant.context.originUserMessageId,
+      ...(body.selection_context_ids === undefined ? {} : { selectionContextIds: body.selection_context_ids as string[] }),
+    });
+    return { ok: true, schema: "agentlas.science.manuscript-edit-proposal-create-result/v1", ...result };
+  }
+  if (route === "/v1/platform/manuscripts/edit-proposals/list") {
+    const manuscriptId = exactText(body.manuscript_id, 80, "science-manuscript-id-invalid");
+    if (!store.getManuscriptForProject(grant.context.projectId, manuscriptId)) throw new Error("science-manuscript-not-found");
+    const limit = body.limit === undefined ? 100 : positiveInteger(body.limit, "science-manuscript-edit-proposal-limit-invalid");
+    if (limit > 500) throw new Error("science-manuscript-edit-proposal-limit-invalid");
+    const statuses = body.statuses === undefined ? null : new Set(body.statuses as ScienceManuscriptEditProposalStatus[]);
+    const proposals = store.listManuscriptEditProposals(grant.context.projectId, manuscriptId, limit)
+      .filter((proposal) => statuses === null || statuses.has(proposal.status));
+    return { ok: true, schema: "agentlas.science.manuscript-edit-proposal-list/v1", proposals };
+  }
+  if (route === "/v1/platform/manuscripts/edit-proposals/apply") {
+    const result = store.applyManuscriptEditProposal({
+      requestId: stableUuid(`science-manuscript-edit-proposal-apply:v1:${grant.context.invocationRunId}:${toolCallId}`),
+      projectId: grant.context.projectId,
+      manuscriptId: exactText(body.manuscript_id, 80, "science-manuscript-id-invalid"),
+      proposalId: exactText(body.proposal_id, 80, "science-manuscript-edit-proposal-id-invalid"),
+      expectedVersion: positiveInteger(body.expected_version, "science-manuscript-version-invalid"),
+      expectedContentSha256: exactSha256(body.expected_content_sha256, "science-manuscript-content-invalid"),
+      expectedDocumentSha256: exactSha256(body.expected_document_sha256, "science-manuscript-document-invalid"),
+    });
+    return { ok: true, schema: "agentlas.science.manuscript-edit-proposal-apply-result/v1", ...result };
+  }
+  if (route === "/v1/platform/manuscripts/edit-proposals/reject") {
+    const result = store.rejectManuscriptEditProposal({
+      requestId: stableUuid(`science-manuscript-edit-proposal-reject:v1:${grant.context.invocationRunId}:${toolCallId}`),
+      projectId: grant.context.projectId,
+      manuscriptId: exactText(body.manuscript_id, 80, "science-manuscript-id-invalid"),
+      proposalId: exactText(body.proposal_id, 80, "science-manuscript-edit-proposal-id-invalid"),
+      reason: body.reason === null ? null : body.reason as string,
+    });
+    return { ok: true, schema: "agentlas.science.manuscript-edit-proposal-reject-result/v1", ...result };
   }
   if (route === "/v1/platform/claim-ledgers/prepare-context") {
     const result = store.prepareClaimLedgerContext({
@@ -2463,6 +4412,38 @@ async function platformResult(route: string, body: Record<string, unknown>, gran
       projectId: grant.context.projectId, manifest: body.manifest as ScienceClaimLedgerManifest });
     return { ok: true, schema: "agentlas.science.claim-ledger-mutation/v1", ...result };
   }
+  if (route === "/v1/platform/claim-ledgers/seal") {
+    const rows = Array.isArray(body.classifications) ? body.classifications as Array<Record<string, unknown>> : [];
+    const result = store.sealClaimLedger({
+      requestId: stableUuid(`science-claim-ledger-seal:v1:${grant.context.invocationRunId}:${toolCallId}`),
+      projectId: grant.context.projectId,
+      manuscriptId: exactText(body.manuscript_id, 80, "science-manuscript-id-invalid"),
+      expectedManuscriptVersion: Number(body.expected_manuscript_version),
+      expectedManuscriptContentSha256: String(body.expected_manuscript_content_sha256 ?? ""),
+      citationIds: Array.isArray(body.citation_ids) ? (body.citation_ids as unknown[]).map((value) => String(value)) : [],
+      validationReceiptIds: Array.isArray(body.validation_receipt_ids) ? (body.validation_receipt_ids as unknown[]).map((value) => String(value)) : [],
+      classifications: rows.map((row) => ({
+        sentenceId: String(row.sentence_id ?? ""),
+        claimClass: row.claim_class as never,
+        status: row.status as never,
+        ...(Array.isArray(row.evidence_citation_ids)
+          ? { evidenceCitationIds: (row.evidence_citation_ids as unknown[]).map((value) => String(value)) }
+          : {}),
+        ...(Array.isArray(row.evidence_assessments)
+          ? { evidenceAssessments: (row.evidence_assessments as Array<Record<string, unknown>>).map((assessment) => ({
+              citationId: String(assessment.citation_id ?? ""),
+              ...(assessment.validation_receipt_id === undefined || assessment.validation_receipt_id === null
+                ? {}
+                : { validationReceiptId: String(assessment.validation_receipt_id) }),
+              direction: assessment.direction as "support" | "contradict" | "qualify",
+              relevance: Number(assessment.relevance),
+              assessmentConfidence: Number(assessment.assessment_confidence),
+            })) }
+          : {}),
+      })),
+    });
+    return { ok: true, schema: "agentlas.science.claim-ledger-mutation/v1", ...result };
+  }
   if (route === "/v1/platform/claim-ledgers/append") {
     const result = store.appendClaimLedgerManifest({ requestId: stableUuid(`science-claim-ledger-append:v1:${grant.context.invocationRunId}:${toolCallId}`),
       projectId: grant.context.projectId, ledgerId: exactText(body.ledger_id, 80, "science-claim-ledger-id-invalid"),
@@ -2475,39 +4456,219 @@ async function platformResult(route: string, body: Record<string, unknown>, gran
     const manuscriptId = exactText(body.manuscript_id, 80, "science-manuscript-id-invalid");
     return { ok: true, schema: "agentlas.science.claim-ledger-gate-read/v1", ledger: store.evaluateClaimLedgerForManuscript(grant.context.projectId, manuscriptId) };
   }
+  if (route === "/v1/platform/manuscript-drafting/start") {
+    const blueprintBinding = body.blueprint_binding as Record<string, unknown>;
+    const result = store.startManuscriptDraftingSession({
+      requestId: stableUuid(`science-manuscript-drafting-start:v1:${grant.context.invocationRunId}:${toolCallId}`),
+      projectId: grant.context.projectId,
+      title: body.title as string,
+      bindings: body.bindings as ScienceManuscriptBindingInput[],
+      blueprintBinding: {
+        blueprintId: exactText(blueprintBinding.blueprint_id, 80, "science-manuscript-blueprint-binding-id-invalid"),
+        blueprintVersion: positiveInteger(blueprintBinding.blueprint_version, "science-manuscript-blueprint-binding-version-invalid"),
+        blueprintContentSha256: exactSha256(blueprintBinding.blueprint_content_sha256, "science-manuscript-blueprint-binding-content-invalid"),
+      },
+    });
+    return { ok: true, schema: "agentlas.science.manuscript-drafting-start-result/v1", ...result };
+  }
+  if (route === "/v1/platform/manuscript-drafting/inspect") {
+    const session = store.getManuscriptDraftingSessionForProject(
+      grant.context.projectId,
+      exactText(body.session_id, 80, "science-manuscript-drafting-session-id-invalid"),
+    );
+    if (!session) throw new Error("science-manuscript-drafting-session-not-found");
+    return { ok: true, schema: "agentlas.science.manuscript-drafting-read/v1", session };
+  }
+  if (route === "/v1/platform/manuscript-drafting/save-section") {
+    const result = store.saveManuscriptDraftSection({
+      requestId: stableUuid(`science-manuscript-drafting-section-save:v1:${grant.context.invocationRunId}:${toolCallId}`),
+      projectId: grant.context.projectId,
+      sessionId: exactText(body.session_id, 80, "science-manuscript-drafting-session-id-invalid"),
+      expectedVersion: positiveInteger(body.expected_version, "science-manuscript-drafting-version-invalid"),
+      expectedStateSha256: exactSha256(body.expected_state_sha256, "science-manuscript-drafting-state-invalid"),
+      sectionKey: exactText(body.section_key, 120, "science-manuscript-draft-section-key-invalid"),
+      markdown: body.markdown as string,
+    }, {
+      method: "research-director-attestation",
+      agentId: grant.context.researchDirectorAgentId,
+      agentSlug: grant.context.researchDirectorAgentSlug,
+      packageVersion: grant.context.researchDirectorPackageVersion,
+      packageDigest: grant.context.researchDirectorPackageDigest,
+      systemPromptSha256: grant.context.researchDirectorSystemPromptSha256,
+      invocationRunId: grant.context.invocationRunId,
+    });
+    return { ok: true, schema: "agentlas.science.manuscript-drafting-section-save-result/v1", ...result };
+  }
+  if (route === "/v1/platform/manuscript-drafting/assemble") {
+    const result = store.assembleManuscriptDraftingSession({
+      requestId: stableUuid(`science-manuscript-drafting-assemble:v1:${grant.context.invocationRunId}:${toolCallId}`),
+      projectId: grant.context.projectId,
+      sessionId: exactText(body.session_id, 80, "science-manuscript-drafting-session-id-invalid"),
+      expectedVersion: positiveInteger(body.expected_version, "science-manuscript-drafting-version-invalid"),
+      expectedStateSha256: exactSha256(body.expected_state_sha256, "science-manuscript-drafting-state-invalid"),
+    });
+    return { ok: true, schema: "agentlas.science.manuscript-drafting-assemble-result/v1", session: result.session,
+      manuscript: manuscriptRecord(result.manuscript, true), replayed: result.replayed };
+  }
+  if (route === "/v1/platform/manuscript-drafting/cancel") {
+    const result = store.cancelManuscriptDraftingSession({
+      requestId: stableUuid(`science-manuscript-drafting-cancel:v1:${grant.context.invocationRunId}:${toolCallId}`),
+      projectId: grant.context.projectId,
+      sessionId: exactText(body.session_id, 80, "science-manuscript-drafting-session-id-invalid"),
+      expectedVersion: positiveInteger(body.expected_version, "science-manuscript-drafting-version-invalid"),
+      expectedStateSha256: exactSha256(body.expected_state_sha256, "science-manuscript-drafting-state-invalid"),
+      reason: body.reason as string,
+    });
+    return { ok: true, schema: "agentlas.science.manuscript-drafting-cancel-result/v1", ...result };
+  }
   if (route === "/v1/platform/manuscripts/create") {
+    const blueprintBinding = body.blueprint_binding === undefined ? undefined : body.blueprint_binding as Record<string, unknown>;
+    if (!blueprintBinding) throw new Error("science-manuscript-agent-blueprint-required");
+    const exactBlueprintId = exactText(blueprintBinding.blueprint_id, 80, "science-manuscript-blueprint-binding-id-invalid");
+    const exactBlueprintVersion = positiveInteger(blueprintBinding.blueprint_version, "science-manuscript-blueprint-binding-version-invalid");
+    const exactBlueprintContentSha256 = exactSha256(blueprintBinding.blueprint_content_sha256, "science-manuscript-blueprint-binding-content-invalid");
+    const exactBlueprint = store.getManuscriptBlueprintForProject(grant.context.projectId, exactBlueprintId);
+    if (!exactBlueprint || exactBlueprint.status !== "current"
+      || exactBlueprint.currentVersion !== exactBlueprintVersion
+      || exactBlueprint.version.contentSha256 !== exactBlueprintContentSha256) {
+      throw new Error("science-manuscript-agent-blueprint-not-current");
+    }
+    assertScienceAgentManuscriptDraft(String(body.markdown ?? ""), exactBlueprint.version.document);
     const result = store.createManuscript({
       requestId: stableUuid(`science-manuscript-create:v1:${grant.context.invocationRunId}:${toolCallId}`),
       projectId: grant.context.projectId,
       title: body.title as string,
       markdown: body.markdown as string,
       bindings: body.bindings as ScienceManuscriptBindingInput[],
+      blueprintBinding: {
+        blueprintId: exactBlueprintId,
+        blueprintVersion: exactBlueprintVersion,
+        blueprintContentSha256: exactBlueprintContentSha256,
+      } satisfies ScienceManuscriptBlueprintBindingInput,
     });
-    return { ok: true, schema: "agentlas.science-manuscript-write-result/v1", manuscript: manuscriptRecord(result.manuscript, true), replayed: result.replayed };
+    return { ok: true, schema: "agentlas.science-manuscript-write-result/v1", manuscript: manuscriptRecord(result.manuscript, true), draftGate: assertScienceAgentManuscriptDraft(result.manuscript.version.markdown, exactBlueprint.version.document), replayed: result.replayed };
   }
   if (route === "/v1/platform/manuscripts/append-version") {
+    const blueprintBinding = body.blueprint_binding === undefined ? undefined : body.blueprint_binding as Record<string, unknown>;
+    const currentManuscript = store.getManuscriptForProject(
+      grant.context.projectId,
+      exactText(body.manuscript_id, 80, "science-manuscript-id-invalid"),
+    );
+    if (!currentManuscript) throw new Error("science-manuscript-not-found");
+    const effectiveBinding = blueprintBinding ? {
+      blueprintId: exactText(blueprintBinding.blueprint_id, 80, "science-manuscript-blueprint-binding-id-invalid"),
+      blueprintVersion: positiveInteger(blueprintBinding.blueprint_version, "science-manuscript-blueprint-binding-version-invalid"),
+      blueprintContentSha256: exactSha256(blueprintBinding.blueprint_content_sha256, "science-manuscript-blueprint-binding-content-invalid"),
+    } : currentManuscript.version.blueprintBinding;
+    if (!effectiveBinding) throw new Error("science-manuscript-agent-blueprint-required");
+    const exactBlueprint = store.getManuscriptBlueprintForProject(grant.context.projectId, effectiveBinding.blueprintId);
+    if (!exactBlueprint || exactBlueprint.status !== "current"
+      || exactBlueprint.currentVersion !== effectiveBinding.blueprintVersion
+      || exactBlueprint.version.contentSha256 !== effectiveBinding.blueprintContentSha256) {
+      throw new Error("science-manuscript-agent-blueprint-not-current");
+    }
+    assertScienceAgentManuscriptDraft(String(body.markdown ?? ""), exactBlueprint.version.document);
     const result = store.appendManuscriptVersion({
       requestId: stableUuid(`science-manuscript-append:v1:${grant.context.invocationRunId}:${toolCallId}`),
       projectId: grant.context.projectId,
-      manuscriptId: exactText(body.manuscript_id, 80, "science-manuscript-id-invalid"),
+      manuscriptId: currentManuscript.id,
       expectedVersion: positiveInteger(body.expected_version, "science-manuscript-version-invalid"),
       expectedContentSha256: exactSha256(body.expected_content_sha256, "science-manuscript-content-invalid"),
       markdown: body.markdown as string,
       bindings: body.bindings as ScienceManuscriptBindingInput[],
+      ...(blueprintBinding ? { blueprintBinding: effectiveBinding satisfies ScienceManuscriptBlueprintBindingInput } : {}),
     });
-    return { ok: true, schema: "agentlas.science-manuscript-write-result/v1", manuscript: manuscriptRecord(result.manuscript, true), replayed: result.replayed };
+    return { ok: true, schema: "agentlas.science-manuscript-write-result/v1", manuscript: manuscriptRecord(result.manuscript, true), draftGate: assertScienceAgentManuscriptDraft(result.manuscript.version.markdown, exactBlueprint.version.document), replayed: result.replayed };
   }
   if (route === "/v1/platform/statistics/capabilities") {
-    const pluginRoot = path.resolve(__dirname, "../../../plugins/agentlas-science-statistics");
-    const coverageRuntime = requireFromToolControl(path.join(pluginRoot, "runtime/coverage.cjs")) as {
-      loadCoverageManifest(root: string): Record<string, unknown>;
-    };
-    const figureRuntime = requireFromToolControl(path.join(pluginRoot, "runtime/figure-catalog.cjs")) as {
-      loadFigureCatalog(root: string): { schema: string; catalogVersion: string; templates: Array<Record<string, unknown>> };
+    const coverageRelease = loadSciencePluginRuntime<{
+      validateCoverageManifest(value: unknown): Record<string, unknown>;
+    }>("agentlas-science-statistics", "runtime/coverage.cjs", 4 * 1024 * 1024);
+    const figureRelease = loadSciencePluginRuntime<{
+      validateFigureCatalog(value: unknown): { schema: string; catalogVersion: string; templates: Array<Record<string, unknown>> };
       summarizeFigureCatalog(catalog: unknown): Record<string, unknown>;
+    }>("agentlas-science-statistics", "runtime/figure-catalog.cjs", 4 * 1024 * 1024);
+    const engineRelease = loadSciencePluginRuntime<{
+      METHOD_REGISTRY?: { definitions?: Array<{ method?: string; family?: string; linkage?: Record<string, unknown> }> };
+    }>("agentlas-science-statistics", "runtime/engine.cjs", 16 * 1024 * 1024);
+    if (coverageRelease.pluginRoot !== figureRelease.pluginRoot
+      || coverageRelease.manifest.version !== figureRelease.manifest.version
+      || coverageRelease.releaseSha256 !== figureRelease.releaseSha256
+      || coverageRelease.pluginRoot !== engineRelease.pluginRoot
+      || coverageRelease.manifest.version !== engineRelease.manifest.version
+      || coverageRelease.releaseSha256 !== engineRelease.releaseSha256) {
+      throw new Error("science-statistics-capabilities-runtime-drift");
+    }
+    // These two grow with the method registry, and a ceiling sized for an older catalogue turns
+    // "we added methods" into "capabilities cannot be read at all". 179 methods already put the
+    // coverage manifest past 256 KB, so both ceilings leave room for the registry to keep growing.
+    const coverageFile = readSciencePluginFile("agentlas-science-statistics", "coverage-manifest.json", 2 * 1024 * 1024);
+    const figureFile = readSciencePluginFile("agentlas-science-statistics", "figure-catalog.json", 2 * 1024 * 1024);
+    if (coverageFile.pluginRoot !== coverageRelease.pluginRoot || figureFile.pluginRoot !== coverageRelease.pluginRoot
+      || coverageFile.manifest.version !== coverageRelease.manifest.version
+      || figureFile.manifest.version !== coverageRelease.manifest.version) {
+      throw new Error("science-statistics-capabilities-data-drift");
+    }
+    const coverageRuntime = coverageRelease.runtime;
+    const figureRuntime = figureRelease.runtime;
+    let coverageValue: unknown;
+    let figureValue: unknown;
+    try {
+      coverageValue = JSON.parse(coverageFile.bytes.toString("utf8"));
+      figureValue = JSON.parse(figureFile.bytes.toString("utf8"));
+    } catch {
+      throw new Error("science-statistics-capabilities-json-invalid");
+    }
+    const loadedCoverage = coverageRuntime.validateCoverageManifest(coverageValue);
+    const figureCatalog = figureRuntime.validateFigureCatalog(figureValue);
+    const engineRuntime = engineRelease.runtime;
+    // The coverage manifest says what each method implements and where it stops. It does not say
+    // when a researcher would reach for it, and that is the question a method is chosen by. Every
+    // definition already carries that -- neededWhen, the decision it settles, what it must show,
+    // and what to do next -- generated and gated alongside the method itself, and nothing handed
+    // it to the agent that has to pick. Choosing among every method in the registry by reading one
+    // boundary paragraph each is not choosing.
+    const firstSentence = (value: unknown): string | null => {
+      const text = typeof value === "string" ? value.trim() : "";
+      if (!text) return null;
+      const boundary = text.search(/\.\s/u);
+      return (boundary > 0 ? text.slice(0, boundary + 1) : text).slice(0, 240);
     };
-    const coverage = coverageRuntime.loadCoverageManifest(pluginRoot);
-    const figureCatalog = figureRuntime.loadFigureCatalog(pluginRoot);
+    // A caller that has shortlisted asks for those methods by name and gets the whole linkage.
+    const requestedDetail = new Set(Array.isArray(body.method_selection_detail)
+      ? (body.method_selection_detail as unknown[]).map((value) => String(value)).slice(0, 40)
+      : []);
+    const selectionByMethod = new Map<string, Record<string, unknown>>();
+    const compactByMethod = new Map<string, Record<string, unknown>>();
+    for (const definition of engineRuntime.METHOD_REGISTRY?.definitions ?? []) {
+      if (typeof definition?.method !== "string" || !definition.linkage) continue;
+      const linkage = definition.linkage;
+      selectionByMethod.set(definition.method, {
+        family: definition.family ?? null,
+        neededWhen: linkage.neededWhen ?? null,
+        decision: linkage.decision ?? null,
+        mustShow: linkage.mustShow ?? null,
+        userGoal: linkage.userGoal ?? null,
+        nextActions: Array.isArray(linkage.nextActions) ? linkage.nextActions : [],
+      });
+      compactByMethod.set(definition.method, {
+        family: definition.family ?? null,
+        // The opening sentence of neededWhen is what a shortlist is made from. The full guidance
+        // for every method at once runs to hundreds of kilobytes, more context than reading it saves.
+        neededWhen: firstSentence(linkage.neededWhen),
+      });
+    }
+    const coverageMethods = Array.isArray(loadedCoverage.methods) ? loadedCoverage.methods as Array<Record<string, unknown>> : [];
+    const coverage = {
+      ...loadedCoverage,
+      methods: coverageMethods.map((entry) => {
+        if (typeof entry.method !== "string") return entry;
+        const selection = requestedDetail.has(entry.method)
+          ? selectionByMethod.get(entry.method)
+          : compactByMethod.get(entry.method);
+        return selection ? { ...entry, selection } : entry;
+      }),
+    };
     const threeDimensionalTemplates = figureCatalog.templates.filter((template) => template.family === "3d-numeric");
     const catalogHasThreeDimensional = threeDimensionalTemplates.some((template) => {
       const renderer = template.renderer && typeof template.renderer === "object" && !Array.isArray(template.renderer)
@@ -2767,6 +4928,16 @@ async function platformResult(route: string, body: Record<string, unknown>, gran
         semantic: context.selectedVersion.semantic,
         provenance: context.selectedVersion.provenance,
         linkage: context.linkage,
+        // A Data Table's SHAPE, when this artifact is one.
+        //
+        // Without it the columns of an uploaded table were invisible to the director: the workspace
+        // carried only a semantic summary ("400 rows and 4 typed columns"), the visual route returns
+        // science-artifact-visual-capture-missing for a table with no adopted capture, and the only
+        // sanctioned way to get data into an analysis is a projection that must NAME its columns. A
+        // live model spent three turns on this and wrote "the column names are genuinely
+        // unavailable to me" -- it was right. Names and types only; no rows, so this carries no
+        // measurement a caller could retype.
+        table: dataTableShape(context.selectedVersion.payload),
       },
       visualObservation: observation ? {
         visualReviewEligible: observation.visualReviewEligible,
@@ -2774,6 +4945,23 @@ async function platformResult(route: string, body: Record<string, unknown>, gran
       } : null,
       history,
     };
+  }
+  if (route === "/v1/platform/artifacts/inspect-numeric-values") {
+    const result = store.inspectArtifactNumericValues({
+      projectId: grant.context.projectId,
+      artifactId: exactText(body.artifact_id, 80, "science-artifact-numeric-catalog-id-invalid"),
+      artifactVersion: positiveInteger(body.artifact_version, "science-artifact-numeric-catalog-version-invalid"),
+      artifactContentSha256: exactSha256(body.artifact_content_sha256, "science-artifact-numeric-catalog-content-invalid"),
+      validationReceiptId: exactText(body.validation_receipt_id, 80, "science-artifact-numeric-catalog-receipt-invalid"),
+      ...(body.json_pointer_prefix === undefined ? {} : {
+        jsonPointerPrefix: exactText(body.json_pointer_prefix, 2_048, "science-artifact-numeric-catalog-prefix-invalid"),
+      }),
+      ...(body.after_json_pointer === undefined ? {} : {
+        afterJsonPointer: exactText(body.after_json_pointer, 2_048, "science-artifact-numeric-catalog-cursor-invalid"),
+      }),
+      ...(body.limit === undefined ? {} : { limit: positiveInteger(body.limit, "science-artifact-numeric-catalog-limit-invalid") }),
+    });
+    return { ok: true, ...result };
   }
   if (route === "/v1/platform/artifacts/inspect-visual") {
     const artifactVersion = positiveInteger(body.artifact_version, "science-artifact-version-invalid");
@@ -2826,6 +5014,83 @@ async function platformResult(route: string, body: Record<string, unknown>, gran
   throw new Error("science-tool-control-not-found");
 }
 
+async function runPaleontologyOccurrenceSearch(
+  body: Record<string, unknown>,
+  grant: Grant,
+  toolCallId: string,
+): Promise<Record<string, unknown>> {
+  if (grant.context.workflowRoute === "dinosaur-comparative-proxy") {
+    const state = grant.routeState;
+    // Keep the first autonomous candidate batch bounded. Without this guard a
+    // model can spend a whole turn fan-out searching taxon names instead of
+    // advancing to the already available derived and comparative tools.
+    if (state.paleontologyOccurrenceAttempts >= 4) {
+      return {
+        ok: true,
+        schema: "agentlas.science.dinosaur-route-control/v1",
+        dinosaurRoute: {
+          stage: "candidate-search-budget-reached",
+          nextTool: "build_extant_reference_assembly_manifest",
+          catalogRunIds: [...state.autoAnalyzedPaleontologyCatalogRuns.keys()],
+          stratigraphicRunIds: [...state.autoAnalyzedPaleontologyCatalogRuns.values()],
+          instruction: "Stop searching PBDB in this turn. Use the existing exact catalog and stratigraphic run ids, then advance to the extant reference assembly and comparative route.",
+        },
+      };
+    }
+    state.paleontologyOccurrenceAttempts += 1;
+  }
+  const catalog = await sciencePaleontologyCatalogService().search({
+    requestId: stableUuid(`science-paleontology-catalog:v1:${grant.context.invocationRunId}:${toolCallId}`),
+    projectId: grant.context.projectId,
+    conversationId: grant.context.conversationId,
+    originMessageId: grant.context.originUserMessageId,
+    taxonName: exactText(body.taxon_name, 500, "science-paleontology-taxon-invalid"),
+    ...(body.page_size === undefined ? {} : { pageSize: boundedInteger(body.page_size, 1, 100, "science-paleontology-page-size-invalid") }),
+    ...(body.max_pages === undefined ? {} : { maxPages: boundedInteger(body.max_pages, 1, 20, "science-paleontology-max-pages-invalid") }),
+    ...(body.max_records === undefined ? {} : { maxRecords: boundedInteger(body.max_records, 1, 2_000, "science-paleontology-max-records-invalid") }),
+    ...(body.title === undefined ? {} : { title: exactText(body.title, 240, "science-paleontology-title-invalid") }),
+  });
+  if (grant.context.workflowRoute !== "dinosaur-comparative-proxy") return { ok: true, ...catalog };
+
+  // A dinosaur intake turn commonly produces several candidate occurrence
+  // calls in parallel. Materialize the deterministic stratigraphic child at
+  // the host boundary as soon as each catalog receipt exists so the model can
+  // advance instead of spending the entire turn re-querying PBDB. This is not
+  // a claim or a score; it is the next receipt in the already-pinned workflow.
+  let stratigraphicRunId: string | null = null;
+  if (!grant.routeState.autoAnalyzedPaleontologyCatalogRuns.has(catalog.runId)) {
+    try {
+      const analysis = await sciencePaleontologyAnalysisService().analyzeStratigraphicEvidence({
+        requestId: stableUuid(`science-dinosaur-route:stratigraphic:v1:${grant.context.invocationRunId}:${catalog.runId}`),
+        projectId: grant.context.projectId,
+        conversationId: grant.context.conversationId,
+        originMessageId: grant.context.originUserMessageId,
+        catalogRunId: catalog.runId,
+        title: `Stratigraphic support · ${catalog.taxon.acceptedName}`,
+      });
+      stratigraphicRunId = analysis.runId;
+      grant.routeState.autoAnalyzedPaleontologyCatalogRuns.set(catalog.runId, analysis.runId);
+    } catch {
+      // Keep the occurrence receipt usable. The model receives no fabricated
+      // child id and can call the public stratigraphic tool explicitly.
+    }
+  }
+  return {
+    ok: true,
+    ...catalog,
+    dinosaurRoute: {
+      schema: "agentlas.science.dinosaur-route-advance/v1",
+      stage: stratigraphicRunId ? "stratigraphic-support-materialized" : "occurrence-only",
+      catalogRunId: catalog.runId,
+      ...(stratigraphicRunId ? { stratigraphicRunId } : {}),
+      catalogRunIds: [...grant.routeState.autoAnalyzedPaleontologyCatalogRuns.keys()],
+      stratigraphicRunIds: [...grant.routeState.autoAnalyzedPaleontologyCatalogRuns.values()],
+      nextTool: stratigraphicRunId ? "build_extant_reference_assembly_manifest" : "analyze_paleontology_stratigraphic_support",
+      boundary: "Fossil occurrence and stratigraphic support do not establish DNA, a genome, an embryo, hatching, or biological revival.",
+    },
+  };
+}
+
 async function handle(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
   if (request.method !== "POST") {
     respond(response, 404, { ok: false, code: "science-tool-control-not-found" });
@@ -2862,6 +5127,11 @@ async function handle(request: http.IncomingMessage, response: http.ServerRespon
     if (route === "/v1/platform/astronomy/catalog-search") {
       exactToolBody(body, ["tool_call_id", "center_ra_deg", "center_dec_deg", "radius_deg", "limit", "title"], "science-astronomy-catalog-input-invalid");
     }
+    assertNoUndeclaredToolProperties(
+      body,
+      platformTool?.inputSchema ?? descriptorTool?.mcp.inputSchema,
+      "science-tool-input-schema-invalid",
+    );
     const result = route === "/v1/platform/sources/retrieve-full-text"
       ? { ok: true, ...await scienceAcademicFullTextService().retrieve({
           requestId: stableUuid(`science-academic-full-text:v1:${grant.context.invocationRunId}:${toolCallId}`),
@@ -2936,6 +5206,8 @@ async function handle(request: http.IncomingMessage, response: http.ServerRespon
             ...(body.limit === undefined ? {} : { limit: positiveInteger(body.limit, "science-biodiversity-limit-invalid") }),
             ...(body.title === undefined ? {} : { title: exactText(body.title, 240, "science-biodiversity-title-invalid") }),
           }) }
+      : route === "/v1/platform/paleontology/occurrence-search"
+        ? await runPaleontologyOccurrenceSearch(body, grant, toolCallId)
       : route === "/v1/platform/earth-science/earthquake-search"
         ? { ok: true, ...await scienceEarthquakeCatalogService().search({
             requestId: stableUuid(`science-earthquake-catalog:v1:${grant.context.invocationRunId}:${toolCallId}`),
@@ -2968,6 +5240,19 @@ async function handle(request: http.IncomingMessage, response: http.ServerRespon
             eventId: exactPatternText(body.event_id, 120, /^[A-Za-z0-9._-]+$/, "science-earthquake-event-id-invalid"),
             ...(body.title === undefined ? {} : { title: exactText(body.title, 240, "science-earthquake-title-invalid") }),
           }) }
+      : route === "/v1/platform/earth-science/noaa-coops-water-levels"
+        ? { ok: true, ...await scienceNoaaCoopsWaterLevelService().retrieve({
+            requestId: stableUuid(`science-noaa-coops-water-level:v1:${grant.context.invocationRunId}:${toolCallId}`),
+            projectId: grant.context.projectId,
+            conversationId: grant.context.conversationId,
+            originMessageId: grant.context.originUserMessageId,
+            stationId: exactPatternText(body.station_id, 7, /^\d{7}$/, "science-noaa-coops-station-invalid"),
+            startTime: exactText(body.start_time, 80, "science-noaa-coops-start-time-invalid"),
+            endTime: exactText(body.end_time, 80, "science-noaa-coops-end-time-invalid"),
+            datum: exactText(body.datum, 8, "science-noaa-coops-datum-invalid") as "CRD" | "IGLD" | "LWD" | "MHHW" | "MHW" | "MTL" | "MSL" | "MLW" | "MLLW" | "NAVD" | "STND",
+            ...(body.units === undefined ? {} : { units: exactText(body.units, 16, "science-noaa-coops-units-invalid") as "metric" | "english" }),
+            ...(body.title === undefined ? {} : { title: exactText(body.title, 240, "science-noaa-coops-title-invalid") }),
+          }) }
       : route === "/v1/platform/economics/world-bank-indicator"
         ? { ok: true, ...await scienceEconomicsCatalogService().fetchSeries({
             requestId: stableUuid(`science-economics-world-bank:v1:${grant.context.invocationRunId}:${toolCallId}`),
@@ -2978,6 +5263,15 @@ async function handle(request: http.IncomingMessage, response: http.ServerRespon
             indicator: exactPatternText(body.indicator, 64, /^[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+){1,7}$/, "science-economics-indicator-invalid"),
             ...scienceEconomicsYears(body.start_year, body.end_year),
             ...(body.title === undefined ? {} : { title: exactText(body.title, 240, "science-economics-title-invalid") }),
+          }) }
+      : route === "/v1/platform/economics/world-bank-growth-analysis"
+        ? { ok: true, ...await scienceEconomicsAnalysisService().analyze({
+            requestId: stableUuid(`science-economics-growth:v1:${grant.context.invocationRunId}:${toolCallId}`),
+            projectId: grant.context.projectId,
+            conversationId: grant.context.conversationId,
+            originMessageId: grant.context.originUserMessageId,
+            parentRunId: exactText(body.parent_run_id, 80, "science-economics-growth-parent-run-invalid"),
+            ...(body.title === undefined ? {} : { title: exactText(body.title, 240, "science-economics-growth-title-invalid") }),
           }) }
       : route === "/v1/platform/materials/structure-search"
         ? { ok: true, ...await scienceMaterialsCatalogService().search({
@@ -3000,6 +5294,62 @@ async function handle(request: http.IncomingMessage, response: http.ServerRespon
             start: positiveInteger(body.start, "science-genomics-start-invalid"),
             end: positiveInteger(body.end, "science-genomics-end-invalid"),
             ...(body.title === undefined ? {} : { title: exactText(body.title, 240, "science-genomics-title-invalid") }),
+          }))
+      : route === "/v1/platform/genomics/extant-reference-assemblies"
+        ? extantReferenceAssemblyResultRecord(await scienceExtantReferenceAssemblyService().build({
+            requestId: stableUuid(`science-extant-reference-assembly:v1:${grant.context.invocationRunId}:${toolCallId}`),
+            projectId: grant.context.projectId,
+            conversationId: grant.context.conversationId,
+            originMessageId: grant.context.originUserMessageId,
+            species: Array.isArray(body.species) ? body.species.map((value) => exactText(value, 80, "science-extant-reference-assembly-species-invalid")) : (() => { throw new Error("science-extant-reference-assembly-species-invalid"); })(),
+            ...(body.title === undefined ? {} : { title: exactText(body.title, 240, "science-extant-reference-assembly-title-invalid") }),
+          }))
+      : route === "/v1/platform/genomics/comparative-gene-tree"
+        ? await (async () => {
+            const comparative = await scienceComparativeGenomicsService().build({
+              requestId: stableUuid(`science-comparative-genomics-gene-tree:v1:${grant.context.invocationRunId}:${toolCallId}`),
+              projectId: grant.context.projectId,
+              conversationId: grant.context.conversationId,
+              originMessageId: grant.context.originUserMessageId,
+              species: exactText(body.species, 80, "science-comparative-genomics-species-invalid"),
+              geneId: exactText(body.gene_id, 80, "science-comparative-genomics-gene-id-invalid"),
+              pruneTaxon: positiveInteger(body.prune_taxon, "science-comparative-genomics-prune-taxon-invalid"),
+              sequenceType: exactText(body.sequence_type, 12, "science-comparative-genomics-sequence-type-invalid") as "protein" | "cdna",
+              ...(body.title === undefined ? {} : { title: exactText(body.title, 240, "science-comparative-genomics-title-invalid") }),
+            });
+            const record = comparativeGenomicsResultRecord(comparative);
+            const routeMetadata = dinosaurComparativeRouteMetadata(comparative.assessment, grant);
+            return routeMetadata ? { ...record, dinosaurRoute: routeMetadata } : record;
+          })()
+      : route === "/v1/platform/genomics/comparative-publication-table"
+        ? comparativeGenomicsTableResultRecord(scienceComparativeGenomicsTableService().materialize({
+            requestId: stableUuid(`science-comparative-genomics-publication-table:v1:${grant.context.invocationRunId}:${toolCallId}`),
+            projectId: grant.context.projectId,
+            parentRunId: exactText(body.parent_run_id, 36, "science-comparative-genomics-parent-run-invalid"),
+            ...(body.title === undefined ? {} : { title: exactText(body.title, 240, "science-comparative-genomics-title-invalid") }),
+          }))
+      : route === "/v1/platform/genomics/hypothetical-asr-fitch"
+        ? hypotheticalAsrResultRecord(scienceHypotheticalAsrService().reconstruct({
+            requestId: stableUuid(`science-hypothetical-asr-fitch:v1:${grant.context.invocationRunId}:${toolCallId}`),
+            projectId: grant.context.projectId,
+            parentRunId: exactText(body.parent_run_id, 36, "science-hypothetical-asr-parent-run-invalid"),
+            targetNodeId: exactPatternText(body.target_node_id, 80, /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/, "science-hypothetical-asr-target-node-invalid"),
+          }))
+      : route === "/v1/platform/genomics/extant-archosaur-locus-panel"
+        ? extantArchosaurLocusPanelResultRecord(scienceExtantArchosaurLocusPanelService().materialize({
+            requestId: stableUuid(`science-extant-archosaur-locus-panel:v1:${grant.context.invocationRunId}:${toolCallId}`),
+            projectId: grant.context.projectId,
+            conversationId: grant.context.conversationId,
+            originMessageId: grant.context.originUserMessageId,
+            parentRunId: exactText(body.parent_run_id, 36, "science-extant-archosaur-locus-panel-parent-run-invalid"),
+            referenceAssemblyRunId: exactText(body.reference_assembly_run_id, 36, "science-extant-archosaur-locus-panel-assembly-run-invalid"),
+            avianLeafNodeIds: Array.isArray(body.avian_leaf_node_ids)
+              ? body.avian_leaf_node_ids.map((value) => exactPatternText(value, 80, /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/, "science-extant-archosaur-locus-panel-avian-leaf-invalid"))
+              : (() => { throw new Error("science-extant-archosaur-locus-panel-avian-leaves-invalid"); })(),
+            crocodilianLeafNodeIds: Array.isArray(body.crocodilian_leaf_node_ids)
+              ? body.crocodilian_leaf_node_ids.map((value) => exactPatternText(value, 80, /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/, "science-extant-archosaur-locus-panel-crocodilian-leaf-invalid"))
+              : (() => { throw new Error("science-extant-archosaur-locus-panel-crocodilian-leaves-invalid"); })(),
+            ...(body.title === undefined ? {} : { title: exactText(body.title, 240, "science-extant-archosaur-locus-panel-title-invalid") }),
           }))
       : route === "/v1/platform/scientific-data/retrieve"
         ? { ok: true, ...await scienceScientificDataService().retrieve({
@@ -3024,7 +5374,12 @@ async function handle(request: http.IncomingMessage, response: http.ServerRespon
       : descriptorTool
         ? await dispatchDescriptorTool(descriptorTool, body, grant, toolCallId)
         : await platformResult(route, body, grant, toolCallId);
-    respond(response, 200, result);
+    // Every successful tool call carries where the STUDY stands. The workspace response alone was
+    // not enough: a live model called the statistics tool eighteen times across six turns without
+    // ever asking the workspace again, so it never saw that the study had not left intake. This is
+    // the one place every tool result passes through, and it is computed from stored state rather
+    // than remembered, so it cannot claim a study is blocked when it is not.
+    respond(response, 200, withStudyProgress(result, grant.context.projectId));
   } catch (error) {
     const code = error instanceof Error ? error.message.slice(0, 240) : "science-tool-control-failed";
     respond(response, 400, { ok: false, code });
@@ -3076,6 +5431,43 @@ function validatedCatalog(value: unknown): ScienceLabCapabilityCatalog {
   return scienceLabCapabilityCatalog(descriptor);
 }
 
+export function assertScienceExtensionReleaseHostCompatibility(release: {
+  releaseDir: string;
+  manifest: ProductExtensionManifest;
+}): ScienceLabCapabilityCatalog {
+  if (!release.manifest.permissions.includes("science:compute") || !release.manifest.serviceEntry) {
+    throw new Error("science-service-not-authorized");
+  }
+  const servicePath = path.join(release.releaseDir, release.manifest.serviceEntry);
+  const stat = fs.lstatSync(servicePath);
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.size < 2 || stat.size > 256 * 1024) throw new Error("science-service-entry-invalid");
+  const descriptorValue = JSON.parse(fs.readFileSync(servicePath, "utf8"));
+  const descriptor = parseScienceServiceDescriptor(descriptorValue);
+  const compatibilityRelativePath = path.posix.join(path.posix.dirname(release.manifest.serviceEntry), "host-compatibility.json");
+  const compatibilityManifestFile = release.manifest.files.find((file) => file.path === compatibilityRelativePath);
+  if (!compatibilityManifestFile) throw new Error("science-extension-host-compatibility-missing");
+  const compatibilityPath = path.join(release.releaseDir, compatibilityRelativePath);
+  const compatibilityStat = fs.lstatSync(compatibilityPath);
+  if (compatibilityStat.isSymbolicLink() || !compatibilityStat.isFile() || compatibilityStat.size < 2 || compatibilityStat.size > 64 * 1024) {
+    throw new Error("science-extension-host-compatibility-invalid");
+  }
+  const compatibilityBytes = fs.readFileSync(compatibilityPath);
+  if (compatibilityStat.size !== compatibilityManifestFile.size
+    || createHash("sha256").update(compatibilityBytes).digest("hex") !== compatibilityManifestFile.sha256) {
+    throw new Error("science-extension-host-compatibility-integrity-invalid");
+  }
+  assertScienceExtensionHostCompatibility(JSON.parse(compatibilityBytes.toString("utf8")), {
+    extensionId: release.manifest.id,
+    extensionVersion: release.manifest.version,
+    minimumDesktopVersion: release.manifest.minimumDesktopVersion,
+    serviceEntry: release.manifest.serviceEntry,
+    descriptorSchema: descriptor.schema,
+    protocolVersion: descriptor.protocolVersion,
+    desktopHost: scienceDesktopHostCompatibilitySnapshot(),
+  });
+  return validatedCatalog(descriptorValue);
+}
+
 async function assertScienceServiceAuthority(testDescriptor?: unknown): Promise<ScienceLabCapabilityCatalog> {
   if (testDescriptor !== undefined) {
     if (process.env.AGENTLAS_SCIENCE_MCP_CONTRACT !== "1") throw new Error("science-service-test-authority-denied");
@@ -3083,13 +5475,8 @@ async function assertScienceServiceAuthority(testDescriptor?: unknown): Promise<
   }
   const { activeScienceExtension } = await import("../extensions/science");
   const release = activeScienceExtension();
-  if (!release || !release.manifest.permissions.includes("science:compute") || !release.manifest.serviceEntry) {
-    throw new Error("science-service-not-authorized");
-  }
-  const servicePath = path.join(release.releaseDir, release.manifest.serviceEntry);
-  const stat = fs.lstatSync(servicePath);
-  if (stat.isSymbolicLink() || !stat.isFile() || stat.size < 2 || stat.size > 256 * 1024) throw new Error("science-service-entry-invalid");
-  return validatedCatalog(JSON.parse(fs.readFileSync(servicePath, "utf8")));
+  if (!release) throw new Error("science-service-not-authorized");
+  return assertScienceExtensionReleaseHostCompatibility(release);
 }
 
 export async function activeScienceLabCapabilityCatalog(): Promise<ScienceLabCapabilityCatalog> {
@@ -3106,7 +5493,16 @@ export async function materializeScienceMcpGrant(context: ScienceContext, baseCo
   const catalog = await assertScienceServiceAuthority(testDescriptor);
   const controlEndpoint = await ensureServer();
   const token = randomBytes(32).toString("base64url");
-  grants.set(context.invocationRunId, { tokenHash: tokenHash(token), context: { ...context }, catalog, expiresAt: Date.now() + 60 * 60_000 });
+  grants.set(context.invocationRunId, {
+    tokenHash: tokenHash(token),
+    context: { ...context },
+    catalog,
+    expiresAt: Date.now() + 60 * 60_000,
+    routeState: {
+      paleontologyOccurrenceAttempts: 0,
+      autoAnalyzedPaleontologyCatalogRuns: new Map<string, string>(),
+    },
+  });
   let base: { mcpServers?: Record<string, unknown> } = {};
   if (baseConfigPath) {
     const stat = fs.lstatSync(baseConfigPath);

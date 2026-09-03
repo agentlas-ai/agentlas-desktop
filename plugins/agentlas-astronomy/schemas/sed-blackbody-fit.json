@@ -1,0 +1,88 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "agentlas.astronomy.sed-blackbody-fit-input/v1",
+  "title": "fit_sed_blackbody",
+  "description": "Single-temperature blackbody fit to broadband photometry (F_nu in Jy or F_lambda in erg/s/cm^2/A at effective wavelengths in micron): deterministic temperature-grid seed, Levenberg-Marquardt on (T, log10 Omega), covariance and chi-square-scaled uncertainties, angular radius, bolometric flux, residual/pull table and log-log SED figure. No bandpass integration or extinction.",
+  "x-agentlas": {
+    "schema": "agentlas.astronomy.tool-schema/v1",
+    "toolName": "fit_sed_blackbody",
+    "runtimeModule": "runtime/sed-blackbody.cjs",
+    "runtimeExport": "fitBlackbodySed",
+    "resultSchema": "agentlas.science.astronomy-sed-blackbody-fit-result/v1",
+    "argumentKeyStyle": "snake_case-to-camelCase"
+  },
+  "type": "object",
+  "properties": {
+    "source_content_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "Lowercase hex SHA-256 of the exact source bytes the measurements were taken from."
+    },
+    "target_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "flux_kind": {
+      "type": "string",
+      "enum": [
+        "F_nu_Jy",
+        "F_lambda_erg_s_cm2_A"
+      ]
+    },
+    "photometry": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "point_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          },
+          "wavelength_micron": {
+            "type": "number",
+            "maximum": 1000000,
+            "exclusiveMinimum": 0
+          },
+          "flux_density": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": -1e+30,
+            "maximum": 1e+30
+          },
+          "flux_density_error": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "maximum": 1e+30,
+            "exclusiveMinimum": 0
+          },
+          "use": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "point_id",
+          "wavelength_micron",
+          "flux_density",
+          "flux_density_error",
+          "use"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 3,
+      "maxItems": 500
+    }
+  },
+  "required": [
+    "source_content_sha256",
+    "target_id",
+    "flux_kind",
+    "photometry"
+  ],
+  "additionalProperties": false
+}

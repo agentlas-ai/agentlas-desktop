@@ -23,7 +23,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { app } from "electron";
+import { optionalElectronAppPath } from "../runtime-paths";
 
 /** 우리가 마련한 uv 가 사는 곳. 사용자 홈 밑, 우리 이름 아래. */
 function uvHome(): string {
@@ -47,11 +47,8 @@ function bundledPython(): string | null {
   const rel = process.platform === "win32" ? ["python.exe"] : ["bin", "python3"];
   const candidates: string[] = [];
   if (process.resourcesPath) candidates.push(path.join(process.resourcesPath, "python-runtime", ...rel));
-  try {
-    candidates.push(path.join(app.getAppPath(), "build-resources", "python-runtime", ...rel));
-  } catch {
-    /* app 미가용(테스트) */
-  }
+  const appPath = optionalElectronAppPath();
+  if (appPath) candidates.push(path.join(appPath, "build-resources", "python-runtime", ...rel));
   // app.getAppPath() 만 믿으면 안 된다 — 그 값은 **진입 스크립트가 있는 곳**이라 개발 중
   // 저장소 안의 다른 스크립트로 들어오면 저장소 루트가 아니다(게이트가 이걸로 실패해서 알았다).
   // 이 모듈은 자기가 어디 있는지 안다: dist/electron/mcp-tools/ → 세 칸 위가 저장소 루트다.

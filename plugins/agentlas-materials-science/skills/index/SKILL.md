@@ -5,4 +5,4 @@ description: Route materials questions to bounded OQMD OPTIMADE structure search
 
 # Materials Science Router
 
-Use `search_oqmd_optimade_structures` for computed structures and provider properties. Use `search_cod_crystals` to resolve COD records, then `fetch_cod_cif` only for explicitly selected COD IDs. Use `$lattice-metrics` after normalization for hash-verified volume and strictly conditional density. Never imply that a normalized site list is a symmetry-expanded crystal. Keep all provenance receipts beside derived artifacts.
+Use `search_oqmd_optimade_structures` for computed structures and provider properties. Its direct MCP receipt is standalone response evidence only; use the Agentlas Science host `search_materials_structures` route whenever immutable ResearchRun, Source, and artifact persistence is required. Use `search_cod_crystals` to resolve COD records, then `fetch_cod_cif` only for explicitly selected COD IDs. Use `$lattice-metrics` after normalization for hash-verified volume and strictly conditional density. Never imply that a normalized site list is a symmetry-expanded crystal. Keep all provenance receipts beside derived artifacts.

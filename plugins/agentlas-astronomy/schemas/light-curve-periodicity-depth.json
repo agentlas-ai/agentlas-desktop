@@ -1,0 +1,194 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "agentlas.astronomy.light-curve-periodicity-depth-input/v1",
+  "title": "analyze_light_curve_periodicity_depth",
+  "description": "Generalized Lomb-Scargle periodicity depth for one irregular light curve: Baluev (2008) analytic false-alarm probability, seeded permutation-bootstrap FAP, peak-width/analytic/bootstrap period uncertainties, daily and sidereal alias screen, and a two-harmonic refinement. Time systems are preserved verbatim.",
+  "x-agentlas": {
+    "schema": "agentlas.astronomy.tool-schema/v1",
+    "toolName": "analyze_light_curve_periodicity_depth",
+    "runtimeModule": "runtime/periodicity-depth.cjs",
+    "runtimeExport": "analyzeLightCurvePeriodicityDepth",
+    "resultSchema": "agentlas.science.astronomy-light-curve-periodicity-depth-result/v1",
+    "argumentKeyStyle": "snake_case-to-camelCase"
+  },
+  "type": "object",
+  "properties": {
+    "source_content_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "Lowercase hex SHA-256 of the exact source bytes the measurements were taken from."
+    },
+    "target_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "time_system": {
+      "type": "string",
+      "enum": [
+        "BJD_TDB",
+        "BJD_UTC",
+        "HJD_UTC",
+        "JD_UTC",
+        "MJD_UTC",
+        "relative-day"
+      ]
+    },
+    "time_offset_days": {
+      "type": "number",
+      "minimum": -1000000000,
+      "maximum": 1000000000
+    },
+    "value_kind": {
+      "type": "string",
+      "enum": [
+        "magnitude",
+        "flux",
+        "relative-flux",
+        "generic"
+      ]
+    },
+    "value_unit": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "weighting": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "weighted",
+        "unweighted"
+      ]
+    },
+    "minimum_period_days": {
+      "type": "number",
+      "maximum": 1000000000,
+      "exclusiveMinimum": 0
+    },
+    "maximum_period_days": {
+      "type": "number",
+      "maximum": 1000000000,
+      "exclusiveMinimum": 0
+    },
+    "frequency_count": {
+      "type": "integer",
+      "minimum": 32,
+      "maximum": 5000
+    },
+    "maximum_peaks": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 20,
+      "default": 5
+    },
+    "measurements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "observation_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          },
+          "time": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": -1000000000,
+            "maximum": 1000000000
+          },
+          "value": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": -1000000000000000,
+            "maximum": 1000000000000000
+          },
+          "standard_error": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "maximum": 1000000000000000,
+            "exclusiveMinimum": 0
+          },
+          "use": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "observation_id",
+          "time",
+          "value",
+          "standard_error",
+          "use"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 5,
+      "maxItems": 2000
+    },
+    "bootstrap_samples": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000,
+      "default": 200
+    },
+    "bootstrap_seed": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295,
+      "default": 20240901
+    },
+    "alias_periods_days": {
+      "type": "array",
+      "items": {
+        "type": "number",
+        "minimum": 0.000001,
+        "maximum": 1000000000
+      },
+      "minItems": 1,
+      "maxItems": 6,
+      "default": [
+        1,
+        0.99726956633
+      ]
+    },
+    "false_alarm_levels": {
+      "type": "array",
+      "items": {
+        "type": "number",
+        "minimum": 1e-12,
+        "maximum": 0.5
+      },
+      "minItems": 1,
+      "maxItems": 6,
+      "default": [
+        0.1,
+        0.01,
+        0.001
+      ]
+    }
+  },
+  "required": [
+    "source_content_sha256",
+    "target_id",
+    "time_system",
+    "time_offset_days",
+    "value_kind",
+    "value_unit",
+    "weighting",
+    "minimum_period_days",
+    "maximum_period_days",
+    "frequency_count",
+    "measurements"
+  ],
+  "additionalProperties": false
+}

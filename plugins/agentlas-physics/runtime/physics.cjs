@@ -645,6 +645,9 @@ function analyzeHepDataChiSquare(input) {
     ],
     rows: rows.map((row) => [row.ordinal, row.x, row.xLow, row.xHigh, row.observed, row.prediction, row.residual, row.propagatedSigma, row.pull, row.chiSquareContribution, String(row.included), row.exclusionReason]),
   };
+  const contentReceipts = {
+    publicationTable: { sha256: sha256(stableStringify(publicationTable)) },
+  };
   const plotRows = rows.filter((row) => row.included).map((row) => ({ x: row.x, observed: row.observed, prediction: row.prediction, residual: row.residual, sigma: row.propagatedSigma, pull: row.pull }));
   const vega = {
     schema: "agentlas.physics.hepdata-chi-square-vega/v1",
@@ -677,6 +680,7 @@ function analyzeHepDataChiSquare(input) {
     summary: { includedPointCount: included.length, excludedPointCount: rows.length - included.length, fittedParameterCount, degreesOfFreedom, chiSquare, reducedChiSquare: chiSquare / degreesOfFreedom, pValue },
     rows,
     publicationTable,
+    contentReceipts,
     vega,
     warnings: ["The selected uncertainty labels are treated as mutually independent diagonal components because the caller explicitly selected them; no covariance or correlation is inferred."],
   };
@@ -925,6 +929,8 @@ module.exports = {
   normalizeInspireResponse,
   normalizeNumericDataset,
   readBoundedBody,
+  regularizedGammaQ,
+  logGamma,
   sha256,
   stableStringify,
 };

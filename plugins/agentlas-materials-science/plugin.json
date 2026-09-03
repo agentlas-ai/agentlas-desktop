@@ -2,9 +2,12 @@
   "schema": "agentlas.plugin/v2",
   "slug": "agentlas-materials-science",
   "name": "Agentlas Materials Science",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "builtin": false,
-  "publisher": { "name": "Agentlas", "url": "https://agentlas.ai" },
+  "publisher": {
+    "name": "Agentlas",
+    "url": "https://agentlas.ai"
+  },
   "surface": {
     "displayName": "Materials Science",
     "displayNameKo": "재료과학",
@@ -17,22 +20,35 @@
     "icon": "assets/icon.svg",
     "defaultPrompts": [
       "이 원소 조합의 OQMD 구조를 찾고 격자·좌표·밴드갭을 비교해줘",
-      "이 COD 결정 레코드를 확인하고 원본 CIF를 3D 구조 아티팩트로 열어줘"
-      ,"이 CIF 또는 OPTIMADE 구조의 격자 부피를 검증하고 명시값이 충분할 때만 밀도를 계산해줘"
+      "이 COD 결정 레코드를 확인하고 원본 CIF를 3D 구조 아티팩트로 열어줘",
+      "이 CIF 또는 OPTIMADE 구조의 격자 부피를 검증하고 명시값이 충분할 때만 밀도를 계산해줘"
     ]
   },
-  "invocation": { "mention": "@agentlas-materials-science", "implicit": "router", "standalone": true },
+  "invocation": {
+    "mention": "@agentlas-materials-science",
+    "implicit": "router",
+    "standalone": true
+  },
   "provides": {
-    "skills": { "router": "skills/index/SKILL.md", "workflows": ["optimade-structures", "cod-crystals", "lattice-metrics"] },
+    "skills": {
+      "router": "skills/index/SKILL.md",
+      "workflows": [
+        "optimade-structures",
+        "cod-crystals",
+        "lattice-metrics"
+      ]
+    },
     "tools": [
       {
         "id": "agentlas-materials-science",
         "capability": "data",
         "kind": "stdio",
         "command": "${node}",
-        "args": ["${pluginDir}/runtime/mcp-server.cjs"],
+        "args": [
+          "${pluginDir}/runtime/mcp-server.cjs"
+        ],
         "envKeys": [],
-        "timeoutMs": 30000,
+        "timeoutMs": 45000,
         "surface": {
           "name": "Agentlas 재료과학 데이터",
           "nameEn": "Agentlas Materials Science Data",
@@ -46,26 +62,81 @@
       }
     ]
   },
-  "requires": { "prereq": [{ "id": "node", "provided-by": "app" }], "os": ["darwin", "win32", "linux"] },
-  "permissions": { "fileWrite": "none", "network": "allow", "shell": "deny" },
-  "state": { "files": [], "assets": false },
+  "requires": {
+    "prereq": [
+      {
+        "id": "node",
+        "provided-by": "app"
+      }
+    ],
+    "os": [
+      "darwin",
+      "win32",
+      "linux"
+    ]
+  },
+  "permissions": {
+    "fileWrite": "none",
+    "network": "allow",
+    "shell": "deny"
+  },
+  "state": {
+    "files": [],
+    "assets": false
+  },
   "integrity": {
     "algo": "sha256",
     "files": [
-      { "path": "README.md", "sha256": "b0c6bd483c9c65b6a2d5aa70afcf93bb054358db5330d97df8bd2ac45322d5c2", "bytes": 2159 },
-      { "path": "assets/icon.svg", "sha256": "c2f49c289143a02c9d746cc795e362ac6e14eaa04d707da30dcbfb45eb9eca33", "bytes": 494 },
-      { "path": "capabilities.json", "sha256": "4d4ba9602b9e57bc3254907ebd49d2139ee8692bbd5ebb7f3f224649b125233a", "bytes": 3248 },
-      { "path": "runtime/materials-science.cjs", "sha256": "71f671f00a060b2f4d6c291df83cc1f26b4246ee25d3eb0871ff902b5cefbace", "bytes": 47125 },
-      { "path": "runtime/mcp-server.cjs", "sha256": "83ef3e73381fd3d83cb95d7c247bb999d308d3da2a04eb5d5205958f60636817", "bytes": 2821 },
-      { "path": "schemas/tools.json", "sha256": "a780e6ef568747634ee6927086f47d73b4228b0ddfaddaae160ee76d3c816733", "bytes": 3626 },
-      { "path": "skills/cod-crystals/SKILL.md", "sha256": "71ed10568c58355aba58a1e4e1d1c2c7aa83b77cb00d8cd8092395ecba7aa33f", "bytes": 817 },
-      { "path": "skills/index/SKILL.md", "sha256": "4f9a4bc194712e06fd586cc44c55b309cb8da1ad3c85e21c70b0640e232252ee", "bytes": 637 },
-      { "path": "skills/lattice-metrics/SKILL.md", "sha256": "386edfa4c4c0cf3c6841d62e3932611e2607cfb407c094185faeba94ac7c6db6", "bytes": 998 },
-      { "path": "skills/optimade-structures/SKILL.md", "sha256": "3f8960cf1b92b57e1587a127d608af18c6208933c85ca8717a259e21ee369873", "bytes": 793 },
-      { "path": "tests/contract.cjs", "sha256": "76562745b2d174d314c149ad3fd0f2bd04271e274bb8291e6e29eb3be927bcaf", "bytes": 9581 },
-      { "path": "tests/fixtures/cod-9000000.cif", "sha256": "6edb7df2edb3dfcf6308e588dc4602e04f027676395e8c05f91ab4c1d59c4227", "bytes": 4833 },
-      { "path": "tests/fixtures/cod-search.json", "sha256": "19b14524b9bb5ea64355998ff6c458df2196e2546134820cb4590be4164000fc", "bytes": 1404 },
-      { "path": "tests/fixtures/oqmd-optimade.json", "sha256": "a61b01656f7774be81fabb77e86580f629559cca8a998e1b6f4717d780a90245", "bytes": 2098 }
+      {
+        "path": "assets/icon.svg",
+        "sha256": "c2f49c289143a02c9d746cc795e362ac6e14eaa04d707da30dcbfb45eb9eca33",
+        "bytes": 494
+      },
+      {
+        "path": "capabilities.json",
+        "sha256": "76f2fa1f5b172001e6586780adb2e6c988ba211a9de15a05a0d94b7d07c461a5",
+        "bytes": 3746
+      },
+      {
+        "path": "README.md",
+        "sha256": "b0c6bd483c9c65b6a2d5aa70afcf93bb054358db5330d97df8bd2ac45322d5c2",
+        "bytes": 2159
+      },
+      {
+        "path": "runtime/materials-science.cjs",
+        "sha256": "b82a855309fdf2538ba337820205c541bd3874bc5b9436e8593e197eadfaa89f",
+        "bytes": 60279
+      },
+      {
+        "path": "runtime/mcp-server.cjs",
+        "sha256": "8bd1645076064defc24f3799b7b63f987be05d6cbc0bebff6bfb80cbe3ac4d76",
+        "bytes": 2844
+      },
+      {
+        "path": "schemas/tools.json",
+        "sha256": "159ab936dc430e2c84e4ec832b5a23e07d4fb4bed4130aaec5aadc36bdc3caf4",
+        "bytes": 8676
+      },
+      {
+        "path": "skills/cod-crystals/SKILL.md",
+        "sha256": "71ed10568c58355aba58a1e4e1d1c2c7aa83b77cb00d8cd8092395ecba7aa33f",
+        "bytes": 817
+      },
+      {
+        "path": "skills/index/SKILL.md",
+        "sha256": "2aeb146e76a8277f4a8249d048c5347dadd02cc0cf56f8d08fbf55a2f135419a",
+        "bytes": 842
+      },
+      {
+        "path": "skills/lattice-metrics/SKILL.md",
+        "sha256": "386edfa4c4c0cf3c6841d62e3932611e2607cfb407c094185faeba94ac7c6db6",
+        "bytes": 998
+      },
+      {
+        "path": "skills/optimade-structures/SKILL.md",
+        "sha256": "fb59b6a0b0d9194a3a312f59f24ab72e5b54132b20c930603d4e15272b943d23",
+        "bytes": 1191
+      }
     ]
   }
 }

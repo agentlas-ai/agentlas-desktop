@@ -41,7 +41,11 @@
       "kind": "physics.hepdata-table",
       "canonicalSchema": "agentlas.physics.hepdata-table/v1",
       "rendererContracts": [
-        { "rendererId": "agentlas.vega", "status": "host-required", "input": "normalized numeric series" }
+        {
+          "rendererId": "agentlas.vega",
+          "status": "host-required",
+          "input": "normalized numeric series"
+        }
       ],
       "rendererProjectionSchema": "agentlas.physics.hepdata-renderer-series/v1",
       "uncertaintyPolicy": "labeled-components-remain-separate-without-covariance"
@@ -50,20 +54,40 @@
       "kind": "physics.hepdata-chi-square-analysis",
       "canonicalSchema": "agentlas.physics.hepdata-chi-square-analysis/v1",
       "rendererContracts": [
-        { "rendererId": "agentlas.vega", "status": "host-required", "input": "inline Vega-Lite v6 measurement and pull specifications" }
+        {
+          "rendererId": "agentlas.vega",
+          "status": "host-required",
+          "input": "inline Vega-Lite v6 measurement and pull specifications"
+        }
       ],
       "publicationTableSchema": "agentlas.science-table/v1",
       "uncertaintyPolicy": "caller-selected-labeled-components-as-independent-diagonal-quadrature",
       "asymmetricPolicy": "direction-toward-prediction",
-      "statistics": ["residual", "propagated standard uncertainty", "pull", "chi-square", "degrees of freedom", "reduced chi-square", "chi-square survival p-value"],
+      "statistics": [
+        "residual",
+        "propagated standard uncertainty",
+        "pull",
+        "chi-square",
+        "degrees of freedom",
+        "reduced chi-square",
+        "chi-square survival p-value"
+      ],
       "lineage": "normalized-table-sha256-plus-analysis-sha256"
     },
     {
       "kind": "physics.user-dataset",
       "canonicalSchema": "agentlas.physics.user-dataset/v1",
       "rendererContracts": [
-        { "rendererId": "agentlas.vega", "status": "host-required", "input": "agentlas.science-table/v1" },
-        { "rendererId": "agentlas.vtk", "status": "unsupported-in-this-version", "input": "VTK/VTU/mesh" }
+        {
+          "rendererId": "agentlas.vega",
+          "status": "host-required",
+          "input": "agentlas.science-table/v1"
+        },
+        {
+          "rendererId": "agentlas.vtk",
+          "status": "unsupported-in-this-version",
+          "input": "VTK/VTU/mesh"
+        }
       ]
     }
   ],
@@ -76,17 +100,127 @@
     "hepdataMinimumIntervalMs": 1000,
     "timeoutMs": 20000,
     "retries": 2,
-    "retryableStatusCodes": [408, 429, 502, 503, 504],
+    "retryableStatusCodes": [
+      408,
+      429,
+      502,
+      503,
+      504
+    ],
     "maxRetryAfterMs": 30000,
     "redirects": "denied",
     "responseRead": "content-length-precheck-and-streaming-byte-cap"
   },
   "notImplemented": [
     "No CERN Open Data event-file or ROOT parser is included.",
-    "No detector simulation, Geant4, lattice solver, symbolic algebra engine, or numerical ODE/PDE solver is included.",
+    "No detector simulation, Geant4, lattice solver, symbolic algebra engine, PDE solver, stiff ODE solver, toy-Monte-Carlo calibration of asymptotic test statistics, or Poisson-likelihood (non-chi-square) spectrum fit is included.",
     "No Vega or vtk.js renderer binary is bundled; the host must provide an exact renderer.",
     "Official HEPData table downloads are attempted only through the documented JSON route; provider-side Cloudflare challenges or other access refusals are surfaced and never bypassed.",
-    "INSPIRE results are discovery metadata and do not establish experimental support."
-    ,"Chi-square analysis is diagonal only and does not infer covariance, correlations, nuisance parameters, parameter estimates, or prediction uncertainty."
+    "INSPIRE results are discovery metadata and do not establish experimental support.",
+    "Chi-square analysis is diagonal only and does not infer covariance, correlations, nuisance parameters, parameter estimates, or prediction uncertainty."
+  ],
+  "capabilities": [
+    {
+      "kind": "physics.analysis-catalogue",
+      "canonicalSchema": "agentlas.physics.analysis-result/v1",
+      "runtime": "pure-deterministic-javascript",
+      "analyses": [
+        {
+          "id": "spectrum-fit",
+          "mcpName": "fit_physics_spectrum_peaks",
+          "method": "levenberg-marquardt-chi-square",
+          "shapes": [
+            "gaussian",
+            "lorentzian",
+            "pseudo_voigt",
+            "voigt",
+            "crystal_ball",
+            "relativistic_breit_wigner"
+          ],
+          "backgrounds": [
+            "none",
+            "polynomial",
+            "exponential"
+          ],
+          "oracle": "scipy.optimize.curve_fit + scipy.special.wofz"
+        },
+        {
+          "id": "significance-limits",
+          "mcpName": "compute_physics_significance_limits",
+          "method": "profile-likelihood-counting-experiment",
+          "statistics": [
+            "Z0 (Cowan 2011)",
+            "Poisson p",
+            "marginalised p",
+            "CLs asymptotic upper limit with expected bands",
+            "Feldman–Cousins explicit construction"
+          ],
+          "oracle": "numerical profiling + scipy.stats + independent FC construction + FC 1998 Table IV rows 1..10"
+        },
+        {
+          "id": "uncertainty-propagation",
+          "mcpName": "propagate_physics_uncertainty",
+          "method": "dual-number-linear-plus-seeded-monte-carlo",
+          "parser": "safe arithmetic grammar, no code execution",
+          "oracle": "numpy finite differences + independent numpy Monte Carlo"
+        },
+        {
+          "id": "unit-analysis",
+          "mcpName": "analyze_physics_units",
+          "method": "si-base-exponent-vectors",
+          "constants": "CODATA 2018",
+          "oracle": "scipy.constants (CODATA 2018 table), NIST SP 811"
+        },
+        {
+          "id": "ode-simulation",
+          "mcpName": "simulate_physics_ode",
+          "method": "dormand-prince-rk54-adaptive",
+          "systems": [
+            "projectile_drag",
+            "damped_driven_oscillator",
+            "nonlinear_pendulum",
+            "rlc_series",
+            "lorenz",
+            "two_body_orbit",
+            "decay_chain",
+            "logistic",
+            "sir"
+          ],
+          "oracle": "scipy.integrate.solve_ivp(DOP853) + Bateman"
+        },
+        {
+          "id": "signal-analysis",
+          "mcpName": "analyze_physics_signal",
+          "method": "fft-radix2-bluestein-windowed",
+          "oracle": "numpy.fft + scipy.signal windows"
+        },
+        {
+          "id": "york-fit",
+          "mcpName": "fit_physics_york_line",
+          "method": "york-2004-errors-in-variables",
+          "oracle": "York 2004 Table I + scipy.odr"
+        },
+        {
+          "id": "lab-experiment",
+          "mcpName": "check_physics_lab_experiment",
+          "method": "weighted-linear-least-squares-with-residual-diagnostics",
+          "experiments": [
+            "free_fall",
+            "pendulum",
+            "ohms_law"
+          ],
+          "oracle": "numpy.polyfit(cov='unscaled') + scipy.special.ellipk + scipy.stats"
+        }
+      ],
+      "rendererContracts": [
+        {
+          "rendererId": "agentlas.vega",
+          "status": "host-required",
+          "input": "vega-v5 spec with inline data"
+        }
+      ],
+      "lineage": "input-sha256-plus-analysis-sha256-plus-figure-sha256",
+      "boundaries": "every result declares method boundaries and data-specific warnings; see docs/science/physics-tools.md"
+    }
   ]
 }

@@ -42,6 +42,7 @@ export type ScienceComposerStartInput = {
 } & (
   | { mode: "existing-user-message"; userMessageId: string }
   | { mode: "append-user-message"; content: string }
+  | { mode: "append-controller-message"; content: string; continuationBasis: Record<string, unknown> }
 );
 
 export interface ScienceComposerStartResult {
@@ -81,6 +82,15 @@ function bounded(value: unknown, maximum: number): string | undefined {
   if (typeof value !== "string") return undefined;
   const normalized = value.trim();
   return normalized ? normalized.slice(0, maximum) : undefined;
+}
+
+/**
+ * Dinosaur requests have a stricter evidence order than ordinary literature
+ * questions. Keep the classifier deliberately small and host-side: it only
+ * selects the workflow guard, never invents taxa or starts a run.
+ */
+function isDinosaurComparativeRequest(value: string): boolean {
+  return /(?:\bdinosaur(?:s)?\b|\bde[- ]?extinction\b|\bdeextinction\b|\barchosaur(?:s)?\b|\bpaleontolog(?:y|ical)\b|\bfossil(?:s)?\b|\ban?cient DNA\b|\bgenome(?:s|ic)?\b|\bphylogen(?:y|etic)\b|공룡|고생물|멸종복원|복원 가능성)/iu.test(value);
 }
 
 function scienceAssistantText(value: string): string {
@@ -186,7 +196,9 @@ export class ScienceConversationService {
       parentTurnId: input.parentTurnId ?? null,
       ...(input.mode === "existing-user-message"
         ? { mode: input.mode, userMessageId: input.userMessageId }
-        : { mode: input.mode, content: input.content }),
+        : input.mode === "append-user-message"
+          ? { mode: input.mode, content: input.content }
+          : { mode: input.mode, content: input.content, continuationBasis: input.continuationBasis }),
     });
     try {
       this.dispatchTurn(started.turn, started.userMessage, input.locale ?? currentUiLocale());
@@ -282,6 +294,9 @@ export class ScienceConversationService {
   private dispatchTurn(turn: ScienceTurn, userMessage: ScienceMessage, locale: "ko" | "en"): void {
     const project = this.store.getProject(turn.projectId);
     if (!project) throw new Error("science-project-not-found");
+    const dinosaurRouteEnabled = isDinosaurComparativeRequest(
+      [project.title, project.question, userMessage.content].filter(Boolean).join("\n"),
+    );
     const researchLifecycle = this.store.getResearchLifecycleForProject(project.id);
     if (!researchLifecycle) throw new Error("science-research-lifecycle-canonical-missing");
     const researchLoop = this.store.getActiveLoopSession(project.id);
@@ -335,13 +350,25 @@ export class ScienceConversationService {
       runtimeChatId: turn.runtimeChatId,
       conversationId: turn.conversationId,
     });
+    // Reserve the loop's active run before entering the external runtime. A
+    // synchronous adapter may settle during `start()`, so confirming only
+    // after that call would resurrect a completed turn as a running loop.
+    const loopDispatchState = researchLoop?.status === "queued"
+      ? this.store.confirmLoopResumeDispatch({
+          projectId: researchLoop.projectId,
+          loopSessionId: researchLoop.id,
+          expectedLoopVersion: researchLoop.version,
+          expectedLoopStateSha256: researchLoop.stateSha256,
+          invocationRunId: turn.invocationRunId,
+        })
+      : null;
     let result;
     try {
       result = this.runtime.start({
       runId: turn.invocationRunId,
       chatId: turn.runtimeChatId,
       userPrompt: userMessage.content,
-      promptOrigin: "user",
+      promptOrigin: turn.origin === "loop-continuation" ? "system" : "user",
       taskIntent: "conversation",
       permissions: "read",
       sessionRouting: true,
@@ -359,6 +386,7 @@ export class ScienceConversationService {
         researchDirectorPackageVersion: researchDirector.packageVersion,
         researchDirectorPackageDigest: researchDirector.packageDigest,
         researchDirectorSystemPromptSha256: researchDirector.systemPromptSha256,
+        ...(dinosaurRouteEnabled ? { workflowRoute: "dinosaur-comparative-proxy" as const } : {}),
       },
       surfaceContext: JSON.stringify({
         schema: "agentlas.science-context/v1",
@@ -403,20 +431,38 @@ export class ScienceConversationService {
         evidenceGraphPolicy: "Use the bounded exact Evidence Graph for retrieval and gap awareness. Citation edges are not support. Never promote an inference candidate or accepted review to fact; use exact non-invalidated evidence paths and explicit conditioning contexts.",
         researchDirectorPolicy: "This turn is owned by the exact built-in Research Director identity and its verified full workflow prompt. Keep one study state across literature, hypotheses, frozen analysis planning, Lab execution, evidence reconciliation, manuscript versions, and target-journal validation.",
         researchLoopPolicy: "After the human-approved Research Contract and evidence-bound hypothesis exist, use the authoritative loop tools. Persist an episode plan before Lab execution, then settle it only with exact terminal run, run-backed artifact, and evidence receipts. Never describe prose-only iteration as an executed episode.",
-        literaturePolicy: "For prior research, novelty, state-of-the-art, citation, related-paper, or literature-review work, call search_academic_literature before answering. Metadata discovery is not full-text verification.",
+        literaturePolicy: dinosaurRouteEnabled
+          ? "For a dinosaur or de-extinction question, the dedicated comparative-proxy route has priority over broad literature discovery: call search_paleontology_occurrences first, then advance through the dedicated paleontology/genomics tools in dinosaurResearchRoutePolicy. Use search_academic_literature only as supplementary evidence after the dedicated route has a receipt. Metadata discovery is not full-text verification."
+          : "For prior research, novelty, state-of-the-art, citation, related-paper, or literature-review work, call search_academic_literature before answering. Metadata discovery is not full-text verification.",
         statisticsPolicy: "For statistical inference, make the estimand, variables, assumptions, multiplicity handling, diagnostics, and sensitivity plan explicit; freeze confirmatory choices before calling run_statistical_analysis. Persist only its receipt-bound Lab artifact.",
         astronomyPolicy: "For a sky-field or astronomical catalog task, route through the installed @agentlas-astronomy provider policy, call search_astronomy_catalog with exact ICRS coordinates, and then build_astronomy_sky_map from its returned runId. For irregular time-series already stored as an exact immutable Data Table, call analyze_light_curve_periodicity with its exact version/hash, explicit column mapping, time system, period grid, and weighting policy; preserve missing rows and treat the strongest grid period as a candidate, not a confirmed physical period, because false-alarm probability and period uncertainty are not computed. Preserve exact provider bytes and null measurements; never invent catalog rows, impute missing measurements, or bypass the bounded SIMBAD policy.",
-        domainPluginPolicy: "Astronomy, Earth-science, and physics work may route to the installed @agentlas-astronomy, @agentlas-earth-science, and @agentlas-physics plugins. Verify the live tool and preserve provider/raw/normalized receipts; never describe unavailable simulation engines as executed.",
+        domainPluginPolicy: "Astronomy, Earth-science, physics, and paleontology work may route to the installed @agentlas-astronomy, @agentlas-earth-science, @agentlas-physics, and @agentlas-paleontology plugins. Verify the live tool and preserve provider/raw/normalized receipts; PBDB fossil occurrences support taxonomic, geographic, and stratigraphic claims only and never direct DNA, genome, embryo, hatching, or de-extinction claims; never describe unavailable simulation engines as executed.",
+        dinosaurResearchRoute: {
+          enabled: dinosaurRouteEnabled,
+          priority: [
+            "search_paleontology_occurrences",
+            "analyze_paleontology_stratigraphic_support",
+            "build_extant_reference_assembly_manifest",
+            "build_comparative_genomics_gene_tree",
+            "run_hypothetical_asr_fitch",
+            "materialize_extant_archosaur_locus_panel",
+            "assess_deextinction_feasibility",
+          ],
+          policy: dinosaurRouteEnabled
+            ? "For a bounded dinosaur/comparative-proxy study, identify an initial batch of 2–4 named candidate taxa from the user's scope (ask one focused decision if the scope is genuinely missing; a later turn may expand the set to 8), call search_paleontology_occurrences before any academic search, then call analyze_paleontology_stratigraphic_support. Only after those receipts may you build the extant reference assembly and comparative gene tree. Read the comparative tool's dinosaurRoute metadata before ASR or locus-panel execution: use its exact hypotheticalAsrTargetNodeId and locusPanelSelection, and if fewer than two crocodilian leaves are available ask one focused human decision instead of duplicating or relabelling a taxon. Finish with assess_deextinction_feasibility when the sealed evidence set is complete. Advance once per receipt, never repeat an identical query, and do not answer as complete until the dedicated route or an explicit blocking decision is recorded. Fossil and extant-proxy evidence can support comparative feasibility only; never claim recovered dinosaur DNA, a dinosaur genome, a viable embryo, hatching, or biological revival."
+            : null,
+        },
       }),
       });
     } catch (error) {
-      if (researchLoop?.status === "queued") {
+      if (loopDispatchState) {
         try {
+          const currentLoop = this.store.getLoopSessionForProject(loopDispatchState.projectId, loopDispatchState.id) ?? loopDispatchState;
           this.store.failLoopResumeDispatch({
-            projectId: researchLoop.projectId,
-            loopSessionId: researchLoop.id,
-            expectedLoopVersion: researchLoop.version,
-            expectedLoopStateSha256: researchLoop.stateSha256,
+            projectId: currentLoop.projectId,
+            loopSessionId: currentLoop.id,
+            expectedLoopVersion: currentLoop.version,
+            expectedLoopStateSha256: currentLoop.stateSha256,
             errorCode: error instanceof Error ? error.message : String(error),
           });
         } catch { /* a newer canonical Science state wins */ }
@@ -424,15 +470,6 @@ export class ScienceConversationService {
       throw error;
     }
     if (result.runId !== turn.invocationRunId) throw new Error("science-invocation-run-receipt-mismatch");
-    if (researchLoop?.status === "queued") {
-      this.store.confirmLoopResumeDispatch({
-        projectId: researchLoop.projectId,
-        loopSessionId: researchLoop.id,
-        expectedLoopVersion: researchLoop.version,
-        expectedLoopStateSha256: researchLoop.stateSha256,
-        invocationRunId: result.runId,
-      });
-    }
   }
 
   private projectRuntimeEvent(envelope: InvocationEventEnvelope): void {
@@ -577,20 +614,25 @@ export class ScienceConversationService {
     }
     if (envelope.receipt.status === "running" || envelope.receipt.status === "cancelling") return;
     this.revokeToolGrant(turn.invocationRunId);
-    this.store.pauseLoopAfterControllerSettlement({
-      projectId: turn.projectId,
-      invocationRunId: turn.invocationRunId,
-      receiptStatus: envelope.receipt.status,
-    });
     if (envelope.receipt.status === "completed") {
       const durable = latestDurableAssistantMessage(turn.runtimeChatId, turn.startedAt ?? turn.createdAt);
       if (!durable) {
+        this.store.pauseLoopAfterControllerSettlement({
+          projectId: turn.projectId,
+          invocationRunId: turn.invocationRunId,
+          receiptStatus: envelope.receipt.status,
+        });
         this.appendTerminalError(turn, "failed", "result-not-durable");
         return;
       }
       const current = this.store.getTurnForProject(turn.projectId, turn.id) ?? turn;
       const content = scienceAssistantText(durable.text);
       if (!content) {
+        this.store.pauseLoopAfterControllerSettlement({
+          projectId: turn.projectId,
+          invocationRunId: turn.invocationRunId,
+          receiptStatus: envelope.receipt.status,
+        });
         this.appendTerminalError(turn, "failed", "science-result-empty-after-presentation-normalization");
         return;
       }
@@ -621,12 +663,73 @@ export class ScienceConversationService {
         // of turning an evidence-reconciliation fault into a false citation.
       }
       this.emit(settled.event);
+      this.prepareAndDispatchLoopContinuation(turn, envelope.receipt.status);
       return;
     }
+    this.store.pauseLoopAfterControllerSettlement({
+      projectId: turn.projectId,
+      invocationRunId: turn.invocationRunId,
+      receiptStatus: envelope.receipt.status,
+    });
     const status = envelope.receipt.status === "cancelled" ? "cancelled"
       : envelope.receipt.status === "interrupted" ? "interrupted"
         : "failed";
     this.appendTerminalError(turn, status, envelope.receipt.errorCode ?? status);
+  }
+
+  private prepareAndDispatchLoopContinuation(turn: ScienceTurn, receiptStatus: string): void {
+    const loop = this.store.getActiveLoopSession(turn.projectId);
+    if (!loop || loop.status !== "running" || loop.activeRunId !== turn.invocationRunId) return;
+    const requestId = stableUuid(`science:loop-continuation-prepare:v1:${turn.invocationRunId}:${loop.version}`);
+    const targetInvocationRunId = stableUuid(`science:loop-continuation-run:v1:${turn.invocationRunId}:${loop.version}`);
+    let prepared;
+    try {
+      prepared = this.store.prepareLoopContinuationAfterSettlement({
+        requestId,
+        projectId: turn.projectId,
+        conversationId: turn.conversationId,
+        sourceTurnId: turn.id,
+        sourceInvocationRunId: turn.invocationRunId,
+        expectedLoopVersion: loop.version,
+        expectedLoopStateSha256: loop.stateSha256,
+        receiptStatus,
+        targetInvocationRunId,
+      });
+    } catch (error) {
+      // A concurrent researcher pause/cancel or an OCC mismatch is already a
+      // valid stop boundary.  Preserve the newer canonical state; only pause
+      // an unchanged running session when preparation itself failed.
+      try {
+        this.store.pauseLoopAfterControllerSettlement({
+          projectId: turn.projectId,
+          invocationRunId: turn.invocationRunId,
+          receiptStatus: `continuation-preparation-failed:${error instanceof Error ? error.message : String(error)}`,
+        });
+      } catch { /* the newer loop state wins */ }
+      return;
+    }
+    if (prepared.outcome !== "dispatch") return;
+    const userMessage = this.store.getMessageForProject(turn.projectId, turn.conversationId, prepared.turn.userMessageId);
+    if (!userMessage) {
+      try {
+        this.store.failLoopResumeDispatch({
+          projectId: prepared.session.projectId,
+          loopSessionId: prepared.session.id,
+          expectedLoopVersion: prepared.session.version,
+          expectedLoopStateSha256: prepared.session.stateSha256,
+          errorCode: "science-loop-continuation-message-missing",
+        });
+      } catch { /* preserve the latest loop state */ }
+      return;
+    }
+    try {
+      this.dispatchTurn(prepared.turn, userMessage, currentUiLocale());
+    } catch (error) {
+      const current = this.store.getTurnForProject(prepared.turn.projectId, prepared.turn.id);
+      if (current && !["completed", "failed", "cancelled", "interrupted"].includes(current.status)) {
+        this.appendTerminalError(current, "failed", error instanceof Error ? error.message : "loop-continuation-dispatch-failed");
+      }
+    }
   }
 
   private appendTerminalError(turn: ScienceTurn, status: "failed" | "cancelled" | "interrupted", errorCode: string): void {

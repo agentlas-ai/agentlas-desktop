@@ -87,7 +87,11 @@ function readOrCreateSecret(userDataPath: string): string {
     }
     throw new Error("invalid Mobile Relay secret file");
   } catch (error) {
-    if (error instanceof Error && "code" in error && error.code !== "ENOENT") throw error;
+    // Only first-run absence may mint a credential. JSON corruption, invalid
+    // schema, and permission/I/O failures must leave the durable value in place
+    // and fail closed; silently replacing it disconnects every already-paired
+    // phone from Cloud Relay with no recovery except re-pairing.
+    if ((error as NodeJS.ErrnoException | null)?.code !== "ENOENT") throw error;
   }
   const directory = path.dirname(target);
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });

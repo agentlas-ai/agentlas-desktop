@@ -22,11 +22,21 @@ export const SCIENCE_STATISTICS_EXECUTION_RECEIPT_SCHEMA = "agentlas.science.sta
 export const SCIENCE_STATISTICS_DATA_TABLE_PROJECTION_RECEIPT_SCHEMA = "agentlas.science.statistics.data-table-projection-receipt/v1" as const;
 export const SCIENCE_STATISTICS_DATA_TABLE_PROJECTION_RECEIPT_V2_SCHEMA = "agentlas.science.statistics.data-table-projection-receipt/v2" as const;
 export const SCIENCE_STATISTICS_DATA_TABLE_PROJECTION_RECEIPT_V3_SCHEMA = "agentlas.science.statistics.data-table-projection-receipt/v3" as const;
+/**
+ * The receipt for the general projection, which reads a table into whatever shape a method declares
+ * for itself.
+ *
+ * It needs its own schema because every receipt above validates a FIXED set of column names for one
+ * named method -- `groupColumn` and `valueColumn`, `outcomeColumn` and `scoreColumn`. That works
+ * while there are six projections and stops working the moment the projection is general: the
+ * mapping here is keyed by the method's own declared data properties, whatever they are called.
+ */
+export const SCIENCE_STATISTICS_DATA_TABLE_PROJECTION_RECEIPT_V4_SCHEMA = "agentlas.science.statistics.data-table-projection-receipt/v4" as const;
 export const SCIENCE_STATISTICS_FIGURE_ARTIFACT_SCHEMA = "agentlas.science.statistics-figure-artifact/v1" as const;
 export const SCIENCE_STATISTICS_FIGURE_RASTER_ARTIFACT_SCHEMA = "agentlas.science.statistics-figure-raster-artifact/v1" as const;
 export const SCIENCE_STATISTICS_FIGURE_VECTOR_ARTIFACT_SCHEMA = "agentlas.science.statistics-figure-vector-artifact/v1" as const;
 export const SCIENCE_STATISTICS_TOOL_ID = "agentlas.statistics-analysis" as const;
-export const SCIENCE_STATISTICS_TOOL_VERSION = "1.9.0" as const;
+export const SCIENCE_STATISTICS_TOOL_VERSION = "1.10.0" as const;
 export const SCIENCE_STATISTICS_LAB_ID = "statistics-analysis" as const;
 export const SCIENCE_STATISTICS_FIGURE_LAB_ID = "data-visualization" as const;
 export const SCIENCE_STATISTICS_FIGURE_RENDERER_ID = "agentlas.vega" as const;
@@ -49,9 +59,219 @@ export const SCIENCE_STATISTICS_METHODS = [
   "principal_component_analysis", "time_series_diagnostics", "roc_curve_analysis", "meta_analysis",
   "response_surface_regression",
   "gaussian_random_intercept_lmm",
+  // Extension methods contributed by runtime/methods/*.cjs in the statistics plugin. This block and
+  // SCIENCE_STATISTICS_EXTENSION_ANALYSIS_MODELS below are generated from the engine registry by
+  // scripts/science-statistics-manifests.cjs; scripts/science-statistics-surface-parity-contract.cjs
+  // fails closed when they drift, because a method the host does not know is a result the host rejects.
+  "ancova", "repeated_measures_anova", "tukey_hsd", "games_howell",
+  "dunnett_test", "scheffe_test", "two_way_anova_unbalanced", "shapiro_wilk",
+  "anderson_darling_normal", "dagostino_k2", "levene_test", "bartlett_test",
+  "fligner_killeen", "kolmogorov_smirnov_two_sample", "durbin_watson", "breusch_pagan",
+  "white_test", "variance_inflation_factors", "ordinal_logistic_regression", "multinomial_logistic_regression",
+  "negative_binomial_regression", "ridge_regression", "lasso_regression", "elastic_net_regression",
+  "quantile_regression", "robust_linear_regression", "polynomial_regression", "nonlinear_least_squares",
+  "model_comparison_information_criteria", "augmented_dickey_fuller", "kpss_test", "phillips_perron",
+  "arima", "auto_arima", "exponential_smoothing", "seasonal_decomposition",
+  "spectral_periodogram", "change_point_detection", "granger_causality", "cross_correlation",
+  "vector_autoregression", "power_t_test", "power_anova", "power_proportions",
+  "power_correlation", "power_chi_square", "power_regression", "sample_size_precision",
+  "bootstrap_confidence_interval", "permutation_test", "jackknife", "cross_validation_regression",
+  "bayesian_t_test", "bayesian_proportion", "bayesian_ab_test", "bayesian_linear_regression",
+  "bayesian_correlation", "bayesian_anova", "bayesian_meta_analysis", "exploratory_factor_analysis",
+  "manova", "hotelling_t2", "linear_discriminant_analysis", "canonical_correlation_analysis",
+  "multidimensional_scaling", "partial_correlation", "mahalanobis_outliers", "k_means",
+  "hierarchical_clustering", "gaussian_mixture", "dbscan", "cluster_validation",
+  "distribution_fit_extended", "probability_calculator", "chi_square_goodness_of_fit", "kernel_density_estimate",
+  "empirical_cdf_comparison", "extreme_value_analysis", "weighted_log_rank", "stratified_cox",
+  "parametric_survival_regression", "competing_risks_cumulative_incidence", "restricted_mean_survival_time", "nelson_aalen",
+  "survival_landmark_analysis", "sign_test", "mood_median_test", "runs_test",
+  "jonckheere_terpstra", "page_trend_test", "dunn_test", "conover_iman_test",
+  "nemenyi_test", "hodges_lehmann_estimate", "brunner_munzel_test", "quade_test",
+  "mcnemar_test", "cochran_q_test", "cochran_armitage_trend_test", "mantel_haenszel_test",
+  "fisher_exact_rxc", "g_test", "two_by_two_effect_measures", "chi_square_independence_residuals",
+  "binomial_test", "poisson_rate_test", "log_linear_model", "standardized_effect_sizes",
+  "effect_size_conversion", "tost_equivalence", "non_inferiority_test", "bland_altman_agreement",
+  "cronbach_alpha", "mcdonald_omega", "intraclass_correlation", "cohen_kappa",
+  "fleiss_kappa", "krippendorff_alpha", "kendall_w", "difference_in_differences",
+  "propensity_score_analysis", "instrumental_variables_2sls", "regression_discontinuity", "mediation_analysis",
+  "effect_size_from_arms", "meta_regression", "subgroup_meta_analysis", "trim_and_fill",
+  "hartung_knapp_meta_analysis", "cumulative_meta_analysis", "network_meta_analysis_frequentist", "control_chart",
+  "process_capability", "gage_rr", "cusum_ewma",
+  "missing_data_pattern",
+  "multiple_imputation_regression",
+  "inverse_probability_weighting",
+  "roc_curve_comparison",
+  "diagnostic_accuracy_measures",
+  "fine_gray_subdistribution_hazard",
+  "linear_mixed_model_random_slopes",
+  "generalized_estimating_equations",
+  "generalized_linear_mixed_model",
+  "linear_factor_model",
+  "fama_macbeth_regression",
+  "grs_test",
+  // Order matters: this list is compared element-by-element with the engine's own, and the merge
+  // left the two disagreeing on where this one sits. The engine is the runtime truth, and it has
+  // this method last.
+  "theil_sen_regression",
 ] as const;
 export type ScienceStatisticsMethod = typeof SCIENCE_STATISTICS_METHODS[number];
 const METHODS = new Set<string>(SCIENCE_STATISTICS_METHODS);
+
+/**
+ * Frozen AnalysisSpec compatibility for every extension method, generated from each module's
+ * declared `analysisModel`. The host cannot import the plugin runtime (it is integrity-verified at
+ * call time), so this table is the host-side copy and the parity contract keeps it exact.
+ */
+export const SCIENCE_STATISTICS_EXTENSION_ANALYSIS_MODELS: Readonly<Record<string, { families: readonly string[]; distributions: readonly (string | null)[]; links: readonly (string | null)[] }>> = Object.freeze({
+  missing_data_pattern: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  multiple_imputation_regression: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  inverse_probability_weighting: { families: ["lm", "glm"], distributions: [null, "normal", "gaussian", "binomial", "bernoulli"], links: [null, "identity", "logit"] },
+  roc_curve_comparison: { families: ["diagnostic-accuracy", "classification-evaluation"], distributions: [null, "binary", "binomial", "bernoulli"], links: [null, "logit", "identity"] },
+  diagnostic_accuracy_measures: { families: ["diagnostic-accuracy", "classification-evaluation"], distributions: [null, "binary", "binomial", "bernoulli"], links: [null, "logit", "identity"] },
+  fine_gray_subdistribution_hazard: { families: ["survival"], distributions: [null], links: [null] },
+  linear_mixed_model_random_slopes: { families: ["mixed-models", "lmm", "mixed-effects"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  generalized_estimating_equations: { families: ["gee", "mixed-models"], distributions: [null, "normal", "gaussian", "binomial", "poisson"], links: [null, "identity", "logit", "log"] },
+  generalized_linear_mixed_model: { families: ["mixed-models", "mixed-effects", "glm"], distributions: [null, "binomial", "poisson"], links: [null, "logit", "log"] },
+  linear_factor_model: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  fama_macbeth_regression: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  grs_test: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  ancova: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  repeated_measures_anova: { families: ["lm", "lmm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  tukey_hsd: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  games_howell: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  dunnett_test: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  scheffe_test: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  two_way_anova_unbalanced: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  shapiro_wilk: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  anderson_darling_normal: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  dagostino_k2: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  levene_test: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  bartlett_test: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  fligner_killeen: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  kolmogorov_smirnov_two_sample: { families: ["lm"], distributions: [null], links: [null] },
+  durbin_watson: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  breusch_pagan: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  white_test: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  variance_inflation_factors: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  ordinal_logistic_regression: { families: ["glm"], distributions: [null, "multinomial", "ordinal"], links: [null, "logit"] },
+  multinomial_logistic_regression: { families: ["glm"], distributions: [null, "multinomial"], links: [null, "logit"] },
+  negative_binomial_regression: { families: ["glm"], distributions: [null, "poisson", "negative-binomial", "negative_binomial"], links: [null, "log"] },
+  ridge_regression: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  lasso_regression: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  elastic_net_regression: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  quantile_regression: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  robust_linear_regression: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  polynomial_regression: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  nonlinear_least_squares: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  model_comparison_information_criteria: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  augmented_dickey_fuller: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  kpss_test: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  phillips_perron: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  arima: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  auto_arima: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  exponential_smoothing: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  seasonal_decomposition: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  spectral_periodogram: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  change_point_detection: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  granger_causality: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  cross_correlation: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  vector_autoregression: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  power_t_test: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  power_anova: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  power_proportions: { families: ["glm"], distributions: [null, "binomial", "bernoulli"], links: [null, "logit", "identity"] },
+  power_correlation: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  power_chi_square: { families: ["glm"], distributions: [null, "multinomial", "binomial"], links: [null, "logit", "log"] },
+  power_regression: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  sample_size_precision: { families: ["lm", "glm"], distributions: [null, "normal", "gaussian", "binomial"], links: [null, "identity", "logit"] },
+  bootstrap_confidence_interval: { families: ["lm", "nonparametric"], distributions: [null, "normal", "gaussian", "unknown"], links: [null, "identity"] },
+  permutation_test: { families: ["lm", "nonparametric"], distributions: [null, "normal", "gaussian", "unknown"], links: [null, "identity"] },
+  jackknife: { families: ["lm", "nonparametric"], distributions: [null, "normal", "gaussian", "unknown"], links: [null, "identity"] },
+  cross_validation_regression: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  bayesian_t_test: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  bayesian_proportion: { families: ["glm"], distributions: [null, "binomial", "bernoulli"], links: [null, "logit", "identity"] },
+  bayesian_ab_test: { families: ["glm"], distributions: [null, "binomial", "bernoulli"], links: [null, "logit", "identity"] },
+  bayesian_linear_regression: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  bayesian_correlation: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  bayesian_anova: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  bayesian_meta_analysis: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  exploratory_factor_analysis: { families: ["pca"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  manova: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  hotelling_t2: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  linear_discriminant_analysis: { families: ["classification-evaluation"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  canonical_correlation_analysis: { families: ["pca", "lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  multidimensional_scaling: { families: ["pca"], distributions: [null], links: [null] },
+  partial_correlation: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  mahalanobis_outliers: { families: ["pca"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  k_means: { families: ["pca"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  hierarchical_clustering: { families: ["pca"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  gaussian_mixture: { families: ["pca"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  dbscan: { families: ["pca"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  cluster_validation: { families: ["pca"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  distribution_fit_extended: { families: ["lm"], distributions: [null, "normal", "student_t", "logistic", "gumbel", "gev", "gamma", "weibull", "beta", "lognormal", "exponential", "uniform", "poisson", "negative_binomial", "binomial", "geometric", "gaussian", "student-t"], links: [null, "identity", "log"] },
+  probability_calculator: { families: ["lm"], distributions: [null, "normal", "student_t", "logistic", "gumbel", "gev", "gamma", "weibull", "beta", "lognormal", "exponential", "uniform", "chi_square", "f", "poisson", "negative_binomial", "binomial", "geometric", "gaussian", "student-t"], links: [null, "identity"] },
+  chi_square_goodness_of_fit: { families: ["glm"], distributions: [null, "multinomial", "poisson"], links: [null, "identity", "log"] },
+  kernel_density_estimate: { families: ["lm"], distributions: [null, "nonparametric"], links: [null, "identity"] },
+  empirical_cdf_comparison: { families: ["lm"], distributions: [null, "nonparametric"], links: [null, "identity"] },
+  extreme_value_analysis: { families: ["lm"], distributions: [null, "gev", "gpd", "gumbel"], links: [null, "identity"] },
+  weighted_log_rank: { families: ["survival"], distributions: [null], links: [null] },
+  stratified_cox: { families: ["survival"], distributions: [null], links: [null] },
+  parametric_survival_regression: { families: ["survival"], distributions: [null], links: [null] },
+  competing_risks_cumulative_incidence: { families: ["survival"], distributions: [null], links: [null] },
+  restricted_mean_survival_time: { families: ["survival"], distributions: [null], links: [null] },
+  nelson_aalen: { families: ["survival"], distributions: [null], links: [null] },
+  survival_landmark_analysis: { families: ["survival"], distributions: [null], links: [null] },
+  sign_test: { families: ["nonparametric"], distributions: [null], links: [null] },
+  mood_median_test: { families: ["nonparametric"], distributions: [null], links: [null] },
+  runs_test: { families: ["nonparametric"], distributions: [null], links: [null] },
+  jonckheere_terpstra: { families: ["nonparametric"], distributions: [null], links: [null] },
+  page_trend_test: { families: ["nonparametric"], distributions: [null], links: [null] },
+  dunn_test: { families: ["nonparametric"], distributions: [null], links: [null] },
+  conover_iman_test: { families: ["nonparametric"], distributions: [null], links: [null] },
+  nemenyi_test: { families: ["nonparametric"], distributions: [null], links: [null] },
+  hodges_lehmann_estimate: { families: ["nonparametric"], distributions: [null], links: [null] },
+  brunner_munzel_test: { families: ["nonparametric"], distributions: [null], links: [null] },
+  quade_test: { families: ["nonparametric"], distributions: [null], links: [null] },
+  mcnemar_test: { families: ["categorical"], distributions: [null, "binomial", "poisson", "multinomial"], links: [null, "logit", "log"] },
+  cochran_q_test: { families: ["categorical"], distributions: [null, "binomial", "poisson", "multinomial"], links: [null, "logit", "log"] },
+  cochran_armitage_trend_test: { families: ["categorical"], distributions: [null, "binomial", "poisson", "multinomial"], links: [null, "logit", "log"] },
+  mantel_haenszel_test: { families: ["categorical"], distributions: [null, "binomial", "poisson", "multinomial"], links: [null, "logit", "log"] },
+  fisher_exact_rxc: { families: ["categorical"], distributions: [null, "binomial", "poisson", "multinomial"], links: [null, "logit", "log"] },
+  g_test: { families: ["categorical"], distributions: [null, "binomial", "poisson", "multinomial"], links: [null, "logit", "log"] },
+  two_by_two_effect_measures: { families: ["categorical"], distributions: [null, "binomial", "poisson", "multinomial"], links: [null, "logit", "log"] },
+  chi_square_independence_residuals: { families: ["categorical"], distributions: [null, "binomial", "poisson", "multinomial"], links: [null, "logit", "log"] },
+  binomial_test: { families: ["categorical"], distributions: [null, "binomial", "poisson", "multinomial"], links: [null, "logit", "log"] },
+  poisson_rate_test: { families: ["categorical"], distributions: [null, "binomial", "poisson", "multinomial"], links: [null, "logit", "log"] },
+  log_linear_model: { families: ["categorical", "glm"], distributions: [null, "poisson", "multinomial"], links: [null, "log"] },
+  standardized_effect_sizes: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  effect_size_conversion: { families: ["lm"], distributions: [null, "normal", "gaussian", "binomial"], links: [null, "identity", "logit"] },
+  tost_equivalence: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  non_inferiority_test: { families: ["lm", "glm"], distributions: [null, "normal", "gaussian", "binomial"], links: [null, "identity", "logit"] },
+  bland_altman_agreement: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  cronbach_alpha: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  mcdonald_omega: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  intraclass_correlation: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  cohen_kappa: { families: ["glm"], distributions: [null, "multinomial", "binomial"], links: [null, "identity"] },
+  fleiss_kappa: { families: ["glm"], distributions: [null, "multinomial", "binomial"], links: [null, "identity"] },
+  krippendorff_alpha: { families: ["glm"], distributions: [null, "multinomial", "normal"], links: [null, "identity"] },
+  kendall_w: { families: ["lm"], distributions: [null, "normal", "ordinal"], links: [null, "identity"] },
+  difference_in_differences: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  propensity_score_analysis: { families: ["lm", "glm"], distributions: [null, "normal", "gaussian", "binomial"], links: [null, "identity", "logit"] },
+  instrumental_variables_2sls: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  regression_discontinuity: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  mediation_analysis: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  effect_size_from_arms: { families: ["meta-analysis"], distributions: [null, "normal", "binomial"], links: [null, "identity", "logit", "log"] },
+  meta_regression: { families: ["meta-analysis"], distributions: [null, "normal"], links: [null, "identity"] },
+  subgroup_meta_analysis: { families: ["meta-analysis"], distributions: [null, "normal"], links: [null, "identity"] },
+  trim_and_fill: { families: ["meta-analysis"], distributions: [null, "normal"], links: [null, "identity"] },
+  hartung_knapp_meta_analysis: { families: ["meta-analysis"], distributions: [null, "normal"], links: [null, "identity"] },
+  cumulative_meta_analysis: { families: ["meta-analysis"], distributions: [null, "normal"], links: [null, "identity"] },
+  network_meta_analysis_frequentist: { families: ["meta-analysis"], distributions: [null, "normal"], links: [null, "identity"] },
+  control_chart: { families: ["lm"], distributions: [null, "normal", "gaussian", "binomial", "poisson"], links: [null, "identity"] },
+  process_capability: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  gage_rr: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  cusum_ewma: { families: ["lm"], distributions: [null, "normal", "gaussian"], links: [null, "identity"] },
+  theil_sen_regression: { families: ["nonparametric"], distributions: [null], links: [null] },
+});
 
 const NORMAL_IDENTITY_METHODS = new Set<ScienceStatisticsMethod>([
   "pearson_correlation",
@@ -80,12 +300,28 @@ export interface ScienceStatisticsKaplanMeierSourceTableBinding extends ScienceS
   label: string;
 }
 
+/**
+ * Every shape a stored data table can be projected into before an analysis reads it.
+ *
+ * This is a runtime array, not a type-only union, because the MCP tool schema advertises one
+ * `source_table` branch per projection and a gate has to be able to check that the two agree.
+ * When the list was type-only the gate could only pin a count, so adding a projection turned it
+ * red for no product reason and dropping one could pass unnoticed.
+ */
+export const SCIENCE_STATISTICS_DATA_TABLE_PROJECTION_KINDS = Object.freeze([
+  "welch-one-way-anova-long",
+  "friedman-long",
+  "roc-curve-analysis",
+  "response-surface-regression",
+  "gaussian-random-intercept-lmm-long",
+  // The general one. Every projection above names a single method and was written by hand; this one
+  // projects against whatever data shape a method declares for itself, which is what made the other
+  // 172 registered methods reachable from an uploaded table at all.
+  "declared-columns",
+] as const);
+
 export type ScienceStatisticsDataTableProjectionKind =
-  | "welch-one-way-anova-long"
-  | "friedman-long"
-  | "roc-curve-analysis"
-  | "response-surface-regression"
-  | "gaussian-random-intercept-lmm-long";
+  typeof SCIENCE_STATISTICS_DATA_TABLE_PROJECTION_KINDS[number];
 
 export interface ScienceStatisticsWelchSourceTableBinding extends ScienceStatisticsInputArtifactBinding {
   method: "welch_one_way_anova";
@@ -197,10 +433,25 @@ export interface ScienceStatisticsDataTableProjectionReceiptV3 {
   receiptSha256: string;
 }
 
+export interface ScienceStatisticsDataTableProjectionReceiptV4 {
+  schema: typeof SCIENCE_STATISTICS_DATA_TABLE_PROJECTION_RECEIPT_V4_SCHEMA;
+  method: string;
+  projectionKind: "declared-columns";
+  sourceArtifact: ScienceStatisticsInputArtifactBinding;
+  sourceTableSha256: string;
+  /** What each declared data property was read from, keyed by the property's own name. */
+  columns: Record<string, unknown>;
+  includedRowCount: number;
+  includedRowsSha256: string;
+  projectedDataSha256: string;
+  receiptSha256: string;
+}
+
 export type ScienceStatisticsAnyDataTableProjectionReceipt =
   | ScienceStatisticsDataTableProjectionReceipt
   | ScienceStatisticsDataTableProjectionReceiptV2
-  | ScienceStatisticsDataTableProjectionReceiptV3;
+  | ScienceStatisticsDataTableProjectionReceiptV3
+  | ScienceStatisticsDataTableProjectionReceiptV4;
 
 export interface ScienceStatisticsFrozenPlanBinding {
   analysisSpecId: string;
@@ -410,6 +661,12 @@ export function scienceStatisticsMethodMatchesAnalysisModel(method: unknown, val
       && (link === null || link === "identity") && Boolean(grouping)
       && ["(1|" + grouping + ")", "1|" + grouping, "random-intercept:" + grouping].includes(randomEffect);
   }
+  const extension = SCIENCE_STATISTICS_EXTENSION_ANALYSIS_MODELS[method];
+  if (extension) {
+    return extension.families.includes(family)
+      && extension.distributions.includes(distribution)
+      && extension.links.includes(link);
+  }
   return false;
 }
 
@@ -510,6 +767,48 @@ function validateScienceStatisticsDataTableProjectionReceiptV3(value: unknown): 
 }
 
 /** Validates an immutable Data Table projection receipt without weakening the legacy Kaplan-Meier v1 rail. */
+/**
+ * The general projection's receipt.
+ *
+ * The method name is checked for shape, not against a list: this receipt exists precisely so that a
+ * method the registry adds later is covered without editing this file. What is still checked
+ * exactly is everything that makes the run reproducible -- the source artifact and its content
+ * hash, the row count, the hash of the rows that were read, the hash of what was produced, and the
+ * receipt's own hash over all of it.
+ */
+function validateScienceStatisticsDataTableProjectionReceiptV4(value: unknown): ScienceStatisticsDataTableProjectionReceiptV4 {
+  const code = "science-statistics-data-table-projection-receipt-v4-invalid";
+  const receipt = record(value);
+  if (!receipt || !exactKeys(receipt, [
+    "schema", "method", "projectionKind", "sourceArtifact", "sourceTableSha256", "columns",
+    "includedRowCount", "includedRowsSha256", "projectedDataSha256", "receiptSha256",
+  ]) || receipt.schema !== SCIENCE_STATISTICS_DATA_TABLE_PROJECTION_RECEIPT_V4_SCHEMA
+    || receipt.projectionKind !== "declared-columns"
+    || typeof receipt.method !== "string" || !/^[a-z][a-z0-9_]{2,63}$/u.test(receipt.method)
+    || typeof receipt.sourceTableSha256 !== "string" || !SHA256_RE.test(receipt.sourceTableSha256)
+    || !Number.isSafeInteger(receipt.includedRowCount) || Number(receipt.includedRowCount) < 1 || Number(receipt.includedRowCount) > 1_000_000
+    || typeof receipt.includedRowsSha256 !== "string" || !SHA256_RE.test(receipt.includedRowsSha256)
+    || typeof receipt.projectedDataSha256 !== "string" || !SHA256_RE.test(receipt.projectedDataSha256)
+    || typeof receipt.receiptSha256 !== "string" || !SHA256_RE.test(receipt.receiptSha256)) {
+    throw new Error(code);
+  }
+  const columns = record(receipt.columns);
+  if (!columns || !Object.keys(columns).length || Object.keys(columns).length > 48) throw new Error(code);
+  const core = {
+    schema: SCIENCE_STATISTICS_DATA_TABLE_PROJECTION_RECEIPT_V4_SCHEMA,
+    method: receipt.method,
+    projectionKind: "declared-columns" as const,
+    sourceArtifact: validateInputArtifactBindings([receipt.sourceArtifact])[0],
+    sourceTableSha256: receipt.sourceTableSha256,
+    columns,
+    includedRowCount: Number(receipt.includedRowCount),
+    includedRowsSha256: receipt.includedRowsSha256,
+    projectedDataSha256: receipt.projectedDataSha256,
+  };
+  if (scienceStatisticsSha256(core) !== receipt.receiptSha256) throw new Error(code);
+  return { ...core, receiptSha256: receipt.receiptSha256 };
+}
+
 export function validateScienceStatisticsDataTableProjectionReceipt(value: unknown): ScienceStatisticsAnyDataTableProjectionReceipt {
   const candidate = record(value);
   if (candidate?.schema === SCIENCE_STATISTICS_DATA_TABLE_PROJECTION_RECEIPT_SCHEMA) {
@@ -517,6 +816,9 @@ export function validateScienceStatisticsDataTableProjectionReceipt(value: unkno
   }
   if (candidate?.schema === SCIENCE_STATISTICS_DATA_TABLE_PROJECTION_RECEIPT_V3_SCHEMA) {
     return validateScienceStatisticsDataTableProjectionReceiptV3(value);
+  }
+  if (candidate?.schema === SCIENCE_STATISTICS_DATA_TABLE_PROJECTION_RECEIPT_V4_SCHEMA) {
+    return validateScienceStatisticsDataTableProjectionReceiptV4(value);
   }
   if (!candidate || !exactKeys(candidate, [
     "schema", "method", "projectionKind", "sourceArtifact", "sourceTableSha256", "columns",

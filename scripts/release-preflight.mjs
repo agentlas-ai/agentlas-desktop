@@ -340,6 +340,14 @@ function verifyReleaseSourceContract(runtimeRoot, manifestVersion) {
 
   const releaseWorkflow = readFileSync(join(root, ".github", "workflows", "release.yml"), "utf8");
   const signedWorkflow = readFileSync(join(root, ".github", "workflows", "release-signed-mac.yml"), "utf8");
+  const signingPolicyText = String(process.env.AGENTLAS_PRODUCT_EXTENSION_TRUSTED_KEYS_JSON || "").trim();
+  if (signingPolicyText) {
+    const require = createRequire(import.meta.url);
+    const { parsePolicyEnvironment } = require(join(root, "build-resources", "product-extension-signing-policy.cjs"));
+    parsePolicyEnvironment(signingPolicyText, "AGENTLAS_PRODUCT_EXTENSION_TRUSTED_KEYS_JSON");
+  } else if (process.env.AGENTLAS_PUBLIC_RELEASE === "1" || process.env.GITHUB_ACTIONS === "true") {
+    throw new Error("AGENTLAS_PRODUCT_EXTENSION_TRUSTED_KEYS_JSON is required for a release preflight");
+  }
   for (const [name, workflow] of [["release.yml", releaseWorkflow], ["release-signed-mac.yml", signedWorkflow]]) {
     if (!workflow.includes("AGENTLAS_PRODUCT_EXTENSION_TRUSTED_KEYS_JSON")) {
       throw new Error(`${name} does not provide the release-owned product-extension public-key policy`);
@@ -461,6 +469,15 @@ if (
 // The contract gate imports from dist/, so a stale build would test stale code.
 if (!run("npm", ["run", "build:electron"], { cwd: root })) {
   fail("build:electron failed; the release contract reads dist/.");
+}
+
+// Science is delivered through a separately versioned catalog. A green
+// Desktop build is not enough: the catalog may still point at an older base
+// archive that lacks the current lab descriptor or host-compatibility contract.
+// Verify the actual catalog archives at promotion time, after dist/ has been
+// rebuilt, so this gate cannot accidentally attest to stale validation code.
+if (!run(process.execPath, [join(root, "scripts", "science-release-catalog-archive-gate.mjs")], { cwd: root })) {
+  fail("Science release catalog failed archive, descriptor, or host-compatibility verification");
 }
 
 const preparedRuntimeRoot = join(root, "dist", "embedded-core");

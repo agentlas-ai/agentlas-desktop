@@ -6,6 +6,21 @@ const toolCatalog = require("../schemas/tools.json");
 const { analyzeHepDataChiSquare, createPhysicsClient, normalizeHepDataTable, normalizeNumericDataset, PhysicsError } = require("./physics.cjs");
 
 const client = createPhysicsClient();
+// Pure analysis catalogue: every entry is a deterministic function of its input (no network, no host store).
+const ANALYSES = {
+  fit_physics_spectrum_peaks: { module: "./spectrum-fit.cjs", exportName: "analyzeSpectrumFit" },
+  compute_physics_significance_limits: { module: "./significance-limits.cjs", exportName: "analyzeSignificanceLimits" },
+  propagate_physics_uncertainty: { module: "./uncertainty-propagation.cjs", exportName: "analyzeUncertaintyPropagation" },
+  analyze_physics_units: { module: "./units.cjs", exportName: "analyzeUnits" },
+  simulate_physics_ode: { module: "./ode-simulation.cjs", exportName: "analyzeOdeSimulation" },
+  analyze_physics_signal: { module: "./signal-analysis.cjs", exportName: "analyzeSignal" },
+  fit_physics_york_line: { module: "./york-fit.cjs", exportName: "analyzeYorkFit" },
+  check_physics_lab_experiment: { module: "./lab-checkers.cjs", exportName: "analyzeLabExperiment" },
+};
+function runAnalysis(name, args) {
+  const entry = ANALYSES[name];
+  return require(entry.module)[entry.exportName](args);
+}
 function toolResult(value) { return { content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value }; }
 
 async function callTool(name, args) {
@@ -15,6 +30,7 @@ async function callTool(name, args) {
   if (name === "normalize_hepdata_table") return toolResult(normalizeHepDataTable(args));
   if (name === "analyze_hepdata_chi_square") return toolResult(analyzeHepDataChiSquare(args));
   if (name === "normalize_physics_dataset") return toolResult(normalizeNumericDataset(args));
+  if (Object.prototype.hasOwnProperty.call(ANALYSES, name)) return toolResult(runAnalysis(name, args));
   if (name === "describe_physics_capabilities") {
     if (args && (typeof args !== "object" || Array.isArray(args) || Object.keys(args).length)) throw new PhysicsError("physics-capabilities-input-invalid");
     return toolResult(require("../capabilities.json"));
@@ -23,7 +39,7 @@ async function callTool(name, args) {
 }
 
 async function handle(message) {
-  if (message.method === "initialize") return { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "agentlas-physics", version: "0.2.0" } };
+  if (message.method === "initialize") return { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "agentlas-physics", version: "0.3.2" } };
   if (message.method === "tools/list") return { tools: toolCatalog.tools };
   if (message.method === "tools/call") return callTool(message.params?.name, message.params?.arguments ?? {});
   if (message.method?.startsWith("notifications/")) return null;

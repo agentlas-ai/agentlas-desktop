@@ -1,0 +1,95 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "agentlas.astronomy.flat-lambda-cdm-cosmology-input/v1",
+  "title": "compute_flat_lambda_cdm_cosmology",
+  "description": "Flat Lambda-CDM calculator (Hogg 1999): comoving, angular-diameter and luminosity distances, distance modulus, lookback time, age at redshift, comoving volume and kpc/arcsec for explicit redshifts plus a declared z grid, with a distance/time figure. Curvature and w != -1 are not modelled.",
+  "x-agentlas": {
+    "schema": "agentlas.astronomy.tool-schema/v1",
+    "toolName": "compute_flat_lambda_cdm_cosmology",
+    "runtimeModule": "runtime/cosmology.cjs",
+    "runtimeExport": "computeFlatLambdaCdmCosmology",
+    "resultSchema": "agentlas.science.astronomy-flat-lambda-cdm-cosmology-result/v1",
+    "argumentKeyStyle": "snake_case-to-camelCase"
+  },
+  "type": "object",
+  "properties": {
+    "source_content_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "Lowercase hex SHA-256 of the exact source bytes the measurements were taken from."
+    },
+    "label": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "hubble_constant_km_s_mpc": {
+      "type": "number",
+      "minimum": 20,
+      "maximum": 200
+    },
+    "omega_matter": {
+      "type": "number",
+      "maximum": 1,
+      "exclusiveMinimum": 0
+    },
+    "omega_radiation": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 0.01,
+      "default": 0
+    },
+    "redshifts": {
+      "type": "array",
+      "items": {
+        "type": "number",
+        "maximum": 1100,
+        "exclusiveMinimum": 0
+      },
+      "minItems": 0,
+      "maxItems": 500
+    },
+    "grid": {
+      "type": "object",
+      "properties": {
+        "minimum_redshift": {
+          "type": "number",
+          "maximum": 1100,
+          "exclusiveMinimum": 0
+        },
+        "maximum_redshift": {
+          "type": "number",
+          "maximum": 1100,
+          "exclusiveMinimum": 0
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 2000
+        },
+        "spacing": {
+          "type": "string",
+          "enum": [
+            "linear",
+            "log"
+          ]
+        }
+      },
+      "required": [
+        "minimum_redshift",
+        "maximum_redshift",
+        "count",
+        "spacing"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "source_content_sha256",
+    "label",
+    "hubble_constant_km_s_mpc",
+    "omega_matter",
+    "redshifts"
+  ],
+  "additionalProperties": false
+}

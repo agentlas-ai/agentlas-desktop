@@ -349,8 +349,14 @@ const METHOD_DECISION_LINKAGE = Object.freeze({
   },
 });
 
+const { loadMethodRegistry } = require("./methods/index.cjs");
+const REGISTRY_DECISION_LINKAGE = Object.freeze(Object.fromEntries(
+  loadMethodRegistry().definitions.map((definition) => [definition.method, definition.linkage]),
+));
+const ALL_DECISION_LINKAGE = Object.freeze({ ...METHOD_DECISION_LINKAGE, ...REGISTRY_DECISION_LINKAGE });
+
 function buildResearchDecisionLinkage(method, artifactRoles) {
-  const entry = METHOD_DECISION_LINKAGE[method];
+  const entry = ALL_DECISION_LINKAGE[method];
   if (!entry) throw new Error(`Missing research decision linkage for ${method}`);
   return {
     name: "research-decision linkage",
@@ -371,6 +377,7 @@ function buildResearchDecisionLinkage(method, artifactRoles) {
 
 module.exports = {
   DECISION_LINKAGE_SCHEMA,
-  METHOD_DECISION_LINKAGE,
+  METHOD_DECISION_LINKAGE: ALL_DECISION_LINKAGE,
+  CORE_METHOD_DECISION_LINKAGE: METHOD_DECISION_LINKAGE,
   buildResearchDecisionLinkage,
 };

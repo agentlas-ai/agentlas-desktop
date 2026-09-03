@@ -88,6 +88,7 @@ function defaultProfile(): OneProfile {
     profileContext: "",
     preferredLocale: "system",
     timeZone: defaultTimeZone(),
+    avatarIcon: "character:orange-dino",
     operatingPrinciples: [],
     createdAt: now,
     updatedAt: now,

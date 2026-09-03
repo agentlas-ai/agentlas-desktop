@@ -1,6 +1,4 @@
 import { createHash } from "node:crypto";
-import fs from "node:fs";
-import path from "node:path";
 import type { ScienceSource } from "../../shared/science-contract";
 import {
   SCIENCE_ASTRONOMY_SOURCE_AUTHORITY,
@@ -8,6 +6,7 @@ import {
   type ScienceAstronomySourceAuthority,
 } from "../../shared/science-astronomy";
 import { ScienceStore } from "./store";
+import { loadSciencePluginRuntime } from "./plugin-runtime";
 
 export const ASTRONOMY_CATALOG_TOOL_ID = "agentlas.astronomy-catalog";
 export const ASTRONOMY_CATALOG_TOOL_VERSION = "1.0.0";
@@ -209,11 +208,9 @@ function assertFreshSource(
 }
 
 function loadRuntime(): AstronomyRuntime {
-  const runtimePath = path.resolve(__dirname, "../../../plugins/agentlas-astronomy/runtime/astronomy.cjs");
-  const stat = fs.lstatSync(runtimePath);
-  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("science-astronomy-runtime-invalid");
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const runtime = require(runtimePath) as AstronomyRuntime;
+  const { runtime } = loadSciencePluginRuntime<AstronomyRuntime>(
+    "agentlas-astronomy", "runtime/astronomy.cjs", 16 * 1024 * 1024,
+  );
   if (!runtime || typeof runtime.buildSimbadUrl !== "function" || typeof runtime.normalizeSimbadResponse !== "function"
     || runtime.SIMBAD_ORIGIN !== "https://simbad.cds.unistra.fr" || runtime.SIMBAD_TAP_PATH !== "/simbad/sim-tap/sync"
     || runtime.SIMBAD_TAP_ENDPOINT !== SIMBAD_TAP_ENDPOINT) throw new Error("science-astronomy-runtime-invalid");

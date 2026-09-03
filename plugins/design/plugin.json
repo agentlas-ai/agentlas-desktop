@@ -82,11 +82,6 @@
     "algo": "sha256",
     "files": [
       {
-        "path": "README.md",
-        "sha256": "a4debadc4499ad0187625a5f7d87abbd03c10a039f992b4b1dc83111198b12e8",
-        "bytes": 4122
-      },
-      {
         "path": "assets/doctor-report.schema.json",
         "sha256": "f2cf80dd873f636ac5e0814cbcecb7e6f0d4279fe97ab4fde72856dface50e5f",
         "bytes": 11704
@@ -100,6 +95,11 @@
         "path": "assets/report-template.html",
         "sha256": "4cef1d9a2463b67814c5dcb0490304a870214479178bc207614df37f38beeebd",
         "bytes": 12793
+      },
+      {
+        "path": "README.md",
+        "sha256": "a4debadc4499ad0187625a5f7d87abbd03c10a039f992b4b1dc83111198b12e8",
+        "bytes": 4122
       },
       {
         "path": "references/apple-hig/hig-checklist.md",
@@ -323,8 +323,8 @@
       },
       {
         "path": "skills/ideate/SKILL.md",
-        "sha256": "b23f4bc206e87eb4e45b8ca117c7021d7ecca34432b51bc7d34307a7610c811c",
-        "bytes": 3984
+        "sha256": "6a0667456e33ce21cfd5187a0d32dc826d8e33b61059b5aa8d6ea705e05882ba",
+        "bytes": 3193
       },
       {
         "path": "skills/image-to-code/SKILL.md",
@@ -333,23 +333,13 @@
       },
       {
         "path": "skills/index/SKILL.md",
-        "sha256": "ac26b5920186f3a61c8d539b4d117d28412479a288ff88ad200f68f17250cedb",
-        "bytes": 2844
+        "sha256": "082039f41ce4210a18a273a0a806b54f45e67c0ce40ff1f34cac508342b2a179",
+        "bytes": 2670
       },
       {
         "path": "skills/motion/SKILL.md",
         "sha256": "4603c36ec9811b17ad83fecab63c0a40a947c9d1a105fb9672b0f605df188f22",
         "bytes": 2832
-      },
-      {
-        "path": "skills/research/SKILL.md",
-        "sha256": "ac186b80dc021f9f83b3affa3aada44eb37dc0825720aba8ba9e38f3805c3906",
-        "bytes": 1860
-      },
-      {
-        "path": "skills/seed-design/SKILL.md",
-        "sha256": "20a4962b2a461dbdf770903e79058d7eef7a5f08d66cb77346a188a59dc9fad0",
-        "bytes": 1747
       },
       {
         "path": "skills/seed-design/references/component-guidelines.md",
@@ -400,6 +390,11 @@
         "path": "skills/seed-design/references/snippet-generation.md",
         "sha256": "917e0f1255e379f596366b5af28f4c86d4c8aa6a23ffaf262d52d742380dd9a8",
         "bytes": 1866
+      },
+      {
+        "path": "skills/seed-design/SKILL.md",
+        "sha256": "20a4962b2a461dbdf770903e79058d7eef7a5f08d66cb77346a188a59dc9fad0",
+        "bytes": 1747
       },
       {
         "path": "skills/share/SKILL.md",

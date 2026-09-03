@@ -1,0 +1,127 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "agentlas.astronomy.radial-velocity-orbit-input/v1",
+  "title": "fit_radial_velocity_orbit",
+  "description": "Single-Keplerian radial-velocity orbit: GLS periodogram seed, multi-start Levenberg-Marquardt over (P, K, e, omega, T_p, gamma), covariance uncertainties, mass function, m sin i and semi-major axis for a declared primary mass, residual RMS, phase-folded figure and residual table. No jitter, trend, or multi-planet model.",
+  "x-agentlas": {
+    "schema": "agentlas.astronomy.tool-schema/v1",
+    "toolName": "fit_radial_velocity_orbit",
+    "runtimeModule": "runtime/rv-orbit.cjs",
+    "runtimeExport": "fitRadialVelocityOrbit",
+    "resultSchema": "agentlas.science.astronomy-radial-velocity-orbit-result/v1",
+    "argumentKeyStyle": "snake_case-to-camelCase"
+  },
+  "type": "object",
+  "properties": {
+    "source_content_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "Lowercase hex SHA-256 of the exact source bytes the measurements were taken from."
+    },
+    "target_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "time_system": {
+      "type": "string",
+      "enum": [
+        "BJD_TDB",
+        "BJD_UTC",
+        "HJD_UTC",
+        "JD_UTC",
+        "MJD_UTC",
+        "relative-day"
+      ]
+    },
+    "time_offset_days": {
+      "type": "number",
+      "minimum": -1000000000,
+      "maximum": 1000000000
+    },
+    "minimum_period_days": {
+      "type": "number",
+      "minimum": 0.0001,
+      "maximum": 1000000
+    },
+    "maximum_period_days": {
+      "type": "number",
+      "minimum": 0.0001,
+      "maximum": 1000000
+    },
+    "frequency_count": {
+      "type": "integer",
+      "minimum": 32,
+      "maximum": 20000
+    },
+    "primary_mass_solar": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0.01,
+      "maximum": 1000
+    },
+    "measurements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "observation_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          },
+          "time": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": -1000000000,
+            "maximum": 1000000000
+          },
+          "radial_velocity_km_s": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": -100000,
+            "maximum": 100000
+          },
+          "standard_error_km_s": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "maximum": 100000,
+            "exclusiveMinimum": 0
+          },
+          "use": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "observation_id",
+          "time",
+          "radial_velocity_km_s",
+          "standard_error_km_s",
+          "use"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 8,
+      "maxItems": 5000
+    }
+  },
+  "required": [
+    "source_content_sha256",
+    "target_id",
+    "time_system",
+    "time_offset_days",
+    "minimum_period_days",
+    "maximum_period_days",
+    "frequency_count",
+    "measurements"
+  ],
+  "additionalProperties": false
+}

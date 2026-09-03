@@ -14,6 +14,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { detachedSpawnOpts, killCliTree, trackRunChild } from "../runtime/exec";
 
 export type DocumentPdfEngine = "tectonic" | "chromium";
 
@@ -61,11 +62,16 @@ function resolveTool(name: string): string | null {
 
 function run(bin: string, args: string[], cwd: string, timeoutMs: number): Promise<{ code: number; stderr: string }> {
   return new Promise((resolve) => {
-    const child = spawn(bin, args, { cwd, stdio: ["ignore", "ignore", "pipe"] });
+    const child = spawn(bin, args, {
+      cwd,
+      stdio: ["ignore", "ignore", "pipe"],
+      ...detachedSpawnOpts(),
+    });
+    trackRunChild(child);
     let stderr = "";
     const timer = setTimeout(() => {
       try {
-        child.kill("SIGKILL");
+        killCliTree(child, 250);
       } catch {
         /* already gone */
       }

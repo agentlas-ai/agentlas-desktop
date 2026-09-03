@@ -2,7 +2,7 @@
 // PRD 3.1 FRE 6단계 — 사용자가 입력 안 해도 한 번 클릭으로 연결되도록.
 import { probeClaudeCode, probeClaudeEfforts } from "./claude-code";
 import { allocationAdvertisement } from "./model-advertisement";
-import { probeCodex } from "./codex";
+import { clearCodexBinCache, probeCodex } from "./codex";
 import { readCodexModelDiscovery } from "./codex-models";
 import { summarizeDiscovery, unsupportedDiscovery, type DiscoveryOutcome } from "../../shared/model-discovery";
 import { POOL_AUTOPICK_ROLES, RUNTIME_ROLES, type RuntimeRole } from "../../shared/runtime-roles";
@@ -56,6 +56,8 @@ type ActiveRuntimeRow = {
 
 let detectCache: { at: number; list: RuntimeStatus[] } | null = null;
 let detectInFlight: Promise<RuntimeStatus[]> | null = null;
+let detectGeneration = 0;
+let detectInFlightGeneration = -1;
 
 function runtimeDetectCacheMs(): number {
   return Number(process.env.AGENTLAS_RUNTIME_DETECT_CACHE_MS ?? 10_000);
@@ -123,6 +125,10 @@ export function conservativeLocalRuntimeAllocation(models: string[]): Pick<
 /** 감지 캐시 무효화 — 활성 런타임 변경·CLI 재로그인 직후 등 "연결" 칩이 낡으면 안 되는 시점에 호출. */
 export function clearDetectCache(): void {
   detectCache = null;
+  detectGeneration += 1;
+  // `codex.ts` keeps the executable path separately for invocation; clearing
+  // only the dashboard snapshot would pin a moved binary until app restart.
+  clearCodexBinCache();
 }
 
 /**
@@ -270,15 +276,28 @@ export async function detectRuntimes(force = false): Promise<RuntimeStatus[]> {
   if (detectCache && now - detectCache.at < runtimeDetectCacheMs()) {
     return cloneRuntimeStatuses(detectCache.list);
   }
-  if (detectInFlight) return cloneRuntimeStatuses(await detectInFlight);
+  if (detectInFlight && detectInFlightGeneration === detectGeneration) {
+    return cloneRuntimeStatuses(await detectInFlight);
+  }
 
-  detectInFlight = detectRuntimesUncached();
+  const requestGeneration = detectGeneration;
+  const flight = detectRuntimesUncached();
+  detectInFlight = flight;
+  detectInFlightGeneration = requestGeneration;
   try {
-    const list = await detectInFlight;
-    detectCache = { at: Date.now(), list: cloneRuntimeStatuses(list) };
+    const list = await flight;
+    // A runtime update/store change may have invalidated this probe while it
+    // was running. Let its caller finish, but never make that old generation
+    // the source for a later dashboard read.
+    if (requestGeneration === detectGeneration) {
+      detectCache = { at: Date.now(), list: cloneRuntimeStatuses(list) };
+    }
     return cloneRuntimeStatuses(list);
   } finally {
-    detectInFlight = null;
+    if (detectInFlight === flight) {
+      detectInFlight = null;
+      detectInFlightGeneration = -1;
+    }
   }
 }
 

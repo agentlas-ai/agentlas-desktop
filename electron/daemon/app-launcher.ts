@@ -29,6 +29,11 @@ import {
   removeAutostart,
   type AutostartCommand,
 } from "./autostart";
+import {
+  OFFICIAL_INSTALL_IDENTITY,
+  serializeInstallIdentity,
+  type InstallIdentity,
+} from "../install-identity";
 
 export interface EnsureDaemonOptions {
   /** 앱과 데몬이 같은 DB 를 보게 하는 단일 진실 — 앱의 userData 디렉터리. */
@@ -42,6 +47,8 @@ export interface EnsureDaemonOptions {
   log?: (line: string) => void;
   /** Desktop owner. The helper exits when this process is no longer alive. */
   parentPid?: number;
+  /** The already-resolved identity of this Desktop install. */
+  installIdentity?: InstallIdentity;
 }
 
 export type EnsureDaemonStatus =
@@ -81,18 +88,6 @@ async function pingDaemon(socketPath: string, timeoutMs = 2_000): Promise<Daemon
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * Disposable Electron QA profiles must not create helper processes. Their
- * user-data directory is deleted when the harness closes, so the helper cannot
- * be reused and would only create noisy listeners during visual verification.
- * Dedicated daemon/mobile-bridge contracts execute daemon/main.js directly.
- */
-function daemonLaunchDisabled(): boolean {
-  return process.env.AGENTLAS_DISABLE_DAEMON === "1"
-    || process.env.AGENTLAS_E2E === "1"
-    || Boolean(process.env.AGENTLAS_QA_USER_DATA_DIR);
-}
-
-/**
  * Hands the single Mobile Bridge listener from agentlasd to the live Desktop
  * process. A newly spawned daemon exposes its control socket before every
  * optional service is ready, so this bounded retry is also the startup handoff
@@ -104,7 +99,7 @@ export async function claimDaemonMobileBridge(
   ownerPid: number,
   timeoutMs = 30_000,
 ): Promise<boolean> {
-  if (daemonLaunchDisabled()) return false;
+  if (process.env.AGENTLAS_DISABLE_DAEMON === "1") return false;
   if (!Number.isSafeInteger(ownerPid) || ownerPid <= 1) {
     throw new Error("Mobile Bridge lease owner pid is invalid");
   }
@@ -134,7 +129,7 @@ export async function releaseDaemonMobileBridge(
   ownerPid: number,
   timeoutMs = 10_000,
 ): Promise<boolean> {
-  if (daemonLaunchDisabled()) return false;
+  if (process.env.AGENTLAS_DISABLE_DAEMON === "1") return false;
   try {
     const result = (await callControlSocket(
       defaultControlSocketPath(userDataDir),
@@ -160,6 +155,12 @@ function spawnDaemonForDesktop(opts: EnsureDaemonOptions): number | null {
       ...process.env,
       ELECTRON_RUN_AS_NODE: "1",
       AGENTLAS_USER_DATA: opts.userDataDir,
+      // The headless child cannot read the packaged app marker itself. Pass
+      // the identity resolved by Desktop so it can configure protected storage
+      // before opening the shared store.
+      AGENTLAS_INSTALL_IDENTITY: serializeInstallIdentity(
+        opts.installIdentity ?? OFFICIAL_INSTALL_IDENTITY,
+      ),
       // 사다리는 앱이 이미 돌렸다. 데몬은 절대 두 번째 마이그레이션 주인이 되지 않는다.
       AGENTLAS_STORE_MIGRATION_ROLE: "follower",
       AGENTLAS_DESKTOP_PARENT_PID: String(opts.parentPid ?? process.pid),
@@ -178,7 +179,7 @@ function spawnDaemonForDesktop(opts: EnsureDaemonOptions): number | null {
  */
 export async function ensureDaemonRunning(opts: EnsureDaemonOptions): Promise<EnsureDaemonStatus> {
   const log = opts.log ?? ((line: string) => console.log(line));
-  if (daemonLaunchDisabled()) return { status: "disabled" };
+  if (process.env.AGENTLAS_DISABLE_DAEMON === "1") return { status: "disabled" };
   const socketPath = defaultControlSocketPath(opts.userDataDir);
 
   try {
@@ -194,7 +195,13 @@ export async function ensureDaemonRunning(opts: EnsureDaemonOptions): Promise<En
       // (다음 앱 실행이 다시 시도한다. 옛 데몬이 계속 돌더라도 스키마는 follower 라 안전).
       log(`[daemon] version skew (daemon ${daemonVersion} vs app ${opts.appVersion}) — asking it to shut down`);
       try {
-        await callControlSocket(socketPath, "daemon.shutdown", { parentPid: expectedParentPid }, 3_000);
+        // The daemon is owner-bound. Reuse the parent pid reported by the
+        // ping so its shutdown authorization is explicit; an unparameterized
+        // RPC is rejected by the same owner check used during Desktop quit.
+        const shutdownParams = Number.isSafeInteger(ping.parentPid) && Number(ping.parentPid) > 1
+          ? { parentPid: Number(ping.parentPid) }
+          : undefined;
+        await callControlSocket(socketPath, "daemon.shutdown", shutdownParams, 3_000);
       } catch {
         /* 응답 전에 소켓이 닫히는 것도 정상 종료의 모양이다 */
       }
@@ -229,7 +236,7 @@ export async function releaseDaemonAgentResidency(
   userDataDir: string,
   timeoutMs = 3_000,
 ): Promise<{ released: number } | null> {
-  if (daemonLaunchDisabled()) return null;
+  if (process.env.AGENTLAS_DISABLE_DAEMON === "1") return null;
   try {
     const result = (await callControlSocket(
       defaultControlSocketPath(userDataDir),
@@ -249,7 +256,7 @@ export async function shutdownDaemon(
   expectedParentPid: number,
   timeoutMs = 10_000,
 ): Promise<{ stopped: boolean; pid: number | null }> {
-  if (daemonLaunchDisabled()) return { stopped: true, pid: null };
+  if (process.env.AGENTLAS_DISABLE_DAEMON === "1") return { stopped: true, pid: null };
   const socketPath = defaultControlSocketPath(userDataDir);
   const ping = await pingDaemon(socketPath, Math.min(timeoutMs, 2_000));
   if (!ping?.ok) return { stopped: true, pid: null };

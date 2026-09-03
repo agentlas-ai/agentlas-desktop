@@ -4,53 +4,12 @@ import {
   createViewState,
   JBrowseLinearGenomeView,
 } from "@jbrowse/react-linear-genome-view2";
+import { projectVariantTrack } from "./project-variants.mjs";
 
 const roots = new WeakMap();
 
-function safeIdentifier(value, fallback) {
-  const normalized = String(value ?? "").replace(/[^A-Za-z0-9_.-]/g, "-").slice(0, 120);
-  return normalized || fallback;
-}
-
-function finiteInteger(value, minimum, maximum, field) {
-  const number = Number(value);
-  if (!Number.isSafeInteger(number) || number < minimum || number > maximum) {
-    throw new Error(`agentlas-jbrowse-${field}-invalid`);
-  }
-  return number;
-}
-
 function createConfiguration(payload) {
-  if (!payload || payload.schema !== "agentlas.science-genomics-variant-track/v1") {
-    throw new Error("agentlas-jbrowse-payload-invalid");
-  }
-  const region = payload.region;
-  const assemblyName = safeIdentifier(payload.assembly?.name, "assembly");
-  const refName = safeIdentifier(region?.refName, "reference");
-  const start = finiteInteger(region?.start, 1, 500_000_000, "region-start");
-  const end = finiteInteger(region?.end, start, 500_000_000, "region-end");
-  const start0 = start - 1;
-  const length = end - start0;
-  if (length > 1_000_000) throw new Error("agentlas-jbrowse-region-too-large");
-  if (!Array.isArray(payload.variants) || payload.variants.length > 8_000) {
-    throw new Error("agentlas-jbrowse-variants-invalid");
-  }
-  const features = payload.variants.map((variant, index) => {
-    const featureStart = finiteInteger(variant.start0, start0, end - 1, `variant-${index}-start`);
-    const featureEnd = finiteInteger(variant.end0, featureStart + 1, end, `variant-${index}-end`);
-    return {
-      uniqueId: safeIdentifier(variant.id, `variant-${index}`),
-      refName,
-      start: featureStart,
-      end: featureEnd,
-      name: String(variant.name || variant.id || `Variant ${index + 1}`).slice(0, 240),
-      type: "sequence_variant",
-      source: String(variant.source || "Ensembl").slice(0, 120),
-      alleles: Array.isArray(variant.alleles) ? variant.alleles.slice(0, 24).join(" / ") : "",
-      consequence_type: Array.isArray(variant.consequenceTypes) ? variant.consequenceTypes.slice(0, 24).join(", ") : "",
-      clinical_significance: Array.isArray(variant.clinicalSignificance) ? variant.clinicalSignificance.slice(0, 24).join(", ") : "",
-    };
-  });
+  const { assemblyName, refName, start, end, start0, length, features } = projectVariantTrack(payload);
   const referenceId = `${assemblyName}-${refName}-reference`;
   const trackId = `${assemblyName}-${refName}-ensembl-variants`;
   const assembly = {

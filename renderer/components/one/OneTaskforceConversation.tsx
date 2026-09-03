@@ -60,7 +60,7 @@ function handoffName(handoff: OneActivityHandoff, id: string): string | undefine
 
 function speakerFor(org: OneOrgState | null, handoff: OneActivityHandoff, id: string): Speaker {
   if (isOneNode(id)) {
-    return { id, name: "One", tone: "purple", status: "quiet", one: true };
+    return { id, name: "One", tone: "character:orange-dino", status: "quiet", one: true };
   }
   const member = memberForNode(org, id);
   const unavailable = !member || Boolean(member.archivedAt) || member.statusKind === "locked" || member.statusKind === "failed";

@@ -6,7 +6,7 @@
 //   - 파일 미리보기는 텍스트만, 사이즈 cap (256KB). 큰 텍스트는 앞부분만 보여준다.
 //   - 모든 path는 절대경로로 받고, main이 해석한 scope의 realpath 내부만 허용한다.
 //   - 쓰기/삭제는 노출하지 않는다 (이번 단계 read-only).
-import { dialog, BrowserWindow } from "electron";
+import type { BrowserWindow } from "electron";
 import fs from "node:fs/promises";
 import { existsSync, Stats } from "node:fs";
 import path from "node:path";
@@ -80,6 +80,8 @@ function isTextLike(name: string): boolean {
 
 /** OS native picker — 사용자가 폴더를 직접 고른다. parent는 modal 부착용. */
 export async function pickDirectory(parent: BrowserWindow | null): Promise<FsPathGrant | null> {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { dialog } = require("electron") as typeof import("electron");
   const res = await dialog.showOpenDialog(parent ?? undefined!, {
     properties: ["openDirectory", "showHiddenFiles"],
     title: "Choose a working folder",

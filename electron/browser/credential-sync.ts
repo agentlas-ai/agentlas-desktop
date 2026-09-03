@@ -92,28 +92,52 @@ export function browserCredentialConsentIsPending(): { pending: boolean; profile
   return { pending: count > 0, profileId: profile.id, count };
 }
 
-let refreshInFlight: Promise<void> | null = null;
+export interface BrowserCredentialRefreshReport {
+  state: "not-consented" | "not-due" | "refreshed" | "failed" | "discarded";
+  /** Value-free counts only; cookie names and values never leave the importer. */
+  cookiesAdded: number;
+  linkedSites: string[];
+  requiresLoginSites: string[];
+}
+
+const NO_REFRESH_REPORT = (state: BrowserCredentialRefreshReport["state"]): BrowserCredentialRefreshReport => ({
+  state,
+  cookiesAdded: 0,
+  linkedSites: [],
+  requiresLoginSites: [],
+});
+
+let refreshInFlight: Promise<BrowserCredentialRefreshReport> | null = null;
 
 /**
  * 승인된 도메인을 조용히 다시 가져온다. 승인이 없거나 아직 주기가 안 됐으면 아무것도 하지 않는다.
  * 앱 시작과 브라우저 도구가 실린 실행 앞에서 부른다 — 실패해도 그 실행을 막지 않는다.
  */
-export function refreshBrowserCredentialsIfDue(opts?: { force?: boolean }): Promise<void> {
+export function refreshBrowserCredentialsIfDue(opts?: { force?: boolean }): Promise<BrowserCredentialRefreshReport> {
   if (refreshInFlight) return refreshInFlight;
   const consent = getBrowserCredentialConsent();
-  if (!consent.granted || !consent.profileId || consent.domains.length === 0) return Promise.resolve();
+  if (!consent.granted || !consent.profileId || consent.domains.length === 0) {
+    return Promise.resolve(NO_REFRESH_REPORT("not-consented"));
+  }
   if (!opts?.force && consent.lastSyncedAt) {
     const age = Date.now() - Date.parse(consent.lastSyncedAt);
-    if (Number.isFinite(age) && age < REFRESH_INTERVAL_MS) return Promise.resolve();
+    if (Number.isFinite(age) && age < REFRESH_INTERVAL_MS) {
+      return Promise.resolve(NO_REFRESH_REPORT("not-due"));
+    }
   }
-  const flight = (async () => {
+  const flight = (async (): Promise<BrowserCredentialRefreshReport> => {
     try {
       const result = await importBrowserCredentials(consent.profileId!, consent.domains);
       if (!result.ok) {
         // 전용 브라우저가 열려 있는 등 정당한 거절이 있다. 다음 기회에 다시 시도하도록
         // lastSyncedAt 을 갱신하지 않는다 — 실패를 성공으로 기록하면 영영 낡은 채로 남는다.
         console.warn("[browser-credentials] auto refresh skipped:", result.error);
-        return;
+        return {
+          state: "failed",
+          cookiesAdded: 0,
+          linkedSites: result.linkedSites,
+          requiresLoginSites: result.requiresLoginSites ?? [],
+        };
       }
       // Import can take long enough for the user to revoke consent (or perform
       // a new manual import) while it is running. Never write the captured
@@ -125,13 +149,27 @@ export function refreshBrowserCredentialsIfDue(opts?: { force?: boolean }): Prom
       if (!current.granted
         || current.grantedAt !== consent.grantedAt
         || current.profileId !== consent.profileId
-        || !sameDomains) return;
+        || !sameDomains) {
+        return {
+          state: "discarded",
+          cookiesAdded: result.cookiesAdded,
+          linkedSites: result.linkedSites,
+          requiresLoginSites: result.requiresLoginSites ?? [],
+        };
+      }
       writeConsent({ ...current, lastSyncedAt: new Date().toISOString() });
       if (result.cookiesAdded > 0) {
         console.log(`[browser-credentials] refreshed ${result.linkedSites.length} site(s), +${result.cookiesAdded} cookies`);
       }
+      return {
+        state: "refreshed",
+        cookiesAdded: result.cookiesAdded,
+        linkedSites: result.linkedSites,
+        requiresLoginSites: result.requiresLoginSites ?? [],
+      };
     } catch (err) {
       console.warn("[browser-credentials] auto refresh failed:", err);
+      return { ...NO_REFRESH_REPORT("failed") };
     }
   })();
   const tracked = flight.finally(() => {

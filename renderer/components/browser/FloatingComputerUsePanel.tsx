@@ -2,11 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { ipc, ipcEvents } from "@/lib/ipc";
+import { ipcEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
-import type { BrowserLiveFrame, ComputerUsePreview } from "@/lib/types";
+import { useAgentScreen, AgentScreenCanvas, AgentScreenFooter, type AgentScreenMode } from "./AgentScreenView";
 
-type ViewMode = "browser" | "computer";
+type ViewMode = AgentScreenMode;
 
 interface ComputerUseActivityDetail {
   mode?: ViewMode;
@@ -27,54 +27,16 @@ interface DragState extends FloatPosition {
 export default function FloatingComputerUsePanel() {
   const { locale } = useT();
   const ko = locale === "ko";
-  const api = ipc();
   const [mode, setMode] = useState<ViewMode>("browser");
   const [open, setOpen] = useState(false);
   const [dismissed, setDismissed] = useState(false);
   const [active, setActive] = useState(false);
   const [position, setPosition] = useState<FloatPosition>({ right: 78, bottom: 116 });
-  const [browserFrame, setBrowserFrame] = useState<BrowserLiveFrame | null>(null);
-  const [computerFrame, setComputerFrame] = useState<ComputerUsePreview | null>(null);
-  const [sourceId, setSourceId] = useState<string | undefined>();
-  const [focusBusy, setFocusBusy] = useState(false);
-  const [focusNotice, setFocusNotice] = useState<string | null>(null);
-  const busy = useRef(false);
   const finishTimer = useRef<number | null>(null);
   const panelRef = useRef<HTMLElement | null>(null);
   const drag = useRef<DragState | null>(null);
-
-  const capture = useCallback(async () => {
-    if (!api || busy.current || document.visibilityState !== "visible") return;
-    busy.current = true;
-    try {
-      if (mode === "browser") {
-        const next = await api.browser.captureLiveFrame();
-        // Keep showing the last good screen through a transient CDP hiccup
-        // (busy socket, mid-navigation, a slow screenshot). Blanking on every
-        // failed poll made the panel flicker to "Waiting for screen" between
-        // good frames. Only replace the image when a new one actually arrives.
-        // 그리고 화면이 안 변했으면(같은 dataUrl) 이전 참조를 유지한다 — 멀티 MB
-        // 문자열 state 교체와 이미지 재디코드를 틱마다 반복하지 않는다.
-        setBrowserFrame((prev) => {
-          if (!next.dataUrl && prev?.dataUrl) return prev;
-          if (prev && prev.dataUrl === next.dataUrl && prev.title === next.title && prev.url === next.url) return prev;
-          return next;
-        });
-      } else {
-        const next = await api.computerUse.capturePreview(sourceId);
-        setComputerFrame((prev) => {
-          if (!next.dataUrl && prev?.dataUrl) return prev;
-          if (prev && prev.dataUrl === next.dataUrl) return prev;
-          return next;
-        });
-        if (!sourceId && next.selectedSourceId) setSourceId(next.selectedSourceId);
-      }
-    } catch {
-      // A stale preload during dev reload must not crash the workspace.
-    } finally {
-      busy.current = false;
-    }
-  }, [api, mode, sourceId]);
+  // 화면은 이 카드가 열려 있을 때만 잡는다 — 접혀 있으면 캡처도 멈춘다.
+  const screen = useAgentScreen(mode, open, ko);
 
   useEffect(() => {
     const onActivity = (event: Event) => {
@@ -87,9 +49,10 @@ export default function FloatingComputerUsePanel() {
         return;
       }
       if (finishTimer.current !== null) window.clearTimeout(finishTimer.current);
-      setDismissed(false);
+      // 스스로 떠오르지 않는다. 화면은 우측 레일이 기본 자리이고(RailAgentScreen),
+      // 이 카드는 사람이 "화면" 버튼을 눌러 떼어 낼 때만 열린다 — 띄워 달라고만 했는데
+      // 매번 떠다닌다는 보고가 정확히 이 자동 열기였다(2026-09-03).
       setActive(true);
-      setOpen(true);
     };
     window.addEventListener("agentlas:computer-use-activity", onActivity);
     const events = ipcEvents();
@@ -103,21 +66,6 @@ export default function FloatingComputerUsePanel() {
       window.removeEventListener("agentlas:computer-use-activity", onActivity);
     };
   }, []);
-
-  useEffect(() => {
-    if (!open) return;
-    void capture();
-    // 화면 캡처는 렌더러 타이머 중 가장 비싸다 — 창이 숨어 있는 동안은 프레임을
-    // 잡지 않고, 다시 보이면 즉시 한 장 갱신한다.
-    const tick = () => { if (document.visibilityState !== "hidden") void capture(); };
-    const timer = window.setInterval(tick, mode === "browser" ? 1_300 : 1_900);
-    const onVisible = () => { if (document.visibilityState !== "hidden") void capture(); };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, [capture, mode, open]);
 
   const startDrag = useCallback((event: ReactPointerEvent<HTMLElement>) => {
     if (event.button !== 0 || (event.target as HTMLElement).closest("button, select")) return;
@@ -150,36 +98,7 @@ export default function FloatingComputerUsePanel() {
     event.currentTarget.releasePointerCapture(event.pointerId);
   }, []);
 
-  const focusPreview = useCallback(async () => {
-    if (!api || focusBusy) return;
-    setFocusBusy(true);
-    setFocusNotice(null);
-    try {
-      const receipt = mode === "browser"
-        ? await api.browser.focusLiveTarget(browserFrame?.targetId ?? undefined)
-        : await api.computerUse.revealPreview();
-      setFocusNotice(receipt.ok
-        ? mode === "browser"
-          ? ko ? "브라우저 화면을 앞으로 가져왔습니다." : "Browser brought to the front."
-          : ko ? "컴퓨터 화면을 열었습니다." : "Computer view opened."
-        : mode === "browser"
-          ? ko ? "열 수 있는 브라우저 화면이 없습니다." : "No browser target is available to open."
-          : ko ? "컴퓨터 화면을 열지 못했습니다. 화면 기록 권한을 확인해 주세요." : "The computer view could not be opened. Check Screen Recording permission.");
-    } catch {
-      setFocusNotice(mode === "browser"
-        ? ko ? "브라우저 화면을 열지 못했습니다. 다시 시도해 주세요." : "The browser view could not be opened. Try again."
-        : ko ? "컴퓨터 화면을 열지 못했습니다. 다시 시도해 주세요." : "The computer view could not be opened. Try again.");
-    } finally {
-      setFocusBusy(false);
-    }
-  }, [api, browserFrame?.targetId, focusBusy, ko, mode]);
-
-  const image = mode === "browser" ? browserFrame?.dataUrl : computerFrame?.dataUrl;
-  const ready = mode === "browser" ? browserFrame?.available : computerFrame?.observationAvailable;
-  const label = mode === "browser"
-    ? browserFrame?.title || (ko ? "브라우저 화면" : "Browser view")
-    : computerFrame?.sources.find((source) => source.id === computerFrame.selectedSourceId)?.name ||
-      (ko ? "컴퓨터 화면" : "Computer view");
+  const { ready, label } = screen;
 
   if (dismissed) return null;
 
@@ -238,53 +157,11 @@ export default function FloatingComputerUsePanel() {
         </div>
       </header>
 
-      <button
-        type="button"
-        className="cua-canvas"
-        onClick={() => void focusPreview()}
-        disabled={focusBusy}
-        aria-busy={focusBusy}
-        aria-label={mode === "browser"
-          ? ko ? "브라우저 화면 앞으로 가져오기" : "Bring browser to front"
-          : ko ? "컴퓨터 화면 열기" : "Show computer screen"}
-      >
-        {image ? (
-          // Main only returns locally generated image data URLs.
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={image} alt={ko ? "에이전트가 보는 화면" : "Screen visible to the agent"} />
-        ) : (
-          <div className="cua-empty">
-            <span className="cua-empty-screen" aria-hidden="true" />
-            <strong>{ko ? "화면 연결 대기 중" : "Waiting for screen"}</strong>
-            <span>
-              {mode === "browser"
-                ? ko ? "브라우저 도구가 시작되면 자동으로 표시됩니다." : "It appears automatically when a browser tool starts."
-                : ko ? "Agentlas의 화면 기록 권한을 확인해 주세요." : "Check Agentlas Screen Recording permission."}
-            </span>
-          </div>
-        )}
-      </button>
+      <AgentScreenCanvas screen={screen} ko={ko} />
 
-      {focusNotice && <div className="cua-focus-notice" role="status">{focusNotice}</div>}
+      {screen.focusNotice && <div className="cua-focus-notice" role="status">{screen.focusNotice}</div>}
 
-      {mode === "computer" && computerFrame && (
-        <footer>
-          {computerFrame.sources.length > 1 && (
-            <select value={sourceId ?? ""} onChange={(event) => setSourceId(event.target.value || undefined)}>
-              {computerFrame.sources.map((source) => <option key={source.id} value={source.id}>{source.name}</option>)}
-            </select>
-          )}
-          <span className={computerFrame.screenPermission === "granted" ? "ok" : "warn"}>
-            {ko ? "화면" : "Screen"} {computerFrame.screenPermission === "granted" ? "ON" : "OFF"}
-          </span>
-          <span className={computerFrame.accessibility ? "ok" : "warn"}>
-            {ko ? "조작 권한" : "Control"} {computerFrame.accessibility ? "ON" : "OFF"}
-          </span>
-          {!computerFrame.interactionAvailable && (
-            <span className="native">{ko ? "네이티브 입력 드라이버 필요" : "Native input driver required"}</span>
-          )}
-        </footer>
-      )}
+      <AgentScreenFooter screen={screen} ko={ko} />
 
       <style jsx>{`
         .cua-float {

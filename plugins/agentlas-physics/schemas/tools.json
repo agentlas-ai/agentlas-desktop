@@ -7,12 +7,36 @@
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["query"],
+        "required": [
+          "query"
+        ],
         "properties": {
-          "query": { "type": "string", "minLength": 2, "maxLength": 500 },
-          "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 25 },
-          "page": { "type": "integer", "minimum": 1, "maximum": 100, "default": 1 },
-          "sort": { "type": "string", "enum": ["relevance", "mostrecent", "mostcited"], "default": "relevance" }
+          "query": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 500
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 25
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 1
+          },
+          "sort": {
+            "type": "string",
+            "enum": [
+              "relevance",
+              "mostrecent",
+              "mostcited"
+            ],
+            "default": "relevance"
+          }
         }
       }
     },
@@ -22,11 +46,23 @@
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["recordId"],
+        "required": [
+          "recordId"
+        ],
         "properties": {
-          "recordId": { "type": "string", "pattern": "^ins[0-9]{1,16}$" },
-          "version": { "type": "integer", "minimum": 1, "maximum": 999 },
-          "includeTables": { "type": "boolean", "default": false }
+          "recordId": {
+            "type": "string",
+            "pattern": "^ins[0-9]{1,16}$"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 999
+          },
+          "includeTables": {
+            "type": "boolean",
+            "default": false
+          }
         }
       }
     },
@@ -36,11 +72,26 @@
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["recordId", "tableName", "version"],
+        "required": [
+          "recordId",
+          "tableName",
+          "version"
+        ],
         "properties": {
-          "recordId": { "type": "string", "pattern": "^ins[0-9]{1,16}$" },
-          "tableName": { "type": "string", "minLength": 1, "maxLength": 500 },
-          "version": { "type": "integer", "minimum": 1, "maximum": 999 }
+          "recordId": {
+            "type": "string",
+            "pattern": "^ins[0-9]{1,16}$"
+          },
+          "tableName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 999
+          }
         }
       }
     },
@@ -50,12 +101,29 @@
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["recordId", "tableName", "table"],
+        "required": [
+          "recordId",
+          "tableName",
+          "table"
+        ],
         "properties": {
-          "recordId": { "type": "string", "pattern": "^ins[0-9]{1,16}$" },
-          "tableName": { "type": "string", "minLength": 1, "maxLength": 500 },
-          "version": { "type": "integer", "minimum": 1, "maximum": 999 },
-          "table": { "type": "object" }
+          "recordId": {
+            "type": "string",
+            "pattern": "^ins[0-9]{1,16}$"
+          },
+          "tableName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 999
+          },
+          "table": {
+            "type": "object"
+          }
         }
       }
     },
@@ -65,22 +133,76 @@
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["table", "dependentSeriesIndex", "prediction", "uncertaintyLabels"],
+        "required": [
+          "table",
+          "dependentSeriesIndex",
+          "prediction",
+          "uncertaintyLabels"
+        ],
         "properties": {
-          "table": { "type": "object", "required": ["schema", "normalizedBytes", "normalizedSha256"] },
-          "dependentSeriesIndex": { "type": "integer", "minimum": 0, "maximum": 63 },
+          "table": {
+            "type": "object",
+            "required": [
+              "schema",
+              "normalizedBytes",
+              "normalizedSha256"
+            ]
+          },
+          "dependentSeriesIndex": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 63
+          },
           "prediction": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["label", "units", "values"],
+            "required": [
+              "label",
+              "units",
+              "values"
+            ],
             "properties": {
-              "label": { "type": "string", "minLength": 1, "maxLength": 300 },
-              "units": { "type": ["string", "null"], "maxLength": 160 },
-              "values": { "type": "array", "maxItems": 10000, "items": { "type": ["number", "null"] } }
+              "label": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              },
+              "units": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 160
+              },
+              "values": {
+                "type": "array",
+                "maxItems": 10000,
+                "items": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              }
             }
           },
-          "uncertaintyLabels": { "type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": true, "items": { "type": "string", "minLength": 1, "maxLength": 300 } },
-          "fittedParameterCount": { "type": "integer", "minimum": 0, "maximum": 1000, "default": 0 }
+          "uncertaintyLabels": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300
+            }
+          },
+          "fittedParameterCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000,
+            "default": 0
+          }
         }
       }
     },
@@ -90,9 +212,17 @@
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["title", "columns", "rows"],
+        "required": [
+          "title",
+          "columns",
+          "rows"
+        ],
         "properties": {
-          "title": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
           "columns": {
             "type": "array",
             "minItems": 1,
@@ -100,22 +230,1834 @@
             "items": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["name", "type"],
+              "required": [
+                "name",
+                "type"
+              ],
               "properties": {
-                "name": { "type": "string", "minLength": 1, "maxLength": 160 },
-                "type": { "type": "string", "enum": ["number", "string"] },
-                "unit": { "type": "string", "maxLength": 120 }
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "number",
+                    "string"
+                  ]
+                },
+                "unit": {
+                  "type": "string",
+                  "maxLength": 120
+                }
               }
             }
           },
-          "rows": { "type": "array", "maxItems": 10000, "items": { "type": "array", "maxItems": 64 } }
+          "rows": {
+            "type": "array",
+            "maxItems": 10000,
+            "items": {
+              "type": "array",
+              "maxItems": 64
+            }
+          }
         }
       }
     },
     {
       "name": "describe_physics_capabilities",
       "description": "Return the exact implemented source, output, renderer, and unsupported-feature boundaries for this plugin.",
-      "inputSchema": { "type": "object", "additionalProperties": false, "properties": {} }
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      }
+    },
+    {
+      "name": "fit_physics_spectrum_peaks",
+      "description": "Levenberg-Marquardt multi-peak spectrum fit (Gaussian, Lorentzian, pseudo-Voigt, Voigt, Crystal Ball, relativistic Breit-Wigner on none/polynomial/exponential backgrounds) with covariance, chi-square/ndf, pulls and a data+model+pull Vega figure.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "table": {
+            "type": "object",
+            "description": "agentlas.science-table/v1 table (for example the `table` of normalize_physics_dataset).",
+            "properties": {
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "agentlas.science-table/v1"
+                ]
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "columns": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 64,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 32
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 160
+                    },
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "number",
+                        "string"
+                      ]
+                    },
+                    "unit": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "maxLength": 120
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "type",
+                    "unit"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "rows": {
+                "type": "array",
+                "maxItems": 10000,
+                "items": {
+                  "type": "array",
+                  "maxItems": 64,
+                  "items": {
+                    "type": [
+                      "number",
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            },
+            "required": [
+              "schema",
+              "title",
+              "columns",
+              "rows"
+            ],
+            "additionalProperties": false
+          },
+          "x_column": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": "Numeric column of the parent dataset used as the abscissa (energy, wavelength, channel)."
+          },
+          "y_column": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": "Numeric column with the measured counts or intensity."
+          },
+          "sigma_column": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": "Numeric column with the per-point standard uncertainty; only valid with uncertainty_model \"column\"."
+          },
+          "uncertainty_model": {
+            "type": "string",
+            "enum": [
+              "column",
+              "poisson",
+              "unit"
+            ],
+            "description": "column: sigma_column; poisson: sqrt(max(y, 1)); unit: equal weights. Defaults to column when sigma_column is given, else poisson."
+          },
+          "range": {
+            "type": "object",
+            "properties": {
+              "min": {
+                "type": "number"
+              },
+              "max": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "min",
+              "max"
+            ],
+            "additionalProperties": false
+          },
+          "peaks": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "properties": {
+                "label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                },
+                "shape": {
+                  "type": "string",
+                  "enum": [
+                    "gaussian",
+                    "lorentzian",
+                    "pseudo_voigt",
+                    "voigt",
+                    "crystal_ball",
+                    "relativistic_breit_wigner"
+                  ]
+                },
+                "initial": {
+                  "type": "object",
+                  "description": "Starting values keyed by the shape's parameter names: gaussian {amplitude, center, sigma}; lorentzian {amplitude, center, gamma}; pseudo_voigt {amplitude, center, fwhm, eta}; voigt {area, center, sigma, gamma}; crystal_ball {amplitude, center, sigma, alpha, n>1}; relativistic_breit_wigner {area, mass, width}.",
+                  "additionalProperties": {
+                    "type": "number"
+                  }
+                },
+                "fixed": {
+                  "type": "array",
+                  "maxItems": 5,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  }
+                },
+                "bounds": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "items": {
+                      "type": "number"
+                    }
+                  }
+                }
+              },
+              "required": [
+                "shape",
+                "initial"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "background": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "polynomial",
+                  "exponential"
+                ]
+              },
+              "degree": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 6,
+                "description": "Polynomial degree (default 1); polynomial only."
+              },
+              "initial": {
+                "type": "array",
+                "maxItems": 7,
+                "items": {
+                  "type": "number"
+                },
+                "description": "polynomial: c0..c_degree; exponential: [a, b] for a·exp(b·x)."
+              },
+              "fixed": {
+                "type": "array",
+                "maxItems": 7,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8
+                }
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "additionalProperties": false
+          },
+          "options": {
+            "type": "object",
+            "properties": {
+              "max_iterations": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 5000,
+                "default": 400
+              },
+              "tolerance": {
+                "type": "number",
+                "minimum": 1e-15,
+                "maximum": 0.01,
+                "default": 1e-10
+              },
+              "jacobian": {
+                "type": "string",
+                "enum": [
+                  "analytic",
+                  "numeric"
+                ],
+                "default": "analytic"
+              },
+              "curve_points": {
+                "type": "integer",
+                "minimum": 50,
+                "maximum": 2000,
+                "default": 400
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "table",
+          "x_column",
+          "y_column",
+          "peaks"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "compute_physics_significance_limits",
+      "description": "Counting-experiment significance (profile-likelihood Z0, Poisson p), asymptotic CLs upper limit with expected bands, and an explicit Feldman-Cousins interval.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "observed": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000000000,
+            "description": "Observed event count n."
+          },
+          "background": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 1000000000000,
+            "description": "Expected background b (same units as n)."
+          },
+          "background_uncertainty": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1000000000000,
+            "default": 0,
+            "description": "Gaussian standard uncertainty on b (0 = background exactly known)."
+          },
+          "signal_expected": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 1000000000000,
+            "description": "Expected signal events s at signal strength mu = 1."
+          },
+          "confidence_level": {
+            "type": "number",
+            "minimum": 0.5,
+            "maximum": 0.999999,
+            "default": 0.95
+          },
+          "feldman_cousins": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "default": true
+              },
+              "signal_max": {
+                "type": "number",
+                "minimum": 1,
+                "maximum": 100000,
+                "description": "Upper edge of the signal-events grid (default n + 5 sqrt(n + b) + 10, at least 10)."
+              },
+              "signal_step": {
+                "type": "number",
+                "minimum": 0.0001,
+                "maximum": 10,
+                "description": "Grid step (default max(0.01, signal_max / 2000)); signal_max / signal_step must not exceed 20000."
+              }
+            },
+            "additionalProperties": false
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          }
+        },
+        "required": [
+          "observed",
+          "background",
+          "signal_expected"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "propagate_physics_uncertainty",
+      "description": "Linear (dual-number gradient, covariance) and seeded Monte Carlo uncertainty propagation through a safe expression or catalogue formula, with a budget table and histogram figure.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "expression": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "description": "Closed-form model y = f(variables) using + - * / ^, parentheses, pi, e, and sin cos tan asin acos atan atan2 sinh cosh tanh exp log ln log10 log2 sqrt cbrt abs pow hypot min max. Provide exactly one of expression or formula."
+          },
+          "formula": {
+            "type": "string",
+            "enum": [
+              "pendulum_g",
+              "ohm_resistance",
+              "free_fall_g",
+              "kinetic_energy",
+              "cylinder_density",
+              "refractive_index_snell",
+              "lens_focal_length",
+              "projectile_range",
+              "spring_constant",
+              "resistivity",
+              "young_modulus",
+              "specific_heat"
+            ],
+            "description": "Catalogue formula id; its variables must be declared in variables."
+          },
+          "variables": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 24,
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+                  "maxLength": 64
+                },
+                "value": {
+                  "type": "number"
+                },
+                "sigma": {
+                  "type": "number",
+                  "minimum": 0,
+                  "description": "Standard uncertainty (1σ)."
+                },
+                "unit": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64,
+                  "description": "Informational label; not checked."
+                },
+                "distribution": {
+                  "type": "string",
+                  "enum": [
+                    "normal",
+                    "uniform"
+                  ],
+                  "default": "normal",
+                  "description": "uniform uses half-width sigma·√3 so sigma stays the standard deviation."
+                }
+              },
+              "required": [
+                "name",
+                "value",
+                "sigma"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "correlation": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 24,
+            "items": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 24,
+              "items": {
+                "type": "number",
+                "minimum": -1,
+                "maximum": 1
+              }
+            },
+            "description": "Square correlation matrix in variables order; symmetric, unit diagonal, positive definite."
+          },
+          "options": {
+            "type": "object",
+            "properties": {
+              "samples": {
+                "type": "integer",
+                "minimum": 1000,
+                "maximum": 200000,
+                "default": 20000
+              },
+              "seed": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295,
+                "default": 20240901
+              },
+              "result_unit": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "description": "Informational label for the result."
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "variables"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "analyze_physics_units",
+      "description": "Unit conversion on SI base vectors, CODATA 2018 constants, natural-units conversion, and equation dimension checks.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "type": "string",
+            "enum": [
+              "convert",
+              "constants",
+              "natural_units",
+              "check_formula"
+            ]
+          },
+          "value": {
+            "type": "number",
+            "description": "convert / natural_units: the numeric quantity."
+          },
+          "from": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120,
+            "description": "convert: source unit, e.g. \"km/h\", \"kg*m^2/s^2\", \"MeV/c^2\", \"degC\" (bare only)."
+          },
+          "to": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120,
+            "description": "convert: target unit with the same dimension."
+          },
+          "ids": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "enum": [
+                "c",
+                "h",
+                "hbar",
+                "e",
+                "k_B",
+                "N_A",
+                "R",
+                "F",
+                "sigma_SB",
+                "G",
+                "epsilon_0",
+                "mu_0",
+                "m_e",
+                "m_p",
+                "m_n",
+                "m_u",
+                "alpha",
+                "a_0",
+                "R_infinity",
+                "eV",
+                "g_n",
+                "atm",
+                "hbar_c",
+                "hbar_c_MeV_fm"
+              ]
+            },
+            "description": "constants: subset of CODATA 2018 ids; default all."
+          },
+          "unit": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120,
+            "description": "natural_units: unit of the quantity (m, kg, s, K dimensions only)."
+          },
+          "equation": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 2000,
+            "description": "check_formula: \"lhs = rhs\" using the safe expression grammar."
+          },
+          "variables": {
+            "type": "object",
+            "minProperties": 1,
+            "maxProperties": 64,
+            "additionalProperties": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "description": "check_formula: variable name → unit string."
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "simulate_physics_ode",
+      "description": "Adaptive Dormand-Prince RK5(4) simulation of a catalogue system with conserved-quantity drift diagnostics, analytic checks, downsampled tables and time-series/phase-space figure.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "system": {
+            "type": "string",
+            "enum": [
+              "projectile_drag",
+              "damped_driven_oscillator",
+              "nonlinear_pendulum",
+              "rlc_series",
+              "lorenz",
+              "two_body_orbit",
+              "decay_chain",
+              "logistic",
+              "sir"
+            ]
+          },
+          "parameters": {
+            "type": "object",
+            "description": "System parameters; every key optional with catalogue defaults. See the per-system if/then blocks."
+          },
+          "initial_state": {
+            "type": "object",
+            "description": "Named initial state components; every key optional with catalogue defaults."
+          },
+          "time_span": {
+            "type": "object",
+            "properties": {
+              "start": {
+                "type": "number",
+                "minimum": -1000000000,
+                "maximum": 1000000000,
+                "default": 0
+              },
+              "end": {
+                "type": "number",
+                "minimum": -1000000000,
+                "maximum": 1000000000,
+                "description": "must exceed start; default start + 10"
+              }
+            },
+            "additionalProperties": false
+          },
+          "options": {
+            "type": "object",
+            "properties": {
+              "rtol": {
+                "type": "number",
+                "minimum": 1e-12,
+                "maximum": 0.01,
+                "default": 1e-08
+              },
+              "atol": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1000000,
+                "default": 1e-10
+              },
+              "output_points": {
+                "type": "integer",
+                "minimum": 10,
+                "maximum": 5000,
+                "default": 1000
+              },
+              "max_steps": {
+                "type": "integer",
+                "minimum": 100,
+                "maximum": 200000,
+                "default": 100000
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "system"
+        ],
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "system": {
+                  "const": "projectile_drag"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "m": {
+                      "type": "number",
+                      "minimum": 1e-12,
+                      "maximum": 1000000000000.0,
+                      "default": 1,
+                      "description": "kg"
+                    },
+                    "g": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1000000,
+                      "default": 9.80665,
+                      "description": "m/s^2"
+                    },
+                    "drag": {
+                      "type": "string",
+                      "enum": [
+                        "none",
+                        "linear",
+                        "quadratic"
+                      ],
+                      "default": "quadratic"
+                    },
+                    "drag_coefficient": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1000000,
+                      "default": 0.01,
+                      "description": "kg/s (linear) or kg/m (quadratic)"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "initial_state": {
+                  "type": "object",
+                  "properties": {
+                    "x": {
+                      "type": "number",
+                      "default": 0,
+                      "description": "m"
+                    },
+                    "y": {
+                      "type": "number",
+                      "default": 0,
+                      "description": "m"
+                    },
+                    "vx": {
+                      "type": "number",
+                      "default": 20,
+                      "description": "m/s"
+                    },
+                    "vy": {
+                      "type": "number",
+                      "default": 20,
+                      "description": "m/s"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "system": {
+                  "const": "damped_driven_oscillator"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "m": {
+                      "type": "number",
+                      "minimum": 1e-12,
+                      "maximum": 1000000000000.0,
+                      "default": 1,
+                      "description": "kg"
+                    },
+                    "omega0": {
+                      "type": "number",
+                      "minimum": 1e-09,
+                      "maximum": 1000000000.0,
+                      "default": 6.283185307179586,
+                      "description": "rad/s"
+                    },
+                    "zeta": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 100,
+                      "default": 0.05
+                    },
+                    "F0": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1000000000000.0,
+                      "default": 1,
+                      "description": "N"
+                    },
+                    "omega_drive": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1000000000.0,
+                      "default": 5.654866776461628,
+                      "description": "rad/s"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "initial_state": {
+                  "type": "object",
+                  "properties": {
+                    "x": {
+                      "type": "number",
+                      "default": 0,
+                      "description": "m"
+                    },
+                    "v": {
+                      "type": "number",
+                      "default": 0,
+                      "description": "m/s"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "system": {
+                  "const": "nonlinear_pendulum"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "g": {
+                      "type": "number",
+                      "minimum": 1e-09,
+                      "maximum": 1000000,
+                      "default": 9.80665,
+                      "description": "m/s^2"
+                    },
+                    "L": {
+                      "type": "number",
+                      "minimum": 1e-09,
+                      "maximum": 1000000000.0,
+                      "default": 1,
+                      "description": "m"
+                    },
+                    "m": {
+                      "type": "number",
+                      "minimum": 1e-12,
+                      "maximum": 1000000000000.0,
+                      "default": 1,
+                      "description": "kg"
+                    },
+                    "b": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1000000,
+                      "default": 0,
+                      "description": "1/s"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "initial_state": {
+                  "type": "object",
+                  "properties": {
+                    "theta": {
+                      "type": "number",
+                      "default": 1,
+                      "description": "rad"
+                    },
+                    "omega": {
+                      "type": "number",
+                      "default": 0,
+                      "description": "rad/s"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "system": {
+                  "const": "rlc_series"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "R": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1000000000000.0,
+                      "default": 10,
+                      "description": "Ω"
+                    },
+                    "L": {
+                      "type": "number",
+                      "minimum": 1e-15,
+                      "maximum": 1000000,
+                      "default": 0.001,
+                      "description": "H"
+                    },
+                    "C": {
+                      "type": "number",
+                      "minimum": 1e-18,
+                      "maximum": 1000,
+                      "default": 1e-06,
+                      "description": "F"
+                    },
+                    "V0": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1000000000.0,
+                      "default": 1,
+                      "description": "V"
+                    },
+                    "omega": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1000000000000.0,
+                      "default": 0,
+                      "description": "rad/s; 0 = DC step"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "initial_state": {
+                  "type": "object",
+                  "properties": {
+                    "q": {
+                      "type": "number",
+                      "default": 0,
+                      "description": "C"
+                    },
+                    "i": {
+                      "type": "number",
+                      "default": 0,
+                      "description": "A"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "system": {
+                  "const": "lorenz"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "sigma": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 10000,
+                      "default": 10
+                    },
+                    "rho": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 10000,
+                      "default": 28
+                    },
+                    "beta": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 10000,
+                      "default": 2.6666666666666665
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "initial_state": {
+                  "type": "object",
+                  "properties": {
+                    "x": {
+                      "type": "number",
+                      "default": 1
+                    },
+                    "y": {
+                      "type": "number",
+                      "default": 1
+                    },
+                    "z": {
+                      "type": "number",
+                      "default": 1
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "system": {
+                  "const": "two_body_orbit"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "preset": {
+                      "type": "string",
+                      "enum": [
+                        "none",
+                        "earth_satellite"
+                      ],
+                      "default": "none",
+                      "description": "earth_satellite sets mu = 3.986004418e14 m^3/s^2 and a 400 km circular default state; cannot be combined with mu"
+                    },
+                    "mu": {
+                      "type": "number",
+                      "minimum": 1e-30,
+                      "maximum": 1e+30,
+                      "default": 1,
+                      "description": "m^3/s^2 (normalized units when preset is none)"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "initial_state": {
+                  "type": "object",
+                  "properties": {
+                    "x": {
+                      "type": "number",
+                      "default": 1
+                    },
+                    "y": {
+                      "type": "number",
+                      "default": 0
+                    },
+                    "vx": {
+                      "type": "number",
+                      "default": 0
+                    },
+                    "vy": {
+                      "type": "number",
+                      "default": 1
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "system": {
+                  "const": "decay_chain"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "decay_constants": {
+                      "type": "array",
+                      "minItems": 2,
+                      "maxItems": 8,
+                      "items": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1000000000000.0
+                      },
+                      "description": "1/s; only the last entry may be 0 (stable). Default [ln2/10, ln2/100, 0]"
+                    },
+                    "half_lives": {
+                      "type": "array",
+                      "minItems": 2,
+                      "maxItems": 8,
+                      "items": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "minimum": 1e-12,
+                        "maximum": 1e+30
+                      },
+                      "description": "s; null = stable; alternative to decay_constants"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "initial_state": {
+                  "type": "object",
+                  "description": "N1..Nk counts (>= 0); default N1 = 1, others 0",
+                  "additionalProperties": {
+                    "type": "number",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "system": {
+                  "const": "logistic"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "r": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1000000,
+                      "default": 1,
+                      "description": "1/time"
+                    },
+                    "K": {
+                      "type": "number",
+                      "minimum": 1e-12,
+                      "maximum": 1e+30,
+                      "default": 100,
+                      "description": "count"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "initial_state": {
+                  "type": "object",
+                  "properties": {
+                    "N": {
+                      "type": "number",
+                      "exclusiveMinimum": 0,
+                      "default": 1,
+                      "description": "count"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "system": {
+                  "const": "sir"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "beta": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1000,
+                      "default": 0.3,
+                      "description": "1/day"
+                    },
+                    "gamma": {
+                      "type": "number",
+                      "minimum": 1e-12,
+                      "maximum": 1000,
+                      "default": 0.1,
+                      "description": "1/day"
+                    },
+                    "N": {
+                      "type": "number",
+                      "minimum": 1e-09,
+                      "maximum": 1000000000000000.0,
+                      "default": 1000,
+                      "description": "count"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "initial_state": {
+                  "type": "object",
+                  "properties": {
+                    "S": {
+                      "type": "number",
+                      "minimum": 0,
+                      "default": 990
+                    },
+                    "I": {
+                      "type": "number",
+                      "minimum": 0,
+                      "default": 10
+                    },
+                    "R": {
+                      "type": "number",
+                      "minimum": 0,
+                      "default": 0
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "analyze_physics_signal",
+      "description": "Windowed FFT amplitude/PSD spectrum, refined dominant peaks, autocorrelation, SNR estimate and optional STFT spectrogram of a uniformly sampled column.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "table": {
+            "type": "object",
+            "description": "agentlas.science-table/v1 table (for example the `table` of normalize_physics_dataset).",
+            "properties": {
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "agentlas.science-table/v1"
+                ]
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "columns": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 64,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 32
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 160
+                    },
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "number",
+                        "string"
+                      ]
+                    },
+                    "unit": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "maxLength": 120
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "type",
+                    "unit"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "rows": {
+                "type": "array",
+                "maxItems": 10000,
+                "items": {
+                  "type": "array",
+                  "maxItems": 64,
+                  "items": {
+                    "type": [
+                      "number",
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            },
+            "required": [
+              "schema",
+              "title",
+              "columns",
+              "rows"
+            ],
+            "additionalProperties": false
+          },
+          "value_column": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": "numeric column holding the samples (no missing cells; at least 8 samples)"
+          },
+          "time_column": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": "numeric time column; spacing must be uniform to 1e-6 relative; the sample rate and its unit are inferred (unit s → Hz, otherwise 1/<unit>)"
+          },
+          "sample_rate": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 1000000000000000.0,
+            "description": "samples per second when no time column exists (assumed Hz)"
+          },
+          "options": {
+            "type": "object",
+            "properties": {
+              "window": {
+                "type": "string",
+                "enum": [
+                  "rectangular",
+                  "hann",
+                  "hamming",
+                  "blackman",
+                  "blackman_harris",
+                  "flat_top"
+                ],
+                "default": "hann"
+              },
+              "detrend": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "mean",
+                  "linear"
+                ],
+                "default": "mean"
+              },
+              "peak_count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20,
+                "default": 5
+              },
+              "min_peak_separation_bins": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10000,
+                "default": 2
+              },
+              "stft": {
+                "type": "object",
+                "description": "when present, an STFT spectrogram table and panel are produced",
+                "properties": {
+                  "frame_size": {
+                    "type": "integer",
+                    "minimum": 16,
+                    "maximum": 4096,
+                    "default": 256,
+                    "description": "power of two, at most the sample count"
+                  },
+                  "hop": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 4096,
+                    "description": "default frame_size / 2"
+                  }
+                },
+                "additionalProperties": false
+              },
+              "autocorrelation_max_lag": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10000,
+                "description": "default min(n − 1, 2000); must be below the sample count"
+              },
+              "zero_pad_to_power_of_two": {
+                "type": "boolean",
+                "default": false
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "table",
+          "value_column"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "fit_physics_york_line",
+      "description": "York (2004) errors-in-variables straight-line fit versus OLS/WLS with covariance, chi-square/ndf, pulls and a two-dimensional error-bar figure.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "table": {
+            "type": "object",
+            "description": "agentlas.science-table/v1 table (for example the `table` of normalize_physics_dataset).",
+            "properties": {
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "agentlas.science-table/v1"
+                ]
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "columns": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 64,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 32
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 160
+                    },
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "number",
+                        "string"
+                      ]
+                    },
+                    "unit": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "maxLength": 120
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "type",
+                    "unit"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "rows": {
+                "type": "array",
+                "maxItems": 10000,
+                "items": {
+                  "type": "array",
+                  "maxItems": 64,
+                  "items": {
+                    "type": [
+                      "number",
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            },
+            "required": [
+              "schema",
+              "title",
+              "columns",
+              "rows"
+            ],
+            "additionalProperties": false
+          },
+          "x_column": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": "Name of the numeric x column"
+          },
+          "y_column": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": "Name of the numeric y column"
+          },
+          "sigma_x_column": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": "Column of positive x standard uncertainties"
+          },
+          "sigma_y_column": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": "Column of positive y standard uncertainties"
+          },
+          "correlation_column": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": "Optional column of per-point x–y error correlations r_i in [-1, 1]; mutually exclusive with correlation"
+          },
+          "correlation": {
+            "type": "number",
+            "minimum": -1,
+            "maximum": 1,
+            "default": 0,
+            "description": "Single x–y error correlation applied to every point; mutually exclusive with correlation_column"
+          },
+          "range": {
+            "type": "object",
+            "properties": {
+              "min": {
+                "type": "number"
+              },
+              "max": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "min",
+              "max"
+            ],
+            "additionalProperties": false,
+            "description": "Inclusive x range of points to fit (max > min)"
+          },
+          "options": {
+            "type": "object",
+            "properties": {
+              "max_iterations": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000,
+                "default": 200
+              },
+              "tolerance": {
+                "type": "number",
+                "minimum": 1e-15,
+                "maximum": 0.001,
+                "default": 1e-12,
+                "description": "Relative slope change that stops the York iteration"
+              },
+              "curve_points": {
+                "type": "integer",
+                "minimum": 50,
+                "maximum": 2000,
+                "default": 200
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "table",
+          "x_column",
+          "y_column",
+          "sigma_x_column",
+          "sigma_y_column"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "check_physics_lab_experiment",
+      "description": "Teaching-lab checks for free fall, pendulum (finite-amplitude corrected) and Ohm's law with uncertainties, reference comparison and residual diagnostics.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "table": {
+            "type": "object",
+            "description": "agentlas.science-table/v1 table (for example the `table` of normalize_physics_dataset).",
+            "properties": {
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "agentlas.science-table/v1"
+                ]
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "columns": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 64,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 32
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 160
+                    },
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "number",
+                        "string"
+                      ]
+                    },
+                    "unit": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "maxLength": 120
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "type",
+                    "unit"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "rows": {
+                "type": "array",
+                "maxItems": 10000,
+                "items": {
+                  "type": "array",
+                  "maxItems": 64,
+                  "items": {
+                    "type": [
+                      "number",
+                      "string",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            },
+            "required": [
+              "schema",
+              "title",
+              "columns",
+              "rows"
+            ],
+            "additionalProperties": false
+          },
+          "experiment": {
+            "type": "string",
+            "enum": [
+              "free_fall",
+              "pendulum",
+              "ohms_law"
+            ]
+          },
+          "time_column": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": "free_fall: time column (s)"
+          },
+          "distance_column": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": "free_fall: distance fallen from release (m); exactly one of distance_column/height_column"
+          },
+          "height_column": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": "free_fall: alias of distance_column (drop height measured from release, m)"
+          },
+          "sigma_column": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": "free_fall: positive distance uncertainties; when absent errors are scaled from scatter"
+          },
+          "length_column": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": "pendulum: length column (m), values > 0"
+          },
+          "period_column": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": "pendulum: period column (s), values > 0"
+          },
+          "sigma_period_column": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": "pendulum: positive period uncertainties"
+          },
+          "amplitude_deg": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 179,
+            "description": "pendulum: single release amplitude in degrees for the finite-amplitude correction; mutually exclusive with amplitude_column"
+          },
+          "amplitude_column": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": "pendulum: per-point amplitude column in degrees [0, 180)"
+          },
+          "voltage_column": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": "ohms_law: voltage column (V)"
+          },
+          "current_column": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": "ohms_law: current column (A)"
+          },
+          "sigma_voltage_column": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": "ohms_law: positive voltage uncertainties"
+          },
+          "sigma_current_column": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": "ohms_law: positive current uncertainties, folded into an effective voltage uncertainty with the fitted R"
+          },
+          "model": {
+            "type": "string",
+            "enum": [
+              "half_g_t_squared",
+              "with_initial_velocity",
+              "full",
+              "through_origin",
+              "with_intercept"
+            ],
+            "description": "free_fall: half_g_t_squared | with_initial_velocity (default) | full; pendulum: through_origin (default) | with_intercept; ohms_law: through_origin | with_intercept (default)"
+          },
+          "reference_g": {
+            "type": "number",
+            "minimum": 0.1,
+            "maximum": 100,
+            "default": 9.80665,
+            "description": "free_fall/pendulum: reference g (m/s²); mutually exclusive with latitude_deg/altitude_m"
+          },
+          "latitude_deg": {
+            "type": "number",
+            "minimum": -90,
+            "maximum": 90,
+            "description": "free_fall/pendulum: latitude for the WGS84 local-g reference"
+          },
+          "altitude_m": {
+            "type": "number",
+            "minimum": -500,
+            "maximum": 10000,
+            "default": 0,
+            "description": "free_fall/pendulum: altitude for the WGS84 local-g reference (requires latitude_deg)"
+          },
+          "reference_resistance": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 1000000000000.0,
+            "description": "ohms_law: reference resistance (Ω) for the z-score"
+          },
+          "options": {
+            "type": "object",
+            "properties": {
+              "curve_points": {
+                "type": "integer",
+                "minimum": 50,
+                "maximum": 2000,
+                "default": 200
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "table",
+          "experiment"
+        ],
+        "additionalProperties": false
+      }
     }
   ]
 }

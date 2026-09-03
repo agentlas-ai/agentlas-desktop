@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { unzipSync } from "fflate";
 import {
+  isProductExtensionManifest,
   isSafeProductExtensionPath,
   type ProductExtensionInstallReceipt,
   type ScienceSuiteComponentId,
@@ -185,7 +186,25 @@ export async function downloadAndInstallSciencePackage(
     const packageDir = path.join(temporaryRoot, "package");
     fs.mkdirSync(packageDir, { recursive: true, mode: 0o700 });
     extractArchive(bytes, packageDir);
-    return installer.installFromDirectory(packageDir);
+    let manifest: unknown;
+    try {
+      const manifestPath = path.join(packageDir, "extension.json");
+      const stat = fs.lstatSync(manifestPath);
+      if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 1024 * 1024) throw new Error();
+      manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    } catch {
+      throw new Error("science-download-package-identity-mismatch");
+    }
+    if (!isProductExtensionManifest(manifest) || manifest.id !== spec.id || manifest.version !== spec.version) {
+      throw new Error("science-download-package-identity-mismatch");
+    }
+    const activation = installer.captureActivationState([spec.id]);
+    const receipt = installer.installFromDirectory(packageDir);
+    if (receipt.id !== spec.id || receipt.version !== spec.version) {
+      installer.restoreActivationState(activation);
+      throw new Error("science-download-package-identity-mismatch");
+    }
+    return receipt;
   } catch (error) {
     const code = error instanceof Error ? error.message.split(":", 1)[0] : "science-download-failed";
     const messages: Record<string, string> = {
@@ -197,6 +216,7 @@ export async function downloadAndInstallSciencePackage(
       "science-download-archive-too-large": "The Agentlas Science package is too large to install safely.",
       "science-download-network-failed": "Agentlas Science could not reach its signed download.",
       "science-download-redirect-invalid": "Agentlas Science was redirected to an untrusted download host.",
+      "science-download-package-identity-mismatch": "The signed Agentlas Science package did not match the requested catalog component.",
     };
     return failure(spec, code, messages[code] ?? "Agentlas Science could not be installed from its signed download.");
   } finally {
