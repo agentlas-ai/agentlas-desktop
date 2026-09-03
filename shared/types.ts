@@ -4184,6 +4184,8 @@ export interface McpInvocationRequest {
   promptOrigin?: "user" | "system";
   /** One may begin as general conversation and promote only on real work signals. */
   taskIntent?: "task" | "conversation";
+  /** Interactive One/Work can ask Main to settle the active turn after the direction is durably queued. */
+  steeringMode?: "queue" | "interrupt";
   /** Chat sent from an automation's session panel. Main injects that
    *  automation's live-edit contract (name + current graph + the control-block
    *  path) so an instruction typed in chat lands on THIS automation. */
@@ -4310,8 +4312,8 @@ export interface InvocationSteerResult {
   /** Exact conversation whose queue/run accepted this direction. */
   chatId: string;
   queued: boolean;
-  /** Steering never aborts the active model turn. A queued turn starts after it settles. */
-  interruptsCurrent: false;
+  /** True when the accepted direction also asked Main to settle the active turn immediately. */
+  interruptsCurrent: boolean;
   activeRunId?: string;
   position?: number;
   runId?: string;

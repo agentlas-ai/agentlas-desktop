@@ -693,7 +693,7 @@ export function reduceOneActivity(
     // runtime failure; the earlier cancel_requested lifecycle fact (or an
     // explicit cancel code) tells them apart. "Stopped" is not "failed".
     // Typed facts only — never the wording of the message.
-    const cancelled = /^(?:cancelled|canceled|user_cancelled|user-cancelled|aborted_by_user)$/i.test(event.error?.code ?? "")
+    const cancelled = /^(?:cancelled|canceled|interrupted|user_cancelled|user-cancelled|aborted_by_user)$/i.test(event.error?.code ?? "")
       || items.some((item) => item.status === "cancelling");
     const status = cancelled ? "cancelled" : "failed";
     const failureCode = !cancelled
@@ -880,7 +880,7 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
 
   // A stop arrives as mcp_error followed by invoke_cancelled. The first row
   // would otherwise seal the run as "failed" before the cancel row is read.
-  const cancelledRun = events.some((row) => row.kind === "invoke_cancelled");
+  const cancelledRun = events.some((row) => row.kind === "invoke_cancelled" || row.kind === "invoke_interrupted");
   for (const row of events) {
     const payload = row.payload ?? {};
     if (row.kind === "invoke_started") {
@@ -1061,8 +1061,8 @@ export function projectOneActivityFromLedger(events: RunEventUi[]): OneActivityS
       }, row.ts);
       continue;
     }
-    if (row.kind === "mcp_error" || row.kind === "invoke_failed" || row.kind === "invoke_cancelled") {
-      const cancelled = row.kind === "invoke_cancelled" || cancelledRun;
+    if (row.kind === "mcp_error" || row.kind === "invoke_failed" || row.kind === "invoke_cancelled" || row.kind === "invoke_interrupted") {
+      const cancelled = row.kind === "invoke_cancelled" || row.kind === "invoke_interrupted" || cancelledRun;
       apply({
         kind: "error",
         error: {

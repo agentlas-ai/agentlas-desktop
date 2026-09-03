@@ -4086,6 +4086,7 @@ export function OneShell() {
         await api.invoke.steer({
           chatId,
           userPrompt: value,
+          steeringMode: "interrupt",
           taskIntent: selected ? "task" : "conversation",
           oneMode: true,
           locale: normalizedLocale,

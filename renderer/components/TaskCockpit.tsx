@@ -3310,6 +3310,7 @@ function ChatPage() {
         void api.invoke.steer({
           chatId: chat.id,
           userPrompt: text,
+          steeringMode: "interrupt",
           images: opts?.images,
           locale,
           permissions: opts?.permissions ?? DEFAULT_PERMISSION,

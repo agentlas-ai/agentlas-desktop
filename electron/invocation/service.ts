@@ -197,6 +197,8 @@ interface RunRecord {
   request: McpInvocationRequest;
   startedAt: string;
   cancelRequestedAt: string | null;
+  /** The active turn is settling because a durable replacement direction exists. */
+  steeringInterruptRequested: boolean;
   events: McpInvocationEvent[];
   partialText: string;
   resultFolder?: string;
@@ -456,10 +458,11 @@ function recordTaskRunStarted(
 function recordTaskTerminalEvidence(input: {
   task: CanonicalTask | null;
   runId: string;
-  terminalKind: "invoke_completed" | "invoke_cancelled" | "invoke_failed";
+  terminalKind: "invoke_completed" | "invoke_cancelled" | "invoke_interrupted" | "invoke_failed";
 }): void {
   if (!input.task) return;
   if (input.terminalKind !== "invoke_completed") {
+    const userDirectedStop = input.terminalKind === "invoke_cancelled" || input.terminalKind === "invoke_interrupted";
     tryRecordOneDomainEvent({
       eventType: "run.failed",
       occurredAt: input.task.updatedAt,
@@ -471,8 +474,8 @@ function recordTaskTerminalEvidence(input: {
       visibility: domainVisibility(input.task),
       entries: [
         { name: "stepId", value: "runtime" },
-        { name: "errorClass", value: input.terminalKind === "invoke_cancelled" ? "cancelled" : "runtime_failure" },
-        { name: "recoverability", value: input.terminalKind === "invoke_cancelled" ? "resume_or_retry" : "review_and_retry" },
+        { name: "errorClass", value: userDirectedStop ? "cancelled" : "runtime_failure" },
+        { name: "recoverability", value: userDirectedStop ? "resume_or_retry" : "review_and_retry" },
       ],
     });
   }
@@ -494,10 +497,10 @@ function recordTaskTerminalEvidence(input: {
 }
 
 function oneWorkspaceTerminalPhase(
-  terminalKind: "invoke_completed" | "invoke_cancelled" | "invoke_failed",
+  terminalKind: "invoke_completed" | "invoke_cancelled" | "invoke_interrupted" | "invoke_failed",
 ): OneWorkspaceRunPhase {
   if (terminalKind === "invoke_completed") return "completed";
-  return terminalKind === "invoke_cancelled" ? "cancelled" : "failed";
+  return terminalKind === "invoke_cancelled" || terminalKind === "invoke_interrupted" ? "cancelled" : "failed";
 }
 
 
@@ -632,6 +635,7 @@ export function terminalTaskStatus(input: {
   kind: "final" | "error";
   requestsDecision: boolean;
   cancelled: boolean;
+  interrupted?: boolean;
   hasPartialText: boolean;
 }): CanonicalTaskStatus {
   if (input.kind === "final") {
@@ -640,6 +644,7 @@ export function terminalTaskStatus(input: {
     // or explicit user acceptance; it must never be inferred from final text.
     return input.requestsDecision ? "waiting-decision" : "partial";
   }
+  if (input.interrupted) return "partial";
   if (input.cancelled) return "cancelled";
   return "failed";
 }
@@ -1038,6 +1043,7 @@ export class InvocationService {
       request: runReq,
       startedAt,
       cancelRequestedAt: null,
+      steeringInterruptRequested: false,
       events: [],
       partialText: "",
       resultFolder,
@@ -1876,7 +1882,9 @@ export class InvocationService {
           const terminalKind =
             event.kind === "final"
               ? "invoke_completed"
-              : controller.signal.aborted
+              : record.steeringInterruptRequested
+                ? "invoke_interrupted"
+                : controller.signal.aborted
                 ? "invoke_cancelled"
               : "invoke_failed";
           settleGoalControllerAttempt(terminalKind === "invoke_completed");
@@ -1885,7 +1893,8 @@ export class InvocationService {
             terminalTaskStatus({
               kind: event.kind,
               requestsDecision: terminalRequestsDecision,
-              cancelled: controller.signal.aborted,
+              cancelled: controller.signal.aborted && !record.steeringInterruptRequested,
+              interrupted: record.steeringInterruptRequested,
               hasPartialText: Boolean(record.partialText.trim()),
             }),
             taskMaterialized,
@@ -2010,7 +2019,7 @@ export class InvocationService {
         );
         const safeFailure = runReq.agentAppMode
           ? untrustedRuntimeFailurePayload()
-          : { code: controller.signal.aborted ? "cancelled" : "invoke-threw", message: rawMessage };
+          : { code: record.steeringInterruptRequested ? "interrupted" : controller.signal.aborted ? "cancelled" : "invoke-threw", message: rawMessage };
         const message = safeFailure.message;
         tryRecordRunEvent({
           runId,
@@ -2019,19 +2028,21 @@ export class InvocationService {
           agentId: record.actualAgentId,
           payload: { errorMessage: message },
         });
-        tryRecordFailureEvent({
-          runId,
-          source: "invoke",
-          chatId: runReq.chatId,
-          agentId: record.actualAgentId,
-          errorCode: safeFailure.code,
-          errorMessage: message,
-        });
+        if (!record.steeringInterruptRequested) {
+          tryRecordFailureEvent({
+            runId,
+            source: "invoke",
+            chatId: runReq.chatId,
+            agentId: record.actualAgentId,
+            errorCode: safeFailure.code,
+            errorMessage: message,
+          });
+        }
         if (!terminalObserved) {
           terminalObserved = true;
           canonicalTask = trySetTaskStatus(
             runReq.chatId,
-            controller.signal.aborted ? "cancelled" : "failed",
+            record.steeringInterruptRequested ? "partial" : controller.signal.aborted ? "cancelled" : "failed",
             taskMaterialized,
             invocationOrigin,
           );
@@ -2048,7 +2059,9 @@ export class InvocationService {
           record.events.push(event);
           recordMcpInvocationEvent(runId, runReq, event);
           this.publishRunEvent(record, { runId, chatId: runReq.chatId, event });
-          const terminalKind = controller.signal.aborted ? "invoke_cancelled" as const : "invoke_failed" as const;
+          const terminalKind = record.steeringInterruptRequested
+            ? "invoke_interrupted" as const
+            : controller.signal.aborted ? "invoke_cancelled" as const : "invoke_failed" as const;
           tryRecordRunEvent({
             runId,
             kind: terminalKind,
@@ -2072,12 +2085,14 @@ export class InvocationService {
         if (!terminalObserved) {
           canonicalTask = trySetTaskStatus(
             runReq.chatId,
-            controller.signal.aborted ? "cancelled" : "failed",
+            record.steeringInterruptRequested ? "partial" : controller.signal.aborted ? "cancelled" : "failed",
             taskMaterialized,
             invocationOrigin,
           );
           taskMaterialized = Boolean(canonicalTask);
-          const terminalKind = controller.signal.aborted ? "invoke_cancelled" as const : "invoke_failed" as const;
+          const terminalKind = record.steeringInterruptRequested
+            ? "invoke_interrupted" as const
+            : controller.signal.aborted ? "invoke_cancelled" as const : "invoke_failed" as const;
           tryRecordRunEvent({
             runId,
             kind: terminalKind,
@@ -2197,6 +2212,36 @@ export class InvocationService {
     return result;
   }
 
+  /** Interrupt an interactive turn only after its replacement direction is durable. */
+  private interruptForSteer(runId: string, record: RunRecord): boolean {
+    const locale = pickLocale(record.request);
+    const result = this.activeRuns.requestCancelWithReason(
+      runId,
+      new Error(locale === "ko"
+        ? "새 지시를 반영하기 위해 이전 실행을 중단했습니다."
+        : "The previous run was interrupted to apply the new direction."),
+    );
+    if (result !== "requested") return result === "already-requested" && record.steeringInterruptRequested;
+    record.steeringInterruptRequested = true;
+    const sequence = nextObservableSequence(record);
+    const cancelEvent: McpInvocationEvent = {
+      kind: "lifecycle",
+      lifecycle: { phase: "cancel_requested" },
+      sequence,
+      observedAt: record.cancelRequestedAt ?? new Date().toISOString(),
+    };
+    record.events.push(cancelEvent);
+    this.publishRunEvent(record, { runId, chatId: record.chatId, event: cancelEvent });
+    tryRecordRunEvent({
+      runId,
+      kind: "invoke_cancel_requested",
+      chatId: record.chatId,
+      agentId: record.actualAgentId,
+      payload: { requestedAt: record.cancelRequestedAt, reason: "steering" },
+    });
+    return true;
+  }
+
   /** DESKTOP_MOBILE_BRIDGE: main owns steering so every client gets identical resume semantics. */
   steer(
     req: McpInvocationRequest,
@@ -2257,15 +2302,16 @@ export class InvocationService {
       chatId: req.chatId,
       agentId: active[1].actualAgentId,
     });
-    // Codex-style steering is additive. Keep the current child process alive,
-    // surface the user's new turn immediately, and drain this queue only from
-    // the active run's settlement path. The CLI runners are one-shot processes,
-    // so writing to stdin here would either close or corrupt their protocol.
+    // Interactive One/Work steering settles the old one-shot process after the
+    // replacement is durable. Other callers retain additive queue semantics.
+    const interruptsCurrent = req.steeringMode === "interrupt"
+      ? this.interruptForSteer(active[0], active[1])
+      : false;
     return {
       accepted: true,
       chatId: req.chatId,
       queued: true,
-      interruptsCurrent: false,
+      interruptsCurrent,
       activeRunId: active[0],
       position: queue.length,
       queuedRequestId: durable.id,

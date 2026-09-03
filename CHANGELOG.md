@@ -11,6 +11,10 @@ artifacts and update feeds remain separate acceptance gates.
 - One and Work preserve per-conversation execution identity across stop, retry,
   queued follow-up, and durable reload paths, preventing late events from an
   older run from replacing the active answer.
+- A new direction sent during an interactive One or Work run is written to the
+  durable queue before the old turn is interrupted, then starts in the same
+  conversation as soon as that turn settles. Sequential automation and remote
+  queues retain their prior non-interrupting behavior.
 - Work accepts free-text answers with Enter, retains answers submitted while a
   run is settling, and sends each answer exactly once instead of treating it as
   a skipped choice.

@@ -1425,8 +1425,8 @@ export function getInvocationRunReceipt(runId: string): InvocationRunReceipt | n
       terminal = row;
       break;
     }
-    if (row.kind === "invoke_cancelled") {
-      status = "cancelled";
+    if (row.kind === "invoke_cancelled" || row.kind === "invoke_interrupted") {
+      status = row.kind === "invoke_interrupted" ? "interrupted" : "cancelled";
       terminal = row;
       break;
     }

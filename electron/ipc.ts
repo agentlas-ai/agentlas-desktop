@@ -1385,6 +1385,7 @@ function rendererInvocationRequest(req: McpInvocationRequest): McpInvocationRequ
     // Closed enum: anything but the exact system marker is the person's own turn.
     promptOrigin: rendererFields.promptOrigin === "system" ? "system" : undefined,
     oneMode: rendererFields.oneMode === true,
+    steeringMode: rendererFields.steeringMode === "interrupt" ? "interrupt" : undefined,
     // One's exact team roster is minted from an opaque Main capability. A
     // renderer may carry the ref, never candidate identities themselves.
     taskForceTargets: rendererFields.oneMode === true
