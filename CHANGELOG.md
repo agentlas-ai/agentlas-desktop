@@ -2,9 +2,13 @@
 
 ## 1.1.1 — 2026-09-03
 
-This release keeps the Agentlas OS v1.2.40 runtime and its immutable source and
-asset pins from 1.1.0. It is a compatibility-focused Desktop update; Agentlas
-Science remains an independently downloaded, signed product extension.
+This release binds Agentlas OS v1.2.40 at
+0c29abdb9505df32b61522861a17bbc537de5263. Its public runtime asset
+`hephaestus-runtime-v1.2.40.tar.gz` is pinned at SHA-256
+`f07527e45fa6be4538898a60e05e5113a72d2de2c61e2e021c1163954c5ba8c2`.
+Source readiness does not prove a public installer or update feed; the Releases
+page stays the authority. This is a compatibility-focused Desktop update;
+Agentlas Science remains an independently downloaded, signed product extension.
 
 - macOS installation stages and verifies the new signed app before an atomic
   swap, preserves the existing user-data directory, and can restore the prior
