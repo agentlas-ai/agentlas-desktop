@@ -1,6 +1,21 @@
 # Changelog
 
+## 1.1.4 — 2026-09-06
+
+Fixes startup after upgrading from 1.1.1 and restores Science installation
+entries in Settings and the product menu. Existing conversations, projects,
+and settings remain in the application data folder. If 1.1.3 is stuck on the
+startup recovery screen, quit Agentlas and replace the application with the
+1.1.4 installer; keep the existing application data folder.
+
+This release binds Agentlas OS v1.2.44 at 1f6d64374502cfd5f8581ad3c1fb18691ed61b1d.
+Its public runtime asset `hephaestus-runtime-v1.2.44.tar.gz` is pinned at SHA-256 `795d1c294db662475d4eb0c7e4562ba0ca1e0f27d3b1da0f5e9c6e7cf627d83a`.
+Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
+
 ## 1.1.3 — 2026-09-06
+
+Withdrawn: upgrading an existing 1.1.1 database can prevent startup. Use 1.1.4
+to recover without removing application data.
 
 This release includes the One, Work, and Science improvements described in 1.1.2,
 including Science's independent model selection and continued research runs,

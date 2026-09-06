@@ -5781,7 +5781,30 @@ export function initStore(options: StoreInitOptions = {}): void {
   // provider session is required to read, pause, recover, or verify them.
   // The state tables are projections. long_run_events and verification
   // receipts retain the append-only evidence needed to rebuild those views.
-  if (userVersion < 107) {
+  // v1.1.1 stamped user_version=107 before these projection tables shipped.
+  // Treat that historical shape like an incomplete v107 migration so the
+  // next fixed Desktop upgrade creates the whole projection before v108 rewrites it.
+  const longRunProjectionTables = [
+    "long_runs",
+    "long_run_tasks",
+    "long_run_workers",
+    "long_run_worker_attempts",
+    "long_run_messages",
+    "long_run_verification_receipts",
+    "long_run_events",
+  ];
+  // If a pre-release v108 stopped after renaming the attempts table, restore
+  // that pending table before the v107 CREATE IF NOT EXISTS block runs. This
+  // keeps its rows visible to the v108 rebuild instead of creating an empty
+  // sibling and silently discarding the partial migration's data.
+  if (
+    !tableExists(_db!, "long_run_worker_attempts")
+    && tableExists(_db!, "long_run_worker_attempts_v108")
+  ) {
+    _db.exec("ALTER TABLE long_run_worker_attempts_v108 RENAME TO long_run_worker_attempts");
+  }
+  const needsLongRunProjectionBootstrap = !longRunProjectionTables.every((table) => tableExists(_db!, table));
+  if (userVersion < 107 || needsLongRunProjectionBootstrap) {
     _db.exec(`
       CREATE TABLE IF NOT EXISTS long_runs (
         id TEXT PRIMARY KEY,
@@ -5984,7 +6007,7 @@ export function initStore(options: StoreInitOptions = {}): void {
   // accidentally made that actual mixed-runtime tree impossible. Preserve
   // uniqueness per logical worker attempt while allowing every child attempt
   // to link to the same durable invocation receipt.
-  if (userVersion < 108) {
+  if (userVersion < 108 || needsLongRunProjectionBootstrap) {
     _db.transaction(() => {
       // A pre-release v108 attempt could have stopped between DDL statements.
       // Recover the only safe shape, otherwise rebuild the temporary table
@@ -5994,6 +6017,11 @@ export function initStore(options: StoreInitOptions = {}): void {
       if (!hasOriginal && hasTemporary) {
         _db!.exec("ALTER TABLE long_run_worker_attempts_v108 RENAME TO long_run_worker_attempts");
       } else {
+        // A historical v107 store can report user_version=107 without ever
+        // having materialized this table (the older ladder stamped the version
+        // before the long-run projection was added). In that shape there is no
+        // source table to copy; create the canonical v108 shape directly so a
+        // retry can continue through v109-v112.
         if (hasTemporary) _db!.exec("DROP TABLE long_run_worker_attempts_v108");
         _db!.exec(`
       CREATE TABLE long_run_worker_attempts_v108 (
@@ -6021,6 +6049,9 @@ export function initStore(options: StoreInitOptions = {}): void {
         FOREIGN KEY(run_id) REFERENCES long_runs(id) ON DELETE CASCADE,
         UNIQUE(worker_id, attempt)
       );
+        `);
+        if (hasOriginal) {
+          _db!.exec(`
       INSERT INTO long_run_worker_attempts_v108 (
         id, worker_id, run_id, task_id, invocation_run_id, attempt, state,
         runtime_selection_json, native_coordinate_json, continuity_capsule_json,
@@ -6034,6 +6065,9 @@ export function initStore(options: StoreInitOptions = {}): void {
         started_at, updated_at, completed_at
       FROM long_run_worker_attempts;
       DROP TABLE long_run_worker_attempts;
+          `);
+        }
+        _db!.exec(`
       ALTER TABLE long_run_worker_attempts_v108 RENAME TO long_run_worker_attempts;
         `);
       }
